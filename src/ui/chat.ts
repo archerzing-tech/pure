@@ -2565,7 +2565,10 @@ export class ChatController {
     };
     // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
     // 现在是 task（折入/排队，确定性目的地）——话绝不因没有分类器而失踪。
-    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    // 第 5 参 now 显式传：第 6 参带思考窗状态——窗内 SCOPE_ADD_RE 快路径让路
+    // 给分类器（调研五位时"新增加两位"是同一份答案 5→7，不是第二件活），
+    // 窗外快路径照旧直通队列。
+    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal, Date.now(), { inThoughtWindow: this.planPreflightActive });
     if (this.abortController?.signal?.aborted) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
@@ -2596,8 +2599,10 @@ export class ChatController {
     // 思考窗吸收（2026-09-27 用户定调）：预检思考还活着时，"往当前正在产出
     // 的那一件东西里加内容"的插话（分类器给了 supplements_current）不排队、
     // 不广播——排队会把一件事拆成两件（先画鸟、再单独补云），构图就断了。
-    // 正确动作是趁模型还在想，把话并进请求一起想（applyPreflightSupplements
-    // 在 planByThinking 返回时并入 userText），第一版产出就带上。取消/停支/
+    // 而且不是"旧思考接着用"：约束类的话（"诗句里一定要出现明月"）必须长进
+    // 构图里，旧思考的构图没有它，带着它继续想等于后贴。所以吸收 = 置重启
+    // 请求 + 掐掉在飞的思考流（preflightAbort），send() 用并账后的请求推倒
+    // 重想；连续 N 句 = 重启 N 轮，每轮带着之前并好的全部补充。取消/停支/
     // 续支的话不是加内容，不吸收，照走各自的路。
     if (this.planPreflightActive
       && (decision.kind === 'steer' || decision.kind === 'task')
@@ -2607,7 +2612,9 @@ export class ChatController {
       && decision.signals.resumesBranch !== true) {
       echoUserBubble();
       this.pendingPreflightSupplements.push({ text, images });
-      this.settleAck(ack, '收到——这句来得正好，我还在想，一并想进去再动手。');
+      this.preflightRestartRequested = true;
+      this.preflightAbort?.abort();
+      this.settleAck(ack, '收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
       return;
     }
     switch (decision.kind) {
@@ -2918,7 +2925,7 @@ export class ChatController {
     userImages: MessageImage[],
     projectBuild: boolean,
     onFirstVisible?: () => void,
-  ): Promise<{ narration: string; plan: Plan | null } | null> {
+  ): Promise<{ narration: string; plan: Plan | null; restarted?: true } | null> {
     const llm = this.planLlm ?? this.turnLlm;
     if (!llm) return null;
     const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0 });
@@ -2927,8 +2934,13 @@ export class ChatController {
       { role: 'user', content: user, images: userImages },
     ];
     // 独立的超时与中止转发：用户点「停止」立刻掐断；掐断后手里有什么算什么，
-    // 判断全在收尾——这一层绝不冒噪音。
+    // 判断全在收尾——这一层绝不冒噪音。preflightAbort 挂给吸收分支：插话
+    // 要推倒重想时掐的就是这一条流。每轮新思考开局都清掉上一轮的重启请求
+    // ——请求只对它打断的那条流有效，残留会把这个新 AbortController 的
+    // 超时/中止误认成重启。
     const ac = new AbortController();
+    this.preflightAbort = ac;
+    this.preflightRestartRequested = false;
     const forwardAbort = (): void => ac.abort();
     this.abortController?.signal.addEventListener('abort', forwardAbort, { once: true });
     const timer = setTimeout(forwardAbort, PLAN_THINKING_TIMEOUT_MS);
@@ -2943,6 +2955,16 @@ export class ChatController {
     try {
       for await (const chunk of llm.stream(request, [], ac.signal)) {
         if (this.abortController?.signal.aborted) break;
+        if (ac.signal.aborted && this.preflightRestartRequested && !this.abortController?.signal.aborted) {
+          // 推倒重想：不是用户的停（回合信号没断），是吸收分支要重开构图掐的。
+          // 已想出的内容整体作废——气泡一并收走（它的叙述建立在旧构图上，
+          // 留着就是假账）——send() 用并账后的请求重开一轮。
+          this.preflightRestartRequested = false;
+          bubble?.remove();
+          bubble = null;
+          full = '';
+          break;
+        }
         if (chunk.type === 'content' && chunk.content) {
           full += chunk.content;
           this.lastStreamActivityAt = Date.now();
@@ -2965,6 +2987,7 @@ export class ChatController {
     } finally {
       clearTimeout(timer);
       this.abortController?.signal.removeEventListener('abort', forwardAbort);
+      this.preflightAbort = null;
       reveal();
     }
     const { narration, planText } = splitNarrationAndPlan(full);
@@ -2976,6 +2999,13 @@ export class ChatController {
         bubble.classList.remove('streaming');
       } else bubble?.remove();
       return null;
+    }
+    if (ac.signal.aborted && this.preflightRestartRequested) {
+      // 循环后兜底：重启请求落在流刚收尾的缝里（最后一块之后、返回之前），
+      // 循环内没机会吃掉。同样整体作废，气泡收走，restart 哨兵让 send() 重开。
+      this.preflightRestartRequested = false;
+      bubble?.remove();
+      return { narration: '', plan: null, restarted: true };
     }
     let plan: Plan | null = null;
     if (planText.trim()) {
@@ -3452,8 +3482,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pendingPlanNarration = null;
     // 新回合开始：思考窗暂存与开关清零（上一回合没被 planByThinking 消化的
     // 补充在这里作废——它们的插入点错过了，别漏进这个回合的请求正文）。
+    // 重启请求同理：它是发给上一条思考流的，流已不在。
     this.pendingPreflightSupplements = [];
     this.planPreflightActive = false;
+    this.preflightAbort = null;
+    this.preflightRestartRequested = false;
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
@@ -4603,15 +4636,27 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           maybeShowPlanSummary();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
-          // 暂存（classifyAndApplyInterject 的吸收分支）。返回的瞬间并账——补充
-          // 统统并进请求正文（【你在思考时补充】块，图随文走），引擎第一轮、
-          // canonical、暂停提交看到的都是同一段合并文本；补充是明文块不剥壳，
-          // 回放也保得住用户原话。必须在 aborted 检查之前并：暂停路径提交的
-          // 同样是合并后的文本。
+          // 暂存（classifyAndApplyInterject 的吸收分支），同时置重启请求、掐掉
+          // 在飞的思考流。重启循环：暂存非空 = 有一句思考途中吸收的话没进构图
+          // ——并进请求正文（【你在思考时补充】块，图随文走）重开一轮，连续
+          // N 句就重启 N 轮，每轮都带着之前并好的全部补充（2026-09-27 用户
+          // 定调：约束类的话必须长进构图里，旧思考推倒）。引擎第一轮、canonical、
+          // 暂停提交看到的都是同一段合并文本；补充是明文块不剥壳，回放也保得住
+          // 用户原话。必须在 aborted 检查之前并：暂停路径提交的同样是合并后
+          // 的文本。窗开着跨整段循环：吸收分支整个期间都能接住新插话。
           this.planPreflightActive = true;
           let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
           try {
-            thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
+            for (;;) {
+              thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
+              if (this.abortController?.signal.aborted) break;
+              if ((this.pendingPreflightSupplements.length > 0 || thought?.restarted) && thought !== null) {
+                userText = this.applyPreflightSupplements(userText, userImages);
+                this.addStatusBubble('这句补得关键——推倒刚才想的，带着它重新想一遍。', false, false, 'info');
+                continue;
+              }
+              break;
+            }
           } finally {
             this.planPreflightActive = false;
           }
@@ -6635,9 +6680,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pendingTasks = [];
     this.queueCardEl?.parentElement?.remove();
     this.queueCardEl = null;
-    // 思考窗吸收的暂存一并清场：新对话不带上一段的补充。
+    // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求与在飞
+    // 思考流的句柄同样作废。
     this.pendingPreflightSupplements = [];
     this.planPreflightActive = false;
+    this.preflightAbort = null;
+    this.preflightRestartRequested = false;
     this.relatedInsert = null;
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
@@ -7169,6 +7217,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 把它们并进引擎看到的请求正文。 */
   private planPreflightActive = false;
   private pendingPreflightSupplements: Array<{ text: string; images: MessageImage[] }> = [];
+  /** 推倒重想（2026-09-27 用户定调）：吸收到的补充不是"旧思考继续用"，约束
+   * 类的话（"诗句里一定要出现明月"）必须长进构图里——旧思考的构图没有它，
+   * 带着它继续想等于后贴。吸收分支置位 + 掐掉 planByThinking 在飞的那条流
+   * （preflightAbort），send() 的重启循环用并账后的请求从头再想；思考窗内
+   * 连续 N 句插话 = 重启 N 轮、每一轮都带着之前并好的全部补充。 */
+  private preflightAbort: AbortController | null = null;
+  private preflightRestartRequested = false;
 
   private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
     const taken = this.pendingPreflightSupplements.splice(0);

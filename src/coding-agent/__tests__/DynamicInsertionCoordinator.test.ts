@@ -43,6 +43,26 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0);
   });
 
+  it('yields the scope-add fast path to the classifier inside the thought window (2026-09-27 用户定调)', async () => {
+    // 调研五位历史人物思考中"新增加两位"——同一份答案从 5 变 7，不是第二件
+    // 活。快路径不认识时机，会让路给分类器带 supplements_current 裁决；窗内
+    // 的吸收（推倒重想）与排队一样是不可丢的投递。窗外照旧直通队列。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => { calls++; return { kind: 'steer', reason: 'grows the one list being assembled', confidence: 0.9, supplementsCurrent: true }; },
+    });
+    const inWindow = await coordinator.decide(llm(), '正在调研五位历史人物的功绩', { text: '新增加两位' }, undefined, Date.now(), { inThoughtWindow: true });
+    expect(inWindow.kind).toBe('steer');
+    expect(inWindow.signals.supplementsCurrent).toBe(true);
+    expect(inWindow.signals.rule).toBeUndefined(); // 快路径没接手，走了分类器
+    expect(calls).toBe(1);
+    // 窗外同一句话照旧走快路径直通队列——防丢顾虑在窗外仍由排队兑现。
+    const outside = await coordinator.decide(llm(), '正在调研五位历史人物的功绩', { text: '新增加两位' });
+    expect(outside.kind).toBe('task');
+    expect(outside.timing.mode).toBe('after-current');
+    expect(calls).toBe(1); // 窗外那次没消耗分类器
+  });
+
   it('routes partial cancellation of a named part to steer via the fast path (2026-09-24 取消案例)', async () => {
     // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入（回执
     // "先补这项，再合并出一份覆盖全部的汇总"）——与意图正好相反。取消一

@@ -1721,6 +1721,43 @@ describe('plan-by-thinking flow', () => {
     expect(absorbGuard).toContain("decision.signals.resumesBranch !== true");
   });
 
+  it('吸收即推倒重想：重启请求掐流、思考重开、N 句 N 轮（2026-09-27 用户定调）', () => {
+    // "诗句里一定要出现明月"必须在构图里，不是旧思考上后贴——吸收分支置
+    // 重启请求 + 掐掉在飞的思考流；send() 的重启循环见暂存非空/哨兵就并账
+    // 重开；用户主动停的优先级永远高于重启（回合信号断 = 不重启）。
+    const absorbIdx = src.indexOf('this.preflightRestartRequested = true;');
+    expect(absorbIdx).toBeGreaterThan(-1);
+    const abortCallIdx = src.indexOf('this.preflightAbort?.abort();', absorbIdx);
+    expect(abortCallIdx).toBeGreaterThan(absorbIdx);
+    // 回执与重开状态行都说人话："推倒"，不是含糊的"一并想"。
+    expect(src).toContain('收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
+    expect(src).toContain('这句补得关键——推倒刚才想的，带着它重新想一遍。');
+    // planByThinking 侧：流句柄挂上 preflightAbort；每轮开局清掉上一轮的
+    // 重启请求（残留会把新控制器的超时误认成重启）。
+    const fnIdx = src.indexOf('private async planByThinking(');
+    const acIdx = src.indexOf('this.preflightAbort = ac;', fnIdx);
+    expect(acIdx).toBeGreaterThan(fnIdx);
+    const flagResetIdx = src.indexOf('this.preflightRestartRequested = false;', acIdx);
+    expect(flagResetIdx).toBeGreaterThan(acIdx);
+    // 循环内重启检查排在回合中止检查之后：用户的停永远赢过重启。
+    const turnAbortIdx = src.indexOf('if (this.abortController?.signal.aborted) break;', acIdx);
+    const restartIdx = src.indexOf('if (ac.signal.aborted && this.preflightRestartRequested && !this.abortController?.signal.aborted)', turnAbortIdx);
+    expect(restartIdx).toBeGreaterThan(turnAbortIdx);
+    // 推倒的思考整体作废：气泡收走、已想内容清空，restart 哨兵交回 send()。
+    const discardIdx = src.indexOf('bubble?.remove();', restartIdx);
+    expect(discardIdx).toBeGreaterThan(-1);
+    expect(src.slice(restartIdx, discardIdx)).toContain('this.preflightRestartRequested = false;');
+    expect(src).toContain('return { narration: \'\', plan: null, restarted: true };');
+    // 句柄用完即摘：不再有悬挂的 preflightAbort。
+    expect(src.slice(acIdx).indexOf('this.preflightAbort = null;')).toBeGreaterThan(-1);
+    // 重启循环：暂存非空或哨兵在场就并账重开一轮，窗跨整段循环不关。
+    const loopIdx = src.indexOf('if ((this.pendingPreflightSupplements.length > 0 || thought?.restarted) && thought !== null) {');
+    expect(loopIdx).toBeGreaterThan(-1);
+    expect(src.slice(loopIdx, src.indexOf('} finally {', loopIdx))).toContain('continue;');
+    // 分类调用带着思考窗状态：窗内 SCOPE_ADD 快路径让路给分类器。
+    expect(src).toContain('{ inThoughtWindow: this.planPreflightActive }');
+  });
+
   it('every ack discard path settles the ledger — no ghost status rows in replays (2026-09-27 排队事故)', () => {
     // ack 行被直接 parentElement.remove() 后账本记录还在：快照把它拼回事件
     // 流，回放凭空多一句"收到——看一下这句话怎么安排…"（真实画图会话事件

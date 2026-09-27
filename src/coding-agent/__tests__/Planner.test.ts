@@ -740,9 +740,14 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(promptStart).toBeGreaterThan(-1);
     const exception = src.indexOf('REFINES THE ONE THING being produced', promptStart);
     expect(exception).toBeGreaterThan(-1);
-    const exceptionBody = src.slice(exception, exception + 900);
+    const exceptionBody = src.slice(exception, exception + 1200);
     expect(exceptionBody).toContain('supplements_current');
-    expect(exceptionBody).toContain('A SECOND deliverable');
+    expect(exceptionBody).toContain('a SECOND deliverable after it');
+    // 2026-09-27 用户定调的第二批形状：约束改构图（明月/五言）、清单长大
+    // （调研五位加两位 = 同一份答案 5→7）——都不是第二件活。
+    expect(exceptionBody).toContain('明月');
+    expect(exceptionBody).toContain('五言');
+    expect(exceptionBody).toContain('新增加两位');
     // JSON 契约字段：仅 steer + 加进当前产出物时为真。
     const fieldDoc = src.indexOf('"supplements_current": include it as true ONLY when kind is "steer"', promptStart);
     expect(fieldDoc).toBeGreaterThan(-1);

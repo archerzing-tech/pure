@@ -892,11 +892,13 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 });
 
-// ── 思考窗吸收（2026-09-27 画鸟排队事故 + 用户定调）────────────────────────
+// ── 思考窗吸收 + 推倒重想（2026-09-27 画鸟排队事故 + 用户定调）──────────────
 // 用户在预检思考还活着时补一句"背景上加一些会动的云朵"——这是往正在产出的
 // 那一张图里加内容，不是第二件活。排队把它拆成两件事（先画鸟、再单独补云），
 // 而队列的活还会丢（真实事故：队列卡挂过、活再没跑，图上永远没有云）。正确
-// 动作：趁模型还在想，把话并进请求一起想，第一版产出就带上。
+// 动作：趁模型还在想，把话并进请求一起想，而且不是旧思考接着用——约束类的
+// 话（"诗句里一定要出现明月"）必须长进构图里，吸收即置重启请求掐掉在飞的
+// 思考流，send() 用并账后的请求推倒重想。
 
 describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
   it('画鸟时补云（steer+supplements_current）：不排队、不折入——并进请求一起想', async () => {
@@ -907,14 +909,17 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true; // 预检思考（planByThinking）还在流式进行
 
     await h.chat.interject('背景上加一些会动的云朵');
-    // 回执说"一并想进去"，不是排队的话术；队列卡绝不出现。
-    expect(assistantJoined(h.root)).toContain('收到——这句来得正好，我还在想，一并想进去再动手。');
+    // 回执说"推倒重想"，不是排队的话术；队列卡绝不出现。
+    expect(assistantJoined(h.root)).toContain('收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
     expect(h.chat.pendingFoldIns).toHaveLength(0);
+    // 重启请求已挂号：send() 的重启循环看到它 + 暂存非空，就用并账后的
+    // 请求重开一轮思考（约束长进构图里，不是旧思考上后贴）。
+    expect(h.chat.preflightRestartRequested).toBe(true);
     // 用户原话上屏（转写对得上谁说了什么），临时回执不留状态行。
     expect(userJoined(h.root)).toContain('云朵');
-    expect(statusJoined(h.root)).not.toContain('一并想进去');
+    expect(statusJoined(h.root)).not.toContain('推倒');
 
     // 落进思考窗暂存，等 planByThinking 返回时并进请求正文。
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
@@ -941,7 +946,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
-    expect(assistantJoined(h.root)).toContain('一并想进去再动手');
+    expect(assistantJoined(h.root)).toContain('推倒，带着它重新想');
   });
 
   it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {

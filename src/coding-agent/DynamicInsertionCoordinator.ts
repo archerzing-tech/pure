@@ -127,6 +127,7 @@ export class DynamicInsertionCoordinator {
     insertion: DynamicInsertion,
     signal?: AbortSignal,
     now = Date.now(),
+    options?: { inThoughtWindow?: boolean },
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
     if (BRANCH_STOP_RE.test(text)) {
@@ -177,8 +178,13 @@ export class DynamicInsertionCoordinator {
         signals: { rule: 'CANCEL_PART_RE', cancelsPart: true },
       });
     }
-    if (SCOPE_ADD_RE.test(text)) {
+    if (SCOPE_ADD_RE.test(text) && !options?.inThoughtWindow) {
       // 加活的量不走分类赌局：排队是唯一保证跑完的投递（见 SCOPE_ADD_RE 注）。
+      // 思考窗内例外（2026-09-27 用户定调）：预检思考还活着时，加的东西可能
+      // 是往**正在产出的那一件东西里**加（调研五位人物时"新增加两位"是同一
+      // 份答案从 5 变 7，不是第二件活）——快路径不认识时机，会让路给分类器
+      // 带 supplements_current 裁决；窗内的吸收（推倒重想+并进请求）与排队
+      // 一样是不可丢的投递，2026-09-22 的防丢顾虑在窗内有更好的兑现点。
       return this.build('task', 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'after-current' },
