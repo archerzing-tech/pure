@@ -1655,4 +1655,17 @@ describe('plan-by-thinking flow', () => {
     expect(refreshIdx).toBeGreaterThan(loopIdx);
     expect(src.slice(loopIdx, refreshIdx)).not.toContain('\n\n');
   });
+
+  it('an interrupted Completed never merges the same payload twice (2026-09-27 HVC 复测修复)', () => {
+    // 引擎的中断路径先 yield Interrupted、break 之后再补一个 interrupted=true
+    // 的 Completed（同一份 messages）。GUI 两个分支都会 merge——第二遍在已被
+    // 第一遍改过的转录上再并一次，userTC 进两份、回合回复被顶掉（复测存档
+    // [system, 叙述, userTC, userTC] 的来源）。Completed 侧必须让位。
+    const completedIdx = src.indexOf("case 'Completed': {");
+    expect(completedIdx).toBeGreaterThan(-1);
+    const mergeIdx = src.indexOf('finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText);', completedIdx);
+    expect(mergeIdx).toBeGreaterThan(completedIdx);
+    const guard = src.slice(Math.max(0, mergeIdx - 400), mergeIdx);
+    expect(guard).toContain('!interruptedMessages');
+  });
 });

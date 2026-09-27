@@ -6030,7 +6030,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 this.scrollUi(chatEl);
               });
             }
-            if (completionMessages) {
+            // 中断回合的账已经在 Interrupted 分支记过（含「用户看到的半截回答」
+            // 兜底）。引擎的中断路径是先 yield Interrupted、break 后再补一个
+            // interrupted=true 的 Completed——同一份载荷会到这里第二次。若再
+            // merge 一次，userTC 会进两份、本回合回复的合并位被顶掉（2026-09-27
+            // HVC 复测存档 [system, 叙述, userTC, userTC] 的来源）。interrupted
+            // 且 Interrupted 已 merge 过时这里必须跳过。
+            if (completionMessages && !interruptedMessages) {
               finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText);
               this.messages = limitMessageHistory(finalMessages);
               this.hasHistory = true;
