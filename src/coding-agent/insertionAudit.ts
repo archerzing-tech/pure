@@ -35,6 +35,16 @@ export interface InsertionAudit {
 const CANCEL_SMELL = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终止|中止|停[掉下来了]|砍掉|掐掉)/;
 
 /**
+ * 排他性标记（2026-09-28）：「不要只查均价」说的是**不要仅限于**，均值仍被需要
+ * ——没有任何东西被移除。先把这类标记抹掉再问"有东西被取消吗"，否则审计会对
+ * 每一次"不要只 X"大喊漏报（假阳性多了人就学会无视它了）。
+ *
+ * 注意它只抹标记、不抹动词："不要只查均价，把区间也取消掉" 抹完还剩"…取消掉"，
+ * 该报的照旧报。
+ */
+const EXCLUSIVITY = /(?:不要|别|不用|无需|不是|并非)?只(?:是|要|会|能|需|想|看|查|算|做|管)?/g;
+
+/**
  * 只留 CANCEL_SMELL 会漏掉本项目**最经典**的取消形状（"X 就不调研了"——裸
  * 否定标记 + 动词，正是 2026-09-24 那场事故的原句）：CANCELISH_RE 的标记表里
  * 没有裸"不"，所以它不命中。而"取消"与"普通事"之间的灰度已经被 LATTER 的
@@ -43,7 +53,8 @@ const CANCEL_SMELL = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终�
  * 假阳性由人一眼扫掉，假阴性才会让一个反向执行静默溜过。
  */
 function looksLikeRemoval(text: string): boolean {
-  return CANCEL_SMELL.test(text) || CANCEL_PART_RE.test(text);
+  const meaningful = text.replace(EXCLUSIVITY, '');
+  return CANCEL_SMELL.test(meaningful) || CANCEL_PART_RE.test(meaningful);
 }
 
 export function auditInsertionDecision(decision: InputDecision): InsertionAudit {
@@ -62,4 +73,56 @@ export function auditInsertionDecision(decision: InputDecision): InsertionAudit 
 
 export function hasInsertionAnomaly(decision: InputDecision): boolean {
   return auditInsertionDecision(decision).anomalies.length > 0;
+}
+
+/**
+ * 契约字段的"遵守率"口径（2026-09-28）：只看**可审计**的决策——命令快路径不
+ * 算（契约字段对它本来就不适用），没有原话的也不算（无从比对）。把这些决策
+ * 当作分母，疑点当作分子：这才是"裁决器该报的报了吗"的遵守率。
+ */
+function isAuditable(decision: InputDecision): boolean {
+  return (decision.inputText ?? '').trim().length > 0 && decision.signals.via !== 'rule';
+}
+
+export interface AuditSummary {
+  total: number;
+  anomalies: number;
+  /** 疑点率 = anomalies / total（无条目时为 0）。 */
+  rate: number;
+}
+
+export function auditSummary(entries: readonly InputDecision[]): AuditSummary {
+  const auditable = entries.filter(isAuditable);
+  const anomalies = auditable.filter(hasInsertionAnomaly).length;
+  return { total: auditable.length, anomalies, rate: auditable.length > 0 ? anomalies / auditable.length : 0 };
+}
+
+export interface AuditBatch extends AuditSummary {
+  /** 1 起的批次序号，按传入顺序（日志是时间序，所以这是时间上的先后）。 */
+  index: number;
+}
+
+/**
+ * 逐批的疑点率——单看总数会把"一直就这样"与"最近才变坏"混成一句"有几个
+ * 疑点"。趋势才看得出收割有没有在改善问题，以及哪一批插话开始变章。
+ *
+ * 批次是**顺序**切分（每 batchSize 条可审计决策一批），不按时间刻度：插话的
+ * 密度本来就不可控，按条数切每批才可比。空日志返回空数组（面板据此显示"还没
+ * 有数据"而不是一条平线）。
+ */
+export function auditTrend(entries: readonly InputDecision[], batchSize = 20): AuditBatch[] {
+  const auditable = entries.filter(isAuditable);
+  const size = Math.max(1, Math.floor(batchSize));
+  const batches: AuditBatch[] = [];
+  for (let start = 0; start < auditable.length; start += size) {
+    const slice = auditable.slice(start, start + size);
+    const anomalies = slice.filter(hasInsertionAnomaly).length;
+    batches.push({
+      index: batches.length + 1,
+      total: slice.length,
+      anomalies,
+      rate: anomalies / slice.length,
+    });
+  }
+  return batches;
 }

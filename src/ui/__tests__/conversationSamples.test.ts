@@ -810,12 +810,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('混着加活的取消话永不停支：整句按取消折入，不能把要加的活一并停掉', async () => {
-    // 「不要只查均价了，把区间也查一下」——取消那一半由 cancels_part 报，加活
+    // 「B站那支别查了，再加一个爱奇艺」——取消那一半由 cancels_part 报，加活
     // 那一半由 adds_along 报（2026-09-28 起宿主的 SCOPE_ADD_RE 停支闸已删）：
     // 两个标记同时在，宿主就只取消折入、绝不停支——停掉那支会把刚要求加进来
     // 的活一并杀掉。
     const llm = scriptedLlm([
-      { match: '区间', cls: { kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancels_part: true, adds_along: true } },
+      { match: 'B站', cls: { kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancels_part: true, adds_along: true } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_price', agentName: '价格调研员', status: 'running', inputSnippet: '调研各平台均价' });
@@ -830,7 +830,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
       },
     };
 
-    await h.chat.interject('不要只查均价了，把区间也查一下');
+    await h.chat.interject('B站那支别查了，再加一个爱奇艺');
     expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);

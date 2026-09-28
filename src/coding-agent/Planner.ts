@@ -319,7 +319,9 @@ export interface InsertionClassification {
    *  removal would run the opposite of what was asked. */
   cancelsPart?: boolean;
   /** True when ONE message does both jobs: removes a named part AND asks for new
-   *  work ("不要只查均价了，把区间也查一下"——停掉均价那路，同时把区间加上).
+   *  work ("B站那支别查了，再加一个爱奇艺"——砍掉那一支，同时把这一支加进来).
+   *  注意别拿「不要只查均价了」当这类句子："只"限定的是排他性，均价仍被需要，
+   *  那既不是移除也没有 adds_along（2026-09-28 复核）。
    *  Only meaningful alongside `cancelsPart`, and the host reads it as the gate
    *  on stopping a branch: pausing that branch would kill the work the message
    *  just asked for, so the removal is folded into the join instead. Replaces
@@ -388,10 +390,10 @@ explicitly belongs after the current task, and null when no timing was said.
 "cancels_part": include it as true whenever the message REMOVES work that was
 already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了") or an
 imperative removal of one ("把 X 这个调研取消掉", "知乎那项也收掉吧"). NARROWING
-counts as removal too: telling the work to stop producing one of the things it was
-asked to produce ("不要只查均价了，把区间也查一下" — the average is no longer wanted)
-removes that part, so report it on such a message even though the same sentence also
-asks for something else. Report it
+counts as removal too — but ONLY when the user actually stops wanting that output
+("均价不用查了，改查区间"): a 只 next to the negation ("不要只查均价了") narrows what is
+EXCLUSIVE, not what is required — the average is still wanted there, so nothing is
+removed and cancels_part stays off. Report it
 EVEN WHEN you pick "task" for the same message: the host routes removals away
 from the queue on this flag alone, and a removal that reaches the queue runs the
 exact opposite of what was asked — a misjudged kind is survivable, a missing
@@ -399,8 +401,9 @@ flag is not. Omit it for messages that only add or adjust work.
 
 "adds_along": include it as true ONLY together with "cancels_part" — when the
 same message does BOTH jobs: it removes one named part AND asks for new work
-("不要只查均价了，把区间也查一下" — drop the average, add the range; "B站那支停了吧，
-再加一个爱奇艺"). The host reads it as a gate on stopping a branch: pausing the
+("B站那支别查了，再加一个爱奇艺" — that branch leaves, this one joins; "均价不用查了，
+把区间加上"). NOT "不要只查均价了，把区间也查一下": 只 narrows the exclusivity only,
+the average is still wanted, so nothing is removed and there is no adds_along. The host reads it as a gate on stopping a branch: pausing the
 named branch would kill the work this very message asked for, so the removal is
 folded into the join and nothing is stopped. Omit it for messages that only
 remove, or only add.

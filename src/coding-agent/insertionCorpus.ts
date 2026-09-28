@@ -52,6 +52,58 @@ export interface Case {
    *  是从诊断区审计里自动收割的：期望由「它被标疑点的原因」推出，还没经过
    *  人复核。统计时分开算，免得把审计网的假阳性当成裁决器判错。 */
   expectation?: 'asserted' | 'suspected';
+  /** 这句发生在哪个场景里（`SCENARIOS` 的键）。不写就走 DEFAULT_SCENARIO。
+   *  回放原先给**每一句**喂同一个上下文（并行调研三个平台），于是「我在西安」
+   *  「这首必须是五言的」被放进一个与它们真实场景无关的语境里判——判错的是
+   *  上下文，不是模型。2026-09-28 实测后每条 Case 可以指名自己的场景。 */
+  scenario?: string;
+}
+
+/**
+ * 语料自带的场景上下文（2026-09-28）。
+ *
+ * 放的是**场景**，不是**答案**：只有当前任务的诉求与阶段，不含任何暗示该判成
+ * 什么的提示——否则语料就变成「把答案抄进上下文」，断言失去意义（有一条测试
+ * 守住这一点）。上下文只描述**「顺势而为」在这里意味着什么**，判定仍归裁决器。
+ */
+export const SCENARIOS: Record<string, string> = {
+  /** 默认：执行中、并行委派在飞。语料里最多句子的原始语境。 */
+  'platform-research': [
+    '用户当前诉求：帮我调研 B站/腾讯/优酷 三个平台的会员价格，最后出一份对比汇总',
+    '并行委派：共 3 个，在飞 3 个',
+  ].join('\n'),
+  /** 规划类纠错的原场景：一条五日自驾路线，预算与落脚点都还算在手里。 */
+  'travel-plan': [
+    '用户当前诉求：帮我规划一条从广东到广西的五日自驾路线，包含每天的落脚点和预算',
+    '（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）',
+    '思考最新说到：先定路线：广东出发往西，每天一个落脚点，预算按四人两天一结',
+  ].join('\n'),
+  /** 写一首诗：唯一产出物是那一首，体裁/字数/意象都是它的属性。 */
+  'poem-writing': [
+    '用户当前诉求：写一首咏月的五言绝句，末尾附一句注释',
+    '（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻补充约束会并进请求重新思考）',
+    '思考最新说到：先定体裁与字数，再选意象：月、桂、夜',
+  ].join('\n'),
+  /** 画一张图：构图与文字排版都是那一张图的属性。 */
+  'drawing': [
+    '用户当前诉求：画一只站在枝头的小鸟，做成一张竖版图',
+    '（当前状态：模型正在思考这个任务的规划、还未开始执行）',
+    '思考最新说到：……先确定构图：一只小鸟站在枝头，背景留白，右下角留标题位',
+  ].join('\n'),
+  /** 改文档的一节：目标是改完那一节，其余章节不动。 */
+  'doc-section': [
+    '用户当前诉求：把这份技术文档的「性能」一节改写清楚，其余章节保持不动',
+    '（当前状态：模型正在思考这个任务的规划、还未开始执行）',
+    '思考最新说到：先读现有那一节，找出说不清的地方再动笔',
+  ].join('\n'),
+};
+
+export const DEFAULT_SCENARIO = 'platform-research';
+
+/** 这句该在哪个场景里判（回放与测试共用这一个读法）。 */
+export function scenarioFor(c: Case): { id: string; text: string } {
+  const id = c.scenario ?? DEFAULT_SCENARIO;
+  return { id, text: SCENARIOS[id] };
 }
 
 export const CASES: Case[] = [
@@ -86,7 +138,12 @@ export const CASES: Case[] = [
   { text: 'Y 那个不用查了', kind: 'steer', detail: 'steer-cancel', cancels: true, source: 'CANCEL_PART_RE 注释' },
   { text: '把 X 这个调研取消掉', kind: 'steer', detail: 'steer-cancel', cancels: true, source: '改进进度记录 2026-09-25 复测案例二' },
   { text: '不用再加知乎了', kind: 'steer', detail: 'steer-cancel', cancels: true, source: 'CANCEL_PART_RE 注释' },
-  { text: '不要只查均价，把区间也查了', kind: 'steer', cancels: true, addsAlong: true, source: 'chat.ts 停支的闸注释（混着加活的收活）' },
+  // 双读句，**不算断言**（2026-09-28 降级为 suspected）：`不要只查均价` 字面是
+  // "不要仅限于查均价"——均值仍被需要，只是不再排他，所以既不该报 cancels_part
+  // 也没有 adds_along。原先把它当"混着加活的收活"是本项目自己把 `只` 读丢了，
+  // 实测反复不稳正是这个原因（3 次 2 掉）。它留在语料里作待复核向量：回放每轮
+  // 都会再判一遍，但不进契约遵守率的分母（分母只收可断言的句子）。
+  { text: '不要只查均价，把区间也查了', kind: 'steer', expectation: 'suspected', source: 'chat.ts 停支的闸注释——原定 cancels+adds，2026-09-28 复核为双读，降级待复核' },
   { text: 'B站那支别查了，再加一个爱奇艺', kind: 'steer', cancels: true, addsAlong: true, source: 'INSERTION_CLASSIFY_PROMPT adds_along 例' },
 
   // ── 软停：正则覆盖不到的停，由裁决器判 stop（2026-09-28 补档）──
@@ -99,17 +156,17 @@ export const CASES: Case[] = [
   { text: '这个先别改，其他照常', kind: 'steer', source: 'stop 档反例（约束不是停）' },
 
   // ── 纠错族：措辞最多样、没有任何标志词，正是正则最不该碰的 ──
-  { text: '我在西安', kind: 'premise-change', source: '改进进度记录 2026-09-22（21775c2）' },
-  { text: '其实我在西安，不是广东', kind: 'premise-change', source: 'INSERTION_CLASSIFY_PROMPT premise-change 例' },
-  { text: '预算只有三千', kind: 'premise-change', source: 'INSERTION_CLASSIFY_PROMPT premise-change 例' },
+  { text: '我在西安', kind: 'premise-change', scenario: 'travel-plan', source: '改进进度记录 2026-09-22（21775c2）' },
+  { text: '其实我在西安，不是广东', kind: 'premise-change', scenario: 'travel-plan', source: 'INSERTION_CLASSIFY_PROMPT premise-change 例' },
+  { text: '预算只有三千', kind: 'premise-change', scenario: 'travel-plan', source: 'INSERTION_CLASSIFY_PROMPT premise-change 例' },
   { text: '你对jev的理解是错误的，jev是2026年9月新发布的模型', kind: 'premise-change', source: 'docs/conversational-intelligence-upgrade.md jev 案例' },
 
   // ── 并进当前产出物：加的是内容不是第二件事 ──
-  { text: '背景上加几朵会动的云', kind: 'steer', source: 'Planner.test.ts supplements_current（画鸟补云）' },
-  { text: '诗句里一定要出现「明月」', kind: 'steer', source: 'INSERTION_CLASSIFY_PROMPT steer 例' },
-  { text: '这首必须是五言的', kind: 'steer', source: 'INSERTION_CLASSIFY_PROMPT steer 例' },
-  { text: '标题再大一点', kind: 'steer', source: 'docs/conversational-intelligence-upgrade.md 思考窗吸收' },
-  { text: '新增加两位', kind: 'steer', source: 'INSERTION_CLASSIFY_PROMPT steer 例（五位加两位）' },
+  { text: '背景上加几朵会动的云', kind: 'steer', scenario: 'drawing', source: 'Planner.test.ts supplements_current（画鸟补云）' },
+  { text: '诗句里一定要出现「明月」', kind: 'steer', scenario: 'poem-writing', source: 'INSERTION_CLASSIFY_PROMPT steer 例' },
+  { text: '这首必须是五言的', kind: 'steer', scenario: 'poem-writing', source: 'INSERTION_CLASSIFY_PROMPT steer 例' },
+  { text: '标题再大一点', kind: 'steer', scenario: 'drawing', source: 'docs/conversational-intelligence-upgrade.md 思考窗吸收' },
+  { text: '新增加两位', kind: 'steer', scenario: 'poem-writing', source: 'INSERTION_CLASSIFY_PROMPT steer 例（五位加两位）' },
 
   // ── 约束/指引 ──
   { text: '记得跑测试', kind: 'steer', source: 'CHANGELOG 插话重构（老逻辑推倒重来的反例）' },
@@ -129,7 +186,7 @@ export const CASES: Case[] = [
   { text: '下午三点再跑一遍完整测试', kind: 'scheduled', source: 'DynamicInsertionCoordinator.test.ts' },
 
   // ── 歧义：置信门的主场（宁可问一句，不猜着推倒）──
-  { text: '这节内容好像都不对了，要不要重新整理一下这一部分', kind: 'goal-change', source: 'DynamicInsertionCoordinator.test.ts 低置信用例' },
+  { text: '这节内容好像都不对了，要不要重新整理一下这一部分', kind: 'goal-change', scenario: 'doc-section', source: 'DynamicInsertionCoordinator.test.ts 低置信用例' },
   { text: '用X。算了还是Y。不，别管刚才那句', kind: 'steer', source: 'INSERTION_CLASSIFY_PROMPT 自相矛盾例' },
 ];
 

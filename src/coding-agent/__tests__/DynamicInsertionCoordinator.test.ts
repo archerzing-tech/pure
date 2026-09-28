@@ -177,12 +177,13 @@ describe('DynamicInsertionCoordinator', () => {
   });
 
   it('threads a classifier addsAlong verdict — the gate that refuses a branch stop (2026-09-28)', async () => {
-    // 混着加活的取消：「不要只查均价了，把区间也查一下」——两个标记都得
+    // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——两个标记都得
     // 到宿主，少一个就会把要加的活一并停掉（停支闸已从宿主关键词改成这个）。
+    // 不用「不要只查均价了」："只"限定的是排他性，那句根本不是收活（2026-09-28）。
     const mixed = new DynamicInsertionCoordinator({
       classify: async () => ({ kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancelsPart: true, addsAlong: true }),
     });
-    const decision = await mixed.decide(llm(), 'current task', { text: '不要只查均价了，把区间也查一下' });
+    const decision = await mixed.decide(llm(), 'current task', { text: 'B站那支别查了，再加一个爱奇艺' });
     expect(decision.signals.cancelsPart).toBe(true);
     expect(decision.signals.addsAlong).toBe(true);
     // 纯取消不带它——缺省绝不自己补。

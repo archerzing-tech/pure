@@ -824,9 +824,13 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(prompt).toContain('a missing\nflag is not');
     // 混着加活的取消：停支的闸从宿主关键词改成了 adds_along 契约。
     expect(prompt).toContain('"adds_along": include it as true ONLY together with "cancels_part"');
-    // 收窄也是移除（不说"取消"的取消）："不要只查均价了"就是不再要那个数。
-    // 没写这句时同一句 3 次里有 2 次漏报 cancels_part（补上后 4/4 报对）。
+    // 收窄也是移除（不说"取消"的取消）："均价不用查了"就是不再要那个数。
     expect(prompt).toContain('NARROWING\ncounts as removal too');
+    // 但"只"限定的是排他性，不是"还要不要"——「不要只查均价」均值仍被需要，
+    // 不该报 cancels_part。2026-09-28 复核认定这是双读句，已从断言语料降级，
+    // 提示词两侧都把这个陷阱写死（否则模型只会在同一个词上来回飘）。
+    expect(prompt).toContain('narrows what is\nEXCLUSIVE, not what is required');
+    expect(prompt).toContain('NOT "不要只查均价了，把区间也查一下"');
   });
 
   it('parses the stop kind through the real pipeline', async () => {
@@ -839,12 +843,12 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
   });
 
   it('parses the adds_along contract field — the gate on stopping a branch (2026-09-28)', async () => {
-    // 混着加活的取消：「不要只查均价了，把区间也查一下」——取消那半由
+    // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——取消那半由
     // cancels_part 报，加活那半由 adds_along 报。宿主靠它拒绝停支：停掉那支
     // 会把刚要求加进来的活一并杀掉。这是宿主侧最后一条关键词闸的接力棒。
     const hit = await classifyInsertion(
       mockLlm('{"kind":"task","reason":"removes one part while adding another","confidence":0.9,"cancels_part":true,"adds_along":true}'),
-      'context', '不要只查均价了，把区间也查一下',
+      'context', 'B站那支别查了，再加一个爱奇艺',
     );
     expect(hit.cancelsPart).toBe(true);
     expect(hit.addsAlong).toBe(true);

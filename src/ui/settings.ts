@@ -58,11 +58,11 @@ import {
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
-import { clearInputDecisionLog, decisorOf, describeTiming, formatInputDecisionLog, getInputDecisionLog } from '../coding-agent/inputDecision';
-import { auditInsertionDecision, type InsertionAnomaly } from '../coding-agent/insertionAudit';
+import { clearInputDecisionLog, decisorOf, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
+import { auditInsertionDecision, auditSummary, auditTrend, type InsertionAnomaly } from '../coding-agent/insertionAudit';
 import { ALL_CASES } from '../coding-agent/insertionCorpus';
 import { HARVESTED_CASES } from '../coding-agent/insertionCorpusHarvested';
-import { harvestCasesFromLog, renderHarvestedModule } from '../coding-agent/insertionHarvest';
+import { harvestCasesFromLog, loadHarvestRounds, recordHarvestRound, renderHarvestedModule } from '../coding-agent/insertionHarvest';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
@@ -388,6 +388,11 @@ export class SettingsPanel {
         this.toast(t('insertionDiag.harvestNone'));
         return;
       }
+      // 记下这一轮（收割了多少句 + 当时的疑点率）：下一轮与它对照，"收割有没有
+      // 让契约字段报得更准"才有读数，而不是只靠感觉。
+      const summary = auditSummary(entries);
+      recordHarvestRound({ ts: Date.now(), harvested: added.length, rate: summary.rate, total: summary.total });
+      this.renderInsertionDecisionLog();
       void copyTextToClipboard(renderHarvestedModule([...HARVESTED_CASES, ...added])).then((ok) => {
         this.toast(ok
           ? t('insertionDiag.harvested').replace('{n}', String(added.length))
@@ -2890,7 +2895,55 @@ export class SettingsPanel {
         <div class="insertion-diag-reason">${escapeHtml(entry.reason)}${escapeHtml(gatedFrom)}</div>
         ${anomalies.map((a) => `<div class="insertion-diag-anomaly">${escapeHtml(t('insertionDiag.anomaly'))}${escapeHtml(t(SettingsPanel.INSERTION_ANOMALY_KEYS[a]))}</div>`).join('')}
       </div>`;
+    }).join('') + this.renderInsertionTrend(entries);
+  }
+
+  /**
+   * 契约字段遵守率的走势（2026-09-28）：每一批插话里"该报的契约字段报了吗"的
+   * 疑点率画成柱条，下面接收割轮次。做成趋势而不是一个总数，是因为总数把"一直
+   * 就这样"与"最近才变坏"混成一句话，而收割的价值恰好只能从走势上看出来。
+   */
+  private renderInsertionTrend(entries: readonly InputDecision[]): string {
+    const batches = auditTrend(entries);
+    if (batches.length === 0) {
+      return `<div class="insertion-diag-trend">
+        <div class="insertion-diag-trend-head"><span class="insertion-diag-trend-label">${escapeHtml(t('insertionDiag.trend'))}</span></div>
+        <div class="insertion-diag-trend-empty">${escapeHtml(t('insertionDiag.trendNone'))}</div>
+      </div>`;
+    }
+    const { total, anomalies } = auditSummary(entries);
+    const rate = total > 0 ? Math.round((anomalies / total) * 100) : 0;
+    const bars = batches.map((b) => {
+      // 高度直接读疑点率；0 疑点也留一条底座，否则"全对"与"没数据"长得一样。
+      const height = Math.max(3, Math.round(b.rate * 100));
+      const title = t('insertionDiag.trendBarTitle')
+        .replace('{i}', String(b.index))
+        .replace('{n}', String(b.anomalies))
+        .replace('{total}', String(b.total));
+      return `<i class="insertion-diag-trend-bar${b.anomalies > 0 ? ' has-anomaly' : ''}" style="height:${height}%" title="${escapeHtml(title)}"></i>`;
     }).join('');
+    const rounds = loadHarvestRounds();
+    const last = rounds[rounds.length - 1];
+    const roundsLine = last
+      ? t('insertionDiag.trendRounds')
+        .replace('{rounds}', String(rounds.length))
+        .replace('{n}', String(rounds.reduce((sum, r) => sum + r.harvested, 0)))
+        .replace('{time}', new Date(last.ts).toLocaleTimeString())
+        .replace('{rate}', String(Math.round(last.rate * 100)))
+      : t('insertionDiag.trendNoRounds');
+    const caption = t('insertionDiag.trendCaption')
+      .replace('{batches}', String(batches.length))
+      .replace('{n}', String(anomalies))
+      .replace('{total}', String(total))
+      .replace('{rate}', String(rate));
+    return `<div class="insertion-diag-trend">
+      <div class="insertion-diag-trend-head">
+        <span class="insertion-diag-trend-label">${escapeHtml(t('insertionDiag.trend'))}</span>
+        <span class="insertion-diag-trend-caption">${escapeHtml(caption)}</span>
+      </div>
+      <div class="insertion-diag-trend-bars">${bars}</div>
+      <div class="insertion-diag-trend-rounds">${escapeHtml(roundsLine)}</div>
+    </div>`;
   }
 
   // ── Memory runtime diagnostics（记忆页诊断区）──

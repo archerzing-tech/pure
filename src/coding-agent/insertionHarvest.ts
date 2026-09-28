@@ -63,6 +63,62 @@ export function harvestCasesFromLog(
   return { added, skipped };
 }
 
+export interface HarvestRound {
+  ts: number;
+  /** 这一轮收进去几句。 */
+  harvested: number;
+  /** 收割那一刻的可审计疑点率——下一轮与它对照，才看得出收割有没有在起作用。 */
+  rate: number;
+  /** 那一刻可审计的决策条数（率的分母）。 */
+  total: number;
+}
+
+/** 收割轮次的落盘位置（设置页诊断区的趋势读数）。 */
+export const HARVEST_ROUNDS_KEY = 'pure.insertionHarvestRounds.v1';
+/** 只留最近这些轮：趋势看的是走势，不是档案。 */
+export const HARVEST_ROUNDS_LIMIT = 20;
+
+/** localStorage 的最小面（传入只为可测：bun 下没有 window.localStorage）。 */
+export interface HarvestRoundStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+function defaultStore(): HarvestRoundStore | null {
+  const ls = (globalThis as { localStorage?: HarvestRoundStore }).localStorage;
+  return ls ?? null;
+}
+
+/** 读历史轮次；没有/坏了/存不了都当空——诊断区绝不为一个读数报错。 */
+export function loadHarvestRounds(store: HarvestRoundStore | null = defaultStore()): HarvestRound[] {
+  if (!store) return [];
+  try {
+    const raw = store.getItem(HARVEST_ROUNDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((r): r is HarvestRound =>
+      typeof r === 'object' && r !== null && Number.isFinite((r as HarvestRound).ts));
+  } catch {
+    return [];
+  }
+}
+
+/** 追加一轮并落盘，返回新的完整列表（写入失败也不影响收割本身）。 */
+export function recordHarvestRound(
+  round: HarvestRound,
+  store: HarvestRoundStore | null = defaultStore(),
+): HarvestRound[] {
+  const next = [...loadHarvestRounds(store), round].slice(-HARVEST_ROUNDS_LIMIT);
+  if (!store) return next;
+  try {
+    store.setItem(HARVEST_ROUNDS_KEY, JSON.stringify(next));
+  } catch {
+    // 存不下就只留在本次会话——趋势丢一轮好过收割失败。
+  }
+  return next;
+}
+
 /**
  * 渲染生成的语料模块（`insertionCorpusHarvested.ts` 的全文）。
  *

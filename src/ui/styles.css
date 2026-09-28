@@ -5885,6 +5885,58 @@ body {
   word-break: break-word;
 }
 
+/* 契约字段遵守率的走势（2026-09-28）：柱子高度就是那一批插话的疑点率。看的是
+   走势——一个总数分不出"一直就这样"与"最近才变坏"，而收割的价值只在走势里
+   才看得见。 */
+.insertion-diag-trend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-light);
+}
+
+.insertion-diag-trend-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.insertion-diag-trend-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.insertion-diag-trend-caption,
+.insertion-diag-trend-rounds,
+.insertion-diag-trend-empty {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.insertion-diag-trend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 26px;
+}
+
+.insertion-diag-trend-bar {
+  flex: 1 1 0;
+  min-width: 3px;
+  max-width: 14px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+.insertion-diag-trend-bar.has-anomaly {
+  background: var(--danger);
+}
+
 /* ── Update Status ── */
 
 .update-status-row {

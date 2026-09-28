@@ -34,7 +34,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ALL_CASES, aligns, mainHit, mechanicalHits, type Case, type MechanicalHit } from '../src/coding-agent/insertionCorpus';
+import { ALL_CASES, DEFAULT_SCENARIO, SCENARIOS, aligns, mainHit, mechanicalHits, scenarioFor, type Case, type MechanicalHit } from '../src/coding-agent/insertionCorpus';
 import { classifyInsertion, type InsertionKind } from '../src/coding-agent/Planner';
 import { DeepSeekAnthropicAdapter } from '../src/adapter/deepseek/DeepSeekAnthropicAdapter';
 import type { LLMAdapter } from '../src/shared/types';
@@ -133,26 +133,20 @@ function resolveLlm(): LLMAdapter | null {
   return process.argv.includes('--thinking-on') ? adapter : withThinkingOff(adapter);
 }
 
-/** 两个阶段上下文：同一个句子在不同时机下该不该得到不同处置，是裁决器
- *  相对正则的核心优势（思考中「顺势」= 并进请求推倒重想，执行中 = 下个动作
- *  带上）。真跑时两个都给（--timing），好看出判定有没有跟着时机走。 */
-const CONTEXTS: Array<{ name: string; text: string }> = [
-  {
-    name: '执行中·并行委派在飞',
-    text: [
-      '用户当前诉求：帮我调研 B站/腾讯/优酷 三个平台的会员价格，最后出一份对比汇总',
-      '并行委派：共 3 个，在飞 3 个',
-    ].join('\n'),
-  },
-  {
-    name: '思考中·规划还没定',
-    text: [
-      '用户当前诉求：画一只站在枝头的小鸟',
-      '（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）',
-      '思考最新说到：……先确定构图：一只小鸟站在枝头，背景留白',
-    ].join('\n'),
-  },
-];
+/**
+ * 每句用它自己的场景（`insertionCorpus.ts` 的 SCENARIOS）。
+ *
+ * 2026-09-28 之前这里是**两个固定上下文**套给所有句子，于是「我在西安」「这首
+ * 必须是五言的」被放在「并行调研三个平台」的语境里判——判错的是上下文，不是
+ * 模型。现在场景跟着句子走；`--timing` 再加跑一遍默认场景，看同一句的判定会不
+ * 会随场景变（场景不匹配会判错，正是这条教训的度量）。
+ */
+function contextsFor(c: Case, withTiming: boolean): Array<{ id: string; text: string }> {
+  const own = scenarioFor(c);
+  if (!withTiming) return [own];
+  const fallback = { id: DEFAULT_SCENARIO, text: SCENARIOS[DEFAULT_SCENARIO] };
+  return own.id === fallback.id ? [own] : [own, fallback];
+}
 
 /** 比生产的 8s 宽松（生产预算见 classifyInsertion 的 timeoutMs 默认值）。关掉
  *  暗推理后实测 1–7s 足够，留 15s 是为了不把“限流/网络慢”混成“判错”。
@@ -202,15 +196,15 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
   // 分片跑是必要的：回放会连续打 provider，限流退避叠起来很容易撞过工具超时，
   // 而一次超时会把整段结果全丢掉（stdout 随进程没）。
   const pool = ALL_CASES.slice(from, limit ? from + limit : undefined);
-  const contexts = withTiming ? CONTEXTS : CONTEXTS.slice(0, 1);
   const thinkingOff = !process.argv.includes('--thinking-on');
-  console.log(`═══ 真跑裁决器（GLM${thinkingOff ? '，暗推理已关' : '，暗推理开着'}，第 ${from + 1}–${from + pool.length} 句 · ${contexts.length} 阶段 · 句间 ${pauseMs}ms）═══\n`);
+  console.log(`═══ 真跑裁决器（GLM${thinkingOff ? '，暗推理已关' : '，暗推理开着'}，第 ${from + 1}–${from + pool.length} 句 · `
+    + `每句自带场景${withTiming ? ' + 默认场景对照' : ''} · 句间 ${pauseMs}ms）═══\n`);
   const rows: LlmRow[] = pool.map((c) => ({ c, verdicts: [], kinds: [], cancels: [], addsAlong: [] }));
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    for (const ctx of contexts) {
+    for (const ctx of contextsFor(row.c, withTiming)) {
       const v = await judgeOnce(llm, ctx.text, row.c.text);
-      row.verdicts.push(`${ctx.name}: ${v.label}`);
+      row.verdicts.push(`${ctx.id}: ${v.label}`);
       row.kinds.push(v.kind);
       row.cancels.push(v.cancelsPart);
       row.addsAlong.push(v.addsAlong);
@@ -295,7 +289,7 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
   if (fell > 0)  if (fell > 0) console.log(`⚠ ${fell} 句走了兜底（裁决超时/解析失败/限流）——不是判错，是没判出来。`);
   if (harvested.length > 0) {
     const held = harvestedJudged.filter((r) => (r.c.cancels ? r.cancels[0] : true) && (r.c.addsAlong ? r.addsAlong[0] : true));
-    console.log(`\n收割段（审计疑点句，期望待复核）${harvested.length} 句，有效裁决 ${harvestedJudged.length}，契约字段现在报对 ${held.length}：`);
+    console.log(`\n非断言段（审计收割 + 复核降级的双读句，期望待复核）${harvested.length} 句，有效裁决 ${harvestedJudged.length}，契约字段现在报对 ${held.length}：`);
     harvested.forEach((r) => console.log(`  「${r.c.text}」  ${r.verdicts[0]}`));
   }
   if (timingSensitive.length > 0) {
