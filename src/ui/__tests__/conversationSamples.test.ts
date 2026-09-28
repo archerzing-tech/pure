@@ -966,6 +966,62 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(queueCard(h.root)).toBeUndefined();
   });
 
+  it('思考窗内事实纠错（premise-change）：吸收推倒重想，绝不拆回合（2026-09-28 jev 案例）', async () => {
+    // 真实事故：调研三个热点思考中，用户看见 pure 把 jev 当成 JEPA，纠正
+    // "你对jev的理解是错误的，jev是2026年9月新发布的模型"——三个子 agent
+    // 照旧按错前提派出。premise-change 的原路是拆回合重入：思考期原请求
+    // 还没落账，新回合只剩纠错这一句，要重做的事反而丢了。窗内纠错的正确
+    // 动作只有一种：并进请求、推倒重想。
+    const llm = scriptedLlm([
+      { match: 'jev', cls: { kind: 'premise-change', reason: 'corrects a fact the plan is built on', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
+    expect(assistantJoined(h.root)).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.preflightRestartRequested).toBe(true);
+    // 不拆回合：重入通道没被占用、回合没被掐——思考流由重启请求掐，重开
+    // 时带着原始请求 + 并账的纠正。
+    expect(h.chat.relatedInsert).toBeFalsy();
+    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(queueCard(h.root)).toBeUndefined();
+    const merged = h.chat.applyPreflightSupplements('从多个方面调研一下当前AI的三个热点', []);
+    expect(merged).toContain('jev是2026年9月新发布的模型');
+  });
+
+  it('窗内普通 steer（分类器没给 supplements_current）也吸收：窗内没有别的活，思考就是唯一兑现点', async () => {
+    // 事故直因：纠错被分类器判成 steer 落 pendingSteers——"下个动作带上"
+    // 的承诺在思考期没有别的兑现点，等计划定型后才被看见就晚了。窗内
+    // steer 一律吸收，不再赌分类器记得打标记。
+    const llm = scriptedLlm([
+      { match: 'jev', cls: { kind: 'steer', reason: 'a correction to carry forward', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.preflightRestartRequested).toBe(true);
+    expect(h.chat.pendingSteers).toHaveLength(0);
+  });
+
+  it('窗内方向推翻（goal-change）：吸收重想，不拆回合', async () => {
+    // 思考期"推翻重来" = 带着新方向重新想。原路拆回合会把原请求丢在
+    // 落账前（首回合 canonical 是空的）——吸收重想一样兑现，还更省。
+    const llm = scriptedLlm([
+      { match: '换个思路', cls: { kind: 'goal-change', reason: 'overturns the approach', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.planPreflightActive = true;
+
+    await h.chat.interject('换个思路，别做俄罗斯方块了，做贪吃蛇');
+    expect(assistantJoined(h.root)).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.relatedInsert).toBeFalsy();
+  });
+
   it('思考窗关了（思考已完、产出已在跑）：同样的补充不吸收，走普通 steer', async () => {
     // planByThinking 已经返回，请求正文并不进去了——此刻的补充只能转达给
     // 在跑的回合（下个 THINK 边界带上），收尾没被带走的按用户原话重入。
@@ -1007,6 +1063,11 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(ctx).toContain('Q3 海外市场进入方案'); // liveTurn.userText（beginLiveTurn 存的）
     expect(ctx).not.toContain('用户当前诉求：（当前任务）');
     expect(ctx).not.toContain('用户当前诉求：\n');
+    // 思考窗开着时，分类器要知道手头的活是"正在想"——premise-change vs
+    // steer 的时机判据就靠这一行（jev 纠错案例）。
+    h.chat.planPreflightActive = true;
+    expect(h.chat.buildInsertionContext([])).toContain('正在思考这个任务的规划');
+    h.chat.planPreflightActive = false;
   });
 
   it('空闲即扫除：setStreaming(false) 自己触发派发——收尾代码断了队列也不丢', async () => {

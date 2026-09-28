@@ -1712,13 +1712,23 @@ describe('plan-by-thinking flow', () => {
     expect(mergeIdx).toBeGreaterThan(closeIdx);
     const abortIdx = src.indexOf('if (this.abortController?.signal.aborted)', mergeIdx);
     expect(abortIdx).toBeGreaterThan(mergeIdx);
-    // 吸收分支不吞取消/停支/续支：三闸齐备。
+    // 吸收分支不吞取消/停支/续支：三闸齐备；四类话进窗即吸收——steer/
+    // premise-change/goal-change 一律，task 仅凭 supplements_current
+    // （2026-09-28 jev 案例：纠错话进不了窗，三个子 agent 按错前提派出）。
     const absorbIdx = src.indexOf('this.pendingPreflightSupplements.push({ text, images });');
     expect(absorbIdx).toBeGreaterThan(-1);
     const absorbGuard = src.slice(src.lastIndexOf('if (this.planPreflightActive', absorbIdx), absorbIdx);
+    expect(absorbGuard).toContain("decision.kind === 'steer'");
+    expect(absorbGuard).toContain("decision.kind === 'premise-change'");
+    expect(absorbGuard).toContain("decision.kind === 'goal-change'");
+    expect(absorbGuard).toContain("decision.kind === 'task' && decision.signals.supplementsCurrent === true");
     expect(absorbGuard).toContain("decision.signals.cancelsPart !== true");
     expect(absorbGuard).toContain("decision.signals.branchStop !== true");
     expect(absorbGuard).toContain("decision.signals.resumesBranch !== true");
+    // 纠错有自己的收执话术（推倒重想的理由不同：事实错了，不是加东西）。
+    expect(src).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    // 分类上下文带思考窗阶段：分类器得知道手头的活是"正在想"。
+    expect(src).toContain('if (this.planPreflightActive) {');
   });
 
   it('吸收即推倒重想：重启请求掐流、思考重开、N 句 N 轮（2026-09-27 用户定调）', () => {

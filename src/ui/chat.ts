@@ -2388,6 +2388,13 @@ export class ChatController {
     const lastUser = runningRequest ? null : [...this.messages].reverse().find((m) => m.role === 'user');
     const currentAsk = runningRequest ?? lastUser?.content ?? '';
     if (currentAsk) parts.push(`用户当前诉求：${currentAsk.slice(0, 400)}`);
+    // 思考窗状态喂给分类器：预检思考还在飞时，手头的活是"正在想"而不是
+    // "正在跑"——纠正事实/加约束/加内容的正确归宿都是并进请求推倒重想，
+    // 分类器只有看见这个阶段才能把时机判对（2026-09-28 jev 纠错案例：
+    // 思考中纠正"jev 不是 JEPA"没被吸收，三个子 agent 照旧按错前提派出）。
+    if (this.planPreflightActive) {
+      parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');
+    }
     if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
     const plan = this.activeComplexPlan;
     if (plan && plan.steps.length > 0) {
@@ -2596,17 +2603,26 @@ export class ChatController {
       void this.askMidrunClarification(decision, text, images, ack);
       return;
     }
-    // 思考窗吸收（2026-09-27 用户定调）：预检思考还活着时，"往当前正在产出
-    // 的那一件东西里加内容"的插话（分类器给了 supplements_current）不排队、
-    // 不广播——排队会把一件事拆成两件（先画鸟、再单独补云），构图就断了。
-    // 而且不是"旧思考接着用"：约束类的话（"诗句里一定要出现明月"）必须长进
-    // 构图里，旧思考的构图没有它，带着它继续想等于后贴。所以吸收 = 置重启
-    // 请求 + 掐掉在飞的思考流（preflightAbort），send() 用并账后的请求推倒
-    // 重想；连续 N 句 = 重启 N 轮，每轮带着之前并好的全部补充。取消/停支/
-    // 续支的话不是加内容，不吸收，照走各自的路。
+    // 思考窗吸收（2026-09-27 定调、2026-09-28 jev 纠错案例扩容）：预检思考
+    // 还活着时，四类话都是"正在想的这件东西本身要变"——不排队、不广播、
+    // 也不许拆回合，全部并进请求推倒重想：
+    // ① 加内容/约束（supplements_current，"背景加云""诗句要有明月"）；
+    // ② 事实纠错（premise-change，"你对 jev 的理解是错的，它是 9 月新发布
+    //    的模型"——旧思考建立在错事实上，继续想全白费；而 premise-change
+    //    原路是拆回合重入，思考期原请求还没落账，新回合只剩纠错这一句，
+    //    要重做的事反而丢了）；
+    // ③ 方向推翻（goal-change，思考期"推翻重来" = 带着新方向重想，同一
+    //    理由不拆回合）；
+    // ④ 窗内普通 steer 一律吸收：窗内没有别的活在跑，steer 的"下个动作
+    //    带上"唯一兑现点就是在飞的思考本身——落 pendingSteers 只会等到
+    //    思考完、计划定型后才被看见（jev 案例的直因）。
+    // 取消/停支/续支不是加内容，不吸收照走各自的路；task（第二件活）照旧
+    // 排队；停/问/寒暄照旧。
     if (this.planPreflightActive
-      && (decision.kind === 'steer' || decision.kind === 'task')
-      && decision.signals.supplementsCurrent === true
+      && (decision.kind === 'steer'
+        || decision.kind === 'premise-change'
+        || decision.kind === 'goal-change'
+        || (decision.kind === 'task' && decision.signals.supplementsCurrent === true))
       && decision.signals.cancelsPart !== true
       && decision.signals.branchStop !== true
       && decision.signals.resumesBranch !== true) {
@@ -2614,7 +2630,10 @@ export class ChatController {
       this.pendingPreflightSupplements.push({ text, images });
       this.preflightRestartRequested = true;
       this.preflightAbort?.abort();
-      this.settleAck(ack, '收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
+      const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
+      this.settleAck(ack, isCorrection
+        ? '收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。'
+        : '收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
       return;
     }
     switch (decision.kind) {
