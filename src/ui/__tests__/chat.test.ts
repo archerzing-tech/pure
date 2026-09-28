@@ -1770,6 +1770,11 @@ describe('plan-by-thinking flow', () => {
     expect(decideIdx).toBeGreaterThan(-1);
     const decideCall = src.slice(decideIdx, src.indexOf(');', decideIdx));
     expect(decideCall).not.toContain('inThoughtWindow');
+    // 裁决走关暗推理的适配器（2026-09-28 实测）：bigmodel 上开着思考首字 8–28s、
+    // 极端 90s，而生产的裁决预算只有 8s——不关的话判定整批落到字面安全网，
+    // 「时机×内容」这一步就没了。与规划路径同款（planLlm）。
+    expect(decideCall).toContain('this.judgeLlm ?? this.turnLlm ?? null');
+    expect(src).toMatch(/this\.judgeLlm = createLLMAdapter\(config, \{ disableThinking: true \}\);/);
     // 裁决器看得见"此刻在思考"与思考最新说到哪：时机证据随上下文过河。
     expect(src).toContain("parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');");
     expect(src).toContain('思考最新说到：');

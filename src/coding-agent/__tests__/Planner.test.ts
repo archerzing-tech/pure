@@ -755,6 +755,34 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(fieldDoc).toBeGreaterThan(-1);
   });
 
+  it('separates 「往当前产出物里加」 from 「单独取回来的一件」 without deliberation (2026-09-28 实测)', () => {
+    // 回放实测：关掉暗推理后加活族 5 句从 task 掉到 steer。不是模型变笨，是原
+    // 判据（"清单变长"）与「往当前产出物里加」共用一句话，没有深思就分不开——
+    // 而 2026-09-22 的丢话事故正是 steer 落空造成的。所以判据换成不需要深思
+    // 的那一问：这件东西要不要**单独取回来**。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const taskBody = src.slice(src.indexOf('- "task"', promptStart), src.indexOf('- "question"', promptStart));
+    expect(taskBody).toContain('The test needs NO deliberation');
+    expect(taskBody).toContain('what has to come BACK');
+    expect(taskBody).toContain('再加一个爱奇艺平台');
+    expect(taskBody).toContain('把爱奇艺也查一下');
+    // 两个守卫都是从实测里掤出来的："当前工作自己就要走的一步"（跑测试/核对/
+    // 文风）不加范围，仍归 steer——第一版没写这句，"记得跑测试"当场被拉到 task。
+    expect(taskBody).toContain('must ALSO be outside the current job');
+    expect(taskBody).toContain('记得跑测试');
+    // 但「同一句既收又加」时收压倒加：否则「B站那支别查了，再加一个爱奇艺」
+    // 会被 task 那条例子拽走（实测真被拽走过），而把删除送进队列是反向执行。
+    expect(taskBody).toContain('ONE exception outranks this test');
+    expect(taskBody).toContain('the removal decides the kind');
+    expect(taskBody).toContain('B站那支别查了，再加一个爱奇艺');
+    // steer 侧的守卫："清单长大"只在**那份清单住在唯一产出物里面**时才算数，
+    // 否则并列对象就是一条新支（task）。
+    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
+    expect(steerBody).toContain('lives INSIDE the one deliverable');
+    expect(steerBody).toContain('a unit of work of its own');
+  });
+
   it('opens with the judge-first frame: timing × content-impact, never keywords (2026-09-28 用户定调)', () => {
     // 用户定调：决策不看关键词，看时机×内容×结果收益——聪明的人类同事
     // 会怎么做（统筹兼顾顺势而为 vs 及时停下改方向）。提示词开篇必须
@@ -775,6 +803,64 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     const premiseBody = src.slice(src.indexOf('- "premise-change"', promptStart), src.indexOf('- "goal-change"', promptStart));
     expect(premiseBody).toContain('would change the ANSWER');
     expect(premiseBody).toContain('jev');
+  });
+
+  it('gives the judge a stop kind — literal stops stay on STOP_RE, non-literal ones need judgement (2026-09-28)', () => {
+    // 正则只认字面命令（停止/停下/取消…）；"先缓一缓""这个就到这儿""停掉整个
+    // 任务"这类软停它盖不到，以前会被判 steer（带上）或 task（排队）。回放实测
+    // 又证明：字面命令交给裁决器时它只能判 goal-change（kind 表里没有 stop），
+    // 等于把单纯止损升级成推翻重排。所以补这一档，并守住分界表述。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    expect(prompt).toContain('- "stop" —');
+    // 契约三件套：JSON 样例、KINDS 白名单、与 goal-change / steer 的分界。
+    expect(prompt).toContain('"kind":"steer|premise-change|goal-change|stop|task|question|chatter"');
+    expect(src.slice(src.indexOf('const KINDS: readonly string[]'), src.indexOf('const KINDS: readonly string[]') + 160)).toContain("'stop'");
+    expect(prompt).toContain('a stop leaves no answer to build');
+    expect(prompt).toContain('is steer with "cancels_part"');
+    // cancels_part 的硬要求：即使判成 task 也必须报（漏报 = 反向执行）。
+    expect(prompt).toContain('EVEN WHEN you pick "task"');
+    expect(prompt).toContain('a missing\nflag is not');
+    // 混着加活的取消：停支的闸从宿主关键词改成了 adds_along 契约。
+    expect(prompt).toContain('"adds_along": include it as true ONLY together with "cancels_part"');
+    // 收窄也是移除（不说"取消"的取消）："不要只查均价了"就是不再要那个数。
+    // 没写这句时同一句 3 次里有 2 次漏报 cancels_part（补上后 4/4 报对）。
+    expect(prompt).toContain('NARROWING\ncounts as removal too');
+  });
+
+  it('parses the stop kind through the real pipeline', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"stop","reason":"the user is done with this run","confidence":0.9}'),
+      'context', '先缓一缓，这个就到这儿吧',
+    );
+    expect(hit.kind).toBe('stop');
+    expect(hit.fallbackUsed).toBeUndefined();
+  });
+
+  it('parses the adds_along contract field — the gate on stopping a branch (2026-09-28)', async () => {
+    // 混着加活的取消：「不要只查均价了，把区间也查一下」——取消那半由
+    // cancels_part 报，加活那半由 adds_along 报。宿主靠它拒绝停支：停掉那支
+    // 会把刚要求加进来的活一并杀掉。这是宿主侧最后一条关键词闸的接力棒。
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"removes one part while adding another","confidence":0.9,"cancels_part":true,"adds_along":true}'),
+      'context', '不要只查均价了，把区间也查一下',
+    );
+    expect(hit.cancelsPart).toBe(true);
+    expect(hit.addsAlong).toBe(true);
+    // 驼峰写法也认（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"same","confidence":0.9,"addsAlong":true}'),
+      'context', '同样的话',
+    );
+    expect(camel.addsAlong).toBe(true);
+    // 缺省/非 true 都不带标记——宿主只认严格 === true。
+    const plain = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"a plain addition","confidence":0.9}'),
+      'context', '顺便查一下汇率',
+    );
+    expect(plain.addsAlong).toBeUndefined();
+    expect(plain.cancelsPart).toBeUndefined();
   });
 
   it('parses the supplements_current contract field through to the classification', async () => {

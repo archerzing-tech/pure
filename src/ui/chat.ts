@@ -26,8 +26,8 @@ import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from
 import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
-import { DynamicInsertionCoordinator, CANCEL_PART_RE, SCOPE_ADD_RE, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
-import { describeTiming, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
+import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
+import { describeTiming, formatInputDecision, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
 import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { PermissionManager } from '../coding-agent/PermissionManager';
@@ -115,13 +115,13 @@ import { setInlineCardHost } from './inlineCard';
 import { createPathRepairNote } from './pathRepairNote';
 import { warmPathIndex, type PathRepair } from './pathIndex';
 
-// 取消味的粗筛（2026-09-25 复测案例二串台）：分类器把「把 X 这个调研取消掉」
-// 这类话判成 task 且没带 cancelsPart 时，宿主若只认 cancelsPart 就会把它当
-// 加活送进去重/折入——回出「已经在调研着了，不重复派」这种答非所问的收执。
-// 这里用宽口的取消词族先嗅一遍：只要话里有取消味，task 判定先改走取消处理
-// （真停点名支 / 取消折入），去重检查只给真正的加活用。宁可多嗅不可漏嗅
-// ——误进取消路的代价是少排一个队（可恢复），漏进加活路的代价是反向执行。
-const CANCELISH_RE = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终止|中止|停[掉下来了]|砍掉|掐掉)/;
+// 取消味的粗筛 CANCELISH_RE 已于 2026-09-28 移除（用户定调：宿主侧不再猜
+// 措辞）。它当年是为了堵「分类器把『把 X 这个调研取消掉』判成 task 且没带
+// cancels_part」这个串台（判决 2026-09-25），但宿主自己嗅关键词等于在裁决
+// 器之外另立一套判断——同一个句子在两边可能被读成相反的两件事。现在取消
+// 的可靠性全部押在契约字段 signals.cancelsPart 上：提示词把 cancels_part
+// 写成「即使判成 task 也必须报」的硬要求（漏报 = 反向执行，误报 = 少排一个
+// 队，两者不对称，所以宁可多报不可漏报）。宿主只认信号。
 
 // Insert a `-v{n}` segment before the extension (or append it for extension-less
 // files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
@@ -1462,6 +1462,20 @@ export class ChatController {
    * 实例关掉暗思考，主回合适配器保持原样（set by send()）。
    * 换掉 createLLMAdapter 签名会牵连非 Tauri 路径与测试，所以走独立实例。 */
   private planLlm?: import('../shared/types').LLMAdapter;
+  /** 裁决专用适配器（2026-09-28 实测）：插话裁决的可见输出就是一个小 JSON，
+   * 暗推理在这里是纯重复税——而且更贵：bigmodel 端点上同一批句子开着思考实测
+   * 首字 8–28s、极端两句 90s 都不出字，关掉后 1.1–6.5s 全部判出。生产的裁决
+   * 预算只有 8s（classifyInsertion 的默认超时），开着思考等于把大部分插话直接
+   * 推给字面安全网——用户的话还能走，但「时机×内容」这一步就没了。与规划路径
+   * 同款处置（planLlm）。
+   *
+   * **代价如实记**：关掉后拿到的判定不如深思时细。回放里加活族（"再加一个
+   * 爱奇艺平台"）5 句从 task 变 steer——而开着思考时它们根本不返回判定，是
+   * 安全网按"其余一律排队"排到 task 的（歪打正着，正是期望）。两害相权仍取关：
+   * 开着思考时软停/premise-change/提问/寒暄/排期这 20 来句会全部落到安全网的
+   * task 上（与意图相反），而这里只涉及 5 句加活。要真正两全，得让加活族在
+   * 提示词里不靠深思也能与"往当前产出物里加"分开——那是下一件事。 */
+  private judgeLlm?: import('../shared/types').LLMAdapter;
   /** 最近一次流活动的时间戳（引擎事件、规划叙述块都刷新它）。静看门狗据此
    * 分辨「真安静」与「活跃流式的 burst 间停顿」——后者不该弹空档卡。 */
   private lastStreamActivityAt = 0;
@@ -2579,7 +2593,15 @@ export class ChatController {
     // 是字面安全网（netVerdict——推翻重开/收活折入/其余排队）——话绝不因
     // 没有裁决器而失踪。决策本身不看关键词（2026-09-28 用户定调）：时机
     // ×内容×结果收益的综合判断全在裁决器（上下文带着当前阶段与思考叙述）。
-    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    // 裁决走 judgeLlm（关暗推理）而不是 turnLlm：见 judgeLlm 的字段注——开着
+    // 思考时 8s 预算几乎必然超时，判定会整批落到字面安全网。turnLlm 是兜底
+    // （judgeLlm 没立起来时它至少让 decide 拿到一个 llm）。
+    const decision = await this.dynamicInsertionCoordinator.decide(this.judgeLlm ?? this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    // 实时诊断（与协询器里的 recordInputDecision 同一份账）：设置页诊断区用来
+    // 回看，这里让「这条是谁定的」当场可见（控制台）——排查「怎么被正则截胡
+    // 了」时不必等回合结束。三个值：judge（裁决器）/ rule（正则快路径）/ net
+    //（字面安全网）。
+    console.info(`[pure] 插话决策 ${formatInputDecision(decision)} via=${String(decision.signals.via ?? 'judge')}`);
     if (this.abortController?.signal?.aborted) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
@@ -2642,6 +2664,9 @@ export class ChatController {
     }
     switch (decision.kind) {
       case 'stop':
+        // 这条可能来自正则快路径（"停止""停下"——字面命令）也可能来自裁决
+        // 器的 stop 档（"先缓一缓""这个就到这儿"——正则覆盖不到的软停）。
+        // 两条路落到同一个分支，因为要做的事一样：停手，不重排。
         // 整树停不重入 send()（没有 held insert），用户的原话不会在别处上屏
         // ——补上回显，别让转写里只剩 pure 的一句话（插话没有回执时 transcript
         // 必须仍能对上「谁说了什么」）。
@@ -2747,20 +2772,23 @@ export class ChatController {
         void this.answerMidrunQuestion(text, images);
         return;
       case 'task': {
-        // 取消不是活（2026-09-24 取消案例的宿主兜底；2026-09-25 复测案例二
-        // 串台加宽）：分类器把收掉一项判成 task 时——无论带没带 cancelsPart
-        // ——绝不能让它走去重、排队或机械折入：排队一个"取消"等于把它当活
-        // 跑（反向执行），送去重会回出"已经在调研着了"这种答非所问。只要话
-        // 里有取消味（CANCELISH_RE 粗筛）就先走取消路：委派在飞时试真停点
-        // 名的那支。停支有闸（stoppable）：混着加活的话——「不要只查均价，
-        // 把区间也查了」——永不停支（会把"把区间也查了"的活一并停掉），只
-        // 取消折入。停不了/点不到具体支按取消型 steer 折入；委派不在飞交给
-        // 在跑的回合自己消化。
-        const cancelish = decision.signals.cancelsPart === true || CANCELISH_RE.test(text);
+        // 取消不是活（2026-09-24 取消案例）：分类器把收掉一项判成 task 时，
+        // 只要它带上了 cancels_part，就绝不能走去重、排队或机械折入——排队
+        // 一个"取消"等于把它当活跑（反向执行），送去重会回出"已经在调研着
+        // 了"这种答非所问。
+        // 2026-09-28：宿主不再自己嗅关键词（CANCELISH_RE 已删），只看这个
+        // 契约字段。可靠性靠提示词的硬要求兑现——「即使判成 task 也必须报」
+        // ——而不是靠宿主当场猜措辞：一个句子在裁决器与宿主两边被读成相反的
+        // 两件事，就是两条反向执行的来路。
+        // 停支的闸 2026-09-28 起由契约字段驱动（adds_along），不再嗅关键词：
+        // 同一句里还要求加活的话——「不要只查均价了，把区间也查一下」——永不
+        // 停支，因为停掉那支会把刚要求加进来的活一并杀掉，只取消折入。
+        // 停不了/点不到具体支按取消型 steer 折入；委派不在飞交给在跑的回合
+        // 自己消化。
+        const cancelish = decision.signals.cancelsPart === true;
         if (cancelish) {
           if (this.hasDelegationInFlight()) {
-            const stoppable = !SCOPE_ADD_RE.test(text);
-            const stopped = stoppable ? this.stopNamedBranch(text, 'pause') : null;
+            const stopped = decision.signals.addsAlong === true ? null : this.stopNamedBranch(text, 'pause');
             if (stopped) {
               echoUserBubble();
               // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
@@ -4096,6 +4124,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 其他 provider 不给开关（planThinkingOffExtraBody 返回 undefined），
       // 于是回落到 reasoning_effort，与主回合行为一致。
       this.planLlm = createLLMAdapter(config, { disableThinking: true });
+      // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
+      // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
+      this.judgeLlm = createLLMAdapter(config, { disableThinking: true });
       // 9.2 — per-phase model routing (experimental). Each phase naming a
       // different model gets its own same-provider adapter through the shared
       // factory; blank / main-model entries fall through to `llm` via the E0.3

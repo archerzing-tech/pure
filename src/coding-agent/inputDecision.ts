@@ -92,9 +92,33 @@ export interface InputDecision {
    *  send. Never true on a `clarify` decision: asking must not abort work. */
   shouldAbort: boolean;
   reason: string;
+  /** The user's own words, kept so the LOG can be read back against the
+   *  conversation (truncated by the recorder). Producers that never expose the
+   *  input leave it out; it carries no decision weight. */
+  inputText?: string;
   /** Why the decision looks like this — rule name, model verdict, fallback flag.
    *  Free-form and small; it is what makes a replayed log diagnosable. */
   signals: Record<string, string | number | boolean | undefined>;
+}
+
+/**
+ * WHO decided it — the one field that answers "did the judge rule, or did a
+ * regex/literal net step in?" for a decision read back out of the log.
+ *  - judge: the LLM weighed timing × content impact (the normal path)
+ *  - rule:  a mechanical fast path matched — imperative stop / named-branch
+ *           stop / named-branch resume, where the words ARE the command and a
+ *           round-trip would be disobedience, not deliberation
+ *  - net:   the literal safety net answered because no verdict was available;
+ *           `signals.netReason` says which ('no-judge' → no LLM at all,
+ *           'judge-down' → the judge timed out / failed / returned garbage)
+ * Producers that do not set `signals.via` are judged by their main path, so
+ * this reads 'judge' for them rather than inventing a fourth bucket.
+ */
+export type InputDecisor = 'judge' | 'rule' | 'net';
+
+export function decisorOf(decision: InputDecision): InputDecisor {
+  const via = decision.signals.via;
+  return via === 'rule' || via === 'net' ? via : 'judge';
 }
 
 /** Below this, the action is downgraded to `clarify`. */

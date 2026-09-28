@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { DynamicInsertionCoordinator } from '../DynamicInsertionCoordinator';
+import { clearInputDecisionLog, decisorOf, getInputDecisionLog } from '../inputDecision';
 import type { LLMAdapter, Message } from '../../shared/types';
 
 function llm(): LLMAdapter {
@@ -17,6 +18,21 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.kind).toBe('stop');
     expect(decision.shouldAbort).toBe(true);
     expect(calls).toBe(0); // 停止等不起一次分类往返
+  });
+
+  it('aborts on a judged stop — the soft stops the literal fast path cannot see (2026-09-28)', async () => {
+    // "先缓一缓"没有任何命令词，STOP_RE 不碰它（BRANCH/RESUME 也都要点名锚）。
+    // 补 stop 档之前，这类话会被判 steer（下个动作带上）或 task（排队）——
+    // 都是"继续干"，与用户意思相反。现在由裁决器判 stop：停手，不重排。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'stop', reason: 'the user is done with this run', confidence: 0.9 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '先缓一缓，这个就到这儿吧' });
+    expect(decision.kind).toBe('stop');
+    expect(decision.action).toBe('stop');
+    expect(decision.shouldAbort).toBe(true);
+    expect(decision.signals.via).toBe('judge'); // 来自裁决，不是正则快路径
+    expect(decision.signals.rule).toBeUndefined();
   });
 
   it('hands overturn phrasing to the judge — the literal net only answers when the judge falls over (2026-09-28 用户定调)', async () => {
@@ -158,6 +174,24 @@ describe('DynamicInsertionCoordinator', () => {
     const decision = await coordinator.decide(llm(), 'current task', { text: '第二个不要了' });
     expect(decision.kind).toBe('steer');
     expect(decision.signals.cancelsPart).toBe(true);
+  });
+
+  it('threads a classifier addsAlong verdict — the gate that refuses a branch stop (2026-09-28)', async () => {
+    // 混着加活的取消：「不要只查均价了，把区间也查一下」——两个标记都得
+    // 到宿主，少一个就会把要加的活一并停掉（停支闸已从宿主关键词改成这个）。
+    const mixed = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancelsPart: true, addsAlong: true }),
+    });
+    const decision = await mixed.decide(llm(), 'current task', { text: '不要只查均价了，把区间也查一下' });
+    expect(decision.signals.cancelsPart).toBe(true);
+    expect(decision.signals.addsAlong).toBe(true);
+    // 纯取消不带它——缺省绝不自己补。
+    const pure = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'removes one branch', confidence: 0.9, cancelsPart: true }),
+    });
+    const plain = await pure.decide(llm(), 'current task', { text: 'X 就不调研了' });
+    expect(plain.signals.cancelsPart).toBe(true);
+    expect(plain.signals.addsAlong).toBeUndefined();
   });
 
   it('threads a classifier supplementsCurrent verdict into the decision signals (2026-09-27 思考窗吸收)', async () => {
@@ -359,5 +393,78 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.when).toBe('下午三点');
     expect(decision.timing.mode).toBe('at');
     expect(decision.action).toBe('queue');
+  });
+});
+
+/** 决策通道 + 决策日志（2026-09-28 定调的可见性半边）：每条插话决策都要
+ *  标明「谁定的」，并进共享日志——用户要在设置页看到这次是裁决器按时机×
+ *  内容判的，还是机械正则/字面安全网接的。三个值互斥：rule（命令快路径）、
+ *  judge（裁决器）、net（裁决器不可用时的安全网，netReason 说明原因）。
+ *  正则接管的次数一眼可见，就是「决策不看关键词」这条定调的验收窗口。 */
+describe('DynamicInsertionCoordinator — decisor channel + decision log', () => {
+  beforeEach(() => clearInputDecisionLog());
+
+  /** 只看插话那一类账（日志里还有 turn-route / host-schedule 的条目）。 */
+  const inserts = () => getInputDecisionLog().filter((entry) => entry.source === 'mid-run-insert');
+
+  it('marks the mechanical fast paths as rule, and names which rule decided', async () => {
+    const coordinator = new DynamicInsertionCoordinator();
+    const stop = await coordinator.decide(llm(), '', { text: '停止当前任务' });
+    expect(stop.signals.via).toBe('rule');
+    expect(stop.signals.rule).toBe('STOP_RE');
+    const branchStop = await coordinator.decide(llm(), '', { text: '停掉竞品那支' });
+    expect(branchStop.signals.via).toBe('rule');
+    expect(branchStop.signals.rule).toBe('BRANCH_STOP_RE');
+    const resume = await coordinator.decide(llm(), '', { text: '把竞品那支接着跑完' });
+    expect(resume.signals.via).toBe('rule');
+    expect(resume.signals.rule).toBe('RESUME_BRANCH_RE');
+  });
+
+  it('marks a verdict from the judge as judge', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'a constraint', confidence: 0.9 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '记得跑测试' });
+    expect(decision.signals.via).toBe('judge');
+    expect(decisorOf(decision)).toBe('judge');
+  });
+
+  it('marks the literal net as net and says WHICH failure sent it there', async () => {
+    // 没有裁决器（no-judge）和裁决器倒下（judge-down）是两件不同的事故：前
+    // 者是宿主还没立起 LLM，后者是模型超时/网络/解析失败——诊断区必须分得
+    // 开，否则「今天怎么这么多兜底」查不出方向。
+    const noJudge = new DynamicInsertionCoordinator();
+    const queued = await noJudge.decide(null, '', { text: '顺便把标题也改了' });
+    expect(queued.signals.via).toBe('net');
+    expect(queued.signals.netReason).toBe('no-judge');
+    expect(decisorOf(queued)).toBe('net');
+
+    const judgeDown = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
+    });
+    const netted = await judgeDown.decide(llm(), '', { text: '推翻重来' });
+    expect(netted.signals.via).toBe('net');
+    expect(netted.signals.netReason).toBe('judge-down');
+  });
+
+  it('writes every decision to the shared log together with the user\'s own words', async () => {
+    // 日志是设置页诊断区的数据源；没记上原话，用户就没法把它跟对话对上。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'question', reason: 'status check', confidence: 0.9 }),
+    });
+    await coordinator.decide(llm(), 'current task', { text: '  现在跑到哪一步了  ' });
+    const entries = inserts();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe('question');
+    expect(entries[0].inputText).toBe('现在跑到哪一步了');
+    expect(decisorOf(entries[0])).toBe('judge');
+  });
+
+  it('caps the logged input so one pasted essay cannot bloat the diagnostics pane', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'a second errand', confidence: 0.9 }),
+    });
+    await coordinator.decide(llm(), '', { text: 'x'.repeat(400) });
+    expect(inserts()[0].inputText).toHaveLength(160);
   });
 });

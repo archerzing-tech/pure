@@ -3,10 +3,18 @@ import { classifyInsertion, type InsertionClassification } from './Planner';
 import {
   applyConfidenceGate,
   parseInputTiming,
+  recordInputDecision,
   type InputAction,
   type InputDecision,
   type InputScope,
 } from './inputDecision';
+
+/** 这条决策是谁定的——用户要看的就是这一个字段（读法见 inputDecision.ts
+ *  的 decisorOf）：
+ *  - judge：裁决器（LLM）按「时机 × 内容对结果的影响」综合判的，正常路径
+ *  - rule ：机械正则快路径（整停 / 点名停支 / 点名续支——命令不是判断）
+ *  - net  ：字面安全网（裁决器不可用时的兜底，signals.netReason 说明原因）
+ *  三者互斥且必填，决策日志（inputDecision.ts）据此对账。 */
 
 /**
  * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有三种情况
@@ -16,6 +24,10 @@ import {
  * 跑就是白烧）。其余一切都不值得推倒重来：提醒、约束、补充顺着下个动作
  * 带上就好（steer）；提问先答一句（question）；新活儿排到手里这单后面
  * （task）；寒暄点头收下（chatter）。
+ *
+ * stop 有两条来路（2026-09-28）：字面命令走 STOP_RE 快路径，非字面的停
+ * （"先缓一缓""这个就到这儿"）由裁决器判（Planner 的 stop 档）——两条都落
+ * 成同一个 kind 与同一个 action，下游不需要知道是哪个来的。
  */
 export type DynamicInsertionKind = 'stop' | 'premise-change' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter';
 
@@ -42,6 +54,7 @@ export interface DynamicInsertionDecision extends InputDecision {
 /** What each kind does to the running work, and what it touches — the join
  *  between insertion vocabulary and the shared action/scope words. */
 const KIND_POLICY: Record<DynamicInsertionKind, { action: InputAction; scope: InputScope[] }> = {
+  // 正则快路径（"停止""停下"）与裁决器的 stop 档（"先缓一缓"）共用这一行。
   stop:            { action: 'stop',   scope: ['plan', 'completed-steps'] },
   'goal-change':   { action: 'replan', scope: ['goal', 'plan', 'completed-steps'] },
   // The goal stands but the fact it is computed from is wrong: everything
@@ -69,16 +82,22 @@ export interface DynamicInsertionCoordinatorOptions {
   ) => Promise<InsertionClassification>;
 }
 
-const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[一-鿿])/i;
+// 导出只为可测/可回放（见 scripts/replay-insertion-decisor.ts）：这些常量
+// 是「哪些话会被机械路径抢答」的唯一事实来源，回放脚本不能复制一份。
+export const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[一-鿿])/i;
 // 2026-09-28 降级为安全网（见 decide() 注）：推翻话不再由正则直判——
 // "改成X"和"推翻重来"的分寸只有结合时机和内容才判得准，正则只在裁决器
 // 倒下时兜底（netVerdict）。
-const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
+export const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
 // 加活字面族，同样降级为安全网。2026-09-22 的两次丢失（"再加一个 爱奇艺
 // 平台"）是 steer 的空头承诺（父任务阻塞收委派时没有"下个动作"可兑现），
 // 排队是唯一保证跑完的投递。2026-09-28 重构把这个保证留在网里（裁决器
 // 不可用 → 排队），主路让给裁决器：加的东西可能是往在飞的那一件产出物里
 // 加（画鸟补云/五位加两位），只有看得到时机的裁决器分得清——正则分不清。
+// 2026-09-28 二段：连"安全网里的一个分支"也算不上了——netVerdict 的默认
+// 目的地本来就是排队 task，"加活"与"其余"合并成同一条，所以这个字面族
+// 不再参与任何生产判定（留着只作两用：给回放脚本标注"加活族"，以及记着
+// 当年丢话事故的原句形状）。
 export const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
 // 收掉一部分（"X 就不调研了"，"Y 那个不用查了"）：steer 的删除语义，
 // 2026-09-24 真实事故的字面形状——并行调研中砍一支被判成加活折入（"先补
@@ -96,7 +115,7 @@ export const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要
 // （X那支别跑了/那个分支停下来）三种语序都收。判定次序上它排在 STOP_RE
 // 和 CANCEL_PART_RE 之前：带点名锚的停比整树停、收活都具体——「停下竞品
 // 那支」不能被整树 abort，「那路别跑了」不能被折进汇合轮。
-const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:帮?我?)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,10}(?:停下来|别跑|停了|不用跑|停掉|掐掉|砍掉|终止|取消)/i;
+export const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:帮?我?)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,10}(?:停下来|别跑|停了|不用跑|停掉|掐掉|砍掉|终止|取消)/i;
 // 分支级继续（第 2 期第三刀）：「把竞品那支接着跑完」「让报价那路继续」。
 // 与 BRANCH_STOP_RE 同款：必须有分支锚（那支/那路/…），续跑动词前后皆可——
 // 命中即由宿主按 callId 找到那支已暂停/已停的档案，用**原始参数**同参重派
@@ -117,6 +136,24 @@ export class DynamicInsertionCoordinator {
     insertion: DynamicInsertion,
     signal?: AbortSignal,
   ): Promise<DynamicInsertionDecision> {
+    // 先后：命令（字面停/点名停支/点名续支）由 decideInner 最先的几条正则
+    // 接走，不进裁决器；其余（含裁决器的 stop 档）走判断。
+    const decision = await this.decideInner(llm, context, insertion, signal);
+    // 每条插话决策都进共享日志（inputDecision.ts 的 recordInputDecision）：
+    // 「这次是裁决器判的，还是正则/安全网接的」变成可查的数据（signals.via），
+    // 设置页诊断区读它，formatInputDecisionLog() 还能整段导出回放。记录点在
+    // 唯一出口，所以四条生产路径（rule / judge / net-no-judge / net-down）
+    // 都不可能绕过。
+    recordInputDecision({ ...decision, inputText: insertion.text.trim().slice(0, 160) });
+    return decision;
+  }
+
+  private async decideInner(
+    llm: LLMAdapter | null,
+    context: string,
+    insertion: DynamicInsertion,
+    signal?: AbortSignal,
+  ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
     if (BRANCH_STOP_RE.test(text)) {
       // 祈使式停一支（第 2 期）：宿主点名寻址后直接 abortBranch 真停。排在
@@ -125,7 +162,7 @@ export class DynamicInsertionCoordinator {
       return this.build('steer', 'imperative branch-stop matched the fast path; the named branch is aborted now', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
-        signals: { rule: 'BRANCH_STOP_RE', branchStop: true },
+        signals: { via: 'rule', rule: 'BRANCH_STOP_RE', branchStop: true },
       });
     }
     if (RESUME_BRANCH_RE.test(text)) {
@@ -136,7 +173,7 @@ export class DynamicInsertionCoordinator {
       return this.build('steer', 'named-branch resume matched the fast path; the branch is re-delegated from its checkpoint', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
-        signals: { rule: 'RESUME_BRANCH_RE', resumesBranch: true },
+        signals: { via: 'rule', rule: 'RESUME_BRANCH_RE', resumesBranch: true },
       });
     }
     if (STOP_RE.test(text)) {
@@ -145,22 +182,23 @@ export class DynamicInsertionCoordinator {
       return this.build('stop', 'user requested the current run to stop', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
-        signals: { rule: 'STOP_RE' },
+        signals: { via: 'rule', rule: 'STOP_RE' },
       });
     }
     // 2026-09-28 用户定调：决策不看关键词——正则只配做裁决器倒下时的安全网。
     // 上面的三类（整停/点名停支/点名续支）是**命令**不是判断：人对"停"字
     // 不需要 deliberation，等一次裁决往返反而是抗命。其余一切（加活/收活/
-    // 推翻/约束/纠错/提问/寒暄）全走裁决器——时机×内容×结果收益的综合
-    // 判断；字面族（SCOPE_ADD/CANCEL_PART/GOAL_CHANGE）只在裁决不可用时
-    // 兜底（netVerdict），绝不再抢在判断前面。
+    // 推翻/约束/纠错/提问/寒暄/**非字面的停**）全走裁决器——时机×内容×
+    // 结果收益的综合判断；字面族（SCOPE_ADD/CANCEL_PART/GOAL_CHANGE）只在
+    // 裁决不可用时兜底（netVerdict），绝不再抢在判断前面。stop 那个档
+    // （Planner）补的正是 STOP_RE 词汇表覆盖不到的软停。
     if (!llm) {
-      return this.netVerdict(text, 'classification unavailable');
+      return this.netVerdict(text, 'classification unavailable', 'no-judge');
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
     if (result.fallbackUsed) {
       // 裁决器倒下（超时/网络/解析失败）：字面网兜底，话绝不丢。
-      return this.netVerdict(text, 'judge unreachable');
+      return this.netVerdict(text, 'judge unreachable', 'judge-down');
     }
     // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个
     // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜（KIND_POLICY）。
@@ -169,8 +207,10 @@ export class DynamicInsertionCoordinator {
       confidence: result.confidence,
       timing,
       signals: {
+        via: 'judge',
         classifier: 'llm',
         ...(result.cancelsPart ? { cancelsPart: true } : {}),
+        ...(result.addsAlong ? { addsAlong: true } : {}),
         ...(result.resumesPart ? { resumesBranch: true } : {}),
         ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
@@ -182,25 +222,25 @@ export class DynamicInsertionCoordinator {
   /** 安全网（2026-09-28 降级）：只裁决器倒下时用它——按字面族挑一个**不丢
    * 话**的目的地，绝不冒充判断。推翻话重开、收活折入、其余一律排队（唯一
    * 保证跑完的投递）。 */
-  private netVerdict(text: string, why: string): DynamicInsertionDecision {
+  private netVerdict(text: string, why: string, netReason: 'no-judge' | 'judge-down'): DynamicInsertionDecision {
     if (GOAL_CHANGE_RE.test(text)) {
       return this.build('goal-change', `${why}; overturn phrasing caught by the literal net`, {
         confidence: NO_CLASSIFIER_CONFIDENCE,
         timing: { mode: 'now' },
-        signals: { fallback: 'literal-net' },
+        signals: { via: 'net', netReason, fallback: 'literal-net' },
       });
     }
     if (CANCEL_PART_RE.test(text)) {
       return this.build('steer', `${why}; partial-cancellation caught by the literal net — the named part leaves the result`, {
         confidence: NO_CLASSIFIER_CONFIDENCE,
         timing: { mode: 'now' },
-        signals: { fallback: 'literal-net', cancelsPart: true },
+        signals: { via: 'net', netReason, fallback: 'literal-net', cancelsPart: true },
       });
     }
     return this.build('task', `${why}; queued so the words can never be lost`, {
       confidence: NO_CLASSIFIER_CONFIDENCE,
       timing: { mode: 'after-current' },
-      signals: { fallback: 'literal-net' },
+      signals: { via: 'net', netReason, fallback: 'literal-net' },
     });
   }
 

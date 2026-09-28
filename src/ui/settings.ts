@@ -58,6 +58,11 @@ import {
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
+import { clearInputDecisionLog, decisorOf, describeTiming, formatInputDecisionLog, getInputDecisionLog } from '../coding-agent/inputDecision';
+import { auditInsertionDecision, type InsertionAnomaly } from '../coding-agent/insertionAudit';
+import { ALL_CASES } from '../coding-agent/insertionCorpus';
+import { HARVESTED_CASES } from '../coding-agent/insertionCorpusHarvested';
+import { harvestCasesFromLog, renderHarvestedModule } from '../coding-agent/insertionHarvest';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
@@ -251,6 +256,8 @@ export class SettingsPanel {
     // Same for the evolution dashboard: reopening on it (or opening the panel
     // for the first time while it is the active page) must refresh its data.
     if (this.currentCategory === 'evolution') void this.renderEvolutionDashboard();
+    // 插话决策日志同理：面板开在通用页时要重读，否则看到的是上次关面板时的快照。
+    if (this.currentCategory === 'general') this.renderInsertionDecisionLog();
     this.onOpen?.();
     // Move keyboard focus into the settings view so opening it never leaves
     // the user tabbing through controls behind the squeezed chat view.
@@ -309,6 +316,8 @@ export class SettingsPanel {
     // 记忆库是只读仪表盘：切换到该页时重新渲染，反映最新的进化状态
     // （比如刚结束的会话刚写入新记忆 / 某条被取代降级）。
     if (category === 'memory') this.renderMemoryDashboard();
+    // 插话决策日志：切到通用页就重读——面板开着时看的是刚过去那几句话。
+    if (category === 'general') this.renderInsertionDecisionLog();
     // 定时任务页：每次进入重建列表；改动后通知主线程 reschedule 调度器。
     if (category === 'schedules') {
       const el = document.getElementById('schedules-dashboard');
@@ -356,6 +365,39 @@ export class SettingsPanel {
     // Update check
     fetchAndDisplayVersion();
     document.getElementById('cfg-check-updates')?.addEventListener('click', () => checkForUpdatesManual());
+
+    // ── Insertion decision log: refresh + clear ──
+    // 日志在内存里（inputDecision.ts），所以清空只是清本次会话的账：用户
+    // 想「现在开始数」时用，不影响任何决策逻辑。
+    document.getElementById('insertion-diag-refresh')?.addEventListener('click', () => this.renderInsertionDecisionLog());
+    document.getElementById('insertion-diag-copy')?.addEventListener('click', () => {
+      // 每行一个 JSON 对象（formatInputDecisionLog）——可以直接贴出去当回放
+      // 样本，而不是一张要人肉誊抄的图。
+      void copyTextToClipboard(formatInputDecisionLog(getInputDecisionLog())).then((ok) => {
+        this.toast(ok ? t('insertionDiag.copied') : t('insertionDiag.copyFailed'));
+      });
+    });
+    document.getElementById('insertion-diag-harvest')?.addEventListener('click', () => {
+      // 一键收割（2026-09-28）：把审计标出的疑点句并进回归语料，而不是让它随
+      // 会话日志一起被清掉。浏览器里写不了源文件，所以给出的是**整份**生成文件
+      // （既有收割项 + 新增），粘贴覆盖即生效——与「复制」按钮同一条路子，但
+      // 产物是可直接落盘的语料，不是要人肉誊抄的日志。
+      const entries = getInputDecisionLog().filter((entry) => entry.source !== 'turn-route');
+      const { added } = harvestCasesFromLog(entries, ALL_CASES, new Date().toISOString().slice(0, 10));
+      if (added.length === 0) {
+        this.toast(t('insertionDiag.harvestNone'));
+        return;
+      }
+      void copyTextToClipboard(renderHarvestedModule([...HARVESTED_CASES, ...added])).then((ok) => {
+        this.toast(ok
+          ? t('insertionDiag.harvested').replace('{n}', String(added.length))
+          : t('insertionDiag.copyFailed'));
+      });
+    });
+    document.getElementById('insertion-diag-clear')?.addEventListener('click', () => {
+      clearInputDecisionLog();
+      this.renderInsertionDecisionLog();
+    });
 
     // E1.3 tool-correction approve buttons — event-delegated (the card list
     // re-renders after every approval). The click is the whole approval flow:
@@ -2771,6 +2813,84 @@ export class SettingsPanel {
     if (floor !== null && floor / 100 !== D.deleteFloor) evo.deleteFloor = floor / 100;
     if (sim !== null && sim / 100 !== D.supersedeSimilarity) evo.supersedeSimilarity = sim / 100;
     return Object.keys(evo).length > 0 ? evo : undefined;
+  }
+
+  // ── Insertion decision log（通用页诊断区）──
+  //
+  // 每次任务进行中的插话都留一条：谁定的处置（裁决器 / 机械正则快路径 /
+  // 字面安全网）、判成了什么、置信度、为什么这么判。这是「决策不看关键词」
+  // 这条定调的验收窗口——裁决器被正则接管的次数一眼可见，正则（rule）和
+  // 安全网（net）的条目就是需要回去看证据的地方。
+
+  /** Show the newest N entries; the log itself caps at 200 (inputDecision.ts). */
+  private static readonly INSERTION_DIAG_ROWS = 50;
+
+  /** 事后审计的疑点标签（insertionAudit.ts）——词族只用来"事后挑可疑句子"，
+   *  绝不参与决策（决策只看裁决器的契约字段）。 */
+  private static readonly INSERTION_ANOMALY_KEYS: Record<InsertionAnomaly, string> = {
+    'cancels-missed': 'insertionDiag.anomaly.cancelsMissed',
+    'adds-along-missed': 'insertionDiag.anomaly.addsAlongMissed',
+  };
+
+  private renderInsertionDecisionLog(): void {
+    const el = document.getElementById('insertion-diag');
+    if (!el) return;
+    // 插话会产生两类账：mid-run-insert（分类器/正则负责处置）和 host-schedule
+    // （话里自带执行时刻，由宿主直接排期）。turn-route 是回合级路由，不属于
+    // 插话，不进这个面板。
+    const entries = getInputDecisionLog().filter((entry) => entry.source !== 'turn-route');
+    const countEl = document.getElementById('insertion-diag-count');
+    // 疑点数先算：契约字段漏报是"零关键词"改动的代价，必须一眼可见，
+    // 否则它只会在下一个反向执行事故里才被发现。
+    const anomalyCount = entries.filter((entry) => auditInsertionDecision(entry).anomalies.length > 0).length;
+    // 「收割」按钮只在有活可干时可用：没有疑点就点不动，少一次"点了没反应"。
+    const harvestBtn = document.getElementById('insertion-diag-harvest') as HTMLButtonElement | null;
+    if (harvestBtn) harvestBtn.disabled = anomalyCount === 0;
+    if (countEl) {
+      countEl.textContent = anomalyCount > 0
+        ? t('insertionDiag.anomalyCount').replace('{n}', String(anomalyCount)).replace('{total}', String(entries.length))
+        : String(entries.length);
+    }
+    if (entries.length === 0) {
+      el.innerHTML = `<div class="insertion-diag-empty">${escapeHtml(t('insertionDiag.empty'))}</div>`;
+      return;
+    }
+    const newest = entries.slice(-SettingsPanel.INSERTION_DIAG_ROWS).reverse();
+    el.innerHTML = newest.map((entry) => {
+      const scheduled = entry.source === 'host-schedule';
+      const decisor = decisorOf(entry);
+      const netReason = entry.signals.netReason;
+      const badge = scheduled ? 'scheduled' : decisor;
+      const label = scheduled
+        ? t('insertionDiag.via.scheduled')
+        : decisor === 'judge'
+          ? t('insertionDiag.via.judge')
+          : decisor === 'rule'
+            ? t('insertionDiag.via.rule')
+            : netReason === 'no-judge'
+              ? t('insertionDiag.via.netNoJudge')
+              : t('insertionDiag.via.netDown');
+      const rule = typeof entry.signals.rule === 'string' ? entry.signals.rule : '';
+      const time = new Date(entry.ts);
+      const hhmmss = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`;
+      const gatedFrom = typeof entry.signals.gatedFrom === 'string'
+        ? ` · ${t('insertionDiag.gated').replace('{action}', entry.signals.gatedFrom)}`
+        : '';
+      const { anomalies } = auditInsertionDecision(entry);
+      return `<div class="insertion-diag-entry${anomalies.length > 0 ? ' has-anomaly' : ''}">
+        <div class="insertion-diag-head">
+          <i class="insertion-diag-via via-${badge}">${escapeHtml(label)}</i>
+          ${rule ? `<span class="insertion-diag-rule">${escapeHtml(rule)}</span>` : ''}
+          <span class="insertion-diag-route">${escapeHtml(entry.kind)} → ${escapeHtml(entry.action)}</span>
+          <span class="insertion-diag-conf">${Math.round(entry.confidence * 100)}%</span>
+          <span class="insertion-diag-timing">${escapeHtml(describeTiming(entry.timing))}</span>
+          <span class="insertion-diag-time">${hhmmss}</span>
+        </div>
+        ${entry.inputText ? `<div class="insertion-diag-said">「${escapeHtml(entry.inputText)}」</div>` : ''}
+        <div class="insertion-diag-reason">${escapeHtml(entry.reason)}${escapeHtml(gatedFrom)}</div>
+        ${anomalies.map((a) => `<div class="insertion-diag-anomaly">${escapeHtml(t('insertionDiag.anomaly'))}${escapeHtml(t(SettingsPanel.INSERTION_ANOMALY_KEYS[a]))}</div>`).join('')}
+      </div>`;
+    }).join('');
   }
 
   // ── Memory runtime diagnostics（记忆页诊断区）──

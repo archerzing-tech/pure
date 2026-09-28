@@ -448,6 +448,20 @@
                     <button id="map-tile-cache-open" class="setting-btn secondary" data-i18n="mapCache.openBtn">Open in file manager</button>
                   </div>
                 </div>
+                <h3 class="settings-section-title" data-i18n="insertionDiag.title">插话决策日志</h3>
+                <p class="settings-page-desc" data-i18n="insertionDiag.desc">任务进行中被插一句话时，这里记下是谁定的处置：裁决器（按时机与内容对结果的影响综合判断）还是机械正则/字面安全网。最新在前。</p>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="insertionDiag.count">已记录</span><span class="setting-hint" id="insertion-diag-count">—</span></div>
+                    <div class="setting-input-group">
+                      <button id="insertion-diag-refresh" class="setting-btn secondary" data-i18n="insertionDiag.refresh">刷新</button>
+                      <button id="insertion-diag-copy" class="setting-btn secondary" data-i18n="insertionDiag.copy">复制</button>
+                      <button id="insertion-diag-harvest" class="setting-btn secondary" data-i18n="insertionDiag.harvest" data-i18n-title="insertionDiag.harvestHint" title="把疑点句并入回归语料">收割</button>
+                      <button id="insertion-diag-clear" class="setting-btn secondary" data-i18n="insertionDiag.clear">清空</button>
+                    </div>
+                  </div>
+                </div>
+                <div id="insertion-diag" class="memory-diag"></div>
               </div>
               <!-- LLM -->
               <div class="settings-page" data-page="llm">

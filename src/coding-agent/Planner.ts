@@ -281,9 +281,15 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
  *
  * 插话重构：判定不再问"相关与否"，而是直接问"人看到这句话会怎么处理"——
  * question 侧路回答、steer 顺路带上、premise-change 前提被推翻止损重来、
- * goal-change 方向推翻重来、task 排队、chatter 会心一笑。Stop 不走 LLM
- * （正则即可，停止等不起一次分类往返）。 */
-export type InsertionKind = 'question' | 'steer' | 'premise-change' | 'goal-change' | 'task' | 'chatter';
+ * goal-change 方向推翻重来、stop 停手不重排、task 排队、chatter 会心一笑。
+ *
+ * stop 分两层（2026-09-28 补）：**字面命令**（"停止""停下""取消"…）仍走
+ * STOP_RE 快路径——停是不可逆动作，等一次分类往返是抗命，且限流/超时期间
+ * 机械路径是唯一可靠的处置通道；**非字面的停**（"先缓一缓""这个就到这儿"
+ * "停掉整个任务""不用继续了"）正则覆盖不到，以前会被判成 steer（带上）或
+ * task（排队），现在由裁决器判 stop。判据是「没有东西补上来」：goal-change
+ * 是换一个方向继续，stop 是不需要这个结果了。 */
+export type InsertionKind = 'question' | 'steer' | 'premise-change' | 'goal-change' | 'stop' | 'task' | 'chatter';
 
 export interface InsertionClassification {
   kind: InsertionKind;
@@ -312,6 +318,13 @@ export interface InsertionClassification {
    *  routes the removal away from the task queue on this flag — queuing a
    *  removal would run the opposite of what was asked. */
   cancelsPart?: boolean;
+  /** True when ONE message does both jobs: removes a named part AND asks for new
+   *  work ("不要只查均价了，把区间也查一下"——停掉均价那路，同时把区间加上).
+   *  Only meaningful alongside `cancelsPart`, and the host reads it as the gate
+   *  on stopping a branch: pausing that branch would kill the work the message
+   *  just asked for, so the removal is folded into the join instead. Replaces
+   *  the host's old SCOPE_ADD_RE keyword sniff (2026-09-28). */
+  addsAlong?: boolean;
   /** 祈使式「停掉 X 那支」（第 2 期分支中断快路径）：真停一支在飞委派，
    * 不等汇合轮。宿主先点名寻址（matchSteerRecipient），点到了就
    * abortBranch；点不到退回取消折入——宁可折叠不误杀。 */
@@ -343,17 +356,18 @@ What the user just said:
 
 The ways to take a remark (pick exactly one kind):
 
-- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
+- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when that list lives INSIDE the one deliverable, so the remark changes what the deliverable covers and nothing else — it is NOT this when the added thing is another OBJECT of the kind already being worked on in parallel (three platforms being researched and the user names a fourth): that object is a unit of work of its own, not a detail of the current one, and it is a TASK (see below). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
 - "premise-change" — the remark corrects a FACT the work is built on: place, dates, environment, versions, budget, who owns what, what something IS ("其实我在西安，不是广东", "预算只有三千", "你对jev的理解是错误的，jev是2026年9月新发布的模型"). The goal stands, but everything computed from the wrong fact comes out worthless — the work must be redone from the corrected fact. Judge this over steer whenever the correction would change the ANSWER, not just its wording. Especially while THINKING: if the thought-so-far (shown in the context) rests on the wrong fact, redoing the thought is the only honest move.
 - "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this.
-- "task" — a NEW, completable piece of work, even one that extends the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理", "再写一首五言绝句" alongside an essay). Queuing runs it right after the current task so it can never be lost; when torn between steer and task over ADDED work, pick task. The test is the user's expectation: ONE deliverable that now carries the remark (steer), or a SECOND deliverable after this one (task).
+- "stop" — the running work ends and NOTHING takes its place ("先缓一缓", "这个就到这儿吧", "停掉整个任务", "不用继续了", "够了，先这样"). The whole question is what happens to the work: a stop leaves no answer to build, a goal-change replaces it with a different one, and a steer reshapes it. Phrases that look like stopping but are not: a constraint on how the work proceeds ("别停下来", "先别改这部分") is steer; asking where things stand ("跑完了吗") is question; a removal of ONE named branch or part while the rest continues is steer with "cancels_part" (the work as a whole carries on).
+- "task" — a NEW, completable piece of work, even one that extends the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理", "再写一首五言绝句" alongside an essay). Queuing runs it right after the current task so it can never be lost; when torn between steer and task over ADDED work, pick task. The test needs NO deliberation — ask what has to come BACK: something that must be fetched, looked up, researched or produced on its own is a task however small, even when it is worded as an addition ("再加一个爱奇艺平台" while three platforms are being researched = one more unit of work of that kind, not a detail of the 对比汇总; "把爱奇艺也查一下", "芒果TV也来一份", "also check Douban" all ask for something brought back). But what has to come back must ALSO be outside the current job: a step the current work itself has to take anyway — verifying it, running its tests, checking the result, keeping a style — adds no scope and is guidance, i.e. steer ("记得跑测试", "文案再口语一点"); it is not a second piece of work just because it names an action. Only a remark that changes the ONE thing you are already producing — its shape, its content, a constraint on it — is steer. ONE exception outranks this test: when the SAME message also REMOVES work that was already asked for (see "cancels_part"), the removal decides the kind — that message is steer, its addition is folded into the join, and nothing is queued ("B站那支别查了，再加一个爱奇艺" drops one branch and grows another in the same breath — the insert is reshaped, not deferred). A removal sent to the queue runs the exact opposite of what was asked. The user's expectation draws the same line otherwise: ONE deliverable that now carries the remark (steer), or a SECOND deliverable after this one (task).
 - "question" — the user asks something and expects an answer NOW ("跑完了吗", "现在到哪了"), or asks for a decision only they can make. Answering must not disturb the running work.
 - "chatter" — small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
 
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"resumes_part":true,"supplements_current":true}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -371,9 +385,25 @@ one is not (the agent restarts work or loses the message).
 "now" when the message implies it must be handled immediately, "after" when it
 explicitly belongs after the current task, and null when no timing was said.
 
-"cancels_part": include it as true ONLY when kind is "steer" AND the message
-cancels or removes a named part of the running work; omit it for every other
-message.
+"cancels_part": include it as true whenever the message REMOVES work that was
+already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了") or an
+imperative removal of one ("把 X 这个调研取消掉", "知乎那项也收掉吧"). NARROWING
+counts as removal too: telling the work to stop producing one of the things it was
+asked to produce ("不要只查均价了，把区间也查一下" — the average is no longer wanted)
+removes that part, so report it on such a message even though the same sentence also
+asks for something else. Report it
+EVEN WHEN you pick "task" for the same message: the host routes removals away
+from the queue on this flag alone, and a removal that reaches the queue runs the
+exact opposite of what was asked — a misjudged kind is survivable, a missing
+flag is not. Omit it for messages that only add or adjust work.
+
+"adds_along": include it as true ONLY together with "cancels_part" — when the
+same message does BOTH jobs: it removes one named part AND asks for new work
+("不要只查均价了，把区间也查一下" — drop the average, add the range; "B站那支停了吧，
+再加一个爱奇艺"). The host reads it as a gate on stopping a branch: pausing the
+named branch would kill the work this very message asked for, so the removal is
+folded into the join and nothing is stopped. Omit it for messages that only
+remove, or only add.
 
 "resumes_part": include it as true ONLY when kind is "steer" AND the message
 asks to carry on ONE named branch that was previously stopped or paused; omit
@@ -422,8 +452,8 @@ export async function classifyInsertion(
     { role: 'system', content: system },
     { role: 'user', content: prompt, images },
   ];
-  const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; resumesPart?: unknown; resumes_part?: unknown }>(
+  const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'stop', 'task', 'chatter'];
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown }>(
     llm,
     request,
     signal,
@@ -453,6 +483,7 @@ export async function classifyInsertion(
       // 契约字段是蛇形 cancels_part（见提示词 JSON 样例）；驼峰兜底防模型
       // 自行改写。两处都严格 === true，缺省即 false。
       ...(parsed.cancels_part === true || parsed.cancelsPart === true ? { cancelsPart: true } : {}),
+      ...(parsed.adds_along === true || parsed.addsAlong === true ? { addsAlong: true } : {}),
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
     };

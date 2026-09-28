@@ -263,6 +263,7 @@ interface ScriptedClassification {
   /** 与真模型按提示词契约回的字段同名（蛇形）——剧本原样 JSON.stringify，
    *  走 classifyInsertion 的真解析，回放保真。 */
   cancels_part?: boolean;
+  adds_along?: boolean;
   supplements_current?: boolean;
 }
 
@@ -751,12 +752,16 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingSteers).toHaveLength(0);
   });
 
-  it('复测案例二串台（2026-09-25）：取消话被判成 task 又没带 cancels_part——仍真停，绝不回「不重复派」', async () => {
-    // 真机串台形态：取消话被分类器判成 task 且没带 cancels_part，宿主只认
-    // cancelsPart，这句就落进去重检查，回出「已经在调研着了，不重复派」——
-    // 答非所问，支还在烧。宿主兜底加宽：话里有取消味（CANCELISH_RE）就走
-    // 取消路，去重只给真正的加活用。
-    const llm = scriptedLlm([]); // 剧本默认判 task、不带 cancels_part——串台同款
+  it('复测案例二串台（2026-09-25）：取消话被判成 task、但报上了 cancels_part——仍真停，绝不回「不重复派」', async () => {
+    // 真机串台形态：取消话被分类器判成 task，宿主若只看 kind 就会把它送进
+    // 去重检查，回出「已经在调研着了，不重复派」——答非所问，支还在烧。
+    // 2026-09-28：宿主的取消味粗筛（CANCELISH_RE）已删，改由契约字段驱动
+    // ——提示词已经把「即使判成 task 也必须报 cancels_part」写成硬要求，
+    // 所以这里的剧本就是那条契约的真实形态：kind 错了不要紧，标记在就不会
+    // 反向执行。
+    const llm = scriptedLlm([
+      { match: '取消', cls: { kind: 'task', reason: 'misjudged as an addition, flag still set', confidence: 0.9, cancels_part: true } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
       { callId: 'call_trend', agentName: '趋势调研员', status: 'running', inputSnippet: '探索 agent 开发技术趋势' },
@@ -785,10 +790,33 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingSteers).toHaveLength(0);
   });
 
+  it('宿主不再嗅关键词：task 判定没带 cancels_part 时，取消味也不改道（2026-09-28 定调）', async () => {
+    // 旧行为：话里只要带取消味（CANCELISH_RE 的 不需/不用/不要/取消/停…），task
+    // 判定就被改成取消路。那条粗筛已删——宿主不在裁决器之外另立一套判断，
+    // 否则同一个句子在两边可能被读成相反的两件事。
+    // 契约的代价在这里如实地钉住：分类器漏报 cancels_part 时，这句会按普通
+    // task 处理（排队），提示词里那句「即使判成 task 也必须报」是唯一防线。
+    const llm = scriptedLlm([
+      { match: '取消', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    // 委派不在飞：判定落在队列路径，才好断言“没被改道成取消”。
+
+    await h.chat.interject('把「市场格局」这份调研取消掉');
+    const said = assistantJoined(h.root) + statusJoined(h.root);
+    expect(said).not.toContain('收掉了');
+    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(queueCard(h.root)).toBeDefined(); // 落回普通 task 的排队路径
+  });
+
   it('混着加活的取消话永不停支：整句按取消折入，不能把要加的活一并停掉', async () => {
-    // 「不要只查均价了，把区间也查一下」——停支有闸（stoppable）：SCOPE_ADD_RE
-    // 在场就只取消折入，否则"把区间也查了"的活会被一并停掉。
-    const llm = scriptedLlm([]);
+    // 「不要只查均价了，把区间也查一下」——取消那一半由 cancels_part 报，加活
+    // 那一半由 adds_along 报（2026-09-28 起宿主的 SCOPE_ADD_RE 停支闸已删）：
+    // 两个标记同时在，宿主就只取消折入、绝不停支——停掉那支会把刚要求加进来
+    // 的活一并杀掉。
+    const llm = scriptedLlm([
+      { match: '区间', cls: { kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancels_part: true, adds_along: true } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_price', agentName: '价格调研员', status: 'running', inputSnippet: '调研各平台均价' });
     const paused: string[] = [];
