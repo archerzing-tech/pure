@@ -30,6 +30,7 @@ import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../c
 import { describeTiming, formatInputDecision, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
 import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -2491,9 +2492,7 @@ export class ChatController {
    * 空的），提不出再退回「这项」的说法——不装懂。 */
   private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void {
     const topic = cancelReceiptTopic(text);
-    this.settleAck(ack, topic
-      ? `好——“${topic}”这项不做了：还没派的不会派出去，也不会进最终汇总。`
-      : '好——这项不做了：还没派的不会派出去，也不会进最终汇总。');
+    this.settleAck(ack, cancelBeforeDispatchReceipt(topic));
   }
 
   /** 插话临时回执的直接退场：行摘掉的同时账上销账。此前各路径只
@@ -2726,9 +2725,7 @@ export class ChatController {
             echoUserBubble();
             // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
             // 气泡（settleAck 终稿语义），不必等收尾扫除摘微光。
-            this.settleAck(ack, pause
-              ? `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`
-              : `已停掉「${stopped}」那支——进度留了断点，随时可以让它接着跑，其余照常。`);
+            this.settleAck(ack, branchStopReceipt(stopped, pause ? 'pause' : 'abort'));
             return;
           }
           // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
@@ -2792,7 +2789,7 @@ export class ChatController {
             if (stopped) {
               echoUserBubble();
               // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
-              this.settleAck(ack, `明白——「${stopped}」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。`);
+              this.settleAck(ack, branchStopReceipt(stopped, 'pause'));
               return;
             }
             // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
@@ -2944,9 +2941,9 @@ export class ChatController {
         // 动作，手头的活继续」会把取消引导成"计划照旧"——模型照数三支，
         // 叙述与闸的实际拦截自相矛盾（收执说不会派、计划书里三支全名）。
         // 框架直接教它：计划当场缩，说话只数会派的支，弃掉的方向点名交代。
-        content: cancel
-          ? `【用户插话·顺路带上】${text}\n（这是任务进行中的取消，不是新任务：用户收掉了一个方向/话题。它不进计划、不派工、不进最终汇总——你现在规划或复述计划时，只数实际会派的支，明说：原规划几路、用户收掉了哪路、现在实际派出哪几路；别再把被收掉的方向当作仍在计划里的一路，也不要再为它派工。其余工作照常。）`
-          : `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`,
+        // （框架文本在 insertionMessaging.steerFrameText——三处取消口径的
+        // 单一事实来源，一致性测试锁着。）
+        content: steerFrameText(text, cancel),
         images,
       },
       target,
@@ -3247,15 +3244,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
-    this.settleAck(ack, cancels
-      ? '收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。'
-      : '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
+    this.settleAck(ack, foldInReceipt(cancels));
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到
    * 的不是一句转达，而是排定的追加委派。 */
   private foldInInstruction(text: string): string {
-    return `【中途追加的任务，不是闲聊】用户要求在本次任务里追加：${text}\n执行要求：把这项追加的工作像其他委派一样派出去做完；拿到结果后，把它与本次任务已产出的全部内容合并，输出一份覆盖所有对象的最终汇总。在此之前不要输出最终汇总。`;
+    return foldInInstructionShared(text);
   }
 
   /** 取消型折入的汇合轮框架（2026-09-24 取消案例）：与追加框架反着说死——
@@ -3263,12 +3258,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 用一句话入账。没有这个框架，取消在汇合轮会被追加口径（"派出去做完…
    * 覆盖所有对象"）反向执行。 */
   private cancelFoldInstruction(text: string): string {
-    return `【中途取消，不是追加】用户中途收掉了这项工作：${text}\n执行要求：不要再为它派任何委派；已经跑出的相关部分不算结论、不写入最终汇总（用户没说要保留）。委派收齐后，最终汇总只覆盖剩下的对象，并用一句话交代这项已按要求取消。`;
+    return cancelFoldInstructionShared(text);
   }
 
-  /** 折入没被照办时的兜底口径（转排队后作为新指令重入）。 */
+  /** 折入没被照办时的兜底口径（转排队后作为新指令重入）。文本在
+   *  insertionMessaging.foldInFollowUpText（一致性测试锁着）。 */
   private foldInFollowUpText(text: string): string {
-    return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
+    return foldInFollowUpTextShared(text);
   }
 
   /** 收尾核验折入的追加：机械执行成功的直接算数；指令注入的看投递后

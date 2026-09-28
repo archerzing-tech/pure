@@ -1042,8 +1042,12 @@ describe('plan overview completion state', () => {
     expect(reset).toBeGreaterThan(-1);
     expect(src.indexOf('this.queueCardEl = null;', reset)).toBeGreaterThan(-1);
     // 折入回执不再点名任务类型（"调研"）——追加的活可能是任何一种。
+    // 回执话术已提取到 insertionMessaging（三处取消口径的单一事实来源）：
+    // 原句扫那边，chat.ts 只扫接线（含反向锁：chat.ts 不得再内联文案）。
+    const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
     expect(src.indexOf('正在跑的调研收齐后')).toBe(-1);
-    expect(src.indexOf('正在跑的活收齐后先补这项')).toBeGreaterThan(-1);
+    expect(msg.indexOf('正在跑的活收齐后先补这项')).toBeGreaterThan(-1);
+    expect(src.indexOf('正在跑的活收齐后先补这项')).toBe(-1);
   });
 
   it('folds mid-flight scope additions into the aggregation round, with a deterministic fallback', () => {
@@ -1135,23 +1139,26 @@ describe('plan overview completion state', () => {
 
   it('handles a cancelled branch of parallel work as a removal, never an addition (2026-09-24 取消案例)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
+    const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
     // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入——回执
     // "先补这项，再合并出一份覆盖全部的汇总"与意图正好相反。取消语义在
     // 宿主侧必须全链路成立：回执说拿掉、汇合轮框架说排除、收尾兜底不重跑。
     // 取消的机器可读标记是 signals.cancelsPart（快路径 CANCEL_PART_RE 或分
     // 类器 cancels_part 都归一到它）。
-    expect(src.indexOf('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。')).toBeGreaterThan(-1);
+    expect(msg.indexOf('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。')).toBeGreaterThan(-1);
     const foldInFn = src.indexOf('private foldInScopeAddition(');
     const foldInBody = src.slice(foldInFn, src.indexOf('private cancelFoldInstruction', foldInFn));
     expect(foldInBody.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
     expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
-    expect(foldInBody.indexOf('? \'收到——这项收掉了')).toBeGreaterThan(-1);
+    // 收执话术走共享模块（foldInReceipt）——原句的归属在 insertionMessaging，
+    // chat.ts 侧锁住「必须经它」而不是自己内联。
+    expect(foldInBody.indexOf('this.settleAck(ack, foldInReceipt(cancels))')).toBeGreaterThan(-1);
     // 汇合轮框架反着说死：不许为取消项派新委派、部分产出不进汇总、幸存分
     // 支照常合并——绝不能沿用追加口径（"派出去做完…覆盖所有对象"）。
     expect(src.indexOf('private cancelFoldInstruction(text: string): string')).toBeGreaterThan(-1);
-    const cancelFrame = src.indexOf('【中途取消，不是追加】');
+    const cancelFrame = msg.indexOf('【中途取消，不是追加】');
     expect(cancelFrame).toBeGreaterThan(-1);
-    const cancelFrameBody = src.slice(cancelFrame, cancelFrame + 400);
+    const cancelFrameBody = msg.slice(cancelFrame, cancelFrame + 400);
     expect(cancelFrameBody.indexOf('不要再为它派任何委派')).toBeGreaterThan(-1);
     expect(cancelFrameBody.indexOf('不写入最终汇总')).toBeGreaterThan(-1);
     expect(cancelFrameBody.indexOf('只覆盖剩下的对象')).toBeGreaterThan(-1);
@@ -1182,6 +1189,7 @@ describe('plan overview completion state', () => {
 
   it('a cancel arriving BEFORE any delegation exists gates the branch at birth (2026-09-26 插话先于委派)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
+    const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
     // 用户实测：插话落在委派出生之前——点名路（abortBranch）无支可点，
     // 折入路只守汇报步，三支照派、取消落空。修法=委派起飞闸：话挂
     // pendingCancels，批次起飞时 gateDelegations 按区分词匹配兑现（整批
@@ -1199,14 +1207,16 @@ describe('plan overview completion state', () => {
     // 走 settleCancelBeforeDispatchAck（2026-09-26 用户实测反馈固定话术里
     // 「这项」是空的——能抽出话题就点名，与停支收执同一人味）。
     expect(src.indexOf('private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void')).toBeGreaterThan(-1);
-    expect(src.indexOf('还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    expect(msg.indexOf('还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
     expect(src.split('this.settleCancelBeforeDispatchAck(ack, text)').length - 1).toBe(2);
     // 叙述一致性（2026-09-26 用户反馈）：取消型插话的转达走取消专用框架——
     // 通用框架「手头的活继续」会把取消引导成"计划照旧"，模型照数三支，
     // 收执说"不派了"、计划书里三支全名，自相矛盾。两处挂号调用都带 cancel=true。
     expect(src.indexOf('cancel = false')).toBeGreaterThan(-1);
-    expect(src.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
-    expect(src.indexOf('只数实际会派的支')).toBeGreaterThan(-1);
+    // 取消专用框架的话术归 insertionMessaging.steerFrameText（chat.ts 侧锁
+    // cancel 参数流转，那边锁措辞与分流——一致性测试再锁三处同向）。
+    expect(msg.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
+    expect(msg.indexOf('只数实际会派的支')).toBeGreaterThan(-1);
     expect(src.split("this.steerRunningTurn(text, images, null, 'parent', true)").length - 1).toBe(2);
     // 起飞闸接进引擎配置：候选集由宿主备好，匹配与消费在纯函数
     // planTakeoffGate（与测试共用同一套纪律）。
