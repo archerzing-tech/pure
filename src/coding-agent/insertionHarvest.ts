@@ -56,7 +56,7 @@ export function harvestCasesFromLog(
       skipped.push({ text, why: 'clean' });
       continue;
     }
-    added.push(caseFromAnomalies(text, anomalies, stamp));
+    added.push(caseFromAnomalies(text, anomalies, stamp, entry.inputContext));
     seen.add(text);
   }
 
@@ -136,6 +136,7 @@ export function renderHarvestedModule(cases: readonly Case[]): string {
       ...(c.cancels ? ['    cancels: true,'] : []),
       ...(c.addsAlong ? ['    addsAlong: true,'] : []),
       "    expectation: 'suspected',",
+      ...(c.scenarioText ? [`    scenarioText: ${JSON.stringify(c.scenarioText)},`] : []),
       `    source: ${JSON.stringify(c.source)},`,
       '  },',
     ].join('\n'))
@@ -160,16 +161,26 @@ import type { Case } from './insertionCorpus';
 export const HARVESTED_CASES: Case[] = `;
 
 /** 疑点 → 用例。收掉具名一支在本项目的分类里就是 steer（见语料收活族），
- *  所以收割的期望 kind 也是 steer——这是从审计结论推出来的，不是猜的。 */
-export function caseFromAnomalies(text: string, anomalies: readonly InsertionAnomaly[], stamp: string): Case {
+ *  所以收割的期望 kind 也是 steer——这是从审计结论推出来的，不是猜的。
+ *
+ *  @param sceneText 判它时真实记下的场景原文。跟着句子一起收，是因为疑点只在
+ *  那个具体局面下成立：换到默认场景重判可能不复现，收割就成了走过场。 */
+export function caseFromAnomalies(
+  text: string,
+  anomalies: readonly InsertionAnomaly[],
+  stamp: string,
+  sceneText?: string,
+): Case {
   const cancels = anomalies.includes('cancels-missed') || anomalies.includes('adds-along-missed');
   const addsAlong = anomalies.includes('adds-along-missed');
+  const scene = sceneText?.trim();
   return {
     text,
     kind: 'steer',
     ...(cancels ? { cancels: true } : {}),
     ...(addsAlong ? { addsAlong: true } : {}),
     expectation: 'suspected',
+    ...(scene ? { scenarioText: scene } : {}),
     source: `${HARVEST_SOURCE_PREFIX} ${stamp}（${anomalies.join(' + ')}）`,
   };
 }

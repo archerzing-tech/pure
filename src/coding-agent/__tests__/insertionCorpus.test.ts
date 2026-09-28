@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { ALL_CASES, CASES, DEFAULT_SCENARIO, SCENARIOS, aligns, mainHit, mechanicalHits, scenarioFor } from '../insertionCorpus';
+import { ALL_CASES, CASES, DEFAULT_SCENARIO, HARVESTED_SCENARIO_ID, SCENARIOS, aligns, mainHit, mechanicalHits, scenarioFor } from '../insertionCorpus';
 
 describe('插话语料：机械路径的行为边界', () => {
   it('语料自洽：每句都有出处、不重复、契约期望成对', () => {
@@ -48,6 +48,13 @@ describe('插话语料：机械路径的行为边界', () => {
     // 与它们无关的语境里被判错——判错的是上下文。场景跟着句子走就是这么定的。
     for (const c of ALL_CASES) {
       const { id, text } = scenarioFor(c);
+      // 收割来的用例带的是**当初判它时的现场原文**（见 Case.scenarioText）：
+      // 它不来自场景库，也不该被收编成场景库的一条——自动收割不编辑现场。
+      if (c.scenarioText) {
+        expect(id).toBe(HARVESTED_SCENARIO_ID);
+        expect(text).toBe(c.scenarioText);
+        continue;
+      }
       expect(SCENARIOS[id]).toBeDefined();
       expect(text).toBe(SCENARIOS[id]);
     }

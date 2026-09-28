@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 
 const read = (rel: string): string => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
-describe('设置页 · 疑点句一键收割', () => {
+describe('设置页 · 插话决策诊断区', () => {
   it('按钮在诊断区的工具行里，带中英文案与提示', () => {
     const html = read('../../../index.html');
     expect(html).toContain('id="insertion-diag-harvest"');
@@ -34,6 +34,38 @@ describe('设置页 · 疑点句一键收割', () => {
     expect(src).toContain('auditSummary(entries)');
     // 收割那一刻的疑点率一起落盘：下一轮才有对照。
     expect(src).toContain('recordHarvestRound({ ts: Date.now(), harvested: added.length, rate: summary.rate, total: summary.total })');
+  });
+
+  it('每行带场景徽章；被标疑点的行把完整场景展开出来', () => {
+    // 「判错了」只有配上「在什么场景下判的」才可行动：同一句换场景能从错到对
+    // （我在西安 chatter→premise-change）。所以场景既要能扫（徽章），也要能读全
+    // （疑点行展开 + 每行 hover）。
+    const src = read('../settings.ts');
+    expect(src).toContain('describeInsertionScene(entry.inputContext)');
+    expect(src).toContain('insertion-diag-scene');
+    expect(src).toContain('insertion-diag-scene-full');
+    expect(src).toContain('title="${escapeHtml(entry.inputContext)}"');
+    // 只有被标疑点的行才展开：否则日志一眼看不到头。
+    expect(src).toContain('anomalies.length > 0 && entry.inputContext');
+    // 没记下场景的行（排期插话）不挂徽章，也不拿空文案占位。
+    expect(src).toContain("scene.key === 'unrecorded'");
+    expect(src).toContain('${sceneLabel ?');
+  });
+
+  it('场景的样式与文案齐备', () => {
+    const css = read('../styles.css');
+    for (const cls of ['insertion-diag-scene', 'insertion-diag-scene-full']) {
+      expect(css).toContain(`.${cls}`);
+    }
+    const i18n = read('../../shared/i18n.ts');
+    for (const key of [
+      'insertionDiag.scene.thinking',
+      'insertionDiag.scene.inflight',
+      'insertionDiag.scene.executing',
+      'insertionDiag.sceneFull',
+    ]) {
+      expect(i18n.split(`'${key}':`).length - 1).toBeGreaterThanOrEqual(2);
+    }
   });
 
   it('趋势的样式与文案齐备（柱条类名对得上）', () => {

@@ -96,6 +96,13 @@ export interface InputDecision {
    *  conversation (truncated by the recorder). Producers that never expose the
    *  input leave it out; it carries no decision weight. */
   inputText?: string;
+  /** The scene the decision was made IN — the same context the judge was given
+   *  (phase, in-flight delegations, thinking narration). Truncated by the
+   *  recorder; carries no decision weight. It exists because "判错了" is only
+   *  actionable together with "在什么场景下判的": a sentence judged wrong in the
+   *  wrong scene is a corpus/context problem, not a judge problem (2026-09-28
+   *  实测：同一句换场景从错到对). */
+  inputContext?: string;
   /** Why the decision looks like this — rule name, model verdict, fallback flag.
    *  Free-form and small; it is what makes a replayed log diagnosable. */
   signals: Record<string, string | number | boolean | undefined>;
@@ -364,6 +371,40 @@ export function describeTiming(timing: InputTiming): string {
   const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   if (timing.text && timing.text.trim() && !/^\d{1,2}[:：]\d{2}$/.test(timing.text.trim())) return timing.text.trim();
   return clock;
+}
+
+/**
+ * 场景徽章（2026-09-28）——**显示用**，绝不参与任何判定。
+ *
+ * 诊断区要回答的不只是"判成了什么"，还有"在什么场景下判的"：「我在西安」在
+ * 旅游规划里是前提纠错，在"调研三个平台"里就什么都不是（实测同一句换场景从错
+ * 到对）。生产里没有具名场景，只有 `buildInsertionContext()` 写的那几行自述，
+ * 所以这里从它的措辞里读出一个能扫的标签。
+ *
+ * 读的是自己写的字符串，所以它天然是脆的——但错了也只是徽章不准，不会改变任
+ * 何判定；要改就地改这一处，别把同样的字符串匹配搬到判定路径上去。
+ *
+ * `unrecorded` 与 `executing` 必须分开（2026-09-28）：没记下场景不等于"在执行的
+ * 场景里判的"。排期插话（`host-schedule`）压根没经过裁决器，它没有场景可显示
+ * ——把它归进 `executing` 就等于给一次没发生过的观察编一个结论，而诊断区存在的
+ * 意义恰好是"判错了要能看到在什么场景下判的"。
+ */
+export type InsertionScene =
+  | { key: 'unrecorded' }
+  | { key: 'thinking' }
+  | { key: 'inflight'; count: number }
+  | { key: 'executing' };
+
+export function describeInsertionScene(context: string | undefined): InsertionScene {
+  const text = (context ?? '').trim();
+  if (!text) return { key: 'unrecorded' };
+  if (text.includes('正在思考这个任务的规划') || text.includes('思考最新说到')) return { key: 'thinking' };
+  const inflight = /并行委派：共\s*\d+\s*个，在飞\s*(\d+)\s*个/.exec(text);
+  if (inflight) {
+    const count = Number(inflight[1]);
+    if (count > 0) return { key: 'inflight', count };
+  }
+  return { key: 'executing' };
 }
 
 // ── Replayable log ────────────────────────────────────────────────────────

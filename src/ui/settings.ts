@@ -58,7 +58,7 @@ import {
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
-import { clearInputDecisionLog, decisorOf, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
+import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
 import { auditInsertionDecision, auditSummary, auditTrend, type InsertionAnomaly } from '../coding-agent/insertionAudit';
 import { ALL_CASES } from '../coding-agent/insertionCorpus';
 import { HARVESTED_CASES } from '../coding-agent/insertionCorpusHarvested';
@@ -2882,10 +2882,23 @@ export class SettingsPanel {
         ? ` · ${t('insertionDiag.gated').replace('{action}', entry.signals.gatedFrom)}`
         : '';
       const { anomalies } = auditInsertionDecision(entry);
-      return `<div class="insertion-diag-entry${anomalies.length > 0 ? ' has-anomaly' : ''}">
+      // 场景徽章：判它时看到的是什么局面（思考中 / 在飞 N / 执行中）。被标疑点
+      // 的行把完整场景展开——"判错了"只有配上"在什么场景下判的"才可行动。
+      // 没记下场景的行（排期插话没经过裁决器）不挂徽章：给它编一个"执行中"
+      // 就是伪造一次没发生过的观察。
+      const scene = describeInsertionScene(entry.inputContext);
+      const sceneLabel = scene.key === 'unrecorded'
+        ? ''
+        : scene.key === 'inflight'
+          ? t('insertionDiag.scene.inflight').replace('{n}', String(scene.count))
+          : scene.key === 'thinking'
+            ? t('insertionDiag.scene.thinking')
+            : t('insertionDiag.scene.executing');
+      return `<div class="insertion-diag-entry${anomalies.length > 0 ? ' has-anomaly' : ''}"${entry.inputContext ? ` title="${escapeHtml(entry.inputContext)}"` : ''}>
         <div class="insertion-diag-head">
           <i class="insertion-diag-via via-${badge}">${escapeHtml(label)}</i>
           ${rule ? `<span class="insertion-diag-rule">${escapeHtml(rule)}</span>` : ''}
+          ${sceneLabel ? `<span class="insertion-diag-scene">${escapeHtml(sceneLabel)}</span>` : ''}
           <span class="insertion-diag-route">${escapeHtml(entry.kind)} → ${escapeHtml(entry.action)}</span>
           <span class="insertion-diag-conf">${Math.round(entry.confidence * 100)}%</span>
           <span class="insertion-diag-timing">${escapeHtml(describeTiming(entry.timing))}</span>
@@ -2893,6 +2906,7 @@ export class SettingsPanel {
         </div>
         ${entry.inputText ? `<div class="insertion-diag-said">「${escapeHtml(entry.inputText)}」</div>` : ''}
         <div class="insertion-diag-reason">${escapeHtml(entry.reason)}${escapeHtml(gatedFrom)}</div>
+        ${anomalies.length > 0 && entry.inputContext ? `<div class="insertion-diag-scene-full">${escapeHtml(t('insertionDiag.sceneFull'))}${escapeHtml(entry.inputContext)}</div>` : ''}
         ${anomalies.map((a) => `<div class="insertion-diag-anomaly">${escapeHtml(t('insertionDiag.anomaly'))}${escapeHtml(t(SettingsPanel.INSERTION_ANOMALY_KEYS[a]))}</div>`).join('')}
       </div>`;
     }).join('') + this.renderInsertionTrend(entries);

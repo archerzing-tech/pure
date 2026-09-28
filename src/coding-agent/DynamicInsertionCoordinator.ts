@@ -144,7 +144,13 @@ export class DynamicInsertionCoordinator {
     // 设置页诊断区读它，formatInputDecisionLog() 还能整段导出回放。记录点在
     // 唯一出口，所以四条生产路径（rule / judge / net-no-judge / net-down）
     // 都不可能绕过。
-    recordInputDecision({ ...decision, inputText: insertion.text.trim().slice(0, 160) });
+    // 连同**判它时的场景**一起入账（2026-09-28）："判错了"只有配上"在什么场景
+    // 下判的"才可行动——同一句换场景能从错到对，看不到场景就只能归咎于模型。
+    recordInputDecision({
+      ...decision,
+      inputText: insertion.text.trim().slice(0, 160),
+      inputContext: context.trim().slice(0, 600),
+    });
     return decision;
   }
 

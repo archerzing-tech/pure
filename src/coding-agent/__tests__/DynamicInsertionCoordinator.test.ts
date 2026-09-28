@@ -421,6 +421,20 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
     expect(resume.signals.rule).toBe('RESUME_BRANCH_RE');
   });
 
+  it('logs the scene the decision was made in — 判错了要能看到在什么场景下判的', async () => {
+    // 场景就是喂给裁决器的那段上下文（时机×内容里的"时机"）。它是事后诊断唯一
+    // 能把"判错了"与"在错场景里判的"分开的东西——同一句换场景能从错到对。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'a constraint', confidence: 0.9 }),
+    });
+    const context = '用户当前诉求：帮我调研三个平台的会员价格\n并行委派：共 3 个，在飞 3 个';
+    await coordinator.decide(llm(), context, { text: '记得跑测试' });
+    expect(inserts()[0].inputContext).toBe(context);
+    // 长上下文截断：日志是给人读的，不是存证全文。
+    await coordinator.decide(llm(), 'x'.repeat(900), { text: '记得跑测试' });
+    expect(inserts()[1].inputContext).toHaveLength(600);
+  });
+
   it('marks a verdict from the judge as judge', async () => {
     const coordinator = new DynamicInsertionCoordinator({
       classify: async () => ({ kind: 'steer', reason: 'a constraint', confidence: 0.9 }),

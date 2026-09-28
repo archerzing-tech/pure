@@ -57,6 +57,14 @@ export interface Case {
    *  「这首必须是五言的」被放进一个与它们真实场景无关的语境里判——判错的是
    *  上下文，不是模型。2026-09-28 实测后每条 Case 可以指名自己的场景。 */
   scenario?: string;
+  /** 判它时**真实记下**的场景原文（`InputDecision.inputContext`）。只有自动收割
+   *  的用例带它，优先于 `scenario`。
+   *
+   *  为什么不把它归到 `SCENARIOS` 的某个键下：`SCENARIOS` 是人工写就的场景库，
+   *  而自动收割最不该做的就是编辑现场。疑点句是"在某个具体局面下判成这样的"
+   *  ——换成默认场景重判，可能根本复现不出当初那个疑点，那么"判错了能看到在
+   *  什么场景下判的"就只停在看得见，接不上"下一次跑得到"。 */
+  scenarioText?: string;
 }
 
 /**
@@ -100,8 +108,15 @@ export const SCENARIOS: Record<string, string> = {
 
 export const DEFAULT_SCENARIO = 'platform-research';
 
-/** 这句该在哪个场景里判（回放与测试共用这一个读法）。 */
+/** 带真实场景原文的用例用这个 id（不是 `SCENARIOS` 的键，只是回放报告里区分
+ *  "人工命名的场景"与"收割来的现场"）。 */
+export const HARVESTED_SCENARIO_ID = 'harvested-context';
+
+/** 这句该在哪个场景里判（回放与测试共用这一个读法）。收割来的用例带的是它
+ *  当初被判时的场景原文，优先于场景键。 */
 export function scenarioFor(c: Case): { id: string; text: string } {
+  const literal = c.scenarioText?.trim();
+  if (literal) return { id: HARVESTED_SCENARIO_ID, text: c.scenarioText as string };
   const id = c.scenario ?? DEFAULT_SCENARIO;
   return { id, text: SCENARIOS[id] };
 }

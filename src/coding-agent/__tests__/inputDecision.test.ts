@@ -6,6 +6,7 @@ import {
   applyConfidenceGate,
   clampConfidence,
   clearInputDecisionLog,
+  describeInsertionScene,
   describeTiming,
   formatInputDecision,
   formatInputDecisionLog,
@@ -185,6 +186,18 @@ describe('detectScheduledInput', () => {
 describe('InputDecision log', () => {
   beforeEach(() => clearInputDecisionLog());
 
+  it('场景随日志一起导出与读回——诊断区与回放都要看得见', () => {
+    // 「判错了」只有配上「在什么场景下判的」才可行动（同一句换场景能从错到
+    // 对）。导出/粘贴/回放这一整条路都得带着它。
+    recordInputDecision(
+      { ...decision(), inputContext: '用户当前诉求：调研三个平台\n并行委派：共 3 个，在飞 3 个' },
+      1000,
+    );
+    const [entry] = parseInputDecisionLog(formatInputDecisionLog(getInputDecisionLog()));
+    expect(entry.inputContext).toContain('在飞 3 个');
+    expect(replayInputDecision(entry).inputContext).toContain('在飞 3 个');
+  });
+
   it('records and replays a decision onto the same action', () => {
     const confident = decision({ kind: 'task', action: 'queue', confidence: 1, shouldAbort: false, timing: { mode: 'after-current', at: undefined } });
     recordInputDecision(confident, 1000);
@@ -218,5 +231,35 @@ describe('InputDecision log', () => {
     const good = formatInputDecisionLog([{ ...decision(), ts: 1 }]);
     const parsed = parseInputDecisionLog(`${good}\n{not json\n{"kind":"task"}`);
     expect(parsed).toHaveLength(1);
+  });
+});
+
+describe('describeInsertionScene — 场景徽章（显示用，不参与判定）', () => {
+  it('从上下文措辞读出思考中 / 在飞 N / 执行中', () => {
+    expect(describeInsertionScene(
+      '用户当前诉求：写一首五言绝句\n（当前状态：模型正在思考这个任务的规划、还未开始执行）',
+    )).toEqual({ key: 'thinking' });
+    expect(describeInsertionScene(
+      '用户当前诉求：调研三个平台\n并行委派：共 3 个，在飞 2 个',
+    )).toEqual({ key: 'inflight', count: 2 });
+    expect(describeInsertionScene('用户当前诉求：调研三个平台')).toEqual({ key: 'executing' });
+  });
+
+  it('"在飞 0 个"当成执行中，而不是一个自相矛盾的徽章', () => {
+    expect(describeInsertionScene('并行委派：共 3 个，在飞 0 个')).toEqual({ key: 'executing' });
+  });
+
+  it('没记下场景就是 unrecorded，不许冒充"执行中"', () => {
+    // 排期插话（host-schedule）没经过裁决器，压根没有场景可显示。归进
+    // executing 等于给一次没发生过的观察编一个结论——诊断区存在的意义恰好是
+    // "判错了要能看到在什么场景下判的"，编出来的场景会把这条线索污染掉。
+    expect(describeInsertionScene(undefined)).toEqual({ key: 'unrecorded' });
+    expect(describeInsertionScene('   ')).toEqual({ key: 'unrecorded' });
+  });
+
+  it('思考期压过在飞数——正在想的时候那才是真正的场景', () => {
+    expect(describeInsertionScene(
+      '并行委派：共 3 个，在飞 3 个\n思考最新说到：先定体裁',
+    )).toEqual({ key: 'thinking' });
   });
 });

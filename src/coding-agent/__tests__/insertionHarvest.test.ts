@@ -73,6 +73,40 @@ describe('疑点句收割', () => {
     expect(added[0].source).toContain('adds-along-missed');
   });
 
+  it('收割带着当初判它的场景一起进语料——否则疑点可能根本复现不出', () => {
+    // 疑点只在那个具体局面下成立。不收场景，回放会拿默认场景重判，"判错了能看
+    // 到在什么场景下判的"就只停在看得见，接不上"下一次跑得到"。
+    const scene = '用户当前诉求：帮我调研三个平台\n并行委派：共 3 个，在飞 2 个';
+    const { added } = harvestCasesFromLog(
+      [decision({ inputText: '把知乎那项也取消掉', inputContext: scene, kind: 'task' })],
+      NO_EXISTING,
+      '2026-09-28',
+    );
+    expect(added[0].scenarioText).toBe(scene);
+    // 没有记下场景的记录不编一个（排期插话没经过裁决器）。
+    const blank = harvestCasesFromLog(
+      [decision({ inputText: 'Y 那个不用查了', inputContext: undefined })],
+      NO_EXISTING,
+      '2026-09-28',
+    );
+    expect(blank.added[0].scenarioText).toBeUndefined();
+  });
+
+  it('渲染出的生成文件里场景原文原样保留', () => {
+    const rendered = renderHarvestedModule([
+      {
+        text: '把知乎那项也取消掉',
+        kind: 'steer',
+        cancels: true,
+        scenarioText: '用户当前诉求：调研三个平台\n并行委派：共 3 个，在飞 2 个',
+        expectation: 'suspected',
+        source: '诊断区审计 2026-09-28（cancels-missed）',
+      },
+    ]);
+    expect(rendered).toContain('scenarioText:');
+    expect(rendered).toContain('并行委派：共 3 个，在飞 2 个');
+  });
+
   it('没疑点的句子不进语料——收割不是把日志整个搬进来', () => {
     const { added, skipped } = harvestCasesFromLog(
       [decision({ inputText: '记得跑测试', signals: { via: 'judge' } })],

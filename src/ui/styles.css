@@ -5885,6 +5885,30 @@ body {
   word-break: break-word;
 }
 
+/* 场景徽章与展开的场景（2026-09-28）：「判错了」只有配上"在什么场景下判的"
+   才可行动——同一句换场景能从错到对（我在西安 chatter→premise-change）。 */
+.insertion-diag-scene {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.insertion-diag-scene-full {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+
 /* 契约字段遵守率的走势（2026-09-28）：柱子高度就是那一批插话的疑点率。看的是
    走势——一个总数分不出"一直就这样"与"最近才变坏"，而收割的价值只在走势里
    才看得见。 */
