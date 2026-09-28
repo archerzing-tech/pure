@@ -1216,6 +1216,19 @@ describe('tool row interior follow-tail (subagent trace panels)', () => {
     return null;
   };
 
+  // .tool-row-result — the INNER box that actually clips the stream once it
+  // fills its own max-height (240px / 440px expanded). Following only the
+  // outer window left this box's scrollbar parked at the top with every new
+  // line below its fold (2026-09-28 用户反馈：进度条不跟到最下面).
+  const findResultEl = (el: any): any => {
+    if (String(el.className).includes('tool-row-result')) return el;
+    for (const child of el.children ?? []) {
+      const hit = findResultEl(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
   // Give the panel real scroll numbers; born at the bottom (a fresh card has
   // no manual scroll-away yet → pinned).
   const giveGeometry = (el: any, scrollHeight: number, clientHeight: number): void => {
@@ -1226,54 +1239,108 @@ describe('tool row interior follow-tail (subagent trace panels)', () => {
     (el as any)._setTop = (v: number) => { scrollTop = v; };
   };
 
-  it('follows streamed lines to the newest content while the user is at the bottom', () => {
+  it('wires the follow-tail on BOTH scrollable boxes of the card', () => {
     stubRaf();
     const restoreDoc = installFakeDocument();
     try {
       const row = createToolRow('code_reviewer', { prompt: '审查这份实现的边界条件' });
       const scroll = findScrollEl(row.el);
+      const result = findResultEl(row.el);
       expect(scroll).toBeTruthy();
+      expect(result).toBeTruthy();
       expect(scroll.dataset.innerFollowWired).toBe('1');
-      giveGeometry(scroll, 900, 320);
-
-      appendToolStreamLine(row, 'stdout', '▶ code_reviewer 接活：审查边界条件');
-      expect(rafCallbacks.length).toBe(1);
-      flushRaf();
-      expect(scroll.scrollTop).toBe(900); // newest line stays in view
-
-      appendToolStreamLine(row, 'stdout', '→ read_file src/engine.ts');
-      flushRaf();
-      expect(scroll.scrollTop).toBe(900);
+      expect(result.dataset.innerFollowWired).toBe('1');
     } finally {
       globalThis.requestAnimationFrame = originalRaf;
       restoreDoc();
     }
   });
 
-  it('stops following once the user scrolled up inside the panel, resumes at the bottom', () => {
+  it('follows streamed lines to the newest content in both boxes while the user is at the bottom', () => {
     stubRaf();
     const restoreDoc = installFakeDocument();
     try {
       const row = createToolRow('code_reviewer', { prompt: '审查这份实现的边界条件' });
       const scroll = findScrollEl(row.el);
+      const result = findResultEl(row.el);
       giveGeometry(scroll, 900, 320);
+      giveGeometry(result, 1200, 440); // result filled its own cap → inner scrollbar exists
+
+      appendToolStreamLine(row, 'stdout', '▶ code_reviewer 接活：审查边界条件');
+      expect(rafCallbacks.length).toBe(2); // one coalesced frame per box
+      flushRaf();
+      expect(scroll.scrollTop).toBe(900); // outer window at its tail
+      expect(result.scrollTop).toBe(1200); // and the box the user actually reads too
+
+      appendToolStreamLine(row, 'stdout', '→ read_file src/engine.ts');
+      flushRaf();
+      expect(scroll.scrollTop).toBe(900);
+      expect(result.scrollTop).toBe(1200);
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf;
+      restoreDoc();
+    }
+  });
+
+  it('stops following the box the user scrolled up in; the other box keeps tailing', () => {
+    stubRaf();
+    const restoreDoc = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: '审查这份实现的边界条件' });
+      const scroll = findScrollEl(row.el);
+      const result = findResultEl(row.el);
+      giveGeometry(scroll, 900, 320);
+      giveGeometry(result, 1200, 440);
 
       appendToolStreamLine(row, 'stdout', '▶ code_reviewer 接活：审查边界条件');
       flushRaf();
-
-      // 用户向上翻面板回读更早的轨迹行 → 不再拽。
-      scroll._setTop(120);
+      // 真浏览器里这两次自写各会触发一个 scroll 事件并消费 self-write 标记；
+      // fake DOM 不发事件，手动补上（补发时都在底部 → 仍 pin，不改状态）。
+      result._listeners.scroll();
       scroll._listeners.scroll();
+
+      // 用户在 result 盒里向上翻回读更早的轨迹行 → 该盒不再拽；外窗没被
+      // 动过，照常跟自己的尾（它跟的是卡片在转写里的位置，不打扰内盒回读）。
+      result._setTop(120);
+      result._listeners.scroll();
       appendToolStreamLine(row, 'stdout', '→ read_file src/engine.ts');
-      expect(rafCallbacks.length).toBe(1); // no new frame scheduled
-      expect(scroll.scrollTop).toBe(120); // and no yank
-
-      // 回到底部 → 尾随续上。
-      scroll._setTop(900);
-      scroll._listeners.scroll();
-      appendToolStreamLine(row, 'stdout', '✓ code_reviewer 交付');
       flushRaf();
-      expect(scroll.scrollTop).toBe(900);
+      expect(result.scrollTop).toBe(120); // no yank in the box being read
+      expect(scroll.scrollTop).toBe(900); // the untouched outer window still tails
+
+      // 外窗也被翻 → 两个盒都暂停。
+      scroll._setTop(500);
+      scroll._listeners.scroll();
+      appendToolStreamLine(row, 'stdout', '→ read_file src/plan.ts');
+      flushRaf();
+      expect(result.scrollTop).toBe(120);
+      expect(scroll.scrollTop).toBe(500);
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf;
+      restoreDoc();
+    }
+  });
+
+  it('keeps the newest lines when the live cap is reached — drops the oldest, never freezes', () => {
+    stubRaf();
+    const restoreDoc = installFakeDocument();
+    try {
+      const row = createToolRow('code_reviewer', { prompt: 'review' });
+      const textOf = (el: any): string =>
+        Array.from(el.childNodes).map((c: any) => c.textContent ?? '').join('');
+      const linesOf = (): any[] => Array.from((row.resultEl as any).children).filter((c: any) =>
+        String(c.className).includes('tool-row-stream-line'));
+      for (let i = 0; i < MAX_LIVE_STREAM_LINES; i++) {
+        appendToolStreamLine(row, 'stdout', `→ line_${i}`);
+      }
+      flushRaf();
+      appendToolStreamLine(row, 'stdout', '→ line_arrived_after_cap');
+      flushRaf();
+      const lines = linesOf();
+      expect(lines).toHaveLength(MAX_LIVE_STREAM_LINES); // constant window, not a frozen one
+      expect(textOf(lines[0])).toContain('line_1'); // oldest dropped
+      expect(textOf(lines[lines.length - 1])).toContain('line_arrived_after_cap');
+      expect(Number(row.resultEl.dataset.streamLines)).toBe(MAX_LIVE_STREAM_LINES);
     } finally {
       globalThis.requestAnimationFrame = originalRaf;
       restoreDoc();

@@ -6,7 +6,7 @@
 // the UI suite.
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom, setScrollPinObservers, wireInnerFollowTail, followInnerTail } from '../scrollPin';
+import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, forceScrollToBottom, isNearBottom, setScrollPinObservers, wireInnerFollowTail, followInnerTail, setFollowTailClock } from '../scrollPin';
 
 // Deterministic rAF: collect callbacks and flush them on demand instead of
 // depending on real animation frames.
@@ -374,5 +374,149 @@ describe('inner follow-tail (tool-card interior panels)', () => {
 
     expect(pins).toEqual([]); // pill policy untouched by card scrolling
     expect(news).toEqual([]);
+  });
+});
+
+// ── 流式面板不再把读者永远晾在旧位置（2026-09-28 用户反馈）──
+// 旧策略要求「回到距底 40px 内」才续跟，但流式期间内容每几百毫秒涨一截，
+// 那个窗口是移动靶——上翻一次就等于整个运行期再也看不到最新内容。现在
+// 上翻是租约：宽限窗（3s）内尊重回读，空闲超窗自动把面板交还给尾随。
+
+class ManualClock {
+  nowMs = 1_000_000;
+  timers: Array<{ fn: () => void; at: number; cancelled: boolean }> = [];
+  now = (): number => this.nowMs;
+  schedule = (fn: () => void, ms: number): (() => void) => {
+    const t = { fn, at: this.nowMs + ms, cancelled: false };
+    this.timers.push(t);
+    return () => { t.cancelled = true; };
+  };
+  advance(ms: number): void {
+    this.nowMs += ms;
+    for (const t of this.timers) {
+      if (!t.cancelled && t.at <= this.nowMs) {
+        t.cancelled = true;
+        t.fn();
+      }
+    }
+  }
+}
+
+describe('inner follow-tail idle resume (streaming panels never strand the reader)', () => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  beforeEach(() => {
+    rafCallbacks.length = 0;
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    };
+  });
+  afterEach(() => {
+    globalThis.requestAnimationFrame = originalRaf;
+    setFollowTailClock();
+  });
+
+  it('hands the tail back after the grace window — the user never has to return to the bottom', () => {
+    const clock = new ManualClock();
+    setFollowTailClock(clock);
+    const { el, setTop } = makeChatEl();
+    wireInnerFollowTail(el as unknown as HTMLElement);
+
+    setTop(100);
+    el.dispatchEvent('scroll'); // unpinned — the user re-reads an earlier line
+    followInnerTail(el as unknown as HTMLElement); // an append lands immediately
+    expect(rafCallbacks.length).toBe(0); // inside the grace window: no yank
+
+    clock.advance(2_000);
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(0); // still inside 3s — the armed deadline stands
+
+    clock.advance(1_100); // past 3s idle — the armed resume fires, panel re-pins
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(1); // the tail owns the panel again
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT); // newest line in view, no manual scroll needed
+  });
+
+  it('a fresh user scroll re-arms the resume — a stale deadline must not fire early', () => {
+    const clock = new ManualClock();
+    setFollowTailClock(clock);
+    const { el, setTop } = makeChatEl();
+    wireInnerFollowTail(el as unknown as HTMLElement);
+
+    setTop(100);
+    el.dispatchEvent('scroll'); // t0
+    followInnerTail(el as unknown as HTMLElement); // arms resume for t0+3s
+
+    clock.advance(2_000);
+    setTop(140);
+    el.dispatchEvent('scroll'); // still reading at t0+2s → cancels the armed timer
+    followInnerTail(el as unknown as HTMLElement); // re-arms for t0+5s
+
+    clock.advance(1_500); // t0+3.5s — the OLD deadline would have fired here
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(0); // the pause stands (a stale timer would have yanked)
+
+    clock.advance(1_600); // t0+5.1s — the re-armed deadline
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(1);
+    flushRaf();
+    expect(el.scrollTop).toBe(SCROLL_HEIGHT);
+  });
+});
+
+// ── 底部无效写不留幽灵标记 ──
+// 面板已在底部时，尾随写赋值被 clamp 到当前值（浏览器不为此发 scroll 事件）；
+// 旧代码仍会预设 self-write 标记——标记无人消费，把用户下一次真实滚动吞掉
+// （上翻被静默吃掉，下一次追加又把人拽回底部）。修法：写前后比对，没动就
+// 不留标记。真实 DOM 的 clamp 用这个桩模拟。
+
+function makeClampingEl(maxScrollTop: number) {
+  const CLIENT_H = 300;
+  let scrollTop = maxScrollTop; // born at the bottom, like a tailing panel
+  const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+  const el = {
+    dataset: {} as Record<string, string>,
+    get scrollTop() { return scrollTop; },
+    set scrollTop(v: number) { scrollTop = Math.max(0, Math.min(v, maxScrollTop)); },
+    get scrollHeight() { return maxScrollTop + CLIENT_H; },
+    get clientHeight() { return CLIENT_H; },
+    addEventListener(type: string, fn: (ev: unknown) => void) {
+      (listeners[type] ??= []).push(fn);
+    },
+    dispatchEvent(type: string) {
+      for (const fn of listeners[type] ?? []) fn({});
+    },
+  };
+  return { el, setTop: (v: number) => { scrollTop = v; } };
+}
+
+describe('no-op bottom writes leave no self-write marker', () => {
+  it('inner panel: the user s scroll-away right after a bottom write still unpins', () => {
+    const { el, setTop } = makeClampingEl(600);
+    wireInnerFollowTail(el as unknown as HTMLElement);
+    followInnerTail(el as unknown as HTMLElement);
+    flushRaf();
+    expect(el.scrollTop).toBe(600); // the write clamped to the current value — no move, no marker
+
+    setTop(100);
+    el.dispatchEvent('scroll'); // genuine user scroll — must NOT be swallowed
+    followInnerTail(el as unknown as HTMLElement);
+    expect(rafCallbacks.length).toBe(0); // unpin respected (a stale marker would yank to bottom)
+    expect(el.scrollTop).toBe(100);
+  });
+
+  it('transcript: the same write leaves the pin verdict to the user s scroll', () => {
+    const { el, setTop } = makeClampingEl(600);
+    wireScrollPin(el as unknown as HTMLElement);
+    const pins: boolean[] = [];
+    setScrollPinObservers({ onPinStateChange: (_el, p) => pins.push(p) });
+    scrollChatToBottomIfPinned(el as unknown as HTMLElement);
+    flushRaf();
+
+    setTop(100);
+    el.dispatchEvent('scroll');
+    expect(pins).toEqual([false]); // a stale marker would have eaten this event
+    setScrollPinObservers({});
   });
 });

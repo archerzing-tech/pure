@@ -94,16 +94,20 @@ export function scrollChatToBottomIfPinned(el: HTMLElement): void {
   if (scrollFrames.has(el)) return;
   scrollFrames.set(el, requestAnimationFrame(() => {
     scrollFrames.delete(el);
-    if (isPinnedToBottom(el)) {
-      const target = el.scrollHeight;
-      // Skip the write (and the flag) when already at the bottom, or when the
-      // content fits the viewport (scrollHeight ≤ clientHeight — scrollTop is
-      // clamped to 0, so no scroll event would fire and the marker would
-      // linger, silently swallowing a later genuine user-scroll event):
-      // nothing needs consuming in either case.
-      if (el.scrollHeight > el.clientHeight && el.scrollTop !== target) {
+    if (isPinnedToBottom(el) && el.scrollHeight > el.clientHeight) {
+      // Mark the self-write ONLY when the browser will actually fire a scroll
+      // event for it. Assigning an out-of-range scrollTop clamps silently, and
+      // at the bottom the clamp lands on the CURRENT value (target = full
+      // scrollHeight, real max = scrollHeight − clientHeight) — a pre-set
+      // marker for a no-op write would linger unconsumed and swallow the
+      // user's next GENUINE scroll: their scroll-away would be eaten and the
+      // transcript would yank them back down on the next append. (Content
+      // that fits the viewport skips the write entirely — scrollTop is
+      // clamped to 0 and nothing needs consuming.)
+      const before = el.scrollTop;
+      el.scrollTop = el.scrollHeight;
+      if (el.scrollTop !== before) {
         selfScrollWrites.set(el, true);
-        el.scrollTop = target;
       }
     }
   }));
@@ -144,25 +148,93 @@ export function wireInnerFollowTail(el: HTMLElement): void {
       selfScrollWrites.delete(el);
       return;
     }
+    // A genuine user scroll both starts the idle clock and cancels any armed
+    // auto-resume: while the hand is still on the wheel, the pause stands.
+    // (Same clock as followInnerTail reads — the injectable test clock must
+    // see one timeline, not a real-now vs fake-now mismatch.)
+    lastUserScrollAt.set(el, followTailClock.now());
+    const armed = resumeTimers.get(el);
+    if (armed !== undefined) {
+      armed();
+      resumeTimers.delete(el);
+    }
     setPinnedToBottom(el, isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
   }, { passive: true });
 }
 
+// ── Streaming panels must not strand the reader above the fold ──
+// While a panel's content is still streaming, a user who scrolled up once used
+// to stay unpinned FOREVER: re-reaching the exact bottom is a moving target
+// when lines land every few hundred ms (the 40px re-pin zone grows away about
+// as fast as a wheel tick approaches it), so the panel never found the newest
+// content again for the rest of the run. Instead, the scroll-away pause is a
+// LEASE: the tail auto-resumes once the user's last manual scroll has been
+// idle past the grace window — a glance back at an earlier line is respected,
+// then the newest line wins again. Finished panels never append, so they never
+// arm a timer and keep the plain manual pin policy (read in peace).
+export const FOLLOW_TAIL_IDLE_RESUME_MS = 3_000;
+
+const lastUserScrollAt = new WeakMap<HTMLElement, number>();
+const resumeTimers = new WeakMap<HTMLElement, () => void>();
+
+// Injectable clock for the bun suite (deterministic "now" and timers, no real
+// event-loop wait). Production never calls the setter.
+export interface FollowTailClock {
+  now(): number;
+  schedule(fn: () => void, ms: number): () => void;
+}
+
+let followTailClock: FollowTailClock = {
+  now: () => Date.now(),
+  schedule: (fn, ms) => {
+    const id = setTimeout(fn, ms);
+    return () => clearTimeout(id);
+  },
+};
+
+/** Test seam: replace the idle clock/timer backend; call with no argument to
+ *  restore the production clock. */
+export function setFollowTailClock(clock?: FollowTailClock): void {
+  followTailClock = clock ?? {
+    now: () => Date.now(),
+    schedule: (fn, ms) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+  };
+}
+
 export function followInnerTail(el: HTMLElement): void {
-  if (!isPinnedToBottom(el)) return;
+  if (!isPinnedToBottom(el)) {
+    // Unpinned by a user scroll. While the panel keeps streaming, that pause
+    // expires: once the last manual scroll has been idle past the grace
+    // window, hand the panel back to the tail (the NEXT append follows; this
+    // call never scrolls mid-read). Active scrolling keeps refreshing
+    // lastUserScrollAt via the wiring above, so reading stays yank-free.
+    const idleFor = followTailClock.now() - (lastUserScrollAt.get(el) ?? 0);
+    if (idleFor < FOLLOW_TAIL_IDLE_RESUME_MS) {
+      if (resumeTimers.has(el)) return; // already armed — the deadline stands
+      resumeTimers.set(el, followTailClock.schedule(() => {
+        resumeTimers.delete(el);
+        if (!isPinnedToBottom(el)) setPinnedToBottom(el, true);
+      }, FOLLOW_TAIL_IDLE_RESUME_MS - idleFor));
+      return;
+    }
+    setPinnedToBottom(el, true);
+  }
   if (scrollFrames.has(el)) return;
   if (typeof requestAnimationFrame !== 'function') return;
   scrollFrames.set(el, requestAnimationFrame(() => {
     scrollFrames.delete(el);
     if (!isPinnedToBottom(el)) return;
-    const target = el.scrollHeight;
-    // Same skip as scrollChatToBottomIfPinned: nothing to write when the
-    // content fits the panel (no scroll event would fire and the marker
-    // would linger, swallowing a later genuine user scroll) or when we're
-    // already at the bottom.
-    if (el.scrollHeight > el.clientHeight && el.scrollTop !== target) {
+    if (el.scrollHeight <= el.clientHeight) return; // nothing to scroll — no write, no marker
+    // Same write-only-if-it-moves rule as scrollChatToBottomIfPinned: a no-op
+    // bottom write must not leave a marker that swallows the user's next
+    // genuine scroll.
+    const before = el.scrollTop;
+    el.scrollTop = el.scrollHeight;
+    if (el.scrollTop !== before) {
       selfScrollWrites.set(el, true);
-      el.scrollTop = target;
     }
   }));
 }

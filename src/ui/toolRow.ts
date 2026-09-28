@@ -610,7 +610,15 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   // Follow-tail wiring for this panel's own scrollbar: while content streams
   // in (子 agent trace lines, a live command log), appendToolStreamLine keeps
   // the newest line in view — unless the user scrolled up inside the panel to
-  // re-read, which unpins until they return to the bottom.
+  // re-read, which unpins until the idle grace window hands the tail back.
+  // The wiring goes on BOTH scrollable boxes: `.tool-row-result` has its own
+  // max-height + overflow-y (the INNER box actually clips the stream once it
+  // fills — the outer .tool-row-scroll stops growing at that point, so
+  // following only the outer window left the result's own scrollbar parked at
+  // the top with every new line below its fold), and the outer window still
+  // clips whenever Input + Output together outgrow it. Each box follows its
+  // own tail; a box that isn't clipping makes the write a no-op.
+  // (resultEl gets its wiring below, right where it's created.)
   wireInnerFollowTail(scroll);
 
   const usesTerminalPanel = shouldUseTerminalPanel(toolName);
@@ -637,6 +645,9 @@ export function createToolRow(toolName: string, args: Record<string, unknown>): 
   outputLabel.textContent = 'Output';
   const resultEl = document.createElement('div');
   resultEl.className = 'tool-row-result';
+  // The inner box's own tail wiring — see the comment at the outer window's
+  // wiring above for why BOTH boxes need it.
+  wireInnerFollowTail(resultEl);
   // Live "waiting for output" placeholder inside the Output panel — a blinking
   // terminal cursor is unmissable right where the user looks for the result.
   // finalizeToolRow clears it (resultEl.innerHTML = ''); markToolRowStopped
@@ -1191,12 +1202,20 @@ function appendHighlightSegments(parent: HTMLElement, line: string): void {
   }
 }
 
+// Oldest live stream line = first child wearing the class (stream lines are
+// direct children of resultEl; the waiting placeholder is gone by the first
+// line, and finalize replaces the whole body). A children scan instead of
+// querySelector because the bun-suite fake document answers null everywhere.
+function dropOldestStreamLine(parent: HTMLElement): void {
+  for (const child of Array.from(parent.children)) {
+    if ((child as HTMLElement).classList?.contains('tool-row-stream-line')) {
+      (child as HTMLElement).remove();
+      return;
+    }
+  }
+}
+
 export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stderr', line: string, progress = false): void {
-  // Counter-based cap (not a per-line DOM scan): once the live preview stops
-  // growing, later lines short-circuit immediately. The adapter still
-  // collects every line for the full final result.
-  const n = Number(row.resultEl.dataset.streamLines ?? 0);
-  if (n >= MAX_LIVE_STREAM_LINES) return;
   // Strip ANSI escape codes / control chars on the live path too: stream lines
   // arrive from the adapter BEFORE its final stripAnsi, so a colored command
   // would otherwise garble the in-flight preview (the small-probability case).
@@ -1205,7 +1224,8 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   // A lone-`\r` progress chunk (pip/npm/bun in-place progress bars, split into
   // live updates by the Rust backend) redraws the LAST stream line instead of
   // appending — one download's ~50 redraws would otherwise flood the panel. It
-  // also skips the byte counter: a redraw isn't distinct output.
+  // also skips the byte counter: a redraw isn't distinct output (and must not
+  // trigger the cap's head-drop below — it adds nothing).
   if (progress) {
     const last = row.resultEl.querySelector('.tool-row-stream-line:last-child') as HTMLElement | null;
     if (last) {
@@ -1214,13 +1234,27 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
       if (kind === 'stdout' && isStepHeaderLine(clean)) last.classList.add('stream-step');
       last.textContent = '';
       appendHighlightSegments(last, clean);
+      followInnerTail(row.resultEl);
       followInnerTail(row.scrollEl);
       return;
     }
     // No previous line to redraw yet — fall through and append the first one.
   }
+  // Counter-based cap (not a per-line DOM scan): the live preview keeps the
+  // newest MAX_LIVE_STREAM_LINES lines — once full, the OLDEST line is
+  // dropped to make room (same keep-the-tail rule as the trace ledger chat.ts
+  // splices for finalize/replay, so the live view and the replay render the
+  // same window). Freezing outright (the old behavior) meant a long-lived
+  // delegation stopped showing anything new after 500 lines — the panel read
+  // as stuck while the sub-agent kept working. The adapter still collects
+  // every line for the full final result.
+  const n = Number(row.resultEl.dataset.streamLines ?? 0);
+  if (n >= MAX_LIVE_STREAM_LINES) {
+    dropOldestStreamLine(row.resultEl);
+  } else {
+    row.resultEl.dataset.streamLines = String(n + 1);
+  }
   updateLiveOutputStatus(row, kind, clean);
-  row.resultEl.dataset.streamLines = String(n + 1);
   const div = document.createElement('div');
   div.className = kind === 'stderr' ? 'tool-row-stream-line stderr' : 'tool-row-stream-line';
   // Step tint only on stdout — a stderr line that starts with `> ` or a build
@@ -1228,8 +1262,10 @@ export function appendToolStreamLine(row: ToolRowHandle, kind: 'stdout' | 'stder
   if (kind === 'stdout' && isStepHeaderLine(clean)) div.classList.add('stream-step');
   appendHighlightSegments(div, clean);
   row.resultEl.appendChild(div);
-  // 尾随滚动：卡片自己的面板跟着最新内容走（用户在面板里向上翻了就停，
-  // 回到底部再续）——委派卡的子 agent 轨迹、命令日志都从这里长出来。
+  // 尾随滚动：卡片自己的面板跟着最新内容走（用户在面板里向上翻了先让位，
+  // 空闲超过宽限窗自动续跟）——resultEl 是流式内容真正装满后开始内滚的
+  // 容器，scrollEl 是 Input+Output 一起超出时的外窗，两个都跟。
+  followInnerTail(row.resultEl);
   followInnerTail(row.scrollEl);
 }
 
