@@ -452,7 +452,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const insert = '预算砍半，不能请外部讲师，你自己出内容。';
 
     await h.chat.interject(insert);
-    expect(statusJoined(h.root)).toContain('前提变了——按旧前提跑下去只会白跑，先停下止损，马上按纠正后的事实重新来。');
+    expect(statusJoined(h.root)).toContain('前提变了——先停下止损，按纠正后的事实重新来；已完成的不丢。');
     expect(h.chat.abortController.signal.aborted).toBe(true);
 
     h.endTurn();
@@ -565,9 +565,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingSteers[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
     expect(h.chat.pendingSteers[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
 
-    // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。
+    // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。收执里的
+    // 「几路」等于真实在飞数（2026-09-28 收执纪律：两支就说两路，不空说）。
     await h.chat.interject('方向都再收紧一点。');
-    expect(assistantJoined(h.root)).toContain('在跑的几路都收到了——各自下个动作就带上。');
+    expect(assistantJoined(h.root)).toContain('在跑的 2 路都收到了——各自下个动作就带上。');
     expect(h.chat.pendingSteers).toHaveLength(2);
     expect(h.chat.pendingSteers[1].target).toBe('all');
   });
@@ -713,7 +714,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(assistantJoined(h.root)).toContain('您说的这个已经在「爱奇艺调研员」那路调研着了，不重复派——收齐后一并汇总给您。');
+    expect(assistantJoined(h.root)).toContain('您说的这个正在「爱奇艺调研员」那路跑着，不重复派——收齐后一并汇总给您。');
     expect(userJoined(h.root)).toContain('新增一个平台，爱奇艺');
     // 重复的那支永远不该被派出去：折入账是空的，队列卡也不出现。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -746,7 +747,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('不要调研"未来三年的爆发点"这个了');
     expect(llm.classifyCalls.length).toBe(1); // 取消裁决来自裁决器，不再走正则
     expect(paused).toEqual(['call_burst']);   // 片段点名，暂停那一支
-    expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。');
+    expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总；其余照常跑，想续上随时说。');
     // 真停了就不再折入：汇合轮没有这笔账。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
     expect(h.chat.pendingSteers).toHaveLength(0);
@@ -848,7 +849,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(assistantJoined(h.root)).toContain('您说的这个已经在「researcher·2号」那路调研着了，不重复派——收齐后一并汇总给您。');
+    expect(assistantJoined(h.root)).toContain('您说的这个正在「researcher·2号」那路跑着，不重复派——收齐后一并汇总给您。');
   });
 
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
@@ -945,7 +946,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
 
     await h.chat.interject('背景上加一些会动的云朵');
     // 回执说"推倒重想"，不是排队的话术；队列卡绝不出现。
-    expect(assistantJoined(h.root)).toContain('收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
+    expect(assistantJoined(h.root)).toContain('收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -1014,7 +1015,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true;
 
     await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
-    expect(assistantJoined(h.root)).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    expect(assistantJoined(h.root)).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(h.chat.preflightRestartRequested).toBe(true);
     // 不拆回合：重入通道没被占用、回合没被掐——思考流由重启请求掐，重开
@@ -1052,7 +1053,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true;
 
     await h.chat.interject('换个思路，别做俄罗斯方块了，做贪吃蛇');
-    expect(assistantJoined(h.root)).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    expect(assistantJoined(h.root)).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(h.chat.relatedInsert).toBeFalsy();
   });

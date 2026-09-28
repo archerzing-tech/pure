@@ -1181,7 +1181,9 @@ describe('plan overview completion state', () => {
     const override = taskBody.indexOf('cancelsPart === true');
     expect(taskBody.indexOf('this.foldInScopeAddition(text, images, displayText, false, ack, true)', override)).toBeGreaterThan(-1);
     // 委派未出生的窗口（2026-09-26）：转达引擎的调用挂 null ack——收执由
-    // 挂号处用取消口径的话说（「还没派的不会派出去」），不再用泛泛的"已转达"；
+    // 挂号处点名（能抽出话题就点名），不再用泛泛的"已转达"；机制承诺（没派
+    // 的不会派之类）2026-09-28 起不进收执——那个窗口可能根本没有委派可派
+    // （单任务场景，说了就是编造），承诺归框架/协议。收执只说砍了什么。
     // cancel=true 走取消专用注入框架（"手头的活继续"会把取消引导成计划照旧）。
     expect(taskBody.indexOf("this.steerRunningTurn(text, images, null, 'parent', true)", override)).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (decision.signals.cancelsPart === true)', override));
@@ -1207,7 +1209,7 @@ describe('plan overview completion state', () => {
     // 走 settleCancelBeforeDispatchAck（2026-09-26 用户实测反馈固定话术里
     // 「这项」是空的——能抽出话题就点名，与停支收执同一人味）。
     expect(src.indexOf('private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void')).toBeGreaterThan(-1);
-    expect(msg.indexOf('还没派的不会派出去，也不会进最终汇总。')).toBeGreaterThan(-1);
+    expect(msg.indexOf('这项不做了。')).toBeGreaterThan(-1);
     expect(src.split('this.settleCancelBeforeDispatchAck(ack, text)').length - 1).toBe(2);
     // 叙述一致性（2026-09-26 用户反馈）：取消型插话的转达走取消专用框架——
     // 通用框架「手头的活继续」会把取消引导成"计划照旧"，模型照数三支，
@@ -1216,7 +1218,13 @@ describe('plan overview completion state', () => {
     // 取消专用框架的话术归 insertionMessaging.steerFrameText（chat.ts 侧锁
     // cancel 参数流转，那边锁措辞与分流——一致性测试再锁三处同向）。
     expect(msg.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
-    expect(msg.indexOf('只数实际会派的支')).toBeGreaterThan(-1);
+    // 叙述规则按场景给（2026-09-28）：有分路数剩下的分路，没分路就不提
+    // 分路——不再教单任务场景「复述原规划几路」（对着一路编排「几路」）。
+    // 负向锁切在 steerFrameText 函数体上：文档注释里留的事故原文不算数。
+    const frameFn = msg.indexOf('export function steerFrameText');
+    const frameBody = msg.slice(frameFn, msg.indexOf('/** ③-a', frameFn));
+    expect(frameBody.indexOf('没有分路就不要提分路')).toBeGreaterThan(-1);
+    expect(frameBody.indexOf('原规划几路')).toBe(-1);
     expect(src.split("this.steerRunningTurn(text, images, null, 'parent', true)").length - 1).toBe(2);
     // 起飞闸接进引擎配置：候选集由宿主备好，匹配与消费在纯函数
     // planTakeoffGate（与测试共用同一套纪律）。
@@ -1736,7 +1744,7 @@ describe('plan-by-thinking flow', () => {
     expect(absorbGuard).toContain("decision.signals.branchStop !== true");
     expect(absorbGuard).toContain("decision.signals.resumesBranch !== true");
     // 纠错有自己的收执话术（推倒重想的理由不同：事实错了，不是加东西）。
-    expect(src).toContain('收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。');
+    expect(src).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
     // 分类上下文带思考窗阶段：分类器得知道手头的活是"正在想"。
     expect(src).toContain('if (this.planPreflightActive) {');
   });
@@ -1750,7 +1758,7 @@ describe('plan-by-thinking flow', () => {
     const abortCallIdx = src.indexOf('this.preflightAbort?.abort();', absorbIdx);
     expect(abortCallIdx).toBeGreaterThan(absorbIdx);
     // 回执与重开状态行都说人话："推倒"，不是含糊的"一并想"。
-    expect(src).toContain('收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
+    expect(src).toContain('收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
     expect(src).toContain('这句补得关键——推倒刚才想的，带着它重新想一遍。');
     // planByThinking 侧：流句柄挂上 preflightAbort；每轮开局清掉上一轮的
     // 重启请求（残留会把新控制器的超时误认成重启）。

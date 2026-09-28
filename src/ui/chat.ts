@@ -2657,8 +2657,8 @@ export class ChatController {
       this.preflightAbort?.abort();
       const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
       this.settleAck(ack, isCorrection
-        ? '收到——这个纠正很关键，我把刚才想的部分推倒，带着对的重新想。'
-        : '收到——这句来得正好，我把刚才想的部分推倒，带着它重新想。');
+        ? '收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。'
+        : '收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
       return;
     }
     switch (decision.kind) {
@@ -2690,7 +2690,7 @@ export class ChatController {
         // 重新入场，按纠正后的事实重排。不预回显：重入 send() 时才上屏，
         // 否则同一句话出现两遍（用户实测暴露）。
         this.relatedInsert = { text, images, displayText };
-        this.settleAck(ack, '前提变了——按旧前提跑下去只会白跑，先停下止损，马上按纠正后的事实重新来。', true, 'info');
+        this.settleAck(ack, '前提变了——先停下止损，按纠正后的事实重新来；已完成的不丢。', true, 'info');
         this.abortController?.abort();
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
@@ -2816,7 +2816,7 @@ export class ChatController {
           // 去重回执是终稿（没有后续在途）——转普通气泡。
           this.settleAck(ack, covered.status === 'done'
             ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
-            : `您说的这个已经在「${coveredName}」那路调研着了，不重复派——收齐后一并汇总给您。`);
+            : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
           return;
         }
         // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
@@ -2954,7 +2954,14 @@ export class ChatController {
       target === 'parent'
         ? '已转达——手头的活不停，下个动作就带上。'
         : typeof target === 'string'
-          ? '在跑的几路都收到了——各自下个动作就带上。'
+          ? // 广播到全部在飞委派：几路就说几路，一路就别装多路（2026-09-28
+            // 收执纪律：收执里的「几路」必须等于真实的在飞数）。
+            (() => {
+              const flying = this.agentActivities.filter((item) => item.status === 'running').length;
+              return flying > 1
+                ? `在跑的 ${flying} 路都收到了——各自下个动作就带上。`
+                : '在跑的那路收到了——下个动作就带上。';
+            })()
           : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`);
   }
 

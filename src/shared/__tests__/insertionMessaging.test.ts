@@ -6,6 +6,10 @@
 //
 // 本测试锁的是「同一规则的多处措辞必须同向」，不是判定逻辑——判定归
 // DynamicInsertionCoordinator / chat.ts / steerTargeting.ts，各有自己的测试。
+//
+// 2026-09-28 收执纪律并入本契约：收执（用户当场看到的）只说场景里真实
+// 发生/真实在场的事——可能在单任务场景发出的收执（出生前取消）一个机制
+// 词汇都不带；机制承诺（不派工/不进汇总/只合并幸存者）住在协议与框架里。
 
 import { describe, it, expect } from 'bun:test';
 import { INSERTION_PROTOCOL_PROMPT } from '../promptLayers';
@@ -42,15 +46,20 @@ describe('插话取消话术三处一致性', () => {
     const cancel = steerFrameText(t, true);
     const normal = steerFrameText(t, false);
 
-    // 取消口径：明说这是取消、不进计划不派工不进汇总、只数会派的支。
+    // 取消口径：明说这是取消、不派工不进汇总；叙述规则按场景给——有分路
+    // 数剩下的分路，没分路就不提分路（框架不预设场景里有几路）。
     expect(cancel).toContain(t);
     expect(cancel).toContain('取消，不是新任务');
     expect(cancel).toMatch(INV.staysOutOfResult);
-    expect(cancel).toContain('只数实际会派的支');
-    // 反漂移锁：取消框架里绝不能出现「选最小动作，手头的活继续」——那是
+    expect(cancel).toContain('没有分路就不要提分路');
+    // 反漂移锁一：取消框架里绝不能出现「选最小动作，手头的活继续」——那是
     // 2026-09-26 把取消引导成「计划照旧」的元凶话术。
     expect(cancel).not.toContain('选最小动作');
     expect(cancel).not.toContain('手头的活继续');
+    // 反漂移锁二（2026-09-28 事故）：不许再教模型「复述原规划几路…实际派出
+    // 哪几路」——单任务游戏场景没有「几路」，教了就是对着一路编「几路」。
+    expect(cancel).not.toContain('原规划几路');
+    expect(cancel).not.toContain('只数实际会派的支');
 
     // 通用口径：引导读 <insertion_protocol>（协议与框架互为引用）。
     expect(normal).toContain(t);
@@ -59,9 +68,11 @@ describe('插话取消话术三处一致性', () => {
     expect(normal).not.toContain('取消');
   });
 
-  it('②→③ steer 框架与收执同一方向：收执汇报宿主动作，承诺产出出清', () => {
-    // 停支收执（pause/abort）都以宿主第一人称汇报「已完成」的动作，
-    // 且承诺与协议/框架同一件事：被收掉的部分不进最终汇总。
+  it('②→③ steer 框架与收执同一方向：收执汇报宿主动作，只说场景里真实在场的机制', () => {
+    // 停支收执（pause/abort）都以宿主第一人称汇报「已完成」的动作。这条
+    // 路径上委派确实在飞（stopNamedBranch 只在 hasDelegationInFlight 时可达），
+    // 「支/汇总」词汇场景真实；出清承诺与框架同向。措辞不预设这支在干
+    // 调研还是写码——「产出」兼指两者。
     const pause = branchStopReceipt('竞品', 'pause');
     const abort = branchStopReceipt('竞品', 'abort');
     expect(pause).toContain('我先暂停了');
@@ -70,16 +81,22 @@ describe('插话取消话术三处一致性', () => {
     expect(abort).toContain('已停掉');
     expect(abort).toContain('其余照常');
 
-    // 出生前取消收执：没派的不会派 + 不进最终汇总（与框架「不派工」同向）。
-    const named = cancelBeforeDispatchReceipt('知乎');
+    // 出生前取消收执（2026-09-28 事故原文重写）：这个收执可能在没有任何
+    // 委派、没有任何汇总的单任务场景发出——「还没派的不会派出去，也不会
+    // 进最终汇总」两头都是编造（用户实测原话：「我在做游戏，哪来的需要
+    // 汇总」）。所以只说砍了什么，一个机制词汇都不带（INV.absentMechanismWords
+    // 负向锁）；机制承诺住在框架与协议里，那里才面向模型、才该说机制。
+    const named = cancelBeforeDispatchReceipt('测试');
     const bare = cancelBeforeDispatchReceipt(null);
-    expect(named).toContain('知乎');
-    expect(named).toContain('还没派的不会派出去');
-    expect(named).toMatch(INV.staysOutOfResult);
-    expect(bare).toContain('还没派的不会派出去');
-    expect(bare).toMatch(INV.staysOutOfResult);
+    expect(named).toContain('测试');
+    expect(named).toContain('这项不做了');
+    expect(bare).toContain('这项不做了');
+    expect(named).not.toMatch(INV.absentMechanismWords);
+    expect(bare).not.toMatch(INV.absentMechanismWords);
 
-    // 折入收执：取消型与追加型方向相反，且取消型必含出清承诺。
+    // 折入收执：取消型与追加型方向相反，且取消型必含出清承诺。这条路径
+    // 有委派在飞（折入只在 hasDelegationInFlight 时可达），汇总/合并词汇
+    // 场景真实。
     const cancelFold = foldInReceipt(true);
     const appendFold = foldInReceipt(false);
     expect(cancelFold).toContain('收掉了');
@@ -130,5 +147,11 @@ describe('插话取消话术三处一致性', () => {
     expect(INV.staysOutOfResult.test('不写入最终汇总（用户没说要保留）')).toBe(true);
     expect(INV.staysOutOfResult.test('把它写进最终汇总')).toBe(false);
     expect(INV.survivorsMerge).toBe('the merge covers the survivors only');
+    // absentMechanismWords 是负向锚：锁「出生前取消收执」不带机制词汇，
+    // 三个机制词都要命中（收执安全线，2026-09-28 事故立）。
+    expect(INV.absentMechanismWords.test('派出')).toBe(true);
+    expect(INV.absentMechanismWords.test('汇总')).toBe(true);
+    expect(INV.absentMechanismWords.test('那支')).toBe(true);
+    expect(INV.absentMechanismWords.test('好——这项不做了。')).toBe(false);
   });
 });
