@@ -580,7 +580,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
 
     await h.chat.interject('报告文案再口语一点。');
-    expect(assistantJoined(h.root)).toContain('已转达——手头的活不停，下个动作就带上。');
+    // 单任务场景（无委派在飞）：话进 pure 自己下个 THINK 边界，收执不说
+    // 「已转达」（没有收件人，2026-09-28 用户指出），只说活不停、带上这句。
+    expect(assistantJoined(h.root)).toContain('收到——活不停，下个动作就带上这句。');
     expect(h.chat.abortController.signal.aborted).toBe(false);
     // 回合收尾时没被 THINK 边界带走的 steer，作为下一回合开场——不丢。
     // 1a + 渲染一致性（2026-09-25）：重入是用户原话，不是引擎框架文——
