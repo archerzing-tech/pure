@@ -70,32 +70,22 @@ export interface DynamicInsertionCoordinatorOptions {
 }
 
 const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[一-鿿])/i;
-// Fast path limited to unambiguous overturn verbs: anything softer ("改成X",
-// "不要再Y") is judged by the LLM with the task in view — a constraint phrased
-// as 不要 is still just a steer, and aborting on it used to restart work the
-// user never asked to restart.
+// 2026-09-28 降级为安全网（见 decide() 注）：推翻话不再由正则直判——
+// "改成X"和"推翻重来"的分寸只有结合时机和内容才判得准，正则只在裁决器
+// 倒下时兜底（netVerdict）。
 const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
-// Scope additions take the SAME deterministic road into the task queue. Both
-// 2026-09-22 losses ("再加一个 爱奇艺平台") were acknowledged as steer and then
-// forgotten: the LLM kept judging additions steerable, and steer's promise
-// ("the next step carries it") is uncashable while the parent is blocked
-// collecting parallel delegations — the engine drains the words at the final
-// summary round, nothing acts on them, and the leftover-drain net only catches
-// steers the engine never took. Queuing makes no promise it can't keep: the
-// item runs to completion right after the current task. So obvious additions
-// skip the classifier entirely (like STOP_RE), conservative high-precision
-// family only, negated forms fall through to the LLM.
+// 加活字面族，同样降级为安全网。2026-09-22 的两次丢失（"再加一个 爱奇艺
+// 平台"）是 steer 的空头承诺（父任务阻塞收委派时没有"下个动作"可兑现），
+// 排队是唯一保证跑完的投递。2026-09-28 重构把这个保证留在网里（裁决器
+// 不可用 → 排队），主路让给裁决器：加的东西可能是往在飞的那一件产出物里
+// 加（画鸟补云/五位加两位），只有看得到时机的裁决器分得清——正则分不清。
 export const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
-// Cancelling ONE PART of the running work ("X 就不调研了", "Y 那个不用查了"):
-// a steer with removal semantics, decided mechanically like the families
-// above. The 2026-09-24 real-world loss had exactly this shape — a branch of
-// a three-way parallel research cancelled mid-run was read as a scope
-// ADDITION and folded into the merge as "先补这项", the exact reverse of what
-// was asked. Deliberately narrow: the verb family excludes bare 做 (whether
-// "别做了" ends the whole run or one branch is context only the classifier
-// has), a negation marker is mandatory, and the 了/吧 tail keeps pure
-// keep-constraints ("不用改") out — anything softer falls through to the LLM,
-// including negated additions ("不用再加知乎了"), which stay unqueued.
+// 收掉一部分（"X 就不调研了"，"Y 那个不用查了"）：steer 的删除语义，
+// 2026-09-24 真实事故的字面形状——并行调研中砍一支被判成加活折入（"先补
+// 这项"），与意图正好相反。同样降级为安全网：主路由裁决器判 cancels_part，
+// 网只在裁决器倒下时接手。词族刻意窄：动词族不含裸做（"别做了"是整树停
+// 还收一支只有看得到上下文才分得清）、否定标记必须、了/吧 尾巴挡住纯保留
+// 约束（"不用改"）——更软的话全归裁决器，含否定式加活（"不用再加知乎了"）。
 export const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
 // 祈使式「停掉某一支」（第 2 期分支中断快路径）：「停掉竞品那支」「把调研
 // 那路掐掉」「分析那条路停下来」。与 CANCEL_PART_RE（"X 就不调研了"——收
@@ -126,8 +116,6 @@ export class DynamicInsertionCoordinator {
     context: string,
     insertion: DynamicInsertion,
     signal?: AbortSignal,
-    now = Date.now(),
-    options?: { inThoughtWindow?: boolean },
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
     if (BRANCH_STOP_RE.test(text)) {
@@ -160,54 +148,23 @@ export class DynamicInsertionCoordinator {
         signals: { rule: 'STOP_RE' },
       });
     }
-    if (GOAL_CHANGE_RE.test(text)) {
-      // Same rationale as STOP_RE: these verbs leave no room for "keep
-      // going with a tweak", so restart without burning a classify call.
-      return this.build('goal-change', 'overturn phrasing matched the fast path', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { rule: 'GOAL_CHANGE_RE' },
-      });
-    }
-    if (CANCEL_PART_RE.test(text)) {
-      // 收掉的是活的一部分，不是全部：走 steering 通道（不打断、不重排），
-      // cancelsPart 让宿主按"该项出结果、不进汇总"折入/注入，绝不排队。
-      return this.build('steer', 'partial-cancellation phrasing matched the fast path; the named part leaves the result', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { rule: 'CANCEL_PART_RE', cancelsPart: true },
-      });
-    }
-    if (SCOPE_ADD_RE.test(text) && !options?.inThoughtWindow) {
-      // 加活的量不走分类赌局：排队是唯一保证跑完的投递（见 SCOPE_ADD_RE 注）。
-      // 思考窗内例外（2026-09-27 用户定调）：预检思考还活着时，加的东西可能
-      // 是往**正在产出的那一件东西里**加（调研五位人物时"新增加两位"是同一
-      // 份答案从 5 变 7，不是第二件活）——快路径不认识时机，会让路给分类器
-      // 带 supplements_current 裁决；窗内的吸收（推倒重想+并进请求）与排队
-      // 一样是不可丢的投递，2026-09-22 的防丢顾虑在窗内有更好的兑现点。
-      return this.build('task', 'scope-addition phrasing matched the fast path; queued so it cannot be forgotten', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'after-current' },
-        signals: { rule: 'SCOPE_ADD_RE' },
-      });
-    }
+    // 2026-09-28 用户定调：决策不看关键词——正则只配做裁决器倒下时的安全网。
+    // 上面的三类（整停/点名停支/点名续支）是**命令**不是判断：人对"停"字
+    // 不需要 deliberation，等一次裁决往返反而是抗命。其余一切（加活/收活/
+    // 推翻/约束/纠错/提问/寒暄）全走裁决器——时机×内容×结果收益的综合
+    // 判断；字面族（SCOPE_ADD/CANCEL_PART/GOAL_CHANGE）只在裁决不可用时
+    // 兜底（netVerdict），绝不再抢在判断前面。
     if (!llm) {
-      // No classifier available: queue as a task, never steer. The old steer
-      // default trusted the engine to reconcile the words at the next THINK
-      // boundary — but a parent blocked on parallel delegations has no such
-      // boundary until the aggregation round, where remarks silently drop
-      // (user-reported three times). Queueing waits its turn and runs
-      // deterministically; the words can never be lost.
-      return this.build('task', 'classification unavailable; queued so the words can never be lost', {
-        confidence: NO_CLASSIFIER_CONFIDENCE,
-        timing: { mode: 'after-current' },
-        signals: { fallback: 'no-classifier' },
-      });
+      return this.netVerdict(text, 'classification unavailable');
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
+    if (result.fallbackUsed) {
+      // 裁决器倒下（超时/网络/解析失败）：字面网兜底，话绝不丢。
+      return this.netVerdict(text, 'judge unreachable');
+    }
     // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个
     // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜（KIND_POLICY）。
-    const timing = parseInputTiming(result.when, text, now);
+    const timing = parseInputTiming(result.when, text, Date.now());
     return this.build(result.kind, result.reason, {
       confidence: result.confidence,
       timing,
@@ -219,6 +176,31 @@ export class DynamicInsertionCoordinator {
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },
+    });
+  }
+
+  /** 安全网（2026-09-28 降级）：只裁决器倒下时用它——按字面族挑一个**不丢
+   * 话**的目的地，绝不冒充判断。推翻话重开、收活折入、其余一律排队（唯一
+   * 保证跑完的投递）。 */
+  private netVerdict(text: string, why: string): DynamicInsertionDecision {
+    if (GOAL_CHANGE_RE.test(text)) {
+      return this.build('goal-change', `${why}; overturn phrasing caught by the literal net`, {
+        confidence: NO_CLASSIFIER_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { fallback: 'literal-net' },
+      });
+    }
+    if (CANCEL_PART_RE.test(text)) {
+      return this.build('steer', `${why}; partial-cancellation caught by the literal net — the named part leaves the result`, {
+        confidence: NO_CLASSIFIER_CONFIDENCE,
+        timing: { mode: 'now' },
+        signals: { fallback: 'literal-net', cancelsPart: true },
+      });
+    }
+    return this.build('task', `${why}; queued so the words can never be lost`, {
+      confidence: NO_CLASSIFIER_CONFIDENCE,
+      timing: { mode: 'after-current' },
+      signals: { fallback: 'literal-net' },
     });
   }
 

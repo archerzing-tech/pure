@@ -1,7 +1,7 @@
 // src/ui/__tests__/conversationSamples.test.ts
 // 样本回放：/Users/ericever/Documents/samples.txt 里的理想对话案例，在宿主
 // 侧（GUI 对话流）逐条跑通。回放的不是字符串，而是真链路——真
-// DynamicInsertionCoordinator（含置信门/时刻解析/快路径正则）、真分发
+// DynamicInsertionCoordinator（含置信门/时刻解析/命令快路径+字面安全网）、真分发
 // switch、真 DOM 回执与活队列卡；只有两处是假的：分类 LLM（按样本剧本
 // 给判定）和引擎 send（记录派发载荷）。模型回合的表达姿态（结论先行、
 // 子 Agent 摘要、变化点清单）不在宿主侧，不进本文件。
@@ -608,9 +608,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '市场 Agent', status: 'running' });
 
-    // SCOPE_ADD_RE 快路径：不经 LLM 直判加活。
+    // 裁决器判 task（加活=收齐后补的第二项），宿主按阶段折入汇合轮——
+    // 2026-09-28 起加活不再走正则快路径，判断全在裁决器。
     await h.chat.interject('再加一个爱奇艺平台');
-    expect(llm.classifyCalls.length).toBe(0);
+    expect(llm.classifyCalls.length).toBe(1);
     expect(assistantJoined(h.root)).toContain('已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
     expect(userJoined(h.root)).toContain('爱奇艺平台');
     // 折入进 pendingFoldIns 等收尾核验，不占待办队列。
@@ -619,13 +620,16 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('委派在飞时收掉一项（2026-09-24 取消案例）：折入按取消口径，不按加活', async () => {
-    const llm = scriptedLlm([]);
+    // 裁决器判 steer + cancels_part（新提示词教的收活裁决），宿主点名停不
+    // 中（'jev' 对不上「调研 Agent」）→ 退回取消折入——宁可折叠不误杀。
+    const llm = scriptedLlm([
+      { match: '就不调研', cls: { kind: 'steer', reason: 'removes the named part from the join', confidence: 0.95, cancels_part: true } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '调研 Agent', status: 'running' });
 
-    // CANCEL_PART_RE 快路径：不经 LLM 直判"收掉一部分"。
     await h.chat.interject('jev 这个就不调研了');
-    expect(llm.classifyCalls.length).toBe(0);
+    expect(llm.classifyCalls.length).toBe(1);
     // 回执必须说"拿掉"——案例里正是"先补这项"这句与意图相反的回执。
     expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
     expect(statusJoined(h.root)).not.toContain('先补这项');
@@ -718,8 +722,11 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   it('复测案例二（2026-09-25）：收掉一项 = 按任务书片段点名暂停那一支，不烧完不空折入', async () => {
     // 真实事故：「不要调研"未来三年的爆发点"这个了」被折入等汇合——支照跑
     // 算力照烧，最后才从结果里删。名字是代号（爆发点未必在名字上），点名
-    // 靠任务书片段；认出支 = 真暂停（不落中止），其余照跑。
-    const llm = scriptedLlm([]);
+    // 靠任务书片段；认出支 = 真暂停（不落中止），其余照跑。裁决器在场，
+    // 取消裁决（steer + cancels_part）由它下。
+    const llm = scriptedLlm([
+      { match: '爆发点', cls: { kind: 'steer', reason: 'removes the named research item', confidence: 0.95, cancels_part: true } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '洞察报告', status: 'running' });
     const paused: string[] = [];
@@ -736,7 +743,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     };
 
     await h.chat.interject('不要调研"未来三年的爆发点"这个了');
-    expect(llm.classifyCalls.length).toBe(0); // CANCEL_PART_RE 快路径
+    expect(llm.classifyCalls.length).toBe(1); // 取消裁决来自裁决器，不再走正则
     expect(paused).toEqual(['call_burst']);   // 片段点名，暂停那一支
     expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它已经查到的部分不进最终汇总；其余照常跑，想续上随时说。');
     // 真停了就不再折入：汇合轮没有这笔账。
@@ -950,7 +957,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
   });
 
   it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {
-    // "云朵那个就不要了"（不碰 CANCEL_PART_RE 快路径的字面族，走真分类）
+    // "云朵那个就不要了"（字面网不接手——裁决器在场，走真分类）
     // 若被吸收，图上该消失的云就留下了——与意图相反。cancels_part 在场
     // 一律不吸收。
     const llm = scriptedLlm([

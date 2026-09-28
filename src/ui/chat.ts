@@ -2388,12 +2388,17 @@ export class ChatController {
     const lastUser = runningRequest ? null : [...this.messages].reverse().find((m) => m.role === 'user');
     const currentAsk = runningRequest ?? lastUser?.content ?? '';
     if (currentAsk) parts.push(`用户当前诉求：${currentAsk.slice(0, 400)}`);
-    // 思考窗状态喂给分类器：预检思考还在飞时，手头的活是"正在想"而不是
-    // "正在跑"——纠正事实/加约束/加内容的正确归宿都是并进请求推倒重想，
-    // 分类器只有看见这个阶段才能把时机判对（2026-09-28 jev 纠错案例：
-    // 思考中纠正"jev 不是 JEPA"没被吸收，三个子 agent 照旧按错前提派出）。
+    // 思考窗状态喂给裁决器（2026-09-28 用户定调：判断=时机×内容×结果收益，
+    // 裁决器得看到全景才能综合权衡）：手头的活是"正在想"而不是"正在跑"；
+    // 思考最新说到哪了（叙述尾——裁决器能自己看见叙述里的错误前提，比如
+    // 把 jev 当成 JEPA，用户不纠正它也该看见）；思考期间已经并进来的补充
+    // （连续插话不丢账）。
     if (this.planPreflightActive) {
       parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');
+      if (this.preflightNarrationTail) parts.push(`思考最新说到：……${this.preflightNarrationTail}`);
+      if (this.pendingPreflightSupplements.length > 0) {
+        parts.push(`思考期间已并进来的补充：${this.pendingPreflightSupplements.map((s) => s.text).join('；')}`);
+      }
     }
     if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
     const plan = this.activeComplexPlan;
@@ -2571,11 +2576,10 @@ export class ChatController {
       this.placeEchoBeforeAck(ack, bubble);
     };
     // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
-    // 现在是 task（折入/排队，确定性目的地）——话绝不因没有分类器而失踪。
-    // 第 5 参 now 显式传：第 6 参带思考窗状态——窗内 SCOPE_ADD_RE 快路径让路
-    // 给分类器（调研五位时"新增加两位"是同一份答案 5→7，不是第二件活），
-    // 窗外快路径照旧直通队列。
-    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal, Date.now(), { inThoughtWindow: this.planPreflightActive });
+    // 是字面安全网（netVerdict——推翻重开/收活折入/其余排队）——话绝不因
+    // 没有裁决器而失踪。决策本身不看关键词（2026-09-28 用户定调）：时机
+    // ×内容×结果收益的综合判断全在裁决器（上下文带着当前阶段与思考叙述）。
+    const decision = await this.dynamicInsertionCoordinator.decide(this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
     if (this.abortController?.signal?.aborted) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
@@ -2960,6 +2964,7 @@ export class ChatController {
     const ac = new AbortController();
     this.preflightAbort = ac;
     this.preflightRestartRequested = false;
+    this.preflightNarrationTail = '';
     const forwardAbort = (): void => ac.abort();
     this.abortController?.signal.addEventListener('abort', forwardAbort, { once: true });
     const timer = setTimeout(forwardAbort, PLAN_THINKING_TIMEOUT_MS);
@@ -2988,6 +2993,8 @@ export class ChatController {
           full += chunk.content;
           this.lastStreamActivityAt = Date.now();
           const live = liveNarrationPortion(full);
+          // 叙述尾实时保鲜：插话裁决的时机证据（见 preflightNarrationTail 注）。
+          this.preflightNarrationTail = live.trim().slice(-400);
           if (!bubble && live.trim()) {
             bubble = this.addBubble('assistant', '');
             bubble.classList.add('streaming');
@@ -3501,11 +3508,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pendingPlanNarration = null;
     // 新回合开始：思考窗暂存与开关清零（上一回合没被 planByThinking 消化的
     // 补充在这里作废——它们的插入点错过了，别漏进这个回合的请求正文）。
-    // 重启请求同理：它是发给上一条思考流的，流已不在。
+    // 重启请求同理：它是发给上一条思考流的，流已不在；叙述尾也是。
     this.pendingPreflightSupplements = [];
     this.planPreflightActive = false;
     this.preflightAbort = null;
     this.preflightRestartRequested = false;
+    this.preflightNarrationTail = '';
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
@@ -6699,12 +6707,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pendingTasks = [];
     this.queueCardEl?.parentElement?.remove();
     this.queueCardEl = null;
-    // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求与在飞
-    // 思考流的句柄同样作废。
+    // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求、在飞
+    // 思考流的句柄与叙述尾同样作废。
     this.pendingPreflightSupplements = [];
     this.planPreflightActive = false;
     this.preflightAbort = null;
     this.preflightRestartRequested = false;
+    this.preflightNarrationTail = '';
     this.relatedInsert = null;
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
@@ -7243,6 +7252,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 连续 N 句插话 = 重启 N 轮、每一轮都带着之前并好的全部补充。 */
   private preflightAbort: AbortController | null = null;
   private preflightRestartRequested = false;
+  /** 在飞思考的叙述尾（最近 ~400 个可见字符）：插话裁决的时机证据——裁决
+   * 器看到"思考最新说到……"才能自己发现叙述里的错误前提（jev 案例：用户
+   * 不说，它也该看见"jev≈JEPA"这个主张），而不是只会读用户的话。每轮
+   * 新思考开局清空（旧轮的尾巴对新轮是假证据）。 */
+  private preflightNarrationTail = '';
 
   private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
     const taken = this.pendingPreflightSupplements.splice(0);

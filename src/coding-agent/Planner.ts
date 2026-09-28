@@ -298,6 +298,11 @@ export interface InsertionClassification {
    *  this flag a default that keeps the app quiet would be indistinguishable
    *  from a model that actually said "I am sure". */
   confidenceDefaulted?: boolean;
+  /** True when this verdict is not a judgment at all but the internal fallback
+   *  (timeout / network / unparseable / empty input): the coordinator answers
+   *  it with the literal safety nets instead of trusting "task" as a reading.
+   *  2026-09-28 用户定调：正则不配做决策，只配做裁决器倒下时的安全网。 */
+  fallbackUsed?: boolean;
   /** The model's reading of WHEN this input wants to run, verbatim ("now",
    *  "after", "10 分钟后", "下午三点"). Parsing happens in inputDecision.ts so
    *  the clock arithmetic stays testable and provider-independent. */
@@ -324,32 +329,33 @@ export interface InsertionClassification {
   supplementsCurrent?: boolean;
 }
 
-const INSERTION_CLASSIFY_PROMPT = `You route a NEW user message that arrives WHILE an agent is already mid-task. Pick what a competent human colleague would do with it — the two hard rules: the user's words must never be dropped, and work must never restart without a real reason.
+const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what to do with it the way a sharp human colleague would — NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
 
-The current task the agent is working on:
+What you are working on right now — read the phase carefully, it decides what "taking it in stride" even means:
 <current_task>
 {{CONTEXT}}
 </current_task>
 
-The new message the user just inserted mid-run:
+What the user just said:
 <new_message>
 {{PROMPT}}
 </new_message>
 
-Categories (pick exactly one):
-- "question": the user asks something and expects an answer NOW — a status check ("跑完了吗", "现在到哪了"), a request for explanation, a decision only they can make. Answering must not disturb the running task.
-- "steer": the message guides HOW the current work proceeds and every bit of work already underway stays valid — a small tweak ("记得跑测试", "文案再口语一点"), a style preference, a caution, a constraint, extra detail that narrows without adding work. Steer works only as a promise ("the next step will take it into account"), so it requires a real next step to still happen; if the task is wrapping up or blocked waiting on parallel delegations to return, there is no such step and the message would be silently lost. Removing or cancelling a NAMED PART of the running work — one branch, topic, or item of a multi-part job ("X 就不调研了", "Y 那个别查了", "Z 不用了") — is steer, and this stays true while parallel delegations are out: the merge round that collects them is exactly the step that honors the removal (the cancelled part just leaves the result), so set "cancels_part": true. A removal is NEVER "task" — queuing a removal would run the exact opposite of what was asked — and "goal-change" only if the WHOLE direction is overturned, not one part of it. Resuming a NAMED STANDBY branch is also steer: when the user points at one branch that was previously stopped or paused mid-run and asks to carry it on ("把竞品那支接着跑完", "让报价那路继续"), set "resumes_part": true — the host re-delegates that branch with its original arguments so it continues from its saved checkpoint instead of starting over. A resume is NEVER "task": the branch already has its own run and checkpoint, and queuing it as new work would start it from scratch.
-- "premise-change": the user corrects a FACT that the current work is built on — origin/place, dates/timing, environment ("我用的是 Windows"), versions, budget, who owns what, an "already/currently X" assumption. The goal itself stands, but anything being computed from the wrong fact comes out worthless, so the running work must be cut short and redone from the corrected fact ("其实我在西安，不是广东", "预算只有三千，不是一万"). Judge this over steer whenever the correction would change the ANSWER, not just its wording.
-- "goal-change": the user overturns the current direction — replace the goal/approach/output, undo what was built, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…").
-- "task": any NEW, completable item of work — even one that EXTENDS the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理"), another file, another feature, a separate errand. A scope addition must go here, never steer: queuing runs it to completion right after the current task, so nothing is forgotten; steering it only promises "the next step will pick it up" — a promise that goes unfulfilled when no real next step remains. When torn between steer and task over an addition of work, pick task. The ONE exception: an addition that REFINES THE ONE THING being produced right now — more elements or detail INSIDE the same deliverable ("背景上加几朵会动的云" while a picture is being drawn, "标题再大一点" while a page is being laid out, "再加一段副歌" while one song is being written), a constraint that RESHAPES that deliverable ("诗句里一定要出现'明月'", "这首必须是五言的" while a poem is being thought out), or a GROWTH of the one list/answer being assembled ("新增加两位" while the deeds of five historical figures are being worked out — the same answer now covers seven, not a second answer) — is a supplement to the current work, not a second item: set kind "steer" and "supplements_current": true. The test: does the user still expect ONE deliverable that now carries this, or a SECOND deliverable after it? ("再画一张猫的", "再出一版英文的", "再写一首五言绝句" alongside an essay) — a second deliverable stays "task". The reverse is just as fixed: a REMOVAL of work never goes here — a message that cancels or drops part of the job is a steer no matter how much it reads like a to-do, because queuing it would execute the opposite of what was asked.
-- "chatter": small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
+The ways to take a remark (pick exactly one kind):
 
-One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the category of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
+- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
+- "premise-change" — the remark corrects a FACT the work is built on: place, dates, environment, versions, budget, who owns what, what something IS ("其实我在西安，不是广东", "预算只有三千", "你对jev的理解是错误的，jev是2026年9月新发布的模型"). The goal stands, but everything computed from the wrong fact comes out worthless — the work must be redone from the corrected fact. Judge this over steer whenever the correction would change the ANSWER, not just its wording. Especially while THINKING: if the thought-so-far (shown in the context) rests on the wrong fact, redoing the thought is the only honest move.
+- "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this.
+- "task" — a NEW, completable piece of work, even one that extends the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理", "再写一首五言绝句" alongside an essay). Queuing runs it right after the current task so it can never be lost; when torn between steer and task over ADDED work, pick task. The test is the user's expectation: ONE deliverable that now carries the remark (steer), or a SECOND deliverable after this one (task).
+- "question" — the user asks something and expects an answer NOW ("跑完了吗", "现在到哪了"), or asks for a decision only they can make. Answering must not disturb the running work.
+- "chatter" — small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
+
+One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"question|steer|premise-change|goal-change|task|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"resumes_part":true}
+{"kind":"steer|premise-change|goal-change|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"resumes_part":true,"supplements_current":true}
 
-"confidence" is how sure you are of the KIND and therefore of the action that
+"confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
 reads two ways (a correction of facts that could also be a small tweak, an
 overturn that could also be a scope addition). Report genuine doubt (~0.5 or
@@ -366,16 +372,17 @@ one is not (the agent restarts work or loses the message).
 explicitly belongs after the current task, and null when no timing was said.
 
 "cancels_part": include it as true ONLY when kind is "steer" AND the message
-cancels or removes a named part of the running work ("X 就不调研了"); omit it
-for every other message.
+cancels or removes a named part of the running work; omit it for every other
+message.
 
 "resumes_part": include it as true ONLY when kind is "steer" AND the message
-asks to carry on ONE named branch that was previously stopped or paused
-("把 X 那支接着跑完"); omit it for every other message.
+asks to carry on ONE named branch that was previously stopped or paused; omit
+it for every other message.
 
 "supplements_current": include it as true ONLY when kind is "steer" AND the
-message adds elements or detail INSIDE the one deliverable currently being
-produced (the exception under "task" above); omit it for every other message.`;
+remark belongs INSIDE the one thing currently being produced — an added
+element, a reshaping constraint, the growing list — so the host merges it
+into the request and redoes the thought; omit it for every other message.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -405,6 +412,7 @@ export async function classifyInsertion(
     // INPUT_DEFAULT_CONFIDENCE (inputDecision.ts). This is the parse/timeout
     // fallback; the no-classifier-at-all policy is the coordinator's.
     confidence: INPUT_DEFAULT_CONFIDENCE,
+    fallbackUsed: true,
   };
   if (!prompt.trim() || signal?.aborted) return fallback;
   const system = INSERTION_CLASSIFY_PROMPT

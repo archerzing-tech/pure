@@ -19,66 +19,91 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0); // 停止等不起一次分类往返
   });
 
-  it('aborts on overturn phrasing via the fast path', async () => {
+  it('hands overturn phrasing to the judge — the literal net only answers when the judge falls over (2026-09-28 用户定调)', async () => {
+    // 推翻话不再由正则直判（GOAL_CHANGE_RE 降级为安全网）：是推倒重想还是
+    // 整树重开、推的是哪一层，只有看得到时机（思考中？执行中？）和上下文
+    // 的裁决器分得清。裁决器倒下时 netVerdict 按字面族重开——绝不丢话。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'goal-change', reason: 'the whole approach is overturned', confidence: 1 }; } });
     const decision = await coordinator.decide(llm(), 'current task', { text: '推翻当前方案，从头重新来' });
     expect(decision.kind).toBe('goal-change');
     expect(decision.shouldAbort).toBe(true);
-    expect(calls).toBe(0);
+    expect(decision.signals.rule).toBeUndefined(); // 不是命令快路径接的
+    expect(calls).toBe(1);
   });
 
-  it('queues scope additions via the fast path, classifier never consulted', async () => {
-    // 用户两次实测暴露：委派在飞时"再加一个 X"被判 steer，而父任务阻塞等
-    // 子 agent 返回根本没有"下个动作"可带上——话被收下然后忘掉。加活的量
-    // 不进分类赌局：字面命中直送排队（唯一保证跑完的投递），与 STOP 同款
-    // 机制。
+  it('hands scope-add phrasing to the judge; queues only when the judge is unreachable (2026-09-28 用户定调)', async () => {
+    // 加活的字面族（SCOPE_ADD_RE）降级为安全网：加的东西可能是往在飞的那
+    // 件产出物里加（画鸟补云/五位加两位），只有看得到时机的裁决器分得清
+    // ——正则分不清。裁决器在场时字面命中绝不抢答；裁决器倒下（无 llm
+    // 或 classify 上报 fallbackUsed）才由 netVerdict 接手，按"唯一保证跑
+    // 完的投递"排队兜底——2026-09-22 防丢保证由网兑现，不再抢在判断前。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: 'grows the one list being assembled', confidence: 0.9, supplementsCurrent: true }; } });
     for (const text of ['再加一个 爱奇艺平台', '顺便也查一下 芒果TV', '把爱奇艺也查一下', '芒果TV也来一份', 'also check Douban']) {
       const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷 三个平台', { text });
-      expect(decision.kind).toBe('task');
-      expect(decision.shouldAbort).toBe(false); // 排队不打断，收尾后必跑
+      expect(decision.kind).toBe('steer'); // 裁决说了算，不再直送排队
+      expect(decision.signals.supplementsCurrent).toBe(true);
+      expect(decision.signals.rule).toBeUndefined();
     }
+    expect(calls).toBe(5); // 每句都过了裁决器
+  });
+
+  it('catches the words with the literal net only when the judge falls over (2026-09-28 用户定调)', async () => {
+    // 裁决器倒下的两个形状：内部 fallback（超时/网络/解析失败，以
+    // fallbackUsed 上报）和根本没有 llm。netVerdict 按字面族挑一个**不丢
+    // 话**的目的地——推翻话重开、收活折入、其余一律排队——绝不冒充判断
+    // （signals.fallback = 'literal-net'，confidence 恒为兜底值）。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
+    });
+    const overturn = await coordinator.decide(llm(), '', { text: '推翻重来' });
+    expect(overturn.kind).toBe('goal-change');
+    expect(overturn.shouldAbort).toBe(true);
+    expect(overturn.signals.fallback).toBe('literal-net');
+    const cancelish = await coordinator.decide(llm(), '', { text: 'jev 这个就不调研了' });
+    expect(cancelish.kind).toBe('steer');
+    expect(cancelish.signals.cancelsPart).toBe(true); // 收活，绝不反向执行
+    expect(cancelish.signals.fallback).toBe('literal-net');
+    const plain = await coordinator.decide(llm(), '', { text: '顺便问一下，跑完了吗' });
+    expect(plain.kind).toBe('task');
+    expect(plain.timing.mode).toBe('after-current');
+    expect(plain.signals.fallback).toBe('literal-net');
+    // 没有 llm 同样落网，且分类调用一次都不该发生。
+    let calls = 0;
+    const noLlm = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'task', reason: '', confidence: 1, fallbackUsed: true }; } });
+    const queued = await noLlm.decide(null, '', { text: '再加一个 爱奇艺平台' });
+    expect(queued.kind).toBe('task');
+    expect(queued.timing.mode).toBe('after-current');
+    expect(queued.signals.fallback).toBe('literal-net');
+    expect(queued.signals.rule).toBeUndefined();
     expect(calls).toBe(0);
   });
 
-  it('yields the scope-add fast path to the classifier inside the thought window (2026-09-27 用户定调)', async () => {
-    // 调研五位历史人物思考中"新增加两位"——同一份答案从 5 变 7，不是第二件
-    // 活。快路径不认识时机，会让路给分类器带 supplements_current 裁决；窗内
-    // 的吸收（推倒重想）与排队一样是不可丢的投递。窗外照旧直通队列。
+  it('hands partial-cancellation phrasing to the judge; cancelsPart comes from the verdict, not the regex (2026-09-24 案例 + 2026-09-28 降级)', async () => {
+    // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入——取消
+    // 的字面族（CANCEL_PART_RE）当年为此而生、直判 steer+cancelsPart。
+    // 2026-09-28 起降级为安全网：收一支还是整树停、收掉的进不进结果，只有
+    // 看得到时机和上下文的裁决器分得清。字面保证（绝不把"取消"当活跑）
+    // 由网兑现：裁决器倒下时 netVerdict 仍按字面族折入 steer+cancelsPart。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => { calls++; return { kind: 'steer', reason: 'grows the one list being assembled', confidence: 0.9, supplementsCurrent: true }; },
-    });
-    const inWindow = await coordinator.decide(llm(), '正在调研五位历史人物的功绩', { text: '新增加两位' }, undefined, Date.now(), { inThoughtWindow: true });
-    expect(inWindow.kind).toBe('steer');
-    expect(inWindow.signals.supplementsCurrent).toBe(true);
-    expect(inWindow.signals.rule).toBeUndefined(); // 快路径没接手，走了分类器
-    expect(calls).toBe(1);
-    // 窗外同一句话照旧走快路径直通队列——防丢顾虑在窗外仍由排队兑现。
-    const outside = await coordinator.decide(llm(), '正在调研五位历史人物的功绩', { text: '新增加两位' });
-    expect(outside.kind).toBe('task');
-    expect(outside.timing.mode).toBe('after-current');
-    expect(calls).toBe(1); // 窗外那次没消耗分类器
-  });
-
-  it('routes partial cancellation of a named part to steer via the fast path (2026-09-24 取消案例)', async () => {
-    // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入（回执
-    // "先补这项，再合并出一份覆盖全部的汇总"）——与意图正好相反。取消一
-    // 部分的字面族直判 steer + cancelsPart，不进分类赌局：判成 task 等于
-    // 把"取消"当活跑，反向执行。
-    let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'task', reason: '', confidence: 1 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: 'removes one named part from the join', confidence: 0.95, cancelsPart: true }; } });
     for (const text of ['jev 这个就不调研了', '知乎那个不用查了', '先别查了', 'RSIAgent 那部分别调研了吧', '芒果TV 就不用翻译了']) {
       const decision = await coordinator.decide(llm(), '正在并行调研 RSIAgent、jev 不聊天的模型、LLM 未来趋势', { text });
       expect(decision.kind).toBe('steer');
       expect(decision.shouldAbort).toBe(false);
-      expect(decision.timing.mode).toBe('now');
-      expect(decision.signals.cancelsPart).toBe(true);
-      expect(decision.signals.rule).toBe('CANCEL_PART_RE');
+      // 裁决没说时刻 → parseInputTiming 的默认（折入由 cancelsPart 驱动，
+      // 不靠 timing）——旧 fast path 的 'now' 不再由正则凭空捏造。
+      expect(decision.timing.mode).toBe('after-current');
+      expect(decision.signals.cancelsPart).toBe(true); // 来自裁决，不是正则
+      expect(decision.signals.rule).toBeUndefined();
     }
-    expect(calls).toBe(0); // 与 STOP/加活同款：取消等不起、也赌不起一次分类往返
+    expect(calls).toBe(5);
+    // 裁决器倒下：字面网兜底——收活折入，话绝不丢、绝不反向执行。
+    const net = await new DynamicInsertionCoordinator({ classify: async () => { throw new Error('judge must not be called'); } }).decide(null, '', { text: 'jev 这个就不调研了' });
+    expect(net.kind).toBe('steer');
+    expect(net.signals.cancelsPart).toBe(true);
+    expect(net.signals.fallback).toBe('literal-net');
   });
 
   it('routes imperative branch-stop to the fast path when a branch anchor is present (第 2 期分支中断)', async () => {
@@ -97,16 +122,17 @@ describe('DynamicInsertionCoordinator', () => {
       expect(decision.signals.rule).toBe('BRANCH_STOP_RE');
     }
     expect(calls).toBe(0); // 点名停与 STOP 同款：等不起、也赌不起一次分类往返
-    // 边界：否定将来时（就不用查了）仍是收活折入，不是真停；无锚的停下仍
-    // 是整树 stop；「先别停」是反义，锚在场也绝不误触。
+    // 边界：否定将来时（就不用查了）不碰点名停支——交给裁决器；无锚的停
+    // 下仍是整树 stop（命令，立即生效）；「先别停」是反义，锚在场也绝不误触。
     const cancelish = await coordinator.decide(llm(), '', { text: '竞品那支就不用查了' });
-    expect(cancelish.signals.cancelsPart).toBe(true);
     expect(cancelish.signals.branchStop).toBeUndefined();
+    expect(cancelish.signals.rule).toBeUndefined(); // 没被任何命令快路径接走
     const wholeTree = await coordinator.decide(llm(), '', { text: '停下来歇会' });
     expect(wholeTree.kind).toBe('stop');
     expect(wholeTree.signals.branchStop).toBeUndefined();
     const keepGoing = await coordinator.decide(llm(), '', { text: '那支先别停' });
     expect(keepGoing.signals.branchStop).toBeUndefined();
+    expect(calls).toBe(2); // 两条边界话都过了裁决器
   });
 
   it('still sends non-cancellation shapes to the classifier, unqueued', async () => {
@@ -203,21 +229,24 @@ describe('DynamicInsertionCoordinator', () => {
   it('queues as a task when no classifier LLM is available (never drops, never aborts)', async () => {
     // 2026-09-22 重新设计：没有分类器时兜底从 steer 换成 task——委派在飞时
     // steer 的承诺不可兑现（没有可兑现的 THINK 边界），排队才保真。
+    // 2026-09-28 起由 netVerdict 兑现：字面网只挑不丢话的目的地。
     const coordinator = new DynamicInsertionCoordinator();
     const decision = await coordinator.decide(null, 'current task', { text: '顺便把标题也改了' });
     expect(decision.kind).toBe('task');
     expect(decision.shouldAbort).toBe(false);
+    expect(decision.signals.fallback).toBe('literal-net');
   });
 
-  it('fast-paths the exact phrasing that was lost in the field ("增加一个平台")', async () => {
-    // 用户实测第三例："增加一个平台 爱奇艺"——此前字面族只有"再加"没有
-    // "增加"，快速路漏过、LLM 又判 steer，话被转达后丢失。这次进快速路。
+  it('sends the exact phrasing that was lost in the field ("增加一个平台") through the judge', async () => {
+    // 用户实测第三例："增加一个平台 爱奇艺"——字面族当年为此补上"增加"，
+    // 2026-09-28 起它的角色只剩安全网：裁决器在场就走裁决（往在飞的产出物
+    // 里加还是第二件活，由裁决定）；裁决器倒下才由网接住排队。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'steer', reason: '', confidence: 1 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'task', reason: 'a second platform to research', confidence: 0.9 }; } });
     const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷', { text: '增加一个平台  爱奇艺' });
     expect(decision.kind).toBe('task');
     expect(decision.shouldAbort).toBe(false);
-    expect(calls).toBe(0);
+    expect(calls).toBe(1);
   });
 
   it('passes the LLM kind through and aborts only on a judged goal-change', async () => {
@@ -243,8 +272,8 @@ describe('DynamicInsertionCoordinator', () => {
   // vocabulary, and the confidence gate runs last so no path can bypass it.
 
   it('asks instead of aborting when the classifier reports low confidence', async () => {
-    // Phrasing that does NOT match the GOAL_CHANGE_RE fast path — the gate is
-    // being tested, and the fast path is a different (mechanical) producer.
+    // Phrasing that no command fast path would claim — the gate is being
+    // tested, and the literal nets only answer when the judge is unreachable.
     const coordinator = new DynamicInsertionCoordinator({
       classify: async () => ({ kind: 'goal-change', reason: 'reads two ways', confidence: 0.4 }),
     });
@@ -266,17 +295,21 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.shouldAbort).toBe(true);
   });
 
-  it('defaults a classifier that never reported confidence, without gating on it', async () => {
+  it('defaults a provider that dropped the confidence field — upstream, not by the gate', async () => {
     // INPUT_DEFAULT_CONFIDENCE sits ABOVE the gate on purpose (see
     // inputDecision.ts): the gate exists for reported doubt, not for providers
-    // that drop the field. The confidenceDefaulted FLAG is added upstream by
-    // classifyInsertion — a mock here bypasses it, which is why it is absent.
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'task', reason: 'independent lookup' }),
-    } as never);
-    const decision = await coordinator.decide(llm(), 'current task', { text: '顺便查一下汇率' });
+    // that drop the field. The defaulting lives in classifyInsertion
+    // (confidence = INPUT_DEFAULT_CONFIDENCE + the confidenceDefaulted flag),
+    // so this runs the REAL classifier over a confidence-less reply — a raw
+    // mock without the number would (correctly) be gated to clarify.
+    const realPipeline = new DynamicInsertionCoordinator();
+    const noConfidence = {
+      stream: async function* () { yield { type: 'content', content: '{"kind":"task","reason":"independent lookup"}' }; },
+    } as unknown as LLMAdapter;
+    const decision = await realPipeline.decide(noConfidence, 'current task', { text: '顺便查一下汇率' });
     expect(decision.action).toBe('queue');
     expect(decision.confidence).toBeGreaterThan(0.6);
+    expect(decision.signals.confidenceDefaulted).toBe(true);
     expect(decision.shouldAbort).toBe(false);
   });
 

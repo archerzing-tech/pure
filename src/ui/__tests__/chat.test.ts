@@ -1764,8 +1764,15 @@ describe('plan-by-thinking flow', () => {
     const loopIdx = src.indexOf('if ((this.pendingPreflightSupplements.length > 0 || thought?.restarted) && thought !== null) {');
     expect(loopIdx).toBeGreaterThan(-1);
     expect(src.slice(loopIdx, src.indexOf('} finally {', loopIdx))).toContain('continue;');
-    // 分类调用带着思考窗状态：窗内 SCOPE_ADD 快路径让路给分类器。
-    expect(src).toContain('{ inThoughtWindow: this.planPreflightActive }');
+    // 分类调用就是四参一条路：时机×内容的判断全在裁决器，协调器不再收
+    // 任何窗口开关（2026-09-28 用户定调——决策不看关键词）。
+    const decideIdx = src.indexOf('this.dynamicInsertionCoordinator.decide(');
+    expect(decideIdx).toBeGreaterThan(-1);
+    const decideCall = src.slice(decideIdx, src.indexOf(');', decideIdx));
+    expect(decideCall).not.toContain('inThoughtWindow');
+    // 裁决器看得见"此刻在思考"与思考最新说到哪：时机证据随上下文过河。
+    expect(src).toContain("parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');");
+    expect(src).toContain('思考最新说到：');
   });
 
   it('every ack discard path settles the ledger — no ghost status rows in replays (2026-09-27 排队事故)', () => {

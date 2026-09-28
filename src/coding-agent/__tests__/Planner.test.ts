@@ -697,20 +697,20 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
 
   it('teaches that cancelling a named part is steer, never task (2026-09-24 取消案例)', () => {
     // 真实事故：并行调研中"X 就不调研了"被判成加活。提示词必须把裁决
-    // 说死：取消一部分=steer（cancels_part），绝不 task（排队=反向执行），
-    // 委派在飞也不改判——汇合轮正是兑现取消的那一步。
+    // 说死：取消一部分=steer（cancels_part），绝不排队（排队=反向执行），
+    // 收一支也不等于整树翻向。2026-09-28 重构后这段住在 steer 的分期语义
+    // 里（COLLECTING 阶段），字段契约不变。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     expect(promptStart).toBeGreaterThan(-1);
-    const guidance = src.indexOf('Removing or cancelling a NAMED PART', promptStart);
-    expect(guidance).toBeGreaterThan(-1);
-    const guidanceBody = src.slice(guidance, guidance + 900);
-    expect(guidanceBody).toContain('is NEVER "task"');
-    expect(guidanceBody).toContain('stays true while parallel delegations are out');
-    expect(guidanceBody).toContain('the merge round that collects them is exactly the step that honors the removal');
-    expect(guidanceBody).toContain('"goal-change" only if the WHOLE direction is overturned');
-    const taskRule = src.indexOf('a REMOVAL of work never goes here', promptStart);
-    expect(taskRule).toBeGreaterThan(-1);
+    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
+    expect(steerBody).toContain('a named removal');
+    expect(steerBody).toContain('NEVER queue a removal');
+    expect(steerBody).toContain('the exact opposite of what was asked');
+    expect(steerBody).toContain('"cancels_part": true');
+    // 收一支 ≠ 翻向：分界线写在 goal-change 的定义里。
+    const goalBody = src.slice(src.indexOf('- "goal-change"', promptStart), src.indexOf('- "task"', promptStart));
+    expect(goalBody).toContain('the whole thing heading somewhere else');
     // 结构化字段：契约输出蛇形 cancels_part，仅 steer+取消一部分时为真。
     const fieldDoc = src.indexOf('include it as true ONLY when kind is "steer"', promptStart);
     expect(fieldDoc).toBeGreaterThan(-1);
@@ -734,23 +734,47 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
   it('teaches the supplements_current carve-out: refining THE ONE deliverable in flight is not a second item (2026-09-27 排队事故)', () => {
     // 真实事故：画小鸟时补一句"背景上加一些会动的云朵"，被当成第二件活
     // 排队，队列的活又丢了——图上没有云。构图补充必须吸收进正在想的那一
-    // 件：提示词把"往当前产出的那一件东西里加内容"这个例外说死。
+    // 件：提示词把"往当前产出的那一件东西里加内容"说死，并按阶段讲清
+    // "顺势而为"在思考中意味着推倒重想（2026-09-28 时机感知重写）。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     expect(promptStart).toBeGreaterThan(-1);
-    const exception = src.indexOf('REFINES THE ONE THING being produced', promptStart);
-    expect(exception).toBeGreaterThan(-1);
-    const exceptionBody = src.slice(exception, exception + 1200);
-    expect(exceptionBody).toContain('supplements_current');
-    expect(exceptionBody).toContain('a SECOND deliverable after it');
+    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
+    expect(steerBody).toContain('"supplements_current": true');
+    expect(steerBody).toContain('the thought must be redone with the remark INSIDE it');
     // 2026-09-27 用户定调的第二批形状：约束改构图（明月/五言）、清单长大
     // （调研五位加两位 = 同一份答案 5→7）——都不是第二件活。
-    expect(exceptionBody).toContain('明月');
-    expect(exceptionBody).toContain('五言');
-    expect(exceptionBody).toContain('新增加两位');
+    expect(steerBody).toContain('明月');
+    expect(steerBody).toContain('五言');
+    expect(steerBody).toContain('新增加两位');
+    // task 的判据写在用户期待上：一份交付物带上它 vs 这一单之后再来一份。
+    const taskBody = src.slice(src.indexOf('- "task"', promptStart), src.indexOf('- "question"', promptStart));
+    expect(taskBody).toContain('a SECOND deliverable after this one');
     // JSON 契约字段：仅 steer + 加进当前产出物时为真。
     const fieldDoc = src.indexOf('"supplements_current": include it as true ONLY when kind is "steer"', promptStart);
     expect(fieldDoc).toBeGreaterThan(-1);
+  });
+
+  it('opens with the judge-first frame: timing × content-impact, never keywords (2026-09-28 用户定调)', () => {
+    // 用户定调：决策不看关键词，看时机×内容×结果收益——聪明的人类同事
+    // 会怎么做（统筹兼顾顺势而为 vs 及时停下改方向）。提示词开篇必须
+    // 立住这个框架，正则只配做裁决器倒下时的安全网。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    expect(promptStart).toBeGreaterThan(-1);
+    const opening = src.slice(promptStart, promptStart + 900);
+    expect(opening).toContain('NOT by matching keywords');
+    expect(opening).toContain('WHEN it arrived');
+    expect(opening).toContain('the result you still owe them');
+    expect(opening).toContain('统筹兼顾顺势而为');
+    expect(opening).toContain('及时停下改方向');
+    // 时机决定"顺势"的含义：思考中=并进请求推倒重想。
+    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
+    expect(steerBody).toContain('the PHASE in the context');
+    // 纠错优先于微调：改正的是答案而不只是说法。
+    const premiseBody = src.slice(src.indexOf('- "premise-change"', promptStart), src.indexOf('- "goal-change"', promptStart));
+    expect(premiseBody).toContain('would change the ANSWER');
+    expect(premiseBody).toContain('jev');
   });
 
   it('parses the supplements_current contract field through to the classification', async () => {
@@ -772,6 +796,19 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
       'context', '明天北京天气怎么样',
     );
     expect(plain.supplementsCurrent).toBeUndefined();
+  });
+
+  it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {
+    // 内部兜底（空话/中止/超时/解析失败）必须自我表白：协调器据此改用
+    // 字面安全网，而不是把"task"当成一份裁决来信。真裁决绝不带这个标记。
+    const fell = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
+    expect(fell.kind).toBe('task');
+    expect(fell.fallbackUsed).toBe(true);
+    const judged = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"a second lookup","confidence":0.9}'),
+      'context', '顺便查一下汇率',
+    );
+    expect(judged.fallbackUsed).toBeUndefined();
   });
 });
 
