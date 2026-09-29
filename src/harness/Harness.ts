@@ -6,7 +6,7 @@ import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
 import { ContextEngine, type ContextCompactionResult } from './ContextEngine';
 import { PromptAssembler, promptAssembler, resolvePromptBudget, estimatePromptTokens, estimateToolDefinitionTokens, type PromptBudgetConfig } from '../shared/PromptAssembler';
-import { promptObservability, promptVersion, observeStrategy, type PromptObservability } from '../shared/promptObservability';
+import { promptObservability, promptVersion, observeStrategy, type MemoryInjectionObservation, type PromptObservability } from '../shared/promptObservability';
 import { AdaptiveControlPlane, adaptiveControlPlane, type AdaptiveStrategy } from '../shared/adaptiveControl';
 import type {
   BudgetConfig,
@@ -141,6 +141,16 @@ export interface HarnessConfig {
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
+  /** P0 棘轮 — 进化总开关（宿主从 config.skills.evolution / PURE_EVOLUTION_DISABLED
+   *  解析后传入）。false 时 Harness 只少记一笔归因（agent_run 不带
+   *  memoryInjection 字段，与旧格式逐字节一致），记忆注入等现状行为一概不动：
+   *  运行时只知道一个「要不要记账」的布尔，不知道进化层存在。Omitted = on 的
+   *  记账语义由字段缺席兜底（stash 不发生 ⇒ 记录无字段）。 */
+  evolutionEnabled?: boolean;
+  /** P0 棘轮 — 本次会话注入的技能名单（SKILL.md 侧，宿主装配系统提示时点
+   * 名）。与记忆条目 id 一起进 memoryInjection 观测，供贡献切片聚合。
+   * Omitted = 无技能可记（CLI 装配点接线前的过渡形态）。 */
+  injectedSkills?: string[];
 }
 
 export class Harness {
@@ -161,6 +171,11 @@ export class Harness {
   private readonly observability: PromptObservability;
   private readonly adaptiveControl: AdaptiveControlPlane;
   private currentAdaptiveStrategy?: AdaptiveStrategy;
+  // P0 棘轮 — composeMemoryPrompt 选定的记忆条目/技能（ids only）。与
+  // currentAdaptiveStrategy 同一冻结语义：run() 组装会话系统提示时落值，
+  // 后续 continueTurn 复用冻结提示，归因到同一批条目是忠实的（模型看到的
+  // 就是它们）。总开关关掉时保持 undefined —— startRun 因此不写字段。
+  private currentMemoryInjection?: MemoryInjectionObservation;
   // E0.2 §2.1 — system prompt frozen for the whole session: composed once at
   // run() (or first continueTurn on a restored session), reused verbatim by
   // every later continueTurn so provider-side prompt-cache breakpoints on the
@@ -336,6 +351,9 @@ export class Harness {
       // prompt; recording it on the run record makes strategy → outcome a
       // zero-join slice (same record holds toolCalls/verification/outcome).
       strategy: observeStrategy(this.currentAdaptiveStrategy),
+      // P0 棘轮 — same zero-join logic for the frozen memory/skill injection:
+      // the run record carries which entries the model actually saw.
+      memoryInjection: this.currentMemoryInjection,
     });
     let traceFinished = false;
     const finishTrace = () => {
@@ -582,6 +600,9 @@ export class Harness {
       // (§2.1 cache freeze); attributing later turns to it is faithful, since
       // that directive is literally what the model saw.
       strategy: observeStrategy(this.currentAdaptiveStrategy),
+      // P0 棘轮 — same freeze semantics: later turns attribute to the entries
+      // frozen at session start (undefined when the evolution switch is off).
+      memoryInjection: this.currentMemoryInjection,
     });
     let traceFinished = false;
     const finishTrace = () => {
@@ -880,7 +901,7 @@ export class Harness {
         : undefined,
     });
     this.currentAdaptiveStrategy = strategy;
-    return this.promptAssembler.composeMemoryPrompt({
+    const composed = this.promptAssembler.composeMemoryPrompt({
       template: systemPrompt,
       memory: {
         preferences,
@@ -895,6 +916,29 @@ export class Harness {
       budget: this.config.promptBudget,
       toolDefinitions: this.currentToolsDefs(),
     });
+    // P0 棘轮归因 — 记下这批进过候选池的条目（ids only，E0.1 纪律不破）。
+    // memories 已在上方滤掉 confidence:'low'，globalToolPrefs 本就 activeOnly；
+    // 个别条目可能被 toolPreference 去重或 fragment 预算挤掉——前者罕见、后者
+    // 由 injected 布尔兜底（聚合器跳过 false 的 run）。总开关关掉时整个 stash
+    // 不发生，currentMemoryInjection 维持 undefined。
+    if (this.config.evolutionEnabled) {
+      const entryIds: string[] = [];
+      const entryTypes: Record<string, number> = {};
+      const seen = new Set<string>();
+      for (const m of [...globalToolPrefs, ...memories]) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        entryIds.push(m.id);
+        entryTypes[m.type] = (entryTypes[m.type] ?? 0) + 1;
+      }
+      this.currentMemoryInjection = {
+        entryIds,
+        entryTypes,
+        skills: this.config.injectedSkills?.length ? [...this.config.injectedSkills] : undefined,
+        injected: composed.includes('<session_memory>'),
+      };
+    }
+    return composed;
   }
 
   /**

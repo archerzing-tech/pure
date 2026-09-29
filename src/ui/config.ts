@@ -300,7 +300,7 @@ export function defaults(): PureConfig {
     tavilyApiKey: '',
     serperApiKey: '',
     searxngUrl: '',
-    skills: { 'code-review': true, 'web-research': true, memory: true, planning: true },
+    skills: { 'code-review': true, 'web-research': true, memory: true, planning: true, evolution: true },
     hubSkills: [],
     mcpServers: [...DEFAULT_MCP_SERVERS],
     mcpExcludedPrefixes: [],

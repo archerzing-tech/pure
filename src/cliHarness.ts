@@ -416,6 +416,10 @@ async function createHarness(args: CliArgs) {
     userHooks,
     userHookRunner,
     failurePolicy: plumbing.failurePolicy,
+    // P0 棘轮 — 进化总开关的 CLI 形态（GUI 走 config.skills.evolution）。
+    // 只控归因记账与后台编排；关掉时 agent_run 不带 memoryInjection 字段，
+    // 行为与本开关诞生前逐字节一致。
+    evolutionEnabled: process.env.PURE_EVOLUTION_DISABLED !== '1',
   });
 
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };

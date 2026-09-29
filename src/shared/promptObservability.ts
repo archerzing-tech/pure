@@ -95,6 +95,24 @@ export interface CacheObservation {
   hitRate: number | null;
 }
 
+/** P0 棘轮 — 组进本次 run 冻结系统提示的记忆条目与技能名单。
+ *  只存 id/名单，不存内容（E0.1 hash-only 纪律不破）；条目内容仍在会话档案
+ *  与记忆库里，观测↔库按 id 直连。字段缺席 = 本字段诞生前的老记录，聚合器
+ *  按「无数据」处理，绝不按零计。 */
+export interface MemoryInjectionObservation {
+  /** 交给 assembler 的候选条目 id（含机器级 GLOBAL tool_preference）。
+   *  low-confidence 条目在 stash 之前已被滤掉，不会出现在这里。 */
+  entryIds: string[];
+  /** 按类型计数——预算裁剪的可见性快照，聚合时免读库。 */
+  entryTypes?: Record<string, number>;
+  /** 注入的技能名（SKILL.md 侧），与 entryIds 平行；聚合器用 `skill:` 前缀
+   *  折进同一 key 空间。 */
+  skills?: string[];
+  /** <session_memory> 片段是否活过了 token 预算（一个 includes 检查）。
+   *  false 的 run 不计入任何条目的贡献——它们没真正到场。 */
+  injected?: boolean;
+}
+
 export interface AgentRunObservation {
   type: 'agent_run';
   traceId: string;
@@ -120,6 +138,11 @@ export interface AgentRunObservation {
    *  aggregators untouched). Absent on pre-T1 records; the parser and the
    *  aggregators treat a missing array as "no data", never as zero. */
   delegations?: DelegationObservation[];
+  /** P0 棘轮 — which memory entries / skills rode into this run's frozen
+   *  system prompt (see MemoryInjectionObservation). Written only when the
+   *  evolution switch is on; absent otherwise, so the off-state record is
+   *  byte-identical to the pre-attribution format. */
+  memoryInjection?: MemoryInjectionObservation;
 }
 
 /** T1 — one role delegation observed with its identity (`ag-xxxxxxxx`),
@@ -210,6 +233,7 @@ export interface AgentRunObservationInput {
   model?: string;
   startedAt?: number;
   strategy?: StrategyObservation;
+  memoryInjection?: MemoryInjectionObservation;
 }
 
 export interface PromptObservabilityOptions {
@@ -397,6 +421,11 @@ export class PromptObservability {
       reasoningChars: 0,
       outputChars: 0,
     };
+    // Conditional on purpose: an absent input must leave the key absent, so
+    // the off-state record stays byte-identical to the pre-attribution format
+    // (`strategy: undefined` serializes away, but the live object keeps the
+    // key — the strict form costs nothing and makes the contract explicit).
+    if (input.memoryInjection) record.memoryInjection = input.memoryInjection;
     this.activeRuns.set(traceId, record);
     return traceId;
   }

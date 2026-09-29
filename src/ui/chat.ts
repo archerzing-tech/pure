@@ -4389,6 +4389,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
+        // P0 棘轮 — 进化总开关（Settings → Skills；与 memory 同一 `!== false`
+        // 读取惯例）+ 本会话注入的技能名单（与下方 assemble() 同源）。只控
+        // 归因记账；关掉时 agent_run 记录与旧格式逐字节一致。
+        evolutionEnabled: config.skills?.evolution !== false,
+        injectedSkills: [
+          ...(config.hubSkills ?? []).filter((s) => s.enabled).map((s) => s.name),
+          ...(await loadAppSkills(effectiveWorkspace)).map((s) => s.name),
+        ],
         // E1.2 — cross-session failure history: traps past sessions recorded
         // in error_pattern memories escalate the failure ladder immediately.
         failureHistory: memoryEnabled

@@ -1649,6 +1649,118 @@ describe('Harness strategy effect records (E4.1)', () => {
   });
 });
 
+// ── P0 棘轮 — memory injection attribution ──
+
+describe('Harness memory injection attribution (P0 ratchet)', () => {
+  it('records the frozen injection (entry ids + skills) on run records when the switch is on', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers bun over npm',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    const observability = new PromptObservability();
+    const harness = new Harness({
+      sessionId: 'sess-attrib',
+      llm: recordingLLM('done'),
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      observability,
+      evolutionEnabled: true,
+      injectedSkills: ['auto-deploy'],
+    });
+
+    const first = await collect(harness.run('SYS', 'switch my scripts to bun'));
+    const completed = first.find(e => e.type === 'Completed');
+    await collect(harness.continueTurn('SYS', completed!.payload.messages!, 'now the deploy step'));
+
+    const runs = observability.records().filter(r => r.type === 'agent_run') as AgentRunObservation[];
+    expect(runs).toHaveLength(2);
+    const injection = runs[0].memoryInjection;
+    expect(injection).toBeDefined();
+    expect(injection!.entryIds).toContain('mem_0');
+    expect(injection!.entryTypes?.user_preference).toBe(1);
+    expect(injection!.skills).toEqual(['auto-deploy']);
+    expect(injection!.injected).toBe(true);
+    // §2.1 cache freeze semantics: the later turn attributes to the SAME
+    // frozen injection — it is literally what the model saw.
+    expect(runs[1].memoryInjection).toEqual(injection);
+  });
+
+  it('keeps run records byte-identical to the old format when the switch is off', async () => {
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers bun over npm',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    const observability = new PromptObservability();
+    const llm = recordingLLM('done');
+    const harness = new Harness({
+      sessionId: 'sess-attrib-off',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      observability,
+      // evolutionEnabled omitted — the off state.
+    });
+
+    await collect(harness.run('SYS', 'switch my scripts to bun'));
+
+    const runs = observability.records().filter(r => r.type === 'agent_run') as AgentRunObservation[];
+    expect(runs).toHaveLength(1);
+    expect(runs[0].memoryInjection).toBeUndefined();
+    expect('memoryInjection' in runs[0]).toBe(false);
+    // Injection behavior itself is NOT governed by the switch: memory still
+    // composes into the prompt exactly as before.
+    expect(llm.received[0][0].content).toContain('<session_memory>');
+    expect(llm.received[0][0].content).toContain('User prefers bun over npm');
+  });
+
+  it('produces a byte-identical system prompt with the switch on vs off', async () => {
+    const seed = async (store: FakeMemoryStore): Promise<void> => {
+      await store.add({
+        type: 'user_preference',
+        content: 'User prefers bun over npm',
+        timestamp: Date.now(),
+        sessionId: 'old-session',
+        projectPath: '/ws',
+      });
+    };
+    const onStore = new FakeMemoryStore();
+    await seed(onStore);
+    const offStore = new FakeMemoryStore();
+    await seed(offStore);
+    const onLlm = recordingLLM('done');
+    const offLlm = recordingLLM('done');
+
+    const onHarness = new Harness({
+      sessionId: 'sess-snap-on', llm: onLlm, toolsDefs: [], budget: STD_BUDGET,
+      memory: onStore, projectPath: '/ws', evolutionEnabled: true, injectedSkills: ['auto-deploy'],
+    });
+    const offHarness = new Harness({
+      sessionId: 'sess-snap-off', llm: offLlm, toolsDefs: [], budget: STD_BUDGET,
+      memory: offStore, projectPath: '/ws',
+    });
+
+    await collect(onHarness.run('BASE SYSTEM', 'switch my scripts to bun'));
+    await collect(offHarness.run('BASE SYSTEM', 'switch my scripts to bun'));
+
+    // 红线断言：归因记账绝不改写运行时提示 —— 开关两态下模型看到的系统提示
+    // 逐字节一致（记的那笔只落在观测记录里）。
+    expect(onLlm.received[0][0].content).toBe(offLlm.received[0][0].content);
+    expect(onLlm.received[0][0].content).toContain('<session_memory>');
+  });
+});
+
 describe('Harness tool-correction notes (E1.3)', () => {
   it('injects an approved correction note into every later session prompt', async () => {
     const memStore = new FakeMemoryStore();

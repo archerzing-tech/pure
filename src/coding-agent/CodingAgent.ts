@@ -106,6 +106,11 @@ export interface CodingAgentConfig {
   };
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
+  /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；只控归因
+   *  记账，false 时 agent_run 不带 memoryInjection 字段。 */
+  evolutionEnabled?: boolean;
+  /** P0 棘轮 — 本次会话注入的技能名单，进 memoryInjection 观测供贡献切片。 */
+  injectedSkills?: string[];
   subagents?: SubagentDefinition[];
   /** 阶段 13.3 — role → 进化 overlay（宿主从 ~/.pure/personas/ 装载后传入）；
    * 命中角色的 system prompt 在 base 之后追加 overlay。 */
@@ -278,6 +283,8 @@ export class CodingAgent {
       gateDelegations: config.gateDelegations,
       subagentEvents: config.subagentEvents,
       reflection: config.reflection,
+      evolutionEnabled: config.evolutionEnabled,
+      injectedSkills: config.injectedSkills,
     });
   }
 
