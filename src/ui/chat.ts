@@ -6301,6 +6301,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               && (isPlanBuild
                 ? (planMarkedCompleted || (needsDeliveryGate && qualityPassed && deliveredOnFinalStage))
                 : (!needsDeliveryGate || qualityPassed) && hasToolWork);
+            // 问题 6a（2026-09-29 用户反馈）：项目交付完成的一刻就把
+            // activePlanProjectBuild 关掉——它是「接续已批准的构建计划」的
+            // 门闩，计划完成后就成了泄漏源：下一条普通消息（"启动服务，
+            // 打开浏览器看看"）会被 continuingProjectBuild 拉进 delivery
+            // gate → 强制重新规划。交付后用户的话该由语义路由按它自己
+            // 的意思读（运营/维护还是新构建），不再被上一轮的构建身份
+            // 绑架。activeComplexPlan 已由完成路径置空，这里补齐同批状态。
+            if (projectDelivered && isPlanBuild) this.activePlanProjectBuild = false;
             // 目录/路径卡片是「项目在哪」的信息，不是「交付合格」的声明：
             // 只要本轮正常结束且产生过文件就显示。此前它被交付门禁拦住——
             // 而会话恢复路径按 write 记录无条件重建卡片，导致「实时不显示、
