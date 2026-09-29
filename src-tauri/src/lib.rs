@@ -14071,19 +14071,52 @@ fn cleanup_all_session_files(dir: &std::path::Path, session_ids: &[String]) -> R
 // 标题取首条用户消息前 6 个字（超长加省略号）——与 TS 侧 extractTitle 同一
 // 规则（2026-09-26 用户定调），两侧不一致会出现落盘前后标题跳变。
 fn extract_title(messages: &[serde_json::Value]) -> String {
+    // 标题必须是用户的话。两类「第一句不是用户输入」的脏形状都不配当标题：
+    // 引擎注入的 internal 消息（失败重试注、接续指令——真实案例 B 会话列表
+    // 出现「Tool call execute_command failed…」）与 <task_context> 协议壳
+    // （壳里是给模型看的上下文，用户的话在壳外——真实案例 A 会话标题成了
+    // 「<task_…」）。跳过/剥壳，剥完为空继续向后找，实在没有才落 New chat
+    // （2026-09-29，与前端 extractTitle 同一规则）。
     for m in messages {
-        if m.get("role").and_then(|r| r.as_str()) == Some("user") {
-            if let Some(content) = m.get("content").and_then(|c| c.as_str()) {
-                let title: String = content.chars().take(6).collect();
-                return if content.chars().count() > 6 {
-                    format!("{}…", title)
-                } else {
-                    title
-                };
-            }
+        if m.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
         }
+        if m.get("internal").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        let Some(content) = m.get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        let stripped = strip_task_context(content).trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        let title: String = stripped.chars().take(6).collect();
+        return if stripped.chars().count() > 6 {
+            format!("{}…", title)
+        } else {
+            title
+        };
     }
     "New chat".to_string()
+}
+
+/// 剥掉 <task_context>…</task_context> 协议壳，只留壳外用户原话（与前端
+/// stripUserTurnContext 同一规则：壳是给模型看的上下文，回放/标题只认壳外；
+/// 壳不完整时原样返回）。
+fn strip_task_context(content: &str) -> &str {
+    const OPEN: &str = "<task_context>";
+    const CLOSE: &str = "</task_context>";
+    let Some(open) = content.find(OPEN) else {
+        return content;
+    };
+    let close = content[open + OPEN.len()..]
+        .find(CLOSE)
+        .map(|offset| open + OPEN.len() + offset);
+    match close {
+        Some(close) => content[close + CLOSE.len()..].trim_start_matches('\n'),
+        None => content,
+    }
 }
 
 fn update_sessions_index(
@@ -17091,5 +17124,59 @@ mod session_stats_tests {
         assert_eq!(bare["prompt_tokens"], 10.0);
         assert_eq!(bare["prompt_cache_hit_tokens"], 0.0);
         assert_eq!(bare["completion_tokens"], 0.0);
+    }
+}
+
+#[cfg(test)]
+mod extract_title_tests {
+    use super::*;
+
+    #[test]
+    fn skips_internal_engine_messages() {
+        // 真实 B 会话形状：裁剪后的头部全是 internal 失败重试注。
+        let messages = serde_json::json!([
+            { "role": "system", "content": "system" },
+            { "role": "user", "content": "Tool call execute_command failed: Command failed with exit code 1", "internal": true },
+            { "role": "user", "content": "Attempt 1: Command failed with exit code 124", "internal": true },
+            { "role": "assistant", "content": "错误说明 output 目录不在仓库里。" },
+            { "role": "user", "content": "从youtube上面随便给我下一个15s左右的视频" },
+        ]);
+        assert_eq!(extract_title(messages.as_array().unwrap()), "从youtu…");
+    }
+
+    #[test]
+    fn strips_task_context_shell() {
+        // 真实 A 会话形状：用户消息带 <task_context> 协议壳，原话在壳外。
+        let messages = serde_json::json!([
+            { "role": "system", "content": "system" },
+            { "role": "assistant", "content": "这个需求的核心是对齐用的原型演示。" },
+            { "role": "user", "content": "<task_context>\n<artifact_output_rule>…</artifact_output_rule>\n</task_context>\n\n构建一个香港 HVC 保障原型" },
+        ]);
+        assert_eq!(extract_title(messages.as_array().unwrap()), "构建一个香港…");
+    }
+
+    #[test]
+    fn empty_after_strip_keeps_scanning_and_falls_back() {
+        let scanning = serde_json::json!([
+            { "role": "user", "content": "<task_context>只有壳</task_context>", "internal": true },
+            { "role": "user", "content": "真正的问题在这" },
+        ]);
+        assert_eq!(extract_title(scanning.as_array().unwrap()), "真正的问题在…");
+        let fallback = serde_json::json!([
+            { "role": "user", "content": "[粘贴图片/截图: x]", "internal": true },
+        ]);
+        assert_eq!(extract_title(fallback.as_array().unwrap()), "New chat");
+    }
+
+    #[test]
+    fn incomplete_shell_returns_content_unchanged() {
+        // 壳不完整（只有开标 / 闭标在前）→ 原样返回，与前端同规则。
+        assert_eq!(strip_task_context("没有壳的原话"), "没有壳的原话");
+        assert_eq!(strip_task_context("<task_context>只有开标"), "<task_context>只有开标");
+        assert_eq!(
+            strip_task_context("</task_context>闭标在开标前 <task_context>x"),
+            "</task_context>闭标在开标前 <task_context>x"
+        );
+        assert_eq!(strip_task_context("<task_context>壳</task_context>\n\n壳外原话"), "壳外原话");
     }
 }

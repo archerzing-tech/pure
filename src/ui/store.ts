@@ -14,6 +14,7 @@ import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
 import type { PathRepair } from './pathIndex';
 import { relocatePreflightNarration } from '../shared/conversation';
+import { stripUserTurnContext } from '../shared/promptLayers';
 
 export const SESSION_SNAPSHOT_VERSION = 3;
 
@@ -563,7 +564,9 @@ function healLeadingNarrationEvents(events: SessionEvent[]): SessionEvent[] {
   const firstUser = events.findIndex(event => event.type === 'user');
   if (firstUser <= 0) return events;
   const head = events.slice(0, firstUser);
-  if (head.length === 0 || head.some(event => event.type !== 'thinking' && event.type !== 'assistant')) return events;
+  // 叙述家族三件套：thinking / assistant 正文 / analysis（预检叙述的事件形态，
+  // 与条目侧「assistant 条目驮 analysis」同源——条目侧天然覆盖，事件侧得点名）。
+  if (head.length === 0 || head.some(event => event.type !== 'thinking' && event.type !== 'assistant' && event.type !== 'analysis')) return events;
   return [events[firstUser], ...head, ...events.slice(firstUser + 1)];
 }
 
@@ -1388,9 +1391,18 @@ export async function deleteAllSessions(): Promise<void> {
  * title appear the moment the user hits send (2026-09-26 用户定调：标题取输入
  * 前 5-6 个字，太长省略；TS/Rust 两侧同规则，Rust 侧见 lib.rs extract_title). */
 export function extractTitle(messages: Message[]): string {
-  const firstUser = messages.find(m => m.role === 'user' && m.content);
-  if (firstUser?.content) {
-    const chars = Array.from(firstUser.content);
+  // 标题必须是用户的话。两类「第一句不是用户输入」的脏形状都不配当标题：
+  // 引擎注入的 internal 消息（失败重试注、接续指令——2026-09-29 用户报
+  // 「Tool call execute_command failed…」当标题）与 <task_context> 协议壳
+  // （壳里是给模型看的上下文，用户的话在壳外——报过「<task_…」当标题）。
+  // 剥壳后为空就继续向后找，实在没有才落 New chat。
+  const firstUser = messages.find(m => {
+    if (m.role !== 'user' || m.internal) return false;
+    return stripUserTurnContext(m.content ?? '').trim().length > 0;
+  });
+  const content = firstUser ? stripUserTurnContext(firstUser.content ?? '').trim() : '';
+  if (content) {
+    const chars = Array.from(content);
     return chars.slice(0, 6).join('') + (chars.length > 6 ? '…' : '');
   }
   return 'New chat';

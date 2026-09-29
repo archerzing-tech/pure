@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { readFileSync } from 'node:fs';
-import { createSessionSnapshot, normalizeSessionSnapshot, type StatusLineRecord, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, extractTitle, normalizeSessionSnapshot, type StatusLineRecord, type TranscriptDraft } from '../store';
 import { projectSessionEvents } from '../transcriptProjection';
 import { ChatController } from '../chat';
 
@@ -187,6 +187,22 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     expect(normalizeSessionSnapshot(JSON.parse(JSON.stringify(once))).events).toEqual(once.events);
   });
 
+  it('analysis 头也属于叙述家族：预检叙述的事件形态同样搬正', () => {
+    const raw = {
+      version: 3,
+      modelContext: { messages: [{ role: 'user', content: '画个图' }, { role: 'assistant', content: '好。' }] },
+      events: [
+        { id: 'e0', type: 'analysis', content: '用户想要一张图，我先拆一下需求。' },
+        { id: 'e1', type: 'user', content: '画个图' },
+        { id: 'e2', type: 'assistant', content: '好。' },
+      ],
+      transcript: [],
+      uiState: {},
+    };
+    const healed = normalizeSessionSnapshot(JSON.parse(JSON.stringify(raw)));
+    expect(healed.events.map(e => e.type)).toEqual(['user', 'analysis', 'assistant']);
+  });
+
   it('源头修复：chat.ts 押账叙述、两个合并点与暂停提交各消费一次', () => {
     const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     // 叙述不再直接 push 进 canonical（push 就是「思考抢在请求前」的病根）。
@@ -196,5 +212,36 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     expect(chatSource.split('this.takePendingPlanNarration()').length - 1).toBe(3);
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration())');
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, event.payload.messages, userText, this.takePendingPlanNarration())');
+  });
+});
+
+describe('会话标题取词（extractTitle）——标题必须是用户的话', () => {
+  it('跳过 internal 引擎消息：失败重试注不配当标题（真实 B 会话形状）', () => {
+    const title = extractTitle([
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'Tool call execute_command failed: Command failed with exit code 1', internal: true },
+      { role: 'user', content: 'Attempt 1: Command failed with exit code 124', internal: true },
+      { role: 'assistant', content: '错误说明 output 目录不在仓库里。' },
+      { role: 'user', content: '从youtube上面随便给我下一个15s左右的视频' },
+    ]);
+    expect(title).toBe('从youtu…');
+  });
+
+  it('剥掉 <task_context> 协议壳：标题取壳外用户原话（真实 A 会话形状）', () => {
+    const title = extractTitle([
+      { role: 'system', content: 'system' },
+      { role: 'assistant', content: '这个需求的核心是对齐用的原型演示。' },
+      { role: 'user', content: '<task_context>\n<artifact_output_rule>…</artifact_output_rule>\n</task_context>\n\n构建一个香港 HVC 保障原型' },
+    ]);
+    expect(title).toBe('构建一个香港…');
+  });
+
+  it('剥壳后为空就继续向后找；全是引擎消息则落 New chat', () => {
+    const skipped = extractTitle([
+      { role: 'user', content: '<task_context>只有壳</task_context>', internal: true },
+      { role: 'user', content: '真正的问题在这' },
+    ]);
+    expect(skipped).toBe('真正的问题在…');
+    expect(extractTitle([{ role: 'user', content: '[粘贴图片/截图: x]', internal: true }])).toBe('New chat');
   });
 });
