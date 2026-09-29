@@ -399,6 +399,40 @@ body {
   font-weight: 500;
 }
 
+/* 问题 3（2026-09-29 用户反馈）：会话切换中的卡片态——点击的瞬间挂上
+   is-switching，冷加载完成（setActive 接棒）或点击落空时摘掉。旋转指示
+   走 ::after 空位（卡片没有空闲子元素可借用），微光扫过标题行，两张信号
+   合起来让"点了、正在切"可见，不再被误读为没点上。 */
+.sidebar-session-item.is-switching {
+  background: var(--accent-soft);
+}
+.sidebar-session-item.is-switching .sidebar-session-item-title {
+  animation: session-switch-shimmer 1.1s ease-in-out infinite;
+}
+.sidebar-session-item.is-switching::after {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: session-switch-spin .7s linear infinite;
+  align-self: center;
+}
+@keyframes session-switch-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes session-switch-shimmer {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-session-item.is-switching::after { animation-duration: 2.5s; }
+  .sidebar-session-item.is-switching .sidebar-session-item-title { animation: none; opacity: .7; }
+}
+
 .sidebar-session-item-main {
   flex: 1;
   min-width: 0;

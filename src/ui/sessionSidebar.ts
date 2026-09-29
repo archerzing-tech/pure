@@ -165,6 +165,25 @@ export class SessionSidebar {
     });
   }
 
+  /** 问题 3（2026-09-29 用户反馈）：点击会话卡的瞬间就给那张卡挂切换中
+   *  状态（旋转指示 + 微光），冷加载完成时由 presentSession→setActive 摘
+   *  掉。加载要几秒时用户看得到「点了、正在切」，不再误读为没点上；切换
+   *  失败/卡片失效时摘掉状态并给出会话不再存在的提示。只锁点击发起的那
+   *  张卡（data-sid 匹配），连点新卡时旧卡的态随 stale 判定一并清场。 */
+  private markSwitching(id: string): void {
+    document.querySelectorAll('.sidebar-session-item.is-switching').forEach(el => {
+      if (el.getAttribute('data-sid') !== id) el.classList.remove('is-switching');
+    });
+    const el = document.querySelector(`.sidebar-session-item[data-sid="${CSS.escape(id)}"]`);
+    el?.classList.add('is-switching');
+  }
+
+  private clearSwitching(): void {
+    document.querySelectorAll('.sidebar-session-item.is-switching').forEach(el => {
+      el.classList.remove('is-switching');
+    });
+  }
+
   /**
    * Coalesce rapid sidebar rebuilds into a single one: doSend's finally fires
    * after EVERY send (and flushQueued can send several queued messages back
@@ -223,6 +242,8 @@ export class SessionSidebar {
    * rebuilt from its stored snapshot. */
   async load(id: string): Promise<void> {
     const seq = ++this.loadSequence;
+    // 点击即反馈：加载中状态挂上，再开始真正的读盘（2026-09-29 用户反馈）。
+    this.markSwitching(id);
     const loaded = await this.deps.loadSession(id);
     // Live-only fallback: the session streams but has no disk snapshot yet
     // (first turn still running). The controller owns the whole transcript in
@@ -231,6 +252,7 @@ export class SessionSidebar {
       if (this.isLoadStale(seq)) return;
       const opened = this.deps.chat.openSession(id);
       if (this.isLoadStale(seq)) return;
+      this.clearSwitching();
       this.presentSession(opened, id);
       return;
     }
@@ -242,7 +264,8 @@ export class SessionSidebar {
       // Neither a disk archive nor a live controller: a stale card (deleted
       // from another window, swept by the empty-session prune). Re-render so
       // the dead entry leaves the list instead of sitting there as a click
-      // that does nothing.
+      // that does nothing. 切换中的态一并摘掉（本次点击已落空）。
+      this.clearSwitching();
       this.refresh();
       return;
     }
@@ -254,6 +277,7 @@ export class SessionSidebar {
       // true; now it reads as a dead card (2026-09-26 用户反馈).
       const opened = this.deps.chat.openSession(id);
       if (this.isLoadStale(seq)) return;
+      this.clearSwitching();
       this.presentSession(opened, id, loaded.workspace || '');
       return;
     }
@@ -271,6 +295,7 @@ export class SessionSidebar {
         // fall through to the cold rebuild path below
       } else {
         if (this.isLoadStale(seq)) return;
+        this.clearSwitching();
         this.setActive(id);
         this.deps.onSessionActivated();
         this.deps.focusPrompt();
@@ -291,6 +316,8 @@ export class SessionSidebar {
     if (this.isLoadStale(seq)) return;
     await this.deps.renderMessages(loaded.snapshot, opened.host);
     if (this.isLoadStale(seq)) return;
+    // 冷加载完成：切换中的态摘掉（setActive 的 active 高亮接过视觉棒）。
+    this.clearSwitching();
     this.setActive(id);
     this.deps.onSessionActivated();
     this.deps.focusPrompt();
