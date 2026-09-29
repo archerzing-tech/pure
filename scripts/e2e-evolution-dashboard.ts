@@ -4,12 +4,18 @@
 // CDP（与 e2e-settings-apikey.ts 同一套管道，不引入 playwright/puppeteer）：
 //
 //   1. 打开设置 → 进化：每个区块都得挂载（7 个汇总块 / 3 张趋势卡 / 错误簇 /
-//      策略 / 经验条目 / 观测统计），页面上不许出现未翻译的 i18n key；
+//      策略 / 经验条目 / 观测统计 / 团队阵容 / 成本视图），页面上不许出现未翻译的
+//      i18n key；
 //   2. 浏览器模式没有本地观测日志 —— 空状态文案必须自己说清楚（"没有数据"
 //      不等于"你从没跑过"），这条同时兜住"innerHTML 崩了但页面还在"的情况；
 //   3. 种一条 procedure 记忆 → 经验区出现该条 + 删除按钮 → 点删除 → 确认弹窗
 //      → 确认后条目从记忆库消失（直达清理的整条链路）；
-//   4. 周/月切换重渲染不影响其它区块（窗口标签跟着变）。
+//   4. 周/月切换重渲染不影响其它区块（窗口标签跟着变）；
+//   5. 团队卡 + 成本卡（T3/T4）：同一份观测 feed 里的 delegations 驱动阵容表与
+//      成本表——有价目表的算钱、没价目表的显示「未定价」、没有 usage 的计进
+//      「没有 token 拆分」提示，三条路径都不冒充 0；
+//   6. 切英文重开：两张卡必须从 en 表取值——t() 的回退链是 zh → en → fallback，
+//      en 表缺键时英文界面会显示中文 fallback（T3 的团队卡文案就这么漏过）。
 //
 // 用法：
 //   bun run scripts/e2e-evolution-dashboard.ts [--app-url=URL] [--cdp-port=PORT] [--chrome=PATH] [--out=DIR] [--keep]
@@ -83,7 +89,7 @@ const MEMORY_KEY = 'pure_memories_v2';
 const SEEDED_ID = 'e2e-procedure-1';
 const SEEDED_CONTENT = 'E2E seeded procedure: search before editing';
 /** 未翻译 key 会以 `evolution.xxx` 字面量出现在页面上。 */
-const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice|baseline|window|range)/;
+const RAW_KEY_PATTERN = /evolution\.(title|desc|chart|tile|errors|experience|stats|table|roles|dimension|level|strategy|advice|baseline|window|range|team|cost)/;
 
 /**
  * 种给仪表盘的观测记录：两条 agent_run，五个策略维度各有两个档位 —— 逐维
@@ -114,26 +120,42 @@ function buildStrategyFeed(): string {
     priorArtHint: true,
     ...overrides,
   });
+  // T1 形状的委派用量（成本卡要靠它算钱，总量配单价是瞎算）。
+  const usage = { promptTokens: 1_000_000, completionTokens: 200_000, cacheHitTokens: 400_000, cacheMissTokens: 600_000 };
+  const delegation = (role: string, agentId: string) => ({
+    agentId,
+    role,
+    startedAt: now - 100_000,
+    durationMs: 4_000,
+    success: true,
+    usage,
+  });
   return [
     {
       ...base,
       traceId: 'e2e-obs-1',
+      provider: 'deepseek-openai',
+      model: 'deepseek-flash',
       startedAt: now - 120_000,
       endedAt: now - 110_000,
       durationMs: 10_000,
       outcome: { isComplete: true, interrupted: false },
       verification: { status: 'passed', evidence: [] },
+      delegations: [delegation('researcher', 'ag-e2e0001'), delegation('code_reviewer', 'ag-e2e0002')],
       strategy: strategy({}),
     },
     {
       ...base,
       traceId: 'e2e-obs-2',
+      // 不在价目表里的 provider：成本卡必须说「未定价」，不许拿 $0 充数。
+      provider: 'e2e-unpriced-provider',
       startedAt: now - 60_000,
       endedAt: now - 55_000,
       durationMs: 5_000,
       outcome: { isComplete: true, interrupted: false },
       verification: { status: 'passed', evidence: [] },
       toolCalls: [{ toolName: 'researcher', success: true, durationMs: 900 }],
+      delegations: [delegation('researcher', 'ag-e2e0003')],
       strategy: strategy({
         verification: 'standard',
         delegation: 'targeted',
@@ -143,6 +165,14 @@ function buildStrategyFeed(): string {
         intentTags: ['quick'],
         priorArtHint: false,
       }),
+    },
+    // T1 之前的记录形状（只有匿名 toolCalls、没有 strategy）：团队卡退回匿名
+    // 计数、成本卡计进「没有 token 拆分」——两条退路都得真的跑到。
+    {
+      ...base,
+      traceId: 'e2e-obs-legacy',
+      startedAt: now - 30_000,
+      toolCalls: [{ toolName: 'researcher', success: true, durationMs: 700 }],
     },
   ].map((record) => JSON.stringify(record)).join('\n');
 }
@@ -307,7 +337,7 @@ try {
     const page = document.querySelector('.settings-page[data-page="evolution"]');
     const tiles = page?.querySelectorAll('#evolution-totals .evo-tile').length ?? 0;
     const charts = page?.querySelectorAll('#evolution-charts .evo-chart-card').length ?? 0;
-    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats', '#evolution-baseline']
+    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats', '#evolution-baseline', '#evolution-team', '#evolution-team-cost']
       .every((sel) => (page?.querySelector(sel)?.childElementCount ?? 0) > 0);
     const text = page?.textContent ?? "";
     return {
@@ -440,6 +470,75 @@ try {
   );
   log('[e2e] strategy dimensions ok — five tabs, one dimension table at a time, roles still sliced');
 
+  // ── 7. 团队卡 + 成本卡（T3/T4）：同一份 feed 驱动两张表，三条路径都不冒充 0 ──
+  const team = await evaluate(`(() => {
+    const roster = document.getElementById('evolution-team');
+    const cost = document.getElementById('evolution-team-cost');
+    const rosterRows = roster?.querySelectorAll('.evo-table tbody tr').length ?? 0;
+    const costRows = cost?.querySelectorAll('.evo-table tbody tr').length ?? 0;
+    const costText = cost?.textContent ?? '';
+    // 「未定价」那一行的成本单元格必须就是这四个字，行内不得出现 $ 金额。
+    const unpricedRow = [...(cost?.querySelectorAll('.evo-table tbody tr') ?? [])]
+      .find((tr) => tr.textContent?.includes('未定价'));
+    const unpricedClean = !!unpricedRow && !unpricedRow.textContent.includes('$');
+    // 渲染体检：内容对不代表画得出来——卡片得真占位，七列表头得齐。
+    const cols = cost?.querySelectorAll('.evo-table thead th').length ?? 0;
+    const visible = (cost?.offsetHeight ?? 0) > 0 && (cost?.offsetWidth ?? 0) > 0;
+    return {
+      ok: rosterRows === 2 && costRows === 3
+        && costText.includes('成本视图')
+        && costText.includes('deepseek-openai')
+        && costText.includes('%')
+        && costText.includes('不在价目表里')
+        && costText.includes('没有 token 拆分')
+        && unpricedClean && cols === 7 && visible,
+      rosterRows, costRows, unpricedClean, cols, visible, costText: costText.slice(0, 240),
+    };
+  })()`);
+  if (!team.ok) {
+    const err = new Error(`team/cost cards did not render: ${JSON.stringify(team)}`) as StepFailure;
+    err.step = 'team-cost';
+    throw err;
+  }
+  log(`[e2e] team + cost cards ok — ${team.rosterRows} role row(s), ${team.costRows} cost bucket(s) across ${team.cols} columns (visible), unpriced row carries no $ amount`);
+
+  // ── 8. 英文界面：T4 新键与 T3 补的键都不能回落中文 fallback ──
+  await evaluate(`(() => {
+    let cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem('pure_config') ?? '{}'); } catch {}
+    localStorage.setItem('pure_config', JSON.stringify({ ...cfg, language: 'en' }));
+    return 'en';
+  })()`);
+  await send('Page.navigate', { url: `${appUrl}?_lang=en&_t=${Date.now()}` });
+  await send('Page.enable');
+  await send('Runtime.enable');
+  await waitFor('({ ok: document.readyState === "complete" && !!document.getElementById("sidebar-settings-btn") })', 25000, 'app boot (en)');
+  await sleep(900);
+  // 页面内变量不跨导航存活，feed 得重新注入。
+  await evaluate(`(() => { window.__PURE_OBSERVATION_FEED__ = ${JSON.stringify(buildStrategyFeed())}; return 'fed'; })()`);
+  await clickUntil(
+    `document.getElementById("sidebar-settings-btn")?.click();`,
+    `({ ok: document.getElementById("settings-view")?.classList.contains("expanded") })`,
+    15000,
+    'settings open (en)',
+  );
+  await clickUntil(
+    `document.querySelector('.settings-nav-item[data-category="evolution"]')?.click();`,
+    `({ ok: document.querySelector('.settings-page[data-page="evolution"]')?.classList.contains("active") })`,
+    15000,
+    'evolution page active (en)',
+  );
+  await clickUntil(
+    `document.querySelector('#evolution-range [data-range="month"]')?.click();`,
+    `(() => {
+      const text = (document.getElementById('evolution-team-cost')?.textContent ?? '') + (document.getElementById('evolution-team')?.textContent ?? '');
+      return { ok: text.includes('Cost view') && text.includes('Unpriced') && text.includes('Team roster'), text: text.slice(0, 160) };
+    })()`,
+    15000,
+    'english cost view + team roster',
+  );
+  log('[e2e] english surface ok — cost view and roster read from the en table, no zh fallback');
+
   const exceptions = consoleLogs.filter((line) => line.startsWith('[exception]'));
   if (exceptions.length > 0) {
     const err = new Error(`page threw during the dashboard flow:\n${exceptions.join('\n')}`) as StepFailure;
@@ -447,7 +546,7 @@ try {
     throw err;
   }
 
-  log('[e2e] PASS — dashboard mounts every section, says why it is empty in browser mode, switches week/month, slices all five strategy dimensions, and deletes a lesson end to end');
+  log('[e2e] PASS — dashboard mounts every section, says why it is empty in browser mode, switches week/month, slices all five strategy dimensions, renders the team roster and the cost view (unpriced stays unpriced), and deletes a lesson end to end');
   ws.close();
   process.exit(0);
 } catch (err) {

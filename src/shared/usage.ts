@@ -37,6 +37,17 @@ export function priceFor(provider: string): ModelPrice {
   return PROVIDER_PRICES[provider] ?? PRICE_FALLBACK;
 }
 
+/**
+ * True when a provider has a real rate card. Unknown providers price to $0,
+ * which every cost surface must render as「未定价」— a $0 row would read as
+ * "this ran for free" instead of "we have no rate for it". Same yardstick as
+ * the baseline card's `isBaselineCostPriced`.
+ */
+export function isPriceKnown(provider: string): boolean {
+  const price = PROVIDER_PRICES[provider];
+  return !!price && (price.inputPerM > 0 || price.outputPerM > 0);
+}
+
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }

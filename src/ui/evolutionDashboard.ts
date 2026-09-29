@@ -25,7 +25,7 @@ import { toolDisplayName } from './toolRow';
 import { formatCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
-import { summarizeTeamRoster, type TeamRosterOptions } from '../shared/teamObservability';
+import { summarizeTeamCosts, summarizeTeamRoster, type TeamRosterOptions } from '../shared/teamObservability';
 
 // ── 数字格式化 ──
 
@@ -614,6 +614,73 @@ export function renderTeamRosterSection(records: readonly import('../shared/prom
       <tbody>${body}</tbody>
     </table>
     ${short}
+  </div>`;
+}
+
+// ── 成本视图（T4）──
+
+/**
+ * 成本卡：这支团队的钱花在哪些 角色 × provider 组合上。数据来自 T1 的委派
+ * usage（provider/model 取自委派所属的 run 记录）；口径与评测基线卡同一把
+ * 尺子——没有 usage 的派发显示「无数据」、provider 没有价目表的显示「未定价」，
+ * 两者都不冒充 0，也不进占比的分母（否则真实成本会被虚低的百分比稀释）。
+ */
+export function renderTeamCostSection(records: readonly PromptObservation[], options: TeamRosterOptions = {}): string {
+  const view = summarizeTeamCosts(records, options);
+  const noData = t('evolution.team.noData', '无数据');
+  const title = `<div class="evo-table-title">${escapeHtml(t('evolution.cost.title', '成本视图'))}</div>`;
+  if (!view.hasMetered) {
+    return `<div class="evo-table-wrap">${title}
+      <div class="evo-stat-note">${escapeHtml(t('evolution.cost.empty', '还没有带 token 拆分的委派记录——委派跑过之后，这里按角色 × provider 显示成本占比。'))}</div></div>`;
+  }
+  const body = view.rows.map((row) => {
+    const cost = row.metered === 0
+      ? noData
+      : row.priced
+        ? formatCostUsd(row.costUsd ?? 0)
+        : t('evolution.cost.unpriced', '未定价');
+    return `<tr>
+    <td class="evo-table-key">${escapeHtml(toolDisplayName(row.role))}</td>
+    <td>${escapeHtml(row.provider || noData)}</td>
+    <td>${escapeHtml(row.model || noData)}</td>
+    <td>${escapeHtml(formatCount(row.delegations))}</td>
+    <td>${row.totalTokens ? escapeHtml(formatCount(row.totalTokens)) : escapeHtml(noData)}</td>
+    <td>${escapeHtml(cost)}</td>
+    <td>${escapeHtml(formatPercent(row.sharePercent))}</td>
+  </tr>`;
+  }).join('');
+  const totalNote = view.totalUsd > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.cost.total', '窗口内已定价成本合计 {total}——占比以此为分母。').replace('{total}', formatCostUsd(view.totalUsd)),
+      )}</div>`
+    : '';
+  const unpricedNote = view.unpricedDelegations > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.cost.unpricedNote', '有 {n} 条派发的 provider 不在价目表里：它们的成本记为未定价，不参与占比。')
+          .replace('{n}', String(view.unpricedDelegations)),
+      )}</div>`
+    : '';
+  const unmeteredNote = view.unmeteredDelegations > 0
+    ? `<div class="evo-stat-note">${escapeHtml(
+        t('evolution.cost.unmeteredNote', '有 {n} 条派发没有 token 拆分（旧记录或子代理未回用量）：它们无法计价，也不冒充 0。')
+          .replace('{n}', String(view.unmeteredDelegations)),
+      )}</div>`
+    : '';
+  return `<div class="evo-table-wrap">
+    ${title}
+    <table class="evo-table">
+      <thead><tr>
+        <th>${escapeHtml(t('evolution.table.role', '角色'))}</th>
+        <th>${escapeHtml(t('evolution.cost.table.provider', 'provider'))}</th>
+        <th>${escapeHtml(t('evolution.cost.table.model', '模型'))}</th>
+        <th>${escapeHtml(t('evolution.table.delegations', '派发'))}</th>
+        <th>${escapeHtml(t('evolution.team.tokens', 'token（含拆分）'))}</th>
+        <th>${escapeHtml(t('evolution.cost.table.cost', '估算成本'))}</th>
+        <th>${escapeHtml(t('evolution.cost.table.share', '占比'))}</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    ${totalNote}${unpricedNote}${unmeteredNote}
   </div>`;
 }
 

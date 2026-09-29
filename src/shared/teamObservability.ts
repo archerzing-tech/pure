@@ -13,6 +13,7 @@
 import type { AgentRunObservation, DelegationObservation, PromptObservation } from './promptObservability';
 import { KNOWN_SUBAGENT_ROLES } from './adaptiveControl';
 import { NON_ROLE_SUBAGENTS } from './subagentAdvisory';
+import { estimateCostUsd, isPriceKnown } from './usage';
 
 /** 与收割器（roleSampleHarvest）同一份可收割角色面：去掉 bash_executor。 */
 export const TEAM_ROLES: readonly string[] = [...KNOWN_SUBAGENT_ROLES].filter((role) => !NON_ROLE_SUBAGENTS.has(role));
@@ -111,4 +112,132 @@ export function summarizeTeamRoster(records: readonly PromptObservation[], optio
     .map((row) => ({ role: row.role, caseCount: row.caseCount, need: minCases - row.caseCount }));
 
   return { rows: [...rows.values()], rolesShortOfGate, windowStart };
+}
+
+// ── T4 成本视图 ──
+//
+// 「这支团队贵在哪」：按 角色 × provider × model 聚合 T1 的委派 usage。
+// provider/model 取自委派所属的 agent_run 记录（子代理跑在父轮的同一 adapter
+// 上，所以同一 run 内的委派共享这一对）——记录本身没带 provider 时该行照实
+// 显示「无数据」，不拿别的字段冒充。
+//
+// 两把尺子（与评测基线卡同款，13.3 part 2 的教训）：
+//   1. 没有 usage 的委派**不计价**（unmetered）——不是 0 元；
+//   2. provider 没有价目表的委派**不冒充 0**（unpriced）——显示「未定价」，
+//      且不进占比的分母，否则真实成本会被虚低的百分比稀释。
+
+/** T4 — one 角色 × provider × model 成本桶。 */
+export interface TeamCostRow {
+  role: string;
+  /** 委派所属 run 的 provider；'' = 旧记录没带这个字段（渲染为「无数据」）。 */
+  provider: string;
+  model?: string;
+  /** 该桶内的委派数（含无 usage 的）。 */
+  delegations: number;
+  /** 带 usage 的委派数——只有它们能进成本计算。 */
+  metered: number;
+  /** 有 usage 的委派 token 合计（prompt + completion，含缓存命中）。 */
+  totalTokens?: number;
+  /** 估算成本（USD）；只在 priced 为 true 时有值。 */
+  costUsd?: number;
+  /** 该桶确实算出了钱（有 usage 且 provider 有价目表）。 */
+  priced: boolean;
+  /** 占已定价成本合计的百分比（一位小数）；null = 没有已定价成本可比。 */
+  sharePercent: number | null;
+}
+
+export interface TeamCostView {
+  rows: TeamCostRow[];
+  /** 已定价成本合计（USD）——未定价的委派不进这个数。 */
+  totalUsd: number;
+  /** 有 usage 但 provider 无价目表的委派数。 */
+  unpricedDelegations: number;
+  /** 完全没有 usage 的委派数（T1 之前的记录，或子代理没回用量）。 */
+  unmeteredDelegations: number;
+  /** 至少一条委派带了 usage（渲染层据此决定是画表还是给空态）。 */
+  hasMetered: boolean;
+  windowStart: number;
+}
+
+const UNKNOWN_PROVIDER = '';
+
+/** 只保留能命名 provider 的行在前，其余按派发数排——未定价/无数据不占头名。 */
+function bySpendThenVolume(a: TeamCostRow, b: TeamCostRow): number {
+  if (a.priced !== b.priced) return a.priced ? -1 : 1;
+  if (a.priced && b.priced) return (b.costUsd ?? 0) - (a.costUsd ?? 0);
+  return b.delegations - a.delegations;
+}
+
+/** 聚合窗口内的委派成本（角色 × provider × model）。窗口按 run 的 startedAt 过滤。 */
+export function summarizeTeamCosts(records: readonly PromptObservation[], options: TeamRosterOptions = {}): TeamCostView {
+  const now = options.now ?? Date.now();
+  const days = options.windowDays ?? TEAM_WINDOW_DAYS;
+  const windowStart = now - days * 24 * 60 * 60 * 1000;
+
+  const rows = new Map<string, TeamCostRow>();
+  let unpricedDelegations = 0;
+  let unmeteredDelegations = 0;
+  let hasMetered = false;
+
+  for (const record of records) {
+    if (record.type !== 'agent_run' || (record.startedAt ?? 0) < windowStart) continue;
+    const provider = record.provider ?? UNKNOWN_PROVIDER;
+    const model = record.model;
+    const delegations = record.delegations;
+    if (!delegations) {
+      // T1 之前的记录只有匿名 toolCalls：数得出派发，但对不出任何用量。
+      unmeteredDelegations += (record.toolCalls ?? [])
+        .filter((call) => TEAM_ROLES.includes(call.toolName)).length;
+      continue;
+    }
+    for (const delegation of delegations) {
+      if (!TEAM_ROLES.includes(delegation.role)) continue;
+      // NUL 分隔：角色名与 provider/model 里都不可能含它，省掉转义歧义。
+      const key = `${delegation.role}\u0000${provider}\u0000${model ?? ''}`;
+      let row = rows.get(key);
+      if (!row) {
+        row = {
+          role: delegation.role,
+          provider,
+          model,
+          delegations: 0,
+          metered: 0,
+          priced: false,
+          sharePercent: null,
+        };
+        rows.set(key, row);
+      }
+      row.delegations += 1;
+      const usage = delegation.usage;
+      if (!usage) {
+        unmeteredDelegations += 1;
+        continue;
+      }
+      row.metered += 1;
+      hasMetered = true;
+      row.totalTokens = (row.totalTokens ?? 0) + (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+      if (isPriceKnown(provider)) {
+        row.priced = true;
+        row.costUsd = (row.costUsd ?? 0) + estimateCostUsd(usage, provider);
+      } else {
+        unpricedDelegations += 1;
+      }
+    }
+  }
+
+  const totalUsd = [...rows.values()].reduce((sum, row) => sum + (row.priced ? row.costUsd ?? 0 : 0), 0);
+  for (const row of rows.values()) {
+    row.sharePercent = row.priced && totalUsd > 0
+      ? Math.round(((row.costUsd ?? 0) / totalUsd) * 1000) / 10
+      : null;
+  }
+
+  return {
+    rows: [...rows.values()].sort(bySpendThenVolume),
+    totalUsd,
+    unpricedDelegations,
+    unmeteredDelegations,
+    hasMetered,
+    windowStart,
+  };
 }

@@ -52,6 +52,7 @@ import {
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
+  renderTeamCostSection,
   renderTeamRosterSection,
   renderTotals,
   renderTrendCards,
@@ -3256,6 +3257,12 @@ export class SettingsPanel {
         // Browser mode: delegation data still renders; stock shows 0.
       }
       teamEl.innerHTML = renderTeamRosterSection(read.records, { now, caseCounts });
+    }
+
+    // T4 成本视图：同一观测切片，按 角色 × provider 聚合 T1 的委派 usage。
+    const teamCostEl = document.getElementById('evolution-team-cost');
+    if (teamCostEl) {
+      teamCostEl.innerHTML = renderTeamCostSection(read.records, { now });
     }
 
     const statsEl = document.getElementById('evolution-stats');

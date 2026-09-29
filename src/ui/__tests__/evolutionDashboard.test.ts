@@ -17,6 +17,7 @@ import {
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
+  renderTeamCostSection,
   renderTeamRosterSection,
   renderTotals,
   renderTrendCards,
@@ -671,6 +672,64 @@ describe('renderTeamRosterSection (T3)', () => {
   it('shows the empty state when no roles were ever delegated or harvested', () => {
     const html = renderTeamRosterSection([], {});
     expect(html).toContain('evo-stat-note');
+    expect(html).not.toContain('<tbody>');
+  });
+});
+
+describe('renderTeamCostSection (T4)', () => {
+  const T4_NOW = 1_700_000_000_000;
+  const pricedRun = (overrides: Partial<AgentRunObservation> = {}): PromptObservation => ({
+    type: 'agent_run',
+    traceId: 'run-cost',
+    startedAt: T4_NOW - 1000,
+    eventCounts: {},
+    toolCalls: [],
+    reasoningChars: 0,
+    outputChars: 0,
+    provider: 'deepseek-openai',
+    model: 'deepseek-flash',
+    delegations: [
+      {
+        agentId: 'ag-aaa11111',
+        role: 'researcher',
+        startedAt: T4_NOW - 1000,
+        durationMs: 12000,
+        success: true,
+        usage: { promptTokens: 1_000_000, completionTokens: 100_000, cacheHitTokens: 400_000, cacheMissTokens: 600_000 },
+      },
+    ],
+    ...overrides,
+  } as PromptObservation);
+
+  it('renders the spend table with provider, model, cost and share', () => {
+    const html = renderTeamCostSection([pricedRun()], { now: T4_NOW });
+    expect(html).toContain('成本视图');
+    expect(html).toContain('evo-table-wrap');
+    expect(html).toContain('deepseek-openai');
+    expect(html).toContain('$0.113');
+    expect(html).toContain('100%');
+    expect(html).not.toContain('未定价');
+  });
+
+  it('shows 「未定价」 and keeps it out of the share instead of printing $0', () => {
+    const html = renderTeamCostSection([pricedRun({ provider: 'mystery-llm' })], { now: T4_NOW });
+    expect(html).toContain('未定价');
+    expect(html).not.toContain('$0');
+    expect(html).toContain('有 1 条派发');
+  });
+
+  it('treats delegations without usage as no data, not as a free run', () => {
+    const legacy = {
+      type: 'agent_run',
+      traceId: 'legacy-cost',
+      startedAt: T4_NOW - 1000,
+      eventCounts: {},
+      toolCalls: [{ toolName: 'researcher', success: true, durationMs: 5000 }],
+      reasoningChars: 0,
+      outputChars: 0,
+    } as PromptObservation;
+    const html = renderTeamCostSection([legacy], { now: T4_NOW });
+    expect(html).toContain('还没有带 token 拆分的委派记录');
     expect(html).not.toContain('<tbody>');
   });
 });
