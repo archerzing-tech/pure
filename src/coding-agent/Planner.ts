@@ -73,7 +73,7 @@ Return ONLY one JSON object with this shape:
 - bash_executor — 跑命令、构建/验证（有真实命令要执行时）
 A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
 
-Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image.`;
+Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
 
 /** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
  * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
@@ -660,8 +660,17 @@ export class Planner {
     if (!documentationRequest && /plan|先计划|think step by step|think through/i.test(prompt)) {
       return 'complex';
     }
-    if (!cnQuestion && /(?:规划|设计)\s*(?:一个|一套|个|套|一下|一番)?\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|方案|模块|功能|页面|界面)/i.test(prompt)) {
-      return 'complex';
+    if (!cnQuestion) {
+      // 规划/设计 + 交付物名词 → 多步复杂。但「设计一个应用的图标」要的是
+      // 那张图，不是那个应用——单资产所属结构不算复杂；「…图标管理系统」
+      // 这类资产词后面跟着真实构造词的仍是复杂。
+      const designScope = /(?:规划|设计)\s*(?:一个|一套|个|套|一下|一番)?\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|方案|模块|功能|页面|界面)/gi;
+      designScope.lastIndex = 0;
+      let dm: RegExpExecArray | null;
+      while ((dm = designScope.exec(prompt)) !== null) {
+        const after = prompt.slice(dm.index + dm[0].length, dm.index + dm[0].length + 16);
+        if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return 'complex';
+      }
     }
 
     // Multiple file operations or new module creation
@@ -911,6 +920,27 @@ export function formatTrapPrompt(traps: TrapWarning[]): string {
   return `\n\n<logical_trap_warning>\nThe user's request may contain a logical trap:\n${bullets}\nBefore acting, verify the premise. If a constraint is self-contradictory or impossible as stated, say so briefly and solve the most reasonable interpretation — do NOT blindly follow contradictory instructions into a failure loop. If your first attempt fails, re-read the ORIGINAL request and switch to a fundamentally different approach.\n</logical_trap_warning>`;
 }
 
+// ── Single-asset possessive guard ─────────────────────────────────────────
+// "给我生成一个桌面端应用的图标" asks for an ICON, not an app — the noun the
+// build regexes match (应用) is only a possessive modifier of the real
+// deliverable. Routing that through the project/artifact pipeline turned a
+// "draw one thing and show it" request into a multi-step engineering plan
+// with test scaffolding. The guard below recognizes 〈deliverable-noun〉 +
+// 的(+short filler)+〈asset word〉 and lets such matches go: the deliverable
+// is the asset. An asset word immediately heading a real construction
+// (图标库 / 图标管理系统 / icon manager) does NOT count — that is a build
+// whose topic happens to be assets.
+const ASSET_NOUN_SRC = '图标|标志|头像|封面|配图|插画|插图|壁纸|横幅|海报|吉祥物|徽章|表情包|贴纸|启动图|开屏图|设计图|原型图|草图|线框图|示意图|效果图|截图|名字|名称|标题|标语|口号|文案|icons?|logos?|avatars?|covers?|banners?|posters?|badges?|stickers?|illustrations?|wallpapers?|mascots?|splash|screenshots?|taglines?|slogans?|wireframes?|mockups?';
+const CONSTRUCTION_SRC = '工具|编辑器|生成器|管理器|管理|库|系统|平台|商店|市场|插件|引擎|manager|tools?|editors?|generators?|library|store|plugins?';
+/** An asset word that is NOT heading a construction noun. */
+const ASSET_NOT_CONSTRUCTION = `(?:${ASSET_NOUN_SRC})(?![a-z])(?![-\\s的]{0,2}?(?:${CONSTRUCTION_SRC}))`;
+/** Directly after a matched deliverable noun: 的(+≤4 filler chars)+asset —
+ * the matched noun was a modifier; the asset is the real deliverable. */
+const ASSET_DELIVERABLE_AFTER = new RegExp(`^\\s*(?:的)?\\s*[^，。；、,.!?？：:]{0,4}?${ASSET_NOT_CONSTRUCTION}`, 'i');
+/** …unless that asset itself heads a construction (图标管理系统) — the build
+ * is real after all. */
+const ASSET_AFTER_CONSTRUCTION = new RegExp(`^\\s*(?:的)?\\s*[^，。；、,.!?？：:]{0,4}?(?:${ASSET_NOUN_SRC})(?![a-z])[-\\s的]{0,2}?(?:${CONSTRUCTION_SRC})`, 'i');
+
 /**
  * Detect whether the user is asking the agent to create a project rather than
  * answer a question about one. Project requests always require a visible plan
@@ -927,10 +957,31 @@ export function detectProjectRequest(prompt: string): boolean {
   // e.g. "创建一个5G保障大屏监控项目" puts "5G保障大屏监控" between the verb
   // and "项目". A short name-like run is allowed in between, but doc-style
   // words in that run (介绍/说明/文档…) are rejected so "写一段介绍项目的文字"
-  // stays a writing task instead of a build. The lookahead after the noun
-  // still excludes "项目的技术方案/说明文档" style doc requests.
-  const creation = /(?:请|帮我|麻烦你|给我)?\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\s*(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\s*)?(?![^，。；、,.!?？：:]{0,32}(?:介绍|说明|文档|方案|总结|报告|教程|README|计划|清单|笔记|心得|简介|描述|演示|思路))[^，。；、,.!?？：:]{0,32}?(?:项目|工程|平台|系统|应用|程序|网站|大屏|dashboard|project|application|app|website|site|system|platform)(?!\s*(?:的)?\s*(?:(?:技术|开发|产品|实施)\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))/i;
-  return creation.test(p.slice(0, 140));
+  // stays a writing task instead of a build; a lone asset word in the run
+  // ("generate an icon for my desktop app") is rejected the same way — the
+  // asset is the deliverable. The lookahead after the noun still excludes
+  // "项目的技术方案/说明文档" style doc requests.
+  const creation = new RegExp(
+    '(?:请|帮我|麻烦你|给我)?\\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\\s*'
+    + '(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\\s*)?'
+    + `(?![^，。；、,.!?？：:]{0,32}(?:介绍|说明|文档|方案|总结|报告|教程|README|计划|清单|笔记|心得|简介|描述|演示|思路|${ASSET_NOT_CONSTRUCTION}))`
+    + '[^，。；、,.!?？：:]{0,32}?'
+    + '(?:项目|工程|平台|系统|应用|程序|网站|大屏|dashboard|project|application|app|website|site|system|platform)'
+    + '(?!\\s*(?:的)?\\s*(?:(?:技术|开发|产品|实施)\\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))',
+    'gi',
+  );
+  const scope = p.slice(0, 140);
+  creation.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = creation.exec(scope)) !== null) {
+    const after = scope.slice(m.index + m[0].length, m.index + m[0].length + 16);
+    // Possessive asset ("…应用的图标/logo/名字"): the matched noun was only a
+    // modifier — unless the asset itself heads a construction ("应用的图标
+    // 管理系统" is a real build). Keep scanning: a later clause may still
+    // hold a genuine project ("…的图标，另外帮我开发一个管理系统").
+    if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return true;
+  }
+  return false;
 }
 
 /**
@@ -959,12 +1010,22 @@ export function detectArtifactRequest(prompt: string): boolean {
   if (detectProjectRequest(p)) return true;
   // Artifact nouns that imply a runnable/complete deliverable.
   const artifact =
-    /(?:小?游戏|网页|网站|页面|主页|首页|工具|脚本|程序|小程序|应用|app|工程|项目|组件|动画|演示|原型|demo|prototype|html\s*页面|web\s*app|web\s*page|mini[- ]?game|game|tool|script|app|project|prototype)/i;
+    /(?:小?游戏|网页|网站|页面|主页|首页|工具|脚本|程序|小程序|应用|app|工程|项目|组件|动画|演示|原型|demo|prototype|html\s*页面|web\s*app|web\s*page|mini[- ]?game|game|tool|script|app|project|prototype)/gi;
 
   // Only look at the first ~40 chars — the artifact clause is almost always at
   // the front of the request ("帮我写一个连连看小游戏，要求…").
   const head = p.slice(0, 40);
-  return buildVerb.test(head) && artifact.test(head);
+  if (!buildVerb.test(head)) return false;
+  artifact.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = artifact.exec(head)) !== null) {
+    // "设计一个网站的logo / 做一个应用的启动图标" — a single visual asset OF
+    // the matched noun is the deliverable, not a runnable artifact (an asset
+    // heading a construction — 图标管理系统 — still counts as a build).
+    const after = head.slice(m.index + m[0].length, m.index + m[0].length + 16);
+    if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return true;
+  }
+  return false;
 }
 
 /**

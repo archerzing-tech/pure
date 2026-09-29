@@ -311,6 +311,37 @@ describe('Planner', () => {
     expect(detectProjectRequest('创建成功，项目已就绪')).toBe(false);
   });
 
+  it('routes single visual/naming assets of an app as direct creative output, not builds', () => {
+    // The regression: "…应用的图标" read 应用 as the deliverable and planned a
+    // full engineering project for a request that just wants one drawn icon.
+    const icon = '给我生成一个桌面端应用的图标，应用是一个工作台智能体';
+    expect(detectProjectRequest(icon)).toBe(false);
+    // The bare icon clause is fully clean; the full sentence's trailing "应用
+    // 是…" clause still trips detectArtifactRequest's noun scan, which is
+    // inert there (build routing keys on analysis.mode/semantic, not this
+    // detector) — the routing assertions below are the real contract.
+    expect(detectArtifactRequest('给我生成一个桌面端应用的图标')).toBe(false);
+    expect(new Planner().analyzeTask(icon)).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    expect(new Planner().analyzeTask('做一个应用的启动图标')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    expect(new Planner().analyzeTask('设计一个网站的logo')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    expect(new Planner().analyzeTask('设计一个应用的图标')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    expect(detectArtifactRequest('设计一个网站的logo')).toBe(false);
+    expect(detectArtifactRequest('做一个应用的启动图标')).toBe(false);
+    expect(detectProjectRequest('给我生成一个app icon')).toBe(false);
+    expect(new Planner().analyzeTask('generate an icon for my desktop app')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    expect(new Planner().analyzeTask('生成一个应用的名字')).toMatchObject({ complexity: 'simple', mode: 'yolo' });
+    // Real builds survive — including asset words heading a real construction
+    // and second clauses that carry a genuine project.
+    expect(new Planner().analyzeTask('做一个应用商店')).toMatchObject({ complexity: 'complex', mode: 'build' });
+    expect(new Planner().analyzeTask('搭建一个个人博客网站')).toMatchObject({ complexity: 'complex', mode: 'build' });
+    expect(new Planner().analyzeTask('开发一个应用图标管理系统')).toMatchObject({ complexity: 'complex', mode: 'build' });
+    expect(new Planner().analyzeTask('设计一个应用图标管理系统').complexity).toBe('complex');
+    expect(detectProjectRequest('build an app icon manager')).toBe(true);
+    expect(detectProjectRequest('做一个应用的图标，另外帮我开发一个管理系统')).toBe(true);
+    expect(new Planner().analyzeTask('做一个应用，图标要扁平风格')).toMatchObject({ complexity: 'complex', mode: 'build' });
+    expect(detectProjectRequest('写一个应用图标库网站')).toBe(true);
+  });
+
   it('routes English project creation through build fallback while excluding questions and docs', () => {
     expect(new Planner().analyzeTask('Create a project for a habit tracker.')).toMatchObject({ complexity: 'complex', mode: 'build' });
     expect(new Planner().analyzeTask('Build a website for the team dashboard.')).toMatchObject({ complexity: 'complex', mode: 'build' });
