@@ -755,16 +755,37 @@ export class SubagentOrchestrator implements ToolAdapter {
             }
             const cancelled = parentSignal?.aborted === true && !timeoutSignal.aborted && !watchdog.signal.aborted && !branchController.signal.aborted;
             const stalled = watchdog.signal.aborted && !timeoutSignal.aborted && !branchController.signal.aborted;
+            // 问题 2 修复（2026-09-29 用户反馈）：整树取消（parentSignal 被
+            // abort，非用户点名停支、非暂停）不再结算成红 ✗ 假失败——三路
+            // 并行调研被前提纠正掐掉时，父模型看到的三个失败会把它吓退到
+            // 自己派工具的降级路。取消的支按暂停语义结算：success:true +
+            // outcome:'paused'（灰 ⏸、checkpoint 已存、同参重派即续跑），
+            // 让重入回合的新决策看到的是可续跑的事实，不是失败证据。
             // A timeout here is the delegation's TOTAL wall (defaultTimeoutMs)
             // or the liveness watchdog, not a malfunction of any single slice.
             // The error tells the parent how to recover (re-delegate to
             // continue from the checkpoint) and that partial output may exist.
             const timeoutNote = cancelled
-              ? 'cancelled'
+              // 问题 2 修复：reason 是给父模型的行动指引，不是错误码。裸词
+              // "cancelled" 只告诉它死了；可续跑的事实与方式才让重入回合敢
+              // 重派原支（checkpoint 续）而不是降级自扛。
+              ? 'The turn was stopped mid-run (the user corrected a premise or redirected the work), so this subtask was paused, NOT failed: its progress is saved. When re-delegating the SAME subtask with identical arguments, it resumes from its checkpoint; or fold its remaining work into your new plan if the corrected premise changed what is needed.'
               : stalled
                 ? `no progress for ${Math.max(1, Math.round(noProgressMs / 60_000))} minutes — the subagent appeared wedged (no tokens, no tool activity). Re-delegate the SAME subtask to retry from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`
                 : `timed out after ${Math.round(def.defaultTimeoutMs / 1000)}s — the subagent used all ${maxSegments} work segment${maxSegments > 1 ? 's' : ''} and was still mid-task (generative tasks take a while). Re-delegate the SAME subtask to continue from its checkpoint${finalOutput ? '; partial output was produced' : ''}.`;
             machine.apply(cancelled ? 'abort' : 'fail', cancelled ? { abortCause: 'tree-cancel' } : { failCause: stalled ? 'stalled' : 'timeout' });
+            if (cancelled) {
+              // 取消≠失败（与用户叫停/暂停同一把尺子）：emit success 让卡片
+              // 灰 ⏸ 而不是红 ✗；reason 仍如实告诉父模型这支被取消、可续跑。
+              emit(progress?.onDone, { success: true, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
+              return {
+                id: toolCall.id,
+                toolName: def.name,
+                result: { aborted: true, agentId, outcome: 'paused', reason: timeoutNote, summary: '已暂停，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
+                success: true,
+                duration: done(0),
+              };
+            }
             emit(progress?.onDone, { success: false, error: timeoutNote, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
             return {
               id: toolCall.id,

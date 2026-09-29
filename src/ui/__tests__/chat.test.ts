@@ -1583,7 +1583,11 @@ describe('superseded-turn finally teardown', () => {
     // normal turn's flow must not be rewritten by the finally.
     expect(finallyBlock).toContain('if (gen !== this.generation) assessmentFlow?.cancel(');
     // The drain schedule survives any teardown throw (2026-09-27 排队事故)。
-    expect(finallyBlock).toContain('if (ownsTurn) this.scheduleDeferred();');
+    // 2026-09-29: a pause-led final also cancels the「继续」bar when the
+    // user's own held insert is about to re-enter via dispatchDeferred —
+    // a manual continue click there would be a lie.
+    expect(finallyBlock).toContain('if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();');
+    expect(finallyBlock).toContain('this.scheduleDeferred();');
   });
 });
 
@@ -1713,7 +1717,9 @@ describe('plan-by-thinking flow', () => {
     const guardIdx = src.indexOf('} finally {', finallyIdx);
     expect(guardIdx).toBeGreaterThan(finallyIdx);
     const sweep = src.slice(guardIdx, src.indexOf('\n      }', guardIdx));
-    expect(sweep).toContain('if (ownsTurn) this.scheduleDeferred();');
+    expect(sweep).toContain('if (ownsTurn) {');
+    expect(sweep).toContain('if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();');
+    expect(sweep).toContain('this.scheduleDeferred();');
   });
 
   it('preflight absorption: the window flag wraps planByThinking and merges before the abort check (2026-09-27 排队事故)', () => {

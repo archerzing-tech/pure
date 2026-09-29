@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
+import { abortPaused, isPauseAbort, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type StatusLineRecord } from './store';
@@ -2685,16 +2685,34 @@ export class ChatController {
         // the held insert — re-arm the deferred dispatch here.
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
-      case 'premise-change':
+      case 'premise-change': {
         // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
-        // 下去全是白跑——走同一条 abort 链止损，插话暂存，收尾后作为新指令
-        // 重新入场，按纠正后的事实重排。不预回显：重入 send() 时才上屏，
-        // 否则同一句话出现两遍（用户实测暴露）。
+        // 下去全是白跑——先止损。
+        // 2026-09-29 用户反馈重构（三路调研 + "现在的年份是2026年9月"案例）：
+        // 旧实现裸 abort 整树，在飞支被结算成 success:false 的假失败——重入
+        // 回合的模型看见三个失败，不敢再派 agent，降级成自己派工具。现在：
+        // ① 活动期整树走 PAUSE 原因 → 在飞支结算成「已暂停·进度已存档」
+        //   （灰 ⏸、success:true，checkpoint 照存），父模型看到的是可续跑
+        //   的事实，不是失败证据；
+        // ② held insert 在收尾派发点重入 → 新回合自主决策：从断点重派原
+        //   支（同参重派命中 checkpoint）、改派、换方案都由它按纠正后的
+        //   前提权衡——用户的插话被接纳后重决策，而不是整树报废。
+        // ③ 已收齐委派、无在飞可暂停时，维持旧路：直接重入（abort 对已
+        //   收尾的回合是 no-op，relatedInsert 照常派发）。
         this.relatedInsert = { text, images, displayText };
-        this.settleAck(ack, '前提变了——先停下止损，按纠正后的事实重新来；已完成的不丢。', true, 'info');
-        this.abortController?.abort();
+        if (this.hasDelegationInFlight()) {
+          this.settleAck(ack, '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
+          this.abortController?.abort(PAUSE_ABORT_REASON);
+        } else {
+          this.settleAck(ack, '前提变了——按纠正后的事实重新来；已完成的不丢。', true, 'info');
+          this.abortController?.abort();
+        }
+        // Same late-classification hazard as queueInterjectTask: if the turn
+        // already finished while we were judging, no finalize will dispatch
+        // the held insert — re-arm the deferred dispatch here.
         if (!this.isStreaming()) this.scheduleDeferred();
         return;
+      }
       case 'steer': {
         // 分支级继续（第 2 期第三刀）：点名把一支**已暂停/已停**的委派接着
         // 跑完——用原始参数同参重派（稳定 sessionId 命中 checkpoint → 子引
@@ -6741,7 +6759,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // ——排队卡挂着，活永远没人派。包进 finally：收尾路再怎么断，排队
         // 的扫除照跑。与 setStreaming(false) 的空闲扫除互为备份（那边管
         // "置 false 的每条路"，这边管"ownsTurn 的收尾整体"）。
-        if (ownsTurn) this.scheduleDeferred();
+        // 问题 2 修复（2026-09-29）：暂停语义的收尾会开「继续」条——但由
+        // 用户自己的插话（premise-change 止损）引发的暂停不一样：held insert
+        // 马上就在 dispatchDeferred 里重入，挂一条「点继续」会误导用户去手
+        // 动续跑一个已经要自动重排的回合。pausedThisTurn 为真且还押着
+        // relatedInsert 时，链条就是该取消的——重入本身在 dispatchDeferred
+        // 里也会再取消一次，这里提前取消只是让「继续」条不闪现。
+        if (ownsTurn) {
+          if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();
+          this.scheduleDeferred();
+        }
       }
     }
   }

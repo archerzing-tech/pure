@@ -618,7 +618,7 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     expect(sessions.get(subSessionId!)!.checkpoints.some((c) => c.label === 'subagent_interrupted')).toBe(true);
   });
 
-  it('a plain parent abort still reports cancelled (hard stop unchanged)', async () => {
+  it('a plain parent abort settles as a resumable pause, not a fake failure (取消≠失败 2026-09-29)', async () => {
     const ac = new AbortController();
     const seen: SubagentActivity[] = [];
     const pausingLLM: LLMAdapter = {
@@ -643,9 +643,21 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     setTimeout(() => ac.abort(), 10);
     const result = await exec;
 
-    expect(result.success).toBe(false);
+    // 整树取消不再结算成红 ✗ 假失败：父模型看见一串失败会吓退到降级自扛，
+    // 真相是这支可续跑（checkpoint 已存，同参重派即续）。旧契约（hard stop
+    // 仍报 cancelled/失败）已按 2026-09-29 反转。
+    expect(result.success).toBe(true);
+    const payload = result.result as { aborted?: boolean; outcome?: string; reason?: string };
+    expect(payload.aborted).toBe(true);
+    expect(payload.outcome).toBe('paused');
+    expect(String(payload.reason)).toContain('paused, NOT failed');
+    expect(String(payload.reason)).not.toContain('timed out');
+    // 卡片侧：状态词仍是 cancelled（机器视角「这支被掐了」），但 success:true
+    // 让它落灰 ⏸ 而不是红 ✗，也不进失败策略。
     const cancelled = seen.find((a) => a.status === 'cancelled');
     expect(cancelled).toBeDefined();
+    expect(cancelled?.success).toBe(true);
+    // 且不是用户点名暂停那条路（那条落 paused 状态、note 是「别重派」）。
     expect(seen.find((a) => a.status === 'paused')).toBeUndefined();
   });
 });
@@ -975,7 +987,7 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(orch.branchView()).toHaveLength(0);
   });
 
-  it('整树取消仍按 cancelled 结算（原有语义不回归），pause 仍按 paused', async () => {
+  it('整树取消按「可续跑的暂停」结算（取消≠失败 2026-09-29），pause 仍按 paused', async () => {
     const ac = new AbortController();
     const seen: SubagentActivity[] = [];
     const orch = new SubagentOrchestrator({
@@ -991,7 +1003,12 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     setTimeout(() => ac.abort(), 10);
     const result = await exec;
     expect(seen.find((a) => a.callId === 'call_tree_cancel' && a.status === 'cancelled')).toBeDefined();
-    expect((result.result as { reason?: string }).reason).toBe('cancelled');
+    // reason 是给父模型的行动指引（可续跑 + 怎么续），不再是裸词错误码；
+    // 结算走 success:true（灰 ⏸），不进失败策略。
+    expect(result.success).toBe(true);
+    const payload = result.result as { aborted?: boolean; outcome?: string; reason?: string };
+    expect(payload.outcome).toBe('paused');
+    expect(String(payload.reason)).toContain('resumes from its checkpoint');
   });
 
   it('pauseBranch 点名暂停一支：按 paused 结算（不是 aborted），存档照存，兄弟支照常', async () => {

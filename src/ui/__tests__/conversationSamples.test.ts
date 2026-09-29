@@ -452,7 +452,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const insert = '预算砍半，不能请外部讲师，你自己出内容。';
 
     await h.chat.interject(insert);
-    expect(statusJoined(h.root)).toContain('前提变了——先停下止损，按纠正后的事实重新来；已完成的不丢。');
+    // 2026-09-29 前提修正分两路：有在飞委派走暂停止损（「暂停存档」），无在飞
+    // 委派走直路重入——本用例无委派，落的是直路回执。
+    expect(statusJoined(h.root)).toContain('前提变了——按纠正后的事实重新来；已完成的不丢。');
     expect(h.chat.abortController.signal.aborted).toBe(true);
 
     h.endTurn();
