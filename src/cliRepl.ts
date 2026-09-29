@@ -12,6 +12,7 @@ import { CliWireframeStream } from './shared/cliDiagram';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
 import { describeTiming, type InputTiming } from './coding-agent/inputDecision';
+import { currentTimeContext, formatTimeContextLine } from './shared/timeContext';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
@@ -225,7 +226,7 @@ function buildEnvironmentContext(): string {
   if (!city) {
     return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.${netNote}`;
   }
-  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services. Call sys_info() for the exact current time, timezone, or OS.${netNote}`;
+  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.${formatTimeContextLine(currentTimeContext())}${netNote}`;
 }   // Probe installed runtime versions (node / bun / python3 / rustc / git) once per process
 // and inject them into the system prompt, reusing the NodeToolAdapter probe so
 // sys_info() and the prompt always report identical versions. CLI runs inside

@@ -25,6 +25,7 @@ import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
+import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeContext';
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
@@ -1196,7 +1197,12 @@ ${description ? `命令用途：${description}` : ''}
       const topic = String(input.topic || '');
       const sources = String(input.sources || 'both');
       const scope = String(input.scope || '');
+      // 时间基准结构性注入（2026-09-29 用户反馈：调研总拿训练语料的旧时间
+      // 当"当前"——子代理看不到父回合的环境行，把"以现在为基准"长进角色
+      // 提示词；现算不写死，也不做任务话术匹配）。
       return `你是一个专业的研究员。
+
+${formatResearchTimeBaseline(currentTimeContext())}
 
 研究主题：${topic}
 信息来源：${sources}
