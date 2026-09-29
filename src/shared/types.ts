@@ -520,6 +520,11 @@ export interface IMemoryStore {
    *  使用频率维度的信号。实现须廉价持久化（FS：内存缓存、decay 时落盘；
    *  localStorage：直接写回）。 */
   recordHits(entries: MemoryEntry[]): Promise<void>;
+
+  /** P0 棘轮 — 按 id 批量淘汰（planEviction 决定名单，store 只管执行）。
+   *  可选：未实现的 store（第三方实现/测试桩）让棘轮本轮跳过，绝不报错。
+   *  返回实际删除条数。 */
+  prune?(ids: string[]): Promise<number>;
 }
 
 // EngineEvent union

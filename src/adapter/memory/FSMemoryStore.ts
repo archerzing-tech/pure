@@ -273,6 +273,49 @@ export class FSMemoryStore implements IMemoryStore {
     return removed;
   }
 
+  /** P0 棘轮 — 批量淘汰：每个项目文件至多一次整文件重写（与 decay 同一
+   *  合并纪律：先并入 recordHits 只写进内存缓存的使用信号，再删，避免这些
+   *  信号在下一次缓存清理时蒸发）。被删条目的取代者引用一并解除。 */
+  async prune(ids: string[]): Promise<number> {
+    if (ids.length === 0 || !existsSync(this.rootPath)) return 0;
+    const doomed = new Set(ids);
+    let removed = 0;
+    for (const dir of readdirSync(this.rootPath)) {
+      if (dir === 'meta.json') continue;
+      const file = join(this.rootPath, dir, 'memories.jsonl');
+      if (!existsSync(file)) continue;
+      const entries = this.loadFromFile(file);
+      if (!entries.some(e => doomed.has(e.id))) continue;
+      // 合并内存缓存里的命中数据（decay 的同名纪律），然后单次重写。
+      const cached = this.cachedForDir(dir);
+      if (cached) {
+        const byId = new Map(cached.map(c => [c.id, c]));
+        for (const e of entries) {
+          const c = byId.get(e.id);
+          if (c && (c.hitCount ?? 0) > (e.hitCount ?? 0)) {
+            e.hitCount = c.hitCount;
+            e.lastUsedAt = c.lastUsedAt ?? e.lastUsedAt;
+          }
+        }
+      }
+      const kept = entries.filter(e => {
+        if (!doomed.has(e.id)) return true;
+        removed++;
+        return false;
+      });
+      for (const e of kept) {
+        if (e.supersededBy && doomed.has(e.supersededBy)) {
+          delete e.supersededBy;
+          if (e.lifecycle === 'degraded') e.lifecycle = undefined;
+        }
+      }
+      const body = kept.map(e => JSON.stringify(e)).join('\n');
+      writeFileSync(file, body ? `${body}\n` : '', 'utf-8');
+    }
+    if (removed > 0) this.cache.clear();
+    return removed;
+  }
+
   async decay(olderThan: number): Promise<void> {
     if (!existsSync(this.rootPath)) return;
     const now = Date.now();

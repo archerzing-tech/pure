@@ -232,6 +232,18 @@ export class WASMEmbeddingStore implements IMemoryStore {
     return this.store.decay(olderThan);
   }
 
+  /** P0 棘轮 — 批量淘汰。委托内层持久化 store；未实现则本轮跳过（返回 0）。
+   *  与 removeById 一致：删除后向量缓存必须失效，否则下一次 search 的 corpus
+   *  修剪可能残留陈旧条目。 */
+  async prune(ids: string[]): Promise<number> {
+    if (!this.store.prune) return 0;
+    const removed = await this.store.prune(ids);
+    if (removed > 0) {
+      for (const id of ids) this.vecCache.delete(id);
+    }
+    return removed;
+  }
+
   async recordHits(entries: MemoryEntry[]): Promise<void> {
     await this.store.recordHits(entries);
   }

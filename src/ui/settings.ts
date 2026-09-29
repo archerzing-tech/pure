@@ -46,6 +46,7 @@ import {
   MAX_EXPERIENCE_ROWS,
   renderAppliedAdviceSection,
   renderBaselineSection,
+  renderDriftAlerts,
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
@@ -58,6 +59,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
+import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
 import { auditInsertionDecision, auditSummary, auditTrend, type InsertionAnomaly } from '../coding-agent/insertionAudit';
@@ -3239,6 +3241,20 @@ export class SettingsPanel {
     // "应用后"由 postApplyStats 从其后的 agent_run 记录现算。
     const appliedEl = document.getElementById('evolution-applied');
     if (appliedEl) appliedEl.innerHTML = renderAppliedAdviceSection(applied, read.records, now);
+
+    // P0 棘轮 — 贡献漂移报警：同一观测切片上找"在场即翻车"的记忆/技能。
+    // 只报警不删；进化总开关关闭时整段隐藏（该区块读的是进化自己的归因数据）。
+    const driftEl = document.getElementById('evolution-drift');
+    if (driftEl) {
+      const driftSection = driftEl.closest('.settings-section');
+      const driftTitle = driftSection?.previousElementSibling;
+      const driftOff = loadConfig()?.skills?.evolution === false;
+      if (driftSection) (driftSection as HTMLElement).hidden = driftOff;
+      if (driftTitle) (driftTitle as HTMLElement).hidden = driftOff;
+      if (!driftOff) {
+        driftEl.innerHTML = renderDriftAlerts(detectContributionDrift(read.records, { now }));
+      }
+    }
 
     // T3 团队阵容：同一观测切片 + 每角色已入库 case 数（读 ~/.pure/roles/<role>/
     // 的文件名清单，浏览器模式为空 → 样本列全部显示 0 但派发数据照常）。

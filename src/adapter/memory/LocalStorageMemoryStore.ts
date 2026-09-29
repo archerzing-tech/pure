@@ -280,6 +280,35 @@ export class LocalStorageMemoryStore implements IMemoryStore {
     return changed;
   }
 
+  /** P0 棘轮 — 批量淘汰：一次重写（与 removeById 同一裸 setItem 纪律，
+   *  配额异常必须冒泡——删除失败静默等于记忆没删还以为删了）。被删条目的
+   *  取代者引用一并解除。 */
+  async prune(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const doomed = new Set(ids);
+    const all = this.read();
+    const kept: MemoryEntry[] = [];
+    let removed = 0;
+    for (const e of all) {
+      if (doomed.has(e.id)) { removed++; continue; }
+      if (e.supersededBy && doomed.has(e.supersededBy)) {
+        delete e.supersededBy;
+        if (e.lifecycle === 'degraded') e.lifecycle = undefined;
+      }
+      kept.push(e);
+    }
+    if (removed === 0) return 0;
+    const prev = this.cache;
+    this.cache = kept;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(kept));
+    } catch (err) {
+      this.cache = prev;
+      throw err;
+    }
+    return removed;
+  }
+
   async decay(olderThan: number): Promise<void> {
     const now = Date.now();
     const entries = this.read();

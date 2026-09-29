@@ -10,9 +10,15 @@
 // 调度依据存储层记录的 lastDecayAt（LocalStorageMemoryStore/FSMemoryStore 的
 // meta），所以 Harness 触发过的衰减（会话开始时）会被本定时器感知，不会重复
 // 提前执行。Memory 技能关闭时跳过 decay（但继续调度，用户随时可能开启）。
+// P0 棘轮：decay 之后同一节流窗内追加一次淘汰 pass（容量封顶 + 贡献淘汰，
+// 见 adapter/memory/ratchet.ts）；进化总开关关闭时该 pass 跳过。
 
 import { memoryStore } from './memoryStore';
 import { loadConfig } from './config';
+import { planEviction, RATCHET_DEFAULTS } from '../adapter/memory/ratchet';
+import { summarizeInjectionContributions } from '../shared/contributionStats';
+import { promptObservability, type PromptObservation } from '../shared/promptObservability';
+import { readGuiObservations } from './observationSource';
 
 /** 与 Harness.MEMORY_DECAY_INTERVAL_MS 一致：decay 至少间隔 1 小时。 */
 export const MEMORY_DECAY_INTERVAL_MS = 60 * 60 * 1000;
@@ -59,6 +65,14 @@ async function runDecay(): Promise<void> {
       return;
     }
     await memoryStore.decay(MEMORY_DECAY_OLDER_THAN_MS);
+    // P0 棘轮 — 同一节流窗内追加一次淘汰 pass（先 decay 后 prune：decay 先把
+    // 生命周期推进 + 落盘，棘轮再按容量/贡献淘汰）。任何失败只降级本轮棘轮，
+    // 绝不影响 decay 本身（degrade-don't-block 纪律）。
+    try {
+      await runRatchetPass();
+    } catch (err) {
+      console.error('[pure] memory ratchet pass failed:', err);
+    }
     // 通知设置面板刷新诊断区/仪表盘（若打开）——下次衰减时间与统计已变化。
     document.dispatchEvent(new CustomEvent('pure:memory-decay-run'));
     scheduleNext(); // decay 已把 meta 推进到 now → 下一轮自动落在 1h 窗后
@@ -66,6 +80,29 @@ async function runDecay(): Promise<void> {
     console.error('[pure] background memory decay failed:', err);
     scheduleNext(MEMORY_DECAY_INTERVAL_MS); // 失败 1 小时后重试
   }
+}
+
+/**
+ * P0 棘轮淘汰 pass：planEviction 决定名单（纯函数），store.prune 执行。
+ * 贡献切片读持久观测（app.jsonl 尾读），失败降级进程内 ring buffer；总开关
+ * 关掉时整段跳过（decay 是现状行为，不受进化开关管辖）。
+ */
+async function runRatchetPass(): Promise<void> {
+  const cfg = loadConfig();
+  if (cfg?.skills?.evolution === false) return;
+  if (typeof memoryStore.prune !== 'function') return; // 第三方 store 未实现 → 跳过
+  let records: PromptObservation[] = [];
+  try {
+    records = (await readGuiObservations()).records;
+  } catch {
+    records = [];
+  }
+  if (records.length === 0) records = promptObservability.records();
+  const contributions = summarizeInjectionContributions(records);
+  const plan = planEviction(memoryStore.list(), contributions, RATCHET_DEFAULTS, Date.now());
+  if (plan.removeIds.length === 0) return;
+  const removed = await memoryStore.prune(plan.removeIds);
+  if (removed > 0) console.info(`[pure] memory ratchet pruned ${removed} entries`);
 }
 
 /** 启动后台衰减定时器（幂等；main.ts deferred init 调用）。 */

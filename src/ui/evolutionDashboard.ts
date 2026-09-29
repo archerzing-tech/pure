@@ -14,6 +14,8 @@ import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { formatBytes, relativeTime } from '../shared/format';
 import { healthScore, lifecycleOf, type EvolutionConfig, type MemoryLifecycle } from '../adapter/memory/evolution';
+import type { DriftAlert } from '../adapter/memory/ratchet';
+import { SKILL_CONTRIBUTION_PREFIX } from '../shared/contributionStats';
 import { isDraftEntry } from '../adapter/memory/correctionDrafts';
 import type { MemoryEntry } from '../adapter/memory/IMemoryStore';
 import type { DashboardTotals, ErrorCluster, EvolutionDashboard, TrendBucket } from '../shared/evolutionDashboard';
@@ -754,4 +756,36 @@ export function renderBaselineSection(snapshot: BaselineSnapshot): string {
       <tbody>${body}</tbody>
     </table>
   </div>`;
+}
+
+// ── P0 棘轮 — 贡献漂移报警 ──
+
+/**
+ * 漂移报警卡："在场即翻车"的记忆条目/技能（失败率显著高于同窗口基线）。
+ * 只报警不删 —— 自动淘汰交给棘轮的 retention 公式，人看完卡再决定。
+ */
+export function renderDriftAlerts(alerts: readonly DriftAlert[]): string {
+  if (alerts.length === 0) {
+    return `<div class="evo-empty">${escapeHtml(t('evolution.drift.empty', '窗口内没有贡献漂移——记忆与技能在场的失败率都在基线附近。'))}</div>`;
+  }
+  const rows = alerts.map((a) => {
+    const label = a.kind === 'skill'
+      ? t('evolution.drift.skill', '技能 {name}').replace('{name}', a.key.slice(SKILL_CONTRIBUTION_PREFIX.length))
+      : t('evolution.drift.memory', '记忆条目 {id}').replace('{id}', a.key);
+    const evidence = t('evolution.drift.evidence', '近 {days} 天 {n} 次在场，失败率 {rate}%（基线 {base}%）')
+      .replace('{days}', String(a.windowDays))
+      .replace('{n}', String(a.runs))
+      .replace('{rate}', formatPercent(a.failureRate * 100))
+      .replace('{base}', formatPercent(a.baselineRate * 100));
+    const action = t('evolution.drift.action', '建议在设置 → 记忆里核对这条内容是否过时；低贡献条目会由棘轮按保留分自动淘汰。');
+    return `<div class="evo-advice-row evo-advice-high">
+      <div class="evo-advice-head">
+        <span class="evo-advice-role">${escapeHtml(label)}</span>
+        <span class="memory-badge memory-type-error_pattern">${escapeHtml(t('evolution.drift.badge', '贡献漂移'))}</span>
+      </div>
+      <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
+      <div class="evo-advice-action">${escapeHtml(action)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-advice-list">${rows}</div>`;
 }
