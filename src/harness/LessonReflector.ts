@@ -13,7 +13,7 @@
 // 路径上是静态导入的，node:crypto 会让整个 Vite 浏览器构建失败。
 import { sha256Hex } from '../shared/sha256';
 import type { LLMAdapter, Message } from '../shared/types';
-import type { IMemoryStore } from '../shared/types';
+import type { IMemoryStore, MemoryEntry } from '../shared/types';
 
 /** 反思产出的证据引用都带这个前缀，每日上限靠它数当天已写条目。 */
 export const REFLECT_DEDUPE_PREFIX = 'reflect:';
@@ -229,8 +229,9 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
 }
 
 /** 今天（本地日）已经写过多少条反思记忆 —— 每日上限的计数器，直接数库里的
- *  reflect: 条目，不引入第二份持久化状态。 */
-export function countReflectionsToday(store: IMemoryStore, projectPath: string, now = Date.now()): number {
+ *  reflect: 条目，不引入第二份持久化状态。只需 list 缝 —— Pick 让 sleep-time
+ *  编排器的窄记忆依赖也能复用同一计数器。 */
+export function countReflectionsToday(store: Pick<IMemoryStore, 'list'>, projectPath: string, now = Date.now()): number {
   let entries: ReturnType<IMemoryStore['list']> = [];
   try {
     entries = store.list({ projectPath });
@@ -245,6 +246,80 @@ export function countReflectionsToday(store: IMemoryStore, projectPath: string, 
     && e.timestamp >= dayStart.getTime()
     && e.timestamp < dayEnd,
   ).length;
+}
+
+/** lessonToMemoryAdds 的落库上下文：持久化层盖在产出条目上的戳。全部由宿主
+ *  （Harness 或 sleep-time 编排器）解析好传入 —— 纯函数不碰实例状态。 */
+export interface LessonPersistContext {
+  sessionId: string;
+  projectPath: string;
+  /** 本轮的 reflect: 查重键（前缀 + sessionId + prompt 小写）。 */
+  dedupeKey: string;
+  verificationSummary: string;
+  verificationPassed: boolean;
+}
+
+/**
+ * 反思结果 → 待落库记忆条目（lesson 主条目 + procedure 便车 + correction 草稿，
+ * Harness.reflectLesson 原三段构造的逐字抽取 —— dedupeKey 格式与截断长度都不变，
+ * 供 sleep-time 编排器复用同一条落库纪律）。procedure 便车只在
+ * ctx.verificationPassed 时跟随；correction 草稿一律 confidence:'low'。
+ */
+export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistContext): Omit<MemoryEntry, 'id'>[] {
+  const evidenceNote = lesson.evidence.length > 0
+    ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.join(', ')}).`
+    : '';
+  const parts = [
+    `Symptom: ${lesson.symptom}`,
+    `Root cause: ${lesson.rootCause}`,
+    `Prevention: ${lesson.prevention}`,
+    `Recovery: ${lesson.recovery}`,
+  ];
+  const adds: Omit<MemoryEntry, 'id'>[] = [
+    {
+      type: 'successful_pattern',
+      content: `Reflected lesson — ${parts.join('. ')}.${evidenceNote}`.slice(0, 900),
+      timestamp: Date.now(),
+      sessionId: ctx.sessionId,
+      projectPath: ctx.projectPath,
+      lesson: {
+        symptom: lesson.symptom,
+        rootCause: lesson.rootCause,
+        recoveryPath: lesson.recovery,
+        verification: ctx.verificationSummary,
+        avoidNextTime: lesson.prevention,
+        ...(lesson.evidence.length > 0 ? { evidence: lesson.evidence } : {}),
+      },
+      dedupeKey: ctx.dedupeKey,
+      // 防幻觉纪律：证据目录里引用不出东西的根因猜测 → low，注入端默认跳过。
+      confidence: lesson.confidence,
+    },
+  ];
+  if (lesson.procedure && ctx.verificationPassed) {
+    adds.push({
+      type: 'procedure',
+      content: lesson.procedure.slice(0, 600),
+      timestamp: Date.now(),
+      sessionId: ctx.sessionId,
+      projectPath: ctx.projectPath,
+      dedupeKey: `procedure:${ctx.dedupeKey}`,
+    });
+  }
+  // E3.1 便车：用户明确纠正过的做法/规矩 → 低置信草稿。确认前没有注入资格
+  // （confidence:'low' 在 composeMemoryPrompt 被过滤），落库只为仪表盘待确认
+  // 卡片；dedupeKey 用内容哈希，同一句纠正跨会话只落一条。
+  if (lesson.correction) {
+    adds.push({
+      type: lesson.correction.kind,
+      content: lesson.correction.statement.slice(0, 300),
+      timestamp: Date.now(),
+      sessionId: ctx.sessionId,
+      projectPath: ctx.projectPath,
+      dedupeKey: correctionDedupeKey(lesson.correction),
+      confidence: 'low',
+    });
+  }
+  return adds;
 }
 
 /** Should this completed turn spend a reflection call? Failures make it

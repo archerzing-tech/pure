@@ -31,8 +31,8 @@ import {
   REFLECT_DEDUPE_PREFIX,
   REFLECTION_DEFAULTS,
   buildTurnEvidence,
-  correctionDedupeKey,
   countReflectionsToday,
+  lessonToMemoryAdds,
   reflectTurn,
   shouldReflect,
   type ReflectionConfig,
@@ -1125,57 +1125,18 @@ export class Harness {
     const dedupeKey = `${REFLECT_DEDUPE_PREFIX}${this.config.sessionId}:${input.userPrompt.trim().toLowerCase()}`;
     if (this.writtenLessonKeys.has(dedupeKey)) return;
     this.writtenLessonKeys.add(dedupeKey);
-    const evidenceNote = lesson.evidence.length > 0
-      ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.join(', ')}).`
-      : '';
-    const parts = [
-      `Symptom: ${lesson.symptom}`,
-      `Root cause: ${lesson.rootCause}`,
-      `Prevention: ${lesson.prevention}`,
-      `Recovery: ${lesson.recovery}`,
-    ];
-    await memory.add({
-      type: 'successful_pattern',
-      content: `Reflected lesson — ${parts.join('. ')}.${evidenceNote}`.slice(0, 900),
-      timestamp: Date.now(),
+    const adds = lessonToMemoryAdds(lesson, {
       sessionId: this.config.sessionId,
       projectPath: this.projectPath(),
-      lesson: {
-        symptom: lesson.symptom,
-        rootCause: lesson.rootCause,
-        recoveryPath: lesson.recovery,
-        verification: this.verificationSummary,
-        avoidNextTime: lesson.prevention,
-        ...(lesson.evidence.length > 0 ? { evidence: lesson.evidence } : {}),
-      },
       dedupeKey,
-      // 防幻觉纪律：证据目录里引用不出东西的根因猜测 → low，注入端默认跳过。
-      confidence: lesson.confidence,
+      verificationSummary: this.verificationSummary,
+      verificationPassed: this.verificationPassed,
     });
-    if (lesson.procedure && this.verificationPassed) {
-      await memory.add({
-        type: 'procedure',
-        content: lesson.procedure.slice(0, 600),
-        timestamp: Date.now(),
-        sessionId: this.config.sessionId,
-        projectPath: this.projectPath(),
-        dedupeKey: `procedure:${dedupeKey}`,
-      }).catch(() => {});
-    }
-    // E3.1 便车：用户明确纠正过的做法/规矩 → 低置信草稿。确认前没有注入资格
-    // （confidence:'low' 在 composeMemoryPrompt 被过滤），落库只为仪表盘待确认
-    // 卡片；dedupeKey 用内容哈希，同一句纠正跨会话只落一条。
-    if (lesson.correction) {
-      await memory.add({
-        type: lesson.correction.kind,
-        content: lesson.correction.statement.slice(0, 300),
-        timestamp: Date.now(),
-        sessionId: this.config.sessionId,
-        projectPath: this.projectPath(),
-        dedupeKey: correctionDedupeKey(lesson.correction),
-        confidence: 'low',
-      }).catch(() => {});
-    }
+    // 主条目失败照旧上抛（fire-and-forget task 的兜底纪律不变），便车失败只
+    // 降级 —— 与抽取前逐字节同语义；条目构造在 LessonReflector.lessonToMemoryAdds。
+    const [main, ...piggybacks] = adds;
+    if (main) await memory.add(main);
+    for (const add of piggybacks) await memory.add(add).catch(() => {});
   }
 
   /**
