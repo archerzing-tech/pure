@@ -462,6 +462,24 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(rowPending(h.root, '前提变了')).toBe(false);
   });
 
+  it('开局插话的收执行不落会话最顶上：首回合消息未入账时锚在下一条消息之后', async () => {
+    // 2026-09-29 用户报：开局插话改前提，翻历史会话第一行是「前提变了……」
+    // 收执标签，不是用户的输入。病根：首回合在飞时 this.messages 还是空的
+    // （用户消息收尾才入账），旧锚算法给 -1，flushStatuses(-1) 把行拼成
+    // 事件流第 0 条。本 harness 就是这个窗口——全新控制器、零入账消息、
+    // 回合在飞——修复后收执行锚 0（本回合用户消息将占的下标）。
+    const llm = scriptedLlm([
+      { match: '预算砍半', cls: { kind: 'premise-change', reason: 'budget premise overturned', confidence: 0.85 } },
+    ]);
+    const h = makeHarness(llm);
+    expect(h.chat.messages).toHaveLength(0);
+    await h.chat.interject('预算砍半，不能请外部讲师，你自己出内容。');
+    const ledger = h.chat.statusLines as Array<{ afterIndex: number; text: string }>;
+    const ack = ledger.find((l) => l.text.includes('前提变了'));
+    expect(ack).toBeDefined();
+    expect(ack!.afterIndex).toBe(0);
+  });
+
   it('模糊澄清型（澄清案例姿态 + 置信门）：破坏性判定没把握时先问一句，手头的活照跑', async () => {
     const llm = scriptedLlm(
       [{ match: '换个搞法', cls: { kind: 'goal-change', reason: 'an overturn, but could also be a tweak', confidence: 0.35 } }],

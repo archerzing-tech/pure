@@ -7360,7 +7360,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   }
 
   private anchorIndex(): number {
-    return this.messages.length - 1;
+    // 流式回合里，本回合的用户消息还没入账（收尾才 merge 进 this.messages），
+    // 它将占的正是 messages.length 这个下标——插话收执、预检播报这些行跟着
+    // 它走，回放才落在用户输入后面（实况里它们就长在用户气泡之后）。旧算法
+    // 一律 length - 1：开局第一回合 messages 为空时给 -1，flushStatuses(-1)
+    // 把行拼到整段会话最顶上，压在第一条用户输入前面（2026-09-29 用户报：
+    // 开局插话改前提，收执标签占了历史会话第一行）。空闲时尾行就是最后一条
+    // 已入账消息；空会话钳到 0（下一条消息之后，别再产生 -1 锚）。
+    const next = this.streaming ? this.messages.length : this.messages.length - 1;
+    return Math.max(0, next);
   }
 
   private patchStatusRecord(record: StatusLineRecord | undefined, patch: Partial<Omit<StatusLineRecord, 'afterIndex'>>): void {

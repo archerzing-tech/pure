@@ -566,7 +566,11 @@ function healLeadingNarrationEvents(events: SessionEvent[]): SessionEvent[] {
   const head = events.slice(0, firstUser);
   // 叙述家族三件套：thinking / assistant 正文 / analysis（预检叙述的事件形态，
   // 与条目侧「assistant 条目驮 analysis」同源——条目侧天然覆盖，事件侧得点名）。
-  if (head.length === 0 || head.some(event => event.type !== 'thinking' && event.type !== 'assistant' && event.type !== 'analysis')) return events;
+  // status 一并算内：插话收执这类状态行锚 -1 时会被 flushStatuses(-1) 拼到
+  // 整段最顶上，压在第一条用户输入前面（2026-09-27 画图会话实证、2026-09-29
+  // 用户再报「开局插话改前提，收执标签占了历史会话第一行」）——实时序里它
+  // 们都在用户开口之后，与叙述同一类倒置。
+  if (head.length === 0 || head.some(event => event.type !== 'thinking' && event.type !== 'assistant' && event.type !== 'analysis' && event.type !== 'status')) return events;
   return [events[firstUser], ...head, ...events.slice(firstUser + 1)];
 }
 
@@ -594,11 +598,18 @@ export function normalizeSessionSnapshot(raw: unknown): SessionSnapshot {
     if (candidate.version === 2 && candidate.modelContext && Array.isArray(candidate.transcript)) {
       // v2 同治：条目搬正后事件由 snapshotV2ToV3 派生，顺序自然跟上。
       const healedTranscript = healLeadingNarrationEntries(candidate.transcript as TranscriptEntry[]);
-      return snapshotV2ToV3({
+      // 账本要走第二参（snapshotV2ToV3 不读对象上的 statusLines 字段）——
+      // 旧账里的活状态行不传就在派生时静默丢掉。
+      const legacyLines = Array.isArray((candidate as { statusLines?: unknown }).statusLines)
+        ? (candidate as { statusLines: StatusLineRecord[] }).statusLines : undefined;
+      const derived = snapshotV2ToV3({
         ...(candidate as unknown as SessionSnapshotV2Legacy),
         transcript: healedTranscript.entries,
         modelContext: { messages: relocatePreflightNarration((candidate.modelContext.messages ?? []) as Message[]) },
-      });
+      }, legacyLines);
+      // 派生事件同样过一遍开头治理：旧账 statusLines 里锚 -1 的行会被
+      // flushStatuses(-1) 拼在最前，与 v3 旧账同病，同治。
+      return { ...derived, events: healLeadingNarrationEvents(derived.events) };
     }
     if (Array.isArray(candidate.messages)) return createSessionSnapshotFromLegacy(candidate.messages as StoredMessage[]);
   }

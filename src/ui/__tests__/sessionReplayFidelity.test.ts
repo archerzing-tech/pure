@@ -30,7 +30,9 @@ describe('状态叙述行入账与事件拼接（store）', () => {
   it('按锚点拼接进事件流：锚点消息的事件落完后插入，同锚保持入账次序', () => {
     const snap = createSessionSnapshot(messages as never, drafts, {}, statusLines);
     const types = snap.events.map(e => e.type);
-    // 锚 -1 最前；锚 1 的两条在 assistant 之后、tool_result 之前（实时转写里
+    // 锚 -1 最前（createSessionSnapshot 是低层拼接，-1 只是历史形状——
+    // 载入侧 healLeadingNarrationEvents 会把这类行搬回用户之后，见下）；
+    // 锚 1 的两条在 assistant 之后、tool_result 之前（实时转写里
     // 这两行就长在回复与结果卡之间）；锚 2 收尾。
     expect(types).toEqual(['status', 'user', 'assistant', 'status', 'status', 'tool_result', 'status']);
     const texts = snap.events.filter(e => e.type === 'status').map(e => e.content);
@@ -42,11 +44,15 @@ describe('状态叙述行入账与事件拼接（store）', () => {
     expect(statusEvents[3].error).toBe(true);
   });
 
-  it('快照往返不丢：v3 序列化→normalize 后 statusLines 与事件原样回来', () => {
+  it('快照往返不丢：账本原样回来；旧账锚 -1 的开场行载入即搬回用户之后', () => {
     const snap = createSessionSnapshot(messages as never, drafts, {}, statusLines);
     const round = normalizeSessionSnapshot(JSON.parse(JSON.stringify(snap)));
     expect(round.statusLines).toEqual(statusLines);
-    expect(round.events.map(e => e.type)).toEqual(['status', 'user', 'assistant', 'status', 'status', 'tool_result', 'status']);
+    // 2026-09-29 用户定调：历史会话第一行必须是用户的输入。锚 -1 的状态行
+    // 曾被 flushStatuses(-1) 拼成事件流第 0 条（画图会话 2026-09-27 实证、
+    // 开局插话改前提的收执标签同病）——载入即治，搬到首条用户事件之后。
+    expect(round.events.map(e => e.type)).toEqual(['user', 'status', 'assistant', 'status', 'status', 'tool_result', 'status']);
+    expect(round.events[1].content).toBe('开场叙述');
   });
 
   it('LS 降级裁剪与 transcript 同一命运：锚点消息被裁的状态行一并裁掉', () => {
@@ -96,7 +102,9 @@ describe('控制器账本（chat）', () => {
     chat.notifyStatus('🔎 探索中…');
     let ledger = chat.statusLines as StatusLineRecord[];
     expect(ledger).toHaveLength(1);
-    expect(ledger[0].afterIndex).toBe(-1);
+    // 空会话钳到 0（下一条消息之后）——不再产生 -1 锚，-1 会被拼接层排到
+    // 整段最顶上、压在第一条用户输入前面（2026-09-29 用户报的病形状）。
+    expect(ledger[0].afterIndex).toBe(0);
     expect(ledger[0].text).toBe('🔎 探索中…');
 
     // 终稿补丁：文本与着色跟上（settleAck / 修复轮次走的同一入口）。
@@ -112,6 +120,35 @@ describe('控制器账本（chat）', () => {
     // 快照没带账（旧会话）：载入即空账，不拿幻影行污染后续持久化。
     chat.loadFromStorage({ version: 3, modelContext: { messages: [] }, events: [], transcript: [], uiState: {} } as never);
     expect(chat.statusLines).toHaveLength(0);
+  });
+
+  it('流式回合里入账：锚跟本回合用户消息将占的下标走，首回合不再锚 -1', () => {
+    const host = document.createElement('div');
+    const chat = new ChatController({ host } as never) as unknown as Record<string, any>;
+    // 首回合在飞：turn 已开、用户气泡已上屏，但消息要收尾才 merge 进
+    // this.messages——此刻 messages 还是空的。旧算法给 -1（会话最顶上，
+    // 2026-09-29 用户报：开局插话改前提，收执标签占了历史会话第一行）；
+    // 修复后本回合用户消息将占下标 0，行锚在它之后。
+    chat.streaming = true;
+    chat.notifyStatus('收到——看一下这句话怎么安排…');
+    expect((chat.statusLines as StatusLineRecord[])[0].afterIndex).toBe(0);
+
+    // 中段回合在飞：已入账 2 条（user+assistant），本回合用户消息将占下标
+    // 2——收执行锚在那里，回放落在在飞回合的用户输入后面（实况里它就长在
+    // 用户气泡之后），而不是压到上一回合的尾巴前面。
+    (chat.statusLines as StatusLineRecord[]).length = 0;
+    chat.messages = [
+      { role: 'user', content: '第一问' },
+      { role: 'assistant', content: '第一答' },
+    ];
+    chat.notifyStatus('方向变了——在跑的先停下止损。');
+    expect((chat.statusLines as StatusLineRecord[])[0].afterIndex).toBe(2);
+
+    // 空闲时尾行是最后一条已入账消息（旧行为保持）。
+    chat.streaming = false;
+    (chat.statusLines as StatusLineRecord[]).length = 0;
+    chat.notifyStatus('手头的活收尾了。');
+    expect((chat.statusLines as StatusLineRecord[])[0].afterIndex).toBe(1);
   });
 
   it('回放渲染同脸：main.ts 的回放分支用 buildStatusRow 长出同一张脸', () => {
@@ -201,6 +238,64 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     };
     const healed = normalizeSessionSnapshot(JSON.parse(JSON.stringify(raw)));
     expect(healed.events.map(e => e.type)).toEqual(['user', 'analysis', 'assistant']);
+  });
+
+  it('收执标签头也搬正（2026-09-29 用户报）：开局插话的状态行不再压在用户输入前面', () => {
+    // 旧锚算法在首回合给 -1，flushStatuses(-1) 把收执行拼成事件流第 0 条——
+    // 翻历史会话第一行是「前提变了……」，不是用户的输入。
+    const raw = {
+      version: 3,
+      modelContext: { messages: [{ role: 'user', content: '帮我策划读书会' }, { role: 'assistant', content: '好的，先定主题。' }] },
+      events: [
+        { id: 's0', type: 'status', content: '前提变了——按纠正后的事实重新来；已完成的不丢。', kind: 'info' },
+        { id: 'e0', type: 'user', content: '帮我策划读书会' },
+        { id: 'e1', type: 'assistant', content: '好的，先定主题。' },
+      ],
+      transcript: [
+        { id: 't0', modelMessageIndex: 0, role: 'user', content: '帮我策划读书会' },
+        { id: 't1', modelMessageIndex: 1, role: 'assistant', content: '好的，先定主题。' },
+      ],
+      uiState: {},
+    };
+    const healed = normalizeSessionSnapshot(JSON.parse(JSON.stringify(raw)));
+    expect(healed.events.map(e => e.type)).toEqual(['user', 'status', 'assistant']);
+    expect(healed.events[0].content).toBe('帮我策划读书会');
+    expect(healed.events[1].content).toContain('前提变了');
+    // 投影同序：回放第一块就是用户的话。
+    const blocks = projectSessionEvents(healed.events);
+    expect(blocks[0].type).toBe('user');
+  });
+
+  it('叙述与状态行混排的头整段搬正：相对次序保持，只是退到用户之后', () => {
+    const raw = {
+      version: 3,
+      modelContext: { messages: [{ role: 'user', content: '调研一下' }, { role: 'assistant', content: '开始。' }] },
+      events: [
+        { id: 'e0', type: 'thinking', content: '先拆一下调研口径…' },
+        { id: 's0', type: 'status', content: '🔎 已完成项目探索' },
+        { id: 'e1', type: 'user', content: '调研一下' },
+        { id: 'e2', type: 'assistant', content: '开始。' },
+      ],
+      transcript: [],
+      uiState: {},
+    };
+    const healed = normalizeSessionSnapshot(JSON.parse(JSON.stringify(raw)));
+    expect(healed.events.map(e => e.type)).toEqual(['user', 'thinking', 'status', 'assistant']);
+  });
+
+  it('v2 旧账同治：派生事件里的锚 -1 开场行同样退到用户之后', () => {
+    const raw = {
+      version: 2,
+      modelContext: { messages: [{ role: 'user', content: '帮我策划读书会' }, { role: 'assistant', content: '好的。' }] },
+      transcript: [
+        { id: 't0', modelMessageIndex: 0, role: 'user', content: '帮我策划读书会' },
+        { id: 't1', modelMessageIndex: 1, role: 'assistant', content: '好的。' },
+      ],
+      statusLines: [{ afterIndex: -1, text: '收到——看一下这句话怎么安排…', pending: true }],
+      uiState: {},
+    };
+    const healed = normalizeSessionSnapshot(JSON.parse(JSON.stringify(raw)));
+    expect(healed.events.map(e => e.type)).toEqual(['user', 'status', 'assistant']);
   });
 
   it('源头修复：chat.ts 押账叙述、两个合并点与暂停提交各消费一次', () => {
