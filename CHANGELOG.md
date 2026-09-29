@@ -38,6 +38,17 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 - 15 个 fixture：控制组全部按种子失败、金标准解全部通过（无 LLM 完整性自检，CI 门禁 `eval:sanity`）。
 
+**sleep-time 进化编排 + 棘轮治理**（P0 双刀，2026-09-29 随版追加）
+
+- 进化不再只靠零散时机：会话末/空闲时由 sleep-time 编排器把 观测→反思→建议→起草→13.3 A/B 门禁→落盘 串成循环——GUI 空闲循环（10 分钟轮询、30 分钟最小间隔）、CLI oneshot 与 /exit 直喂，预算 90s/30s/10s 三档，超预算存游标下轮续。门禁 allow 自动落盘，deny 记账 7 天退避，绝不重试风暴。
+- 进化产物有了棘轮：记忆容量封顶（项目 300/全局 120 等防御性边界，对现有任何用户都从不触发）、按实测贡献+健康度+新近度淘汰（`correction:` 永不自动淘汰）、漂移报警盯贡献统计。总开关 `config.skills.evolution` / `PURE_EVOLUTION_DISABLED=1`，关掉即与旧版逐字节一致。
+- mock provider 全链路 e2e（反思落库→建议增量→overlay A/B allow→自动落盘→游标推进→幂等回放）。
+
+**历史会话还原修复**（2026-09-29 随版追加）
+
+- 切到历史会话，开头第一句一定是你的输入：规划叙述排进请求之前的旧账，用载入同款规则把盘上数据一次治平（25 个历史会话全部回写）；被容量裁剪掉头部的长会话诚实保留裁剪后开头，不冒充完整对话。
+- 会话列表标题必须是用户的话：引擎 internal 消息（失败重试注）与 `<task_context>` 协议壳都不配当标题——此前列表出现过「Tool call execute_command failed…」「<task_…」这样的标题，TS 与 Rust 两侧同一规则根治。
+
 ## v3.0.2-beta
 
 **回话只说场景里真实发生的事**
