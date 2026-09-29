@@ -46,6 +46,7 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../shared/dynamicCapabilityTools';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
+import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { checkPreflight, type PreflightGate } from './preflight';
@@ -848,6 +849,10 @@ function deferToIdle(fn: () => void): void {
       // throttle), so idle apps never forget. A timer re-runs decay after the
       // throttle window elapses — see src/ui/memoryDecayTimer.ts.
       startMemoryDecayTimer();
+      // Idle sleep-time evolution: reflect on finished sessions / route advice
+      // while nobody is chatting (30min min gap, busy ⇒ yield). See
+      // src/ui/evolutionOrchestratorTimer.ts.
+      startEvolutionOrchestratorTimer({ isBusy: () => chat.isStreaming(), getWorkspace: () => chat.getWorkspace() });
       // Stats panel: subscribe to per-session updates + draw the empty state.
       chat.onSessionStatsChanged(() => renderSessionStats());
       chat.onWorkspaceSnapshotChanged((available) => {

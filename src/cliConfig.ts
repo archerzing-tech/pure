@@ -51,6 +51,13 @@ export interface PureConfig {
    * system prompt so terminal and GUI sessions behave identically.
    */
   hubSkills?: Array<{ name: string; description: string; source: string; body: string; enabled: boolean }>;
+  /**
+   * Feature switches — the GUI's config.ts owns the default table; the CLI only
+   * reads/toggles entries in the same shared config.json: `evolution` mirrors
+   * the master kill switch, and the sleep-time orchestrator flips failing
+   * skill gates off here (settings.ts「一键应用」同一语义).
+   */
+  skills?: Record<string, boolean>;
   /** MCP servers written by the GUI Settings → MCP page. */
   mcpServers?: MCPServerConfig[];
   /** MCP tool-name prefixes to hide (GUI Settings → MCP). */

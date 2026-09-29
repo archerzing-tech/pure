@@ -63,6 +63,40 @@ export function emptyCursor(now = 0): OrchestratorCursor {
   return { lastProcessedAt: now, processedSessionIds: [], overlayLedger: {} };
 }
 
+/** 任意来源的 JSON → 合法游标：宿主读盘后必经这道闸（字段缺失/类型不对的
+ *  一律落默认值 —— 手改坏、半截写、旧版本文件都不能把循环带崩）。 */
+export function sanitizeCursor(raw: unknown): OrchestratorCursor {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const ledger: OrchestratorCursor['overlayLedger'] = {};
+  if (r.overlayLedger && typeof r.overlayLedger === 'object') {
+    for (const [key, value] of Object.entries(r.overlayLedger as Record<string, unknown>)) {
+      const v = value as { deniedAt?: unknown; attempts?: unknown } | null;
+      if (v && typeof v.deniedAt === 'number' && typeof v.attempts === 'number') {
+        ledger[key] = { deniedAt: v.deniedAt, attempts: v.attempts };
+      }
+    }
+  }
+  return {
+    lastProcessedAt: typeof r.lastProcessedAt === 'number' ? r.lastProcessedAt : 0,
+    processedSessionIds: Array.isArray(r.processedSessionIds)
+      ? r.processedSessionIds.filter((id): id is string => typeof id === 'string')
+      : [],
+    overlayLedger: ledger,
+  };
+}
+
+/** 空闲循环的下一跳延迟（宿主定时器的纯核策略）：没跑过 → 等一个轮询窗
+ *  （启动不抢跑）；跑过 → 间隔到期还剩多久，过期归 0。 */
+export function computeIdleCycleDelayMs(
+  lastCycleAt: number | undefined,
+  now: number,
+  pollMs: number,
+  gapMs: number,
+): number {
+  if (!lastCycleAt) return pollMs;
+  return Math.max(0, lastCycleAt + gapMs - now);
+}
+
 /** overlay 门禁失败后的退避窗：一次判卷失败不该变成每 30 分钟一次的重试风暴。 */
 export const OVERLAY_BACKOFF_MS = 7 * 24 * 3600 * 1000;
 /** processedSessionIds 的留存上限（FIFO 截尾）。 */
@@ -86,6 +120,33 @@ export interface SleepTimeTurnInput {
   failures?: { toolName?: string; message: string }[];
   verificationSummary?: string;
   verificationPassed?: boolean;
+}
+
+/**
+ * 会话快照消息流 → 可反思切片：最后一条真实 user 消息 = userPrompt，其后最后
+ * 一条 assistant 消息 = finalOutput；整段 messages 供证据目录提取。纯函数，
+ * GUI（session.json 快照）与 CLI（直喂内存消息流）两个宿主共用同一映射。
+ */
+export function sessionTurnFromMessages(messages: Message[]): SleepTimeTurnInput | undefined {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === 'user' && !m.internal && typeof m.content === 'string' && m.content.trim()) {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) return undefined;
+  const userPrompt = (messages[lastUserIdx] as Message).content.trim();
+  let finalOutput: string | undefined;
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const m = messages[i];
+    if (m?.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) {
+      finalOutput = m.content;
+      break;
+    }
+  }
+  return { userPrompt, ...(finalOutput !== undefined ? { finalOutput } : {}), messages };
 }
 
 // ── 确认策略 ──
@@ -212,7 +273,11 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
   // 游标 + advisory 重入窗：另一个循环在跑就让路（GUI 定时器 + CLI 并存的护栏）。
   let cursor: OrchestratorCursor;
   try {
-    cursor = (await deps.cursor.load()) ?? emptyCursor(startedAt);
+    // 水位从 0 起步（不是 startedAt）：水位语义是「已处理基线」，新游标没有
+    // 基线。若设成 startedAt，直喂会话（updatedAt === startedAt）会被
+    // `<= 水位` 判成已处理，首轮就被孤儿化。已反思过的会话由 reflect: 前缀
+    // 查重兜底，不存在重放。
+    cursor = (await deps.cursor.load()) ?? emptyCursor(0);
   } catch (err) {
     result.errors.push(`cursor load failed: ${errorMessage(err)}`);
     result.endedAt = nowFn();

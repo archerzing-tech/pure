@@ -27,19 +27,13 @@ import type { StrategyDimension } from '../shared/strategyEffect';
 import { buildSkillGateAppliedRecord, scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { buildDraftRoleManifest } from '../shared/subagentDraft';
 import { compileExternalSubagents } from '../harness/externalSubagents';
-import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
-import type { SubagentDefinition } from '../coding-agent/types';
+import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/SubagentOrchestrator';
 import { readGuiObservations } from './observationSource';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { toolDisplayName } from './toolRow';
 import { createLLMAdapter } from './chat';
-import { TauriToolAdapter } from './TauriToolAdapter';
-import { getApplicationTmpWorkspace } from '../shared/tauri';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
-import { draftPersonaOverlay } from '../harness/personaOverlayReflector';
-import { extractSubagentOutput, type RoleCaseFixture } from '../evaluation/roleRegression';
-import { runPersonaOverlayFlow } from './personaOverlayFlow';
-import type { BudgetConfig, ToolCall } from '../shared/types';
+import { runOverlayFlowForAdvice } from './overlayFlowHost';
 import {
   buildExperienceItems,
   DEFAULT_STRATEGY_DIMENSION,
@@ -1171,28 +1165,6 @@ export class SettingsPanel {
       const role = btn.dataset.evoOverlay || '';
       if (!role) return;
 
-      const safeRoleContract = (d: SubagentDefinition): string => {
-        try {
-          return d.createSystemPrompt({});
-        } catch {
-          return d.description;
-        }
-      };
-      const isRoleCaseFixture = (value: unknown): value is RoleCaseFixture => {
-        if (!value || typeof value !== 'object') return false;
-        const v = value as Record<string, unknown>;
-        return typeof v.id === 'string'
-          && typeof v.args === 'object' && v.args !== null
-          && Array.isArray(v.must) && v.must.every((m) => typeof m === 'string');
-      };
-      const OVERLAY_AB_BUDGET: BudgetConfig = {
-        maxTurns: 12,
-        maxTotalTokens: 120_000,
-        maxExecutionTime: 12 * 60 * 1000,
-        warningThreshold: 0.8,
-        graceTurns: 1,
-      };
-
       const read = await readGuiObservations();
       const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
       if (!advice) {
@@ -1204,54 +1176,15 @@ export class SettingsPanel {
         this.toast(t('evolution.advice.overlay.invalid'));
         return;
       }
-      const core = await loadTauriCore();
-      if (!core) return;
-      const cfg = loadConfig() ?? defaults();
-      const knownRoles = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
-
-      // 编排抽在 personaOverlayFlow（无 Tauri/DOM），这里只接 Tauri IO + adapter +
-      // 确认弹窗；e2e（scripts/e2e-overlay-flow.ts）用 mock provider 驱动同一段代码。
+      // Tauri IO / adapter / A-B 跑例装配在 overlayFlowHost（settings 与
+      // sleep-time 编排器共用一份）；这里只接确认弹窗与进度 toast。
       const pureHome = await join(await homeDir(), '.pure');
-      const workspace = await getApplicationTmpWorkspace(`role-overlay-${role}`);
-      const adapter = createLLMAdapter(cfg);
       const pct = (side: { passed: number; total: number }): string =>
         `${side.total > 0 ? Math.round((side.passed / side.total) * 100) : 0}%`;
-
-      const result = await runPersonaOverlayFlow({
+      const result = await runOverlayFlowForAdvice({
         role,
-        baseContract: safeRoleContract(def),
         advice,
-        knownRoles,
-        draft: (input) => draftPersonaOverlay(adapter, input),
-        // 逐文件校验：一个坏 fixture 不拖垮整批。
-        loadFixtures: async (r) => {
-          const out: RoleCaseFixture[] = [];
-          try {
-            const files = await core.invoke<Array<{ file: string; text: string }>>('list_role_cases', { role: r });
-            for (const file of files ?? []) {
-              try {
-                const parsed: unknown = JSON.parse(file.text);
-                if (isRoleCaseFixture(parsed)) out.push(parsed);
-              } catch {
-                // skip a broken fixture file, keep the rest
-              }
-            }
-          } catch {
-            return [];
-          }
-          return out;
-        },
-        overlayExists: async (r) => {
-          try {
-            await core.invoke('read_file', { workspace: pureHome, path: `personas/${r}.overlay.md` });
-            return true;
-          } catch {
-            return false; // 读不到 = 还没这个 overlay，正是落盘前提
-          }
-        },
-        writeOverlay: async (r, text) => {
-          await core.invoke('write_file', { workspace: pureHome, path: `personas/${r}.overlay.md`, content: `${text}\n` });
-        },
+        cfg: loadConfig() ?? defaults(),
         confirm: ({ role: target, base, overlay: overlayScore }) => showConfirmModal({
           title: t('evolution.advice.overlay.title'),
           message: t('evolution.advice.overlay.confirm')
@@ -1261,29 +1194,12 @@ export class SettingsPanel {
           okLabel: t('common.ok'),
           cancelLabel: t('common.cancel'),
         }),
-        runCase: async (fixture, ov) => {
-          const tools = new TauriToolAdapter(workspace, cfg.tavilyApiKey, cfg.serperApiKey, cfg.city, undefined, `role-overlay-${role}`);
-          const orch = new SubagentOrchestrator({
-            llm: adapter,
-            parentTools: tools,
-            parentToolsDefsProvider: () => tools.getTools(),
-            defaultBudget: OVERLAY_AB_BUDGET,
-            parentSessionId: `role-overlay-${role}`,
-            ...(ov ? { personaOverlays: new Map([[role, ov]]) } : {}),
-          });
-          orch.register(def);
-          const toolCall: ToolCall = {
-            id: `call_${fixture.id}`,
-            index: 0,
-            function: { name: role, arguments: JSON.stringify(fixture.args) },
-          };
-          return extractSubagentOutput(await orch.execute(toolCall));
-        },
         onStage: (stage, detail) => {
           if (stage === 'draft') this.toast(t('evolution.advice.overlay.drafting'));
           else if (stage === 'gate') this.toast(t('evolution.advice.overlay.gateRunning').replace('{n}', detail ?? '0'));
         },
       });
+      if (!result) return; // 非 Tauri / core 缺失（未知角色已在上面拦过）
 
       switch (result.outcome) {
         case 'written':
