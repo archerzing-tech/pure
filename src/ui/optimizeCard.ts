@@ -71,10 +71,30 @@ export function createOptimizeCard(host: HTMLElement, opts: OptimizeCardOptions)
     if (running) return;
     running = true;
     body.replaceChildren();
+    // 过程可见（2026-09-29 用户反馈：点下去很久什么都看不到）：审查是子
+    // 代理级别的长活（读文件→逐文件审→汇总），至少给用户一个活的阶段行，
+    // 别让它读起来像点了没反应。阶段推进由下方 timer 驱动（轮换文案），
+    // 完成时连同耗时一行收尾。
     const loading = document.createElement('p');
-    loading.className = 'optimize-loading';
+    loading.className = 'optimize-loading optimize-loading-live';
     loading.textContent = t('optimize.loading');
     body.appendChild(loading);
+    const stages = [
+      t('optimize.loading'),
+      t('optimize.staging.reading'),
+      t('optimize.staging.reviewing'),
+      t('optimize.staging.summarizing'),
+    ];
+    let stageIdx = 0;
+    const stageTimer = window.setInterval(() => {
+      stageIdx = (stageIdx + 1) % stages.length;
+      loading.textContent = stages[stageIdx]!;
+    }, 12_000);
+    const startedAt = Date.now();
+    const elapsed = (): string => {
+      const s = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
+    };
     const files = opts.files.length > 0 ? opts.files : [opts.workspace || '（未设置工作区）'];
     const prompt = [
       '这是课后优化建议（非阻断，请只给出改进方向，不要输出 VERDICT）。',
@@ -88,7 +108,10 @@ export function createOptimizeCard(host: HTMLElement, opts: OptimizeCardOptions)
       const text = document.createElement('pre');
       text.className = 'optimize-result';
       text.textContent = stripVerdict(output) || t('optimize.empty');
-      body.appendChild(text);
+      const doneLine = document.createElement('p');
+      doneLine.className = 'optimize-elapsed';
+      doneLine.textContent = t('optimize.doneIn').replace('{n}', elapsed());
+      body.append(doneLine, text);
     } catch (err) {
       body.replaceChildren();
       const fail = document.createElement('p');
@@ -101,6 +124,7 @@ export function createOptimizeCard(host: HTMLElement, opts: OptimizeCardOptions)
       retry.addEventListener('click', () => void trigger());
       body.append(fail, retry);
     } finally {
+      window.clearInterval(stageTimer);
       running = false;
     }
   };

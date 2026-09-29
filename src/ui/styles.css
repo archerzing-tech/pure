@@ -8193,6 +8193,24 @@ select:focus-visible,
   font-size: 12px;
 }
 
+/* 过程可见（2026-09-29）：审查进行中的阶段行带呼吸微光；完成后阶段行
+   让位于耗时行（optimize-elapsed）。 */
+.optimize-loading-live {
+  animation: optimize-stage-pulse 2.2s ease-in-out infinite;
+}
+@keyframes optimize-stage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .optimize-loading-live { animation: none; opacity: .75; }
+}
+.optimize-elapsed {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  margin: 6px 0 2px;
+}
+
 .optimize-result {
   margin: 0;
   max-height: 300px;

@@ -1120,6 +1120,10 @@ const translations: Record<Language, Record<string, string>> = {
     'optimize.hint': '交付完成。点击生成课后优化建议（重构 / 性能 / 可维护性 / 边界情况）。',
     'optimize.generate': '生成建议',
     'optimize.loading': '正在审查本次改动…',
+    'optimize.staging.reading': '正在读取本次生成的文件…',
+    'optimize.staging.reviewing': '正在逐文件审查（重构 / 性能 / 边界）…',
+    'optimize.staging.summarizing': '正在汇总建议…',
+    'optimize.doneIn': '审查完成，用时 {n}。',
     'optimize.empty': '未发现明显优化点。',
     'optimize.error': '生成失败',
     // ── Paste chips ──
@@ -2292,6 +2296,10 @@ const translations: Record<Language, Record<string, string>> = {
     'optimize.hint': 'Delivery complete. Generate non-blocking suggestions (refactor / performance / maintainability / edge cases).',
     'optimize.generate': 'Generate suggestions',
     'optimize.loading': 'Reviewing this change…',
+    'optimize.staging.reading': 'Reading the generated files…',
+    'optimize.staging.reviewing': 'Reviewing file by file (refactor / performance / edge cases)…',
+    'optimize.staging.summarizing': 'Summarizing suggestions…',
+    'optimize.doneIn': 'Review finished in {n}.',
     'optimize.empty': 'No obvious optimizations found.',
     'optimize.error': 'Generation failed',
     // ── Paste chips ──

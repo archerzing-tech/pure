@@ -6340,7 +6340,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   };
                   const result = await codingAgent.subagentOrchestrator.execute(toolCall, this.abortController?.signal);
                   if (!result.success || result.error) throw new Error(result.error || 'code_reviewer failed');
-                  return String(result.result ?? '');
+                  // 修复（2026-09-29 用户反馈「[object Object]」）：execute 的
+                  // result.result 是子代理结果对象（{ output, agentId, … }），
+                  // 文本在 output/finalOutput 里——String(obj) 只会打出
+                  // "[object Object]"。字符串形状也兼容（防御未来改形）。
+                  const inner: unknown = result.result;
+                  const text = typeof inner === 'string'
+                    ? inner
+                    : ((inner as { output?: string; finalOutput?: string } | null)?.output
+                      ?? (inner as { finalOutput?: string } | null)?.finalOutput
+                      ?? '');
+                  if (!text.trim()) throw new Error('code_reviewer returned no text');
+                  return text;
                 },
               });
               this.scrollUi(chatEl);
