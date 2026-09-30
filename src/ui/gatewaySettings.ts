@@ -170,15 +170,18 @@ export function renderGatewaySettings(host: HTMLElement): void {
     if (busy) return;
     setBusy(true);
     try {
+      // 不能用 WebView fetch：tauri:// 源向 127.0.0.1 发跨域请求会被 CORS/ATS
+      // 拦截（Load failed），不代表端口死活。探测统一走 Rust（gateway_status
+      // 里就是 no_proxy 的 reqwest）。
       const core = await coreOf();
-      const port = lastStatus?.port ?? 18790;
+      if (!core) return;
       const t0 = Date.now();
-      const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'HEAD' });
+      const s = await core.invoke<GatewayStatus>('gateway_status');
       const ms = Date.now() - t0;
-      log(res.ok || res.status === 400
-        ? `${t('gateway.testOk')} (HTTP ${res.status}, ${ms}ms, port ${port})`
-        : `${t('gateway.testFail')} (HTTP ${res.status})`);
-      void core;
+      log(s.http_ok
+        ? `${t('gateway.testOk')} (${ms}ms, port ${s.port})`
+        : `${t('gateway.testFail')} (port ${s.port})`);
+      apply(s);
     } catch (err) {
       log(`${t('gateway.testFail')}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
