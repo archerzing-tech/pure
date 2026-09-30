@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11812,6 +11813,202 @@ fn secrets_path() -> PathBuf {
     PathBuf::from(pure_home_dir()).join(".pure").join("secrets.json")
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Gateway lifecycle (Settings → Gateway)
+//  管的是独立的 `pure gateway` 守护进程（channels 宿主），与 WebView 里的
+//  agent 会话完全无关——这里的启停绝不触碰本地对话/任务能力。
+//  事实源是 ~/.pure/channels/gateway.lock（channels 层写的 pid+startedAt+channels），
+//  连通性探测打 gateway 的 webchat HTTP 端口。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn gateway_lock_path() -> PathBuf {
+    PathBuf::from(pure_home_dir()).join(".pure").join("channels").join("gateway.lock")
+}
+
+#[derive(Deserialize, Clone)]
+struct GatewayLockInfo {
+    pid: i64,
+    #[serde(default)]
+    started_at: i64,
+    #[serde(default)]
+    channels: Vec<String>,
+}
+
+fn read_gateway_lock() -> Option<GatewayLockInfo> {
+    let raw = fs::read_to_string(gateway_lock_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn gateway_pid_alive(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // kill(pid, 0)：不发包只探活；EPERM = 存在但无权限，也算活着。
+        let pid = pid as i32;
+        if pid <= 0 {
+            return false;
+        }
+        let r = unsafe { libc::kill(pid, 0) };
+        if r == 0 {
+            return true;
+        }
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// 探测 gateway 的 webchat HTTP 端口（连通性 = 端口有 HTTP 应答）。
+async fn gateway_http_ok(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+        .unwrap_or_default();
+    matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 400)
+}
+
+#[derive(serde::Serialize)]
+struct GatewayStatus {
+    running: bool,
+    /// lock 文件里的 pid 还活着（可能存在但 HTTP 未就绪）。
+    pid_alive: bool,
+    pid: Option<i64>,
+    started_at: Option<i64>,
+    channels: Vec<String>,
+    /// webchat 端口（从 ~/.pure/channels.json 读，缺省 18790）。
+    port: u16,
+    /// HTTP 探测通过 = 真正可服务。
+    http_ok: bool,
+}
+
+fn read_gateway_port() -> u16 {
+    let path = PathBuf::from(pure_home_dir()).join(".pure").join("channels.json");
+    if let Ok(raw) = fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(port) = v.get("gateway").and_then(|g| g.get("port")).and_then(|p| p.as_u64()) {
+                if (1..=65535).contains(&port) {
+                    return port as u16;
+                }
+            }
+        }
+    }
+    18790
+}
+
+#[tauri::command]
+async fn gateway_status() -> Result<GatewayStatus, String> {
+    let lock = read_gateway_lock();
+    let pid_alive = lock.as_ref().map(|l| gateway_pid_alive(l.pid)).unwrap_or(false);
+    let port = read_gateway_port();
+    let http_ok = gateway_http_ok(port).await;
+    Ok(GatewayStatus {
+        running: http_ok,
+        pid_alive,
+        pid: lock.as_ref().map(|l| l.pid),
+        started_at: lock.as_ref().map(|l| l.started_at),
+        channels: lock.as_ref().map(|l| l.channels.clone()).unwrap_or_default(),
+        port,
+        http_ok,
+    })
+}
+
+/// 后台启动 `pure gateway`。优先用打包在 pure.app 里的 CLI 二进制；
+/// 找不到才回落 PATH 上的 `pure`。 detached + 全套输出落日志文件。
+#[tauri::command]
+async fn gateway_start() -> Result<GatewayStatus, String> {
+    if let Some(lock) = read_gateway_lock() {
+        if gateway_pid_alive(lock.pid) {
+            return Err(format!("gateway 已在运行（pid {}）。先停止再启动。", lock.pid));
+        }
+    }
+    let log_path = PathBuf::from(pure_home_dir()).join(".pure").join("channels").join("gateway-gui.log");
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("open log: {}", e))?;
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    // pure.app/Contents/MacOS/pure 同目录放 CLI 时的布局；GUI 应用自身就叫 pure，
+    // 不能再 exec 自己（会开第二个 GUI），所以优先找纯 CLI 侧车，其次 PATH。
+    let candidates: Vec<String> = vec![
+        exe.parent().map(|d| d.join("pure-cli")).map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "/usr/local/bin/pure".to_string(),
+        format!("{}/.pure/bin/pure", pure_home_dir()),
+        "pure".to_string(),
+    ];
+    let mut last_err = String::from("no candidate");
+    for bin in candidates {
+        if bin.is_empty() {
+            continue;
+        }
+        let is_path = bin.contains('/');
+        if is_path && !Path::new(&bin).exists() {
+            last_err = format!("{} 不存在", bin);
+            continue;
+        }
+        let mut cmd = TokioCommand::new(&bin);
+        cmd.arg("gateway")
+            .stdin(std::process::Stdio::null())
+            .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
+            .stderr(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?);
+        #[cfg(unix)]
+        {
+            cmd.process_group(0); // 脱离 GUI 进程组：GUI 退出不带走 gateway
+        }
+        match cmd.spawn() {
+            Ok(_) => {
+                // 给它几秒握手（连平台长连接），随后报状态。
+                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                return gateway_status().await;
+            }
+            Err(e) => {
+                last_err = format!("{}: {}", bin, e);
+            }
+        }
+    }
+    Err(format!("启动 gateway 失败：{}。请先安装 CLI（pure）。", last_err))
+}
+
+/// 停止 gateway：先 SIGTERM 优雅退出（写 checkpoint、关长连接），
+/// 3 秒不退再 SIGKILL。锁文件由 gateway 自己的信号处理器清理。
+#[tauri::command]
+async fn gateway_stop() -> Result<GatewayStatus, String> {
+    let lock = read_gateway_lock()
+        .ok_or_else(|| "gateway 未在运行（无锁文件）".to_string())?;
+    if !gateway_pid_alive(lock.pid) {
+        return gateway_status().await;
+    }
+    let pid = lock.pid as i32;
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if !gateway_pid_alive(lock.pid) {
+            break;
+        }
+    }
+    if gateway_pid_alive(lock.pid) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    gateway_status().await
+}
+
 fn load_secrets() -> Result<serde_json::Value, String> {
     let path = secrets_path();
     if !path.exists() {
@@ -16390,6 +16587,10 @@ pub fn run() {
             cleanup_tmp_pastes,
             secret_get,
             secret_set,
+            // Gateway lifecycle (Settings → Gateway)
+            gateway_status,
+            gateway_start,
+            gateway_stop,
             secret_delete,
             secret_list,
             // App config file (~/.pure/config.json)

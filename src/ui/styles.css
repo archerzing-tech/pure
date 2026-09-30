@@ -14359,3 +14359,23 @@ button svg,
   border-radius: 6px;
   background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
 }
+
+/* ── Settings → Gateway ────────────────────────────────────── */
+.gateway-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.gateway-output {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

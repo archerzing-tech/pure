@@ -22,6 +22,7 @@ import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
 import { renderChannelSettings } from './channelSettings';
+import { renderGatewaySettings } from './gatewaySettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
 import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
@@ -325,6 +326,11 @@ export class SettingsPanel {
     if (category === 'channels') {
       const el = document.getElementById('channels-dashboard');
       if (el) renderChannelSettings(el, () => this.onSave());
+    }
+    // Gateway 页：进入即拉状态并开始轮询。
+    if (category === 'gateway') {
+      const el = document.getElementById('gateway-dashboard');
+      if (el) renderGatewaySettings(el);
     }
     // 进化仪表盘：切过来就重读观测日志 + 记忆库（刚跑完的会话立刻反映在趋势里）。
     if (category === 'evolution') void this.renderEvolutionDashboard();
