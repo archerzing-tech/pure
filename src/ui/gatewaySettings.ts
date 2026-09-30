@@ -44,10 +44,11 @@ export function renderGatewaySettings(host: HTMLElement): void {
   statusRow.className = 'setting-row';
   statusRow.innerHTML = `
     <div class="setting-info">
-      <span class="setting-label">${t('gateway.status')}</span>
+      <span class="setting-label"><span class="gateway-dot" id="gateway-dot"></span>${t('gateway.status')}</span>
       <span class="setting-hint">…</span>
     </div>`;
   section.appendChild(statusRow);
+  const dot = statusRow.querySelector<HTMLSpanElement>('#gateway-dot');
 
   const hint = statusRow.querySelector<HTMLSpanElement>('.setting-hint');
 
@@ -103,11 +104,14 @@ export function renderGatewaySettings(host: HTMLElement): void {
 
   function apply(s: GatewayStatus): void {
     lastStatus = s;
+    // 运行中 = 端口有应答（即启动未报错）→ 绿点；进程在但端口未就绪 → 琥珀；
+    // 没进程 → 灰点。
+    if (dot) dot.className = `gateway-dot ${s.running ? 'gateway-dot-ok' : s.pid_alive ? 'gateway-dot-warn' : ''}`;
     if (hint) hint.textContent = s.running
-      ? `● ${t('gateway.running')} (${t('gateway.port')} ${s.port})`
+      ? `${t('gateway.running')} (${t('gateway.port')} ${s.port})`
       : s.pid_alive
-        ? `◐ ${t('gateway.starting')}`
-        : `○ ${t('gateway.stopped')}`;
+        ? t('gateway.starting')
+        : t('gateway.stopped');
     if (channelsHint) channelsHint.textContent = s.channels.length > 0 ? s.channels.join(', ') : '—';
     if (pidHint) pidHint.textContent = s.pid ? `pid ${s.pid} · ${t('gateway.since')} ${fmtTime(s.started_at)}` : '—';
     startBtn.disabled = busy || s.pid_alive;

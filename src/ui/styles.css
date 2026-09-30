@@ -14419,3 +14419,21 @@ button svg,
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ── Gateway 状态圆点 ──────────────────────────────────────── */
+.gateway-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: color-mix(in srgb, var(--text-secondary) 45%, transparent);
+}
+.gateway-dot-ok {
+  background: #22c55e;
+  box-shadow: 0 0 6px color-mix(in srgb, #22c55e 60%, transparent);
+}
+.gateway-dot-warn {
+  background: #f59e0b;
+}
