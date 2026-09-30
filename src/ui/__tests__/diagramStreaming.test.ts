@@ -25,7 +25,7 @@ mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } 
 // on the Windows release run (export-not-found at link time). The DOM setup
 // mirrors that file's contract for the engine instead.
 
-const { flushStreamingRender, renderMarkdown, scheduleStreamingRender } = await import('../markdown');
+const { flushStreamingRender, renderMarkdown, scheduleStreamingRender, normalizeViewerDiagramSize } = await import('../markdown');
 const fs = await import('node:fs');
 
 beforeAll(() => {
@@ -251,5 +251,40 @@ describe('streaming diagram gate (图渲染完，后面的文字才开始显示)
     expect(filterCount).toBeGreaterThanOrEqual(4);
     // The completion render adopts painted diagram slots (no repaint flicker).
     expect(src).toContain('adoptPreservedDiagramSlots(container, preservedDiagrams);');
+  });
+});
+
+describe('enlarge viewer normalization (放大视图白色方块回归)', () => {
+  // 2026-09-30 用户实测：chat 里 ```chart 图表双击放大后，左上角总有一个白色
+  // 方块。根因：echarts（zrender SVG painter）在 svg 根上打内联
+  // `position:absolute;left:0;top:0`，克隆进 fixed 定位查看器后图表脱流，
+  // 白色底卡 shrink-wrap 只剩自己的 40px padding——就是那个白方块，图表本体
+  // 则溢出卡片悬空。normalizeViewerDiagramSize 必须把根 svg 拉回常规流。
+  it('forces an echarts-root svg back into flow and keeps its concrete canvas', () => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '620');
+    svg.setAttribute('height', '320');
+    svg.style.cssText = 'position: absolute; left: 0px; top: 0px; user-select: none;';
+    normalizeViewerDiagramSize(svg as unknown as HTMLElement);
+    expect(svg.style.position).toBe('static');
+    // No viewBox → the width/height attrs are the pan/zoom math's canvas;
+    // they must survive untouched.
+    expect(svg.getAttribute('width')).toBe('620');
+    expect(svg.getAttribute('height')).toBe('320');
+  });
+
+  it('still concretizes percentage-sized roots (mermaid case)', () => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('viewBox', '0 0 800 600');
+    normalizeViewerDiagramSize(svg as unknown as HTMLElement);
+    expect(svg.style.width).toBe('800px');
+    expect(svg.style.height).toBe('600px');
+  });
+
+  it('leaves non-svg elements alone (inline image clone)', () => {
+    const img = document.createElement('img');
+    normalizeViewerDiagramSize(img);
+    expect(img.style.cssText).toBe('');
   });
 });

@@ -3034,11 +3034,20 @@ function bindMdImagePopup(container: HTMLElement): void {
 // was called on the old overlay).
 let activeViewerCleanup: (() => void) | null = null;
 
-function normalizeViewerDiagramSize(el: HTMLElement): void {
+export function normalizeViewerDiagramSize(el: HTMLElement): void {
   const svg = el instanceof SVGSVGElement
     ? el
     : el.querySelector<SVGSVGElement>('svg');
   if (!svg) return;
+
+  // ECharts (zrender's SVG painter) stamps `position:absolute;left:0;top:0`
+  // inline on the svg root. Inside the fixed viewer that takes the chart out
+  // of flow: the white wrapper then shrink-wraps to its own 40px padding and
+  // shows up as a stray white square pinned to the chart's top-left corner
+  // while the chart itself overflows the card. Restore in-flow layout so the
+  // wrapper actually wraps the chart (mermaid/puml/svg-block roots carry no
+  // positioning here, so for them this is a no-op).
+  svg.style.position = 'static';
 
   const viewBox = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
   const viewBoxWidth = viewBox && viewBox.length === 4 && Number.isFinite(viewBox[2]) && viewBox[2] > 0 ? viewBox[2] : null;
