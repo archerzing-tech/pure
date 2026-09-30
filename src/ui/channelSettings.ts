@@ -1,11 +1,13 @@
 // src/ui/channelSettings.ts
-// 设置 → 频道页：飞书 / 钉钉 / 企业微信 / webchat 的接入卡片。
+// 设置 → 频道页：飞书 / 钉钉 / 企业微信 / webchat 的接入卡片（手风琴式）。
 // 单一事实源是 ~/.pure/channels.json（gateway 读的就是它），本页用 Tauri 的
 // read_file/write_file 直接编辑该文件；密钥不进 localStorage/channels.json，
 // 走 Rust secret_set/secret_get 落在 ~/.pure/secrets.json（0600）——
 // 与 CLI/gateway 的 appSecretRef/clientSecretRef 约定同源，零翻译层。
-// 表单编辑即时写盘（沿用设置页的 auto-save 姿态）；生效时机 = gateway
-// 下次启动（gateway 不热加载配置，页面上有说明）。
+//
+// 交互：每个频道一张卡，头部一行 = 图标 + 名称 + 状态徽标 + 启用开关；
+// 默认全部收起，点头部展开（同时只展开一个），表单改动即改即存，
+// 「完成」收起。收起时也能从徽标一眼看出「已启用/未启用 + 凭据是否已设」。
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
 import { t } from '../shared/i18n';
@@ -29,7 +31,6 @@ interface ChannelSpec {
   id: 'feishu' | 'dingtalk' | 'wecom' | 'webchat';
   name: string;
   icon: string;
-  /** 每个输入框：key ↔ 凭据槽位或 channels.json 字段。 */
   fields: { key: keyof ChannelAccountDraft; label: string; placeholder: string; secret?: boolean }[];
   guide: string[];
   status: 'implemented' | 'planned';
@@ -70,7 +71,7 @@ const SPECS: ChannelSpec[] = [
     guide: [
       '开放平台 → 创建企业内部应用 → 开启「机器人」',
       'Stream 模式推送（无需公网 IP）',
-      '企业内部应用的凭据即 Client ID / Client Secret（Stream 模式无需公网 IP）',
+      '企业内部应用的凭据即 Client ID / Client Secret',
     ],
     status: 'implemented',
   },
@@ -118,8 +119,9 @@ async function readChannelsFile(): Promise<ChannelsFile> {
 }
 
 async function writeChannelsFile(cfg: ChannelsFile): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('write_file requires the Tauri runtime');
   const core = await loadTauriCore();
-  if (!core || !isTauriRuntime()) return;
+  if (!core) throw new Error('write_file requires the Tauri runtime');
   const pureHome = await pureHomeDir();
   await core.invoke('write_file', { workspace: pureHome, path: 'channels.json', content: JSON.stringify(cfg, null, 2) + '\n' });
 }
@@ -141,7 +143,7 @@ async function secretGet(key: string): Promise<string> {
 
 async function secretSet(key: string, value: string): Promise<void> {
   const core = await loadTauriCore();
-  if (!core || !isTauriRuntime()) return;
+  if (!core || !isTauriRuntime()) throw new Error('secret_set requires the Tauri runtime');
   await core.invoke('secret_set', { key, value });
 }
 
@@ -172,150 +174,156 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
   note.className = 'settings-page-desc channel-note';
   host.appendChild(note);
 
-  void (async () => {
+  // 手风琴状态：同时只展开一张卡（undefined = 全收起）。
+  let expandedId: string | undefined;
+
+  async function renderAll(): Promise<void> {
     const [cfg, running] = await Promise.all([readChannelsFile(), gatewayRunning()]);
     cfg.channels = cfg.channels ?? {};
-
     note.textContent = running ? t('channel.gatewayRunning') : t('channel.gatewayStopped');
-
+    wrap.replaceChildren();
     for (const spec of SPECS) {
-      wrap.appendChild(await buildCard(spec, cfg));
+      wrap.appendChild(await buildCard(spec, cfg, () => {
+        expandedId = undefined;
+        void renderAll();
+      }));
     }
-    wrap.appendChild(buildGatewayCard(cfg));
-  })();
-}
-
-async function buildCard(spec: ChannelSpec, cfg: ChannelsFile): Promise<HTMLElement> {
-  const entry = cfg.channels![spec.id] ?? {};
-  const account = Object.values(entry.accounts ?? {})[0] ?? {};
-  const secretKey = SECRETS_KEY[spec.id];
-
-  const card = document.createElement('div');
-  card.className = `channel-card${spec.status === 'planned' ? ' channel-card-planned' : ''}`;
-
-  const head = document.createElement('div');
-  head.className = 'channel-card-head';
-  head.innerHTML = `<span class="channel-card-icon">${spec.icon}</span><span class="channel-card-name">${spec.name}</span>`;
-
-  const enabledToggle = document.createElement('label');
-  enabledToggle.className = 'toggle';
-  const enabledInput = document.createElement('input');
-  enabledInput.type = 'checkbox';
-  enabledInput.checked = entry.enabled === true;
-  if (spec.status === 'planned') enabledInput.disabled = true;
-  enabledToggle.append(enabledInput, Object.assign(document.createElement('span'), { className: 'toggle-slider' }));
-  head.appendChild(enabledToggle);
-  card.appendChild(head);
-
-  const hint = document.createElement('div');
-  hint.className = 'channel-card-hint';
-  hint.textContent = spec.status === 'planned' ? t('channel.planned') : t('channel.statusPrefix') + (enabledInput.checked ? t('channel.state.on') : t('channel.state.off'));
-  card.appendChild(hint);
-
-  for (const g of spec.guide) {
-    const li = document.createElement('div');
-    li.className = 'channel-guide-line';
-    li.textContent = `· ${g}`;
-    card.appendChild(li);
   }
 
-  for (const field of spec.fields) {
-    const row = document.createElement('div');
-    row.className = 'channel-field-row';
-    const label = document.createElement('span');
-    label.className = 'channel-field-label';
-    label.textContent = field.label;
-    const input = document.createElement('input');
-    input.className = 'setting-input channel-field-input';
-    input.type = field.secret ? 'password' : 'text';
-    input.placeholder = field.placeholder;
-    input.autocomplete = 'off';
-    // 凭据字段从 secrets 读（不回显明文，占位提示已设置）；非凭据从 channels.json 读
-    if (field.secret && secretKey) {
-      input.dataset.pending = '';
+  async function buildCard(spec: ChannelSpec, cfg: ChannelsFile, onDone: () => void): Promise<HTMLElement> {
+    const entry = cfg.channels![spec.id] ?? {};
+    const account = Object.values(entry.accounts ?? {})[0] ?? {};
+    const secretKey = SECRETS_KEY[spec.id];
+    const enabled = entry.enabled === true;
+    const expanded = expandedId === spec.id;
+
+    const card = document.createElement('div');
+    card.className = `channel-card${expanded ? ' channel-card-open' : ''}${spec.status === 'planned' ? ' channel-card-planned' : ''}`;
+
+    // ── 头部（始终可见）：图标 + 名称 + 徽标 + 开关 + 展开箭头 ──
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'channel-card-head';
+    head.setAttribute('aria-expanded', String(expanded));
+
+    const icon = document.createElement('span');
+    icon.className = 'channel-card-icon';
+    icon.innerHTML = spec.icon;
+    const name = document.createElement('span');
+    name.className = 'channel-card-name';
+    name.textContent = spec.name;
+
+    const badge = document.createElement('span');
+    badge.className = `channel-badge ${enabled ? 'channel-badge-on' : 'channel-badge-off'}`;
+    badge.textContent = spec.status === 'planned'
+      ? t('channel.planned')
+      : enabled ? t('channel.badgeOn') : t('channel.badgeOff');
+    if (spec.status !== 'planned' && secretKey) {
       void secretGet(secretKey).then((v) => {
-        input.placeholder = v ? t('channel.secretSet') : field.placeholder;
+        if (v && !badge.textContent?.includes('·')) badge.textContent += ` · ${t('channel.badgeSecretSet')}`;
       });
-    } else {
-      input.value = String(account[field.key] ?? '');
     }
-    input.addEventListener('change', () => {
+
+    const chevron = document.createElement('span');
+    chevron.className = 'channel-chevron';
+    chevron.textContent = '▾';
+
+    head.append(icon, name, badge, chevron);
+
+    // 启用开关单独一层：点它不触发展开/收起。
+    const toggleWrap = document.createElement('label');
+    toggleWrap.className = 'toggle';
+    const enabledInput = document.createElement('input');
+    enabledInput.type = 'checkbox';
+    enabledInput.checked = enabled;
+    if (spec.status === 'planned') enabledInput.disabled = true;
+    toggleWrap.append(enabledInput, Object.assign(document.createElement('span'), { className: 'toggle-slider' }));
+    enabledInput.addEventListener('click', (e) => e.stopPropagation());
+    toggleWrap.addEventListener('click', (e) => e.stopPropagation());
+    enabledInput.addEventListener('change', () => {
       void (async () => {
-        if (field.secret && secretKey) {
-          if (input.value.trim()) await secretSet(secretKey, input.value.trim());
-          input.value = '';
-          input.placeholder = t('channel.secretSet');
-        } else {
-          await updateChannelAccount(cfg, spec.id, (acc) => { acc[field.key] = input.value.trim(); });
-        }
+        await updateChannelEntry(cfg, spec.id, (e) => { e.enabled = enabledInput.checked; });
+        badge.className = `channel-badge ${enabledInput.checked ? 'channel-badge-on' : 'channel-badge-off'}`;
+        badge.textContent = enabledInput.checked ? t('channel.badgeOn') : t('channel.badgeOff');
       })();
     });
-    row.append(label, input);
-    card.appendChild(row);
+    head.appendChild(toggleWrap);
+
+    head.addEventListener('click', () => {
+      if (spec.status === 'planned') return;
+      expandedId = expanded ? undefined : spec.id;
+      void renderAll();
+    });
+    card.appendChild(head);
+
+    // ── 展开体：开通步骤 + 凭据表单 + 完成 ──
+    if (expanded) {
+      const body = document.createElement('div');
+      body.className = 'channel-card-body';
+
+      const guide = document.createElement('div');
+      guide.className = 'channel-guide';
+      for (const g of spec.guide) {
+        const line = document.createElement('div');
+        line.className = 'channel-guide-line';
+        line.textContent = `· ${g}`;
+        guide.appendChild(line);
+      }
+      body.appendChild(guide);
+
+      for (const field of spec.fields) {
+        const row = document.createElement('div');
+        row.className = 'channel-field-row';
+        const label = document.createElement('span');
+        label.className = 'channel-field-label';
+        label.textContent = field.label;
+        const input = document.createElement('input');
+        input.className = 'setting-input channel-field-input';
+        input.type = field.secret ? 'password' : 'text';
+        input.placeholder = field.placeholder;
+        input.autocomplete = 'off';
+        if (field.secret && secretKey) {
+          void secretGet(secretKey).then((v) => {
+            input.placeholder = v ? t('channel.secretSet') : field.placeholder;
+          });
+        } else {
+          input.value = String(account[field.key] ?? '');
+        }
+        input.addEventListener('change', () => {
+          void (async () => {
+            try {
+              if (field.secret && secretKey) {
+                if (input.value.trim()) await secretSet(secretKey, input.value.trim());
+                input.value = '';
+                input.placeholder = t('channel.secretSet');
+              } else {
+                await updateChannelAccount(cfg, spec.id, (acc) => { acc[field.key] = input.value.trim(); });
+              }
+            } catch (err) {
+              // 浏览器预览等非 Tauri 环境写入不了本地文件：明说，别假装保存成功。
+              input.placeholder = `${t('channel.saveFailed')}: ${err instanceof Error ? err.message : String(err)}`;
+            }
+          })();
+        });
+        row.append(label, input);
+        body.appendChild(row);
+      }
+
+      const footer = document.createElement('div');
+      footer.className = 'channel-card-footer';
+      const doneBtn = document.createElement('button');
+      doneBtn.className = 'setting-btn secondary';
+      doneBtn.textContent = t('channel.done');
+      doneBtn.addEventListener('click', onDone);
+      footer.appendChild(doneBtn);
+      body.appendChild(footer);
+
+      card.appendChild(body);
+    }
+    return card;
   }
 
-  enabledInput.addEventListener('change', () => {
-    void (async () => {
-      await updateChannelEntry(cfg, spec.id, (e) => { e.enabled = enabledInput.checked; });
-      hint.textContent = spec.status === 'planned' ? t('channel.planned') : t('channel.statusPrefix') + (enabledInput.checked ? t('channel.state.on') : t('channel.state.off'));
-    })();
-  });
-
-  return card;
-}
-
-function buildGatewayCard(cfg: ChannelsFile): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'channel-card channel-card-gateway';
-  const title = document.createElement('div');
-  title.className = 'channel-card-name';
-  title.textContent = t('channel.gateway.title');
-  card.appendChild(title);
-
-  const hostRow = document.createElement('div');
-  hostRow.className = 'channel-field-row';
-  const hostLabel = document.createElement('span');
-  hostLabel.className = 'channel-field-label';
-  hostLabel.textContent = 'Host';
-  const hostInput = document.createElement('input');
-  hostInput.className = 'setting-input channel-field-input';
-  hostInput.value = cfg.gateway?.host ?? '127.0.0.1';
-  hostInput.addEventListener('change', () => {
-    void updateGateway(cfg, (g) => { g.host = hostInput.value.trim() || '127.0.0.1'; });
-  });
-  hostRow.append(hostLabel, hostInput);
-  card.appendChild(hostRow);
-
-  const portRow = document.createElement('div');
-  portRow.className = 'channel-field-row';
-  const portLabel = document.createElement('span');
-  portLabel.className = 'channel-field-label';
-  portLabel.textContent = 'Port';
-  const portInput = document.createElement('input');
-  portInput.className = 'setting-input channel-field-input';
-  portInput.type = 'number';
-  portInput.value = String(cfg.gateway?.port ?? 18790);
-  portInput.addEventListener('change', () => {
-    void updateGateway(cfg, (g) => { g.port = Number(portInput.value) || 18790; });
-  });
-  portRow.append(portLabel, portInput);
-  card.appendChild(portRow);
-
-  const startRow = document.createElement('div');
-  startRow.className = 'channel-start-row';
-  const startBtn = document.createElement('button');
-  startBtn.className = 'setting-btn secondary';
-  startBtn.textContent = t('channel.gateway.openWebchat');
-  startBtn.addEventListener('click', () => {
-    const port = cfg.gateway?.port ?? 18790;
-    window.open(`http://127.0.0.1:${port}/`, '_blank');
-  });
-  const cli = document.createElement('code');
-  cli.className = 'channel-cli-hint';
-  cli.textContent = 'pure gateway';
-  startRow.append(startBtn, cli);
-  card.appendChild(startRow);
-  return card;
+  void renderAll();
 }
 
 async function updateChannelEntry(cfg: ChannelsFile, id: string, patch: (entry: NonNullable<ChannelsFile['channels']>[string]) => void): Promise<void> {
@@ -333,10 +341,4 @@ async function updateChannelAccount(cfg: ChannelsFile, id: string, patch: (acc: 
     patch(acc);
     entry.accounts.main = acc;
   });
-}
-
-async function updateGateway(cfg: ChannelsFile, patch: (g: NonNullable<ChannelsFile['gateway']>) => void): Promise<void> {
-  cfg.gateway = cfg.gateway ?? {};
-  patch(cfg.gateway);
-  await writeChannelsFile(cfg);
 }

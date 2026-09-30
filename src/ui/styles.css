@@ -14293,31 +14293,39 @@ button svg,
   border-color: var(--accent);
 }
 
-/* ── Settings → 频道（channels）────────────────────────────── */
+/* ── Settings → 频道（channels）：手风琴卡片 ────────────────── */
 .channel-cards {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 .channel-card {
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   background: var(--bg-elevated, transparent);
+  overflow: hidden;
+}
+.channel-card-open {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 .channel-card-planned {
-  opacity: 0.65;
+  opacity: 0.6;
 }
 .channel-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
 }
-.channel-card-head .toggle {
-  margin-left: auto;
+.channel-card-head:hover {
+  background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
 }
 .channel-card-icon {
   display: inline-flex;
@@ -14326,9 +14334,44 @@ button svg,
 .channel-card-name {
   font-weight: 600;
 }
-.channel-card-hint {
-  font-size: 12px;
+.channel-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
   color: var(--text-secondary);
+  white-space: nowrap;
+}
+.channel-badge-on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.channel-chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+.channel-card-open .channel-chevron {
+  transform: rotate(180deg);
+}
+.channel-card-head .toggle {
+  margin-left: auto;
+}
+.channel-card-open .channel-chevron {
+  margin-left: 0;
+}
+.channel-card-body {
+  padding: 4px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+}
+.channel-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .channel-guide-line {
   font-size: 12px;
@@ -14348,16 +14391,9 @@ button svg,
 .channel-field-input {
   flex: 1;
 }
-.channel-start-row {
+.channel-card-footer {
   display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.channel-cli-hint {
-  font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+  justify-content: flex-end;
 }
 
 /* ── Settings → Gateway ────────────────────────────────────── */
