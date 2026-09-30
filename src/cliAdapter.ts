@@ -6,7 +6,8 @@
 // harness or run-loop modules (acyclic graph).
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
-import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor, promptBudgetForProvider, resolvePromptBudget } from './shared/providers';
+import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
+import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor, promptBudgetForProvider, protocolForURL, resolvePromptBudget } from './shared/providers';
 import { bold, cyan, dim, red } from './termcolors';
 import type { LLMAdapter } from './shared/types';
 import type { CliArgs } from './cliConfig';
@@ -66,8 +67,15 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
       }
       return { adapter: createQwenAdapter(args.apiKey, '', args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
     }
-    case 'glm':
+    case 'glm': {
+      // 用户可以把 glm 覆盖成 Anthropic 兼容端点（如 open.bigmodel.cn/api/anthropic，
+      // GUI 设置页就这么配）。CLI/gateway 同样按端点 URL 探测协议，别把 OpenAI 格式
+      // 打到 anthropic 端点上 —— 那只会得到 4xx 或空回复。
+      if (endpoint && protocolForURL(endpoint) === 'anthropic') {
+        return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model, baseURL: endpoint, maxTokens }), label: `${displayName} (${args.model})` };
+      }
       return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
+    }
     case 'deepseek-openai':
       return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
     // The remaining built-ins are plain OpenAI-compatible endpoints;
