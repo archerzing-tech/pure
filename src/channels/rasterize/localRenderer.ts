@@ -8,12 +8,13 @@
 // 走 headlessRenderer.ts 的 headless Chrome —— 那部分是可选的，没装 Chrome 时
 // 由降级矩阵转成说明文本，而不是假装成功。
 import type { RichRenderers } from '../richOutput';
+import { gracefulPng } from '../pngOptimizer';
 
 /** SVG → PNG（resvg）。chart / svg / mermaid / puml 四条路最终都汇到这里。 */
 export async function rasterizeSvg(svg: string, width = 900): Promise<Uint8Array> {
   const { Resvg } = await import('@resvg/resvg-js');
   const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: width } });
-  return resvg.render().asPng();
+  return gracefulPng(resvg.render().asPng());
 }
 
 export function createLocalRichRenderers(): RichRenderers {

@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildBrowserBundle } from '../rasterize/browserBundle';
 import { HeadlessChrome, findChromePath } from '../rasterize/headlessChrome';
+import { gracefulPng } from '../pngOptimizer';
 
 export interface ProjectionPageOptions {
   chromePath?: string;
@@ -225,7 +226,8 @@ export function createProjectionPage(options: ProjectionPageOptions = {}): Proje
           });
           const data = shot.data;
           if (typeof data !== 'string' || data.length === 0) return null;
-          return new Uint8Array(Buffer.from(data, 'base64'));
+          // Chrome 截图编码对文字类内容很浪费；无损调色板化后再投递（不适用的图原样返回）。
+          return gracefulPng(new Uint8Array(Buffer.from(data, 'base64')));
         } catch (err) {
           log?.(`projection render failed: ${err instanceof Error ? err.message : String(err)}`);
           return null;
