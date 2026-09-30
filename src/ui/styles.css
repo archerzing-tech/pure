@@ -14437,3 +14437,19 @@ button svg,
 .gateway-dot-warn {
   background: #f59e0b;
 }
+
+/* ── setting-btn 禁用态 ────────────────────────────────────── */
+/* 全局补：此前禁用只靠 disabled 属性，primary 的实心高亮还在，看起来
+ * 仍可点（Gateway 页的「启动」在运行中被禁用时尤其误导）。 */
+.setting-btn:disabled,
+.setting-btn:disabled:hover,
+.setting-btn:disabled:active {
+  cursor: not-allowed;
+  transform: none;
+  opacity: 0.45;
+  filter: saturate(0.2);
+}
+.setting-btn.primary:disabled,
+.setting-btn.primary:disabled:hover {
+  background: var(--accent);
+}
