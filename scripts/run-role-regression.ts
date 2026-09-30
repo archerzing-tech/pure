@@ -149,6 +149,9 @@ const ROLE_BUDGET: BudgetConfig = {
 const adapter = createAdapter({ provider: requestedAgent!, model, apiKey: apiKeyForProvider(requestedAgent!) });
 
 // One throwaway workspace per side: subagent tool writes never touch the repo.
+// S1 真机（2026-09-30）：fixture 带工作区且目录还在 ⇒ 原地重跑该例（文件依赖
+// 型样本的评审对象在那里，两侧同一目录保证 A/B 看到同一份世界）；否则退回
+// 该侧的临时目录（研究型样本无感）。
 const workspaces = new Map<string, string>();
 async function workspaceFor(side: string): Promise<string> {
   let workspace = workspaces.get(side);
@@ -159,11 +162,22 @@ async function workspaceFor(side: string): Promise<string> {
   return workspace;
 }
 
+async function workspaceExists(dir: string): Promise<boolean> {
+  try {
+    const stat = await (await import('node:fs/promises')).stat(dir);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** The one host-specific seam: run one case under one side. Everything else
  *  (grading, verdict) lives in the shared, injected-runCase core. */
 const runCase: RunRoleCase = async (fixture, overlay) => {
   const side = overlay ? 'overlay' : 'base';
-  const workspace = await workspaceFor(side);
+  const workspace = fixture.workspace && await workspaceExists(fixture.workspace)
+    ? fixture.workspace
+    : await workspaceFor(side);
   const tools = new NodeToolAdapter({ workspace, sessionId: `role-regression-${role}-${side}` });
   const orch = new SubagentOrchestrator({
     llm: adapter,

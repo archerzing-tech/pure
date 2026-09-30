@@ -112,9 +112,12 @@ export function parseAssertionDraft(reply: string): AssertionDraft | undefined {
   return { must, mustNot: cleanMarkers(parsed.mustNot) };
 }
 
-/** Same wall-clock discipline as the lesson reflector: a hung provider must not
- *  wedge the harvest script — reject and let the caller skip the sample. */
-const DRAFT_TIMEOUT_MS = 60_000;
+/** Wall-clock bound for one assertion draft. 5 minutes, not 1: 2026-09-30 S1
+ *  真机（glm-5.3-flash，深思档）对真实样本的起草实测 165s —— 60s 上限让收割器
+ *  在推理型 flash 模型上每条必超时、一条都收不进。收割是批量后台活（GUI 收割
+ *  入口有进度提示），总墙钟由候选数上界兜底，单条放宽不破坏"挂死不挡路"的
+ *  纪律：真挂死的 provider 依然会被拒并跳过该样本。 */
+const DRAFT_TIMEOUT_MS = 300_000;
 
 export async function draftRoleAssertions(
   llm: LLMAdapter,

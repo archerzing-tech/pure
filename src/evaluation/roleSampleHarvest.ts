@@ -31,6 +31,11 @@ export interface HarvestMessage {
 export interface HarvestSession {
   id: string;
   messages: HarvestMessage[];
+  /** 会话的工作区（存档顶层字段）。S1 真机发现：文件依赖型角色的样本
+   *  （code_reviewer 评审 src/ 下的文件）在空临时目录里重跑永远过不了自洽
+   *  门——评审对象不在那里。带上工作区，收割与 A/B 重跑时「目录还在就用，
+   *  没了退回空临时目录」（研究型角色不受影响）。 */
+  workspace?: string;
 }
 
 export interface RoleDelegationSample {
@@ -40,6 +45,8 @@ export interface RoleDelegationSample {
   sessionId: string;
   /** assistant 消息在会话里的下标 —— 同一会话内唯一，用于稳定排序。 */
   messageIndex: number;
+  /** 该会话的工作区（见 HarvestSession.workspace；目录可能已不存在，消费方自查）。 */
+  workspace?: string;
 }
 
 /** 被中断/失败的委派不是可用的"真实样本"：产出是错误串而不是子 agent 的答案。 */
@@ -127,7 +134,7 @@ export function harvestRoleSamples(
         if (!result) continue;
         const output = usableOutput(parseToolPayload(result.content));
         if (!output) continue;
-        samples.push({ role: name, args, output, sessionId: session.id, messageIndex: index });
+        samples.push({ role: name, args, output, sessionId: session.id, messageIndex: index, ...(session.workspace ? { workspace: session.workspace } : {}) });
       }
     });
   }

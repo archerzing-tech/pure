@@ -25,6 +25,14 @@ Tier-2 结构化直查的整个解析器栈（意图分类器 + 天气/空气质
 
 MCP 的 12 个 tauri command（子进程 spawn / HTTP 转发 / JSON-RPC request / notify / shutdown / list + 6.4 OAuth loopback 接收器与令牌库，约 410 行）搬入新模块 `src-tauri/src/mcp.rs`。切缝是「命令层」与「子进程传输层」的分界：`McpHandle` / `McpRegistry` / `mcp_call_inner` 等底层传输与投毒扫描留在 lib.rs，模块反向引用；对 lib.rs 暴露 12 个命令与 `OAuthLoopbackRegistry`（run() 的 `.manage` 用）。机械移动零语义变化，cargo test 231 测全绿，lib.rs 16117 → 15716 行。
 
+**S1 飞轮首转：真实样本收割 + overlay 首次 ALLOW 落盘（P1-1）**
+
+自进化回路第一次在真实数据上转完一圈：两轮 GLM 真实多 agent 会话（五主题并行调研 → 5 路 researcher 委派；buggy 仓库评审 → 1 路 code_reviewer 委派），收割器落袋 researcher 6 条真实样本（断言由便宜模型起草、自洽门 base 重跑通过才收录），13.3 overlay 起草流以真实失败画像（30 天 151 派发 / 8 失败 / 主导 tool_error / 均耗时 206s）起草 → 编译校验 → 回归 A/B（6 例 × 两侧，4/6 ≥ 4/6）→ ALLOW → `~/.pure/personas/researcher.overlay.md` 落盘，重启后随系统提示并入 researcher 角色。新增 `scripts/s1-real-session.ts`（CLI 侧真实会话驱动器，按 GUI 存档格式落档使收割可回收）与 `scripts/s1-overlay-flow.ts`（overlay 流 headless 驱动，复用产品同一编排核心）。
+
+**S1 撞出来的两处收割器修复**
+
+真机跑 S1 暴露两个让收割器形同虚设的缺陷并修复：① 断言起草超时 60s 在推理型 flash 模型上每条必超时（glm-5.3-flash 深思档实测 165s）——放宽到 300s，收割是批量后台活，总墙钟由候选数上界兜底；② 收割与 A/B 重跑都在空临时目录里跑，文件依赖型角色的样本（code_reviewer 评审 `src/` 下的文件）永远过不了自洽门——评审对象不在那里。fixture 现在携带会话工作区（`RoleCaseFixture.workspace`），目录还在就原地重跑，没了如实退回空目录（不假装）。
+
 ## v3.0.3
 
 **图表放大视图与文件列表：真机撞出来的一批修复**

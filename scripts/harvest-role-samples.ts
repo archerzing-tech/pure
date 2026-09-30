@@ -93,7 +93,7 @@ const REGISTRY = new Map<string, SubagentDefinition>(
 
 // ── Read + harvest session archives ──
 
-interface SessionFile { id: string; messages: HarvestSession['messages'] }
+interface SessionFile { id: string; messages: HarvestSession['messages']; workspace?: string }
 
 async function readSessions(): Promise<SessionFile[]> {
   let dirs: string[] = [];
@@ -107,8 +107,10 @@ async function readSessions(): Promise<SessionFile[]> {
   for (const id of dirs) {
     try {
       const raw = await readFile(join(sessionsDir, id, 'session.json'), 'utf8');
-      const parsed = JSON.parse(raw) as { messages?: HarvestSession['messages'] };
-      if (Array.isArray(parsed.messages)) out.push({ id, messages: parsed.messages });
+      const parsed = JSON.parse(raw) as { messages?: HarvestSession['messages']; workspace?: string };
+      if (Array.isArray(parsed.messages)) {
+        out.push({ id, messages: parsed.messages, ...(typeof parsed.workspace === 'string' && parsed.workspace ? { workspace: parsed.workspace } : {}) });
+      }
     } catch {
       // A broken/empty archive must not stop the harvest — skip it.
     }
@@ -221,9 +223,20 @@ function safeContract(def: SubagentDefinition, sample: RoleDelegationSample): st
 
 /** Run the base persona once for one case and report whether the drafted
  *  assertions hold. The self-consistency gate: an assertion set the base
- *  persona cannot satisfy measures nothing, so it is never admitted. */
+ *  persona cannot satisfy measures nothing, so it is never admitted.
+ *  S1 真机（2026-09-30）：样本带工作区且目录还在 ⇒ 原地重跑（文件依赖型角色
+ *  的评审对象在那里）；否则空临时目录（研究型样本无感，文件型的会如实地
+ *  过不了断言——不假装）。 */
 async function basePasses(role: string, fixture: RoleCaseFixture): Promise<boolean> {
-  const workspace = await mkdtemp(join(resolve('/tmp'), `pure-harvest-${role}-`));
+  const hint = fixture.workspace;
+  let hinted = false;
+  if (hint) {
+    try {
+      const stat = await (await import('node:fs/promises')).stat(hint);
+      hinted = stat.isDirectory();
+    } catch { /* 目录没了就退回临时目录 */ }
+  }
+  const workspace = hinted ? hint! : await mkdtemp(join(resolve('/tmp'), `pure-harvest-${role}-`));
   const tools = new NodeToolAdapter({ workspace, sessionId: `harvest-${role}` });
   const orch = new SubagentOrchestrator({
     llm: adapter,
@@ -276,6 +289,7 @@ for (const [role, group] of samples) {
       args: sample.args,
       must: draft.must,
       ...(draft.mustNot.length > 0 ? { mustNot: draft.mustNot } : {}),
+      ...(sample.workspace ? { workspace: sample.workspace } : {}),
     };
     const passes = await basePasses(role, fixture).catch(() => false);
     if (!passes) {

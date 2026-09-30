@@ -23,6 +23,10 @@ export interface RoleCaseFixture {
   must: string[];
   /** Substrings that must NOT appear in the output. */
   mustNot?: string[];
+  /** S1 真机（2026-09-30）：文件依赖型样本的委派对象所在工作区。判卷不读它，
+   *  只是重跑器的提示——目录还在就原地重跑（评审/编辑才有对象可看），没了退
+   *  回空临时目录（此类样本会如实地过不了断言）。研究型样本无此字段。 */
+  workspace?: string;
 }
 
 export interface RoleCaseGrade {
