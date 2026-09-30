@@ -6651,7 +6651,11 @@ body {
   left: 0;
   transform-origin: 0 0;
   will-change: transform;
-  background: #ffffff;
+  /* Charts and mermaid bake theme colors into the SVG at render time (dark
+     theme bakes near-white text) — the card behind a zoomed diagram must be
+     the same theme token the inline card and the PNG export backdrop use,
+     or dark-mode text lands on white and vanishes. */
+  background: var(--bg-card);
   border-radius: 6px;
   padding: 20px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
