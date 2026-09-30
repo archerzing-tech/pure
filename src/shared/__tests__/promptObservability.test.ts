@@ -326,8 +326,30 @@ describe('delegation observations (T1)', () => {
     expect(delegation?.startedAt).toBeLessThanOrEqual(Date.now());
   });
 
-  it('records the failure path with an error kind and no output size', () => {
+  // P0-3（两柱焊点）— 子代理记忆注入的归因面：进块的条目 id 随结果上抛，
+  // 贡献统计将来据此切「给子代理的记忆有没有用」。旧结果（无字段）照旧可读。
+  it('carries the injected memory entry ids on the delegation observation', () => {
     const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    observability.setDelegationRolePredicate(() => true);
+    const run = observability.startRun();
+    observability.recordEvent(run, delegationEvent({
+      result: { agentId: 'ag-deadbeef', memoryInjected: ['p1', 'p2'] },
+    }));
+    observability.finishRun(run);
+    const record = observability.records().find((r) => r.type === 'agent_run');
+    const delegation = record && record.type === 'agent_run' ? record.delegations![0] : undefined;
+    expect(delegation?.memoryInjected).toEqual(['p1', 'p2']);
+    // 无注入 = 字段缺席（与 usage 同款可选语义，不冒充空数组）。
+    const bareObservability = new PromptObservability({}, new InMemoryPromptObservationStore());
+    bareObservability.setDelegationRolePredicate(() => true);
+    const bareRun = bareObservability.startRun();
+    bareObservability.recordEvent(bareRun, delegationEvent());
+    bareObservability.finishRun(bareRun);
+    const bare = bareObservability.records().find((r) => r.type === 'agent_run');
+    expect(bare && bare.type === 'agent_run' ? bare.delegations![0].memoryInjected : 'present').toBeUndefined();
+  });
+
+  it('records the failure path with an error kind and no output size', () => {    const observability = new PromptObservability({}, new InMemoryPromptObservationStore());
     observability.setDelegationRolePredicate(() => true);
     const run = observability.startRun();
     observability.recordEvent(run, delegationEvent({ success: false, result: { agentId: 'ag-failed1' }, error: 'Connection reset while fetching' }));

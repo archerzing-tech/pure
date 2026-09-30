@@ -225,6 +225,7 @@ async function createTools(
   mcpExcludedPrefixes?: string[],
   permissionMode: PermissionMode = 'NORMAL',
   permissionHandler?: PermissionRequestHandler,
+  evolutionEnabled = true,
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
@@ -304,6 +305,13 @@ export interface HarnessOverrides {
 
 async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
   const { adapter } = createAdapter(args);
+  // P0-3 — 进化总开关与项目域在 createTools 之前算好：编排器（子代理记忆
+  // 注入）与 Harness（父侧）用同一份，与 GUI 的 chat.ts 装配同构。
+  const evolutionEnabled = overrides.evolutionEnabled ?? (process.env.PURE_EVOLUTION_DISABLED !== '1');
+  // Project-scoped memory: resolved workspace (same as createTools uses).
+  const projectPath = args.workspace
+    ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
+    : process.cwd();
   // 9.2 — per-phase model routing (experimental): each phase naming a
   // different model rebuilds through createAdapter ({ ...args, model }), so
   // endpoint overrides, prompt budgets and provider quirks resolve exactly
@@ -330,6 +338,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     args.mcpExcludedPrefixes,
     overrides.permissionMode,
     overrides.permissionHandler,
+    evolutionEnabled,
   );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
@@ -389,6 +398,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
       // 阶段 13.3 — persona overlays (~/.pure/personas/*.overlay.md) merge into
       // the matching role's system prompt at spawn time.
       personaOverlays: loadCliPersonaOverlays(externalRoles.defs),
+      // P0-3 两柱焊点 — 子代理记忆注入：同一份 CLI 记忆库 + 工作区项目域 +
+      // 进化总开关（函数顶算好，与 Harness 那份同源零漂移）。
+      memory: memoryStore,
+      memoryProjectPath: projectPath,
+      evolutionEnabled,
     });
     for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);
@@ -399,10 +413,6 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     // can actually delegate (getTools() alone filters subagents out).
     toolsDefs = [...tools.getTools(), ...tools.getSubagentTools()];
   }
-  // Project-scoped memory: resolved workspace (same as createTools uses).
-  const projectPath = args.workspace
-    ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
-    : process.cwd();
 
   // User hooks (hooks.json): only the global layer (~/.pure) is loaded for
   // now. The workspace layer is project-provided and waits for its permission
@@ -449,10 +459,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     userHookRunner,
     failurePolicy: plumbing.failurePolicy,
     // P0 棘轮 — 进化总开关的 CLI 形态（GUI 走 config.skills.evolution）。
-    // 控归因记账、后台编排与 E1.1 反思器（P0-1：关掉时 agent_run 不带
-    // memoryInjection 字段、回合末零反思 LLM 调用、lesson 走模板——即进化层
-    // 不存在时的行为）。
-    evolutionEnabled: overrides.evolutionEnabled ?? (process.env.PURE_EVOLUTION_DISABLED !== '1'),
+    // 控归因记账、后台编排与 E1.1 反思器（P0-1）及子代理记忆注入（P0-3）；
+    // 函数顶算好，与编排器同一份。
+    evolutionEnabled,
   });
 
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };

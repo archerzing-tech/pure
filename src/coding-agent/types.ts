@@ -191,6 +191,11 @@ export interface SubagentResult {
    *  Completed payload so cost per role is computable (total × rate is not).
    *  Optional: absent on results produced before this field existed. */
   usage?: TokenUsage;
+  /** P0-3（两柱焊点）— 本次委派 spawn 时注入该子代理 system prompt 的记忆条目
+   *  id。只在有注入时出现（与 usage 同款可选语义，旧结果/parser 不受影响）；
+   *  随 ToolResult 落进 DelegationObservation，贡献统计将来才能回答「给子代理
+   *  的记忆有没有用」。 */
+  memoryInjected?: string[];
 }
 
 export interface SubagentRegistry {

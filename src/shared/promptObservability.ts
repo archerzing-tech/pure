@@ -158,6 +158,10 @@ export interface DelegationObservation {
   usage?: TokenUsage;
   outputChars?: number;
   errorKind?: string;
+  /** P0-3（两柱焊点）— 本次委派 spawn 时注入该子代理 system prompt 的记忆条目
+   *  id（只在有注入时出现，与 usage 同款可选语义）。贡献统计将来据此回答
+   *  「给子代理的记忆有没有用」——父侧 memoryInjection 的子代理对应面。 */
+  memoryInjected?: string[];
 }
 
 /** T1 seam — decides whether a ToolResult for `toolName` is a subagent role
@@ -535,6 +539,7 @@ export class PromptObservability {
       usage: inner.usage,
       outputChars: typeof inner.output === 'string' ? inner.output.length : undefined,
       errorKind: error ? errorKind(error) : undefined,
+      memoryInjected: inner.memoryInjected?.length ? inner.memoryInjected : undefined,
     };
   }
 }
@@ -545,6 +550,8 @@ interface SubagentResultLike {
   agentId?: string;
   output?: string;
   usage?: TokenUsage;
+  /** P0-3 — spawn 时注入该子代理的记忆条目 id（见 DelegationObservation）。 */
+  memoryInjected?: string[];
 }
 
 export const promptObservability = new PromptObservability();

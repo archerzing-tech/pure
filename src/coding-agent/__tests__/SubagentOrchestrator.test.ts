@@ -1103,3 +1103,101 @@ describe('SubagentOrchestrator branch events (第 2 期第四刀)', () => {
     expect(result.success).toBe(true);
   });
 });
+
+// ── P0-3（2026-09-30，两柱焊点）— 子代理记忆注入的装配面 ──
+// 纯核（检索/分组/定容）在 subagentMemory.test.ts；这里锁三件装配事：
+// 注入真的进了 spawn 出去的 system prompt、开关关掉逐字节回到无注入、
+// 检索失败降级不挡委派。
+
+/** Capturing LLM — records the system prompt each spawned engine run started with. */
+class SystemPromptCapturingLLM implements LLMAdapter {
+  readonly systemPrompts: string[] = [];
+  async *stream(messages: Message[], _tools: ToolDefinition[], _signal?: AbortSignal): AsyncGenerator<LLMChunk, void, void> {
+    this.systemPrompts.push(String(messages[0]?.content ?? ''));
+    yield { type: 'content', content: 'research findings' };
+    yield { type: 'done', content: 'research findings', toolCalls: [] };
+  }
+  async complete(): Promise<{ content: string; toolCalls: never[] }> {
+    return { content: 'research findings', toolCalls: [] };
+  }
+}
+
+function memoryEntry(id: string, type: 'procedure' | 'error_pattern', content: string): import('../../shared/types').MemoryEntry {
+  return { id, type, content, timestamp: Date.now(), sessionId: 's', projectPath: '/ws' };
+}
+
+function delegationMemoryStore(entries: import('../../shared/types').MemoryEntry[]): import('../../shared/types').IMemoryStore {
+  return {
+    add: async () => 'x',
+    search: async () => entries,
+    list: () => entries,
+    forget: async () => {},
+    removeById: async () => false,
+    decay: async () => {},
+    recordHits: async () => {},
+  };
+}
+
+describe('SubagentOrchestrator delegation memory (P0-3)', () => {
+  const MEMORY = [memoryEntry('p1', 'procedure', 'proven playbook for this topic')];
+
+  it('injects retrieved experience into the spawned engine system prompt and reports the entry ids', async () => {
+    const llm = new SystemPromptCapturingLLM();
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      memory: delegationMemoryStore(MEMORY),
+      memoryProjectPath: '/ws',
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    expect(result.success).toBe(true);
+    expect(llm.systemPrompts[0]).toContain('<delegated_task_memory>');
+    expect(llm.systemPrompts[0]).toContain('proven playbook for this topic');
+    expect((result.result as SubagentResult).memoryInjected).toEqual(['p1']);
+  });
+
+  it('keeps the delegation prompt byte-identical when the evolution switch is off', async () => {
+    const baselineLlm = new SystemPromptCapturingLLM();
+    const baseline = new SubagentOrchestrator({
+      llm: baselineLlm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+    });
+    baseline.register(subagentDef('test_researcher'));
+    await baseline.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    const offLlm = new SystemPromptCapturingLLM();
+    const off = new SubagentOrchestrator({
+      llm: offLlm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+      memory: delegationMemoryStore(MEMORY), // 库在场也没用 —— 开关压过一切
+      memoryProjectPath: '/ws',
+      evolutionEnabled: false,
+    });
+    off.register(subagentDef('test_researcher'));
+    const result = await off.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(offLlm.systemPrompts[0]).toBe(baselineLlm.systemPrompts[0]); // 逐字节一致
+    expect(offLlm.systemPrompts[0]).not.toContain('<delegated_task_memory>');
+    expect((result.result as SubagentResult).memoryInjected).toBeUndefined();
+  });
+
+  it('degrades to no injection when the memory search fails — the delegation still flies', async () => {
+    const broken: import('../../shared/types').IMemoryStore = {
+      ...delegationMemoryStore(MEMORY),
+      search: async () => { throw new Error('store down'); },
+    };
+    const llm = new SystemPromptCapturingLLM();
+    const orch = new SubagentOrchestrator({
+      llm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+      memory: broken, memoryProjectPath: '/ws',
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    expect(result.success).toBe(true);
+    expect(llm.systemPrompts[0]).not.toContain('<delegated_task_memory>');
+    expect((result.result as SubagentResult).memoryInjected).toBeUndefined();
+  });
+});

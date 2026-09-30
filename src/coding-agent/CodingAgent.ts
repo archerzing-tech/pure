@@ -187,6 +187,11 @@ export class CodingAgent {
       takeSteerMessages: config.takeSteerMessages,
       // 13.3：宿主装载好的角色 overlay 透传给编排器（spawn 时合并进 system prompt）。
       personaOverlays: config.personaOverlays,
+      // P0-3 两柱焊点：父会话同一份记忆库 + 项目域 + 进化总开关透传给编排器
+      //（spawn 时检索一次相关经验拼进该支 prompt；关掉即逐字节回到无注入）。
+      memory: config.memory,
+      memoryProjectPath: config.projectPath,
+      evolutionEnabled: config.evolutionEnabled,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 

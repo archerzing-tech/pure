@@ -11,6 +11,7 @@ import type {
   BudgetConfig,
   EngineContext,
   FailurePolicy,
+  IMemoryStore,
   IStateStore,
   LLMAdapter,
   Message,
@@ -24,6 +25,7 @@ import type { TokenUsage } from '../shared/types';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
+import { retrieveDelegationMemory } from './subagentMemory';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeContext';
 import type { SubagentDefinition, SubagentResult } from './types';
@@ -227,6 +229,18 @@ export interface SubagentOrchestratorConfig {
    * 命中的角色在 spawn 时把 overlay 追加在 base persona 之后（只增补，不重写）；
    * 无命中的角色 prompt 逐字节不变。宿主装载（启动扫描），运行中不热删。 */
   personaOverlays?: Map<string, string>;
+  /** P0-3（2026-09-30，两柱焊点）— 父会话同一份记忆库。传入后每个委派在
+   *  spawn 时以「角色 + 委派参数」检索一次相关经验（procedure 优先、错误
+   *  教训次之，k=6、块 ≤1600 字符），拼在该支 system prompt 尾部。每支只
+   *  此一次、运行中不刷新（同父会话「会话内冻结」决策）；检索失败/超时降级
+   *  为不注入。Omitted = 现状（子代理不吃记忆）。 */
+  memory?: IMemoryStore;
+  /** 记忆检索的项目域（与父 Harness 的 projectPath 同源 —— 记忆按项目隔离）。 */
+  memoryProjectPath?: string;
+  /** 进化总开关（与父 Harness 的 evolutionEnabled 同源）。false 时不注入 ——
+   *  总开关关闭即整条自进化弧（含抵达子代理的部分）缺席，委派 prompt 与
+   *  本焊点诞生前逐字节一致。 */
+  evolutionEnabled?: boolean;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -519,10 +533,27 @@ export class SubagentOrchestrator implements ToolAdapter {
     };
 
     try {
+      // P0-3 两柱焊点 — spawn 时检索一次与「角色 + 委派参数」相关的经验，拼在
+      // 该支 system prompt 尾部（overlay 之后）。每支只此一次（同父会话的会话内
+      // 冻结决策）；检索失败/超时降级为不注入；总开关关闭时整段缺席 —— 委派
+      // prompt 与本焊点诞生前逐字节一致。进块的条目 id 随结果上抛供归因。
+      let memoryBlock = '';
+      let memoryInjected: string[] | undefined;
+      if (this.config.memory && this.config.evolutionEnabled !== false) {
+        const query = `${def.name}: ${typeof args.prompt === 'string' ? args.prompt : JSON.stringify(args)}`;
+        const retrieved = await retrieveDelegationMemory({
+          store: this.config.memory,
+          query,
+          projectPath: this.config.memoryProjectPath,
+        });
+        memoryBlock = retrieved.block;
+        if (retrieved.entryIds.length > 0) memoryInjected = retrieved.entryIds;
+      }
       // 13.3 合并点：base（代码里，不动）+ 进化 overlay（命中才追加）+ 机械性
-      // 汇报格式说明。删 overlay 文件即回滚——下一个会话自然回原样。
+      // 汇报格式说明 +（P0-3）委派记忆块。删 overlay 文件即回滚——下一个会话
+      // 自然回原样。
       const overlay = this.config.personaOverlays?.get(def.name);
-      const systemPrompt = applyPersonaOverlay(def.createSystemPrompt(args), overlay) + subagentReportNote(def.name);
+      const systemPrompt = applyPersonaOverlay(def.createSystemPrompt(args), overlay) + subagentReportNote(def.name) + memoryBlock;
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);
@@ -694,6 +725,7 @@ export class SubagentOrchestrator implements ToolAdapter {
               duration: done(0),
               tokensUsed,
               usage,
+              memoryInjected,
             },
             success: true,
             duration: done(0),
