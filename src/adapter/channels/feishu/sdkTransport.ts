@@ -114,10 +114,11 @@ function toRawMessage(data: unknown, botOpenId?: string): FeishuRawMessage | nul
 }
 
 export async function createFeishuSdkTransport(options: FeishuSdkTransportOptions): Promise<FeishuTransport> {
-  const specifier = '@larksuiteoapi/node-sdk';
+  // import 必须写字面量：Bun build --compile 只内嵌可静态追踪的模块；
+  // 变量形式的动态 import 在单文件二进制里解析不到，飞书通道会静默缺席。
   let mod: LarkModuleShape;
   try {
-    mod = (await import(specifier)) as unknown as LarkModuleShape;
+    mod = (await import('@larksuiteoapi/node-sdk')) as unknown as LarkModuleShape;
   } catch (err) {
     throw new Error(
       `飞书通道需要 @larksuiteoapi/node-sdk（≥1.24.0）：${err instanceof Error ? err.message : String(err)}。` +

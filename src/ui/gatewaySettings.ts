@@ -95,7 +95,10 @@ export function renderGatewaySettings(host: HTMLElement): void {
 
   function setBusy(v: boolean): void {
     busy = v;
-    for (const b of [startBtn, stopBtn, restartBtn, testBtn]) b.disabled = v;
+    for (const b of [startBtn, stopBtn, restartBtn, testBtn]) {
+      b.disabled = v;
+      if (v) b.blur(); // 操作中不保留按下态；结束由 apply() 按真实状态接管
+    }
   }
 
   function apply(s: GatewayStatus): void {
@@ -107,6 +110,7 @@ export function renderGatewaySettings(host: HTMLElement): void {
         : `○ ${t('gateway.stopped')}`;
     if (channelsHint) channelsHint.textContent = s.channels.length > 0 ? s.channels.join(', ') : '—';
     if (pidHint) pidHint.textContent = s.pid ? `pid ${s.pid} · ${t('gateway.since')} ${fmtTime(s.started_at)}` : '—';
+    startBtn.disabled = busy || s.pid_alive;
     stopBtn.disabled = busy || !s.pid_alive;
     restartBtn.disabled = busy || !s.pid_alive;
   }

@@ -147,10 +147,10 @@ export function dingTalkImageRequest(
 }
 
 export async function createDingTalkSdkTransport(options: DingTalkSdkTransportOptions): Promise<DingTalkTransport> {
-  const specifier = 'dingtalk-stream';
+  // import 必须写字面量：Bun build --compile 只内嵌可静态追踪的模块。
   let mod: DingTalkModuleShape;
   try {
-    mod = (await import(specifier)) as unknown as DingTalkModuleShape;
+    mod = (await import('dingtalk-stream')) as unknown as DingTalkModuleShape;
   } catch (err) {
     throw new Error(
       `钉钉通道需要 dingtalk-stream：${err instanceof Error ? err.message : String(err)}。` +

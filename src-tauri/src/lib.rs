@@ -11864,10 +11864,13 @@ fn gateway_pid_alive(pid: i64) -> bool {
 }
 
 /// 探测 gateway 的 webchat HTTP 端口（连通性 = 端口有 HTTP 应答）。
+/// no_proxy 必须显式关掉：系统代理环境下 reqwest 会把 127.0.0.1 的探测
+/// 发去代理，代理回不回都判定不了本机端口死活。
 async fn gateway_http_ok(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(1500))
+        .no_proxy()
         .build()
         .unwrap_or_default();
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 400)
