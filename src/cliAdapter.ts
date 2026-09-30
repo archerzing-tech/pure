@@ -8,6 +8,7 @@ import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
 import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor, promptBudgetForProvider, protocolForURL, resolvePromptBudget } from './shared/providers';
+import { reflectModelFor } from './shared/phaseModels';
 import { bold, cyan, dim, red } from './termcolors';
 import type { LLMAdapter } from './shared/types';
 import type { CliArgs } from './cliConfig';
@@ -118,4 +119,14 @@ const PROVIDER_ENV_HINT: Record<Exclude<CliArgs['provider'], 'mock'>, string> = 
   'nvidia': 'NVIDIA_API_KEY',
 };
 
-export { createAdapter, PROVIDER_LABELS, PROVIDER_ENV_HINT };
+/** P0-2（2026-09-30）— sleep-time 反思 / overlay 起草的 LLM 解析（E0.3 的
+ *  REFLECT 相位契约，CLI 侧）。配了 --reflect-model / config.phaseModels.reflect
+ *  时为那个模型建一个同 provider adapter（端点覆盖、预算、provider 怪癖与主
+ *  adapter 同一套解析）；没配或覆盖等于主模型时直接复用调用方手里的主 adapter，
+ *  不重建。与 Harness 的 llmFor('REFLECT') ?? llm 同一回退语义。 */
+function resolveReflectAdapter(args: CliArgs, main: LLMAdapter): LLMAdapter {
+  const model = reflectModelFor(args.phaseModels, args.model);
+  return model ? createAdapter({ ...args, model }).adapter : main;
+}
+
+export { createAdapter, resolveReflectAdapter, PROVIDER_LABELS, PROVIDER_ENV_HINT };

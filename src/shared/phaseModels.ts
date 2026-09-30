@@ -69,3 +69,15 @@ export function sanitizePhaseModelConfig(raw: unknown): PhaseModelConfig | undef
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
+
+/** P0-2（2026-09-30）— sleep-time 反思 / overlay 起草该用的模型 id：路由开着取
+ *  REFLECT 覆盖，没开返回 undefined（= 调用方回退自己的主 adapter）。给「手里
+ *  只有一个 adapter、没有 llmFor 解析器」的宿主用（GUI 空闲循环 / CLI oneshot
+ *  与 /exit 路径）——E0.3 的 llmFor('REFLECT') 契约在这些装配点同样成立，此前
+ *  两处绑的都是主模型，反思的成本护栏只剩调用次数、单次价格没降。 */
+export function reflectModelFor(
+  cfg: PhaseModelConfig | undefined,
+  mainModel: string,
+): string | undefined {
+  return phaseModelOverrides(cfg, mainModel).REFLECT;
+}

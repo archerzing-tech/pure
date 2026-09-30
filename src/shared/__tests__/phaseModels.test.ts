@@ -1,6 +1,6 @@
 // 9.2 — phase-model override normalization shared by the GUI and the CLI.
 import { describe, expect, test } from 'bun:test';
-import { mergePhaseModelConfig, phaseModelOverrides } from '../phaseModels';
+import { mergePhaseModelConfig, phaseModelOverrides, reflectModelFor } from '../phaseModels';
 
 describe('phaseModelOverrides', () => {
   test('keeps only phases that actually reroute', () => {
@@ -46,5 +46,24 @@ describe('mergePhaseModelConfig', () => {
   test('no base and no flags yields undefined (config stays unset)', () => {
     expect(mergePhaseModelConfig(undefined, {})).toBeUndefined();
     expect(mergePhaseModelConfig(undefined, { think: '' })).toBeUndefined();
+  });
+});
+
+// P0-2 — sleep-time reflection / overlay drafting resolves its model through
+// the same REFLECT override the in-turn reflector uses (E0.3 contract), so the
+// cheap-channel guard applies to every host that holds a single adapter.
+describe('reflectModelFor', () => {
+  test('returns the REFLECT override when routing is on', () => {
+    expect(reflectModelFor({ reflect: 'glm-4.5-flash' }, 'glm-5.3-flash')).toBe('glm-4.5-flash');
+  });
+
+  test('undefined when unset, blank, or equal to the main model — caller falls back to its main adapter', () => {
+    expect(reflectModelFor(undefined, 'glm-5.3-flash')).toBeUndefined();
+    expect(reflectModelFor({ reflect: '  ' }, 'glm-5.3-flash')).toBeUndefined();
+    expect(reflectModelFor({ reflect: 'glm-5.3-flash' }, 'glm-5.3-flash')).toBeUndefined();
+  });
+
+  test('other phases never leak into the reflect slot', () => {
+    expect(reflectModelFor({ think: 'glm-5.3' }, 'glm-5.3-flash')).toBeUndefined();
   });
 });

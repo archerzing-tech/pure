@@ -72,7 +72,7 @@ async function waitForScheduledInput(timing: InputTiming, signal?: AbortSignal):
   });
 }
 import type { CliArgs } from './cliConfig';
-import { createAdapter } from './cliAdapter';
+import { createAdapter, resolveReflectAdapter } from './cliAdapter';
 import { createHarness, distillSkillFromMemory, learnFromInput, printToolCorrectionHints } from './cliHarness';
 import { matchSkillDistillInstruction } from './shared/skillDistill';
 
@@ -723,7 +723,7 @@ async function runOneShot(args: CliArgs) {
   // P0-1 — sleep-time 进化循环（oneshot 短预算版）：直喂刚结束的会话 + 观测→
   // 建议增量路由。进程内 in-turn 反思已写过的会话被 reflect: 查重跳过 ——
   // 这里只补漏（反思失败/超时）+ 跑建议路由；总开关关了直接零开销。
-  await runCliSleepCycle({ llm: adapter, sessionId, projectPath, messages: result.messages, budget: 'cli' });
+  await runCliSleepCycle({ llm: resolveReflectAdapter(args, adapter), sessionId, projectPath, messages: result.messages, budget: 'cli' });
 
   // MCP subprocesses keep stdio pipes open — without an explicit disconnect the
   // event loop never drains and the one-shot CLI would hang after finishing.
@@ -819,7 +819,7 @@ async function runRepl(args: CliArgs) {
       // P0-1 — 退出前的速战速决版（10s/1 会话/2 调用）：直喂 REPL 消息流跑
       // 一轮进化循环；预算到了立刻走，绝不 hold 退出。空会话（没聊过）不跑。
       if (messages.length > 0) {
-        await runCliSleepCycle({ llm: adapter, sessionId, projectPath, messages, budget: 'exit' });
+        await runCliSleepCycle({ llm: resolveReflectAdapter(args, adapter), sessionId, projectPath, messages, budget: 'exit' });
       }
       process.stdout.write(`  ${dim('👋 Goodbye.')}\n`);
       saveInputHistory();

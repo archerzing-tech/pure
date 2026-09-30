@@ -34,6 +34,7 @@ import {
 import { buildOverlayFlowDeps } from './overlayFlowHost';
 import { runPersonaOverlayFlow } from './personaOverlayFlow';
 import { createLLMAdapter } from './chat';
+import { reflectModelFor } from '../shared/phaseModels';
 
 /** 轮询节奏：每 10 分钟醒来看一眼（开关/忙碌/间隔都可能在变）。 */
 export const ORCHESTRATOR_POLL_MS = 10 * 60 * 1000;
@@ -166,12 +167,16 @@ async function loadSession(id: string): Promise<SleepTimeTurnInput | undefined> 
 // ── 依赖装配 ──
 
 async function buildGuiSleepTimeDeps(cfg: PureConfig): Promise<SleepTimeDeps> {
+  // P0-2 — 反思/overlay 起草走 E0.3 的 REFLECT 相位通道（同 Harness 的
+  // llmFor('REFLECT') 契约）：配了 reflect 相位路由就建便宜模型 adapter，
+  // 没配回退主模型（现状不变，零新配置面）。
+  const reflectModel = reflectModelFor(cfg.phaseModels, cfg.model);
   return {
     cursor: { load: loadCursor, save: saveCursor },
     listPendingSessions,
     loadSession,
     memory: memoryStore,
-    llm: createLLMAdapter(cfg),
+    llm: reflectModel ? createLLMAdapter({ ...cfg, model: reflectModel }) : createLLMAdapter(cfg),
     projectPath: host.getWorkspace(),
     observations: async () => {
       try {

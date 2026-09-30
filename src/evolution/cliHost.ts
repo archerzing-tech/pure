@@ -105,7 +105,8 @@ function buildCliSleepTimeDeps(llm: LLMAdapter, projectPath: string, budget: 'cl
 }
 
 export interface CliSleepCycleInput {
-  /** 便宜档 LLM（调用方已有 adapter —— 复用，不重建）。 */
+  /** 反思/起草用 LLM：调用方经 resolveReflectAdapter 解析（P0-2 —— 配了
+   *  REFLECT 相位路由走便宜模型，没配即主 adapter）。 */
   llm: LLMAdapter;
   /** 刚结束会话的 id（reflect: 查重键的一半 —— 与 Harness 落库格式对齐）。 */
   sessionId: string;

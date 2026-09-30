@@ -9,6 +9,10 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 E1.1 回合内反思器此前不受进化总开关管辖——用户在设置里关掉「进化」（或 CLI 设 `PURE_EVOLUTION_DISABLED=1`）后，回合末的反思 LLM 调用与结构化 lesson 落库照旧发生，与「关掉后行为与纯运行时一致」的红线冲突。收口在 Harness 构造点：`evolutionEnabled: false` 压过 reflection 自身的配置，无论宿主怎么调反思参数，回合末都零反思调用、落回同步模板写入（即 E1.1 诞生前的行为）。GUI / CLI / 通道三个宿主传的是同一个布尔，一处收口零漂移；记忆注入等现状行为不受影响。
 
+**sleep-time 进化循环接 REFLECT 便宜通道（P0-2）**
+
+GUI 空闲循环与 CLI oneshot/exit 路径此前给 sleep-time 编排器绑的都是主模型——反思与 overlay 起草的成本护栏只剩调用次数预算，单次价格没降，与纯核注释声明的 E0.3 REFLECT 契约不符。新增 `reflectModelFor` 共享解析（与回合内反思器同一份相位路由规则）：配了按阶段模型路由的 REFLECT 档，sleep-time 的反思/起草就建便宜模型 adapter；没配回退主模型，行为不变、零新配置面。
+
 ## v3.0.3
 
 **图表放大视图与文件列表：真机撞出来的一批修复**
