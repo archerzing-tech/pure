@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "pure"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "base64 0.21.7",
  "block2",

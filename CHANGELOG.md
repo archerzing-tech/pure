@@ -3,6 +3,21 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v3.0.3
+
+**图表放大视图与文件列表：真机撞出来的一批修复**
+
+3.0.3 随版修复批，三处都来自真实使用：暗色模式放大图表文字消失、放大视图白色方块、列目录报「找不到路径」。不新增能力，只把撞出来的毛边磨平。
+
+**图表放大视图**
+
+- 暗色模式下双击放大折线图/柱状图，标题、坐标轴、图例全看不见：图表颜色在渲染时烤进 SVG（暗色主题烤进近白文字），放大视图的底卡却写死 `#ffffff`——近白文字落纯白卡。底卡改跟主题 token（`--bg-card`）：暗色 `#222222` 与聊天里的内联图表卡同色，亮色 `#FBFAF9` 视觉与原白色无异；PNG 导出底衬本来就是这把尺子，三处从此对齐同一契约。mermaid / puml / svg 块放大同样受益。
+- 双击放大 echarts 图表时左上角钉着一个孤立的白色小方块：echarts（zrender SVG painter）在 svg 根上带内联 `position:absolute`，克隆进放大查看器后图表脱离常规流，白色底卡 shrink-wrap 只剩 40px padding。克隆根 svg 强制拉回常规流后底卡正常包裹整图。
+
+**文件列表**
+
+- 已设置用户空间，pure 第一次列目录却报「找不到路径」（path is required）：模型按工具 schema「默认列根目录」的语义常显式传 `path:""`（部分 provider 会把可选参数自动补成空串），GUI 适配器的 `?? '.'` 只拦 null/undefined，空串原样穿到 Rust 被拒。list_files 补上 search_files / find_files / glob_files 早就在用的空串兜底——空串按工作区根目录列出，回归测试覆盖空串与纯空白。
+
 ## v3.0.2
 
 **成本视图：这支团队贵在哪**
