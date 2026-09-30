@@ -19,6 +19,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
+import type { PermissionMode, PermissionRequestHandler } from './coding-agent/types';
+import type { Verifier } from './coding-agent/Verifier';
 import { FSMemoryStore } from './adapter/memory/FSMemoryStore';
 import { scanToolCorrections } from './adapter/memory/toolCorrections';
 import { createEmbeddingMemoryStore } from './shared/memoryFactory';
@@ -221,6 +223,8 @@ async function createTools(
   sessionId = '',
   mcpServers?: MCPServerConfig[],
   mcpExcludedPrefixes?: string[],
+  permissionMode: PermissionMode = 'NORMAL',
+  permissionHandler?: PermissionRequestHandler,
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
@@ -244,7 +248,9 @@ async function createTools(
   // every tool call is allowed without prompting. Useful for piped / scripted
   // invocations where no human is at the keyboard to answer y/n/a.
   const registry = new ToolRegistry(adapter);
-  registry.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
+  // 通道来源默认 PLAN（只读）并由 gateway 注入审批 handler；CLI 保持 NORMAL +
+  // 终端 y/n/a。同一接口，两个表面，PermissionManager 本身零改动。
+  registry.setPermissionManager(new PermissionManager(permissionMode, permissionHandler ?? createCliPermissionHandler(autoApprove)));
 
   // MCP servers: GUI-written ~/.pure/config.json `mcpServers` plus repeatable
   // --mcp-server flags. Tools are registered into the same registry as the
@@ -280,7 +286,23 @@ function createStore(args: CliArgs): IStateStore | undefined {
 
 // ── Harness factory ──
 
-async function createHarness(args: CliArgs) {
+// 通道宿主（gateway）经由这里复用同一份 createHarness 装配。全是可选覆盖：
+// 不传时行为与本字段存在前逐字节一致（CLI / GUI 路径不受影响）。
+export interface HarnessOverrides {
+  sessionId?: string;
+  /** 需要持久化 checkpoint（通道会话重启后要能续聊）。 */
+  persistState?: boolean;
+  permissionMode?: PermissionMode;
+  permissionHandler?: PermissionRequestHandler;
+  evolutionEnabled?: boolean;
+  workspaceAvailable?: boolean;
+  /** 直接指定验证器。 */
+  verifier?: Verifier;
+  /** 按最终 LLM adapter 构造验证器（通道档要 GUI 那档的 LLM 复核）。 */
+  verifierFactory?: (llm: LLMAdapter) => Verifier;
+}
+
+async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
   const { adapter } = createAdapter(args);
   // 9.2 — per-phase model routing (experimental): each phase naming a
   // different model rebuilds through createAdapter ({ ...args, model }), so
@@ -299,11 +321,19 @@ async function createHarness(args: CliArgs) {
     const routed = Object.entries(phaseOverrides).map(([phase, model]) => `${phase}→${model}`).join(', ');
     process.stderr.write(`  ${dim('[phase-routing]')} ${dim(routed)}\n`);
   }
-  const sessionId = args.resume || `session_${Date.now()}`;
-  const createdTools = await createTools(args.workspace, args.autoApprove, sessionId, args.mcpServers, args.mcpExcludedPrefixes);
+  const sessionId = overrides.sessionId ?? (args.resume || `session_${Date.now()}`);
+  const createdTools = await createTools(
+    args.workspace,
+    args.autoApprove,
+    sessionId,
+    args.mcpServers,
+    args.mcpExcludedPrefixes,
+    overrides.permissionMode,
+    overrides.permissionHandler,
+  );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
-  const store = args.resume ? createStore(args) : undefined;
+  const store = (args.resume || overrides.persistState) ? createStore(args) : undefined;
 
   // Default Harness plumbing (ContextEngine + rule-based verifier + default
   // hooks + default failure policy) shared with the GUI's CodingAgent — one
@@ -399,7 +429,7 @@ async function createHarness(args: CliArgs) {
     stateStore: store,
     memory: memoryStore,
     projectPath,
-    workspaceAvailable: true,
+    workspaceAvailable: overrides.workspaceAvailable ?? true,
     promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
     // G-3 fix: the ContextEngine (with LLM summarization fallback) is wired in
     // so long REPL sessions don't grow without bound — the CLI's Harness never
@@ -410,7 +440,9 @@ async function createHarness(args: CliArgs) {
     // rewrite). The LLM re-check of the final answer is NOT run synchronously
     // here: the round-trip it added after the answer stream kept the CLI stuck
     // in "verifying…" and a failed verdict rewrote the answer just printed.
-    verifier: plumbing.verifier,
+    // 通道来源没有人在旁边看输出，验证是唯一的质量闸 —— 由 overrides 换成
+    // GUI 那档（含 LLM 复核），延迟换正确性（设计文档 §5.2）。
+    verifier: overrides.verifier ?? overrides.verifierFactory?.(adapter) ?? plumbing.verifier,
     // Lifecycle hooks + escalating failure recovery policy.
     hooks: plumbing.hooks,
     userHooks,
@@ -419,7 +451,7 @@ async function createHarness(args: CliArgs) {
     // P0 棘轮 — 进化总开关的 CLI 形态（GUI 走 config.skills.evolution）。
     // 只控归因记账与后台编排；关掉时 agent_run 不带 memoryInjection 字段，
     // 行为与本开关诞生前逐字节一致。
-    evolutionEnabled: process.env.PURE_EVOLUTION_DISABLED !== '1',
+    evolutionEnabled: overrides.evolutionEnabled ?? (process.env.PURE_EVOLUTION_DISABLED !== '1'),
   });
 
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };

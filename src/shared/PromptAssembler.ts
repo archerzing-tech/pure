@@ -31,7 +31,7 @@ import {
   type UserTurnContext,
 } from './promptLayers';
 
-export type PromptSurface = 'gui' | 'cli';
+export type PromptSurface = 'gui' | 'cli' | 'channel';
 export type PromptTaskMode = 'yolo' | 'plan' | 'build';
 export type { PromptBudgetConfig, ResolvedPromptBudget } from './providers';
 
@@ -196,7 +196,9 @@ function buildOutputStyle(surface: PromptSurface, imageGeneration = false): stri
     ? imageGeneration
       ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. To EXPLAIN an image the user attached (what it is, what it shows), answer directly and never call generate_image. For diagrams (flowcharts, architecture, logic, deployment, UML), emit fenced code blocks tagged svg, mermaid or puml/plantuml — ALL of them render locally in the app with no network: mermaid (default) for flowchart/sequence/state/ER/gantt/pie/mindmap/timeline, puml/plantuml when PlantUML's layout is better (class / component / deployment / activity / use-case diagrams).\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
       : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (structural diagrams default to fenced mermaid blocks: flowchart/sequence/class/state/ER/gantt/pie/mindmap/timeline; fenced puml/plantuml blocks render locally too — use them for class / component / deployment / activity / use-case UML). All of these render offline. A picture request is DELIVERED as the fenced svg/mermaid/puml block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
-    : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
+    : surface === 'channel'
+      ? '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the channel host rasterizes or degrades them per the platform\'s capabilities. Keep the response readable as a chat message, not as a terminal dump.'
+      : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
   return `Output style:
 - Default to inline replies for questions, explanations, and SHORT code snippets: render them directly in your response (use fenced markdown code blocks for code). Call write_file / edit_file / replace_files ONLY when the user explicitly asks to save or persist to disk, names a target path, or the task requires on-disk artifacts (e.g. "scaffold a project at /tmp/foo", "create README.md", "fix this file").
 - Engineering exception to that default: when the workspace holds a project that the request builds into or fixes — a function or module to implement, a stub/NotImplementedError to fill, tests to pass, a bug to repair — implement the change with write_file / edit_file and run the project's own verification (tests) instead of pasting the code only in the reply; an inline-only answer fails the task even though no path was named. Questions and explanations about code stay inline regardless.
@@ -213,7 +215,9 @@ ${visualOutput}
 function buildToolCallingRules(surface: PromptSurface): string {
   const workspaceRule = surface === 'gui'
     ? '- If no user workspace is configured, use the isolated application temporary workspace provided for this session. Do not imply that those files were written into a user-selected project.'
-    : '- The CLI defaults workspace to the current directory. Do not claim a file was written outside the workspace or invent a workspace path.';
+    : surface === 'channel'
+      ? '- The channel host resolves a workspace from the sender binding; use it as given. When no workspace is bound this is a read-only chat — do not claim a file was written.'
+      : '- The CLI defaults workspace to the current directory. Do not claim a file was written outside the workspace or invent a workspace path.';
   return `Tool-calling rules:
 - NEVER emit tool calls as XML or text (no <tool_calls>, <invoke name="...">, or JSON inside your reply).
 - Tool calls are made ONLY through the function-calling interface, never as visible text.
