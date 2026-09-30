@@ -21,6 +21,10 @@ GUI 空闲循环与 CLI oneshot/exit 路径此前给 sleep-time 编排器绑的�
 
 Tier-2 结构化直查的整个解析器栈（意图分类器 + 天气/空气质量/地理编码/新闻/wiki/IP/汇率/股价/GitHub/世界银行各 resolver + `web_public_api` 命令，约 1300 行）从 17,410 行的 lib.rs 整段搬入新模块 `src-tauri/src/web_public_api.rs`。机械移动零语义变化：响应缓存与 L1 搜索兜底留在 lib.rs，模块经 `crate::` 反向引用；对 lib.rs 只暴露命令与四个消费面（`try_direct_public_api` / `PublicApiOutcome` / `IntentKind` / `parse_rss_items`）；`static_regex!` 宏上提到文件顶供两侧共用；内嵌测试留在原地补显式导入。lib.rs 17410 → 16117 行。
 
+**lib.rs 拆分第二刀：MCP 命令层独立成模块（P3-1）**
+
+MCP 的 12 个 tauri command（子进程 spawn / HTTP 转发 / JSON-RPC request / notify / shutdown / list + 6.4 OAuth loopback 接收器与令牌库，约 410 行）搬入新模块 `src-tauri/src/mcp.rs`。切缝是「命令层」与「子进程传输层」的分界：`McpHandle` / `McpRegistry` / `mcp_call_inner` 等底层传输与投毒扫描留在 lib.rs，模块反向引用；对 lib.rs 暴露 12 个命令与 `OAuthLoopbackRegistry`（run() 的 `.manage` 用）。机械移动零语义变化，cargo test 231 测全绿，lib.rs 16117 → 15716 行。
+
 ## v3.0.3
 
 **图表放大视图与文件列表：真机撞出来的一批修复**
