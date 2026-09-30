@@ -174,11 +174,15 @@ export async function createFeishuSdkTransport(options: FeishuSdkTransportOption
       });
     },
 
-    async sendImage(chatId: string, image: Uint8Array, _name: string): Promise<string> {
+    async sendImage(chatId: string, image: Uint8Array, name: string): Promise<string> {
       const imageResource = client.im.image ?? client.im.v1?.image;
       if (!imageResource) throw new Error('feishu SDK shape mismatch: im.image is unavailable');
+      // multipart 里必须带文件名：裸 Buffer 会让飞书报 234011「Can't recognize
+      // image format」（无法从内容嗅探格式），带 .png 后缀才稳定识别。
+      const file = Buffer.from(image);
+      (file as Buffer & { name?: string }).name = name.endsWith('.png') ? name : `${name || 'image'}.png`;
       const uploaded = await imageResource.create({
-        data: { image_type: 'message', image: Buffer.from(image) },
+        data: { image_type: 'message', image: file },
       });
       const imageKey = (uploaded as { data?: { image_key?: string } })?.data?.image_key;
       if (!imageKey) throw new Error('feishu image upload returned no image_key');

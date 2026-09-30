@@ -2,7 +2,7 @@
 // 第一层入口信任（设计文档 §6.1）：dmPolicy: pairing(默认) | allowlist | open。
 // 首次私信生成配对码，必须在本地 `pure channels approve <code>` 批准；未配对来源
 // 根本不进 agent（不是靠提示词自觉）。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -52,6 +52,8 @@ function randomCode(): string {
 export class PairingGate {
   private pending = new Map<string, PendingPairing>();
   private peers = new Map<string, PairedPeer>();
+  private pendingMtime = -1;
+  private peersMtime = -1;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
 
@@ -60,6 +62,33 @@ export class PairingGate {
     this.log = options.log ?? (() => {});
     this.pending = this.load<PendingPairing>(options.pendingPath, (v) => typeof v.code === 'string' && typeof v.peerId === 'string');
     this.peers = this.load<PairedPeer>(options.peersPath, (v) => typeof v.peerId === 'string');
+    this.pendingMtime = this.mtimeOf(options.pendingPath);
+    this.peersMtime = this.mtimeOf(options.peersPath);
+  }
+
+  private mtimeOf(path: string): number {
+    try {
+      return statSync(path).mtimeMs;
+    } catch {
+      return -1;
+    }
+  }
+
+  /**
+   * 跨进程批准：`pure channels approve` 是另一个进程，直接改磁盘文件。
+   * gateway 每次决策前按 mtime 增量重读，批准/撤销才会在不重启的情况下生效。
+   */
+  private refreshFromDisk(): void {
+    const pm = this.mtimeOf(this.options.peersPath);
+    if (pm !== this.peersMtime) {
+      this.peersMtime = pm;
+      this.peers = this.load<PairedPeer>(this.options.peersPath, (v) => typeof v.peerId === 'string');
+    }
+    const dm = this.mtimeOf(this.options.pendingPath);
+    if (dm !== this.pendingMtime) {
+      this.pendingMtime = dm;
+      this.pending = this.load<PendingPairing>(this.options.pendingPath, (v) => typeof v.code === 'string' && typeof v.peerId === 'string');
+    }
   }
 
   private load<T extends { peerId: string }>(path: string, valid: (v: Partial<T>) => boolean): Map<string, T> {
@@ -86,10 +115,12 @@ export class PairingGate {
   }
 
   isPaired(channelId: string, peerId: string): boolean {
+    this.refreshFromDisk();
     return this.peers.has(keyOf(channelId, peerId));
   }
 
   check(channelId: string, peerId: string, policy: DmPolicy, name?: string): PairingCheck {
+    this.refreshFromDisk();
     if (policy === 'open' || this.isPaired(channelId, peerId)) return { allowed: true };
     if (policy === 'allowlist') return { allowed: false };
 
@@ -104,6 +135,7 @@ export class PairingGate {
   }
 
   approve(code: string): PairedPeer | null {
+    this.refreshFromDisk();
     const normalized = code.trim().toUpperCase();
     for (const [key, pending] of this.pending) {
       if (pending.code !== normalized) continue;
@@ -125,10 +157,12 @@ export class PairingGate {
   }
 
   listPending(): PendingPairing[] {
+    this.refreshFromDisk();
     return [...this.pending.values()].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   listPeers(): PairedPeer[] {
+    this.refreshFromDisk();
     return [...this.peers.values()].sort((a, b) => a.approvedAt - b.approvedAt);
   }
 }
