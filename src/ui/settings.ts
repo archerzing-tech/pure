@@ -21,6 +21,7 @@ import { buildMemoryExportJson, buildMemoryExportMarkdown, parseMemoryImport } f
 import { showToastHtml } from '../shared/toast';
 import { showConfirmModal } from './modal';
 import { renderSchedulesSettings } from './scheduleSettings';
+import { renderChannelSettings } from './channelSettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
 import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
@@ -319,6 +320,11 @@ export class SettingsPanel {
     if (category === 'schedules') {
       const el = document.getElementById('schedules-dashboard');
       if (el) renderSchedulesSettings(el, () => this.onSave());
+    }
+    // 频道页：每次进入重建（反映 channels.json 与 gateway 的最新状态）。
+    if (category === 'channels') {
+      const el = document.getElementById('channels-dashboard');
+      if (el) renderChannelSettings(el, () => this.onSave());
     }
     // 进化仪表盘：切过来就重读观测日志 + 记忆库（刚跑完的会话立刻反映在趋势里）。
     if (category === 'evolution') void this.renderEvolutionDashboard();

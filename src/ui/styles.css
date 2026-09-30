@@ -14292,3 +14292,70 @@ button svg,
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: var(--accent);
 }
+
+/* ── Settings → 频道（channels）────────────────────────────── */
+.channel-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.channel-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elevated, transparent);
+}
+.channel-card-planned {
+  opacity: 0.65;
+}
+.channel-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.channel-card-head .toggle {
+  margin-left: auto;
+}
+.channel-card-icon {
+  display: inline-flex;
+  color: var(--text-secondary);
+}
+.channel-card-name {
+  font-weight: 600;
+}
+.channel-card-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.channel-guide-line {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.channel-field-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.channel-field-label {
+  flex: 0 0 230px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.channel-field-input {
+  flex: 1;
+}
+.channel-start-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.channel-cli-hint {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+}
