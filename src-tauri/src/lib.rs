@@ -1857,7 +1857,15 @@ fn list_files_impl(
 ) -> Result<String, String> {
     const DEFAULT_MAX_LIST_RESULTS: usize = 2000;
     const ABSOLUTE_MAX_LIST_RESULTS: usize = 5000;
-    let dir = resolve(&workspace, &path)?;
+    // `path: ""` means "the workspace root" (schema default) — models emit an
+    // empty string instead of omitting the argument, and the GUI adapter's
+    // `args.path ?? '.'` only rewrites null/undefined. Same guard as
+    // search_files / find_files / glob_files below.
+    let dir = if path.trim().is_empty() {
+        resolve(&workspace, ".")?
+    } else {
+        resolve(&workspace, &path)?
+    };
     if dir.is_file() {
         return Err(format!(
             "list_files: '{}' 是文件而不是目录——读取文件内容请用 read_file，按名字查找请用 glob_files。",
@@ -6319,6 +6327,22 @@ mod resolve_tests {
             output.split("\n\n[截断]").next().unwrap().lines().count(),
             2
         );
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn list_files_treats_empty_path_as_workspace_root() {
+        // Models that want the workspace root sometimes emit `path: ""` instead
+        // of omitting the argument (the schema says "Default: workspace root",
+        // and the GUI adapter's `args.path ?? '.'` only catches null/undefined,
+        // so "" reaches Rust verbatim). Normalize it like search_files /
+        // find_files / glob_files already do.
+        let ws = temp_workspace("list-empty-path");
+        fs::write(PathBuf::from(&ws).join("hello.txt"), "").unwrap();
+        let output = list_files_impl(ws.clone(), String::new(), Some(false), None).unwrap();
+        assert!(output.contains("hello.txt"));
+        let ws_output = list_files_impl(ws.clone(), "  ".into(), Some(false), None).unwrap();
+        assert!(ws_output.contains("hello.txt"));
         fs::remove_dir_all(&ws).unwrap();
     }
 
