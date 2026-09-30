@@ -17,6 +17,10 @@ GUI 空闲循环与 CLI oneshot/exit 路径此前给 sleep-time 编排器绑的�
 
 多 agent 与自进化两根柱子此前没有焊上——编排器直接驱动引擎，子代理拿不到记忆库，进化产物里数量最大的 lessons/procedures 只到父 agent、到不了干活的人。现在每个委派在起飞时以「角色 + 委派参数」检索一次相关经验（已验证打法优先、错误教训次之，k=6、整块 ≤1600 字符），拼进该支 system prompt 尾部：每支只此一次（与父会话「会话内冻结」同一决策）、检索失败或超时降级为不注入、confidence:'low' 照 E1.1 纪律不进。进块条目 id 随委派结果落进观测（`DelegationObservation.memoryInjected`），将来贡献统计才能回答「给子代理的记忆有没有用」。进化总开关关闭时整段缺席，委派 prompt 与焊点诞生前逐字节一致。GUI / CLI / 通道三个宿主同一份装配。
 
+**lib.rs 拆分第一刀：Web Public API 解析器栈独立成模块（P3-1）**
+
+Tier-2 结构化直查的整个解析器栈（意图分类器 + 天气/空气质量/地理编码/新闻/wiki/IP/汇率/股价/GitHub/世界银行各 resolver + `web_public_api` 命令，约 1300 行）从 17,410 行的 lib.rs 整段搬入新模块 `src-tauri/src/web_public_api.rs`。机械移动零语义变化：响应缓存与 L1 搜索兜底留在 lib.rs，模块经 `crate::` 反向引用；对 lib.rs 只暴露命令与四个消费面（`try_direct_public_api` / `PublicApiOutcome` / `IntentKind` / `parse_rss_items`）；`static_regex!` 宏上提到文件顶供两侧共用；内嵌测试留在原地补显式导入。lib.rs 17410 → 16117 行。
+
 ## v3.0.3
 
 **图表放大视图与文件列表：真机撞出来的一批修复**
