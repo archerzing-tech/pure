@@ -3,6 +3,12 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## Unreleased
+
+**进化总开关补洞：反思器纳入管辖（P0-1）**
+
+E1.1 回合内反思器此前不受进化总开关管辖——用户在设置里关掉「进化」（或 CLI 设 `PURE_EVOLUTION_DISABLED=1`）后，回合末的反思 LLM 调用与结构化 lesson 落库照旧发生，与「关掉后行为与纯运行时一致」的红线冲突。收口在 Harness 构造点：`evolutionEnabled: false` 压过 reflection 自身的配置，无论宿主怎么调反思参数，回合末都零反思调用、落回同步模板写入（即 E1.1 诞生前的行为）。GUI / CLI / 通道三个宿主传的是同一个布尔，一处收口零漂移；记忆注入等现状行为不受影响。
+
 ## v3.0.3
 
 **图表放大视图与文件列表：真机撞出来的一批修复**

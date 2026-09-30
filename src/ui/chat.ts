@@ -4390,8 +4390,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
         // P0 棘轮 — 进化总开关（Settings → Skills；与 memory 同一 `!== false`
-        // 读取惯例）+ 本会话注入的技能名单（与下方 assemble() 同源）。只控
-        // 归因记账；关掉时 agent_run 记录与旧格式逐字节一致。
+        // 读取惯例）+ 本会话注入的技能名单（与下方 assemble() 同源）。控归因
+        // 记账与 E1.1 反思器（P0-1：关掉时 agent_run 记录与旧格式逐字节一致、
+        // 回合末零反思 LLM 调用）。
         evolutionEnabled: config.skills?.evolution !== false,
         injectedSkills: [
           ...(config.hubSkills ?? []).filter((s) => s.enabled).map((s) => s.name),

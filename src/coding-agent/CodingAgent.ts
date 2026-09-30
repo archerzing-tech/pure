@@ -106,8 +106,8 @@ export interface CodingAgentConfig {
   };
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
-  /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；只控归因
-   *  记账，false 时 agent_run 不带 memoryInjection 字段。 */
+  /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
+   *  agent_run 不带 memoryInjection 字段，且 E1.1 反思器强制关闭（P0-1）。 */
   evolutionEnabled?: boolean;
   /** P0 棘轮 — 本次会话注入的技能名单，进 memoryInjection 观测供贡献切片。 */
   injectedSkills?: string[];

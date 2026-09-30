@@ -1282,6 +1282,7 @@ describe('Harness lesson reflector (E1.1)', () => {
     llm: LLMAdapter;
     reflect?: LLMAdapter;
     reflection?: { enabled?: boolean; dailyCap?: number };
+    evolutionEnabled?: boolean;
   }): Harness {
     // A working read_file adapter so the engine actually executes the tool
     // rounds — without one it abandons the loop after the first call and the
@@ -1307,6 +1308,7 @@ describe('Harness lesson reflector (E1.1)', () => {
       projectPath: '/ws',
       llmFor: (phase) => (phase === 'REFLECT' ? opts.reflect : undefined),
       reflection: opts.reflection,
+      evolutionEnabled: opts.evolutionEnabled,
     });
   }
 
@@ -1397,6 +1399,26 @@ describe('Harness lesson reflector (E1.1)', () => {
     await harness.settleReflections();
 
     expect(reflect.calls).toBe(0);
+    expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
+  });
+
+  // P0-1 — the evolution master switch overrides the reflection config itself:
+  // a disabled evolution layer must spend ZERO reflection LLM calls at turn end
+  // even when the caller never touched `reflection` (the host reality — no host
+  // passes reflection today) or tuned other fields of it. The seam lives in the
+  // Harness constructor so GUI / CLI / channel hosts inherit it drift-free.
+  it('spends zero reflection calls when the evolution master switch is off, regardless of reflection tuning', async () => {
+    const memStore = new FakeMemoryStore();
+    const main = multiStepLLM(3, 'done');
+    const reflect = reflectLLM(async () => ({ content: '{}' }));
+    const harness = harnessWith({ memStore, llm: main, reflect, reflection: { dailyCap: 5 }, evolutionEnabled: false });
+
+    await collect(harness.run('SYS', 'inspect several files'));
+    await harness.settleReflections();
+
+    expect(reflect.calls).toBe(0);
+    expect(memStore.entries.filter(e => e.dedupeKey?.startsWith('reflect:'))).toHaveLength(0);
+    // Pre-E1.1 behavior: the turn still leaves a template lesson behind.
     expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
   });
 

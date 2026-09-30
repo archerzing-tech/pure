@@ -142,9 +142,9 @@ export interface HarnessConfig {
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（宿主从 config.skills.evolution / PURE_EVOLUTION_DISABLED
-   *  解析后传入）。false 时 Harness 只少记一笔归因（agent_run 不带
-   *  memoryInjection 字段，与旧格式逐字节一致），记忆注入等现状行为一概不动：
-   *  运行时只知道一个「要不要记账」的布尔，不知道进化层存在。Omitted = on 的
+   *  解析后传入）。false 时 Harness 少记一笔归因（agent_run 不带 memoryInjection
+   *  字段，与旧格式逐字节一致），并强制 E1.1 反思器关闭（P0-1：回合末零反思
+   *  LLM 调用、落回模板 lesson）；记忆注入等现状行为一概不动。Omitted = on 的
    *  记账语义由字段缺席兜底（stash 不发生 ⇒ 记录无字段）。 */
   evolutionEnabled?: boolean;
   /** P0 棘轮 — 本次会话注入的技能名单（SKILL.md 侧，宿主装配系统提示时点
@@ -193,7 +193,18 @@ export class Harness {
   constructor(config: HarnessConfig) {
     this.engine = new AgentLoopEngine();
     this.config = config;
-    this.reflection = { ...REFLECTION_DEFAULTS, ...config.reflection };
+    // P0-1（2026-09-30）— 进化总开关压过 reflection 自身的 enabled：false 时
+    // 无论宿主怎么调 reflection 配置，回合末都零反思 LLM 调用、零结构化 lesson，
+    // 落回同步模板写入（= E1.1 诞生前的行为）。收口在构造点而不是两个宿主装配
+    // 点，是让「开关关 = 进化层不存在」这同一个语义对所有传 evolutionEnabled
+    // 的调用方（GUI / CLI / 通道）零漂移地成立——此前反思器是这个语义唯一的
+    // 漏网面：开关关了，回合末的反思调用照发。undefined 时不改调用方的
+    // reflection 调优（测试与未接开关的直接构造保持原行为）。
+    this.reflection = {
+      ...REFLECTION_DEFAULTS,
+      ...config.reflection,
+      ...(config.evolutionEnabled === false ? { enabled: false } : {}),
+    };
     this.promptAssembler = config.promptAssembler ?? promptAssembler;
     // The compiler is the source of truth when callers provide both objects;
     // this prevents assembly and run spans from landing in different sinks.

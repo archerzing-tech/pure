@@ -449,8 +449,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     userHookRunner,
     failurePolicy: plumbing.failurePolicy,
     // P0 棘轮 — 进化总开关的 CLI 形态（GUI 走 config.skills.evolution）。
-    // 只控归因记账与后台编排；关掉时 agent_run 不带 memoryInjection 字段，
-    // 行为与本开关诞生前逐字节一致。
+    // 控归因记账、后台编排与 E1.1 反思器（P0-1：关掉时 agent_run 不带
+    // memoryInjection 字段、回合末零反思 LLM 调用、lesson 走模板——即进化层
+    // 不存在时的行为）。
     evolutionEnabled: overrides.evolutionEnabled ?? (process.env.PURE_EVOLUTION_DISABLED !== '1'),
   });
 
