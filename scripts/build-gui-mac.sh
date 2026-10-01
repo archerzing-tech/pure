@@ -82,6 +82,21 @@ if [[ "${PURE_SKIP_UPDATER_SIGN:-0}" == "1" ]]; then
 else
   bun run gui:build
 fi
+
+# ── CLI sidecar（2026-10-01 网关排障的根因修复）─────────────────────────────
+# gateway_start 的头号候选是 <app>/Contents/MacOS/pure-cli，但本地构建链从未
+# 产过它——GUI 一直回退到 PATH 上的 pure（那台机器上是 7 月的旧符号链接），
+# 网关因此永远跑旧代码。这里把 CLI 编译并放进 bundle（在 sign 之前，签名覆盖
+# 整个 bundle）。PURE_SKIP_CLI_SIDECAR=1 跳过（纯前端改动快速重编时）。
+if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
+  echo ""
+  echo "▶ CLI SIDECAR: bun run cli:build → pure-cli into the .app bundle"
+  bun run cli:build \
+    && cp -f pure "src-tauri/target/release/bundle/macos/pure.app/Contents/MacOS/pure-cli" \
+    && echo "✔ sidecar embedded (pure-cli)" \
+    || { echo "✘ CLI SIDECAR: build/copy failed; aborting（设置 PURE_SKIP_CLI_SIDECAR=1 可跳过）"; exit 1; }
+fi
+
 bun run sign:mac
 
 # ── Optional local deploy to /Applications/pure.app ────────────────────────
