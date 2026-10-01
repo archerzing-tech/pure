@@ -1,0 +1,54 @@
+name: relay-smoke
+
+# 自动更新中继（services/update-relay，部署在 Vercel）的冒烟检查：从 GitHub
+# runner（外部视角）打 /latest.json 与资产重定向，确认目录形状与回源可达。
+# workflow_dispatch 手动触发 —— 发版后或怀疑中继故障时跑一次。
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: '中继基址（默认生产别名）'
+        required: false
+        default: 'https://update-relay.vercel.app'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check /latest.json shape
+        env:
+          BASE: ${{ github.event.inputs.base || 'https://update-relay.vercel.app' }}
+        run: |
+          set -euo pipefail
+          echo "::group::latest.json"
+          curl -sS --fail "$BASE/latest.json" -o latest.json
+          cat latest.json
+          echo "::endgroup::"
+          python3 - <<'PY'
+          import json, sys
+          m = json.load(open('latest.json'))
+          assert m.get('version'), 'missing version'
+          plats = m.get('platforms', {})
+          assert plats, 'no platforms entry'
+          for key, entry in plats.items():
+              assert entry.get('signature'), f'{key}: missing signature'
+              assert str(entry.get('url', '')).startswith('http'), f'{key}: bad url'
+          print(f"OK: version={m['version']}, platforms={sorted(plats)}")
+          PY
+
+      - name: Check one asset redirect
+        env:
+          BASE: ${{ github.event.inputs.base || 'https://update-relay.vercel.app' }}
+        run: |
+          set -euo pipefail
+          URL=$(python3 -c "import json; print(next(iter(json.load(open('latest.json'))['platforms'].values()))['url'])")
+          echo "asset url: $URL"
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL")
+          LOCATION=$(curl -sS -o /dev/null -w '%{redirect_url}' "$URL")
+          echo "status=$CODE redirect=$LOCATION"
+          test "$CODE" = "307"
+          case "$LOCATION" in
+            https://github.com/*) echo "redirects to github: OK" ;;
+            *) echo "unexpected redirect target"; exit 1 ;;
+          esac
