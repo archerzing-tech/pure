@@ -523,7 +523,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('（边干边答）');
     // 问答对已入账：internal 消息进 steer 队列，下个 THINK 边界模型读到，
     // 最终汇总与旁答口径一致；重放不把它渲染成用户气泡。
-    const records = h.chat.pendingSteers.filter((e: { message: { internal?: boolean } }) => e.message.internal);
+    const records = h.chat.steerBus.entries().filter((e: { message: { internal?: boolean } }) => e.message.internal);
     expect(records).toHaveLength(1);
     expect((records[0] as { message: { content: string } }).message.content).toContain('我老板问报告什么时候好');
     expect((records[0] as { message: { content: string } }).message.content).toContain('市场调研已完成大半');
@@ -541,7 +541,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('我老板问报告什么时候好？');
     expect(statusJoined(h.root)).toContain('这个问题我暂时没答上来');
-    const records = h.chat.pendingSteers.filter((e: { message: { internal?: boolean } }) => e.message.internal);
+    const records = h.chat.steerBus.entries().filter((e: { message: { internal?: boolean } }) => e.message.internal);
     expect(records).toHaveLength(1);
     expect((records[0] as { displayText: string }).displayText).toBe('我老板问报告什么时候好？');
     // 回合收尾：没答上的问题按用户原话重入——「收尾时一并答」的承诺兑现。
@@ -581,16 +581,16 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 点名：「竞品」「定价」只在竞品分析员的匹配面里 → 直达那支，其余照跑。
     await h.chat.interject('竞品那支重点看下沉市场的定价。');
     expect(assistantJoined(h.root)).toContain('已直接转给「竞品分析员」那一路——它下个动作就带上，其余照跑。');
-    expect(h.chat.pendingSteers).toHaveLength(1);
-    expect(h.chat.pendingSteers[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
-    expect(h.chat.pendingSteers[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
+    expect(h.chat.steerBus.entries()).toHaveLength(1);
+    expect(h.chat.steerBus.entries()[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
+    expect(h.chat.steerBus.entries()[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
 
     // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。收执里的
     // 「几路」等于真实在飞数（2026-09-28 收执纪律：两支就说两路，不空说）。
     await h.chat.interject('方向都再收紧一点。');
     expect(assistantJoined(h.root)).toContain('在跑的 2 路都收到了——各自下个动作就带上。');
-    expect(h.chat.pendingSteers).toHaveLength(2);
-    expect(h.chat.pendingSteers[1].target).toBe('all');
+    expect(h.chat.steerBus.entries()).toHaveLength(2);
+    expect(h.chat.steerBus.entries()[1].target).toBe('all');
   });
 
   it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {
@@ -692,7 +692,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(userJoined(h.root)).toContain('停掉竞品那支');
     // 真停不走折入/投递账：汇合轮没有这笔，steer 池也是空的。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('点名停却点不出具体支：退回取消折入，绝不把「停掉」广播给所有在飞支', async () => {
@@ -720,7 +720,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
     expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
     expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('复测案例一（2026-09-25）：加的活某支已经在跑——回「已经在跑着了」，不重复派', async () => {
@@ -772,7 +772,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总；其余照常跑，想续上随时说。');
     // 真停了就不再折入：汇合轮没有这笔账。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('复测案例二串台（2026-09-25）：取消话被判成 task、但报上了 cancels_part——仍真停，绝不回「不重复派」', async () => {
@@ -810,7 +810,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(status).toContain('明白——「爆发点分析员」那路我先暂停了');
     expect(status).not.toContain('不重复派'); // 去重回执绝不准碰取消话
     expect(h.chat.pendingFoldIns).toHaveLength(0);
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('宿主不再嗅关键词：task 判定没带 cancels_part 时，取消味也不改道（2026-09-28 定调）', async () => {
@@ -918,7 +918,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingResumes[0].args).toBe('{"prompt":"分析主要竞品的定价策略"}');
     // 续跑既不是折入也不是普通 steer：两个池子都干净。
     expect(h.chat.pendingFoldIns).toHaveLength(0);
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('第 2 期第三刀：同参重派没赶上 THINK 边界——收尾转成排队的新指令，话绝不丢', async () => {
@@ -946,7 +946,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('把竞品那支接着跑完。');
     expect(h.chat.pendingResumes).toHaveLength(0);
     // 退回 steer（转达父引擎），话不丢。
-    expect(h.chat.pendingSteers).toHaveLength(1);
+    expect(h.chat.steerBus.entries()).toHaveLength(1);
   });
 });
 
@@ -1062,7 +1062,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(h.chat.preflightRestartRequested).toBe(true);
-    expect(h.chat.pendingSteers).toHaveLength(0);
+    expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
   it('窗内方向推翻（goal-change）：吸收重想，不拆回合', async () => {
@@ -1092,7 +1092,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
 
     await h.chat.interject('背景上加一些会动的云朵');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
-    expect(h.chat.pendingSteers).toHaveLength(1);
+    expect(h.chat.steerBus.entries()).toHaveLength(1);
     expect(queueCard(h.root)).toBeUndefined();
   });
 

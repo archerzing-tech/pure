@@ -30,7 +30,8 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
-import { matchInFlightBranch, steerDeliversTo, steerConsumedBy, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { matchInFlightBranch, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { SteerBus } from '../coding-agent/steerBus';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -1531,7 +1532,41 @@ export class ChatController {
    * 引擎（委派不在飞时的普通顺路带上）、'all' 广播给所有在飞的活、点名某支
    * 时直达那一支。渲染一致性：displayText 保存用户原话，回合结束后残留的
    * 插话以原话重入（不是引擎框架文），重载后与实时所见一致。 */
-  private pendingSteers: Array<{ message: import('../shared/types').Message; target: SteerTarget; displayText: string; images?: import('../shared/types').MessageImage[] }> = [];
+  /** S2 第一刀（P3-2 控制面抽出）— 转向队列改住宿主无关的 SteerBus：语义
+   *  真相一份（投递/消费口径在 steerTargeting + bus），GUI 消费、CLI/通道
+   *  宿主可同接——「手机遥控」的地基。 */
+  private steerBus = new SteerBus();
+
+  /**
+   * S2 — 折入铺排（SteerBus 父边界回调的实现）：折入只在父引擎边界且没有
+   * 在飞委派时交付——那恰好是父任务的汇合轮。分支拉取被 bus 的身份检查
+   * 结构性排除（回调根本不会被调）；在飞判断在回调里做，闸门只留父级时序
+   * 这一职责。指令型折入铺合并口径框架（scope 追加走 takeSyntheticToolCalls
+   * 的代执行回合，这里只铺口径，交付标记留给代执行闭包）；机械追加的代执行
+   * 合并口径每条只铺一次。
+   */
+  private deliverDueFoldIns(): import('../shared/types').Message[] {
+    if (this.hasDelegationInFlight()) return [];
+    const drained: import('../shared/types').Message[] = [];
+    for (const fold of this.pendingFoldIns) {
+      if (fold.delivered || fold.mechanical) continue;
+      fold.delivered = true;
+      fold.activityCountAtDelivery = this.agentActivities.length;
+      drained.push({ role: 'user', content: fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text), images: fold.images });
+    }
+    for (const fold of this.pendingFoldIns) {
+      if (fold.delivered || !fold.mechanical || fold.mergeFramed) continue;
+      const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
+      if (!role) continue;
+      fold.mergeFramed = true;
+      drained.push({
+        role: 'user',
+        content: `【系统接管执行】用户中途追加的任务「${fold.text}」将在本轮由系统直接委派给 ${role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
+        images: fold.images,
+      });
+    }
+    return drained;
+  }
   /**
    * 委派起飞闸的挂号簿（2026-09-26 用户实测）：取消型插话落在委派出生之
    * 前时，点名路（abortBranch）无支可点，折入路只守汇报步、守不到还没出
@@ -3043,7 +3078,7 @@ export class ChatController {
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
    * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
   private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = 'parent', cancel = false): void {
-    this.pendingSteers.push({
+    this.steerBus.enqueue({
       message: {
         role: 'user',
         // 取消型插话用专用框架（2026-09-26 用户反馈）：通用框架的「选最小
@@ -3243,7 +3278,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
     const content = answer
       ? `【边干边答记录】用户刚才问：「${question}」，宿主已旁答：「${answer}」。知悉即可，后续输出与此口径一致，不必再答一遍。`
       : `【边干边答记录】用户刚才问：「${question}」，宿主暂时没答上。收尾时在输出里把这个问题答了。`;
-    this.pendingSteers.push({
+    this.steerBus.enqueue({
       message: { role: 'user', content, internal: true },
       target: this.hasDelegationInFlight() ? 'all' : 'parent',
       displayText: answer ? '' : question,
@@ -3459,8 +3494,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 文——开场气泡、存档、重载看到的都是用户自己说的话。点名某支但那支已
     // 收工的也一样：话不丢，作为用户的新指令重开。1b 旁答记录按账处置：答
     // 上的（displayText 空）账已清，残留即弃；没答上的把问题原话重入。
-    const leftoverSteers = this.pendingSteers.filter((entry) => !entry.message.internal || entry.displayText);
-    this.pendingSteers = []; // 没被带走的只剩「已答上的旁答记录」——账已清，弃
+    const leftoverSteers = this.steerBus.settleRound(); // 没被带走的只剩「已答上的旁答记录」——账已清，弃
     // 起飞闸挂号随回合清空：残留的取消挂号若跨回合，会拦下用户后来明确
     // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。点名停支的
     // 挂号同理：下一回合的重派是新指令，本轮的门闩不该越回合生效。
@@ -4355,48 +4389,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // a mid-run remark lands in the very next reasoning round instead of
         // killing the turn. 1a 定向投递：拉取者自带身份（分支由编排器包上
         // branchCallId/branchName，不带参 = 父引擎），按身份过滤投递与消费。
-        takeSteerMessages: async (recipient) => {
-          const isBranch = Boolean(recipient?.branchCallId);
-          const drained: import('../shared/types').Message[] = [];
-          const remaining: typeof this.pendingSteers = [];
-          // 投递/消费语义（steerTargeting 单一口径）：点名条目只给被点名的那
-          // 一支、也只有它能取走；广播条目在飞分支人人可读（复制），只有父
-          // 边界能收走——话在回合收尾时仍归父处置，绝不因分支读过就丢。
-          for (const entry of this.pendingSteers) {
-            if (steerDeliversTo(entry.target, recipient)) drained.push(entry.message);
-            if (!steerConsumedBy(entry.target, recipient)) remaining.push(entry);
-          }
-          this.pendingSteers = remaining;
-          // 折入只在父引擎边界（非分支拉取）且没有在飞委派时交付——那恰好是
-          // 父任务的汇合轮。旧实现靠"在飞恒 true"挡子代理偷折入，现在分支
-          // 拉取被身份检查结构性排除，闸门只留父级时序这一职责。
-          if (!isBranch && !this.hasDelegationInFlight()) {
-          // 指令型折入：合并口径框架随转向通道注入。scope 追加（mechanical）
-          // 不在这里交付——它们走 takeSyntheticToolCalls 的代执行回合（见下），
-          // 这里只提前铺一句合并口径，交付标记留给代执行闭包。
-          for (const fold of this.pendingFoldIns) {
-            if (fold.delivered || fold.mechanical) continue;
-            fold.delivered = true;
-            fold.activityCountAtDelivery = this.agentActivities.length;
-            drained.push({ role: 'user', content: fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text), images: fold.images });
-          }
-          // 代执行回合的合并口径（每条折入只铺一次）：本轮系统将直接委派执行
-          // 追加项，模型下一个 THINK 才被咨询——这句话先入档，让"合并全部
-          // 产出"成为它睁眼后的自然任务。
-          for (const fold of this.pendingFoldIns) {
-            if (fold.delivered || !fold.mechanical || fold.mergeFramed) continue;
-            const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
-            if (!role) continue;
-            fold.mergeFramed = true;
-            drained.push({
-              role: 'user',
-              content: `【系统接管执行】用户中途追加的任务「${fold.text}」将在本轮由系统直接委派给 ${role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
-              images: fold.images,
-            });
-          }
-          }
-          return drained;
-        },
+        // S2 第一刀 — 队列本体已抽住宿主无关的 SteerBus（语义真相一份）；
+        // 这里只剩 GUI 特有的折入铺排，经父边界回调缝交给 bus（bus 不猜
+        // 在飞状态，回调里自己判）。
+        takeSteerMessages: async (recipient) => this.steerBus.drain(recipient, () => this.deliverDueFoldIns()),
         // 代执行回合（2026-09-22 插话重设计）：委派收齐后的第一个 THINK 边界，
         // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，
         // 让这些调用走原生 ACT 管线（ToolStarted 出卡片、SubagentActivity 流
@@ -6945,7 +6941,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.relatedInsert = null;
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
-    this.pendingSteers = [];
+    this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
     this.pendingCancels = [];
     this.pendingBranchStops = [];
     this.pendingFoldIns = [];

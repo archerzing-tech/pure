@@ -8,7 +8,7 @@
 // 交互：每个频道一张卡，头部一行 = 图标 + 名称 + 状态徽标 + 启用开关；
 // 默认全部收起，点头部展开（同时只展开一个），表单改动即改即存，
 // 「完成」收起。收起时也能从徽标一眼看出「已启用/未启用 + 凭据是否已设」。
-import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
 import { t } from '../shared/i18n';
 
@@ -148,11 +148,12 @@ async function secretSet(key: string, value: string): Promise<void> {
 }
 
 async function gatewayRunning(): Promise<boolean> {
-  const cfg = await readChannelsFile();
-  const port = cfg.gateway?.port ?? 18790;
+  // 2026-10-01 真机：webview 裸 fetch 打 127.0.0.1 是跨源请求，网关不回
+  // CORS 头 ⇒ 浏览器直接拒（Gateway 明明在跑，频道页却报「未运行」）。
+  // 与 Gateway 页同一真相：Rust gateway_status（no_proxy、无 CORS 之说）。
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'HEAD' });
-    return res.ok;
+    const status = await tauriInvoke<{ running?: boolean }>('gateway_status');
+    return status?.running === true;
   } catch {
     return false;
   }

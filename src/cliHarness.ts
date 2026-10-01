@@ -13,6 +13,7 @@ import { SQLiteStore } from './adapter/storage/SQLiteStore';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
+import { SteerBus } from './coding-agent/steerBus';
 import { compileExternalSubagents } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
@@ -317,7 +318,19 @@ export interface HarnessOverrides {
   verifierFactory?: (llm: LLMAdapter) => Verifier;
 }
 
-async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
+/** createHarness 的返回形状（S2 起 steerBus = 转向队列入队口）。 */
+export interface CliHarness {
+  harness: import('./harness/Harness').Harness;
+  tools: ToolAdapter | undefined;
+  toolsDefs: import('./shared/types').ToolDefinition[];
+  store: IStateStore | undefined;
+  sessionId: string;
+  projectPath: string;
+  mcpClient: MCPClient | undefined;
+  steerBus: SteerBus;
+}
+
+async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): Promise<CliHarness> {
   const { adapter } = createAdapter(args);
   // P0-3 — 进化总开关与项目域在 createTools 之前算好：编排器（子代理记忆
   // 注入）与 Harness（父侧）用同一份，与 GUI 的 chat.ts 装配同构。
@@ -344,6 +357,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     process.stderr.write(`  ${dim('[phase-routing]')} ${dim(routed)}\n`);
   }
   const sessionId = overrides.sessionId ?? (args.resume || `session_${Date.now()}`);
+  // S2 第一刀 — 转向队列同接：CLI/通道宿主从此拥有与 GUI 同一份投递/消费
+  // 语义（SteerBus）。今天入队面还空着（CLI 没有插话输入路），行为与省略
+  // takeSteerMessages 逐字节一致；随返回值暴露 bus，是远程遥控（手机经通道
+  // 插话）的入队口。
+  const steerBus = new SteerBus();
   const createdTools = await createTools(
     args.workspace,
     args.autoApprove,
@@ -476,9 +494,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}) {
     // 控归因记账、后台编排与 E1.1 反思器（P0-1）及子代理记忆注入（P0-3）；
     // 函数顶算好，与编排器同一份。
     evolutionEnabled,
+    // S2 — 引擎在 THINK 边界拉转向队列（空队列 = 与省略时行为一致）。
+    takeSteerMessages: (recipient) => steerBus.drain(recipient),
   });
 
-  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient };
+  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus };
 }
 
 export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints, distillSkillFromMemory };

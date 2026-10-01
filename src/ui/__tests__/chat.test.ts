@@ -1092,22 +1092,28 @@ describe('plan overview completion state', () => {
     expect(synthBody.indexOf('JSON.stringify({ prompt: brief })')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('用户的主任务：「${userText}」')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('${fold.text}')).toBeGreaterThan(-1);
-    // steer 闭包只管指令型折入的交付 + 代执行回合的合并口径铺垫（每条只铺
-    // 一次）；机械折入留给代执行闭包。此前所有手搓 UI 补丁（宿主内直接
-    // orchestrator.execute / 合成卡片 / 事件泵 / 思考卡接管）必须不存在。
-    // 1a 定向投递：闭包按拉取者身份过滤（recipient），折入闸门只认父引擎
-    // 边界（!isBranch）且无在飞委派——旧"在飞恒 return"让位给身份寻址。
+    // S2 第一刀后：投递/消费语义住进 SteerBus（宿主无关），闭包只剩委托；
+    // 折入铺排住进 deliverDueFoldIns（父边界回调，在飞判断在回调里）。
+    // 语义锁不变：定向投递语义在 bus 源里、折入闸门在回调里、此前所有手搓
+    // UI 补丁（宿主内直接 orchestrator.execute / 合成卡片 / 事件泵 / 思考卡
+    // 接管）必须不存在。
     const closure = src.indexOf('takeSteerMessages: async (recipient) =>');
     const closureBody = src.slice(closure, synth);
-    expect(closureBody.indexOf('!isBranch && !this.hasDelegationInFlight()')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('steerDeliversTo(entry.target, recipient)')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('steerConsumedBy(entry.target, recipient)')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
-    expect(closureBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);
-    expect(closureBody.indexOf('appendToolRow(')).toBe(-1);
-    expect(closureBody.indexOf('finalizeToolRow(')).toBe(-1);
-    expect(closureBody.indexOf('subagentEventFanout.subscribe()')).toBe(-1);
+    expect(closureBody.indexOf('this.steerBus.drain(recipient, () => this.deliverDueFoldIns())')).toBeGreaterThan(-1);
+    const foldHook = src.indexOf('private deliverDueFoldIns()');
+    const foldBody = src.slice(foldHook, foldHook + 2200);
+    expect(foldBody.indexOf('if (this.hasDelegationInFlight()) return [];')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);
+    expect(foldBody.indexOf('appendToolRow(')).toBe(-1);
+    expect(foldBody.indexOf('finalizeToolRow(')).toBe(-1);
+    expect(foldBody.indexOf('subagentEventFanout.subscribe()')).toBe(-1);
+    // 投递/消费语义的单一真相现在在 bus 模块里（点名独占/广播复制父收走）。
+    const busSrc = readFileSync('src/coding-agent/steerBus.ts', 'utf8');
+    expect(busSrc.indexOf('steerDeliversTo(entry.target, recipient)')).toBeGreaterThan(-1);
+    expect(busSrc.indexOf('steerConsumedBy(entry.target, recipient)')).toBeGreaterThan(-1);
+    expect(busSrc.indexOf('const isBranch = Boolean(recipient?.branchCallId);')).toBeGreaterThan(-1);
     // 兑现回写：foldin_* 的 ToolResult 成功 ⇒ mechanicallyDone（settle 放行）。
     const toolResultCase = src.indexOf("case 'ToolResult': {");
     expect(toolResultCase).toBeGreaterThan(-1);

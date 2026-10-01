@@ -4362,8 +4362,9 @@ body {
   color: var(--text);
 }
 .settings-page-desc {
-  /* 页面说明用满内容宽度：900px 的面板里 620px 只是白白多折一行。 */
-  max-width: 760px;
+  /* 页面说明用满内容宽度：人为 max-width 帽子会让「差几个字就一行」的文案
+   * 把句尾两三个字孤零零挤到第二行（2026-10-01 用户实测：回"复。"）。 */
+  max-width: none;
   font-size: 13px;
   line-height: 1.55;
   color: var(--text-secondary);
