@@ -53,7 +53,9 @@ export function cancelBeforeDispatchReceipt(topic: string | null): string {
 
 /** ③-c 折入收执（取消型 vs 追加型）。取消口径绝不能沿用追加口径——把
  *  「收掉一项」回成「先补这项」就是反向执行（2026-09-24 事故原话）。 */
-export function foldInReceipt(cancels: boolean, hasDelegation = true): string {
+// hasDelegation 无默认值——调用方必须显式声明场景（忘传 = 编译错误而不是
+// 单任务里静默说多路黑话）。
+export function foldInReceipt(cancels: boolean, hasDelegation: boolean): string {
   if (cancels) {
     // 有委派在飞：机制词汇真实在场，可以说。
     if (hasDelegation) {

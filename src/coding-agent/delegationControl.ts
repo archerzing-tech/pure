@@ -109,7 +109,7 @@ export class DelegationControlPlane {
     live: readonly LiveBranchView[],
     act: (callId: string, mode: BranchStopMode) => boolean,
     label: (name: string, callId: string) => string,
-    mode: BranchStopMode = 'abort',
+    mode: BranchStopMode,
   ): NamedStopResult | null {
     const matched = matchInFlightBranch(text, live as InFlightBranch[]);
     if (!matched) return null;

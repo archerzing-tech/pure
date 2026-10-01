@@ -1003,8 +1003,8 @@ describe('plan overview completion state', () => {
       expect(body.indexOf('this.settleAck(ack') !== -1 || body.indexOf('this.discardAckRow(ack)') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
-    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false)')).toBeGreaterThan(-1);
-    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = \'parent\', cancel = false)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {
@@ -1220,7 +1220,11 @@ describe('plan overview completion state', () => {
     // 叙述一致性（2026-09-26 用户反馈）：取消型插话的转达走取消专用框架——
     // 通用框架「手头的活继续」会把取消引导成"计划照旧"，模型照数三支，
     // 收执说"不派了"、计划书里三支全名，自相矛盾。两处挂号调用都带 cancel=true。
-    expect(src.indexOf('cancel = false')).toBeGreaterThan(-1);
+    // footgun 反向锁（2026-10-01）：cancel 不再有默认值——曾经 `cancel = false`
+    // 让忘传的取消路径静默用通用框架（"计划照旧"，2026-09-26 事故）；现在
+    // 忘传是编译错误，签名里绝不能再出现 `cancel = false`。
+    expect(src.indexOf('cancel = false')).toBe(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
     // 取消专用框架的话术归 insertionMessaging.steerFrameText（chat.ts 侧锁
     // cancel 参数流转，那边锁措辞与分流——一致性测试再锁三处同向）。
     expect(msg.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);

@@ -2929,9 +2929,9 @@ export class ChatController {
         }
         echoUserBubble();
         if (this.hasDelegationInFlight()) {
-          this.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text));
+          this.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false);
         } else {
-          this.steerRunningTurn(text, images, ack);
+          this.steerRunningTurn(text, images, ack, 'parent', false);
         }
         return;
       }
@@ -2997,7 +2997,7 @@ export class ChatController {
         // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
         // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
         if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, true, ack); // scope 追加：机械执行
+          this.foldInScopeAddition(text, images, displayText, true, ack, false); // scope 追加：机械执行
         } else {
           // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
           this.discardAckRow(ack);
@@ -3033,7 +3033,7 @@ export class ChatController {
    * 返回 null，调用方退回取消折入——宁可折叠不误杀。mode：abort = 祈使
    * 「停掉那支」（判例 13 的口径）；pause = 收掉一项「先停下」（复测案
    * 例二的口径，留的活口更大）。返回被停支的名字。 */
-  private stopNamedBranch(text: string, mode: 'abort' | 'pause' = 'abort'): string | null {
+  private stopNamedBranch(text: string, mode: 'abort' | 'pause'): string | null {
     const orchestrator = this.codingAgentRef?.subagentOrchestrator;
     if (!orchestrator) return null;
     // S2 第三刀 — 匹配/派发/挂闸走 plane；宿主只供 live 匹配面、act 执行器
@@ -3108,7 +3108,7 @@ export class ChatController {
    * (smallest action, state what changed/stays, never discard finished work).
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
    * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
-  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null = null, target: SteerTarget = 'parent', cancel = false): void {
+  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean): void {
     this.steerBus.enqueue({
       message: {
         role: 'user',
@@ -3422,7 +3422,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null = null, cancels = false): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean): void {
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
     this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical, cancels });

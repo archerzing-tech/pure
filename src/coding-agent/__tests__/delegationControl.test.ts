@@ -64,6 +64,7 @@ describe('DelegationControlPlane stopNamed', () => {
       live,
       (callId, mode) => { acted.push({ callId, mode }); return true; },
       (name) => name,
+      'abort',
     );
     expect(stopped).toEqual({ callId: 'call_a', label: 'researcher' });
     expect(acted).toEqual([{ callId: 'call_a', mode: 'abort' }]);
@@ -80,17 +81,17 @@ describe('DelegationControlPlane stopNamed', () => {
 
   it('returns null when no distinctive word resolves (fold back, never misfire)', () => {
     const plane = new DelegationControlPlane();
-    expect(plane.stopNamed('停掉那支', live, () => true, (n) => n)).toBeNull();
+    expect(plane.stopNamed('停掉那支', live, () => true, (n) => n, 'abort')).toBeNull();
     // 真正的打平用例：两支的任务书都含「调研」（改 matching 面）。
     const both: LiveBranchView[] = [
       { callId: 'x1', name: 'researcher', snippet: '调研甲主题' },
       { callId: 'x2', name: 'researcher', snippet: '调研乙主题' },
     ];
-    expect(plane.stopNamed('停掉调研', both, () => true, (n) => n)).toBeNull(); // 区分词打平 ⇒ 宁可不停
+    expect(plane.stopNamed('停掉调研', both, () => true, (n) => n, 'abort')).toBeNull(); // 区分词打平 ⇒ 宁可不停
   });
 
   it('returns null when the act seam declines (branch just settled)', () => {
     const plane = new DelegationControlPlane();
-    expect(plane.stopNamed('停掉竞品那支', live, () => false, (n) => n)).toBeNull();
+    expect(plane.stopNamed('停掉竞品那支', live, () => false, (n) => n, 'abort')).toBeNull();
   });
 });

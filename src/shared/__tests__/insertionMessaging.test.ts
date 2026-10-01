@@ -97,8 +97,8 @@ describe('插话取消话术三处一致性', () => {
     // 折入收执：取消型与追加型方向相反，且取消型必含出清承诺。这条路径
     // 有委派在飞（折入只在 hasDelegationInFlight 时可达），汇总/合并词汇
     // 场景真实。
-    const cancelFold = foldInReceipt(true);
-    const appendFold = foldInReceipt(false);
+    const cancelFold = foldInReceipt(true, true);
+    const appendFold = foldInReceipt(false, true);
     expect(cancelFold).toContain('不做了');
     expect(appendFold).toContain('先补这项');
     expect(cancelFold).not.toContain('先补这项');
@@ -152,5 +152,84 @@ describe('插话取消话术三处一致性', () => {
     expect(INV.absentMechanismWords.test('汇总')).toBe(true);
     expect(INV.absentMechanismWords.test('那支')).toBe(true);
     expect(INV.absentMechanismWords.test('好——这项不做了。')).toBe(false);
+  });
+});
+
+// ── 2026-10-01 用户要求泛化排查：收执话术的场景矩阵 ──
+// 用户场景："我让你做 3 件事，中途说 xxx 不做了"——3 件事有三种形态
+// （3 路并行委派 / 委派未出生 / 单任务 3 步），每种形态的收执必须是那个
+// 场景里的真话。不变式：**无委派的收执绝不带机制词汇**（汇总/合并/收齐/
+// 派工/支/路）——那些词只属于多路调研的世界（续八收执纪律的泛化）。
+
+/** 机制词汇黑名单——单任务收执中出现任何一个都是编造。 */
+const MECHANISM_WORDS = /汇总|合并|收齐|派工|那路|那支|调研/;
+
+describe('收执场景矩阵（2026-10-01 泛化排查）', () => {
+  // 用户场景：做 3 件事，中途说「xxx 不做了」
+
+  it('A1 三路并行委派在飞，收掉 1 路 → 机制词真实在场，允许说「其余照常」', () => {
+    const receipt = foldInReceipt(true, true);
+    expect(receipt).toBe('收到——这项不做了；其余照常。');
+    // 有委派在飞，「照常」有真实所指
+    expect(receipt).not.toMatch(MECHANISM_WORDS); // 简洁版也不编造细节
+  });
+
+  it('A2 三件事在一个单任务里（无委派）→ 一个机制词都不带', () => {
+    const receipt = foldInReceipt(true, false);
+    expect(receipt).toBe('好——这步不做了。');
+    expect(receipt).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('A3 三件事刚下单就反悔一件（委派未出生）→ 只说砍了什么', () => {
+    const receipt = cancelBeforeDispatchReceipt('排行榜');
+    expect(receipt).toBe('好——“排行榜”这项不做了。');
+    expect(receipt).not.toMatch(MECHANISM_WORDS);
+    const noTopic = cancelBeforeDispatchReceipt(null);
+    expect(noTopic).toBe('好——这项不做了。');
+    expect(noTopic).not.toMatch(MECHANISM_WORDS);
+  });
+
+  // 追加类的对称场景
+
+  it('B1 单任务中途加活 → 不预支「汇总」', () => {
+    const receipt = foldInReceipt(false, false);
+    expect(receipt).toBe('收到——做完手头的就带上这句。');
+    expect(receipt).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('B2 多路在飞加活 → 「先补这项」有真实所指', () => {
+    const receipt = foldInReceipt(false, true);
+    expect(receipt).toBe('已收到——收齐后先补这项。');
+  });
+
+  // 泛化不变式：无委派口径对任意取消/追加组合都不带机制词。"无委派"只是
+  // 这一侧的安全口径——安全默认靠类型系统锁（见下一条），不靠参数默认值。
+
+  it('不变式：无委派口径对任意取消/追加组合都无机制词', () => {
+    for (const cancels of [true, false]) {
+      const receipt = foldInReceipt(cancels, false);
+      expect(receipt).not.toMatch(MECHANISM_WORDS);
+    }
+  });
+
+  // footgun 回归锁：本模块每个函数都绝不能带默认形参。带默认值时 caller
+  // 忘传会静默落到默认场景——foldInReceipt 的 hasDelegation 曾经默认为
+  // true，单任务里就会说「其余照常」这类多路黑话；去掉默认值后，忘传是
+  // 编译错误。JS 的 Function.length 只数「首个默认参数之前」的形参，所以
+  // length 等于形参总数就是「每个形参都必须显式给」的运行时证据——一旦
+  // 有人给任一函数偷偷加回 `= ...`，length 掉下来，这条立刻红。
+  it('footgun 回归：全模块函数都无默认形参（arity 回归锁）', () => {
+    const arity: Array<[string, number, (...args: never[]) => unknown]> = [
+      ['steerFrameText（cancel 场景开关必填）', 2, steerFrameText as (...args: never[]) => unknown],
+      ['branchStopReceipt（pause/abort 口径必填）', 2, branchStopReceipt as (...args: never[]) => unknown],
+      ['cancelBeforeDispatchReceipt（topic 必填，显式传 null）', 1, cancelBeforeDispatchReceipt as (...args: never[]) => unknown],
+      ['foldInReceipt（cancels + hasDelegation 场景必填）', 2, foldInReceipt as (...args: never[]) => unknown],
+      ['cancelFoldInstruction', 1, cancelFoldInstruction as (...args: never[]) => unknown],
+      ['foldInInstruction', 1, foldInInstruction as (...args: never[]) => unknown],
+      ['foldInFollowUpText', 1, foldInFollowUpText as (...args: never[]) => unknown],
+    ];
+    for (const [name, expected, fn] of arity) {
+      expect({ name, length: fn.length }).toEqual({ name, length: expected });
+    }
   });
 });
