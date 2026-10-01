@@ -99,6 +99,51 @@ function buildCliSleepTimeDeps(llm: LLMAdapter, projectPath: string, budget: 'cl
       }
       return defaultConfirmPolicy()(action);
     },
+    // P2-2 — procedure→工具固化（CLI 侧：node:fs 写盘 + Bun.spawn 试跑；
+    // confirm 绑 true = 试跑通过即自动落盘，与 GUI sleep-time 同立场）。
+    runSolidify: async (procedure) => {
+      try {
+        const { runSolidifyFlow } = await import('../harness/toolSolidification');
+        const { mkdir, writeFile, access } = await import('node:fs/promises');
+        const { join } = await import('node:path');
+        const { homedir } = await import('node:os');
+        const toolsDir = join(homedir(), '.pure', 'tools');
+        return await runSolidifyFlow({
+          procedure,
+          llm,
+          io: {
+            runCommand: (command, timeoutMs) => new Promise((resolve) => {
+              const proc = Bun.spawn(command.split(/\s+/), {
+                stdout: 'pipe',
+                stderr: 'pipe',
+                timeout: timeoutMs,
+              });
+              proc.exited.then(async (code) => {
+                const ok = code === 0;
+                const text = await new Response(proc.stdout).text();
+                resolve({ ok, output: text.slice(0, 500) });
+              }).catch(() => resolve({ ok: false, output: 'spawn failed' }));
+            }),
+            writeToolDir: async (name, manifest) => {
+              const dir = join(toolsDir, name);
+              await mkdir(dir, { recursive: true });
+              await writeFile(join(dir, 'TOOL.json'), manifest, 'utf8');
+            },
+            toolExists: async (name) => {
+              try {
+                await access(join(toolsDir, name, 'TOOL.json'));
+                return true;
+              } catch {
+                return false;
+              }
+            },
+          },
+          confirm: async () => true,
+        });
+      } catch (err) {
+        return { kind: 'failed', reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
     budget: SLEEP_TIME_BUDGETS[budget],
     onAction,
   };
