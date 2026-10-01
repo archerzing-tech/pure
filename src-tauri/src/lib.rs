@@ -10289,6 +10289,21 @@ async fn gateway_status() -> Result<GatewayStatus, String> {
 /// 后台启动 `pure gateway`。优先用打包在 pure.app 里的 CLI 二进制；
 /// 找不到才回落 PATH 上的 `pure`。 detached + 全套输出落日志文件。
 #[tauri::command]
+
+/// Windows 上 GUI 进程 spawn 控制台程序时不弹终端窗口。
+/// CREATE_NO_WINDOW = 0x08000000：进程没有控制台窗口（也不会闪一下）。
+#[cfg(windows)]
+fn no_window(cmd: &mut TokioCommand) -> &mut TokioCommand {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000);
+    cmd
+}
+#[cfg(not(windows))]
+fn no_window(cmd: &mut TokioCommand) -> &mut TokioCommand {
+    cmd
+}
+
+#[tauri::command]
 async fn gateway_start() -> Result<GatewayStatus, String> {
     if let Some(lock) = read_gateway_lock() {
         if gateway_pid_alive(lock.pid) {
@@ -10359,6 +10374,7 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
             }
         }
         let mut cmd = TokioCommand::new(&bin);
+        no_window(&mut cmd);
         cmd.arg("gateway")
             .stdin(std::process::Stdio::null())
             .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
@@ -10468,6 +10484,7 @@ setInterval(() => {{}}, 30_000); // keep alive
                     .unwrap_or_else(|| "bun".to_string())  // PATH 兜底
             };
             let mut cmd = TokioCommand::new(&bun_exe);
+            no_window(&mut cmd);
             cmd.arg(&script_path)
                 .stdin(std::process::Stdio::null())
                 .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
@@ -10523,10 +10540,12 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
     }
     #[cfg(windows)]
     {
-        // Windows 没有 SIGTERM：用 taskkill /T（发 CTRL_BREAK 给进程树）做
-        // 优雅停。网关的 Bun 进程在 SIGINT/SIGBREAK 上有优雅退出处理器。
+        // Windows 直接 force kill：优雅停（CTRL_BREAK）对从 GUI spawn 的
+        // 控制台应用不可靠——Bun 进程收不到信号，taskkill /T 等 3 秒白等。
+        // 直接 /T /F（kill 进程树 + 强制）是 Windows 上唯一可靠的停法。
         let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &lock.pid.to_string(), "/T"])
+            .args(["/PID", &lock.pid.to_string(), "/T", "/F"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output();
     }
     for _ in 0..30 {
@@ -10586,7 +10605,9 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     // PATH 兜底（如果上述位置都没找到但 PATH 上有）。
     if bun_path.is_empty() {
         let which = if cfg!(windows) { "where" } else { "which" };
-        if let Ok(o) = TokioCommand::new(which).arg("bun").output().await {
+        let mut which_cmd = TokioCommand::new(which);
+        no_window(&mut which_cmd);
+        if let Ok(o) = which_cmd.arg("bun").output().await {
             if o.status.success() {
                 if let Ok(text) = String::from_utf8(o.stdout) {
                     if let Some(first) = text.lines().next() {
@@ -10600,20 +10621,7 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
         }
     }
     let bun_ok = !bun_path.is_empty();
-    let bun_version = if bun_ok { bun_path } else { String::new() };
-    // Bun 路径：which bun 的结果。
-    let bun_path = if bun_ok {
-        TokioCommand::new(if cfg!(windows) { "where" } else { "which" })
-            .arg("bun")
-            .output()
-            .await
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let bun_version = bun_path.clone();
     out.push(GatewayDependency {
         name: "Bun".to_string(),
         installed: bun_ok,
@@ -10668,7 +10676,9 @@ async fn gateway_install_bun() -> Result<String, String> {
     // ── ② 下载 + 安装（官方脚本：下载、解压、放置全部内聚）──
     #[cfg(windows)]
     {
-        let output = TokioCommand::new("powershell")
+        let mut ps_cmd = TokioCommand::new("powershell");
+        no_window(&mut ps_cmd);
+        let output = ps_cmd
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
                    "irm bun.sh/install.ps1 | iex"])
             .output()
@@ -10681,7 +10691,9 @@ async fn gateway_install_bun() -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
-        let output = TokioCommand::new("sh")
+        let mut sh_cmd = TokioCommand::new("sh");
+        no_window(&mut sh_cmd);
+        let output = sh_cmd
             .args(["-c", "curl -fsSL https://bun.sh/install | bash"])
             .output()
             .await
