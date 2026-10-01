@@ -12090,6 +12090,39 @@ fn append_session_event(session_id: String, event: String) -> Result<(), String>
     writeln!(file, "{}", line).map_err(|e| format!("append: {}", e))
 }
 
+/// 有界尾读（消费侧读取通路）：默认尾部 16MB（观测 dump 同款量级），从头被
+/// 截断时从下一整行开始（不吐半行）。文件不存在返回空串（没有事件是正常态）。
+const SESSION_EVENT_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+
+#[tauri::command]
+fn read_session_events(session_id: String, tail_bytes: Option<u64>) -> Result<String, String> {
+    validate_session_id(&session_id)?;
+    let path = sessions_dir().join(&session_id).join("events.jsonl");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let bound = tail_bytes.unwrap_or(SESSION_EVENT_TAIL_BYTES).clamp(1, 64 * 1024 * 1024);
+    let size = path.metadata().map_err(|e| format!("stat: {}", e))?.len();
+    let start = size.saturating_sub(bound);
+    let mut file = fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
+    use std::io::{Read, Seek, SeekFrom};
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).map_err(|e| format!("seek: {}", e))?;
+    }
+    let mut raw = String::new();
+    file.take(bound).read_to_string(&mut raw).map_err(|e| format!("read: {}", e))?;
+    // 头部被截断时丢掉第一行（可能是半行；非 UTF-8 边界概率极低，坏行由
+    // TS 解析侧行容错兜住）。
+    if start > 0 {
+        if let Some(nl) = raw.find('\n') {
+            raw.drain(..=nl);
+        } else {
+            raw.clear();
+        }
+    }
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod session_event_log_tests {
     use super::*;
@@ -12131,6 +12164,32 @@ mod session_event_log_tests {
             assert!(append_session_event("s1".into(), "a\nb".into()).is_err());
             assert!(append_session_event("".into(), "{}".into()).is_err());
             assert!(append_session_event("bad/../id".into(), "{}".into()).is_err());
+        });
+    }
+
+    #[test]
+    fn reads_back_events_and_drops_the_partial_head_line_when_tailed() {
+        with_temp_home(|| {
+            let sid = format!("events{}", std::process::id());
+            for i in 0..5 {
+                append_session_event(sid.clone(), format!(r#"{{"n":{}}}"#, i)).unwrap();
+            }
+            // 全量读：五行都在。
+            let full = read_session_events(sid.clone(), None).unwrap();
+            assert_eq!(full.trim_end().lines().count(), 5);
+
+            // 尾读预算 1 字节：只有半行 ⇒ 清空（不吐半行）。预算含余量
+            //（start>0 时首行无条件丢弃——无法区分整行与半行，标准 tail 语义：
+            // 预算 = 目标行数 + 起行余量）。
+            let tiny = read_session_events(sid.clone(), Some(1)).unwrap();
+            assert_eq!(tiny, "");
+            let last_line_len = full.trim_end().lines().last().unwrap().len() as u64;
+            let tail = read_session_events(sid.clone(), Some(last_line_len + 4)).unwrap();
+            assert_eq!(tail.trim_end().lines().count(), 1);
+            assert!(tail.contains(r#""n":4"#));
+
+            // 没有日志的会话：空串（没有事件是正常态，不是错误）。
+            assert_eq!(read_session_events("absent_session".into(), None).unwrap(), "");
         });
     }
 }
@@ -14984,6 +15043,7 @@ pub fn run() {
             // Session persistence
             save_session,
             append_session_event,
+            read_session_events,
             load_session,
             load_last_session,
             load_session_list,

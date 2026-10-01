@@ -118,3 +118,29 @@ describe('projectSessionTimeline + recentTimelineDigest', () => {
     expect(digest[0].summary).toContain('r15');
   });
 });
+
+// S1-3 — turn_messages 是转录原料：不进时间线，但解析侧完整可读。
+describe('turn_messages handling', () => {
+  it('is excluded from the timeline (bulk data is not digest material)', () => {
+    const events: SessionEvent[] = [
+      { ts: 1, kind: 'user_input', actor: 'gui', payload: { text: 'hi' } },
+      { ts: 2, kind: 'turn_messages', actor: 'gui', payload: { messages: [{ role: 'assistant', content: 'answer' }] } },
+      { ts: 3, kind: 'turn_settled', actor: 'gui', payload: { totalMs: 1000 } },
+    ];
+    const timeline = projectSessionTimeline(events);
+    expect(timeline.map((t) => t.kind)).toEqual(['user_input', 'turn_settled']);
+  });
+
+  it('round-trips message arrays through the line log intact', () => {
+    const messages = [
+      { role: 'user', content: '做个调研' },
+      { role: 'tool', content: '{"agentName":"researcher","success":true}', toolCallId: 'c1' },
+      { role: 'assistant', content: '结论如下…' },
+    ] as never[];
+    const line = JSON.stringify({ ts: 1, kind: 'turn_messages', actor: 'gui', payload: { messages } });
+    const parsed = parseSessionEvents(line);
+    expect(parsed).toHaveLength(1);
+    expect((parsed[0].payload as { messages: typeof messages }).messages).toHaveLength(3);
+    expect((parsed[0].payload as { messages: Array<{ role: string }> }).messages[1].role).toBe('tool');
+  });
+});

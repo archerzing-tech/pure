@@ -3505,6 +3505,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // by a session switch never writes into the session the user switched TO).
     const turnStartMs = performance.now();
     const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, totalMs: null };
+    // 架构评审 v2 A1（S1-3）— 转录增量基线：回合入口的窗口长度。finally 里
+    // 以此切片出「本回合新增的消息」落 turn_messages 事件——日志自此带上
+    // 引擎转录，快照可降级为日志的 fold。窗口若在回合中发生头部裁剪
+    // （limitMessageHistory 越界），极端情况下会少记几条新消息：快照仍是
+    // 权威、fold 读取侧会对账，这是绞杀期的已知边界。
+    const turnMessageBaseline = this.messages.length;
     // 架构评审 v2 A1（S1-1）— 用户输入进会话事件日志（带 gui 来源；通道/CLI
     // 来源的输入事件由各自宿主在 S1-2 接入）。fire-and-forget：日志失败熔断
     // 降级，绝不挡回合。
@@ -6766,6 +6772,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         timings.push(turnTiming);
         if (timings.length > 20) timings.splice(0, timings.length - 20);
         this.persistStats();
+        // 架构评审 v2 A1（S1-3）— 转录增量落日志：finally 时 this.messages 已由
+        // 本回合的提交点（完成/中断/硬停三条路径都在 try 内）写入终态，切片即
+        // 本回合新增。与 turn_settled 同一世代护栏。
+        const turnDelta = this.messages.slice(turnMessageBaseline);
+        if (turnDelta.length > 0) {
+          void getSessionEventSink(this.sessionId).append({
+            ts: Date.now(),
+            kind: 'turn_messages',
+            actor: 'gui',
+            payload: { messages: turnDelta },
+          });
+        }
         // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志（与 turnTimings 同一
         // 生成代护栏：被会话切换作废的回合不写）。ttft/分支账给远端 digest 用。
         void getSessionEventSink(this.sessionId).append({
