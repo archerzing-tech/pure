@@ -10576,10 +10576,23 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     } else {
         String::new()
     };
+    // Bun 路径：which bun 的结果。
+    let bun_path = if bun_ok {
+        TokioCommand::new(if cfg!(windows) { "where" } else { "which" })
+            .arg("bun")
+            .output()
+            .await
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     out.push(GatewayDependency {
         name: "Bun".to_string(),
         installed: bun_ok,
-        version: bun_version,
+        version: bun_path,
         install_hint: "bun.sh".to_string(),
     });
 
@@ -10610,10 +10623,12 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
             }
         }
     }
+    // CLI 路径：找到的那个文件的完整路径。
+    let cli_path = if cli_found && !cli_version.is_empty() { cli_version } else { String::new() };
     out.push(GatewayDependency {
         name: "CLI (pure)".to_string(),
         installed: cli_found,
-        version: cli_version,
+        version: cli_path,
         install_hint: "从 GitHub Release 下载".to_string(),
     });
 

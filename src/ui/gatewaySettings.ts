@@ -80,27 +80,31 @@ export function renderGatewaySettings(host: HTMLElement): void {
   const testBtn = mkButton(t('gateway.test'), 'secondary');
   // ── 依赖管理（一键安装缺失依赖，2026-10-01 用户建议）──
   const depsSection = document.createElement('div');
-  depsSection.className = 'gateway-deps-section';
-  depsSection.style.cssText = 'margin-top:18px;padding:14px;border:1px solid var(--border-light);border-radius:10px;';
+  depsSection.className = 'settings-section gateway-deps-section';
   host.appendChild(depsSection);
 
-  const depsTitle = document.createElement('h4');
-  depsTitle.textContent = t('gateway.deps.title', '依赖管理');
-  depsTitle.style.cssText = 'margin:0 0 10px;font-size:14px;font-weight:600;';
+  const depsTitle = document.createElement('div');
+  depsTitle.className = 'settings-section-title';
+  depsTitle.textContent = t('gateway.deps.title', '依赖');
   depsSection.appendChild(depsTitle);
 
   const depsList = document.createElement('div');
+  depsList.className = 'gateway-deps-list';
   depsSection.appendChild(depsList);
 
-  const installAllBtn = document.createElement('button');
-  installAllBtn.className = 'gateway-install-all-btn';
-  installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
-  installAllBtn.style.cssText = 'margin-top:10px;padding:8px 16px;border-radius:8px;border:1px solid var(--accent,#3b82f6);background:var(--accent,#3b82f6);color:#fff;cursor:pointer;font-size:13px;';
-  depsSection.appendChild(installAllBtn);
+  const depsFooter = document.createElement('div');
+  depsFooter.className = 'gateway-deps-footer';
+  depsSection.appendChild(depsFooter);
 
-  const depsStatus = document.createElement('p');
-  depsStatus.style.cssText = 'margin-top:8px;font-size:12px;color:var(--text-secondary);';
-  depsSection.appendChild(depsStatus);
+  const installAllBtn = document.createElement('button');
+  installAllBtn.type = 'button';
+  installAllBtn.className = 'setting-btn setting-btn-primary gateway-deps-install';
+  installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
+  depsFooter.appendChild(installAllBtn);
+
+  const depsStatus = document.createElement('span');
+  depsStatus.className = 'gateway-deps-status';
+  depsFooter.appendChild(depsStatus);
 
   async function refreshDeps(): Promise<void> {
     try {
@@ -111,10 +115,32 @@ export function renderGatewaySettings(host: HTMLElement): void {
       let allOk = true;
       for (const dep of deps ?? []) {
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;';
-        const icon = dep.installed ? '✅' : '❌';
-        const ver = dep.installed && dep.version ? `（${dep.version}）` : '';
-        row.textContent = `${icon} ${dep.name}${ver}`;
+        row.className = `setting-row gateway-dep-row${dep.installed ? '' : ' gateway-dep-missing'}`;
+        const label = document.createElement('div');
+        label.className = 'setting-label';
+        const dot = document.createElement('span');
+        dot.className = `gateway-dot${dep.installed ? ' gateway-dot-ok' : ' gateway-dot-warn'}`;
+        label.appendChild(dot);
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = dep.name;
+        label.appendChild(nameSpan);
+        if (dep.installed && dep.version) {
+          const ver = document.createElement('span');
+          ver.className = 'gateway-dep-version';
+          ver.textContent = dep.version;
+          ver.title = dep.version;
+          label.appendChild(ver);
+        }
+        row.appendChild(label);
+        const state = document.createElement('div');
+        state.className = 'setting-value';
+        state.textContent = dep.installed
+          ? (dep.version || t('gateway.deps.installed', '已安装'))
+          : t('gateway.deps.missing', '未安装');
+        if (dep.installed && dep.version) {
+          state.title = dep.version;
+        }
+        row.appendChild(state);
         if (!dep.installed) allOk = false;
         depsList.appendChild(row);
       }
