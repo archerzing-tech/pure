@@ -90,13 +90,14 @@ export async function runGateway(args: CliArgs): Promise<void> {
       healthServer = Bun.serve({
         hostname: config.gateway.host,
         port: config.gateway.port,
-        fetch(req) {
-          return new URL(req.url).pathname === '/healthz'
-            ? new Response('ok', { headers: { 'content-type': 'text/plain' } })
-            : new Response('not found', { status: 404 });
+        // 对所有路径答 200：Rust 探针打的是根路径 `/` 且要求 2xx（初版只答
+        // /healthz、根路径 404——「我验证了自己的契约，没验证消费者的请求」，
+        // 2026-10-01 二次真机撞出来的）。这个应答器没有别的页面要服务。
+        fetch() {
+          return new Response('ok', { headers: { 'content-type': 'text/plain' } });
         },
       });
-      channelsLog(`health endpoint on http://${config.gateway.host}:${config.gateway.port}/healthz（webchat 已禁用，端口由网关应答）`);
+      channelsLog(`health endpoint on http://${config.gateway.host}:${config.gateway.port}/（webchat 已禁用，端口由网关应答）`);
     } catch (err) {
       // 端口被占（残留实例等）不是致命伤：网关主职能（通道长连接）不受影响，
       // 探活退化为锁文件 + pid 判定。如实记录。
