@@ -1,7 +1,7 @@
 // 架构评审 v2 A1 — 会话事件日志纯核：串行化顺序、单行不变式、降级熔断、
 // 行容错解析。
 import { describe, expect, it } from 'bun:test';
-import { capEventText, createSerializingSink, parseSessionEvents, projectSessionTimeline, recentTimelineDigest, type SessionEvent } from '../sessionEventLog';
+import { capEventText, createSerializingSink, mergeFoldWithLog, parseSessionEvents, projectSessionTimeline, recentTimelineDigest, type SessionEvent } from '../sessionEventLog';
 
 function event(kind: string, ts: number, payload: unknown = {}): SessionEvent {
   return { ts, kind, actor: 'gui', payload };
@@ -142,5 +142,34 @@ describe('turn_messages handling', () => {
     expect(parsed).toHaveLength(1);
     expect((parsed[0].payload as { messages: typeof messages }).messages).toHaveLength(3);
     expect((parsed[0].payload as { messages: Array<{ role: string }> }).messages[1].role).toBe('tool');
+  });
+});
+
+// S1-4 — fold 合并读取面：水位语义（不重复计入）、旧会话保守、非转录事件不掺和。
+describe('mergeFoldWithLog', () => {
+  const msgs = (n: number) => Array.from({ length: n }, (_, i) => ({ role: 'user', content: `m${i}` }));
+  const turnEvent = (ts: number, n: number): SessionEvent => ({
+    ts, kind: 'turn_messages', actor: 'gui', payload: { messages: msgs(n) },
+  });
+
+  it('appends only post-watermark transcript events to the snapshot', () => {
+    const merged = mergeFoldWithLog(msgs(2), 100, [
+      turnEvent(90, 1),   // ≤ 水位：已在快照里，跳过
+      { ts: 95, kind: 'receipt', actor: 'gui', payload: { text: 'x' } }, // 非转录：不掺和
+      turnEvent(101, 3),  // > 水位：追加
+      turnEvent(200, 2),  // > 水位：追加
+    ] as SessionEvent[]);
+    expect(merged).toHaveLength(2 + 3 + 2);
+    expect(merged[2].content).toBe('m0'); // 第一段增量的开头
+  });
+
+  it('treats a missing watermark as snapshot-authoritative (legacy sessions, conservative)', () => {
+    const merged = mergeFoldWithLog(msgs(2), undefined, [turnEvent(999, 5)]);
+    expect(merged).toHaveLength(2);
+  });
+
+  it('watermark equality excludes the event (ts ≤ watermark is already folded)', () => {
+    const merged = mergeFoldWithLog(msgs(2), 100, [turnEvent(100, 5)]);
+    expect(merged).toHaveLength(2);
   });
 });

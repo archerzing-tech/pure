@@ -2293,6 +2293,9 @@ export class ChatController {
     this.generation++;
     const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
     this.messages = boundedMessages.map(m => ({ ...m }));
+    // A1（S1-4）fold 水位随快照恢复：恢复进来的 messages 已含日志中
+    // ts ≤ foldedThrough 的转录，水位续在这里才不会重复计入。
+    this.logFoldedThrough = snapshot.foldedThrough;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
@@ -2553,10 +2556,14 @@ export class ChatController {
    * placeEchoBeforeAck 保证：用户原话在前，宿主回话在后）。
    * keepPending=true 是「话还没说完」的占位——停/改向/追问的后续还在途，
    * 保留状态行 + 微光，等追问气泡或收尾扫除接管；只有终稿回执才转气泡。 */
+  /** A1（S1-4）fold 水位：最近一次已落日志（且已进 this.messages）的
+   *  turn_messages 事件 ts。快照保存时写进 foldedThrough；会话恢复时从快照
+   *  读回，清空归 undefined（旧会话：保守忽略日志尾增量）。 */
+  private logFoldedThrough: number | undefined;
+
   /** 架构评审 v2 A1（S1-2）— 委派落定进会话事件日志（subagentProgress 的
    *  onDone/onError 单点；世代护栏由调用方的 gen 检查承担）。 */
-  private logDelegationSettled(a: import('../coding-agent/SubagentOrchestrator').SubagentActivity): void {
-    void getSessionEventSink(this.sessionId).append({
+  private logDelegationSettled(a: import('../coding-agent/SubagentOrchestrator').SubagentActivity): void {    void getSessionEventSink(this.sessionId).append({
       ts: Date.now(),
       kind: 'delegation_settled',
       actor: 'gui',
@@ -6777,8 +6784,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 本回合新增。与 turn_settled 同一世代护栏。
         const turnDelta = this.messages.slice(turnMessageBaseline);
         if (turnDelta.length > 0) {
+          const transcriptEventTs = Date.now();
+          this.logFoldedThrough = transcriptEventTs;
           void getSessionEventSink(this.sessionId).append({
-            ts: Date.now(),
+            ts: transcriptEventTs,
             kind: 'turn_messages',
             actor: 'gui',
             payload: { messages: turnDelta },
@@ -6919,6 +6928,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // New chat supersedes any in-flight send loop.
     this.generation++;
     this.messages = [];
+    this.logFoldedThrough = undefined; // A1（S1-4）：清空即新会话，水位归零
     this.contextEngine = undefined;
     this.hasHistory = false;
     this.activeComplexPlan = null;
@@ -7246,6 +7256,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const nextSnapshot: SessionSnapshot = {
       version: 3,
       modelContext: nextSnapshotV2.modelContext,
+      // A1（S1-4）fold 标记：本快照已含日志中 ts ≤ 此值的 turn_messages。
+      ...(this.logFoldedThrough !== undefined ? { foldedThrough: this.logFoldedThrough } : {}),
       events,
       transcript: nextSnapshotV2.transcript,
       uiState: {

@@ -198,6 +198,11 @@ export interface SessionSnapshotV3 {
   modelContext: {
     messages: Message[];
   };
+  /** 架构评审 v2 A1（S1-4）— fold 标记：快照里的 messages 已包含事件日志中
+   *  ts ≤ 此值的全部 turn_messages 事件。读取侧据此做「快照 + 日志尾增量」
+   *  合并（mergeFoldWithLog）。缺省 = 日志标记诞生前的旧会话：快照权威、
+   *  忽略尾增量（保守不错记）。注意与 events（GUI 状态行事件）是两个东西。 */
+  foldedThrough?: number;
   events: SessionEvent[];
   uiState: SessionUiState;
   transcript: TranscriptEntry[];

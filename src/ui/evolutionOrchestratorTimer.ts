@@ -35,6 +35,7 @@ import { buildOverlayFlowDeps } from './overlayFlowHost';
 import { runPersonaOverlayFlow } from './personaOverlayFlow';
 import { createLLMAdapter } from './chat';
 import { reflectModelFor } from '../shared/phaseModels';
+import { mergeFoldWithLog, parseSessionEvents } from '../shared/sessionEventLog';
 
 /** 轮询节奏：每 10 分钟醒来看一眼（开关/忙碌/间隔都可能在变）。 */
 export const ORCHESTRATOR_POLL_MS = 10 * 60 * 1000;
@@ -152,12 +153,30 @@ async function listPendingSessions(): Promise<SleepTimeSessionRef[]> {
 
 async function loadSession(id: string): Promise<SleepTimeTurnInput | undefined> {
   try {
-    const data = await tauriInvoke<{ snapshot?: { modelContext?: { messages?: Message[] }; messages?: Message[] } } | null>(
-      'load_session',
-      { sessionId: id },
-    );
+    const data = await tauriInvoke<{
+      snapshot?: {
+        modelContext?: { messages?: Message[] };
+        messages?: Message[];
+        /** A1（S1-4）fold 水位：快照 messages 已含日志中 ts ≤ 此值的转录。 */
+        foldedThrough?: number;
+      };
+    } | null>('load_session', { sessionId: id });
     if (!data?.snapshot) return undefined;
-    const messages = data.snapshot.modelContext?.messages ?? data.snapshot.messages ?? [];
+    const snapshotMessages = data.snapshot.modelContext?.messages ?? data.snapshot.messages ?? [];
+    // A1（S1-4）— 合并读取面（首个消费者）：快照 + 事件日志尾增量。快照保存
+    // 与事件落盘之间存在窗口（fire-and-forget），日志读不到属正常降级——
+    // 退回快照原样，绝不让进化循环因为读日志而变盲。
+    let messages = snapshotMessages;
+    if (data.snapshot.foldedThrough !== undefined) {
+      try {
+        const raw = await tauriInvoke<string>('read_session_events', { sessionId: id });
+        if (raw) {
+          messages = mergeFoldWithLog(snapshotMessages, data.snapshot.foldedThrough, parseSessionEvents(raw));
+        }
+      } catch {
+        // 日志读失败：快照仍权威。
+      }
+    }
     return sessionTurnFromMessages(messages);
   } catch {
     return undefined;

@@ -186,3 +186,29 @@ export function projectSessionTimeline(events: readonly SessionEvent[]): Timelin
 export function recentTimelineDigest(events: readonly SessionEvent[], limit = 12): TimelineEntry[] {
   return projectSessionTimeline(events).slice(-limit);
 }
+
+// ── S1-4：fold 合并读取面 ──
+// 快照 = 日志的压缩视图（foldedThrough 水位之前的 turn_messages 已在快照
+// messages 里）；完整现状 = 快照 messages + 水位之后的 turn_messages 增量。
+// 这是「日志为唯一事实源、快照为物化」的读取侧兑现。
+
+/**
+ * 合并 fold 与日志尾增量。保守不错记：
+ *   - foldedThrough 缺省（标记诞生前的旧会话）⇒ 快照权威、忽略尾增量；
+ *   - ts ≤ 水位的 turn_messages 已在快照里，跳过（水位语义即不重复计入）；
+ *   - 非 turn_messages 事件不参与转录合并（叙事事件走时间线投影）。
+ */
+export function mergeFoldWithLog<T>(
+  snapshotMessages: readonly T[],
+  foldedThrough: number | undefined,
+  events: readonly SessionEvent[],
+): T[] {
+  if (foldedThrough === undefined) return [...snapshotMessages];
+  const tail: T[] = [];
+  for (const event of events) {
+    if (event.kind !== 'turn_messages' || event.ts <= foldedThrough) continue;
+    const payload = event.payload as { messages?: unknown } | null | undefined;
+    if (Array.isArray(payload?.messages)) tail.push(...(payload.messages as T[]));
+  }
+  return [...snapshotMessages, ...tail];
+}
