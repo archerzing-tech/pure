@@ -3,7 +3,37 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## v3.0.4（重发：含发布后真机修复批）
+## v3.1.0
+
+**自进化全组件就位 + Windows gateway 生命周期根本修**
+
+3.1.0 是「可自进化的多 agent 智能体系统」的架构里程碑：五类进化产物（记忆/skill/prompt/角色/工具）全链路就位，事件日志为唯一事实源，控制面宿主无关，Windows gateway 三层启动递进 + 生命周期根本修。
+
+**进化批（P0 + P1 + P2）**
+- P0 焊缝：反思器纳入进化总开关、sleep-time 接 REFLECT 便宜通道、两柱焊点（子代理记忆注入——经验到得了干活的人）
+- P1 飞轮首转：S1 真实样本收割落袋 researcher 六条过门槛、overlay 以真实失败画像经全真 A/B 判 ALLOW 首次落盘、overlay 回退护栏（快照+meta 标记+装载过滤）
+- P2 工具自进化：13.4 装载半边（TOOL.json 编译+ToolRegistry 注册+执行适配器）+ 生成半边（procedure→起草→试跑→确认→写盘）+ GUI 按钮 + sleep-time 自动触发 + CLI 接线
+
+**架构批（A1 + S2）**
+- A1 事件日志四刀：O_APPEND 纯核 → 五事件词汇表+时间线投影 → 转录增量+有界尾读 → fold 水位+合并读取面——「事件日志为唯一事实源、快照为物化视图」
+- S2 控制面抽出三刀：SteerBus（转向队列）+ DelegationControlPlane（起飞闸+点名停支）+ chat.ts 全量消费——CLI/通道接线即得远程遥控
+
+**通道与更新**
+- QQ 官方机器人通道（原生 WebSocket + REST v2 被动回复，零公网暴露）
+- 自动更新中继上线 Vercel（update-relay.vercel.app）——3.1.0 起安装的包自动更新真实可用
+- 频道页拆开渲染（Windows 空端口探测不再白屏 5s）
+
+**Windows gateway 根本修**
+- `gateway_pid_alive` 在 Windows 恒 false（cfg(not(unix)) { false }）——所有生命周期判定失效
+- `gateway_stop` 的 SIGTERM/SIGKILL 只编译在 unix——Windows 上是空操作
+- 修法：tasklist 探活 + taskkill 优雅/强杀 + 原子 `gateway_restart` 命令
+- 三层启动递进：CLI 侧车（NSIS 打包）→ 系统路径 → Bun 兜底（不依赖打包成功）
+- CLI 侧车打进安装包（release workflow 产 pure-cli.exe 进 binaries/）
+
+**结构债**
+- lib.rs 拆分两刀：web_public_api.rs（~1300 行）+ mcp.rs（~410 行），17410→15716 行
+
+## v3.0.4
 
 **网关连通性三层修复（发布后真机撞出）**
 
