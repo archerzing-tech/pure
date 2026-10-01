@@ -78,107 +78,154 @@ export function renderGatewaySettings(host: HTMLElement): void {
   const stopBtn = mkButton(t('gateway.stop'), 'secondary');
   const restartBtn = mkButton(t('gateway.restart'), 'secondary');
   const testBtn = mkButton(t('gateway.test'), 'secondary');
-  // ── 依赖管理（一键安装缺失依赖，2026-10-01 用户建议）──
+  // ── 依赖管理（三列表格 + 智能展开/收起，2026-10-01 用户定稿设计）──
   const depsSection = document.createElement('div');
   depsSection.className = 'settings-section gateway-deps-section';
   host.appendChild(depsSection);
 
-  const depsTitle = document.createElement('div');
-  depsTitle.className = 'settings-section-title';
-  depsTitle.textContent = t('gateway.deps.title', '依赖');
-  depsSection.appendChild(depsTitle);
+  const depsCard = document.createElement('div');
+  depsCard.className = 'setting-row gateway-deps-header';
+  depsCard.style.cssText = 'cursor:pointer;user-select:none;';
+  depsSection.appendChild(depsCard);
 
-  const depsList = document.createElement('div');
-  depsList.className = 'gateway-deps-list';
-  depsSection.appendChild(depsList);
+  const depsHeaderLabel = document.createElement('div');
+  depsHeaderLabel.className = 'setting-label';
+  depsCard.appendChild(depsHeaderLabel);
 
-  const depsFooter = document.createElement('div');
-  depsFooter.className = 'gateway-deps-footer';
-  depsSection.appendChild(depsFooter);
+  const depsHeaderArrow = document.createElement('span');
+  depsHeaderArrow.className = 'gateway-deps-arrow';
+  depsHeaderArrow.textContent = '▸';
+  depsCard.appendChild(depsHeaderLabel);
+  depsCard.appendChild(depsHeaderArrow);
 
-  const installAllBtn = document.createElement('button');
-  installAllBtn.type = 'button';
-  installAllBtn.className = 'setting-btn setting-btn-primary gateway-deps-install';
-  installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
-  depsFooter.appendChild(installAllBtn);
+  const depsTable = document.createElement('div');
+  depsTable.className = 'gateway-deps-table';
+  depsTable.style.display = 'none';
+  depsSection.appendChild(depsTable);
 
-  const depsStatus = document.createElement('span');
-  depsStatus.className = 'gateway-deps-status';
-  depsFooter.appendChild(depsStatus);
+  let depsExpanded = false;
+  depsCard.addEventListener('click', () => {
+    depsExpanded = !depsExpanded;
+    depsTable.style.display = depsExpanded ? '' : 'none';
+    depsHeaderArrow.textContent = depsExpanded ? '▾' : '▸';
+  });
 
+  interface DepRow { name: string; installed: boolean; version: string; required: boolean; }
   async function refreshDeps(): Promise<void> {
     try {
       const core = await coreOf();
       if (!core) return;
       const deps = await core.invoke<Array<{ name: string; installed: boolean; version: string }>>('gateway_check_deps');
-      depsList.replaceChildren();
-      let allOk = true;
-      for (const dep of deps ?? []) {
-        const row = document.createElement('div');
-        row.className = `setting-row gateway-dep-row${dep.installed ? '' : ' gateway-dep-missing'}`;
-        const label = document.createElement('div');
-        label.className = 'setting-label';
+      // Bun 是必需依赖（网关的运行时），CLI 是可选增强（完整通道需要）。
+      const rows: DepRow[] = (deps ?? []).map((d) => ({
+        ...d,
+        required: d.name === 'Bun',
+      }));
+      const missingRequired = rows.filter((r) => r.required && !r.installed);
+      const missingOptional = rows.filter((r) => !r.required && !r.installed);
+      const allOk = missingRequired.length === 0 && missingOptional.length === 0;
+
+      // ── 首行状态 ──
+      depsHeaderLabel.replaceChildren();
+      if (missingRequired.length > 0) {
+        const names = missingRequired.map((r) => r.name).join('、');
+        depsHeaderLabel.textContent = `⚠️ 缺少必需依赖「${names}」——没有它 Gateway 无法启动`;
+        depsHeaderLabel.className = 'setting-label gateway-deps-warning';
+        // 缺必需依赖 → 自动展开
+        if (!depsExpanded) { depsExpanded = true; depsTable.style.display = ''; depsHeaderArrow.textContent = '▾'; }
+      } else if (missingOptional.length > 0) {
+        const dot = document.createElement('span');
+        dot.className = 'gateway-dot gateway-dot-ok';
+        depsHeaderLabel.appendChild(dot);
+        depsHeaderLabel.appendChild(document.createTextNode('可启动 Gateway（基础模式）'));
+        const hint = document.createElement('div');
+        hint.className = 'gateway-deps-hint';
+        hint.textContent = `安装 ${missingOptional.map((r) => r.name).join('、')} 可启用完整通道连接（飞书/QQ/钉钉）`;
+        depsHeaderLabel.appendChild(hint);
+      } else {
+        const dot = document.createElement('span');
+        dot.className = 'gateway-dot gateway-dot-ok';
+        depsHeaderLabel.appendChild(dot);
+        depsHeaderLabel.appendChild(document.createTextNode('依赖已就绪'));
+      }
+
+      // ── 三列表格 ──
+      depsTable.replaceChildren();
+      const table = document.createElement('table');
+      table.className = 'gateway-deps-table-inner';
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      for (const col of ['名称', '路径', '操作']) {
+        const th = document.createElement('th');
+        th.textContent = col;
+        headRow.appendChild(th);
+      }
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+
+      for (const dep of rows) {
+        const tr = document.createElement('tr');
+        tr.className = dep.installed ? 'gateway-dep-ok' : 'gateway-dep-missing';
+
+        // 第一列：名称 + 圆点 + 必需标记
+        const tdName = document.createElement('td');
         const dot = document.createElement('span');
         dot.className = `gateway-dot${dep.installed ? ' gateway-dot-ok' : ' gateway-dot-warn'}`;
-        label.appendChild(dot);
-        const nameSpan = document.createElement('span');
-        nameSpan.textContent = dep.name;
-        label.appendChild(nameSpan);
-        if (dep.installed && dep.version) {
-          const ver = document.createElement('span');
-          ver.className = 'gateway-dep-version';
-          ver.textContent = dep.version;
-          ver.title = dep.version;
-          label.appendChild(ver);
+        tdName.appendChild(dot);
+        tdName.appendChild(document.createTextNode(dep.name));
+        if (dep.required) {
+          const badge = document.createElement('span');
+          badge.className = 'gateway-dep-badge';
+          badge.textContent = '必需';
+          tdName.appendChild(badge);
         }
-        row.appendChild(label);
-        const state = document.createElement('div');
-        state.className = 'setting-value';
-        state.textContent = dep.installed
-          ? (dep.version || t('gateway.deps.installed', '已安装'))
-          : t('gateway.deps.missing', '未安装');
+        tr.appendChild(tdName);
+
+        // 第二列：路径（已装显示，未装显示 —）
+        const tdPath = document.createElement('td');
+        tdPath.className = 'gateway-dep-path';
         if (dep.installed && dep.version) {
-          state.title = dep.version;
+          tdPath.textContent = dep.version;
+          tdPath.title = dep.version;
+        } else {
+          tdPath.textContent = '—';
         }
-        row.appendChild(state);
-        if (!dep.installed) allOk = false;
-        depsList.appendChild(row);
+        tr.appendChild(tdPath);
+
+        // 第三列：按钮（已装=灰禁用，未装=高亮安装）
+        const tdAction = document.createElement('td');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `setting-btn ${dep.installed ? '' : 'setting-btn-primary'} gateway-dep-install-btn`;
+        btn.textContent = dep.installed ? '已安装' : '⬇ 安装';
+        btn.disabled = dep.installed;
+        if (!dep.installed) {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            btn.textContent = '⬱ 安装中…';
+            try {
+              const cmd = dep.name === 'Bun' ? 'gateway_install_bun' : 'gateway_download_cli';
+              const result = await core.invoke<string>(cmd);
+              btn.textContent = '✅ 完成';
+              void refreshDeps();
+            } catch (err) {
+              btn.textContent = '❌ 重试';
+              btn.disabled = false;
+              btn.title = err instanceof Error ? err.message : String(err);
+            }
+          });
+        }
+        tdAction.appendChild(btn);
+        tr.appendChild(tdAction);
+        tbody.appendChild(tr);
       }
-      installAllBtn.style.display = allOk ? 'none' : '';
-      depsStatus.textContent = allOk ? t('gateway.deps.allOk', '所有依赖已就绪') : '';
+      table.appendChild(tbody);
+      depsTable.appendChild(table);
     } catch {
-      depsList.replaceChildren();
+      depsTable.replaceChildren();
     }
   }
-
-  installAllBtn.addEventListener('click', async () => {
-    const core = await coreOf();
-    if (!core) return;
-    installAllBtn.disabled = true;
-    installAllBtn.textContent = t('gateway.deps.installing', '安装中…');
-    depsStatus.textContent = '';
-    try {
-      const deps = await core.invoke<Array<{ name: string; installed: boolean }>>('gateway_check_deps');
-      const messages: string[] = [];
-      for (const dep of deps ?? []) {
-        if (dep.installed) continue;
-        if (dep.name === 'Bun') {
-          const result = await core.invoke<string>('gateway_install_bun');
-          messages.push(result);
-        } else if (dep.name.includes('CLI')) {
-          const result = await core.invoke<string>('gateway_download_cli');
-          messages.push(result);
-        }
-      }
-      depsStatus.textContent = messages.length > 0 ? messages.join('；') : t('gateway.deps.allOk', '所有依赖已就绪');
-    } catch (err) {
-      depsStatus.textContent = `${t('gateway.deps.installError', '安装失败')}: ${err instanceof Error ? err.message : String(err)}`;
-    } finally {
-      installAllBtn.disabled = false;
-      installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
-      void refreshDeps();
-    }
-  });
 
   void refreshDeps();
 

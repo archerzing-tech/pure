@@ -10635,34 +10635,29 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     Ok(out)
 }
 
-/// 安装 Bun（幂等：已安装则跳过）。Windows 用官方 PowerShell 脚本，macOS 用 curl。
+/// 安装 Bun（完整管道：探测 → 下载安装 → 验证 → 更新 PATH）。
+/// Bun 官方安装脚本内部处理下载和解压，这里只负责跑脚本 + 找到结果 + 刷 PATH。
 #[tauri::command]
 async fn gateway_install_bun() -> Result<String, String> {
-    // 先探测——已安装就不装。
-    let check = TokioCommand::new("bun").arg("--version").output().await;
-    if let Ok(o) = check {
-        if o.status.success() {
-            let v = String::from_utf8(o.stdout).unwrap_or_default().trim().to_string();
-            return Ok(format!("Bun 已安装（{}），无需重复安装", v));
-        }
+    // ── ① 探测：已安装则跳过 ──
+    let bun_bin = bun_binary_path();
+    if !bun_bin.is_empty() && Path::new(&bun_bin).exists() {
+        let version = bun_version_from(&bun_bin).await;
+        return Ok(format!("Bun 已安装（{}，{}）", version, bun_bin));
     }
+
+    // ── ② 下载 + 安装（官方脚本：下载、解压、放置全部内聚）──
     #[cfg(windows)]
     {
         let output = TokioCommand::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command",
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
                    "irm bun.sh/install.ps1 | iex"])
             .output()
             .await
             .map_err(|e| format!("PowerShell 启动失败：{}", e))?;
-        if output.status.success() {
-            // 刷新 PATH（安装脚本加的 PATH 在当前进程不生效，这里手动补）。
-            let home = pure_home_dir();
-            let bun_path = format!("{}\\.bun\\bin", home);
-            std::env::set_var("PATH", format!("{};{}", bun_path, std::env::var("PATH").unwrap_or_default()));
-            Ok("Bun 安装完成".to_string())
-        } else {
+        if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            Err(format!("Bun 安装失败：{}", err))
+            return Err(format!("Bun 安装脚本失败：{}", err));
         }
     }
     #[cfg(not(windows))]
@@ -10672,46 +10667,140 @@ async fn gateway_install_bun() -> Result<String, String> {
             .output()
             .await
             .map_err(|e| format!("sh 启动失败：{}", e))?;
-        if output.status.success() {
-            Ok("Bun 安装完成（可能需要重启终端刷新 PATH）".to_string())
-        } else {
+        if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            Err(format!("Bun 安装失败：{}", err))
+            return Err(format!("Bun 安装脚本失败：{}", err));
         }
     }
+
+    // ── ③ 验证：找到实际安装的二进制并确认能跑 ──
+    let bun_bin = bun_binary_path();
+    if bun_bin.is_empty() || !Path::new(&bun_bin).exists() {
+        return Err("安装脚本执行完毕但找不到 bun（预期 ~/.bun/bin/bun）".to_string());
+    }
+    let version = bun_version_from(&bun_bin).await;
+    if version.is_empty() {
+        return Err(format!("bun 存在但无法执行（{}）", bun_bin));
+    }
+
+    // ── ④ 更新 PATH：当前进程立即可见（安装脚本改的是注册表/shell 配置，
+    //     对已运行进程不生效——不加这步装完还是找不到）──
+    add_to_path(Path::new(&bun_bin).parent().unwrap_or(Path::new("")));
+
+    Ok(format!("Bun 安装完成（{}，{}）", version, bun_bin))
 }
 
-/// 下载 CLI 到 ~/.pure/bin/（幂等：已存在则跳过）。
+/// Bun 二进制的预期安装路径。
+fn bun_binary_path() -> String {
+    let home = pure_home_dir();
+    let name = if cfg!(windows) { "bun.exe" } else { "bun" };
+    format!("{}/.bun/bin/{}", home, name)
+}
+
+/// 用完整路径跑 bun --version（不依赖 PATH）。
+async fn bun_version_from(binary: &str) -> String {
+    TokioCommand::new(binary)
+        .arg("--version")
+        .output()
+        .await
+        .ok()
+        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 把目录加入当前进程的 PATH（幂等：已在则跳过）。
+fn add_to_path(dir: &Path) {
+    let dir_str = dir.to_string_lossy().to_string();
+    if dir_str.is_empty() { return; }
+    let current = std::env::var("PATH").unwrap_or_default();
+    if current.contains(&dir_str) { return; }
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    std::env::set_var("PATH", format!("{}{}{}", dir_str, sep, current));
+}
+
+/// 下载 CLI 到 ~/.pure/bin/（完整管道：探测 → 下载 → [条件解压] → 放置 → PATH → 验证）。
+/// 解压按实际文件类型决定：裸二进制直接放置，zip 自动解压。
 #[tauri::command]
 async fn gateway_download_cli() -> Result<String, String> {
+    // ── ① 探测 ──
     let bin_dir = PathBuf::from(pure_home_dir()).join(".pure").join("bin");
-    fs::create_dir_all(&bin_dir).map_err(|e| format!("mkdir: {}", e))?;
     let cli_name = if cfg!(windows) { "pure.exe" } else { "pure" };
     let target = bin_dir.join(cli_name);
     if target.exists() {
-        return Ok(format!("CLI 已存在（{}），无需下载", target.display()));
+        return Ok(format!("CLI 已存在（{}）", target.display()));
     }
+
+    // ── ② 下载 ──
     let url = if cfg!(windows) {
         "https://github.com/archerzing-tech/pure/releases/latest/download/pure.exe"
     } else {
         "https://github.com/archerzing-tech/pure/releases/latest/download/pure_x86_64"
     };
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
-        .map_err(|e| format!("client: {}", e))?;
-    let resp = client.get(url).send().await.map_err(|e| format!("download: {}", e))?;
+        .map_err(|e| format!("HTTP client: {}", e))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("下载失败：{}", e))?;
     if !resp.status().is_success() {
         return Err(format!("下载失败：HTTP {}", resp.status()));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {}", e))?;
-    fs::write(&target, &bytes).map_err(|e| format!("write: {}", e))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("读取失败：{}", e))?;
+
+    // ── ③ 条件解压：检查文件头判断是否压缩包 ──
+    let payload = if bytes.starts_with(&[0x50, 0x4B]) {
+        // ZIP（PK 头）→ 解压取第一个可执行文件
+        extract_zip_first_executable(&bytes)
+            .map_err(|e| format!("解压失败：{}", e))?
+    } else if bytes.starts_with(&[0x1F, 0x8B]) {
+        // GZIP → 当前不产 tar.gz，留待将来
+        return Err("下载了 gzip 压缩包但暂不支持自动解压".to_string());
+    } else {
+        // 裸二进制 → 直接用
+        bytes.to_vec()
+    };
+
+    // ── ④ 放置 ──
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("mkdir: {}", e))?;
+    fs::write(&target, &payload).map_err(|e| format!("写入失败：{}", e))?;
+
+    // ── ⑤ 权限（Unix +x）──
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod: {}", e))?;
     }
-    Ok(format!("CLI 已下载到 {}", target.display()))
+
+    // ── ⑥ PATH ──
+    add_to_path(&bin_dir);
+
+    // ── ⑦ 验证：非零且合理大小 ──
+    let size = target.metadata().map(|m| m.len()).unwrap_or(0);
+    if size < 1_000_000 {
+        let _ = fs::remove_file(&target);
+        return Err(format!("文件太小（{} bytes），不是有效 CLI", size));
+    }
+    Ok(format!("CLI 已安装到 {}", target.display()))
+}
+
+/// 从 ZIP 字节流中提取第一个可执行文件（按文件名匹配 cli_name）。
+fn extract_zip_first_executable(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let cursor = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("zip: {}", e))?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("zip entry: {}", e))?;
+        let name = file.name().to_string();
+        // 找可执行文件（pure / pure.exe，忽略路径前缀）
+        let base = name.rsplit('/').next().unwrap_or(&name);
+        if base == "pure" || base == "pure.exe" || base == "pure-cli" || base == "pure-cli.exe" {
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).map_err(|e| format!("zip read: {}", e))?;
+            return Ok(buf);
+        }
+    }
+    Err("ZIP 中未找到 pure 可执行文件".to_string())
 }
 
 /// 重启 gateway：stop → 等端口释放 → start。

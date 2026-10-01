@@ -14542,3 +14542,90 @@ button svg,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Gateway 依赖管理（三列表格 + 智能展开，2026-10-01 定稿）── */
+.gateway-deps-section {
+  margin-top: 18px;
+}
+.gateway-deps-header {
+  min-height: 52px;
+  align-items: center;
+}
+.gateway-deps-header .setting-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.gateway-deps-warning {
+  color: var(--text);
+  font-weight: 500;
+}
+.gateway-deps-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.gateway-deps-arrow {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  transition: transform 0.15s;
+}
+.gateway-deps-table {
+  padding: 0 16px 10px;
+}
+.gateway-deps-table-inner {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.gateway-deps-table-inner th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-light);
+}
+.gateway-deps-table-inner td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: middle;
+}
+.gateway-deps-table-inner tr:last-child td {
+  border-bottom: none;
+}
+.gateway-dep-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.gateway-dep-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.gateway-dep-install-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 7px;
+  white-space: nowrap;
+}
+.gateway-dep-install-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
