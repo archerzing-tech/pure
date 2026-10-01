@@ -3,6 +3,12 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## Unreleased
+
+**会话事件日志地基（架构评审 v2 A1 第一刀）**
+
+会话持久层开始向「事件日志为唯一事实源、快照降为压缩视图」迁移（docs/remote-office-bridge-design.md §2）。第一刀只交地基本与两条最高价值事件：Rust 新增 `append_session_event` 命令做 O_APPEND 单行原子写（多进程并发追加只交错过界不互相覆盖——日志原语的安全语义）；TS 纯核 `sessionEventLog`（类型 + 串行化追加保证事件顺序 + 行容错解析 + 一次性熔断降级——日志失败永远不挡回合）；GUI 接线 `user_input`（带 gui 来源标注，未来手机/CLI 来源同形）与 `turn_settled`（与 turnTimings 同一世代护栏）。纯增量：现有快照路径零改动，收执/插话/委派事件与日志→messages 投影归下一刀。
+
 ## v3.0.4
 
 **进化总开关补洞：反思器纳入管辖（P0-1）**

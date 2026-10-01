@@ -66,6 +66,7 @@ import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapt
 import { DeepSeekAnthropicAdapter } from '../adapter/deepseek/DeepSeekAnthropicAdapter';
 import { RustLLMAdapter } from '../adapter/rust/RustLLMAdapter';
 import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
+import { capEventText, createSerializingSink, type SessionEventSink } from '../shared/sessionEventLog';
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
@@ -690,12 +691,27 @@ function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
   return externalSubagentsPromise;
 }
 
+// ── 架构评审 v2 A1（S1-1）— 会话事件日志的 GUI 写手 ──
+// 每会话一个串行化 sink（Rust append_session_event 做 O_APPEND 行写，多进程
+// 并发追加是日志原语支持的正常形态）。浏览器模式降级为 no-op——日志失败/
+// 缺席永远不挡回合（纯核的一次性熔断同款纪律）。
+const sessionEventSinks = new Map<string, SessionEventSink>();
+function getSessionEventSink(sessionId: string): SessionEventSink {
+  let sink = sessionEventSinks.get(sessionId);
+  if (!sink) {
+    sink = isTauriRuntime()
+      ? createSerializingSink((line) => tauriInvoke('append_session_event', { sessionId, event: line }))
+      : { append: async () => {} };
+    sessionEventSinks.set(sessionId, sink);
+  }
+  return sink;
+}
+
 /** 阶段 13.3 — persona overlays from ~/.pure/personas/*.overlay.md. Same shape
  * as the 13.2 scan: Rust does the IO, the shared compiler validates; scanned
  * once per app run, a broken file warns instead of blocking a turn. Deleting
  * an overlay file reverts the role at the next app start. */
-let personaOverlaysPromise: Promise<Map<string, string>> | null = null;
-function loadGuiPersonaOverlays(knownRoles: string[]): Promise<Map<string, string>> {
+let personaOverlaysPromise: Promise<Map<string, string>> | null = null;function loadGuiPersonaOverlays(knownRoles: string[]): Promise<Map<string, string>> {
   personaOverlaysPromise ??= (async () => {
     if (!isTauriRuntime()) return new Map<string, string>();
     try {
@@ -3448,6 +3464,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // by a session switch never writes into the session the user switched TO).
     const turnStartMs = performance.now();
     const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, totalMs: null };
+    // 架构评审 v2 A1（S1-1）— 用户输入进会话事件日志（带 gui 来源；通道/CLI
+    // 来源的输入事件由各自宿主在 S1-2 接入）。fire-and-forget：日志失败熔断
+    // 降级，绝不挡回合。
+    void getSessionEventSink(this.sessionId).append({
+      ts: Date.now(),
+      kind: 'user_input',
+      actor: 'gui',
+      origin: { surface: 'gui' },
+      payload: { text: capEventText(displayUserText), isAuto },
+    });
     // First STREAMED byte counts — reasoning deltas open the visible card just
     // like answer text, so both TokenDelta and ReasoningDelta mark through here.
     const markFirstToken = (): void => {
@@ -6697,6 +6723,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         timings.push(turnTiming);
         if (timings.length > 20) timings.splice(0, timings.length - 20);
         this.persistStats();
+        // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志（与 turnTimings 同一
+        // 生成代护栏：被会话切换作废的回合不写）。ttft/分支账给远端 digest 用。
+        void getSessionEventSink(this.sessionId).append({
+          ts: Date.now(),
+          kind: 'turn_settled',
+          actor: 'gui',
+          payload: {
+            totalMs: turnTiming.totalMs,
+            ttftMs: turnTiming.ttftMs,
+            branchEvents: turnTiming.branches?.length ?? 0,
+          },
+        });
       }
       if (liveToolOutputFrame !== undefined) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(liveToolOutputFrame);

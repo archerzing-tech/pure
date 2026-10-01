@@ -12066,6 +12066,75 @@ fn load_stored_session_revision(session_id: &str) -> Result<u64, String> {
         .unwrap_or(0))
 }
 
+// ── 架构评审 v2 A1：会话事件日志（events.jsonl，只追加）──
+// 每会话一行一事件的唯一事实源（快照降为压缩视图，见
+// docs/remote-office-bridge-design.md §2）。O_APPEND 单行写是日志原语的安全
+// 语义：多进程并发追加只交错过界、不互相覆盖。事件体由 TS 侧序列化（schema
+// 在 src/shared/sessionEventLog.ts），这里只管原子落行；坏 JSON 不在这层拦
+// ——读取侧按行容错（parseSessionEvents 跳过坏行）。
+#[tauri::command]
+fn append_session_event(session_id: String, event: String) -> Result<(), String> {
+    use std::io::Write as _;
+    validate_session_id(&session_id)?;
+    let line = event.trim_end();
+    if line.is_empty() || line.contains('\n') {
+        return Err("event must be a single non-empty line".to_string());
+    }
+    let dir = sessions_dir().join(&session_id);
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("events.jsonl"))
+        .map_err(|e| format!("open events.jsonl: {}", e))?;
+    writeln!(file, "{}", line).map_err(|e| format!("append: {}", e))
+}
+
+#[cfg(test)]
+mod session_event_log_tests {
+    use super::*;
+
+    fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
+        let _home_guard = test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "pure-session-events-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let out = f();
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        }
+        let _ = fs::remove_dir_all(&home);
+        out
+    }
+
+    #[test]
+    fn appends_single_lines_and_creates_the_file() {
+        with_temp_home(|| {
+            let sid = format!("events{}", std::process::id());
+            append_session_event(sid.clone(), r#"{"kind":"user_input"}"#.into()).unwrap();
+            append_session_event(sid.clone(), r#"{"kind":"turn_settled"}"#.into()).unwrap();
+            let raw = fs::read_to_string(sessions_dir().join(&sid).join("events.jsonl")).unwrap();
+            let lines: Vec<&str> = raw.trim_end().lines().collect();
+            assert_eq!(lines, vec![r#"{"kind":"user_input"}"#, r#"{"kind":"turn_settled"}"#]);
+        });
+    }
+
+    #[test]
+    fn rejects_multiline_events_and_bad_session_ids() {
+        with_temp_home(|| {
+            assert!(append_session_event("s1".into(), "a\nb".into()).is_err());
+            assert!(append_session_event("".into(), "{}".into()).is_err());
+            assert!(append_session_event("bad/../id".into(), "{}".into()).is_err());
+        });
+    }
+}
+
 fn workspace_override_path(session_id: &str) -> PathBuf {
     sessions_dir().join(session_id).join("workspace.txt")
 }
@@ -14914,6 +14983,7 @@ pub fn run() {
             generate_image,
             // Session persistence
             save_session,
+            append_session_event,
             load_session,
             load_last_session,
             load_session_list,
