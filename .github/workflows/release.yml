@@ -41,10 +41,12 @@ jobs:
         run: bun test
 
       - name: Build CLI binary (Windows) and embed as sidecar
+        shell: bash
         run: |
           bun run cli:build
           mkdir -p src-tauri/binaries
-          cp pure "src-tauri/binaries/pure-cli.exe"
+          # Bun on Windows auto-appends .exe to --outfile pure → the artifact is pure.exe
+          cp pure.exe "src-tauri/binaries/pure-cli.exe"
 
       # Same release-notes extraction as the macOS job (bash is available on
       # Windows runners via Git Bash) so both jobs publish the same body.
