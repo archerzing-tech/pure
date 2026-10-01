@@ -526,12 +526,17 @@ export function renderExperienceList(items: readonly ExperienceItem[], now: numb
       ? `<span class="memory-badge evo-badge-low">${escapeHtml(t('evolution.experience.lowConfidence', '低可信度'))}</span>`
       : '';
     const content = entry.content.length > 140 ? `${entry.content.slice(0, 140)}…` : entry.content;
+    // P2-2：procedure 复用够多 → 固化成工具按钮（13.4 生成半边的入口）。
+    const solidify = entry.type === 'procedure' && (entry.hitCount ?? 0) >= 2
+      ? `<button type="button" class="evo-solidify-btn" data-evo-solidify="${escapeHtml(entry.id)}" title="${escapeHtml(t('evolution.experience.solidifyTitle', '把这个做法固化成可复用的命令工具'))}">🔧 ${escapeHtml(t('evolution.experience.solidify', '固化成工具'))}</button>`
+      : '';
     return `<div class="evo-experience-row">
       <div class="evo-experience-head">
         <span class="memory-badge memory-badge-type memory-type-${escapeHtml(entry.type)}">${escapeHtml(t(`memory.type.${entry.type}`, entry.type))}</span>
         <span class="memory-badge memory-life-${lifecycle}">${escapeHtml(t(`memory.lifecycle.${lifecycle}`, lifecycle))}</span>
         ${draft}${confidence}
         <span class="evo-experience-score" title="${escapeHtml(t('memory.health', '健康分'))}">${pct}%</span>
+        ${solidify}
         <button type="button" class="memory-delete-btn" data-evo-del="${escapeHtml(entry.id)}" title="${escapeHtml(t('evolution.experience.deleteTitle', '从记忆库删除这条经验'))}" aria-label="${escapeHtml(t('evolution.experience.deleteTitle', '从记忆库删除这条经验'))}">✕</button>
       </div>
       <div class="evo-experience-content" title="${escapeHtml(entry.content)}">${escapeHtml(content)}</div>

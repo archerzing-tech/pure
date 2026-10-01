@@ -1093,7 +1093,20 @@ export class SettingsPanel {
     });
 
     // ── Evolution dashboard：经验条目直达清理（与记忆页同一条删除通道）──
-    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-del]');
+    document.getElementById('evolution-experience')
+    // ── P2-2：procedure 固化成工具（data-evo-solidify 按钮）──
+    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-solidify]');
+      if (!btn) return;
+      event.stopPropagation();
+      const id = btn.dataset.evoSolidify || '';
+      if (!id) return;
+      await this.runSolidifyFromDashboard(id, btn);
+    });
+
+    // ── Evolution dashboard：经验条目直达清理（与记忆页同一条删除通道）──
+    document.getElementById('evolution-experience')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-del]');
       if (!btn) return;
       event.stopPropagation();
       const id = btn.dataset.evoDel || '';
@@ -3118,6 +3131,102 @@ export class SettingsPanel {
    * 读失败一律降级成"没有数据"而不是报错：仪表盘空了应该能看出原因（下面各区块
    * 自己的空状态文案），绝不能让设置页白屏。
    */
+  /**
+   * P2-2 — 从仪表盘发起 procedure→工具固化流。按钮 → 找到 procedure 条目 →
+   * 走 runSolidifyFlow（起草→编译校验→试跑→确认→写盘）→ 按钮就地反馈结果。
+   */
+  private async runSolidifyFromDashboard(entryId: string, btn: HTMLElement): Promise<void> {
+    const entry = memoryStore.list().find((e) => e.id === entryId);
+    if (!entry || entry.type !== 'procedure') return;
+    const cfg = loadConfig();
+    if (!hasConfiguredKey(cfg)) return;
+
+    const original = btn.textContent;
+    btn.textContent = '⏳ 起草中…';
+    btn.setAttribute('disabled', 'true');
+    try {
+      const { runSolidifyFlow } = await import('../harness/toolSolidification');
+      const { createLLMAdapter } = await import('./chat');
+      const { tauriInvoke, loadTauriCore } = await import('../shared/tauri');
+      const { join, homeDir } = await import('@tauri-apps/api/path');
+      const core = await loadTauriCore();
+      if (!core) return;
+      const pureHome = await join(await homeDir(), '.pure');
+
+      const outcome = await runSolidifyFlow({
+        procedure: { procedureId: entry.id, content: entry.content, hitCount: entry.hitCount ?? 0 },
+        llm: createLLMAdapter(cfg),
+        io: {
+          runCommand: async (command, timeoutMs) => {
+            try {
+              const result = await tauriInvoke<{ stdout?: string; stderr?: string; code?: number }>('execute_command', {
+                workspace: pureHome,
+                command,
+                timeout_ms: timeoutMs,
+              });
+              const ok = (result?.code ?? 0) === 0;
+              return { ok, output: `${result?.stdout ?? ''}${result?.stderr ?? ''}`.trim() };
+            } catch (err) {
+              return { ok: false, output: err instanceof Error ? err.message : String(err) };
+            }
+          },
+          writeToolDir: async (name, manifest) => {
+            await core.invoke('write_file', {
+              workspace: pureHome,
+              path: `tools/${name}/TOOL.json`,
+              content: manifest,
+            });
+          },
+          toolExists: async (name) => {
+            try {
+              await core.invoke('read_file', { workspace: pureHome, path: `tools/${name}/TOOL.json` });
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        },
+        confirm: async (info) => {
+          const ok = await showConfirmModal({
+            title: t('evolution.solidify.confirmTitle', '固化成工具'),
+            message: t('evolution.solidify.confirmMessage', `将创建 ~/.pure/tools/${info.name}/TOOL.json\n\n名称：${info.name}\n描述：${info.description}\n命令：${info.exec}\n\n下次启动 pure 后，模型就能直接调用这个工具。`),
+            okLabel: t('evolution.solidify.confirmOk', '固化'),
+            cancelLabel: t('common.cancel', '取消'),
+          });
+          return ok;
+        },
+      });
+
+      switch (outcome.kind) {
+        case 'written':
+          btn.textContent = `✅ 已创建 ${outcome.name}`;
+          btn.classList.add('evo-solidify-done');
+          break;
+        case 'none':
+          btn.textContent = '🤷 模型认为不适合做工具';
+          break;
+        case 'test_failed':
+          btn.textContent = '❌ 试跑失败';
+          btn.title = outcome.reason;
+          break;
+        case 'exists':
+          btn.textContent = '⚠️ 已有同名工具';
+          break;
+        case 'cancelled':
+          btn.textContent = original ?? '';
+          break;
+        default:
+          btn.textContent = '❌ 失败';
+          btn.title = (outcome as { reason?: string }).reason ?? '';
+      }
+    } catch (err) {
+      btn.textContent = '❌ 出错';
+      btn.title = err instanceof Error ? err.message : String(err);
+    } finally {
+      btn.removeAttribute('disabled');
+    }
+  }
+
   private async renderEvolutionDashboard(): Promise<void> {
     const now = Date.now();
     const read = await readGuiObservations();

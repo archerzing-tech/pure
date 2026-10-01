@@ -14454,3 +14454,30 @@ button svg,
 .setting-btn.primary:disabled:hover {
   background: var(--accent);
 }
+
+/* ── P2-2: 固化成工具按钮（经验条目行内）── */
+.evo-solidify-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.evo-solidify-btn:hover:not(:disabled) {
+  background: var(--accent-dim, rgba(59,130,246,0.12));
+  color: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+}
+.evo-solidify-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.evo-solidify-btn.evo-solidify-done {
+  background: rgba(34,197,94,0.12);
+  color: #16a34a;
+  border-color: #16a34a;
+}
