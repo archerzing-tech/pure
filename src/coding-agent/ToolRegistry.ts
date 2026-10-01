@@ -27,6 +27,7 @@ export const Tags = {
   SEARCH: 'search',
   MCP: 'mcp',
   DOWNLOAD: 'download',
+  EXTERNAL: 'external',
 } as const;
 
 // ── Built-in tool definitions with tags ──
@@ -90,10 +91,17 @@ export class ToolRegistry implements ToolAdapter {
   private tools: TaggedTool[] = [...BUILT_IN_TOOLS];
   private subagentExecutor?: ToolAdapter;
   private mcpExecutor?: ToolAdapter;
+  private externalToolsExecutor?: ToolAdapter;
   private permissionManager?: PermissionManager;
   private commandGuard?: (command: string) => string | null;
 
   constructor(private delegate: ToolAdapter) {}
+
+  /** The underlying adapter (NodeToolAdapter / TauriToolAdapter) — used by
+   * the external-tools executor to route through execute_command. */
+  getDelegate(): ToolAdapter {
+    return this.delegate;
+  }
 
   /** Set the executor for subagent (Tags.AGENT) tools. */
   setSubagentExecutor(executor: ToolAdapter): void {
@@ -103,6 +111,11 @@ export class ToolRegistry implements ToolAdapter {
   /** Set the executor for MCP (Tags.MCP) tools. */
   setMCPExecutor(executor: ToolAdapter): void {
     this.mcpExecutor = executor;
+  }
+
+  /** Set the executor for external script tools (Tags.EXTERNAL). */
+  setExternalToolsExecutor(executor: ToolAdapter): void {
+    this.externalToolsExecutor = executor;
   }
 
   /** Set the permission manager consulted before every tool execution. */
@@ -236,6 +249,11 @@ export class ToolRegistry implements ToolAdapter {
     // Route MCP tools to the MCP client
     if (known.tags.includes(Tags.MCP) && this.mcpExecutor) {
       return this.mcpExecutor.execute(toolCall, signal);
+    }
+
+    // Route external script tools to their adapter
+    if (known.tags.includes(Tags.EXTERNAL) && this.externalToolsExecutor) {
+      return this.externalToolsExecutor.execute(toolCall, signal);
     }
 
     return this.delegate.execute(toolCall, signal);

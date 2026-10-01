@@ -20,7 +20,7 @@ import { estimateTextTokens } from '../shared/tokenEstimate';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
-import { isGitMutationCommand, Tags } from '../coding-agent/ToolRegistry';
+import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
 import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
@@ -33,6 +33,8 @@ import { sanitizeSkillName } from './skillHub';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
+import { compileExternalTools } from '../harness/externalTools';
+import type { TaggedTool } from '../coding-agent/types';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -691,6 +693,35 @@ function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
     }
   })();
   return externalSubagentsPromise;
+}
+
+// ── 阶段 13.4 — external script tools from ~/.pure/tools/<name>/TOOL.json ──
+// Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;
+// scanned once per app run. Delete the directory and the tool is gone at the
+// next app start. Master switch off = don't load (Principle 1).
+let externalToolsPromise: Promise<TaggedTool[]> | null = null;
+function loadGuiExternalTools(): Promise<TaggedTool[]> {
+  externalToolsPromise ??= (async () => {
+    if (!isTauriRuntime()) return [];
+    const cfg = loadConfig();
+    if (cfg?.skills?.evolution === false) return [];
+    try {
+      const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_external_tools');
+      const { tools, errors } = compileExternalTools(
+        sources ?? [],
+        (name) => {
+          // 目录名与工具名同构——Rust 侧只扫目录，这里信任扫描结果。
+          return (sources ?? []).some((s) => s.file.startsWith(`${name}/`));
+        },
+      );
+      for (const line of errors) console.warn(`[external-tools] ${line}`);
+      return tools;
+    } catch (error) {
+      console.warn('[external-tools] scan failed:', error);
+      return [];
+    }
+  })();
+  return externalToolsPromise;
 }
 
 // ── 架构评审 v2 A1（S1-1）— 会话事件日志的 GUI 写手 ──
@@ -4315,6 +4346,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // delegation surface. They skip the skill toggles (they aren't skills)
       // and can never shadow a built-in (the compiler rejects the collision).
       const externalSubagents = await loadGuiExternalSubagents();
+      // 13.4 — external script tools: compile + register alongside built-ins
+      // (MCP-same pathway). Collision with built-in names is rejected here —
+      // the ToolRegistry would otherwise silently replace the built-in.
+      const externalTools = await loadGuiExternalTools();
+      const builtinToolNames = new Set(BUILT_IN_TOOLS.map((t) => t.name));
+      const safeExternalTools = externalTools.filter((t) => {
+        if (builtinToolNames.has(t.name)) {
+          console.warn(`[external-tools] "${t.name}" collides with a built-in — skipped`);
+          return false;
+        }
+        return true;
+      });
       // 13.3 — overlays load alongside the roles; unknown-role files are
       // rejected at compile time against the full delegable surface.
       const personaOverlays = await loadGuiPersonaOverlays(
@@ -4423,6 +4466,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         toolAdapter,
         subagents,
         personaOverlays,
+        // 13.4 — external script tools join the registry (MCP-same pathway);
+        // the executor routes through the tool adapter's execute_command.
+        ...(safeExternalTools.length > 0 ? { externalTools: safeExternalTools } : {}),
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task
         // after a stop + continue in this same conversation.
         stateStore: this.subagentStore,

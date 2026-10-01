@@ -12,6 +12,7 @@ import { createDefaultHarnessConfig } from './defaultHarnessConfig';
 import { ToolRegistry } from './ToolRegistry';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
+import { substituteExec } from '../harness/externalTools';
 import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
@@ -31,6 +32,7 @@ import type {
   SubagentActivityEvent,
   ToolAdapter,
   ToolDefinition,
+  ToolCall,
   IStateStore,
 } from '../shared/types';
 import type {
@@ -41,6 +43,7 @@ import type {
   AnalysisResult,
   SemanticRouteDecision,
   SubagentDefinition,
+  TaggedTool,
 } from './types';
 
 export interface CodingAgentConfig {
@@ -115,6 +118,12 @@ export interface CodingAgentConfig {
   /** 阶段 13.3 — role → 进化 overlay（宿主从 ~/.pure/personas/ 装载后传入）；
    * 命中角色的 system prompt 在 base 之后追加 overlay。 */
   personaOverlays?: Map<string, string>;
+  /** 阶段 13.4 — external script tools（宿主从 ~/.pure/tools/ 装载编译后
+   * 传入）；经 ToolRegistry.register 注册（MCP 同款通路），执行路由到
+   * execute_command 信任模型。 */
+  externalTools?: TaggedTool[];
+  /** 阶段 13.4 — 外部工具的 exec 模板（name → { exec, timeoutMs }）。 */
+  externalToolExecs?: Map<string, { exec: string; timeoutMs: number }>;
   /** Optional UI sink to surface which subagent is currently working. */
   subagentProgress?: SubagentProgress;
   mcpServers?: MCPServerConfig[];
@@ -208,6 +217,21 @@ export class CodingAgent {
       this.toolRegistry.register(def);
     }
 
+    // ── 阶段 13.4 — external script tools (MCP-same pathway) ──
+    // The host compiled ~/.pure/tools/<name>/TOOL.json into TaggedTools +
+    // exec templates; register into ToolRegistry and set the executor that
+    // routes execution through the tool adapter's execute_command.
+    if (config.externalTools && config.externalTools.length > 0) {
+      for (const tool of config.externalTools) {
+        this.toolRegistry.register(tool);
+      }
+      if (config.externalToolExecs && config.externalToolExecs.size > 0) {
+        this.toolRegistry.setExternalToolsExecutor(
+          this.createExternalToolsExecutor(config.externalToolExecs),
+        );
+      }
+    }
+
     // T1 — the observation layer needs to know which tool names are role
     // delegations. The roster is whatever this agent registered above; the
     // predicate keeps the shared observer decoupled from roster types.
@@ -294,8 +318,55 @@ export class CodingAgent {
   }
 
   /**
-   * Composite progress sink for the orchestrator: every callback forwards to
-   * the legacy UI sink unchanged (activity panel keeps its rich model) and
+   * 13.4 — executor for external script tools: substitute {param} placeholders
+   * in the exec template, then route through the tool adapter's
+   * execute_command (permission gate / timeout / cancel all use the existing
+   * execute_command pipeline — no new security surface, design stance 3).
+   */
+  private createExternalToolsExecutor(
+    execs: Map<string, { exec: string; timeoutMs: number }>,
+  ): ToolAdapter {
+    const delegate = this.toolRegistry.getDelegate();
+    return {
+      getTools: () => [],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (toolCall, signal) => {
+        const entry = execs.get(toolCall.function.name);
+        if (!entry) {
+          return {
+            id: toolCall.id,
+            toolName: toolCall.function.name,
+            error: `External tool "${toolCall.function.name}" has no exec template`,
+            success: false,
+            duration: 0,
+          };
+        }
+        let args: Record<string, unknown>;
+        try {
+          args = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
+        } catch {
+          args = {};
+        }
+        const command = substituteExec(entry.exec, args);
+        // Route as an execute_command call through the same adapter — the
+        // permission gate already ran for the tool call itself (Tags.EXTERNAL
+        // in the registry), and the adapter's execute_command path handles
+        // shell execution, timeout, and output formatting.
+        const cmdCall: ToolCall = {
+          id: toolCall.id,
+          index: toolCall.index,
+          function: {
+            name: 'execute_command',
+            arguments: JSON.stringify({ command, timeout_ms: entry.timeoutMs }),
+          },
+        };
+        return delegate.execute(cmdCall, signal);
+      },
+    };
+  }
+
+  /**
+   * Composite progress sink for the orchestrator: every callback forwards to   * the legacy UI sink unchanged (activity panel keeps its rich model) and
    * simultaneously maps onto the lean shared event shape and publishes to the
    * feed, so the engine event stream carries subagent interior activity
    * namespaced by the delegation toolCallId. Subagents are one activity per

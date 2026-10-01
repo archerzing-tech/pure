@@ -7367,6 +7367,37 @@ fn persona_overlays_dir() -> PathBuf {
     PathBuf::from(base).join("personas")
 }
 
+/// 阶段 13.4 — external script tools. Every `~/.pure/tools/<name>/TOOL.json`
+/// is a potential tool; Rust does the scan, the TS compiler validates.
+/// PURE_TOOLS_DIR env override (tests).
+#[tauri::command]
+fn list_external_tools() -> Vec<serde_json::Value> {
+    let dir = std::env::var("PURE_TOOLS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(pure_home_dir()).join(".pure").join("tools"));
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in names {
+        let manifest = dir.join(&name).join("TOOL.json");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        out.push(serde_json::json!({
+            "file": format!("{}/TOOL.json", name),
+            "text": text,
+        }));
+    }
+    out
+}
+
 #[tauri::command]
 fn list_persona_overlays() -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -10265,7 +10296,11 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
         }
     }
     if cfg!(windows) {
+        // Windows 候选：CLI 安装器可能放 ~/.pure/bin/ 或直接 ~/.pure/。
+        // 错误信息把全部候选列出来，用户知道往哪放 pure.exe。
         candidates.push(format!("{}/.pure/bin/pure.exe", pure_home_dir()));
+        candidates.push(format!("{}/.pure/pure.exe", pure_home_dir()));
+        candidates.push("pure.exe".to_string());
     } else {
         candidates.push("/usr/local/bin/pure".to_string());
         candidates.push(format!("{}/.pure/bin/pure", pure_home_dir()));
@@ -10310,7 +10345,7 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
             }
         }
     }
-    Err(format!("启动 gateway 失败：{}。请先安装 CLI（pure）。", last_err))
+    Err(format!("启动 gateway 失败：{}。请把 CLI（pure.exe）放到 ~/.pure/bin/、~/.pure/ 或 app 同目录（pure-cli.exe）。", last_err))
 }
 
 /// 停止 gateway：先 SIGTERM 优雅退出（写 checkpoint、关长连接），
@@ -15069,6 +15104,7 @@ pub fn run() {
             save_session,
             append_session_event,
             read_session_events,
+            list_external_tools,
             load_session,
             load_last_session,
             load_session_list,
