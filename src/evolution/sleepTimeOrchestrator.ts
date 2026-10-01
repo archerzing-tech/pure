@@ -23,6 +23,7 @@ import {
   shouldReflect,
   type ReflectionConfig,
 } from '../harness/LessonReflector';
+import { findSolidifyCandidates } from '../harness/toolSolidification';
 import { scanSubagentAdvice, type SubagentAdvice, type SubagentAdviceSeverity } from '../shared/subagentAdvisory';
 import type { OverlayFlowOutcome, OverlayFlowResult } from '../ui/personaOverlayFlow';
 import type { PromptObservation } from '../shared/promptObservability';
@@ -201,6 +202,10 @@ export interface SleepTimeDeps {
   overlayExists?: (role: string) => Promise<boolean>;
   /** 技能闸执行（翻转 config + persist + advice_applied 记账 —— settings.ts 语义）。 */
   applySkillGate?: (advice: SubagentAdvice) => Promise<void> | void;
+  /** P2-2 — procedure→工具固化流（起草→编译校验→试跑→确认→写盘）。
+   *  宿主装配 runSolidifyFlow；confirm 绑 async () => true（试跑通过即自动
+   *  落盘，与 overlay 同立场：门禁过了就是证据）。无此缝的宿主跳过。 */
+  runSolidify?: (procedure: { procedureId: string; content: string; hitCount: number }) => Promise<{ kind: string; name?: string; reason?: string }>;
   confirmPolicy?: ConfirmPolicy;
   budget?: Partial<SleepTimeBudget>;
   /** 可测试性：时钟与取消。 */
@@ -215,7 +220,9 @@ export type SleepTimeAction =
   | { kind: 'session-skipped'; sessionId: string; reason: SessionSkipReason }
   | { kind: 'skill-gate-applied'; advice: SubagentAdvice }
   | { kind: 'overlay-written'; role: string }
-  | { kind: 'overlay-deferred'; role: string; outcome: OverlayFlowOutcome; backoffMs: number };
+  | { kind: 'overlay-deferred'; role: string; outcome: OverlayFlowOutcome; backoffMs: number }
+  | { kind: 'tool-solidified'; name: string }
+  | { kind: 'solidify-deferred'; procedureId: string; outcome: string; backoffMs: number };
 
 export type SessionSkipReason =
   | 'cursor' // 水位/尾表已覆盖
@@ -232,6 +239,8 @@ export interface CycleResult {
   advicesConsidered: number;
   skillGatesApplied: number;
   overlaysWritten: number;
+  /** P2-2 — 本轮固化的工具数。 */
+  solidifiedTools: number;
   /** 哪个预算维度先到顶（null = 自然跑完）。 */
   budgetExhausted: 'wall-clock' | 'sessions' | 'llm' | null;
   aborted: boolean;
@@ -263,6 +272,7 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
     advicesConsidered: 0,
     skillGatesApplied: 0,
     overlaysWritten: 0,
+      solidifiedTools: 0,
     budgetExhausted: null,
     aborted: false,
     skippedRunning: false,
@@ -476,6 +486,33 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
           emit({ kind: 'overlay-deferred', role: advice.role, outcome: flow.outcome, backoffMs: OVERLAY_BACKOFF_MS });
         }
         await saveCursor();
+      }
+    }
+
+    // ── P2-2：procedure→工具固化路由（每轮最多固化一个，预算 +1 次调用）──
+    if (deps.runSolidify && llmCalls + 1 <= budget.maxLlmCalls) {
+      try {
+        const candidates = findSolidifyCandidates(deps.memory.list());
+        if (candidates.length > 0) {
+          const proc = candidates[0];
+          const key = `solidify:${proc.procedureId}`;
+          const prior = cursor.overlayLedger[key]; // 复用 overlay 的退避账本（同源纪律）
+          if (!prior || nowFn() - prior.deniedAt >= OVERLAY_BACKOFF_MS) {
+            llmCalls += 1;
+            const outcome = await deps.runSolidify(proc);
+            if (outcome.kind === 'written' && outcome.name) {
+              result.solidifiedTools = (result.solidifiedTools ?? 0) + 1;
+              delete cursor.overlayLedger[key];
+              emit({ kind: 'tool-solidified', name: outcome.name });
+            } else {
+              cursor.overlayLedger[key] = { deniedAt: nowFn(), attempts: (prior?.attempts ?? 0) + 1 };
+              emit({ kind: 'solidify-deferred', procedureId: proc.procedureId, outcome: outcome.kind, backoffMs: OVERLAY_BACKOFF_MS });
+            }
+            await saveCursor();
+          }
+        }
+      } catch (err) {
+        result.errors.push(`solidify route failed: ${errorMessage(err)}`);
       }
     }
   } finally {

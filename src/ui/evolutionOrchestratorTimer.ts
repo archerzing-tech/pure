@@ -232,6 +232,43 @@ async function buildGuiSleepTimeDeps(cfg: PureConfig): Promise<SleepTimeDeps> {
       }
       return defaultConfirmPolicy()(action);
     },
+    // P2-2 — procedure→工具固化路由（GUI 空闲循环自动触发；confirm 绑 true
+    //  = 试跑通过即自动落盘，与 overlay 同立场）。
+    runSolidify: async (procedure) => {
+      try {
+        const { runSolidifyFlow } = await import('../harness/toolSolidification');
+        const { createLLMAdapter } = await import('./chat');
+        const { loadTauriCore, tauriInvoke } = await import('../shared/tauri');
+        const { join, homeDir } = await import('@tauri-apps/api/path');
+        const core = await loadTauriCore();
+        if (!core) return { kind: 'failed', reason: 'no tauri' };
+        const pureHome = await join(await homeDir(), '.pure');
+        const cfg = loadConfig();
+        return await runSolidifyFlow({
+          procedure,
+          llm: createLLMAdapter(cfg),
+          io: {
+            runCommand: async (command, timeoutMs) => {
+              try {
+                const r = await tauriInvoke<{ stdout?: string; stderr?: string; code?: number }>('execute_command', { workspace: pureHome, command, timeout_ms: timeoutMs });
+                return { ok: (r?.code ?? 0) === 0, output: `${r?.stdout ?? ''}${r?.stderr ?? ''}`.trim() };
+              } catch (err) {
+                return { ok: false, output: err instanceof Error ? err.message : String(err) };
+              }
+            },
+            writeToolDir: async (name, manifest) => {
+              await core.invoke('write_file', { workspace: pureHome, path: `tools/${name}/TOOL.json`, content: manifest });
+            },
+            toolExists: async (name) => {
+              try { await core.invoke('read_file', { workspace: pureHome, path: `tools/${name}/TOOL.json` }); return true; } catch { return false; }
+            },
+          },
+          confirm: async () => true,
+        });
+      } catch (err) {
+        return { kind: 'failed', reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
     budget: SLEEP_TIME_BUDGETS.gui,
     onAction: (action) => {
       console.info(`[pure] evolution cycle: ${action.kind}`);
