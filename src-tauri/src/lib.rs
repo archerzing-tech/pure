@@ -10456,7 +10456,18 @@ setInterval(() => {{}}, 30_000); // keep alive
         if let Err(e) = fs::write(&script_path, &script) {
             last_err = format!("write bootstrap: {}", e);
         } else {
-            let mut cmd = TokioCommand::new("bun");
+            // GUI 进程的 PATH 可能没有 bun——先找文件系统位置。
+            let bun_exe = {
+                let candidates = [
+                    format!("{}/.bun/bin/{}", pure_home_dir(), if cfg!(windows) { "bun.exe" } else { "bun" }),
+                    "/opt/homebrew/bin/bun".to_string(),
+                    "/usr/local/bin/bun".to_string(),
+                ];
+                candidates.iter().find(|p| Path::new(p).exists())
+                    .cloned()
+                    .unwrap_or_else(|| "bun".to_string())  // PATH 兜底
+            };
+            let mut cmd = TokioCommand::new(&bun_exe);
             cmd.arg(&script_path)
                 .stdin(std::process::Stdio::null())
                 .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
@@ -10557,25 +10568,39 @@ struct GatewayDependency {
 async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     let mut out = Vec::new();
 
-    // Bun：PATH 上能跑 bun --version 即已安装。
-    let bun_ok = TokioCommand::new("bun")
-        .arg("--version")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let bun_version = if bun_ok {
-        TokioCommand::new("bun")
-            .arg("--version")
-            .output()
-            .await
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    // Bun：GUI 进程不继承终端的 shell PATH（macOS 从 Finder/Dock 启动只有
+    // 系统最小 PATH，~/.bun/bin 不在里面）——不依赖 PATH，直接检查已知
+    // 文件系统位置 + PATH 兜底。
+    let bun_locations = [
+        format!("{}/.bun/bin/{}", pure_home_dir(), if cfg!(windows) { "bun.exe" } else { "bun" }),
+        "/opt/homebrew/bin/bun".to_string(),
+        "/usr/local/bin/bun".to_string(),
+    ];
+    let mut bun_path = String::new();
+    for loc in &bun_locations {
+        if Path::new(loc).exists() {
+            bun_path = loc.clone();
+            break;
+        }
+    }
+    // PATH 兜底（如果上述位置都没找到但 PATH 上有）。
+    if bun_path.is_empty() {
+        let which = if cfg!(windows) { "where" } else { "which" };
+        if let Ok(o) = TokioCommand::new(which).arg("bun").output().await {
+            if o.status.success() {
+                if let Ok(text) = String::from_utf8(o.stdout) {
+                    if let Some(first) = text.lines().next() {
+                        let p = first.trim();
+                        if !p.is_empty() && Path::new(p).exists() {
+                            bun_path = p.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let bun_ok = !bun_path.is_empty();
+    let bun_version = if bun_ok { bun_path } else { String::new() };
     // Bun 路径：which bun 的结果。
     let bun_path = if bun_ok {
         TokioCommand::new(if cfg!(windows) { "where" } else { "which" })
@@ -10602,24 +10627,18 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     let cli_names = if cfg!(windows) { ["pure-cli.exe", "pure.exe"] } else { ["pure-cli", "pure"] };
     let mut cli_found = false;
     let mut cli_version = String::new();
-    if let Some(dir) = &exe_dir {
+    let cli_search_dirs: Vec<PathBuf> = [
+        exe_dir.clone().unwrap_or_default(),
+        PathBuf::from(pure_home_dir()).join(".pure").join("bin"),
+        PathBuf::from(pure_home_dir()).join(".pure"),
+    ].into_iter().filter(|d| !d.as_os_str().is_empty()).collect();
+    'outer: for dir in &cli_search_dirs {
         for name in cli_names {
             let p = dir.join(name);
             if p.exists() {
                 cli_found = true;
-                cli_version = name.to_string();
-                break;
-            }
-        }
-    }
-    if !cli_found {
-        let global = PathBuf::from(pure_home_dir()).join(".pure").join("bin");
-        for name in cli_names {
-            let p = global.join(name);
-            if p.exists() {
-                cli_found = true;
-                cli_version = name.to_string();
-                break;
+                cli_version = p.to_string_lossy().to_string();
+                break 'outer;
             }
         }
     }
