@@ -24,8 +24,11 @@ export interface SessionEventOrigin {
 
 /** v1 事件词汇表（有界起点，S1-2 随投影层扩展）。 */
 export type SessionEventKind =
-  | 'user_input'      // 一条用户输入进入会话（含 origin）
-  | 'turn_settled';   // 一个回合落定（完成/中断/失败，带耗时）
+  | 'user_input'            // 一条用户输入进入会话（含 origin）
+  | 'turn_settled'          // 一个回合落定（完成/中断/失败，带耗时）
+  | 'receipt'               // 插话/操作收执的终稿（settleAck 单点）
+  | 'insertion_classified'  // 插话裁决结果（kind/action/via）
+  | 'delegation_settled';   // 一路子代理委派落定（onDone/onError 单点）
 
 export interface SessionEvent<K extends string = string> {
   /** 事件时刻（epoch ms）。 */
@@ -101,4 +104,81 @@ export const SESSION_EVENT_TEXT_CAP = 2_000;
 
 export function capEventText(text: string): string {
   return text.length > SESSION_EVENT_TEXT_CAP ? `${text.slice(0, SESSION_EVENT_TEXT_CAP)}…` : text;
+}
+
+// ── S1-2：日志 → 时间线投影（远程 digest 与「重开即互见」的读取地基）──
+// 投影只做归并与措辞，不发明新事实：每条时间线条目都能指回事件本身。未知
+// kind 照样通过（前向兼容——旧读新日志，新事件顶多不带摘要）。
+
+export interface TimelineEntry {
+  ts: number;
+  /** 事件 kind 原样（消费方按需过滤/分组）。 */
+  kind: SessionEventKind | (string & {});
+  /** 一行摘要（已截断；直接给 digest/通知用）。 */
+  summary: string;
+  origin?: SessionEventOrigin;
+}
+
+interface EventPayloadShape {
+  text?: unknown;
+  isAuto?: unknown;
+  totalMs?: unknown;
+  ttftMs?: unknown;
+  branchEvents?: unknown;
+  style?: unknown;
+  final?: unknown;
+  kind?: unknown;
+  action?: unknown;
+  via?: unknown;
+  agentName?: unknown;
+  agentId?: unknown;
+  success?: unknown;
+  outcome?: unknown;
+  durationMs?: unknown;
+}
+
+function clip(text: unknown, max = 120): string {
+  const s = typeof text === 'string' ? text.trim() : '';
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function ms(n: unknown): string {
+  return typeof n === 'number' && Number.isFinite(n) ? `${Math.round(n / 100) / 10}s` : '?';
+}
+
+/** 把事件日志投影成时间线（每事件一条，保持日志序）。 */
+export function projectSessionTimeline(events: readonly SessionEvent[]): TimelineEntry[] {
+  const out: TimelineEntry[] = [];
+  for (const event of events) {
+    const p = (event.payload ?? {}) as EventPayloadShape;
+    let summary: string;
+    switch (event.kind) {
+      case 'user_input': {
+        const who = event.origin && event.origin.surface !== 'gui' ? `(${event.origin.surface})` : '';
+        summary = `${p.isAuto === true ? '[自动]' : '用户'}${who}：${clip(p.text)}`;
+        break;
+      }
+      case 'turn_settled':
+        summary = `回合落定（${ms(p.totalMs)}，分支事件 ${typeof p.branchEvents === 'number' ? p.branchEvents : 0}）`;
+        break;
+      case 'receipt':
+        summary = `回执：${clip(p.text)}`;
+        break;
+      case 'insertion_classified':
+        summary = `插话裁决：${String(p.kind ?? '?')} → ${String(p.action ?? '?')}（${String(p.via ?? '?')}）：${clip(p.text, 60)}`;
+        break;
+      case 'delegation_settled':
+        summary = `${String(p.agentName ?? '?')} ${p.success === true ? '✔' : '✘'}${p.outcome ? ` ${String(p.outcome)}` : ''}（${ms(p.durationMs)}）`;
+        break;
+      default:
+        summary = event.kind;
+    }
+    out.push({ ts: event.ts, kind: event.kind, summary, ...(event.origin ? { origin: event.origin } : {}) });
+  }
+  return out;
+}
+
+/** digest 视图：最近 limit 条时间线（手机推送/快速回看的形状）。 */
+export function recentTimelineDigest(events: readonly SessionEvent[], limit = 12): TimelineEntry[] {
+  return projectSessionTimeline(events).slice(-limit);
 }

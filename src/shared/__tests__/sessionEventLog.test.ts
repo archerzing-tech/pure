@@ -1,7 +1,7 @@
 // 架构评审 v2 A1 — 会话事件日志纯核：串行化顺序、单行不变式、降级熔断、
 // 行容错解析。
 import { describe, expect, it } from 'bun:test';
-import { capEventText, createSerializingSink, parseSessionEvents, type SessionEvent } from '../sessionEventLog';
+import { capEventText, createSerializingSink, parseSessionEvents, projectSessionTimeline, recentTimelineDigest, type SessionEvent } from '../sessionEventLog';
 
 function event(kind: string, ts: number, payload: unknown = {}): SessionEvent {
   return { ts, kind, actor: 'gui', payload };
@@ -76,5 +76,45 @@ describe('capEventText', () => {
   it('caps long user text with an ellipsis', () => {
     expect(capEventText('x'.repeat(3000)).length).toBeLessThanOrEqual(2001);
     expect(capEventText('short')).toBe('short');
+  });
+});
+
+// S1-2 — 时间线投影：每 kind 一条摘要、未知 kind 前向兼容、digest 取尾。
+describe('projectSessionTimeline + recentTimelineDigest', () => {
+  it('summarizes each known kind in log order', () => {
+    const events: SessionEvent[] = [
+      { ts: 1, kind: 'user_input', actor: 'gui', origin: { surface: 'gui' }, payload: { text: '调研三个主题' } },
+      { ts: 2, kind: 'insertion_classified', actor: 'gui', payload: { kind: 'steer', action: 'fold', via: 'judge', text: '重点看 X' } },
+      { ts: 3, kind: 'delegation_settled', actor: 'gui', payload: { agentName: 'researcher', success: true, outcome: 'done', durationMs: 12000 } },
+      { ts: 4, kind: 'receipt', actor: 'gui', payload: { text: '收到——活不停，下个动作就带上这句。' } },
+      { ts: 5, kind: 'turn_settled', actor: 'gui', payload: { totalMs: 34000, ttftMs: 800, branchEvents: 2 } },
+    ];
+    const timeline = projectSessionTimeline(events);
+    expect(timeline.map((t) => t.kind)).toEqual(['user_input', 'insertion_classified', 'delegation_settled', 'receipt', 'turn_settled']);
+    expect(timeline[0].summary).toContain('用户：调研三个主题');
+    expect(timeline[0].summary).not.toContain('(qq)');
+    expect(timeline[2].summary).toContain('researcher ✔');
+    expect(timeline[2].summary).toContain('12s');
+    expect(timeline[3].summary).toContain('回执：');
+    expect(timeline[4].summary).toContain('回合落定');
+  });
+
+  it('marks channel-originated inputs with their surface', () => {
+    const events: SessionEvent[] = [
+      { ts: 1, kind: 'user_input', actor: 'gateway', origin: { surface: 'qq', peer: 'p1' }, payload: { text: '现在到哪了' } },
+    ];
+    expect(projectSessionTimeline(events)[0].summary).toContain('(qq)');
+  });
+
+  it('passes unknown kinds through with forward compatibility', () => {
+    const timeline = projectSessionTimeline([{ ts: 1, kind: 'future_event', actor: 'gui', payload: {} }]);
+    expect(timeline[0].summary).toBe('future_event');
+  });
+
+  it('digest keeps only the trailing entries', () => {
+    const events = Array.from({ length: 20 }, (_, i): SessionEvent => ({ ts: i, kind: 'receipt', actor: 'gui', payload: { text: `r${i}` } }));
+    const digest = recentTimelineDigest(events, 5);
+    expect(digest).toHaveLength(5);
+    expect(digest[0].summary).toContain('r15');
   });
 });

@@ -2553,8 +2553,36 @@ export class ChatController {
    * placeEchoBeforeAck 保证：用户原话在前，宿主回话在后）。
    * keepPending=true 是「话还没说完」的占位——停/改向/追问的后续还在途，
    * 保留状态行 + 微光，等追问气泡或收尾扫除接管；只有终稿回执才转气泡。 */
+  /** 架构评审 v2 A1（S1-2）— 委派落定进会话事件日志（subagentProgress 的
+   *  onDone/onError 单点；世代护栏由调用方的 gen 检查承担）。 */
+  private logDelegationSettled(a: import('../coding-agent/SubagentOrchestrator').SubagentActivity): void {
+    void getSessionEventSink(this.sessionId).append({
+      ts: Date.now(),
+      kind: 'delegation_settled',
+      actor: 'gui',
+      payload: {
+        agentName: a.agentName,
+        agentId: a.agentId ?? null,
+        success: a.success === true,
+        outcome: a.status ?? null,
+        durationMs: a.durationMs ?? null,
+        inputSnippet: a.inputSnippet ? capEventText(a.inputSnippet) : null,
+      },
+    });
+  }
+
   private settleAck(ack: HTMLElement | null, text: string, keepPending = false, kind?: 'success' | 'warn' | 'info'): void {
     if (!ack) return;
+    // 架构评审 v2 A1（S1-2）— 收执终稿进会话事件日志（settleAck 是全部收执的
+    // 单点；keepPending 的过渡稿不记，账本只要终稿）。
+    if (!keepPending) {
+      void getSessionEventSink(this.sessionId).append({
+        ts: Date.now(),
+        kind: 'receipt',
+        actor: 'gui',
+        payload: { text: capEventText(text), style: kind ?? null },
+      });
+    }
     const row = ack.parentElement;
     if (keepPending || !row?.parentNode) {
       ack.textContent = text;
@@ -2638,6 +2666,19 @@ export class ChatController {
     // 思考时 8s 预算几乎必然超时，判定会整批落到字面安全网。turnLlm 是兜底
     // （judgeLlm 没立起来时它至少让 decide 拿到一个 llm）。
     const decision = await this.dynamicInsertionCoordinator.decide(this.judgeLlm ?? this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
+    // 架构评审 v2 A1（S1-2）— 插话裁决进会话事件日志（远端 digest 的「这句
+    // 被怎么处理了」一行）。
+    void getSessionEventSink(this.sessionId).append({
+      ts: Date.now(),
+      kind: 'insertion_classified',
+      actor: 'gui',
+      payload: {
+        kind: decision.kind,
+        action: decision.action,
+        via: decision.signals.via ?? null,
+        text: capEventText(text),
+      },
+    });
     // 实时诊断（与协询器里的 recordInputDecision 同一份账）：设置页诊断区用来
     // 回看，这里让「这条是谁定的」当场可见（控制台）——排查「怎么被正则截胡
     // 了」时不必等回合结束。三个值：judge（裁决器）/ rule（正则快路径）/ net
@@ -3586,10 +3627,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       onDone: (a) => {
         if (gen !== this.generation) return;
         this.updateAgentActivity(a);
+        this.logDelegationSettled(a);
       },
       onError: (a) => {
         if (gen !== this.generation) return;
         this.updateAgentActivity(a);
+        this.logDelegationSettled(a);
       },
     };
     // The plan-card snapshot belongs to this turn only; a follow-up simple
