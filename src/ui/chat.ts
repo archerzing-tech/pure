@@ -38,6 +38,7 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type Sub
 import type { SubagentDefinition } from '../coding-agent/types';
 import { compileExternalSubagents } from '../harness/externalSubagents';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
+import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from '../harness/overlayGuard';
 import { requestPermission } from './permission';
 import { MemoryStateStore } from '../adapter/storage/MemoryStateStore';
 import {
@@ -699,7 +700,10 @@ function loadGuiPersonaOverlays(knownRoles: string[]): Promise<Map<string, strin
     if (!isTauriRuntime()) return new Map<string, string>();
     try {
       const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_persona_overlays');
-      const { overlays, errors } = compilePersonaOverlays(sources ?? [], knownRoles);
+      // P1-2 回退护栏 — 装载侧过滤：13.3 流落盘的 overlay 带 meta（.bak 前版 +
+      // 基线），meta.revertedAt ⇒ 回退到前版或 base；手写文件无 meta，照装不受管辖。
+      const guarded = await applyOverlayGuardToSources(sources ?? []);
+      const { overlays, errors } = compilePersonaOverlays(guarded, knownRoles);
       for (const line of errors) console.warn(`[persona-overlays] ${line}`);
       return overlays;
     } catch (error) {
@@ -708,6 +712,27 @@ function loadGuiPersonaOverlays(knownRoles: string[]): Promise<Map<string, strin
     }
   })();
   return personaOverlaysPromise;
+}
+
+/** P1-2 — 按回退 meta 过滤扫描结果（meta/bak 经 Rust read_file 读 ~/.pure）。 */
+async function applyOverlayGuardToSources(sources: Array<{ file: string; text: string }>): Promise<Array<{ file: string; text: string }>> {
+  const out: Array<{ file: string; text: string }> = [];
+  const pureHome = await join(await homeDir(), '.pure');
+  for (const source of sources) {
+    const role = source.file.replace(/\.overlay\.md$/, '');
+    const paths = overlayGuardPaths(role);
+    const readSafe = async (path: string): Promise<string | undefined> => {
+      try {
+        return await tauriInvoke<string>('read_file', { workspace: pureHome, path });
+      } catch {
+        return undefined;
+      }
+    };
+    const meta = parseOverlayGuardMeta(await readSafe(paths.meta));
+    const text = loadOverlayText(meta, source.text, await readSafe(paths.bak));
+    if (text !== undefined) out.push({ file: source.file, text });
+  }
+  return out;
 }
 
 function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string): string {

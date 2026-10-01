@@ -14,6 +14,7 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '..
 import type { SubagentDefinition } from '../coding-agent/types';
 import { extractSubagentOutput, type RoleCaseFixture } from '../evaluation/roleRegression';
 import { runPersonaOverlayFlow, type OverlayFlowDeps } from './personaOverlayFlow';
+import { writeOverlayGuardedly } from '../harness/overlayGuard';
 import type { BudgetConfig, ToolCall } from '../shared/types';
 import type { SubagentAdvice } from '../shared/subagentAdvisory';
 import type { PureConfig } from './config';
@@ -102,7 +103,25 @@ export async function buildOverlayFlowDeps(opts: OverlayHostOptions): Promise<Ov
       }
     },
     writeOverlay: async (r, text) => {
-      await core.invoke('write_file', { workspace: pureHome, path: `personas/${r}.overlay.md`, content: `${text}\n` });
+      // P1-2 回退护栏 — 落盘写手升级：同一时刻写 .bak 前版快照 + meta 基线
+      //（E1.4 画像里的真实数字），供周期判定与装载侧回退。
+      await writeOverlayGuardedly(
+        {
+          readFile: async (path) => {
+            try {
+              return await core.invoke<string>('read_file', { workspace: pureHome, path });
+            } catch {
+              return undefined;
+            }
+          },
+          writeFile: async (path, content) => {
+            await core.invoke('write_file', { workspace: pureHome, path, content });
+          },
+        },
+        r,
+        text,
+        { delegations: opts.advice.delegations, failures: opts.advice.failures, failureRate: opts.advice.failureRate },
+      );
     },
     confirm: opts.confirm,
     runCase: async (fixture, ov) => {

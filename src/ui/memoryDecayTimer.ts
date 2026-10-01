@@ -73,6 +73,14 @@ async function runDecay(): Promise<void> {
     } catch (err) {
       console.error('[pure] memory ratchet pass failed:', err);
     }
+    // P1-2 overlay 回退护栏 — 同窗追加：13.3 落盘的 overlay 若在落盘后持续
+    // 回归（派发 ≥8 次且失败率较基线恶化），meta 打回退标记 + 原文归档，
+    // 下次装载回到前版/base。失败只降级本轮，不碰 decay。
+    try {
+      await runOverlayGuardPass();
+    } catch (err) {
+      console.error('[pure] overlay guard pass failed:', err);
+    }
     // 通知设置面板刷新诊断区/仪表盘（若打开）——下次衰减时间与统计已变化。
     document.dispatchEvent(new CustomEvent('pure:memory-decay-run'));
     scheduleNext(); // decay 已把 meta 推进到 now → 下一轮自动落在 1h 窗后
@@ -103,6 +111,56 @@ async function runRatchetPass(): Promise<void> {
   if (plan.removeIds.length === 0) return;
   const removed = await memoryStore.prune(plan.removeIds);
   if (removed > 0) console.info(`[pure] memory ratchet pruned ${removed} entries`);
+}
+
+/**
+ * P1-2 — overlay 回退判定 pass：读 ~/.pure/personas 的 meta 基线，用持久观测
+ * 里落盘窗口后的真实结局判卷。纯逻辑在 harness/overlayGuard（runOverlayGuardPass），
+ * 这里只做 Tauri IO 与数据源接线；总开关关掉时跳过（overlay 属进化层）。
+ */
+async function runOverlayGuardPass(): Promise<void> {
+  const cfg = loadConfig();
+  if (cfg?.skills?.evolution === false) return;
+  const { loadTauriCore, tauriInvoke } = await import('../shared/tauri');
+  const { join, homeDir } = await import('@tauri-apps/api/path');
+  const core = await loadTauriCore();
+  if (!core) return;
+  const pureHome = await join(await homeDir(), '.pure');
+  let roles: string[] = [];
+  try {
+    const files = await tauriInvoke<Array<{ file: string }>>('list_persona_overlays');
+    roles = (files ?? []).map((f) => f.file.replace(/\.overlay\.md$/, ''));
+  } catch {
+    return;
+  }
+  if (roles.length === 0) return;
+  let records: PromptObservation[] = [];
+  try {
+    records = (await readGuiObservations()).records;
+  } catch {
+    records = [];
+  }
+  const { runOverlayGuardPass: run } = await import('../harness/overlayGuard');
+  const report = await run(
+    {
+      readFile: async (path) => {
+        try {
+          return await core.invoke<string>('read_file', { workspace: pureHome, path });
+        } catch {
+          return undefined;
+        }
+      },
+      writeFile: async (path, content) => {
+        await core.invoke('write_file', { workspace: pureHome, path, content });
+      },
+    },
+    roles,
+    records,
+  );
+  if (report.reverted.length > 0) {
+    console.warn(`[pure] overlay guard reverted: ${report.reverted.join(', ')}（原文见 .reverted.md，meta 删 revertedAt 即恢复）`);
+    document.dispatchEvent(new CustomEvent('pure:evolution-cycle'));
+  }
 }
 
 /** 启动后台衰减定时器（幂等；main.ts deferred init 调用）。 */

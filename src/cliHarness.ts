@@ -15,6 +15,7 @@ import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { compileExternalSubagents } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
+import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
@@ -56,10 +57,15 @@ function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, s
     ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'personas');
   let sources: { file: string; text: string }[] = [];
   try {
-    sources = readdirSync(dir).filter((f) => f.endsWith('.overlay.md')).sort().map((file) => ({
-      file,
-      text: readFileSync(join(dir, file), 'utf8'),
-    }));
+    sources = readdirSync(dir).filter((f) => f.endsWith('.overlay.md')).sort().map((file) => {
+      // P1-2 回退护栏 — 装载侧过滤：meta.revertedAt ⇒ 回 .bak 前版或 base；
+      // 手写文件无 meta 照装（与 GUI 装载同一份决策 loadOverlayText）。
+      const role = file.replace(/\.overlay\.md$/, '');
+      const paths = overlayGuardPaths(role);
+      const meta = parseOverlayGuardMeta(readFileOrNull(join(dir, paths.meta)));
+      const text = loadOverlayText(meta, readFileSync(join(dir, file), 'utf8'), readFileOrNull(join(dir, paths.bak)));
+      return { file, text: text ?? '' };
+    }).filter((s) => s.text !== '');
   } catch {
     return new Map();
   }
@@ -69,6 +75,14 @@ function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, s
     process.stderr.write(`  ${yellow('[persona-overlays]')} ${dim(line)}\n`);
   }
   return overlays;
+}
+
+function readFileOrNull(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 // ── CLI cross-session memory (IMemoryStore) ──
