@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## Unreleased
+## v3.0.4
 
 **进化总开关补洞：反思器纳入管辖（P0-1）**
 
@@ -32,6 +32,18 @@ MCP 的 12 个 tauri command（子进程 spawn / HTTP 转发 / JSON-RPC request 
 **S1 撞出来的两处收割器修复**
 
 真机跑 S1 暴露两个让收割器形同虚设的缺陷并修复：① 断言起草超时 60s 在推理型 flash 模型上每条必超时（glm-5.3-flash 深思档实测 165s）——放宽到 300s，收割是批量后台活，总墙钟由候选数上界兜底；② 收割与 A/B 重跑都在空临时目录里跑，文件依赖型角色的样本（code_reviewer 评审 `src/` 下的文件）永远过不了自洽门——评审对象不在那里。fixture 现在携带会话工作区（`RoleCaseFixture.workspace`），目录还在就原地重跑，没了如实退回空目录（不假装）。
+
+**QQ 通道落地，撤掉企微占位**
+
+QQ 官方机器人通道成军：原生 WebSocket 入站（Identify + 心跳 + 断线退避重连，无 SDK 依赖）+ REST v2 被动回复出站（引用 msg_id、msg_seq 递增、单锚五次上限），出站长连接模型与钉钉 Stream 同型、零公网暴露。能力按降级矩阵诚实声明：无卡片流式（只发最终结果）、纯文本回复、审批按钮文字双轨（y/n/a 短指令，中英词表与钉钉同套）、群聊天然仅 @ 触达；图片出站走 /files + 富媒体。设置页通道清单加 QQ 卡片（appId/appSecret，secret 走 qq.appSecret），同时撤掉企业微信的 planned 占位——它只有设计稿没有后端。协议实测项照 cn-im-channels.md 纪律标注。
+
+**自动更新中继上线（Vercel），updater 端点首次真实可达**
+
+updater 端点此前指着从未存在的占位域名 releases.pure.app，自动更新从未通过。新增 services/update-relay 并部署 Vercel（update-relay.vercel.app）：/latest.json 从 GitHub Releases 实时拉目录、资产 URL 重写为 307 重定向（仓库公开无需令牌、二进制不经手、文件名白名单防滥用）；端点已写入 tauri.conf——**从 3.0.4 起安装的应用自动更新链路真实可用**。relay-smoke 工作流（GitHub Actions 外部视角）冒烟通过，发版后可复跑。国内直连 vercel.app 不稳：后续自有域名 CNAME 到 vercel-dns 一行升级。
+
+**overlay 回退护栏：落盘快照 + meta 标记回退 + 装载侧过滤**
+
+13.3 的 overlay 此前是"起草 → A/B 一次 → allow 即落盘"的单候选爬坡，落盘后若角色持续回归只有人工删文件。护栏三件套：落盘写手同刻快照前版进 .bak、把 E1.4 画像的真实基线写进 meta；周期判定（挂 decay/棘轮同窗）发现落盘后派发满八次且失败率较基线恶化绝对 0.2 又 1.5 倍时打 revertedAt 并归档原文，完全可逆；GUI/CLI 两侧装载按 meta 决定装正文、前版还是回 base。手写 overlay 无 meta 即结构性豁免——自动机制永远不动用户手上的东西。
 
 ## v3.0.3
 
