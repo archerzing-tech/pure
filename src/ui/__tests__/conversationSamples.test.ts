@@ -636,7 +636,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 2026-09-28 起加活不再走正则快路径，判断全在裁决器。
     await h.chat.interject('再加一个爱奇艺平台');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(assistantJoined(h.root)).toContain('已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。');
+    expect(assistantJoined(h.root)).toContain('已收到——收齐后先补这项。');
     expect(userJoined(h.root)).toContain('爱奇艺平台');
     // 折入进 pendingFoldIns 等收尾核验，不占待办队列。
     expect(h.chat.pendingFoldIns).toHaveLength(1);
@@ -655,7 +655,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('jev 这个就不调研了');
     expect(llm.classifyCalls.length).toBe(1);
     // 回执必须说"拿掉"——案例里正是"先补这项"这句与意图相反的回执。
-    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
     expect(statusJoined(h.root)).not.toContain('先补这项');
     expect(userJoined(h.root)).toContain('jev 这个就不调研了');
     expect(h.chat.pendingFoldIns).toHaveLength(1);
@@ -719,7 +719,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
     expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
-    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -857,7 +857,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
-    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
   });
 
   it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
@@ -886,7 +886,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('知乎那项也收掉吧');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(assistantJoined(h.root)).toContain('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
     expect(h.chat.pendingFoldIns).toHaveLength(1);
     expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
     expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);

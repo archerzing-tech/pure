@@ -53,10 +53,22 @@ export function cancelBeforeDispatchReceipt(topic: string | null): string {
 
 /** ③-c 折入收执（取消型 vs 追加型）。取消口径绝不能沿用追加口径——把
  *  「收掉一项」回成「先补这项」就是反向执行（2026-09-24 事故原话）。 */
-export function foldInReceipt(cancels: boolean): string {
-  return cancels
-    ? '收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。'
-    : '已收到——正在跑的活收齐后先补这项，再合并出一份覆盖全部的汇总。';
+export function foldInReceipt(cancels: boolean, hasDelegation = true): string {
+  if (cancels) {
+    // 有委派在飞：机制词汇真实在场，可以说。
+    if (hasDelegation) {
+      return '收到——这项不做了；其余照常。';
+    }
+    // 没有委派在飞（单任务场景）：一个机制词都不带——「汇总」「合并」
+    // 「收齐」这些词只属于多路调研的世界，单任务里说了就是编造
+    // （2026-10-01 用户事故：做飞机大战，插话「不用测试了」，收执却回
+    // 「不进最终汇总；收齐后只合并剩下的」——驴头不对马嘴）。
+    return '好——这步不做了。';
+  }
+  if (hasDelegation) {
+    return '已收到——收齐后先补这项。';
+  }
+  return '收到——做完手头的就带上这句。';
 }
 
 /** ④ 取消型折入的引擎侧框架（chat.ts cancelFoldInstruction）。与追加框架

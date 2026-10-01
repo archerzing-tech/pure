@@ -1046,7 +1046,7 @@ describe('plan overview completion state', () => {
     // 原句扫那边，chat.ts 只扫接线（含反向锁：chat.ts 不得再内联文案）。
     const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
     expect(src.indexOf('正在跑的调研收齐后')).toBe(-1);
-    expect(msg.indexOf('正在跑的活收齐后先补这项')).toBeGreaterThan(-1);
+    expect(msg.indexOf('收齐后先补这项')).toBeGreaterThan(-1);
     expect(src.indexOf('正在跑的活收齐后先补这项')).toBe(-1);
   });
 
@@ -1151,14 +1151,14 @@ describe('plan overview completion state', () => {
     // 宿主侧必须全链路成立：回执说拿掉、汇合轮框架说排除、收尾兜底不重跑。
     // 取消的机器可读标记是 signals.cancelsPart（快路径 CANCEL_PART_RE 或分
     // 类器 cancels_part 都归一到它）。
-    expect(msg.indexOf('收到——这项收掉了，不进最终汇总；其余照跑，收齐后只合并剩下的。')).toBeGreaterThan(-1);
+    expect(msg.indexOf('收到——这项不做了；其余照常。')).toBeGreaterThan(-1);
     const foldInFn = src.indexOf('private foldInScopeAddition(');
     const foldInBody = src.slice(foldInFn, src.indexOf('private cancelFoldInstruction', foldInFn));
     expect(foldInBody.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
     expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
     // 收执话术走共享模块（foldInReceipt）——原句的归属在 insertionMessaging，
     // chat.ts 侧锁住「必须经它」而不是自己内联。
-    expect(foldInBody.indexOf('this.settleAck(ack, foldInReceipt(cancels))')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('this.settleAck(ack, foldInReceipt(cancels, this.hasDelegationInFlight()))')).toBeGreaterThan(-1);
     // 汇合轮框架反着说死：不许为取消项派新委派、部分产出不进汇总、幸存分
     // 支照常合并——绝不能沿用追加口径（"派出去做完…覆盖所有对象"）。
     expect(src.indexOf('private cancelFoldInstruction(text: string): string')).toBeGreaterThan(-1);

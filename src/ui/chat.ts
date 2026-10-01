@@ -3429,7 +3429,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
-    this.settleAck(ack, foldInReceipt(cancels));
+    this.settleAck(ack, foldInReceipt(cancels, this.hasDelegationInFlight()));
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到

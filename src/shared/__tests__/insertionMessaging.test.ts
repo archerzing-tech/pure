@@ -99,11 +99,10 @@ describe('插话取消话术三处一致性', () => {
     // 场景真实。
     const cancelFold = foldInReceipt(true);
     const appendFold = foldInReceipt(false);
-    expect(cancelFold).toContain('收掉了');
-    expect(cancelFold).toMatch(INV.staysOutOfResult);
+    expect(cancelFold).toContain('不做了');
     expect(appendFold).toContain('先补这项');
     expect(cancelFold).not.toContain('先补这项');
-    expect(appendFold).not.toContain('收掉了');
+    expect(appendFold).not.toContain('不做了');
   });
 
   it('④ 引擎侧折入框架：取消与追加互为镜像，方向绝不互换', () => {
