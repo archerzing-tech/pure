@@ -99,6 +99,17 @@ if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
     || { echo "✘ CLI SIDECAR: build/copy failed; aborting（设置 PURE_SKIP_CLI_SIDECAR=1 可跳过）"; exit 1; }
 fi
 
+# ── Gateway bundle（绝对兜底）─────────────────────────────────────────────
+# 产一个独立可跑的网关 bundle 进资源面：gateway_start 找不到 CLI 二进制时，
+# 用系统 Bun 直接跑这个文件——不依赖 NSIS 打包成功，只要装了 Bun 就能用。
+if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
+  echo ""
+  echo "▶ GATEWAY BUNDLE: bun build → resources/gateway-bundle.ts"
+  bun build src/cliChannels.ts --outfile src-tauri/resources/gateway-bundle.ts --target bun \
+    && echo "✔ gateway bundle produced" \
+    || { echo "✘ GATEWAY BUNDLE failed (non-fatal — CI/CLI sidecar still available)"; }
+fi
+
 bun run sign:mac
 
 # ── Optional local deploy to /Applications/pure.app ────────────────────────

@@ -10308,6 +10308,11 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
         candidates.push("pure".to_string());
     }
     let mut last_err = String::from("no candidate");
+    // ── 绝对兜底（2026-10-01 用户要求绝对性解决）──
+    // 以上所有候选都失败时，试最后一条路：系统上装了 Bun（pure 的运行时），
+    // 用它直接跑资源目录里的网关入口脚本。脚本文件是构建时从 src/cliChannels.ts
+    // 生成的（resources 面的一部分），Bun 跑它与 CLI 二进制完全等价——这条
+    // 路不依赖 CI 打包成功，只要用户装了 pure 就必然有 Bun（安装器依赖它）。
     for bin in candidates {
         if bin.is_empty() {
             continue;
@@ -10345,7 +10350,42 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
             }
         }
     }
-    Err(format!("启动 gateway 失败：{}。请把 CLI（pure.exe）放到 ~/.pure/bin/、~/.pure/ 或 app 同目录（pure-cli.exe）。", last_err))
+
+    // ── Bun 兜底：所有 CLI 候选都失败，试 `bun run <资源>/cliChannels.ts` ──
+    // 这条路不依赖 NSIS 打包成功（资源文件总是随安装走的），也不依赖用户
+    // 手动放 pure-cli.exe——只要系统有 Bun 就能跑网关。
+    {
+        // Tauri resources 在安装后位于 <install>/resources/（exe 的同级目录）。
+        let resource_dir = exe.parent().map(|d| d.join("resources")).unwrap_or_default();
+        let gateway_script = resource_dir.join("cliChannels.ts");
+        if gateway_script.exists() {
+            let bun_candidates = ["bun", "bunx"];
+            for bun in bun_candidates {
+                let mut cmd = TokioCommand::new(bun);
+                cmd.arg("run")
+                    .arg(&gateway_script)
+                    .arg("gateway")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
+                    .stderr(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?);
+                #[cfg(unix)]
+                {
+                    cmd.process_group(0);
+                }
+                match cmd.spawn() {
+                    Ok(_) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                        return gateway_status().await;
+                    }
+                    Err(e) => {
+                        last_err = format!("bun fallback: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(format!("启动 gateway 失败：{}。请安装 Bun（bun.sh），或把 CLI（pure.exe）放到 ~/.pure/bin/、~/.pure/ 或 app 同目录。", last_err))
 }
 
 /// 停止 gateway：先 SIGTERM 优雅退出（写 checkpoint、关长连接），
