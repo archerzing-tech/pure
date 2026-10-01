@@ -92,8 +92,10 @@ if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
   echo ""
   echo "▶ CLI SIDECAR: bun run cli:build → pure-cli into the .app bundle"
   bun run cli:build \
+    && mkdir -p src-tauri/binaries \
+    && cp -f pure src-tauri/binaries/pure-cli \
     && cp -f pure "src-tauri/target/release/bundle/macos/pure.app/Contents/MacOS/pure-cli" \
-    && echo "✔ sidecar embedded (pure-cli)" \
+    && echo "✔ sidecar embedded (pure-cli + binaries/)" \
     || { echo "✘ CLI SIDECAR: build/copy failed; aborting（设置 PURE_SKIP_CLI_SIDECAR=1 可跳过）"; exit 1; }
 fi
 
