@@ -24,14 +24,16 @@ describe('gateway lock', () => {
   });
 
   it('refuses to start when a live instance holds the lock', () => {
-    // pid 1 (launchd/init) is always alive on POSIX; EPERM also counts as alive.
-    writeFileSync(path, JSON.stringify({ pid: 1, startedAt: 1, channels: ['feishu'] }));
-    expect(isProcessAlive(1)).toBe(true);
+    // 活进程要跨平台：本测试进程自己在哪个 runner 上都活着。（原先用 pid 1
+    // ——POSIX 的 launchd/init 恒活，但 Windows 没有 pid 1，2026-10-01 的
+    // v3.0.4 release 就是在这一行红了 windows-release 的测试步。）
+    writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt: 1, channels: ['feishu'] }));
+    expect(isProcessAlive(process.pid)).toBe(true);
     expect(() => acquireGatewayLock(path, { channels: [] })).toThrow(GatewayLockError);
     try {
       acquireGatewayLock(path, { channels: [] });
     } catch (err) {
-      expect((err as GatewayLockError).holder?.pid).toBe(1);
+      expect((err as GatewayLockError).holder?.pid).toBe(process.pid);
       expect((err as Error).message).toContain('已有实例在运行');
     }
   });
