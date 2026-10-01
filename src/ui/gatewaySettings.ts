@@ -78,6 +78,84 @@ export function renderGatewaySettings(host: HTMLElement): void {
   const stopBtn = mkButton(t('gateway.stop'), 'secondary');
   const restartBtn = mkButton(t('gateway.restart'), 'secondary');
   const testBtn = mkButton(t('gateway.test'), 'secondary');
+  // ── 依赖管理（一键安装缺失依赖，2026-10-01 用户建议）──
+  const depsSection = document.createElement('div');
+  depsSection.className = 'gateway-deps-section';
+  depsSection.style.cssText = 'margin-top:18px;padding:14px;border:1px solid var(--border-light);border-radius:10px;';
+  host.appendChild(depsSection);
+
+  const depsTitle = document.createElement('h4');
+  depsTitle.textContent = t('gateway.deps.title', '依赖管理');
+  depsTitle.style.cssText = 'margin:0 0 10px;font-size:14px;font-weight:600;';
+  depsSection.appendChild(depsTitle);
+
+  const depsList = document.createElement('div');
+  depsSection.appendChild(depsList);
+
+  const installAllBtn = document.createElement('button');
+  installAllBtn.className = 'gateway-install-all-btn';
+  installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
+  installAllBtn.style.cssText = 'margin-top:10px;padding:8px 16px;border-radius:8px;border:1px solid var(--accent,#3b82f6);background:var(--accent,#3b82f6);color:#fff;cursor:pointer;font-size:13px;';
+  depsSection.appendChild(installAllBtn);
+
+  const depsStatus = document.createElement('p');
+  depsStatus.style.cssText = 'margin-top:8px;font-size:12px;color:var(--text-secondary);';
+  depsSection.appendChild(depsStatus);
+
+  async function refreshDeps(): Promise<void> {
+    try {
+      const core = await coreOf();
+      if (!core) return;
+      const deps = await core.invoke<Array<{ name: string; installed: boolean; version: string }>>('gateway_check_deps');
+      depsList.replaceChildren();
+      let allOk = true;
+      for (const dep of deps ?? []) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;';
+        const icon = dep.installed ? '✅' : '❌';
+        const ver = dep.installed && dep.version ? `（${dep.version}）` : '';
+        row.textContent = `${icon} ${dep.name}${ver}`;
+        if (!dep.installed) allOk = false;
+        depsList.appendChild(row);
+      }
+      installAllBtn.style.display = allOk ? 'none' : '';
+      depsStatus.textContent = allOk ? t('gateway.deps.allOk', '所有依赖已就绪') : '';
+    } catch {
+      depsList.replaceChildren();
+    }
+  }
+
+  installAllBtn.addEventListener('click', async () => {
+    const core = await coreOf();
+    if (!core) return;
+    installAllBtn.disabled = true;
+    installAllBtn.textContent = t('gateway.deps.installing', '安装中…');
+    depsStatus.textContent = '';
+    try {
+      const deps = await core.invoke<Array<{ name: string; installed: boolean }>>('gateway_check_deps');
+      const messages: string[] = [];
+      for (const dep of deps ?? []) {
+        if (dep.installed) continue;
+        if (dep.name === 'Bun') {
+          const result = await core.invoke<string>('gateway_install_bun');
+          messages.push(result);
+        } else if (dep.name.includes('CLI')) {
+          const result = await core.invoke<string>('gateway_download_cli');
+          messages.push(result);
+        }
+      }
+      depsStatus.textContent = messages.length > 0 ? messages.join('；') : t('gateway.deps.allOk', '所有依赖已就绪');
+    } catch (err) {
+      depsStatus.textContent = `${t('gateway.deps.installError', '安装失败')}: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      installAllBtn.disabled = false;
+      installAllBtn.textContent = t('gateway.deps.installAll', '一键安装缺失依赖');
+      void refreshDeps();
+    }
+  });
+
+  void refreshDeps();
+
   actions.append(startBtn, stopBtn, restartBtn, testBtn);
   host.appendChild(actions);
 

@@ -10544,6 +10544,161 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
     gateway_status().await
 }
 
+/// 探测 gateway 依赖（Bun / CLI）：返回每项的安装状态。
+#[derive(serde::Serialize)]
+struct GatewayDependency {
+    name: String,
+    installed: bool,
+    version: String,
+    install_hint: String,
+}
+
+#[tauri::command]
+async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
+    let mut out = Vec::new();
+
+    // Bun：PATH 上能跑 bun --version 即已安装。
+    let bun_ok = TokioCommand::new("bun")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let bun_version = if bun_ok {
+        TokioCommand::new("bun")
+            .arg("--version")
+            .output()
+            .await
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    out.push(GatewayDependency {
+        name: "Bun".to_string(),
+        installed: bun_ok,
+        version: bun_version,
+        install_hint: "bun.sh".to_string(),
+    });
+
+    // CLI：~/.pure/bin/pure(.exe) 或 app 同目录 pure-cli(.exe)。
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    let exe_dir = exe.parent().map(|p| p.to_path_buf());
+    let cli_names = if cfg!(windows) { ["pure-cli.exe", "pure.exe"] } else { ["pure-cli", "pure"] };
+    let mut cli_found = false;
+    let mut cli_version = String::new();
+    if let Some(dir) = &exe_dir {
+        for name in cli_names {
+            let p = dir.join(name);
+            if p.exists() {
+                cli_found = true;
+                cli_version = name.to_string();
+                break;
+            }
+        }
+    }
+    if !cli_found {
+        let global = PathBuf::from(pure_home_dir()).join(".pure").join("bin");
+        for name in cli_names {
+            let p = global.join(name);
+            if p.exists() {
+                cli_found = true;
+                cli_version = name.to_string();
+                break;
+            }
+        }
+    }
+    out.push(GatewayDependency {
+        name: "CLI (pure)".to_string(),
+        installed: cli_found,
+        version: cli_version,
+        install_hint: "从 GitHub Release 下载".to_string(),
+    });
+
+    Ok(out)
+}
+
+/// 安装 Bun（幂等：已安装则跳过）。Windows 用官方 PowerShell 脚本，macOS 用 curl。
+#[tauri::command]
+async fn gateway_install_bun() -> Result<String, String> {
+    // 先探测——已安装就不装。
+    let check = TokioCommand::new("bun").arg("--version").output().await;
+    if let Ok(o) = check {
+        if o.status.success() {
+            let v = String::from_utf8(o.stdout).unwrap_or_default().trim().to_string();
+            return Ok(format!("Bun 已安装（{}），无需重复安装", v));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = TokioCommand::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                   "irm bun.sh/install.ps1 | iex"])
+            .output()
+            .await
+            .map_err(|e| format!("PowerShell 启动失败：{}", e))?;
+        if output.status.success() {
+            // 刷新 PATH（安装脚本加的 PATH 在当前进程不生效，这里手动补）。
+            let home = pure_home_dir();
+            let bun_path = format!("{}\\.bun\\bin", home);
+            std::env::set_var("PATH", format!("{};{}", bun_path, std::env::var("PATH").unwrap_or_default()));
+            Ok("Bun 安装完成".to_string())
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Bun 安装失败：{}", err))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let output = TokioCommand::new("sh")
+            .args(["-c", "curl -fsSL https://bun.sh/install | bash"])
+            .output()
+            .await
+            .map_err(|e| format!("sh 启动失败：{}", e))?;
+        if output.status.success() {
+            Ok("Bun 安装完成（可能需要重启终端刷新 PATH）".to_string())
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Bun 安装失败：{}", err))
+        }
+    }
+}
+
+/// 下载 CLI 到 ~/.pure/bin/（幂等：已存在则跳过）。
+#[tauri::command]
+async fn gateway_download_cli() -> Result<String, String> {
+    let bin_dir = PathBuf::from(pure_home_dir()).join(".pure").join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("mkdir: {}", e))?;
+    let cli_name = if cfg!(windows) { "pure.exe" } else { "pure" };
+    let target = bin_dir.join(cli_name);
+    if target.exists() {
+        return Ok(format!("CLI 已存在（{}），无需下载", target.display()));
+    }
+    let url = if cfg!(windows) {
+        "https://github.com/archerzing-tech/pure/releases/latest/download/pure.exe"
+    } else {
+        "https://github.com/archerzing-tech/pure/releases/latest/download/pure_x86_64"
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("download: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载失败：HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {}", e))?;
+    fs::write(&target, &bytes).map_err(|e| format!("write: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
+    }
+    Ok(format!("CLI 已下载到 {}", target.display()))
+}
+
 /// 重启 gateway：stop → 等端口释放 → start。
 #[tauri::command]
 async fn gateway_restart() -> Result<GatewayStatus, String> {
@@ -15264,6 +15419,9 @@ pub fn run() {
             // Gateway lifecycle (Settings → Gateway)
             gateway_status,
             gateway_restart,
+            gateway_check_deps,
+            gateway_install_bun,
+            gateway_download_cli,
             gateway_start,
             gateway_stop,
             secret_delete,
