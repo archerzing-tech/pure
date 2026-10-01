@@ -164,6 +164,11 @@ export function createWebChatAdapter(options: WebChatOptions): ChannelAdapter {
           port: options.port,
           fetch(req, srv) {
             const url = new URL(req.url);
+            // 端口契约（2026-10-01）：网关在跑就必答 /healthz——探活/连通性测试
+            // 不依赖 webchat 是否被禁用（禁用时由 cliChannels 的极简应答器答）。
+            if (url.pathname === '/healthz') {
+              return new Response('ok', { headers: { 'content-type': 'text/plain' } });
+            }
             if (url.pathname === '/ws') {
               const peer = url.searchParams.get('peer') || `web-${Math.random().toString(36).slice(2, 10)}`;
               if (srv.upgrade(req, { data: { peer } })) return undefined;

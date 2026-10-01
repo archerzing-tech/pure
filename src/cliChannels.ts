@@ -78,6 +78,31 @@ export async function runGateway(args: CliArgs): Promise<void> {
   await registerConfiguredFeishu(registry, config);
   await registerConfiguredDingTalk(registry, config);
   await registerConfiguredQQ(registry, config);
+
+  // 2026-10-01 真机：探活打 gateway.host:port，而端口唯一的绑定者是 webchat
+  // 适配器——webchat 禁用时网关本身健康（飞书长连接已建立）但探针无门可敲，
+  // 设置页报「端口未就绪/连通性失败」。端口契约改为「网关在跑就必答
+  // /healthz」：webchat 启用时由它的服务器答（adapter 内同款路由）；显式
+  // 禁用时由这里的极简应答器答。这也是将来 daemon 控制面的第一粒种子。
+  let healthServer: ReturnType<typeof Bun.serve> | undefined;
+  if (config.channels.webchat?.enabled === false) {
+    try {
+      healthServer = Bun.serve({
+        hostname: config.gateway.host,
+        port: config.gateway.port,
+        fetch(req) {
+          return new URL(req.url).pathname === '/healthz'
+            ? new Response('ok', { headers: { 'content-type': 'text/plain' } })
+            : new Response('not found', { status: 404 });
+        },
+      });
+      channelsLog(`health endpoint on http://${config.gateway.host}:${config.gateway.port}/healthz（webchat 已禁用，端口由网关应答）`);
+    } catch (err) {
+      // 端口被占（残留实例等）不是致命伤：网关主职能（通道长连接）不受影响，
+      // 探活退化为锁文件 + pid 判定。如实记录。
+      channelsLog(`health endpoint 绑定失败（${err instanceof Error ? err.message : String(err)}）——探活退化为进程判定`);
+    }
+  }
   const plugins = await registry.loadPlugins(`${PURE_DIR}/channels`);
   if (plugins.length > 0) channelsLog(`loaded plugins: ${plugins.join(', ')}`);
 
@@ -116,6 +141,7 @@ export async function runGateway(args: CliArgs): Promise<void> {
     if (stopping) return;
     stopping = true;
     channelsLog(`收到 ${signal}，正在停止…`);
+    try { healthServer?.stop(true); } catch { /* already down */ }
     await gateway.stop();
     process.exit(0);
   };
