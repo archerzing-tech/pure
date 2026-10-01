@@ -10193,7 +10193,23 @@ fn gateway_pid_alive(pid: i64) -> bool {
         }
         return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Windows 没有 kill(pid, 0)；用 tasklist 按 PID 精确探活（输出含该
+        // PID 号 = 进程存在）。这是 2026-10-01 发现的根本 bug：此前 Windows
+        // 恒返回 false，导致 stop 认为没在跑不发 kill、start 重复启动。
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output();
+        match output {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                text.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
@@ -10398,9 +10414,19 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
         return gateway_status().await;
     }
     let pid = lock.pid as i32;
+    let _ = pid;
+    // 优雅停：先给网关自己的 SIGTERM 处理器时间收尾（写 checkpoint、关长连接）。
     #[cfg(unix)]
     unsafe {
         libc::kill(pid, libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+        // Windows 没有 SIGTERM：用 taskkill /T（发 CTRL_BREAK 给进程树）做
+        // 优雅停。网关的 Bun 进程在 SIGINT/SIGBREAK 上有优雅退出处理器。
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &lock.pid.to_string(), "/T"])
+            .output();
     }
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -10409,13 +10435,34 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
         }
     }
     if gateway_pid_alive(lock.pid) {
+        // 3 秒不退强杀。
         #[cfg(unix)]
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &lock.pid.to_string(), "/T", "/F"])
+                .output();
+        }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
+    // 清理残留锁文件（进程死了但锁文件可能没来得及清）。
+    let lock_path = gateway_lock_path();
+    let _ = fs::remove_file(&lock_path);
     gateway_status().await
+}
+
+/// 重启 gateway：stop → 等端口释放 → start。
+#[tauri::command]
+async fn gateway_restart() -> Result<GatewayStatus, String> {
+    // 先停（stop 内部已处理「没在跑」的场景）。
+    let _ = gateway_stop().await;
+    // 等端口释放（Windows TIME_WAIT 可达 30s，这里给 2s 足够——网关端口是
+    // SO_REUSEADDR 的 Bun HTTP 服务）。
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    gateway_start().await
 }
 
 fn load_secrets() -> Result<serde_json::Value, String> {
@@ -15126,6 +15173,7 @@ pub fn run() {
             secret_set,
             // Gateway lifecycle (Settings → Gateway)
             gateway_status,
+            gateway_restart,
             gateway_start,
             gateway_stop,
             secret_delete,

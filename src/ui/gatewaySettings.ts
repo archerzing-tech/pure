@@ -158,9 +158,9 @@ export function renderGatewaySettings(host: HTMLElement): void {
     if (!core || busy) return;
     setBusy(true);
     try {
-      await core.invoke('gateway_stop');
-      await new Promise((r) => setTimeout(r, 500));
-      apply(await core.invoke<GatewayStatus>('gateway_start'));
+      // 2026-10-01：改走 Rust 侧 gateway_restart（原子命令——内含正确的
+      // 停止→等端口释放→启动序列，且 Windows 侧 taskkill 语义已修）。
+      apply(await core.invoke<GatewayStatus>('gateway_restart'));
       log(t('gateway.logRestarted'));
     } catch (err) {
       log(`${t('gateway.logError')}: ${err instanceof Error ? err.message : String(err)}`);
