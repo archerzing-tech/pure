@@ -1203,14 +1203,14 @@ describe('plan overview completion state', () => {
     // pendingCancels，批次起飞时 gateDelegations 按区分词匹配兑现（整批
     // 调用一起做候选集，「调研」这类共用词永远指不出单支）；挂号一次性
     // 消费、随回合清空——用户后来的「继续/再跑」是新指令，挂号无权否决。
-    expect(src.indexOf('private pendingCancels: string[] = [];')).toBeGreaterThan(-1);
+    expect(src.indexOf('private delegationControl = new DelegationControlPlane();')).toBeGreaterThan(-1);
     // 四个挂号入口：steer 案（无委派窗 + 在飞点不出支的折入）、task 案（同两处）。
     const steer = src.indexOf("case 'steer': {");
     const steerBody = src.slice(steer, src.indexOf("case 'question':", steer));
-    expect(steerBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
+    expect(steerBody.split('this.delegationControl.registerCancel(text)').length - 1).toBe(2);
     const task = src.indexOf("case 'task': {");
     const taskBody = src.slice(task, src.indexOf("case 'chatter':", task));
-    expect(taskBody.split('this.pendingCancels.push(text)').length - 1).toBe(2);
+    expect(taskBody.split('this.delegationControl.registerCancel(text)').length - 1).toBe(2);
     // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"；收执点名
     // 走 settleCancelBeforeDispatchAck（2026-09-26 用户实测反馈固定话术里
     // 「这项」是空的——能抽出话题就点名，与停支收执同一人味）。
@@ -1235,10 +1235,11 @@ describe('plan overview completion state', () => {
     // 起飞闸接进引擎配置：候选集由宿主备好，匹配与消费在纯函数
     // planTakeoffGate（与测试共用同一套纪律）。
     expect(src.indexOf('gateDelegations: async (calls) =>')).toBeGreaterThan(-1);
-    expect(src.indexOf('const { blocked, consumed } = planTakeoffGate(')).toBeGreaterThan(-1);
-    expect(src.indexOf('cancelReceiptTopic, planTakeoffGate')).toBeGreaterThan(-1);
+    expect(src.indexOf('gateDelegations: async (calls) => this.delegationControl.gate(calls, subagentNames)')).toBeGreaterThan(-1);
+    // 匹配与消费住在 plane 里（delegationControl.gate）——宿主侧锁闭包委托形状。
+    expect(src.indexOf('cancelReceiptTopic')).toBeGreaterThan(-1);
     // 挂号不跨回合：finalize 与 new chat 两条清扫都要在。
-    expect(src.split('this.pendingCancels = [];').length - 1).toBeGreaterThanOrEqual(2);
+    expect(src.split('this.delegationControl.settleRound();').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('clears same-named branches queued but not yet airborne (第 2 期「排队未起飞的同名支」)', () => {
@@ -1247,32 +1248,30 @@ describe('plan overview completion state', () => {
     // relay 下游由 fail-fast 管；真正「已排队、还没起飞」的委派只有一种
     // ——下一批次里父又派的那一支。所以停支的效力不只落在在飞那支：
     // 用户原话同时挂上同一道起飞闸，同回合的重派在出生点就被拦下。
-    expect(src.indexOf('private pendingBranchStops: Array<{ text: string; label: string }> = [];')).toBeGreaterThan(-1);
+    // 挂闸在 plane.stopNamed 内部（registerBranchStop）——delegationControl.test 锁着；宿主锁委托形状：
     const stopFn = src.indexOf('private stopNamedBranch(text: string, mode:');
     expect(stopFn).toBeGreaterThan(-1);
     const stopBody = src.slice(stopFn, src.indexOf('private resumeNamedBranch(', stopFn));
-    expect(stopBody.indexOf('if (!this.pendingBranchStops.some((s) => s.text === text)) this.pendingBranchStops.push({ text, label });')).toBeGreaterThan(-1);
+    expect(stopBody.indexOf('this.delegationControl.stopNamed(')).toBeGreaterThan(-1);
     // 两个停支入口（祈使停 + 取消型暂停）共用 stopNamedBranch，因此共用这道闸。
     expect(src.split("this.stopNamedBranch(text, pause ? 'pause' : 'abort')").length - 1).toBe(1);
     expect(src.split("this.stopNamedBranch(text, 'pause')").length - 1).toBe(1);
-    // 闸读两本挂号簿：停支的那本按 kind='stopped-branch' 出另一套收据。
-    expect(src.indexOf('this.pendingBranchStops.map((s) => s.text)')).toBeGreaterThan(-1);
-    expect(src.indexOf('this.pendingBranchStops = this.pendingBranchStops.filter((s) => !consumed.includes(s.text));')).toBeGreaterThan(-1);
+    // 闸读两本挂号簿住在 plane（gate 内 planTakeoffGate；挂闸在 stopNamed 内）。
     // 合成重派豁免：resume_/foldin_ 承载用户**最新**的话（「接着跑」「再加
     // 一个」），旧挂号无权否决——与挂号不跨回合同源纪律。
-    expect(src.indexOf("!c.id.startsWith('resume_') && !c.id.startsWith('foldin_')")).toBeGreaterThan(-1);
+    // 合成重派豁免住在 plane（gate 内）——delegationControl.test 锁着。
     // 随回合清空（与 pendingCancels 同命）：回合收尾与 new chat 两条清扫都
     // 要在——控制器跨会话单例，new chat 不摘簿子，旧会话的停支挂号会闯进
     // 新会话把同话题的委派误杀在出生点。
-    expect(src.split('this.pendingBranchStops = [];').length - 1).toBeGreaterThanOrEqual(2);
+    expect(src.split('this.delegationControl.settleRound();').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('re-delegates a NAMED paused branch with its original args (第 2 期第三刀)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 「把 X 那支接着跑完」：续跑的唯一凭据是**原始参数**——稳定 sessionId
     // 命中 checkpoint，子引擎 continue。原始参数在委派批次起飞时捕获。
-    expect(src.indexOf('private delegationArgs = new Map<string, { name: string; args: string }>();')).toBeGreaterThan(-1);
-    expect(src.indexOf('this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments })')).toBeGreaterThan(-1);
+    expect(src.indexOf('private delegationControl = new DelegationControlPlane();')).toBeGreaterThan(-1);
+    // 参数捕获住在 plane（gate 先捕获再过闸）——delegationControl.test 锁着。
     expect(src.indexOf('private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];')).toBeGreaterThan(-1);
     // 宿主入口：resumesBranch 信号 → 点名（已暂停/已取消的支）→ 排队同参重派；
     // 排在停支/取消之前（带点名锚的「接着跑」最具体）。
@@ -1285,7 +1284,7 @@ describe('plan overview completion state', () => {
     expect(resumeFn).toBeGreaterThan(-1);
     const resumeBody = src.slice(resumeFn, src.indexOf('private branchLabel(', resumeFn));
     expect(resumeBody.indexOf("item.status === 'paused' || item.status === 'cancelled'")).toBeGreaterThan(-1);
-    expect(resumeBody.indexOf('this.delegationArgs.get(matched.callId)')).toBeGreaterThan(-1);
+    expect(resumeBody.indexOf('this.delegationControl.delegationArgs.get(matched.callId)')).toBeGreaterThan(-1);
     expect(resumeBody.indexOf('this.pendingResumes.push(')).toBeGreaterThan(-1);
     // 消费端：委派收齐后的 THINK 边界用原始参数包成普通委派调用还引擎。
     const synth = src.indexOf('takeSyntheticToolCalls: async () =>');

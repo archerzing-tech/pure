@@ -905,7 +905,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
       { callId: 'call_a', agentName: '市场调研员', agentRole: 'researcher', inputSnippet: '调研海外市场规模', status: 'running' },
     ];
     // 原始参数在委派批次起飞时被 gateDelegations 捕获（同参重派的唯一凭据）。
-    h.chat.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+    h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
 
     // RESUME_BRANCH_RE 快路径：不经 LLM 直判「把那一支接着跑完」。
     await h.chat.interject('把竞品那支接着跑完。');
@@ -927,7 +927,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.agentActivities = [
       { callId: 'call_b', agentName: '竞品分析员', status: 'paused', inputSnippet: '分析主要竞品的定价策略' },
     ];
-    h.chat.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+    h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
 
     await h.chat.interject('把竞品那支接着跑完。');
     expect(h.chat.pendingResumes).toHaveLength(1);
@@ -1020,7 +1020,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     await h.chat.interject('云朵那个就不要了');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
     // 取消路照走：委派不在飞 → 起飞闸挂号 + 转达父引擎。
-    expect(h.chat.pendingCancels).toHaveLength(1);
+    expect(h.chat.delegationControl.pendingCancelCount()).toBe(1);
     expect(queueCard(h.root)).toBeUndefined();
   });
 

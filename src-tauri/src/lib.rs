@@ -10247,14 +10247,31 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
         .map_err(|e| format!("open log: {}", e))?;
 
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
-    // pure.app/Contents/MacOS/pure 同目录放 CLI 时的布局；GUI 应用自身就叫 pure，
-    // 不能再 exec 自己（会开第二个 GUI），所以优先找纯 CLI 侧车，其次 PATH。
-    let candidates: Vec<String> = vec![
-        exe.parent().map(|d| d.join("pure-cli")).map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        "/usr/local/bin/pure".to_string(),
-        format!("{}/.pure/bin/pure", pure_home_dir()),
-        "pure".to_string(),
-    ];
+    // GUI 自身就叫 pure，绝不能 exec 自己（会开第二个 GUI）。候选按平台给对
+    // 扩展名：Windows 侧车是 pure-cli.exe、全局安装是 ~/.pure/bin/pure.exe，
+    // 三个无扩展名候选在 Windows 全部 miss 后裸名 "pure" 会被 CreateProcess
+    // 按应用目录优先解析——命中的就是 GUI 自己（2026-10-01 真机：点启动弹
+    // 出第二个 pure 窗口）。自体守卫再兜一层：canonicalize 后等于当前进程
+    // 的候选直接跳过。
+    let exe_canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+    let mut candidates: Vec<String> = vec![];
+    if let Some(dir) = exe.parent() {
+        let sidecar = if cfg!(windows) { dir.join("pure-cli.exe") } else { dir.join("pure-cli") };
+        candidates.push(sidecar.to_string_lossy().to_string());
+        // 侧车双保险：本地构建脚本在 mac 上写的是无扩展名的 pure-cli，交叉
+        // 场景（Windows 上手工拷贝）也认一遍两种拼写。
+        if cfg!(windows) {
+            candidates.push(dir.join("pure-cli").to_string_lossy().to_string());
+        }
+    }
+    if cfg!(windows) {
+        candidates.push(format!("{}/.pure/bin/pure.exe", pure_home_dir()));
+    } else {
+        candidates.push("/usr/local/bin/pure".to_string());
+        candidates.push(format!("{}/.pure/bin/pure", pure_home_dir()));
+        // 裸名只在不自体命中的前提下安全（mac：CreateProcess 不含应用目录）。
+        candidates.push("pure".to_string());
+    }
     let mut last_err = String::from("no candidate");
     for bin in candidates {
         if bin.is_empty() {
@@ -10264,6 +10281,14 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
         if is_path && !Path::new(&bin).exists() {
             last_err = format!("{} 不存在", bin);
             continue;
+        }
+        // 自体守卫：候选解析到当前进程 = 会开第二个 GUI，跳过。
+        let candidate_path = Path::new(&bin);
+        if let Ok(canon) = candidate_path.canonicalize() {
+            if canon == exe_canonical {
+                last_err = format!("{} 是 GUI 自身（自体启动守卫拦截）", bin);
+                continue;
+            }
         }
         let mut cmd = TokioCommand::new(&bin);
         cmd.arg("gateway")

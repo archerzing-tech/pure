@@ -30,8 +30,9 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
 import { sanitizeSkillName } from './skillHub';
-import { matchInFlightBranch, cancelReceiptTopic, planTakeoffGate, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
+import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -1574,23 +1575,9 @@ export class ChatController {
    * 配兑现（命中即拦，一次性消费）。回合收尾清空：用户的「继续/再跑」永
    * 远是新指令，挂号绝不跨回合拦活。
    */
-  private pendingCancels: string[] = [];
-  /**
-   * 排队未起飞的同名支清除（第 2 期「原子顺序锁死」宿主半边）：点名真停
-   * 不是一次性的——用户停掉的那支如果父在同一回合里又派了一遍（模型没听
-   * 结算理由里那句「不要再为它派工」），那一支就是「已排队、还没起飞」的
-   * 同名支，出生点就该拦下。停支的效力因此不靠父的自觉：stopNamedBranch
-   * 成功即把用户原话挂上同一道起飞闸，gateDelegations 按区分词认出同目标
-   * 的重派（kind='stopped-branch'，收据说清「你已经停过它、断点还在」）。
-   * 与 pendingCancels 同命：命中即消费、随回合清空。
-   */
-  private pendingBranchStops: Array<{ text: string; label: string }> = [];
-  /** 分支级继续（第 2 期第三刀）：点名把某一支已暂停/已停的委派接着跑完
-   * 时，宿主用**原始参数**同参重派——稳定 sessionId 命中 checkpoint，子引
-   * 擎走 continue 而不是从头 run。原始参数在委派批次起飞时捕获（见
-   * gateDelegations）：callId → { name, args }。拿不到原始参数的旧会话退回
-   * 让父模型重派（可能从头跑）。 */
-  private delegationArgs = new Map<string, { name: string; args: string }>();
+  /** S2 第二/三刀（P3-2）— 起飞闸挂号簿与委派参数捕获改住
+   *  DelegationControlPlane（宿主无关，CLI/通道同接）。字段退役。 */
+  private delegationControl = new DelegationControlPlane();
   /** 待同参重派的分支：委派收齐后的 THINK 边界由 takeSyntheticToolCalls
    * 包成普通委派调用还引擎（卡片/明细/回放全部原生）。 */
   private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];
@@ -2876,7 +2863,7 @@ export class ChatController {
           // 把自己当成"那支"自己停（反向执行最伤，2026-09-24 取消案例同源）。
           // 折入只守汇报步；同回合父若再为这个话题派工，起飞闸（挂号簿）
           // 在出生点拦下。
-          this.pendingCancels.push(text);
+          this.delegationControl.registerCancel(text);
           this.foldInScopeAddition(text, images, displayText, false, ack, true);
           return;
         }
@@ -2893,7 +2880,7 @@ export class ChatController {
           // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
           // （2026-09-28：这个窗口可能压根没有委派可派）。
           echoUserBubble();
-          this.pendingCancels.push(text);
+          this.delegationControl.registerCancel(text);
           this.steerRunningTurn(text, images, null, 'parent', true);
           this.settleCancelBeforeDispatchAck(ack, text);
           return;
@@ -2937,13 +2924,13 @@ export class ChatController {
               return;
             }
             // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
-            this.pendingCancels.push(text);
+            this.delegationControl.registerCancel(text);
             this.foldInScopeAddition(text, images, displayText, false, ack, true);
             return;
           }
           // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
           echoUserBubble();
-          this.pendingCancels.push(text);
+          this.delegationControl.registerCancel(text);
           this.steerRunningTurn(text, images, null, 'parent', true);
           this.settleCancelBeforeDispatchAck(ack, text);
           return;
@@ -3007,17 +2994,19 @@ export class ChatController {
   private stopNamedBranch(text: string, mode: 'abort' | 'pause' = 'abort'): string | null {
     const orchestrator = this.codingAgentRef?.subagentOrchestrator;
     if (!orchestrator) return null;
+    // S2 第三刀 — 匹配/派发/挂闸走 plane；宿主只供 live 匹配面、act 执行器
+    //（编排器的 pause/abort 分支把手）与 label 展示名。
     const live = orchestrator.branchView()
-      .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing');
-    const matched = matchInFlightBranch(text, live.map((b) => ({ callId: b.callId, name: b.agentName, snippet: b.inputSnippet })));
-    if (!matched) return null;
-    const stopped = mode === 'pause' ? orchestrator.pauseBranch(matched.callId) : orchestrator.abortBranch(matched.callId);
-    if (!stopped) return null;
-    const label = this.branchLabel(matched.name, matched.callId);
-    // 排队未起飞的同名支清除：停支同时挂上起飞闸，同回合里父若再派同一支，
-    // 出生点拦下（真停的效力不依赖父听不听话）。同一支只挂一次。
-    if (!this.pendingBranchStops.some((s) => s.text === text)) this.pendingBranchStops.push({ text, label });
-    return label;
+      .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing')
+      .map((b) => ({ callId: b.callId, name: b.agentName, snippet: b.inputSnippet ?? '' }));
+    const stopped = this.delegationControl.stopNamed(
+      text,
+      live,
+      (callId, m) => (m === 'pause' ? orchestrator.pauseBranch(callId) : orchestrator.abortBranch(callId)),
+      (name, callId) => this.branchLabel(name, callId),
+      mode,
+    );
+    return stopped ? stopped.label : null;
   }
 
   /** 分支级继续（第 2 期第三刀）：从用户话里点名一支**已暂停/已停**的委
@@ -3033,7 +3022,7 @@ export class ChatController {
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
     const matched = matchInFlightBranch(text, candidates);
     if (!matched) return null;
-    const original = this.delegationArgs.get(matched.callId);
+    const original = this.delegationControl.delegationArgs.get(matched.callId);
     if (!original) return null;
     // 同一支只排一次：重复点名不重复派工（第二遍无意义，还会撞去重）。
     if (this.pendingResumes.some((r) => r.callId === matched.callId)) return null;
@@ -3498,8 +3487,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 起飞闸挂号随回合清空：残留的取消挂号若跨回合，会拦下用户后来明确
     // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。点名停支的
     // 挂号同理：下一回合的重派是新指令，本轮的门闩不该越回合生效。
-    this.pendingCancels = [];
-    this.pendingBranchStops = [];
+    this.delegationControl.settleRound();
     if (leftoverSteers.length > 0) {
       const drained = leftoverSteers;
       this.autoContinue.cancel(); // the user's own words supersede '继续'
@@ -4427,49 +4415,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
           return calls;
         },
-        // 委派起飞闸（2026-09-26 用户实测）：取消型插话落在委派出生之前时，
-        // 点名路无支可点——话挂在 pendingCancels，批次在这里起飞时按区分词
-        // 匹配兑现。候选集=本批全部委派（区分词匹配器看得到全部兄弟任务书
-        // ——「调研」这类家家都有的词永远指不出单支，打平/认不出=放行，
-        // 话留给父引擎边界消化）；命中即拦、挂号一次性消费。第 2 期把同一
-        // 道闸扩给点名真停（pendingBranchStops）：停掉的那支若被父在同回合
-        // 重派，同样在出生点拦下，两群挂号分开说收据（kind）。
-        gateDelegations: async (calls) => {
-          // 分支级继续的地基：每个委派的原始参数在这里捕获（同参重派命中
-          // checkpoint 的唯一凭据）。先于闸、与有无取消挂号无关。
-          for (const c of calls) {
-            if (!subagentNames.has(c.function.name) || this.delegationArgs.has(c.id)) continue;
-            this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments });
-          }
-          if (this.pendingCancels.length === 0 && this.pendingBranchStops.length === 0) return [];
-          // 合成重派豁免：takeSyntheticToolCalls 出来的调用（resume_/foldin_）
-          // 承载的是用户**最新**的话（「接着跑」、「再加一个」），挂号无权否
-          // 决它——这与挂号随回合清空同源纪律：最新的指令永远赢。
-          const candidates = calls
-            .filter((c) => subagentNames.has(c.function.name) && !c.id.startsWith('resume_') && !c.id.startsWith('foldin_'))
-            .map((c) => {
-              let snippet = '';
-              try {
-                const parsed = JSON.parse(c.function.arguments || '{}') as Record<string, unknown>;
-                const raw = parsed.prompt ?? parsed.task ?? parsed.question ?? parsed.topic ?? parsed.instructions;
-                if (typeof raw === 'string') snippet = raw;
-              } catch { /* 参数没解析开就只拿名字当匹配面 */ }
-              return { callId: c.id, name: c.function.name, snippet };
-            });
-          if (candidates.length === 0) return [];
-          // 匹配口径与消费纪律都在纯函数里（steerTargeting.planTakeoffGate）：
-          // 与测试共用同一套，宿主只负责备好候选集与两本挂号簿。
-          const { blocked, consumed } = planTakeoffGate(
-            candidates,
-            [...this.pendingCancels],
-            this.pendingBranchStops.map((s) => s.text),
-          );
-          if (consumed.length > 0) {
-            this.pendingCancels = this.pendingCancels.filter((t) => !consumed.includes(t));
-            this.pendingBranchStops = this.pendingBranchStops.filter((s) => !consumed.includes(s.text));
-          }
-          return blocked;
-        },
+        // S2 第三刀 — 起飞闸整体委托 DelegationControlPlane（宿主无关，
+        // CLI/通道同接）：参数捕获、区分词匹配、一次性消费、合成重派豁免
+        // 都住在 plane 里（语义与原闭包逐条一致，见 delegationControl.ts
+        // 的方法级注释与测试）。
+        gateDelegations: async (calls) => this.delegationControl.gate(calls, subagentNames),
         toolAdapter,
         subagents,
         personaOverlays,
@@ -6942,8 +6892,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
-    this.pendingCancels = [];
-    this.pendingBranchStops = [];
+    this.delegationControl.settleRound();
     this.pendingFoldIns = [];
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
