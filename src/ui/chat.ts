@@ -699,26 +699,37 @@ function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
 // Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;
 // scanned once per app run. Delete the directory and the tool is gone at the
 // next app start. Master switch off = don't load (Principle 1).
-let externalToolsPromise: Promise<TaggedTool[]> | null = null;
-function loadGuiExternalTools(): Promise<TaggedTool[]> {
+let externalToolsPromise: Promise<{ tools: TaggedTool[]; execs: Map<string, { exec: string; timeoutMs: number }> }> | null = null;
+function loadGuiExternalTools(): Promise<{ tools: TaggedTool[]; execs: Map<string, { exec: string; timeoutMs: number }> }> {
   externalToolsPromise ??= (async () => {
-    if (!isTauriRuntime()) return [];
+    if (!isTauriRuntime()) return { tools: [], execs: new Map() };
     const cfg = loadConfig();
-    if (cfg?.skills?.evolution === false) return [];
+    if (cfg?.skills?.evolution === false) return { tools: [], execs: new Map() };
     try {
       const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_external_tools');
       const { tools, errors } = compileExternalTools(
         sources ?? [],
-        (name) => {
-          // 目录名与工具名同构——Rust 侧只扫目录，这里信任扫描结果。
-          return (sources ?? []).some((s) => s.file.startsWith(`${name}/`));
-        },
+        (name) => (sources ?? []).some((s) => s.file.startsWith(`${name}/`)),
       );
       for (const line of errors) console.warn(`[external-tools] ${line}`);
-      return tools;
+      // exec 模板从原始 manifest 里提取（编译器只出 TaggedTool，exec 模板留在
+      // 这里拆——两件同源、一次扫描产出）。
+      const execs = new Map<string, { exec: string; timeoutMs: number }>();
+      for (const source of sources ?? []) {
+        try {
+          const m = JSON.parse(source.text) as { name?: string; exec?: string; timeoutMs?: number };
+          if (m.name && m.exec && tools.some((t) => t.name === m.name)) {
+            execs.set(m.name, {
+              exec: m.exec,
+              timeoutMs: Math.min(600_000, Math.max(5_000, Math.floor(m.timeoutMs ?? 120_000))),
+            });
+          }
+        } catch { /* 坏 manifest 编译器已报 */ }
+      }
+      return { tools, execs };
     } catch (error) {
       console.warn('[external-tools] scan failed:', error);
-      return [];
+      return { tools: [], execs: new Map() };
     }
   })();
   return externalToolsPromise;
@@ -4349,7 +4360,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 13.4 — external script tools: compile + register alongside built-ins
       // (MCP-same pathway). Collision with built-in names is rejected here —
       // the ToolRegistry would otherwise silently replace the built-in.
-      const externalTools = await loadGuiExternalTools();
+      const { tools: externalTools, execs: externalToolExecs } = await loadGuiExternalTools();
       const builtinToolNames = new Set(BUILT_IN_TOOLS.map((t) => t.name));
       const safeExternalTools = externalTools.filter((t) => {
         if (builtinToolNames.has(t.name)) {
@@ -4468,7 +4479,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         personaOverlays,
         // 13.4 — external script tools join the registry (MCP-same pathway);
         // the executor routes through the tool adapter's execute_command.
-        ...(safeExternalTools.length > 0 ? { externalTools: safeExternalTools } : {}),
+        ...(safeExternalTools.length > 0 ? { externalTools: safeExternalTools, externalToolExecs } : {}),
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task
         // after a stop + continue in this same conversation.
         stateStore: this.subagentStore,
