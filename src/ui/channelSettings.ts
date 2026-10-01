@@ -179,9 +179,11 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
   let expandedId: string | undefined;
 
   async function renderAll(): Promise<void> {
-    const [cfg, running] = await Promise.all([readChannelsFile(), gatewayRunning()]);
+    // 频道列表立即渲染——不等 gateway 探测（2026-10-01 Windows 真机：网关
+    // 没跑时 127.0.0.1 空端口不走快速拒绝，HTTP 探测超时 ≈ 5s 白屏）。
+    const cfg = await readChannelsFile();
     cfg.channels = cfg.channels ?? {};
-    note.textContent = running ? t('channel.gatewayRunning') : t('channel.gatewayStopped');
+    note.textContent = t('channel.gatewayChecking', '检查 gateway 状态…');
     wrap.replaceChildren();
     for (const spec of SPECS) {
       wrap.appendChild(await buildCard(spec, cfg, () => {
@@ -189,6 +191,10 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
         void renderAll();
       }));
     }
+    // 网关状态异步补上（列表已经在了，这行只改顶部徽章文案）。
+    void gatewayRunning().then((running) => {
+      note.textContent = running ? t('channel.gatewayRunning') : t('channel.gatewayStopped');
+    });
   }
 
   async function buildCard(spec: ChannelSpec, cfg: ChannelsFile, onDone: () => void): Promise<HTMLElement> {
