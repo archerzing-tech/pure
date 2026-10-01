@@ -77,6 +77,7 @@ export async function runGateway(args: CliArgs): Promise<void> {
   registry.register(createWebChatAdapter({ host: config.gateway.host, port: config.gateway.port }));
   await registerConfiguredFeishu(registry, config);
   await registerConfiguredDingTalk(registry, config);
+  await registerConfiguredQQ(registry, config);
   const plugins = await registry.loadPlugins(`${PURE_DIR}/channels`);
   if (plugins.length > 0) channelsLog(`loaded plugins: ${plugins.join(', ')}`);
 
@@ -147,6 +148,29 @@ async function registerConfiguredFeishu(registry: ChannelRegistry, config: Retur
     registry.register(createFeishuAdapter({ accountId, transport }));
   } catch (err) {
     channelsLog(`feishu 通道不可用：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** 按配置注册 QQ：原生 WS transport（无 SDK 依赖），缺凭据只 warn 跳过。 */
+async function registerConfiguredQQ(registry: ChannelRegistry, config: ReturnType<typeof loadChannelsConfig>['config']): Promise<void> {
+  const entry = config.channels.qq;
+  if (!entry || entry.enabled === false) return;
+  const first = Object.entries(entry.accounts ?? {})[0];
+  const accountId = first?.[0] ?? 'main';
+  const account = (first?.[1] ?? {}) as Record<string, unknown>;
+  const appId = typeof account.appId === 'string' ? account.appId : '';
+  const appSecret = typeof account.appSecret === 'string' ? account.appSecret : resolveChannelSecret(account.appSecretRef);
+  if (!appId || !appSecret) {
+    channelsLog('qq 已启用但缺少 appId / appSecret（或 appSecretRef），已跳过该通道');
+    return;
+  }
+  try {
+    const { createQQWsTransport } = await import('./adapter/channels/qq/wsTransport');
+    const transport = await createQQWsTransport({ appId, appSecret, log: channelsLog });
+    const { createQQAdapter } = await import('./adapter/channels/qq');
+    registry.register(createQQAdapter({ accountId, transport }));
+  } catch (err) {
+    channelsLog(`qq 通道不可用：${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

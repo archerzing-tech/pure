@@ -19,16 +19,12 @@ export interface ChannelAccountDraft {
   clientSecret: string;
   robotCode: string;
   cardTemplateId: string;
-  corpId: string;
-  agentId: string;
-  token: string;
-  encodingAesKey: string;
 }
 
 type Draft = Partial<ChannelAccountDraft>;
 
 interface ChannelSpec {
-  id: 'feishu' | 'dingtalk' | 'wecom' | 'webchat';
+  id: 'feishu' | 'dingtalk' | 'qq' | 'webchat';
   name: string;
   icon: string;
   fields: { key: keyof ChannelAccountDraft; label: string; placeholder: string; secret?: boolean }[];
@@ -39,6 +35,7 @@ interface ChannelSpec {
 const SECRETS_KEY: Partial<Record<ChannelSpec['id'], string>> = {
   feishu: 'feishu.appSecret',
   dingtalk: 'dingtalk.clientSecret',
+  qq: 'qq.appSecret',
 };
 
 const SPECS: ChannelSpec[] = [
@@ -76,16 +73,19 @@ const SPECS: ChannelSpec[] = [
     status: 'implemented',
   },
   {
-    id: 'wecom',
-    name: '企业微信',
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h6"/></svg>',
+    id: 'qq',
+    name: 'QQ',
+    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8.5 14.5a5 5 0 0 0 7 0"/></svg>',
     fields: [
-      { key: 'corpId', label: 'Corp ID', placeholder: 'ww_xxx' },
-      { key: 'token', label: 'Token', placeholder: '', secret: true },
-      { key: 'encodingAesKey', label: 'EncodingAESKey', placeholder: '', secret: true },
+      { key: 'appId', label: 'AppID', placeholder: '10xxxxxx' },
+      { key: 'appSecret', label: 'AppSecret', placeholder: '••••••••', secret: true },
     ],
-    guide: ['智能机器人长连接接入（设计稿阶段，待实现）'],
-    status: 'planned',
+    guide: [
+      'QQ 开放平台 → 创建机器人 → 拿 AppID / AppSecret',
+      ' websocket 长连接接入（无需公网 IP），群聊默认仅 @ 触发',
+      '沙箱环境先试单聊（C2C），群消息需上线审核后全量可用',
+    ],
+    status: 'implemented',
   },
   {
     id: 'webchat',
