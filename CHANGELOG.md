@@ -13,6 +13,10 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 三条事件补齐远程互见所需的「谁说了什么、怎么处理的、干出了什么」：`receipt`（settleAck 单点——全部收执的终稿必经之地）、`insertion_classified`（插话裁决结果，kind/action/via）、`delegation_settled`（subagentProgress 的 onDone/onError 单点，带 agentId/结局/耗时）。新增 `projectSessionTimeline` / `recentTimelineDigest` 投影：日志 → 一行一条的时间线摘要（用户来源标注通道、委派带 ✔/✘ 与秒数），是将来手机 digest 与「重开即互见」的读取地基；未知事件 kind 前向兼容通过。
 
+**转录增量入日志 + 有界尾读（A1 第三刀）**
+
+`turn_messages` 事件让日志自此带上引擎转录：回合入口捕获窗口基线、finally 里切出本回合新增的消息数组落盘（完成/中断/硬停三条提交路径都在 try 内，finally 是单点）——这是快照降级为日志 fold 的原料。配套 Rust `read_session_events` 有界尾读（默认 16MB、头截断丢首行不吐半行、预算含起行余量）。时间线投影明确排除转录事件（批量数据不进 digest，回合落定一行已代表它）。绞杀期边界照实记：回合中窗口头部裁剪的极端情况会少记几条新消息，快照仍权威、fold 读取侧对账。
+
 ## v3.0.4
 
 **进化总开关补洞：反思器纳入管辖（P0-1）**
