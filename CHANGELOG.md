@@ -3,25 +3,41 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
-## Unreleased
+## v3.0.4（重发：含发布后真机修复批）
 
-**会话事件日志地基（架构评审 v2 A1 第一刀）**
+**网关连通性三层修复（发布后真机撞出）**
 
-会话持久层开始向「事件日志为唯一事实源、快照降为压缩视图」迁移（docs/remote-office-bridge-design.md §2）。第一刀只交地基本与两条最高价值事件：Rust 新增 `append_session_event` 命令做 O_APPEND 单行原子写（多进程并发追加只交错过界不互相覆盖——日志原语的安全语义）；TS 纯核 `sessionEventLog`（类型 + 串行化追加保证事件顺序 + 行容错解析 + 一次性熔断降级——日志失败永远不挡回合）；GUI 接线 `user_input`（带 gui 来源标注，未来手机/CLI 来源同形）与 `turn_settled`（与 turnTimings 同一世代护栏）。纯增量：现有快照路径零改动，收执/插话/委派事件与日志→messages 投影归下一刀。
+① 端口契约：探活打 gateway.host:port，而端口唯一绑定者是 webchat 适配器——禁用 webchat 的网关（只跑飞书）探针无门可敲，设置页误报「端口未就绪」。端口契约改为网关在跑就必答 `/healthz`（webchat 启用时由它的服务器答、禁用时由极简应答器答——对所有路径答 200，包括 Rust 探针真实请求的根路径）。② CLI 侧车嵌入本地构建链：本地 `build:gui:mac` 从不构建 CLI、app 包里从没有 `pure-cli` 侧车——GUI 永远回退到 PATH 上的旧二进制跑网关（本机是七月的手装符号链接），换多少次 app 都与网关无关。构建链现在把 `cli:build` 产物拷进 bundle 的 `MacOS/pure-cli`（签名前），本地构建自洽。③ Windows 自体启动守卫：三个路径候选在 Windows 全部 miss（都不带 `.exe`），裸名 `pure` 被 CreateProcess 按应用目录优先解析——命中的是 GUI 自己的 `pure.exe`，点启动弹出第二个 pure 窗口。候选按平台给对扩展名 + 自体守卫（canonicalize 等于当前进程即跳过）+ 裸名从 Windows 候选移除。
 
-**事件词汇表扩展 + 时间线投影（A1 第二刀）**
+**会话事件日志（架构评审 v2 A1 四刀）**
 
-三条事件补齐远程互见所需的「谁说了什么、怎么处理的、干出了什么」：`receipt`（settleAck 单点——全部收执的终稿必经之地）、`insertion_classified`（插话裁决结果，kind/action/via）、`delegation_settled`（subagentProgress 的 onDone/onError 单点，带 agentId/结局/耗时）。新增 `projectSessionTimeline` / `recentTimelineDigest` 投影：日志 → 一行一条的时间线摘要（用户来源标注通道、委派带 ✔/✘ 与秒数），是将来手机 digest 与「重开即互见」的读取地基；未知事件 kind 前向兼容通过。
+会话持久层向「事件日志为唯一事实源、快照降为压缩视图」迁移：Rust `append_session_event` O_APPEND 行写（多进程并发追加只交错过界不互相覆盖）；TS 纯核（串行化保事件顺序、行容错解析、一次性熔断——日志失败永远不挡回合）；五条事件（user_input 带来源标注 / turn_settled / receipt / insertion_classified / delegation_settled / turn_messages 转录增量）；时间线投影（一行一条摘要，手机 digest 的读取地基）；`read_session_events` 有界尾读；快照 `foldedThrough` 水位 + `mergeFoldWithLog` 合并读取面（首个消费者：sleep-time 编排器）。GUI 热路径零改动。
 
-**转录增量入日志 + 有界尾读（A1 第三刀）**
+**控制面抽出（架构评审 v2 A2 前半，P3-2 / 蓝图第 8 期）**
 
-`turn_messages` 事件让日志自此带上引擎转录：回合入口捕获窗口基线、finally 里切出本回合新增的消息数组落盘（完成/中断/硬停三条提交路径都在 try 内，finally 是单点）——这是快照降级为日志 fold 的原料。配套 Rust `read_session_events` 有界尾读（默认 16MB、头截断丢首行不吐半行、预算含起行余量）。时间线投影明确排除转录事件（批量数据不进 digest，回合落定一行已代表它）。绞杀期边界照实记：回合中窗口头部裁剪的极端情况会少记几条新消息，快照仍权威、fold 读取侧对账。
+转向队列（SteerBus）与委派控制面（DelegationControlPlane：起飞闸挂号簿 / 点名停支 / 委派参数捕获）从 chat.ts 抽成宿主无关模块——匹配口径单一真相保持在 steerTargeting，模块只是有状态容器加派发缝。chat.ts 四本账全量切 plane 消费，字段退役。CLI/通道接线即得远程遥控能力（通道输入路落地时一次接上）。
 
-**fold 落地：快照带水位 + 合并读取面（A1 收口刀）**
+**QQ 通道落地，撤掉企微占位**
 
-快照顶层新增 `foldedThrough` 水位——本快照 messages 已包含事件日志中 ts ≤ 此值的全部转录事件；回合落日志的同一刻更新水位（事件 ts 即水位值，ts ≤ 水位即不重复计入），会话恢复随快照读回、清空归零。新增 `mergeFoldWithLog` 合并读取面：快照 + 水位后的日志尾增量 = 完整现状；水位缺省（标记诞生前的旧会话）保守地快照权威。首个消费者切换：sleep-time 编排器的会话装载改走合并面（日志读失败退回快照原样，进化循环绝不因此变盲）。GUI 热路径（历史会话还原）本刀不动——等合并面在冷路径证明后随 S2 迁移。至此「事件日志为唯一事实源、快照为物化视图」在写入与读取两侧都名实相符。
+QQ 官方机器人通道：原生 WebSocket 入站（Identify + 心跳 + 断线退避重连，无 SDK 依赖）+ REST v2 被动回复出站，出站长连接模型与钉钉 Stream 同型、零公网暴露。能力按降级矩阵诚实声明：无卡片流式、纯文本回复、审批按钮文字双轨（y/n/a）、群聊天然仅 @ 触达。设置页通道清单加 QQ 卡片，撤掉企业微信的 planned 占位。
 
-## v3.0.4
+**自动更新中继上线（Vercel）**
+
+updater 端点此前指着从未存在的占位域名，自动更新从未通过。新增 services/update-relay 并部署 Vercel（update-relay.vercel.app）：/latest.json 从 GitHub Releases 实时拉目录、资产 URL 重写为 307 重定向。端点已写入 tauri.conf——**从 3.0.4 起安装的应用自动更新链路真实可用**。
+
+**进化批：总开关补洞 + REFLECT 便宜通道 + 两柱焊点 + overlay 回退护栏 + S1 飞轮首转**
+
+E1.1 反思器纳入进化总开关（关掉即零反思调用）；sleep-time 进化循环接 REFLECT 相位便宜通道；两柱焊点——子代理记忆注入（每委派起飞时检索一次相关经验拼进该支 prompt，进块条目 id 随观测落盘供归因）；overlay 回退护栏（落盘快照 + meta 标记回退 + 装载侧过滤，手写文件结构性豁免）；S1 飞轮首转——真实样本收割落袋 researcher 六条过门槛、overlay 以真实失败画像起草并经六例两侧全真 A/B 判 ALLOW 首次落盘，随附收割器两处真机修复（断言起草超时 60s→300s、空目录重跑杀死文件依赖型样本）。
+
+**lib.rs 拆分两刀**
+
+Tier-2 解析器栈（约 1300 行）与 MCP 命令层（12 个 command，约 410 行）从 17,410 行的 lib.rs 整段搬入独立模块。机械移动零语义变化，cargo test 全绿，lib.rs 降至 15,716 行。
+
+**设置页折行治理 + 频道页状态真相统一**
+
+设置页描述摘掉人为宽度帽并收紧五条恰在换行边缘的中文文案（孤字换行不再）；频道页的 gateway 状态从 webview 裸 fetch（跨源被 CORS 拒）改为 Rust gateway_status 同源真相。
+
+## v3.0.3
 
 **进化总开关补洞：反思器纳入管辖（P0-1）**
 
