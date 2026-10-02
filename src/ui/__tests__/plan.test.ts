@@ -61,8 +61,8 @@ describe('formatPlanForPrompt', () => {
         { id: '2', action: 'Implement', description: 'Write the changes.', expectedOutcome: 'Working code' },
       ],
     };
-    const out = formatPlanForPrompt(plan);
-    const projectOut = formatPlanForPrompt(plan, true);
+    const out = formatPlanForPrompt(plan, false, false);
+    const projectOut = formatPlanForPrompt(plan, true, false);
     expect(out).toContain('整体安排');
     expect(out).toContain('1. Understand: Read relevant files.');
     expect(out).toContain('2. Implement: Write the changes.');
@@ -146,7 +146,7 @@ describe('dedupePlanAnnouncements', () => {
       steps: [{ id: '1', action: '需求深挖', description: '先确认范围', expectedOutcome: '范围清楚', substeps: [{ id: '1', action: '确认用户画像', description: '明确对象', expectedOutcome: '画像明确' }] }],
     };
     const pause = formatPlanPauseMessage(plan);
-    const continuation = formatPlanContinuation(plan, 1, 1);
+    const continuation = formatPlanContinuation(plan, 1, 1, false);
     expect(pause).toContain('安排先放这儿');
     expect(pause).toContain('□ 1. 确认用户画像');
     expect(continuation).toContain('<plan_continuation>');
@@ -158,6 +158,18 @@ describe('dedupePlanAnnouncements', () => {
     expect(continuation).toContain('## 计划 n 已完成');
     expect(continuation).toContain('开始行没写就不要执行，完成行没写就不要进入下一计划');
     expect(continuation).toContain('### 子步骤 k 已完成');
+  });
+});
+
+// footgun 回归锁：plan 格式化函数的场景开关都不能有默认值。approved 曾经默认
+// false，新的批准执行调用点忘传就会静默滑回「等用户下一条消息才开工」的规划
+// 暂停；projectBuild 忘传则让构建任务丢掉交付验证段。JS 的 Function.length 只
+// 数「首个默认参数之前」的形参，所以 length 等于形参总数就是「每个形参都必须
+// 显式给」的运行时证据——谁把默认值加回来，length 掉下来，这条立刻红。
+describe('plan 格式化函数的默认值回归锁', () => {
+  it('formatPlanForPrompt / formatPlanContinuation 都无默认形参', () => {
+    expect(formatPlanForPrompt.length).toBe(3);
+    expect(formatPlanContinuation.length).toBe(4);
   });
 });
 

@@ -82,7 +82,10 @@ const PLAN_STAGE_PROTOCOL = `Use this strict stage protocol for every top-level 
  * Also instructs the model to write a `## 阶段 n/m` heading at the start of
  * each phase — the chat UI scans for that marker to show which phase of the
  * plan is currently executing. */
-export function formatPlanForPrompt(plan: Plan, projectBuild = false, approved = false): string {
+// 场景开关无默认值（2026-10-01 footgun 收口）：approved 曾经默认为 false，
+// 新调用点忘传就会静默滑回「等用户下一条消息才开工」的规划暂停；projectBuild
+// 忘传会让构建任务丢掉交付验证段。忘传即编译错误，逼每个调用点显式声明场景。
+export function formatPlanForPrompt(plan: Plan, projectBuild: boolean, approved: boolean): string {
   const steps = plan.steps
     .map((s, i) => {
       const substeps = s.todosRequired === false ? '' : (s.substeps ?? [])
@@ -125,7 +128,7 @@ export function formatPlanPauseMessage(plan: Plan): string {
 }
 
 /** Context for a later user turn that continues an already-approved complex plan. */
-export function formatPlanContinuation(plan: Plan, currentPlan: number, currentTodo: number, projectBuild = false): string {
+export function formatPlanContinuation(plan: Plan, currentPlan: number, currentTodo: number, projectBuild: boolean): string {
   const planLines = plan.steps.map((step, index) => {
     const done = index + 1 < currentPlan;
     return `${done ? '✓ ~~' : '□ '}${index + 1}. ${step.action}${done ? '~~ [已完成]' : index + 1 === currentPlan ? ' 👈 当前阶段' : ''}`;
