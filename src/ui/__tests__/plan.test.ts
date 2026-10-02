@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, evaluatePlanContinuation, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
+import { expectNoDefaultParams } from '../../shared/__tests__/arityLock';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
 import { PlanProgressModel } from '../planProgress';
@@ -168,8 +169,10 @@ describe('dedupePlanAnnouncements', () => {
 // 显式给」的运行时证据——谁把默认值加回来，length 掉下来，这条立刻红。
 describe('plan 格式化函数的默认值回归锁', () => {
   it('formatPlanForPrompt / formatPlanContinuation 都无默认形参', () => {
-    expect(formatPlanForPrompt.length).toBe(3);
-    expect(formatPlanContinuation.length).toBe(4);
+    expectNoDefaultParams([
+      ['formatPlanForPrompt（projectBuild + approved 场景必填）', 3, formatPlanForPrompt],
+      ['formatPlanContinuation（projectBuild 场景必填）', 4, formatPlanContinuation],
+    ]);
   });
 });
 

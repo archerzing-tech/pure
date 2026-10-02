@@ -23,6 +23,7 @@ import {
   foldInFollowUpText,
   CANCELLATION_INVARIANTS as INV,
 } from '../insertionMessaging';
+import { expectNoDefaultParams } from './arityLock';
 
 describe('插话取消话术三处一致性', () => {
   it('① L1 协议：停/暂停分支是宿主动作，模型永不亲自动手停', () => {
@@ -219,17 +220,14 @@ describe('收执场景矩阵（2026-10-01 泛化排查）', () => {
   // length 等于形参总数就是「每个形参都必须显式给」的运行时证据——一旦
   // 有人给任一函数偷偷加回 `= ...`，length 掉下来，这条立刻红。
   it('footgun 回归：全模块函数都无默认形参（arity 回归锁）', () => {
-    const arity: Array<[string, number, (...args: never[]) => unknown]> = [
-      ['steerFrameText（cancel 场景开关必填）', 2, steerFrameText as (...args: never[]) => unknown],
-      ['branchStopReceipt（pause/abort 口径必填）', 2, branchStopReceipt as (...args: never[]) => unknown],
-      ['cancelBeforeDispatchReceipt（topic 必填，显式传 null）', 1, cancelBeforeDispatchReceipt as (...args: never[]) => unknown],
-      ['foldInReceipt（cancels + hasDelegation 场景必填）', 2, foldInReceipt as (...args: never[]) => unknown],
-      ['cancelFoldInstruction', 1, cancelFoldInstruction as (...args: never[]) => unknown],
-      ['foldInInstruction', 1, foldInInstruction as (...args: never[]) => unknown],
-      ['foldInFollowUpText', 1, foldInFollowUpText as (...args: never[]) => unknown],
-    ];
-    for (const [name, expected, fn] of arity) {
-      expect({ name, length: fn.length }).toEqual({ name, length: expected });
-    }
+    expectNoDefaultParams([
+      ['steerFrameText（cancel 场景开关必填）', 2, steerFrameText],
+      ['branchStopReceipt（pause/abort 口径必填）', 2, branchStopReceipt],
+      ['cancelBeforeDispatchReceipt（topic 必填，显式传 null）', 1, cancelBeforeDispatchReceipt],
+      ['foldInReceipt（cancels + hasDelegation 场景必填）', 2, foldInReceipt],
+      ['cancelFoldInstruction', 1, cancelFoldInstruction],
+      ['foldInInstruction', 1, foldInInstruction],
+      ['foldInFollowUpText', 1, foldInFollowUpText],
+    ]);
   });
 });
