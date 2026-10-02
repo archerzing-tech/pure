@@ -54,8 +54,7 @@ describe('proxy configuration', () => {
     expect(config.enabled).toBe(false);
     expect(config.llmEnabled).toBe(false);
     expect(config.toolsEnabled).toBe(false);
-    expect(effectiveProxyUrl(config, 'llm')).toBe('');
-    expect(effectiveProxyUrl(config, 'tools')).toBe('');
+    expect(effectiveProxyUrl(config)).toBe('');
   });
 
   it('disables an empty proxy without changing the configured bypass rules', () => {
@@ -70,8 +69,7 @@ describe('proxy configuration', () => {
 
   it('ignores malformed proxy URLs instead of breaking the request path', () => {
     const config = normalizeProxyConfig({ enabled: true, url: 'not-a-proxy' });
-    expect(effectiveProxyUrl(config, 'llm')).toBe('');
-    expect(effectiveProxyUrl(config, 'tools')).toBe('');
+    expect(effectiveProxyUrl(config)).toBe('');
   });
 
   it('ignores the retired per-surface switches — routing is per-destination now', () => {
@@ -84,12 +82,10 @@ describe('proxy configuration', () => {
     // The old llmEnabled/toolsEnabled toggles are retired: the proxy source is
     // returned for every surface, and per-DESTINATION routing (netRoute.ts)
     // decides direct vs proxy per host.
-    expect(effectiveProxyUrl(config, 'llm')).toBe('socks5://127.0.0.1:1080');
-    expect(effectiveProxyUrl(config, 'tools')).toBe('socks5://127.0.0.1:1080');
+    expect(effectiveProxyUrl(config)).toBe('socks5://127.0.0.1:1080');
 
     config.enabled = false;
-    expect(effectiveProxyUrl(config, 'llm')).toBe('');
-    expect(effectiveProxyUrl(config, 'tools')).toBe('');
+    expect(effectiveProxyUrl(config)).toBe('');
   });
 
   it('defaults the mode to manual and treats system mode as a transparent marker', () => {
@@ -101,10 +97,9 @@ describe('proxy configuration', () => {
       mode: 'system',
       url: '',
     });
-    expect(effectiveProxyUrl(config, 'llm')).toBe('system://');
-    expect(effectiveProxyUrl(config, 'tools')).toBe('system://');
+    expect(effectiveProxyUrl(config)).toBe('system://');
     config.enabled = false;
-    expect(effectiveProxyUrl(config, 'llm')).toBe('');
+    expect(effectiveProxyUrl(config)).toBe('');
   });
 
   it('embeds percent-encoded proxy credentials into the effective URL', () => {

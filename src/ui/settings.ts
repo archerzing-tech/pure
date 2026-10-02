@@ -1610,7 +1610,7 @@ export class SettingsPanel {
       // and swings with every proxy node change while actual chats go
       // direct. Only a manual provider bypass skips the route entirely.
       const bypassed = proxy.bypassProviders.includes(provider);
-      const rawProxy = bypassed ? '' : (effectiveProxyUrl(proxy, 'llm') ?? '');
+      const rawProxy = bypassed ? '' : (effectiveProxyUrl(proxy) ?? '');
       const pair = rawProxy
         ? netRouteProxyPair(baseURL, rawProxy)
         : { proxyUrl: '', fallbackProxyUrl: null as string | null };
@@ -2006,7 +2006,7 @@ export class SettingsPanel {
     if (isTauriRuntime()) {
       const core = await loadTauriCore();
       const proxy = normalizeProxyConfig(loadConfig()?.proxy);
-      const loc = await core?.invoke<string>('detect_location', { proxyUrl: effectiveProxyUrl(proxy, 'tools') });
+      const loc = await core?.invoke<string>('detect_location', { proxyUrl: effectiveProxyUrl(proxy) });
       if (!loc) throw new Error('empty location result');
       return loc;
     }
@@ -2281,7 +2281,7 @@ export class SettingsPanel {
    *  second probe process. Rendering lives in mcpProbe.ts (pure, tested). */
   private mcpResourcesRowHtml(s: PureConfig['mcpServers'][number]): string {
     const probe = this.mcpToolProbes.get(s.name);
-    if (probe) return renderMcpResourcesRow(probe);
+    if (probe) return renderMcpResourcesRow(probe, 'probe');
     const live = this.liveMcpResources.get(s.name);
     return live ? renderMcpResourcesRow({ serverName: s.name, tools: [], resources: live, resourcesSupported: true, durationMs: 0 }, 'live') : '';
   }
@@ -2415,7 +2415,7 @@ export class SettingsPanel {
 
     const result = await probeMcpServerTools(server, {
       excludedPrefixes,
-      proxyUrl: effectiveProxyUrl(proxy, 'tools'),
+      proxyUrl: effectiveProxyUrl(proxy),
       timeoutLabel: t('mcp.tools.timeout'),
     });
 

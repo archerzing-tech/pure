@@ -587,7 +587,7 @@ function buildEnvironmentContext(config: PureConfig | null): string {
 function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: string): string {
   const proxy = config?.proxy;
   if (!proxy) return '';
-  const base = effectiveProxyUrl(proxy, 'llm');
+  const base = effectiveProxyUrl(proxy);
   if (!base) return '';
   // Bypass is provider-level by design (shouldBypassProxy): a model-level
   // list existed once but was two deciders disagreeing — removed.
@@ -1093,7 +1093,7 @@ export function createLLMAdapter(
       // 实测学习：这条路由真的通了（或真的失败）就按主机记住，下次直接走
       // 可行的路。没配代理时不学——所有轮次都是直连，记了只是噪声。
       onNetOutcome: (outcome) => {
-        if (!effectiveProxyUrl(config.proxy, 'llm')) return;
+        if (!effectiveProxyUrl(config.proxy)) return;
         const host = hostOf(baseURL);
         if (host) recordNetOutcome(host, outcome.route, outcome.ok);
       },
@@ -1234,7 +1234,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = '', capabilityHooks?: DynamicCapabilityHooks): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy, 'tools'), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true);
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.
@@ -2051,7 +2051,7 @@ export class ChatController {
     if (!config) return null;
     const servers = config.mcpServers ?? [];
     if (servers.length === 0) return null;
-    const proxyUrl = effectiveProxyUrl(config.proxy, 'tools');
+    const proxyUrl = effectiveProxyUrl(config.proxy);
     if (!this.mcpClient) {
       this.mcpClient = new MCPClient({
         servers: [],
@@ -2486,8 +2486,8 @@ export class ChatController {
       config.proxy?.enabled,
       config.proxy?.llmEnabled,
       config.proxy?.toolsEnabled,
-      effectiveProxyUrl(config.proxy, 'tools'),
-      effectiveProxyUrl(config.proxy, 'llm'),
+      effectiveProxyUrl(config.proxy),
+      effectiveProxyUrl(config.proxy),
       ...(config.proxy?.bypassProviders ?? []),
       config.toolBrowser,
       config.toolCmd,
@@ -4411,7 +4411,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // new sessionId/config.
       if (this.deferredInitDone && (
         this.mcpSessionId !== sendSessionId ||
-        this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')])
+        this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy)])
       )) {
         this.disconnectMcpClient();
       }
@@ -4520,7 +4520,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
         mcpExcludedPrefixes: config.mcpExcludedPrefixes,
-        proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
+        proxyUrl: effectiveProxyUrl(config.proxy),
         permissionManager: this.permissionManager,
         // The engine verifier stays purely rule-based (non-empty-output check);
         // a hard failure there triggers an in-engine rewrite. No LLM re-check of
@@ -4547,7 +4547,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       let mcpConnectPromise: Promise<void> | null = null;
       if (!this.deferredInitDone) {
         this.mcpSessionId = sendSessionId;
-        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy, 'tools')]);
+        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy)]);
         this.mcpClient = codingAgent.mcpClient;
         this.codingAgentRef = codingAgent;
         if (this.mcpClient && !fastConversationalTurn) {
@@ -4580,7 +4580,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             servers: [],
             sessionId: sendSessionId,
             onToolDiscovered: (tool) => codingAgent.toolRegistry.register(tool),
-            proxyUrl: effectiveProxyUrl(config.proxy, 'tools'),
+            proxyUrl: effectiveProxyUrl(config.proxy),
             excludedPrefixes: config.mcpExcludedPrefixes,
           });
           codingAgent.toolRegistry.setMCPExecutor(client);
@@ -4595,7 +4595,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (existing >= 0) servers[existing] = server;
         else servers.push(server);
         persistConfig({ ...current, mcpServers: servers });
-        this.mcpConfigSnapshot = JSON.stringify([servers, effectiveProxyUrl(current.proxy, 'tools')]);
+        this.mcpConfigSnapshot = JSON.stringify([servers, effectiveProxyUrl(current.proxy)]);
         return { tools: client.getTools(), persisted: true };
       };
       const promptTools = effectiveWorkspace

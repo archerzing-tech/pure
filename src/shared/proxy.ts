@@ -189,8 +189,6 @@ export function composeProxyUrl(scheme: string, host: string, port: string): str
   return portPart ? `${schemePart}${hostPart}:${portPart}` : `${schemePart}${hostPart}`;
 }
 
-export type ProxyScope = 'llm' | 'tools';
-
 export function isUsableProxyUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -220,12 +218,12 @@ export function proxyUrlWithAuth(url: string, username: string, password: string
   }
 }
 
-export function effectiveProxyUrl(config: ProxyConfig, scope: ProxyScope = 'tools'): string {
-  // scope is retained for call-site compatibility, but the per-surface
-  // toggles (llmEnabled/toolsEnabled) are RETIRED: routing is per-DESTINATION
-  // now (see netRoute.ts) — a surface-level boolean cannot express "github
-  // needs the proxy but amap tiles must go direct". Only the master switch
-  // gates the proxy source here.
+// No scope argument (2026-10-01): the old llm/tools surface split is RETIRED —
+// routing is per-DESTINATION now (see netRoute.ts), so a surface-level selector
+// cannot express "github needs the proxy but amap tiles must go direct". The
+// parameter was already ignored, so it was removed rather than given a default.
+// Only the master switch gates the proxy source here.
+export function effectiveProxyUrl(config: ProxyConfig): string {
   if (!config.enabled) return '';
   // System mode: send the sentinel so the backend resolves the OS proxy at
   // request time (transparent forwarding) instead of using the form address.

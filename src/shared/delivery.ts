@@ -374,7 +374,11 @@ export function detectUiDesignRequest(prompt: string): boolean {
  * commands discovered from the workspace, fixing root causes and re-running
  * until everything passes. Evidence (command + real result) is mandatory.
  */
-export function formatDeliveryPipeline(profile: WorkspaceProfile | undefined, needsDesignPhase = false): string {
+// needsDesignPhase 无默认值（2026-10-01 footgun 收口）：它是构建流程的场景
+// 开关（需不需要先行设计稿）。默认 false 会让忘传的构建任务静默漏掉整个设计
+// 确认阶段；调用点传的是 workflow.needsDesignPhase 这个运行期变量，两侧都会
+// 出现，没有安全的默认。
+export function formatDeliveryPipeline(profile: WorkspaceProfile | undefined, needsDesignPhase: boolean): string {
   const commands = profile && profile.verification.length > 0
     ? profile.verification.map((spec) => `- ${spec.label}：\`${spec.command}\`${spec.required ? '' : '（可选）'}`).join('\n')
     : '- 先探明项目的验证入口（package.json scripts / Cargo.toml / pyproject.toml），没有标准入口时先补齐测试基础设施再验证。';

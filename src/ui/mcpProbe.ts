@@ -67,7 +67,7 @@ let probeCounter = 0;
  *
  * Pure and exported for tests — the Settings panel only mounts the string.
  */
-export function renderMcpResourcesRow(probe?: McpProbeResult, source: 'probe' | 'live' = 'probe'): string {
+export function renderMcpResourcesRow(probe: McpProbeResult | undefined, source: 'probe' | 'live'): string {
   if (!probe || probe.error) return '';
   if (!probe.resourcesSupported) {
     return `<div class="mcp-server-tools mcp-resource-row"><span class="mcp-probe-status">${t('mcp.resources.unsupported')}</span></div>`;

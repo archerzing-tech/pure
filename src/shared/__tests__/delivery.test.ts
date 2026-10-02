@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker } from '../delivery';
+import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
 function adapter(listing: string, packageJson = ''): ToolAdapter {
@@ -123,5 +124,9 @@ describe('design-first phase (UI builds)', () => {
     expect(parseDesignReadyMarker('前言\n## 设计稿已就绪：design.html\n停在这里等待确认。')).toBe('design.html');
     expect(parseDesignReadyMarker('没有标记的普通回复')).toBeNull();
     expect(parseDesignReadyMarker('## 设计稿已就绪：\n(无文件名)')).toBeNull();
+  });
+
+  it('footgun 回归：formatDeliveryPipeline 无默认形参（needsDesignPhase 场景必填）', () => {
+    expectNoDefaultParams([['formatDeliveryPipeline', 2, formatDeliveryPipeline]]);
   });
 });

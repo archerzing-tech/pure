@@ -169,7 +169,7 @@ async function resolveTileConfig(): Promise<TileFetchConfig> {
   }
   const cfg = tileConfigResolvers.loadConfig();
   return {
-    proxyUrl: cfg?.proxy ? tileConfigResolvers.effectiveProxyUrl(cfg.proxy, 'tools') : '',
+    proxyUrl: cfg?.proxy ? tileConfigResolvers.effectiveProxyUrl(cfg.proxy) : '',
     maxBytes: (cfg?.mapTileCacheMB ?? tileConfigResolvers.defaultMapTileCacheMB) * 1024 * 1024,
     tileKey: cfg?.mapTileKey?.trim() ?? '',
   };
