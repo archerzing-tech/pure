@@ -1139,7 +1139,7 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
         } else if (block.type === 'plan') {
           const progress = chat.getPlanProgressModel();
           if (!progress) continue;
-          const restoredPlanCard = createRestoredPlanCard(progress);
+          const restoredPlanCard = createRestoredPlanCard(progress, () => chat.getTaskScript());
           target.appendChild(restoredPlanCard.el);
           chat.registerRestoredPlanCard(restoredPlanCard);
         } else if (block.type === 'assistant') {

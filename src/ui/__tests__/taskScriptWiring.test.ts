@@ -104,12 +104,27 @@ describe('chat.ts · TaskScript 信号接线', () => {
     expect(src.split('this.activeTaskScript = null;').length - 1).toBe(6);
   });
 
-  it('剧本只经 recordTaskScript 与两处建本写入，不存在第二处直接改账', () => {
+  it('剧本只经 recordTaskScript / 建本 / 恢复写入，不存在第二处直接改账', () => {
     const assignments = src.split('this.activeTaskScript =').length - 1;
-    // 1 处追加（recordTaskScript）+ 2 处建本（新计划 / 续跑重开）+ 6 处归零。
-    expect(assignments).toBe(9);
+    // 1 处追加（recordTaskScript）+ 2 处建本（新计划 / 续跑重开）
+    // + 1 处恢复（loadFromStorage，期 4）+ 6 处归零。
+    expect(assignments).toBe(10);
     expect(src.split('this.activeTaskScript = createTaskScript(').length - 1).toBe(2);
     expect(src.split('this.activeTaskScript = applyTaskScriptSignal(').length - 1).toBe(1);
+    expect(src.split('this.activeTaskScript = null;').length - 1).toBe(6);
+  });
+
+  it('恢复的账先验结构再认（宁可没账，不要一本坏账）', () => {
+    const restore = src.slice(src.indexOf('private restoreTaskScript('), src.indexOf('private restoreTaskScript(') + 800);
+    expect(restore).toContain('candidate.version !== 1');
+    expect(restore).toContain('Array.isArray(candidate.plan.steps)');
+    expect(restore).toContain('Array.isArray(candidate.signals)');
+  });
+
+  it('落盘句柄随计划游标一起收（切换会话不会把旧会话的账写回去）', () => {
+    const detach = src.slice(src.indexOf('private detachActivePlanProgress('), src.indexOf('private detachActivePlanProgress(') + 900);
+    expect(detach).toContain('void scriptPersistence.flush()');
+    expect(detach).toContain('scriptPersistence.dispose()');
   });
 
   it('对外只暴露只读账本，不暴露可写的剧本引用之外的状态', () => {

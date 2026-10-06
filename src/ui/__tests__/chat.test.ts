@@ -1427,7 +1427,7 @@ describe('plan overview completion state', () => {
   it('restores the transcript plan card directly from the session progress model', () => {
     const src = readSource(new URL('../main.ts', import.meta.url));
     expect(src).toContain('const progress = chat.getPlanProgressModel();');
-    expect(src).toContain('const restoredPlanCard = createRestoredPlanCard(progress);');
+    expect(src).toContain('const restoredPlanCard = createRestoredPlanCard(progress, () => chat.getTaskScript());');
     expect(src).not.toContain('bindPlanCardProgress(restoredPlanCard, progress);');
     expect(src).not.toContain('createRestoredPlanCard(block.snapshot)');
   });

@@ -12,6 +12,7 @@
 import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
 import type { PlanProgressSnapshot } from './planProgress';
+import type { TaskScript } from '../shared/taskScript';
 import type { PathRepair } from './pathIndex';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
@@ -99,6 +100,9 @@ export interface SessionUiState {
   planState?: PlanState | null;
   /** Latest multi-agent activity for the current task, retained on restore. */
   agentActivities?: SessionAgentActivity[];
+  /** 期 4：TaskScript 结构账（纯 JSON：version + plan + signals）。重启后重建
+   * 同一本账，否则恢复出来的卡片丢证据、续跑轮拿不到收尾素材。 */
+  taskScript?: TaskScript | null;
 }
 
 export interface PlanState {
@@ -1214,6 +1218,74 @@ export interface SessionPlanProgressPersistence {
   persist(snapshot: PlanProgressSnapshot): void;
   flush(): Promise<void>;
   dispose(): void;
+}
+
+/**
+ * TaskScript 的落盘句柄。与计划游标分开是有原因的：游标只在阶段切换时变，
+ * 而剧本每来一个工具结果就长一条——按微任务节流会把磁盘写放大成“每个工具
+ * 一次读+写”。所以这里用尾沿定时器合并写，并保留 flush（切换会话/退出时
+ * 必须把最后一笔写下去，否则恢复出来的账比屏幕上少一步）。
+ */
+export interface SessionTaskScriptPersistence {
+  persist(script: TaskScript): void;
+  flush(): Promise<void>;
+  dispose(): void;
+}
+
+const TASK_SCRIPT_PERSIST_DEBOUNCE_MS = 2_000;
+
+export async function persistSessionTaskScript(
+  sessionId: string,
+  script: TaskScript,
+  workspace = '',
+): Promise<void> {
+  const loaded = await loadSession(sessionId);
+  if (!loaded) return;
+  await saveSession(sessionId, {
+    ...loaded.snapshot,
+    uiState: { ...loaded.snapshot.uiState, taskScript: script },
+  }, workspace);
+}
+
+export function createSessionTaskScriptPersistence(
+  sessionId: string,
+  workspace = '',
+): SessionTaskScriptPersistence {
+  let pending: TaskScript | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  let chain: Promise<unknown> = Promise.resolve();
+
+  const runPending = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const next = pending;
+    pending = null;
+    if (!next || disposed) return;
+    chain = chain.then(() => persistSessionTaskScript(sessionId, next, workspace)).catch(() => {});
+  };
+
+  return {
+    persist(script): void {
+      if (disposed) return;
+      pending = script;
+      if (timer === null) timer = setTimeout(runPending, TASK_SCRIPT_PERSIST_DEBOUNCE_MS);
+    },
+    flush(): Promise<void> {
+      runPending();
+      return resolveWithin(chain, 5_000);
+    },
+    dispose(): void {
+      disposed = true;
+      pending = null;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
 }
 
 export async function persistSessionPlanProgress(

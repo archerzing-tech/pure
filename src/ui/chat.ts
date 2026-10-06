@@ -6,7 +6,7 @@ import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type Pure
 import { abortPaused, isPauseAbort, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type StatusLineRecord } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { blockedHosts } from '../shared/netGuard';
@@ -1496,6 +1496,7 @@ export class ChatController {
   private activePlanCardHandle: PlanCardHandle | null = null;
   /** 期 2·结构账：当前计划的剧本（只追加信号，状态现算）。没有计划卡时为 null。 */
   private activeTaskScript: TaskScript | null = null;
+  private activeTaskScriptPersistence?: SessionTaskScriptPersistence;
   private activePlanProgressUnsubscribe?: () => void;
   private activePlanProgressPersistence?: SessionPlanProgressPersistence;
   /** Whether the active plan was approved as a project build — carried across
@@ -1829,6 +1830,21 @@ export class ChatController {
     this.activeTaskScript = applyTaskScriptSignal(this.activeTaskScript, signal);
     // 账变了，卡片上那一步的悬停提示就得跟着变（工具结果不改游标，不靠订阅刷新）。
     refreshPlanCardTaskScript(this.activePlanCardHandle);
+    this.activeTaskScriptPersistence?.persist(this.activeTaskScript);
+  }
+
+  /** 只认结构完整的账本：版本、步骤表、信号列表任一不对就当没存过。 */
+  private restoreTaskScript(raw: unknown): void {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const candidate = raw as Partial<TaskScript>;
+    if (candidate.version !== 1) return;
+    if (!candidate.plan || !Array.isArray(candidate.plan.steps)) return;
+    if (!Array.isArray(candidate.signals)) return;
+    this.activeTaskScript = {
+      version: 1,
+      plan: candidate.plan,
+      signals: candidate.signals.filter((signal): signal is TaskScriptSignal => Boolean(signal) && typeof signal === 'object' && typeof (signal as { kind?: unknown }).kind === 'string'),
+    };
   }
 
   getTaskScript(): TaskScript | null {
@@ -1872,6 +1888,13 @@ export class ChatController {
       void persistence.flush();
       persistence.dispose();
     }
+    // 账本落盘句柄跟着计划游标一起收：最后那笔必须写下去，否则重启后账比屏幕上少。
+    const scriptPersistence = this.activeTaskScriptPersistence;
+    this.activeTaskScriptPersistence = undefined;
+    if (scriptPersistence) {
+      void scriptPersistence.flush();
+      scriptPersistence.dispose();
+    }
   }
 
   private bindActivePlanProgress(
@@ -1885,6 +1908,7 @@ export class ChatController {
     this.applyPlanProgressSnapshot(model.getSnapshot());
     const persistence = createSessionPlanProgressPersistence(sessionId, workspace);
     this.activePlanProgressPersistence = persistence;
+    this.activeTaskScriptPersistence = createSessionTaskScriptPersistence(sessionId, workspace);
     this.activePlanProgressUnsubscribe = model.subscribePersistence((snapshot) => {
       if (this.activePlanProgress !== model) return;
       this.applyPlanProgressSnapshot(snapshot);
@@ -2431,6 +2455,8 @@ export class ChatController {
     if (savedProgress) {
       const restoredProgress = PlanProgressModel.fromSnapshot(savedProgress);
       this.bindActivePlanProgress(restoredProgress);
+      // 期 4：剧本跟着恢复（结构不合法就不认——宁可没账，不要一本坏账）。
+      this.restoreTaskScript(snapshot.uiState.taskScript);
       if (savedProgress.status === 'complete') this.activePlanCardSnapshot = null;
     }
     this.hasHistory = this.messages.length > 0;
@@ -8069,6 +8095,11 @@ export class SessionChatManager {
 
   getPlanProgressModel(): PlanProgressModel | null {
     return this.activeNow().getPlanProgressModel();
+  }
+
+  /** 本会话当前的剧本账本（期 4：随快照持久化，重启后恢复同一本）。 */
+  getTaskScript(): TaskScript | null {
+    return this.activeNow().getTaskScript();
   }
 
   continuePausedPlan(): boolean {
