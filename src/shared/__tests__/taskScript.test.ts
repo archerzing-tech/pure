@@ -9,6 +9,7 @@ import {
   taskScriptHandOver,
   taskScriptProgress,
 } from '../taskScript';
+import { MAX_DELEGATION_SUMMARY, MAX_DELEGATIONS_PER_STEP } from '../taskScript';
 import type { Plan } from '../../coding-agent/types';
 
 function plan(...actions: string[]): Plan {
@@ -35,7 +36,7 @@ describe('taskScript · 空账与数字账', () => {
     expect(deriveTaskScript(script).steps.map((s) => s.status)).toEqual(['pending', 'pending']);
     expect(deriveTaskScript(script).cursor).toBe(1);
     expect(taskScriptProgress(script)).toEqual({ total: 2, done: 0, current: 1, allDone: false });
-    expect(deriveTaskScript(script).steps[0]?.evidence).toEqual({ tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null });
+    expect(deriveTaskScript(script).steps[0]?.evidence).toEqual({ tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null, delegations: [], delegationCount: 0 });
   });
 
   it('账本只追加不原地改：旧快照不受后续信号影响（实时=重载同路径）', () => {
@@ -314,7 +315,7 @@ describe('taskScript · 收尾素材只出事实', () => {
     });
     expect(handover.steps[0]?.evidence.artifacts).toEqual(['src/ui/chat.ts']);
     expect(handover.steps[1]?.evidence.verifications).toEqual([{ command: 'bun test', ok: true }]);
-    expect(handover.earlierEvidence).toEqual({ tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null });
+    expect(handover.earlierEvidence).toEqual({ tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null, delegations: [], delegationCount: 0 });
   });
 
   it('未全完成的剧本 allDone 为 false，且明确暴露还差哪步', () => {
@@ -334,7 +335,7 @@ describe('taskScript · 收尾素材只出事实', () => {
       doneSteps: 0,
       allDone: false,
       steps: [],
-      earlierEvidence: { tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null },
+      earlierEvidence: { tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null, delegations: [], delegationCount: 0 },
     });
     expect(taskScriptProgress(createTaskScript({ reasoning: 'r', steps: [] })).allDone).toBe(false);
   });
@@ -388,6 +389,79 @@ describe('taskScript · 收尾素材只出事实', () => {
     expect(facts).toContain('计划细化前已发生（无法归属到具体步骤）');
     expect(facts).toContain('old.ts');
     expect(facts).toContain('第 1 步「A refined」｜承诺：A refined done｜状态：未开始');
+  });
+
+  it('委派回灌：子代理交回的结论记在父步骤的账上', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('并行调研')), [
+      { kind: 'control', marker: 'phaseStart', phase: 1 },
+      { kind: 'delegation', toolName: 'researcher_web', ok: true, summary: '三家竞品的定价页都抓到了' },
+    ]);
+    const evidence = deriveTaskScript(script).steps[0]?.evidence;
+    expect(evidence?.delegationCount).toBe(1);
+    expect(evidence?.delegations).toEqual([
+      { tool: 'researcher_web', ok: true, outcome: null, summary: '三家竞品的定价页都抓到了' },
+    ]);
+  });
+
+  it('委派被用户暂停时：进账、标中断，但不当作已交回', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('并行调研')), [
+      { kind: 'delegation', toolName: 'researcher_web', ok: false, outcome: 'paused', summary: '抓了两家' },
+    ]);
+    const step = deriveTaskScript(script).steps[0];
+    expect(step?.evidence.branchOutcome).toBe('paused');
+    expect(step?.evidence.delegations[0]).toMatchObject({ ok: false, outcome: 'paused' });
+    expect(step?.evidence.failedTools).toEqual(['researcher_web']);
+    expect(step?.status).toBe('active');
+  });
+
+  it('委派也是一步真实活动：能撑住隐式收束', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A', 'B')), [
+      { kind: 'delegation', toolName: 'researcher_web', ok: true, summary: '好了' },
+      { kind: 'turnEnd' },
+    ]);
+    expect(deriveTaskScript(script).steps[0]?.closure).toBe('inferred');
+    expect(taskScriptProgress(script).done).toBe(1);
+  });
+
+  it('摘要硬上限：长报告压成一句（账本要进快照，不能把支的报告存进去）', () => {
+    const long = 'x'.repeat(5_000);
+    const script = applyTaskScriptSignals(createTaskScript(plan('A')), [
+      { kind: 'delegation', toolName: 'researcher_web', ok: true, summary: long },
+    ]);
+    const summary = deriveTaskScript(script).steps[0]?.evidence.delegations[0]?.summary ?? '';
+    expect(summary.length).toBe(MAX_DELEGATION_SUMMARY + 1);
+    expect(summary.endsWith('…')).toBe(true);
+  });
+
+  it('摘要里的换行与多余空白被压平（清单是一行，不是报告）', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A')), [
+      { kind: 'delegation', toolName: 'r', ok: true, summary: '第一行\n\n   第二行\t尾' },
+    ]);
+    expect(deriveTaskScript(script).steps[0]?.evidence.delegations[0]?.summary).toBe('第一行 第二行 尾');
+  });
+
+  it('每步只留前 N 条委派摘要，超出的只计数（账本不随轮次无限长）', () => {
+    const signals = Array.from({ length: 7 }, (_, i) => ({
+      kind: 'delegation' as const,
+      toolName: `agent${i}`,
+      ok: true,
+      summary: `第 ${i} 支`,
+    }));
+    const evidence = deriveTaskScript(applyTaskScriptSignals(createTaskScript(plan('A')), signals)).steps[0]?.evidence;
+    expect(evidence?.delegationCount).toBe(7);
+    expect(evidence?.delegations).toHaveLength(MAX_DELEGATIONS_PER_STEP);
+    expect(evidence?.delegations[0]?.tool).toBe('agent0');
+  });
+
+  it('委派在计划细化前发生：进历史事实桶，不挂到新步骤上', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A')), [
+      { kind: 'delegation', toolName: 'researcher_web', ok: true, summary: '旧结论' },
+      { kind: 'planReplaced', plan: plan('A refined') },
+    ]);
+    const derived = deriveTaskScript(script);
+    expect(derived.steps[0]?.evidence.delegations).toEqual([]);
+    expect(derived.earlierEvidence.delegationCount).toBe(1);
+    expect(formatTaskScriptFacts(taskScriptHandOver(script))).toContain('researcher_web');
   });
 
   it('derive 返回副本：外部改结果不会污染下一次推导', () => {

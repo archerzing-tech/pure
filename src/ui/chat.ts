@@ -6061,6 +6061,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               artifact: writtenArtifactPath(toolName, resultArgs),
             });
             if (branchOutcome) this.recordTaskScript({ kind: 'branch', outcome: branchOutcome, toolName });
+            // 委派也算这一步的真实活动：把支交回的结论回灌到父步骤的账上，
+            // 「这一步把活派给了谁、回来什么」才查得到。摘要用现成的行数截断
+            // 口径（与工具卡一致），账本侧再按字符硬上限压一次。
+            if (subagentNames.has(toolName)) {
+              this.recordTaskScript({
+                kind: 'delegation',
+                toolName,
+                ok: event.payload.result.success,
+                ...(branchOutcome ? { outcome: branchOutcome } : {}),
+                summary: truncateResultLines(resultText),
+              });
+            }
             this.recordToolActivity(
               toolName,
               resultArgs,

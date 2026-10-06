@@ -29,6 +29,21 @@ export interface TaskVerification {
   ok: boolean;
 }
 
+/** 一次委派的落定：支跑了什么、回来什么结果、中途有没有被用户打断。 */
+export interface TaskDelegation {
+  tool: string;
+  ok: boolean;
+  outcome: BranchOutcome | null;
+  /** 有界的产出摘要——账本要进快照，不能把整份支的报告存进去。 */
+  summary: string;
+}
+
+/** 摘要字符上限：一句结论的长度上限，不是报告的长度上限。 */
+export const MAX_DELEGATION_SUMMARY = 160;
+
+/** 每步保留的委派条目上限；超出只计数，账本不会随轮次无限长。 */
+export const MAX_DELEGATIONS_PER_STEP = 4;
+
 export interface TaskStepEvidence {
   /** 本步内完成过的工具调用数。 */
   tools: number;
@@ -40,6 +55,10 @@ export interface TaskStepEvidence {
   verifications: TaskVerification[];
   /** 本步进行期间用户中断过一支（暂停/停止），即不是「顺利做完」。 */
   branchOutcome: BranchOutcome | null;
+  /** 本步委派出去的活与落定结果（保留前 MAX_DELEGATIONS_PER_STEP 条）。 */
+  delegations: TaskDelegation[];
+  /** 委派总次数（可能大于 delegations.length——超出的只计数不存摘要）。 */
+  delegationCount: number;
 }
 
 export interface TaskSubstepRecord {
@@ -68,6 +87,7 @@ export type TaskScriptSignal =
   | { kind: 'planReplaced'; plan: Plan }
   | { kind: 'control'; marker: 'phaseStart' | 'phaseDone' | 'phaseJump' | 'substepStart' | 'substepDone'; phase: number; substep?: number }
   | { kind: 'tool'; toolName: string; ok: boolean; command?: string; artifact?: string }
+  | { kind: 'delegation'; toolName: string; ok: boolean; outcome?: BranchOutcome; summary: string }
   | { kind: 'verification'; command: string; ok: boolean }
   | { kind: 'turnEnd' }
   | { kind: 'branch'; outcome: BranchOutcome; toolName?: string };
@@ -106,6 +126,8 @@ interface FoldedStep {
   artifacts: string[];
   verifications: TaskVerification[];
   branchOutcome: BranchOutcome | null;
+  delegations: TaskDelegation[];
+  delegationCount: number;
   substeps: TaskSubstepRecord[];
 }
 
@@ -126,6 +148,17 @@ function pushUnique(list: string[], value: string | undefined): void {
   const trimmed = value.trim();
   if (!trimmed || list.includes(trimmed)) return;
   list.push(trimmed);
+}
+
+/**
+ * 把一份支的报告压成一句结论。账本要进会话快照，摘要必须硬上限——否则一
+ * 个跑了几千行的支就能把会话文件撑大一个数量级，而收尾真正需要的只是
+ * 「它得出了什么结论」。
+ */
+function summarizeDelegation(summary: string): string {
+  const collapsed = summary.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= MAX_DELEGATION_SUMMARY) return collapsed;
+  return `${collapsed.slice(0, MAX_DELEGATION_SUMMARY).trimEnd()}…`;
 }
 
 /** 一次回合结束最多隐式收束一步——与既有 plan 游标纪律同口径，不跳格。 */
@@ -154,6 +187,8 @@ function blankSteps(plan: Plan): FoldedStep[] {
     artifacts: [],
     verifications: [],
     branchOutcome: null,
+    delegations: [],
+    delegationCount: 0,
     substeps: (step.substeps ?? []).map((_, j) => ({ index: j + 1, status: 'pending' as TaskStepStatus, doneByControl: false })),
   }));
 }
@@ -165,13 +200,17 @@ function fold(script: TaskScript): { folded: FoldedStep[]; cursor: number; earli
   // 计划细化之前的产出：文件真写了、验证真跑了，不能因为步骤表换了就当作没发生。
   // 但新步骤与旧步骤没有可信的一一对应，所以不硬挂到新步骤上，只作为「已发生的事实」
   // 单独交给消费方（模型收尾素材 / UI），避免把旧产出谎报成某一步的产出。
-  const earlier: TaskStepEvidence = { tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null };
+  const earlier: TaskStepEvidence = { tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null, delegations: [], delegationCount: 0 };
   const bank = (evidence: TaskStepEvidence): void => {
     earlier.tools += evidence.tools;
     for (const name of evidence.failedTools) pushUnique(earlier.failedTools, name);
     for (const path of evidence.artifacts) pushUnique(earlier.artifacts, path);
     earlier.verifications.push(...evidence.verifications);
     earlier.branchOutcome = earlier.branchOutcome ?? evidence.branchOutcome;
+    earlier.delegationCount += evidence.delegationCount;
+    for (const item of evidence.delegations) {
+      if (earlier.delegations.length < MAX_DELEGATIONS_PER_STEP) earlier.delegations.push({ ...item });
+    }
   };
   for (const signal of script.signals) {
     if (signal.kind === 'planReplaced') {
@@ -182,6 +221,8 @@ function fold(script: TaskScript): { folded: FoldedStep[]; cursor: number; earli
           artifacts: step.artifacts,
           verifications: step.verifications,
           branchOutcome: step.branchOutcome,
+          delegations: step.delegations,
+          delegationCount: step.delegationCount,
         });
       }
       folded = blankSteps(signal.plan);
@@ -267,6 +308,22 @@ function fold(script: TaskScript): { folded: FoldedStep[]; cursor: number; earli
     const step = folded[Math.min(cursor, folded.length) - 1];
     if (!step) continue;
     step.tools += 1;
+    if (signal.kind === 'delegation') {
+      // 委派一次 = 一步真实活动：它会阻止隐式收束把没干完的步当做完，
+      // 也让「这一步把活派给了谁、回来什么结果」在账上查得到。
+      step.delegationCount += 1;
+      if (step.delegations.length < MAX_DELEGATIONS_PER_STEP) {
+        step.delegations.push({
+          tool: signal.toolName,
+          ok: signal.ok,
+          outcome: signal.outcome ?? step.branchOutcome ?? null,
+          summary: summarizeDelegation(signal.summary),
+        });
+      }
+      if (!signal.ok) pushUnique(step.failedTools, signal.toolName);
+      if (signal.outcome) step.branchOutcome = signal.outcome;
+      continue;
+    }
     if (signal.kind === 'verification') {
       step.verifications.push({ command: signal.command, ok: signal.ok });
       continue;
@@ -307,10 +364,12 @@ export function deriveTaskScript(script: TaskScript): { steps: TaskStepRecord[];
       artifacts: [...step.artifacts],
       verifications: step.verifications.map((item) => ({ ...item })),
       branchOutcome: step.branchOutcome,
+      delegations: step.delegations.map((item) => ({ ...item })),
+      delegationCount: step.delegationCount,
     },
     substeps: step.substeps.map((row) => ({ ...row })),
   }));
-  return { steps, cursor, earlierEvidence: { ...earlier, failedTools: [...earlier.failedTools], artifacts: [...earlier.artifacts], verifications: earlier.verifications.map((item) => ({ ...item })) } };
+  return { steps, cursor, earlierEvidence: { ...earlier, failedTools: [...earlier.failedTools], artifacts: [...earlier.artifacts], verifications: earlier.verifications.map((item) => ({ ...item })), delegations: earlier.delegations.map((item) => ({ ...item })) } };
 }
 
 export interface TaskScriptProgress {
@@ -401,7 +460,7 @@ const MAX_LISTED_PER_STEP = 6;
 export function formatTaskStepEvidence(step: TaskStepRecord): string {
   // 什么也没记到的步不给提示：「未开始」不是信息，卡片本来就用灰态写着这件事。
   // 只有真记下了什么（或真收束了）才值得占用一个悬停提示。
-  if (step.evidence.tools === 0 && step.closure === null) return '';
+  if (step.evidence.tools === 0 && step.closure === null && step.evidence.delegationCount === 0) return '';
   const parts: string[] = [STATUS_LABEL[step.status]];
   if (step.closure) parts.push(CLOSURE_LABEL[step.closure]);
   if (step.evidence.artifacts.length > 0) parts.push(`产出 ${listed(step.evidence.artifacts, 3)}`);
@@ -409,6 +468,7 @@ export function formatTaskStepEvidence(step: TaskStepRecord): string {
     parts.push(`验证 ${listed(step.evidence.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`), 3)}`);
   }
   if (step.evidence.failedTools.length > 0) parts.push(`失败 ${listed(step.evidence.failedTools, 3)}`);
+  if (step.evidence.delegations.length > 0) parts.push(`委派 ${listed(step.evidence.delegations.map((item) => item.tool), 3)}`);
   if (step.evidence.branchOutcome) parts.push(step.evidence.branchOutcome === 'paused' ? '期间被用户暂停' : '期间被用户停止');
   return parts.join(' · ');
 }
@@ -426,6 +486,12 @@ function stepFacts(step: TaskStepHandOver): string {
     `验证：${listed(step.evidence.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`))}`,
   ];
   if (step.evidence.failedTools.length > 0) parts.push(`失败工具：${listed(step.evidence.failedTools)}`);
+  if (step.evidence.delegations.length > 0) {
+    const more = step.evidence.delegationCount > step.evidence.delegations.length
+      ? `（共 ${step.evidence.delegationCount} 次委派）`
+      : '';
+    parts.push(`委派：${listed(step.evidence.delegations.map((item) => `${item.tool} ${item.ok ? '已交回' : '未完成'}${item.outcome ? `（${item.outcome === 'paused' ? '用户暂停' : '用户停止'}）` : ''}${item.summary ? `：${item.summary}` : ''}`), 3)}${more}`);
+  }
   if (step.evidence.branchOutcome) parts.push(`期间被中断：${step.evidence.branchOutcome === 'paused' ? '用户暂停' : '用户停止'}`);
   return `第 ${step.index} 步「${step.action}」｜承诺：${step.expectedOutcome}｜${parts.join('｜')}`;
 }
@@ -441,12 +507,16 @@ export function formatTaskScriptFacts(handover: TaskScriptHandOver | null | unde
   if (!handover || handover.totalSteps === 0) return '';
   const lines = handover.steps.map(stepFacts);
   const earlier = handover.earlierEvidence;
-  if (earlier.tools > 0 || earlier.artifacts.length > 0 || earlier.verifications.length > 0) {
-    lines.push([
+  if (earlier.tools > 0 || earlier.artifacts.length > 0 || earlier.verifications.length > 0 || earlier.delegationCount > 0) {
+    const parts = [
       '计划细化前已发生（无法归属到具体步骤）：',
       `产出：${listed(earlier.artifacts)}`,
       `验证：${listed(earlier.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`))}`,
-    ].join('｜'));
+    ];
+    if (earlier.delegations.length > 0) {
+      parts.push(`委派：${listed(earlier.delegations.map((item) => `${item.tool} ${item.ok ? '已交回' : '未完成'}${item.summary ? `：${item.summary}` : ''}`), 3)}`);
+    }
+    lines.push(parts.join('｜'));
   }
   return [
     '<task_script_facts>',

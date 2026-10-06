@@ -57,13 +57,25 @@ describe('chat.ts · TaskScript 信号接线', () => {
     }
   });
 
-  it('工具结果、交付门禁验证、分支中断、回合收尾、计划细化都进剧本', () => {
+  it('工具结果、委派交回、交付门禁验证、分支中断、回合收尾、计划细化都进剧本', () => {
     const calls = recordCalls().join('\n');
     expect(calls).toContain("kind: 'tool'");
+    expect(calls).toContain("kind: 'delegation'");
     expect(calls).toContain("kind: 'verification'");
     expect(calls).toContain("kind: 'branch'");
     expect(calls).toContain("kind: 'turnEnd'");
     expect(calls).toContain("kind: 'planReplaced'");
+  });
+
+  it('委派只对子代理工具记账，且摘要走现成的行数截断口径', () => {
+    // 该调用体内有嵌套展开，不能用 recordCalls() 的大括号截取（会在第一个 } 处断掉）。
+    const at = src.indexOf("kind: 'delegation'");
+    expect(at).toBeGreaterThan(-1);
+    const body = src.slice(at, at + 400);
+    expect(body).toContain('ok: event.payload.result.success');
+    expect(body).toContain('summary: truncateResultLines(resultText)');
+    const guard = src.slice(src.lastIndexOf('if (subagentNames.has(toolName))', at), at);
+    expect(guard).toContain('if (subagentNames.has(toolName)) {');
   });
 
   it('工具信号带真结果、真命令行、真产出路径（不是只有工具名）', () => {
