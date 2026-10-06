@@ -506,7 +506,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 停止/取消时用户消息必须留在对话里（这是发送记录，不是幽灵气泡）：所有预检
     // 中止分支走 keepOrDropUserBubble，仅在切换到其他会话时才移除气泡。
     expect(src).toContain('const keepOrDropUserBubble = (pausedText: string): void => {');
-    expect(src).toContain("keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。')");
+    expect(src).toContain("keepOrDropUserBubble('已暂停：你的请求已保留在对话中。')");
     // Every remaining userBubble.remove() is guarded by a session-switch check.
     expect(src).toMatch(/if \(gen !== this\.generation\) \{\s*userBubble\.remove\(\);\s*return;\s*\}/);
   });
@@ -1034,7 +1034,7 @@ describe('plan overview completion state', () => {
     // 没有衔接读起来就是无中生有。
     expect(src.indexOf('private renderQueueCard(): void')).toBeGreaterThan(-1);
     expect(src.indexOf('this.renderQueueCard();', src.indexOf('private queueInterjectTask('))).toBeGreaterThan(-1);
-    expect(src.indexOf('⏳ 待办队列（')).toBeGreaterThan(-1);
+    expect(src.indexOf('待办队列（')).toBeGreaterThan(-1);
     expect(src.indexOf('队列：处理下一件，后面还排着')).toBeGreaterThan(-1);
     expect(src.indexOf('队列：现在处理排下的那件。')).toBeGreaterThan(-1);
     // 新会话清空 pendingTasks 时同步撤卡，不留上一场对话的幽灵队列。

@@ -3367,7 +3367,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     bubble.textContent = '';
     const title = document.createElement('div');
     title.className = 'queue-card-title';
-    title.textContent = `⏳ 待办队列（${this.pendingTasks.length} 件）——当前任务完成后依次处理`;
+    title.textContent = `待办队列（${this.pendingTasks.length} 件）——当前任务完成后依次处理`;
     bubble.appendChild(title);
     const list = document.createElement('ol');
     list.className = 'queue-card-items';
@@ -3392,7 +3392,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     if (!timedInputSink({ text, images, displayText, at, timingText: timing.text })) return false;
     this.addBubble('user', displayText, images);
     const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
-    this.addStatusBubble(`⏳ 已排期：${describeTiming(timing)}执行「${preview}」，当前任务不受影响。`, false, false, 'info');
+    this.addStatusBubble(`已排期：${describeTiming(timing)}执行「${preview}」，当前任务不受影响。`, false, false, 'info');
     return true;
   }
 
@@ -3821,7 +3821,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       return;
     }
     if (turnController.signal.aborted) {
-      this.addStatusBubble('⏸ 已暂停：你的请求已保留在对话中。', true, false);
+      this.addStatusBubble('已暂停：你的请求已保留在对话中。', true, false);
       commitPausedUserTurn(new Map(), []);
       this.finishLiveTurn(liveTurn);
       releaseSupersededTurn();
@@ -4252,7 +4252,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     let assessmentFlow: AssessmentFlowHandle | null = null as AssessmentFlowHandle | null;
     try {
       if (turnController.signal.aborted) {
-        keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
+        keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
         return;
       }
       // All setup that could throw synchronously (adapter creation, agent construction)
@@ -4674,7 +4674,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (probeFindingsReported) return;
         if (workflow.probeRequired && !workflow.probeAvailable) {
           probeFindingsReported = true;
-          this.addStatusBubble('⚠ 这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false, 'warn');
+          this.addStatusBubble('这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false, 'warn');
           return;
         }
         if (!workspaceProfile || !taskContract) return;
@@ -4686,8 +4686,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
           return;
         }
-        this.addStatusBubble(`🔎 已完成项目探索：${workspaceProfileSummary(workspaceProfile)}`, true, false, 'info');
-        this.addStatusBubble(`📋 已建立任务契约：${taskContract.acceptanceCriteria.length} 项验收标准，验证结果将决定是否交付。`, true, false, 'info');
+        this.addStatusBubble(`已完成项目探索：${workspaceProfileSummary(workspaceProfile)}`, true, false, 'info');
+        this.addStatusBubble(`已建立任务契约：${taskContract.acceptanceCriteria.length} 项验收标准，验证结果将决定是否交付。`, true, false, 'info');
       };
       const maybeShowAssessment = (): void => {
         if (assessmentFlow) return;
@@ -4746,7 +4746,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 探针期间用户点击「停止」：立即收尾，不再进入访谈（探针只读，无副作用）。
       if (this.abortController?.signal.aborted) {
         removeThinkingCard();
-        keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
+        keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
         return;
       }
       if (workflow.userContext.buildProtocol) {
@@ -4839,7 +4839,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           if (this.abortController?.signal.aborted) {
             // 思考被用户掐断：请求留在对话里，计划流程一并收场（探针同款收尾）。
             removeThinkingCard();
-            keepOrDropUserBubble('⏸ 已暂停：你的请求已保留在对话中。');
+            keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
             return;
           }
           if (thought?.narration) {
@@ -5002,7 +5002,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // 计划卡与模式提示属于本次流程，一并清理。
               discardPlanCard();
               removeThinkingCard();
-              keepOrDropUserBubble(stopped ? '⏸ 已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
+              keepOrDropUserBubble(stopped ? '已暂停：你的请求已保留在对话中。' : '已取消本次执行计划，你的请求已保留在对话中。');
               modeBubble?.remove();
               this.removeStatusLine(modeBubble);
               return; // finally resets streaming
@@ -5279,7 +5279,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         const fixCommandGuard = (command: string): string | null => isGitMutationCommand(command)
           ? '修复阶段禁止修改 Git 仓库状态（包括 git -C、shell 包装形式）；请只修复交付验证报告的代码问题。'
           : null;
-        this.addStatusBubble('🛠️ 修复阶段：agent 正在根据真实失败输出修复并重新验证…', true);
+        this.addStatusBubble('修复阶段：正在根据真实失败输出修复并重新验证…', true);
         const fixSegment = createSegment();
         const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
@@ -5305,7 +5305,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               resultText: typeof fixEvent.payload.result.result === 'string' ? fixEvent.payload.result.result.slice(0, 800) : fixEvent.payload.result.error,
             });
             this.recordToolActivity(fixEvent.payload.toolName, undefined, ok);
-            this.addStatusBubble(`${ok ? '🔧✅' : '🔧⛔'} 修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
+            this.addStatusBubble(`修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
             this.scrollUi(chatEl);
           } else if (fixEvent.type === 'Completed') {
             latestMessages = fixEvent.payload.messages ?? latestMessages;
@@ -5327,7 +5327,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // agent will verify the premise before executing.
       if (analysis.traps.length > 0) {
         const labels = [...new Set(analysis.traps.map(t => TRAP_TYPE_LABELS[t.type] ?? t.type))].join('、');
-        this.addStatusBubble(`⚠️ 检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`, false, false, 'warn');
+        this.addStatusBubble(`检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`, false, false, 'warn');
       }
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text. A
@@ -5417,7 +5417,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         planProgress?.dispatch({ type: 'statusChanged', status: 'waiting' });
         // 一个脉冲状态气泡放在最后：明确告诉用户“一切就绪，等你回复开工”，
         // 避免输入框恢复后看起来像流程悄悄停止了。
-        this.addStatusBubble(`⏸ 已暂停在这里等你：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
+        this.addStatusBubble(`已暂停在这里：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
         this.scrollUi(chatEl);
         await this.persistSession(
           pauseSnapshot,
@@ -6067,7 +6067,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               break;
             }
             endThinking();
-            this.addStatusBubble(`⚠️ ${event.payload.code}: ${event.payload.message}`, false, true);
+            this.addStatusBubble(`${event.payload.code}: ${event.payload.message}`, false, true);
             this.scrollUi(chatEl);
             break;
 
@@ -6136,16 +6136,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 const round = qualityRepairRounds;
                 const issueSummary = deliveryVerificationSummary(deliveryResult);
                 qualityRepairIssues.push(`第 ${round} 轮发现：${issueSummary}`);
-                this.addStatusBubble(`🔎 第 ${round}/${MAX_QUALITY_REPAIR_ROUNDS} 轮交付验证未通过：${issueSummary}`, true, true);
+                this.addStatusBubble(`第 ${round}/${MAX_QUALITY_REPAIR_ROUNDS} 轮交付验证未通过：${issueSummary}`, true, true);
                 const fix = await runDeliveryFixRound(completionMessages, deliveryResult);
                 qualityRepairRan = qualityRepairRan || fix.completed;
                 completionMessages = fix.messages;
                 if (gen !== this.generation || this.abortController?.signal.aborted) return;
                 if (!fix.completed) {
                   qualityRepairIssues.push(`第 ${round} 轮修复未完成：修复 agent 未返回可继续验证的完成结果。`);
-                  this.addStatusBubble(`⚠️ 第 ${round} 轮修复没有完成，仍先重新验证当前工作区；未达到三轮前不会让人工介入。`, true, true);
+                  this.addStatusBubble(`第 ${round} 轮修复没有完成，仍先重新验证当前工作区；未达到三轮前不会让人工介入。`, true, true);
                 } else {
-                  this.addStatusBubble(`🔁 第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
+                  this.addStatusBubble(`第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
                 }
                 // Every round closes with a real re-check, never the previous
                 // round's evidence.
@@ -6154,7 +6154,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               if (!deliveryResult.passed && qualityRepairRounds >= MAX_QUALITY_REPAIR_ROUNDS) {
                 qualityRepairIssues.push(`第 ${MAX_QUALITY_REPAIR_ROUNDS} 轮后仍未通过：${deliveryVerificationSummary(deliveryResult)}`);
-                this.addStatusBubble(`⚠️ 已自动完成 ${MAX_QUALITY_REPAIR_ROUNDS} 轮修复与复查，仍有明确问题未解决，建议人工介入。\n${qualityRepairIssues.join('\n')}`, false, true);
+                this.addStatusBubble(`已自动完成 ${MAX_QUALITY_REPAIR_ROUNDS} 轮修复与复查，仍有明确问题未解决，建议人工介入。\n${qualityRepairIssues.join('\n')}`, false, true);
               }
               this.addStatusBubble(deliveryResult.passed
                 ? (deliveryResult.steps.length === 0
@@ -6381,7 +6381,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   this.appendToTranscript(createDesignPreviewCard(html, designMockupFile, () => {
                     void this.send('用户已确认当前设计稿：请严格按照该设计稿开始实现，实现完成后继续执行交付验证管线。');
                   }).el);
-                  this.addStatusBubble('⏸ 已按约定停在实现前：请在上方预览卡确认设计效果；确认前不会写实现代码，想调整直接回复意见。', true, false);
+                  this.addStatusBubble('已按约定停在实现前：请在上方预览卡确认设计效果；确认前不会写实现代码，想调整直接回复意见。', true, false);
                   this.scrollUi(chatEl);
                   designPreviewShown = true;
                 }
@@ -6672,7 +6672,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 前置检查失败/被停止时不再删除用户消息：它仍是发送过的记录。只有切换会话
         // 才移除（转录将由新会话重建）；同一会话内保留并给出提示。
         removeThinkingCard();
-        keepOrDropUserBubble(err?.name === 'AbortError' ? '⏸ 已暂停：你的请求已保留在对话中。' : '本轮处理未完成，你的请求已保留在对话中。');
+        keepOrDropUserBubble(err?.name === 'AbortError' ? '已暂停：你的请求已保留在对话中。' : '本轮处理未完成，你的请求已保留在对话中。');
       }
       if (interruptedMessages && gen === this.generation) {
         await this.persistSession(
