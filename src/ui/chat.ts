@@ -2575,7 +2575,7 @@ export class ChatController {
     const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText, ack));
     // A rejected link must never poison the chain for later inserts.
     this.insertClassificationChain = run.catch(() => {
-      this.settleAck(ack, '这句话没安排上——直接再发一次就行。');
+      this.settleAck(ack, '未能处理这句插话；请重新发送。');
     });
     await run;
   }
@@ -2795,8 +2795,8 @@ export class ChatController {
       this.preflightAbort?.abort();
       const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
       this.settleAck(ack, isCorrection
-        ? '收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。'
-        : '收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
+        ? '已按纠正重构思路，重新规划…'
+        : '已并入补充，重新规划…');
       return;
     }
     switch (decision.kind) {
@@ -3280,7 +3280,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       this.recordSideAnswer(text, answer);
     } else {
       // 旁答失败不再静默：明说没答上，问题已入账，收尾时模型统一答。
-      this.addStatusBubble('这个问题我暂时没答上来——先记下了，收尾时一并答你。', false, false, 'info');
+      this.addStatusBubble('旁答未完成；问题已入账，收尾统一回答。', false, false, 'info');
       this.recordSideAnswer(text, '');
     }
   }
@@ -3528,8 +3528,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 话凭空开始跑，没有这句衔接读起来就是无中生有。
       this.renderQueueCard();
       this.addStatusBubble(remaining > 0
-        ? `手头的活收尾了——先处理排队的，这后面还排着 ${remaining} 件。`
-        : '手头的活收尾了——现在处理刚才排下的那件。', false, false, 'info');
+        ? `队列：处理下一件，后面还排着 ${remaining} 件。`
+        : '队列：现在处理排下的那件。', false, false, 'info');
       void this.send(t.text, t.images, t.displayText);
     }
   }

@@ -413,13 +413,13 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 主线收尾 → 交接先说一声，再从队头派发；卡同步掉到 1 件。
     h.endTurn();
     expect(h.sends).toEqual(['对了，明天北京天气怎么样？']);
-    expect(statusJoined(h.root)).toContain('手头的活收尾了——先处理排队的，这后面还排着 1 件。');
+    expect(statusJoined(h.root)).toContain('队列：处理下一件，后面还排着 1 件。');
     expect(queueCard(h.root)!.textContent).toContain('待办队列（1 件）');
 
     // 再收尾 → 最后一件照跑，卡撤掉。
     h.endTurn();
     expect(h.sends).toEqual(['对了，明天北京天气怎么样？', '顺便帮我看看上海到东京的机票。']);
-    expect(statusJoined(h.root)).toContain('手头的活收尾了——现在处理刚才排下的那件。');
+    expect(statusJoined(h.root)).toContain('队列：现在处理排下的那件。');
     expect(queueCard(h.root)).toBeUndefined();
   });
 
@@ -540,7 +540,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
 
     await h.chat.interject('我老板问报告什么时候好？');
-    expect(statusJoined(h.root)).toContain('这个问题我暂时没答上来');
+    expect(statusJoined(h.root)).toContain('旁答未完成');
     const records = h.chat.steerBus.entries().filter((e: { message: { internal?: boolean } }) => e.message.internal);
     expect(records).toHaveLength(1);
     expect((records[0] as { displayText: string }).displayText).toBe('我老板问报告什么时候好？');
@@ -967,8 +967,8 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true; // 预检思考（planByThinking）还在流式进行
 
     await h.chat.interject('背景上加一些会动的云朵');
-    // 回执说"推倒重想"，不是排队的话术；队列卡绝不出现。
-    expect(assistantJoined(h.root)).toContain('收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
+    // 回执走系统腔，不是排队的话术；队列卡绝不出现。
+    expect(assistantJoined(h.root)).toContain('已并入补充，重新规划…');
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
     expect(h.chat.pendingFoldIns).toHaveLength(0);
@@ -1004,7 +1004,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
-    expect(assistantJoined(h.root)).toContain('推倒，带着它重新想');
+    expect(assistantJoined(h.root)).toContain('已并入补充，重新规划');
   });
 
   it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {
@@ -1037,7 +1037,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true;
 
     await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
-    expect(assistantJoined(h.root)).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
+    expect(assistantJoined(h.root)).toContain('已按纠正重构思路，重新规划…');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(h.chat.preflightRestartRequested).toBe(true);
     // 不拆回合：重入通道没被占用、回合没被掐——思考流由重启请求掐，重开
@@ -1075,7 +1075,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     h.chat.planPreflightActive = true;
 
     await h.chat.interject('换个思路，别做俄罗斯方块了，做贪吃蛇');
-    expect(assistantJoined(h.root)).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
+    expect(assistantJoined(h.root)).toContain('已按纠正重构思路，重新规划…');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(h.chat.relatedInsert).toBeFalsy();
   });

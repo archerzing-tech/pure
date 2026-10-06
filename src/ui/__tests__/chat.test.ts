@@ -962,7 +962,7 @@ describe('plan overview completion state', () => {
     // 判定失败除了不毒化链条，还必须把 pending 的临时回执收场——留着它就是
     // 一条永远在闪的"插话处理中…"。
     expect(src.indexOf('this.insertClassificationChain = run.catch(() => {')).toBeGreaterThan(-1);
-    expect(src.indexOf("'这句话没安排上——直接再发一次就行。'")).toBeGreaterThan(-1);
+    expect(src.indexOf("'未能处理这句插话；请重新发送。'")).toBeGreaterThan(-1);
     // 链上的每一环重新检查 isStreaming()：前一条 RELATED 插话可能已中止回合，
     // 轮到本条时它应该走正常 send 而不是对已结束的回合做判定。
     const link = src.indexOf('private async classifyAndApplyInterject(');
@@ -1035,8 +1035,8 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('private renderQueueCard(): void')).toBeGreaterThan(-1);
     expect(src.indexOf('this.renderQueueCard();', src.indexOf('private queueInterjectTask('))).toBeGreaterThan(-1);
     expect(src.indexOf('⏳ 待办队列（')).toBeGreaterThan(-1);
-    expect(src.indexOf('手头的活收尾了——先处理排队的，这后面还排着')).toBeGreaterThan(-1);
-    expect(src.indexOf('手头的活收尾了——现在处理刚才排下的那件。')).toBeGreaterThan(-1);
+    expect(src.indexOf('队列：处理下一件，后面还排着')).toBeGreaterThan(-1);
+    expect(src.indexOf('队列：现在处理排下的那件。')).toBeGreaterThan(-1);
     // 新会话清空 pendingTasks 时同步撤卡，不留上一场对话的幽灵队列。
     const reset = src.indexOf('this.pendingTasks = [];');
     expect(reset).toBeGreaterThan(-1);
@@ -1759,7 +1759,7 @@ describe('plan-by-thinking flow', () => {
     expect(absorbGuard).toContain("decision.signals.branchStop !== true");
     expect(absorbGuard).toContain("decision.signals.resumesBranch !== true");
     // 纠错有自己的收执话术（推倒重想的理由不同：事实错了，不是加东西）。
-    expect(src).toContain('收到——按这个纠正，把刚才想的部分推倒，带着对的重新想。');
+    expect(src).toContain('已按纠正重构思路，重新规划…');
     // 分类上下文带思考窗阶段：分类器得知道手头的活是"正在想"。
     expect(src).toContain('if (this.planPreflightActive) {');
   });
@@ -1773,7 +1773,7 @@ describe('plan-by-thinking flow', () => {
     const abortCallIdx = src.indexOf('this.preflightAbort?.abort();', absorbIdx);
     expect(abortCallIdx).toBeGreaterThan(absorbIdx);
     // 吸收回执走系统腔（无 agent 拟人），不再输出固定拟人话术。
-    expect(src).toContain('收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
+    expect(src).toContain('已按纠正重构思路，重新规划…');
     expect(src).toContain('已并入补充，重新规划…');
     // planByThinking 侧：流句柄挂上 preflightAbort；每轮开局清掉上一轮的
     // 重启请求（残留会把新控制器的超时误认成重启）。
