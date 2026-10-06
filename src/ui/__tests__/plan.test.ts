@@ -90,6 +90,39 @@ describe('formatPlanForPrompt', () => {
     expect(projectOut).not.toContain('at most ONE Todo');
   });
 
+  // 期 3b：阶段完成行周围的话必须是「交付了什么 + 怎么验的」，且失败直说。
+  // 同时钉住两条纪律——不得读回阶段名、不得复用上一阶段的句子（防八股），
+  // 以及控制行字面量本期零改动（期 3a 单独立项评审前不许动）。
+  it('阶段完成要求实质交代：交付了什么、怎么验证的、失败怎么直说', () => {
+    const plan: Plan = {
+      reasoning: 'complex task',
+      steps: [{ id: '1', action: 'Understand', description: 'Read relevant files.', expectedOutcome: 'Context' }],
+    };
+    const out = formatPlanForPrompt(plan, false, false);
+    expect(out).toContain('say with your own words what this stage now delivers and how you verified it');
+    expect(out).toContain('the check you actually ran and what it reported');
+    expect(out).toContain('say that plainly in the same breath');
+    expect(out).toContain('a stage is not done because you tried');
+    expect(out).toContain('do not read the stage name back');
+    expect(out).toContain('do not reuse the sentence you wrote for the previous stage');
+    // 防八股：本期只规定实质，不给可原样复用的收尾模板。
+    expect(out).not.toMatch(/say (exactly|verbatim)[: ]/i);
+    expect(out).not.toMatch(/##\s*(完成总结|完成报告)/);
+  });
+
+  it('控制行字面量本期零改动（期 3a 单独立项评审前不许动解析与写法）', () => {
+    const plan: Plan = {
+      reasoning: 'complex task',
+      steps: [{ id: '1', action: 'Understand', description: 'Read relevant files.', expectedOutcome: 'Context' }],
+    };
+    const out = formatPlanForPrompt(plan, false, false);
+    expect(out).toContain('## 计划 n：<阶段名称>');
+    expect(out).toContain('## 计划 n 已完成');
+    expect(out).toContain('### 子步骤 k：<子步骤名称>');
+    expect(out).toContain('### 子步骤 k 已完成');
+    expect(out).toContain('The interface advances the Todo list only in numeric order');
+  });
+
   it('approved plans start executing immediately instead of pausing for a go-ahead', () => {
     const plan: Plan = {
       reasoning: 'complex',

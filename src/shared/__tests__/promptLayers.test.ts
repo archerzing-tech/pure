@@ -110,6 +110,17 @@ describe('L1 behavior contracts', () => {
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('the seam you left for it');
     // ⑤ 收尾给裁决 + 效力边界（对哪成立、再扩要多少活）。
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain("where the deliverable's validity ends");
+    // ⑥ 期 3b·每步收尾一句实质：阶段真的落地时，模型自己的话要带两件事——
+    // 现在多出来的是什么、拿什么验证的（真跑过的检查及其结果）；没验或验挂
+    // 就当场直说，不得拿「努力过」当完成。事实账只是证据，不是可照抄的稿子。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('what now exists that did not before');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('the check you actually ran and what it reported');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('say that in the same breath');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never as a script to recite');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never repeat the phrasing you used for the previous stage');
+    // 防八股：不得给模型一段可以原样复用的收尾句式（本期只规定实质，不新增模板）。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toMatch(/say (exactly|verbatim)[: ]/i);
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toMatch(/##\s*(完成总结|Completion Summary|完成报告)/);
     // 甄别否决项（负向锁）：固定产物名和结构化轨迹输出不得进协议——
     // 定死即八股，机器侧轨迹由运行时（活动卡/可重放日志）原生承担。
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('assumptions.md');
