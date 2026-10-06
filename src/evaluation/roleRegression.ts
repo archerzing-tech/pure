@@ -36,6 +36,22 @@ export interface RoleCaseGrade {
   failures: string[];
 }
 
+/** The ONE definition of "this JSON is a role case fixture" — the gate loader
+ *  and the held-out loader must not each keep their own, or a file the gate
+ *  happily loads can be rejected by the other (they disagreed on whether an
+ *  empty id is acceptable, and on mustNot entirely). mustNot is checked here
+ *  because a malformed one throws mid-run inside a grading loop that has
+ *  already consumed real LLM calls. */
+export function isRoleCaseFixture(value: unknown): value is RoleCaseFixture {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === 'string' && v.id.trim().length > 0
+    && typeof v.args === 'object' && v.args !== null && !Array.isArray(v.args)
+    && Array.isArray(v.must) && v.must.every((m) => typeof m === 'string')
+    && (v.mustNot === undefined
+      || (Array.isArray(v.mustNot) && v.mustNot.every((m) => typeof m === 'string')));
+}
+
 export type RoleRegressionVerdict = 'allow' | 'reject' | 'deny_insufficient_data';
 
 /** Minimum cases per side before its pass rate means anything. Below this

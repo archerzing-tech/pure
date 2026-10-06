@@ -12,11 +12,12 @@
 //
 // 退出码：0 = ALLOW，1 = REJECT，4 = DENY（样本不足），2 = 用法/环境错误。
 
+import { describeHeldOut, expandHome, loadHeldOutRoleCases } from '../src/evaluation/heldOutSets';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
-import { extractSubagentOutput, type RoleCaseFixture } from '../src/evaluation/roleRegression';
+import { extractSubagentOutput, isRoleCaseFixture, MIN_ROLE_CASES, type RoleCaseFixture } from '../src/evaluation/roleRegression';
 import { runRoleRegressionAB, type RunRoleCase } from '../src/evaluation/roleRegressionRun';
 import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
@@ -36,10 +37,23 @@ const modelFlag = flag('--model');
 const overlayFlag = flag('--overlay');
 const casesFlag = flag('--cases');
 const reportFlag = flag('--report');
+// P1-3 — the gate above decides ALLOW/DENY on the tuning set. These cases were
+// never seen while drafting the overlay, so they answer the only question that
+// matters about "evolution works": does it hold OUTSIDE the set it was tuned on?
+const heldoutFlag = argv.includes('--heldout');
+// A valueless --heldout-dir must be a usage error, not a silent fall-through
+// to the real ~/.pure/evals-heldout — same rule the `flag()` helper already
+// gives every other path-taking flag, and the same reason: a mistyped flag
+// should never quietly measure a different set than the one you named.
+const heldoutRootFlag = flag('--heldout-dir');
+if (argv.includes('--heldout-dir') && !heldoutRootFlag) {
+  console.error('--heldout-dir needs a directory path.');
+  process.exit(2);
+}
 const requestedAgent = agentFlag ?? process.env.PURE_EVAL_AGENT;
 
 if (!role) {
-  console.error('Usage: bun run eval:roles -- --role <role> [--agent provider] [--model model] [--overlay path] [--cases dir] [--report path]');
+  console.error('Usage: bun run eval:roles -- --role <role> [--agent provider] [--model model] [--overlay path] [--cases dir] [--report path] [--heldout] [--heldout-dir path]');
   process.exit(2);
 }
 
@@ -98,14 +112,6 @@ if (requestedAgent !== 'mock' && !apiKeyForProvider(requestedAgent)) {
 }
 
 // ── Load fixtures ──
-
-function isRoleCaseFixture(value: unknown): value is RoleCaseFixture {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return typeof v.id === 'string'
-    && typeof v.args === 'object' && v.args !== null
-    && Array.isArray(v.must) && v.must.every((m) => typeof m === 'string');
-}
 
 const fixtures: RoleCaseFixture[] = [];
 for (const entry of (await readdir(casesDir)).sort()) {
@@ -219,6 +225,90 @@ console.log(`\nbase:    ${ab.base.passed}/${ab.base.total}`);
 console.log(`overlay: ${ab.overlay.passed}/${ab.overlay.total}`);
 console.log(`verdict: ${ab.verdict} — ${ab.reason}`);
 
+// ── P1-3 held-out side (observation only, never gates) ──
+// The verdict above is computed BEFORE this block and this block cannot change
+// it: the held-out A/B runs on its own fixtures, its verdict is reported
+// separately, and the process exit code stays keyed to the tuning-set verdict.
+// Holding out is exactly what makes it evidence; letting it block would just
+// make it another gate tuned on the same data.
+//
+// Everything below is inside a try/catch on purpose. This block runs AFTER the
+// gate has already produced its verdict, so an exception here — a hostile path,
+// an unreadable file, a malformed mustNot — would otherwise turn a computed
+// ALLOW into a non-zero exit with no report on disk. A broken observation must
+// degrade to "no observation"; it must never be able to veto or erase the gate.
+let heldOut: Record<string, unknown> | undefined;
+if (heldoutFlag) {
+ try {
+  const root = heldoutRootFlag ? expandHome(heldoutRootFlag) : undefined;
+  const loaded = await loadHeldOutRoleCases(role, root);
+  console.log(`\n${describeHeldOut(`held-out (${role})`, loaded)}`);
+  for (const issue of loaded.issues) console.log(`  跳过 ${issue.file}: ${issue.reason}`);
+
+  // A held-out case id already in the tuning set means the two sets overlap —
+  // measuring on it proves nothing, and silently running it would read as
+  // sample-out evidence that isn't.
+  const tuningIds = new Set(fixtures.map((f) => f.id));
+  const usable = loaded.fixtures.filter((f) => !tuningIds.has(f.id));
+  const overlapping = loaded.fixtures.length - usable.length;
+
+  if (usable.length === 0) {
+    console.log('held-out 集无可用题目（缺席、为空或全部与准入门样本重名）——本列缺省，不影响上面的裁决。');
+    heldOut = { available: false, reason: loaded.issues.length > 0 ? '所有文件不可解析' : overlapping > 0 ? '全部与准入门样本重名' : '目录不存在或为空', caseCount: 0 };
+  } else {
+    if (overlapping > 0) console.log(`  ${overlapping} 份与准入门样本重名，已排除`);
+    // Same runner, same budget, same grading — only the fixture set differs, so
+    // a difference in the numbers is attributable to the cases and nothing else.
+    const heldOutAB = await runRoleRegressionAB({
+      role,
+      fixtures: usable,
+      overlay: overlayText,
+      runCase,
+      onCase: (side, grade) => {
+        const mark = grade.passed ? '✓' : '✗';
+        if (!grade.passed) process.stdout.write(`  ${side} ${grade.id}: ${mark} — ${grade.failures.join('; ')}\n`);
+      },
+    });
+    const heldOutRate = (score: { passed: number; total: number }) => (score.total > 0 ? Math.round((score.passed / score.total) * 100) : 0);
+    // The held-out reading must clear the SAME sample floor the gate does.
+    // Comparing pass rates on 1-vs-1 case reads "held" off a coin flip — and
+    // "not enough data to tell" reported as "held" is the single worst reading
+    // this whole mechanism can produce, since its entire job is to say whether
+    // the tuning-set win survives outside the tuning set.
+    const sufficient = usable.length >= MIN_ROLE_CASES;
+    const heldOutVerdict = !sufficient
+      ? 'insufficient-data'
+      : heldOutAB.overlay.passed >= heldOutAB.base.passed ? 'held' : 'not-held';
+    const heldOutReason = !sufficient
+      ? `留出样本 ${usable.length} < ${MIN_ROLE_CASES}——测不出结论，不读作成立`
+      : heldOutAB.reason;
+    console.log(`  base:    ${heldOutAB.base.passed}/${heldOutAB.base.total} (${heldOutRate(heldOutAB.base)}%)`);
+    console.log(`  overlay: ${heldOutAB.overlay.passed}/${heldOutAB.overlay.total} (${heldOutRate(heldOutAB.overlay)}%)`);
+    console.log(`  留出结论: ${heldOutVerdict} — ${heldOutReason}`);
+    console.log('  （仅观测：ALLOW/DENY 仍只由准入门样本决定，本列不改裁决也不改退出码）');
+    heldOut = {
+      available: true,
+      caseCount: usable.length,
+      excludedOverlapping: overlapping,
+      cases: usable.map((f) => ({
+        id: f.id,
+        base: heldOutAB.grades.base.find((g) => g.id === f.id),
+        overlay: heldOutAB.grades.overlay.find((g) => g.id === f.id),
+      })),
+      base: heldOutAB.base,
+      overlay: heldOutAB.overlay,
+      holds: heldOutVerdict === 'held',
+      reading: heldOutVerdict,
+      reason: heldOutReason,
+    };
+  }
+ } catch (error) {
+  const reason = error instanceof Error ? error.message : String(error);
+  console.log(`  held-out 观测失败（不影响上面的裁决）：${reason}`);
+  heldOut = { available: false, reason: `观测失败: ${reason}`, caseCount: 0 };
+ }
+}
+
 const report = {
   suiteVersion: 'role-regression-v1',
   role,
@@ -236,6 +326,7 @@ const report = {
   overlay: ab.overlay,
   verdict: ab.verdict,
   reason: ab.reason,
+  ...(heldOut ? { heldOut } : {}),
   ranAt: new Date().toISOString(),
 };
 if (reportFlag) {

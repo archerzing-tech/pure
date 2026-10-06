@@ -21,7 +21,7 @@ const OUT_PATH = 'src/shared/baselineSnapshotData.ts';
 interface RawReport {
   suiteVersion?: unknown;
   fixtureHash?: unknown;
-  metadata?: { provider?: unknown; model?: unknown; gitRevision?: unknown };
+  metadata?: { provider?: unknown; model?: unknown; gitRevision?: unknown; heldOut?: unknown };
   taskCount?: unknown;
   passAt1?: unknown;
   meanDurationMs?: unknown;
@@ -47,6 +47,13 @@ for (const name of readdirSync(EVALS_DIR).filter((entry) => entry.endsWith('.jso
   }
   // 只认套件报告：其它 JSON（记忆对照、临时产物）没有 suiteVersion + tasks。
   if (typeof report.suiteVersion !== 'string' || !Array.isArray(report.tasks)) continue;
+  // P1-3 held-out 报告带着与 v5 相同的 suiteVersion（它复用同一套报告结构），
+  // 只靠版本号认不出来。放行会让一份 3 题的留出报告作为 v5 真实基线行进表，
+  // 而它测的是从未参与调优的题目——两行不可比。metadata.heldOut 是唯一的区分。
+  if (report.metadata?.heldOut === true) {
+    excluded.push({ report: reportPath, suiteVersion: `${report.suiteVersion} (held-out)` });
+    continue;
+  }
   if (report.suiteVersion !== BASELINE_SUITE_VERSION) {
     excluded.push({ report: reportPath, suiteVersion: report.suiteVersion });
     continue;

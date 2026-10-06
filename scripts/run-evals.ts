@@ -5,6 +5,7 @@ import { FSMemoryStore } from '../src/adapter/memory/FSMemoryStore';
 import { PromptObservability } from '../src/shared/promptObservability';
 import { FilePromptObservationStore } from '../src/shared/FilePromptObservationStore';
 import { defaultModelFor } from '../src/shared/providers';
+import { describeHeldOut, expandHome, loadHeldOutCodingTasks } from '../src/evaluation/heldOutSets';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
@@ -17,6 +18,20 @@ const sanity = argv.includes('--sanity');
 const notes = argv.includes('--notes');
 const withMemory = argv.includes('--with-memory');
 const compare = argv.includes('--compare');
+// P1-3 — run the held-out set instead of the committed v5 suite. The whole
+// point of held-out is that these fixtures were never seen while tuning, so
+// they run as their OWN suite: merging them into CODING_TASK_FIXTURES would
+// mix the tuning set into the measurement and destroy the property. Absent
+// directory ⇒ nothing to run, reported, exit 0 (CI never passes this flag).
+const heldout = argv.includes('--heldout');
+const heldoutRootFlag = argv.indexOf('--heldout-dir');
+// A valueless --heldout-dir used to fall through to the REAL ~/.pure/evals-heldout
+// and silently run someone else's held-out set — same failure shape as the
+// --report/--trace checks below: a flag that names a directory must either name
+// one or be a usage error.
+const heldoutRootArg = heldoutRootFlag >= 0 && argv[heldoutRootFlag + 1] && !argv[heldoutRootFlag + 1].startsWith('--')
+  ? argv[heldoutRootFlag + 1]
+  : undefined;
 const agentFlag = argv.indexOf('--agent');
 // --model was documented in BASELINE.md's reproduce commands but never
 // actually parsed — following it verbatim silently ran the provider default
@@ -42,8 +57,8 @@ const tracePath = traceFlag >= 0
   : process.env.PURE_EVAL_TRACE;
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
-if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--')))) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--keep-workspaces] [--strict]');
+if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--'))) || (heldoutRootFlag >= 0 && !heldoutRootArg)) {
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--heldout] [--heldout-dir path] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -171,6 +186,33 @@ if (requestedAgent) {
     });
 }
 
+// P1-3 — held-out fixtures replace the committed suite for this run. Loaded
+// before the dispatch below so an empty set is reported once and the run ends
+// cleanly (exit 0) rather than reporting "0 tasks, 0% pass" as if it measured
+// something.
+let heldOutFixtures: readonly import('../src/evaluation/codingTaskBaseline').CodingTaskFixture[] | undefined;
+if (heldout) {
+  const root = heldoutRootArg ? expandHome(heldoutRootArg) : undefined;
+  const loaded = await loadHeldOutCodingTasks(root);
+  process.stdout.write(`${describeHeldOut('held-out (coding)', loaded)}\n`);
+  for (const issue of loaded.issues) {
+    process.stderr.write(`  跳过 ${issue.file}: ${issue.reason}\n`);
+  }
+  if (loaded.fixtures.length === 0) {
+    process.stdout.write('held-out 集为空，跳过本次运行（用 PURE_EVAL_HELDOUT_DIR 或 --heldout-dir 指定目录）。\n');
+    process.exit(0);
+  }
+  // An id shared with the committed suite means the tuning set leaked in (or
+  // vice versa) — the report would then compare against itself.
+  const committed = new Set(CODING_TASK_FIXTURES.map((f) => f.id));
+  const collided = loaded.fixtures.map((f) => f.id).filter((id) => committed.has(id));
+  if (collided.length > 0) {
+    process.stderr.write(`held-out 集与已提交套件 id 冲突（${collided.join(', ')}）——留出集已污染，拒绝运行。\n`);
+    process.exit(2);
+  }
+  heldOutFixtures = loaded.fixtures;
+}
+
 const suiteMetadata = {
   provider: requestedAgent,
   model,
@@ -246,10 +288,21 @@ try {
     const suiteOptions = (memoryPhase: string) => ({
       keepWorkspace: keepWorkspaces,
       agent,
-      metadata: { ...suiteMetadata, memoryPhase },
+      metadata: {
+        ...suiteMetadata,
+        memoryPhase,
+        // The memory-compare runs the SAME set twice; when that set is the
+        // held-out one, the header must say so or the cold/warm table reads as
+        // a committed-suite baseline.
+        ...(heldOutFixtures ? { heldOut: true } : {}),
+      },
     });
-    const cold = await evaluateCodingTaskSuite(undefined, suiteOptions('cold-seed'));
-    const warm = await evaluateCodingTaskSuite(undefined, suiteOptions('warm-reuse'));
+    // The held-out set replaces the committed suite in BOTH passes. Passing
+    // undefined here used to make `--heldout --compare` print a held-out
+    // banner and then quietly measure the tuning set — the one combination that
+    // silently destroys the property the flag exists for.
+    const cold = await evaluateCodingTaskSuite(heldOutFixtures, suiteOptions('cold-seed'));
+    const warm = await evaluateCodingTaskSuite(heldOutFixtures, suiteOptions('warm-reuse'));
     printMemoryComparison(cold, warm);
     if (reportPath) {
       const compareReport = { mode: 'memory-compare', generatedAt: new Date().toISOString(), cold, warm, fixtures: memoryCompareRows(cold, warm) };
@@ -260,12 +313,13 @@ try {
     // quality --compare exists to inspect.
     if (strict && warm.tasks.some((task) => task.status !== 'passed')) process.exitCode = 1;
   } else {
-    const report = await evaluateCodingTaskSuite(undefined, {
+    const report = await evaluateCodingTaskSuite(heldOutFixtures, {
       keepWorkspace: keepWorkspaces,
       agent,
       metadata: {
         ...suiteMetadata,
         ...(memoryStores ? { memoryPhase: 'single' } : {}),
+        ...(heldOutFixtures ? { heldOut: true } : {}),
       },
     });
     // An agent_error means the provider never produced a usable answer (unknown

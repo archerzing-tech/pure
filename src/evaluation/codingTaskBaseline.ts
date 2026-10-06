@@ -4,22 +4,32 @@ import type { TokenUsage } from '../shared/types';
 import { estimateCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION } from '../shared/baseline';
 
+/** The category / difficulty vocabularies, exported as values so a loader that
+ *  validates an EXTERNAL fixture set (the held-out runner) checks against this
+ *  list instead of re-typing the union above — two copies drift the moment a
+ *  category is added, and the drifted copy fails silently by rejecting a
+ *  perfectly valid fixture. */
+export const CODING_TASK_CATEGORIES = [
+  'bugfix', 'feature', 'refactor', 'multi-step', 'recovery', 'guardrail', 'long-context', 'repo-scale', 'performance',
+] as const;
+export const CODING_TASK_DIFFICULTIES = ['easy', 'medium', 'hard', 'extreme'] as const;
+
 export interface CodingTaskFixture {
   id: string;
-  category: 'bugfix' | 'feature' | 'refactor' | 'multi-step' | 'recovery' | 'guardrail' | 'long-context' | 'repo-scale' | 'performance';
+  category: (typeof CODING_TASK_CATEGORIES)[number];
   /** `hard` is the 1.5 tier: the suite's other fixtures sit below a frontier
    *  model's ceiling, so these exist to make the baseline discriminate again.
    *  They stay deterministic (control fails from seed, golden passes) — "hard"
    *  means more real reasoning, not flakier checks. `extreme` is the 1.6 tier:
    *  repo-scale search (the relevant module is one of dozens) and a hard
    *  resource ceiling (a naive algorithm cannot finish, at any machine speed). */
-  difficulty: 'easy' | 'medium' | 'hard' | 'extreme';
+  difficulty: (typeof CODING_TASK_DIFFICULTIES)[number];
   prompt: string;
   files: Record<string, string>;
   /** Optional environment preparation (e.g. seed a git repo) executed after
    * `files` are materialized, before the agent/control/golden acts — in every
    * run mode alike. A failed step aborts the task as 'fixture_error', never
-   * as an agent failure. */
+   *  as an agent failure. */
   setup?: VerificationCommand[];
   verification: VerificationCommand[];
 }
@@ -77,6 +87,11 @@ export interface CodingTaskEvaluationMetadata {
   promptVersion?: string;
   gitRevision?: string;
   seed?: string;
+  /** P1-3 — this report came from the held-out set, not the committed v5
+   *  suite. A consumer that compares two reports must not treat a held-out row
+   *  as a drop-in replacement for a suite row: the two sets are scored on
+   *  different fixtures, so the numbers are only comparable within themselves. */
+  heldOut?: boolean;
   runtime: string;
   platform: string;
 }
