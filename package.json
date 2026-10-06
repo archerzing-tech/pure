@@ -16,6 +16,7 @@
     "verify:plan-events": "bun run scripts/verify-plan-restore.ts --scenario=events",
     "verify:plan-session": "bun run scripts/verify-plan-restore.ts --scenario=session",
     "verify:plan-progress": "bun run scripts/verify-plan-restore.ts --scenario=progress",
+    "verify:plan-card-lag": "bun run scripts/verify-plan-card-lag.ts",
     "verify:gates": "bun run scripts/verify-plan-restore.ts --scenario=gates",
     "verify:auto-continue": "bun run scripts/verify-auto-continue.ts",
     "verify:auto-continue-abort": "bun run scripts/verify-auto-continue.ts --scenario=abort",
