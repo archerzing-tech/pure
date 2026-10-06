@@ -10,8 +10,8 @@ const sessionIds = new Set<string>();
 
 beforeAll(() => {
   GlobalRegistrator.register();
-  // 会话内进度播报直接追加进转写列：给这些集成测试挂上生产同款的最小外壳，
-  // 否则 ChatController 找不到 #chat（生产里由应用布局保证存在）。
+  // 这些集成测试走 ChatController 的真实渲染路径：挂上生产同款的最小 #chat
+  // 外壳，否则找不到转写列容器（生产里由应用布局保证存在）。
   const chatShell = document.createElement('div');
   chatShell.id = 'chat';
   document.body.appendChild(chatShell);

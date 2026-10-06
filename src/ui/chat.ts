@@ -60,7 +60,7 @@ import {
   type PlanCardHandle,
 } from './plan';
 import { renderAttachmentCard } from './pasteChip';
-import { PlanProgressModel, formatPlanProgressNarration, planProgressNarrationSeedFrom, shouldAdvancePlanAtTurnEnd, type PlanProgressNarrationSeed, type PlanProgressSnapshot } from './planProgress';
+import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
 import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
@@ -1483,18 +1483,13 @@ export class ChatController {
   private activePlanProjectBuild = false;
   /** 会话级交付证据：构建计划曾在某一回合真实通过机械验证（typecheck/测试/构建）。
    * 后续纯总结轮没有工具调用、不会重跑验证，收尾时仍可据此把计划置为完成，
-   * 避免进度播报在项目交付后停在「执行中 第 N 步」。新对话/会话切换清零。 */
+   * 避免计划卡在项目交付后仍停在「执行中」。新对话/会话切换清零。 */
   private deliveryGatePassed = false;
   /** 本会话内已生成的第几个独立规划（1、2、…）。同一规划的细化/续跑不递增，
    * 只有新请求在对话里再开一份计划才 +1；会话切换/新对话清零。 */
   private planSeqCounter = 0;
   /** 当前活动规划的会话内编号（applyPlanProgressSnapshot 从快照恢复）。 */
   private activePlanSeq = 1;
-  /** 对话内进度播报（2026-09-25 顶部固定进度条拆除后的替身）：阶段推进不
-   * 再钉在聊天区上方，而是在对话流里说一句「已完成哪几步、正在跑哪步」。
-   * 播报位 = 上次播报时看到的快照形状，模型订阅里比差出话。 */
-  private planProgressNarrationSeed: PlanProgressNarrationSeed | null = null;
-  private activePlanProgressNarrator?: () => void;
   /** Task-scoped collaboration trace shared by live execution and restore. */
   private agentActivities: SessionAgentActivity[] = [];
   private agentActivityPanel: AgentActivityPanelHandle | null = null;
@@ -1832,9 +1827,6 @@ export class ChatController {
   private detachActivePlanProgress(): void {
     this.activePlanProgressUnsubscribe?.();
     this.activePlanProgressUnsubscribe = undefined;
-    this.activePlanProgressNarrator?.();
-    this.activePlanProgressNarrator = undefined;
-    this.planProgressNarrationSeed = null;
     const persistence = this.activePlanProgressPersistence;
     this.activePlanProgressPersistence = undefined;
     if (persistence) {
@@ -1852,14 +1844,6 @@ export class ChatController {
     this.activePlanProgress = model;
     this.activePlanProjectBuild = model.getSnapshot().projectBuild === true;
     this.applyPlanProgressSnapshot(model.getSnapshot());
-    // 播报位从当前快照起算：bind/恢复不回放历史，之后每次前进才说话。
-    this.planProgressNarrationSeed = planProgressNarrationSeedFrom(model.getSnapshot());
-    this.activePlanProgressNarrator = model.subscribe((snapshot) => {
-      if (this.activePlanProgress !== model) return;
-      const line = formatPlanProgressNarration(this.planProgressNarrationSeed, snapshot);
-      this.planProgressNarrationSeed = planProgressNarrationSeedFrom(snapshot);
-      if (line) this.addStatusBubble(line, false, false, 'info');
-    }, { emitCurrent: false });
     const persistence = createSessionPlanProgressPersistence(sessionId, workspace);
     this.activePlanProgressPersistence = persistence;
     this.activePlanProgressUnsubscribe = model.subscribePersistence((snapshot) => {
@@ -1890,7 +1874,7 @@ export class ChatController {
     this.agentActivityHistorical = false;
     this.clearAgentActivityPersistence();
     this.removeAgentActivityPanel();
-    // 会话切换 = 新的一次对话：规划编号重新起算，进度播报随之重新播种。
+    // 会话切换 = 新的一次对话：规划编号重新起算。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
@@ -4728,17 +4712,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 探索/契约结论跟随评估卡一起呈现：先看到真实分析，再看到基于它的发现。
         reportProbeFindings();
       };
-      // 执行方案卡：把语义路由的决策（意图/复杂度/策略/风险/计划协作的子 agent
-      // 名单）在 LLM 分析完成后、执行开始前呈现给用户——让"为什么这样拆、打算
-      // 动用哪些角色"与计划/评估卡并列可见，而不是只在引擎内部消费。每轮只展示
-      // 一次；继续轮与纯咨询不重复弹卡。
-      let planSummaryShown = false;
-      const maybeShowPlanSummary = (): void => {
-        // Plan summary card REMOVED: it was redundant with the plan card (both
-        // announce multi-agent delegation), used generic "这个问题" phrasing
-        // that mismatched build intents, and its heavy bubble visual competed
-        // with the plan card. The plan card alone communicates the stages.
-      };
       // "写一个小游戏 / 做一个网页 / 开发一个工具" → build the artifact on disk
       // instead of printing the full source inline (see the compiled build protocol).
       // Multi-file builds also get the incremental-build protocol (outline
@@ -4836,7 +4809,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 死了）；第一个可见字落屏时由 planByThinking 揭卡，叙述气泡接着顶上。
           if (thinkingCard) setThinkingLabel(thinkingCard, '正在想这个任务怎么做…');
           maybeShowAssessment();
-          maybeShowPlanSummary();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
           // 暂存（classifyAndApplyInterject 的吸收分支），同时置重启请求、掐掉
@@ -5468,7 +5440,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 未走计划访谈的路径（如中风险但简单的请求）在这里补出评估卡：此时所有前置
       // 检查都已真实完成，闸门随检查结果落定，卡片再随执行/验证进度推进。
       maybeShowAssessment();
-      maybeShowPlanSummary();
       if (assessmentFlow) {
         assessmentFlow.setPhase('execute', '已通过评估闸门，开始按确认范围小步执行…');
       }
@@ -6963,7 +6934,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
     this.activePlanProjectBuild = false;
-    // 新对话 = 新的一次会话：规划编号重新起算，进度播报随之重新播种。
+    // 新对话 = 新的一次会话：规划编号重新起算。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
