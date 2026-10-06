@@ -6,7 +6,12 @@
 // generic 3-minute cap, and every FailurePolicy retry re-hit the same wall.
 
 import { describe, expect, it } from 'bun:test';
-import { ToolExecutionCoordinator, TOOL_EXECUTION_TIMEOUT_MS, type ExecutedToolResult } from '../ToolExecutionCoordinator';
+import {
+  ToolExecutionCoordinator,
+  TOOL_EXECUTION_TIMEOUT_MS,
+  DEFAULT_MAX_READ_CONCURRENCY,
+  type ExecutedToolResult,
+} from '../ToolExecutionCoordinator';
 import { abortPaused } from '../../shared/pauseSignal';
 import type { EngineContext, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
 
@@ -164,6 +169,137 @@ describe('ToolExecutionCoordinator concurrency policy (2026-09-20)', () => {
     expect(events[0]).toBe('start:scanner');
     expect(events.indexOf('start:mutator')).toBeGreaterThan(events.indexOf('end:scanner'));
   }, 5_000);
+});
+
+describe('ToolExecutionCoordinator read concurrency cap (P3-3)', () => {
+  // A batch of N independent delegations used to start N sub-engines and N LLM
+  // streams at once; the pool now holds at most maxReadConcurrency reads in
+  // flight and queues the rest (never rejects them). Regression anchor for the
+  // N-at-once fan-out that motivated the cap.
+  const READ_METADATA = { sideEffects: true, isWrite: false };
+
+  function poolCtx(
+    maxReadConcurrency: number | undefined,
+    each: (tc: ToolCall) => Promise<ToolResult>,
+  ): { ctx: EngineContext; peakInFlight: () => number; started: () => number } {
+    let inFlight = 0;
+    let peak = 0;
+    let launched = 0;
+    const ctx = makeContext(async (tc) => {
+      launched++;
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      try {
+        return await each(tc);
+      } finally {
+        inFlight--;
+      }
+    }, READ_METADATA);
+    if (maxReadConcurrency !== undefined) ctx.maxReadConcurrency = maxReadConcurrency;
+    return { ctx, peakInFlight: () => peak, started: () => launched };
+  }
+
+  function batch(n: number): ToolCall[] {
+    return Array.from({ length: n }, (_, i) => call(`reader_${i}`));
+  }
+
+  it('DEFAULT_MAX_READ_CONCURRENCY is 5 — the documented default, not a magic number in the UI', () => {
+    expect(DEFAULT_MAX_READ_CONCURRENCY).toBe(5);
+  });
+
+  it('a batch wider than the cap never exceeds it in flight, and every call still settles', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const { ctx, peakInFlight, started } = poolCtx(2, async (tc) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return ok(tc);
+    });
+
+    const results = await coordinator.execute(batch(6), ctx, BUDGET);
+    expect(peakInFlight()).toBe(2);
+    // Queueing, not rejecting: all six ran and all six came back.
+    expect(started()).toBe(6);
+    expect(results).toHaveLength(6);
+    expect(results.every((r) => r.result.success)).toBe(true);
+    expect(results.map((r) => r.toolCallId).sort()).toEqual(batch(6).map((c) => c.id).sort());
+  }, 5_000);
+
+  it('a cap at or above the batch width launches the whole batch up front (pre-cap behavior kept)', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const { ctx, peakInFlight } = poolCtx(4, async (tc) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return ok(tc);
+    });
+
+    const results = await coordinator.execute(batch(4), ctx, BUDGET);
+    expect(peakInFlight()).toBe(4);
+    expect(results.every((r) => r.result.success)).toBe(true);
+  }, 5_000);
+
+  it('an omitted or non-positive cap falls back to the default (no accidental 1-wide serialization)', async () => {
+    for (const cap of [undefined, 0, -3]) {
+      const coordinator = new ToolExecutionCoordinator();
+      const { ctx, peakInFlight } = poolCtx(cap, async (tc) => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return ok(tc);
+      });
+
+      const results = await coordinator.execute(batch(DEFAULT_MAX_READ_CONCURRENCY + 1), ctx, BUDGET);
+      expect(peakInFlight()).toBe(DEFAULT_MAX_READ_CONCURRENCY);
+      expect(results.every((r) => r.result.success)).toBe(true);
+    }
+  }, 10_000);
+
+  it('the cap holds per pool, so writes still queue behind reads and never overlap', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let writeInFlight = 0;
+    let writePeak = 0;
+    const tools: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: (name: string) => (name.startsWith('mutator') ? { isWrite: true } : READ_METADATA),
+      execute: async (tc) => {
+        if (tc.function.name.startsWith('mutator')) {
+          writeInFlight++;
+          writePeak = Math.max(writePeak, writeInFlight);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          writeInFlight--;
+          return ok(tc);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return ok(tc);
+      },
+    };
+    const ctx = { tools, maxReadConcurrency: 2 } as unknown as EngineContext;
+
+    const results = await coordinator.execute([...batch(4), call('mutator_a'), call('mutator_b')], ctx, BUDGET);
+    expect(results).toHaveLength(6);
+    expect(results.every((r) => r.result.success)).toBe(true);
+    expect(writePeak).toBe(1);
+  }, 5_000);
+
+  it('4–6 concurrent reads at the cap cost no more wall clock than uncapped (排队不劣化)', async () => {
+    const each = async (tc: ToolCall): Promise<ToolResult> => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return ok(tc);
+    };
+    const uncapped = new ToolExecutionCoordinator();
+    const uncappedRun = poolCtx(undefined, each);
+    const t0 = Date.now();
+    await uncapped.execute(batch(6), uncappedRun.ctx, BUDGET);
+    const uncappedMs = Date.now() - t0;
+
+    const capped = new ToolExecutionCoordinator();
+    const cappedRun = poolCtx(6, each);
+    const t1 = Date.now();
+    await capped.execute(batch(6), cappedRun.ctx, BUDGET);
+    const cappedMs = Date.now() - t1;
+
+    // Same batch at a cap it never hits: the bound is a ceiling, not a queue
+    // that shows up in latency. Generous slack — this asserts no regression,
+    // not a benchmark.
+    expect(cappedRun.peakInFlight()).toBe(6);
+    expect(cappedMs).toBeLessThan(uncappedMs * 2 + 120);
+    expect(uncappedMs).toBeLessThan(6 * 60 * 2); // and genuinely concurrent, not serial
+  }, 10_000);
 });
 
 describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即时)', () => {

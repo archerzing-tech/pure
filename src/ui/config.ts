@@ -195,6 +195,16 @@ export interface PureConfig {
    */
   autoContinueMaxRounds: number;
   /**
+   * P3-3 — cap on concurrently in-flight read tool calls in one
+   * execution pool (default 5 when absent). A batch of N parallel
+   * delegations otherwise starts N sub-engines and N LLM streams at
+   * once; beyond the cap the extra reads queue, not reject. Optional
+   * so stored configs without it keep the engine default — no
+   * migration. Edited nowhere in the UI yet: a power knob for the
+   * stored config until a settings row asks for it.
+   */
+  maxReadConcurrency?: number;
+  /**
    * Offline basemap tile cache size cap in MB (Settings → General). The Rust
    * fetch_map_tile evicts the oldest tiles past this byte budget.
    */

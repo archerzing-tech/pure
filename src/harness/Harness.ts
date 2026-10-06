@@ -138,6 +138,9 @@ export interface HarnessConfig {
    *  a reader per tool batch and re-emits the events as `SubagentActivity`.
    *  Omitted = silent tools (CLI / nested subagent runs), as before. */
   subagentEvents?: EngineContext['subagentEvents'];
+  /** P3-3 — cap on concurrently in-flight reads per execution pool
+   *  (default DEFAULT_MAX_READ_CONCURRENCY). Omitted = default. */
+  maxReadConcurrency?: EngineContext['maxReadConcurrency'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -241,6 +244,8 @@ export class Harness {
       gateDelegations: this.config.gateDelegations,
       // Live subagent interior events, re-emitted during tool batches.
       subagentEvents: this.config.subagentEvents,
+      // P3-3 — 同一执行池内在飞读调用上限（缺省走协调器默认值）。
+      maxReadConcurrency: this.config.maxReadConcurrency,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

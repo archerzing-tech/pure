@@ -4549,6 +4549,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
         ],
         budget: DEFAULT_BUDGET,
+        // P3-3 — 同一执行池内在飞读上限（Settings 尚无输入行，
+        // 缺省走协调器默认 5；config.maxReadConcurrency 存在时生效）。
+        maxReadConcurrency: config.maxReadConcurrency,
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,

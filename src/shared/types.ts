@@ -311,6 +311,14 @@ export interface EngineContext {
   /** Hard cap on nested delegation depth (default 1 = single-level). When
    * depth would exceed maxDepth, the orchestrator refuses to spawn. */
   maxDepth?: number;
+  /** P3-3 — cap on concurrently in-flight READ tool calls inside one
+   * execution pool (default DEFAULT_MAX_READ_CONCURRENCY). A batch of N
+   * independent delegations would otherwise start N sub-engines and N LLM
+   * streams at once; beyond the cap, reads queue (never reject) and start
+   * as earlier ones settle. Writes are unaffected — they already serialize
+   * after reads. Injectable so tests can exercise the bound in milliseconds.
+   * Absent or <= 0 ⇒ the default. */
+  maxReadConcurrency?: number;
 }
 
 export interface LockManager {

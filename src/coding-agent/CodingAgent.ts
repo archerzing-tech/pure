@@ -107,6 +107,8 @@ export interface CodingAgentConfig {
     publish(event: SubagentActivityEvent): void;
     subscribe(): AsyncQueueLike<SubagentActivityEvent>;
   };
+  /** P3-3 — 同一执行池内在飞读调用上限（缺省走协调器默认值）。 */
+  maxReadConcurrency?: number;
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
@@ -311,6 +313,7 @@ export class CodingAgent {
       takeSyntheticToolCalls: config.takeSyntheticToolCalls,
       gateDelegations: config.gateDelegations,
       subagentEvents: config.subagentEvents,
+      maxReadConcurrency: config.maxReadConcurrency,
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,

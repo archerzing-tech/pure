@@ -15,6 +15,12 @@ import {
 
 export const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
 
+/** P3-3 — default cap on concurrently in-flight reads in one execution
+ * pool. A batch of N independent delegations otherwise starts N
+ * sub-engines and N LLM streams at once; beyond the cap, reads queue
+ * (never reject) and start as earlier ones settle. */
+export const DEFAULT_MAX_READ_CONCURRENCY = 5;
+
 export interface ExecutedToolResult {
   toolName: string;
   result: ToolResult;
@@ -279,19 +285,27 @@ export class ToolExecutionCoordinator {
       else reads.push(call);
     }
 
-    // Each read settles into a tagged entry that carries its own promise, so
-    // the loop can remove exactly the entry it raced on. (Deleting inside a
-    // .then is racy: for an already-settled promise the delete microtask runs
-    // before the awaiting generator resumes, draining the set mid-batch.)
+    // P3-3 — bound concurrent reads: each settles into a tagged entry that
+    // carries its own promise, so the loop can remove exactly the entry it
+    // raced on. (Deleting inside a .then is racy: for an already-settled
+    // promise the delete microtask runs before the awaiting generator
+    // resumes, draining the set mid-batch.)
+    const configured = ctx.maxReadConcurrency;
+    const maxInFlight =
+      configured !== undefined && configured > 0 ? Math.floor(configured) : DEFAULT_MAX_READ_CONCURRENCY;
     const pending = new Set<Promise<TaggedRead>>();
-    for (const call of reads) {
-      // Explicit annotation: the closure reads `entry` itself, which the
-      // inference algorithm refuses to untangle on its own (TS7022).
-      const entry: Promise<TaggedRead> =
-        this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
-      pending.add(entry);
-    }
-    while (pending.size > 0) {
+    let nextRead = 0;
+    while (nextRead < reads.length || pending.size > 0) {
+      // Top up to the cap; with cap >= reads.length this launches the whole
+      // batch up front, byte-identical to the pre-cap behavior.
+      while (nextRead < reads.length && pending.size < maxInFlight) {
+        const call = reads[nextRead++];
+        // Explicit annotation: the closure reads `entry` itself, which the
+        // inference algorithm refuses to untangle on its own (TS7022).
+        const entry: Promise<TaggedRead> =
+          this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
+        pending.add(entry);
+      }
       const { p, tr } = await Promise.race(pending);
       pending.delete(p);
       yield tr;
