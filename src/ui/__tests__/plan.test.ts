@@ -81,7 +81,14 @@ describe('formatPlanForPrompt', () => {
     expect(projectOut).toContain('## 计划 n 已完成');
     expect(projectOut).toContain('plain language');
     expect(projectOut).toContain('strict stage protocol');
-    expect(projectOut).toContain('Do not call tools before that line');
+    // 期 3a：标记降级为「准而不要的辅助」，不再强制发出。第一锁=旧强制口吻消失，
+    // 第二锁=放开后的免责话术在场（否则降级只是删掉约束，模型会误以为标记没用）。
+    expect(projectOut).not.toContain('Do not call tools before that line');
+    expect(projectOut).not.toContain('Do not start the next stage');
+    expect(projectOut).toContain('skipping them is acceptable and never blocks the work');
+    expect(projectOut).toContain('an accuracy aid rather than a precondition');
+    expect(projectOut).toContain('never hold work back or refuse to proceed because a mark is missing');
+    // 字面量/顺序约束零改动：解析器 matchPlanProgressMarkers 只认这些形态。
     expect(projectOut).toContain('The interface advances the Todo list only in numeric order');
     expect(projectOut).toContain('## 计划 n：<阶段名称>');
     expect(projectOut).toContain('### 子步骤 k 已完成');
@@ -110,7 +117,7 @@ describe('formatPlanForPrompt', () => {
     expect(out).not.toMatch(/##\s*(完成总结|完成报告)/);
   });
 
-  it('控制行字面量本期零改动（期 3a 单独立项评审前不许动解析与写法）', () => {
+  it('控制行字面量与顺序约束不随措辞改动而漂移（期 3a 只降级强度，不动解析）', () => {
     const plan: Plan = {
       reasoning: 'complex task',
       steps: [{ id: '1', action: 'Understand', description: 'Read relevant files.', expectedOutcome: 'Context' }],
@@ -190,7 +197,12 @@ describe('dedupePlanAnnouncements', () => {
     // 否则执行期聊天计划卡会停在第一步（只有首轮 formatPlanForPrompt 有该指令）。
     expect(continuation).toContain('## 计划 n：');
     expect(continuation).toContain('## 计划 n 已完成');
-    expect(continuation).toContain('开始行没写就不要执行，完成行没写就不要进入下一计划');
+    // 期 3a 双锁：续跑框架同样不再把标记当执行前置条件，但控制行字面量与
+    // 「同一计划只标一次」的去重纪律一字不动。
+    expect(continuation).not.toContain('开始行没写就不要执行，完成行没写就不要进入下一计划');
+    expect(continuation).toContain('不发也照样往下干');
+    expect(continuation).toContain('不要因为漏了标记就停下或重头再来');
+    expect(continuation).toContain('同一计划只标记一次开始、一次完成');
     expect(continuation).toContain('### 子步骤 k 已完成');
   });
 });

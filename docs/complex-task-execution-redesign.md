@@ -160,6 +160,14 @@
 **建议做，但带两个前置**，缺一不可：
 
 1. ~~**对照回放**~~ ✅ 已完成：`scripts/verify-plan-card-lag.ts` + `planCardLag.test.ts`（5 测锁死数字），结果见 10.4。
-2. **双锁改断言**：13 处控制行断言改为「不再强制发出」+「解析器字面量与顺序约束零改动」，防止放开变成连解析一起废掉。
+2. ~~**双锁改断言**~~ ✅ 已完成：`plan.test.ts` 改为「旧强制口吻已消失 + 免责话术在场 + 控制行字面量与顺序约束一字不动」三层。`chat.test.ts` 另三处经核实是注释而非断言，未改。
 
-验收（承设计稿）：发了更准语义 + 对照回放全量不回归。**评审通过、前置 1 已完成；只剩前置 2（双锁改断言）。**
+### 10.6 落地范围（已完成）
+
+**提示词降级，`src/ui/plan.ts` 两处**：
+- `PLAN_STAGE_PROTOCOL` 删掉 `Do not call tools before that line` 与 `Do not start the next stage …`，改为 `you may write` + `skipping them is acceptable and never blocks the work` + `an accuracy aid rather than a precondition, never hold work back or refuse to proceed because a mark is missing`。
+- `formatPlanContinuation` 中文句 `开始行没写就不要执行…` → `发了这两行界面跟得更准；不发也照样往下干……不要因为漏了标记就停下或重头再来`。
+
+**零改动**：`matchPlanProgressMarkers`、`PlanProgressModel`、所有控制行字面量与数字顺序约束、去重纪律。
+
+验收：发了更准语义 + 对照回放不回归 + 全量 `bun test` 3348 pass / 0 fail。**期 3a 收官。**
