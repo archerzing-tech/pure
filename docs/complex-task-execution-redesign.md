@@ -117,3 +117,37 @@
 - 本设计：`docs/complex-task-execution-redesign.md`（本文）。
 - 分期进度：`改进进度记录.md`。
 - 父蓝图：`docs/conversational-intelligence-upgrade.md`（不冲突，两文都读）。
+
+---
+
+## 10. 期 3a 专项评审：控制行从「必须发」降为「发了更准」（2026-10-06）
+
+> 设计稿标注期 3a 需单独立项评审。本节是那份评审的结论，**评审阶段未改任何代码**。
+
+### 10.1 取证：强制点其实只有两处，且都在提示词里
+
+- `PLAN_STAGE_PROTOCOL`（`src/ui/plan.ts`）：`Do not call tools before that line` / `Do not start the next stage … before the current stage's completion line`。
+- `formatPlanContinuation`（同文件，中文续跑框架）：`开始行没写就不要执行，完成行没写就不要进入下一计划`。
+
+解析器 `matchPlanProgressMarkers` 与游标状态机 `PlanProgressModel` **不依赖提示词措辞**，放开不要求改它们。回归面：13 处断言控制行字面量的测试（`plan.test.ts` 10 + `chat.test.ts` 3），放开后这些属**预期更新**，不是放宽守卫。
+
+### 10.2 取证：标记缺失时的回退层早已存在且带真实证据门槛
+
+不发标记时推游标的既有路径：`shouldAdvancePlanAtTurnEnd`（回合末至多推一格）、`legacyPlanFinished` / `protocolPlanFinished` / `toolFinishedLastPlan`、`unblockDeferredOnWork`（首个真实工具调用解冻延后阶段）、`planSummarized` / `deliveryCompletedPlan` / `deliverySummarizedPlan`。它们都以**真实工具成功或交付门禁通过**为门槛，不是「猜模型大概做完了」。
+
+### 10.3 关键结论：期 2 的事实账让这一步今天才可行
+
+期 1 之前放开标记，卡片会真的卡住——游标唯一的驱动力就是标记。期 2 起，TaskScript 在无标记时也能自证进度与完成：`inferClosures` 按回合内的真实活动量隐式收束，`phaseJump` 覆盖跳格，收尾素材另有事实清单。**放开标记后，「做了什么/结果如何」不再依赖模型是否听话。**
+
+### 10.4 真实代价（必须接受的那一条）
+
+放开后，**回合内**的阶段推进不再由标记驱动，退化为「回合末一跳」。一个回合里连续做完三个阶段时，卡片会明显滞后于对话内容。跨回合不受影响（续跑轮本来就重发框架）。这是「降为可选」换来的代价，不是 bug——但要在验收里量出来，不能默认它小。
+
+### 10.5 结论与 go/no-go
+
+**建议做，但带两个前置**，缺一不可：
+
+1. **对照回放**：同一多步任务跑两份脚本（有标记 / 无标记），量出卡片步进滞后多少、账本推导是否一致，结果写进本文；滞后不可接受就回滚。
+2. **双锁改断言**：13 处控制行断言改为「不再强制发出」+「解析器字面量与顺序约束零改动」，防止放开变成连解析一起废掉。
+
+验收（承设计稿）：发了更准语义 + 对照回放全量不回归。**评审通过、两个前置完成后才动代码。**
