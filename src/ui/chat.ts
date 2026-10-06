@@ -2761,7 +2761,7 @@ export class ChatController {
     // 误判自己能愈（排队晚点跑、旁答只答一次），照旧分发，不拿问题烦人。
     const gatedFrom = decision.signals.gatedFrom;
     if (needsClarification(decision) && typeof gatedFrom === 'string' && isDestructiveAction(gatedFrom as InputAction)) {
-      this.settleAck(ack, '先不动手——这句话我拿不准，问你一句…', true);
+      this.settleAck(ack, '这句判定没把握，先问你一句…', true);
       echoUserBubble();
       void this.askMidrunClarification(decision, text, images, ack);
       return;
@@ -2863,8 +2863,8 @@ export class ChatController {
             // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
             // 是终稿——转普通气泡（与停支/暂停收执同一形态）。
             this.settleAck(ack, this.hasDelegationInFlight()
-              ? `好——让「${resumed}」那路接着跑，它从存档的断点续，不从头做；等手头这批收齐就接上。`
-              : `好——让「${resumed}」那路接着跑，它从存档的断点续，不从头做。`);
+              ? `续跑：「${resumed}」从存档断点继续；等手头这批收齐接上。`
+              : `续跑：「${resumed}」从存档断点继续。`);
             return;
           }
         }
@@ -5028,8 +5028,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           if (!needsDeliveryGate) {
             this.addStatusBubble(
               effectiveWorkspace
-                ? t('plan.modeDisabled', '🧭 计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
-                : t('plan.modeNoWorkspace', '🧭 计划/构建模式需要先选择工作区，本次按普通对话继续'),
+                ? t('plan.modeDisabled', '计划/构建模式已被禁用（设置 → Skills → Planning），本次按普通对话继续')
+                : t('plan.modeNoWorkspace', '计划/构建模式需要先选择工作区，本次按普通对话继续'),
             );
           }
         }
@@ -5076,7 +5076,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       }
 
       if (needsDeliveryGate && !effectiveWorkspace) {
-        this.addStatusBubble(t('plan.modeNoWorkspace', '🧭 项目构建需要先选择工作区；计划已确认，本次暂不执行'));
+        this.addStatusBubble(t('plan.modeNoWorkspace', '项目构建需要先选择工作区；计划已确认，本次暂不执行'));
       }
 
       // The user bubble was already rendered synchronously at send() start
@@ -6576,7 +6576,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // sink. Friendly copy + the resume affordance instead of the
               // alarming "⏹ Interrupted".
               pausedThisTurn = true;
-              const pausedText = t('chat.paused', '⏸ 已暂停：进度已存档，随时接着跑。');
+              const pausedText = t('chat.paused', '已暂停：进度已存档，随时接着跑。');
               if (hasContent) {
                 this.addStatusBubble(pausedText);
               } else if (lastSeg) {
@@ -7019,7 +7019,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     bar.dataset.state = 'pausing';
     const note = document.createElement('span');
     note.className = 'paused-resume-note';
-    note.textContent = t('chat.paused.draining', '⏸ 正在暂停：等在跑的步骤收尾（子 agent 会存档进度）——等不及就再点 ⏹ 或按 Esc，立即停。');
+    note.textContent = t('chat.paused.draining', '正在暂停：等在跑的步骤收尾（子 agent 会存档进度）——等不及就再点 ⏹ 或按 Esc，立即停。');
     bar.appendChild(note);
     this.transcriptElement().appendChild(bar);
     this.pausedResumeBar = bar;

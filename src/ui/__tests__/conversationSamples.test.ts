@@ -496,7 +496,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await flush();
     expect(assistantJoined(h.root)).toContain('推倒当前方向重来');
     // 临时回执的问题气泡接管对话——同一句话不留两行系统话。
-    expect(statusJoined(h.root)).not.toContain('先不动手——这句话我拿不准');
+    expect(statusJoined(h.root)).not.toContain('这句判定没把握');
   });
 
   it('主线相关追问（排队案例2 插话3）：老板问进度 → 边干边答，主线不动', async () => {
@@ -910,7 +910,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // RESUME_BRANCH_RE 快路径：不经 LLM 直判「把那一支接着跑完」。
     await h.chat.interject('把竞品那支接着跑完。');
     expect(llm.classifyCalls.length).toBe(0);
-    expect(assistantJoined(h.root)).toContain('好——让「竞品分析员」那路接着跑，它从存档的断点续，不从头做；等手头这批收齐就接上。');
+    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点继续；等手头这批收齐接上。');
     expect(userJoined(h.root)).toContain('把竞品那支接着跑完');
     // 排上了同参重派：**原始参数**原样，不是新任务。
     expect(h.chat.pendingResumes).toHaveLength(1);
