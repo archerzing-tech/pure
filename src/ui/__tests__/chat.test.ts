@@ -960,7 +960,7 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('if (this.insertInFlight) return')).toBe(-1);
     expect(src.indexOf('this.insertClassificationChain.then(')).toBeGreaterThan(-1);
     // 判定失败除了不毒化链条，还必须把 pending 的临时回执收场——留着它就是
-    // 一条永远在闪的"看一下这句话怎么安排…"。
+    // 一条永远在闪的"插话处理中…"。
     expect(src.indexOf('this.insertClassificationChain = run.catch(() => {')).toBeGreaterThan(-1);
     expect(src.indexOf("'这句话没安排上——直接再发一次就行。'")).toBeGreaterThan(-1);
     // 链上的每一环重新检查 isStreaming()：前一条 RELATED 插话可能已中止回合，
@@ -990,7 +990,7 @@ describe('plan overview completion state', () => {
     // 插话判定是秒级 LLM 往返：期间用户的话不上屏（abort 类要从 send() 重入），
     // 没有即时回执就是死空气——说了句话没人理。ack 是唯一一条 pending 状态行，
     // 最终回执原行定格（settleAck）， transcript 不为一条插话出两行系统话。
-    expect(src.indexOf("'收到——看一下这句话怎么安排…'")).toBeGreaterThan(-1);
+    expect(src.indexOf("'插话处理中…'")).toBeGreaterThan(-1);
     const settle = src.indexOf('private settleAck(');
     expect(settle).toBeGreaterThan(-1);
     // 每条插话路径都要收场 ack：定格（回执行）或移除（有自己的气泡/卡片），
@@ -1086,7 +1086,7 @@ describe('plan overview completion state', () => {
     expect(synthBody.indexOf('fold.delivered || !fold.mechanical) continue;')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('fold.delivered = true;')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('fold.syntheticCallId = callId;')).toBeGreaterThan(-1);
-    expect(synthBody.indexOf('你追加的安排上了')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('追加委派：')).toBeGreaterThan(-1);
     // 任务书必须带主任务上下文（2026-09-22 实测教训：用户原话速记原样当
     // 任务书，子代理把「爱奇艺」跑成了爱奇艺开放平台 API 文档）。
     expect(synthBody.indexOf('JSON.stringify({ prompt: brief })')).toBeGreaterThan(-1);
@@ -1772,9 +1772,9 @@ describe('plan-by-thinking flow', () => {
     expect(absorbIdx).toBeGreaterThan(-1);
     const abortCallIdx = src.indexOf('this.preflightAbort?.abort();', absorbIdx);
     expect(abortCallIdx).toBeGreaterThan(absorbIdx);
-    // 回执与重开状态行都说人话："推倒"，不是含糊的"一并想"。
+    // 吸收回执走系统腔（无 agent 拟人），不再输出固定拟人话术。
     expect(src).toContain('收到——这句并进来了，把刚才想的部分推倒，带着它重新想。');
-    expect(src).toContain('这句补得关键——推倒刚才想的，带着它重新想一遍。');
+    expect(src).toContain('已并入补充，重新规划…');
     // planByThinking 侧：流句柄挂上 preflightAbort；每轮开局清掉上一轮的
     // 重启请求（残留会把新控制器的超时误认成重启）。
     const fnIdx = src.indexOf('private async planByThinking(');

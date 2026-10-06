@@ -390,7 +390,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(card).toBeDefined();
     expect(card!.textContent).toContain('待办队列（1 件）');
     expect(card!.textContent).toContain('明天北京天气');
-    expect(statusJoined(h.root)).not.toContain('收到——看一下这句话怎么安排');
+    expect(statusJoined(h.root)).not.toContain('插话处理中');
     expect(userJoined(h.root)).not.toContain('北京天气');
 
     await h.chat.interject('顺便帮我看看上海到东京的机票。');
@@ -510,7 +510,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(userJoined(h.root)).toContain('我老板问报告');
     expect(assistantJoined(h.root)).toContain('（边干边答）市场调研已完成大半');
     // 临时回执没留行（回答气泡本身就是反馈）。
-    expect(statusJoined(h.root)).not.toContain('看一下这句话怎么安排');
+    expect(statusJoined(h.root)).not.toContain('插话处理中');
   });
 
   it('1b question 入账：旁答后问答对折进运行回合（internal，重放不冒充用户）', async () => {
@@ -1146,18 +1146,19 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
   });
 
   it('排队路的临时回执不留幽灵账：摘行的同时销账，回放不再凭空多一句', async () => {
-    // 真实会话实证：画图会话的事件流第 0 条就是"收到——看一下这句话怎么
-    // 安排…"——ack 行被直接 remove() 后账本里的记录还在，快照把它拼回去。
+    // 真实会话实证：画图会话的事件流第 0 条就是一条插话即时回执（旧文案
+    // "收到——看一下这句话怎么安排…"）——ack 行被直接 remove() 后账本里的
+    // 记录还在，快照把它拼回去。
     const llm = scriptedLlm([
       { match: '云朵', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
     await h.chat.interject('背景上加一些会动的云朵');
-    const ghosts = (h.chat.statusLines as Array<{ text: string }>).filter((l) => l.text.includes('看一下这句话怎么安排'));
+    const ghosts = (h.chat.statusLines as Array<{ text: string }>).filter((l) => l.text.includes('插话处理中'));
     expect(ghosts).toHaveLength(0);
     // 屏上也确实没有这行（队列卡就是回执）。
-    expect(statusJoined(h.root)).not.toContain('看一下这句话怎么安排');
+    expect(statusJoined(h.root)).not.toContain('插话处理中');
   });
 });
 

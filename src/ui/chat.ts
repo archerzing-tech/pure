@@ -2569,7 +2569,7 @@ export class ChatController {
     // window reads as dead air: you said something and nobody reacted. The
     // ack is ONE pending status line that the final receipt REPLACES in
     // place, so the transcript never shows two lines for one insert.
-    const ack = this.addStatusBubble('收到——看一下这句话怎么安排…', true, false);
+    const ack = this.addStatusBubble('插话处理中…', true, false);
     const ackRow = ack.parentElement;
     if (ackRow) this.interjectReceiptRows.add(ackRow);
     const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText, ack));
@@ -4437,7 +4437,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const callId = `foldin_${Date.now()}_${calls.length}`;
             fold.syntheticCallId = callId;
             // 恰好一行的因果叙述：把"追加"和"第三张卡"在对话流里接起来。
-            this.addStatusBubble(`你追加的安排上了——派 ${role} 单独补跑，跑完和前面的产出一起汇总。`, false, false, 'info');
+            this.addStatusBubble(`追加委派：${role} 单独补跑，产出并入最终汇总。`, false, false, 'info');
             // 子代理没有对话上下文——fold.text 是用户原话速记（"新增一个平台，
             // 爱奇艺"），原样当任务书它只能瞎猜调研对象（2026-09-22 实测跑成了
             // 爱奇艺开放平台 API 文档）。任务书必须带上主任务原文，并约束它
@@ -4448,7 +4448,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 分支级继续（第 2 期第三刀）：点名续跑的那支用**原始参数**同参
           // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。
           for (const resume of this.pendingResumes.splice(0)) {
-            this.addStatusBubble(`「${resume.label}」那路接上了——从存档断点续跑，不从头做。`, false, false, 'info');
+            this.addStatusBubble(`续跑：「${resume.label}」从存档断点继续。`, false, false, 'info');
             calls.push({ id: `resume_${resume.callId}`, index: calls.length, function: { name: resume.name, arguments: resume.args } });
           }
           return calls;
@@ -4827,7 +4827,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (this.abortController?.signal.aborted) break;
               if ((this.pendingPreflightSupplements.length > 0 || thought?.restarted) && thought !== null) {
                 userText = this.applyPreflightSupplements(userText, userImages);
-                this.addStatusBubble('这句补得关键——推倒刚才想的，带着它重新想一遍。', false, false, 'info');
+                this.addStatusBubble('已并入补充，重新规划…', false, false, 'info');
                 continue;
               }
               break;
@@ -5068,7 +5068,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
         if (isExplicitContinuation(userText)) {
-          this.addStatusBubble(`收到，接着第 ${this.activePlanNumber} 阶段的第 ${this.activeTodoNumber} 个 Todo 往下干。`, false, false);
+          this.addStatusBubble(`继续：第 ${this.activePlanNumber} 阶段 · 第 ${this.activeTodoNumber} 个 Todo。`, false, false);
         }
         // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
         planProgress?.dispatch({ type: 'statusChanged', status: 'active' });
