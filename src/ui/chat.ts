@@ -8,7 +8,7 @@ import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
-import { applyTaskScriptSignal, createTaskScript, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
+import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
@@ -54,6 +54,7 @@ import {
   createPlanCard,
   updatePlanCard,
   clearPlanCardRefining,
+  refreshPlanCardTaskScript,
   matchPlanProgressMarkers,
   dedupePlanAnnouncements,
   evaluatePlanContinuation,
@@ -1826,6 +1827,8 @@ export class ChatController {
   private recordTaskScript(signal: TaskScriptSignal): void {
     if (!this.activeTaskScript) return;
     this.activeTaskScript = applyTaskScriptSignal(this.activeTaskScript, signal);
+    // 账变了，卡片上那一步的悬停提示就得跟着变（工具结果不改游标，不靠订阅刷新）。
+    refreshPlanCardTaskScript(this.activePlanCardHandle);
   }
 
   getTaskScript(): TaskScript | null {
@@ -4962,9 +4965,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // its contents in place preserves the user's visual anchor and
               // makes later phase changes visible instead of replacing the
               // only plan card that appeared at the start.
-              updatePlanCard(planCard, plan, refining, planProgress);
+              updatePlanCard(planCard, plan, refining, planProgress, () => this.activeTaskScript);
             } else {
-              planCard = createPlanCard(plan, refining, planProgress);
+              planCard = createPlanCard(plan, refining, planProgress, () => this.activeTaskScript);
               this.appendToTranscript(planCard.el);
             }
             this.activePlanCardHandle = planCard;
@@ -5107,10 +5110,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (existingCard) {
           // One stable progress list per transcript: rebind the SAME card to
           // the fresh model instead of stacking a duplicate every round.
-          updatePlanCard(existingCard, this.activeComplexPlan, false, planProgress);
+          updatePlanCard(existingCard, this.activeComplexPlan, false, planProgress, () => this.activeTaskScript);
           planCard = existingCard;
         } else {
-          planCard = createPlanCard(this.activeComplexPlan, false, planProgress);
+          planCard = createPlanCard(this.activeComplexPlan, false, planProgress, () => this.activeTaskScript);
           this.appendToTranscript(planCard.el);
         }
         this.activePlanCardHandle = planCard;
@@ -5547,6 +5550,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         buildProtocol: userBuildProtocol,
         plan: userPlan,
         contract: taskContract ? formatTaskContract(taskContract) : undefined,
+        taskScriptFacts: formatTaskScriptFacts(this.getTaskScriptHandOver()),
         assessment: userAssessment,
         plausibilityOverride: userPlausibilityOverride,
         // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个

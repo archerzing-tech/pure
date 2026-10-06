@@ -324,6 +324,9 @@ export interface UserTurnContext {
   clarifications?: string;
   /** Structured delivery contract discovered for THIS request/workspace. */
   contract?: string;
+  /** TaskScript 记账导出的事实清单（改了什么文件、跑了什么命令、验证结果）。
+   * 素材，不是稿子——收尾怎么讲由模型自己决定。 */
+  taskScriptFacts?: string;
   /** formatDeliveryPipeline() output — the agent-driven delivery verification
    * pipeline (code review → typecheck → tests → e2e/build) with the exact
    * commands discovered from THIS workspace, plus the design-first protocol
@@ -401,6 +404,7 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.plan) parts.push(ctx.plan);
   if (ctx.clarifications) parts.push(ctx.clarifications);
   if (ctx.contract) parts.push(ctx.contract);
+  if (ctx.taskScriptFacts) parts.push(ctx.taskScriptFacts);
   if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
   if (ctx.assessment) parts.push(ctx.assessment);
   if (ctx.plausibilityOverride) parts.push(ctx.plausibilityOverride);

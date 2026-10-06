@@ -4,6 +4,7 @@ import {
   applyTaskScriptSignals,
   createTaskScript,
   deriveTaskScript,
+  formatTaskScriptFacts,
   inferredClosures,
   taskScriptHandOver,
   taskScriptProgress,
@@ -336,6 +337,57 @@ describe('taskScript · 收尾素材只出事实', () => {
       earlierEvidence: { tools: 0, failedTools: [], artifacts: [], verifications: [], branchOutcome: null },
     });
     expect(taskScriptProgress(createTaskScript({ reasoning: 'r', steps: [] })).allDone).toBe(false);
+  });
+
+  it('事实素材：只列发生了什么，带上失败与中断，不编结论', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('改 chat.ts')), [
+      { kind: 'tool', toolName: 'write_file', ok: true, artifact: 'src/ui/chat.ts' },
+      { kind: 'verification', command: 'bun test', ok: true },
+      { kind: 'verification', command: 'bun run typecheck', ok: false },
+      { kind: 'tool', toolName: 'edit_file', ok: false, artifact: '' },
+    ]);
+    const facts = formatTaskScriptFacts(taskScriptHandOver(script));
+    expect(facts).toContain('<task_script_facts>');
+    expect(facts).toContain('第 1 步「改 chat.ts」');
+    expect(facts).toContain('产出：src/ui/chat.ts');
+    expect(facts).toContain('bun test 通过');
+    expect(facts).toContain('bun run typecheck 未通过');
+    expect(facts).toContain('失败工具：edit_file');
+    expect(facts).toContain('怎么讲、按什么顺序、用什么语气，你自己决定');
+  });
+
+  it('事实素材：空账与空计划不输出（宁可不给素材也不给空清单）', () => {
+    expect(formatTaskScriptFacts(null)).toBe('');
+    expect(formatTaskScriptFacts(taskScriptHandOver(createTaskScript({ reasoning: 'r', steps: [] })))).toBe('');
+  });
+
+  it('事实素材：区分显式完成与兜底收束（模型自己知道哪个是真的）', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A', 'B')), [
+      { kind: 'control', marker: 'phaseDone', phase: 1 },
+      { kind: 'tool', toolName: 'write_file', ok: true, artifact: 'a.ts' },
+      { kind: 'turnEnd' },
+    ]);
+    const facts = formatTaskScriptFacts(taskScriptHandOver(script));
+    expect(facts).toContain('已完成（模型标记完成）');
+    expect(facts).toContain('已完成（按真实活动兜底收束）');
+  });
+
+  it('事实素材：单步列表有上限，不把整轮工具历史灌进提示词', () => {
+    const signals = Array.from({ length: 9 }, (_, i) => ({ kind: 'tool' as const, toolName: 'write_file', ok: true, artifact: `f${i}.ts` }));
+    const facts = formatTaskScriptFacts(taskScriptHandOver(applyTaskScriptSignals(createTaskScript(plan('A')), signals)));
+    expect(facts).toContain('共 9 项');
+    expect(facts).not.toContain('f8.ts');
+  });
+
+  it('事实素材：计划细化前的产出单独一行，不挂到新步骤上', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A')), [
+      { kind: 'tool', toolName: 'write_file', ok: true, artifact: 'old.ts' },
+      { kind: 'planReplaced', plan: plan('A refined') },
+    ]);
+    const facts = formatTaskScriptFacts(taskScriptHandOver(script));
+    expect(facts).toContain('计划细化前已发生（无法归属到具体步骤）');
+    expect(facts).toContain('old.ts');
+    expect(facts).toContain('第 1 步「A refined」｜承诺：A refined done｜状态：未开始');
   });
 
   it('derive 返回副本：外部改结果不会污染下一次推导', () => {

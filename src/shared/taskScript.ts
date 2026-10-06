@@ -379,3 +379,79 @@ export function inferredClosures(script: TaskScript): number[] {
     .steps.filter((step) => step.closure === 'inferred')
     .map((step) => step.index);
 }
+
+const STATUS_LABEL: Record<TaskStepStatus, string> = {
+  done: '已完成',
+  active: '进行中',
+  pending: '未开始',
+};
+
+const CLOSURE_LABEL: Record<Exclude<TaskStepClosure, null>, string> = {
+  control: '模型标记完成',
+  inferred: '按真实活动兜底收束',
+};
+
+/** 每步列出的产出/验证条数上限：素材要够用，也不能把整轮工具历史灌进提示词。 */
+const MAX_LISTED_PER_STEP = 6;
+
+/**
+ * 单步已记账事实的一句话摘要，给 UI 当悬停提示用：只说记到了什么，不下结论。
+ * 没有证据时返回空串——空串意味着「没什么可显示」，不是「这步很顺利」。
+ */
+export function formatTaskStepEvidence(step: TaskStepRecord): string {
+  // 什么也没记到的步不给提示：「未开始」不是信息，卡片本来就用灰态写着这件事。
+  // 只有真记下了什么（或真收束了）才值得占用一个悬停提示。
+  if (step.evidence.tools === 0 && step.closure === null) return '';
+  const parts: string[] = [STATUS_LABEL[step.status]];
+  if (step.closure) parts.push(CLOSURE_LABEL[step.closure]);
+  if (step.evidence.artifacts.length > 0) parts.push(`产出 ${listed(step.evidence.artifacts, 3)}`);
+  if (step.evidence.verifications.length > 0) {
+    parts.push(`验证 ${listed(step.evidence.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`), 3)}`);
+  }
+  if (step.evidence.failedTools.length > 0) parts.push(`失败 ${listed(step.evidence.failedTools, 3)}`);
+  if (step.evidence.branchOutcome) parts.push(step.evidence.branchOutcome === 'paused' ? '期间被用户暂停' : '期间被用户停止');
+  return parts.join(' · ');
+}
+
+function listed(values: string[], max = MAX_LISTED_PER_STEP): string {
+  if (values.length === 0) return '无';
+  const shown = values.slice(0, max).join('、');
+  return values.length > max ? `${shown}…（共 ${values.length} 项）` : shown;
+}
+
+function stepFacts(step: TaskStepHandOver): string {
+  const parts = [
+    `状态：${STATUS_LABEL[step.status]}${step.closure ? `（${CLOSURE_LABEL[step.closure]}）` : ''}`,
+    `产出：${listed(step.evidence.artifacts)}`,
+    `验证：${listed(step.evidence.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`))}`,
+  ];
+  if (step.evidence.failedTools.length > 0) parts.push(`失败工具：${listed(step.evidence.failedTools)}`);
+  if (step.evidence.branchOutcome) parts.push(`期间被中断：${step.evidence.branchOutcome === 'paused' ? '用户暂停' : '用户停止'}`);
+  return `第 ${step.index} 步「${step.action}」｜承诺：${step.expectedOutcome}｜${parts.join('｜')}`;
+}
+
+/**
+ * 把账本排成一段**给模型看的素材**。这里排的是事实清单，不是替模型写好的收尾——
+ * 它进的是提示词（user-turn context），不是对话流。措辞、顺序、语气仍由模型自己
+ * 决定；模型没记到的事由它按自己知道的讲，宿主不补。
+ *
+ * 空账（还没开工或没有计划）返回空串：宁可不给素材，也不给一份空清单占提示词。
+ */
+export function formatTaskScriptFacts(handover: TaskScriptHandOver | null | undefined): string {
+  if (!handover || handover.totalSteps === 0) return '';
+  const lines = handover.steps.map(stepFacts);
+  const earlier = handover.earlierEvidence;
+  if (earlier.tools > 0 || earlier.artifacts.length > 0 || earlier.verifications.length > 0) {
+    lines.push([
+      '计划细化前已发生（无法归属到具体步骤）：',
+      `产出：${listed(earlier.artifacts)}`,
+      `验证：${listed(earlier.verifications.map((item) => `${item.command} ${item.ok ? '通过' : '未通过'}`))}`,
+    ].join('｜'));
+  }
+  return [
+    '<task_script_facts>',
+    '以下是宿主按真实信号记下的账：文件是真写过的，命令是真跑过的，验证是真跑过的。它只是素材，不是要你照抄的稿子——怎么讲、按什么顺序、用什么语气，你自己决定；它没记到的事按你实际知道的讲，不要替它补，也不要因为清单里没写就当作没发生。',
+    ...lines,
+    '</task_script_facts>',
+  ].join('\n');
+}

@@ -296,6 +296,11 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     ['plan', context.plan, 85],
     ['clarifications', context.clarifications, 100, true],
     ['contract', context.contract, 80],
+    // The recorded facts of what was actually written/run/verified. Required:
+    // dropping it under budget pressure is exactly the failure mode it exists
+    // to prevent — the completion report then has no evidence and the model
+    // falls back to claiming whatever feels right.
+    ['task_script_facts', context.taskScriptFacts, 95, true],
     ['assessment', context.assessment, 90],
     // Fiction override is required: a detected fiction request must always
     // carry the skip directive, even when the budget is tight.

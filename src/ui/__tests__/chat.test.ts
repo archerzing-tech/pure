@@ -414,7 +414,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
   it('updates the existing plan list in place instead of replacing the card', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const show = src.indexOf('const showPlanCard = (plan: Plan, refining = false): void => {');
-    const update = src.indexOf('updatePlanCard(planCard, plan, refining, planProgress);', show);
+    const update = src.indexOf('updatePlanCard(planCard, plan, refining, planProgress, () => this.activeTaskScript)', show);
     const oldReplace = src.indexOf('old.classList.add(\'plan-card-leaving\')', show);
     expect(show).toBeGreaterThan(-1);
     expect(update).toBeGreaterThan(show);
@@ -446,7 +446,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(thinking).toBeGreaterThan(probe);
     expect(planRender).toBeGreaterThan(thinking);
     expect(src).toMatch(/llm\.stream\(request, \[\], ac\.signal\)/);
-    expect(src).toMatch(/createPlanCard\(plan, refining, planProgress\)/);
+    expect(src).toMatch(/createPlanCard\(plan, refining, planProgress(, \(\) => this\.activeTaskScript)?\)/);
     expect(src.indexOf('已回退到通用步骤')).toBe(-1);
     // 死空气回归的锁定（2026-09-26）：规划期间思考卡活着顶着（「正在想这个任务
     // 怎么做…」），第一个可见字落屏才收卡（removeThinkingCard 作揭卡回调传入），
@@ -758,8 +758,8 @@ describe('plan overview completion state', () => {
   it('keeps the chat plan card as the only live plan projection', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     expect(src).toContain('let planProgress: PlanProgressModel | null = null;');
-    expect(src).toContain('createPlanCard(plan, refining, planProgress);');
-    expect(src).toContain('updatePlanCard(planCard, plan, refining, planProgress);');
+    expect(src).toContain('createPlanCard(plan, refining, planProgress, () => this.activeTaskScript)');
+    expect(src).toContain('updatePlanCard(planCard, plan, refining, planProgress, () => this.activeTaskScript)');
     expect(src).not.toContain('planOverview().bindProgress(planProgress);');
     expect(src).toContain("planProgress?.dispatch({ type: 'completed' });");
     expect(src).not.toContain('overview.update(plan, done ? \'complete\' : status');

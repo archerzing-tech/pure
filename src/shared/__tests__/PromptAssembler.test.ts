@@ -13,6 +13,37 @@ function estimateLength(systemPrompt: string, userPrompt?: string): number {
 
 const assembler = new PromptAssembler();
 
+describe('composeUserTurn · 剧本事实素材', () => {
+  it('有账时把事实素材带进 user turn（素材进提示词，不是对话流）', () => {
+    const prompt = composeUserTurn('继续', { taskScriptFacts: '<task_script_facts>\n第 1 步「改 chat.ts」｜产出：src/ui/chat.ts\n</task_script_facts>' });
+    expect(prompt).toContain('<task_script_facts>');
+    expect(prompt).toContain('产出：src/ui/chat.ts');
+    expect(prompt).toContain('继续');
+  });
+
+  it('没有账时不生成空素材块', () => {
+    expect(composeUserTurn('继续', {})).not.toContain('<task_script_facts>');
+  });
+
+  it('预算再紧也不能丢事实素材（丢了模型就只能凭感觉编收尾）', () => {
+    const assembly = assembler.assemble({
+      surface: 'cli',
+      capabilities: 'capabilities',
+      budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0 },
+    }, '继续', { traps: 'trap '.repeat(4_000), taskScriptFacts: '<task_script_facts>证据</task_script_facts>' });
+    expect(assembly.budget.omittedFragmentIds).toContain('traps');
+    expect(assembly.userPrompt).toContain('<task_script_facts>证据</task_script_facts>');
+  });
+
+  it('走组装器时事实素材同样进 user turn', () => {
+    const assembly = assembler.assemble({ surface: 'gui', capabilities: 'capabilities' }, '继续', {
+      taskScriptFacts: '<task_script_facts>第 2 步｜验证：bun test 通过</task_script_facts>',
+    });
+    expect(assembly.userPrompt).toContain('验证：bun test 通过');
+    expect(assembly.budget.includedFragmentIds).toContain('task_script_facts');
+  });
+});
+
 describe('PromptAssembler', () => {
   it('uses an injected observability sink for assembly traces', () => {
     const store = new InMemoryPromptObservationStore();

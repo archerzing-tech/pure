@@ -9,6 +9,7 @@ import { t } from '../shared/i18n';
 import { parseDesignReadyMarker } from '../shared/delivery';
 import { showInlineCard } from './inlineCard';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
+import { deriveTaskScript, formatTaskStepEvidence, type TaskScript } from '../shared/taskScript';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
 
@@ -161,6 +162,9 @@ export interface PlanCardHandle {
   /** One independent Todo list per top-level plan; never nested inside plan rows. */
   todoLists: HTMLElement[];
   todoTitleEls: HTMLElement[];
+  /** 期 2·结构账：当前计划的剧本读取器（可能为 undefined）。卡片的悬停提示从它
+   * 取已记账的事实，不自己编。传 getter 而非快照：账本是活的。 */
+  taskScriptSource?: () => TaskScript | null;
   /** Refining badge element, present while the LLM is still generating the plan. */
   refiningEl: HTMLElement | null;
   /** Human-readable live activity, kept visible while the transcript grows. */
@@ -189,7 +193,7 @@ const refiningTimers = new WeakMap<HTMLElement, number>();
 
 const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
 
-export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgressModel): PlanCardHandle {
+export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgressModel, taskScriptSource?: () => TaskScript | null): PlanCardHandle {
   // 会话内计划身份：同一对话可能有多份独立计划（原计划 + 反馈后重计划），
   // planSeq 区分它们，reason 说明新一轮计划的触发来源（仅新计划携带）。
   const planSnapshot = source.getSnapshot();
@@ -393,6 +397,7 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
     substepNumEls,
     todoLists,
     todoTitleEls,
+    taskScriptSource,
     refiningEl: refining ? head.querySelector('.plan-progress-refining') : null,
     setActivity: (message: string): void => {
       activity.classList.remove('is-waiting');
@@ -425,11 +430,11 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
 /** Update the existing plan card in place. The outer transcript row stays
  * mounted, so task progress remains visible throughout the turn instead of
  * looking like a one-time list that disappears during plan refinement. */
-export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean, source: PlanProgressModel): void {
+export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean, source: PlanProgressModel, taskScriptSource?: () => TaskScript | null): void {
   unbindPlanCardProgress(h);
   const previousActivity = h.el.querySelector<HTMLElement>('.plan-progress-activity')?.textContent;
   clearPlanCardRefining(h);
-  const fresh = createPlanCard(plan, refining, source);
+  const fresh = createPlanCard(plan, refining, source, taskScriptSource ?? h.taskScriptSource);
   unbindPlanCardProgress(fresh);
   // The step list is replaced in place; instead of an abrupt cut (old steps
   // vanish, new steps pop in), cascade the FRESH steps in with the same
@@ -448,6 +453,7 @@ export function updatePlanCard(h: PlanCardHandle, plan: Plan, refining: boolean,
   h.substepNumEls = fresh.substepNumEls;
   h.todoLists = fresh.todoLists;
   h.todoTitleEls = fresh.todoTitleEls;
+  h.taskScriptSource = fresh.taskScriptSource;
   h.refiningEl = fresh.refiningEl;
   h.setActivity = fresh.setActivity;
   // Keep the auto-continue badge alive across the in-place upgrade: point the
@@ -488,6 +494,29 @@ function renderPlanCardProgress(h: PlanCardHandle, snapshot: PlanProgressSnapsho
     const activity = h.el.querySelector<HTMLElement>('.plan-progress-activity');
     if (activity?.classList.contains('is-waiting')) h.setActivity('已恢复执行当前计划…');
   }
+  applyTaskScriptEvidence(h);
+}
+
+/**
+ * 期 2·结构账：把已记账的事实挂到对应步骤行的悬停提示上。
+ *
+ * 只加提示，不改步骤的 done/active/pending——那三个状态仍由计划游标决定。
+ * 两者职责不同：游标回答「现在走到哪」，账本回答「这步到底做了什么、结果如何」。
+ * 让账本去改状态会出现两个同时高亮的行（剧本按真实活动记账，游标按标记推进，
+ * 漏标记时两者会错开），那是拿一个真相盖另一个真相。
+ */
+export function refreshPlanCardTaskScript(h: PlanCardHandle | null): void {
+  if (h) applyTaskScriptEvidence(h);
+}
+function applyTaskScriptEvidence(h: PlanCardHandle): void {
+  const script = h.taskScriptSource?.() ?? null;
+  const steps = script ? deriveTaskScript(script).steps : [];
+  h.stepEls.forEach((row, i) => {
+    const evidence = steps[i] ? formatTaskStepEvidence(steps[i]!) : '';
+    // setAttribute 而不是 removeAttribute：本仓的测试假 DOM 只提供前者，
+    // 且空 title 与无 title 在真实浏览器里都不弹提示。
+    row.setAttribute('title', evidence);
+  });
 }
 
 /** Remove the "完善中…" refining badge in place — used when plan generation
@@ -582,9 +611,9 @@ function renderPlanSubstepsComplete(rows: HTMLElement[]): void {
 }
 
 /** Rebuild a plan card from the already-restored session progress model. */
-export function createRestoredPlanCard(source: PlanProgressModel): PlanCardHandle {
+export function createRestoredPlanCard(source: PlanProgressModel, taskScriptSource?: () => TaskScript | null): PlanCardHandle {
   const snapshot = source.getSnapshot();
-  return createPlanCard(snapshot.plan, false, source);
+  return createPlanCard(snapshot.plan, false, source, taskScriptSource);
 }
 
 // A top-level marker is `## 第 2 步…`; a substep marker is `### 子步骤 2/3…`
