@@ -27,7 +27,7 @@ import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } f
 import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
 import { buildSkillGateAppliedRecord, scanSubagentAdvice } from '../shared/subagentAdvisory';
-import { buildDraftRoleManifest } from '../shared/subagentDraft';
+import { buildDraftRoleManifest, roleDraftManifest, runRoleDraftFlow } from '../shared/subagentDraft';
 import { compileExternalSubagents } from '../harness/externalSubagents';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/SubagentOrchestrator';
 import { readGuiObservations } from './observationSource';
@@ -1175,6 +1175,74 @@ export class SettingsPanel {
         this.toast(t('evolution.advice.draft.done').replace('{file}', draft.file));
       } catch (err) {
         console.error('[pure] draft role manifest write failed:', err);
+        this.toast(t('evolution.advice.draft.failed'));
+      }
+    });
+
+    // ── 13.2 完整版：模型起草角色 manifest（同一张建议卡的第二个入口）──
+    // 与上方确定性草稿**共用三道门**（同一校验器 / 落盘前确认 / 同名拒覆盖），
+    // 不新开通路；差别只在草稿从哪来：确定性模板 vs 模型起草。
+    //
+    // 为什么两条并存：确定性草稿零 provider 依赖、瞬间完成，是模型起草不可用
+    // （无 key / 起草失败 / 模型拒绝）时的退路，不能因为加了完整版就拆掉。
+    document.getElementById('evolution-advice')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLElement>('[data-evo-model-draft]');
+      if (!btn || !isTauriRuntime()) return;
+      const role = btn.dataset.evoModelDraft || '';
+      if (!role) return;
+      const read = await readGuiObservations();
+      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      if (!advice) {
+        this.toast(t('evolution.advice.draft.stale'));
+        return;
+      }
+      const cfg = loadConfig() ?? defaults();
+      this.toast(t('evolution.advice.modelDraft.drafting'));
+      const outcome = await runRoleDraftFlow({
+        advice,
+        llm: createLLMAdapter(cfg, { disableThinking: true }),
+        reservedNames: [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name),
+      });
+      if (outcome.kind === 'none') {
+        // 模型真的说了 NONE：画像不足以支撑设计新角色。这是模型的判断，不是故障。
+        this.toast(t('evolution.advice.modelDraft.none'));
+        return;
+      }
+      if (outcome.kind === 'invalid') {
+        console.error('[pure] model-drafted role manifest rejected:', outcome.reason);
+        this.toast(t('evolution.advice.modelDraft.invalid'));
+        return;
+      }
+      const draft = outcome.draft;
+      const file = `${draft.name}.json`;
+      const core = await loadTauriCore();
+      if (!core) return;
+      const pureHome = await join(await homeDir(), '.pure');
+      // 第二道门：同名拒覆盖（模型可能给出与现有外部角色重名的名字）。
+      try {
+        await core.invoke('read_file', { workspace: pureHome, path: `subagents/${file}` });
+        this.toast(t('evolution.advice.draft.exists').replace('{file}', file));
+        return;
+      } catch {
+        // 读不到 = 文件还不存在，正是落盘前提。
+      }
+      // 第三道门：落盘前确认。先把 manifest 全文给用户看——模型起草的东西比模板
+      // 不可控，用户得能拒绝一段自己看不懂的提示词。
+      const manifestText = roleDraftManifest(draft);
+      const ok = await showConfirmModal({
+        title: t('evolution.advice.modelDraft.title'),
+        message: t('evolution.advice.modelDraft.confirm')
+          .replace('{file}', `${pureHome}/subagents/${file}`)
+          .replace('{manifest}', manifestText),
+        okLabel: t('common.ok'),
+        cancelLabel: t('common.cancel'),
+      });
+      if (!ok) return;
+      try {
+        await core.invoke('write_file', { workspace: pureHome, path: `subagents/${file}`, content: manifestText });
+        this.toast(t('evolution.advice.draft.done').replace('{file}', file));
+      } catch (err) {
+        console.error('[pure] model-drafted role manifest write failed:', err);
         this.toast(t('evolution.advice.draft.failed'));
       }
     });

@@ -6,7 +6,15 @@
 // 设计口径（capability-self-extension-design.md §13.2）：模型起草是完整版；MVP 先做
 // 确定性草稿——不依赖 provider、瞬间完成、绝不静默落盘（调用方必须先过
 // compileExternalSubagents 校验，再让用户确认）。试用制准入留给完整版。
+//
+// 2026-10-06 完整版加厚：确定性草稿**不改**（它是零 provider 依赖的快路径，也是模型
+// 起草失败时的退路），另加一条模型起草路径——纪律与 13.4（P2-2 `toolSolidification`）
+// 逐字同款：草稿必须过加载半边**同一个** `compileExternalSubagents`、模型有拒绝权
+// （输出 NONE 即不当工具使）、落盘前必过确认缝、同名绝不覆盖。这三道门原本就写在
+// 确定性路径的调用方里，加厚后两条路径共用，不新增第四道门。
 
+import { compileExternalSubagents } from '../harness/externalSubagents';
+import type { LLMAdapter } from './types';
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from './subagentAdvisory';
 
 /** 草稿命名：原角色名 + `_focused`（收窄语义），与 manifest 名字规则同构。 */
@@ -61,4 +69,169 @@ ${discipline}`,
     ...(timeoutShaped ? { timeoutMs: 1_800_000 } : {}),
   };
   return { file: `${name}.json`, json: `${JSON.stringify(manifest, null, 2)}\n` };
+}
+
+// ── 完整版：模型起草（13.2，与 13.4 同款纪律）──
+
+/** 起草超时（与 13.4 TOOL.json 起草同档：写一份角色 manifest 不需要更久）。 */
+const ROLE_DRAFT_TIMEOUT_MS = 60_000;
+
+/** 起草重试上限：一次失败退回重写，两次都失败放弃（与 13.4 同值同理由）。 */
+export const MAX_ROLE_DRAFT_ATTEMPTS = 2;
+
+/**
+ * 起草 system prompt。与 13.4 的 DRAFT_SYSTEM_PROMPT 同纪律：只输出 JSON，
+ * 教清字段形状，并把拒绝权写在第一行——不合适就说 NONE，不许硬凑。
+ *
+ * 与 13.4 的差别只在内容面：工具固化改的是「怎么执行」，角色起草改的是「一个代理
+ * 怎么做事」，所以纪律条文本身直接取自失败画像（超时→粒度，失败→证据），而不是让
+ * 模型自己想。画像是真数据，比模型拍脑袋更可靠。
+ */
+const ROLE_DRAFT_SYSTEM_PROMPT = `You design a specialist sub-agent role manifest for a coding agent team. Output ONLY valid JSON (no markdown fences, no explanation).
+
+The JSON must have these fields:
+- name: lowercase_with_underscores, 2-64 chars, must start with a letter. Append "_v2" unless you are deliberately renaming.
+- description: what this role does and when to delegate to it, ≥8 chars (the parent LLM picks the role by reading this).
+- systemPrompt: the role's operating instructions. Use {prompt} where the delegated task goes.
+- input_schema: JSON Schema object with "properties" and "required" (always include "prompt").
+- tags: optional array from ["read", "write", "parallel"].
+- timeoutMs: optional positive number of milliseconds.
+
+Rules:
+- Write the discipline into systemPrompt; the parent LLM cannot see this manifest.
+- If this role's failure is timeouts, the discipline must shrink the unit of work. If it is failures, the discipline must demand verification evidence. Never soften either into generic advice.
+- Keep systemPrompt under 400 chars. A role prompt that reads like an essay is not used.
+- If the failure profile does not actually support designing a new role, output the single word: NONE`;
+
+/** 把失败画像渲染成起草素材（与确定性草稿同源事实，不另编数据）。 */
+export function buildRoleDraftPrompt(advice: SubagentAdvice): string {
+  const timeoutShaped = advice.reason === 'timeout';
+  const profile = [
+    `ROLE UNDER TROUBLE: ${advice.role}`,
+    `Failures in the last ${SUBAGENT_ADVICE_WINDOW_DAYS} days: ${advice.failures} of ${advice.delegations} delegations failed (${advice.failureRate}%), ${advice.timeoutCount} of them timed out.`,
+    `Dominant failure kind: ${advice.dominantKind}. Average duration: ${advice.avgDurationMs === null ? 'not recorded' : `${Math.round(advice.avgDurationMs / 1000)}s`}.`,
+    '',
+    timeoutShaped
+      ? 'Shape: this role times out, so its unit of work is too big. The new role must do ONE small self-contained step and hand back early.'
+      : 'Shape: this role fails without finishing, so its deliverables are unverified. The new role must demand evidence and report blockers honestly instead of guessing.',
+  ].join('\n');
+  return profile;
+}
+
+export interface RoleDraft {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  input_schema: Record<string, unknown>;
+  tags?: string[];
+  timeoutMs?: number;
+}
+
+/** 解析 LLM 回复为 RoleDraft。NONE / 坏 JSON / 缺字段 → undefined。 */
+export function parseRoleDraft(reply: string): RoleDraft | undefined {
+  const text = reply.trim().replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim();
+  if (!text || text === 'NONE') return undefined;
+  try {
+    const parsed = JSON.parse(text) as Partial<RoleDraft>;
+    if (typeof parsed.name !== 'string' || typeof parsed.description !== 'string' || typeof parsed.systemPrompt !== 'string') {
+      return undefined;
+    }
+    if (!parsed.input_schema || typeof parsed.input_schema !== 'object') return undefined;
+    const draft: RoleDraft = {
+      name: parsed.name,
+      description: parsed.description,
+      systemPrompt: parsed.systemPrompt,
+      input_schema: parsed.input_schema as Record<string, unknown>,
+    };
+    if (Array.isArray(parsed.tags)) draft.tags = parsed.tags.filter((tag): tag is string => typeof tag === 'string');
+    if (typeof parsed.timeoutMs === 'number' && Number.isFinite(parsed.timeoutMs)) draft.timeoutMs = parsed.timeoutMs;
+    return draft;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 草稿过加载半边**同一个**校验器（与 13.4 的 draftPassesCompiler 同纪律）。
+ * reservedNames 是内建角色名：碰名的草稿一律不许落盘。
+ */
+export function roleDraftPassesCompiler(draft: RoleDraft, reservedNames: Iterable<string>): boolean {
+  const { defs, errors } = compileExternalSubagents(
+    [{ file: `${draft.name}.json`, text: roleDraftManifest(draft) }],
+    reservedNames,
+  );
+  return defs.length === 1 && errors.length === 0;
+}
+
+/** 草稿 → 落盘文本（确定性路径的 manifest 序列化与此处共用同一形状）。 */
+export function roleDraftManifest(draft: RoleDraft): string {
+  const manifest: Record<string, unknown> = {
+    version: 1,
+    name: draft.name,
+    description: draft.description,
+    systemPrompt: draft.systemPrompt,
+    input_schema: draft.input_schema,
+  };
+  if (draft.tags && draft.tags.length > 0) manifest.tags = draft.tags;
+  if (draft.timeoutMs !== undefined) manifest.timeoutMs = draft.timeoutMs;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+export type RoleDraftOutcome =
+  | { kind: 'drafted'; draft: RoleDraft }
+  | { kind: 'none' }        // 模型拒绝（画像不支持设计新角色）
+  | { kind: 'invalid'; reason: string };
+
+/**
+ * 模型起草一步：LLM 出草稿 → 解析 → 过加载半边校验器。
+ * **不写盘、不确认**——落盘那三道门（确认 / 同名不覆盖 / 写失败）全在调用方，
+ * 与确定性路径共用同一处，模型起草不另开通路。失败重试 ≤ MAX_ROLE_DRAFT_ATTEMPTS。
+ */
+export async function runRoleDraftFlow(input: {
+  advice: SubagentAdvice;
+  llm: LLMAdapter;
+  reservedNames: Iterable<string>;
+  signal?: AbortSignal;
+}): Promise<RoleDraftOutcome> {
+  let lastError = '';
+  // 拒绝权只能来自模型**真的说 NONE**：所以在解析之前就判定并当场返回，不靠
+  // lastError 里含 "declined" 字样反推——否则「首轮解析坏、二轮校验失败」会被误报成
+  // 「模型拒绝」，用户看到的是一个根本没发生过的拒绝。这两种结局要给不同的下一步。
+  for (let attempt = 1; attempt <= MAX_ROLE_DRAFT_ATTEMPTS; attempt++) {
+    let reply: string;
+    try {
+      const result = await Promise.race([
+        input.llm.complete(
+          [
+            { role: 'system', content: ROLE_DRAFT_SYSTEM_PROMPT },
+            { role: 'user', content: buildRoleDraftPrompt(input.advice) },
+          ],
+          [],
+          input.signal,
+        ),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`draft timed out after ${ROLE_DRAFT_TIMEOUT_MS}ms`)), ROLE_DRAFT_TIMEOUT_MS)),
+      ]);
+      reply = result.content;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+
+    if (reply.trim().replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim() === 'NONE') {
+      return { kind: 'none' };
+    }
+
+    const draft = parseRoleDraft(reply);
+    if (!draft) {
+      lastError = 'model produced unparseable JSON';
+      continue;
+    }
+    if (!roleDraftPassesCompiler(draft, input.reservedNames)) {
+      lastError = `draft failed loader validation (name="${draft.name}")`;
+      continue;
+    }
+    return { kind: 'drafted', draft };
+  }
+  return { kind: 'invalid', reason: lastError };
 }

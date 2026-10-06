@@ -393,6 +393,19 @@ describe('renderSubagentAdvice (E1.4)', () => {
     expect(html).toContain('evo-advice-overlay-btn');
   });
 
+  it('offers both draft paths for a role with no switch — deterministic and model-drafted (13.2 full)', () => {
+    // 两个入口并存是有意的：确定性草稿零 provider 依赖，是模型起草不可用时的退路。
+    // 所以这条同时钉住两个按钮都在，且都只给有缺口的角色（action==='prompt'）。
+    const promptAdvice = advice({ role: 'deep_thinker', action: 'prompt', skillId: undefined });
+    const html = renderSubagentAdvice([promptAdvice], NOW);
+    expect(html).toContain('data-evo-draft="deep_thinker"');
+    expect(html).toContain('data-evo-model-draft="deep_thinker"');
+    // skill-gate 类不给这两个按钮（它有自己的出路：关技能）。
+    const gated = renderSubagentAdvice([advice({ action: 'skill-gate' })], NOW);
+    expect(gated).not.toContain('data-evo-draft');
+    expect(gated).not.toContain('data-evo-model-draft');
+  });
+
   it('offers a one-click apply button on skill-gate advice (13.1)', () => {
     const html = renderSubagentAdvice([advice()], NOW);
     expect(html).toContain('data-evo-apply="researcher"');

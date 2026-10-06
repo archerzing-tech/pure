@@ -404,6 +404,11 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
     const draftButton = item.action === 'prompt'
       ? `<button class="evo-advice-draft-btn" data-evo-draft="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.draft', '生成收窄版角色草稿'))}</button>`
       : '';
+    // 13.2 完整版：同一张卡上的第二个入口——让模型按失败画像起草一个**新**角色。
+    // 与确定性草稿并存而不是取代：后者零 provider 依赖，是前者不可用时的退路。
+    const modelDraftButton = item.action === 'prompt'
+      ? `<button class="evo-advice-draft-btn" data-evo-model-draft="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.modelDraft', '让模型起草新角色'))}</button>`
+      : '';
     // 13.3 part 3：给任何有持续短板的角色一条"起草 prompt overlay"的出路。
     // 起草走便宜模型，落盘前必过该角色的回归 A/B 门槛（写盘前强跑）。
     const overlayButton = `<button class="evo-advice-overlay-btn" data-evo-overlay="${escapeHtml(item.role)}">${escapeHtml(t('evolution.advice.overlay', '起草 prompt overlay（过 A/B 后落盘）'))}</button>`;
@@ -422,7 +427,7 @@ export function renderSubagentAdvice(advice: readonly SubagentAdvice[], now: num
       </div>
       <div class="evo-advice-evidence">${escapeHtml(evidence)}</div>
       <div class="evo-advice-action">${escapeHtml(action)}</div>
-      ${draftButton}${overlayButton}${applyButton}
+      ${draftButton}${modelDraftButton}${overlayButton}${applyButton}
     </div>`;
   }).join('');
   return `<div class="evo-advice-list">${rows}</div>`;
