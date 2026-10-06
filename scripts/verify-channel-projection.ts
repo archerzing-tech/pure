@@ -26,7 +26,7 @@ const MIXED_PROMPT = '给我一段带代码和表格的回答';
 interface MockFeishu extends FeishuTransport {
   handlers?: FeishuTransportHandlers;
   texts: Array<{ chatId: string; text: string }>;
-  cards: Array<{ chatId: string; card: unknown }>;
+  cards: Array<{ messageId: string; chatId: string; card: unknown }>;
   images: Array<{ chatId: string; data: Uint8Array; name: string; at: number }>;
   order: string[];
 }
@@ -42,11 +42,15 @@ function mockTransport(): MockFeishu {
       return `om_t${transport.texts.length}`;
     },
     async sendCard(chatId, card) {
-      transport.cards.push({ chatId, card });
+      transport.cards.push({ messageId: `om_c${transport.cards.length + 1}`, chatId, card });
       transport.order.push(`card:${JSON.stringify(card).length}`);
-      return `om_c${transport.cards.length}`;
+      return transport.cards[transport.cards.length - 1].messageId;
     },
-    async patchCard() {},
+    // 流式续帧是「全量快照替换」：必须真的更新同一条卡片，而不是新发一条。
+    async patchCard(messageId, card) {
+      const entry = transport.cards.find((c) => c.messageId === messageId);
+      if (entry) entry.card = card;
+    },
     async sendImage(chatId, image, name) {
       transport.images.push({ chatId, data: image, name, at: Date.now() });
       transport.order.push('image');
@@ -151,8 +155,10 @@ async function main(): Promise<void> {
     }
     process.stdout.write(`  ✓ 富块出图：${transport.images.length} 张 PNG（代码块 / 表格 / 图表），均为 2048px 宽\n`);
 
-    // 3) 最终正文保持原生 markdown，且不再重复富块源码。
-    //    （流式过程中的进度帧本来就会携带原文，所以只看最后一张卡片。）
+    // 3) 流式帧与最终帧都写回同一条卡片 —— 回答不该被拆成一串重复的消息。
+    assert(transport.cards.length === 1, `整条回答应只占一张卡片（流式期间原地更新），实际 ${transport.cards.length} 张`);
+
+    // 4) 最终正文保持原生 markdown，且不再重复富块源码。
     const finalCard = transport.cards[transport.cards.length - 1];
     assert(!!finalCard, '应有一张最终正文卡片');
     const finalJson = JSON.stringify(finalCard.card);
@@ -161,11 +167,11 @@ async function main(): Promise<void> {
     assert(!finalJson.includes('```mermaid'), '图表已被图替代，不该再出现在正文里');
     process.stdout.write('  ✓ 正文：最终卡片保留原生 markdown「这是结论。」，富块源码已被图替代\n');
 
-    // 4) 只发图的帧不产生空卡片（适配器跳过空文本）。
+    // 5) 只发图的帧不产生空卡片（适配器跳过空文本）。
     const emptyCards = transport.cards.filter((c) => JSON.stringify(c.card).includes('"content":""'));
     assert(emptyCards.length === 0, `不该出现空文本卡片，实际 ${emptyCards.length} 张`);
 
-    // 5) 顺序：文本在图之前。
+    // 6) 顺序：文本在图之前。
     const firstImage = transport.order.indexOf('image');
     const firstCard = transport.order.findIndex((entry) => entry.startsWith('card:'));
     assert(firstCard >= 0 && firstCard < firstImage, `文本应先于图片，实际顺序 ${transport.order.join(',')}`);

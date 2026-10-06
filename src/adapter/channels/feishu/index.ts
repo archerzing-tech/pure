@@ -8,6 +8,7 @@ import type {
   ChannelRuntimeContext,
   ChannelTarget,
   OutboundMessage,
+  SendOptions,
   SendResult,
 } from '../../../channels/types';
 import type { FeishuAdapterOptions, FeishuTransport } from './types';
@@ -87,16 +88,23 @@ export function createFeishuAdapter(deps: FeishuAdapterDeps): ChannelAdapter {
       await transport.stop();
     },
 
-    async send(target: ChannelTarget, msg: OutboundMessage): Promise<SendResult> {
+    async send(target: ChannelTarget, msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> {
       // 只有附件的帧（通道投影里富块单独发的图）不该再发一张空卡片。
       const hasText = msg.text.trim() !== '';
-      let result: SendResult = { messageId: '' };
+      let result: SendResult = { messageId: msg.messageId ?? '' };
       if (hasText) {
         if (msg.kind === 'approval') {
           result = { messageId: await transport.sendCard(target.peerId, buildApprovalCard(msg.text, msg.approvalId ?? 'ap')) };
         } else if (msg.kind === 'progress' || msg.kind === 'final') {
-          // 进度/最终答案走卡片：飞书纯文本不渲染 markdown，且卡片可整块替换（流式）。
-          result = { messageId: await transport.sendCard(target.peerId, buildMarkdownCard(msg.text)) };
+          // 进度/最终答案走卡片。续帧（opts.edit + messageId）必须更新同一条卡片：
+          // 卡片流式在规范层就是「全量快照替换」，若这里新发一条，每个节流快照都会
+          // 变成一张新卡片，手机端就会反复收到同一段回答。
+          if (opts?.edit && msg.messageId) {
+            await transport.patchCard(msg.messageId, buildMarkdownCard(msg.text));
+            result = { messageId: msg.messageId };
+          } else {
+            result = { messageId: await transport.sendCard(target.peerId, buildMarkdownCard(msg.text)) };
+          }
         } else {
           result = { messageId: await sendChunked(target.peerId, msg.text) };
         }

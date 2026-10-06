@@ -161,7 +161,10 @@ export async function createDingTalkSdkTransport(options: DingTalkSdkTransportOp
   const client = new mod.DWClient({ clientId: options.clientId, clientSecret: options.clientSecret });
   const webhooks = new Map<string, string>();
   const conversations = new Map<string, ConversationMeta>();
-  const canStreamCards = !!options.cardTemplateId;
+  // 卡片实例的原地更新（updateCard）尚未实现，这里不能声称能流式：否则每个
+  // 节流快照都会新发一条消息、最终结果又会去更新一条无法更新的卡片而消失。
+  // 诚实降级为「只发最终结果」，能力里的 streaming 会据此变成 'none'。
+  const canStreamCards = false;
 
   async function postToWebhook(conversationId: string, body: unknown): Promise<string> {
     const webhook = webhooks.get(conversationId);

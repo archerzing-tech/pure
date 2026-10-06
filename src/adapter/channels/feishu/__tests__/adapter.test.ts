@@ -106,6 +106,19 @@ describe('feishu adapter outbound', () => {
     expect(JSON.stringify(transport.patches[0].card)).toContain('答案');
   });
 
+  it('updates the same card for throttled progress frames instead of posting duplicates', async () => {
+    const { adapter, transport } = setup();
+    const target = { accountId: 'main', peerId: 'oc_1', peerKind: 'group' as const };
+    const first = await adapter.send(target, { kind: 'progress', text: '第一段', final: false });
+    expect(transport.cards).toHaveLength(1);
+    await adapter.send(target, { kind: 'progress', text: '第一段第二段', final: false, messageId: first.messageId }, { edit: true });
+    // 续帧是「全量快照替换」：只能更新同一条卡片，不能新发 —— 否则手机端会反复收到同一段回答。
+    expect(transport.cards).toHaveLength(1);
+    expect(transport.patches).toHaveLength(1);
+    expect(transport.patches[0].messageId).toBe(first.messageId);
+    expect(JSON.stringify(transport.patches[0].card)).toContain('第一段第二段');
+  });
+
   it('sends an approval card carrying the approval id', async () => {
     const { adapter, transport } = setup();
     await adapter.send({ accountId: 'main', peerId: 'oc_1', peerKind: 'dm' }, { kind: 'approval', text: '需要批准 y/n/a', approvalId: 'ap9' });

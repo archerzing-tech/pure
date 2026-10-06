@@ -303,7 +303,7 @@ streaming: 'none' | 'edit' | 'card' | 'stream';
   **待真机核对**：钉钉图片发送需 `robotCode`（入站消息体自带，配置项 `robotCode` 兜底）；`sampleImageMsg.photoURL` 是否接受 `media_id` 以真机为准 —— 社区有「填 `media_id` 只显示占位符、必须公网 URL」的报告，若属实则需自行托管 PNG 或改用卡片内嵌图。
 - [ ] 三家：`mermaid` / `puml` 的出图依赖**目标机器上有 Chrome**（懒启动 + 裸 CDP，不下载 Chromium）；没有则降级为文本。macOS 已验证（`bun run verify:channel-diagrams`），Windows / Linux 的 Chrome 路径探测（`src/channels/rasterize/headlessChrome.ts` 候选列表 + `PURE_CHROME_PATH`）待实机核对。
 - [ ] 三家：**通道投影**（`src/channels/projection/`，设计见 `docs/channel-projection-design.md`）与 mermaid/puml 共用同一 Chrome 依赖（懒启动、串行队列、空闲关闭）；有富块+能发图+有 Chrome 时正文走原生 markdown、富块按桌面端同管线逐块截图投递，无 Chrome 或纯文本回答自动降级，失败块源码并回正文不丢内容。macOS 已验证（`bun run verify:channel-projection`），Windows / Linux Chrome 路径待实机核对。
-- [ ] 钉钉：AI 卡片流式需要卡片实例 OpenAPI + 卡片模板 id；当前 `cardTemplateId` 未配置时自动降级为「只发最终结果」，按钮也降级为文字双轨。
+- [ ] 钉钉：AI 卡片流式需要卡片实例 OpenAPI + 卡片模板 id；当前 `updateCard` 尚未实现（空实现），所以无论是否配 `cardTemplateId` 都一律降级为「只发最终结果」（不推进度帧），按钮也降级为文字双轨。
 
 ---
 

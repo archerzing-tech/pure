@@ -155,9 +155,7 @@ export class AgentSession {
       const projected = await this.deps.projection(message.text, this.deps.capabilities).catch(() => null);
       if (projected && projected.messages.length > 0) {
         // 投影把一条回答拆成了「文本帧 + 图片帧」；按原顺序逐条投递。
-        for (const projectedMessage of projected.messages) {
-          await this.deps.deliver(this.target, projectedMessage);
-        }
+        await this.deliverProjected(projected.messages);
         return;
       }
     }
@@ -171,10 +169,29 @@ export class AgentSession {
         // 附件生成失败不能影响回复本身。
       }
     }
-    if (out.kind === 'progress' && this.streamMessageId) out.messageId = this.streamMessageId;
+    // 最终帧是流式气泡的收尾帧（OutboundMessage.final 语义），必须写回同一条消息；
+    // 否则「流式卡片已经显示了完整回答」+「最终帧又新发一条」= 同一段回答发两遍。
+    if ((out.kind === 'progress' || out.kind === 'final') && this.streamMessageId) out.messageId = this.streamMessageId;
     const id = await this.deps.deliver(this.target, out);
     if (id && !this.streamMessageId) this.streamMessageId = id;
     if (out.messageId && !this.streamMessageId) this.streamMessageId = out.messageId;
+  }
+
+  /**
+   * 投递投影拆出的消息串。第一条带正文的消息接管流式气泡：流式阶段已经把原文
+   * 显示在那条消息上，收尾时让它变成投影的第一段正文，而不是再新发一条重复文本。
+   */
+  private async deliverProjected(messages: OutboundMessage[]): Promise<void> {
+    let claimedStream = false;
+    for (const message of messages) {
+      const out = { ...message };
+      if (!claimedStream && this.streamMessageId && out.text.trim() !== '') {
+        out.messageId = this.streamMessageId;
+        claimedStream = true;
+      }
+      const id = await this.deps.deliver(this.target, out);
+      if (id && !this.streamMessageId) this.streamMessageId = id;
+    }
   }
 
   /** 空闲驱逐：落 checkpoint、排空反思、释放 Harness。 */

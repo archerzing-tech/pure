@@ -73,7 +73,7 @@ pure channels approve <CODE>   # 在本地（能读到 ~/.pure 的人）批准
     },
     "dingtalk": {
       "enabled": true,
-      // robotCode 可省（优先从入站消息取；发图片需要它）；cardTemplateId 缺省时自动降级为只发最终结果
+      // robotCode 可省（优先从入站消息取；发图片需要它）；卡片实例更新未实现，降级为只发最终结果
       "accounts": { "main": { "clientId": "ding_xxx", "clientSecretRef": "dingtalk.clientSecret" } }
     }
   }

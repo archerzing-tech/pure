@@ -22,7 +22,7 @@ const FILE_PROMPT = '请在工作区创建 hello.txt';
 interface MockFeishu extends FeishuTransport {
   handlers?: FeishuTransportHandlers;
   texts: Array<{ chatId: string; text: string }>;
-  cards: Array<{ chatId: string; card: unknown }>;
+  cards: Array<{ messageId: string; chatId: string; card: unknown }>;
   patches: Array<{ messageId: string; card: unknown }>;
   images: Array<{ chatId: string; data: Uint8Array; name: string }>;
 }
@@ -40,14 +40,19 @@ function mockTransport(): MockFeishu {
     async stop() {},
     async sendText(chatId, text) { transport.texts.push({ chatId, text }); return `om_t${transport.texts.length}`; },
     async sendCard(chatId, card) {
-      transport.cards.push({ chatId, card });
+      transport.cards.push({ messageId: `om_c${transport.cards.length + 1}`, chatId, card });
       // 审批卡片：脚本模拟「人按了批准按钮」——走按钮回调路径（非文字）。
       if (JSON.stringify(card).includes('需要批准')) {
         setTimeout(() => buttonReply(transport, chatId, 'p2p', 'allow'), 10);
       }
-      return `om_c${transport.cards.length}`;
+      return transport.cards[transport.cards.length - 1].messageId;
     },
-    async patchCard(messageId, card) { transport.patches.push({ messageId, card }); },
+    // 流式续帧是「全量快照替换」：更新同一条卡片，不新发。
+    async patchCard(messageId, card) {
+      transport.patches.push({ messageId, card });
+      const entry = transport.cards.find((c) => c.messageId === messageId);
+      if (entry) entry.card = card;
+    },
     async sendImage(chatId, image, name) {
       transport.images.push({ chatId, data: image, name });
       return `om_i${transport.images.length}`;
@@ -139,6 +144,10 @@ async function main(): Promise<void> {
     await waitFor(() => existsSync(helloPath), 15_000, 'hello.txt');
     assert(readFileSync(helloPath, 'utf8').includes('hello from channel gateway'), 'hello.txt 内容应来自脚本化工具调用');
     assert(transport.cards.length >= 1, 'agent 的回答应以卡片下发');
+    // 流式回答只该占一张卡片（不断原地更新 + 收尾写回），不能每个快照都新发一条重复消息。
+    const streamCards = transport.cards.filter((c) => !JSON.stringify(c.card).includes('需要批准'));
+    assert(streamCards.length === 1, `流式回答应只占一张卡片，实际 ${streamCards.length} 张`);
+    assert(transport.patches.length >= 1, '流式续帧应更新已发卡片，而不是新发');
     assert(scriptedStats.verifierCalls >= 1, '通道会话应跑过 LLM 复核验证');
     process.stdout.write(`  ✓ 配对后：agent 在 ${helloPath} 造出文件；卡片 ${transport.cards.length} 张；LLM 复核 ${scriptedStats.verifierCalls} 次\n`);
 
