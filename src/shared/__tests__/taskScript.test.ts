@@ -115,6 +115,42 @@ describe('taskScript · 显式控制行记账', () => {
     expect(taskScriptProgress(script).done).toBe(0);
   });
 
+  it('跳格：中间步按隐式收束记账（走过但不冒充逐步显式完成）', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A', 'B', 'C')), [
+      { kind: 'control', marker: 'phaseStart', phase: 1 },
+      { kind: 'tool', toolName: 'write_file', ok: true, artifact: 'a.ts' },
+      { kind: 'control', marker: 'phaseJump', phase: 3 },
+    ]);
+    const steps = deriveTaskScript(script).steps;
+    expect(steps.map((s) => s.status)).toEqual(['done', 'done', 'active']);
+    expect(steps.map((s) => s.closure)).toEqual(['inferred', 'inferred', null]);
+    expect(inferredClosures(script)).toEqual([1, 2]);
+    expect(taskScriptProgress(script).current).toBe(3);
+  });
+
+  it('跳格到越界编号时不记账（不把错编号猜成跳到末尾）', () => {
+    const script = applyTaskScriptSignals(createTaskScript(plan('A', 'B')), [
+      { kind: 'control', marker: 'phaseStart', phase: 1 },
+      { kind: 'tool', toolName: 'write_file', ok: true },
+      { kind: 'control', marker: 'phaseJump', phase: 9 },
+    ]);
+    const steps = deriveTaskScript(script).steps;
+    expect(steps.map((s) => s.status)).toEqual(['active', 'pending']);
+    expect(steps.every((s) => s.closure === null)).toBe(true);
+  });
+
+  it('跳格时子步骤一并收束，但不记成控制行发的（doneByControl 为假）', () => {
+    const script = applyTaskScriptSignals(createTaskScript({ reasoning: 'r', steps: [
+      { id: 's1', action: 'A', description: 'd', expectedOutcome: 'e', substeps: [{ id: 't1', action: 't1', description: 'd', expectedOutcome: 'e' }] },
+      { id: 's2', action: 'B', description: 'd', expectedOutcome: 'e' },
+    ] }), [
+      { kind: 'control', marker: 'phaseJump', phase: 2 },
+    ]);
+    const steps = deriveTaskScript(script).steps;
+    expect(steps[0]?.substeps.map((s) => s.status)).toEqual(['done']);
+    expect(steps[0]?.closure).toBe('inferred');
+  });
+
   it('合法编号照常记账（与越界用例对照）', () => {
     const script = applyTaskScriptSignals(createTaskScript(plan('A', 'B')), [
       { kind: 'control', marker: 'phaseStart', phase: 1 },

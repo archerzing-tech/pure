@@ -66,7 +66,7 @@ export interface TaskStepRecord {
  */
 export type TaskScriptSignal =
   | { kind: 'planReplaced'; plan: Plan }
-  | { kind: 'control'; marker: 'phaseStart' | 'phaseDone' | 'substepStart' | 'substepDone'; phase: number; substep?: number }
+  | { kind: 'control'; marker: 'phaseStart' | 'phaseDone' | 'phaseJump' | 'substepStart' | 'substepDone'; phase: number; substep?: number }
   | { kind: 'tool'; toolName: string; ok: boolean; command?: string; artifact?: string }
   | { kind: 'verification'; command: string; ok: boolean }
   | { kind: 'turnEnd' }
@@ -195,6 +195,27 @@ function fold(script: TaskScript): { folded: FoldedStep[]; cursor: number; earli
       const step = folded[phase - 1];
       if (!step) continue;
       if (signal.marker === 'phaseStart') {
+        cursor = phase;
+        openSubstep = null;
+        if (!step.closed) step.startedByControl = true;
+        continue;
+      }
+      if (signal.marker === 'phaseJump') {
+        // 跳格：中间的步骤确实被走过了（计划卡也这么推进），但模型没逐步发完成
+        // 行。按隐式收束记账（closure='inferred'）——不冒充它逐步显式完成，
+        // 也不留成 pending 说它没做。
+        for (let i = cursor; i < phase; i += 1) {
+          const skipped = folded[i - 1];
+          if (!skipped || skipped.closed) continue;
+          for (const row of skipped.substeps) {
+            if (row.status !== 'done') {
+              row.status = 'done';
+              row.doneByControl = false;
+            }
+          }
+          skipped.closed = true;
+          skipped.closure = 'inferred';
+        }
         cursor = phase;
         openSubstep = null;
         if (!step.closed) step.startedByControl = true;

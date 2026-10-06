@@ -8,6 +8,7 @@ import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
+import { applyTaskScriptSignal, createTaskScript, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
@@ -1436,6 +1437,22 @@ function installAgentActivityHostLayout(): void {
   sync();
 }
 
+/**
+ * 这次工具调用真正写盘/改了哪个路径（期 2·结构账的产出证据）。
+ * 只认写类工具的真实参数：失败调用、读类工具、非写工具都返回 undefined——
+ * 「产出」是发生过的事，不是工具名暗示的事。
+ */
+export function writtenArtifactPath(toolName: string, args: Record<string, unknown> | undefined): string | undefined {
+  if (!args) return undefined;
+  if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_document') {
+    return typeof args.path === 'string' && args.path.trim() ? args.path : undefined;
+  }
+  if (toolName === 'replace_files' && Array.isArray(args.files)) {
+    return args.files.filter((f): f is string => typeof f === 'string' && f.trim() > '').join(', ') || undefined;
+  }
+  return undefined;
+}
+
 export class ChatController {
   private streaming = false;
   private abortController: AbortController | null = null;
@@ -1476,6 +1493,8 @@ export class ChatController {
   // turn rebinds THIS card to a fresh progress model (updatePlanCard) instead
   // of appending a duplicate card per round.
   private activePlanCardHandle: PlanCardHandle | null = null;
+  /** 期 2·结构账：当前计划的剧本（只追加信号，状态现算）。没有计划卡时为 null。 */
+  private activeTaskScript: TaskScript | null = null;
   private activePlanProgressUnsubscribe?: () => void;
   private activePlanProgressPersistence?: SessionPlanProgressPersistence;
   /** Whether the active plan was approved as a project build — carried across
@@ -1800,6 +1819,23 @@ export class ChatController {
     return this.activePlanProgress;
   }
 
+  /**
+   * 期 2·结构账：把本轮真实发生的信号喂进剧本。只记账，不说话——
+   * `taskScriptHandOver()` 给模型的收尾素材全是事实，由模型自己讲。
+   */
+  private recordTaskScript(signal: TaskScriptSignal): void {
+    if (!this.activeTaskScript) return;
+    this.activeTaskScript = applyTaskScriptSignal(this.activeTaskScript, signal);
+  }
+
+  getTaskScript(): TaskScript | null {
+    return this.activeTaskScript;
+  }
+
+  getTaskScriptHandOver(): TaskScriptHandOver | null {
+    return this.activeTaskScript ? taskScriptHandOver(this.activeTaskScript) : null;
+  }
+
   private applyPlanProgressSnapshot(snapshot: PlanProgressSnapshot): void {
     // 快照带会话内计划编号：恢复旧会话时编号接续，后续新计划不会重复编号。
     this.activePlanSeq = snapshot.planSeq ?? 1;
@@ -1863,6 +1899,7 @@ export class ChatController {
     this.pendingAutoContinue = null;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
+    this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
@@ -2125,6 +2162,7 @@ export class ChatController {
     if (!this.activeComplexPlan || this.streaming) return false;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
+    this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
@@ -2346,6 +2384,7 @@ export class ChatController {
     this.logFoldedThrough = snapshot.foldedThrough;
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
+    this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
@@ -3703,6 +3742,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     if (!this.activeComplexPlan) {
       this.detachActivePlanProgress();
       this.activePlanProgress = null;
+      this.activeTaskScript = null;
       this.activePlanCardSnapshot = null;
     }
     // Create the turn controller before any preflight await. Previously the
@@ -4777,6 +4817,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         planCard.el.remove();
         planCard = null;
         planProgress = null;
+        this.activeTaskScript = null;
         this.activePlanCardHandle = null;
         this.detachActivePlanProgress();
         this.activePlanCardSnapshot = null;
@@ -4910,9 +4951,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               const planSeq = ++this.planSeqCounter;
               this.activePlanSeq = planSeq;
               planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate, planSeq, userText);
+              this.activeTaskScript = createTaskScript(plan);
             } else if (planProgress.getSnapshot().plan !== plan) {
               // 同一规划在细化中换了步骤（planReplaced）：编号沿用，不递增。
               planProgress.dispatch({ type: 'planReplaced', plan });
+              this.recordTaskScript({ kind: 'planReplaced', plan });
             }
             if (planCard) {
               // Keep one stable, flat progress list in the transcript. Updating
@@ -5047,6 +5090,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           ? formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate)
           : undefined;
         planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild, this.activePlanSeq);
+        // 续跑轮重建的是游标模型，剧本账本要跨轮延续（同一计划的工作是连续的）。
+        // 只有剧本缺失（重载恢复）才重开一本，重开时从当前游标补一条起手信号，
+        // 免得已进行的步看起来从没开工。
+        if (!this.activeTaskScript) {
+          this.activeTaskScript = createTaskScript(this.activeComplexPlan);
+          this.recordTaskScript({ kind: 'control', marker: 'phaseStart', phase: this.activePlanNumber });
+        }
         const existingCard = this.activePlanCardHandle?.el.isConnected
           ? this.activePlanCardHandle
           : null;
@@ -5119,6 +5169,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             ? `计划 ${planNumber} 已完成，整个计划收尾中…`
             : `计划 ${planNumber} 已完成，正在准备下一个计划…`);
           planProgress?.dispatch({ type: 'phaseStarted', planNumber: planNumber + 1 });
+          this.recordTaskScript({ kind: 'control', marker: 'phaseDone', phase: planNumber });
           planTrack.completedPlan = planNumber;
           consumeDeferredSubsteps(planNumber, planNumber + 1);
         };
@@ -5133,12 +5184,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           if (marker.kind === 'substepDone') {
             const wasCurrentTodo = activeStep?.todosRequired !== false && marker.number >= 1 && marker.number <= totalTodos && todoSnapshot.currentTodo === marker.number && planProgress?.isTodoStarted(marker.number) === true;
             planProgress?.dispatch({ type: 'todoCompleted', todoNumber: marker.number });
+            this.recordTaskScript({ kind: 'control', marker: 'substepDone', phase: activePlan, substep: marker.number });
             if (wasCurrentTodo) {
               const nextTodo = planProgress?.getSnapshot().currentTodo ?? marker.number + 1;
               card.setActivity(`计划 ${activePlan} 的 Todo ${marker.number} 已完成${nextTodo <= totalTodos ? '，开始下一项…' : '，Todos 已全部完成，等待计划收尾…'}`);
             }
           } else {
             planProgress?.dispatch({ type: 'todoStarted', todoNumber: marker.number });
+            this.recordTaskScript({ kind: 'control', marker: 'substepStart', phase: activePlan, substep: marker.number });
             card.setActivity(`正在执行计划 ${activePlan} 的 Todo ${marker.number}${todoLabel ? `：${todoLabel}` : ''}…`);
           }
           if ((planProgress?.canCompleteCurrentTodos() ?? false)) {
@@ -5158,6 +5211,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
            const snapshot = modelSnapshot();
            if (!snapshot || !planTrack.phaseStarted.has(target) || target <= snapshot.currentPlan) return;
            planProgress?.dispatch({ type: 'phaseJumped', planNumber: target });
+           this.recordTaskScript({ kind: 'control', marker: 'phaseJump', phase: target });
            planTrack.deferredPhase = null;
            planTrack.deferredReason = null;
            const after = modelSnapshot();
@@ -5188,6 +5242,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             planProgress?.dispatch({ type: 'phaseStarted', planNumber: marker.number });
             const afterStart = modelSnapshot();
             if (afterStart?.currentPlan === marker.number) {
+              this.recordTaskScript({ kind: 'control', marker: 'phaseStart', phase: marker.number });
               const stepLabel = afterStart.plan.steps[marker.number - 1]?.action;
               const todosRequired = afterStart.plan.steps[marker.number - 1]?.todosRequired !== false;
               card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${todosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
@@ -5216,6 +5271,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 planProgress?.dispatch({ type: 'phaseJumped', planNumber: Math.max(before + 1, Math.min(marker.number, beforeSnapshot.plan.steps.length + 1)) });
                 const afterJump = modelSnapshot();
                 if (afterJump?.currentPlan === marker.number) {
+                  this.recordTaskScript({ kind: 'control', marker: 'phaseJump', phase: marker.number });
                   const stepLabel = afterJump.plan.steps[marker.number - 1]?.action;
                   const todosRequired = afterJump.plan.steps[marker.number - 1]?.todosRequired !== false;
                   card.setActivity(`已开始计划 ${marker.number}${stepLabel ? `：${stepLabel}` : ''}${todosRequired ? '，正在执行它的 Todos…' : '，正在执行原子任务…'}`);
@@ -5965,6 +6021,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               }
 
               }
+            // 期 2·结构账：工具结果进剧本（只记账，不说话）。写盘路径记为产出，
+            // execute_command 的命令行记为验证证据（是否验证由下游消费方判定）。
+            this.recordTaskScript({
+              kind: 'tool',
+              toolName,
+              ok: event.payload.result.success,
+              command: String(resultArgs?.command ?? '') || undefined,
+              artifact: writtenArtifactPath(toolName, resultArgs),
+            });
+            if (branchOutcome) this.recordTaskScript({ kind: 'branch', outcome: branchOutcome, toolName });
             this.recordToolActivity(
               toolName,
               resultArgs,
@@ -6120,6 +6186,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // that appears to do nothing before "passed").
               const onDeliveryStep = (step: DeliveryStepResult): void => {
                 if (gen !== this.generation) return;
+                // 交付门禁的机械验证是真证据，进剧本账（skipped 不是一次真跑过）。
+                if (step.status !== 'skipped') {
+                  this.recordTaskScript({ kind: 'verification', command: step.command, ok: step.status === 'passed' });
+                }
                 const icon = step.status === 'passed' ? '✅' : step.status === 'skipped' ? '⏭️' : '❌';
                 const dur = step.durationMs ? ` · ${(step.durationMs / 1000).toFixed(1)}s` : '';
                 this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`, false, step.status === 'failed', step.status === 'passed' ? 'success' : undefined);
@@ -6198,6 +6268,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const planFinished = planCard && hasToolSuccess && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
             const completionSnapshot = planProgress?.getSnapshot();
+            // 期 2·结构账：回合收尾是真发生的边界，剧本据此做隐式收束兜底
+            //（模型漏发 `## 计划 n 已完成` 时仍能按真实活动量记账）。
+            // 被中断 / 会话已换代时不算“回合正常收尾”——那不是干完了。
+            if (planCard && gen === this.generation && !event.payload.interrupted && !turnAsksForInput && !this.pausePlanCard) {
+              this.recordTaskScript({ kind: 'turnEnd' });
+            }
             // True when the turn-end finalize actually dispatched 'completed'
             // (needed by the auto-continue terminal gate below).
             let planMarkedCompleted = false;
@@ -6933,6 +7009,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.removeAgentActivityPanel();
     this.detachActivePlanProgress();
     this.activePlanProgress = null;
+    this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
     // 新对话 = 新的一次会话：规划编号重新起算。
     this.planSeqCounter = 0;
