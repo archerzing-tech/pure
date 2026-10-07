@@ -45,6 +45,7 @@ import {
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
+  renderArchivedRolesSection,
   renderQuarantineSection,
   renderStrategySection,
   renderStrategyTabs,
@@ -55,7 +56,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
-import { buildTrialBadges, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, startRoleTrial } from './delegableRoles';
+import { buildTrialBadges, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, restoreGeneratedRole, startRoleTrial } from './delegableRoles';
 import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
@@ -1153,10 +1154,38 @@ export class SettingsPanel {
       }
     });
 
+    // ── 13.2 归档：重新启用（一段新的试用期）──
+    // 只把旁挂账写回试用态，不碰 manifest —— 那是角色的定义，归档本来就没动它。
+    // 重新启用会把 registeredAt 重置：不重置的话下一次裁决读到的还是当年把它送进
+    // 归档的那批委派，同一个角色会被立刻再次归档（一个出不来的门）。
+    document.getElementById('evolution-roles-archived')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-restore-role]');
+      if (!btn) return;
+      event.stopPropagation();
+      const role = btn.dataset.evoRestoreRole || '';
+      if (!role) return;
+      btn.disabled = true;
+      try {
+        const restored = await restoreGeneratedRole(role);
+        this.toast(restored
+          ? t('evolution.archivedRoles.restored', '已重新启用角色 {role}——它会从头开始一段新的试用期').replace('{role}', role)
+          : t('evolution.archivedRoles.restoreFailed'));
+      } catch (err) {
+        console.error('[pure] restore role failed:', err);
+        this.toast(t('evolution.archivedRoles.restoreFailed'));
+      } finally {
+        btn.disabled = false;
+        void this.renderEvolutionDashboard();
+      }
+    });
+
     // ── 13.2 试用制：够格转正 → 落盘转正标记 ──
     // 用户点确认而不是系统自动写：转正是「这个角色从此不再是临时产物」的永久性结论，
-    // 而读数已经摆在旁边（够格转正 + 父角色对比证据）。自动归档那种会删文件的动作
-    // 另有其设计，这一刀不做。
+    // 而读数已经摆在旁边（够格转正 + 父角色对比证据）。
+    //
+    // 反方向（不达标）是**自动**的，且由空闲循环做而不是设置页做（见
+    // sleepTimeOrchestrator 的归档扫掠）；两边的不对称是有意的：转正给一个角色
+    // 永久身份，归档只是把它从可委派面摘下来、随时可恢复（隔离，不删文件）。
     document.getElementById('evolution-team')?.addEventListener('click', async (event) => {
       const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-promote-role]');
       if (!btn) return;
@@ -3493,6 +3522,35 @@ export class SettingsPanel {
         } catch (err) {
           console.warn('[pure] quarantine list failed:', err);
           quarantineEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('evolution.quarantine.unavailable', '读不到停用名单——重新进入本页再试。'))}</div>`;
+        }
+      }
+    }
+
+    // 13.2 归档：被自动停用的生成角色。数据来自同一个装载面（**含已归档的那些**
+    // ——可委派面把它们排除在外，这一节正是它们唯一还能被看见、被恢复的地方）。
+    // 与停用工具那一节同口径：总开关关着时整节隐藏（门不存在，卡也不该在）。
+    const archivedEl = document.getElementById('evolution-roles-archived');
+    if (archivedEl) {
+      const archivedSection = archivedEl.closest('.settings-section');
+      const archivedTitle = archivedSection?.previousElementSibling;
+      if (archivedSection) (archivedSection as HTMLElement).hidden = evolutionOff;
+      if (archivedTitle) (archivedTitle as HTMLElement).hidden = evolutionOff;
+      if (!evolutionOff) {
+        try {
+          const generated = await loadGeneratedRoles();
+          archivedEl.innerHTML = renderArchivedRolesSection(
+            generated
+              .filter((entry) => entry.trial.status === 'archived')
+              .map((entry) => ({
+                role: entry.def.name,
+                reason: entry.trial.reason,
+                archivedAt: entry.trial.archivedAt ?? entry.trial.decidedAt,
+              })),
+            now,
+          );
+        } catch (err) {
+          console.warn('[pure] archived roles list failed:', err);
+          archivedEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('evolution.archivedRoles.unavailable', '读不到归档名单——重新进入本页再试。'))}</div>`;
         }
       }
     }

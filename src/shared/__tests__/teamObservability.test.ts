@@ -3,7 +3,7 @@
 // 「未定价」；没有 usage 的派发显示「无数据」——后两者都不冒充 0，也不进占比
 // 的分母（与评测基线卡同一把尺子）。
 import { describe, expect, it } from 'bun:test';
-import { summarizeTeamCosts } from '../teamObservability';
+import { summarizeTeamCosts, summarizeTeamRoster } from '../teamObservability';
 import type { AgentRunObservation, DelegationObservation, PromptObservation } from '../promptObservability';
 
 const NOW = 1_700_000_000_000;
@@ -161,5 +161,34 @@ describe('summarizeTeamCosts (T4)', () => {
     expect(view.rows).toHaveLength(0);
     expect(view.hasMetered).toBe(false);
     expect(view.windowStart).toBe(NOW - 30 * DAY);
+  });
+});
+
+describe('summarizeTeamRoster：每角色的窗口下界（13.2 试用期）', () => {
+  function delegating(role: string, startedAt: number): PromptObservation {
+    return run({ startedAt, delegations: [delegation({ role, startedAt })] });
+  }
+
+  it('早于下界的委派不计入该角色，别的角色照旧', () => {
+    const roster = summarizeTeamRoster([
+      delegating('researcher', NOW - 10 * DAY),
+      delegating('researcher_focused', NOW - 10 * DAY),
+      delegating('researcher_focused', NOW - 1 * DAY),
+    ], {
+      now: NOW,
+      roles: ['researcher', 'researcher_focused'],
+      // 「重新启用」= 一段新的试用期：当年把它送进归档的那次委派不该再算数。
+      roleSince: { researcher_focused: NOW - 2 * DAY },
+    });
+    expect(roster.rows.find((row) => row.role === 'researcher_focused')?.delegations).toBe(1);
+    // 下界是**按角色**的：父角色自己的读数不该被变体的重启来回改写。
+    expect(roster.rows.find((row) => row.role === 'researcher')?.delegations).toBe(1);
+  });
+
+  it('下界表里没有的角色照旧读满窗口（手写角色没有注册时刻）', () => {
+    const roster = summarizeTeamRoster([
+      delegating('researcher', NOW - 10 * DAY),
+    ], { now: NOW, roles: ['researcher'], roleSince: {} });
+    expect(roster.rows.find((row) => row.role === 'researcher')?.delegations).toBe(1);
   });
 });

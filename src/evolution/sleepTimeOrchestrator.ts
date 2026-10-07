@@ -24,6 +24,15 @@ import {
   type ReflectionConfig,
 } from '../harness/LessonReflector';
 import { findSolidifyCandidates } from '../harness/toolSolidification';
+import { summarizeTeamRoster } from '../shared/teamObservability';
+import {
+  judgeRoleTrial,
+  shouldArchiveTrial,
+  trialWindowFloors,
+  TRIAL_WINDOW_DAYS,
+  type RoleOutcome,
+  type RoleTrialState,
+} from '../shared/roleTrial';
 import { scanSubagentAdvice, type SubagentAdvice, type SubagentAdviceSeverity } from '../shared/subagentAdvisory';
 import type { OverlayFlowOutcome, OverlayFlowResult } from '../ui/personaOverlayFlow';
 import type { PromptObservation } from '../shared/promptObservability';
@@ -198,6 +207,13 @@ export interface SleepTimeDeps {
    *  角色，于是生成角色永远到不了这条循环——而这是唯一会自动写盘的读者：设置页
    *  那半边只显示，13.2 的数据要真被裁决就得先到达这里。 */
   roleSurface?: () => Promise<string[]> | string[];
+  /** 13.2 归档扫掠 — 生成角色及其试用态。与 `roleSurface` 的差别是**含已归档**：
+   *  可委派面把它们排除在外，而裁决得看得见全部，否则一个以生成角色为父的变体
+   *  就找不到基线（屏上是「不达标」，扫掠却读成「未记父角色」）。 */
+  generatedRoles?: () => Promise<GeneratedRoleTrialRef[]> | GeneratedRoleTrialRef[];
+  /** 执行归档：写旁挂账 `status=archived`（**隔离，不删文件**），成功返回 true。
+   *  无此缝的宿主跳过整段扫掠 —— 只读的宿主不该凭空多出一个写面。 */
+  archiveRole?: (role: string, evidence: string) => Promise<boolean>;
   /** 13.3 overlay 全流程（起草→校验→A/B→确认→落盘）。宿主装配
    *  runPersonaOverlayFlow；confirm 绑定为 async () => true（走到 confirm
    *  即门禁 verdict==='allow'，符合「门禁通过即自动落盘」立场）。 */
@@ -226,7 +242,14 @@ export type SleepTimeAction =
   | { kind: 'overlay-written'; role: string }
   | { kind: 'overlay-deferred'; role: string; outcome: OverlayFlowOutcome; backoffMs: number }
   | { kind: 'tool-solidified'; name: string }
-  | { kind: 'solidify-deferred'; procedureId: string; outcome: string; backoffMs: number };
+  | { kind: 'solidify-deferred'; procedureId: string; outcome: string; backoffMs: number }
+  | { kind: 'role-archived'; role: string; evidence: string };
+
+/** 一个生成角色的试用读数（扫掠的输入；形状由 `trialWindowFloors` 辖定）。 */
+export interface GeneratedRoleTrialRef {
+  name: string;
+  trial: RoleTrialState;
+}
 
 export type SessionSkipReason =
   | 'cursor' // 水位/尾表已覆盖
@@ -245,6 +268,8 @@ export interface CycleResult {
   overlaysWritten: number;
   /** P2-2 — 本轮固化的工具数。 */
   solidifiedTools: number;
+  /** 13.2 — 本轮自动归档的生成角色数。 */
+  rolesArchived: number;
   /** 哪个预算维度先到顶（null = 自然跑完）。 */
   budgetExhausted: 'wall-clock' | 'sessions' | 'llm' | null;
   aborted: boolean;
@@ -277,6 +302,7 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
     skillGatesApplied: 0,
     overlaysWritten: 0,
       solidifiedTools: 0,
+    rolesArchived: 0,
     budgetExhausted: null,
     aborted: false,
     skippedRunning: false,
@@ -496,6 +522,57 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
           emit({ kind: 'overlay-deferred', role: advice.role, outcome: flow.outcome, backoffMs: OVERLAY_BACKOFF_MS });
         }
         await saveCursor();
+      }
+
+      // ── 13.2 归档扫掠：攒够样本仍不达标 → 自动归档（隔离，不删文件）──
+      // 放在这条循环里，因为它是全仓唯一会自动写盘的读者（会写 overlay、会固化
+      // 工具），试用制的结论就该同样在这里执行。不接这一半，13.2 的裁决就只是屏上
+      // 的一句话：一个「只进不出」的试用制里，失败的生成角色会一直留在可委派面里
+      // 继续吃委派，而系统对它唯一的表达是「不达标」三个字。
+      if (deps.generatedRoles && deps.archiveRole && !aborted()) {
+        let generated: GeneratedRoleTrialRef[] = [];
+        try {
+          generated = await deps.generatedRoles();
+        } catch (err) {
+          result.errors.push(`generated roles failed: ${errorMessage(err)}`);
+        }
+        if (generated.length > 0) {
+          // 与仪表盘角标**同一份**读数：同一角色面（内建 + 全部生成角色，含已归档
+          // ——否则以生成角色为父的变体找不到基线）、同一窗口下界。两边各算一遍就会
+          // 出现「屏上写着继续攒样本，系统却已经把它归档了」。
+          const now = nowFn();
+          const roster = summarizeTeamRoster(records, {
+            now,
+            windowDays: TRIAL_WINDOW_DAYS,
+            roles: [...(roles ?? []), ...generated.map((role) => role.name)],
+            roleSince: trialWindowFloors(generated, now),
+          });
+          const byRole: Record<string, RoleOutcome> = {};
+          for (const row of roster.rows) {
+            byRole[row.role] = { delegations: row.delegations ?? 0, successes: row.successes };
+          }
+          for (const { name, trial } of generated) {
+            if (aborted()) { result.aborted = true; break; }
+            const verdict = judgeRoleTrial({
+              state: trial,
+              outcome: byRole[name] ?? { delegations: 0, successes: 0 },
+              baselineByRole: byRole,
+            });
+            // `shouldArchiveTrial` 只认「样本够但不达标」：accumulating 与
+            // no-baseline 都不动——把「没测到」读成「失败」和读成「通过」一样错。
+            if (!shouldArchiveTrial(verdict)) continue;
+            try {
+              const archived = await deps.archiveRole(name, verdict.evidence);
+              if (archived) {
+                result.rolesArchived += 1;
+                emit({ kind: 'role-archived', role: name, evidence: verdict.evidence });
+              }
+            } catch (err) {
+              // 一个角色归档失败不该拖住其他角色 —— 与循环「永不 throw」同款。
+              result.errors.push(`archive role ${name} failed: ${errorMessage(err)}`);
+            }
+          }
+        }
       }
     }
 

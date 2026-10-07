@@ -36,7 +36,7 @@ import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { compileExternalTools } from '../harness/externalTools';
 import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
-import { loadExternalSubagents } from './delegableRoles';
+import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
@@ -680,8 +680,25 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
  * The scan itself lives in `delegableRoles` so the settings dashboard measures
  * the SAME role surface this session delegates into — two private scans of the
  * same directory is how those two would drift into disagreeing about which
- * roles exist. */
-const loadGuiExternalSubagents = loadExternalSubagents;
+ * roles exist.
+ *
+ * This is the **delegable** view, not the scan: an archived role is still on disk
+ * and still on the dashboard (it has to be, or nothing could offer the way back),
+ * but it must not be registered here — a role the model can still delegate to is
+ * not archived in any sense the user would recognize. */
+const loadGuiExternalSubagents = delegableExternalSubagents;
+
+/**
+ * The scan, unfiltered: every generated role on disk, archived ones included.
+ *
+ * Needed for the **persona** surface, which is not the delegation surface. An
+ * overlay is part of a role's definition and the role still exists after it is
+ * archived — compiling overlays against the delegable view would log
+ * 「unknown role」 for a role that plainly exists (it is just off the team), and
+ * the warning would be wrong about the cause. Registration is the only thing
+ * archiving is allowed to change.
+ */
+const loadGuiGeneratedRoles = loadGeneratedRoles;
 
 // ── 阶段 13.4 — external script tools from ~/.pure/tools/<name>/TOOL.json ──
 // Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;
@@ -4435,7 +4452,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 13.3 — overlays load alongside the roles; unknown-role files are
       // rejected at compile time against the full delegable surface.
       const personaOverlays = await loadGuiPersonaOverlays(
-        [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalSubagents].map((d) => d.name),
+        [
+          ...BUILT_IN_SUBAGENTS,
+          ...CODING_AGENT_ROLES,
+          ...(await loadGuiGeneratedRoles()).map((entry) => entry.def),
+        ].map((def) => def.name),
       );
       const subagents = (() => {
         const keep = allSubagents.filter((def) => {

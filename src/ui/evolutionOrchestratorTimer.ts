@@ -31,7 +31,8 @@ import {
   type SleepTimeSessionRef,
   type SleepTimeTurnInput,
 } from '../evolution/sleepTimeOrchestrator';
-import { loadDelegableRoleNames } from './delegableRoles';
+import { archiveGeneratedRole, loadDelegableRoleNames, loadGeneratedRoles } from './delegableRoles';
+import { t } from '../shared/i18n';
 import { buildOverlayFlowDeps } from './overlayFlowHost';
 import { runPersonaOverlayFlow } from './personaOverlayFlow';
 import { createLLMAdapter } from './chat';
@@ -55,6 +56,10 @@ export interface OrchestratorTimerHost {
   isBusy: () => boolean;
   /** 当前工作区（记忆按项目隔离，会话与反思都归属它）。 */
   getWorkspace: () => string;
+  /** 「出卡」这半句的落点：一条会自己消失的通知（同 13.4 停用门的做法）。
+   *  归档会改变用户的能力面——那个角色从此不再被委派——只写控制台等于替用户
+   *  静默改了他的团队；没有这个缝的宿主（测试）只是少一条通知，不影响归档本身。 */
+  notify?: (message: string, durationMs?: number) => void;
 }
 
 let host: OrchestratorTimerHost = { isBusy: () => false, getWorkspace: () => '' };
@@ -201,6 +206,10 @@ async function buildGuiSleepTimeDeps(cfg: PureConfig): Promise<SleepTimeDeps> {
     // 生成角色也在可委派面内：这是唯一会自动写盘的观察者，不接就等于
     // 13.2 的数据只通到设置页的显示层，通不到真正会动手的那一半。
     roleSurface: () => loadDelegableRoleNames(),
+    // 13.2 归档扫掠：可委派面只管「能派给谁」，裁决还要看得见已归档的那些
+    // （否则以生成角色为父的变体找不到基线）。
+    generatedRoles: async () => (await loadGeneratedRoles()).map((entry) => ({ name: entry.def.name, trial: entry.trial })),
+    archiveRole: (role, evidence) => archiveGeneratedRole(role, evidence),
     observations: async () => {
       try {
         return (await readGuiObservations()).records;
@@ -276,6 +285,14 @@ async function buildGuiSleepTimeDeps(cfg: PureConfig): Promise<SleepTimeDeps> {
     budget: SLEEP_TIME_BUDGETS.gui,
     onAction: (action) => {
       console.info(`[pure] evolution cycle: ${action.kind}`);
+      if (action.kind === 'role-archived') {
+        host.notify?.(
+          t('evolution.team.archivedToast', '已自动归档角色 {role}：{evidence}。它已从可委派角色里移除，可在设置的进化仪表盘里重新启用。')
+            .replace('{role}', action.role)
+            .replace('{evidence}', action.evidence),
+          12_000,
+        );
+      }
     },
   };
 }

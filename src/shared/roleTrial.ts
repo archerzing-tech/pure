@@ -5,7 +5,8 @@
 // "试用"状态注册（卡片带试用角标），接 5–10 个真实委派，结局数据 ≥ 同类现有角色基线
 // 才转正；不达标自动归档并出卡说明。」
 //
-// 本模块只做**判**，「转正」的写盘与「归档」的删除都在宿主侧。三条纪律：
+// 本模块只做**判**：转正与归档的写盘都在宿主侧，而且两者都是写旁挂账的一个状态
+// ——归档**不是删除**（见 `RoleTrialStatus`）。三条纪律：
 //
 //  1. **基线是父角色自己的数据，不是某个统计口径**。收窄变体的产生方式就是
 //     「原角色在掉链子」（`scanSubagentAdvice` 的失败画像），所以它该被比过的对象
@@ -52,7 +53,14 @@ export const TRIAL_MIN_DELEGATIONS = 5;
 /** 只看最近这么久的委派——半年前的样本不能给今天的角色背书。 */
 export const TRIAL_WINDOW_DAYS = 30;
 
-export type RoleTrialStatus = 'trial' | 'promoted';
+/**
+ * `archived` is the negative verdict: enough samples, below the parent's own
+ * record. It is **isolation, not deletion** — the manifest is still there, the
+ * role simply stops being delegable. Same discipline as the 13.4 tool gate
+ * (「自动停用（隔离，不删除）+ 出卡；用户可看可删可重新启用」): a lifecycle the
+ * system can undo beats one that can only be undone from the filesystem.
+ */
+export type RoleTrialStatus = 'trial' | 'promoted' | 'archived';
 
 export interface RoleTrialState {
   status: RoleTrialStatus;
@@ -60,9 +68,18 @@ export interface RoleTrialState {
   parentRole?: string;
   /** 注册时刻（ms）。用于「试用了多久」与窗口裁剪。 */
   registeredAt?: number;
-  /** 裁决时刻与理由（转正时写）。 */
+  /** 裁决时刻与理由（转正/归档时写）。 */
   decidedAt?: number;
   reason?: string;
+  /** 归档时刻（ms）。单独一格，是因为「什么时候被停用」与「什么时候做过裁决」
+   *  在重新启用之后不再是一件事——恢复会把 decidedAt 清掉。 */
+  archivedAt?: number;
+}
+
+/** 归档态 = 这个角色已从可委派面移除。消费者（装载面、观测切片、仪表盘）都用
+ *  这一个判断，免得三处各自比字符串。 */
+export function isRoleArchived(state: RoleTrialState): boolean {
+  return state.status === 'archived';
 }
 
 /**
@@ -88,14 +105,57 @@ export function trialStateFromMarker(marker: string | object | null | undefined)
   const m = parsed as Record<string, unknown>;
   const num = (value: unknown): number | undefined =>
     typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  // Unknown statuses still read as `trial` — a value we do not understand must
+  // never be promoted into a permanent state. `archived` is understood, so it
+  // survives the round trip; it is the one status that *hides* a role, and
+  // reading it back as `trial` would silently re-arm a retired role.
+  const status: RoleTrialStatus = m.status === 'promoted'
+    ? 'promoted'
+    : m.status === 'archived'
+      ? 'archived'
+      : 'trial';
   const state: RoleTrialState = {
-    status: m.status === 'promoted' ? 'promoted' : 'trial',
+    status,
     ...(typeof m.parentRole === 'string' && m.parentRole ? { parentRole: m.parentRole } : {}),
     ...(num(m.registeredAt) !== undefined ? { registeredAt: num(m.registeredAt) } : {}),
     ...(num(m.decidedAt) !== undefined ? { decidedAt: num(m.decidedAt) } : {}),
     ...(typeof m.reason === 'string' && m.reason ? { reason: m.reason } : {}),
+    ...(num(m.archivedAt) !== undefined ? { archivedAt: num(m.archivedAt) } : {}),
   };
   return state;
+}
+
+/**
+ * 试用期读数的窗口下界：「最近 N 天」与「注册时刻」取较晚者。
+ *
+ * 存在的理由只有一个：**重新启用必须是一段新的试用期**。没有它，恢复后的第一
+ * 次裁决读到的还是当年那批把角色送进归档的委派，于是同一个角色会在下一个空闲循环
+ * 里被立刻再次归档——一个只会自我复读的门。
+ *
+ * 手写角色没有 registeredAt，于是照旧读满窗口：它们的全部历史就是仅有的证据。
+ */
+export function trialWindowStart(state: RoleTrialState, now: number, windowDays: number = TRIAL_WINDOW_DAYS): number {
+  const recent = now - windowDays * 24 * 60 * 60 * 1000;
+  return state.registeredAt !== undefined && state.registeredAt > recent ? state.registeredAt : recent;
+}
+
+/**
+ * 每角色的窗口下界表，喂给 `summarizeTeamRoster({ roleSince })`。
+ *
+ * 一处算、两处用（仪表盘角标与空闲循环的归档扫掠）——两边各自算一遍正是
+ * 「屏上写着『继续攒样本』、系统却已经把它归档了」的来源。
+ */
+export function trialWindowFloors(
+  roles: readonly { name: string; trial: RoleTrialState }[],
+  now: number,
+  windowDays: number = TRIAL_WINDOW_DAYS,
+): Record<string, number> {
+  const floors: Record<string, number> = {};
+  for (const { name, trial } of roles) {
+    if (trial.registeredAt === undefined) continue;
+    floors[name] = trialWindowStart(trial, now, windowDays);
+  }
+  return floors;
 }
 
 export function renderTrialMarker(state: RoleTrialState): string {
@@ -111,6 +171,8 @@ export interface RoleOutcome {
 export type RoleTrialVerdict =
   /** 已转正，或本来就已转正——不需要再裁决。 */
   | { kind: 'already-promoted' }
+  /** 已归档——不再裁决，也不再被委派。 */
+  | { kind: 'already-archived' }
   /** 试用样本还不够，继续攒。 */
   | { kind: 'accumulating'; delegations: number; need: number }
   /** 父角色没有可比的基线，不裁决（不是通过，也不是失败）。 */
@@ -138,6 +200,10 @@ export function judgeRoleTrial(input: {
 }): RoleTrialVerdict {
   const need = input.minDelegations ?? TRIAL_MIN_DELEGATIONS;
   if (input.state.status === 'promoted') return { kind: 'already-promoted' };
+  // 归档过的角色不再参与裁决。少了这一句，一个已归档的角色会被继续判成
+  // 「够格转正」——屏上会同时写着「已归档」和一个转正按钮，而按下去是给一个
+  // 已被停用的角色发通行证。
+  if (input.state.status === 'archived') return { kind: 'already-archived' };
   if (input.outcome.delegations < need) {
     return { kind: 'accumulating', delegations: input.outcome.delegations, need };
   }
@@ -158,6 +224,18 @@ export function judgeRoleTrial(input: {
     : { kind: 'below-baseline', evidence };
 }
 
+/**
+ * 该不该把它归档？只有「样本够、但没赢过父角色」这一种结局算数。
+ *
+ * 刻意**不**包含 accumulating / no-baseline：那两种是「还没测到」，把「没测到」
+ * 读成「失败」和读成「通过」一样错，只是方向相反。
+ */
+export function shouldArchiveTrial(
+  verdict: RoleTrialVerdict,
+): verdict is { kind: 'below-baseline'; evidence: string } {
+  return verdict.kind === 'below-baseline';
+}
+
 /** 卡片上给人看的那一行状态文案所需的数据。 */
 export interface RoleTrialBadge {
   status: RoleTrialStatus;
@@ -175,6 +253,8 @@ export function trialBadge(
   switch (verdict.kind) {
     case 'already-promoted':
       return badge('已转正');
+    case 'already-archived':
+      return badge('已归档');
     case 'accumulating':
       return badge(`试用中 · ${verdict.delegations}/${verdict.need} 次`);
     case 'no-baseline':
@@ -196,4 +276,14 @@ export function trialBadge(
  */
 export function trialPromotionReason(role: string, evidence: string): string {
   return `角色 "${role}" 已转正：${evidence}。它不再带试用角标。`;
+}
+
+/**
+ * 归档理由，和转正理由同理：**把当时那组数字落盘**，而不是一句结论。
+ *
+ * 唯一的差别是这里还有半句「怎么回来」——归档会改变用户的能力面（这个角色
+ * 不再被委派），一条只说「已归档」的记录等于让用户自己去找回它的路径。
+ */
+export function trialArchiveReason(role: string, evidence: string): string {
+  return `角色 "${role}" 已归档：${evidence}。它已从可委派角色里移除，可在仪表盘里重新启用。`;
 }

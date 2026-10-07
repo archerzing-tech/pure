@@ -10,8 +10,11 @@
 // what it actually registered; the single scan that knows that lives here, so
 // the chat session and the settings dashboard cannot drift into two truths.
 //
-// Deleting a manifest makes the role disappear on the next scan, exactly like
-// the rest of the 13.2 half — this module adds no lifecycle of its own.
+// Role lifecycle lives here too (13.2's second half): the trial sidecar records
+// `trial` / `promoted` / `archived`, and archiving is isolation — the role drops
+// off the delegable surface while its manifest stays put, restorable from the
+// dashboard. Deleting a manifest still makes the role disappear on the next scan;
+// that remains the only way to get rid of one for good.
 
 import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
@@ -22,14 +25,17 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/Subagent
 import { BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import type { SubagentDefinition } from '../coding-agent/types';
 import {
+  isRoleArchived,
   judgeRoleTrial,
   renderTrialMarker,
   trialBadge,
   trialStateFromMarker,
+  trialWindowFloors,
   TRIAL_WINDOW_DAYS,
   type RoleOutcome,
   type RoleTrialBadge,
   type RoleTrialState,
+  trialArchiveReason,
   trialMarkerFileName,
   trialPromotionReason,
 } from '../shared/roleTrial';
@@ -54,9 +60,20 @@ export function builtinRoleNames(): string[] {
  */
 const BUILT_IN_TOOL_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TOOLS.map((tool) => tool.name.toLowerCase()));
 
+/**
+ * Built-in roles **and** built-in tools: the reserved names a generated artifact
+ * may never take. Read side (the scan below) rejects them at compile time so the
+ * user is told; write side (trial / promote / archive / restore) must guard too,
+ * because those write a sidecar for a role that only exists in the user's
+ * imagination otherwise.
+ */
+const RESERVED_ROLE_NAMES: ReadonlySet<string> = new Set([...builtinRoleNames(), ...BUILT_IN_TOOL_NAMES]);
+
 /** One delegable role plus what the system knows about it beyond its definition.
  *  `trial` is the 13.2 admission state; it is absent-free by design (a role with no
- *  marker is on trial), so consumers must not treat `undefined` as "unknown". */
+ *  marker is on trial), so consumers must not treat `undefined` as "unknown".
+ *  `archived` is also a real state here, not a missing one — see
+ *  `delegableExternalSubagents` for the difference between the two views. */
 export interface DelegableRole {
   def: SubagentDefinition;
   trial: RoleTrialState;
@@ -112,7 +129,7 @@ export function loadExternalSubagents(): Promise<DelegableRole[]> {
       // this surface reached the observation slices every shell call in the
       // session would render as a "role delegation". Rejecting at compile time
       // means the user is told, rather than silently measured wrong.
-      const reserved = [...builtinRoleNames(), ...BUILT_IN_TOOL_NAMES];
+      const reserved = [...RESERVED_ROLE_NAMES];
       const { defs, errors } = compileExternalSubagents(sources ?? [], reserved);
       for (const line of errors) console.warn(`[external-subagents] ${line}`);
       // Belt and braces for a manifest directory that predates this guard.
@@ -137,16 +154,34 @@ export function loadExternalSubagents(): Promise<DelegableRole[]> {
 /**
  * Every role name the host can delegate to, generated ones included. Pass this
  * to the observation slices; omitting it falls back to the built-in eight.
+ * **Archived roles are not in here** — they are off the team on purpose.
  */
 export async function loadDelegableRoleNames(): Promise<string[]> {
-  const external = await loadExternalSubagents();
+  const external = await delegableExternalSubagents();
   return [...builtinRoleNames(), ...external.map((entry) => entry.def.name)];
 }
 
 /**
- * The generated roles and their trial states. **Promoted roles stay in this
- * list** — promotion removes the badge, not the role; a role that vanishes from
- * the roster because it was promoted would be the most confusing possible outcome.
+ * The generated roles a session may actually delegate to: everything the scan
+ * found **minus the archived ones**.
+ *
+ * This is the split that makes archiving mean anything. One scan answers "what is
+ * on disk" (the source of truth the dashboard needs, archived roles included),
+ * and this view answers "what is on the team" (what gets registered for
+ * delegation). Filtering inside the scan instead would hide an archived role from
+ * the very screen that is supposed to offer to bring it back.
+ */
+export async function delegableExternalSubagents(): Promise<DelegableRole[]> {
+  return (await loadExternalSubagents()).filter((entry) => !isRoleArchived(entry.trial));
+}
+
+/**
+ * The generated roles and their trial states, **archived ones included**.
+ * **Promoted roles stay in this list** too — promotion removes the badge, not the
+ * role; a role that vanishes from the roster because it was promoted would be the
+ * most confusing possible outcome. Archived roles need to stay for the same
+ * reason: the dashboard has to be able to show what the system retired and offer
+ * the way back.
  */
 export async function loadGeneratedRoles(): Promise<DelegableRole[]> {
   return loadExternalSubagents();
@@ -173,10 +208,15 @@ export function buildTrialBadges(
   // the named `delegations` array. Using it here made the trial verdict read
   // zero delegations on real data — the badge would sit at "0/5" forever and the
   // promotion path would be unreachable in production.
+  //
+  // `roleSince` bounds each trial role's window at its own registration moment,
+  // so a restored role starts a genuinely new trial instead of re-reading the
+  // delegations that archived it.
   const roster = summarizeTeamRoster(records, {
     now,
     windowDays: TRIAL_WINDOW_DAYS,
     roles: surface,
+    roleSince: trialWindowFloors(roles.map(({ def, trial }) => ({ name: def.name, trial })), now),
   });
   const byRole: Record<string, RoleOutcome> = {};
   for (const row of roster.rows) {
@@ -213,7 +253,7 @@ export function buildTrialBadges(
 export async function promoteGeneratedRole(role: string, evidence?: string): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   if (!evolutionEnabled()) return false;
-  if (ROLE_NAME_RE.test(role) && !BUILT_IN_TOOL_NAMES.has(role.toLowerCase())) {
+  if (ROLE_NAME_RE.test(role) && !RESERVED_ROLE_NAMES.has(role)) {
     const core = await loadTauriCore();
     if (!core) return false;
     const pureHome = await join(await homeDir(), '.pure');
@@ -252,6 +292,111 @@ export async function promoteGeneratedRole(role: string, evidence?: string): Pro
 }
 
 /**
+ * Archive a role: same sidecar, a different verdict — **isolation, not deletion**.
+ *
+ * The manifest is untouched. What changes is that the role drops off the
+ * delegable surface (`delegableExternalSubagents`), which is the entire point of
+ * 13.2's 「不达标自动归档」: a variant that lost to the role it was derived from
+ * should stop consuming delegations, and a screen that says 「不达标」 while the
+ * role keeps taking work is not a lifecycle, just a label.
+ *
+ * Why not delete the manifest, as the design's wording (「自动归档」) could be read
+ * to mean: deletion is a one-way door into the user's own file, it needs a
+ * recursive host delete command this gate has no other use for, and the 13.4
+ * tool gate already settled the same question the same way (隔离，不删除；用户可看
+ * 可删可重新启用). Restore is one write; 删文件即消失 still holds for anyone who
+ * wants it gone for good.
+ *
+ * The role must still exist on disk. A sidecar that outlives its manifest would
+ * be an archive for a role nobody has.
+ */
+export async function archiveGeneratedRole(role: string, evidence?: string): Promise<boolean> {
+  if (!isTauriRuntime() || !evolutionEnabled()) return false;
+  if (!ROLE_NAME_RE.test(role) || RESERVED_ROLE_NAMES.has(role)) return false;
+  const core = await loadTauriCore();
+  if (!core) return false;
+  const pureHome = await join(await homeDir(), '.pure');
+  const markerPath = `subagents/${trialMarkerFileName(role)}`;
+  // Read-then-write on purpose: a hand-written role has no sidecar, and archiving
+  // one is legitimate — but if we wrote from scratch we would also throw away a
+  // `parentRole`/`registeredAt` a hand-edit had put there.
+  let previous: RoleTrialState = { status: 'trial' };
+  try {
+    const raw = await core.invoke<string>('read_file', { workspace: pureHome, path: markerPath });
+    previous = trialStateFromMarker(JSON.parse(raw));
+  } catch {
+    // No sidecar yet — first verdict for this role.
+  }
+  try {
+    await core.invoke('read_file', { workspace: pureHome, path: `subagents/${role}.json` });
+  } catch {
+    return false; // the manifest is gone; nothing to archive
+  }
+  const now = Date.now();
+  const next: RoleTrialState = {
+    ...previous,
+    status: 'archived',
+    decidedAt: now,
+    archivedAt: now,
+    // 落盘**当时那组数字**（与转正同理）：下次有人问「凭什么把它归档」，账上有答案，
+    // 而不是一句「不达标」。
+    reason: evidence
+      ? trialArchiveReason(role, evidence)
+      : t('evolution.team.archiveReason', '结局数据低于父角色，已自动归档'),
+  };
+  await core.invoke('write_file', { workspace: pureHome, path: markerPath, content: renderTrialMarker(next) });
+  // Writes change what the scan would return; without this the role keeps being
+  // offered for delegation until the next app start — i.e. the archive does
+  // nothing today.
+  invalidateExternalSubagents();
+  return true;
+}
+
+/**
+ * Bring an archived role back: a **new trial**, not a resumed one.
+ *
+ * `registeredAt` is reset, and that reset is the whole substance of "restore":
+ * the trial window is bounded at registration (`trialWindowStart`), so without it
+ * the next verdict would read the very delegations that produced the archive and
+ * the gate would archive the role again on its next idle pass — a loop the user
+ * could never leave. Clearing `decidedAt`/`reason` follows from the same idea: a
+ * live trial should not carry a past verdict around as if it were current.
+ *
+ * `parentRole` is preserved — the lineage is a fact about the role, not about the
+ * verdict, and dropping it would strand the restored role at 「未记父角色」 with
+ * no way back.
+ */
+export async function restoreGeneratedRole(role: string): Promise<boolean> {
+  if (!isTauriRuntime() || !evolutionEnabled()) return false;
+  if (!ROLE_NAME_RE.test(role) || RESERVED_ROLE_NAMES.has(role)) return false;
+  const core = await loadTauriCore();
+  if (!core) return false;
+  const pureHome = await join(await homeDir(), '.pure');
+  const markerPath = `subagents/${trialMarkerFileName(role)}`;
+  let previous: RoleTrialState;
+  try {
+    const raw = await core.invoke<string>('read_file', { workspace: pureHome, path: markerPath });
+    previous = trialStateFromMarker(JSON.parse(raw));
+  } catch {
+    return false; // no sidecar = nothing that was ever archived
+  }
+  if (!isRoleArchived(previous)) return false; // only an archived role can be restored
+  try {
+    await core.invoke('read_file', { workspace: pureHome, path: `subagents/${role}.json` });
+  } catch {
+    return false; // the manifest is gone; bring nothing back
+  }
+  const next: RoleTrialState = {
+    ...(previous.parentRole ? { parentRole: previous.parentRole } : {}),
+    status: 'trial',
+    registeredAt: Date.now(),
+  };
+  await core.invoke('write_file', { workspace: pureHome, path: markerPath, content: renderTrialMarker(next) });
+  invalidateExternalSubagents();
+  return true;
+}
+
+/**
  * Start a role's trial period: write the sidecar with the parent it was derived
  * from.
  *
@@ -268,7 +413,7 @@ export async function promoteGeneratedRole(role: string, evidence?: string): Pro
  */
 export async function startRoleTrial(role: string, parentRole: string): Promise<boolean> {
   if (!isTauriRuntime() || !evolutionEnabled()) return false;
-  if (!ROLE_NAME_RE.test(role)) return false;
+  if (!ROLE_NAME_RE.test(role) || RESERVED_ROLE_NAMES.has(role)) return false;
   // 血缘校验：模型起草那条路可以自取名字（prompt 里明写 "Append _v2 unless you
   // are deliberately renaming"），于是 `startRoleTrial(draft.name, advice.role)`
   // 可能把一个与父角色毫无关系的角色绑成父子。裁决会拿不相干角色的战绩当基线
@@ -302,11 +447,16 @@ const ROLE_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
 
 /**
  * Does `role` read as a variant of `parentRole`? The deterministic draft is
- * exactly `<parent>_focused`; the model path is told to append `_v2`. So the
- * name must *start with* the parent. Anything else is a rename, and a rename is
- * not evidence of lineage — the advice card diagnosed one role, and a different
- * name is not that role's variant.
+ * exactly `<parent>_focused`; the model path is told to append `_v2`. So the name
+ * must start with the parent **followed by a separator**. Anything else is a
+ * rename, and a rename is not evidence of lineage — the advice card diagnosed one
+ * role, and a different name is not that role's variant.
+ *
+ * The separator is not pedantry: a bare prefix test says `researcherfoo` derives
+ * from `researcher`, and a lineage claim is what unlocks the baseline comparison
+ * — the wrong parent means the verdict is computed against an unrelated role's
+ * record while still reading like a proper two-sided comparison.
  */
 export function derivesFrom(role: string, parentRole: string): boolean {
-  return parentRole.length > 0 && role.startsWith(parentRole) && role.length > parentRole.length;
+  return parentRole.length > 0 && role.startsWith(`${parentRole}_`) && role.length > parentRole.length + 1;
 }

@@ -10,6 +10,7 @@ import {
   formatPercent,
   formatSteps,
   renderAppliedAdviceSection,
+  renderArchivedRolesSection,
   renderBaselineSection,
   renderErrorClusters,
   renderExperienceList,
@@ -782,5 +783,48 @@ describe('renderTeamCostSection (T4)', () => {
     const html = renderTeamCostSection([legacy], { now: T4_NOW });
     expect(html).toContain('还没有带 token 拆分的委派记录');
     expect(html).not.toContain('<tbody>');
+  });
+});
+
+describe('renderArchivedRolesSection（13.2 归档）', () => {
+  const A_NOW = 1_700_000_000_000;
+
+  it('空列表说的是「没有角色被归档过」，且不给任何恢复动作', () => {
+    const html = renderArchivedRolesSection([], A_NOW);
+    expect(html).toContain('没有被自动归档的角色');
+    expect(html).toContain('5 次'); // 门槛写在空态里，用户才知道这道门什么时候会响
+    expect(html).not.toContain('data-evo-restore-role');
+  });
+
+  it('一行带齐三件事：为什么归档（当时那组数字）、怎么回来、不想留怎么办', () => {
+    const html = renderArchivedRolesSection([{
+      role: 'researcher_focused',
+      reason: '角色 "researcher_focused" 已归档：本角色 6 次委派成功 17%（1/6）…',
+      archivedAt: A_NOW - 3 * 24 * 3600 * 1000,
+    }], A_NOW);
+    expect(html).toContain('researcher_focused');
+    expect(html).toContain('已归档');
+    // 证据进 title/内容：只说「已归档」等于让用户自己去找原因。
+    expect(html).toContain('17%');
+    expect(html).toContain('data-evo-restore-role="researcher_focused"');
+    // 彻底删掉走「删文件即消失」的设计口径，不新增递归删除的宿主命令。
+    expect(html).toContain('~/.pure/subagents/researcher_focused.json');
+    expect(html).toContain('3 天前');
+  });
+
+  it('没有理由时诚实写「没有留下理由」，而不是编一个', () => {
+    const html = renderArchivedRolesSection([{ role: 'r_x' }], A_NOW);
+    expect(html).toContain('没有留下归档理由');
+    expect(html).toContain('—'); // 没有时间戳就不装成「刚刚」
+  });
+
+  it('理由里的 HTML 被转义（它与旁挂账一样是本地文件内容）', () => {
+    const html = renderArchivedRolesSection([{
+      role: 'r_x',
+      reason: '<img src=x onerror=alert(1)>',
+      archivedAt: A_NOW,
+    }], A_NOW);
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain('&lt;img');
   });
 });

@@ -852,7 +852,14 @@ function deferToIdle(fn: () => void): void {
       // Idle sleep-time evolution: reflect on finished sessions / route advice
       // while nobody is chatting (30min min gap, busy ⇒ yield). See
       // src/ui/evolutionOrchestratorTimer.ts.
-      startEvolutionOrchestratorTimer({ isBusy: () => chat.isStreaming(), getWorkspace: () => chat.getWorkspace() });
+      // `notify` is the 13.2 archive gate's "出卡": archiving takes a role off the
+      // delegation surface, and the user has to hear about that from the app, not
+      // from a tool call that stopped happening.
+      startEvolutionOrchestratorTimer({
+        isBusy: () => chat.isStreaming(),
+        getWorkspace: () => chat.getWorkspace(),
+        notify: showToast,
+      });
       // Stats panel: subscribe to per-session updates + draw the empty state.
       chat.onSessionStatsChanged(() => renderSessionStats());
       chat.onWorkspaceSnapshotChanged((available) => {

@@ -500,3 +500,157 @@ describe('转正落盘要留下「凭什么」', () => {
     });
   });
 });
+
+describe('13.2 归档：隔离不删，且可重新启用', () => {
+  function setEvolution(on: boolean): void {
+    evolution = on;
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: on } });
+    invalidateConfigCache();
+  }
+  function seedRole(role = 'researcher_focused', marker?: Record<string, unknown>): void {
+    files[`subagents/${role}.json`] = '{"version":1}';
+    if (marker) files[`subagents/${role}.trial.json`] = JSON.stringify(marker);
+  }
+  function trialWrites(): typeof writes {
+    return writes.filter((w) => w.path.endsWith('.trial.json'));
+  }
+
+  it('归档只改旁挂账：manifest 逐字节不动，状态变 archived 且留下理由', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole('researcher_focused', { status: 'trial', parentRole: 'researcher', registeredAt: 111 });
+      const manifestPath = 'subagents/researcher_focused.json';
+      const before = files[manifestPath];
+
+      const evidence = '本角色 6 次委派成功 17%（1/6），父角色 researcher 12 次成功 83%（10/12）';
+      expect(await mod.archiveGeneratedRole('researcher_focused', evidence)).toBe(true);
+      expect(trialWrites()).toHaveLength(1);
+      const written = JSON.parse(trialWrites()[0].content);
+      expect(written.status).toBe('archived');
+      // 血缘是角色的事实，不是裁决的附属品：归档不该把它抹掉。
+      expect(written.parentRole).toBe('researcher');
+      expect(written.registeredAt).toBe(111);
+      expect(typeof written.archivedAt).toBe('number');
+      expect(written.reason).toContain(evidence);
+      // 隔离而不是删除：manifest 是用户的文件，这道门不碰它。
+      expect(files[manifestPath]).toBe(before);
+    });
+  });
+
+  it('归档把角色从可委派面拿掉，但它仍留在仪表盘读得到的那份名单里', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole();
+      expect(await mod.loadDelegableRoleNames()).toContain('researcher_focused');
+
+      expect(await mod.archiveGeneratedRole('researcher_focused')).toBe(true);
+
+      // 不清缓存：归档必须自己失效缓存，否则「今天不再被委派」不成立，
+      // 而这一刀的全部意义就是不成立。
+      expect(await mod.loadDelegableRoleNames()).not.toContain('researcher_focused');
+      const generated = await mod.loadGeneratedRoles();
+      expect(generated.map((entry) => entry.def.name)).toContain('researcher_focused');
+      expect(generated.find((entry) => entry.def.name === 'researcher_focused')?.trial.status).toBe('archived');
+    });
+  });
+
+  it('归档也守红线与保留名：开关关着 / 名字不合法 / 撞内建，一条命令都不发', async () => {
+    await withFreshModule(async (mod) => {
+      setEvolution(false);
+      seedRole();
+      expect(await mod.archiveGeneratedRole('researcher_focused')).toBe(false);
+      expect(writes).toEqual([]);
+
+      setEvolution(true);
+      for (const bad of ['../escape', '', 'UPPER', 'execute_command', 'researcher']) {
+        calls.length = 0;
+        expect(await mod.archiveGeneratedRole(bad)).toBe(false);
+        expect(calls).toEqual([]);
+      }
+    });
+  });
+
+  it('manifest 已不在 → 不留下孤儿旁挂账（它得比 manifest 短命）', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      // 不 seed manifest：读盘抛错 → 没有可归档的角色。
+      expect(await mod.archiveGeneratedRole('researcher_focused')).toBe(false);
+      expect(writes).toEqual([]);
+    });
+  });
+
+  it('重新启用：回到试用态、血缘保留、注册时刻重置（那就是「一段新的试用期」）', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole('researcher_focused', {
+        status: 'archived', parentRole: 'researcher', registeredAt: 111, decidedAt: 222, archivedAt: 222, reason: '旧结论',
+      });
+      const before = Date.now();
+      expect(await mod.restoreGeneratedRole('researcher_focused')).toBe(true);
+      const written = JSON.parse(trialWrites()[0].content);
+      expect(written.status).toBe('trial');
+      expect(written.parentRole).toBe('researcher');
+      // 不重置就是「恢复 → 下一次扫掠立刻再归档」的死循环。
+      expect(written.registeredAt).toBeGreaterThanOrEqual(before);
+      // 已经过去的裁决不该挂在一段正在进行的试用期上。
+      expect(written.reason).toBeUndefined();
+      expect(written.decidedAt).toBeUndefined();
+      expect(await mod.loadDelegableRoleNames()).toContain('researcher_focused');
+    });
+  });
+
+  it('没被归档的角色不能「重新启用」（那是在改一个不存在的状态）', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole('researcher_focused', { status: 'trial', parentRole: 'researcher', registeredAt: 111 });
+      expect(await mod.restoreGeneratedRole('researcher_focused')).toBe(false);
+      expect(writes).toEqual([]);
+    });
+  });
+
+  it('没有旁挂账就没有可恢复的归档态', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole();
+      expect(await mod.restoreGeneratedRole('researcher_focused')).toBe(false);
+      expect(writes).toEqual([]);
+    });
+  });
+
+  it('已归档的角色不再被裁决成「够格转正」', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      seedRole('researcher_focused', { status: 'archived', parentRole: 'researcher', registeredAt: 1 });
+      const records = [
+        delegatingRecord('researcher', 6, 5),
+        delegatingRecord('researcher_focused', 6, 6),
+      ] as unknown as import('../../shared/promptObservability').PromptObservation[];
+      const badges = mod.buildTrialBadges(await mod.loadGeneratedRoles(), records, NOW);
+      expect(badges['researcher_focused'].label).toBe('已归档');
+    });
+  });
+
+  it('试用窗口从注册时刻起算：重新启用后的新试用期不读当年那批委派', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      const day = 24 * 60 * 60 * 1000;
+      // 委派都在 10 天前，而重新启用发生在 1 天前。没有窗口下界的话，这组读数
+      // （子 100% vs 父 83%）会读成「够格转正」——同一个角色被归档后又立刻回来。
+      seedRole('researcher_focused', { status: 'trial', parentRole: 'researcher', registeredAt: NOW - day });
+      const records = [
+        { ...delegatingRecord('researcher', 6, 5), startedAt: NOW - 10 * day },
+        { ...delegatingRecord('researcher_focused', 6, 6), startedAt: NOW - 10 * day },
+      ] as unknown as import('../../shared/promptObservability').PromptObservation[];
+      const badges = mod.buildTrialBadges(await mod.loadGeneratedRoles(), records, NOW);
+      expect(badges['researcher_focused'].label).toBe('试用中 · 0/5 次');
+    });
+  });
+});

@@ -8,13 +8,19 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  isRoleArchived,
   judgeRoleTrial,
   renderTrialMarker,
+  shouldArchiveTrial,
+  trialArchiveReason,
   trialBadge,
   trialPromotionReason,
   trialStateFromMarker,
+  trialWindowFloors,
+  trialWindowStart,
   TRIAL_MIN_DELEGATIONS,
   TRIAL_MARKER_SUFFIX,
+  TRIAL_WINDOW_DAYS,
   trialMarkerFileName,
   type RoleOutcome,
   type RoleTrialState,
@@ -48,9 +54,18 @@ describe('试用态从旁挂账读出，缺省即「在试用中」', () => {
   });
 
   it('未知 status 读成试用中（宁可保守，不可误发永久状态）', () => {
-    expect(trialStateFromMarker({ status: 'archived' }).status).toBe('trial');
+    expect(trialStateFromMarker({ status: 'retired' }).status).toBe('trial');
     // Array guard: the OBJECT form of '[]' never reaches it in the string test.
     expect(trialStateFromMarker([] as unknown as object)).toEqual({ status: 'trial' });
+  });
+
+  it('archived 是**已知**状态：读成试用中会让一个已停用的角色悄悄回到可委派面', () => {
+    expect(trialStateFromMarker({ status: 'archived' })).toEqual({ status: 'archived' });
+    const state: RoleTrialState = { status: 'archived', parentRole: PARENT, archivedAt: NOW, reason: 'r' };
+    expect(trialStateFromMarker(renderTrialMarker(state))).toEqual(state);
+    expect(isRoleArchived({ status: 'archived' })).toBe(true);
+    expect(isRoleArchived({ status: 'trial' })).toBe(false);
+    expect(isRoleArchived({ status: 'promoted' })).toBe(false);
   });
 });
 
@@ -151,5 +166,67 @@ describe('角标：五种读数各有各的话', () => {
     expect(reason).toContain(`父角色 ${PARENT} `);
     // 落盘的必须是**数字**，不是结论。下次有人问凭什么转正，账上要有答案。
     expect(reason).toContain('100%');
+  });
+});
+
+describe('归档：判定、理由、与「没测到」的边界', () => {
+  const baseline = { [PARENT]: ok(12, 10) };
+
+  it('已归档的角色不再被裁决（否则屏上会同时写着「已归档」和一个转正按钮）', () => {
+    expect(judgeRoleTrial({
+      state: { status: 'archived', parentRole: PARENT },
+      outcome: ok(9, 9),
+      baselineByRole: baseline,
+    }).kind).toBe('already-archived');
+  });
+
+  it('只有「样本够且不达标」该被归档：没测到的两种一律不动', () => {
+    const judge = (state: RoleTrialState, outcome: RoleOutcome) =>
+      judgeRoleTrial({ state, outcome, baselineByRole: baseline });
+    expect(shouldArchiveTrial(judge({ status: 'trial', parentRole: PARENT }, ok(6, 1)))).toBe(true);
+    // 样本不够：不是「不达标」，是「还没测到」。
+    expect(shouldArchiveTrial(judge({ status: 'trial', parentRole: PARENT }, ok(2, 0)))).toBe(false);
+    // 没有基线：同样不裁决（拿整体平均当基线会造出一条谁都没验证过的门槛）。
+    expect(shouldArchiveTrial(judge({ status: 'trial' }, ok(9, 0)))).toBe(false);
+    // 够格转正的当然不动。
+    expect(shouldArchiveTrial(judge({ status: 'trial', parentRole: PARENT }, ok(9, 9)))).toBe(false);
+  });
+
+  it('归档角标是「已归档」，且 status 跟着走（渲染层靠它选样式/选分区）', () => {
+    const badge = trialBadge(CHILD, { status: 'archived' }, { kind: 'already-archived' });
+    expect(badge.label).toBe('已归档');
+    expect(badge.status).toBe('archived');
+  });
+
+  it('归档理由带上角色名、两侧数字，以及「怎么回来」', () => {
+    const verdict = judgeRoleTrial({ state: { status: 'trial', parentRole: PARENT }, outcome: ok(6, 1), baselineByRole: baseline });
+    if (!shouldArchiveTrial(verdict)) throw new Error('unreachable');
+    const reason = trialArchiveReason(CHILD, verdict.evidence);
+    expect(reason).toContain(`"${CHILD}"`);
+    expect(reason).toContain(`父角色 ${PARENT} `);
+    expect(reason).toContain('17%');
+    // 归档改变了用户的能力面，记录里必须带上恢复路径，而不是只写一句结论。
+    expect(reason).toContain('重新启用');
+  });
+});
+
+describe('试用窗口下界：重新启用必须是一段新的试用期', () => {
+  const windowStart = NOW - TRIAL_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+  it('注册时刻晚于窗口起点 → 以注册时刻为界', () => {
+    expect(trialWindowStart({ status: 'trial', registeredAt: NOW - 1000 }, NOW)).toBe(NOW - 1000);
+  });
+
+  it('没有注册时刻（手写角色）或注册得太久远 → 退回「最近 N 天」', () => {
+    const older = NOW - 40 * 24 * 60 * 60 * 1000;
+    expect(trialWindowStart({ status: 'trial' }, NOW)).toBe(windowStart);
+    expect(trialWindowStart({ status: 'trial', registeredAt: older }, NOW)).toBe(windowStart);
+  });
+
+  it('下界表只收有注册时刻的角色（没有的时刻不是「从 0 开始」）', () => {
+    expect(trialWindowFloors([
+      { name: CHILD, trial: { status: 'trial', registeredAt: NOW - 5 } },
+      { name: 'handwritten', trial: { status: 'trial' } },
+    ], NOW)).toEqual({ [CHILD]: NOW - 5 });
   });
 });

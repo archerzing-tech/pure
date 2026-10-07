@@ -21,9 +21,11 @@ import {
   emptyCursor,
   runSleepTimeCycle,
   type OrchestratorCursor,
+  type SleepTimeAction,
   type SleepTimeDeps,
   type SleepTimeTurnInput,
 } from '../sleepTimeOrchestrator';
+import type { RoleTrialState } from '../../shared/roleTrial';
 
 const NOW = Date.parse('2026-09-29T12:00:00Z');
 const DAY = 24 * 3600 * 1000;
@@ -468,6 +470,169 @@ describe('runSleepTimeCycle advice routing', () => {
     expect(result.advicesConsidered).toBe(1);
     expect(result.skillGatesApplied).toBe(0);
     expect(result.overlaysWritten).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+});
+
+describe('runSleepTimeCycle 归档扫掠（13.2）', () => {
+  /** 一条带**有名委派**的运行记录（T1 之后的真机形态：delegations[]）。 */
+  function delegationRun(role: string, total: number, successes: number, startedAt = NOW - 1000): AgentRunObservation {
+    seq++;
+    return {
+      type: 'agent_run',
+      traceId: `d${seq}`,
+      startedAt,
+      endedAt: startedAt + 10,
+      eventCounts: {},
+      reasoningChars: 0,
+      outputChars: 0,
+      toolCalls: [],
+      delegations: Array.from({ length: total }, (_, i) => ({
+        agentId: 'ag-00000000',
+        role,
+        startedAt,
+        durationMs: 5,
+        success: i < successes,
+      })),
+    } as unknown as AgentRunObservation;
+  }
+
+  const SURFACE = ['researcher', 'researcher_focused'];
+  /** 父角色 12 次成 10（83%），变体 6 次成 1（17%）—— 样本够、且不达标。 */
+  const below = [delegationRun('researcher', 12, 10), delegationRun('researcher_focused', 6, 1)];
+  const surfaceOf = (): string[] => SURFACE;
+
+  it('样本够且不达标 → 自动归档，并把两侧数字交给宿主', async () => {
+    const archived: Array<{ role: string; evidence: string }> = [];
+    const actions: SleepTimeAction[] = [];
+    const f = fixture({
+      now: () => NOW,
+      observations: () => below,
+      roleSurface: surfaceOf,
+      generatedRoles: () => [{ name: 'researcher_focused', trial: { status: 'trial', parentRole: 'researcher' } }],
+      archiveRole: async (role, evidence) => { archived.push({ role, evidence }); return true; },
+      onAction: (action) => { actions.push(action); },
+    }, []);
+    f.deps.listPendingSessions = async () => [];
+
+    const result = await runSleepTimeCycle(f.deps);
+    expect(result.rolesArchived).toBe(1);
+    expect(archived).toHaveLength(1);
+    expect(archived[0].role).toBe('researcher_focused');
+    // 「凭什么归档」必须一起交出去：只报一个角色名，用户无从判断该不该恢复。
+    expect(archived[0].evidence).toContain('父角色 researcher');
+    expect(actions.some((action) => action.kind === 'role-archived')).toBe(true);
+  });
+
+  it('没测到的三种一律不动：样本不够 / 没记父角色 / 已转正（+已归档幂等）', async () => {
+    const cases: Array<{ name: string; trial: RoleTrialState; records: AgentRunObservation[] }> = [
+      {
+        name: '样本不够',
+        trial: { status: 'trial', parentRole: 'researcher' },
+        records: [delegationRun('researcher', 12, 10), delegationRun('researcher_focused', 2, 0)],
+      },
+      { name: '没记父角色', trial: { status: 'trial' }, records: below },
+      { name: '已转正', trial: { status: 'promoted', parentRole: 'researcher' }, records: below },
+      { name: '已归档', trial: { status: 'archived', parentRole: 'researcher' }, records: below },
+    ];
+    for (const kase of cases) {
+      const archived: string[] = [];
+      const f = fixture({
+        now: () => NOW,
+        observations: () => kase.records,
+        roleSurface: surfaceOf,
+        generatedRoles: () => [{ name: 'researcher_focused', trial: kase.trial }],
+        archiveRole: async (role) => { archived.push(role); return true; },
+      }, []);
+      f.deps.listPendingSessions = async () => [];
+      const result = await runSleepTimeCycle(f.deps);
+      // 把「没测到」读成「失败」和读成「通过」一样错，只是方向相反。
+      expect({ name: kase.name, archived, count: result.rolesArchived })
+        .toEqual({ name: kase.name, archived: [], count: 0 });
+    }
+  });
+
+  it('一个角色归档失败不拖住另一个（循环永不 throw）', async () => {
+    const archived: string[] = [];
+    const f = fixture({
+      now: () => NOW,
+      observations: () => [
+        delegationRun('researcher', 12, 10),
+        delegationRun('researcher_focused', 6, 1),
+        delegationRun('code_reviewer_v2', 6, 1),
+      ],
+      roleSurface: () => ['researcher', 'researcher_focused', 'code_reviewer_v2'],
+      generatedRoles: () => [
+        { name: 'researcher_focused', trial: { status: 'trial', parentRole: 'researcher' } },
+        { name: 'code_reviewer_v2', trial: { status: 'trial', parentRole: 'researcher' } },
+      ],
+      archiveRole: async (role) => {
+        if (role === 'researcher_focused') throw new Error('disk full');
+        archived.push(role);
+        return true;
+      },
+    }, []);
+    f.deps.listPendingSessions = async () => [];
+
+    const result = await runSleepTimeCycle(f.deps);
+    expect(archived).toEqual(['code_reviewer_v2']);
+    expect(result.rolesArchived).toBe(1);
+    expect(result.errors.some((error) => error.includes('researcher_focused'))).toBe(true);
+  });
+
+  it('取消后不再归档剩下的角色', async () => {
+    const controller = new AbortController();
+    const archived: string[] = [];
+    const f = fixture({
+      now: () => NOW,
+      observations: () => [
+        delegationRun('researcher', 12, 10),
+        delegationRun('researcher_focused', 6, 1),
+        delegationRun('code_reviewer_v2', 6, 1),
+      ],
+      roleSurface: () => ['researcher', 'researcher_focused', 'code_reviewer_v2'],
+      generatedRoles: () => [
+        { name: 'researcher_focused', trial: { status: 'trial', parentRole: 'researcher' } },
+        { name: 'code_reviewer_v2', trial: { status: 'trial', parentRole: 'researcher' } },
+      ],
+      archiveRole: async (role) => { archived.push(role); controller.abort(); return true; },
+      signal: controller.signal,
+    }, []);
+    f.deps.listPendingSessions = async () => [];
+
+    const result = await runSleepTimeCycle(f.deps);
+    expect(archived).toEqual(['researcher_focused']);
+    expect(result.aborted).toBe(true);
+  });
+
+  it('窗口下界与仪表盘同一份：重启后的新试用期不会被当年那批委派送进归档', async () => {
+    const archived: string[] = [];
+    const f = fixture({
+      now: () => NOW,
+      observations: () => [
+        delegationRun('researcher', 12, 10),
+        // 把变体送进归档的那批委派发生在 10 天前，而它在 1 天前才被重新启用。
+        delegationRun('researcher_focused', 6, 1, NOW - 10 * DAY),
+      ],
+      roleSurface: surfaceOf,
+      generatedRoles: () => [{
+        name: 'researcher_focused',
+        trial: { status: 'trial', parentRole: 'researcher', registeredAt: NOW - DAY },
+      }],
+      archiveRole: async (role) => { archived.push(role); return true; },
+    }, []);
+    f.deps.listPendingSessions = async () => [];
+
+    const result = await runSleepTimeCycle(f.deps);
+    expect(result.rolesArchived).toBe(0);
+    expect(archived).toEqual([]);
+  });
+
+  it('宿主没接归档缝 → 一段扫掠都不跑（只读宿主不该凭空多一个写面）', async () => {
+    const f = fixture({ now: () => NOW, observations: () => below, roleSurface: surfaceOf }, []);
+    f.deps.listPendingSessions = async () => [];
+    const result = await runSleepTimeCycle(f.deps);
+    expect(result.rolesArchived).toBe(0);
     expect(result.errors).toEqual([]);
   });
 });

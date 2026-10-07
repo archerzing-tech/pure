@@ -71,6 +71,11 @@ export interface TeamRosterOptions {
    *  existed — kept as the default so a forgotten argument degrades to the old
    *  behaviour rather than to a wrong global. */
   roles?: readonly string[];
+  /** Per-role window floor (ms, by `startedAt`). A trial role's sample window
+   *  starts at its registration — without this, re-enabling a role would re-read
+   *  the very delegations that archived it and the gate would only ever repeat
+   *  itself. Missing entries keep the shared window. */
+  roleSince?: Readonly<Record<string, number>>;
 }
 
 function emptyRow(role: string, caseCount: number): TeamRoleRow {
@@ -101,6 +106,7 @@ export function summarizeTeamRoster(records: readonly PromptObservation[], optio
   const windowStart = now - days * 24 * 60 * 60 * 1000;
   const minCases = options.minCases ?? 5;
   const caseCounts = options.caseCounts ?? {};
+  const roleSince = options.roleSince;
   const roles = roleSurface(options.roles);
 
   const rows = new Map<string, TeamRoleRow>([...roles].map((role) => [role, emptyRow(role, caseCounts[role] ?? 0)]));
@@ -108,6 +114,8 @@ export function summarizeTeamRoster(records: readonly PromptObservation[], optio
   for (const record of records) {
     if (record.type !== 'agent_run' || (record.startedAt ?? 0) < windowStart) continue;
     for (const slice of delegationSlices(record, roles)) {
+      const floor = roleSince?.[slice.role];
+      if (floor !== undefined && (record.startedAt ?? 0) < floor) continue;
       const row = rows.get(slice.role);
       if (!row) continue;
       row.delegations = (row.delegations ?? 0) + 1;

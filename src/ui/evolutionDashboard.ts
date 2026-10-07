@@ -12,7 +12,7 @@
 
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
-import { TRIAL_PROMOTE_LABEL as PROMOTE_LABEL } from '../shared/roleTrial';
+import { TRIAL_MIN_DELEGATIONS, TRIAL_PROMOTE_LABEL as PROMOTE_LABEL } from '../shared/roleTrial';
 import { formatBytes, relativeTime } from '../shared/format';
 import { healthScore, lifecycleOf, type EvolutionConfig, type MemoryLifecycle } from '../adapter/memory/evolution';
 import type { DriftAlert } from '../adapter/memory/ratchet';
@@ -659,6 +659,48 @@ export function renderTeamRosterSection(
     </table>
     ${short}
   </div>`;
+}
+
+// ── 13.2 归档：被系统停用的生成角色 ──
+
+/** 已归档角色的一行（理由取自旁挂账，写的是归档当时那组两侧数字）。 */
+export interface ArchivedRoleView {
+  role: string;
+  reason?: string;
+  archivedAt?: number;
+}
+
+/**
+ * 已归档的生成角色。归档是**可逆**的动作，所以这一节必须同时给出三件事：为什么
+ * 归档（当时那组数字）、怎么回来（重新启用）、不想留怎么办（删文件）。只写「已归档」
+ * 而不给恢复路径，等于把用户逼回手工翻 `~/.pure/subagents/`。
+ *
+ * 空列表说的是「没有角色被归档过」，不是「所有角色都够格」——两者的差别正是这道门
+ * 存在的意义，调用方不再另加一句安慰话。
+ */
+export function renderArchivedRolesSection(items: readonly ArchivedRoleView[], now: number): string {
+  if (items.length === 0) {
+    const empty = t('evolution.archivedRoles.empty', '没有被自动归档的角色——生成角色攒够 {n} 次委派仍低于父角色才会归档。')
+      .replace('{n}', String(TRIAL_MIN_DELEGATIONS));
+    return `<div class="evo-empty">${escapeHtml(empty)}</div>`;
+  }
+  const rows = items.map(({ role, reason, archivedAt }) => {
+    const since = archivedAt ? relativeTime(archivedAt, now) : '—';
+    // 恢复与删除的分工写进行内：重新启用是本门提供的动作（一段新试用期），
+    // 彻底删掉走「删文件即消失」的设计口径（手删），不新增递归删除的宿主命令。
+    const howto = t('evolution.archivedRoles.howto', '重新启用会让它从头开始一段新的试用期；不想留就删掉 ~/.pure/subagents/{file}。')
+      .replace('{file}', `${role}.json`);
+    return `<div class="evo-experience-row">
+      <div class="evo-experience-head">
+        <span class="memory-badge memory-badge-type memory-type-error_pattern">${escapeHtml(toolDisplayName(role))}</span>
+        <span class="memory-badge evo-badge-low">${escapeHtml(t('evolution.archivedRoles.badge', '已归档'))}</span>
+        <button type="button" class="evo-advice-apply-btn" data-evo-restore-role="${escapeHtml(role)}" title="${escapeHtml(t('evolution.archivedRoles.restoreTitle', '让它重新进入试用期，从头攒样本'))}">${escapeHtml(t('evolution.archivedRoles.restore', '重新启用'))}</button>
+      </div>
+      <div class="evo-experience-content">${escapeHtml(reason ?? t('evolution.archivedRoles.noReason', '（没有留下归档理由）'))}</div>
+      <div class="evo-experience-meta">${escapeHtml(howto)} · ${escapeHtml(since)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-experience-list">${rows}</div>`;
 }
 
 // ── 成本视图（T4）──
