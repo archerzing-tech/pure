@@ -337,7 +337,7 @@ try {
     const page = document.querySelector('.settings-page[data-page="evolution"]');
     const tiles = page?.querySelectorAll('#evolution-totals .evo-tile').length ?? 0;
     const charts = page?.querySelectorAll('#evolution-charts .evo-chart-card').length ?? 0;
-    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats', '#evolution-baseline', '#evolution-team', '#evolution-team-cost']
+    const sections = ['#evolution-errors', '#evolution-strategy', '#evolution-advice', '#evolution-experience', '#evolution-stats', '#evolution-baseline', '#evolution-team', '#evolution-team-cost', '#evolution-roles-archived']
       .every((sel) => (page?.querySelector(sel)?.childElementCount ?? 0) > 0);
     const text = page?.textContent ?? "";
     return {
@@ -355,7 +355,10 @@ try {
         && !!page?.querySelector("#evolution-advice .evo-empty")
         && !!page?.querySelector("#evolution-strategy .evo-empty")
         && !page?.querySelector("#evolution-strategy-tabs .evo-range-btn")
-        && !!page?.querySelector("#evolution-stats .evo-empty"),
+        && !!page?.querySelector("#evolution-stats .evo-empty")
+        // 13.2 归档：浏览器模式读不到 ~/.pure/subagents/，所以这一节必须说清
+        // 「没有角色被归档过」而不是空着——空着看不出是没归档还是没读盘。
+        && !!page?.querySelector("#evolution-roles-archived .evo-empty"),
       errors: page?.querySelector("#evolution-errors .evo-empty")?.textContent ?? null,
       stats: page?.querySelector("#evolution-stats .evo-empty")?.textContent ?? null,
     };
@@ -532,12 +535,17 @@ try {
     `document.querySelector('#evolution-range [data-range="month"]')?.click();`,
     `(() => {
       const text = (document.getElementById('evolution-team-cost')?.textContent ?? '') + (document.getElementById('evolution-team')?.textContent ?? '');
-      return { ok: text.includes('Cost view') && text.includes('Unpriced') && text.includes('Team roster'), text: text.slice(0, 160) };
+      const archived = document.getElementById('evolution-roles-archived')?.textContent ?? '';
+      return {
+        ok: text.includes('Cost view') && text.includes('Unpriced') && text.includes('Team roster')
+          && archived.includes('No role has been archived'),
+        text: (text + archived).slice(0, 200),
+      };
     })()`,
     15000,
-    'english cost view + team roster',
+    'english cost view + team roster + archived empty state',
   );
-  log('[e2e] english surface ok — cost view and roster read from the en table, no zh fallback');
+  log('[e2e] english surface ok — cost view, roster and the archived-roles section read from the en table, no zh fallback');
 
   const exceptions = consoleLogs.filter((line) => line.startsWith('[exception]'));
   if (exceptions.length > 0) {
