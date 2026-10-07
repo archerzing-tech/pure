@@ -26,6 +26,15 @@ release summary when publishing (see `.github/workflows/release.yml`).
 **可观测与评测**
 - T4 成本视图（角色 × provider × model）、held-out 留出集（只观测不阻断）、reads 并发池上限
 
+**Windows gateway：点「启动」起不来（四条根因一次收掉）**
+- 候选表删掉 Windows 裸名 `pure.exe`：CreateProcess 按应用目录优先解析裸名，命中的是 GUI 自己——spawn 成功、网关没起；自体守卫用 cwd 相对 canonicalize，拦不住这条路
+- spawn 之后改「验收」：进程没起来/端口没应答就继续试下一个候选，被「假网关」挡死的 Bun 真兜底恢复可达
+- 删掉 Rust 内嵌「假网关」（无条件写锁 + 后台线程应答 200）：它把锁文件写成 GUI 自己的 pid，点「停止」= taskkill 自己，而界面显示「运行中」
+- 端口契约补齐第三态：未配置 webchat 时由极简应答器监听（此前网关健康却零端口，探针永远「连通性失败 (port 18790)」）
+- 顶层 `channels.enabled` 语义对齐：GUI 勾通道时同步写它，CLI 对历史配置容错（此前网关打印一行警告即退出）
+- CLI 侧车递送恢复（Windows/macOS 两侧 CI + `resources`/`binaries` 占位归位，装完即用）；gateway 相关子进程全部静默，不再闪终端窗
+- 顺带：运行中的网关若一个通道都没接上会明确标出（此前空列表读起来像「没事」），陈旧锁文件自愈
+
 **设计文档**
 - 五份设计稿的落地状态按 git 证据逐行重建（此前状态表落后半个月，已两次误导判断）
 
