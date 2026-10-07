@@ -35,6 +35,8 @@ import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRe
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { compileExternalTools } from '../harness/externalTools';
+import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
+import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
@@ -701,23 +703,40 @@ function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
 // Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;
 // scanned once per app run. Delete the directory and the tool is gone at the
 // next app start. Master switch off = don't load (Principle 1).
-let externalToolsPromise: Promise<{ tools: TaggedTool[]; execs: Map<string, { exec: string; timeoutMs: number }> }> | null = null;
-function loadGuiExternalTools(): Promise<{ tools: TaggedTool[]; execs: Map<string, { exec: string; timeoutMs: number }> }> {
+//
+// A tool quarantined by the runtime failure gate (§13.4 验收口径 4) is dropped
+// HERE, not just refused at execution: a tool the model cannot see is one fewer
+// wasted turn than a tool it keeps calling into a wall. Its exec template goes
+// with it, so a call that still slips through this turn is refused by the
+// executor's quarantine backstop rather than answered with "no exec template"
+// (which would read to the model like a missing manifest, not a stopped tool).
+interface GuiExternalTools {
+  tools: TaggedTool[];
+  execs: Map<string, { exec: string; timeoutMs: number }>;
+  /** Every tool carrying a marker, quarantined or not — the counters of a
+   *  not-yet-quarantined tool live here too, which is what lets "consecutive"
+   *  span turns. Dropping these would reset the gate's memory each turn. */
+  marked: QuarantinedToolEntry[];
+}
+let externalToolsPromise: Promise<GuiExternalTools> | null = null;
+function loadGuiExternalTools(): Promise<GuiExternalTools> {
   externalToolsPromise ??= (async () => {
-    if (!isTauriRuntime()) return { tools: [], execs: new Map() };
+    const empty: GuiExternalTools = { tools: [], execs: new Map(), marked: [] };
+    if (!isTauriRuntime()) return empty;
     const cfg = loadConfig();
-    if (cfg?.skills?.evolution === false) return { tools: [], execs: new Map() };
+    if (cfg?.skills?.evolution === false) return empty;
     try {
-      const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_external_tools');
+      const sources = await tauriInvoke<Array<{ file: string; text: string; quarantined?: boolean; quarantineMarker?: QuarantineMarker | string | null }>>('list_external_tools');
+      const live = (sources ?? []).filter((s) => s.quarantined !== true);
       const { tools, errors } = compileExternalTools(
-        sources ?? [],
+        live,
         (name) => (sources ?? []).some((s) => s.file.startsWith(`${name}/`)),
       );
       for (const line of errors) console.warn(`[external-tools] ${line}`);
       // exec 模板从原始 manifest 里提取（编译器只出 TaggedTool，exec 模板留在
       // 这里拆——两件同源、一次扫描产出）。
       const execs = new Map<string, { exec: string; timeoutMs: number }>();
-      for (const source of sources ?? []) {
+      for (const source of live) {
         try {
           const m = JSON.parse(source.text) as { name?: string; exec?: string; timeoutMs?: number };
           if (m.name && m.exec && tools.some((t) => t.name === m.name)) {
@@ -728,10 +747,17 @@ function loadGuiExternalTools(): Promise<{ tools: TaggedTool[]; execs: Map<strin
           }
         } catch { /* 坏 manifest 编译器已报 */ }
       }
-      return { tools, execs };
+      // Every marker, not just the quarantined ones: the counters of a healthy
+      // tool are exactly what makes "consecutive" span turns. Dropping them
+      // here would reset the gate's memory on every turn.
+      const marked: QuarantinedToolEntry[] = (sources ?? []).map((source) => ({
+        name: source.file.replace(/\/TOOL\.json$/, ''),
+        state: parseQuarantineMarker(source.quarantineMarker),
+      }));
+      return { tools, execs, marked };
     } catch (error) {
       console.warn('[external-tools] scan failed:', error);
-      return { tools: [], execs: new Map() };
+      return empty;
     }
   })();
   return externalToolsPromise;
@@ -4413,7 +4439,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 13.4 — external script tools: compile + register alongside built-ins
       // (MCP-same pathway). Collision with built-in names is rejected here —
       // the ToolRegistry would otherwise silently replace the built-in.
-      const { tools: externalTools, execs: externalToolExecs } = await loadGuiExternalTools();
+      const { tools: externalTools, execs: externalToolExecs, marked: externalToolMarkers } = await loadGuiExternalTools();
       const builtinToolNames = new Set(BUILT_IN_TOOLS.map((t) => t.name));
       const safeExternalTools = externalTools.filter((t) => {
         if (builtinToolNames.has(t.name)) {
@@ -4532,7 +4558,25 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         personaOverlays,
         // 13.4 — external script tools join the registry (MCP-same pathway);
         // the executor routes through the tool adapter's execute_command.
-        ...(safeExternalTools.length > 0 ? { externalTools: safeExternalTools, externalToolExecs } : {}),
+        // 停用看门狗的宿主缝也在这里接上：不接就没有计数，也就没有这道门。
+        ...(safeExternalTools.length > 0 ? {
+          externalTools: safeExternalTools,
+          externalToolExecs,
+          // 计数从同一次扫描灌进来：每回合新建的 host 若从零开始，这道门就只
+          // 在「同一回合内连挂 3 次」时触发，跨回合的慢性损坏永远抓不到。
+          externalToolQuarantine: createToolQuarantineHost({
+            seed: externalToolMarkers,
+            // 「出卡」这半句在这里兑现：模型当场看得见（工具列表里它消失了），
+            // 用户也看得见（一条不会自己消失的通知，带证据与恢复路径）。只往
+            // 控制台写等于这道门悄悄改了用户的能力面——那正是纪律 2 要防的。
+            onQuarantined: (card) => {
+              showToast(
+                `已自动停用工具 ${card.toolName}：${card.evidence}。${card.reason.replace(card.toolName, '').trim()}`,
+                12_000,
+              );
+            },
+          }),
+        } : {}),
         // In-memory subagent checkpoint store: lets the GUI resume a sub-task
         // after a stop + continue in this same conversation.
         stateStore: this.subagentStore,

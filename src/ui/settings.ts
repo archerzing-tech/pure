@@ -46,6 +46,7 @@ import {
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
+  renderQuarantineSection,
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
@@ -55,6 +56,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
+import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
@@ -1126,6 +1128,28 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] evolution experience delete failed:', err);
         this.toast(t('evolution.experience.deleteFailed'));
+      }
+    });
+
+    // ── 13.4 停用门：重新启用 ──
+    // 只清标记，不碰脚本 —— 那是用户自己的文件，我们没有资格替他改。重新启用
+    // 后下一次扫描就会把它装回工具列表。
+    document.getElementById('evolution-quarantine')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-reinstate]');
+      if (!btn) return;
+      event.stopPropagation();
+      const name = btn.dataset.evoReinstate || '';
+      if (!name) return;
+      btn.disabled = true;
+      try {
+        await reinstateTool(name);
+        this.toast(t('evolution.quarantine.reinstated', '已重新启用工具 {name}').replace('{name}', name));
+      } catch (err) {
+        console.error('[pure] reinstate tool failed:', err);
+        this.toast(t('evolution.quarantine.reinstateFailed'));
+      } finally {
+        btn.disabled = false;
+        void this.renderEvolutionDashboard();
       }
     });
 
@@ -3389,6 +3413,27 @@ export class SettingsPanel {
     const statsEl = document.getElementById('evolution-stats');
     if (statsEl) {
       statsEl.innerHTML = renderObservationStats(dashboard.observations, read, now);
+    }
+
+    // 13.4 停用门：被自动停用的生成工具。数据来自 ~/.pure/tools/<name>/ 的
+    // 停用标记，由 `loadQuarantinedTools` 做一次**新鲜重扫**（刻意不共用装载面的
+    // 进程级缓存——十秒前刚停用的工具必须立刻出现在屏上）。
+    // 总开关关着时整节隐藏，与上面的 evolution-drift 同一口径：门不存在，卡也不该在。
+    const evolutionOff = loadConfig()?.skills?.evolution === false;
+    const quarantineEl = document.getElementById('evolution-quarantine');
+    if (quarantineEl) {
+      const quarantineSection = quarantineEl.closest('.settings-section');
+      const quarantineTitle = quarantineSection?.previousElementSibling;
+      if (quarantineSection) (quarantineSection as HTMLElement).hidden = evolutionOff;
+      if (quarantineTitle) (quarantineTitle as HTMLElement).hidden = evolutionOff;
+      if (!evolutionOff) {
+        try {
+          quarantineEl.innerHTML = renderQuarantineSection(await loadQuarantinedTools(), now);
+        } catch (err) {
+          console.warn('[pure] quarantine list failed:', err);
+          quarantineEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('evolution.quarantine.unavailable', '读不到停用名单——重新进入本页再试。'))}</div>`;
+        }
+      }
     }
 
     // 发布口径的基线成绩：数据是随发布提交进仓库的快照（不读盘、不依赖

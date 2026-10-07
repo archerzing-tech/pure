@@ -7370,6 +7370,12 @@ fn persona_overlays_dir() -> PathBuf {
 /// 阶段 13.4 — external script tools. Every `~/.pure/tools/<name>/TOOL.json`
 /// is a potential tool; Rust does the scan, the TS compiler validates.
 /// PURE_TOOLS_DIR env override (tests).
+///
+/// The quarantine marker's filename lives here as the single source: TS exports
+/// the same string, and a rename that only touched one side would silently stop
+/// the gate (every read misses, every write creates a file nobody looks at).
+pub const QUARANTINE_MARKER_FILE: &str = "QUARANTINED.json";
+
 #[tauri::command]
 fn list_external_tools() -> Vec<serde_json::Value> {
     let dir = std::env::var("PURE_TOOLS_DIR")
@@ -7390,12 +7396,131 @@ fn list_external_tools() -> Vec<serde_json::Value> {
         let Ok(text) = std::fs::read_to_string(&manifest) else {
             continue;
         };
+        // 阶段 13.4 停用门：QUARANTINED.json 与 TOOL.json 同级（删工具目录即连带
+        // 删掉它，「删文件即消失」不变）。**无论停没停用都要把标记原样带出去**——
+        // 未停用标记里存的是连续失败计数，而计数正是「跨回合连续」的载体；只发已
+        // 停用的那个，等于每次装载都把计数清零，这道门就永远只在同一回合内成立。
+        // 读取失败一律当没停用：标记坏了不该让一个工具永久死掉，那比不禁用更糟。
+        let quarantine_path = dir.join(&name).join(QUARANTINE_MARKER_FILE);
+        let marker = std::fs::read_to_string(&quarantine_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|value| value.is_object());
+        let quarantined = marker
+            .as_ref()
+            .and_then(|value| value.get("quarantined"))
+            .and_then(|v| v.as_bool())
+            == Some(true);
         out.push(serde_json::json!({
             "file": format!("{}/TOOL.json", name),
             "text": text,
+            "quarantined": quarantined,
+            "quarantineMarker": marker,
         }));
     }
     out
+}
+
+/// What `set_tool_quarantined` should do. **An explicit operation, not an
+/// inferred one.** The previous shape overloaded `reason: None` to mean both
+/// "no reason to record" and "reinstate, delete the file" — and TS sent the
+/// former while Rust read the latter, so every counter write was silently
+/// consumed as a delete. One enum, three meanings, no collision.
+#[derive(serde::Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum QuarantineOp {
+    /// Persist the counters only; the file is created or rewritten.
+    Record,
+    /// Same, plus mark the tool stopped and store the reason.
+    Quarantine,
+    /// Remove the marker entirely (byte-identical to never having been stopped).
+    Reinstate,
+}
+
+/// 阶段 13.4 — write (or clear) a tool's quarantine marker. One command for all
+/// three operations because they are one file: two commands would let a counter
+/// write and a stop write race each other into a marker that says one thing and
+/// counts another.
+#[tauri::command]
+fn set_tool_quarantined(
+    name: String,
+    op: QuarantineOp,
+    reason: Option<String>,
+    state: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let dir = std::env::var("PURE_TOOLS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(pure_home_dir()).join(".pure").join("tools"));
+    set_tool_quarantined_in(&dir, &name, op, reason, state)
+}
+
+/// Same as the command, with the root injected so it can be unit tested against a
+/// sandbox directory (a Tauri command can't be constructed inside a plain test).
+///
+/// `name` is untrusted: it crosses the Tauri IPC boundary and the reinstate branch
+/// **deletes** a file. `dir.join("../../.ssh")` escapes the tools dir, and `join`
+/// with an absolute path replaces the whole prefix — so a raw join would let a
+/// caller write (and delete) `QUARANTINED.json` anywhere the user can write.
+/// `file_name()` reduces it to one component first (the same trick
+/// `sanitize_paste_name` uses), then the parent check re-verifies the result: a
+/// bare lexical `starts_with` does NOT catch `tools/../../x`.
+fn set_tool_quarantined_in(
+    dir: &std::path::Path,
+    name: &str,
+    op: QuarantineOp,
+    reason: Option<String>,
+    state: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let safe_name = std::path::Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "tool name is empty".to_string())?;
+    let tool_dir = dir.join(&safe_name);
+    if tool_dir.parent() != Some(dir) {
+        return Err(format!("invalid tool name: {}", name));
+    }
+    if !tool_dir.is_dir() {
+        return Err(format!("tool directory not found: {}", tool_dir.display()));
+    }
+    // A symlinked tool dir passes the lexical check above but still points
+    // somewhere else, and `is_dir`/`write` both follow links — so the write would
+    // land outside. Canonicalize and re-check before touching anything.
+    if let Ok(real_dir) = std::fs::canonicalize(dir) {
+        if let Ok(real_tool) = std::fs::canonicalize(&tool_dir) {
+            if real_tool.parent() != Some(real_dir.as_path()) {
+                return Err(format!("tool directory escapes {}: {}", real_dir.display(), name));
+            }
+        }
+    }
+    let marker = tool_dir.join(QUARANTINE_MARKER_FILE);
+    if op == QuarantineOp::Reinstate {
+        return match std::fs::remove_file(&marker) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!("failed to clear quarantine marker: {}", err)),
+        };
+    }
+    let mut value = state
+        .filter(|v| v.is_object())
+        .ok_or_else(|| "quarantine state must be an object".to_string())?;
+    value["quarantined"] = serde_json::Value::Bool(op == QuarantineOp::Quarantine);
+    match op {
+        QuarantineOp::Quarantine => {
+            let text = reason.ok_or_else(|| "quarantine requires a reason".to_string())?;
+            value["reason"] = serde_json::Value::String(text);
+        }
+        _ => {
+            value.as_object_mut().map(|o| o.remove("reason"));
+        }
+    }
+    // No timestamp is invented here: the caller owns the clock, and a marker
+    // written with a made-up time would make the dashboard's "quarantined
+    // since" disagree with the card the user actually saw.
+    let text = serde_json::to_string_pretty(&value)
+        .map_err(|err| format!("failed to serialize quarantine marker: {}", err))?;
+    std::fs::write(&marker, format!("{}\n", text))
+        .map_err(|err| format!("failed to write quarantine marker: {}", err))
 }
 
 #[tauri::command]
@@ -15576,6 +15701,7 @@ pub fn run() {
             append_session_event,
             read_session_events,
             list_external_tools,
+            set_tool_quarantined,
             load_session,
             load_last_session,
             load_session_list,
@@ -16374,5 +16500,165 @@ mod extract_title_tests {
             "</task_context>闭标在开标前 <task_context>x"
         );
         assert_eq!(strip_task_context("<task_context>壳</task_context>\n\n壳外原话"), "壳外原话");
+    }
+}
+
+#[cfg(test)]
+mod tool_quarantine_tests {
+    use super::*;
+
+    fn sandbox(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pure-q14-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("good_tool")).unwrap();
+        std::fs::create_dir_all(dir.join("victim")).unwrap();
+        dir
+    }
+
+    fn state() -> serde_json::Value {
+        serde_json::json!({
+            "consecutiveFailures": 3,
+            "totalCalls": 4,
+            "lastFailureAt": 1_700_000_000_000u64,
+            "quarantinedAt": 1_700_000_000_001u64,
+        })
+    }
+
+    #[test]
+    fn quarantines_then_reinstates_idempotently() {
+        let dir = sandbox("roundtrip");
+        let marker = dir.join("good_tool").join("QUARANTINED.json");
+
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Quarantine, Some("坏了".into()), Some(state())).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(written["quarantined"], serde_json::json!(true));
+        assert_eq!(written["reason"], serde_json::json!("坏了"));
+        assert_eq!(written["consecutiveFailures"], serde_json::json!(3));
+
+        // Reinstate is a delete; running it when there is nothing to delete must
+        // not error, or the dashboard's button breaks on an already-clean tool.
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Reinstate, None, None).unwrap();
+        assert!(!marker.exists());
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Reinstate, None, None).unwrap();
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Reinstate, None, None).unwrap();
+    }
+
+    #[test]
+    fn traversing_names_are_clamped_never_followed() {
+        let parent = sandbox("traversal");
+        // tools/ sits next to a real victim dir, so an escaping join would
+        // actually reach it — a write we can assert on rather than guess about.
+        let dir = parent.join("tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("good_tool")).unwrap();
+
+        for evil in ["../victim", "../../victim", "good_tool/../../victim", "/etc", "..", ""] {
+            let _ = set_tool_quarantined_in(&dir, evil, QuarantineOp::Quarantine, Some("x".into()), Some(state()));
+            let _ = set_tool_quarantined_in(&dir, evil, QuarantineOp::Reinstate, None, None); // the DELETE branch
+        }
+        // Nothing outside tools/ was touched — not written, not deleted.
+        assert!(!parent.join("victim").join("QUARANTINED.json").exists());
+        assert!(!PathBuf::from("/etc").join("QUARANTINED.json").exists());
+        // A traversing name is clamped to its last component, so it lands inside
+        // tools/ at worst. `good_tool` is the only real tool there.
+        assert!(dir.join("good_tool").is_dir());
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "good_tool")
+            .collect();
+        assert!(strays.is_empty(), "unexpected entries created under tools/: {:?}", strays);
+    }
+
+    #[test]
+    fn unknown_tool_name_is_an_error() {
+        let dir = sandbox("unknown");
+        // Not a traversing name, just not a tool: must say so rather than create
+        // a directory or write into the tools root.
+        assert!(set_tool_quarantined_in(&dir, "no_such_tool", QuarantineOp::Quarantine, Some("x".into()), Some(state())).is_err());
+        assert!(set_tool_quarantined_in(&dir, "no_such_tool", QuarantineOp::Reinstate, None, None).is_err());
+        assert!(!dir.join("no_such_tool").exists());
+    }
+
+    #[test]
+    fn record_op_persists_counters_instead_of_deleting() {
+        // Regression anchor for the bug that made the gate inert: `record` and
+        // `reinstate` used to be spelled the same way (`reason: None`), so every
+        // counter write was consumed as a delete. The gate then only ever fired
+        // on "three failures inside ONE turn" — exactly the slow breakage it
+        // exists to catch.
+        let dir = sandbox("record");
+        let marker = dir.join("good_tool").join("QUARANTINED.json");
+        for calls in 1..=2u64 {
+            let mut s = state();
+            s["consecutiveFailures"] = serde_json::json!(calls);
+            s["totalCalls"] = serde_json::json!(calls + 1);
+            set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Record, None, Some(s)).unwrap();
+            assert!(marker.exists(), "record op must keep the marker on disk");
+            let back: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+            assert_eq!(back["quarantined"], serde_json::json!(false));
+            assert_eq!(back["consecutiveFailures"], serde_json::json!(calls));
+            assert!(back.get("reason").is_none(), "a recorded counter carries no reason");
+        }
+        // Only `reinstate` removes it, and it stays idempotent.
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Reinstate, None, None).unwrap();
+        assert!(!marker.exists());
+        set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Reinstate, None, None).unwrap();
+    }
+
+    #[test]
+    fn quarantine_op_requires_a_reason() {
+        let dir = sandbox("noreason");
+        assert!(set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Quarantine, None, Some(state())).is_err());
+    }
+
+    #[test]
+    fn marker_filename_constant_is_the_one_on_disk() {
+        // The scan and the writer must agree on the filename or the gate silently
+        // stops seeing what it wrote.
+        assert_eq!(QUARANTINE_MARKER_FILE, "QUARANTINED.json");
+    }
+
+    #[test]
+    fn bad_state_and_missing_dir_are_errors_not_panics() {
+        let dir = sandbox("errors");
+        assert!(set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Quarantine, Some("x".into()), None).is_err());
+        assert!(set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Quarantine, Some("x".into()), Some(serde_json::json!("nope"))).is_err());
+        assert!(set_tool_quarantined_in(&dir, "not_a_tool", QuarantineOp::Quarantine, Some("x".into()), Some(state())).is_err());
+        assert!(set_tool_quarantined_in(&dir, "not_a_tool", QuarantineOp::Reinstate, None, None).is_err());
+    }
+
+    #[test]
+    fn unreadable_marker_never_quarantines() {
+        let dir = sandbox("badmarker");
+        let tool_dir = dir.join("good_tool");
+        // Every one of these must read back as "not quarantined": a corrupted
+        // marker may not permanently kill a working tool.
+        for (label, body) in [
+            ("broken", "{ not json"),
+            ("empty", ""),
+            ("false", r#"{"quarantined": false}"#),
+            ("string", r#"{"quarantined": "true"}"#),
+            ("array", "[]"),
+            ("null", "null"),
+        ] {
+            std::fs::write(tool_dir.join("QUARANTINED.json"), body).unwrap();
+            let parsed = std::fs::read_to_string(tool_dir.join("QUARANTINED.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .filter(|value| value.get("quarantined").and_then(|v| v.as_bool()) == Some(true));
+            assert!(parsed.is_none(), "{} marker must not quarantine", label);
+        }
     }
 }

@@ -28,6 +28,7 @@ import { formatCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
 import { summarizeTeamCosts, summarizeTeamRoster, type TeamRosterOptions } from '../shared/teamObservability';
+import { QUARANTINE_CONSECUTIVE_FAILURES, type ToolQuarantineState } from '../harness/toolQuarantine';
 
 // ── 数字格式化 ──
 
@@ -630,6 +631,47 @@ export function renderTeamRosterSection(records: readonly import('../shared/prom
 }
 
 // ── 成本视图（T4）──
+
+/**
+ * 已停用的生成工具（13.4 停用门）。停用是**可逆且带证据**的动作，所以这一节
+ * 必须同时给出三件事：为什么停（证据行）、怎么恢复（重新启用）、不想留怎么办
+ * （删除）。只写「已停用」而不给恢复路径，等于把用户逼回手工删目录。
+ *
+ * 空列表说的是「没有工具被停用过」，不是「所有工具都健康」——两者的差别正是
+ * 这道门存在的意义，调用方（设置页）不再另加一句安慰话。
+ */
+export function renderQuarantineSection(
+  items: readonly { name: string; state: ToolQuarantineState }[],
+  now: number,
+): string {
+  if (items.length === 0) {
+    const empty = t('evolution.quarantine.empty', '没有被自动停用的工具——生成工具连续失败到 {n} 次才会停用。')
+      .replace('{n}', String(QUARANTINE_CONSECUTIVE_FAILURES));
+    return `<div class="evo-empty">${escapeHtml(empty)}</div>`;
+  }
+  const rows = items.map(({ name, state }) => {
+    const evidence = t('evolution.quarantine.evidence', '连续 {n} 次失败 · 共调用 {total} 次')
+      .replace('{n}', String(state.consecutiveFailures))
+      .replace('{total}', String(state.totalCalls));
+    const since = state.quarantinedAt ? relativeTime(state.quarantinedAt, now) : '—';
+    const reason = state.reason ?? t('evolution.quarantine.noReason', '（没有留下停用理由）');
+    // 恢复指引写进行内：重新启用是本门提供的动作，删除不是——删目录要走
+    // 「删文件即消失」的设计口径（手删），不新增一条递归删除的宿主命令。
+    const howto = t('evolution.quarantine.howto', '修好 {dir} 下的脚本后点「重新启用」即可恢复；不想留就删掉这个目录。')
+      .replace('{dir}', `~/.pure/tools/${name}/`);
+    return `<div class="evo-experience-row">
+      <div class="evo-experience-head">
+        <span class="memory-badge memory-badge-type memory-type-error_pattern">${escapeHtml(toolDisplayName(name))}</span>
+        <span class="memory-badge evo-badge-low">${escapeHtml(t('evolution.quarantine.badge', '已停用'))}</span>
+        <span class="evo-experience-score" title="${escapeHtml(evidence)}">${escapeHtml(evidence)}</span>
+        <button type="button" class="evo-advice-apply-btn" data-evo-reinstate="${escapeHtml(name)}" title="${escapeHtml(t('evolution.quarantine.reinstateTitle', '修好脚本后重新启用这个工具'))}">${escapeHtml(t('evolution.quarantine.reinstate', '重新启用'))}</button>
+      </div>
+      <div class="evo-experience-content">${escapeHtml(reason)}</div>
+      <div class="evo-experience-meta">${escapeHtml(howto)} · ${escapeHtml(since)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-experience-list">${rows}</div>`;
+}
 
 /**
  * 成本卡：这支团队的钱花在哪些 角色 × provider 组合上。数据来自 T1 的委派

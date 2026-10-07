@@ -13,6 +13,16 @@ import { ToolRegistry } from './ToolRegistry';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
 import { substituteExec } from '../harness/externalTools';
+import {
+  buildQuarantineCard,
+  classifyExternalToolOutcome,
+  looksTimedOut,
+  quarantineVerdict,
+  quarantinedToolResult,
+  tallyToolOutcome,
+  type ToolQuarantineCard,
+  type ToolQuarantineState,
+} from '../harness/toolQuarantine';
 import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
@@ -126,6 +136,9 @@ export interface CodingAgentConfig {
   externalTools?: TaggedTool[];
   /** 阶段 13.4 — 外部工具的 exec 模板（name → { exec, timeoutMs }）。 */
   externalToolExecs?: Map<string, { exec: string; timeoutMs: number }>;
+  /** 阶段 13.4 — 停用看门狗的宿主缝。**不接就等于没有这道门**（执行面完全
+   *  不计数），这是刻意的：CLI 等未接缝的宿主不该被半截门误伤。 */
+  externalToolQuarantine?: ExternalToolQuarantineHost;
   /** Optional UI sink to surface which subagent is currently working. */
   subagentProgress?: SubagentProgress;
   mcpServers?: MCPServerConfig[];
@@ -134,6 +147,21 @@ export interface CodingAgentConfig {
   proxyUrl?: string;
   /** Pre-created MCPClient — if provided, mcpServers is ignored. */
   mcpClient?: MCPClient;
+}
+
+/**
+ * 阶段 13.4 停用看门狗的宿主缝（职责都刻意留在宿主侧）：
+ *  - `seed`：该工具已知的持久状态（宿主在装载时从标记文件灌入）。缺省即「没跑过」。
+ *  - `record`：**每次调用后**都要调，无论结局——计数要跨回合就得每次落盘。
+ *  - `mark`：刚判过停用线时调一次，用于出卡。
+ *
+ * 不接就等于没有这道门（执行面完全不计数），这是刻意的：CLI 等未接缝的宿主不该
+ * 被半截门误伤。
+ */
+export interface ExternalToolQuarantineHost {
+  seed(name: string): ToolQuarantineState;
+  record(name: string, state: ToolQuarantineState): void;
+  mark(name: string, state: ToolQuarantineState, card: ToolQuarantineCard): void | Promise<void>;
 }
 
 export class CodingAgent {
@@ -229,7 +257,7 @@ export class CodingAgent {
       }
       if (config.externalToolExecs && config.externalToolExecs.size > 0) {
         this.toolRegistry.setExternalToolsExecutor(
-          this.createExternalToolsExecutor(config.externalToolExecs),
+          this.createExternalToolsExecutor(config.externalToolExecs, config.externalToolQuarantine),
         );
       }
     }
@@ -328,22 +356,38 @@ export class CodingAgent {
    */
   private createExternalToolsExecutor(
     execs: Map<string, { exec: string; timeoutMs: number }>,
+    quarantine?: ExternalToolQuarantineHost,
   ): ToolAdapter {
     const delegate = this.toolRegistry.getDelegate();
+    // Per-tool failure tallies, seeded from the persisted marker so "consecutive"
+    // spans restarts — a tool that fails twice per launch would otherwise never
+    // reach the threshold and the gate would never fire.
+    const tallies = new Map<string, ToolQuarantineState>();
     return {
       getTools: () => [],
       getMetadata: () => ({ isWrite: false }),
       execute: async (toolCall, signal) => {
-        const entry = execs.get(toolCall.function.name);
+        const name = toolCall.function.name;
+        // Quarantine backstop comes FIRST, ahead of the exec lookup. A dropped
+        // tool has no exec template by construction, so checking the template
+        // first would answer every stray call with "no exec template" — which
+        // reads to the model like a broken manifest, not like a tool that was
+        // deliberately stopped. This is the only path that covers the turn in
+        // which the tool was just quarantined (the registry-level drop is too
+        // late for a call the model already made).
+        const known = quarantine ? (tallies.get(name) ?? quarantine.seed(name)) : undefined;
+        if (known?.quarantined) return quarantinedToolResult(toolCall.id, name, known);
+        const entry = execs.get(name);
         if (!entry) {
           return {
             id: toolCall.id,
-            toolName: toolCall.function.name,
-            error: `External tool "${toolCall.function.name}" has no exec template`,
+            toolName: name,
+            error: `External tool "${name}" has no exec template`,
             success: false,
             duration: 0,
           };
         }
+
         let args: Record<string, unknown>;
         try {
           args = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
@@ -363,7 +407,34 @@ export class CodingAgent {
             arguments: JSON.stringify({ command, timeout_ms: entry.timeoutMs }),
           },
         };
-        return delegate.execute(cmdCall, signal);
+        const result = await delegate.execute(cmdCall, signal);
+        if (!quarantine) return result;
+        // Only `broken` counts. A non-zero exit that PRINTED something is a
+        // successful run whose answer was "no" (grep without a match, a diff with
+        // differences, a test suite with failures) — counting those would kill
+        // healthy tools, which is worse than having no gate at all.
+        const outcome = classifyExternalToolOutcome(result, {
+          aborted: signal?.aborted === true,
+          timedOut: looksTimedOut(result),
+        });
+        const now = Date.now();
+        const state = tallyToolOutcome(known ?? quarantine.seed(name), { outcome, now });
+        const verdict = quarantineVerdict(name, state);
+        const settled: ToolQuarantineState = verdict.kind === 'quarantine'
+          ? { ...state, quarantined: true, quarantinedAt: now, reason: verdict.reason }
+          : state;
+        tallies.set(name, settled);
+        // Exactly ONE write per call. Two fire-and-forget writes have no ordering
+        // guarantee between them, and a late `record` landing after the
+        // `quarantine` write silently un-stops the tool on disk while this
+        // process still believes it is stopped.
+        quarantine.record(name, settled);
+        if (verdict.kind === 'quarantine') {
+          quarantine.mark(name, settled, buildQuarantineCard(name, settled, verdict));
+        }
+        // The call that tripped the line still returns its real result — it
+        // already ran, and rewriting it would hide one legitimate outcome.
+        return result;
       },
     };
   }
