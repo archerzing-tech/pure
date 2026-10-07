@@ -41,14 +41,15 @@ export interface BottleneckOptions {
 
 // 阈值。
 //
-// 已知设计问题（未改，测试 bottleneckSummary.test.ts:91 正指着这里）：`warning`
+// 已知设计问题（未改；测试里「failureRate 30–50% currently classifies as ok」
+// 那条正钉着这个口径）：`warning`
 // 档在当前阈值下几乎不可达。失败率 ≥ 50% 被 critical 先吃掉；剩下要进 warning 得
 // 同时满足 successRate ∈ [70, 90]，也就是失败率 ∈ [10, 30]。窄，但真实存在
 // （夹具 failureRate=20 那条就命中了）。真正读不出来的是失败率 ∈ (30, 50) 这一段：
 // 既不够 critical 又不够 healthy，被归成 ok——而「三成失败却显示 ok」对一个专门
 // 找瓶颈的视图是误导。这属于产品判断（40% 失败该报什么），不是实现 bug，
-// 所以这里只把边界写明：WARNING_FAILURE_RATE_LOW = 10、HIGH = 30（即上面的
-// successRate 区间），要不要把 HIGH 抬到 50 让中段也进 warning，等口径定下来再动。
+// 所以这里只把边界写明：换成失败率口径就是 [10, 30]（对应上面 successRate 的
+// [70, 90]），要不要把上界抬到 50 让中段也进 warning，等口径定下来再动。
 const CRITICAL_FAILURE_RATE = 50;
 const CRITICAL_MIN_DELEGATIONS = 3;
 const WARNING_SUCCESS_RATE_LOW = 70;
