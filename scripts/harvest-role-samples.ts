@@ -10,6 +10,11 @@
 //   bun run eval:harvest -- --agent deepseek-openai [--model deepseek-chat]
 //       [--roles code_reviewer,researcher] [--max 8] [--replace] [--dry-run]
 //       [--sessions ~/.pure/sessions] [--cases-root ~/.pure/roles]
+//       [--subagents ~/.pure/subagents]
+//
+// 默认角色面 = 内建七角色 ∪ `~/.pure/subagents/` 里的生成角色。生成角色能被委派，
+// 它的样本就同样收得回来；此前只有内建角色，于是生成角色的样本源默认是空的，
+// 转正门槛 MIN_ROLE_CASES=5 结构上永远满足不了。
 //
 // --dry-run 只报告每个角色有多少可收样本，不调模型、不写盘（先看料够不够）。
 // --replace 会先清掉该角色的 case-*.json（把旧手写种子换掉）再写新样本。
@@ -39,6 +44,9 @@ import {
 } from '../src/evaluation/roleRegression';
 import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
+import { BUILT_IN_TOOLS } from '../src/coding-agent/ToolRegistry';
+import { compileExternalSubagents } from '../src/harness/externalSubagents';
+import { TRIAL_MARKER_SUFFIX } from '../src/shared/roleTrial';
 import type { SubagentDefinition } from '../src/coding-agent/types';
 import { NON_ROLE_SUBAGENTS } from '../src/shared/subagentAdvisory';
 import { defaultModelFor } from '../src/shared/providers';
@@ -57,6 +65,7 @@ const rolesFlag = flag('--roles');
 const maxPerRole = Number.parseInt(flag('--max') ?? '8', 10);
 const sessionsFlag = flag('--sessions');
 const casesRootFlag = flag('--cases-root');
+const subagentsFlag = flag('--subagents');
 const requestedAgent = agentFlag ?? process.env.PURE_EVAL_AGENT;
 const dryRun = has('--dry-run');
 const replace = has('--replace');
@@ -66,6 +75,9 @@ const sessionsDir = expandHome(sessionsFlag ?? join(homedir(), '.pure', 'session
 const casesRoot = casesRootFlag
   ? resolve(casesRootFlag.replace(/^~(?=$|\/|\\)/, homedir()))
   : join(homedir(), '.pure', 'roles');
+const subagentsDir = expandHome(
+  subagentsFlag ?? process.env.PURE_SUBAGENTS_DIR ?? join(homedir(), '.pure', 'subagents'),
+);
 
 if (!Number.isFinite(maxPerRole) || maxPerRole < 1) {
   console.error('--max must be a positive integer');
@@ -90,6 +102,47 @@ function apiKeyForProvider(provider: string): string | undefined {
 const REGISTRY = new Map<string, SubagentDefinition>(
   [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((def) => [def.name, def]),
 );
+
+/** `~/.pure/subagents/` 里的生成角色定义。
+ *
+ * 收割面默认只有内建七角色时，生成角色的样本源是空的：能委派、收不到样本、
+ * MIN_ROLE_CASES=5 永不满足，overlay A/B 裁决恒 `deny_insufficient_data`——
+ * 一个结构上不可达的功能（2026-10-07 审计）。
+ *
+ * 校验与编译走 `compileExternalSubagents` 那一份定义（和 GUI 装载面同源），
+ * 这里不自己判一遍：多一份判据就多一次“两边对同一个 manifest 看法不同”。
+ */
+async function loadGeneratedRoleDefs(): Promise<SubagentDefinition[]> {
+  let files: string[] = [];
+  try {
+    files = (await readdir(subagentsDir))
+      .filter((name) => name.endsWith('.json') && !name.endsWith(`.${TRIAL_MARKER_SUFFIX}`))
+      .sort();
+  } catch {
+    return []; // 没有生成角色目录：退回只收内建角色的老行为
+  }
+  const sources: Array<{ file: string; text: string }> = [];
+  for (const file of files) {
+    try {
+      sources.push({ file, text: await readFile(join(subagentsDir, file), 'utf8') });
+    } catch {
+      // 单个文件读不到不该拖垮整批。
+    }
+  }
+  // 保留名 = 内建角色名 ∪ 内建工具名，与 GUI 装载面同一份判据。叫
+  // `execute_command` 的 manifest 会被编译器拒掉；放它进来，之后每一条 shell
+  // 调用都会被当成一次角色委派收样本。
+  const reserved = [...REGISTRY.keys(), ...BUILT_IN_TOOLS.map((tool) => tool.name.toLowerCase())];
+  const { defs, errors } = compileExternalSubagents(sources, reserved);
+  for (const line of errors) console.warn(`[harvest] ${line}`);
+  return defs;
+}
+
+// 内建优先：生成角色不允许与内建同名（编译器在 reserved 里已经拦下）。
+const generatedRoleDefs = await loadGeneratedRoleDefs();
+for (const def of generatedRoleDefs) {
+  if (!REGISTRY.has(def.name)) REGISTRY.set(def.name, def);
+}
 
 // ── Read + harvest session archives ──
 
@@ -153,6 +206,11 @@ const wantedRoles = rolesFlag
 const samples = groupSamplesByRole(dedupeSamples(harvestRoleSamples(sessions, wantedRoles)));
 
 console.log(`sessions: ${sessions.length} from ${sessionsDir}`);
+// 把收割面本身打出来：生成角色收不到样本时，「没料」与「根本没在面里」是两件
+// 完全不同的事，两者的修法也完全不同（多跑几次 vs 换目录）。
+if (generatedRoleDefs.length > 0) {
+  console.log(`generated roles: ${generatedRoleDefs.map((def) => def.name).join(', ')} (from ${subagentsDir})`);
+}
 console.log(`roles with real samples:`);
 let total = 0;
 for (const [role, group] of samples) {

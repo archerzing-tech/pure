@@ -10,7 +10,8 @@ import { join, homeDir } from '@tauri-apps/api/path';
 import { createLLMAdapter } from './chat';
 import { TauriToolAdapter } from './TauriToolAdapter';
 import { draftPersonaOverlay } from '../harness/personaOverlayReflector';
-import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
+import { SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
+import { allRoleNames, findRoleDefinition } from './delegableRoles';
 import type { SubagentDefinition } from '../coding-agent/types';
 import { extractSubagentOutput, type RoleCaseFixture } from '../evaluation/roleRegression';
 import { runPersonaOverlayFlow, type OverlayFlowDeps } from './personaOverlayFlow';
@@ -64,9 +65,12 @@ export interface OverlayHostOptions {
 export async function buildOverlayFlowDeps(opts: OverlayHostOptions): Promise<OverlayFlowDeps | undefined> {
   const core = await loadTauriCore();
   if (!core) return undefined;
-  const def = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].find((d) => d.name === opts.role);
+  const def = await findRoleDefinition(opts.role);
   if (!def) return undefined;
-  const knownRoles = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
+  // 生成角色也在面上：草稿的 `targetRole` 校验必须用同一份名单（含已归档的——
+  // 一个在盘上存在的角色是合法目标），否则一条合法草稿会被判成「未知角色」
+  // 而整条流退回。名字数组此前是内建七角色的第二份副本，已收进 delegableRoles。
+  const knownRoles = await allRoleNames();
   const pureHome = await join(await homeDir(), '.pure');
   const workspace = await getApplicationTmpWorkspace(`role-overlay-${opts.role}`);
   const adapter = createLLMAdapter(opts.cfg);

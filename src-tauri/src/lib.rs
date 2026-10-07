@@ -13193,7 +13193,10 @@ fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), 
 /// the session.json messages and counts assistant toolCalls whose function
 /// name is a registered role (single pass, no schema parsing beyond that).
 #[tauri::command]
-fn summarize_session_delegations(session_id: String) -> Result<serde_json::Value, String> {
+fn summarize_session_delegations(
+    session_id: String,
+    roles: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
     validate_session_id(&session_id)?;
     let path = sessions_dir().join(&session_id).join("session.json");
     let Ok(raw) = fs::read_to_string(&path) else {
@@ -13204,24 +13207,38 @@ fn summarize_session_delegations(session_id: String) -> Result<serde_json::Value
         Ok(v) => v,
         Err(_) => return Ok(serde_json::json!({ "delegationCount": 0, "byRole": {} })),
     };
-    let by_role = count_role_delegations(&parsed_messages(&parsed));
+    let roster = subagent_role_names(roles);
+    let by_role = count_role_delegations(&parsed_messages(&parsed), &roster);
     let delegation_count: u64 = by_role.values().sum();
     Ok(serde_json::json!({ "delegationCount": delegation_count, "byRole": by_role }))
 }
 
 /// The role roster as plain names, shared by summarize_session_delegations.
-/// Mirrors the GUI-side predicate wiring: everything the hosts register as a
-/// subagent role (the roster compiles into the binary, so no IO here).
-fn subagent_role_names() -> std::collections::HashSet<String> {
+///
+/// The caller passes the live surface (`~/.pure/subagents/` included) because
+/// Rust cannot know which manifests the TS compiler accepted: a manifest named
+/// after a built-in tool is rejected there and must not be counted here, and the
+/// manifest's own `name` field is only trustworthy after that compile. The
+/// built-in seven stay as the fallback, so a caller that passes nothing gets the
+/// pre-13.2 answer instead of an empty one — and 13.2's generated roles, which
+/// used to be missing from this list, now reach the count that tells the user
+/// what a session delete would throw away.
+fn subagent_role_names(extra: Option<Vec<String>>) -> std::collections::HashSet<String> {
     // Keep in sync with BUILT_IN_SUBAGENTS + CODING_AGENT_ROLES + the
     // external-role loader's tag whitelist (non-delegable names excluded).
-    [
+    let mut names: std::collections::HashSet<String> = [
         "researcher", "code_reviewer", "project_auditor", "task_planner",
         "code_editor", "deep_thinker", "ui_designer",
     ]
     .into_iter()
     .map(str::to_string)
-    .collect()
+    .collect();
+    for name in extra.unwrap_or_default() {
+        if !name.is_empty() {
+            names.insert(name);
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -13248,7 +13265,7 @@ mod delegation_summary_tests {
         // Point sessions_dir at the temp tree for this check.
         // sessions_dir() resolves via pure_home_dir(); use the real command
         // path but with an isolated home through PURE_HOME if available.
-        let count = count_role_delegations(&parsed_messages(&session));
+        let count = count_role_delegations(&parsed_messages(&session), &subagent_role_names(None));
         assert_eq!(count.get("researcher"), Some(&2));
         assert_eq!(count.get("code_reviewer"), Some(&1));
         assert!(!count.contains_key("read_file"));
@@ -13257,11 +13274,32 @@ mod delegation_summary_tests {
 
     #[test]
     fn role_roster_matches_the_registered_subagent_roles() {
-        let roles = subagent_role_names();
+        let roles = subagent_role_names(None);
         for role in ["researcher", "code_reviewer", "project_auditor", "task_planner", "code_editor", "deep_thinker", "ui_designer"] {
             assert!(roles.contains(role), "roster missing {role}");
         }
         assert!(!roles.contains("bash_executor"), "bash_executor is a tool, not a role");
+    }
+
+    #[test]
+    fn caller_supplied_roles_join_the_roster_and_the_count() {
+        // 13.2：生成角色落进 `~/.pure/subagents/` 后可委派，它的委派也是删会话会
+        // 丢掉的原料。硬编码名单把这条计数落掉，删除代价提示因此偏低。名单由调用方
+        // 传入（TS 侧那份唯一的扫描），Rust 不自己读盘猜编译器收不收。
+        let session = serde_json::json!({
+            "messages": [
+                { "role": "assistant", "toolCalls": [
+                    { "id": "g1", "function": { "name": "researcher_focused", "arguments": "{}" } },
+                    { "id": "g2", "function": { "name": "researcher", "arguments": "{}" } }
+                ] }
+            ]
+        });
+        let bare = count_role_delegations(&parsed_messages(&session), &subagent_role_names(None));
+        assert_eq!(bare.get("researcher_focused"), None, "fallback roster must not invent roles");
+        let live = subagent_role_names(Some(vec!["researcher_focused".to_string()]));
+        let counted = count_role_delegations(&parsed_messages(&session), &live);
+        assert_eq!(counted.get("researcher_focused"), Some(&1));
+        assert_eq!(counted.get("researcher"), Some(&1));
     }
 }
 
@@ -13273,8 +13311,10 @@ fn parsed_messages(session: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-fn count_role_delegations(messages: &[serde_json::Value]) -> std::collections::BTreeMap<String, u64> {
-    let roles = subagent_role_names();
+fn count_role_delegations(
+    messages: &[serde_json::Value],
+    roles: &std::collections::HashSet<String>,
+) -> std::collections::BTreeMap<String, u64> {
     let mut by_role = std::collections::BTreeMap::new();
     for message in messages {
         let Some(calls) = message.get("toolCalls").and_then(|c| c.as_array()) else { continue };

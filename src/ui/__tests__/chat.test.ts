@@ -1825,3 +1825,28 @@ describe('plan-by-thinking flow', () => {
     expect(withoutHelper.includes('ack?.parentElement?.remove()')).toBe(false);
   });
 });
+
+// 委派记账的接线守卫（2026-10-07 审计取证）。
+//
+// T1 的 `delegations[]` 只在观测层知道「哪些工具名是角色」时才写，而那个判断由
+// CodingAgent 构造函数从 `config.observability` 装上去。GUI 一直没传这个键，
+// `config.observability?.setDelegationRolePredicate(...)` 于是整体静默 no-op——
+// 真机 32 条 agent_run 记录里 delegations 出现 0 次，成本视图（T4）永远读空、
+// 13.2 试用制没有结局可裁。丢这个键的代价是**零报错**：没有这条守卫，下次重构
+// 配置字面量时它会再丢一次，而下一次同样要等真机数据才发现。
+describe('delegation accounting wiring', () => {
+  it('the CodingAgent config the GUI builds carries the observability singleton', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain("import { promptObservability } from '../shared/promptObservability'");
+    // 边界用构造行与构造后紧邻的赋值行夹住：不数括号，也不依赖配置项的顺序。
+    const start = src.indexOf('const codingAgent = new CodingAgent({');
+    const end = src.indexOf('this.codingAgentRef = codingAgent;');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const wiring = src.slice(start, end);
+    expect(wiring).toMatch(/^\s*observability: promptObservability,$/m);
+    // 传的必须是那个全局单例（sink 挂在它身上），不是每轮新建的实例——
+    // 后者会让记账离开 JSONL，磁盘上照样一条没有。
+    expect(src.split('observability: promptObservability').length - 1).toBe(1);
+  });
+});

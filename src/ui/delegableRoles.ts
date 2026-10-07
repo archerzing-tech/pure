@@ -187,6 +187,31 @@ export async function loadGeneratedRoles(): Promise<DelegableRole[]> {
   return loadExternalSubagents();
 }
 
+/**
+ * Resolve one role name to its definition — built-ins first, then the scan.
+ *
+ * The overlay entry point used to look only inside `[...BUILT_IN_SUBAGENTS,
+ * ...CODING_AGENT_ROLES]`, so a generated role fell through to `undefined` and
+ * the button answered 「无效角色」. Worse, the very advice card that rendered that
+ * button had already been produced by a scan that DOES know the role — and once
+ * `scanSubagentAdvice` was given the real surface, generated roles genuinely
+ * reach those cards, turning a barely-reachable button into a reliably broken
+ * one. Same scan as everything else: there is no second opinion about which
+ * roles exist.
+ */
+export async function findRoleDefinition(role: string): Promise<SubagentDefinition | undefined> {
+  const builtin = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].find((def) => def.name === role);
+  if (builtin) return builtin;
+  return (await loadExternalSubagents()).find((entry) => entry.def.name === role)?.def;
+}
+
+/** Every role name the scan can see, **archived ones included** — the surface a
+ *  drafted overlay's `targetRole` is validated against (a role that exists on disk
+ *  is a legitimate target even if it is currently off the team). */
+export async function allRoleNames(): Promise<string[]> {
+  return [...builtinRoleNames(), ...(await loadExternalSubagents()).map((entry) => entry.def.name)];
+}
+
 
 // ── 13.2 试用制：角标与转正 ──
 
@@ -392,6 +417,40 @@ export async function restoreGeneratedRole(role: string): Promise<boolean> {
     registeredAt: Date.now(),
   };
   await core.invoke('write_file', { workspace: pureHome, path: markerPath, content: renderTrialMarker(next) });
+  invalidateExternalSubagents();
+  return true;
+}
+
+/**
+ * Delete a generated role **for good**: its manifest and its trial sidecar.
+ *
+ * Archiving covers the reversible half; without this the only way to actually
+ * get rid of a retired role was for the user to go find `~/.pure/subagents/` by
+ * hand — the archived-roles card could do nothing but tell them to do that. It
+ * goes through the same `remove_path` the rest of the app uses (symlink and
+ * workspace-root guards included) rather than adding a bespoke delete command.
+ *
+ * The harvested samples under `~/.pure/roles/<role>/` are deliberately left
+ * alone: they are measurements about a role that existed, they cost nothing to
+ * keep, and deleting a manifest is not a claim about that role's evidence. The
+ * role does disappear from the delegable surface on the next scan, which is what
+ * "deleted" has to mean here.
+ */
+export async function deleteGeneratedRole(role: string): Promise<boolean> {
+  if (!isTauriRuntime() || !evolutionEnabled()) return false;
+  if (!ROLE_NAME_RE.test(role) || RESERVED_ROLE_NAMES.has(role)) return false;
+  const core = await loadTauriCore();
+  if (!core) return false;
+  const pureHome = await join(await homeDir(), '.pure');
+  try {
+    await core.invoke('read_file', { workspace: pureHome, path: `subagents/${role}.json` });
+  } catch {
+    return false; // nothing on disk under that name — nothing to delete
+  }
+  await core.invoke('remove_path', { workspace: pureHome, path: `subagents/${role}.json`, recursive: false });
+  // The sidecar is optional (a hand-written role has none) and `remove_path`
+  // treats an absent path as success, so this needs no existence check.
+  await core.invoke('remove_path', { workspace: pureHome, path: `subagents/${trialMarkerFileName(role)}`, recursive: false });
   invalidateExternalSubagents();
   return true;
 }

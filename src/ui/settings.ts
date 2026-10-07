@@ -56,7 +56,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
-import { buildTrialBadges, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, restoreGeneratedRole, startRoleTrial } from './delegableRoles';
+import { buildTrialBadges, deleteGeneratedRole, findRoleDefinition, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, restoreGeneratedRole, startRoleTrial } from './delegableRoles';
 import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
@@ -1179,6 +1179,38 @@ export class SettingsPanel {
       }
     });
 
+    // ── 13.2 归档：彻底删除（manifest + 旁挂账）──
+    // 与「重新启用」同一条事件委托、同一个列表：两个动作是同一件事的两半——
+    // 「再给它一次机会」与「不留了」。删除不可逆，所以先弹一次确认；确认文案必须
+    // 说清丢的是什么（manifest 与旁挂账）以及不丢的是什么（已收割的样本）。
+    document.getElementById('evolution-roles-archived')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-delete-role]');
+      if (!btn) return;
+      event.stopPropagation();
+      const role = btn.dataset.evoDeleteRole || '';
+      if (!role) return;
+      const ok = await showConfirmModal({
+        title: t('evolution.archivedRoles.deleteTitle', '删掉 manifest 与旁挂账，它不会再出现在可委派面里'),
+        message: t('evolution.archivedRoles.deleteConfirm', '彻底删除生成角色 {role}：manifest 与试用旁挂账（~/.pure/subagents/）都会被删掉，已收割的样本留在 ~/.pure/roles/ 不动。删除不可恢复。').replace('{role}', role),
+        okLabel: t('common.ok'),
+        cancelLabel: t('common.cancel'),
+      });
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        const deleted = await deleteGeneratedRole(role);
+        this.toast(deleted
+          ? t('evolution.archivedRoles.deleted', '已彻底删除角色 {role}').replace('{role}', role)
+          : t('evolution.archivedRoles.deleteFailed'));
+      } catch (err) {
+        console.error('[pure] delete role failed:', err);
+        this.toast(t('evolution.archivedRoles.deleteFailed'));
+      } finally {
+        btn.disabled = false;
+        void this.renderEvolutionDashboard();
+      }
+    });
+
     // ── 13.2 试用制：够格转正 → 落盘转正标记 ──
     // 用户点确认而不是系统自动写：转正是「这个角色从此不再是临时产物」的永久性结论，
     // 而读数已经摆在旁边（够格转正 + 父角色对比证据）。
@@ -1357,7 +1389,10 @@ export class SettingsPanel {
         this.toast(t('evolution.advice.overlay.stale'));
         return;
       }
-      const def = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].find((d) => d.name === role);
+      // 生成角色也算角色：渲染这个按钮的建议卡，其角色面已经是「内建 ∪
+      // ~/.pure/subagents/」（`scanSubagentAdvice` 吃 loadDelegableRoleNames），
+      // 只查内建名单等于给生成角色发一个点下去必报「无效」的按钮。
+      const def = await findRoleDefinition(role);
       if (!def) {
         this.toast(t('evolution.advice.overlay.invalid'));
         return;

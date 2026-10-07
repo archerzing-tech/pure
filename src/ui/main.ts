@@ -23,6 +23,7 @@ import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { promptObservability } from '../shared/promptObservability';
+import { allRoleNames } from './delegableRoles';
 import { workspaceBase } from '../shared/paths';
 import { loadSession, loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats, type TurnTiming } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
@@ -167,7 +168,13 @@ sessionSidebar = new SessionSidebar({
   delegationNotice: async (sessionId) => {
     if (!isTauriRuntime()) return null;
     try {
-      const summary = await tauriInvoke<{ delegationCount?: number; byRole?: Record<string, number> }>('summarize_session_delegations', { sessionId });
+      // 角色名单从这里传进去：Rust 侧那份是缺省兜底（内建七角色），而生成角色
+      // 落进 `~/.pure/subagents/` 后同样可委派、同样是「删了会丢的原料」。
+      // 用盘上全量名单（含已归档——它们的委派就在存档里，照样收得回）。
+      const summary = await tauriInvoke<{ delegationCount?: number; byRole?: Record<string, number> }>(
+        'summarize_session_delegations',
+        { sessionId, roles: await allRoleNames() },
+      );
       const count = summary?.delegationCount ?? 0;
       if (count <= 0) return null;
       const detail = Object.entries(summary?.byRole ?? {})

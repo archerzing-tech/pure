@@ -14243,6 +14243,13 @@ button svg,
   color: var(--accent, #6c8cff);
   background: color-mix(in srgb, var(--accent, #6c8cff) 8%, transparent);
 }
+/* 已归档角色行的「彻底删除」：与旁边那颗同款，只是把它染成危险色——
+   两个动作挨着放，长得一样就是在赌用户读得比点得快。 */
+.evo-role-delete-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
 /* 已应用的建议行：徽章走中性确认色（不是 high/medium 那种告警色）。 */
 .evo-badge-applied {
   color: var(--success);
