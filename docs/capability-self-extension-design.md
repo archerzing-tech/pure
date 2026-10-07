@@ -11,7 +11,18 @@
 委派记录不进观测切片（`subagentAdvisory.ts:86` / `teamObservability.ts:19` /
 `strategyEffect.ts:113` 用的都是静态 `KNOWN_SUBAGENT_ROLES`）。该前置由 `c36f263`
 解开——三个切片改吃可注入的角色面，裁决读的是 `delegations[]`（T1 之后的真机形态，
-不是只读的 `toolCalls`）。下文论证逐字仍有效。
+不是只读的 `toolCalls`）。
+
+📌 当日第二次取证（同一审计的下半段）：切片可注入只解开了**一半**。真机 32 条
+`agent_run` 记录里 `delegations` 出现 0 次——因为 GUI 构造 CodingAgent 时从未传
+`observability`，`config.observability?.setDelegationRolePredicate(...)` 整体是
+no-op，而 `delegations[]` 的写入闸（`promptObservability` 的 `isDelegationRole`）
+就卡在那一个 predicate 上。同一个「读取端没跟上」的病还有另外三处，一并补齐：
+收割面默认只收内建七角色（生成角色样本源恒空 → `MIN_ROLE_CASES` 永不满足）、
+Rust `subagent_role_names()` 硬编码七角色（删除会话的代价提示偏低）、overlay 入口
+只在内建名单里找角色（生成角色上出现点下去必报「无效」的按钮）。
+四处都以「内建 ∪ 盘上真实角色面」为口径收口，**谁扫谁说了算**只保留一份。
+下文论证逐字仍有效。
 
 起因：用户问系统能否自己生成新工具、
 改进存量工具、生成新子 agent、改进存量子 agent。审计结论：四项里两项不具备、
@@ -147,7 +158,9 @@ input_schema / exec）+ 实现脚本。启动扫描 → 构造 TaggedTool → `t
 ## 验收口径（逐条标注当前达成状态，2026-10-07 取证）
 
 1. 13.1：建议卡一键应用后设置 / 记忆确实变更；应用记录进观测，仪表盘可回看效果。**✅**
-2. 13.2：生成的角色可被正常委派，试用角标 / 数据可见，不达标自动归档，删文件即消失。
+2. 13.2：生成的角色可被正常委派，试用角标 / 数据可见，不达标自动归档；退役有两个出口——
+   「重新启用」走一段新试用期，「彻底删除」删掉 manifest 与旁挂账（已收割样本留在
+   `~/.pure/roles/` 不动）。
    **✅ 起草 / 角标 / 裁决 / 归档四条全部已落**（逐条列在下面）：
    - ✅ 起草两条路（确定性 / 模型）落盘后都写试用期旁挂账 `<role>.trial.json`，
      不改用户 manifest，删文件即消失。

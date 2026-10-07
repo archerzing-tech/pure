@@ -35,8 +35,17 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - CLI 侧车递送恢复（Windows/macOS 两侧 CI + `resources`/`binaries` 占位归位，装完即用）；gateway 相关子进程全部静默，不再闪终端窗
 - 顺带：运行中的网关若一个通道都没接上会明确标出（此前空列表读起来像「没事」），陈旧锁文件自愈
 
+**生成角色读取端补齐（审计取证：写入端做完、读取端没跟上）**
+- 委派记账恢复：构造 CodingAgent 的 config 从来没有 `observability` 键，`config.observability?.…` 于是整体静默 no-op；`delegations[]` 的写入闸就卡在那一个 predicate 上——真机 32 条 `agent_run` 里 `delegations` 出现 **0 次**，成本视图（T4）与 13.2 试用制裁决读的都是空数据
+- 收割面不再只认内建七角色：生成角色是能委派的，它的样本同样收得回来（此前样本源恒空 → `MIN_ROLE_CASES=5` 结构上永不满足）
+- 删除会话的「N 条委派存档」计数不再漏掉生成角色（此前 Rust 侧名单硬编码内建七角色，删除代价提示偏低）
+- overlay 入口不再只在内建名单里找角色：生成角色上不会再出现一颗点下去必报「无效」的按钮
+- 四处统一到「内建 ∪ 盘上真实角色面」，角色名单只留一份真相
+- 归档角色补上「彻底删除」（manifest + 旁挂账；已收割样本保留在 `~/.pure/roles/`）——此前「不想留」只写在行内文案里，等于让用户自己去翻目录
+
 **设计文档**
 - 五份设计稿的落地状态按 git 证据逐行重建（此前状态表落后半个月，已两次误导判断）
+- 更正 `multi-agent-self-evolving-architecture.md` 里「新角色同样进观测记账与建议卡」那条**已被推翻的断言**（它此前只在进度记录里更正过，设计稿漏改）
 
 ## v3.1.0
 
