@@ -36,14 +36,13 @@ import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { compileExternalTools } from '../harness/externalTools';
 import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
+import { loadExternalSubagents } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
 import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
-import type { SubagentDefinition } from '../coding-agent/types';
-import { compileExternalSubagents } from '../harness/externalSubagents';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from '../harness/overlayGuard';
 import { requestPermission } from './permission';
@@ -678,26 +677,11 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
 }
 
 /** 阶段 13.2 (loading half) — external subagent roles from ~/.pure/subagents/*.json.
- * Scanned once per app run (Rust does the IO, the shared compiler validates);
- * adding/removing a manifest takes effect on the next app start. Errors are
- * logged once, never thrown — a broken file must not block a turn. */
-let externalSubagentsPromise: Promise<SubagentDefinition[]> | null = null;
-function loadGuiExternalSubagents(): Promise<SubagentDefinition[]> {
-  externalSubagentsPromise ??= (async () => {
-    if (!isTauriRuntime()) return [];
-    try {
-      const sources = await tauriInvoke<Array<{ file: string; text: string }>>('list_external_subagents');
-      const reserved = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES].map((d) => d.name);
-      const { defs, errors } = compileExternalSubagents(sources ?? [], reserved);
-      for (const line of errors) console.warn(`[external-subagents] ${line}`);
-      return defs;
-    } catch (error) {
-      console.warn('[external-subagents] scan failed:', error);
-      return [];
-    }
-  })();
-  return externalSubagentsPromise;
-}
+ * The scan itself lives in `delegableRoles` so the settings dashboard measures
+ * the SAME role surface this session delegates into — two private scans of the
+ * same directory is how those two would drift into disagreeing about which
+ * roles exist. */
+const loadGuiExternalSubagents = loadExternalSubagents;
 
 // ── 阶段 13.4 — external script tools from ~/.pure/tools/<name>/TOOL.json ──
 // Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;

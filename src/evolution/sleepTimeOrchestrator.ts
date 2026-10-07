@@ -194,6 +194,10 @@ export interface SleepTimeDeps {
   projectPath?: string;
   /** 观测来源（GUI 读 app.jsonl 尾读，CLI 读 FilePromptObservationStore）。 */
   observations?: () => Promise<PromptObservation[]> | PromptObservation[];
+  /** 真实可委派角色面（内建 + `~/.pure/subagents/` 生成角色）。不给 = 只认内建八
+   *  角色，于是生成角色永远到不了这条循环——而这是唯一会自动写盘的读者：设置页
+   *  那半边只显示，13.2 的数据要真被裁决就得先到达这里。 */
+  roleSurface?: () => Promise<string[]> | string[];
   /** 13.3 overlay 全流程（起草→校验→A/B→确认→落盘）。宿主装配
    *  runPersonaOverlayFlow；confirm 绑定为 async () => true（走到 confirm
    *  即门禁 verdict==='allow'，符合「门禁通过即自动落盘」立场）。 */
@@ -430,7 +434,13 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
       } catch (err) {
         result.errors.push(`observations failed: ${errorMessage(err)}`);
       }
-      for (const advice of scanSubagentAdvice(records, { now: nowFn() })) {
+      let roles: string[] | undefined;
+      try {
+        roles = await deps.roleSurface?.();
+      } catch (err) {
+        result.errors.push(`role surface failed: ${errorMessage(err)}`);
+      }
+      for (const advice of scanSubagentAdvice(records, { now: nowFn(), ...(roles ? { roles } : {}) })) {
         if (aborted()) { result.aborted = true; break; }
         if (nowFn() >= deadline) { result.budgetExhausted = 'wall-clock'; break; }
         result.advicesConsidered += 1;

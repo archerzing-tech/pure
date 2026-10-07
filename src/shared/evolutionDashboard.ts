@@ -219,7 +219,7 @@ function buildErrorClusters(runs: readonly AgentRunObservation[]): ErrorCluster[
  */
 export function buildEvolutionDashboard(
   records: readonly PromptObservation[],
-  options: { range: DashboardRange; now?: number },
+  options: { range: DashboardRange; now?: number; roles?: readonly string[] },
 ): EvolutionDashboard {
   const now = options.now ?? Date.now();
   const windowDays = DASHBOARD_WINDOW_DAYS[options.range];
@@ -292,6 +292,6 @@ export function buildEvolutionDashboard(
     },
     buckets: [...buckets.values()],
     errorClusters: buildErrorClusters(windowRuns),
-    strategy: summarizeStrategyEffects(windowRuns),
+    strategy: summarizeStrategyEffects(windowRuns, options.roles ? new Set(options.roles) : undefined),
   };
 }

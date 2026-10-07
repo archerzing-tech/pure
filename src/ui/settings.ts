@@ -24,7 +24,6 @@ import { renderSchedulesSettings } from './scheduleSettings';
 import { renderChannelSettings } from './channelSettings';
 import { renderGatewaySettings } from './gatewaySettings';
 import { buildEvolutionDashboard, DASHBOARD_WINDOW_DAYS, type DashboardRange } from '../shared/evolutionDashboard';
-import { TEAM_ROLES } from '../shared/teamObservability';
 import type { StrategyDimension } from '../shared/strategyEffect';
 import { buildSkillGateAppliedRecord, scanSubagentAdvice } from '../shared/subagentAdvisory';
 import { buildDraftRoleManifest, roleDraftManifest, runRoleDraftFlow } from '../shared/subagentDraft';
@@ -56,6 +55,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
+import { loadDelegableRoleNames } from './delegableRoles';
 import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
@@ -1164,7 +1164,7 @@ export class SettingsPanel {
       if (!role) return;
       // 处理器端重扫拿完整失败画像（按钮只带角色名），与卡片同一数据源。
       const read = await readGuiObservations();
-      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      const advice = scanSubagentAdvice(read.records, { now: Date.now(), roles: await loadDelegableRoleNames() }).find((item) => item.role === role);
       if (!advice) {
         this.toast(t('evolution.advice.draft.stale'));
         return;
@@ -1215,7 +1215,7 @@ export class SettingsPanel {
       const role = btn.dataset.evoModelDraft || '';
       if (!role) return;
       const read = await readGuiObservations();
-      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      const advice = scanSubagentAdvice(read.records, { now: Date.now(), roles: await loadDelegableRoleNames() }).find((item) => item.role === role);
       if (!advice) {
         this.toast(t('evolution.advice.draft.stale'));
         return;
@@ -1283,7 +1283,7 @@ export class SettingsPanel {
       if (!role) return;
 
       const read = await readGuiObservations();
-      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      const advice = scanSubagentAdvice(read.records, { now: Date.now(), roles: await loadDelegableRoleNames() }).find((item) => item.role === role);
       if (!advice) {
         this.toast(t('evolution.advice.overlay.stale'));
         return;
@@ -1359,7 +1359,7 @@ export class SettingsPanel {
       const role = btn.dataset.evoApply || '';
       if (!role) return;
       const read = await readGuiObservations();
-      const advice = scanSubagentAdvice(read.records, { now: Date.now() }).find((item) => item.role === role);
+      const advice = scanSubagentAdvice(read.records, { now: Date.now(), roles: await loadDelegableRoleNames() }).find((item) => item.role === role);
       if (!advice) {
         this.toast(t('evolution.advice.apply.stale'));
         return;
@@ -3322,7 +3322,12 @@ export class SettingsPanel {
   private async renderEvolutionDashboard(): Promise<void> {
     const now = Date.now();
     const read = await readGuiObservations();
-    const dashboard = buildEvolutionDashboard(read.records, { range: this.evolutionRange, now });
+    // The delegable role surface: built-ins + roles compiled from
+    // ~/.pure/subagents/. Every slice below measures this, not a hardcoded list
+    // of eight — otherwise a generated role's delegations land nowhere and 13.2's
+    // trial-period verdict has nothing to read.
+    const roleSurface = await loadDelegableRoleNames();
+    const dashboard = buildEvolutionDashboard(read.records, { range: this.evolutionRange, now, roles: roleSurface });
 
     const windowEl = document.getElementById('evolution-window');
     if (windowEl) {
@@ -3364,7 +3369,7 @@ export class SettingsPanel {
     const applied = collectAppliedAdvice(read.records);
     const appliedSkills = new Set(applied.filter((item) => item.kind === 'skill-gate').map((item) => item.target));
     const adviceEl = document.getElementById('evolution-advice');
-    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now }), now, appliedSkills);
+    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now, roles: roleSurface }), now, appliedSkills);
 
     // 13.1 已应用的建议：同一份记录的回看半边——"应用前"是落盘时的快照，
     // "应用后"由 postApplyStats 从其后的 agent_run 记录现算。
@@ -3393,7 +3398,7 @@ export class SettingsPanel {
       try {
         const core = await loadTauriCore();
         if (core) {
-          for (const role of TEAM_ROLES) {
+          for (const role of roleSurface) {
             const cases = await core.invoke<Array<{ file: string }>>('list_role_cases', { role }).catch(() => [] as Array<{ file: string }>);
             if (cases.length > 0) caseCounts[role] = cases.length;
           }
@@ -3401,13 +3406,13 @@ export class SettingsPanel {
       } catch {
         // Browser mode: delegation data still renders; stock shows 0.
       }
-      teamEl.innerHTML = renderTeamRosterSection(read.records, { now, caseCounts });
+      teamEl.innerHTML = renderTeamRosterSection(read.records, { now, caseCounts, roles: roleSurface });
     }
 
     // T4 成本视图：同一观测切片，按 角色 × provider 聚合 T1 的委派 usage。
     const teamCostEl = document.getElementById('evolution-team-cost');
     if (teamCostEl) {
-      teamCostEl.innerHTML = renderTeamCostSection(read.records, { now });
+      teamCostEl.innerHTML = renderTeamCostSection(read.records, { now, roles: roleSurface });
     }
 
     const statsEl = document.getElementById('evolution-stats');

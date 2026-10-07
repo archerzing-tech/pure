@@ -95,7 +95,11 @@ export function compileExternalSubagents(
       continue;
     }
     if (reserved.has(manifest.name)) {
-      errors.push(`${source.file}: name "${manifest.name}" collides with a built-in role — skipped (built-ins cannot be overridden)`);
+      // `reserved` now carries built-in TOOL names as well as role names, so the
+      // wording says "built-in" rather than "built-in role" — otherwise a
+      // manifest called `execute_command.json` reports a collision with a role
+      // that does not exist.
+      errors.push(`${source.file}: name "${manifest.name}" collides with a built-in name — skipped (built-ins cannot be overridden)`);
       continue;
     }
     if (defs.some((d) => d.name === manifest.name)) {

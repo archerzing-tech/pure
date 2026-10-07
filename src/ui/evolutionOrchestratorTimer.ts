@@ -31,6 +31,7 @@ import {
   type SleepTimeSessionRef,
   type SleepTimeTurnInput,
 } from '../evolution/sleepTimeOrchestrator';
+import { loadDelegableRoleNames } from './delegableRoles';
 import { buildOverlayFlowDeps } from './overlayFlowHost';
 import { runPersonaOverlayFlow } from './personaOverlayFlow';
 import { createLLMAdapter } from './chat';
@@ -197,6 +198,9 @@ async function buildGuiSleepTimeDeps(cfg: PureConfig): Promise<SleepTimeDeps> {
     memory: memoryStore,
     llm: reflectModel ? createLLMAdapter({ ...cfg, model: reflectModel }) : createLLMAdapter(cfg),
     projectPath: host.getWorkspace(),
+    // 生成角色也在可委派面内：这是唯一会自动写盘的观察者，不接就等于
+    // 13.2 的数据只通到设置页的显示层，通不到真正会动手的那一半。
+    roleSurface: () => loadDelegableRoleNames(),
     observations: async () => {
       try {
         return (await readGuiObservations()).records;

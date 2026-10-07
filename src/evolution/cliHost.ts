@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import { PURE_DIR, loadConfig, saveConfig } from '../cliConfig';
 import { FilePromptObservationStore } from '../shared/FilePromptObservationStore';
 import { buildSkillGateAppliedRecord } from '../shared/subagentAdvisory';
+import { loadDelegableRoleNames } from '../ui/delegableRoles';
 import { memoryStore } from '../cliHarness';
 import type { LLMAdapter, Message } from '../shared/types';
 import {
@@ -73,6 +74,9 @@ function buildCliSleepTimeDeps(llm: LLMAdapter, projectPath: string, budget: 'cl
     memory: memoryStore,
     llm,
     projectPath,
+    // 生成角色也在可委派面内：这是唯一会自动写盘的观察者，不接就等于
+    // 13.2 的数据只通到设置页的显示层，通不到真正会动手的那一半。
+    roleSurface: () => loadDelegableRoleNames(),
     observations: () => {
       try {
         return observations.list();

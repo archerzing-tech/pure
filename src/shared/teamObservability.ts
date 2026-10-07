@@ -15,8 +15,24 @@ import { KNOWN_SUBAGENT_ROLES } from './adaptiveControl';
 import { NON_ROLE_SUBAGENTS } from './subagentAdvisory';
 import { estimateCostUsd, isPriceKnown } from './usage';
 
-/** 与收割器（roleSampleHarvest）同一份可收割角色面：去掉 bash_executor。 */
+/**
+ * The default role surface: the built-in eight minus `bash_executor` (a shell
+ * command in an agent's coat, not a role — same verdict as the advice scanner).
+ *
+ * It is the **default**, not the truth. A role generated into
+ * `~/.pure/subagents/` is registered and delegable but absent from this list, so
+ * every one of its delegations used to fall outside the roster, the cost view
+ * and the advice cards — which left the trial-period verdict (13.2) with nothing
+ * to read. Hosts pass the real surface via `TeamRosterOptions.roles`.
+ */
 export const TEAM_ROLES: readonly string[] = [...KNOWN_SUBAGENT_ROLES].filter((role) => !NON_ROLE_SUBAGENTS.has(role));
+
+/** The role surface a slice recognises: the default, or whatever the host
+ *  actually registered. `bash_executor` is filtered out either way. */
+export function roleSurface(roles?: readonly string[]): ReadonlySet<string> {
+  if (!roles || roles.length === 0) return new Set(TEAM_ROLES);
+  return new Set(roles.filter((role) => !NON_ROLE_SUBAGENTS.has(role)));
+}
 
 /** 一次窗口聚合的窗口长度（毫秒）——与仪表盘默认 30 天一致。 */
 export const TEAM_WINDOW_DAYS = 30;
@@ -50,6 +66,11 @@ export interface TeamRosterOptions {
   minCases?: number;
   /** role → 已入库 case 数。 */
   caseCounts?: Record<string, number>;
+  /** The delegable role surface (built-ins + generated roles). Omitted = the
+   *  built-in default, which is what every caller had before generated roles
+   *  existed — kept as the default so a forgotten argument degrades to the old
+   *  behaviour rather than to a wrong global. */
+  roles?: readonly string[];
 }
 
 function emptyRow(role: string, caseCount: number): TeamRoleRow {
@@ -57,7 +78,7 @@ function emptyRow(role: string, caseCount: number): TeamRoleRow {
 }
 
 /** 抽一条 run 记录里的委派切片：优先 T1 delegations，退回匿名 toolCalls。 */
-function delegationSlices(record: AgentRunObservation): Array<{ role: string; success: boolean; durationMs?: number; tokens?: number }> {
+function delegationSlices(record: AgentRunObservation, roles: ReadonlySet<string>): Array<{ role: string; success: boolean; durationMs?: number; tokens?: number }> {
   if (record.delegations) {
     return record.delegations.map((delegation: DelegationObservation) => ({
       role: delegation.role,
@@ -69,7 +90,7 @@ function delegationSlices(record: AgentRunObservation): Array<{ role: string; su
     }));
   }
   return (record.toolCalls ?? [])
-    .filter((call) => TEAM_ROLES.includes(call.toolName))
+    .filter((call) => roles.has(call.toolName))
     .map((call) => ({ role: call.toolName, success: call.success, durationMs: call.durationMs }));
 }
 
@@ -80,12 +101,13 @@ export function summarizeTeamRoster(records: readonly PromptObservation[], optio
   const windowStart = now - days * 24 * 60 * 60 * 1000;
   const minCases = options.minCases ?? 5;
   const caseCounts = options.caseCounts ?? {};
+  const roles = roleSurface(options.roles);
 
-  const rows = new Map<string, TeamRoleRow>(TEAM_ROLES.map((role) => [role, emptyRow(role, caseCounts[role] ?? 0)]));
+  const rows = new Map<string, TeamRoleRow>([...roles].map((role) => [role, emptyRow(role, caseCounts[role] ?? 0)]));
 
   for (const record of records) {
     if (record.type !== 'agent_run' || (record.startedAt ?? 0) < windowStart) continue;
-    for (const slice of delegationSlices(record)) {
+    for (const slice of delegationSlices(record, roles)) {
       const row = rows.get(slice.role);
       if (!row) continue;
       row.delegations = (row.delegations ?? 0) + 1;
@@ -174,6 +196,7 @@ export function summarizeTeamCosts(records: readonly PromptObservation[], option
   const days = options.windowDays ?? TEAM_WINDOW_DAYS;
   const windowStart = now - days * 24 * 60 * 60 * 1000;
 
+  const roles = roleSurface(options.roles);
   const rows = new Map<string, TeamCostRow>();
   let unpricedDelegations = 0;
   let unmeteredDelegations = 0;
@@ -187,11 +210,11 @@ export function summarizeTeamCosts(records: readonly PromptObservation[], option
     if (!delegations) {
       // T1 之前的记录只有匿名 toolCalls：数得出派发，但对不出任何用量。
       unmeteredDelegations += (record.toolCalls ?? [])
-        .filter((call) => TEAM_ROLES.includes(call.toolName)).length;
+        .filter((call) => roles.has(call.toolName)).length;
       continue;
     }
     for (const delegation of delegations) {
-      if (!TEAM_ROLES.includes(delegation.role)) continue;
+      if (!roles.has(delegation.role)) continue;
       // NUL 分隔：角色名与 provider/model 里都不可能含它，省掉转义歧义。
       const key = `${delegation.role}\u0000${provider}\u0000${model ?? ''}`;
       let row = rows.get(key);

@@ -82,8 +82,19 @@ function endTime(record: AgentRunObservation): number {
   return record.endedAt && record.endedAt >= record.startedAt ? record.endedAt : record.startedAt;
 }
 
-function isRoleCall(call: ToolObservation): boolean {
-  return KNOWN_SUBAGENT_ROLES.has(call.toolName) && !NON_ROLE_SUBAGENTS.has(call.toolName);
+/** The role surface a slice should recognise. Defaults to the built-in eight —
+ *  a caller that knows the real delegable surface (built-ins + roles compiled
+ *  from `~/.pure/subagents/`) passes it, otherwise a generated role's delegations
+ *  land nowhere and the trial-period verdict has nothing to read. */
+export type DelegableRoleSurface = ReadonlySet<string> | readonly string[];
+
+export function toRoleSet(surface: DelegableRoleSurface | undefined): ReadonlySet<string> {
+  if (!surface) return KNOWN_SUBAGENT_ROLES;
+  return surface instanceof Set ? surface : new Set(surface);
+}
+
+function isRoleCall(call: ToolObservation, roles: ReadonlySet<string>): boolean {
+  return roles.has(call.toolName) && !NON_ROLE_SUBAGENTS.has(call.toolName);
 }
 
 function tallyRole(tally: RoleTally, call: ToolObservation, record: AgentRunObservation): void {
@@ -117,18 +128,19 @@ function dominantKind(kinds: Map<string, number>): string {
  */
 export function scanSubagentAdvice(
   records: readonly PromptObservation[],
-  options: { now?: number; windowDays?: number } = {},
+  options: { now?: number; windowDays?: number; roles?: DelegableRoleSurface } = {},
 ): SubagentAdvice[] {
   const now = options.now ?? Date.now();
   const windowDays = options.windowDays ?? SUBAGENT_ADVICE_WINDOW_DAYS;
   const windowStart = now - windowDays * 86_400_000;
+  const roles = toRoleSet(options.roles);
 
   const tallies = new Map<string, RoleTally>();
   for (const record of records) {
     if (record.type !== 'agent_run') continue;
     if (record.startedAt < windowStart || record.startedAt > now) continue;
     for (const call of record.toolCalls) {
-      if (!isRoleCall(call)) continue;
+      if (!isRoleCall(call, roles)) continue;
       const tally = tallies.get(call.toolName) ?? {
         delegations: 0,
         failures: 0,

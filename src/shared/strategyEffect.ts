@@ -103,14 +103,24 @@ export function summarizeByDimension(records: readonly PromptObservation[], dime
   return slices;
 }
 
-/** 按子代理角色切片：子代理工具就是按角色命名的（KNOWN_SUBAGENT_ROLES），
- *  写路径不需要新字段 —— 这里按 toolName 归类即可。 */
-export function summarizeByRole(records: readonly PromptObservation[]): Record<string, RoleEffectSlice> {
+/**
+ * 按子代理角色切片：子代理工具就是按角色命名的，写路径不需要新字段 —— 这里按
+ * toolName 归类即可。
+ *
+ * `roles` defaults to the built-in eight. A role generated into
+ * `~/.pure/subagents/` is delegable but not in that set, so its slice used to be
+ * silently absent rather than empty — an unmeasured role reads exactly like a
+ * role nobody delegated to. Hosts pass the real surface.
+ */
+export function summarizeByRole(
+  records: readonly PromptObservation[],
+  roles: ReadonlySet<string> = KNOWN_SUBAGENT_ROLES,
+): Record<string, RoleEffectSlice> {
   const slices: Record<string, RoleEffectSlice> = {};
   for (const record of records) {
     if (record.type !== 'agent_run') continue;
     for (const call of record.toolCalls) {
-      if (!KNOWN_SUBAGENT_ROLES.has(call.toolName)) continue;
+      if (!roles.has(call.toolName)) continue;
       const slice = slices[call.toolName] ?? { delegations: 0, successes: 0, totalDurationMs: 0 };
       slice.delegations++;
       if (call.success) slice.successes++;
@@ -125,7 +135,10 @@ export function summarizeByRole(records: readonly PromptObservation[]): Record<s
 }
 
 /** 一次性汇总：总体 + 五个策略维度 + 角色。E4.2 仪表盘的唯一入口。 */
-export function summarizeStrategyEffects(records: readonly PromptObservation[]): StrategyEffectSummary {
+export function summarizeStrategyEffects(
+  records: readonly PromptObservation[],
+  roles?: ReadonlySet<string>,
+): StrategyEffectSummary {
   const overall = emptyRunSlice();
   for (const record of records) {
     if (isStrategyRun(record)) accumulate(overall, record);
@@ -133,5 +146,5 @@ export function summarizeStrategyEffects(records: readonly PromptObservation[]):
   const byDimension = Object.fromEntries(
     STRATEGY_DIMENSIONS.map((dimension) => [dimension, summarizeByDimension(records, dimension)]),
   ) as Record<StrategyDimension, Record<string, RunEffectSlice>>;
-  return { overall, byDimension, byRole: summarizeByRole(records) };
+  return { overall, byDimension, byRole: summarizeByRole(records, roles) };
 }
