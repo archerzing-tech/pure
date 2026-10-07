@@ -25,6 +25,7 @@
     "verify:channel-dingtalk": "bun run scripts/verify-channel-dingtalk.ts",
     "verify:channel-diagrams": "bun run scripts/verify-channel-diagrams.ts",
     "verify:channel-projection": "bun run scripts/verify-channel-projection.ts",
+    "verify:delegation-accounting": "bun run scripts/verify-delegation-accounting.ts",
     "eval:baseline": "bun run scripts/run-evals.ts",
     "eval:sanity": "bun run scripts/run-evals.ts --sanity",
     "eval:notes": "bun run scripts/run-evals.ts --notes",
