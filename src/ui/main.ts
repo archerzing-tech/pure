@@ -787,13 +787,21 @@ function deferToIdle(fn: () => void): void {
   const appShell = document.getElementById('main');
   if (appShell) {
     let hideChromeTimer: ReturnType<typeof setTimeout> | undefined;
-    document.addEventListener('mousemove', () => {
+    const revealChrome = (): void => {
       if (hideChromeTimer) {
         clearTimeout(hideChromeTimer);
         hideChromeTimer = undefined;
       }
       appShell.classList.add('window-hover');
-    }, { passive: true });
+    };
+    document.addEventListener('mousemove', revealChrome, { passive: true });
+    // 「鼠标在窗口里」不总会产生 mousemove：Alt+Tab / 点任务栏把窗口拉回前台时
+    // 指针可能就停在窗口内却没有任何移动事件，window-hover 便一直缺失——右上角
+    // 设置按钮停在 pointer-events:none，那片区域的点击穿透到子 agent 卡片上
+    // （2026-10-07 用户报「设置按钮被卡片遮住、点不动」）。鼠标真正进入视图、
+    // 以及窗口重新获得焦点，都算「人在窗口前」，补上这两个信号。
+    document.addEventListener('mouseenter', revealChrome, { passive: true });
+    window.addEventListener('focus', revealChrome);
     document.documentElement.addEventListener('mouseleave', () => {
       if (!hideChromeTimer) {
         hideChromeTimer = setTimeout(() => {

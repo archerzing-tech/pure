@@ -1105,7 +1105,20 @@ body {
      close under the button (2026-09-20 user report). Right padding leaves a
      gap to the window edge. No rail header — the cards ARE the UI. */
   padding: 54px 8px 16px;
-  pointer-events: auto; /* the rail (scroll) + cards stay interactive */
+  /* Transparent gaps must NOT eat clicks. The host is pointer-events:none so
+     the conversation stays interactive behind the floating rail — but the rail
+     used to re-enable pointer events for its WHOLE box, top padding included.
+     That padding is exactly the strip that clears the floating settings button
+     (top:12px, z-index 20 > this host's 18), so whenever the button is in its
+     pointer-events:none state (pointer outside the window), clicks in that
+     strip landed on a sub-agent card instead — 2026-10-07 user report: "the
+     settings button gets covered by the agent cards and can't be clicked".
+     Only the cards are interactive now; a scroll on a card still scrolls the
+     rail (wheel targets the nearest scrollable ancestor). */
+  pointer-events: none;
+}
+.agent-activity-rail > * {
+  pointer-events: auto;
 }
 /* The session id line: quiet, mono, one line — click copies the full id. */
 .agent-activity-session {
