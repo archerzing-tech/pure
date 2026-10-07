@@ -55,7 +55,7 @@ import {
   renderTrendCards,
 } from './evolutionDashboard';
 import { collectAppliedAdvice } from '../shared/adviceApplication';
-import { loadDelegableRoleNames } from './delegableRoles';
+import { buildTrialBadges, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, startRoleTrial } from './delegableRoles';
 import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
@@ -1153,6 +1153,33 @@ export class SettingsPanel {
       }
     });
 
+    // ── 13.2 试用制：够格转正 → 落盘转正标记 ──
+    // 用户点确认而不是系统自动写：转正是「这个角色从此不再是临时产物」的永久性结论，
+    // 而读数已经摆在旁边（够格转正 + 父角色对比证据）。自动归档那种会删文件的动作
+    // 另有其设计，这一刀不做。
+    document.getElementById('evolution-team')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-promote-role]');
+      if (!btn) return;
+      event.stopPropagation();
+      const role = btn.dataset.evoPromoteRole || '';
+      if (!role) return;
+      btn.disabled = true;
+      try {
+        const promoted = await promoteGeneratedRole(role, btn.dataset.evoPromoteEvidence || undefined);
+        if (!promoted) {
+          this.toast(t('evolution.team.promoteRoleFailed'));
+        } else {
+          this.toast(t('evolution.team.promoteRoleDone', '已转正角色 {role}').replace('{role}', role));
+        }
+      } catch (err) {
+        console.error('[pure] promote role failed:', err);
+        this.toast(t('evolution.team.promoteRoleFailed'));
+      } finally {
+        btn.disabled = false;
+        void this.renderEvolutionDashboard();
+      }
+    });
+
     // ── 13.2 生成半边 MVP：角色建议卡 → 一键生成收窄版角色草稿 ──
     // 草稿落盘 ~/.pure/subagents/<role>_focused.json，用户改完重启生效。
     // 三道门都保留：自己生成的草稿也要过加载半边的校验器；落盘前弹确认；
@@ -1196,7 +1223,16 @@ export class SettingsPanel {
       if (!ok) return;
       try {
         await core.invoke('write_file', { workspace: pureHome, path: `subagents/${draft.file}`, content: draft.json });
-        this.toast(t('evolution.advice.draft.done').replace('{file}', draft.file));
+        // 13.2 试用制：立刻开试用期并记下父角色。**这是整道门唯一知道父角色是谁的
+        // 时刻**（建议卡带着 role，manifest 的 description 也写着「<role> 的收窄变
+        // 体」）——不落这笔账，转正裁决就永远找不到基线，「够格转正」在真机上不会
+        // 出现，转正按钮等于死代码。
+        // 试用期记录写不进去 ≠ 角色没生成：manifest 已在盘上，那个角色会永远停在
+        // 「未记父角色」、永不转正、且没有任何提示。必须说出来。
+        const trialStarted = await startRoleTrial(draft.file.replace(/\.json$/, ''), advice.role);
+        this.toast(trialStarted
+          ? t('evolution.advice.draft.done').replace('{file}', draft.file)
+          : t('evolution.advice.draft.trialMissing').replace('{file}', draft.file));
       } catch (err) {
         console.error('[pure] draft role manifest write failed:', err);
         this.toast(t('evolution.advice.draft.failed'));
@@ -1264,6 +1300,10 @@ export class SettingsPanel {
       if (!ok) return;
       try {
         await core.invoke('write_file', { workspace: pureHome, path: `subagents/${file}`, content: manifestText });
+        // 同上：模型起草那条路也必须开试用期，否则模型自取的名字与父角色的关系就断了。
+        // 名字不派生自父角色时 startRoleTrial 会拒绝写——那是有意的保守，见它的注释。
+        const trialStarted = await startRoleTrial(draft.name, advice.role);
+        if (!trialStarted) console.warn(`[evolution] role "${draft.name}" generated without a trial record; it will not auto-promote`);
         this.toast(t('evolution.advice.draft.done').replace('{file}', file));
       } catch (err) {
         console.error('[pure] model-drafted role manifest write failed:', err);
@@ -3369,7 +3409,20 @@ export class SettingsPanel {
     const applied = collectAppliedAdvice(read.records);
     const appliedSkills = new Set(applied.filter((item) => item.kind === 'skill-gate').map((item) => item.target));
     const adviceEl = document.getElementById('evolution-advice');
-    if (adviceEl) adviceEl.innerHTML = renderSubagentAdvice(scanSubagentAdvice(read.records, { now, roles: roleSurface }), now, appliedSkills);
+    if (adviceEl) {
+      // §13 边界表原文：总开关关着时「建议卡不再出」。这一节此前**从来没被隐藏过**
+      // —— 卡片照样渲染、按钮照样可点，于是关着开关点一下会落一个 manifest，而
+      // startRoleTrial 因同一开关拒绝写账，用户拿到一句「试用期记录没写成」，
+      // 被指向一个完全错误的成因。门不存在，卡也不该在：与 evolution-drift 同一口径。
+      const adviceOff = loadConfig()?.skills?.evolution === false;
+      const adviceSection = adviceEl.closest('.settings-section');
+      const adviceTitle = adviceSection?.previousElementSibling;
+      if (adviceSection) (adviceSection as HTMLElement).hidden = adviceOff;
+      if (adviceTitle) (adviceTitle as HTMLElement).hidden = adviceOff;
+      adviceEl.innerHTML = adviceOff
+        ? ''
+        : renderSubagentAdvice(scanSubagentAdvice(read.records, { now, roles: roleSurface }), now, appliedSkills);
+    }
 
     // 13.1 已应用的建议：同一份记录的回看半边——"应用前"是落盘时的快照，
     // "应用后"由 postApplyStats 从其后的 agent_run 记录现算。
@@ -3406,7 +3459,10 @@ export class SettingsPanel {
       } catch {
         // Browser mode: delegation data still renders; stock shows 0.
       }
-      teamEl.innerHTML = renderTeamRosterSection(read.records, { now, caseCounts, roles: roleSurface });
+      teamEl.innerHTML = renderTeamRosterSection(read.records, {
+        now, caseCounts, roles: roleSurface,
+        trialBadges: buildTrialBadges(await loadGeneratedRoles(), read.records, now),
+      });
     }
 
     // T4 成本视图：同一观测切片，按 角色 × provider 聚合 T1 的委派 usage。

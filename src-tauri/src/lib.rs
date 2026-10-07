@@ -7330,6 +7330,10 @@ fn external_subagents_dir() -> PathBuf {
     PathBuf::from(base).join("subagents")
 }
 
+/// 阶段 13.2 试用制旁挂账的文件名后缀（`<role>.trial.json`，与 manifest 同目录）。
+/// 与 TS 侧 `roleTrial` 配对；扫描与写入两侧共用它，避免只改一边就开始互相看不见。
+pub const TRIAL_MARKER_SUFFIX: &str = "trial.json";
+
 #[tauri::command]
 fn list_external_subagents() -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -7342,15 +7346,27 @@ fn list_external_subagents() -> Vec<serde_json::Value> {
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".json"))
+        // `.trial.json` is the 13.2 bookkeeping sidecar, not a manifest. Leaving
+        // it in made every app start log a bogus "name must match…" warning, and
+        // a hand-written marker carrying manifest fields would have been
+        // compiled into a real role.
+        .filter(|n| !n.ends_with(&format!(".{}", TRIAL_MARKER_SUFFIX)))
         .collect();
     names.sort();
     for name in names {
         let Ok(text) = std::fs::read_to_string(dir.join(&name)) else {
             continue;
         };
+        // 阶段 13.2 试用制：旁挂账 `<name>.trial.json` 与 manifest 同目录。**读不到
+        // 就是「在试用中」**——手写的 manifest 与模型起草的在盘上长得一样，而我们有
+        // 任何办法知道手写那个是否被验证过。没被证明过的，就还在试用里。
+        // 故意不改 manifest 本身：那是用户可编辑的角色定义。
+        let trial_path = dir.join(name.replace(".json", &format!(".{}", TRIAL_MARKER_SUFFIX)));
+        let trial = std::fs::read_to_string(&trial_path).ok();
         out.push(serde_json::json!({
             "file": name,
             "text": text,
+            "trialMarker": trial,
         }));
     }
     out

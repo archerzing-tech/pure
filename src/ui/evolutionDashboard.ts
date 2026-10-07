@@ -12,6 +12,7 @@
 
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
+import { TRIAL_PROMOTE_LABEL as PROMOTE_LABEL } from '../shared/roleTrial';
 import { formatBytes, relativeTime } from '../shared/format';
 import { healthScore, lifecycleOf, type EvolutionConfig, type MemoryLifecycle } from '../adapter/memory/evolution';
 import type { DriftAlert } from '../adapter/memory/ratchet';
@@ -28,6 +29,13 @@ import { formatCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
 import { summarizeTeamCosts, summarizeTeamRoster, type TeamRosterOptions } from '../shared/teamObservability';
+import { type RoleTrialBadge } from '../shared/roleTrial';
+
+/** Kept in sync with `roleTrial.trialBadge`'s `promote` branch. The renderer
+ *  compares labels rather than re-deriving the verdict, because the verdict is
+ *  computed once upstream and re-deciding it here would let the badge and the
+ *  verdict drift. */
+const TRIAL_PROMOTE_LABEL = PROMOTE_LABEL;
 import { QUARANTINE_CONSECUTIVE_FAILURES, type ToolQuarantineState } from '../harness/toolQuarantine';
 
 // ── 数字格式化 ──
@@ -586,9 +594,21 @@ export function renderObservationStats(
  * 数据全部来自观测记录（T1 起带 delegations）+ 宿主传进的每角色 case 计数；
  * 本函数纯渲染。旧记录无 delegations 时该列显示「无数据」而不是 0。
  */
-export function renderTeamRosterSection(records: readonly import('../shared/promptObservability').PromptObservation[], options: TeamRosterOptions & { caseCounts?: Record<string, number> } = {}): string {
+export function renderTeamRosterSection(
+  records: readonly import('../shared/promptObservability').PromptObservation[],
+  options: TeamRosterOptions & {
+    caseCounts?: Record<string, number>;
+    /** 13.2 试用态：role → 角标。生成角色在阵容表里带「试用中 / 已转正」角标，
+     *  并在够格转正时给出动作——裁决由 roleTrial 算，这里只渲染。 */
+    trialBadges?: Readonly<Record<string, RoleTrialBadge>>;
+  } = {},
+): string {
   const roster = summarizeTeamRoster(records, options);
-  const rows = roster.rows.filter((row) => row.delegations !== null || row.caseCount > 0);
+  // A generated role with zero delegations has no delegations and no cases, so
+  // the old filter dropped its row entirely — hiding 「试用中 · 0/5 次」 in exactly
+  // the window where the badge matters most (right after generation, before
+  // anyone delegated to it). A trial badge is itself a reason to show the row.
+  const rows = roster.rows.filter((row) => row.delegations !== null || row.caseCount > 0 || options.trialBadges?.[row.role]);
   if (rows.length === 0) {
     return `<div class="evo-table-wrap"><div class="evo-table-title">${escapeHtml(t('evolution.team.title', '团队阵容'))}</div>
       <div class="evo-stat-note">${escapeHtml(t('evolution.team.empty', '还没有角色委派记录——跑一个多 agent 任务后这里会显示团队的派发与样本存量。'))}</div></div>`;
@@ -597,8 +617,19 @@ export function renderTeamRosterSection(records: readonly import('../shared/prom
     const gate = row.caseCount >= (options.minCases ?? 5)
       ? `<span class="evo-badge-overlay">${escapeHtml(t('evolution.team.gateOk', '门槛已过'))}</span>`
       : escapeHtml(t('evolution.team.gateShort', '还差 {n} 条').replace('{n}', String((options.minCases ?? 5) - row.caseCount)));
+    // 试用角标（13.2）。够格转正时给一个动作按钮：不达标时**不给**——留在试用里继续
+    // 看样本，或者由用户自己归档，系统不代替用户下删除结论。
+    const badge = options.trialBadges?.[row.role];
+    const trial = badge
+      ? `<span class="${badge.status === 'promoted' ? 'evo-badge-overlay' : 'memory-badge memory-badge-draft'}"${badge.evidence ? ` title="${escapeHtml(badge.evidence)}"` : ''}>${escapeHtml(badge.label)}</span>`
+        + (badge.label === TRIAL_PROMOTE_LABEL
+          // evidence goes on the button: whatever numbers the user is looking at
+          // when they click are the numbers that get recorded as the reason.
+          ? ` <button type="button" class="evo-advice-apply-btn" data-evo-promote-role="${escapeHtml(row.role)}" data-evo-promote-evidence="${escapeHtml(badge.evidence ?? '')}">${escapeHtml(t('evolution.team.promoteRole', '转正'))}</button>`
+          : '')
+      : '';
     return `<tr>
-    <td class="evo-table-key">${escapeHtml(toolDisplayName(row.role))}</td>
+    <td class="evo-table-key">${escapeHtml(toolDisplayName(row.role))}${trial ? ` ${trial}` : ''}</td>
     <td>${escapeHtml(row.delegations === null ? t('evolution.team.noData', '无数据') : formatCount(row.delegations))}</td>
     <td>${escapeHtml(formatPercent(row.successRate))}</td>
     <td>${escapeHtml(formatDuration(row.avgDurationMs))}</td>

@@ -4419,7 +4419,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 阶段 13.2 — declarative roles from ~/.pure/subagents/ join the
       // delegation surface. They skip the skill toggles (they aren't skills)
       // and can never shadow a built-in (the compiler rejects the collision).
-      const externalSubagents = await loadGuiExternalSubagents();
+      const externalSubagents = (await loadGuiExternalSubagents()).map((entry) => entry.def);
       // 13.4 — external script tools: compile + register alongside built-ins
       // (MCP-same pathway). Collision with built-in names is rejected here —
       // the ToolRegistry would otherwise silently replace the built-in.

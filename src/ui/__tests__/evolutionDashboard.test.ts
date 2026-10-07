@@ -667,6 +667,44 @@ describe('renderTeamRosterSection (T3)', () => {
     expect(html).toContain('A/B 门槛 5 条');
   });
 
+  it('13.2: a trial role with ZERO delegations still gets a row — otherwise the badge hides exactly when it matters', () => {
+    // 回归锚点。刚生成的角色一次委派都没接过，delegations 是 null、caseCount 是 0，
+    // 旧 filter 会把整行滤掉，于是「试用中 · 0/5 次」在**最该看到它的那段窗口**
+    // （生成之后、还没人用过）里根本不显示。
+    const records = [runRecord()];
+    const surface = ['researcher', 'researcher_focused'];
+    const badges = { researcher_focused: { status: 'trial' as const, label: '试用中 · 0/5 次' } };
+
+    const withBadge = renderTeamRosterSection(records, { caseCounts: {}, roles: surface, trialBadges: badges });
+    // 断言到**表格行**而不是整段 HTML：零样本角色名也会出现在「还差样本」脚注里，
+    // 断言整段会被脚注满足，等于没测。
+    expect(withBadge).toMatch(/<td class="evo-table-key">[^<]*researcher_focused/);
+    expect(withBadge).toContain('试用中 · 0/5 次');
+
+    // 对照：没有角标就不出这一行（否则上一条恒真）。
+    const withoutBadge = renderTeamRosterSection(records, { caseCounts: {}, roles: surface });
+    expect(withoutBadge).not.toMatch(/<td class="evo-table-key">[^<]*researcher_focused/);
+  });
+
+  it('13.2: the promote button appears only for a verdict of 「够格转正」', () => {
+    const records = [runRecord()];
+    const surface = ['researcher', 'researcher_focused'];
+    const promote = renderTeamRosterSection(records, {
+      caseCounts: {}, roles: surface,
+      trialBadges: { researcher_focused: { status: 'trial', label: '够格转正', evidence: 'x' } },
+    });
+    expect(promote).toContain('data-evo-promote-role="researcher_focused"');
+
+    // 不达标 / 样本不足 一律不给按钮——不代替用户下删除或转正的结论。
+    for (const label of ['试用中 · 不达标', '试用中 · 2/5 次', '试用中 · 未记父角色', '已转正']) {
+      const html = renderTeamRosterSection(records, {
+        caseCounts: {}, roles: surface,
+        trialBadges: { researcher_focused: { status: 'trial', label } },
+      });
+      expect(html).not.toContain('data-evo-promote-role');
+    }
+  });
+
   it('treats pre-T1 records without delegations as no data, not zero', () => {
     const legacy: PromptObservation = {
       type: 'agent_run',

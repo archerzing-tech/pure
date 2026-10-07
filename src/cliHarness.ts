@@ -14,7 +14,7 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { SteerBus } from './coding-agent/steerBus';
-import { compileExternalSubagents } from './harness/externalSubagents';
+import { compileExternalSubagents, isExternalSubagentManifest } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -402,10 +402,13 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
         ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'subagents');
       let sources: { file: string; text: string }[] = [];
       try {
-        sources = readdirSync(dir).filter((f) => f.endsWith('.json')).sort().map((file) => ({
-          file,
-          text: readFileSync(join(dir, file), 'utf8'),
-        }));
+        // 旁挂账（`<role>.trial.json`）不是 manifest。它没有 `name` 字段，喂给
+        // compileExternalSubagents 会每次启动都吐一行假告警，还把这个角色算两次。
+        // Rust 侧的扫描早就排除了它；这份 node:fs 扫描是第三份，得跟上。
+        sources = readdirSync(dir)
+          .filter(isExternalSubagentManifest)
+          .sort()
+          .map((file) => ({ file, text: readFileSync(join(dir, file), 'utf8') }));
       } catch {
         return { defs: [], errors: [] as string[] };
       }

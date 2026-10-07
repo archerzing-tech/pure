@@ -6,7 +6,7 @@
 // isolation (one broken file never takes down the others).
 
 import { describe, expect, it } from 'bun:test';
-import { compileExternalSubagents } from '../externalSubagents';
+import { compileExternalSubagents, isExternalSubagentManifest } from '../externalSubagents';
 import { Tags } from '../../coding-agent/ToolRegistry';
 
 const RESERVED = ['code_reviewer', 'task_planner'];
@@ -135,5 +135,23 @@ describe('compileExternalSubagents (阶段 13.2)', () => {
     const prompt = defs[0].createSystemPrompt({ feature: 'settings', platform: 'web' });
     expect(prompt).toContain('Design: settings for web.');
     expect(prompt).toContain('{"strict": true}');
+  });
+});
+
+describe('旁挂账不是 manifest（13.2）', () => {
+  it('sidecar 被排除，普通 manifest 放行', () => {
+    expect(isExternalSubagentManifest('researcher_focused.json')).toBe(true);
+    expect(isExternalSubagentManifest('researcher_focused.trial.json')).toBe(false);
+    expect(isExternalSubagentManifest('notes.md')).toBe(false);
+  });
+
+  it('把 sidecar 喂进编译器只会得到一条假告警 —— 这就是必须排除的原因', () => {
+    const { defs, errors } = compileExternalSubagents([
+      { file: 'researcher_focused.json', text: manifest({ name: 'researcher_focused', description: 'A narrowed variant of the failing role.' }) },
+      { file: 'researcher_focused.trial.json', text: '{"status":"trial","parentRole":"researcher"}' },
+    ], []);
+    expect(defs.map((d) => d.name)).toEqual(['researcher_focused']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('researcher_focused.trial.json');
   });
 });

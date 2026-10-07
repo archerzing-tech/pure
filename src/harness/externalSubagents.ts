@@ -11,6 +11,7 @@
 // vs node:fs), so Bun tests cover the whole pipeline without mocking IO.
 
 import { Tags } from '../coding-agent/ToolRegistry';
+import { TRIAL_MARKER_SUFFIX } from '../shared/roleTrial';
 import type { SubagentDefinition } from '../coding-agent/types';
 import type { ToolDefinition } from '../shared/types';
 
@@ -74,6 +75,20 @@ export interface ExternalSubagentsResult {
  * skipped with an error, never overriding core roles. Two external files with
  * the same name: the first (sorted by source order) wins, the duplicate is
  * reported. */
+/**
+ * Is `file` a role manifest, or is it a 13.2 trial sidecar?
+ *
+ * The sidecar (`<role>.trial.json`) sits in the SAME directory as the manifests
+ * and has no `name` field, so feeding it to `compileExternalSubagents` produces
+ * one bogus warning per file per process start. The CLI's node:fs scan is a
+ * THIRD scanner (the other two are the Rust tauri command and the GUI loader) and
+ * it had no exclusion — which is exactly the kind of drift a shared predicate
+ * prevents. Rust has the mirror-image check in `TRIAL_MARKER_SUFFIX`.
+ */
+export function isExternalSubagentManifest(file: string): boolean {
+  return file.endsWith('.json') && !file.endsWith(`.${TRIAL_MARKER_SUFFIX}`);
+}
+
 export function compileExternalSubagents(
   sources: ExternalSubagentSource[],
   reservedNames: Iterable<string>,
