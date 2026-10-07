@@ -7,7 +7,8 @@
 > - P1：飞书适配器（`src/adapter/channels/feishu/`，SDK 动态 import）+ 钉钉适配器（`src/adapter/channels/dingtalk/`，`dingtalk-stream` 动态 import；卡片实例原地更新尚未实现，一律降级为只发最终结果）+ 配对（`src/channels/pairing.ts`，`pure channels pending|approve`）+ 出站队列落盘重放（`~/.pure/channels/outbox.jsonl`）+ 通道档 LLM 复核验证器（`src/channels/verifierProfile.ts`），验收 `bun run verify:channel-feishu` / `bun run verify:channel-dingtalk`（mock transport）。
 > - P2（部分）：审计（`src/channels/audit.ts`，默认只记 hash/长度/元数据）+ 限流与每日预算（`src/channels/limits.ts`）+ 出站队列落盘（已随 P1 前移）+ 富输出降级矩阵（`src/channels/richOutput.ts` + `src/channels/rasterize/`：`chart`/`svg` 走 `@resvg/resvg-js`，`mermaid`/`puml` 走 headless Chrome —— 系统 Chrome + 裸 CDP，不引入 puppeteer/playwright，没装 Chrome 才降级为文本；飞书/钉钉出站图片上传已接入，按 `canDeliverImages` 投递成图片消息），验收 `bun run verify:channel-diagrams`。
 > - P2（部分）：**通道投影**（`src/channels/projection/`，设计见 [`docs/channel-projection-design.md`](channel-projection-design.md)）：目标是在通道里看到与桌面端 GUI 一致的表现——把桌面端自己的渲染管线（同一份 `src/ui/markdown.ts` + `src/ui/styles.css` + 同一 DOM 层级）搬进 headless Chrome 页面，按块截图成 PNG 投递；正文与段落列表保持原生 markdown，代码块/表格/图表与 GUI 同像素。渲染失败或图片超限时把富块源码并回正文，**内容永不丢失**；纯文本回答不启动浏览器。优先级：通道投影 > `richOutput` 单块光栅化 > 纯文本，验收 `bun run verify:channel-projection`。
-> - P3–P4 仍为设计稿；个人微信维持「默认关闭」。
+> - P3（部分，2026-10-07 补记）：**QQ 适配器已落**（`src/adapter/channels/qq/`，含 wsTransport，`8ace3c6`），原「企微占位」已主动撤掉——此前这份状态行完全没提 QQ，是个漏报。仍未做：WS 控制平面、GUI 只读看通道会话、`pure attach`。
+> - P3–P4 其余仍为设计稿；个人微信维持「默认关闭」。
 
 ## 1. 要解决什么
 
