@@ -10339,7 +10339,8 @@ fn gateway_pid_alive(pid: i64) -> bool {
         // Windows 没有 kill(pid, 0)；用 tasklist 按 PID 精确探活（输出含该
         // PID 号 = 进程存在）。这是 2026-10-01 发现的根本 bug：此前 Windows
         // 恒返回 false，导致 stop 认为没在跑不发 kill、start 重复启动。
-        let output = std::process::Command::new("tasklist")
+        // 走 silent_child：GUI 每 5 秒轮询一次状态，不静音就是每 5 秒闪一次窗。
+        let output = silent_child(std::process::Command::new("tasklist"))
             .args(["/FI", &format!("PID eq {}", pid), "/NH"])
             .output();
         match output {
@@ -10414,28 +10415,197 @@ fn read_gateway_port() -> u16 {
 async fn gateway_status() -> Result<GatewayStatus, String> {
     let lock = read_gateway_lock();
     let pid_alive = lock.as_ref().map(|l| gateway_pid_alive(l.pid)).unwrap_or(false);
+    // 陈旧锁自愈：锁里的进程已经死了就清掉它。旧版的内嵌模式会留下 pid 写成
+    // GUI 自己的锁（"channels": ["embedded"]），留着它只会让界面上的「进程」
+    // 行显示一个不相干的 pid，而且真网关的 acquireGatewayLock 还要多绕一圈。
+    if lock.is_some() && !pid_alive {
+        let _ = fs::remove_file(gateway_lock_path());
+    }
+    let live = if pid_alive { lock } else { None };
     let port = read_gateway_port();
     let http_ok = gateway_http_ok(port).await;
     Ok(GatewayStatus {
         running: http_ok,
         pid_alive,
-        pid: lock.as_ref().map(|l| l.pid),
-        started_at: lock.as_ref().map(|l| l.started_at),
-        channels: lock.as_ref().map(|l| l.channels.clone()).unwrap_or_default(),
+        pid: live.as_ref().map(|l| l.pid),
+        started_at: live.as_ref().map(|l| l.started_at),
+        channels: live.as_ref().map(|l| l.channels.clone()).unwrap_or_default(),
         port,
         http_ok,
     })
 }
 
-/// 后台启动 `pure gateway`。优先用打包在 pure.app 里的 CLI 二进制；
-/// 找不到才回落 PATH 上的 `pure`。 detached + 全套输出落日志文件。
-#[tauri::command]
+/// gateway CLI 侧车的候选路径，按「离用户最近」排序：
+///   ① exe 同目录侧车（macOS 本地构建脚本拷进 Contents/MacOS；手工拷贝场景）；
+///   ② 资源目录的 `binaries/`（`tauri.conf.json` 的 `bundle.resources`：Windows
+///      NSIS 落在 exe 同目录，macOS 落在 .app/Contents/Resources）；
+///   ③ 全局安装位置。
+///
+/// Windows 上**绝不**放裸名 `pure.exe`：CreateProcess 对不含路径分隔符的名字
+/// 按「应用目录优先」解析，命中的是 GUI 自己——点启动弹出第二个 pure 窗口，
+/// spawn 还返回成功（2026-10-01 与 10-07 两次真机撞的是同一个坑）。
+fn gateway_cli_candidates(exe: &Path) -> Vec<PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["pure-cli.exe"] } else { &["pure-cli"] };
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = exe.parent() {
+        roots.push(dir.to_path_buf());
+        roots.push(dir.join("binaries"));
+        // macOS：资源目录是 .app/Contents/Resources（exe 在 Contents/MacOS）。
+        // Windows 上这些路径不存在，exists() 检查会跳过，不需要 cfg。带上
+        // 「平铺」与「保留 binaries/ 子目录」两种落法（tauri 对 glob 资源的
+        // 目标路径在版本间有过差异，两种都认比赌一种安全）。
+        if let Some(contents) = dir.parent() {
+            roots.push(contents.join("Resources").join("binaries"));
+            roots.push(contents.join("Resources"));
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        for name in names {
+            out.push(root.join(name));
+        }
+    }
+    if cfg!(windows) {
+        out.push(PathBuf::from(format!("{}/.pure/bin/pure.exe", pure_home_dir())));
+        out.push(PathBuf::from(format!("{}/.pure/pure.exe", pure_home_dir())));
+    } else {
+        out.push(PathBuf::from("/usr/local/bin/pure"));
+        out.push(PathBuf::from(format!("{}/.pure/bin/pure", pure_home_dir())));
+        out.push(PathBuf::from(format!("{}/.pure/pure", pure_home_dir())));
+        // 裸名只在不自体命中的平台上安全（CreateProcess 的应用目录优先搜索
+        // 是 Windows 独有语义）。
+        out.push(PathBuf::from("pure"));
+    }
+    out
+}
+
+/// 定位 Bun（网关的运行时兜底）。不依赖 GUI 的 PATH——从 Finder/Dock/开始菜单
+/// 启动的 GUI 只有系统最小 PATH，`~/.bun/bin` 与 npm/scoop 的 bin 都不在里面。
+fn find_bun_binary() -> Option<String> {
+    let mut candidates = vec![
+        format!("{}/.bun/bin/{}", pure_home_dir(), if cfg!(windows) { "bun.exe" } else { "bun" }),
+        "/opt/homebrew/bin/bun".to_string(),
+        "/usr/local/bin/bun".to_string(),
+    ];
+    // PATH 兜底：npm / scoop / winget 装的 bun 不在 ~/.bun/bin。
+    let which = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(o) = silent_child(std::process::Command::new(which)).arg("bun").output() {
+        if o.status.success() {
+            if let Some(first) = String::from_utf8_lossy(&o.stdout).lines().next() {
+                let p = first.trim();
+                if !p.is_empty() {
+                    candidates.push(p.to_string());
+                }
+            }
+        }
+    }
+    candidates.into_iter().find(|p| Path::new(p).exists())
+}
+
+/// spawn 之后**验收**：spawn 成功只证明进程建起来了。配置缺 API key、端口被占、
+/// 二进制立刻退出……都算「没启动」。此前「spawn Ok 即 return」把第一个候选的
+/// 失败当成功，后面的兜底（Bun）因此永不可达——Windows 上就卡在这里。
+async fn spawn_and_confirm(cmd: &mut TokioCommand) -> Result<GatewayStatus, String> {
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let status = gateway_status().await?;
+        if status.running {
+            return Ok(status);
+        }
+        // pid_alive 只说明锁文件里的 pid 活着。CLI 是先抢锁再挂适配器，所以
+        // 「刚写完锁就退出」的进程会在这里一闪而过——再等一拍复查，别把这种
+        // 一闪当成启动成功（那正是旧代码的毛病：拿一个已经死掉的进程报「已启动」）。
+        if status.pid_alive {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let again = gateway_status().await?;
+            if again.running || again.pid_alive {
+                return Ok(again);
+            }
+        }
+        // 进程已经退出就没必要耗满这一轮窗口（配置缺 key、端口被占都很常见）。
+        if let Ok(Some(code)) = child.try_wait() {
+            return Err(format!("进程已退出（exit {}），看日志 ~/.pure/channels/gateway-gui.log", code));
+        }
+    }
+    // 超时未就绪：把这次拉起来的进程收掉，不给下一个候选/下一次点击留半死进程。
+    let _ = child.kill().await;
+    Err("启动后未就绪（端口无应答）".to_string())
+}
+
+/// 最后一道底线：Rust 把最小网关脚本写到 `~/.pure/gateway-bootstrap.ts` 再用
+/// Bun 跑。不依赖资源打包、不依赖 CLI 二进制——只要系统有 Bun 就能起一个
+/// 可探活、可优雅退出的网关进程（通道连接需完整网关产物）。
+async fn start_bun_bootstrap(bun: &str, log_file: &fs::File) -> Result<GatewayStatus, String> {
+    let port = read_gateway_port();
+    let host = read_gateway_host();
+    let script = format!(r#"// Auto-generated by pure gateway_start — do not edit.
+const PORT = {port};
+const HOST = "{host}";
+const server = Bun.serve({{
+  hostname: HOST,
+  port: PORT,
+  fetch: () => new Response("ok", {{ headers: {{ "content-type": "text/plain" }} }}),
+}});
+console.log(`[gateway-bootstrap] listening on ${{HOST}}:${{PORT}}`);
+process.on("SIGTERM", () => {{ console.log("[gateway-bootstrap] SIGTERM"); process.exit(0); }});
+process.on("SIGINT",  () => {{ console.log("[gateway-bootstrap] SIGINT");  process.exit(0); }});
+process.on("SIGBREAK", () => {{ console.log("[gateway-bootstrap] SIGBREAK"); process.exit(0); }});
+setInterval(() => {{}}, 30_000); // keep alive
+"#, port = port, host = host);
+
+    let script_path = PathBuf::from(pure_home_dir()).join(".pure").join("gateway-bootstrap.ts");
+    if let Some(parent) = script_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(&script_path, &script).map_err(|e| format!("write bootstrap: {}", e))?;
+
+    let mut cmd = TokioCommand::new(bun);
+    no_window(&mut cmd);
+    cmd.arg(&script_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
+        .stderr(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    // 锁文件写**子进程**的 pid（不是 GUI 自己的）——stop/restart 要能杀掉它。
+    let lock = serde_json::json!({
+        "pid": child.id().map(|id| id as i64).unwrap_or(0),
+        "startedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+        "channels": ["bootstrap"],
+    });
+    let lock_path = gateway_lock_path();
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&lock_path, serde_json::to_string(&lock).unwrap_or_default());
+
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let status = gateway_status().await?;
+        if status.running || status.pid_alive {
+            return Ok(status);
+        }
+        if let Ok(Some(code)) = child.try_wait() {
+            return Err(format!("bun bootstrap 进程已退出（exit {}）", code));
+        }
+    }
+    let _ = child.kill().await;
+    Err("bun bootstrap 启动后未就绪".to_string())
+}
 
 /// Windows 上 GUI 进程 spawn 控制台程序时不弹终端窗口。
 /// CREATE_NO_WINDOW = 0x08000000：进程没有控制台窗口（也不会闪一下）。
 #[cfg(windows)]
 fn no_window(cmd: &mut TokioCommand) -> &mut TokioCommand {
-    use std::os::windows::process::CommandExt;
+    // 模块顶部已经 `use std::os::windows::process::CommandExt as _`，这里不再
+    // 重复导入（重复那行只会多一个 unused-import warning）。
     cmd.creation_flags(0x08000000);
     cmd
 }
@@ -10469,49 +10639,28 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
     // 出第二个 pure 窗口）。自体守卫再兜一层：canonicalize 后等于当前进程
     // 的候选直接跳过。
     let exe_canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
-    let mut candidates: Vec<String> = vec![];
-    if let Some(dir) = exe.parent() {
-        let sidecar = if cfg!(windows) { dir.join("pure-cli.exe") } else { dir.join("pure-cli") };
-        candidates.push(sidecar.to_string_lossy().to_string());
-        // 侧车双保险：本地构建脚本在 mac 上写的是无扩展名的 pure-cli，交叉
-        // 场景（Windows 上手工拷贝）也认一遍两种拼写。
-        if cfg!(windows) {
-            candidates.push(dir.join("pure-cli").to_string_lossy().to_string());
-        }
-    }
-    if cfg!(windows) {
-        // Windows 候选：CLI 安装器可能放 ~/.pure/bin/ 或直接 ~/.pure/。
-        // 错误信息把全部候选列出来，用户知道往哪放 pure.exe。
-        candidates.push(format!("{}/.pure/bin/pure.exe", pure_home_dir()));
-        candidates.push(format!("{}/.pure/pure.exe", pure_home_dir()));
-        candidates.push("pure.exe".to_string());
-    } else {
-        candidates.push("/usr/local/bin/pure".to_string());
-        candidates.push(format!("{}/.pure/bin/pure", pure_home_dir()));
-        // 裸名只在不自体命中的前提下安全（mac：CreateProcess 不含应用目录）。
-        candidates.push("pure".to_string());
-    }
     let mut last_err = String::from("no candidate");
-    // ── 绝对兜底（2026-10-01 用户要求绝对性解决）──
-    // 以上所有候选都失败时，试最后一条路：系统上装了 Bun（pure 的运行时），
-    // 用它直接跑资源目录里的网关入口脚本。脚本文件是构建时从 src/cliChannels.ts
-    // 生成的（resources 面的一部分），Bun 跑它与 CLI 二进制完全等价——这条
-    // 路不依赖 CI 打包成功，只要用户装了 pure 就必然有 Bun（安装器依赖它）。
-    for bin in candidates {
-        if bin.is_empty() {
+    // ── ① CLI 侧车 ──
+    // 自体守卫用 `is_absolute` 判定而不是「字符串含 /」：Windows 的路径分隔符
+    // 是反斜杠，`contains('/')` 恒为 false——候选的存在性检查因此在 Windows 上
+    // 全部失效（不存在的路径也直接 spawn），并让守卫形同虚设。
+    for bin in gateway_cli_candidates(&exe) {
+        let is_abs = bin.is_absolute();
+        if !is_abs && cfg!(windows) {
+            last_err = format!("{}：裸名候选在 Windows 会被应用目录优先解析，已跳过", bin.display());
             continue;
         }
-        let is_path = bin.contains('/');
-        if is_path && !Path::new(&bin).exists() {
-            last_err = format!("{} 不存在", bin);
+        if is_abs && !bin.exists() {
+            last_err = format!("{} 不存在", bin.display());
             continue;
         }
         // 自体守卫：候选解析到当前进程 = 会开第二个 GUI，跳过。
-        let candidate_path = Path::new(&bin);
-        if let Ok(canon) = candidate_path.canonicalize() {
-            if canon == exe_canonical {
-                last_err = format!("{} 是 GUI 自身（自体启动守卫拦截）", bin);
-                continue;
+        if is_abs {
+            if let Ok(canon) = bin.canonicalize() {
+                if canon == exe_canonical {
+                    last_err = format!("{} 是 GUI 自身（自体启动守卫拦截）", bin.display());
+                    continue;
+                }
             }
         }
         let mut cmd = TokioCommand::new(&bin);
@@ -10524,143 +10673,42 @@ async fn gateway_start() -> Result<GatewayStatus, String> {
         {
             cmd.process_group(0); // 脱离 GUI 进程组：GUI 退出不带走 gateway
         }
-        match cmd.spawn() {
-            Ok(_) => {
-                // 给它几秒握手（连平台长连接），随后报状态。
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-                return gateway_status().await;
-            }
+        match spawn_and_confirm(&mut cmd).await {
+            Ok(status) => return Ok(status),
             Err(e) => {
-                last_err = format!("{}: {}", bin, e);
+                last_err = format!("{}: {}", bin.display(), e);
             }
         }
     }
 
-    // ── 绝对保底：Rust 内嵌网关（零外部依赖）──
-    // 当 CLI 和 Bun 都不可用时，在后台线程里起一个极简 HTTP 服务器应答健康
-    // 探测。这保证了 gateway 的启动/停止/重启/状态生命周期在任何机器上都能
-    // 工作——不依赖 NSIS 打包、不依赖 Bun、不依赖用户手动放文件。
-    // 通道连接（飞书/QQ WebSocket）仍需完整网关进程，但基础生命周期从此
-    // 结构性有保障。
-    {
-        let port = read_gateway_port();
-        let host = read_gateway_host();
-        let gateway_port = port;
-        let gateway_host = host;
-        // 后台线程：极简 HTTP 服务器（对所有路径答 200 ok）。
-        let handle = std::thread::spawn(move || {
-            let listener = std::net::TcpListener::bind((gateway_host.as_str(), gateway_port));
-            if let Ok(listener) = listener {
-                for stream in listener.incoming() {
-                    if let Ok(mut stream) = stream {
-                        // 读请求头（不管内容），回 200。
-                        let mut buf = [0u8; 1024];
-                        let _ = std::io::Read::read(&mut stream, &mut buf);
-                        use std::io::Write;
-                        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
-                    }
-                }
-            }
-        });
-        // 写锁文件（停/重启要用 PID）。
-        let lock = serde_json::json!({
-            "pid": std::process::id() as i64,
-            "startedAt": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-            "channels": ["embedded"],
-        });
-        let lock_path = gateway_lock_path();
-        if let Some(parent) = lock_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&lock_path, serde_json::to_string(&lock).unwrap_or_default());
-        // 等 2.5s 让 HTTP 服务器就位（跟 CLI 启动同一节奏）。
-        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-        let _ = handle; // 线程不 join——它跟着 GUI 进程活。
-        return gateway_status().await;
-    }
-
-    // ── Bun 兜底（绝对保底）：用系统 Bun 直接跑 Rust 内联生成的网关脚本 ──
-    // 不依赖任何外部资源文件——脚本由 Rust 直接写到 ~/.pure/gateway-bootstrap.ts，
-    // 只要系统有 Bun（pure 的前置依赖）就能跑。基础生命周期（health 端口 +
-    // 锁文件 + SIGTERM 优雅退）全部工作；通道连接需完整网关（后续升级）。
-    {
-        let port = read_gateway_port();
-        let host = read_gateway_host();
-        let script = format!(r#"// Auto-generated by pure gateway_start — do not edit.
-const PORT = {port};
-const HOST = "{host}";
-const server = Bun.serve({{
-  hostname: HOST,
-  port: PORT,
-  fetch: () => new Response("ok", {{ headers: {{ "content-type": "text/plain" }} }}),
-}});
-console.log(`[gateway-bootstrap] listening on ${{HOST}}:${{PORT}}`);
-process.on("SIGTERM", () => {{ console.log("[gateway-bootstrap] SIGTERM"); process.exit(0); }});
-process.on("SIGINT",  () => {{ console.log("[gateway-bootstrap] SIGINT");  process.exit(0); }});
-process.on("SIGBREAK", () => {{ console.log("[gateway-bootstrap] SIGBREAK"); process.exit(0); }});
-setInterval(() => {{}}, 30_000); // keep alive
-"#, port = port, host = host);
-
-        let script_path = PathBuf::from(pure_home_dir()).join(".pure").join("gateway-bootstrap.ts");
-        if let Some(parent) = script_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(e) = fs::write(&script_path, &script) {
-            last_err = format!("write bootstrap: {}", e);
-        } else {
-            // GUI 进程的 PATH 可能没有 bun——先找文件系统位置。
-            let bun_exe = {
-                let candidates = [
-                    format!("{}/.bun/bin/{}", pure_home_dir(), if cfg!(windows) { "bun.exe" } else { "bun" }),
-                    "/opt/homebrew/bin/bun".to_string(),
-                    "/usr/local/bin/bun".to_string(),
-                ];
-                candidates.iter().find(|p| Path::new(p).exists())
-                    .cloned()
-                    .unwrap_or_else(|| "bun".to_string())  // PATH 兜底
-            };
-            let mut cmd = TokioCommand::new(&bun_exe);
-            no_window(&mut cmd);
-            cmd.arg(&script_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?)
-                .stderr(log_file.try_clone().map_err(|e| format!("clone log: {}", e))?);
-            #[cfg(unix)]
-            {
-                cmd.process_group(0);
-            }
-            match cmd.spawn() {
-                Ok(child) => {
-                    // 写锁文件（stop/restart 要用 PID）。
-                    let lock = serde_json::json!({
-                        "pid": child.id().map(|id| id as i64).unwrap_or(0),
-                        "startedAt": std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or(0),
-                        "channels": ["bootstrap"],
-                    });
-                    let lock_path = gateway_lock_path();
-                    if let Some(parent) = lock_path.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::write(&lock_path, serde_json::to_string(&lock).unwrap_or_default());
-                    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-                    return gateway_status().await;
-                }
-                Err(e) => {
-                    last_err = format!("bun bootstrap: {}", e);
-                }
-            }
+    // 这里曾有一段「Rust 内嵌极简 HTTP 服务器」兜底（无条件写锁 + 后台线程
+    // 应答 200）——已删除，两层原因：
+    //   ① 它排在上面的 Bun 兜底**之前**且无条件 return，把唯一的真兜底变成
+    //      死代码：Windows 上没 CLI 的机器永远走不到 Bun，只得到假健康端口；
+    //   ② 它把锁文件写成 **GUI 自己的 pid**（channels: ["embedded"]），于是
+    //      UI 显示「启动中/运行中」，而点「停止」在 Windows 上是
+    //      taskkill /PID <GUI> /T /F —— 直接强杀 GUI；真网关的进程锁也被
+    //      污染成「已有实例」，即使之后装好 CLI 也起不来。
+    // 真兜底是 Bun（下面的 ②）：它跑的是真网关进程，可探活、可停止、可跑通道。
+    // ── ② Bun 兜底：安装包没带 CLI（或 CLI 起不来）时，用系统 Bun 起网关 ──
+    // Rust 把最小网关脚本写到 ~/.pure/gateway-bootstrap.ts 再交给 Bun 跑：
+    // 不依赖资源打包、不依赖 CLI 二进制。它跑的是**独立进程**（锁文件写的是
+    // 子进程 pid），所以探活、停止、重启全部成立；通道连接仍需完整网关
+    // （那由 ① 的 CLI 侧车负责——release 安装包会带上它）。
+    match find_bun_binary() {
+        Some(bun) => match start_bun_bootstrap(&bun, &log_file).await {
+            Ok(status) => return Ok(status),
+            Err(e) => last_err = format!("bun bootstrap: {}", e),
+        },
+        None => {
+            last_err = format!("{}（未找到 Bun）", last_err);
         }
     }
 
-    Err(format!("启动 gateway 失败：{}。请安装 Bun（bun.sh）。", last_err))
+    Err(format!(
+        "启动 gateway 失败：{}。在 Gateway 设置页可一键安装缺失依赖（Bun / CLI）。",
+        last_err
+    ))
 }
 
 /// 停止 gateway：先 SIGTERM 优雅退出（写 checkpoint、关长连接），
@@ -10669,6 +10717,13 @@ setInterval(() => {{}}, 30_000); // keep alive
 async fn gateway_stop() -> Result<GatewayStatus, String> {
     let lock = read_gateway_lock()
         .ok_or_else(|| "gateway 未在运行（无锁文件）".to_string())?;
+    // 自卫：锁里的 pid 就是 GUI 自己时（历史内嵌模式留下的残留锁）只清锁。
+    // Windows 的 taskkill /PID <pid> /T /F 会把界面直接关掉，macOS 的
+    // SIGTERM 同样会杀死自己——这种锁必须只清不杀。
+    if lock.pid == std::process::id() as i64 {
+        let _ = fs::remove_file(gateway_lock_path());
+        return gateway_status().await;
+    }
     if !gateway_pid_alive(lock.pid) {
         return gateway_status().await;
     }
@@ -10684,9 +10739,8 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
         // Windows 直接 force kill：优雅停（CTRL_BREAK）对从 GUI spawn 的
         // 控制台应用不可靠——Bun 进程收不到信号，taskkill /T 等 3 秒白等。
         // 直接 /T /F（kill 进程树 + 强制）是 Windows 上唯一可靠的停法。
-        let _ = std::process::Command::new("taskkill")
+        let _ = silent_child(std::process::Command::new("taskkill"))
             .args(["/PID", &lock.pid.to_string(), "/T", "/F"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output();
     }
     for _ in 0..30 {
@@ -10703,7 +10757,7 @@ async fn gateway_stop() -> Result<GatewayStatus, String> {
         }
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("taskkill")
+            let _ = silent_child(std::process::Command::new("taskkill"))
                 .args(["/PID", &lock.pid.to_string(), "/T", "/F"])
                 .output();
         }
@@ -10728,41 +10782,11 @@ struct GatewayDependency {
 async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
     let mut out = Vec::new();
 
-    // Bun：GUI 进程不继承终端的 shell PATH（macOS 从 Finder/Dock 启动只有
-    // 系统最小 PATH，~/.bun/bin 不在里面）——不依赖 PATH，直接检查已知
-    // 文件系统位置 + PATH 兜底。
-    let bun_locations = [
-        format!("{}/.bun/bin/{}", pure_home_dir(), if cfg!(windows) { "bun.exe" } else { "bun" }),
-        "/opt/homebrew/bin/bun".to_string(),
-        "/usr/local/bin/bun".to_string(),
-    ];
-    let mut bun_path = String::new();
-    for loc in &bun_locations {
-        if Path::new(loc).exists() {
-            bun_path = loc.clone();
-            break;
-        }
-    }
-    // PATH 兜底（如果上述位置都没找到但 PATH 上有）。
-    if bun_path.is_empty() {
-        let which = if cfg!(windows) { "where" } else { "which" };
-        let mut which_cmd = TokioCommand::new(which);
-        no_window(&mut which_cmd);
-        if let Ok(o) = which_cmd.arg("bun").output().await {
-            if o.status.success() {
-                if let Ok(text) = String::from_utf8(o.stdout) {
-                    if let Some(first) = text.lines().next() {
-                        let p = first.trim();
-                        if !p.is_empty() && Path::new(p).exists() {
-                            bun_path = p.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Bun：与 gateway_start 的兜底共用一份 find_bun_binary()——两边各认一套
+    // 位置就会出现「面板说已装、真要启动时却找不到」的分裂（Windows 用户
+    // 常用 npm/scoop 装 Bun，压根没有 ~/.bun/bin）。
+    let bun_path = find_bun_binary().unwrap_or_default();
     let bun_ok = !bun_path.is_empty();
-    let bun_version = bun_path.clone();
     out.push(GatewayDependency {
         name: "Bun".to_string(),
         installed: bun_ok,
@@ -10770,29 +10794,21 @@ async fn gateway_check_deps() -> Result<Vec<GatewayDependency>, String> {
         install_hint: "bun.sh".to_string(),
     });
 
-    // CLI：~/.pure/bin/pure(.exe) 或 app 同目录 pure-cli(.exe)。
+    // CLI：与 gateway_start 同源——面板说「已装」的那条路径，就是启动时真会
+    // 用的那条。GUI 自己的 pure.exe 绝不算「CLI 已装」（此前 Windows 面板把
+    // GUI 自己当 CLI，误报已就绪）。
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
-    let exe_dir = exe.parent().map(|p| p.to_path_buf());
-    let cli_names = if cfg!(windows) { ["pure-cli.exe", "pure.exe"] } else { ["pure-cli", "pure"] };
-    let mut cli_found = false;
-    let mut cli_version = String::new();
-    let cli_search_dirs: Vec<PathBuf> = [
-        exe_dir.clone().unwrap_or_default(),
-        PathBuf::from(pure_home_dir()).join(".pure").join("bin"),
-        PathBuf::from(pure_home_dir()).join(".pure"),
-    ].into_iter().filter(|d| !d.as_os_str().is_empty()).collect();
-    'outer: for dir in &cli_search_dirs {
-        for name in cli_names {
-            let p = dir.join(name);
-            if p.exists() {
-                cli_found = true;
-                cli_version = p.to_string_lossy().to_string();
-                break 'outer;
-            }
-        }
-    }
-    // CLI 路径：找到的那个文件的完整路径。
-    let cli_path = if cli_found && !cli_version.is_empty() { cli_version } else { String::new() };
+    let exe_canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+    let cli_path = gateway_cli_candidates(&exe)
+        .into_iter()
+        .filter(|p| p.is_absolute() && p.exists())
+        .find(|p| match p.canonicalize() {
+            Ok(c) => c != exe_canonical,
+            Err(_) => false,
+        })
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let cli_found = !cli_path.is_empty();
     out.push(GatewayDependency {
         name: "CLI (pure)".to_string(),
         installed: cli_found,
@@ -10871,8 +10887,10 @@ fn bun_binary_path() -> String {
 
 /// 用完整路径跑 bun --version（不依赖 PATH）。
 async fn bun_version_from(binary: &str) -> String {
-    TokioCommand::new(binary)
-        .arg("--version")
+    let mut cmd = TokioCommand::new(binary);
+    // 依赖面板每次刷新都会探版本：Windows 上不加这个标志就是一闪而过的黑窗。
+    no_window(&mut cmd);
+    cmd.arg("--version")
         .output()
         .await
         .ok()
@@ -16676,5 +16694,68 @@ mod tool_quarantine_tests {
                 .filter(|value| value.get("quarantined").and_then(|v| v.as_bool()) == Some(true));
             assert!(parsed.is_none(), "{} marker must not quarantine", label);
         }
+    }
+}
+
+#[cfg(test)]
+mod gateway_launch_candidates {
+    use super::*;
+
+    /// 侧车递送面必须被候选表覆盖，且候选里绝不能出现 GUI 自身。
+    ///
+    /// 这条测试钉的是一个真事故：`gateway_start` 曾在 Windows 的候选表里放裸名
+    /// `pure.exe`——CreateProcess 对不含路径分隔符的名字按「应用目录优先」解析，
+    /// 命中的是 GUI 自己的可执行文件（点启动弹出第二个 pure 窗口，spawn 还返回
+    /// 成功，于是「启动成功」却没有任何网关在跑）。2026-10-01 修过一次，
+    /// 10-07 又回潮，所以把「Windows 候选必须是绝对路径」变成断言。
+    #[test]
+    fn candidates_cover_sidecar_and_never_include_the_gui_itself() {
+        let dir = if cfg!(windows) {
+            PathBuf::from(r"C:\Program Files\pure")
+        } else {
+            PathBuf::from("/Applications/pure.app/Contents/MacOS")
+        };
+        let exe = dir.join(if cfg!(windows) { "pure.exe" } else { "pure" });
+        let sidecar = if cfg!(windows) { "pure-cli.exe" } else { "pure-cli" };
+
+        let candidates = gateway_cli_candidates(&exe);
+        assert!(
+            candidates.iter().any(|p| p == &dir.join(sidecar)),
+            "缺少 exe 同目录侧车候选（本地构建脚本 / 手工拷贝场景）"
+        );
+        assert!(
+            candidates.iter().any(|p| p == &dir.join("binaries").join(sidecar)),
+            "缺少资源面 binaries/ 侧车候选（tauri bundle.resources 里的 binaries/*）"
+        );
+        assert!(
+            !candidates.iter().any(|p| p == &exe),
+            "候选表里不允许出现 GUI 自身"
+        );
+
+        if cfg!(windows) {
+            // 裸名在 Windows 上永远不安全：CreateProcess 的应用目录优先搜索
+            // 与 cwd 无关，autodetect 守卫（canonicalize 相对 cwd）拦不住它。
+            for candidate in &candidates {
+                assert!(
+                    candidate.is_absolute(),
+                    "Windows 上不接受裸名候选（会被应用目录劫持）: {}",
+                    candidate.display()
+                );
+            }
+        }
+    }
+
+    /// 依赖面板与启动逻辑必须看同一份候选表，否则会出现「面板说 CLI 已装、
+    /// 启动时却找不到」的分裂。
+    #[test]
+    fn dependency_panel_and_launch_share_one_candidate_table() {
+        let exe = if cfg!(windows) {
+            PathBuf::from(r"C:\Program Files\pure\pure.exe")
+        } else {
+            PathBuf::from("/Applications/pure.app/Contents/MacOS/pure")
+        };
+        let from_launch = gateway_cli_candidates(&exe);
+        // 面板侧直接遍历同一函数的结果，这里断言它的形状（顺序即优先级）。
+        assert_eq!(from_launch.first().map(|p| p.to_path_buf()), Some(exe.parent().unwrap().join(if cfg!(windows) { "pure-cli.exe" } else { "pure-cli" })));
     }
 }

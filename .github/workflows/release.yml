@@ -40,8 +40,17 @@ jobs:
       - name: Run tests
         run: bun test
 
-      - name: Build CLI binary (Windows)
-        run: bun run cli:build
+      # The CLI sidecar is what `gateway_start` picks first after install
+      # (`<install>/binaries/pure-cli.exe`). Dropping it here — together with
+      # the `binaries/*` entry in tauri.conf.json's bundle.resources — is the
+      # difference between a gateway that starts on Windows and one that has
+      # nothing to start. Bun on Windows auto-appends .exe to --outfile pure.
+      - name: Build CLI binary (Windows) and embed as sidecar
+        shell: bash
+        run: |
+          bun run cli:build
+          mkdir -p src-tauri/binaries
+          cp pure.exe "src-tauri/binaries/pure-cli.exe"
 
       # Same release-notes extraction as the macOS job (bash is available on
       # Windows runners via Git Bash) so both jobs publish the same body.
@@ -119,6 +128,17 @@ jobs:
 
       - name: Install dependencies
         run: bun install
+
+      # Same sidecar embed as the Windows job, for the same reason: the app
+      # bundle must ship a CLI or `gateway_start` has nothing local to run.
+      # The app is cross-compiled to x86_64, so the sidecar must be too.
+      - name: Build CLI sidecar (macOS x86_64)
+        env:
+          PURE_CLI_TARGET: bun-darwin-x64
+        run: |
+          bun run cli:build
+          mkdir -p src-tauri/binaries
+          cp pure src-tauri/binaries/pure-cli
 
       - name: Build and publish GUI (signed, Intel cross-compiled)
         if: env.HAS_APPLE_SIGNING == 'true'

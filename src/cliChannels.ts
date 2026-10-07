@@ -67,9 +67,16 @@ export async function runGateway(args: CliArgs): Promise<void> {
     process.exit(1);
   }
   const config = loaded.config;
-  if (!config.enabled) {
+  // 顶层 enabled 是总开关，但历史配置（GUI 早期版本只写通道级开关）里它可能
+  // 缺失而通道已经逐个启用——这种配置意图很清楚，不该当成「没启用任何通道」
+  // 直接退出：进程起来即退出，UI 只看到「已启动 + 连通性失败」（2026-10-07 真机）。
+  const anyChannelEnabled = Object.values(config.channels).some((entry) => entry?.enabled === true);
+  if (!config.enabled && !anyChannelEnabled) {
     process.stderr.write(`  ${yellow('⚠')} channels.enabled 为 false —— 未启动任何通道。\n`);
     return;
+  }
+  if (!config.enabled) {
+    channelsLog('channels.enabled 未显式开启：按通道级 enabled 启动（在设置页重新保存一次通道配置可消除本行）。');
   }
   if (!ensureProviderConfigured(args)) process.exit(1);
 
@@ -84,8 +91,19 @@ export async function runGateway(args: CliArgs): Promise<void> {
   // 设置页报「端口未就绪/连通性失败」。端口契约改为「网关在跑就必答
   // /healthz」：webchat 启用时由它的服务器答（adapter 内同款路由）；显式
   // 禁用时由这里的极简应答器答。这也是将来 daemon 控制面的第一粒种子。
+  // 端口契约：网关在跑就必答 host:port 的根路径（Rust 探针打的就是根路径）。
+  // 判据必须与 Gateway 的适配器过滤（gateway.ts：`cfg.enabled !== false`，
+  // 且只看得见**配置里存在**的通道）严格对齐：
+  //   · 未配置 webchat → webchat 不会监听 → 由这里答；
+  //   · 显式 enabled:false → 同上；
+  //   · 已配置且未禁用 → webchat 自己答（再起一个会撞端口）。
+  // 旧的判据只看 `=== false`，于是「未配置」这个最常见的形态两头都不管：网关
+  // 健康地跑着、一个端口都没监听，设置页永远报「连通性失败 (port 18790)」
+  // （2026-10-07 用户真机。改 gateway.ts 的过滤逻辑时请同步这里）。
+  const webchatEntry = config.channels.webchat;
+  const webchatWillServePort = webchatEntry !== undefined && webchatEntry.enabled !== false;
   let healthServer: ReturnType<typeof Bun.serve> | undefined;
-  if (config.channels.webchat?.enabled === false) {
+  if (!webchatWillServePort) {
     try {
       healthServer = Bun.serve({
         hostname: config.gateway.host,
@@ -97,7 +115,7 @@ export async function runGateway(args: CliArgs): Promise<void> {
           return new Response('ok', { headers: { 'content-type': 'text/plain' } });
         },
       });
-      channelsLog(`health endpoint on http://${config.gateway.host}:${config.gateway.port}/（webchat 已禁用，端口由网关应答）`);
+      channelsLog(`health endpoint on http://${config.gateway.host}:${config.gateway.port}/（webchat 未启用，端口由网关应答）`);
     } catch (err) {
       // 端口被占（残留实例等）不是致命伤：网关主职能（通道长连接）不受影响，
       // 探活退化为锁文件 + pid 判定。如实记录。
