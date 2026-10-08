@@ -18,6 +18,8 @@
 //
 // --dry-run 只报告每个角色有多少可收样本，不调模型、不写盘（先看料够不够）。
 // --replace 会先清掉该角色的 case-*.json（把旧手写种子换掉）再写新样本。
+// 默认（无 --replace）是断点续收：盘上已有的 case 按样本 args 识别后跳过，
+// 新案例的编号接着盘上最大的排——收割常被墙钟掐断，续跑不重烧已过门的资产。
 //
 // 默认写运行时目录 ~/.pure/roles/<role>/ —— GUI 的 A/B 门槛读的就是这里
 // （Rust list_role_cases），写去仓库 evals/roles/ 会让 GUI 永远找不到样本。
@@ -37,6 +39,7 @@ import {
   dedupeSamples,
   groupSamplesByRole,
   harvestRoleSamples,
+  sampleDedupeKey,
   type HarvestSession,
   type RoleDelegationSample,
 } from '../src/evaluation/roleSampleHarvest';
@@ -354,9 +357,32 @@ for (const [role, group] of samples) {
       if (/^case-\d+\.json$/.test(entry)) await rm(join(roleDir, entry));
     }
   }
+  // 断点续收：盘上已有的案例是过了门的资产，重跑不覆盖也不重收——按 args
+  // 去重键（与样本去重同一把尺）识别已收录的委派，编号接着盘上最大的排。
+  // 一次收割常被墙钟掐断（门跑 K 次很花时间），没有这条语义就只能白白重烧
+  // 已过案例的门，还得赌新起草的不如旧的好。
+  const diskKeys = new Set<string>();
+  let maxDiskIndex = 0;
+  const diskKey = (args: Record<string, unknown>): string =>
+    sampleDedupeKey({ role, args, output: '', sessionId: '', messageIndex: 0 });
+  for (const entry of await readdir(roleDir)) {
+    const m = /^case-(\d+)\.json$/.exec(entry);
+    if (!m) continue;
+    maxDiskIndex = Math.max(maxDiskIndex, Number(m[1]));
+    try {
+      const parsed = JSON.parse(await readFile(join(roleDir, entry), 'utf8')) as { args?: unknown };
+      if (parsed && typeof parsed.args === 'object' && parsed.args !== null && !Array.isArray(parsed.args)) {
+        diskKeys.add(diskKey(parsed.args as Record<string, unknown>));
+      }
+    } catch { /* 旧案例读不动就放着，也不许被本轮覆盖 */ }
+  }
   const fixtures: RoleCaseFixture[] = [];
-  let index = 1;
+  let index = maxDiskIndex + 1;
   for (const sample of candidates) {
+    if (diskKeys.has(diskKey(sample.args))) {
+      console.log(`  ${sample.sessionId}#${sample.messageIndex}: already on disk — kept`);
+      continue;
+    }
     const draft = await draftRoleAssertions(adapter, {
       role,
       roleContract: safeContract(def, sample),
