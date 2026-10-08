@@ -10,7 +10,7 @@ const IMG: never[] = [];
 const task = (text: string, over: Partial<QueuedTask> = {}): QueuedTask => ({ text, images: IMG, displayText: text, ts: 1, ...over });
 
 function steer(text: string, displayText = ''): SteerQueueEntry {
-  return { message: { role: 'user', content: text }, target: 'parent', displayText, images: IMG } as unknown as SteerQueueEntry;
+  return { message: { role: 'user', content: text }, target: 'parent', displayText, images: IMG };
 }
 
 /** 全录依赖缝：每拍调用按序记进 calls，返回 plane 与账本供断言。 */
@@ -89,7 +89,7 @@ describe('RoundClosePlane dispatch 裁决序', () => {
     expect(r.reentered[0].displayText).toBe('原话A\n框架文B');
   });
 
-  it('settles the delegation gate ledger even with no steers (挂 号不跨回合)', () => {
+  it('settles the delegation gate ledger even with no steers (挂号不跨回合)', () => {
     const r = rig();
     r.plane.dispatch();
     expect(r.calls).toContain('delegationSettle');

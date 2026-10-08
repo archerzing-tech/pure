@@ -334,6 +334,9 @@ export interface CliHarness {
   /** S2 第五刀 — 控制面三件（起飞闸/折入账/收尾派发序），远程通道宿主的
    *  入队与读数口（入队面还空着，见构造处注释）。 */
   delegationControl: DelegationControlPlane;
+  /** 折入账暴露口。注意：roundClose.foldSettle 目前是空桩（见构造处注释）——
+   *  未来通道宿主往 folds 折入并调 dispatch 前，先把桩换成真缝，否则折入
+   *  残差静默不派。 */
   folds: FoldInLedger;
   roundClose: RoundClosePlane;
 }
