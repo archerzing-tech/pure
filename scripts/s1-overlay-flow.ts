@@ -11,12 +11,12 @@
 // confirm 绑 true 是 sleep-time 编排器的既定语义（门禁通过即自动落盘）。
 //
 // 用法：
-//   bun run scripts/s1-overlay-flow.ts --role code_reviewer [--model glm-5.3-flash]
+//   bun run scripts/s1-overlay-flow.ts --role code_reviewer [--provider glm] [--model glm-5.3-flash]
 // 前置：~/.pure/roles/<role>/ 已有 ≥ MIN_ROLE_CASES(5) 条收割样本。
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
 import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
@@ -25,6 +25,7 @@ import { extractSubagentOutput, type RoleCaseFixture } from '../src/evaluation/r
 import type { RunRoleCase } from '../src/evaluation/roleRegressionRun';
 import { runPersonaOverlayFlow } from '../src/ui/personaOverlayFlow';
 import { draftPersonaOverlay } from '../src/harness/personaOverlayReflector';
+import { writeOverlayGuardedly } from '../src/harness/overlayGuard';
 import type { SubagentAdvice } from '../src/shared/subagentAdvisory';
 import { parsePromptObservations } from '../src/shared/promptObservability';
 import type { BudgetConfig, ToolCall } from '../src/shared/types';
@@ -49,9 +50,12 @@ if (!def) {
 
 // ── provider/key（与 s1-real-session 同一套解析）──
 const cfg = JSON.parse(await readFile(join(homedir(), '.pure', 'config.json'), 'utf8')) as { provider?: string; model?: string; apiKey?: string };
-const provider = cfg.provider ?? 'glm';
+const explicitProvider = flag('--provider');
+const provider = explicitProvider ?? cfg.provider ?? 'glm';
 const model = flag('--model') ?? cfg.model ?? 'glm-5.3-flash';
-let apiKey = cfg.apiKey?.trim() || '';
+// 显式 --provider 时跳过顶层 apiKey——那是 config provider 的钥匙，张冠李戴
+// 只会全量空响应。
+let apiKey = (!explicitProvider && cfg.apiKey?.trim()) || '';
 if (!apiKey) {
   const secrets = JSON.parse(await readFile(join(homedir(), '.pure', 'secrets.json'), 'utf8')) as Record<string, unknown>;
   // secrets.json 是扁平的：键名本身就带点（"llm.apiKey.glm"），不是嵌套对象。
@@ -156,7 +160,8 @@ const runCase: RunRoleCase = async (fixture, overlay) => {
   return extractSubagentOutput(result);
 };
 
-const personasDir = join(homedir(), '.pure', 'personas');
+const pureHome = join(homedir(), '.pure');
+const personasDir = join(pureHome, 'personas');
 const result = await runPersonaOverlayFlow({
   role,
   baseContract: (() => { try { return def.createSystemPrompt({}); } catch { return def.description; } })(),
@@ -183,9 +188,29 @@ const result = await runPersonaOverlayFlow({
     }
   },
   writeOverlay: async (r, text) => {
-    const { mkdir } = await import('node:fs/promises');
-    await mkdir(personasDir, { recursive: true });
-    await writeFile(join(personasDir, `${r}.overlay.md`), text);
+    // P1-1 — 落盘写手升级为护栏写手（与 GUI overlayFlowHost 同款）：同一时刻
+    // 写 .bak 前版快照 + meta 基线（本脚本 30d 真实画像的数字），ALLOW 落盘
+    // 即被回退护栏接管，不再产生无 meta 的裸 overlay。
+    await writeOverlayGuardedly(
+      {
+        readFile: async (path) => {
+          try {
+            return await readFile(join(pureHome, path), 'utf8');
+          } catch {
+            return undefined;
+          }
+        },
+        writeFile: async (path, content) => {
+          const { mkdir } = await import('node:fs/promises');
+          const target = join(pureHome, path);
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, content);
+        },
+      },
+      r,
+      text,
+      { delegations: advice.delegations, failures: advice.failures, failureRate: advice.failureRate },
+    );
   },
   confirm: async () => true, // sleep-time 同语义：A/B verdict === allow 即落盘
   runCase,

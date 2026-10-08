@@ -11,7 +11,7 @@
 //
 // 用法：
 //   bun run scripts/s1-real-session.ts --workspace <dir> --title <t> --prompt <text>
-//     [--model glm-5.3-flash] [--max-turns 30]
+//     [--provider glm] [--model glm-5.3-flash] [--max-turns 30]
 //
 // provider/key 读 ~/.pure/config.json（与 CLI 同源）；permissionMode YOLO 与 CLI
 // 默认一致。收完样本后跑：
@@ -46,11 +46,13 @@ interface PureConfigLite {
   apiKey?: string;
 }
 const cfg = JSON.parse(await readFile(join(homedir(), '.pure', 'config.json'), 'utf8')) as PureConfigLite;
-const provider = cfg.provider ?? 'glm';
+const explicitProvider = flag('--provider');
+const provider = explicitProvider ?? cfg.provider ?? 'glm';
 const model = flag('--model') ?? cfg.model ?? 'glm-5.3-flash';
 // 钥匙解析镜像产品：config.json 顶层 apiKey（CLI 形态）→ Rust secrets 的
-// llm.apiKey.<provider>（桌面形态）。只取值用，绝不回显。
-let apiKey = cfg.apiKey?.trim() || '';
+// llm.apiKey.<provider>（桌面形态）。只取值用，绝不回显。显式 --provider 时
+// 跳过顶层 apiKey——那是 config provider 的钥匙，张冠李戴只会全量空响应。
+let apiKey = (!explicitProvider && cfg.apiKey?.trim()) || '';
 if (!apiKey) {
   try {
     const secrets = JSON.parse(await readFile(join(homedir(), '.pure', 'secrets.json'), 'utf8')) as Record<string, unknown>;
