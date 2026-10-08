@@ -336,7 +336,7 @@ function makeHarness(llm: ScriptedLlm): {
     // 回合收尾：真实链路里 finalize 之后就是这一步派发。
     endTurn: () => {
       chat.streaming = false;
-      chat.dispatchDeferred();
+      chat.roundClose.dispatch();
     },
   };
 }
@@ -970,7 +970,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 回执走系统腔，不是排队的话术；队列卡绝不出现。
     expect(assistantJoined(h.root)).toContain('已并入补充，重新规划…');
     expect(queueCard(h.root)).toBeUndefined();
-    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(h.chat.roundClose.queueView()).toHaveLength(0);
     expect(h.chat.folds.entries()).toHaveLength(0);
     // 重启请求已挂号：send() 的重启循环看到它 + 暂存非空，就用并账后的
     // 请求重开一轮思考（约束长进构图里，不是旧思考上后贴）。
@@ -1002,7 +1002,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     await h.chat.interject('背景上加一些会动的云朵');
     expect(llm.classifyCalls.length).toBe(1);
     expect(queueCard(h.root)).toBeUndefined();
-    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(h.chat.roundClose.queueView()).toHaveLength(0);
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
     expect(assistantJoined(h.root)).toContain('已并入补充，重新规划');
   });
@@ -1042,8 +1042,8 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(h.chat.preflightRestartRequested).toBe(true);
     // 不拆回合：重入通道没被占用、回合没被掐——思考流由重启请求掐，重开
     // 时带着原始请求 + 并账的纠正。
-    expect(h.chat.relatedInsert).toBeFalsy();
-    expect(h.chat.pendingTasks).toHaveLength(0);
+    expect(h.chat.roundClose.hasHeldInsert()).toBe(false);
+    expect(h.chat.roundClose.queueView()).toHaveLength(0);
     expect(queueCard(h.root)).toBeUndefined();
     const merged = h.chat.applyPreflightSupplements('从多个方面调研一下当前AI的三个热点', []);
     expect(merged).toContain('jev是2026年9月新发布的模型');
@@ -1077,7 +1077,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     await h.chat.interject('换个思路，别做俄罗斯方块了，做贪吃蛇');
     expect(assistantJoined(h.root)).toContain('已按纠正重构思路，重新规划…');
     expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
-    expect(h.chat.relatedInsert).toBeFalsy();
+    expect(h.chat.roundClose.hasHeldInsert()).toBe(false);
   });
 
   it('思考窗关了（思考已完、产出已在跑）：同样的补充不吸收，走普通 steer', async () => {
@@ -1138,7 +1138,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
 
     await h.chat.interject('背景上加一些会动的云朵');
     expect(queueCard(h.root)).toBeDefined();
-    // 不调 endTurn（不手动 dispatchDeferred）：只把流态置空。
+    // 不调 endTurn（不手动收尾派发）：只把流态置空。
     h.chat.setStreaming(false);
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(h.sends).toEqual(['背景上加一些会动的云朵']);

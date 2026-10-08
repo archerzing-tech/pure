@@ -14,6 +14,9 @@ import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { SteerBus } from './coding-agent/steerBus';
+import { DelegationControlPlane } from './coding-agent/delegationControl';
+import { FoldInLedger } from './coding-agent/foldInLedger';
+import { RoundClosePlane } from './coding-agent/roundClosePlane';
 import { compileExternalSubagents, isExternalSubagentManifest } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
@@ -328,6 +331,11 @@ export interface CliHarness {
   projectPath: string;
   mcpClient: MCPClient | undefined;
   steerBus: SteerBus;
+  /** S2 第五刀 — 控制面三件（起飞闸/折入账/收尾派发序），远程通道宿主的
+   *  入队与读数口（入队面还空着，见构造处注释）。 */
+  delegationControl: DelegationControlPlane;
+  folds: FoldInLedger;
+  roundClose: RoundClosePlane;
 }
 
 async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): Promise<CliHarness> {
@@ -362,6 +370,28 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   // takeSteerMessages 逐字节一致；随返回值暴露 bus，是远程遥控（手机经通道
   // 插话）的入队口。
   const steerBus = new SteerBus();
+  // S2 第五刀 — 控制面同接（比照 steerBus 先例）：CLI 从此拥有与 GUI 同一份
+  // 起飞闸/折入账/收尾派发序的实现。今天插话输入路仍空着（cliRepl 没有中途
+  // 插话），FoldInLedger/RoundClosePlane 以中性读数构造并随返回值暴露——
+  // 远程遥控（通道宿主）的入队口；dispatch 在 CLI 尚无调用方（回合收尾钩子
+  // 未接），接通时再把读数换成真账。真正的引擎缝先接实：起飞闸
+  // gateDelegations（委派批次出生时按区分词拦下取消/停支挂号）。
+  const delegationControl = new DelegationControlPlane();
+  const folds = new FoldInLedger();
+  const roundClose = new RoundClosePlane({
+    activityCount: () => 0,
+    isStreaming: () => false,
+    autoContinuePending: () => false,
+    steerSettleRound: () => steerBus.settleRound(),
+    delegationSettleRound: () => delegationControl.settleRound(),
+    foldSettle: () => [],
+    resumeFallback: () => delegationControl.settleResumesFallback(),
+    settleReceipts: () => {},
+    supersedeAutoContinue: () => {},
+    reenter: () => {},
+    narrateHandoff: () => {},
+    timer: (fn, ms) => setTimeout(fn, ms),
+  });
   const createdTools = await createTools(
     args.workspace,
     args.autoApprove,
@@ -390,6 +420,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     failureHistory: failureHistoryFromMemories(memoryStore.list({ type: 'error_pattern', activeOnly: true })),
   });
 
+  // 起飞闸的角色集：与下面注册进 orchestrator/tools 的子代理名单同源（gate
+  // 只按角色名认委派批次）。子代理面关着时恒空 = gate 恒放行。
+  const cliSubagentNames = new Set<string>();
   if (tools && tools instanceof ToolRegistry) {
     // Full delegation surface, mirroring the GUI: both the built-in reviewers
     // and the coding roles (task_planner / code_editor / researcher /
@@ -442,6 +475,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);
       tools.register(def);
+      cliSubagentNames.add(def.name);
     }
     tools.setSubagentExecutor(orchestrator);
     // Model-visible tools = public tools + subagent tools, so the parent LLM
@@ -499,9 +533,13 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     evolutionEnabled,
     // S2 — 引擎在 THINK 边界拉转向队列（空队列 = 与省略时行为一致）。
     takeSteerMessages: (recipient) => steerBus.drain(recipient),
+    // S2 第五刀 — 委派批次出生时过起飞闸：取消/停支挂号按区分词拦下（CLI
+    // 今天无插话输入路，挂号簿恒空 = 与省略时行为一致；通道宿主经暴露的
+    // delegationControl 挂号即生效）。
+    gateDelegations: async (calls) => delegationControl.gate(calls, cliSubagentNames),
   });
 
-  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus };
+  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus, delegationControl, folds, roundClose };
 }
 
 export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints, distillSkillFromMemory };

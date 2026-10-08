@@ -967,22 +967,33 @@ describe('plan overview completion state', () => {
     // 轮到本条时它应该走正常 send 而不是对已结束的回合做判定。
     const link = src.indexOf('private async classifyAndApplyInterject(');
     expect(link).toBeGreaterThan(-1);
-    const linkBody = src.slice(link, src.indexOf('private scheduleDeferred', link));
+    const linkBody = src.slice(link, src.indexOf('private foldInInstruction(', link));
     expect(linkBody.indexOf('if (!this.isStreaming())')).toBeGreaterThan(-1);
     expect(linkBody.indexOf('void this.send(text, images, displayText)')).toBeGreaterThan(-1);
   });
 
   it('re-arms the deferred dispatch when a classification lands after the turn already ended', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
+    const plane = readSource(new URL('../../coding-agent/roundClosePlane.ts', import.meta.url));
     // 判定 LLM 可能跑好几秒：回合在这期间自然结束的话，send() 的 finally 已经
     // 跑过 deferred dispatch——RELATED 插话 / 排队任务会冻结到用户下一条消息
-    // 结束后才突然执行。判定落定时若已不在流式中，必须补一次 scheduleDeferred；
-    // dispatchDeferred 的 isStreaming 守卫保证重复调度不会开出第二个并发回合。
-    expect(src.indexOf('if (!this.isStreaming()) this.scheduleDeferred()')).toBeGreaterThan(-1);
-    const dispatch = src.indexOf('private dispatchDeferred(): void');
+    // 结束后才突然执行。判定落定时若已不在流式中，必须补一次 scheduleDispatch；
+    // dispatch 的 isStreaming 守卫保证重复调度不会开出第二个并发回合。
+    expect(src.indexOf('if (!this.isStreaming()) this.roundClose.scheduleDispatch()')).toBeGreaterThan(-1);
+    const dispatch = plane.indexOf('  dispatch(): void {');
     expect(dispatch).toBeGreaterThan(-1);
-    const dispatchBody = src.slice(dispatch, dispatch + 400);
-    expect(dispatchBody.indexOf('if (this.isStreaming()) return;')).toBeGreaterThan(-1);
+    const dispatchBody = plane.slice(dispatch, dispatch + 400);
+    expect(dispatchBody.indexOf('if (this.deps.isStreaming()) return;')).toBeGreaterThan(-1);
+    // 注入钉（防宿主侧硬编码假读数把闸焊死）：派发序吃的三个宿主读数必须
+    // 来自真账——流态、活动水位、「继续」链。常量 stub 会让守卫永真。
+    const depsIdx = src.indexOf('private roundClose = new RoundClosePlane({');
+    expect(depsIdx).toBeGreaterThan(-1);
+    const depsBody = src.slice(depsIdx, depsIdx + 1_600);
+    expect(depsBody.indexOf('isStreaming: () => this.isStreaming()')).toBeGreaterThan(-1);
+    expect(depsBody.indexOf('activityCount: () => this.agentActivities.length')).toBeGreaterThan(-1);
+    expect(depsBody.indexOf('autoContinuePending: () => this.autoContinue.pending')).toBeGreaterThan(-1);
+    expect(depsBody.indexOf('reenter: (t) => void this.send(t.text, t.images, t.displayText)')).toBeGreaterThan(-1);
+    expect(depsBody.indexOf('timer: (fn, ms) => window.setTimeout(fn, ms)')).toBeGreaterThan(-1);
   });
 
   it('bridges the classification gap with one ack line the receipt replaces in place', () => {
@@ -1037,8 +1048,8 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('待办队列（')).toBeGreaterThan(-1);
     expect(src.indexOf('队列：处理下一件，后面还排着')).toBeGreaterThan(-1);
     expect(src.indexOf('队列：现在处理排下的那件。')).toBeGreaterThan(-1);
-    // 新会话清空 pendingTasks 时同步撤卡，不留上一场对话的幽灵队列。
-    const reset = src.indexOf('this.pendingTasks = [];');
+    // 新会话清空待办账（plane.reset）时同步撤卡，不留上一场对话的幽灵队列。
+    const reset = src.indexOf('this.roundClose.reset();');
     expect(reset).toBeGreaterThan(-1);
     expect(src.indexOf('this.queueCardEl = null;', reset)).toBeGreaterThan(-1);
     // 折入回执不再点名任务类型（"调研"）——追加的活可能是任何一种。
@@ -1075,6 +1086,7 @@ describe('plan overview completion state', () => {
     // （账本裁决、残差转排队在宿主）。S2 第四刀后闸/账/核验的语义锁扫
     // foldInLedger 源；宿主锁「经账本」的委托形状。
     const ledger = readSource(new URL('../../coding-agent/foldInLedger.ts', import.meta.url));
+    const plane = readSource(new URL('../../coding-agent/roundClosePlane.ts', import.meta.url));
     expect(ledger.indexOf('this.queue.push(')).toBeGreaterThan(-1);
     expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
     expect(src.indexOf('this.folds.beginDelivery(')).toBeGreaterThan(-1);
@@ -1151,15 +1163,14 @@ describe('plan overview completion state', () => {
     expect(src.slice(foldInFn, foldInFn + 600).indexOf('this.placeEchoBeforeAck(ack, bubble)')).toBeGreaterThan(-1);
     const echoFn = src.indexOf('const echoUserBubble = (): void =>');
     expect(src.slice(echoFn, echoFn + 400).indexOf('this.placeEchoBeforeAck(ack, bubble)')).toBeGreaterThan(-1);
-    const settle = src.indexOf('private settleFoldIns(');
-    expect(settle).toBeGreaterThan(-1);
-    const settleBody = src.slice(settle, settle + 500);
     // 水位核验的裁决住账本（S2 第四刀）；宿主只把残差转排队。
     expect(ledger.indexOf('activityCount > fold.activityCountAtDelivery')).toBeGreaterThan(-1);
-    expect(settleBody.indexOf('this.pendingTasks.push(')).toBeGreaterThan(-1);
-    // dispatchDeferred 一进门先结算折入，同一趟把兜底任务派出去。
-    const dispatch = src.indexOf('private dispatchDeferred(): void');
-    expect(src.slice(dispatch, dispatch + 400).indexOf('this.settleFoldIns()')).toBeGreaterThan(-1);
+    // 残差转排队住收尾缝（S2 第五刀）：foldSettle 依赖把账本残差按合并口径
+    // 包成排队任务，冻结进 RoundClosePlane 的待办账。
+    expect(src.indexOf('foldSettle: (activityCount) => this.folds.settle(activityCount).map((fold) =>')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.foldInFollowUpText(fold.text)')).toBeGreaterThan(-1);
+    // dispatch 一进门先结算折入，同一趟把兜底任务派出去。
+    expect(plane.indexOf('for (const task of this.deps.foldSettle(this.deps.activityCount())) this.queueTask(task);')).toBeGreaterThan(-1);
   });
 
   it('handles a cancelled branch of parallel work as a removal, never an addition (2026-09-24 取消案例)', () => {
@@ -1192,10 +1203,9 @@ describe('plan overview completion state', () => {
     expect(deliver).toBeGreaterThan(-1);
     // 收尾核验对取消型直接放行：排除一项永远不会产生新委派活动，按追加
     // 的水位核验它恒算"没照办"，转排队只会把"取消"当活重跑（反向伤害）。
-    // 裁决住账本（S2 第四刀）——语义锁扫 foldInLedger 源；宿主锁委托形状。
-    const settle = src.indexOf('private settleFoldIns(');
-    const settleBody = src.slice(settle, src.indexOf('private scheduleDeferred()', settle));
-    expect(settleBody.indexOf('this.folds.settle(')).toBeGreaterThan(-1);
+    // 裁决住账本（S2 第四刀）——语义锁扫 foldInLedger 源；宿主锁委托形状
+    // （收尾结算经 roundClose 的 foldSettle 依赖缝进账本，S2 第五刀）。
+    expect(src.indexOf('foldSettle: (activityCount) => this.folds.settle(activityCount).map((fold) =>')).toBeGreaterThan(-1);
     const ledger = readSource(new URL('../../coding-agent/foldInLedger.ts', import.meta.url));
     expect(ledger.indexOf('if (fold.cancels) continue;')).toBeGreaterThan(-1);
     // steer 分发透传取消标记；task 分发兜底改道——分类器万一仍把取消判成
@@ -1265,7 +1275,7 @@ describe('plan overview completion state', () => {
     // 匹配与消费住在 plane 里（delegationControl.gate）——宿主侧锁闭包委托形状。
     expect(src.indexOf('cancelReceiptTopic')).toBeGreaterThan(-1);
     // 挂号不跨回合：finalize 与 new chat 两条清扫都要在。
-    expect(src.split('this.delegationControl.settleRound();').length - 1).toBeGreaterThanOrEqual(2);
+    expect(src.split('this.delegationControl.settleRound()').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('clears same-named branches queued but not yet airborne (第 2 期「排队未起飞的同名支」)', () => {
@@ -1289,11 +1299,12 @@ describe('plan overview completion state', () => {
     // 随回合清空（与 pendingCancels 同命）：回合收尾与 new chat 两条清扫都
     // 要在——控制器跨会话单例，new chat 不摘簿子，旧会话的停支挂号会闯进
     // 新会话把同话题的委派误杀在出生点。
-    expect(src.split('this.delegationControl.settleRound();').length - 1).toBeGreaterThanOrEqual(2);
+    expect(src.split('this.delegationControl.settleRound()').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   it('re-delegates a NAMED paused branch with its original args (第 2 期第三刀)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
+    const plane = readSource(new URL('../../coding-agent/roundClosePlane.ts', import.meta.url));
     // 「把 X 那支接着跑完」：续跑的唯一凭据是**原始参数**——稳定 sessionId
     // 命中 checkpoint，子引擎 continue。原始参数在委派批次起飞时捕获。
     expect(src.indexOf('private delegationControl = new DelegationControlPlane();')).toBeGreaterThan(-1);
@@ -1320,11 +1331,12 @@ describe('plan overview completion state', () => {
     const synthBody = src.slice(synth, synth + 3_500);
     expect(synthBody.indexOf('for (const resume of this.delegationControl.takeResumes())')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('arguments: resume.args')).toBeGreaterThan(-1);
-    // 兜底：没赶上 THINK 边界 → 收尾转成排队的新指令，话绝不丢；由
-    // dispatchDeferred 在折入核验同拍结算。
-    expect(src.indexOf('private settlePendingResumes(): void')).toBeGreaterThan(-1);
-    const dispatch = src.indexOf('private dispatchDeferred(): void');
-    expect(src.slice(dispatch, dispatch + 900).indexOf('this.settlePendingResumes()')).toBeGreaterThan(-1);
+    // 兜底：没赶上 THINK 边界 → 收尾转成排队的新指令，话绝不丢；装配住
+    // DelegationControlPlane（S2 第五刀），经 roundClose 的 resumeFallback
+    // 依赖缝在折入核验同拍转排队。
+    expect(src.indexOf('resumeFallback: () => this.delegationControl.settleResumesFallback()')).toBeGreaterThan(-1);
+    expect(plane.indexOf('const fallback = this.deps.resumeFallback();')).toBeGreaterThan(-1);
+    expect(plane.indexOf('if (fallback) this.queueTask(fallback);')).toBeGreaterThan(-1);
     // 分类器判据输入：暂停/已停的支作为可续跑候补喂给分类器（否则它看不见）。
     expect(src.indexOf('已暂停/已停的支（用户点名可让它们接着跑）')).toBeGreaterThan(-1);
   });
@@ -1617,10 +1629,10 @@ describe('superseded-turn finally teardown', () => {
     expect(finallyBlock).toContain('if (gen !== this.generation) assessmentFlow?.cancel(');
     // The drain schedule survives any teardown throw (2026-09-27 排队事故)。
     // 2026-09-29: a pause-led final also cancels the「继续」bar when the
-    // user's own held insert is about to re-enter via dispatchDeferred —
+    // user's own held insert is about to re-enter via the round-close dispatch —
     // a manual continue click there would be a lie.
-    expect(finallyBlock).toContain('if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();');
-    expect(finallyBlock).toContain('this.scheduleDeferred();');
+    expect(finallyBlock).toContain('if (pausedThisTurn && this.roundClose.hasHeldInsert()) this.autoContinue.cancel();');
+    expect(finallyBlock).toContain('this.roundClose.scheduleDispatch();');
   });
 });
 
@@ -1743,7 +1755,7 @@ describe('plan-by-thinking flow', () => {
     const streamingIdx = src.indexOf('private setStreaming(v: boolean) {');
     expect(streamingIdx).toBeGreaterThan(-1);
     const body = src.slice(streamingIdx, src.indexOf('\n  }', streamingIdx));
-    expect(body).toContain('if (!v) this.scheduleDeferred();');
+    expect(body).toContain('if (!v) this.roundClose.scheduleDispatch();');
     // finally 兜底：ownsTurn 派发包在 try/finally 里，收尾路再怎么断都装上。
     const finallyIdx = src.indexOf('this.finishLiveTurn(liveTurn);\n        releaseSupersededTurn();');
     expect(finallyIdx).toBeGreaterThan(-1);
@@ -1751,8 +1763,8 @@ describe('plan-by-thinking flow', () => {
     expect(guardIdx).toBeGreaterThan(finallyIdx);
     const sweep = src.slice(guardIdx, src.indexOf('\n      }', guardIdx));
     expect(sweep).toContain('if (ownsTurn) {');
-    expect(sweep).toContain('if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();');
-    expect(sweep).toContain('this.scheduleDeferred();');
+    expect(sweep).toContain('if (pausedThisTurn && this.roundClose.hasHeldInsert()) this.autoContinue.cancel();');
+    expect(sweep).toContain('this.roundClose.scheduleDispatch();');
   });
 
   it('preflight absorption: the window flag wraps planByThinking and merges before the abort check (2026-09-27 排队事故)', () => {

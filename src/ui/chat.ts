@@ -35,6 +35,7 @@ import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRe
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { FoldInLedger } from '../coding-agent/foldInLedger';
+import { RoundClosePlane } from '../coding-agent/roundClosePlane';
 import { compileExternalTools } from '../harness/externalTools';
 import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
@@ -1562,10 +1563,7 @@ export class ChatController {
    * （系统提示词 + 工具定义 token 估算），与底部上下文窗口进度条共用口径；
    * 尚未发过消息时为 0，由 main.ts 的静态近似兜底（启动/恢复场景）。 */
   private contextOverhead = { system: 0, tools: 0 };
-  /** Messages the user typed while a turn was running, judged UNRELATED to the
-   * current task. They are queued and started as fresh tasks once the current
-   * task/plan reaches a terminal state (no auto-continue pending). */
-  private pendingTasks: Array<{ text: string; images: MessageImage[]; displayText: string; ts: number }> = [];
+  /** 待办队列账已迁 RoundClosePlane（S2 第五刀）；queueCardEl 仍是纯 DOM 投影。 */
   /** The live 待办队列 card (renderQueueCard); null while the queue is empty. */
   private queueCardEl: HTMLElement | null = null;
   /** Status rows whose interject receipt promised an in-flight action (停 /
@@ -1575,10 +1573,7 @@ export class ChatController {
    *  shimmer that never stops reads as work still running. settleInterject
    *  Receipts() cashes them at exactly those moments. */
   private interjectReceiptRows = new Set<HTMLElement>();
-  /** A message the user typed mid-run that IS related to the current task. Held
-   * until the interrupted round finalizes, then re-entered as a continuation of
-   * the SAME task so the model re-plans/rewrites around the new variable. */
-  private relatedInsert: { text: string; images: MessageImage[]; displayText: string } | null = null;
+  /** 押账插话账已迁 RoundClosePlane（S2 第五刀）：holdInsert/hasHeldInsert。 */
   /** Serializes mid-run insert classifications. A second insert typed while
    * the first is still being judged must WAIT its turn — main.ts clears the
    * input box the moment interject() is called, so dropping the call would
@@ -1614,7 +1609,7 @@ export class ChatController {
    * pushes here; the engine drains the queue at each THINK boundary (via
    * takeSteerMessages) so the very next round reconciles the words mid-flight —
    * no abort, no replan. Leftovers after the turn ends fall back to a normal
-   * send in dispatchDeferred so nothing typed is ever lost.
+   * send in the round-close dispatch (RoundClosePlane) so nothing typed is ever lost.
    * 1a 定向投递（对话智能升格）: 每条插话带着目的地入队——'parent' 只进父
    * 引擎（委派不在飞时的普通顺路带上）、'all' 广播给所有在飞的活、点名某支
    * 时直达那一支。渲染一致性：displayText 保存用户原话，回合结束后残留的
@@ -1670,6 +1665,32 @@ export class ChatController {
    * /取消框架/合并口径文案与代执行任务书构造留在宿主（铺排）。分支级继续
    * 的待重派账住 DelegationControlPlane（与 delegationArgs 同账本）。 */
   private folds = new FoldInLedger();
+  /** S2 第五刀（P3-2）— 回合收尾派发序 + 待办账住 RoundClosePlane（宿主无
+   * 关，CLI/通道同接）：待办队列与押账插话是 plane 私有态，收尾裁决序（回
+   * 执结算 → 折入核验 → 续跑兜底 → 押账插话优先 → 残留 steer 重入 → 队列
+   * 派发）在 plane；队列卡/交接叙述/回执行的 DOM 投影与回合生命周期
+   * （autoContinue/统计/事件日志）经动作缝留给宿主。 */
+  private roundClose = new RoundClosePlane({
+    activityCount: () => this.agentActivities.length,
+    isStreaming: () => this.isStreaming(),
+    autoContinuePending: () => this.autoContinue.pending,
+    steerSettleRound: () => this.steerBus.settleRound(),
+    delegationSettleRound: () => this.delegationControl.settleRound(),
+    // 折入残差按合并口径转成排队的新指令（口径文本在 insertionMessaging，
+    // 一致性测试锁着）；账本只出残差，转排队由这半边宿主缝完成。
+    foldSettle: (activityCount) => this.folds.settle(activityCount).map((fold) => ({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() })),
+    resumeFallback: () => this.delegationControl.settleResumesFallback(),
+    settleReceipts: () => this.settleInterjectReceipts(),
+    supersedeAutoContinue: () => this.autoContinue.cancel(),
+    reenter: (t) => void this.send(t.text, t.images, t.displayText),
+    narrateHandoff: (remaining) => {
+      this.renderQueueCard();
+      this.addStatusBubble(remaining > 0
+        ? `队列：处理下一件，后面还排着 ${remaining} 件。`
+        : '队列：现在处理排下的那件。', false, false, 'info');
+    },
+    timer: (fn, ms) => window.setTimeout(fn, ms),
+  });
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -2637,7 +2658,7 @@ export class ChatController {
    *   - question → 侧路回答一句，主循环毫无感知。
    *   - task    → 阶段感知：委派还在飞 → 折入汇合轮（foldInScopeAddition，
    *               先补这项再合并汇总，收尾核验没折入就转排队兜底）；
-   *               委派收齐 → 排队（pendingTasks），收尾后作为新任务启动。
+   *               委派收齐 → 排队（RoundClosePlane 待办账），收尾后作为新任务启动。
    *   - chatter → 收下即可，用户的话以自己的气泡上屏，不打扰干活的人。
    * 分类不可用时保守按 steer 处理：话一定送到，活绝不推倒重来。
    */
@@ -2765,7 +2786,7 @@ export class ChatController {
   /** Cash the receipts that promised an in-flight action: the abort has drained
    * (turn finalize) or the held insert is re-entering as a fresh turn (fresh
    * send) — either way the shimmer's claim stopped being true the moment this
-   * runs. Called from dispatchDeferred (the finalize-side entry) and send()
+   * runs. Called from the round-close dispatch (the finalize-side entry) and send()
    * (the re-entry/new-send entry) so every path that ends the wait sweeps. */
   private settleInterjectReceipts(): void {
     if (this.interjectReceiptRows.size === 0) return;
@@ -2903,13 +2924,13 @@ export class ChatController {
       case 'goal-change':
         // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
         // 先回显再重入 = 同一句话上两遍。
-        this.relatedInsert = { text, images, displayText };
+        this.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
         this.settleAck(ack, '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
         this.abortController?.abort();
         // Same late-classification hazard as queueInterjectTask: if the turn
         // already finished while we were judging, no finalize will dispatch
         // the held insert — re-arm the deferred dispatch here.
-        if (!this.isStreaming()) this.scheduleDeferred();
+        if (!this.isStreaming()) this.roundClose.scheduleDispatch();
         return;
       case 'premise-change': {
         // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
@@ -2924,8 +2945,8 @@ export class ChatController {
         //   支（同参重派命中 checkpoint）、改派、换方案都由它按纠正后的
         //   前提权衡——用户的插话被接纳后重决策，而不是整树报废。
         // ③ 已收齐委派、无在飞可暂停时，维持旧路：直接重入（abort 对已
-        //   收尾的回合是 no-op，relatedInsert 照常派发）。
-        this.relatedInsert = { text, images, displayText };
+        //   收尾的回合是 no-op，押账插话照常派发）。
+        this.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
         if (this.hasDelegationInFlight()) {
           this.settleAck(ack, '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
           this.abortController?.abort(PAUSE_ABORT_REASON);
@@ -2936,7 +2957,7 @@ export class ChatController {
         // Same late-classification hazard as queueInterjectTask: if the turn
         // already finished while we were judging, no finalize will dispatch
         // the held insert — re-arm the deferred dispatch here.
-        if (!this.isStreaming()) this.scheduleDeferred();
+        if (!this.isStreaming()) this.roundClose.scheduleDispatch();
         return;
       }
       case 'steer': {
@@ -3376,7 +3397,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
 
   /** 1b question 入账 — 把问答对（answer 为空 = 没答上）作为 internal 消息
    * 折进运行回合：模型下个边界读到，最终输出与旁答口径一致。displayText 的
-   * 区分兜底在 dispatchDeferred：答上的记录回合就结束了 = 账已清，残留即弃；
+   * 区分兜底在收尾派发（RoundClosePlane.dispatch）：答上的记录回合就结束了 = 账已清，残留即弃；
    * 没答上的把问题原话重入（「收尾时统一答」的承诺必须兑现）。 */
   private recordSideAnswer(question: string, answer: string): void {
     const content = answer
@@ -3426,19 +3447,19 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * finished (LLM judges can take seconds) would otherwise leave the queued
    * task or a RELATED insert frozen until the user's NEXT turn completed. */
   private queueInterjectTask(text: string, images: MessageImage[], displayText: string): void {
-    this.pendingTasks.push({ text, images, displayText, ts: Date.now() });
+    this.roundClose.queueTask({ text, images, displayText, ts: Date.now() });
     this.renderQueueCard();
-    if (!this.isStreaming()) this.scheduleDeferred();
+    if (!this.isStreaming()) this.roundClose.scheduleDispatch();
   }
 
   /** The visible to-do queue: ONE card in the transcript that re-renders as
    * items queue up and drain, instead of a system line per enqueue. A
    * colleague keeps a running list you can glance at — "待办队列更新：1… 2…"
-   * — not a receipt for every entry. DOM-only by design: pendingTasks is live
-   * state (a restored session has none), so there is nothing to re-render on
+   * — not a receipt for every entry. DOM-only by design: the queue ledger is
+   * live state (a restored session has none), so there is nothing to re-render on
    * disk restore and nothing stale to clean up. */
   private renderQueueCard(): void {
-    if (this.pendingTasks.length === 0) {
+    if (this.roundClose.queueView().length === 0) {
       this.queueCardEl?.parentElement?.remove();
       this.queueCardEl = null;
       return;
@@ -3456,11 +3477,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     bubble.textContent = '';
     const title = document.createElement('div');
     title.className = 'queue-card-title';
-    title.textContent = `待办队列（${this.pendingTasks.length} 件）——当前任务完成后依次处理`;
+    title.textContent = `待办队列（${this.roundClose.queueView().length} 件）——当前任务完成后依次处理`;
     bubble.appendChild(title);
     const list = document.createElement('ol');
     list.className = 'queue-card-items';
-    for (const t of this.pendingTasks) {
+    for (const t of this.roundClose.queueView()) {
       const item = document.createElement('li');
       item.textContent = t.displayText.length > 60 ? `${t.displayText.slice(0, 60)}…` : t.displayText;
       list.appendChild(item);
@@ -3525,89 +3546,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     return foldInFollowUpTextShared(text);
   }
 
-  /** 收尾核验折入的追加：裁决（机械兑现/水位核验/取消型恒算残差）在
-   * FoldInLedger.settle（S2 第五刀迁出），宿主只把残差转 pendingTasks 按
-   * 合并口径补跑。由 dispatchDeferred 在回合收尾时调用。 */
-  private settleFoldIns(): void {
-    const residuals = this.folds.settle(this.agentActivities.length);
-    for (const fold of residuals) {
-      this.pendingTasks.push({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() });
-    }
-  }
-
-  /** 分支级继续的兜底：同参重派没赶在回合最后一个 THINK 边界落地——留在
-   * 队列里的转成用户的新指令重入，父从上下文重派同一委派（相同参数 →
-   * 相同 sessionId → 仍从断点续）。话绝不丢。兜底指令的装配在
-   * DelegationControlPlane.settleResumesFallback（S2 第五刀迁出，与凭据同
-   * 账本）；宿主只负责转入待办队列。由 dispatchDeferred 在回合收尾时调用。 */
-  private settlePendingResumes(): void {
-    const fallback = this.delegationControl.settleResumesFallback();
-    if (fallback) this.pendingTasks.push(fallback);
-  }
-
-  /** Schedule the deferred dispatch just after a turn fully finalizes. */
-  private scheduleDeferred(): void {
-    window.setTimeout(() => this.dispatchDeferred(), 40);
-  }
-
-  /** After the current turn is over:
-   *  - a goal-change insert → immediately re-enter the same task with it (fold in).
-   *  - else, steers that never reached a THINK boundary (queued in the turn's
-   *    final seconds) → send them as a normal message, so nothing typed is lost.
-   *  - else, if a queued task waits AND the task is terminal (no auto-continue
-   *    pending) → start it as a fresh task.
-   * The isStreaming guard makes overlapping schedules (turn finalize + a late
-   * interject classification) safe: the first dispatch enters send(), which
-   * flips streaming on synchronously, and the second becomes a no-op instead
-   * of starting a second concurrent turn. */
-  private dispatchDeferred(): void {
-    if (this.isStreaming()) return;
-    // 回执的账在这里结：收尾派发点就是"承诺的动作已兑现"的时刻——停的收尾
-    // 落定、被留下的插话正要重入、排队的活开始交接，微光都该停了。
-    this.settleInterjectReceipts();
-    // 折入追加的收尾核验先行：没被照办的转进 pendingTasks，下面同一趟
-    // dispatchDeferred 就会把它们作为新指令派发出去。
-    this.settleFoldIns();
-    // 分支级继续的兜底同拍：没赶上 THINK 边界的同参重派转成排队的新指令。
-    this.settlePendingResumes();
-    if (this.relatedInsert) {
-      const ri = this.relatedInsert;
-      this.relatedInsert = null;
-      this.autoContinue.cancel(); // folding in supersedes the '继续' chain
-      void this.send(ri.text, ri.images, ri.displayText);
-      return;
-    }
-    // 插话重构 — steers left over when the turn already ended never reached a
-    // THINK boundary. A colleague would just say them out loud as the next
-    // thing to do; so does pure: they open the next turn as the user's words.
-    // 1a 定向投递 + 渲染一致性：重入用用户原话（displayText），不是引擎框架
-    // 文——开场气泡、存档、重载看到的都是用户自己说的话。点名某支但那支已
-    // 收工的也一样：话不丢，作为用户的新指令重开。1b 旁答记录按账处置：答
-    // 上的（displayText 空）账已清，残留即弃；没答上的把问题原话重入。
-    const leftoverSteers = this.steerBus.settleRound(); // 没被带走的只剩「已答上的旁答记录」——账已清，弃
-    // 起飞闸挂号随回合清空：残留的取消挂号若跨回合，会拦下用户后来明确
-    // 要「继续/再跑」的那支——那是新指令，挂号没资格否决它。点名停支的
-    // 挂号同理：下一回合的重派是新指令，本轮的门闩不该越回合生效。
-    this.delegationControl.settleRound();
-    if (leftoverSteers.length > 0) {
-      const drained = leftoverSteers;
-      this.autoContinue.cancel(); // the user's own words supersede '继续'
-      const text = drained.map((entry) => entry.displayText || entry.message.content).join('\n');
-      void this.send(text, drained.flatMap((entry) => entry.images ?? []));
-      return;
-    }
-    if (this.pendingTasks.length > 0 && !this.autoContinue.pending) {
-      const t = this.pendingTasks.shift()!;
-      const remaining = this.pendingTasks.length;
-      // 交接先说一声再动手（队列卡同步收掉这项/空了撤卡）——用户的下一句
-      // 话凭空开始跑，没有这句衔接读起来就是无中生有。
-      this.renderQueueCard();
-      this.addStatusBubble(remaining > 0
-        ? `队列：处理下一件，后面还排着 ${remaining} 件。`
-        : '队列：现在处理排下的那件。', false, false, 'info');
-      void this.send(t.text, t.images, t.displayText);
-    }
-  }
+  /** 收尾核验折入 / 续跑兜底 / 回合收尾派发序已迁 RoundClosePlane（S2 第五
+   * 刀）：裁决序与待办账住 plane，roundClose 字段的依赖缝回接折入残差转
+   * 排队与续跑兜底。 */
 
   /** 11.2 — how a path-repair note puts the original draft back in the
    *  composer. This controller does not own the composer; the shell (main.ts)
@@ -7027,13 +6968,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // "置 false 的每条路"，这边管"ownsTurn 的收尾整体"）。
         // 问题 2 修复（2026-09-29）：暂停语义的收尾会开「继续」条——但由
         // 用户自己的插话（premise-change 止损）引发的暂停不一样：held insert
-        // 马上就在 dispatchDeferred 里重入，挂一条「点继续」会误导用户去手
+        // 马上就在收尾派发（roundClose.dispatch）里重入，挂一条「点继续」会误导用户去手
         // 动续跑一个已经要自动重排的回合。pausedThisTurn 为真且还押着
-        // relatedInsert 时，链条就是该取消的——重入本身在 dispatchDeferred
+        // 押账插话时，链条就是该取消的——重入本身在 roundClose.dispatch
         // 里也会再取消一次，这里提前取消只是让「继续」条不闪现。
         if (ownsTurn) {
-          if (pausedThisTurn && this.relatedInsert) this.autoContinue.cancel();
-          this.scheduleDeferred();
+          if (pausedThisTurn && this.roundClose.hasHeldInsert()) this.autoContinue.cancel();
+          this.roundClose.scheduleDispatch();
         }
       }
     }
@@ -7056,7 +6997,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.contextEngine = undefined;
     this.hasHistory = false;
     this.activeComplexPlan = null;
-    this.pendingTasks = [];
+    this.roundClose.reset();
     this.queueCardEl?.parentElement?.remove();
     this.queueCardEl = null;
     // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求、在飞
@@ -7066,7 +7007,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.preflightAbort = null;
     this.preflightRestartRequested = false;
     this.preflightNarrationTail = '';
-    this.relatedInsert = null;
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
@@ -7717,7 +7657,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 不再装上，队列卡挂在屏上、活再也没人做。这里兜底：所有置 false 的路
     // （正常收尾、被接管、测试、未来新路径）统一触发一次扫除；dispatch/
     // schedule 自身幂等，与 finally 里的那次重复无害。
-    if (!v) this.scheduleDeferred();
+    if (!v) this.roundClose.scheduleDispatch();
   }
 }
 
