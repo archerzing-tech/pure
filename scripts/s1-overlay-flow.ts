@@ -21,6 +21,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator } from '../src/coding-agent/SubagentOrchestrator';
 import { NodeToolAdapter } from '../src/adapter/node/NodeToolAdapter';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
+import { defaultModelFor } from '../src/shared/providers';
 import { extractSubagentOutput, type RoleCaseFixture } from '../src/evaluation/roleRegression';
 import type { RunRoleCase } from '../src/evaluation/roleRegressionRun';
 import { runPersonaOverlayFlow } from '../src/ui/personaOverlayFlow';
@@ -52,7 +53,11 @@ if (!def) {
 const cfg = JSON.parse(await readFile(join(homedir(), '.pure', 'config.json'), 'utf8')) as { provider?: string; model?: string; apiKey?: string };
 const explicitProvider = flag('--provider');
 const provider = explicitProvider ?? cfg.provider ?? 'glm';
-const model = flag('--model') ?? cfg.model ?? 'glm-5.3-flash';
+// 显式 --provider 时同样跳过顶层 model——那是 config provider 的模型名，喂给
+// 别家 provider 就是 400 Unknown Model（与上面 apiKey 的张冠李戴同款，首跑
+// 修了钥匙漏了这个模型名）。
+const model = flag('--model')
+  ?? ((!explicitProvider && cfg.model?.trim()) || defaultModelFor(provider));
 // 显式 --provider 时跳过顶层 apiKey——那是 config provider 的钥匙，张冠李戴
 // 只会全量空响应。
 let apiKey = (!explicitProvider && cfg.apiKey?.trim()) || '';
