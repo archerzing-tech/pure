@@ -257,9 +257,12 @@ function fragment(id: string, content: string, priority: number, required = fals
   return content.trim() ? { id, content, priority, required } : null;
 }
 
-function selectFragments(fragments: PromptFragment[], maxTokens: number): { fragments: PromptFragment[]; omitted: string[] } {
-  const required = fragments.filter((item) => item.required);
-  const optional = fragments
+function selectFragments(fragments: (PromptFragment | null)[], maxTokens: number): { fragments: PromptFragment[]; omitted: string[] } {
+  // fragment() 对空 content 返回 null；构造点漏过滤时在这里收口，而不是让
+  // .required 摸到 null 崩掉整个回合装配（空白用户输入曾炸过这里）。
+  const items = fragments.filter((item): item is PromptFragment => item !== null);
+  const required = items.filter((item) => item.required);
+  const optional = items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => !item.required)
     .sort((a, b) => b.item.priority - a.item.priority || a.index - b.index);
@@ -273,8 +276,8 @@ function selectFragments(fragments: PromptFragment[], maxTokens: number): { frag
     }
   }
   return {
-    fragments: fragments.filter((item) => included.has(item)),
-    omitted: fragments.filter((item) => !included.has(item)).map((item) => item.id),
+    fragments: items.filter((item) => included.has(item)),
+    omitted: items.filter((item) => !included.has(item)).map((item) => item.id),
   };
 }
 
@@ -313,12 +316,16 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
 
 function composeSelectedUserPrompt(text: string, context: UserTurnContext, maxTokens: number): { prompt: string; fragments: PromptFragment[]; omitted: string[] } {
   const task = buildTaskFragments(context);
-  const userText = fragment('user_request', text, 120, true)!;
+  // 空白输入（误触回车）在这里拿到 null——required 语义挡不住 fragment 的
+  // 空内容契约。给显式占位让模型得体回应，而不是装配层崩溃；占位同时贯通
+  // 最终 prompt 拼接（selection 只决定上下文块，尾部仍是用户文本本体）。
+  const normalized = text.trim() ? text : '(the user sent an empty message)';
+  const userText = fragment('user_request', normalized, 120, true)!;
   const selection = selectFragments([userText, ...task], maxTokens);
   const selectedTask = selection.fragments.filter((item) => item.id !== 'user_request');
   const prompt = selectedTask.length === 0
-    ? text
-    : `<task_context>\n${selectedTask.map((item) => item.content).join('\n\n')}\n</task_context>\n\n${text}`;
+    ? normalized
+    : `<task_context>\n${selectedTask.map((item) => item.content).join('\n\n')}\n</task_context>\n\n${normalized}`;
   return { prompt, fragments: selection.fragments, omitted: selection.omitted };
 }
 

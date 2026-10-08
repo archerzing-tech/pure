@@ -448,4 +448,11 @@ describe('PromptAssembler', () => {
     expect(plain).toContain('generate_image(prompt');
     expect(plain).not.toContain('write_file(path, content)');
   });
+
+  it('空白/空串输入不崩装配：给显式占位让模型得体回应（误触回车是真实输入）', () => {
+    for (const blank of ['', '   ']) {
+      const assembly = assembler.assemble({ surface: 'cli', capabilities: 'capabilities' }, blank);
+      expect(assembly.userPrompt).toContain('(the user sent an empty message)');
+    }
+  });
 });
