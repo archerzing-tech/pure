@@ -1071,10 +1071,14 @@ describe('plan overview completion state', () => {
     expect(steerBody.indexOf('this.hasDelegationInFlight()')).toBeGreaterThan(-1);
     expect(steerBody.indexOf('this.foldInScopeAddition(')).toBeGreaterThan(-1);
     expect(src.indexOf('No classifier for this turn')).toBe(-1);
-    // 折入三件套：原话上屏 + 投递记录水位 + 收尾核验。
-    expect(src.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
+    // 折入三件套：原话上屏（宿主铺排）+ 投递记录水位（账本）+ 收尾核验
+    // （账本裁决、残差转排队在宿主）。S2 第四刀后闸/账/核验的语义锁扫
+    // foldInLedger 源；宿主锁「经账本」的委托形状。
+    const ledger = readSource(new URL('../../coding-agent/foldInLedger.ts', import.meta.url));
+    expect(ledger.indexOf('this.queue.push(')).toBeGreaterThan(-1);
     expect(src.indexOf('this.addBubble(\'user\', displayText, images)', src.indexOf('private foldInScopeAddition('))).toBeGreaterThan(-1);
-    expect(src.indexOf('fold.activityCountAtDelivery = this.agentActivities.length')).toBeGreaterThan(-1);
+    expect(src.indexOf('this.folds.beginDelivery(')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.activityCountAtDelivery = input.activityCount')).toBeGreaterThan(-1);
     // 2026-09-22 插话重设计（代执行回合）：委派收齐后的第一个 THINK 边界，
     // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，走
     // 原生 ACT 管线（ToolStarted 出卡片 / SubagentActivity 流明细 / ToolResult
@@ -1083,9 +1087,15 @@ describe('plan overview completion state', () => {
     const synth = src.indexOf('takeSyntheticToolCalls: async () =>');
     const synthBody = src.slice(synth, synth + 1_500);
     expect(synthBody.indexOf('if (this.hasDelegationInFlight()) return [];')).toBeGreaterThan(-1);
-    expect(synthBody.indexOf('fold.delivered || !fold.mechanical) continue;')).toBeGreaterThan(-1);
-    expect(synthBody.indexOf('fold.delivered = true;')).toBeGreaterThan(-1);
-    expect(synthBody.indexOf('fold.syntheticCallId = callId;')).toBeGreaterThan(-1);
+    // 领用记账住账本（S2 第四刀）：投递标记/水位/代执行 id 的语义锁扫
+    // foldInLedger 源；宿主锁「经 claimForSynthetic」的委托形状与实时注入
+    // （水位/末位角色硬编码会让账本记错账而测试全绿）。
+    expect(synthBody.indexOf('this.folds.claimForSynthetic(')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('activityCount: this.agentActivities.length')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.delivered || !fold.mechanical) continue;')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.delivered = true;')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.syntheticCallId = callId;')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('追加委派：')).toBeGreaterThan(-1);
     // 任务书必须带主任务上下文（2026-09-22 实测教训：用户原话速记原样当
     // 任务书，子代理把「爱奇艺」跑成了爱奇艺开放平台 API 文档）。
@@ -1102,9 +1112,15 @@ describe('plan overview completion state', () => {
     expect(closureBody.indexOf('this.steerBus.drain(recipient, () => this.deliverDueFoldIns())')).toBeGreaterThan(-1);
     const foldHook = src.indexOf('private deliverDueFoldIns()');
     const foldBody = src.slice(foldHook, foldHook + 2200);
-    expect(foldBody.indexOf('if (this.hasDelegationInFlight()) return [];')).toBeGreaterThan(-1);
-    expect(foldBody.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
-    expect(foldBody.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
+    // 闸门住账本（在飞读数由宿主注入）——语义锁扫 foldInLedger 源；注入
+    // 锚锁宿主喂的是实时读数（硬编码 false 会让闸死掉而测试全绿）。
+    expect(ledger.indexOf('if (input.delegationInFlight) return [];')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.delivered || fold.mechanical) continue;')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('fold.mergeFramed = true;')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('this.folds.beginDelivery(')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('delegationInFlight: this.hasDelegationInFlight()')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('activityCount: this.agentActivities.length')).toBeGreaterThan(-1);
+    expect(foldBody.indexOf('lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName')).toBeGreaterThan(-1);
     expect(foldBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);
     expect(foldBody.indexOf('appendToolRow(')).toBe(-1);
     expect(foldBody.indexOf('finalizeToolRow(')).toBe(-1);
@@ -1115,9 +1131,11 @@ describe('plan overview completion state', () => {
     expect(busSrc.indexOf('steerConsumedBy(entry.target, recipient)')).toBeGreaterThan(-1);
     expect(busSrc.indexOf('const isBranch = Boolean(recipient?.branchCallId);')).toBeGreaterThan(-1);
     // 兑现回写：foldin_* 的 ToolResult 成功 ⇒ mechanicallyDone（settle 放行）。
+    // 找账住 FoldInLedger（S2 第四刀）——宿主锁委托形状，语义锁扫账本源。
     const toolResultCase = src.indexOf("case 'ToolResult': {");
     expect(toolResultCase).toBeGreaterThan(-1);
-    expect(src.slice(toolResultCase, toolResultCase + 900).indexOf('f.syntheticCallId === event.payload.toolCallId')).toBeGreaterThan(-1);
+    expect(src.slice(toolResultCase, toolResultCase + 900).indexOf('this.folds.markMechanicallyDone(')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('f.syntheticCallId === callId')).toBeGreaterThan(-1);
     // 代执行回合的卡片兜底（2026-09-23 用户实测：合成回合没有流式 TokenDelta，
     // 卡片必须由 ToolStarted 补上，否则追加的委派后台在跑、对话流里无卡）。
     const toolStartedCase = src.indexOf("case 'ToolStarted': {");
@@ -1136,7 +1154,8 @@ describe('plan overview completion state', () => {
     const settle = src.indexOf('private settleFoldIns(');
     expect(settle).toBeGreaterThan(-1);
     const settleBody = src.slice(settle, settle + 500);
-    expect(settleBody.indexOf('this.agentActivities.length > fold.activityCountAtDelivery')).toBeGreaterThan(-1);
+    // 水位核验的裁决住账本（S2 第四刀）；宿主只把残差转排队。
+    expect(ledger.indexOf('activityCount > fold.activityCountAtDelivery')).toBeGreaterThan(-1);
     expect(settleBody.indexOf('this.pendingTasks.push(')).toBeGreaterThan(-1);
     // dispatchDeferred 一进门先结算折入，同一趟把兜底任务派出去。
     const dispatch = src.indexOf('private dispatchDeferred(): void');
@@ -1154,7 +1173,7 @@ describe('plan overview completion state', () => {
     expect(msg.indexOf('收到——这项不做了；其余照常。')).toBeGreaterThan(-1);
     const foldInFn = src.indexOf('private foldInScopeAddition(');
     const foldInBody = src.slice(foldInFn, src.indexOf('private cancelFoldInstruction', foldInFn));
-    expect(foldInBody.indexOf('this.pendingFoldIns.push(')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('this.folds.add(')).toBeGreaterThan(-1);
     expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
     // 收执话术走共享模块（foldInReceipt）——原句的归属在 insertionMessaging，
     // chat.ts 侧锁住「必须经它」而不是自己内联。
@@ -1169,13 +1188,16 @@ describe('plan overview completion state', () => {
     expect(cancelFrameBody.indexOf('不写入最终汇总')).toBeGreaterThan(-1);
     expect(cancelFrameBody.indexOf('只覆盖剩下的对象')).toBeGreaterThan(-1);
     // 交付分流：取消型折入走取消框架，追加型照旧。
-    const deliver = src.indexOf('fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text)');
+    const deliver = src.indexOf('plan.fold.cancels ? this.cancelFoldInstruction(plan.fold.text) : this.foldInInstruction(plan.fold.text)');
     expect(deliver).toBeGreaterThan(-1);
     // 收尾核验对取消型直接放行：排除一项永远不会产生新委派活动，按追加
     // 的水位核验它恒算"没照办"，转排队只会把"取消"当活重跑（反向伤害）。
+    // 裁决住账本（S2 第四刀）——语义锁扫 foldInLedger 源；宿主锁委托形状。
     const settle = src.indexOf('private settleFoldIns(');
     const settleBody = src.slice(settle, src.indexOf('private scheduleDeferred()', settle));
-    expect(settleBody.indexOf('if (fold.cancels) continue;')).toBeGreaterThan(-1);
+    expect(settleBody.indexOf('this.folds.settle(')).toBeGreaterThan(-1);
+    const ledger = readSource(new URL('../../coding-agent/foldInLedger.ts', import.meta.url));
+    expect(ledger.indexOf('if (fold.cancels) continue;')).toBeGreaterThan(-1);
     // steer 分发透传取消标记；task 分发兜底改道——分类器万一仍把取消判成
     // task（案例的真实形态），绝不排队、绝不机械折入。
     const steer = src.indexOf("case 'steer': {");
@@ -1275,8 +1297,10 @@ describe('plan overview completion state', () => {
     // 「把 X 那支接着跑完」：续跑的唯一凭据是**原始参数**——稳定 sessionId
     // 命中 checkpoint，子引擎 continue。原始参数在委派批次起飞时捕获。
     expect(src.indexOf('private delegationControl = new DelegationControlPlane();')).toBeGreaterThan(-1);
-    // 参数捕获住在 plane（gate 先捕获再过闸）——delegationControl.test 锁着。
-    expect(src.indexOf('private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];')).toBeGreaterThan(-1);
+    // 参数捕获与待重派账都住在 plane（gate 先捕获再过闸；queueResume 去重）
+    // ——delegationControl.test 锁着。
+    const dcSource = readSource(new URL('../../coding-agent/delegationControl.ts', import.meta.url));
+    expect(dcSource.indexOf('private resumes: ResumeRecord[] = [];')).toBeGreaterThan(-1);
     // 宿主入口：resumesBranch 信号 → 点名（已暂停/已取消的支）→ 排队同参重派；
     // 排在停支/取消之前（带点名锚的「接着跑」最具体）。
     const steer = src.indexOf("case 'steer': {");
@@ -1289,12 +1313,12 @@ describe('plan overview completion state', () => {
     const resumeBody = src.slice(resumeFn, src.indexOf('private branchLabel(', resumeFn));
     expect(resumeBody.indexOf("item.status === 'paused' || item.status === 'cancelled'")).toBeGreaterThan(-1);
     expect(resumeBody.indexOf('this.delegationControl.delegationArgs.get(matched.callId)')).toBeGreaterThan(-1);
-    expect(resumeBody.indexOf('this.pendingResumes.push(')).toBeGreaterThan(-1);
+    expect(resumeBody.indexOf('this.delegationControl.queueResume(')).toBeGreaterThan(-1);
     // 消费端：委派收齐后的 THINK 边界用原始参数包成普通委派调用还引擎。
     const synth = src.indexOf('takeSyntheticToolCalls: async () =>');
     expect(synth).toBeGreaterThan(-1);
     const synthBody = src.slice(synth, synth + 3_500);
-    expect(synthBody.indexOf('for (const resume of this.pendingResumes.splice(0))')).toBeGreaterThan(-1);
+    expect(synthBody.indexOf('for (const resume of this.delegationControl.takeResumes())')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('arguments: resume.args')).toBeGreaterThan(-1);
     // 兜底：没赶上 THINK 边界 → 收尾转成排队的新指令，话绝不丢；由
     // dispatchDeferred 在折入核验同拍结算。

@@ -7,9 +7,9 @@
 // 可读、只有父边界收走；点名只给被点名的那支、也只有它取走），bus 只是这组
 // 纯函数之上的有状态容器——不发明第二种语义。
 //
-// 折入（pendingFoldIns）刻意留在宿主：它与在飞状态、活动面板、指令框架深耦合，
-// bus 只留一个父边界回调缝（folds），宿主在回调里自己判在飞与铺指令——
-// 「bus 不猜宿主的状态」。
+// 折入的闸/账/核验现住 FoldInLedger（S2 第四刀，宿主无关）；铺排（指令框架、
+// 活动面板联动）仍在宿主——bus 只留一个父边界回调缝（folds），宿主在回调里
+// 注入在飞读数并铺指令——「bus 不猜宿主的状态」。
 
 import type { Message, MessageImage } from '../shared/types';
 import { steerConsumedBy, steerDeliversTo, type SteerRecipient, type SteerTarget } from '../shared/steerTargeting';

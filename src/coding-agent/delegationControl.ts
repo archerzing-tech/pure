@@ -9,7 +9,7 @@
 // 容器 + 派发缝，不发明第二种语义。收执渲染、折入、steer 路由留在宿主。
 
 import { matchInFlightBranch, planTakeoffGate, type InFlightBranch, type TakeoffBlock } from '../shared/steerTargeting';
-import type { ToolCall } from '../shared/types';
+import type { MessageImage, ToolCall } from '../shared/types';
 
 /** 停支挂号（text + 展示名，收据用）。 */
 export interface BranchStopEntry {
@@ -21,6 +21,25 @@ export interface BranchStopEntry {
 export interface DelegationArgsRecord {
   name: string;
   args: string;
+}
+
+/** 待同参重派的分支：点名命中后从 delegationArgs 取出凭据排队，等委派收齐
+ *  后的 THINK 边界（takeSyntheticToolCalls）或收尾兜底（settleResumesFallback）。 */
+export interface ResumeRecord {
+  callId: string;
+  name: string;
+  args: string;
+  label: string;
+  text: string;
+  images: MessageImage[];
+}
+
+/** 续跑兜底转排队的新指令（与宿主待办队列元素结构同形）。 */
+export interface ResumeFallbackTask {
+  text: string;
+  images: MessageImage[];
+  displayText: string;
+  ts: number;
 }
 
 /** 在飞支的匹配面（名字是代号，主题在任务书里）。 */
@@ -53,6 +72,10 @@ export class DelegationControlPlane {
   private branchStops: BranchStopEntry[] = [];
   /** callId → 原始参数。跨回合保留（续跑点名的是上一回合停下的支）。 */
   readonly delegationArgs = new Map<string, DelegationArgsRecord>();
+  /** 待同参重派的分支。跨回合保留（与 delegationArgs 同命：点名的是历史支，
+   *  new chat 不清——旧字段 pendingResumes（原 chat.ts）的 clear() 从未清
+   *  它，行为逐字保留）。 */
+  private resumes: ResumeRecord[] = [];
 
   /** 取消挂号：话先挂上，委派批次出生时按区分词拦下。 */
   registerCancel(text: string): void {
@@ -122,5 +145,46 @@ export class DelegationControlPlane {
   /** 诊断/收据叙述用。 */
   pendingCancelCount(): number {
     return this.cancels.length;
+  }
+
+  // ── 分支级继续的账（S2 第五刀从 chat.ts 归位）─────────────────────────
+  // 续跑点名的是历史支（跨回合保留），与 delegationArgs 同账本：同参重派
+  // 的凭据（原始参数）在 gate 捕获，待重派的队列在这里。
+
+  /** 排队同参重派的凭据（callId + 原始参数 + 收执用的展示名与用户原话）。 */
+  queueResume(record: ResumeRecord): boolean {
+    // 同一支只排一次：重复点名不重复派工（第二遍无意义，还会撞去重）。
+    if (this.resumes.some((r) => r.callId === record.callId)) return false;
+    this.resumes.push(record);
+    return true;
+  }
+
+  /** 只读视图（测试与宿主读数用）。 */
+  pendingResumesView(): readonly ResumeRecord[] {
+    return this.resumes;
+  }
+
+  /** 消费：委派收齐后的 THINK 边界 splice 全部（宿主包成普通委派调用）。 */
+  takeResumes(): ResumeRecord[] {
+    return this.resumes.splice(0);
+  }
+
+  /**
+   * 兜底：同参重派没赶在回合最后一个 THINK 边界落地（模型直奔汇总 / 回合
+   * 提前终止）——留在队列里的就转成用户的新指令重入，父从上下文重派同一
+   * 委派（相同参数 → 相同 sessionId → 仍从断点续）。话绝不丢。返回 null =
+   * 无待续跑支。指令型兜底：明确让父用相同参数重派（否则它可能把这句读成
+   * 新活从头跑）。displayText 仍是用户原话——渲染一致性与实时所见同形。
+   * 转入宿主待办队列由调用方做（本模块不碰宿主账）。
+   */
+  settleResumesFallback(): ResumeFallbackTask | null {
+    if (this.resumes.length === 0) return null;
+    const resumes = this.resumes.splice(0);
+    return {
+      text: resumes.map((r) => `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：请用相同参数重新委派同一子任务，它会从存档的断点续跑，不要从头做。用户原话：“${r.text}”`).join('\n'),
+      images: resumes.flatMap((r) => r.images ?? []),
+      displayText: resumes.map((r) => r.text).join('\n'),
+      ts: Date.now(),
+    };
   }
 }

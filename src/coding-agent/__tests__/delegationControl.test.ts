@@ -95,3 +95,48 @@ describe('DelegationControlPlane stopNamed', () => {
     expect(plane.stopNamed('停掉竞品那支', live, () => false, (n) => n, 'abort')).toBeNull();
   });
 });
+
+describe('DelegationControlPlane resume ledger', () => {
+  const record = { callId: 'call_a', name: 'researcher', args: '{"prompt":"调研竞品定价策略"}', label: 'researcher', text: '把竞品那支接着跑完', images: [] };
+
+  it('queues a named paused branch and shows it in the view', () => {
+    const plane = new DelegationControlPlane();
+    expect(plane.queueResume(record)).toBe(true);
+    expect(plane.pendingResumesView()).toHaveLength(1);
+    expect(plane.pendingResumesView()[0].callId).toBe('call_a');
+  });
+
+  it('declines a duplicate queue for the same branch (never double-dispatch)', () => {
+    const plane = new DelegationControlPlane();
+    plane.queueResume(record);
+    expect(plane.queueResume(record)).toBe(false);
+    expect(plane.pendingResumesView()).toHaveLength(1);
+  });
+
+  it('hands all queued resumes over exactly once via takeResumes', () => {
+    const plane = new DelegationControlPlane();
+    plane.queueResume(record);
+    expect(plane.takeResumes()).toHaveLength(1);
+    expect(plane.takeResumes()).toHaveLength(0);
+  });
+
+  it('builds the explicit re-dispatch fallback task with original phrasing kept in displayText', () => {
+    const plane = new DelegationControlPlane();
+    expect(plane.settleResumesFallback()).toBeNull();
+    plane.queueResume(record);
+    const task = plane.settleResumesFallback();
+    expect(task).not.toBeNull();
+    expect(task!.text).toContain('【分支级继续】');
+    expect(task!.text).toContain('相同参数');
+    expect(task!.text).toContain('researcher'); // 凭据里的支名进兜底指令
+    expect(task!.displayText).toBe('把竞品那支接着跑完'); // 渲染一致性：原话重入
+    expect(plane.pendingResumesView()).toHaveLength(0); // 兜底即清账
+  });
+
+  it('keeps resumes across settleRound (a resume names history, not this round)', () => {
+    const plane = new DelegationControlPlane();
+    plane.queueResume(record);
+    plane.settleRound();
+    expect(plane.pendingResumesView()).toHaveLength(1); // 与 delegationArgs 同命
+  });
+});

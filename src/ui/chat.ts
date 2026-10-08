@@ -34,6 +34,7 @@ import { sanitizeSkillName } from './skillHub';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
+import { FoldInLedger } from '../coding-agent/foldInLedger';
 import { compileExternalTools } from '../harness/externalTools';
 import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
@@ -1624,34 +1625,28 @@ export class ChatController {
   private steerBus = new SteerBus();
 
   /**
-   * S2 — 折入铺排（SteerBus 父边界回调的实现）：折入只在父引擎边界且没有
-   * 在飞委派时交付——那恰好是父任务的汇合轮。分支拉取被 bus 的身份检查
-   * 结构性排除（回调根本不会被调）；在飞判断在回调里做，闸门只留父级时序
-   * 这一职责。指令型折入铺合并口径框架（scope 追加走 takeSyntheticToolCalls
-   * 的代执行回合，这里只铺口径，交付标记留给代执行闭包）；机械追加的代执行
-   * 合并口径每条只铺一次。
+   * S2 第四刀（P3-2）— 折入铺排（SteerBus 父边界回调的实现）：折入只在父
+   * 引擎边界且没有在飞委派时交付——那恰好是父任务的汇合轮。分支拉取被 bus
+   * 的身份检查结构性排除（回调根本不会被调）；在飞读数由回调注入账本，闸
+   * 门住在 FoldInLedger（宿主无关，CLI/通道同接）。本方法只剩铺排：照账本
+   * 给出的铺排指令铺框架消息（指令/取消/合并口径），交付与水位的记账全在
+   * 账本；机械追加的代执行交付标记留给代执行闭包。
    */
   private deliverDueFoldIns(): import('../shared/types').Message[] {
-    if (this.hasDelegationInFlight()) return [];
-    const drained: import('../shared/types').Message[] = [];
-    for (const fold of this.pendingFoldIns) {
-      if (fold.delivered || fold.mechanical) continue;
-      fold.delivered = true;
-      fold.activityCountAtDelivery = this.agentActivities.length;
-      drained.push({ role: 'user', content: fold.cancels ? this.cancelFoldInstruction(fold.text) : this.foldInInstruction(fold.text), images: fold.images });
-    }
-    for (const fold of this.pendingFoldIns) {
-      if (fold.delivered || !fold.mechanical || fold.mergeFramed) continue;
-      const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
-      if (!role) continue;
-      fold.mergeFramed = true;
-      drained.push({
-        role: 'user',
-        content: `【系统接管执行】用户中途追加的任务「${fold.text}」将在本轮由系统直接委派给 ${role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
-        images: fold.images,
-      });
-    }
-    return drained;
+    const plans = this.folds.beginDelivery({
+      delegationInFlight: this.hasDelegationInFlight(),
+      activityCount: this.agentActivities.length,
+      lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName,
+    });
+    return plans.map((plan) =>
+      plan.kind === 'instruction'
+        ? { role: 'user', content: plan.fold.cancels ? this.cancelFoldInstruction(plan.fold.text) : this.foldInInstruction(plan.fold.text), images: plan.fold.images }
+        : {
+            role: 'user',
+            content: `【系统接管执行】用户中途追加的任务「${plan.fold.text}」将在本轮由系统直接委派给 ${plan.role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
+            images: plan.fold.images,
+          },
+    );
   }
   /**
    * 委派起飞闸的挂号簿（2026-09-26 用户实测）：取消型插话落在委派出生之
@@ -1663,19 +1658,18 @@ export class ChatController {
   /** S2 第二/三刀（P3-2）— 起飞闸挂号簿与委派参数捕获改住
    *  DelegationControlPlane（宿主无关，CLI/通道同接）。字段退役。 */
   private delegationControl = new DelegationControlPlane();
-  /** 待同参重派的分支：委派收齐后的 THINK 边界由 takeSyntheticToolCalls
-   * 包成普通委派调用还引擎（卡片/明细/回放全部原生）。 */
-  private pendingResumes: Array<{ callId: string; name: string; args: string; label: string; text: string; images: MessageImage[] }> = [];
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
    * 代执行回合（takeSyntheticToolCalls，2026-09-22 重设计）在委派收齐后的
    * 第一个 THINK 边界把追加包成普通委派调用交还引擎，走原生 ACT 管线——
-   * 卡片/明细/回放全部原生，顺序由结构保证。syntheticCallId 记录代执行
-   * 调用 id，ToolResult 事件据此回写 mechanicallyDone（机器核验兑现）；
-   * mergeFramed 保证合并口径指令只铺一次。指令型折入（mechanical=false）
-   * 仍走 takeSteerMessages 框架注入 + 水位核验。收尾 settleFoldIns 兜底
-   * 转排队，话绝不丢。 */
-  private pendingFoldIns: Array<{ text: string; images: MessageImage[]; displayText: string; delivered: boolean; activityCountAtDelivery: number; mechanical: boolean; cancels?: boolean; mechanicallyDone?: boolean; syntheticCallId?: string; mergeFramed?: boolean }> = [];
+   * 卡片/明细/回放全部原生，顺序由结构保证。指令型折入（mechanical=false）
+   * 仍走 takeSteerMessages 框架注入 + 水位核验。收尾核验兜底转排队，话
+   * 绝不丢。
+   * S2 第五刀（P3-2）— 折入的闸/账/核验住 FoldInLedger（宿主无关，CLI/
+   * 通道同接）：可交付判定、投递水位、机器核验、收尾裁决在账本；指令框架
+   * /取消框架/合并口径文案与代执行任务书构造留在宿主（铺排）。分支级继续
+   * 的待重派账住 DelegationControlPlane（与 delegationArgs 同账本）。 */
+  private folds = new FoldInLedger();
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
    * (an answer is a summarization chore, not the main reasoning stream). */
@@ -3145,10 +3139,10 @@ export class ChatController {
     if (!matched) return null;
     const original = this.delegationControl.delegationArgs.get(matched.callId);
     if (!original) return null;
-    // 同一支只排一次：重复点名不重复派工（第二遍无意义，还会撞去重）。
-    if (this.pendingResumes.some((r) => r.callId === matched.callId)) return null;
     const label = this.branchLabel(matched.name, matched.callId);
-    this.pendingResumes.push({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [] });
+    // 排队同参重派：凭据与去重记账都在 plane（同一支只排一次）——重复点名
+    // 按「点不出」退回，调用方落回普通 steer。
+    if (!this.delegationControl.queueResume({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [] })) return null;
     return label;
   }
 
@@ -3504,7 +3498,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean): void {
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
-    this.pendingFoldIns.push({ text, images, displayText, delivered: false, activityCountAtDelivery: -1, mechanical, cancels });
+    this.folds.add(text, images, displayText, mechanical, cancels);
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
@@ -3531,38 +3525,24 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     return foldInFollowUpTextShared(text);
   }
 
-  /** 收尾核验折入的追加：机械执行成功的直接算数；指令注入的看投递后
-   * agentActivities 是否有新增（真的发起了新委派）。都没有（模型直奔汇总）
-   * 或根本没投递（回合提前终止）→ 转 pendingTasks 按合并口径补跑。由
-   * dispatchDeferred 在回合收尾时调用。 */
+  /** 收尾核验折入的追加：裁决（机械兑现/水位核验/取消型恒算残差）在
+   * FoldInLedger.settle（S2 第五刀迁出），宿主只把残差转 pendingTasks 按
+   * 合并口径补跑。由 dispatchDeferred 在回合收尾时调用。 */
   private settleFoldIns(): void {
-    for (const fold of this.pendingFoldIns.splice(0)) {
-      // 取消型折入不做"补跑"兜底（2026-09-24 取消案例）：排除一项永远不会
-      // 产生新委派活动，按追加的水位核验它恒算"没照办"；而取消一旦错过
-      // 汇合轮也无法事后补——转排队只会把"取消"当活重跑（反向伤害）。未
-      // 照办的取消接受为残差（与轻转向同款），靠汇合轮框架 + 协议文本保证。
-      if (fold.cancels) continue;
-      const honored = fold.mechanicallyDone || (fold.delivered && this.agentActivities.length > fold.activityCountAtDelivery);
-      if (honored) continue;
+    const residuals = this.folds.settle(this.agentActivities.length);
+    for (const fold of residuals) {
       this.pendingTasks.push({ text: this.foldInFollowUpText(fold.text), images: fold.images, displayText: fold.displayText, ts: Date.now() });
     }
   }
 
-  /** 分支级继续的兜底：同参重派没赶在回合最后一个 THINK 边界落地（模型直
-   * 奔汇总 / 回合提前终止）——留在队列里的就转成用户的新指令重入，父从上下文
-   * 重派同一委派（相同参数 → 相同 sessionId → 仍从断点续）。话绝不丢。由
-   * dispatchDeferred 在回合收尾时调用。 */
+  /** 分支级继续的兜底：同参重派没赶在回合最后一个 THINK 边界落地——留在
+   * 队列里的转成用户的新指令重入，父从上下文重派同一委派（相同参数 →
+   * 相同 sessionId → 仍从断点续）。话绝不丢。兜底指令的装配在
+   * DelegationControlPlane.settleResumesFallback（S2 第五刀迁出，与凭据同
+   * 账本）；宿主只负责转入待办队列。由 dispatchDeferred 在回合收尾时调用。 */
   private settlePendingResumes(): void {
-    if (this.pendingResumes.length === 0) return;
-    const resumes = this.pendingResumes.splice(0);
-    this.pendingTasks.push({
-      // 指令型兜底：明确让父用相同参数重派（否则它可能把这句读成新活从头
-      // 跑）。displayText 仍是用户原话——渲染一致性与实时所见同形。
-      text: resumes.map((r) => `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：请用相同参数重新委派同一子任务，它会从存档的断点续跑，不要从头做。用户原话：“${r.text}”`).join('\n'),
-      images: resumes.flatMap((r) => r.images ?? []),
-      displayText: resumes.map((r) => r.text).join('\n'),
-      ts: Date.now(),
-    });
+    const fallback = this.delegationControl.settleResumesFallback();
+    if (fallback) this.pendingTasks.push(fallback);
   }
 
   /** Schedule the deferred dispatch just after a turn fully finalizes. */
@@ -4528,14 +4508,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         takeSyntheticToolCalls: async () => {
           if (this.hasDelegationInFlight()) return [];
           const calls: ToolCall[] = [];
-          for (const fold of this.pendingFoldIns) {
-            if (fold.delivered || !fold.mechanical) continue;
-            const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
-            if (!role) continue;
-            fold.delivered = true;
-            fold.activityCountAtDelivery = this.agentActivities.length;
-            const callId = `foldin_${Date.now()}_${calls.length}`;
-            fold.syntheticCallId = callId;
+          let foldinSeq = 0;
+          // S2 第四刀 — 领用记账在 FoldInLedger（投递标记/水位/代执行 id）；
+          // 任务书拼装与因果叙述是铺排，留宿主。
+          for (const { fold, callId, role } of this.folds.claimForSynthetic({
+            activityCount: this.agentActivities.length,
+            lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName,
+            assignId: () => `foldin_${Date.now()}_${foldinSeq++}`,
+          })) {
             // 恰好一行的因果叙述：把"追加"和"第三张卡"在对话流里接起来。
             this.addStatusBubble(`追加委派：${role} 单独补跑，产出并入最终汇总。`, false, false, 'info');
             // 子代理没有对话上下文——fold.text 是用户原话速记（"新增一个平台，
@@ -4547,7 +4527,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
           // 分支级继续（第 2 期第三刀）：点名续跑的那支用**原始参数**同参
           // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。
-          for (const resume of this.pendingResumes.splice(0)) {
+          for (const resume of this.delegationControl.takeResumes()) {
             this.addStatusBubble(`续跑：「${resume.label}」从存档断点继续。`, false, false, 'info');
             calls.push({ id: `resume_${resume.callId}`, index: calls.length, function: { name: resume.name, arguments: resume.args } });
           }
@@ -5975,8 +5955,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 代执行回合的兑现回写（2026-09-22 重设计）：foldin_* 调用成功
             // 结束 ⇒ 对应折入机器核验完成，settle 直接放行。
             if (event.payload.toolCallId.startsWith('foldin_')) {
-              const fold = this.pendingFoldIns.find((f) => f.syntheticCallId === event.payload.toolCallId);
-              if (fold && event.payload.result.success) fold.mechanicallyDone = true;
+              // 兑现回写记账在 FoldInLedger（按 syntheticCallId 找账）。
+              if (event.payload.result.success) this.folds.markMechanicallyDone(event.payload.toolCallId);
             }
             const status = event.payload.result.success ? '✓' : '✗';
             const toolName = event.payload.toolName;
@@ -7091,7 +7071,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
     this.delegationControl.settleRound();
-    this.pendingFoldIns = [];
+    this.folds.reset();
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;

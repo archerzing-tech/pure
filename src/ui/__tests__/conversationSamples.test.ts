@@ -638,8 +638,8 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(llm.classifyCalls.length).toBe(1);
     expect(assistantJoined(h.root)).toContain('已收到——收齐后先补这项。');
     expect(userJoined(h.root)).toContain('爱奇艺平台');
-    // 折入进 pendingFoldIns 等收尾核验，不占待办队列。
-    expect(h.chat.pendingFoldIns).toHaveLength(1);
+    // 折入进 FoldInLedger 等收尾核验，不占待办队列。
+    expect(h.chat.folds.entries()).toHaveLength(1);
     expect(queueCard(h.root)).toBeUndefined();
   });
 
@@ -658,9 +658,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
     expect(statusJoined(h.root)).not.toContain('先补这项');
     expect(userJoined(h.root)).toContain('jev 这个就不调研了');
-    expect(h.chat.pendingFoldIns).toHaveLength(1);
-    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
-    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(h.chat.folds.entries()).toHaveLength(1);
+    expect(h.chat.folds.entries()[0].mechanical).toBe(false);
+    expect(h.chat.folds.entries()[0].cancels).toBe(true);
     expect(queueCard(h.root)).toBeUndefined();
     // 取消型折入不做"补跑"兜底：没被汇合轮照办也不把"取消"当活重跑。
     h.endTurn();
@@ -691,7 +691,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('已停掉「竞品分析员」那支——进度留了断点，随时可以让它接着跑，其余照常。');
     expect(userJoined(h.root)).toContain('停掉竞品那支');
     // 真停不走折入/投递账：汇合轮没有这笔，steer 池也是空的。
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -716,9 +716,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('停掉那支。');
     expect(llm.classifyCalls.length).toBe(0);
     expect(aborted).toHaveLength(0); // 打平宁可不停，绝不误杀
-    expect(h.chat.pendingFoldIns).toHaveLength(1);
-    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
-    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
+    expect(h.chat.folds.entries()).toHaveLength(1);
+    expect(h.chat.folds.entries()[0].cancels).toBe(true);
+    expect(h.chat.folds.entries()[0].mechanical).toBe(false);
     expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
@@ -739,7 +739,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('您说的这个正在「爱奇艺调研员」那路跑着，不重复派——收齐后一并汇总给您。');
     expect(userJoined(h.root)).toContain('新增一个平台，爱奇艺');
     // 重复的那支永远不该被派出去：折入账是空的，队列卡也不出现。
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(queueCard(h.root)).toBeUndefined();
   });
 
@@ -771,7 +771,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(paused).toEqual(['call_burst']);   // 片段点名，暂停那一支
     expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总；其余照常跑，想续上随时说。');
     // 真停了就不再折入：汇合轮没有这笔账。
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -809,7 +809,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const status = statusJoined(h.root) + assistantJoined(h.root);
     expect(status).toContain('明白——「爆发点分析员」那路我先暂停了');
     expect(status).not.toContain('不重复派'); // 去重回执绝不准碰取消话
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -828,7 +828,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('把「市场格局」这份调研取消掉');
     const said = assistantJoined(h.root) + statusJoined(h.root);
     expect(said).not.toContain('收掉了');
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(queueCard(h.root)).toBeDefined(); // 落回普通 task 的排队路径
   });
 
@@ -855,8 +855,8 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('B站那支别查了，再加一个爱奇艺');
     expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
-    expect(h.chat.pendingFoldIns).toHaveLength(1);
-    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
+    expect(h.chat.folds.entries()).toHaveLength(1);
+    expect(h.chat.folds.entries()[0].cancels).toBe(true);
     expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
   });
 
@@ -887,9 +887,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('知乎那项也收掉吧');
     expect(llm.classifyCalls.length).toBe(1);
     expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
-    expect(h.chat.pendingFoldIns).toHaveLength(1);
-    expect(h.chat.pendingFoldIns[0].cancels).toBe(true);
-    expect(h.chat.pendingFoldIns[0].mechanical).toBe(false);
+    expect(h.chat.folds.entries()).toHaveLength(1);
+    expect(h.chat.folds.entries()[0].cancels).toBe(true);
+    expect(h.chat.folds.entries()[0].mechanical).toBe(false);
     expect(queueCard(h.root)).toBeUndefined();
     h.endTurn();
     expect(h.sends).toHaveLength(0);
@@ -913,11 +913,11 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点继续；等手头这批收齐接上。');
     expect(userJoined(h.root)).toContain('把竞品那支接着跑完');
     // 排上了同参重派：**原始参数**原样，不是新任务。
-    expect(h.chat.pendingResumes).toHaveLength(1);
-    expect(h.chat.pendingResumes[0].name).toBe('competitor_analyst');
-    expect(h.chat.pendingResumes[0].args).toBe('{"prompt":"分析主要竞品的定价策略"}');
+    expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
+    expect(h.chat.delegationControl.pendingResumesView()[0].name).toBe('competitor_analyst');
+    expect(h.chat.delegationControl.pendingResumesView()[0].args).toBe('{"prompt":"分析主要竞品的定价策略"}');
     // 续跑既不是折入也不是普通 steer：两个池子都干净。
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -930,10 +930,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
 
     await h.chat.interject('把竞品那支接着跑完。');
-    expect(h.chat.pendingResumes).toHaveLength(1);
+    expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
     // 回合在落地前就收尾了：兜底把它当用户的新指令重入（父从上下文重派）。
     h.endTurn();
-    expect(h.chat.pendingResumes).toHaveLength(0);
+    expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(0);
     expect(h.sends).toHaveLength(1);
     expect(h.sends[0]).toContain('把竞品那支接着跑完');
   });
@@ -944,7 +944,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.agentActivities = []; // 没有可续跑的候补
 
     await h.chat.interject('把竞品那支接着跑完。');
-    expect(h.chat.pendingResumes).toHaveLength(0);
+    expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(0);
     // 退回 steer（转达父引擎），话不丢。
     expect(h.chat.steerBus.entries()).toHaveLength(1);
   });
@@ -971,7 +971,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(assistantJoined(h.root)).toContain('已并入补充，重新规划…');
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.pendingTasks).toHaveLength(0);
-    expect(h.chat.pendingFoldIns).toHaveLength(0);
+    expect(h.chat.folds.entries()).toHaveLength(0);
     // 重启请求已挂号：send() 的重启循环看到它 + 暂存非空，就用并账后的
     // 请求重开一轮思考（约束长进构图里，不是旧思考上后贴）。
     expect(h.chat.preflightRestartRequested).toBe(true);
