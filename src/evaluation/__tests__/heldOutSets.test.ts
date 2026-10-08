@@ -7,8 +7,8 @@
 
 import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   describeHeldOut,
   expandHome,
@@ -85,20 +85,25 @@ describe('held-out 缺席语义（CI 不受影响的全部依据）', () => {
   });
 
   it('expandHome 展开 ~ 前缀，非 ~ 开头原样 resolve', () => {
-    expect(expandHome('~/x')).toBe(join(process.env.HOME ?? '', 'x'));
-    expect(expandHome('~')).toBe(process.env.HOME ?? '');
-    expect(expandHome('/abs/x')).toBe('/abs/x');
+    // 期望值只能用跨平台原语表达：HOME 环境变量在 Windows runner 上未必存在
+    // （那边是 USERPROFILE），'/abs/x' 会被 win32 resolve 成 'C:\abs\x'——
+    // 写死 POSIX 字面量就是给发布门埋雷（v3.1.1-beta 首打实测）。
+    expect(expandHome('~/x')).toBe(join(homedir(), 'x'));
+    expect(expandHome('~')).toBe(homedir());
+    const absolute = join(resolve('/'), 'abs', 'x');
+    expect(expandHome(absolute)).toBe(absolute);
   });
 
   it('heldOutRoot 认 PURE_EVAL_HELDOUT_DIR，且展开 ~ 前缀', () => {
     const previous = process.env.PURE_EVAL_HELDOUT_DIR;
     try {
       process.env.PURE_EVAL_HELDOUT_DIR = '~/somewhere';
-      expect(heldOutRoot()).toBe(join(process.env.HOME ?? '', 'somewhere'));
-      process.env.PURE_EVAL_HELDOUT_DIR = '/absolute/path';
-      expect(heldOutRoot()).toBe('/absolute/path');
+      expect(heldOutRoot()).toBe(join(homedir(), 'somewhere'));
+      const absolute = join(resolve('/'), 'absolute', 'path');
+      process.env.PURE_EVAL_HELDOUT_DIR = absolute;
+      expect(heldOutRoot()).toBe(absolute);
       delete process.env.PURE_EVAL_HELDOUT_DIR;
-      expect(heldOutRoot()).toBe(join(process.env.HOME ?? '', '.pure', 'evals-heldout'));
+      expect(heldOutRoot()).toBe(join(homedir(), '.pure', 'evals-heldout'));
     } finally {
       if (previous === undefined) delete process.env.PURE_EVAL_HELDOUT_DIR;
       else process.env.PURE_EVAL_HELDOUT_DIR = previous;
