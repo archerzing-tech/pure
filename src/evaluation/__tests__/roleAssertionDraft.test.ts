@@ -4,6 +4,8 @@
 import { describe, expect, it } from 'bun:test';
 import {
   buildAssertionDraftPrompt,
+  filterUnsupportedMarkers,
+  gateAdmits,
   MAX_ASSERTION_CHARS,
   MAX_ASSERTIONS,
   parseAssertionDraft,
@@ -55,5 +57,50 @@ describe('parseAssertionDraft', () => {
   it('折叠标记里的连续空白（子串匹配前先归一）', () => {
     const draft = parseAssertionDraft(JSON.stringify({ must: ['two   words'], mustNot: [] }));
     expect(draft!.must).toEqual(['two words']);
+  });
+});
+
+describe('filterUnsupportedMarkers', () => {
+  const output = 'We evaluated LangGraph and AutoGen; conclusions follow.\n依据：官方文档。';
+
+  it('原文有的 must 保留（大小写与空白按判分器口径归一）', () => {
+    const draft = { must: ['langgraph', '  依据', 'AUTOGEN'], mustNot: [] };
+    expect(filterUnsupportedMarkers(draft, output)).toEqual({ must: ['langgraph', '  依据', 'AUTOGEN'], mustNot: [] });
+  });
+
+  it('paraphrase 出来的 must 被丢弃，不烧 base 重跑', () => {
+    // 产出说"质量还行"，草稿写"代码质量很高"——判分器永远找不到支撑。
+    const draft = { must: ['代码质量很高', 'LangGraph'], mustNot: [] };
+    expect(filterUnsupportedMarkers(draft, output)!.must).toEqual(['LangGraph']);
+  });
+
+  it('must 被滤空 → 整个草稿不可用', () => {
+    const draft = { must: ['深度学习框架横评'], mustNot: ['TODO'] };
+    expect(filterUnsupportedMarkers(draft, output)).toBeUndefined();
+  });
+
+  it('mustNot 不受原文约束（失败特征本就不该在好产出里）', () => {
+    const draft = { must: ['LangGraph'], mustNot: ['均已核实', '据我所知'] };
+    const filtered = filterUnsupportedMarkers(draft, output);
+    expect(filtered!.mustNot).toEqual(['均已核实', '据我所知']);
+  });
+});
+
+describe('gateAdmits', () => {
+  it('过半收录，平票与不过半皆拒（宁可漏收）', () => {
+    expect(gateAdmits([true, true, false])).toBe(true);
+    expect(gateAdmits([true, false, false])).toBe(false);
+    expect(gateAdmits([true, false])).toBe(false);
+    expect(gateAdmits([false, false])).toBe(false);
+  });
+
+  it('首跑挂不等于拒：后两跑全过即 2/3 过半收录（多数票语义的分歧票型）', () => {
+    expect(gateAdmits([false, true, true])).toBe(true);
+  });
+
+  it('K=1 退化为单次判定；空跑恒不过（无「跑 0 次全收录」）', () => {
+    expect(gateAdmits([true])).toBe(true);
+    expect(gateAdmits([false])).toBe(false);
+    expect(gateAdmits([])).toBe(false);
   });
 });

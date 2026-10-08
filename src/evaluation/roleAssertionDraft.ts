@@ -4,10 +4,12 @@
 // 真实派发只给 {args, output}，给不出"该出现什么"（must/mustNot）。用一次便宜
 // 模型调用从（角色契约 + 真实产出）起草断言：断言描述的是**该角色的产出契约**
 // （结构/证据/必须覆盖的维度），而不是逐字抄这份产出——否则断言不可迁移，A/B
-// 也会退化成"像不像那次输出"。自洽门（base 侧必须通过）在脚本里执行，本模块
-// 只做提示词构造与回复校验，与 LessonReflector 的纪律一致：模型没有最终决定权。
+// 也会退化成"像不像那次输出"。自洽门的判定核（gateAdmits）与原文支撑预滤
+// （filterUnsupportedMarkers）也在这里；base 重跑的执行在收割脚本里。
+// 与 LessonReflector 的纪律一致：模型没有最终决定权。
 
 import type { LLMAdapter } from '../shared/types';
+import { normalizeGraderText } from './roleRegression';
 
 export interface AssertionDraftInput {
   role: string;
@@ -22,8 +24,11 @@ export interface AssertionDraft {
   mustNot: string[];
 }
 
-/** 单条断言长度上限——断言是用来做子串匹配的短标记，不是句子。 */
-export const MAX_ASSERTION_CHARS = 60;
+/** 单条断言长度上限——断言是用来做子串匹配的短标记，不是句子。60 字中文≈一
+ *  整句话，正是首跑（2026-10-08，8 候选 0 落盘）脆断言的温床：起草模型把评审
+ *  措辞整句搬进 must，原文稍有 paraphrase 门就找不到。过门样本（researcher 6
+ *  例）的 marker 全是 ≤10 字的结构 token，24 字给中英混合术语留足余量。 */
+export const MAX_ASSERTION_CHARS = 24;
 /** 每侧断言条数上限——太多会让 A/B 过脆（任何风格偏差都判挂）。 */
 export const MAX_ASSERTIONS = 6;
 const REAL_OUTPUT_MAX = 3000;
@@ -32,15 +37,16 @@ const DRAFT_SYSTEM_PROMPT = `You write content assertions for a regression test 
 
 Respond with STRICT JSON only — no markdown fences, no prose:
 {
-  "must": ["short marker that any good output of this role MUST contain"],
+  "must": ["short structural marker that any good output of this role MUST contain"],
   "mustNot": ["short marker that a BAD output would contain (e.g. ungrounded claims of success)"]
 }
 
 Hard rules:
-- Assertions describe the ROLE CONTRACT, not this one sample. Do not copy sample-specific wording, file names, or findings verbatim.
-- Each marker is a short literal substring (2–${MAX_ASSERTION_CHARS} chars) that the checker will search for case-insensitively. Prefer stable, structural markers (section names, required dimension labels, evidence words) over full sentences.
+- Each "must" marker MUST appear VERBATIM in the reference output. Pick structural tokens the sample actually contains: dimension labels, section/heading words, evidence terms, craft terminology. A marker the sample merely paraphrases is discarded before it ever reaches the checker.
+- Assertions describe the ROLE CONTRACT, not this one sample. Prefer generic structural vocabulary over sample-specific findings, file names, or numbers.
+- Each marker is a literal substring (2-${MAX_ASSERTION_CHARS} chars), matched case-insensitively with whitespace collapsed. A single word or short phrase — NEVER a sentence, never a clause with a verb, never a paraphrase of the sample's wording.
 - "must" must be non-empty (${MAX_ASSERTIONS} items max) and must hold for a competent output of this role, whether or not the sample is ideal.
-- "mustNot" (${MAX_ASSERTIONS} items max) targets failure signatures: blanket approval, invented evidence, empty stubs. Emit [] if you cannot justify any.
+- "mustNot" (${MAX_ASSERTIONS} items max) targets failure signatures: blanket approval, invented evidence, empty stubs. It does NOT need to appear in the reference output (it shouldn't). Emit [] if you cannot justify any.
 - Write markers in the SAME language as the role contract.`;
 
 /** Render the user-message payload. Truncated so a monster output can't blow the call. */
@@ -110,6 +116,30 @@ export function parseAssertionDraft(reply: string): AssertionDraft | undefined {
   const must = cleanMarkers(parsed.must);
   if (must.length === 0) return undefined;
   return { must, mustNot: cleanMarkers(parsed.mustNot) };
+}
+
+/** 首跑复盘（2026-10-08）的零成本预滤：must 标记在这份真实产出里归一化后
+ *  找不到 = 起草模型在 paraphrase 或幻觉——判分器永远找不到它的支撑，A/B 的
+ *  base 侧必挂，与其烧一次 base 重跑等门毙，不如在这里丢掉。mustNot 不滤
+ *  （失败特征本来就不该出现在好产出里）。must 被滤空 = 起草整体不可用，
+ *  返回 undefined，调用方跳过该样本。归一化语义取自判分器的
+ *  normalizeGraderText——「找得到」的判据两边必须同一份。 */
+export function filterUnsupportedMarkers(
+  draft: AssertionDraft,
+  realOutput: string,
+): AssertionDraft | undefined {
+  const haystack = normalizeGraderText(realOutput);
+  const must = draft.must.filter((marker) => haystack.includes(normalizeGraderText(marker)));
+  if (must.length === 0) return undefined;
+  return { must, mustNot: draft.mustNot };
+}
+
+/** 自洽门的判定核：K 次 base 重跑的通过票型是否过半收录。过半而非全票——
+ *  门要与判定 LLM 的抖动对冲；平票与全败都算不过（宁可漏收，不放脆断言进
+ *  A/B 扭曲 base 基线）。空跑（K=0）恒不过——「跑 0 次全收录」是门的退化。 */
+export function gateAdmits(passes: readonly boolean[]): boolean {
+  const yes = passes.filter(Boolean).length;
+  return yes * 2 > passes.length;
 }
 
 /** Wall-clock bound for one assertion draft. 5 minutes, not 1: 2026-09-30 S1

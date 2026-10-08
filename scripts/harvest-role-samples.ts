@@ -8,8 +8,8 @@
 //
 // 用法：
 //   bun run eval:harvest -- --agent deepseek-openai [--model deepseek-chat]
-//       [--roles code_reviewer,researcher] [--max 8] [--replace] [--dry-run]
-//       [--sessions ~/.pure/sessions] [--cases-root ~/.pure/roles]
+//       [--roles code_reviewer,researcher] [--max 8] [--gate-runs 3] [--replace]
+//       [--dry-run] [--sessions ~/.pure/sessions] [--cases-root ~/.pure/roles]
 //       [--subagents ~/.pure/subagents]
 //
 // 默认角色面 = 内建七角色 ∪ `~/.pure/subagents/` 里的生成角色。生成角色能被委派，
@@ -28,7 +28,11 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
-import { draftRoleAssertions } from '../src/evaluation/roleAssertionDraft';
+import {
+  draftRoleAssertions,
+  filterUnsupportedMarkers,
+  gateAdmits,
+} from '../src/evaluation/roleAssertionDraft';
 import {
   dedupeSamples,
   groupSamplesByRole,
@@ -66,6 +70,7 @@ const maxPerRole = Number.parseInt(flag('--max') ?? '8', 10);
 const sessionsFlag = flag('--sessions');
 const casesRootFlag = flag('--cases-root');
 const subagentsFlag = flag('--subagents');
+const gateRunsFlag = Number(flag('--gate-runs') ?? '3');
 const requestedAgent = agentFlag ?? process.env.PURE_EVAL_AGENT;
 const dryRun = has('--dry-run');
 const replace = has('--replace');
@@ -81,6 +86,10 @@ const subagentsDir = expandHome(
 
 if (!Number.isFinite(maxPerRole) || maxPerRole < 1) {
   console.error('--max must be a positive integer');
+  process.exit(2);
+}
+if (!Number.isInteger(gateRunsFlag) || gateRunsFlag < 1) {
+  console.error('--gate-runs must be a positive integer');
   process.exit(2);
 }
 
@@ -279,9 +288,28 @@ function safeContract(def: SubagentDefinition, sample: RoleDelegationSample): st
   }
 }
 
+/** 自洽门：收录一条样本前，base 侧对起草断言的满足度要经得起重复——
+ *  判定核是 roleAssertionDraft.gateAdmits（K 次过半收录），与判定 LLM 的
+ *  抖动对冲：「偶尔可满足」的断言集不可收录，否则 A/B 的 base 基线自身
+ *  随机挂，verdict 全是噪音。提前终止只在数学上安全时发生：剩余票全败
+ *  也已过半，或剩余票全过也凑不齐多数——票没开完不预判（独立检验打回：
+ *  「首跑挂即拒」比多数票更严，1/3 抖动的合法样本被误杀，且 K≥3 时不
+ *  等价）。 */
+async function gatePasses(role: string, fixture: RoleCaseFixture): Promise<{ admit: boolean; tally: string }> {
+  const runs: boolean[] = [];
+  for (let i = 0; i < gateRunsFlag; i++) {
+    runs.push(await basePasses(role, fixture).catch(() => false));
+    const yes = runs.filter(Boolean).length;
+    const remaining = gateRunsFlag - runs.length;
+    if (yes * 2 > gateRunsFlag || (yes + remaining) * 2 <= gateRunsFlag) break;
+  }
+  const yes = runs.filter(Boolean).length;
+  return { admit: gateAdmits(runs), tally: `${yes} yes of ${runs.length}/${gateRunsFlag} run(s)` };
+}
+
 /** Run the base persona once for one case and report whether the drafted
- *  assertions hold. The self-consistency gate: an assertion set the base
- *  persona cannot satisfy measures nothing, so it is never admitted.
+ *  assertions hold. An assertion set the base persona cannot satisfy measures
+ *  nothing, so it is never admitted.
  *  S1 真机（2026-09-30）：样本带工作区且目录还在 ⇒ 原地重跑（文件依赖型角色
  *  的评审对象在那里）；否则空临时目录（研究型样本无感，文件型的会如实地
  *  过不了断言——不假装）。 */
@@ -341,22 +369,29 @@ for (const [role, group] of samples) {
       console.warn(`  ${sample.sessionId}#${sample.messageIndex}: no usable assertions — skipped`);
       continue;
     }
+    // 预滤先走：原文里找不到的 must 是 paraphrase/幻觉，判分器永远找不到
+    // 支撑，不值得为它烧 K 次 base 重跑。
+    const supported = filterUnsupportedMarkers(draft, sample.output);
+    if (!supported) {
+      console.warn(`  ${sample.sessionId}#${sample.messageIndex}: every must marker is absent from the real output (paraphrased?) — skipped`);
+      continue;
+    }
     const fixture: RoleCaseFixture = {
       id: `case-${String(index).padStart(2, '0')}`,
       description: `真实派发样本：${sample.sessionId}#${sample.messageIndex}`,
       args: sample.args,
-      must: draft.must,
-      ...(draft.mustNot.length > 0 ? { mustNot: draft.mustNot } : {}),
+      must: supported.must,
+      ...(supported.mustNot.length > 0 ? { mustNot: supported.mustNot } : {}),
       ...(sample.workspace ? { workspace: sample.workspace } : {}),
     };
-    const passes = await basePasses(role, fixture).catch(() => false);
-    if (!passes) {
-      console.warn(`  ${fixture.id}: base failed the drafted assertions (self-consistency gate) — skipped`);
+    const gate = await gatePasses(role, fixture);
+    if (!gate.admit) {
+      console.warn(`  ${fixture.id}: gate ${gate.tally} — base could not reliably satisfy the assertions — skipped`);
       continue;
     }
     await writeFile(join(roleDir, `${fixture.id}.json`), `${JSON.stringify(fixture, null, 2)}\n`);
     fixtures.push(fixture);
-    console.log(`  ${fixture.id}: ✓ must[${fixture.must.join(' | ')}]`);
+    console.log(`  ${fixture.id}: ✓ gate ${gate.tally} — must[${fixture.must.join(' | ')}]`);
     index++;
   }
   written[role] = fixtures.length;

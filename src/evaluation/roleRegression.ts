@@ -63,7 +63,12 @@ export interface RoleSideScore {
   total: number;
 }
 
-const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase();
+/** 判卷的唯一归一化语义：判分器用它匹配，起草侧的原文支撑预滤也必须用它
+ *  （roleAssertionDraft.filterUnsupportedMarkers）——两处各写一份，迟早对
+ *  「什么算找得到」看法不同。 */
+export const normalizeGraderText = (text: string): string =>
+  text.replace(/\s+/g, ' ').trim().toLowerCase();
+const normalize = normalizeGraderText;
 
 /** Grade one output against one fixture's content assertions. A run that
  *  produced no output (crash, timeout) fails every must by construction. */
