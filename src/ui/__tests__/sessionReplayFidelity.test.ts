@@ -308,6 +308,12 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration())');
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, event.payload.messages, userText, this.takePendingPlanNarration())');
   });
+
+  it('自动续跑的代劳「继续」打 internal：send 的三处 user 消息构造同款（丢了恢复渲染就冒充用户发言）', () => {
+    const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+    // 押账提交、提交即落盘、暂停快照——isAuto 的消息每条都得带标记。
+    expect(chatSource.split('internal: isAuto || undefined').length - 1).toBe(3);
+  });
 });
 
 describe('会话标题取词（extractTitle）——标题必须是用户的话', () => {

@@ -3433,7 +3433,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     ): Message[] => {
       // 押账的规划叙述跟在请求后面入账（2026-09-27 时序修正）：先请求后思考。
       const pendingNarration = this.takePendingPlanNarration();
-      const appended: Message[] = [{ role: 'user', content: userText, images: userImages, attachments: userMessageAttachments }];
+      // isAuto（自动续跑的「继续」）打 internal：引擎代劳的输入不冒充用户的
+      // 话——存档恢复时不渲染成用户气泡（transcriptProjection 认 internal），
+      // 模型上下文里照旧保留（续跑指令要读得到）。
+      const appended: Message[] = [{ role: 'user', content: userText, images: userImages, attachments: userMessageAttachments, internal: isAuto || undefined }];
       if (pendingNarration) appended.push(pendingNarration);
       const pausedMessages = limitMessageHistory([...this.messages, ...appended]);
       this.messages = pausedMessages;
@@ -3460,7 +3463,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       void this.persistSession(
         limitMessageHistory([
           ...this.messages,
-          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
+          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments, internal: isAuto || undefined },
         ]),
         new Map<string, ToolExecMeta>(),
         [],
@@ -5124,7 +5127,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         const pauseMessage = formatPlanPauseMessage(this.activeComplexPlan);
         const pauseSnapshot: Message[] = [
           ...this.messages,
-          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments },
+          { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments, internal: isAuto || undefined },
           { role: 'assistant', content: pauseMessage },
         ];
         this.messages = pauseSnapshot;

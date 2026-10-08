@@ -294,6 +294,23 @@ describe('projectTranscript', () => {
     ]);
     expect((blocks[0] as { content: string }).content).toBe('写个脚本\n执行要求：带错误处理');
   });
+
+  it('自动续跑代劳的「继续」（internal）不渲染成用户气泡——产出归并前回合；真实输入照常渲染', () => {
+    const base: TranscriptEntry[] = [
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '修复导出 bug' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '修好了主问题。' },
+      { id: 'u2', modelMessageIndex: 2, role: 'user', content: '继续', internal: true },
+      { id: 'a2', modelMessageIndex: 3, role: 'assistant', content: '又修了两处边角。' },
+    ];
+    const hidden = projectTranscript(base);
+    expect(types(hidden)).toEqual(['user', 'assistant', 'assistant']);
+    expect((hidden[0] as { content: string }).content).toBe('修复导出 bug');
+
+    // 正向对照：同形状但没打 internal（用户真的点过继续）→ 照常上屏。
+    const shown = projectTranscript(base.map((e) => ({ ...e, internal: undefined })));
+    expect(types(shown)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect((shown[2] as { content: string }).content).toBe('继续');
+  });
 });
 
 describe('orphaned delegation cards rebuild the user interruption from the activity ledger (第 2 期第四刀收尾)', () => {
