@@ -14,14 +14,23 @@ import {
   type SettleNotifierDeps,
 } from '../notify';
 
+// 探测对象是 document（本文件真正需要的），不是 window：某些 bun 版本上
+// 前一个文件的 unregister 删不掉 window 属性（v3.1.1-beta 的 CI 实测：
+// window 残留 + document 已被删 → 按 window 判断会误跳过注册，11 条测试
+// 全程没有 DOM）。registeredHere 记「是谁注册的」——只有自己注册的才由
+// 自己注销，借来的 DOM 不还（也没法还）。
+let registeredHere = false;
 beforeAll(() => {
-  if (!('window' in globalThis)) GlobalRegistrator.register();
+  if (typeof document === 'undefined') {
+    GlobalRegistrator.register();
+    registeredHere = true;
+  }
 });
 // Release the global DOM so files running after this one can register their
 // own (same contract as sessionChatManager.test.ts — a second register()
 // while globals are already installed fails on readonly assignment).
 afterAll(() => {
-  if ('window' in globalThis) GlobalRegistrator.unregister();
+  if (registeredHere) GlobalRegistrator.unregister();
 });
 afterEach(() => {
   // Keep document content from leaking between cases.
