@@ -44,12 +44,18 @@ export const OVERLAY_GUARD_DELTA = 0.2;
 /** 相对恶化阈值（倍数；基线为 0 时只看绝对值）。 */
 export const OVERLAY_GUARD_RATIO = 1.5;
 
+function overlayGuardFileNames(role: string): { overlay: string; bak: string; meta: string; reverted: string } {
+  const overlay = `${role}.overlay.md`;
+  return { overlay, bak: `${overlay}.bak`, meta: `${overlay}.meta.json`, reverted: `${overlay}.reverted.md` };
+}
+
 export function overlayGuardPaths(role: string): { overlay: string; bak: string; meta: string; reverted: string } {
+  const names = overlayGuardFileNames(role);
   return {
-    overlay: `personas/${role}.overlay.md`,
-    bak: `personas/${role}.overlay.md.bak`,
-    meta: `personas/${role}.overlay.meta.json`,
-    reverted: `personas/${role}.overlay.reverted.md`,
+    overlay: `personas/${names.overlay}`,
+    bak: `personas/${names.bak}`,
+    meta: `personas/${names.meta}`,
+    reverted: `personas/${names.reverted}`,
   };
 }
 
@@ -76,6 +82,18 @@ export function loadOverlayText(
   if (!meta || meta.revertedAt === undefined) return overlayText;
   // 已回退：有前版回前版，没前版回 base（不装）。
   return meta.prevExisted ? bakText : undefined;
+}
+
+/**
+ * 用户触发的恢复（设置页「已回退 overlay」节）：删掉回退标记，装载侧随即
+ * 回到 overlay 正文——恢复的就是被回退的那份文本（正文在回退时从未被动过），
+ * 归档 .reverted.md 保留作历史。没被回退过 = 原样返回（幂等）。
+ */
+export function reinstateOverlayMeta(meta: OverlayGuardMeta): OverlayGuardMeta {
+  const next: OverlayGuardMeta = { ...meta };
+  delete next.revertedAt;
+  delete next.revertedReason;
+  return next;
 }
 
 /** 落盘后窗口内的角色结局统计（与 E1.4/subagentAdvisory 同口径计数）。 */

@@ -5,6 +5,7 @@ import {
   loadOverlayText,
   overlayGuardPaths,
   parseOverlayGuardMeta,
+  reinstateOverlayMeta,
   roleStatsSince,
   runOverlayGuardPass,
   shouldRevertOverlay,
@@ -142,5 +143,28 @@ describe('roleStatsSince window', () => {
       runRecord(1_003, 'code_reviewer', false),
     ];
     expect(roleStatsSince(records, 'researcher', 1_000)).toEqual({ delegations: 3, failures: 2 });
+  });
+});
+
+describe('reinstateOverlayMeta（用户触发的恢复）', () => {
+  it('strips the revert markers so loading goes back to the overlay body', () => {
+    const reinstated = reinstateOverlayMeta(meta({ revertedAt: 5_000, prevExisted: true, revertedReason: '回归' }));
+    expect(reinstated.revertedAt).toBeUndefined();
+    expect(reinstated.revertedReason).toBeUndefined();
+    // 装载决策随之反转：回退态装前版，恢复态装正文。
+    expect(loadOverlayText(meta({ revertedAt: 5_000, prevExisted: true }), 'overlay', 'prev')).toBe('prev');
+    expect(loadOverlayText(reinstated, 'overlay', 'prev')).toBe('overlay');
+  });
+
+  it('is idempotent for a meta that was never reverted', () => {
+    const plain = meta();
+    expect(reinstateOverlayMeta(plain)).toEqual(plain);
+  });
+});
+
+describe('loadOverlayText 防陈旧 bak（prevExisted:false 时盘上可能有上一世的 .bak）', () => {
+  it('ignores a stale .bak when the overlay was written without a previous version', () => {
+    // 变异「丢 prevExisted 判断、直接回 bakText」在此红：回退态无前版必须回 base。
+    expect(loadOverlayText(meta({ revertedAt: 5_000, prevExisted: false }), 'overlay', 'stale bak from an earlier life')).toBeUndefined();
   });
 });

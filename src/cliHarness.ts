@@ -24,7 +24,7 @@ import { compileExternalSubagents, isExternalSubagentManifest } from './harness/
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import type { PermissionMode, PermissionRequestHandler } from './coding-agent/types';
@@ -59,9 +59,13 @@ promptObservability.setSink(new FilePromptObservationStore(`${PURE_DIR}/observat
 // 阶段 13.3 — persona overlays for the CLI host: node:fs does the IO, the
 // shared compiler validates (same split as the GUI's Tauri invoke). Pure
 // function of the filesystem + role set; a broken file warns, never throws.
-function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, string> {
+export function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, string> {
   const dir = process.env.PURE_PERSONAS_DIR
     ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'personas');
+  // 护栏路径的基准是 pure home（overlayGuardPaths 给 pure-home 相对路径）——
+  // 直接 join 到 dir（已是 personas 目录）会双层错位、永不读到 meta，回退
+  // 过滤整体失效。这个错法真实发生过，测试锁在 cliPersonaOverlays.test.ts。
+  const guardBase = dirname(dir);
   let sources: { file: string; text: string }[] = [];
   try {
     sources = readdirSync(dir).filter((f) => f.endsWith('.overlay.md')).sort().map((file) => {
@@ -69,8 +73,8 @@ function loadCliPersonaOverlays(externalDefs: { name: string }[]): Map<string, s
       // 手写文件无 meta 照装（与 GUI 装载同一份决策 loadOverlayText）。
       const role = file.replace(/\.overlay\.md$/, '');
       const paths = overlayGuardPaths(role);
-      const meta = parseOverlayGuardMeta(readFileOrNull(join(dir, paths.meta)));
-      const text = loadOverlayText(meta, readFileSync(join(dir, file), 'utf8'), readFileOrNull(join(dir, paths.bak)));
+      const meta = parseOverlayGuardMeta(readFileOrNull(join(guardBase, paths.meta)));
+      const text = loadOverlayText(meta, readFileSync(join(dir, file), 'utf8'), readFileOrNull(join(guardBase, paths.bak)));
       return { file, text: text ?? '' };
     }).filter((s) => s.text !== '');
   } catch {

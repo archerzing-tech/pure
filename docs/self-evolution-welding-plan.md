@@ -28,7 +28,7 @@
   P0-3 子代理记忆注入（两柱焊点）        M
 第二波 P1 飞轮转一圈（唯一能证明"自进化"的事）
   P1-1 S1 真实样本 + 首次 ALLOW         半人工
-  P1-2 overlay 落盘后自动回退护栏        M   ← 依赖 P1-1（有真实 overlay 才有对象）
+  P1-2 overlay 落盘后自动回退护栏        M   ← 依赖 P1-1（✅ 2026-10-08 收尾缝齐）
   P1-3 held-out mini-set               S+
 第三波 P2 工具自进化（兑现"工具"这个词）
   P2-1 TOOL.json 装载半边              M   ← 独立
@@ -139,6 +139,16 @@ delegations 观测带 injection 标记（parser 兼容旧记录）；e2e 可选�
 overlay（无快照）不触发、回退后 7 天内不重复尝试同一 overlay；与既有 deny 退避
 账本的关系写进注释（退避管准入失败，回退管准入后退化，两层不同）。
 
+**落地（✅）**：主体 2026-10-01（`f2897af`，纯核 `src/harness/overlayGuard.ts`：
+writeOverlayGuardedly 同刻写 overlay+.bak+meta、runOverlayGuardPass 周期判定、
+loadOverlayText 装载决策；手写无 meta 豁免）。收尾缝 2026-10-08：CLI 侧判定挂
+runCliSleepCycle 同一退出路径（`overlayGuardHost.ts`，角色自扫 personas、records
+同源 cli.jsonl）；回退发生时 GUI 出卡（decay 定时器 notify 缝 + main 注入 toast）；
+设置页进化面板「已回退的角色 overlay」节（新鲜重扫 + 回退证据 + 装载去向 + 一键
+恢复=reinstateOverlayMeta 删回退标记）。两处与验收原文的偏差（有意）：防横跳用
+meta.revertedAt 永久标记 + personaOverlayFlow 同名 'exists' 拒写，比「7 天冷却」
+更保守；「退避账本记一笔」裁决不加——两层防横跳已够，分账是过度工程。
+
 ### P1-3 held-out mini-set（S+，半天–1 天）
 
 **现状洞**：v5 全套 15 fixtures 连 golden 解公开在仓库；角色 A/B 门 5 例；lesson
@@ -163,7 +173,9 @@ overlay（无快照）不触发、回退后 7 天内不重复尝试同一 overla
 异步注册竞态 / 字段契约错位 / 假 200 错误体 fail-fast / 区域互斥状态机 / 启动合并
 数据保全）+ role 1 条（researcher，真实派发参数）。出题质量干跑矩阵：每条
 **control（未解快照）必红 + golden（参考解）必绿** 全绿——题不会开卷即绿，也不会
-怎么都红。真 LLM 跑对比列待有 key 的手跑窗口。
+怎么都红。真跑读数（2026-10-08，glm-5.3-flash）：**8/8 全过 pass@1 = 100%**
+（均值 64.8s/题，$0.25）——题目对该档位不构成区分度，基线即天花板，低于 8/8 即
+显著退化信号。
 
 ## 4. 第三波 P2：工具自进化（13.4 MVP）
 

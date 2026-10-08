@@ -19,6 +19,7 @@ import { planEviction, RATCHET_DEFAULTS } from '../adapter/memory/ratchet';
 import { summarizeInjectionContributions } from '../shared/contributionStats';
 import { promptObservability, type PromptObservation } from '../shared/promptObservability';
 import { readGuiObservations } from './observationSource';
+import { t } from '../shared/i18n';
 
 /** 与 Harness.MEMORY_DECAY_INTERVAL_MS 一致：decay 至少间隔 1 小时。 */
 export const MEMORY_DECAY_INTERVAL_MS = 60 * 60 * 1000;
@@ -27,6 +28,16 @@ export const MEMORY_DECAY_OLDER_THAN_MS = 14 * 24 * 3600 * 1000;
 
 let timer: ReturnType<typeof setTimeout> | undefined;
 let started = false;
+
+/** 宿主接缝（main.ts 注入 —— toast 是 main 的局部件，不可反向依赖）。 */
+export interface MemoryDecayTimerHost {
+  /** 「出卡」这半句的落点：一条会自己消失的通知。overlay 回退改变用户的
+   *  行为面（角色装载回到前版/base）——只写控制台等于替用户静默改了他的
+   *  团队；没有这个缝的宿主（测试）只是少一条通知，不影响回退本身。 */
+  notify?: (message: string, durationMs?: number) => void;
+}
+
+let host: MemoryDecayTimerHost = {};
 
 /** 距下次衰减调度还有多久（ms）。从未运行 → 0（启动后立即触发第一轮）。 */
 export function computeNextDecayDelayMs(
@@ -158,15 +169,21 @@ async function runOverlayGuardPass(): Promise<void> {
     records,
   );
   if (report.reverted.length > 0) {
-    console.warn(`[pure] overlay guard reverted: ${report.reverted.join(', ')}（原文见 .reverted.md，meta 删 revertedAt 即恢复）`);
+    console.warn(`[pure] overlay guard reverted: ${report.reverted.join(', ')}（原文见 .reverted.md，设置页可恢复）`);
+    host.notify?.(
+      t('evolution.overlayReverted.toast', '已自动回退角色 overlay：{roles}——派发失败率较落盘基线显著恶化，装载回到前版/基础人格，可在设置的进化面板查看与恢复。')
+        .replace('{roles}', report.reverted.join('、')),
+      12_000,
+    );
     document.dispatchEvent(new CustomEvent('pure:evolution-cycle'));
   }
 }
 
-/** 启动后台衰减定时器（幂等；main.ts deferred init 调用）。 */
-export function startMemoryDecayTimer(): void {
+/** 启动后台衰减定时器（幂等；main.ts deferred init 调用，注入出卡缝）。 */
+export function startMemoryDecayTimer(options?: MemoryDecayTimerHost): void {
   if (started) return;
   started = true;
+  host = options ?? {};
   scheduleNext();
 }
 

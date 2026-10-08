@@ -47,6 +47,7 @@ import {
   renderObservationStats,
   renderArchivedRolesSection,
   renderQuarantineSection,
+  renderRevertedOverlaysSection,
   renderStrategySection,
   renderStrategyTabs,
   renderSubagentAdvice,
@@ -58,6 +59,7 @@ import {
 import { collectAppliedAdvice } from '../shared/adviceApplication';
 import { buildTrialBadges, deleteGeneratedRole, findRoleDefinition, loadGeneratedRoles, loadDelegableRoleNames, promoteGeneratedRole, restoreGeneratedRole, startRoleTrial } from './delegableRoles';
 import { loadQuarantinedTools, reinstateTool } from './toolQuarantineHost';
+import { loadRevertedOverlays, reinstateOverlay } from './overlayRevertHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
@@ -1148,6 +1150,28 @@ export class SettingsPanel {
       } catch (err) {
         console.error('[pure] reinstate tool failed:', err);
         this.toast(t('evolution.quarantine.reinstateFailed'));
+      } finally {
+        btn.disabled = false;
+        void this.renderEvolutionDashboard();
+      }
+    });
+
+    // ── P1-2 回退护栏：恢复 ──
+    // 只删 meta 的回退标记，不碰 overlay 正文 —— 恢复的就是被回退的那份文本；
+    // 归档 .reverted.md 保留作历史。恢复后下一次装载即回到 overlay 正文。
+    document.getElementById('evolution-overlays-reverted')?.addEventListener('click', async (event) => {
+      const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-reinstate-overlay]');
+      if (!btn) return;
+      event.stopPropagation();
+      const role = btn.dataset.evoReinstateOverlay || '';
+      if (!role) return;
+      btn.disabled = true;
+      try {
+        await reinstateOverlay(role);
+        this.toast(t('evolution.overlayReverted.reinstated', '已恢复角色 {role} 的 overlay').replace('{role}', role));
+      } catch (err) {
+        console.error('[pure] reinstate overlay failed:', err);
+        this.toast(t('evolution.overlayReverted.reinstateFailed', '恢复失败——读不到该 overlay 的 meta 文件'));
       } finally {
         btn.disabled = false;
         void this.renderEvolutionDashboard();
@@ -3586,6 +3610,26 @@ export class SettingsPanel {
         } catch (err) {
           console.warn('[pure] archived roles list failed:', err);
           archivedEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('evolution.archivedRoles.unavailable', '读不到归档名单——重新进入本页再试。'))}</div>`;
+        }
+      }
+    }
+
+    // P1-2 回退护栏：被自动回退的角色 overlay。数据来自 personas 的 meta
+    // （`loadRevertedOverlays` 做一次**新鲜重扫**——十秒前刚回退的必须立刻
+    // 在屏上），恢复动作只是删 meta 的回退标记，装载侧随即回到 overlay 正文。
+    // 与停用工具那一节同口径：总开关关着时整节隐藏（门不存在，卡也不该在）。
+    const revertedEl = document.getElementById('evolution-overlays-reverted');
+    if (revertedEl) {
+      const revertedSection = revertedEl.closest('.settings-section');
+      const revertedTitle = revertedSection?.previousElementSibling;
+      if (revertedSection) (revertedSection as HTMLElement).hidden = evolutionOff;
+      if (revertedTitle) (revertedTitle as HTMLElement).hidden = evolutionOff;
+      if (!evolutionOff) {
+        try {
+          revertedEl.innerHTML = renderRevertedOverlaysSection(await loadRevertedOverlays(), now);
+        } catch (err) {
+          console.warn('[pure] reverted overlays list failed:', err);
+          revertedEl.innerHTML = `<div class="evo-empty">${escapeHtml(t('evolution.overlayReverted.unavailable', '读不到回退名单——重新进入本页再试。'))}</div>`;
         }
       }
     }

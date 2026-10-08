@@ -25,6 +25,7 @@ import { postApplyStats } from '../shared/adviceApplication';
 import type { AdviceAppliedObservation, PromptObservation } from '../shared/promptObservability';
 import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
 import { toolDisplayName } from './toolRow';
+import type { RevertedOverlayEntry } from './overlayRevertHost';
 import { formatCostUsd } from '../shared/usage';
 import { BASELINE_SUITE_VERSION, isBaselineCostPriced, orderBaselineRows, type BaselineSnapshot } from '../shared/baseline';
 import { baselineCacheHitRate, isBaselineStale } from '../shared/baselineSnapshot';
@@ -742,6 +743,39 @@ export function renderQuarantineSection(
         <button type="button" class="evo-advice-apply-btn" data-evo-reinstate="${escapeHtml(name)}" title="${escapeHtml(t('evolution.quarantine.reinstateTitle', '修好脚本后重新启用这个工具'))}">${escapeHtml(t('evolution.quarantine.reinstate', '重新启用'))}</button>
       </div>
       <div class="evo-experience-content">${escapeHtml(reason)}</div>
+      <div class="evo-experience-meta">${escapeHtml(howto)} · ${escapeHtml(since)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="evo-experience-list">${rows}</div>`;
+}
+
+/**
+ * 已回退的角色 overlay（P1-2 回退护栏）。回退是**可逆且带证据**的动作，与
+ * 停用门同一立场：为什么回退（证据行）、装载现在去了哪（前版/基础人格）、
+ * 怎么恢复（一键）。只写「已回退」不给恢复路径，等于把用户逼回手工改 meta。
+ */
+export function renderRevertedOverlaysSection(
+  items: readonly RevertedOverlayEntry[],
+  now: number,
+): string {
+  if (items.length === 0) {
+    return `<div class="evo-empty">${escapeHtml(t('evolution.overlayReverted.empty', '没有被回退的 overlay——落盘后派发满 8 次且失败率较基线恶化 20 个点才会回退。'))}</div>`;
+  }
+  const rows = items.map(({ role, meta }) => {
+    const reason = meta.revertedReason ?? t('evolution.overlayReverted.noReason', '（没有留下回退理由）');
+    const since = meta.revertedAt ? relativeTime(meta.revertedAt, now) : '—';
+    const where = meta.prevExisted
+      ? t('evolution.overlayReverted.toPrev', '装载已回到回退前的前版 overlay')
+      : t('evolution.overlayReverted.toBase', '装载已回到基础人格（这份 overlay 落盘时没有前版）');
+    const howto = t('evolution.overlayReverted.howto', '点「恢复」即删掉回退标记，装载回到这份 overlay 正文（归档原文见 ~/.pure/personas/）；它若继续恶化会被再次回退。');
+    return `<div class="evo-experience-row">
+      <div class="evo-experience-head">
+        <span class="memory-badge memory-badge-type memory-type-error_pattern">${escapeHtml(role)}</span>
+        <span class="memory-badge evo-badge-low">${escapeHtml(t('evolution.overlayReverted.badge', '已回退'))}</span>
+        <span class="evo-experience-score" title="${escapeHtml(reason)}">${escapeHtml(reason)}</span>
+        <button type="button" class="evo-advice-apply-btn" data-evo-reinstate-overlay="${escapeHtml(role)}" title="${escapeHtml(t('evolution.overlayReverted.reinstateTitle', '删掉回退标记，重新装载这份 overlay'))}">${escapeHtml(t('evolution.overlayReverted.reinstate', '恢复'))}</button>
+      </div>
+      <div class="evo-experience-content">${escapeHtml(where)}</div>
       <div class="evo-experience-meta">${escapeHtml(howto)} · ${escapeHtml(since)}</div>
     </div>`;
   }).join('');

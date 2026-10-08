@@ -18,6 +18,7 @@ import { buildSkillGateAppliedRecord } from '../shared/subagentAdvisory';
 import { loadDelegableRoleNames } from '../ui/delegableRoles';
 import { memoryStore } from '../cliHarness';
 import type { LLMAdapter, Message } from '../shared/types';
+import { runCliOverlayGuardPass } from './overlayGuardHost';
 import {
   SLEEP_TIME_BUDGETS,
   defaultConfirmPolicy,
@@ -174,8 +175,20 @@ export interface CliSleepCycleInput {
 export async function runCliSleepCycle(input: CliSleepCycleInput): Promise<CycleResult | undefined> {
   if (cliEvolutionDisabled()) return undefined;
   const turn = sessionTurnFromMessages(input.messages);
-  return runSleepTimeCycle({
+  const result = await runSleepTimeCycle({
     ...buildCliSleepTimeDeps(input.llm, input.projectPath, input.budget ?? 'cli', input.onAction),
     ...(turn ? { directSession: { ...turn, id: input.sessionId } } : {}),
   });
+  // P1-2 — 同窗追加 overlay 回退判定（缝在 overlayGuardHost，GUI 挂 decay
+  // 同一节流窗，CLI 挂 sleep 循环同一退出路径）。失败只降级本轮，绝不影响
+  // 已完成的进化循环。
+  try {
+    const reverted = await runCliOverlayGuardPass({});
+    if (reverted.length > 0) {
+      console.warn(`[pure] overlay guard reverted: ${reverted.join(', ')}（原文见 .reverted.md，设置页可恢复）`);
+    }
+  } catch (err) {
+    console.error('[pure] overlay guard pass failed:', err);
+  }
+  return result;
 }

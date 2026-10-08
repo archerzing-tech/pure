@@ -863,7 +863,10 @@ function deferToIdle(fn: () => void): void {
       // Background memory decay: Harness only decays at session start (1h
       // throttle), so idle apps never forget. A timer re-runs decay after the
       // throttle window elapses — see src/ui/memoryDecayTimer.ts.
-      startMemoryDecayTimer();
+      // `notify` is the P1-2 overlay-revert gate's "出卡": a revert changes which
+      // persona text gets loaded, and the user has to hear about that from the
+      // app, not from a role that quietly started behaving like its old self.
+      startMemoryDecayTimer({ notify: showToast });
       // Idle sleep-time evolution: reflect on finished sessions / route advice
       // while nobody is chatting (30min min gap, busy ⇒ yield). See
       // src/ui/evolutionOrchestratorTimer.ts.
