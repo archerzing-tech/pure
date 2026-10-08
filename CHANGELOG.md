@@ -43,6 +43,12 @@ release summary when publishing (see `.github/workflows/release.yml`).
 - 四处统一到「内建 ∪ 盘上真实角色面」，角色名单只留一份真相
 - 归档角色补上「彻底删除」（manifest + 旁挂账；已收割样本保留在 `~/.pure/roles/`）——此前「不想留」只写在行内文案里，等于让用户自己去翻目录
 
+**控制面抽出收官（S2 绞杀者序，架构评审 v2 → P3-2）**
+- 插话分类编排出 chat.ts：五类裁决序（置信门 / 思考窗吸收 / 点名停支与续跑 / 去重收执 / 判定落地补派）与序列化链迁成宿主无关模块，chat.ts 从裁决者退为缝宿主（读数注入 + 引擎动作 + 投影三组绑定）；纯裁决下沉 inputDecision
+- CLI 同接：真缝 delegation / roundClose / steer 转达，send/abort/投影休眠并如实注明——插话输入路落地时一次接上
+- 暂停宽限收口：宽限窗里再叫停升级为硬停（`upgradeToHardStop`，判定先于 abort 保住暂停记账——断点照存、卡片如实标 ⏸；工具协调器宽限定时器当场作废），这十行判定不再焊在 GUI 的 cancel() 里
+- 守卫随刀迁移并变异抽查：两处迁移后失锚（分支候选过滤被同文串糊掉、编排器补派无锚）补 scoped 切片与计数锚，mutant 击杀验证过
+
 **设计文档**
 - 五份设计稿的落地状态按 git 证据逐行重建（此前状态表落后半个月，已两次误导判断）
 - 更正 `multi-agent-self-evolving-architecture.md` 里「新角色同样进观测记账与建议卡」那条**已被推翻的断言**（它此前只在进度记录里更正过，设计稿漏改）
@@ -51,7 +57,7 @@ release summary when publishing (see `.github/workflows/release.yml`).
 
 **自进化全组件就位 + Windows gateway 生命周期根本修**
 
-3.1.0 是「可自进化的多 agent 智能体系统」的架构里程碑：五类进化产物（记忆/skill/prompt/角色/工具）全链路就位，事件日志为唯一事实源，控制面宿主无关，Windows gateway 三层启动递进 + 生命周期根本修。
+3.1.0 是「可自进化的多 agent 智能体系统」的架构里程碑：五类进化产物（记忆/skill/prompt/角色/工具）全链路就位，事件日志为唯一事实源，控制面抽出启动（转向队列 + 委派控制面；插话分类等主裁决当时仍在 UI 层，3.1.1-alpha 收官），Windows gateway 三层启动递进 + 生命周期根本修。
 
 **进化批（P0 + P1 + P2）**
 - P0 焊缝：反思器纳入进化总开关、sleep-time 接 REFLECT 便宜通道、两柱焊点（子代理记忆注入——经验到得了干活的人）

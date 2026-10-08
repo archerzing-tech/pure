@@ -95,7 +95,7 @@ agent 复用插话分类器 + SteerInjected 同款机制；接力流水线是委
 | 团队可观测（进度聚合 / 瓶颈 / 成本视图） | 观测层→UI | 🟡 部分落地：T3 团队卡 `3ca03dc`/`8f85399` + T4 成本视图（角色 × provider × model 聚合）；瓶颈视图未实施（设计 `docs/team-observability-design.md`） |
 | A1 会话 = 可追加事件日志 | 持久层 | ✅ 已落地（四刀收官：O_APPEND 地基 / 词汇表与时间线投影 / 转录增量 / fold 水位） |
 | A2 引擎所有权收敛单主 daemon | 运行时 | ⏸ 未开工：卡点 = 控制面焊死 `chat.ts`（P3-2/S2），按绞杀者序 S2 → S3；不做也已消除 v1 桥接的 V1/V3/V4 |
-| S2 控制面抽出（P3-2） | 运行时 | 🟡 第一刀已落：`steerBus.ts` + 委派控制面（起飞闸挂号簿、点名停支）；`chat.ts` 主体控制面仍未出 |
+| S2 控制面抽出（P3-2） | 运行时 | ✅ 已收官（2026-10-08，五刀 `2411279`→`18e8583`+收口）：SteerBus / DelegationControlPlane / FoldInLedger+续跑账 / RoundClosePlane / InterjectOrchestrator+暂停宽限收口；chat.ts 退为投影与组装，CLI 同接（插话输入路落地时接通） |
 | 11.3/11.4 输入纠错尾部 | 正交 | 维持靠后 |
 | 阶段 7 签名 / 10 沙箱 | —— | 维持缓做（2026-09-17 优先级） |
 

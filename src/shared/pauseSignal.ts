@@ -43,6 +43,19 @@ export function isPauseAbort(signal: AbortSignal | null | undefined): boolean {
   return (signal as { reason?: unknown }).reason === PAUSE_ABORT_REASON;
 }
 
+/** 1c 升级硬停（S2 第四刀收口）：暂停的宽限窗里再叫停，不等宽限——立即打断
+ * 硬停第二通道（工具协调器的宽限定时器当场作废；在飞工具按暂停记账掐断，
+ * 断点照存、卡片如实标 ⏸）。判定必须先于主信号的 abort——abort 会把暂停
+ * reason 冲掉（已 aborted 的 controller 二次 abort 是 no-op，reason 保留，
+ * 但新回合换了控制器后这个读数就再也拿不到了）。返回是否发生了升级；主信号
+ * 的 abort 由调用方执行（顺序在工具协调器侧与升级可交换：escalate 与转发
+ * 两路监听幂等——clearTimeout 幂等、abort 幂等——最终态一致）。 */
+export function upgradeToHardStop(mainSignal: AbortSignal | null | undefined, hardStop: AbortController | null | undefined): boolean {
+  const upgrade = isPauseAbort(mainSignal);
+  if (upgrade) hardStop?.abort();
+  return upgrade;
+}
+
 /** The Interrupted event reason an engine should yield for the current signal
  * state — 'paused' for a drain-style pause, 'aborted' for a hard stop. */
 export function interruptedReasonFor(signal: AbortSignal | null | undefined): string {

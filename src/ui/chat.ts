@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
+import { abortPaused, upgradeToHardStop } from '../shared/pauseSignal';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
@@ -6730,11 +6730,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   }
 
   cancel() {
-    const wasPausing = isPauseAbort(this.abortController?.signal);
+    // 1c 升级硬停（S2 第四刀收口）：暂停的宽限窗口里再叫停，不等宽限——
+    // 立即掐掉在飞工具（记账仍归暂停：断点照存、卡片如实标 ⏸）。判定必须
+    // 先于本方 abort：abort 会把暂停 reason 冲掉。与工具协调器两路监听
+    // （宽限升级 / abort 转发）顺序可交换：两路幂等，最终态一致。
+    upgradeToHardStop(this.abortController?.signal, this.hardStopController);
     this.abortController?.abort();
-    // 1c 升级硬停：暂停的宽限窗口里再叫停，不等宽限——立即掐掉在飞工具
-    // （记账仍归暂停：断点照存、卡片如实标 ⏸）。
-    if (wasPausing) this.hardStopController?.abort();
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();

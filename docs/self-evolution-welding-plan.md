@@ -35,7 +35,7 @@
   P2-2 procedure→工具固化流             M   ← 依赖 P2-1
 第四波 P3 结构债（穿插进行，随时可插）
   P3-1 lib.rs 三刀（web_public_api / mcp / llm_stream）  各 M
-  P3-2 chat.ts 控制面出 UI（第一刀）     L
+  P3-2 chat.ts 控制面出 UI（✅ 五刀收官，见 :205）   L
   P3-3 reads 并发池上限                 S
   P3-4 仓库卫生                        S
 ```
@@ -202,7 +202,7 @@ overlay（无快照）不触发、回退后 7 天内不重复尝试同一 overla
 `mcp.rs`（子进程注册表 + OAuth）→ `llm_stream.rs`（chat_stream 一族 ~550 行）。
 每刀验收：cargo test 绿 + tauri build 过 + 行数变化记账。
 
-### P3-2 chat.ts 控制面出 UI（L，第一刀只做一件事）
+### P3-2 chat.ts 控制面出 UI（L，✅ 已收官 2026-10-08）
 
 多 agent 控制面（steer 队列 / 折入闸 / 起飞闸 / 分支点名 / 暂停宽限状态机）住在
 UI 层 7,924 行的 god-module 里，CLI 宿主没有等价能力——同一编排器两套宿主语义。
@@ -210,6 +210,15 @@ UI 层 7,924 行的 god-module 里，CLI 宿主没有等价能力——同一编
 消费者。这是蓝图第 8 期"CLI 接 steering 通道"的前置，也是 runLoop/execute 拆方法
 的前置（控制面抽走后再动引擎，不然一次改两处）。
 验收：T01–T30 回放器 + 全部判例回放绿（行为逐字节等价）。
+
+**落地（绞杀者序五刀，2411279 → 18e8583 + 收口提交）**：SteerBus（`2411279`）→
+DelegationControlPlane（`4f9e40e`）→ 四本账全量切 plane（`d423cac`）→ FoldInLedger
++ 续跑账（`2c06f4c`）→ RoundClosePlane（`f1fbebb`）→ InterjectOrchestrator 五类裁决
+序（`18e8583`）→ 暂停宽限收口 `upgradeToHardStop`。每刀独立检验对照 HEAD 逐分支
+等价 + 变异抽查守卫有效性；判例回放 39 例文本零改、decisor 回放 byte-identical。
+CLI 宿主真缝 delegation/roundClose/steerRunningTurn，send/abort/投影休眠（CLI 插话
+输入路落地时一次接上）。**交棒**：S2 结构收益已拿满，主线回进化轨道（P1-3 held-out
+mini-set）——飞轮转过一圈之前，不再给系统加新的进化机制，也不再开架构刀。
 
 ### P3-3 reads 并发池上限（S）
 
