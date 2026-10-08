@@ -925,6 +925,36 @@ describe('AgentLoopEngine', () => {
     expect(completed!.payload.finalOutput).toBe('Rust is great!');
   });
 
+  it('continue() 的轮入消息按 userInternal 带 internal（存档落引擎副本，标记在这里丢就白打了）', async () => {
+    const engine = new AgentLoopEngine();
+    const prevMessages: Message[] = [
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: 'I like Rust.' },
+      { role: 'assistant', content: 'Noted!' },
+    ];
+
+    // 宿主代劳的续跑（GUI 自动续跑「继续」）：引擎自己的轮入副本必须带标记，
+    // 否则回合结束落档的就是没标记的引擎副本（GUI 测试集 [39] 实证）。
+    const autoEvents = await collect(engine.continue(
+      { sessionId: 's12', messages: prevMessages, newUserPrompt: '继续', budget: STD_BUDGET, userInternal: true },
+      baseCtx({ llm: textLLM('继续推进。') }),
+    ));
+    const autoCompleted = autoEvents.find(e => e.type === 'Completed');
+    expect(autoCompleted).toBeDefined();
+    const autoEntry = autoCompleted!.payload.messages?.find(m => m.role === 'user' && m.content === '继续');
+    expect(autoEntry?.internal).toBe(true);
+
+    // 正向对照：真实用户输入（不带 userInternal）→ 不打标记，重放照常渲染。
+    const realEvents = await collect(engine.continue(
+      { sessionId: 's13', messages: prevMessages, newUserPrompt: '接着改', budget: STD_BUDGET },
+      baseCtx({ llm: textLLM('好的。') }),
+    ));
+    const realCompleted = realEvents.find(e => e.type === 'Completed');
+    expect(realCompleted).toBeDefined();
+    const realEntry = realCompleted!.payload.messages?.find(m => m.role === 'user' && m.content === '接着改');
+    expect(realEntry?.internal).toBeUndefined();
+  });
+
   // ═══ YieldControl event (G-5 fix) ═══
 
   it('emits YieldControl with turnNumber and budget snapshot after tool rounds', async () => {

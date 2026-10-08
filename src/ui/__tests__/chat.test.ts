@@ -525,8 +525,9 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(src.slice(keeper, keeper + 600)).toContain('commitPausedUserTurn(toolResults, thinkingPhases)');
     // 工作区解析期间的中断分支同样提交（该分支在 toolResults 声明前返回）。
     expect(src).toContain('commitPausedUserTurn(new Map(), []);');
-    // 流中出错且已有部分输出的收尾快照也必须写回内存历史。
-    expect(src).toMatch(/const interruptedSnapshot: Message\[\] = limitMessageHistory\(\[\s*\.\.\.this\.messages,\s*\{ role: 'user', content: userText \},/);
+    // 流中出错且已有部分输出的收尾快照也必须写回内存历史（isAuto 的代劳输入
+    // 同步带 internal，见 sessionReplayFidelity 的全链锚）。
+    expect(src).toMatch(/const interruptedSnapshot: Message\[\] = limitMessageHistory\(\[\s*\.\.\.this\.messages,\s*\{ role: 'user', content: userText, internal: isAuto \|\| undefined \},/);
   });
 
   it('wires the abort signal into the plan-review dialog', () => {

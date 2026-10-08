@@ -572,6 +572,7 @@ export class Harness {
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
+    userInternal?: boolean,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -603,6 +604,7 @@ export class Harness {
         images,
         messages: msgs,
         budget: this.config.budget,
+        userInternal,
       },
       this.buildContext(signal, hardStopSignal),
     );

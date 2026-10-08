@@ -523,8 +523,9 @@ export class CodingAgent {
     images?: MessageImage[],
     semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
+    userInternal?: boolean,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, semantic, hardStopSignal);
+    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, semantic, hardStopSignal, userInternal);
   }
 
   /** Get the underlying Harness instance (for advanced use). */

@@ -5016,7 +5016,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           : null;
         this.addStatusBubble('修复阶段：正在根据真实失败输出修复并重新验证…', true);
         const fixSegment = createSegment();
-        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal);
+        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, undefined, true);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
         let output = '';
         let latestMessages = messages;
@@ -5255,7 +5255,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // the plan, or a follow-up after the previous plan finished), do not
       // attach any stale plan presentation to the new turn.
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal)
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal, isAuto)
         : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal);
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
@@ -6464,7 +6464,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // partial answer enter the live history so a follow-up can continue.
         const interruptedSnapshot: Message[] = limitMessageHistory([
           ...this.messages,
-          { role: 'user', content: userText },
+          { role: 'user', content: userText, internal: isAuto || undefined },
           { role: 'assistant', content: partialOutput },
         ]);
         this.messages = interruptedSnapshot;

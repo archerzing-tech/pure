@@ -172,7 +172,9 @@ export class AgentLoopEngine {
     ctx: EngineContext,
   ): AsyncGenerator<EngineEvent, void, void> {
     const budget = new BudgetManager(input.budget);
-    const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt, images: input.images }];
+    // userInternal（宿主代劳的续跑/修复轮）跟着进转录：存档落的是这份引擎
+    // 副本，chat 侧打的 internal 到不了这里（a866036 的缺口，GUI 测试集 [39]）。
+    const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt, images: input.images, internal: input.userInternal || undefined }];
     budget.addTokens(input.newUserPrompt);
     for (const m of input.messages) budget.addTokens(m.content);
 

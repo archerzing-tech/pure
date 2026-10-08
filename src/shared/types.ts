@@ -191,6 +191,11 @@ export interface RunContinueInput {
   images?: MessageImage[];
   messages: Message[];
   budget: BudgetConfig;
+  /** Host-generated follow-up (auto-continue "继续", delivery fix rounds): the
+   *  entry user message then carries `internal`, so the persisted transcript —
+   *  which stores the ENGINE's turn segment, not the host's copy — never
+   *  replays the nudge as a user bubble. */
+  userInternal?: boolean;
 }
 
 export type VerificationStatus = 'passed' | 'failed' | 'incomplete' | 'not_run';
