@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { ChatController } from '../chat';
 import { createAgentActivityPanel, isAgentActivityActive, mergeAgentActivity } from '../agentActivityPanel';
@@ -363,5 +364,51 @@ describe('agent activity panel', () => {
     expect(panel.el.textContent).toContain('researcher');
     expect(panel.el.textContent).not.toContain('deep_thinker');
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+  });
+});
+
+/**
+ * 浮动 rail 的命中面：透明空隙不得吃点击。
+ *
+ * 事故（2026-10-07 用户报「最右上角设置按钮有时被多个子 agent 卡片遮住、点不动」）：
+ * host 是 pointer-events:none 的浮层（让对话在它后面照常可交互），可 rail 把
+ * pointer-events 在**整个盒子**上打开——包括顶部那段专门用来避开设置按钮的
+ * padding。按钮 top:12px、z-index 20 高于 host 的 18，但按钮一旦处于
+ * pointer-events:none（指针在窗口外）状态，那块区域的点击就落在子 agent 卡片上。
+ * 只有卡片本身可交互，空隙一律穿透。
+ */
+describe('activity rail hit surface', () => {
+  const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf-8');
+  const critical = readFileSync(new URL('../critical.css', import.meta.url), 'utf-8');
+
+  function block(source: string, selector: string): string {
+    const start = source.indexOf(selector);
+    expect(start).toBeGreaterThan(-1);
+    const open = source.indexOf('{', start);
+    const close = source.indexOf('}', open);
+    return source.slice(open, close);
+  }
+
+  it('leaves the rail gaps (incl. the settings-button strip) click-through', () => {
+    for (const sheet of [critical, styles]) {
+      expect(block(sheet, '.agent-activity-rail {')).toContain('pointer-events: none');
+      expect(block(sheet, '.agent-activity-rail > *')).toContain('pointer-events: auto');
+    }
+  });
+
+  it('keeps the top padding at least as tall as the floating button', () => {
+    // 按钮高 ≈ 36px 且 top:12px（styles.css）→ 空隙必须 > 48px，否则卡片会
+    // 贴着按钮压上去（z-index 上按钮在上，视觉上仍然挤）。
+    expect(block(styles, '.agent-activity-rail {')).toMatch(/padding:\s*(\d+)px/);
+    const padding = Number(block(styles, '.agent-activity-rail {').match(/padding:\s*(\d+)px/)?.[1] ?? 0);
+    expect(padding).toBeGreaterThan(48);
+  });
+
+  it('reveals the corner chrome when the window regains focus', () => {
+    // Alt+Tab/点任务栏把窗口拉回前台时指针可能不产生 mousemove：不补这一次，
+    // 右上角按钮会停在 pointer-events:none，那片区域的点击穿透到卡片上。
+    const main = readFileSync(new URL('../main.ts', import.meta.url), 'utf-8');
+    expect(main).toContain("window.addEventListener('focus', revealChrome)");
+    expect(main).toContain("document.addEventListener('mouseenter', revealChrome");
   });
 });

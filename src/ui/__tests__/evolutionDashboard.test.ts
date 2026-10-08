@@ -807,8 +807,11 @@ describe('renderArchivedRolesSection（13.2 归档）', () => {
     // 证据进 title/内容：只说「已归档」等于让用户自己去找原因。
     expect(html).toContain('17%');
     expect(html).toContain('data-evo-restore-role="researcher_focused"');
-    // 彻底删掉走「删文件即消失」的设计口径，不新增递归删除的宿主命令。
-    expect(html).toContain('~/.pure/subagents/researcher_focused.json');
+    // 「不想留」也是一颗按钮，不是一句「请自己去翻 ~/.pure/subagents/」。
+    // 只给恢复而让删除停在文案里，等于把「彻底不留」做成一个口头承诺。
+    expect(html).toContain('data-evo-delete-role="researcher_focused"');
+    // 删除的边界要写在行内：丢的是 manifest 与旁挂账，没收割样本。
+    expect(html).toContain('~/.pure/roles/');
     expect(html).toContain('3 天前');
   });
 

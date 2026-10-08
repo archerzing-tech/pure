@@ -99,16 +99,12 @@ if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
     || { echo "✘ CLI SIDECAR: build/copy failed; aborting（设置 PURE_SKIP_CLI_SIDECAR=1 可跳过）"; exit 1; }
 fi
 
-# ── Gateway bundle（绝对兜底）─────────────────────────────────────────────
-# 产一个独立可跑的网关 bundle 进资源面：gateway_start 找不到 CLI 二进制时，
-# 用系统 Bun 直接跑这个文件——不依赖 NSIS 打包成功，只要装了 Bun 就能用。
-if [[ "${PURE_SKIP_CLI_SIDECAR:-0}" != "1" ]]; then
-  echo ""
-  echo "▶ GATEWAY BUNDLE: bun build → resources/gateway-bundle.ts"
-  bun build src/cliChannels.ts --outfile src-tauri/resources/gateway-bundle.ts --target bun \
-    && echo "✔ gateway bundle produced" \
-    || { echo "✘ GATEWAY BUNDLE failed (non-fatal — CI/CLI sidecar still available)"; }
-fi
+# 2026-10-07 删掉了这里的「GATEWAY BUNDLE」步骤（bun build src/cliChannels.ts →
+# resources/gateway-bundle.ts）：那是一层从未生效的假兜底——cliChannels.ts 是
+# 模块不是入口，跑起来什么也不做；gateway_start 也从没读过那个文件。真正的
+# 兜底是上面这个 CLI 侧车，以及 gateway_start 里「找不到 CLI 就用 Bun 跑内联
+# 最小网关脚本」那条路。留着一层看起来有、实际没有的保底，是这次 Windows
+# 事故里最贵的一课。
 
 bun run sign:mac
 

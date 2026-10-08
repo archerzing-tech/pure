@@ -23,6 +23,7 @@ import { t, updateLanguage } from '../shared/i18n';
 import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { promptObservability } from '../shared/promptObservability';
+import { allRoleNames } from './delegableRoles';
 import { workspaceBase } from '../shared/paths';
 import { loadSession, loadSessionList, loadSessionStatsForList, flushSessionSaves, saveSessionWorkspace, type SessionMeta, type SessionStats, type TurnTiming } from './store';
 import type { Language as I18nLanguage } from '../shared/i18n';
@@ -167,7 +168,13 @@ sessionSidebar = new SessionSidebar({
   delegationNotice: async (sessionId) => {
     if (!isTauriRuntime()) return null;
     try {
-      const summary = await tauriInvoke<{ delegationCount?: number; byRole?: Record<string, number> }>('summarize_session_delegations', { sessionId });
+      // 角色名单从这里传进去：Rust 侧那份是缺省兜底（内建七角色），而生成角色
+      // 落进 `~/.pure/subagents/` 后同样可委派、同样是「删了会丢的原料」。
+      // 用盘上全量名单（含已归档——它们的委派就在存档里，照样收得回）。
+      const summary = await tauriInvoke<{ delegationCount?: number; byRole?: Record<string, number> }>(
+        'summarize_session_delegations',
+        { sessionId, roles: await allRoleNames() },
+      );
       const count = summary?.delegationCount ?? 0;
       if (count <= 0) return null;
       const detail = Object.entries(summary?.byRole ?? {})
@@ -787,13 +794,21 @@ function deferToIdle(fn: () => void): void {
   const appShell = document.getElementById('main');
   if (appShell) {
     let hideChromeTimer: ReturnType<typeof setTimeout> | undefined;
-    document.addEventListener('mousemove', () => {
+    const revealChrome = (): void => {
       if (hideChromeTimer) {
         clearTimeout(hideChromeTimer);
         hideChromeTimer = undefined;
       }
       appShell.classList.add('window-hover');
-    }, { passive: true });
+    };
+    document.addEventListener('mousemove', revealChrome, { passive: true });
+    // 「鼠标在窗口里」不总会产生 mousemove：Alt+Tab / 点任务栏把窗口拉回前台时
+    // 指针可能就停在窗口内却没有任何移动事件，window-hover 便一直缺失——右上角
+    // 设置按钮停在 pointer-events:none，那片区域的点击穿透到子 agent 卡片上
+    // （2026-10-07 用户报「设置按钮被卡片遮住、点不动」）。鼠标真正进入视图、
+    // 以及窗口重新获得焦点，都算「人在窗口前」，补上这两个信号。
+    document.addEventListener('mouseenter', revealChrome, { passive: true });
+    window.addEventListener('focus', revealChrome);
     document.documentElement.addEventListener('mouseleave', () => {
       if (!hideChromeTimer) {
         hideChromeTimer = setTimeout(() => {

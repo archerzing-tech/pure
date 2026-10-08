@@ -686,15 +686,17 @@ export function renderArchivedRolesSection(items: readonly ArchivedRoleView[], n
   }
   const rows = items.map(({ role, reason, archivedAt }) => {
     const since = archivedAt ? relativeTime(archivedAt, now) : '—';
-    // 恢复与删除的分工写进行内：重新启用是本门提供的动作（一段新试用期），
-    // 彻底删掉走「删文件即消失」的设计口径（手删），不新增递归删除的宿主命令。
-    const howto = t('evolution.archivedRoles.howto', '重新启用会让它从头开始一段新的试用期；不想留就删掉 ~/.pure/subagents/{file}。')
-      .replace('{file}', `${role}.json`);
+    // 恢复与删除的分工写进行内：重新启用给一段新试用期，彻底删掉走
+    // `deleteGeneratedRole`（manifest + 旁挂账）。此前这里只有恢复一颗按钮，
+    // 「不想留」只出现在这行文案里——等于把删除做成一个需要用户自己去翻
+    // `~/.pure/subagents/` 的口头承诺，而这一节本来就是为「不用手工翻目录」而存在。
+    const howto = t('evolution.archivedRoles.howto', '重新启用会从头开始一段新的试用期；彻底删除只删 manifest 与旁挂账，已收割的样本留在 ~/.pure/roles/ 不动。');
     return `<div class="evo-experience-row">
       <div class="evo-experience-head">
         <span class="memory-badge memory-badge-type memory-type-error_pattern">${escapeHtml(toolDisplayName(role))}</span>
         <span class="memory-badge evo-badge-low">${escapeHtml(t('evolution.archivedRoles.badge', '已归档'))}</span>
         <button type="button" class="evo-advice-apply-btn" data-evo-restore-role="${escapeHtml(role)}" title="${escapeHtml(t('evolution.archivedRoles.restoreTitle', '让它重新进入试用期，从头攒样本'))}">${escapeHtml(t('evolution.archivedRoles.restore', '重新启用'))}</button>
+        <button type="button" class="evo-advice-apply-btn evo-role-delete-btn" data-evo-delete-role="${escapeHtml(role)}" title="${escapeHtml(t('evolution.archivedRoles.deleteTitle', '删掉 manifest 与旁挂账，它不会再出现在可委派面里'))}">${escapeHtml(t('evolution.archivedRoles.delete', '彻底删除'))}</button>
       </div>
       <div class="evo-experience-content">${escapeHtml(reason ?? t('evolution.archivedRoles.noReason', '（没有留下归档理由）'))}</div>
       <div class="evo-experience-meta">${escapeHtml(howto)} · ${escapeHtml(since)}</div>

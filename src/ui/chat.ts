@@ -15,6 +15,7 @@ import { memoryStore } from './memoryStore';
 import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
+import { promptObservability } from '../shared/promptObservability';
 import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
@@ -4542,6 +4543,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         projectPath: effectiveWorkspace || undefined,
         workspaceAvailable: Boolean(effectiveWorkspace),
         promptAssembler,
+        // T1 — 观测层只在「知道哪些工具名是角色」时才写 `delegations[]`
+        // （PromptObservability.isDelegationRole），而这个判断是 CodingAgent 从
+        // `config.observability` 装上去的。GUI 一直没传这个键，于是原本写在这里的
+        // 一句 `config.observability?.setDelegationRolePredicate(...)` 整体静默
+        // no-op：真机 32 条 agent_run 记录里 delegations 出现 0 次，设置页的成本
+        // 视图（T4）因此永远读空，13.2 的试用制裁决也没有结局可读。这里补的就是
+        // 那个键——与 main.ts 挂持久化 sink 的是同一个单例，GUI 的记账直接落 JSONL。
+        observability: promptObservability,
         promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),

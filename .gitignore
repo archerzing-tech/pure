@@ -19,4 +19,7 @@ public/
 # 本地体检/回放脚本的临时产物与工作区（scripts/tmp-*.ts 的 --out 默认落点、
 # coding-testset 的 python venv 与 workspace），不该进版本库。
 tmp/
-src-tauri/binaries/
+# CLI 侧车构建产物。README 占位必须留在版本库里：tauri 的 resources glob
+# `binaries/*` 匹配不到任何文件时整个构建失败，当初就是这么丢掉侧车递送的。
+src-tauri/binaries/*
+!src-tauri/binaries/README.md

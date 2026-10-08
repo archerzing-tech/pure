@@ -61,6 +61,14 @@ mock.module('../../shared/tauri', () => ({
         writes.push({ path: String(args?.path ?? ''), content: String(args?.content ?? '') });
         files[String(args?.path ?? '')] = String(args?.content ?? '');
       }
+      if (cmd === 'remove_path') {
+        // 真命令（lib.rs remove_path）对不存在的路径返回 Ok，不是报错：删除侧
+        // 因此不需要先探一次存在，旁挂账可缺也照删。
+        const path = String(args?.path ?? '');
+        if (files[path] === undefined) return 'Path already absent';
+        delete files[path];
+        return 'Removed';
+      }
       return undefined;
     },
   }),
@@ -651,6 +659,83 @@ describe('13.2 归档：隔离不删，且可重新启用', () => {
       ] as unknown as import('../../shared/promptObservability').PromptObservation[];
       const badges = mod.buildTrialBadges(await mod.loadGeneratedRoles(), records, NOW);
       expect(badges['researcher_focused'].label).toBe('试用中 · 0/5 次');
+    });
+  });
+});
+
+describe('13.2 归档：彻底删除是一颗按钮，不是一句文案', () => {
+  function setEvolution(on: boolean): void {
+    evolution = on;
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: on } });
+    invalidateConfigCache();
+  }
+
+  it('删掉 manifest 与旁挂账，下一次扫描就看不见它了', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      setEvolution(true);
+      files['subagents/researcher_focused.json'] = sources[0].text;
+      files['subagents/researcher_focused.trial.json'] = JSON.stringify({ status: 'archived', archivedAt: NOW });
+      // 先扫一遍：让缓存里有它，这样才能证明删除自己失效了缓存（否则"没了"
+      // 可能只是碰巧没扫过）。
+      expect((await mod.loadGeneratedRoles()).map((e) => e.def.name)).toContain('researcher_focused');
+
+      expect(await mod.deleteGeneratedRole('researcher_focused')).toBe(true);
+      expect(files['subagents/researcher_focused.json']).toBeUndefined();
+      expect(files['subagents/researcher_focused.trial.json']).toBeUndefined();
+      // 样本目录故意不动：删 manifest 不是对证据的表态。
+      sources = [];
+      expect((await mod.loadGeneratedRoles()).some((e) => e.def.name === 'researcher_focused')).toBe(false);
+    });
+  });
+
+  it('盘上没有这个角色 → 返回 false，且一条删除命令都不发', async () => {
+    await withFreshModule(async (mod) => {
+      setEvolution(true);
+      expect(await mod.deleteGeneratedRole('researcher_focused')).toBe(false);
+      expect(calls).not.toContain('remove_path');
+    });
+  });
+
+  it('守红线：开关关着 / 名字不合法 / 撞内建工具名，一条命令都不发', async () => {
+    await withFreshModule(async (mod) => {
+      files['subagents/researcher_focused.json'] = manifest('researcher_focused').text;
+      setEvolution(false);
+      expect(await mod.deleteGeneratedRole('researcher_focused')).toBe(false);
+      setEvolution(true);
+      for (const bad of ['../escape', '', 'UPPER', 'execute_command', 'researcher']) {
+        calls.length = 0;
+        expect(await mod.deleteGeneratedRole(bad)).toBe(false);
+        expect(calls).not.toContain('remove_path');
+      }
+      // 对照：合法名字确实会发命令，所以上面那条不是因为全都拒绝。
+      expect(await mod.deleteGeneratedRole('researcher_focused')).toBe(true);
+      expect(calls).toContain('remove_path');
+    });
+  });
+});
+
+describe('生成角色解得进 overlay 入口', () => {
+  it('findRoleDefinition 先认内建，再认盘上的生成角色', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      expect((await mod.findRoleDefinition('researcher'))?.name).toBe('researcher');
+      // 只查内建名单时这里返回 undefined，按钮于是必报「无效角色」——
+      // 而渲染那颗按钮的建议卡，其角色面本来就已经含生成角色。
+      expect((await mod.findRoleDefinition('researcher_focused'))?.name).toBe('researcher_focused');
+      expect(await mod.findRoleDefinition('nobody_home')).toBeUndefined();
+    });
+  });
+
+  it('allRoleNames 含内建与生成角色，已归档的也算（它是盘上存在的合法目标）', async () => {
+    await withFreshModule(async (mod) => {
+      sources = [manifest('researcher_focused')];
+      files['subagents/researcher_focused.trial.json'] = JSON.stringify({ status: 'archived', archivedAt: NOW });
+      const names = await mod.allRoleNames();
+      expect(names).toContain('researcher');
+      expect(names).toContain('researcher_focused');
+      // 对照：可委派面把它排除在外，两份名单的差别就是归档的含义。
+      expect(await mod.loadDelegableRoleNames()).not.toContain('researcher_focused');
     });
   });
 });

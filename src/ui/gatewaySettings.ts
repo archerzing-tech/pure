@@ -263,7 +263,15 @@ export function renderGatewaySettings(host: HTMLElement): void {
       : s.pid_alive
         ? t('gateway.starting')
         : t('gateway.stopped');
-    if (channelsHint) channelsHint.textContent = s.channels.length > 0 ? s.channels.join(', ') : '—';
+    if (channelsHint) {
+      // 「网关在跑、一个通道都没接上」是最容易误判成正常的形态：进程活着、
+      // 端口也在应答，但没有任何平台连着（缺凭据时适配器会被跳过）。这里把
+      // 它明确标出来并指向该去哪里补——一个空列表读起来像「没事」（2026-10-07
+      // 真机：飞书/QQ 勾了但没填 appSecret，网关起来了却零通道）。
+      channelsHint.textContent = s.channels.length > 0
+        ? s.channels.join(', ')
+        : (s.running || s.pid_alive) ? t('gateway.noChannels') : '—';
+    }
     if (pidHint) pidHint.textContent = s.pid ? `pid ${s.pid} · ${t('gateway.since')} ${fmtTime(s.started_at)}` : '—';
     startBtn.disabled = busy || s.pid_alive;
     stopBtn.disabled = busy || !s.pid_alive;
@@ -284,18 +292,27 @@ export function renderGatewaySettings(host: HTMLElement): void {
     }
   }
 
-  startBtn.addEventListener('click', () => void run('gateway_start', t('gateway.logStarted')));
-  stopBtn.addEventListener('click', () => void run('gateway_stop', t('gateway.logStopped')));
+  startBtn.addEventListener('click', () => void run('gateway_start', t('gateway.logStarted'), 'up'));
+  stopBtn.addEventListener('click', () => void run('gateway_stop', t('gateway.logStopped'), 'down'));
   restartBtn.addEventListener('click', () => void runRestart());
   testBtn.addEventListener('click', () => void runTest());
 
-  async function run(cmd: string, done: string): Promise<void> {
+  async function run(cmd: string, done: string, target: 'up' | 'down'): Promise<void> {
     const core = await coreOf();
     if (!core || busy) return;
     setBusy(true);
     try {
-      apply(await core.invoke<GatewayStatus>(cmd));
-      log(done);
+      const s = await core.invoke<GatewayStatus>(cmd);
+      apply(s);
+      // 回执按真实状态给，不按命令返回给：命令返回 ≠ 网关起来了。此前无条件
+      // 打「已启动」，用户拿着这句去访问一个没人听的端口（2026-10-07 真机）。
+      // 停止方向反过来判：没在跑才算停成功。
+      const up = s.running || s.pid_alive;
+      if (target === 'up' ? up : !up) {
+        log(done);
+      } else {
+        log(`${t('gateway.logError')}: ${t('gateway.logNotReady')}`);
+      }
     } catch (err) {
       log(`${t('gateway.logError')}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -311,8 +328,13 @@ export function renderGatewaySettings(host: HTMLElement): void {
     try {
       // 2026-10-01：改走 Rust 侧 gateway_restart（原子命令——内含正确的
       // 停止→等端口释放→启动序列，且 Windows 侧 taskkill 语义已修）。
-      apply(await core.invoke<GatewayStatus>('gateway_restart'));
-      log(t('gateway.logRestarted'));
+      const s = await core.invoke<GatewayStatus>('gateway_restart');
+      apply(s);
+      if (s.running || s.pid_alive) {
+        log(t('gateway.logRestarted'));
+      } else {
+        log(`${t('gateway.logError')}: ${t('gateway.logNotReady')}`);
+      }
     } catch (err) {
       log(`${t('gateway.logError')}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

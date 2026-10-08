@@ -87,7 +87,7 @@ agent 复用插话分类器 + SteerInjected 同款机制；接力流水线是委
 | 子 agent 接力流水线（新） | 运行时 | ✅ 已落地（`a18a489`/`8d1fe0e`）：`engine/relayPipeline.ts` + `withRelaySchema` 给委派工具注入 relay 保留参数，模型同一条消息里声明串行依赖链 |
 | 6.4 MCP OAuth | 运行时（工具进口） | ✅ 已落地（`a394274`/`c2eecd1`/`bf5c4f5` 核心 + 传输 + 设置登录流） |
 | 阶段 13.1 建议一键应用 | 进化层→产物层 | ✅ 已落地（`5464580` 建议卡一键应用 + 回看效果） |
-| 阶段 13.2 子 agent 生成 | 进化层→产物层 | ✅ 已落地：装载半边 `7692991`（`~/.pure/subagents/` manifest）+ 生成半边 MVP `4a137e3`（确定性草稿）+ **完整版模型起草（2026-10-06，与 13.4 同款纪律）**；试用制准入采用「新角色以新名字注册、不替换旧角色」的形式（新角色同样进观测记账与建议卡） |
+| 阶段 13.2 子 agent 生成 | 进化层→产物层 | ✅ 已落地：装载半边 `7692991`（`~/.pure/subagents/` manifest）+ 生成半边 MVP `4a137e3`（确定性草稿）+ **完整版模型起草（2026-10-06，与 13.4 同款纪律）**；试用制准入采用「新角色以新名字注册、不替换旧角色」的形式。**（2026-10-07 更正）** 本条原文结尾写的是「新角色同样进观测记账与建议卡」，那是**错的**，且错了两层：① 三个观测切片（`subagentAdvisory` / `teamObservability` / `strategyEffect`）当时读的是硬编码的 8 个内建角色，生成角色的委派一条都进不了画像（已由可注入角色面 `c36f263` 修开）；② GUI 从未安装 T1 的 delegation predicate（`chat.ts` 构造 CodingAgent 的 config 里没有 `observability` 键），所以 `delegations[]` 全仓恒空——切片能注入也看不见东西。同批补齐的还有读取端三处（收割面 / Rust 计数 / overlay 入口）。本条至此才成立。 |
 | 阶段 13.3 persona overlay | 进化层→产物层 | ✅ 已落地：sleep-time 起草 + `REFLECT` 便宜通道（`47b7212`）+ 回退护栏 `f2897af`（落盘快照 / meta 标记回退 / 装载侧过滤） |
 | 阶段 13.4 工具生成 | 进化层→产物层 | ✅ 已落地：装载半边 `5c3d431`（`~/.pure/tools/<name>/TOOL.json`）+ 生成半边 `5d7dcf0`（procedure→工具固化全链路）+ sleep-time 自动触发 `87b43ce` |
 | 自进化飞轮首次转动 | 进化层 | ✅ 已落地（`cd638c0`）：真实样本收割 + overlay 首次 ALLOW 落盘 |

@@ -26,8 +26,26 @@ release summary when publishing (see `.github/workflows/release.yml`).
 **可观测与评测**
 - T4 成本视图（角色 × provider × model）、held-out 留出集（只观测不阻断）、reads 并发池上限
 
+**Windows gateway：点「启动」起不来（四条根因一次收掉）**
+- 候选表删掉 Windows 裸名 `pure.exe`：CreateProcess 按应用目录优先解析裸名，命中的是 GUI 自己——spawn 成功、网关没起；自体守卫用 cwd 相对 canonicalize，拦不住这条路
+- spawn 之后改「验收」：进程没起来/端口没应答就继续试下一个候选，被「假网关」挡死的 Bun 真兜底恢复可达
+- 删掉 Rust 内嵌「假网关」（无条件写锁 + 后台线程应答 200）：它把锁文件写成 GUI 自己的 pid，点「停止」= taskkill 自己，而界面显示「运行中」
+- 端口契约补齐第三态：未配置 webchat 时由极简应答器监听（此前网关健康却零端口，探针永远「连通性失败 (port 18790)」）
+- 顶层 `channels.enabled` 语义对齐：GUI 勾通道时同步写它，CLI 对历史配置容错（此前网关打印一行警告即退出）
+- CLI 侧车递送恢复（Windows/macOS 两侧 CI + `resources`/`binaries` 占位归位，装完即用）；gateway 相关子进程全部静默，不再闪终端窗
+- 顺带：运行中的网关若一个通道都没接上会明确标出（此前空列表读起来像「没事」），陈旧锁文件自愈
+
+**生成角色读取端补齐（审计取证：写入端做完、读取端没跟上）**
+- 委派记账恢复：构造 CodingAgent 的 config 从来没有 `observability` 键，`config.observability?.…` 于是整体静默 no-op；`delegations[]` 的写入闸就卡在那一个 predicate 上——真机 32 条 `agent_run` 里 `delegations` 出现 **0 次**，成本视图（T4）与 13.2 试用制裁决读的都是空数据
+- 收割面不再只认内建七角色：生成角色是能委派的，它的样本同样收得回来（此前样本源恒空 → `MIN_ROLE_CASES=5` 结构上永不满足）
+- 删除会话的「N 条委派存档」计数不再漏掉生成角色（此前 Rust 侧名单硬编码内建七角色，删除代价提示偏低）
+- overlay 入口不再只在内建名单里找角色：生成角色上不会再出现一颗点下去必报「无效」的按钮
+- 四处统一到「内建 ∪ 盘上真实角色面」，角色名单只留一份真相
+- 归档角色补上「彻底删除」（manifest + 旁挂账；已收割样本保留在 `~/.pure/roles/`）——此前「不想留」只写在行内文案里，等于让用户自己去翻目录
+
 **设计文档**
 - 五份设计稿的落地状态按 git 证据逐行重建（此前状态表落后半个月，已两次误导判断）
+- 更正 `multi-agent-self-evolving-architecture.md` 里「新角色同样进观测记账与建议卡」那条**已被推翻的断言**（它此前只在进度记录里更正过，设计稿漏改）
 
 ## v3.1.0
 

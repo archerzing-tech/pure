@@ -333,11 +333,23 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
   void renderAll();
 }
 
+/**
+ * 顶层 `enabled` 是 gateway 的总开关：`pure gateway` 在它为 false 时打印
+ * 「channels.enabled 为 false」后直接退出（src/cliChannels.ts）。而这个字段
+ * 只有 CLI 手写时会存在——GUI 一直只写通道级开关，于是用户勾了飞书/QQ，
+ * 网关照旧「未启动任何通道」立刻退出，设置页却报「已启动 + 连通性失败」
+ * （2026-10-07 Windows 真机）。写文件前按「任一通道启用」同步它。
+ */
+function syncChannelsEnabled(cfg: ChannelsFile): void {
+  cfg.enabled = Object.values(cfg.channels ?? {}).some((c) => c?.enabled === true);
+}
+
 async function updateChannelEntry(cfg: ChannelsFile, id: string, patch: (entry: NonNullable<ChannelsFile['channels']>[string]) => void): Promise<void> {
   cfg.channels = cfg.channels ?? {};
   const entry = cfg.channels[id] ?? {};
   patch(entry);
   cfg.channels[id] = entry;
+  syncChannelsEnabled(cfg);
   await writeChannelsFile(cfg);
 }
 

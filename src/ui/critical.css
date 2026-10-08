@@ -289,6 +289,11 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding: 48px 10px 20px;
+  /* Gap/padding must not swallow clicks — see the full rationale in styles.css
+     (the top padding is the strip that clears the floating settings button). */
+  pointer-events: none;
+}
+.agent-activity-rail > * {
   pointer-events: auto;
 }
 #chat {
