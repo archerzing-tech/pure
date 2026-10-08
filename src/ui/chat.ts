@@ -3,7 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
-import { abortPaused, isPauseAbort, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
+import { abortPaused, isPauseAbort } from '../shared/pauseSignal';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
@@ -30,9 +30,10 @@ import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinki
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
-import { describeTiming, formatInputDecision, needsClarification, isDestructiveAction, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
+import { describeTiming, formatInputDecision, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
+import { InterjectOrchestrator } from '../coding-agent/interjectOrchestrator';
 import { sanitizeSkillName } from './skillHub';
-import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type SteerRecipient, type InFlightBranch } from '../shared/steerTargeting';
+import { type SteerTarget } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { FoldInLedger } from '../coding-agent/foldInLedger';
@@ -42,7 +43,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, branchStopReceipt, cancelBeforeDispatchReceipt, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1574,13 +1575,9 @@ export class ChatController {
    *  shimmer that never stops reads as work still running. settleInterject
    *  Receipts() cashes them at exactly those moments. */
   private interjectReceiptRows = new Set<HTMLElement>();
-  /** 押账插话账已迁 RoundClosePlane（S2 第五刀）：holdInsert/hasHeldInsert。 */
-  /** Serializes mid-run insert classifications. A second insert typed while
-   * the first is still being judged must WAIT its turn — main.ts clears the
-   * input box the moment interject() is called, so dropping the call would
-   * lose the user's words for good. */
-  private insertClassificationChain: Promise<void> = Promise.resolve();
-  private dynamicInsertionCoordinator = new DynamicInsertionCoordinator();
+  /** 押账插话账已迁 RoundClosePlane（S2 第五刀）：holdInsert/hasHeldInsert。
+   * 插话分类编排已迁 InterjectOrchestrator（S2 第六刀）：interject() 入口、
+   * 序列化链、裁决序、思考窗寄存器。 */
   /** The LLM adapter for the current turn — interject() reuses it to classify
    * a mid-run insert (set by send(); null before first run). */
   private turnLlm?: import('../shared/types').LLMAdapter;
@@ -1606,8 +1603,8 @@ export class ChatController {
   /** 最近一次流活动的时间戳（引擎事件、规划叙述块都刷新它）。静看门狗据此
    * 分辨「真安静」与「活跃流式的 burst 间停顿」——后者不该弹空档卡。 */
   private lastStreamActivityAt = 0;
-  /** 插话重构 — steering channel into the RUNNING turn. classifyAndApplyInterject
-   * pushes here; the engine drains the queue at each THINK boundary (via
+  /** 插话重构 — steering channel into the RUNNING turn. 插话编排器（
+   * InterjectOrchestrator）的 steer 分支经动作缝入队; the engine drains the queue at each THINK boundary (via
    * takeSteerMessages) so the very next round reconciles the words mid-flight —
    * no abort, no replan. Leftovers after the turn ends fall back to a normal
    * send in the round-close dispatch (RoundClosePlane) so nothing typed is ever lost.
@@ -1691,6 +1688,78 @@ export class ChatController {
         : '队列：现在处理排下的那件。', false, false, 'info');
     },
     timer: (fn, ms) => window.setTimeout(fn, ms),
+  });
+  /** S2 第六刀（P3-2）— 插话分类编排住 InterjectOrchestrator（宿主无关，
+   * CLI/通道同接）：interject() 入口与序列化链、classifyAndApply 的裁决序
+   * （时机语义 → 置信门 → 思考窗吸收 → 五类分发）、1a 定向投递匹配 / 覆盖
+   * 去重 / 点名续跑的编排、思考窗寄存器五件。决策核不猜宿主状态——流态/
+   * 在飞/分支视图全部经读数缝注入；DOM（ack 行/回显/收执/队列卡）、LLM
+   * 产出（旁答/追问/计划思考）、铺排（折入框架/转向框架）与引擎把手
+   * （abort/真停支）经动作与投影缝留给宿主。ack 句柄不透明：这里给
+   * HTMLElement，通道宿主给什么都行。 */
+  private interjectOrchestrator = new InterjectOrchestrator({
+    decider: new DynamicInsertionCoordinator(),
+    delegation: this.delegationControl,
+    roundClose: this.roundClose,
+    isStreaming: () => this.isStreaming(),
+    isAborted: () => this.abortController?.signal?.aborted === true,
+    decideSignal: () => this.abortController?.signal,
+    decideLlm: () => this.judgeLlm ?? this.turnLlm ?? null,
+    insertionContext: (images) => this.buildInsertionContext(images),
+    hasDelegationInFlight: () => this.hasDelegationInFlight(),
+    runningBranches: () => this.agentActivities
+      .filter((item) => item.status === 'running')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet })),
+    stoppedBranches: () => this.agentActivities
+      .filter((item) => item.status === 'paused' || item.status === 'cancelled')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet })),
+    coveringCandidates: () => this.agentActivities
+      .filter((item) => item.status === 'running' || item.status === 'done')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet, status: item.status === 'running' ? 'running' as const : 'done' as const })),
+    branchLabel: (name, callId) => this.branchLabel(name, callId),
+    send: (text, images, displayText) => { void this.send(text, images, displayText); },
+    abort: (reason) => this.abortController?.abort(reason),
+    stopNamedBranch: (text, mode) => this.stopNamedBranch(text, mode),
+    steerRunningTurn: (text, images, ack, target, cancel) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel),
+    queueInterjectTask: (text, images, displayText) => this.queueInterjectTask(text, images, displayText),
+    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels),
+    answerMidrunQuestion: (text, images) => this.answerMidrunQuestion(text, images),
+    askMidrunClarification: (decision, text, images, ack) => this.askMidrunClarification(decision, text, images, ack as HTMLElement | null),
+    deferTimedInsert: (timing, text, images, displayText) => this.deferTimedInsert(timing, text, images, displayText),
+    createAck: () => {
+      const ack = this.addStatusBubble('插话处理中…', true, false);
+      const ackRow = ack.parentElement;
+      if (ackRow) this.interjectReceiptRows.add(ackRow);
+      return ack;
+    },
+    settleAck: (ack, text, keepPending, kind) => this.settleAck(ack as HTMLElement | null, text, keepPending, kind),
+    discardAckRow: (ack) => this.discardAckRow(ack as HTMLElement | null),
+    echoUser: (ack, displayText, images) => {
+      const bubble = this.addBubble('user', displayText, images);
+      // 回显插队到 ack 行前面——用户的话在前，宿主的收执在后（见
+      // placeEchoBeforeAck 注：末尾追加会让流式行把顺序冲乱）。
+      this.placeEchoBeforeAck(ack as HTMLElement | null, bubble);
+    },
+    logDecision: (decision, text) => {
+      // 架构评审 v2 A1（S1-2）— 插话裁决进会话事件日志（远端 digest 的「这句
+      // 被怎么处理了」一行）。
+      void getSessionEventSink(this.sessionId).append({
+        ts: Date.now(),
+        kind: 'insertion_classified',
+        actor: 'gui',
+        payload: {
+          kind: decision.kind,
+          action: decision.action,
+          via: decision.signals.via ?? null,
+          text: capEventText(text),
+        },
+      });
+      // 实时诊断（与协询器里的 recordInputDecision 同一份账）：设置页诊断区用来
+      // 回看，这里让「这条是谁定的」当场可见（控制台）——排查「怎么被正则截胡
+      // 了」时不必等回合结束。三个值：judge（裁决器）/ rule（正则快路径）/ net
+      //（字面安全网）。
+      console.info(`[pure] 插话决策 ${formatInputDecision(decision)} via=${String(decision.signals.via ?? 'judge')}`);
+    },
   });
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
    * routing is on: side-channel mid-run questions prefer the cheap model
@@ -2612,11 +2681,12 @@ export class ChatController {
     // 思考最新说到哪了（叙述尾——裁决器能自己看见叙述里的错误前提，比如
     // 把 jev 当成 JEPA，用户不纠正它也该看见）；思考期间已经并进来的补充
     // （连续插话不丢账）。
-    if (this.planPreflightActive) {
+    if (this.interjectOrchestrator.preflightWindowActive()) {
       parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');
-      if (this.preflightNarrationTail) parts.push(`思考最新说到：……${this.preflightNarrationTail}`);
-      if (this.pendingPreflightSupplements.length > 0) {
-        parts.push(`思考期间已并进来的补充：${this.pendingPreflightSupplements.map((s) => s.text).join('；')}`);
+      const narrationTail = this.interjectOrchestrator.preflightNarrationTailView();
+      if (narrationTail) parts.push(`思考最新说到：……${narrationTail}`);
+      if (this.interjectOrchestrator.pendingPreflightCount() > 0) {
+        parts.push(`思考期间已并进来的补充：${this.interjectOrchestrator.pendingPreflightView().map((s) => s.text).join('；')}`);
       }
     }
     if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
@@ -2649,54 +2719,11 @@ export class ChatController {
 
   /**
    * Handle a message the user typed while a turn is running (interrupt-and-
-   * insert). 插话重构 — 判定的依据从"相不相关"换成了"一个埋头干活的人听到
-   * 这句话会怎么处理"，只有两种情况值得停下手里的活：
-   *   - stop        → 用户叫停，结束当前任务（正则直判，不占分类往返）。
-   *   - goal-change → 方向被掀掉，停下并把这句话作为新指令重新出发。
-   * 其余全部不打断：
-   *   - steer   → 进引擎转向通道（takeSteerMessages），下一个 THINK 轮顺路
-   *               带上，手头的活继续干。
-   *   - question → 侧路回答一句，主循环毫无感知。
-   *   - task    → 阶段感知：委派还在飞 → 折入汇合轮（foldInScopeAddition，
-   *               先补这项再合并汇总，收尾核验没折入就转排队兜底）；
-   *               委派收齐 → 排队（RoundClosePlane 待办账），收尾后作为新任务启动。
-   *   - chatter → 收下即可，用户的话以自己的气泡上屏，不打扰干活的人。
-   * 分类不可用时保守按 steer 处理：话一定送到，活绝不推倒重来。
+   * insert). S2 第六刀：入口、序列化链与裁决序住 InterjectOrchestrator——
+   * 宿主只剩转发与 DOM 投影缝。语义注解（五类分发矩阵）见编排器模块头。
    */
   async interject(text: string, images: MessageImage[] = [], displayText = text): Promise<void> {
-    if (!text.trim()) return;
-    // Not mid-run → a normal send.
-    if (!this.isStreaming()) {
-      void this.send(text, images, displayText);
-      return;
-    }
-    // Serialize classifications instead of dropping concurrent inserts: the
-    // old insertInFlight early-return silently discarded any message typed
-    // while an earlier one was still being judged — and the caller has
-    // already cleared the input box, so those words were gone.
-    // The judge is an LLM round trip (seconds). During it the user's words
-    // are deliberately not on screen yet (the abort classes re-enter through
-    // send(), which renders its own bubble) — without an instant ack that
-    // window reads as dead air: you said something and nobody reacted. The
-    // ack is ONE pending status line that the final receipt REPLACES in
-    // place, so the transcript never shows two lines for one insert.
-    const ack = this.addStatusBubble('插话处理中…', true, false);
-    const ackRow = ack.parentElement;
-    if (ackRow) this.interjectReceiptRows.add(ackRow);
-    const run = this.insertClassificationChain.then(() => this.classifyAndApplyInterject(text, images, displayText, ack));
-    // A rejected link must never poison the chain for later inserts.
-    this.insertClassificationChain = run.catch(() => {
-      this.settleAck(ack, '未能处理这句插话；请重新发送。');
-    });
-    await run;
-  }
-
-  /** 出生前取消的收执：能从原话里点出被收掉的话题就点名（与停支收执带
-   * 「${stopped}」同一人味，2026-09-26 用户实测反馈固定话术里「这项」是
-   * 空的），提不出再退回「这项」的说法——不装懂。 */
-  private settleCancelBeforeDispatchAck(ack: HTMLElement | null, text: string): void {
-    const topic = cancelReceiptTopic(text);
-    this.settleAck(ack, cancelBeforeDispatchReceipt(topic));
+    await this.interjectOrchestrator.interject(text, images, displayText);
   }
 
   /** 插话临时回执的直接退场：行摘掉的同时账上销账。此前各路径只
@@ -2799,327 +2826,6 @@ export class ChatController {
     this.interjectReceiptRows.clear();
   }
 
-  /** One link of the interject chain: runs only after every earlier insert has
-   * been judged. Re-checks isStreaming() because an earlier stop/goal-change
-   * aborts the turn — by the time this link runs, the insert may belong to a
-   * fresh send instead. */
-  private async classifyAndApplyInterject(text: string, images: MessageImage[], displayText: string, ack: HTMLElement | null): Promise<void> {
-    if (!this.isStreaming()) {
-      // The turn is over; a normal send renders the user's own bubble, so the
-      // provisional ack would only orphan a promise nobody keeps.
-      this.discardAckRow(ack);
-      void this.send(text, images, displayText);
-      return;
-    }
-    // Steer / question / chatter never re-render the user's words later, so the
-    // echo here is the only chance for the transcript to show who said what.
-    // The abort classes (goal-change / premise-change) are the exception: their
-    // insert is HELD and re-enters through send(), which renders the bubble as
-    // the fresh turn's opening line — echoing here too made the same message
-    // appear twice (user-reported). The status label carries the instant
-    // feedback while the abort drains.
-    const echoUserBubble = (): void => {
-      const bubble = this.addBubble('user', displayText, images);
-      // 回显插队到 ack 行前面——用户的话在前，宿主的收执在后（见
-      // placeEchoBeforeAck 注：末尾追加会让流式行把顺序冲乱）。
-      this.placeEchoBeforeAck(ack, bubble);
-    };
-    // 分类器不可用（turnLlm 还没立起来）也照走 decide(null)：协调器的兜底
-    // 是字面安全网（netVerdict——推翻重开/收活折入/其余排队）——话绝不因
-    // 没有裁决器而失踪。决策本身不看关键词（2026-09-28 用户定调）：时机
-    // ×内容×结果收益的综合判断全在裁决器（上下文带着当前阶段与思考叙述）。
-    // 裁决走 judgeLlm（关暗推理）而不是 turnLlm：见 judgeLlm 的字段注——开着
-    // 思考时 8s 预算几乎必然超时，判定会整批落到字面安全网。turnLlm 是兜底
-    // （judgeLlm 没立起来时它至少让 decide 拿到一个 llm）。
-    const decision = await this.dynamicInsertionCoordinator.decide(this.judgeLlm ?? this.turnLlm ?? null, this.buildInsertionContext(images), { text, images, displayText }, this.abortController?.signal);
-    // 架构评审 v2 A1（S1-2）— 插话裁决进会话事件日志（远端 digest 的「这句
-    // 被怎么处理了」一行）。
-    void getSessionEventSink(this.sessionId).append({
-      ts: Date.now(),
-      kind: 'insertion_classified',
-      actor: 'gui',
-      payload: {
-        kind: decision.kind,
-        action: decision.action,
-        via: decision.signals.via ?? null,
-        text: capEventText(text),
-      },
-    });
-    // 实时诊断（与协询器里的 recordInputDecision 同一份账）：设置页诊断区用来
-    // 回看，这里让「这条是谁定的」当场可见（控制台）——排查「怎么被正则截胡
-    // 了」时不必等回合结束。三个值：judge（裁决器）/ rule（正则快路径）/ net
-    //（字面安全网）。
-    console.info(`[pure] 插话决策 ${formatInputDecision(decision)} via=${String(decision.signals.via ?? 'judge')}`);
-    if (this.abortController?.signal?.aborted) {
-      // The turn was hard-stopped while we were classifying — don't drop the
-      // insert; queue it so it still runs as a task. The queue card that
-      // queueInterjectTask renders is the receipt; the provisional ack would
-      // only duplicate it.
-      this.discardAckRow(ack);
-      this.queueInterjectTask(text, images, displayText);
-      return;
-    }
-    // 输入级时间语义先于 kind 生效：这句话自己报了执行时刻，那它现在就不该被
-    // 执行——不管分类器把它读成什么（stop 除外：停是立即的，timing 恒为 now）。
-    // 少了这一步，"下午三点再跑一遍"会被当成当场追加的活跑掉。
-    if (decision.timing.mode === 'at' && this.deferTimedInsert(decision.timing, text, images, displayText)) {
-      this.discardAckRow(ack);
-      return;
-    }
-    // 置信门在这里兑现（此前门只改写决策、分发按 kind 照走——低置信的
-    // goal-change 照样拆任务，"问而不赌"从未发生）：分类器明确报告没把握、
-    // 且原判定是破坏性的（停/重开），先把问题问出来，手头的活照跑。不破坏的
-    // 误判自己能愈（排队晚点跑、旁答只答一次），照旧分发，不拿问题烦人。
-    const gatedFrom = decision.signals.gatedFrom;
-    if (needsClarification(decision) && typeof gatedFrom === 'string' && isDestructiveAction(gatedFrom as InputAction)) {
-      this.settleAck(ack, '这句判定没把握，先问你一句…', true);
-      echoUserBubble();
-      void this.askMidrunClarification(decision, text, images, ack);
-      return;
-    }
-    // 思考窗吸收（2026-09-27 定调、2026-09-28 jev 纠错案例扩容）：预检思考
-    // 还活着时，四类话都是"正在想的这件东西本身要变"——不排队、不广播、
-    // 也不许拆回合，全部并进请求推倒重想：
-    // ① 加内容/约束（supplements_current，"背景加云""诗句要有明月"）；
-    // ② 事实纠错（premise-change，"你对 jev 的理解是错的，它是 9 月新发布
-    //    的模型"——旧思考建立在错事实上，继续想全白费；而 premise-change
-    //    原路是拆回合重入，思考期原请求还没落账，新回合只剩纠错这一句，
-    //    要重做的事反而丢了）；
-    // ③ 方向推翻（goal-change，思考期"推翻重来" = 带着新方向重想，同一
-    //    理由不拆回合）；
-    // ④ 窗内普通 steer 一律吸收：窗内没有别的活在跑，steer 的"下个动作
-    //    带上"唯一兑现点就是在飞的思考本身——落 pendingSteers 只会等到
-    //    思考完、计划定型后才被看见（jev 案例的直因）。
-    // 取消/停支/续支不是加内容，不吸收照走各自的路；task（第二件活）照旧
-    // 排队；停/问/寒暄照旧。
-    if (this.planPreflightActive
-      && (decision.kind === 'steer'
-        || decision.kind === 'premise-change'
-        || decision.kind === 'goal-change'
-        || (decision.kind === 'task' && decision.signals.supplementsCurrent === true))
-      && decision.signals.cancelsPart !== true
-      && decision.signals.branchStop !== true
-      && decision.signals.resumesBranch !== true) {
-      echoUserBubble();
-      this.pendingPreflightSupplements.push({ text, images });
-      this.preflightRestartRequested = true;
-      this.preflightAbort?.abort();
-      const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
-      this.settleAck(ack, isCorrection
-        ? '已按纠正重构思路，重新规划…'
-        : '已并入补充，重新规划…');
-      return;
-    }
-    switch (decision.kind) {
-      case 'stop':
-        // 这条可能来自正则快路径（"停止""停下"——字面命令）也可能来自裁决
-        // 器的 stop 档（"先缓一缓""这个就到这儿"——正则覆盖不到的软停）。
-        // 两条路落到同一个分支，因为要做的事一样：停手，不重排。
-        // 整树停不重入 send()（没有 held insert），用户的原话不会在别处上屏
-        // ——补上回显，别让转写里只剩 pure 的一句话（插话没有回执时 transcript
-        // 必须仍能对上「谁说了什么」）。
-        echoUserBubble();
-        this.settleAck(ack, '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
-        this.abortController?.abort();
-        return;
-      case 'goal-change':
-        // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
-        // 先回显再重入 = 同一句话上两遍。
-        this.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-        this.settleAck(ack, '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
-        this.abortController?.abort();
-        // Same late-classification hazard as queueInterjectTask: if the turn
-        // already finished while we were judging, no finalize will dispatch
-        // the held insert — re-arm the deferred dispatch here.
-        if (!this.isStreaming()) this.roundClose.scheduleDispatch();
-        return;
-      case 'premise-change': {
-        // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
-        // 下去全是白跑——先止损。
-        // 2026-09-29 用户反馈重构（三路调研 + "现在的年份是2026年9月"案例）：
-        // 旧实现裸 abort 整树，在飞支被结算成 success:false 的假失败——重入
-        // 回合的模型看见三个失败，不敢再派 agent，降级成自己派工具。现在：
-        // ① 活动期整树走 PAUSE 原因 → 在飞支结算成「已暂停·进度已存档」
-        //   （灰 ⏸、success:true，checkpoint 照存），父模型看到的是可续跑
-        //   的事实，不是失败证据；
-        // ② held insert 在收尾派发点重入 → 新回合自主决策：从断点重派原
-        //   支（同参重派命中 checkpoint）、改派、换方案都由它按纠正后的
-        //   前提权衡——用户的插话被接纳后重决策，而不是整树报废。
-        // ③ 已收齐委派、无在飞可暂停时，维持旧路：直接重入（abort 对已
-        //   收尾的回合是 no-op，押账插话照常派发）。
-        this.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-        if (this.hasDelegationInFlight()) {
-          this.settleAck(ack, '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
-          this.abortController?.abort(PAUSE_ABORT_REASON);
-        } else {
-          this.settleAck(ack, '前提变了——按纠正后的事实重新来；已完成的不丢。', true, 'info');
-          this.abortController?.abort();
-        }
-        // Same late-classification hazard as queueInterjectTask: if the turn
-        // already finished while we were judging, no finalize will dispatch
-        // the held insert — re-arm the deferred dispatch here.
-        if (!this.isStreaming()) this.roundClose.scheduleDispatch();
-        return;
-      }
-      case 'steer': {
-        // 分支级继续（第 2 期第三刀）：点名把一支**已暂停/已停**的委派接着
-        // 跑完——用原始参数同参重派（稳定 sessionId 命中 checkpoint → 子引
-        // 擎 continue），排在停支/取消/普通 steer 之前（带点名锚的「接着跑」
-        // 比整树续跑、加活都具体）。点不出具体支或拿不到原参，落下去走普通
-        // steer——让父模型从上下文重派（旧会话的兜底，可能从头跑）。
-        if (decision.signals.resumesBranch === true) {
-          const resumed = this.resumeNamedBranch(text);
-          if (resumed) {
-            echoUserBubble();
-            // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
-            // 是终稿——转普通气泡（与停支/暂停收执同一形态）。
-            this.settleAck(ack, this.hasDelegationInFlight()
-              ? `续跑：「${resumed}」从存档断点继续；等手头这批收齐接上。`
-              : `续跑：「${resumed}」从存档断点继续。`);
-            return;
-          }
-        }
-        // 第 2 期分支中断：祈使式「停掉 X 那支」或取消型话里点得出具体支的
-        // ——真停那一支（abortBranch，产出不入账、断点照存），其余照跑。
-        // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
-        const stopish = decision.signals.branchStop === true || decision.signals.cancelsPart === true;
-        if (stopish && this.hasDelegationInFlight()) {
-          // 祈使「停掉那支」= 中止（判例 13 口径）；收掉一项「先停下」= 暂停
-          // （复测案例二口径：立即止损不烧完，活口比中止更大）。
-          const pause = decision.signals.branchStop !== true;
-          const stopped = this.stopNamedBranch(text, pause ? 'pause' : 'abort');
-          if (stopped) {
-            echoUserBubble();
-            // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
-            // 气泡（settleAck 终稿语义），不必等收尾扫除摘微光。
-            this.settleAck(ack, branchStopReceipt(stopped, pause ? 'pause' : 'abort'));
-            return;
-          }
-          // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
-          // 绝不能往下走 1a 广播：「停掉那支」广播给所有在飞支，每支都可能
-          // 把自己当成"那支"自己停（反向执行最伤，2026-09-24 取消案例同源）。
-          // 折入只守汇报步；同回合父若再为这个话题派工，起飞闸（挂号簿）
-          // 在出生点拦下。
-          this.delegationControl.registerCancel(text);
-          this.foldInScopeAddition(text, images, displayText, false, ack, true);
-          return;
-        }
-        // 非取消、非停支的 steer 走 1a 定向投递：委派在飞时按点名找收件人
-        // ——点到某一支就直达那一支（其余照跑），没点名就广播给所有在飞的
-        // 活。委派不在飞时照旧：父引擎下个 THINK 边界顺路带上。
-        // 1a 定向投递：委派在飞时，用户的话按点名找收件人——点到某一支就
-        // 直达那一支（其余照跑），没点名就广播给所有在飞的活。委派不在飞
-        // 时照旧：父引擎下个 THINK 边界顺路带上。
-        if (stopish && !this.hasDelegationInFlight()) {
-          // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
-          // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
-          // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
-          // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
-          // （2026-09-28：这个窗口可能压根没有委派可派）。
-          echoUserBubble();
-          this.delegationControl.registerCancel(text);
-          this.steerRunningTurn(text, images, null, 'parent', true);
-          this.settleCancelBeforeDispatchAck(ack, text);
-          return;
-        }
-        echoUserBubble();
-        if (this.hasDelegationInFlight()) {
-          this.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false);
-        } else {
-          this.steerRunningTurn(text, images, ack, 'parent', false);
-        }
-        return;
-      }
-      case 'question':
-        // 回答气泡马上就来（旁路一次 LLM 调用），临时回执不再留行。
-        this.discardAckRow(ack);
-        echoUserBubble();
-        void this.answerMidrunQuestion(text, images);
-        return;
-      case 'task': {
-        // 取消不是活（2026-09-24 取消案例）：分类器把收掉一项判成 task 时，
-        // 只要它带上了 cancels_part，就绝不能走去重、排队或机械折入——排队
-        // 一个"取消"等于把它当活跑（反向执行），送去重会回出"已经在调研着
-        // 了"这种答非所问。
-        // 2026-09-28：宿主不再自己嗅关键词（CANCELISH_RE 已删），只看这个
-        // 契约字段。可靠性靠提示词的硬要求兑现——「即使判成 task 也必须报」
-        // ——而不是靠宿主当场猜措辞：一个句子在裁决器与宿主两边被读成相反的
-        // 两件事，就是两条反向执行的来路。
-        // 停支的闸 2026-09-28 起由契约字段驱动（adds_along），不再嗅关键词：
-        // 同一句里还要求加活的话——「B站那支别查了，再加一个爱奇艺」——永不
-        // 停支，因为停掉那支会把刚要求加进来的活一并杀掉，只取消折入。
-        // 停不了/点不到具体支按取消型 steer 折入；委派不在飞交给在跑的回合
-        // 自己消化。
-        const cancelish = decision.signals.cancelsPart === true;
-        if (cancelish) {
-          if (this.hasDelegationInFlight()) {
-            const stopped = decision.signals.addsAlong === true ? null : this.stopNamedBranch(text, 'pause');
-            if (stopped) {
-              echoUserBubble();
-              // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
-              this.settleAck(ack, branchStopReceipt(stopped, 'pause'));
-              return;
-            }
-            // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
-            this.delegationControl.registerCancel(text);
-            this.foldInScopeAddition(text, images, displayText, false, ack, true);
-            return;
-          }
-          // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
-          echoUserBubble();
-          this.delegationControl.registerCancel(text);
-          this.steerRunningTurn(text, images, null, 'parent', true);
-          this.settleCancelBeforeDispatchAck(ack, text);
-          return;
-        }
-        // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
-        // 经覆盖（「新增一个平台，爱奇艺」而爱奇艺那路正在跑），如实回「已
-        // 经在跑/已在汇总里」，不重复派也不折入——重复派一支是白烧算力还
-        // 污染汇总。只认区分性命中（1a 同款纪律）：打平认不出 = 宁可照旧
-        // 折入，绝不拿"可能重复"当理由吞用户的活。
-        const covered = this.findCoveringBranch(text);
-        if (covered) {
-          echoUserBubble();
-          const coveredName = this.branchLabel(covered.name, covered.callId);
-          // 去重回执是终稿（没有后续在途）——转普通气泡。
-          this.settleAck(ack, covered.status === 'done'
-            ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
-            : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
-          return;
-        }
-        // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
-        // 不进"当前任务完成后处理"的队列——那会先输出一份没有它的汇总。折入
-        // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
-        // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
-        if (this.hasDelegationInFlight()) {
-          this.foldInScopeAddition(text, images, displayText, true, ack, false); // scope 追加：机械执行
-        } else {
-          // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
-          this.discardAckRow(ack);
-          this.queueInterjectTask(text, images, displayText);
-        }
-        return;
-      }
-      case 'chatter':
-        // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
-        // 气泡已上屏，这就够了，别再打扰干活的人。临时回执也一并收走。
-        this.discardAckRow(ack);
-        echoUserBubble();
-        return;
-    }
-  }
-
-  /** 1a 定向投递 — 从 agentActivities（宿主唯一在飞账本，观测单向，不另立
-   * 注册表）取在飞分支视图，交给纯匹配器判断用户这句话点名了哪一支。返回
-   * 'all' = 没点名，按广播处理。 */
-  private matchSteerRecipient(text: string): SteerTarget {
-    const branches: InFlightBranch[] = this.agentActivities
-      .filter((item) => item.status === 'running')
-      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
-    const matched = matchInFlightBranch(text, branches);
-    return matched ? { branchCallId: matched.callId, branchName: matched.name } : 'all';
-  }
-
   /** 第 2 期分支中断（宿主半边）：从用户话里点名一支在飞委派并真停它。
    * 点名复用 1a 的区分词匹配器（只认只被一支含有的词，打平宁可不停）；
    * 匹配面 = 分支名 + 任务书片段（branchView 供数）——名字是代号，主题
@@ -3146,28 +2852,6 @@ export class ChatController {
     return stopped ? stopped.label : null;
   }
 
-  /** 分支级继续（第 2 期第三刀）：从用户话里点名一支**已暂停/已停**的委
-   * 派，用**原始参数**排队同参重派——稳定 sessionId 命中 checkpoint，子引
-   * 擎走 continue 而不是从头 run。点名复用 1a 区分词匹配器（只认只被一支
-   * 含有的词，打平宁可续不了也不赌）；候选 = 已暂停/已取消的支（在飞的支
-   * 走 steer，已完成的支结果已在汇总，无需重跑）。拿不到原始参数（旧会话/
-   * 非本会话捕获）返回 null，调用方落回普通 steer 让父模型重派。返回被续
-   * 支的展示名（含同名序号）。 */
-  private resumeNamedBranch(text: string): string | null {
-    const candidates: InFlightBranch[] = this.agentActivities
-      .filter((item) => item.status === 'paused' || item.status === 'cancelled')
-      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
-    const matched = matchInFlightBranch(text, candidates);
-    if (!matched) return null;
-    const original = this.delegationControl.delegationArgs.get(matched.callId);
-    if (!original) return null;
-    const label = this.branchLabel(matched.name, matched.callId);
-    // 排队同参重派：凭据与去重记账都在 plane（同一支只排一次）——重复点名
-    // 按「点不出」退回，调用方落回普通 steer。
-    if (!this.delegationControl.queueResume({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [] })) return null;
-    return label;
-  }
-
   /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的
    * 「researcher」指不清是哪一支，用户对不上号。只此一支时保持裸名——
    * 「researcher」本来就清楚，别添噪音。 */
@@ -3176,21 +2860,6 @@ export class ChatController {
     if (sameName.length <= 1) return name;
     const no = sameName.find((item) => item.callId === callId)?.instanceNo;
     return no ? `${name}·${no}号` : name;
-  }
-
-  /** 不重复做（2026-09-25 复测案例一）：这句加活是否已被某支覆盖。匹配面
-   * 与点名停同源（1a 区分词匹配器：名+角色+任务书片段，只认区分性命中），
-   * 范围扩到已收工的支（结果已经在汇总里的，同样不重派）。返回 null =
-   * 没认出覆盖，照旧折入/排队——宁可重复问一句，绝不吞用户的活。 */
-  private findCoveringBranch(text: string): { name: string; callId: string; status: 'running' | 'done' } | null {
-    const candidates = this.agentActivities
-      .filter((item) => item.status === 'running' || item.status === 'done')
-      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
-    const matched = matchInFlightBranch(text, candidates);
-    if (!matched) return null;
-    const hit = this.agentActivities.find((item) => item.callId === matched.callId);
-    if (!hit) return null;
-    return { name: hit.agentName, callId: hit.callId, status: hit.status === 'running' ? 'running' : 'done' };
   }
 
   /** 插话重构 — hand a remark to the RUNNING turn via the steering channel:
@@ -3265,11 +2934,10 @@ export class ChatController {
     // 判断全在收尾——这一层绝不冒噪音。preflightAbort 挂给吸收分支：插话
     // 要推倒重想时掐的就是这一条流。每轮新思考开局都清掉上一轮的重启请求
     // ——请求只对它打断的那条流有效，残留会把这个新 AbortController 的
-    // 超时/中止误认成重启。
+    // 超时/中止误认成重启。（在飞把手与重启请求、叙述尾寄存在编排器——
+    // S2 第六刀：吸收分支的置位面在那边。）
     const ac = new AbortController();
-    this.preflightAbort = ac;
-    this.preflightRestartRequested = false;
-    this.preflightNarrationTail = '';
+    this.interjectOrchestrator.beginPreflightThought(ac);
     const forwardAbort = (): void => ac.abort();
     this.abortController?.signal.addEventListener('abort', forwardAbort, { once: true });
     const timer = setTimeout(forwardAbort, PLAN_THINKING_TIMEOUT_MS);
@@ -3284,11 +2952,11 @@ export class ChatController {
     try {
       for await (const chunk of llm.stream(request, [], ac.signal)) {
         if (this.abortController?.signal.aborted) break;
-        if (ac.signal.aborted && this.preflightRestartRequested && !this.abortController?.signal.aborted) {
+        if (ac.signal.aborted && this.interjectOrchestrator.wasPreflightRestarted() && !this.abortController?.signal.aborted) {
           // 推倒重想：不是用户的停（回合信号没断），是吸收分支要重开构图掐的。
           // 已想出的内容整体作废——气泡一并收走（它的叙述建立在旧构图上，
           // 留着就是假账）——send() 用并账后的请求重开一轮。
-          this.preflightRestartRequested = false;
+          this.interjectOrchestrator.clearPreflightRestart();
           bubble?.remove();
           bubble = null;
           full = '';
@@ -3298,8 +2966,8 @@ export class ChatController {
           full += chunk.content;
           this.lastStreamActivityAt = Date.now();
           const live = liveNarrationPortion(full);
-          // 叙述尾实时保鲜：插话裁决的时机证据（见 preflightNarrationTail 注）。
-          this.preflightNarrationTail = live.trim().slice(-400);
+          // 叙述尾实时保鲜：插话裁决的时机证据（见编排器 preflightNarrationTail 注）。
+          this.interjectOrchestrator.setPreflightNarrationTail(live.trim().slice(-400));
           if (!bubble && live.trim()) {
             bubble = this.addBubble('assistant', '');
             bubble.classList.add('streaming');
@@ -3318,7 +2986,7 @@ export class ChatController {
     } finally {
       clearTimeout(timer);
       this.abortController?.signal.removeEventListener('abort', forwardAbort);
-      this.preflightAbort = null;
+      this.interjectOrchestrator.endPreflightThought();
       reveal();
     }
     const { narration, planText } = splitNarrationAndPlan(full);
@@ -3331,10 +2999,10 @@ export class ChatController {
       } else bubble?.remove();
       return null;
     }
-    if (ac.signal.aborted && this.preflightRestartRequested) {
+    if (ac.signal.aborted && this.interjectOrchestrator.wasPreflightRestarted()) {
       // 循环后兜底：重启请求落在流刚收尾的缝里（最后一块之后、返回之前），
       // 循环内没机会吃掉。同样整体作废，气泡收走，restart 哨兵让 send() 重开。
-      this.preflightRestartRequested = false;
+      this.interjectOrchestrator.clearPreflightRestart();
       bubble?.remove();
       return { narration: '', plan: null, restarted: true };
     }
@@ -3733,14 +3401,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 上一回合异常残留的押账叙述在这里作废：它的插入点（那一回合的用户消息）
     // 已经错过了，留着只会插进错误的回合（2026-09-27 时序修正）。
     this.pendingPlanNarration = null;
-    // 新回合开始：思考窗暂存与开关清零（上一回合没被 planByThinking 消化的
+    // 新回合开始：思考窗寄存器清场（上一回合没被 planByThinking 消化的
     // 补充在这里作废——它们的插入点错过了，别漏进这个回合的请求正文）。
     // 重启请求同理：它是发给上一条思考流的，流已不在；叙述尾也是。
-    this.pendingPreflightSupplements = [];
-    this.planPreflightActive = false;
-    this.preflightAbort = null;
-    this.preflightRestartRequested = false;
-    this.preflightNarrationTail = '';
+    this.interjectOrchestrator.resetPreflight();
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
@@ -4863,7 +4527,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           maybeShowAssessment();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
-          // 暂存（classifyAndApplyInterject 的吸收分支），同时置重启请求、掐掉
+          // 编排器的暂存（吸收分支），同时置重启请求、掐掉
           // 在飞的思考流。重启循环：暂存非空 = 有一句思考途中吸收的话没进构图
           // ——并进请求正文（【你在思考时补充】块，图随文走）重开一轮，连续
           // N 句就重启 N 轮，每轮都带着之前并好的全部补充（2026-09-27 用户
@@ -4871,13 +4535,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 暂停提交看到的都是同一段合并文本；补充是明文块不剥壳，回放也保得住
           // 用户原话。必须在 aborted 检查之前并：暂停路径提交的同样是合并后
           // 的文本。窗开着跨整段循环：吸收分支整个期间都能接住新插话。
-          this.planPreflightActive = true;
+          // （窗与暂存、重启请求、在飞把手都寄存在 InterjectOrchestrator——S2 第六刀。）
+          this.interjectOrchestrator.openPreflightWindow();
           let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
           try {
             for (;;) {
               thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
               if (this.abortController?.signal.aborted) break;
-              if ((this.pendingPreflightSupplements.length > 0 || thought?.restarted) && thought !== null) {
+              if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
                 userText = this.applyPreflightSupplements(userText, userImages);
                 this.addStatusBubble('已并入补充，重新规划…', false, false, 'info');
                 continue;
@@ -4885,7 +4550,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               break;
             }
           } finally {
-            this.planPreflightActive = false;
+            this.interjectOrchestrator.closePreflightWindow();
           }
           userText = this.applyPreflightSupplements(userText, userImages);
           if (this.abortController?.signal.aborted) {
@@ -7011,11 +6676,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.queueCardEl = null;
     // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求、在飞
     // 思考流的句柄与叙述尾同样作废。
-    this.pendingPreflightSupplements = [];
-    this.planPreflightActive = false;
-    this.preflightAbort = null;
-    this.preflightRestartRequested = false;
-    this.preflightNarrationTail = '';
+    this.interjectOrchestrator.resetPreflight();
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
@@ -7539,30 +7200,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     return narration ? { role: 'assistant', content: narration } : undefined;
   }
 
-  /** 思考窗吸收（2026-09-27 用户定调）：预检思考（planByThinking）还在流式
-   * 进行时，用户插话往**当前正在产出的那一件东西里**加内容（画小鸟时“背景
-   * 加几朵会动的云”）——这不是第二件活，是这一件的构图变了对。排队会把
-   * 一件事拆成两件（先画鸟、再单独补云）；正确动作是趁模型还在想，把话并
-   * 进请求一起想，第一版产出就带上。分类器给出 supplements_current 且预检
-   * 活着时，插话落到这里；planByThinking 返回时 applyPreflightSupplements
-   * 把它们并进引擎看到的请求正文。 */
-  private planPreflightActive = false;
-  private pendingPreflightSupplements: Array<{ text: string; images: MessageImage[] }> = [];
-  /** 推倒重想（2026-09-27 用户定调）：吸收到的补充不是"旧思考继续用"，约束
-   * 类的话（"诗句里一定要出现明月"）必须长进构图里——旧思考的构图没有它，
-   * 带着它继续想等于后贴。吸收分支置位 + 掐掉 planByThinking 在飞的那条流
-   * （preflightAbort），send() 的重启循环用并账后的请求从头再想；思考窗内
-   * 连续 N 句插话 = 重启 N 轮、每一轮都带着之前并好的全部补充。 */
-  private preflightAbort: AbortController | null = null;
-  private preflightRestartRequested = false;
-  /** 在飞思考的叙述尾（最近 ~400 个可见字符）：插话裁决的时机证据——裁决
-   * 器看到"思考最新说到……"才能自己发现叙述里的错误前提（jev 案例：用户
-   * 不说，它也该看见"jev≈JEPA"这个主张），而不是只会读用户的话。每轮
-   * 新思考开局清空（旧轮的尾巴对新轮是假证据）。 */
-  private preflightNarrationTail = '';
-
+  /** 思考窗吸收的五件寄存器（窗开关、暂存、在飞把手、重启请求、叙述尾）
+   * 已迁 InterjectOrchestrator（S2 第六刀）：吸收分支的置位面与 send() 的
+   * 重启循环经窄 API（openPreflightWindow/beginPreflightThought/take…
+   * 等）对接。并账消费（splice 语义）在这里：取走的补充并进请求正文。 */
   private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
-    const taken = this.pendingPreflightSupplements.splice(0);
+    const taken = this.interjectOrchestrator.takePreflightSupplements();
     if (taken.length === 0) return userText;
     for (const supplement of taken) userImages.push(...supplement.images);
     const block = taken.map((s) => `【你在思考时补充】${s.text}`).join('\n');

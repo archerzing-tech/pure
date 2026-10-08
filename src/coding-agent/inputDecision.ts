@@ -176,6 +176,40 @@ export function needsClarification(decision: InputDecision): boolean {
   return decision.action === 'clarify';
 }
 
+/**
+ * 思考窗吸收判据（S2 第六刀从 chat.ts classifyAndApplyInterject 的内联条件
+ * 下沉为纯函数；2026-09-27 定调、2026-09-28 jev 纠错案例扩容）：预检思考
+ * 还活着时，四类话都是"正在想的这件东西本身要变"——不排队、不广播、
+ * 也不许拆回合，全部并进请求推倒重想：
+ * ① 加内容/约束（task + supplements_current，"背景加云""诗句要有明月"）；
+ * ② 事实纠错（premise-change，"你对 jev 的理解是错的"——旧思考建立在错事
+ *    实上，继续想全白费；而 premise-change 原路是拆回合重入，思考期原请求
+ *    还没落账，新回合只剩纠错这一句，要重做的事反而丢了）；
+ * ③ 方向推翻（goal-change，思考期"推翻重来" = 带着新方向重想，同一理由
+ *    不拆回合）；
+ * ④ 窗内普通 steer 一律吸收：窗内没有别的活在跑，steer 的"下个动作带上"
+ *    唯一兑现点就是在飞的思考本身——落转向队只会等到思考完、计划定型后才
+ *    被看见（jev 案例的直因）。
+ * 取消/停支/续支不是加内容，不吸收照走各自的路；不带 supplements 的 task
+ * （第二件活）照旧排队；停/问/寒暄照旧。
+ */
+export function shouldAbsorbIntoThinkingWindow(
+  decision: {
+    kind: string;
+    signals: { supplementsCurrent?: boolean; cancelsPart?: boolean; branchStop?: boolean; resumesBranch?: boolean };
+  },
+  windowActive: boolean,
+): boolean {
+  return windowActive
+    && (decision.kind === 'steer'
+      || decision.kind === 'premise-change'
+      || decision.kind === 'goal-change'
+      || (decision.kind === 'task' && decision.signals.supplementsCurrent === true))
+    && decision.signals.cancelsPart !== true
+    && decision.signals.branchStop !== true
+    && decision.signals.resumesBranch !== true;
+}
+
 // ── Timing ────────────────────────────────────────────────────────────────
 // The classifier answers `when` with a loose string; the user's own text is the
 // fallback source. Parsing here (not in the prompt) keeps the clock arithmetic

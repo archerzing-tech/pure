@@ -964,7 +964,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: '云朵', cls: { kind: 'steer', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9, supplements_current: true } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true; // 预检思考（planByThinking）还在流式进行
+    h.chat.interjectOrchestrator.openPreflightWindow(); // 预检思考（planByThinking）还在流式进行
 
     await h.chat.interject('背景上加一些会动的云朵');
     // 回执走系统腔，不是排队的话术；队列卡绝不出现。
@@ -974,19 +974,19 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(h.chat.folds.entries()).toHaveLength(0);
     // 重启请求已挂号：send() 的重启循环看到它 + 暂存非空，就用并账后的
     // 请求重开一轮思考（约束长进构图里，不是旧思考上后贴）。
-    expect(h.chat.preflightRestartRequested).toBe(true);
+    expect(h.chat.interjectOrchestrator.wasPreflightRestarted()).toBe(true);
     // 用户原话上屏（转写对得上谁说了什么），临时回执不留状态行。
     expect(userJoined(h.root)).toContain('云朵');
     expect(statusJoined(h.root)).not.toContain('推倒');
 
     // 落进思考窗暂存，等 planByThinking 返回时并进请求正文。
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
     const merged = h.chat.applyPreflightSupplements('给我画一个动态的图片，图片内容是一只小鸟在天空飞翔', []);
     expect(merged).toContain('一只小鸟在天空飞翔');
     expect(merged).toContain('【你在思考时补充】背景上加一些会动的云朵');
     // 并账即清账：同一段补充不会并两次（引擎第一轮 + canonical 各看一遍是
     // 同一份合并文本，不是两次拼接）。
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
     expect(h.chat.applyPreflightSupplements('再来一句', [])).toBe('再来一句');
   });
 
@@ -997,13 +997,13 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: '云朵', cls: { kind: 'task', reason: 'scope addition, but INSIDE the current deliverable', confidence: 0.9, supplements_current: true } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('背景上加一些会动的云朵');
     expect(llm.classifyCalls.length).toBe(1);
     expect(queueCard(h.root)).toBeUndefined();
     expect(h.chat.roundClose.queueView()).toHaveLength(0);
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
     expect(assistantJoined(h.root)).toContain('已并入补充，重新规划');
   });
 
@@ -1015,10 +1015,10 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: '云朵', cls: { kind: 'steer', reason: 'removes one element', confidence: 0.9, cancels_part: true } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('云朵那个就不要了');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
     // 取消路照走：委派不在飞 → 起飞闸挂号 + 转达父引擎。
     expect(h.chat.delegationControl.pendingCancelCount()).toBe(1);
     expect(queueCard(h.root)).toBeUndefined();
@@ -1034,12 +1034,12 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: 'jev', cls: { kind: 'premise-change', reason: 'corrects a fact the plan is built on', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
     expect(assistantJoined(h.root)).toContain('已按纠正重构思路，重新规划…');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
-    expect(h.chat.preflightRestartRequested).toBe(true);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
+    expect(h.chat.interjectOrchestrator.wasPreflightRestarted()).toBe(true);
     // 不拆回合：重入通道没被占用、回合没被掐——思考流由重启请求掐，重开
     // 时带着原始请求 + 并账的纠正。
     expect(h.chat.roundClose.hasHeldInsert()).toBe(false);
@@ -1057,11 +1057,11 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: 'jev', cls: { kind: 'steer', reason: 'a correction to carry forward', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('你对jev的理解是错误的，jev是2026年9月新发布的模型');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
-    expect(h.chat.preflightRestartRequested).toBe(true);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
+    expect(h.chat.interjectOrchestrator.wasPreflightRestarted()).toBe(true);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
@@ -1072,11 +1072,11 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: '换个思路', cls: { kind: 'goal-change', reason: 'overturns the approach', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('换个思路，别做俄罗斯方块了，做贪吃蛇');
     expect(assistantJoined(h.root)).toContain('已按纠正重构思路，重新规划…');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(1);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
     expect(h.chat.roundClose.hasHeldInsert()).toBe(false);
   });
 
@@ -1091,7 +1091,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 的 finally 已把它关上。
 
     await h.chat.interject('背景上加一些会动的云朵');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
     expect(h.chat.steerBus.entries()).toHaveLength(1);
     expect(queueCard(h.root)).toBeUndefined();
   });
@@ -1103,10 +1103,10 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
       { match: '年报', cls: { kind: 'task', reason: 'a second, unrelated deliverable', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('顺便再帮我写一份 Q4 年报。');
-    expect(h.chat.pendingPreflightSupplements).toHaveLength(0);
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
     const card = queueCard(h.root);
     expect(card).toBeDefined();
     expect(card!.textContent).toContain('待办队列（1 件）');
@@ -1123,9 +1123,9 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(ctx).not.toContain('用户当前诉求：\n');
     // 思考窗开着时，分类器要知道手头的活是"正在想"——premise-change vs
     // steer 的时机判据就靠这一行（jev 纠错案例）。
-    h.chat.planPreflightActive = true;
+    h.chat.interjectOrchestrator.openPreflightWindow();
     expect(h.chat.buildInsertionContext([])).toContain('正在思考这个任务的规划');
-    h.chat.planPreflightActive = false;
+    h.chat.interjectOrchestrator.closePreflightWindow();
   });
 
   it('空闲即扫除：setStreaming(false) 自己触发派发——收尾代码断了队列也不丢', async () => {

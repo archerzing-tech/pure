@@ -17,6 +17,9 @@ import { SteerBus } from './coding-agent/steerBus';
 import { DelegationControlPlane } from './coding-agent/delegationControl';
 import { FoldInLedger } from './coding-agent/foldInLedger';
 import { RoundClosePlane } from './coding-agent/roundClosePlane';
+import { InterjectOrchestrator } from './coding-agent/interjectOrchestrator';
+import { DynamicInsertionCoordinator } from './coding-agent/DynamicInsertionCoordinator';
+import { steerFrameText } from './shared/insertionMessaging';
 import { compileExternalSubagents, isExternalSubagentManifest } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
@@ -339,6 +342,8 @@ export interface CliHarness {
    *  残差静默不派。 */
   folds: FoldInLedger;
   roundClose: RoundClosePlane;
+  /** S2 第六刀 — 插话分类编排暴露口（见构造处注释：休眠，插话输入路未接）。 */
+  interjectOrchestrator: InterjectOrchestrator;
 }
 
 async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): Promise<CliHarness> {
@@ -394,6 +399,44 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     reenter: () => {},
     narrateHandoff: () => {},
     timer: (fn, ms) => setTimeout(fn, ms),
+  });
+  // S2 第六刀 — 插话编排同接（比照 steerBus/roundClose 先例）：CLI 从此拥有
+  // 与 GUI 同一份五分类裁决序/序列化链/思考窗寄存器的实现。今天插话输入路仍
+  // 空着：宿主读数全部中性（流态恒 false、分支视图恒空、无 abort 把手），
+  // 动作缝里 delegation/roundClose/steerRunningTurn（进 steerBus）是真缝，
+  // send/abort/DOM 投影（ack/回显/收执）休眠——判定 LLM 未接（decideLlm 恒
+  // null 时 decide 走字面安全网，休眠下不会被调用）。远程通道宿主接插话输入
+  // 时，把这些缝换成真账即可；GUI 的 chat.ts 装配是权威参照。
+  const interjectOrchestrator = new InterjectOrchestrator({
+    decider: new DynamicInsertionCoordinator(),
+    delegation: delegationControl,
+    roundClose,
+    isStreaming: () => false,
+    isAborted: () => false,
+    decideSignal: () => undefined,
+    decideLlm: () => null,
+    insertionContext: () => '（当前任务）',
+    hasDelegationInFlight: () => false,
+    runningBranches: () => [],
+    stoppedBranches: () => [],
+    coveringCandidates: () => [],
+    branchLabel: (name) => name,
+    // send 缝休眠：cliRepl 没有单条消息入口（引擎整回合跑），插话输入路接通
+    // 时把这里换成通道宿主的真发送缝；空函数保证休眠期零副作用。
+    send: () => {},
+    abort: () => {},
+    stopNamedBranch: () => null,
+    steerRunningTurn: (text, images, ack, target, cancel) => steerBus.enqueue({ message: { role: 'user', content: steerFrameText(text, cancel), images }, target, displayText: text, images }),
+    queueInterjectTask: (text, images, displayText) => roundClose.queueTask({ text, images, displayText, ts: Date.now() }),
+    foldInScopeAddition: () => {},
+    answerMidrunQuestion: async () => {},
+    askMidrunClarification: async () => {},
+    deferTimedInsert: () => false,
+    createAck: () => null,
+    settleAck: () => {},
+    discardAckRow: () => {},
+    echoUser: () => {},
+    logDecision: () => {},
   });
   const createdTools = await createTools(
     args.workspace,
@@ -542,7 +585,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     gateDelegations: async (calls) => delegationControl.gate(calls, cliSubagentNames),
   });
 
-  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus, delegationControl, folds, roundClose };
+  return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus, delegationControl, folds, roundClose, interjectOrchestrator };
 }
 
 export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints, distillSkillFromMemory };
