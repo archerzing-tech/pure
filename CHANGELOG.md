@@ -3,6 +3,27 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v3.1.1-beta
+
+**双宿主全量测试集收官 + 产品核两 bug 修复 + 收割门结构断言化**
+
+alpha 之后：44 条 Agent 测试集在 CLI 全量 91 会话与 GUI 真壳 10 条精选两面跑完（零崩溃、红线零 FAIL），收割自洽门在真实数据首跑暴露的脆断言问题修掉。
+
+**测试抓出的产品核修复**
+- 空白输入不再炸提示词装配：fragment 空内容契约在装配层收口+占位符兜底（109a5bf）
+- 自动续跑的代劳「继续」不再在恢复的历史里冒充用户发言：internal 标记穿引擎轮入、落到存档，补运行时守卫（a866036、51609bc）
+
+**进化轨道**
+- P1-2 overlay 回退护栏收尾：CLI 判定/出卡/恢复面板三缝补齐，装载侧双层错位修复（d7c3de2）
+- P1-3 held-out 留出集建成：8+1 题，进化主张有了样本外读数（13036c7）
+- 收割自洽门改结构断言 + K 次多数票：措辞级断言在原文支撑预滤处毙掉（不再白烧 base 重跑），门跑 `--gate-runs` 次过半收录、与判定 LLM 抖动对冲（ede3c79）
+
+**控制面（S2 收官）**
+- 暂停宽限收口 upgradeToHardStop：暂停信号可升级硬停，控制面抽出七步完结（21435ac）
+
+**测试资产**
+- Agent 测试集三件套入库：44 条用例表 + CLI 回放器 + GUI 真壳驱动器（e0ad852）
+
 ## v3.1.1-alpha
 
 **13.2「编制」闭环 + 呈现去话术 + 停用门**
