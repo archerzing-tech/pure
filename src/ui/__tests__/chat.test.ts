@@ -80,6 +80,27 @@ describe('interruption reason classification', () => {
   it('keeps the engine budget wording for the exact engine reason', () => {
     expect(sanitizeInterruptedReason('Budget exceeded')).toContain('本轮预算上限');
   });
+
+  it('explains a context-window overflow in plain words and surfaces the provider line', () => {
+    // The field wedge: the provider 400 body said "maximum context length",
+    // but the old truncation regex showed only `400 bad request {` — cryptic.
+    const reason = `Context window exhausted: the conversation no longer fits the model's input window (2 consecutive provider rejections). Last: "400 bad request {"error":{"message":"This model's maximum context length is 65536 tokens. However, your messages resulted in 81234 tokens.","type":"invalid_request_error"}}". Retrying cannot shrink it.`;
+    const message = sanitizeInterruptedReason(reason);
+    expect(message).toContain('上下文超出模型窗口');
+    expect(message).toContain('maximum context length');
+    expect(message).not.toContain('invalid_request_error');
+  });
+
+  it('keeps the full provider body in an identical-call stop cause (no early quote/period truncation)', () => {
+    // extractFailureCause used to stop at the first quote/period inside the
+    // body — the same "400 bad request {" truncation. Lock the anchored
+    // extraction with a non-context body (context overflows take the
+    // dedicated branch above).
+    const raw = `5 consecutive failures of the identical call (tool: web_fetch): "400 bad request {"error":{"message":"field tools.0 is missing; see docs.example.com/help."}}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again.`;
+    const message = sanitizeInterruptedReason(raw);
+    expect(message).toContain('失败原因');
+    expect(message).toContain('tools.0 is missing');
+  });
 });
 
 describe('parseToolCallBuffer', () => {
@@ -313,7 +334,9 @@ describe('send feedback timing', () => {
     const afterLoad = src.indexOf('private preCompactAfterLoad');
     expect(afterLoad).toBeGreaterThan(-1);
     expect(src.indexOf("BASE_SYSTEM_PROMPT(!!(this.effectiveWorkspace || this.workspace))", afterLoad)).toBeGreaterThan(afterLoad);
-    expect(src.indexOf('estimateTextTokens(', afterLoad)).toBeGreaterThan(afterLoad);
+    // 廉价闸与压缩器共用同一估算出处（ContextEngine.estimateTokens）——
+    // 只数正文不数工具参数的旧闸曾在长任务上错误豁免预压缩。
+    expect(src.indexOf('estimateTokens(compactionInput)', afterLoad)).toBeGreaterThan(afterLoad);
     const scheduler = src.indexOf('private scheduleBackgroundPreCompaction');
     expect(scheduler).toBeGreaterThan(afterLoad);
     const factory = src.indexOf('() => new ContextEngine({', afterLoad);

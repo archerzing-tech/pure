@@ -116,6 +116,20 @@ export class DefaultFailurePolicy implements FailurePolicy {
       };
     }
 
+    // ── Context-window overflow: structural, not transient ──
+    // A provider 400 saying the conversation no longer fits the input window
+    // cannot be retried into success — every injected retry/reflect directive
+    // (a user-role message that DOES go on the wire) makes the next request
+    // strictly larger. One repeat is enough to stop: grinding the usual
+    // 8-failure ladder burned tokens and wedged the session against "继续"
+    // (every new turn re-entered trim with the same overweight transcript).
+    if (lastClass === 'context' && count >= 2) {
+      return {
+        kind: 'stop',
+        reason: `Context window exhausted: the conversation no longer fits the model's input window (${count} consecutive provider rejections). Last: "${last.message}". Retrying cannot shrink it — the user should start a fresh session or reduce the input; compaction must shed tool-call payloads too.`,
+      };
+    }
+
     // Same call failed 5+ times with the same error: it kept failing even
     // after the skip-it directive below — a genuine stuck loop. Stop instead
     // of grinding toward the generic 6-failure ceiling.

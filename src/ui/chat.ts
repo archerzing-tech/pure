@@ -18,10 +18,9 @@ import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, re
 import { promptObservability } from '../shared/promptObservability';
 import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
-import { estimateTextTokens } from '../shared/tokenEstimate';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
-import { ContextEngine, type ContextCompactionResult } from '../harness/ContextEngine';
+import { ContextEngine, estimateTokens, type ContextCompactionResult } from '../harness/ContextEngine';
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
@@ -179,11 +178,31 @@ const TOOL_CALL_REFRESH_MS = 120;
  */
 function extractFailureCause(raw: string): string {
   // Identical-call loop stop: `3 consecutive failures of the identical call (tool: X): "msg". This exact call keeps failing…`
-  const identical = raw.match(/^\s*(\d+\s+consecutive failures of the identical call(?: \(tool: [^)]+\))?: ".*?")/);
+  // The message itself may contain quotes/periods (provider error bodies are
+  // raw JSON), so anchor on the template's fixed tail instead of stopping at
+  // the first quote — that truncation once turned "400 bad request
+  // {"error":{... maximum context length ...}}" into the cryptic
+  // "400 bad request {" the user could make nothing of.
+  const identical = raw.match(/^\s*(\d+\s+consecutive failures of the identical call(?: \(tool: [^)]+\))?: ".*)"\. This exact call/);
   if (identical) return identical[1];
-  // Generic ceiling stop: `6 consecutive failures. Last: msg. Please review…`
-  const ceiling = raw.match(/^\s*(\d+\s+consecutive failures\. Last: .*?)\./);
+  // Generic ceiling stop: `6 consecutive failures. Last: msg. Salvage mode could not complete…`
+  const ceiling = raw.match(/^\s*(\d+\s+consecutive failures\. Last: .*)\. Salvage mode could not complete/);
   if (ceiling) return ceiling[1];
+  return '';
+}
+
+/** Pull the human-readable line out of a provider error body (OpenAI-style
+ *  `{"error":{"message":"…"}}` / `{"message":"…"}`), so the interrupt card
+ *  shows what the provider actually said instead of truncated JSON. */
+function extractProviderErrorDetail(raw: string): string {
+  const msg = raw.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (msg) {
+    try {
+      return JSON.parse(`"${msg[1]}"`) as string;
+    } catch {
+      return msg[1];
+    }
+  }
   return '';
 }
 
@@ -205,6 +224,14 @@ export function sanitizeInterruptedReason(raw: string): string {
   }
   if (/hook aborted/i.test(raw)) {
     return t('chat.interrupted.policy', 'Stopped by a safety/policy check');
+  }
+  // ── Provider 明说上下文装不下（400 + maximum context length 等）──
+  // 压缩裁剪失真的兜底信号：讲人话 + 透出 provider 原始错误，
+  // 不能再吞成「400 bad request {」让用户摸不着头脑。
+  if (/context window exhausted|maximum context|context length|context_length_exceeded/i.test(raw)) {
+    const detail = extractProviderErrorDetail(raw);
+    const base = t('chat.interrupted.contextOverflow', '上下文超出模型窗口：压缩后仍装不下。请开新会话，或减小输入/附件后重试');
+    return detail ? `${base}\n${detail}` : base;
   }
   // FailurePolicy stop reasons ("N consecutive failures ..."). These already
   // contain the concrete cause (the repeated tool + its real error text), so
@@ -7116,7 +7143,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       ];
       // 廉价闸：窗口明显放得下（给工具 schema + 真提示词增量留足半个预算）时，
       // 发送期 trim 本来就是 no-op，整条链路（含适配器构建）直接跳过。
-      if (estimateTextTokens(compactionInput.map((m) => m.content ?? '').join('')) < maxTokens / 2) return;
+      // 估算走 ContextEngine 的同一出处——工具参数是线上载荷的一部分，
+      // 只数正文会在这里错误豁免长任务会话的预压缩。
+      if (estimateTokens(compactionInput) < maxTokens / 2) return;
       this.scheduleBackgroundPreCompaction(
         () => new ContextEngine({
           maxMessages: 20,

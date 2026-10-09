@@ -153,6 +153,28 @@ describe('ContextEngine', () => {
     expect(result.messages.at(-1)?.content).toBe('x'.repeat(400));
   });
 
+  it('prices assistant tool-call arguments into the window (wire payload, not just content)', async () => {
+    // The exact 400-wedge shape from the field: write_file carries a whole
+    // file in its arguments. Content-only estimating saw ~zero tokens here,
+    // "compacted" to a window that still overflowed, and every subsequent
+    // turn 400'd (context length) — the session wedged even on fresh input.
+    const heavyPair = (id: string): Message[] => [
+      { role: 'assistant', content: '', toolCalls: [{ id, index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: `/tmp/${id}.html`, content: 'x'.repeat(600) }) } }] },
+      { role: 'tool', content: 'ok', toolCallId: id, toolName: 'write_file' },
+    ];
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 500 });
+    const msgs: Message[] = [...heavyPair('a0'), ...heavyPair('a1'), ...heavyPair('a2')];
+
+    const result = await engine.compact(msgs);
+
+    // ~207 est. tokens per pair (args are dense JSON, padded 4/3): a 500-token
+    // window keeps only the newest two — the oldest pair must go, pairs intact.
+    expect(result.compacted).toBe(true);
+    expect(result.messages.some(m => m.role === 'assistant' && m.toolCalls?.some(tc => tc.id === 'a0'))).toBe(false);
+    expect(result.messages.some(m => m.role === 'assistant' && m.toolCalls?.some(tc => tc.id === 'a2'))).toBe(true);
+    expect(result.messages.some(m => m.role === 'tool' && m.toolCallId === 'a2')).toBe(true);
+  });
+
   // ═══ LLM summary fallback (G-3 fix) ═══
 
   it('summarizes evicted messages when llm is provided and threshold is exceeded', async () => {

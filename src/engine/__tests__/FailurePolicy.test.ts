@@ -357,3 +357,32 @@ describe('failureHistoryFromMemories (E1.2 snapshot builder)', () => {
     expect(history.lookup('web_fetch', 'network')).toEqual({ count: 0, lesson: '' });
   });
 });
+
+describe('DefaultFailurePolicy context-window overflow (structural stop)', () => {
+  const provider400 = '400 bad request {"error":{"message":"This model\'s maximum context length is 65536 tokens. However, your messages resulted in 81234 tokens.","type":"invalid_request_error"}}';
+
+  it('classifies provider context-length 400s as the context class', async () => {
+    const { classifyFailure } = await import('../../shared/netGuard');
+    expect(classifyFailure(provider400)).toBe('context');
+    expect(classifyFailure('400 bad request {"error":{"code":"context_length_exceeded"}}')).toBe('context');
+    // Anthropic route words the same 400 differently.
+    expect(classifyFailure('400 bad request: prompt is too long: 81234 tokens > 65536 maximum')).toBe('context');
+    // A generic 400 must NOT be swept into it.
+    expect(classifyFailure('400 bad request {"error":{"message":"invalid api format"}}')).not.toBe('context');
+  });
+
+  it('stops on the second context rejection instead of grinding the retry ladder', () => {
+    const policy = new DefaultFailurePolicy();
+    // First rejection: one retry is fair (provider blips happen).
+    expect(policy.decide([llmError(provider400)]).kind).not.toBe('stop');
+    // Second one: structural — every injected retry directive makes the next
+    // request strictly larger. The field wedge: 8 ladder rounds of guidance
+    // inflation, then "已中断：连续多次尝试失败" with the session wedged.
+    const action = policy.decide([llmError(provider400, 2), llmError(provider400, 3)]);
+    expect(action.kind).toBe('stop');
+    if (action.kind === 'stop') {
+      expect(action.reason).toContain('Context window exhausted');
+      expect(action.reason).toContain('maximum context length');
+    }
+  });
+});

@@ -139,6 +139,7 @@ export type FailureClass =
   | 'permission'
   | 'not-found'
   | 'rate-limit'
+  | 'context'
   | 'content'
   | 'generic';
 
@@ -150,6 +151,12 @@ export function classifyFailure(message: string): FailureClass {
   if (/permission denied|eacces|eperm|access denied|权限/.test(m)) return 'permission';
   if (/404|not found|no such file|does not exist|不存在|无法找到/.test(m)) return 'not-found';
   if (/429|rate limit|too many requests|限流/.test(m)) return 'rate-limit';
+  // Before 'content': provider 400 bodies say "maximum context length" /
+  // "context_length_exceeded" — a structural overflow, not a malformed
+  // payload. Class-level loop detection must see it, or the request ladder
+  // grinds through retry/reflect rounds that only inflate the context further.
+  // "prompt is too long" is the Anthropic route's wording for the same 400.
+  if (/maximum context|context length|context_length_exceeded|input length exceeds|prompt is too long/.test(m)) return 'context';
   if (/unsupported content type|invalid json|parse|decode|encoding|乱码/.test(m)) return 'content';
   return 'generic';
 }
@@ -163,6 +170,7 @@ export const FAILURE_CLASS_HINTS: Record<FailureClass, string> = {
   permission: '此类失败 = 此环境不允许该操作。不要重试；换合规路径或向用户说明。',
   'not-found': '此类失败 = 目标不存在。核对路径/名称/来源一次，仍失败就换目标或跳过。',
   'rate-limit': '此类失败 = 被限流。换后端或降低频率，不要立即原样重试。',
+  context: '此类失败 = 对话已超出模型上下文窗口，属结构性失败。任何重试都只会原样 400（注入的指令还在加长上下文）；立即停止回合，交回用户压缩或新开会话。',
   content: '此类失败 = 返回内容不符合预期。换解析方式或来源；不要原样重试。',
   generic: '',
 };

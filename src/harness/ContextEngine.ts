@@ -67,9 +67,30 @@ function summarizeExcerpt(message: Message): string {
   return `${text.slice(0, headLen)}\n[...excerpt...]\n${text.slice(text.length - tailLen)}`;
 }
 
-function estimateTokens(messages: Message[]): number {
+/** Single source for compaction sizing: content + tool-call arguments, shared
+ *  with the GUI's background pre-compaction gate so both surfaces blind-spot
+ *  the same wire payload or neither does. */
+export function estimateTokens(messages: Message[]): number {
   let sum = 0;
-  for (const message of messages) sum += estimateTextTokens(message.content ?? '');
+  for (const message of messages) {
+    sum += estimateTextTokens(message.content ?? '');
+    // Tool-call arguments ARE wire payload: mapMessages serializes every
+    // assistant tool_calls entry (write_file `content` = a whole file) into
+    // the request body, yet none of it lives in `content`. Blind to it, the
+    // compactor under-counted exactly the heaviest part of a long task,
+    // "trimmed" to a window that still overflowed, and every request came
+    // back 400 (context length) — the session wedged, immune to "继续".
+    if (message.toolCalls) {
+      for (const call of message.toolCalls) {
+        // Dense JSON (quotes, escapes, punctuation) runs ~3 chars/token, not
+        // the Latin-average 4 — pad by 4/3 so the estimator's residue can't
+        // eat the whole safety margin.
+        sum += Math.ceil(
+          (estimateTextTokens(call.function.name) + estimateTextTokens(call.function.arguments)) * 4 / 3,
+        );
+      }
+    }
+  }
   return sum;
 }
 
