@@ -7,6 +7,7 @@ import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, Run
 import { mergeTokenUsage } from '../shared/usage';
 import { applyLanguageDirective, detectReplyLanguage, lastHumanUserText, replyLanguageDirective } from '../shared/langDetect';
 import { interruptedReasonFor } from '../shared/pauseSignal';
+import { classifyFailure } from '../shared/netGuard';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -42,6 +43,12 @@ const VERIFIER_TIMEOUT_MS = 60_000;
 // think-text → nudge → think-text loop; three chances is enough to recover a
 // premature stop, after which the turn genuinely ends.
 const MAX_GUARD_CONTINUES = 3;
+// 9.1 — how many times a provider context-length rejection may be answered by
+// an aggressive recompaction + retry before the failure ladder stops the turn.
+// Two attempts: the aggressive pass clears old tool results and targets a
+// safety margin below the budget, so the first retry almost always converges;
+// the second covers a host whose estimator is systematically off.
+const MAX_REACTIVE_COMPACTIONS = 2;
 // Stable key for a tool call (name + arguments with sorted object keys), used
 // by the consecutive-identical-call dedupe below.
 function stableStringify(value: unknown): string {
@@ -226,6 +233,9 @@ export class AgentLoopEngine {
     // disconnected-tool-call recoveries (stream cut off mid tool call).
     let guardContinues = 0;
     let toolCallResumes = 0;
+    // 9.1 reactive compactions this run: provider context-length rejections
+    // answered by compacting harder and retrying (see the THINK catch).
+    let reactiveCompactions = 0;
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -442,6 +452,46 @@ export class AgentLoopEngine {
           yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
           interrupted = true;
           break;
+        }
+        // 9.1 reactive compaction — the provider rejected THIS request as over
+        // its context window, which means the pre-flight trim's estimate was
+        // optimistic (dense tool-call JSON, a provider-specific tokenizer, tool
+        // schemas). Re-sending the identical request only 400s again, and the
+        // failure ladder's answer to the class is a stop.
+        //
+        // Recover instead: recompact HARDER than the configured budget
+        // (aggressive mode clears old tool results and targets a safety
+        // margin) and re-enter THINK with the smaller transcript. Bounded —
+        // once the attempts are spent the policy's context branch stops the
+        // turn with its existing wording, so a genuinely unfixable overflow
+        // (one newest message larger than the whole window) still terminates.
+        if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS) {
+          const errMessage = err?.message ?? String(err);
+          if (classifyFailure(errMessage) === 'context') {
+            reactiveCompactions++;
+            try {
+              const compacted = await ctx.contextEngine.compact(messages, { force: true, aggressive: true });
+              const shrank = compacted.messages.length !== messages.length || (compacted.reclaimedTokens ?? 0) > 0;
+              if (shrank) {
+                messages.length = 0;
+                messages.push(...compacted.messages);
+                yield {
+                  type: 'ContextCompactRetry',
+                  payload: {
+                    attempt: reactiveCompactions,
+                    evictedMessages: compacted.evictedMessages ?? 0,
+                    reclaimedTokens: compacted.reclaimedTokens ?? 0,
+                    estimatedTokens: compacted.estimatedTokens ?? 0,
+                  },
+                  timestamp: Date.now(),
+                };
+                yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+                continue;
+              }
+            } catch {
+              // Compaction failed — fall through to the failure ladder.
+            }
+          }
         }
         const isTimeout = err?.name === 'TimeoutError';
         // Auto-resume: the idle deadline fired while the model was STILL

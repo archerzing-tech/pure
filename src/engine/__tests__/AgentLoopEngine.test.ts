@@ -1118,6 +1118,95 @@ describe('AgentLoopEngine', () => {
     expect(completed?.payload.isComplete).toBe(true);
   });
 
+  // ═══ 9.1 reactive compaction on a provider context-length rejection ═══
+
+  const OVER_LONG_400 = '400 bad request {"error":{"message":"This model\'s maximum context length is 65536 tokens. However, your messages resulted in 81234 tokens.","type":"invalid_request_error"}}';
+
+  it('recompacts aggressively and retries when the provider rejects the request as too long', async () => {
+    const sentLengths: number[] = [];
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        sentLengths.push(messages.length);
+        if (calls === 1) throw new Error(OVER_LONG_400);
+        yield { type: 'content', content: 'recovered' };
+        yield { type: 'done', content: 'recovered', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactArgs: Array<{ force?: boolean; aggressive?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean }) => {
+        compactArgs.push(options);
+        const kept = messages.slice(-1);
+        return {
+          messages: kept,
+          evictedMessages: messages.length - kept.length,
+          reclaimedTokens: 500,
+          estimatedTokens: 5,
+        };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-reactive', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // The overflow was answered by compacting harder, not by stopping the turn.
+    expect(compactArgs).toEqual([{ force: true, aggressive: true }]);
+    const retry = events.find(e => e.type === 'ContextCompactRetry');
+    expect(retry).toBeDefined();
+    if (retry?.type === 'ContextCompactRetry') {
+      expect(retry.payload.attempt).toBe(1);
+      expect(retry.payload.reclaimedTokens).toBe(500);
+    }
+    expect(events.some(e => e.type === 'Interrupted')).toBe(false);
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+    // The retry ran against the COMPACTED transcript, not the rejected one.
+    expect(sentLengths[0]).toBeGreaterThan(sentLengths[1]);
+    expect(sentLengths[1]).toBe(1);
+  });
+
+  it('caps reactive recompaction and hands a persistent overflow back to the failure ladder', async () => {
+    const llm = errorLLM(OVER_LONG_400);
+    let compactCalls = 0;
+    const contextEngine = {
+      compact: async (messages: Message[]) => {
+        compactCalls++;
+        return { messages: messages.slice(0, 1), evictedMessages: 1, reclaimedTokens: 1, estimatedTokens: 1 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-reactive-cap', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    expect(compactCalls).toBe(2);
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+  });
+
+  it('leaves a context-length rejection to the failure policy when no compactor is wired', async () => {
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: errorLLM(OVER_LONG_400), failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-no-compactor', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    expect(events.some(e => e.type === 'ContextCompactRetry')).toBe(false);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('Context window exhausted');
+  });
+
   it('emits FailurePolicyDecision with stop action when policy stops', async () => {
     const engine = new AgentLoopEngine();
     const policy = {

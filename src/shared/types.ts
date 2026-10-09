@@ -225,6 +225,25 @@ export interface VerificationSummary {
  * VERIFY routes through ctx.verifier, not an adapter. */
 export type EngineLlmPhase = 'THINK' | 'HANDOVER' | 'REFLECT';
 
+export interface ReactiveCompactionOutcome {
+  messages: Message[];
+  evictedMessages?: number;
+  reclaimedTokens?: number;
+  estimatedTokens?: number;
+}
+
+/** 9.1 — the minimal surface the engine needs for REACTIVE compaction: a
+ *  provider context-length rejection means our pre-flight estimate was wrong,
+ *  so the engine asks for an aggressive recompaction and retries the round.
+ *  ContextEngine satisfies this structurally; declared as an interface here so
+ *  shared/types never has to import from harness/. */
+export interface ReactiveContextCompactor {
+  compact(
+    messages: Message[],
+    options?: { force?: boolean; aggressive?: boolean },
+  ): Promise<ReactiveCompactionOutcome>;
+}
+
 export interface EngineContext {
   llm: LLMAdapter;
   /** E0.3 — per-phase adapter override. Return the adapter for a phase, or
@@ -289,6 +308,14 @@ export interface EngineContext {
   subagentEvents?: { subscribe(): AsyncQueueLike<SubagentActivityEvent> };
   tools?: ToolAdapter;
   toolsDefs: ToolDefinition[];
+  /** 9.1 reactive compaction — when set, a provider rejection worded as a
+   *  context-length overflow triggers an in-loop AGGRESSIVE recompaction and a
+   *  retry of the same THINK round instead of wedging the session: the
+   *  request the pre-flight trim believed fit did not, so the only recovery is
+   *  to compact harder (below the budget) and try again. Bounded; once the
+   *  attempts are spent the failure ladder takes over exactly as before.
+   *  Absent ⇒ unchanged behavior. */
+  contextEngine?: ReactiveContextCompactor;
   /** Recompute the LLM-visible tool list before each THINK iteration so
    * dynamically connected MCP servers become usable without restarting the turn. */
   toolsDefsProvider?: () => ToolDefinition[];
@@ -621,6 +648,11 @@ export type EngineEvent =
   // chat surface; this event lets tests and observers pin down the round
   // where steering took effect.
   | { type: 'SteerInjected'; payload: { count: number; turnNumber: number }; timestamp: number }
+  // 9.1 reactive compaction: the provider rejected the request as too long
+  // even though the pre-flight estimator said it fit. The engine compacted
+  // harder and is retrying the round. Observability only — the retry itself is
+  // transparent to the user.
+  | { type: 'ContextCompactRetry'; payload: { attempt: number; evictedMessages: number; reclaimedTokens: number; estimatedTokens: number }; timestamp: number }
   // Live subagent interior activity (parallel multi-agent): forwarded from the
   // orchestrator's progress sink through ctx.subagentEvents while the engine
   // awaits the tool batch, namespaced by the delegation toolCallId. Between a

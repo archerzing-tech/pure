@@ -7,7 +7,7 @@
 // goes through CodingAgent — without a shared factory these four pieces lived
 // in two places and could drift apart. This is the single source for the
 // defaults.
-import { ContextEngine } from '../harness/ContextEngine';
+import { ContextEngine, type ContextRehydrationConfig } from '../harness/ContextEngine';
 import { DefaultHookRouter } from '../engine/HookRouter';
 import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import { Verifier, createDefaultVerifier } from './Verifier';
@@ -29,8 +29,14 @@ export interface DefaultHarnessConfigOptions {
   /** Resolves the model-visible tool list lazily (after MCP/subagents register). */
   toolsProvider: () => ToolDefinition[];
   /** E1.2 — preloaded cross-session failure history; accelerates the failure
-   * ladder for traps past sessions already recorded (undefined = stock ladder). */
+   *  ladder for traps past sessions already recorded (undefined = stock ladder). */
   failureHistory?: FailureHistory;
+  /** 9.1 — post-compaction rehydration hooks (L3). Host-specific by nature:
+   *  the CLI reads through node:fs, the Tauri GUI through its IPC read_file,
+   *  and only the GUI has a plan/todo surface to restate. Deliberately NOT
+   *  defaulted here — this factory is shared by hosts with and without a
+   *  filesystem, so an fs import would break the WebView bundle. */
+  rehydration?: ContextRehydrationConfig | false;
 }
 
 export function createDefaultHarnessConfig(options: DefaultHarnessConfigOptions): DefaultHarnessPlumbing {
@@ -40,6 +46,7 @@ export function createDefaultHarnessConfig(options: DefaultHarnessConfigOptions)
       maxTokens: resolvePromptBudget(options.promptBudget).availableInputTokens,
       toolsProvider: options.toolsProvider,
       llm: options.llm,
+      rehydration: options.rehydration,
     }),
     verifier: createDefaultVerifier(),
     hooks: new DefaultHookRouter(),

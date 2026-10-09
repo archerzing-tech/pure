@@ -24,7 +24,8 @@ import { compileExternalSubagents, isExternalSubagentManifest } from './harness/
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFile as readFileContent } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import type { PermissionMode, PermissionRequestHandler } from './coding-agent/types';
@@ -169,6 +170,10 @@ function printToolCorrectionHints(): void {
     // Suggestions are informational — a scan failure never blocks startup.
   }
 }
+
+/** Cap on a rehydrated file read: the ContextEngine truncates what enters the
+ *  prompt, but there is no reason to hold a 64MB file in memory to do it. */
+const REHYDRATION_READ_CAP = 20_000;
 
 function learnFromInput(text: string, sessionId: string, projectPath: string): Promise<unknown> {
   const entries = harvestUserPreferences(text, { sessionId, projectPath });
@@ -471,6 +476,20 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // E1.2 — preload the cross-session failure history from error_pattern
     // memories so already-seen traps escalate the failure ladder immediately.
     failureHistory: failureHistoryFromMemories(memoryStore.list({ type: 'error_pattern', activeOnly: true })),
+    // 9.1 — L3 rehydration: after a compaction drops messages, re-read the
+    // files this session most recently wrote so the model resumes against the
+    // real on-disk contents instead of a summary's memory of them. The CLI has
+    // no plan/todo surface, so only the file half is wired.
+    rehydration: {
+      readFile: async (path: string) => {
+        try {
+          const text = await readFileContent(resolve(projectPath, path), 'utf8');
+          return text.length > REHYDRATION_READ_CAP ? text.slice(0, REHYDRATION_READ_CAP) : text;
+        } catch {
+          return undefined;
+        }
+      },
+    },
   });
 
   // 起飞闸的角色集：与下面注册进 orchestrator/tools 的子代理名单同源（gate

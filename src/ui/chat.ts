@@ -21,7 +21,7 @@ import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
-import { ContextEngine, estimateTokens, type ContextCompactionResult } from '../harness/ContextEngine';
+import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
@@ -163,6 +163,9 @@ const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
 // and rebuilding the Input panel on every token is O(n²) and freezes the UI.
 // Mirrors the 100ms streaming-render throttle (markdown.ts).
 const TOOL_CALL_REFRESH_MS = 120;
+/** 9.1 — cap on a rehydrated file read; the ContextEngine truncates what
+ *  enters the prompt, this just keeps the bridge payload bounded. */
+const REHYDRATION_READ_CAP = 20_000;
 
 // ── Interrupt-reason sanitization ──
 // FailurePolicy.stop reasons are written as instructions FOR the model (they
@@ -2334,13 +2337,14 @@ export class ChatController {
   async compactContext(): Promise<ContextCompactionResult> {
     const messages = this.messages;
     if (this.streaming || messages.length === 0) {
-      return { messages, compacted: false, summarized: false, summaryUnavailable: false, evictedMessages: 0, estimatedTokens: 0, overBudget: false, oversizedNewestGroup: false };
+      return { messages, compacted: false, summarized: false, summaryUnavailable: false, evictedMessages: 0, estimatedTokens: 0, overBudget: false, oversizedNewestGroup: false, microcompactedToolResults: 0, reclaimedTokens: 0, rehydratedFiles: 0, restoredPlan: false };
     }
     this.cancelBackgroundPreCompaction();
     const config = loadConfig();
     const contextEngine = this.contextEngine ?? new ContextEngine({
       maxMessages: 20,
       maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides)).availableInputTokens,
+      rehydration: this.contextRehydration(),
     });
     this.contextEngine = contextEngine;
     const result = await contextEngine.compact(messages, { force: true });
@@ -2351,6 +2355,50 @@ export class ChatController {
       this.preCompactMessageCount = messages.length;
     }
     return result;
+  }
+
+  /** 9.1 — L3 rehydration hooks shared by EVERY ContextEngine this view builds
+   *  (the Harness engine, the idle background pre-compaction engine, and the
+   *  manual ⌁ fallback). One factory so a compaction path can never silently
+   *  drop the workspace/plan restatement. */
+  private contextRehydration(): ContextRehydrationConfig {
+    return {
+      readFile: async (path: string) => {
+        const workspace = this.effectiveWorkspace || this.workspace;
+        if (!workspace) return undefined;
+        try {
+          const text = await tauriInvoke<string>('read_file', { workspace, path });
+          return text.length > REHYDRATION_READ_CAP ? text.slice(0, REHYDRATION_READ_CAP) : text;
+        } catch {
+          return undefined;
+        }
+      },
+      todos: () => this.formatRehydrationPlan(),
+    };
+  }
+
+  /** 9.1 — L3 rehydration payload: the in-flight plan compacted to plain lines.
+   *  Only the guidance the model needs to resume — which stage is current, which
+   *  todos are done — never the card markup. Undefined when no plan is active
+   *  (a completed plan is cleared, and a simple task never had one). */
+  private formatRehydrationPlan(): string | undefined {
+    const plan = this.activeComplexPlan;
+    if (!plan || plan.steps.length === 0) return undefined;
+    return plan.steps.map((step, index) => {
+      const number = index + 1;
+      const stageMark = number < this.activePlanNumber ? '[done]'
+        : number === this.activePlanNumber ? '[current]'
+        : '[pending]';
+      const todos = step.todosRequired === false ? [] : (step.substeps ?? []);
+      const todoLines = todos.map((todo, todoIndex) => {
+        const todoNumber = todoIndex + 1;
+        const mark = todoNumber < this.activeTodoNumber ? '[x]'
+          : todoNumber === this.activeTodoNumber ? '[>]'
+          : '[ ]';
+        return `    ${mark} ${todo.action}`;
+      });
+      return [`${stageMark} ${number}. ${step.action}`, ...todoLines].join('\n');
+    }).join('\n');
   }
 
   /** Resume a paused plan from the pause-bubble shortcut. Reuses the normal
@@ -4371,6 +4419,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // delegation card can live-stream interior progress (see the
         // SubagentActivity case below).
         subagentEvents: subagentEventFanout,
+        // 9.1 — L3 rehydration: after a compaction drops messages, re-read the
+        // files this session most recently wrote (through the SAME Tauri
+        // read_file bridge the tools use, so path resolution matches) and
+        // restate the live plan/todos. The model then resumes against the real
+        // workspace instead of a summary's memory of it.
+        rehydration: this.contextRehydration(),
       });
       // MCP warm-up: kick the transport handshake off HERE so it overlaps the
       // local preflight that follows, instead of being awaited on its own right
@@ -7236,6 +7290,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           maxMessages: 20,
           maxTokens,
           llm: createLLMAdapter(cfg),
+          rehydration: this.contextRehydration(),
         }),
         placeholderSystem,
         transcriptMessages,

@@ -3,6 +3,7 @@
 // Includes SubagentOrchestrator + MCPClient integration.
 
 import { Harness, type HarnessConfig } from '../harness/Harness';
+import type { ContextRehydrationConfig } from '../harness/ContextEngine';
 import type { ReflectionConfig } from '../harness/LessonReflector';
 import { DefaultSubagentRegistry } from '../harness/SubagentRegistry';
 import { Planner } from './Planner';
@@ -90,6 +91,11 @@ export interface CodingAgentConfig {
   /** E1.2 — preloaded cross-session failure history for the default policy
    * (ignored when a custom failurePolicy is supplied). */
   failureHistory?: FailureHistory;
+  /** 9.1 — post-compaction rehydration (L3): re-read the files this session
+   *  changed and restate the live plan/todos after a compaction dropped
+   *  messages. Host-supplied because the file read differs (node:fs in the
+   *  CLI, Tauri IPC in the GUI) and only the GUI owns plan state. */
+  rehydration?: ContextRehydrationConfig | false;
   /** Optional plan-completion guard (EngineContext.continueGuard) — recovers
    * turns where the model stopped calling tools while plan work remained. */
   continueGuard?: EngineContext['continueGuard'];
@@ -192,6 +198,7 @@ export class CodingAgent {
       promptBudget: config.promptBudget,
       toolsProvider: () => this.toolRegistry.getTools(),
       failureHistory: config.failureHistory,
+      rehydration: config.rehydration,
     });
     this.verifier = config.verifier ?? plumbing.verifier;
     this.hooks = config.hooks ?? plumbing.hooks;

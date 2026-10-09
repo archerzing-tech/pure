@@ -256,6 +256,11 @@ export class Harness {
       userHookRunner: this.config.userHookRunner,
       failurePolicy: this.config.failurePolicy,
       continueGuard: this.config.continueGuard,
+      // 9.1 — the engine compacts reactively when a provider rejects the
+      // request as over its context window (see AgentLoopEngine's THINK
+      // catch). Sharing the SAME engine instance as the pre-flight trim keeps
+      // its budget/tools view and lastCompactionResult in one place.
+      contextEngine: this.config.contextEngine,
       signal,
       // 1c 升级硬停第二通道：暂停宽限期内宿主再叫停时立即掐掉在飞工具。
       hardStopSignal,
