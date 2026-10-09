@@ -32,6 +32,11 @@ export interface ResumeRecord {
   label: string;
   text: string;
   images: MessageImage[];
+  /** 续跑收执的诚实凭据（第 2 期第三刀）：排队时对 checkpoint 的预检读数
+   *  （编排器 probeResumeCheckpoint 的同口径结果，随记录走——排队收执与派
+   *  工收执、兜底指令三处都按它二分）。hit=false 必须明说「没找到存档，
+   *  会重新跑」，不许预支「从断点续」的承诺。 */
+  checkpoint: { hit: boolean; turns: number };
 }
 
 /** 续跑兜底转排队的新指令（与宿主待办队列元素结构同形）。 */
@@ -181,7 +186,11 @@ export class DelegationControlPlane {
     if (this.resumes.length === 0) return null;
     const resumes = this.resumes.splice(0);
     return {
-      text: resumes.map((r) => `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：请用相同参数重新委派同一子任务，它会从存档的断点续跑，不要从头做。用户原话：“${r.text}”`).join('\n'),
+      // 二分口径与收执同源（checkpoint 凭据随记录走）：命中说从第几轮续、
+      // 没命中明说重跑——指令不能比机制许的愿更多。
+      text: resumes.map((r) => r.checkpoint.hit
+        ? `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：请用相同参数重新委派同一子任务，它会从存档断点（第 ${r.checkpoint.turns} 轮）续跑，不要从头做。用户原话：“${r.text}”`
+        : `【分支级继续】用户要求把之前暂停的「${r.label}」那支接着跑完：没找到存档，请用相同参数重新委派同一子任务（会重新跑一遍）。用户原话：“${r.text}”`).join('\n'),
       images: resumes.flatMap((r) => r.images ?? []),
       displayText: resumes.map((r) => r.text).join('\n'),
       ts: Date.now(),

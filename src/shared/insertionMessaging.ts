@@ -90,6 +90,24 @@ export function foldInFollowUpText(text: string): string {
   return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
 }
 
+/** ⑤ 分支级继续的收执（第 2 期第三刀）：排队（interjectOrchestrator）与派工
+ *  （chat.ts takeSyntheticToolCalls）两处共用一个出处。二分口径（蓝图判例
+ *  14「回执说清从哪轮接的」+「找不到断点不许悄悄从头跑」）：命中 checkpoint
+ *  说从断点第几轮接上；没命中明说没找到存档、会重新跑——绝不预支「从断点
+ *  继续」的承诺（GUI 的 checkpoint 在进程内存里，重启/旧会话后 miss 是常态，
+ *  收执替机制许愿就是说谎）。pending=true = 还有委派在飞（这支等收齐再接），
+ *  补一句时序交代；派工收执（本批就是它）不带走时不带。 */
+export function branchResumeReceipt(
+  label: string,
+  checkpoint: { hit: boolean; turns: number },
+  pending: boolean,
+): string {
+  const tail = pending ? '等手头这批收齐接上。' : '';
+  return checkpoint.hit
+    ? `续跑：「${label}」从存档断点（第 ${checkpoint.turns} 轮）接上。${tail}`
+    : `续跑：「${label}」——没找到存档，会重新跑一遍。${tail}`;
+}
+
 /** 三处口径的一致性锚（一致性测试读它，不读各处散文）——每条都是「取消」
  *  这个动作在系统里必须同时成立的三个面：宿主动手、产出出清、幸存者合并。 */
 export const CANCELLATION_INVARIANTS = {
@@ -105,4 +123,13 @@ export const CANCELLATION_INVARIANTS = {
    *  单任务场景发出，一个机制词汇都不能带——测试断言它**不匹配**这个正则。
    *  停支/折入收执不受此锁（那些路径机制真实在场）。 */
   absentMechanismWords: /派|汇总|支/,
+} as const;
+
+/** 续跑口径的一致性锚（第 2 期第三刀）：命中必须说断点（最好带轮数）、
+ *  未命中必须认账「没找到存档」——漂移到任何一头，都是收执在替机制许愿
+ *  或把用户蒙在鼓里。 */
+export const RESUME_INVARIANTS = {
+  // 全角括号是字面量不是分组：锚必须真咬住轮数（\d+ 缺席即锚失效）。
+  hitSaysFromCheckpoint: /从存档断点（第 \d+ 轮）/,
+  missAdmitsNoArchive: /没找到存档/,
 } as const;

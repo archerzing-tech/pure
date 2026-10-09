@@ -425,6 +425,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     stoppedBranches: () => [],
     coveringCandidates: () => [],
     branchLabel: (name) => name,
+    // 续跑预检同接（第 2 期第三刀）：store 在下方才建（const store），缝延
+    // 迟求值没问题；CLI 的 checkpoint 走 FSStore 落盘，重启后 probe 仍命中。
+    probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(store, sessionId, name, args),
     // send 缝休眠：cliRepl 没有单条消息入口（引擎整回合跑），插话输入路接通
     // 时把这里换成通道宿主的真发送缝；空函数保证休眠期零副作用。
     send: () => {},

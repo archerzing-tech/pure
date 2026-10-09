@@ -43,10 +43,10 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
-import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
+import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from '../harness/overlayGuard';
 import { requestPermission } from './permission';
@@ -1717,6 +1717,10 @@ export class ChatController {
       .filter((item) => item.status === 'running' || item.status === 'done')
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet, status: item.status === 'running' ? 'running' as const : 'done' as const })),
     branchLabel: (name, callId) => this.branchLabel(name, callId),
+    // 续跑预检（第 2 期第三刀）：static 直摸 store 字段——不经过回合金的
+    // 编排器实例（续跑常发生在会话恢复后，那时没有实例）；口径与 execute
+    // 的 sessionId 生成同源（stableSessionId）。
+    probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(this.subagentStore, this.sessionId, name, args),
     send: (text, images, displayText) => { void this.send(text, images, displayText); },
     abort: (reason) => this.abortController?.abort(reason),
     stopNamedBranch: (text, mode) => this.stopNamedBranch(text, mode),
@@ -4135,9 +4139,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } });
           }
           // 分支级继续（第 2 期第三刀）：点名续跑的那支用**原始参数**同参
-          // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。
+          // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。收执按
+          // 排队时的预检凭据二分（命中说第几轮 / 没命中明说从头跑），与排
+          // 队收执同一出处（branchResumeReceipt）——两处不许漂移。
           for (const resume of this.delegationControl.takeResumes()) {
-            this.addStatusBubble(`续跑：「${resume.label}」从存档断点继续。`, false, false, 'info');
+            this.addStatusBubble(branchResumeReceipt(resume.label, resume.checkpoint, false), false, false, 'info');
             calls.push({ id: `resume_${resume.callId}`, index: calls.length, function: { name: resume.name, arguments: resume.args } });
           }
           return calls;

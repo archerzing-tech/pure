@@ -1342,8 +1342,11 @@ describe('plan overview completion state', () => {
     expect(steerBody.indexOf('decision.signals.resumesBranch === true')).toBeGreaterThan(-1);
     expect(steerBody.indexOf('this.resumeNamedBranch(text)')).toBeGreaterThan(-1);
     expect(steerBody.indexOf('resumesBranch === true')).toBeLessThan(steerBody.indexOf('decision.signals.branchStop === true'));
-    const resumeFn = orch.indexOf('private resumeNamedBranch(text: string): string | null');
+    const resumeFn = orch.indexOf('private resumeNamedBranch(text: string)');
     expect(resumeFn).toBeGreaterThan(-1);
+    // 第 2 期第三刀：返回类型带 checkpoint 预检凭据（收执诚实二分——收执、
+    // 兜底指令按同一份预检二分，见 insertionMessaging 的 RESUME_INVARIANTS）。
+    expect(orch.slice(resumeFn, resumeFn + 160)).toContain("{ label: string; checkpoint: { hit: boolean; turns: number } } | null");
     const resumeBody = orch.slice(resumeFn, orch.indexOf('private findCoveringBranch(', resumeFn));
     // 宿主读数缝的候选过滤（paused+cancelled 两腿都要）——scoped 到
     // stoppedBranches 绑定块：全文件扫描会被 buildInsertionContext 里逐字

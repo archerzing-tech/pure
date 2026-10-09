@@ -307,7 +307,7 @@ export class SubagentOrchestrator implements ToolAdapter {
   /** FNV-1a 64-bit over the UTF-8 bytes of a string (stable, no Date/random —
    * reused so a re-delegated identical sub-task maps to the same sessionId).
    * Mirrors the webCache hashKey convention. */
-  private stableHash(parts: string[]): string {
+  private static stableHash(parts: string[]): string {
     let h = 0xcbf29ce484222325n;
     for (const p of parts) {
       for (const b of new TextEncoder().encode(p)) {
@@ -316,6 +316,37 @@ export class SubagentOrchestrator implements ToolAdapter {
       }
     }
     return h.toString(16);
+  }
+
+  /** 稳定子代理 sessionId（checkpoint 续跑的键）：同 parent + role + args →
+   *  同 sessionId → 同参重派即命中存档。execute 与 probeResumeCheckpoint 共用
+   *  本式——续跑预检与实际命中是同一份口径，永不分叉。仅在配置 stateStore 时
+   *  有意义（无 store 的宿主走时间戳 id，天然不命中）。`_`/`.`/`-` 之外的字符
+   *  一律净化（FSStore 的路径穿越护栏拒收 `:` 等）。 */
+  static stableSessionId(parentSessionId: string | undefined, toolName: string, args: Record<string, unknown>): string {
+    const sanitized = (parentSessionId ?? 'cli').replace(/[^A-Za-z0-9._-]/g, '_');
+    return `sub_${sanitized}_${toolName}_${SubagentOrchestrator.stableHash([toolName, JSON.stringify(args)])}`;
+  }
+
+  /** 分支级继续（第 2 期第三刀）：续跑收执的诚实预检——同参重派**会不会**
+   *  命中 checkpoint。hit=true 带断点轮数（收执「从第 N 轮接上」，判例 14
+   *  验收语「回执说清从哪轮接的」）；hit=false 时收执必须明说「没找到存档，
+   *  会重新跑」——蓝图纪律：resume 找不到断点不许悄悄从头跑，收执替机制许
+   *  愿就是说谎。做成 static（store + sessionId 参数化）是因为续跑常发生在
+   *  跨回合（会话恢复后点名旧支）：宿主手里是 store 字段与会话 id，不是回
+   *  合金的编排器实例。 */
+  static probeResumeCheckpoint(
+    stateStore: IStateStore | undefined,
+    parentSessionId: string | undefined,
+    toolName: string,
+    rawArgs: string,
+  ): { hit: boolean; turns: number } {
+    if (!stateStore) return { hit: false, turns: 0 };
+    const sessionId = this.stableSessionId(parentSessionId, toolName, parseToolArguments(rawArgs));
+    const state = stateStore.loadSession(sessionId)?.state;
+    const messages = state?.messages;
+    if (!messages || messages.length === 0) return { hit: false, turns: 0 };
+    return { hit: true, turns: state?.turnCount ?? messages.length };
   }
 
   private inputSnippet(args: Record<string, unknown>): string {
@@ -445,11 +476,10 @@ export class SubagentOrchestrator implements ToolAdapter {
     // Stable subagent sessionId for checkpoint resume; only meaningful when a
     // stateStore is configured (CLI / GUI 进程内). Same parent session + agent
     // + task input → same sessionId → a re-delegated identical sub-task
-    // continues. Use `_`/`.`/`-` only — FSStore rejects sessionIds with `:` or
-    // other path characters (path-traversal guard).
-    const parentSessionId = (this.config.parentSessionId ?? 'cli').replace(/[^A-Za-z0-9._-]/g, '_');
+    // continues. 生成式收口在 stableSessionId（static）：probeResumeCheckpoint
+    // 与本处共用同一口径——预检说会命中，execute 就真的命中。
     const sessionId = this.config.stateStore
-      ? `sub_${parentSessionId}_${def.name}_${this.stableHash([def.name, JSON.stringify(args)])}`
+      ? SubagentOrchestrator.stableSessionId(this.config.parentSessionId, def.name, args)
       : `subagent_${def.name}_${startTime}`;
     // 分支级继续（第 2 期第三刀）：同参重派命中上一条 checkpoint = 续跑，
     // 不是从头跑。这是血缘/续跑徽标的唯一事实来源，onStart 起可见。
@@ -755,7 +785,11 @@ export class SubagentOrchestrator implements ToolAdapter {
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, outcome: 'stopped', reason: branchAbortNote, summary: '已按你的要求停止，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
+                // 部分产出不入账（机制强制，2026-10-09）：结算体不带 finalOutput
+                // ——父上下文从此没有部分产出可写进汇总，不再依赖 reason 劝阻。
+                // 断点在 checkpoint 全量在（续跑不丢）；UI 卡面读 summary、徽标
+                // 读事件流，均不经此字段。
+                result: { aborted: true, agentId, outcome: 'stopped', reason: branchAbortNote, summary: '已按你的要求停止，进度已存档', resumed: resumedFromCheckpoint },
                 success: true,
                 duration: done(0),
               };
@@ -780,7 +814,9 @@ export class SubagentOrchestrator implements ToolAdapter {
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, outcome: 'paused', reason: pausedNote, summary: '已暂停，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
+                // 部分产出不入账（机制强制，同 stopped 路）：结算体不带
+                // finalOutput，父上下文没有部分产出可入账；断点在 checkpoint。
+                result: { aborted: true, agentId, outcome: 'paused', reason: pausedNote, summary: '已暂停，进度已存档', resumed: resumedFromCheckpoint },
                 success: true,
                 duration: done(0),
               };
@@ -809,11 +845,12 @@ export class SubagentOrchestrator implements ToolAdapter {
             if (cancelled) {
               // 取消≠失败（与用户叫停/暂停同一把尺子）：emit success 让卡片
               // 灰 ⏸ 而不是红 ✗；reason 仍如实告诉父模型这支被取消、可续跑。
+              // 部分产出不入账（机制强制，同上两路）：不带 finalOutput。
               emit(progress?.onDone, { success: true, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
               return {
                 id: toolCall.id,
                 toolName: def.name,
-                result: { aborted: true, agentId, outcome: 'paused', reason: timeoutNote, summary: '已暂停，进度已存档', finalOutput, resumed: resumedFromCheckpoint },
+                result: { aborted: true, agentId, outcome: 'paused', reason: timeoutNote, summary: '已暂停，进度已存档', resumed: resumedFromCheckpoint },
                 success: true,
                 duration: done(0),
               };

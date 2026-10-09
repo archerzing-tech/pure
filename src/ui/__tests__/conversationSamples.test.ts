@@ -9,6 +9,7 @@
 import { describe, expect, it, afterEach } from 'bun:test';
 import { ChatController, setTimedInputSink, wireNewContentHint } from '../chat';
 import { wireScrollPin, setPinnedToBottom, scrollChatToBottomIfPinned, setScrollPinObservers } from '../scrollPin';
+import { SubagentOrchestrator } from '../../coding-agent/SubagentOrchestrator';
 
 // ── 极小假 DOM：只为插话路径真正摸到的面负责 ─────────────────────────────
 
@@ -100,8 +101,14 @@ class FakeElement {
     if (!ref) return this.appendChild(node);
     const at = this.children.indexOf(ref);
     if (at < 0) return this.appendChild(node);
+    // 真 DOM 语义：insertBefore 是移动——先把节点从旧父摘除再插（同一父内
+    // 重排也先摘，否则同一节点在 children 里出现两份；2026-10-09 续跑收执
+    // 判例实证：回显行被 placeEchoBeforeAck 重排时在假 DOM 里复制成了两行）。
+    node.parentNode?.removeChild(node);
+    const atAfterDetach = this.children.indexOf(ref);
+    if (atAfterDetach < 0) return this.appendChild(node);
     const incoming = (node as FakeElement)[FRAGMENT] ? [...(node as FakeElement).children] : [node];
-    this.children.splice(at, 0, ...incoming);
+    this.children.splice(atAfterDetach, 0, ...incoming);
     for (const child of incoming) child.parentNode = this;
     return node;
   }
@@ -895,7 +902,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.sends).toHaveLength(0);
   });
 
-  it('第 2 期第三刀：点名把一支已暂停的委派接着跑完——同参重派，不从头做', async () => {
+  it('第 2 期第三刀：点名把一支已暂停的委派接着跑完——同参重派命中存档，回执说清从哪轮接', async () => {
     // 用户真机诉求：「把 jev 那支接着跑完」。名字是代号，点名靠区分词；
     // 关键在"用原始参数"——稳定 sessionId 命中 checkpoint，子引擎 continue。
     const llm = scriptedLlm([]);
@@ -906,19 +913,52 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     ];
     // 原始参数在委派批次起飞时被 gateDelegations 捕获（同参重派的唯一凭据）。
     h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+    // 判例 14 端到端：真存档真的在——编排器 stableSessionId 同口径落一份
+    // checkpoint（persist-before-settle 的手工等价），probe 预检才有东西可读。
+    const resumeArgs = { prompt: '分析主要竞品的定价策略' };
+    const archiveId = SubagentOrchestrator.stableSessionId(h.chat.sessionId, 'competitor_analyst', resumeArgs);
+    await h.chat.subagentStore.saveCheckpoint(archiveId, {
+      version: 1,
+      label: 'subagent_interrupted',
+      createdAt: Date.now(),
+      state: { messages: [{ role: 'user', content: '分析主要竞品的定价策略' }], turnCount: 12 },
+    });
 
     // RESUME_BRANCH_RE 快路径：不经 LLM 直判「把那一支接着跑完」。
     await h.chat.interject('把竞品那支接着跑完。');
     expect(llm.classifyCalls.length).toBe(0);
-    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点继续；等手头这批收齐接上。');
+    // 回执诚实二分（判例 14 验收语）：命中存档必须说清从哪轮接的。
+    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点（第 12 轮）接上。等手头这批收齐接上。');
+    expect(assistantJoined(h.root)).not.toContain('没找到存档');
     expect(userJoined(h.root)).toContain('把竞品那支接着跑完');
     // 排上了同参重派：**原始参数**原样，不是新任务。
     expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
     expect(h.chat.delegationControl.pendingResumesView()[0].name).toBe('competitor_analyst');
     expect(h.chat.delegationControl.pendingResumesView()[0].args).toBe('{"prompt":"分析主要竞品的定价策略"}');
+    // 凭据随记录走：排队记录里的预检读数与收执同源。
+    expect(h.chat.delegationControl.pendingResumesView()[0].checkpoint).toEqual({ hit: true, turns: 12 });
     // 续跑既不是折入也不是普通 steer：两个池子都干净。
     expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
+  });
+
+  it('第 2 期第三刀：续跑点名但存档不在（store 空）——回执明说没存档会重跑，不许预支断点承诺', async () => {
+    // 反面对照（判例 14 下半句）：「resume 找不到断点不许悄悄从头跑——
+    // 明说『没找到存档，重新跑了』」。收执不能比机制许的愿更多。
+    const llm = scriptedLlm([]);
+    const h = makeHarness(llm); // subagentStore 是空 MemoryStateStore：probe 必 miss
+    h.chat.agentActivities = [
+      { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'paused' },
+    ];
+    h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
+
+    await h.chat.interject('把竞品那支接着跑完。');
+    // 无在飞委派 → 收执不带「等手头这批」尾巴（诚实二分的 pending 半边）。
+    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」——没找到存档，会重新跑一遍。');
+    expect(assistantJoined(h.root)).not.toContain('断点'); // 没命中绝不预支断点承诺
+    // 照排不误：话不丢，重派照做（只是收执诚实）。
+    expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
+    expect(h.chat.delegationControl.pendingResumesView()[0].checkpoint).toEqual({ hit: false, turns: 0 });
   });
 
   it('第 2 期第三刀：同参重派没赶上 THINK 边界——收尾转成排队的新指令，话绝不丢', async () => {

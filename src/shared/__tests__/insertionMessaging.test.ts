@@ -22,6 +22,8 @@ import {
   foldInInstruction,
   foldInFollowUpText,
   CANCELLATION_INVARIANTS as INV,
+  branchResumeReceipt,
+  RESUME_INVARIANTS as RESUME_INV,
 } from '../insertionMessaging';
 import { expectNoDefaultParams } from './arityLock';
 
@@ -229,5 +231,31 @@ describe('收执场景矩阵（2026-10-01 泛化排查）', () => {
       ['foldInInstruction', 1, foldInInstruction],
       ['foldInFollowUpText', 1, foldInFollowUpText],
     ]);
+  });
+});
+
+describe('续跑收执诚实二分（第 2 期第三刀，判例 14）', () => {
+  // 判例 14 验收语：「同参重派命中断点，从断点续不从头来；回执说清从哪
+  // 轮接的」「resume 找不到断点不许悄悄从头跑——明说『没找到存档，重新
+  // 跑了』」。收执不能比机制许的愿更多：命中说轮数，没命中明说重跑。
+  it('hit：说清从存档断点第几轮接上；pending 时补尾巴，miss 语绝不出现', () => {
+    const t = branchResumeReceipt('竞品分析员', { hit: true, turns: 7 }, true);
+    expect(t).toContain('续跑：「竞品分析员」');
+    expect(t).toMatch(RESUME_INV.hitSaysFromCheckpoint);
+    expect(t).toContain('第 7 轮');
+    expect(t).toContain('等手头这批收齐接上。');
+    expect(t).not.toContain('没找到存档');
+    // 正则锚必须真咬住轮数——正则里没有 \d 的话锚就只剩装饰作用。
+    expect(RESUME_INV.hitSaysFromCheckpoint.test('从存档断点（第 12 轮）接上')).toBe(true);
+    expect(RESUME_INV.hitSaysFromCheckpoint.test('没找到存档，会重新跑一遍')).toBe(false);
+  });
+
+  it('miss：明说没找到存档会重新跑，绝不预支「断点」承诺', () => {
+    const t = branchResumeReceipt('竞品分析员', { hit: false, turns: 0 }, false);
+    expect(t).toContain('续跑：「竞品分析员」');
+    expect(t).toMatch(RESUME_INV.missAdmitsNoArchive);
+    expect(t).toContain('会重新跑一遍');
+    expect(t).not.toContain('断点');
+    expect(t).not.toContain('等手头这批收齐接上'); // pending=false 无尾巴
   });
 });

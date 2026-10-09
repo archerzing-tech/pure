@@ -13,6 +13,7 @@ import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
+import { MemoryStateStore } from '../../adapter/storage/MemoryStateStore';
 import { abortPaused } from '../../shared/pauseSignal';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolDefinition, ToolResult } from '../../shared/types';
 import type { SubagentDefinition, SubagentResult } from '../types';
@@ -606,6 +607,9 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     expect(payload.aborted).toBe(true);
     expect(payload.outcome).toBe('paused');
     expect(String(payload.reason)).toContain('PAUSED');
+    // 部分产出不入账（机制强制，2026-10-09）：中止结算体不带 finalOutput——
+    // 父上下文从此没有部分产出可写进汇总；断点在 checkpoint 全量在（续跑不丢）。
+    expect('finalOutput' in payload).toBe(false);
     // 整轮暂停：「继续」条承诺子 agent 从存档续——恢复指引必须保留。
     expect(String(payload.reason)).toContain('re-delegate');
     const paused = seen.find((a) => a.status === 'paused');
@@ -615,6 +619,9 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     // SAME subtask resumes from it.
     const subSessionId = Array.from(sessions.keys()).find((id) => id.startsWith('sub_parentp_test_researcher_'));
     expect(subSessionId).toBeDefined();
+    // 同源口径锁（第 2 期第三刀）：probe 预检与 execute 落盘共用同一个
+    // stableSessionId——续跑收执「从存档断点（第 N 轮）接上」读的就是它。
+    expect(SubagentOrchestrator.stableSessionId('parentp', 'test_researcher', { prompt: 'long research' })).toBe(subSessionId!);
     expect(sessions.get(subSessionId!)!.checkpoints.some((c) => c.label === 'subagent_interrupted')).toBe(true);
   });
 
@@ -650,6 +657,8 @@ describe('SubagentOrchestrator pause (阶段 12)', () => {
     const payload = result.result as { aborted?: boolean; outcome?: string; reason?: string };
     expect(payload.aborted).toBe(true);
     expect(payload.outcome).toBe('paused');
+    // 部分产出不入账（机制强制）：整树取消的结算体同样不带 finalOutput。
+    expect('finalOutput' in payload).toBe(false);
     expect(String(payload.reason)).toContain('paused, NOT failed');
     expect(String(payload.reason)).not.toContain('timed out');
     // 卡片侧：状态词仍是 cancelled（机器视角「这支被掐了」），但 success:true
@@ -971,6 +980,9 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     const payload = stopmeResult.result as { aborted?: boolean; reason?: string; outcome?: string };
     expect(payload.aborted).toBe(true);
     expect(payload.outcome).toBe('stopped');
+    // 部分产出不入账（机制强制）：点名叫停的结算体同样不带 finalOutput——
+    // 用户喊停的东西不许借汇总回流；断点在 checkpoint 全量在。
+    expect('finalOutput' in payload).toBe(false);
     expect(String(payload.reason)).toContain('STOPPED');
     expect(String(payload.reason)).not.toContain('timed out');
     const stopmeCard = seen.find((a) => a.callId === 'call_stopme' && a.status);
@@ -1008,6 +1020,8 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(result.success).toBe(true);
     const payload = result.result as { aborted?: boolean; outcome?: string; reason?: string };
     expect(payload.outcome).toBe('paused');
+    // 部分产出不入账（机制强制）：第三路中止结算同样剥离。
+    expect('finalOutput' in payload).toBe(false);
     expect(String(payload.reason)).toContain('resumes from its checkpoint');
   });
 
@@ -1036,6 +1050,8 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     const payload = pauseResult.result as { aborted?: boolean; reason?: string; outcome?: string };
     expect(payload.aborted).toBe(true);
     expect(payload.outcome).toBe('paused');
+    // 部分产出不入账（机制强制）：点名暂停的结算体同样剥离 finalOutput。
+    expect('finalOutput' in payload).toBe(false);
     expect(String(payload.reason)).toContain('PAUSED');
     expect(String(payload.reason)).not.toContain('STOPPED');
     expect(String(payload.reason)).not.toContain('timed out');
@@ -1199,5 +1215,32 @@ describe('SubagentOrchestrator delegation memory (P0-3)', () => {
     expect(result.success).toBe(true);
     expect(llm.systemPrompts[0]).not.toContain('<delegated_task_memory>');
     expect((result.result as SubagentResult).memoryInjected).toBeUndefined();
+  });
+});
+
+describe('SubagentOrchestrator probeResumeCheckpoint (第 2 期第三刀)', () => {
+  it('misses on an empty store, hits with the archived turn count after a pause', async () => {
+    const store = new MemoryStateStore();
+    // 没存档：hit=false——收执必须明说「没找到存档，会重新跑」，不许预支断点。
+    expect(SubagentOrchestrator.probeResumeCheckpoint(store, 'parentX', 'test_researcher', '{"prompt":"long research"}'))
+      .toEqual({ hit: false, turns: 0 });
+    // 无 store（会话恢复后缝可能空）：同样 miss，不炸——假 miss 风险的对岸
+    // 也锁住：预检绝不依赖编排器实例（实例每回合重建，跨回合账挂不住）。
+    expect(SubagentOrchestrator.probeResumeCheckpoint(undefined, 'parentX', 'test_researcher', '{"prompt":"long research"}'))
+      .toEqual({ hit: false, turns: 0 });
+
+    // 存档在：hit=true + 断点轮数——收执「从存档断点（第 N 轮）接上」的读数。
+    const sid = SubagentOrchestrator.stableSessionId('parentX', 'test_researcher', { prompt: 'long research' });
+    await store.saveCheckpoint(sid, {
+      version: 1,
+      label: 'subagent_interrupted',
+      createdAt: Date.now(),
+      state: { messages: [{ role: 'user', content: 'long research' }], turnCount: 9 },
+    });
+    expect(SubagentOrchestrator.probeResumeCheckpoint(store, 'parentX', 'test_researcher', '{"prompt":"long research"}'))
+      .toEqual({ hit: true, turns: 9 });
+    // 参数变了 = 另一支：稳定 sessionId 分叉，不误报命中。
+    expect(SubagentOrchestrator.probeResumeCheckpoint(store, 'parentX', 'test_researcher', '{"prompt":"different task"}'))
+      .toEqual({ hit: false, turns: 0 });
   });
 });

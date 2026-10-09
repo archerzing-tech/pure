@@ -2,6 +2,7 @@
 // 点名停支匹配。语义锁从 chat.ts 闭包原样迁移（不发明第二种语义）。
 import { describe, expect, it } from 'bun:test';
 import { DelegationControlPlane, type LiveBranchView } from '../delegationControl';
+import { RESUME_INVARIANTS as RESUME_INV } from '../../shared/insertionMessaging';
 import type { TakeoffBlock } from '../../shared/steerTargeting';
 import type { ToolCall } from '../../shared/types';
 
@@ -97,13 +98,17 @@ describe('DelegationControlPlane stopNamed', () => {
 });
 
 describe('DelegationControlPlane resume ledger', () => {
-  const record = { callId: 'call_a', name: 'researcher', args: '{"prompt":"调研竞品定价策略"}', label: 'researcher', text: '把竞品那支接着跑完', images: [] };
+  // checkpoint 凭据随记录走（第 2 期第三刀）：命中/未命中二分是收执诚实性
+  // 的地基——记录里没有它，收执就只能无脑许愿「从断点续」。
+  const record = { callId: 'call_a', name: 'researcher', args: '{"prompt":"调研竞品定价策略"}', label: 'researcher', text: '把竞品那支接着跑完', images: [], checkpoint: { hit: true, turns: 7 } };
+  const missedRecord = { ...record, checkpoint: { hit: false, turns: 0 } };
 
   it('queues a named paused branch and shows it in the view', () => {
     const plane = new DelegationControlPlane();
     expect(plane.queueResume(record)).toBe(true);
     expect(plane.pendingResumesView()).toHaveLength(1);
     expect(plane.pendingResumesView()[0].callId).toBe('call_a');
+    expect(plane.pendingResumesView()[0].checkpoint).toEqual({ hit: true, turns: 7 }); // 凭据随记录走
   });
 
   it('declines a duplicate queue for the same branch (never double-dispatch)', () => {
@@ -131,6 +136,26 @@ describe('DelegationControlPlane resume ledger', () => {
     expect(task!.text).toContain('researcher'); // 凭据里的支名进兜底指令
     expect(task!.displayText).toBe('把竞品那支接着跑完'); // 渲染一致性：原话重入
     expect(plane.pendingResumesView()).toHaveLength(0); // 兜底即清账
+  });
+
+  it('fallback instruction splits on the checkpoint verdict (hit says from-round, miss admits re-run)', () => {
+    const hit = new DelegationControlPlane();
+    hit.queueResume(record);
+    const hitTask = hit.settleResumesFallback()!;
+    expect(hitTask.text).toContain('从存档断点（第 7 轮）续跑');
+    expect(hitTask.text).toContain('不要从头做');
+    expect(hitTask.text).not.toContain('没找到存档');
+    // 兜底文案与收执同锚（RESUME_INVARIANTS）：miss 语必须含「没找到存档」
+    // 子串、hit 语必须咬「从存档断点（第 N 轮）」——锚的覆盖面不含兜底就是
+    // 游离在一致性测试外，靠自身字面断言自锁（独立检验观察点，2026-10-09）。
+    expect(hitTask.text).toMatch(RESUME_INV.hitSaysFromCheckpoint);
+    const miss = new DelegationControlPlane();
+    miss.queueResume(missedRecord);
+    const missTask = miss.settleResumesFallback()!;
+    expect(missTask.text).toContain('没找到存档');
+    expect(missTask.text).toMatch(RESUME_INV.missAdmitsNoArchive);
+    expect(missTask.text).toContain('会重新跑一遍');
+    expect(missTask.text).not.toContain('断点'); // 没命中绝不预支断点承诺
   });
 
   it('keeps resumes across settleRound (a resume names history, not this round)', () => {

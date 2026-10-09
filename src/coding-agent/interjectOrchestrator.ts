@@ -16,7 +16,7 @@
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
 import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
-import { branchStopReceipt, cancelBeforeDispatchReceipt } from '../shared/insertionMessaging';
+import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt } from '../shared/insertionMessaging';
 import { PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import type { DelegationControlPlane } from './delegationControl';
 import type { RoundClosePlane } from './roundClosePlane';
@@ -52,6 +52,10 @@ export interface InterjectOrchestratorDeps {
   coveringCandidates(): CoveringBranch[];
   /** 收执里引用支名时带同任务第几号（同名多支消歧）。 */
   branchLabel(name: string, callId: string): string;
+  /** 续跑预检（第 2 期第三刀）：同参重派会不会命中 checkpoint（编排器
+   *  probeResumeCheckpoint 的同口径读数）。无必填默认——凭据缺失会让收执
+   *  退回「无脑许愿从断点续」，正是本刀要收掉的谎。 */
+  probeResume(toolName: string, rawArgs: string): { hit: boolean; turns: number };
 
   // ── 引擎动作缝（宿主生命周期）─────────────────────────────────────
   send(text: string, images: MessageImage[], displayText: string): void;
@@ -280,10 +284,10 @@ export class InterjectOrchestrator {
           if (resumed) {
             echoUserBubble();
             // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
-            // 是终稿——转普通气泡（与停支/暂停收执同一形态）。
-            this.deps.settleAck(ack, this.deps.hasDelegationInFlight()
-              ? `续跑：「${resumed}」从存档断点继续；等手头这批收齐接上。`
-              : `续跑：「${resumed}」从存档断点继续。`);
+            // 是终稿——转普通气泡（与停支/暂停收执同一形态）。命中说从第 N
+            // 轮接 / 没命中明说从头跑，口径单一出处（branchResumeReceipt），
+            // 与派工收执、兜底指令三处同源。
+            this.deps.settleAck(ack, branchResumeReceipt(resumed.label, resumed.checkpoint, this.deps.hasDelegationInFlight()));
             return;
           }
         }
@@ -428,17 +432,21 @@ export class InterjectOrchestrator {
    * 含有的词，打平宁可续不了也不赌）；候选 = 已暂停/已取消的支（在飞的支
    * 走 steer，已完成的支结果已在汇总，无需重跑）。拿不到原始参数（旧会话/
    * 非本会话捕获）返回 null，调用方落回普通 steer 让父模型重派。返回被续
-   * 支的展示名（含同名序号）。凭据与去重记账在 DelegationControlPlane。 */
-  private resumeNamedBranch(text: string): string | null {
+   * 支的展示名（含同名序号）+ checkpoint 预检凭据（收执诚实二分用）。凭据
+   * 与去重记账在 DelegationControlPlane。 */
+  private resumeNamedBranch(text: string): { label: string; checkpoint: { hit: boolean; turns: number } } | null {
     const matched = matchInFlightBranch(text, this.deps.stoppedBranches());
     if (!matched) return null;
     const original = this.deps.delegation.delegationArgs.get(matched.callId);
     if (!original) return null;
     const label = this.deps.branchLabel(matched.name, matched.callId);
+    // 预检先行、凭据随记录走：排队收执、派工收执、兜底指令三处按同一份
+    // 预检二分——命中说从第 N 轮接，没命中明说从头跑，绝不预支断点承诺。
+    const checkpoint = this.deps.probeResume(original.name, original.args);
     // 排队同参重派：同一支只排一次——重复点名按「点不出」退回，调用方
     // 落回普通 steer。
-    if (!this.deps.delegation.queueResume({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [] })) return null;
-    return label;
+    if (!this.deps.delegation.queueResume({ callId: matched.callId, name: original.name, args: original.args, label, text, images: [], checkpoint })) return null;
+    return { label, checkpoint };
   }
 
   /** 不重复做（2026-09-25 复测案例一）：这句加活是否已被某支覆盖。匹配面
