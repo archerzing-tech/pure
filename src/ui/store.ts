@@ -103,6 +103,12 @@ export interface SessionUiState {
   /** 期 4：TaskScript 结构账（纯 JSON：version + plan + signals）。重启后重建
    * 同一本账，否则恢复出来的卡片丢证据、续跑轮拿不到收尾素材。 */
   taskScript?: TaskScript | null;
+  /** 第 3 期刀 2（2026-10-09）：回合以 Interrupted(paused) 收场的显式标记。
+   *  「继续」条原先只住 DOM，重启即消失——用户回来只能干瞪着半截转写。恢复
+   *  侧据此重建 affordance；下一次 send 开头清标记，落盘时字段随之消失。
+   *  可选字段对 v3 完全向后兼容（旧 app 读新档无感），故不升快照版本号——
+   *  normalize 只认 version===3，升号反而让旧 app 读新档掉兜底清空会话。 */
+  paused?: boolean;
 }
 
 export interface PlanState {

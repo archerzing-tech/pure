@@ -1834,6 +1834,10 @@ export class ChatController {
   // 持久子代理断点仓（第 3 期）：落盘 ~/.pure/checkpoints/，跨重启可续
   // （setSessionId 预热进镜像；非 Tauri 环境退化为纯镜像，语义同旧内存仓）。
   private subagentStore = new TauriCheckpointStore();
+  // 第 3 期刀 2：本会话最后一个回合是否以 Interrupted(paused) 收场。persistSession
+  // 把它写进 uiState.paused，恢复侧据此重建「继续」条；send() 开头清零——用户
+  // 再次开口本身就是对暂停态的处置，落盘字段随之消失。
+  private sessionEndedPaused = false;
   private liveTranscript: LiveTranscriptWindow;
   private liveTurn: LiveTurnHandle | null = null;
 
@@ -2095,6 +2099,10 @@ export class ChatController {
     // 是同步签名只能读镜像，不预热则重启后的续跑永远诚实 miss。晚到的预热
     // 无污染：镜像键自带父会话前缀（sub_<parent>_…），跨会话不会误命中。
     void this.subagentStore.warm(id);
+    // 刀 2：切走的会话暂停标记不残留；目标会话若有暂停档，回放完成时由
+    // loadFromStorage（读快照）+ restorePausedAffordance（建条）接管。
+    this.sessionEndedPaused = false;
+    this.dismissPausedResumeBar();
   }
 
   /**
@@ -2553,6 +2561,9 @@ export class ChatController {
     }
     this.agentActivityHistorical = true;
     this.removeAgentActivityPanel();
+    // 刀 2：暂停标记随快照回来（回放完成后由 restorePausedAffordance 重建
+    // 「继续」条——这里只装状态，不碰 DOM，回放还没铺完）。
+    this.sessionEndedPaused = snapshot.uiState.paused === true;
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
 
@@ -3419,6 +3430,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.abortController = turnController;
     this.hardStopController = turnHardStop;
     this.setStreaming(true);
+    // 刀 2：新回合开始 = 用户已对暂停态表态（点「继续」或直接发了新指令），
+    // 清掉上一回合的暂停标记——本回合落盘时 uiState.paused 随之消失。
+    this.sessionEndedPaused = false;
     // Set by the Interrupted(paused) branch; the release path must not eat the
     // 「继续」 bar it just showed. Any other ending clears a stale pausing notice.
     let pausedThisTurn = false;
@@ -6357,6 +6371,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // sink. Friendly copy + the resume affordance instead of the
               // alarming "⏹ Interrupted".
               pausedThisTurn = true;
+              // 刀 2：显式暂停标记——随本回合落盘进 uiState.paused，重启后
+              // 恢复侧据此重建「继续」条。
+              this.sessionEndedPaused = true;
               const pausedText = t('chat.paused', '已暂停：进度已存档，随时接着跑。');
               if (hasContent) {
                 this.addStatusBubble(pausedText);
@@ -6833,6 +6850,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pausedResumeBar = bar;
   }
 
+  /** 刀 2：回放完成后由宿主调用——快照带暂停标记时重建「继续」条。回放期间
+   *  不能建（条会被铺在回放内容中间），回放后建则自然落在转写尾部，与实况
+   *  暂停时的位置一致。回合正在跑（warm 会话的后台流）时不建——单写者铁律，
+   *  正在流的回合自己会在收尾时决定要不要展示。 */
+  restorePausedAffordance(): void {
+    if (!this.sessionEndedPaused || this.isStreaming()) return;
+    this.showPausedResumeBar();
+  }
+
   private dismissPausedResumeBar(): void {
     this.pausedResumeBar?.remove();
     this.pausedResumeBar = null;
@@ -7017,6 +7043,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       uiState: {
         ...nextSnapshotV2.uiState,
         agentActivities: this.agentActivities.length > 0 ? this.agentActivities.map((activity) => ({ ...activity })) : undefined,
+        paused: this.sessionEndedPaused || undefined,
       },
     };
     await saveSession(sessionId, nextSnapshot, workspace);
@@ -7739,6 +7766,11 @@ export class SessionChatManager {
 
   mountAgentActivityPanel(): void {
     this.activeNow().mountAgentActivityPanel();
+  }
+
+  /** 刀 2：回放收尾转发——「继续」条住在可见会话的 controller 里。 */
+  restorePausedAffordance(): void {
+    this.activeNow().restorePausedAffordance();
   }
 
   registerPausedAssessment(flow: AssessmentFlowHandle | null): void {

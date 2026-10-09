@@ -653,3 +653,29 @@ describe('file write activity deduplication', () => {
     ])).toEqual([{ path: 'src/app.ts', ts: 9, success: true }]);
   });
 });
+
+describe('session paused state persistence (第 3 期刀 2)', () => {
+  it('round-trips uiState.paused through save/load and stays absent on legacy snapshots', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const message: Message = { role: 'user', content: '跑一半的任务' };
+      const sessionId = `paused-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await saveSession(sessionId, createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }], { paused: true }));
+      const loaded = await loadSession(sessionId);
+      expect(loaded?.snapshot.uiState.paused).toBe(true);
+
+      // 旧档没有这个字段：normalize 透传后仍为 undefined，恢复侧不得误报暂停。
+      const legacyId = `${sessionId}-legacy`;
+      await saveSession(legacyId, createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }]));
+      expect((await loadSession(legacyId))?.snapshot.uiState.paused).toBeUndefined();
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
