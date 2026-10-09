@@ -9575,8 +9575,8 @@ button svg,
 .paste-viewer-close {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 0;
   border-radius: 7px;

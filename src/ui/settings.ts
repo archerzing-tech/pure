@@ -1638,8 +1638,12 @@ export class SettingsPanel {
           ? override.protocol
           : providerDef(id)?.protocol ?? protocolForURL(customBaseURL(customs, id, overrides)));
       const protocolBadge = `<span class="llm-provider-card-protocol">${escapeHtml(t(`llm.protocol.${resolvedProtocol}`))}</span>`;
+      // 删除钮只给删得掉的卡：纯内置供应商来自注册表常量、永远会重渲回来，
+      // 给它 × 就是弹「已删除」而卡还在（2026-10-09 用户实测）。有同名自建
+      // 条目的内置卡（custom=true）删的是那条自建记录，× 保留。
+      const deletable = custom || !providerDef(id);
       return `<button type="button" class="llm-provider-card" data-provider="${escapeHtml(id)}" title="${t('llm.card.open')}">
-        <span class="llm-provider-card-del" data-del-provider="${escapeHtml(id)}" role="button" aria-label="${escapeHtml(t('llm.custom.delete'))}" title="${escapeHtml(t('llm.custom.delete'))}">×</span>
+        ${deletable ? `<span class="llm-provider-card-del" data-del-provider="${escapeHtml(id)}" role="button" aria-label="${escapeHtml(t('llm.custom.delete'))}" title="${escapeHtml(t('llm.custom.delete'))}">×</span>` : ''}
         <span class="llm-provider-card-top">
           <span class="provider-card-mark ${markClass}">${escapeHtml(mark)}</span>
           <span class="llm-provider-card-status${hasKey ? '' : ' llm-provider-card-status-empty'}">${escapeHtml(status)}</span>
@@ -4239,8 +4243,11 @@ export class SettingsPanel {
   private removeProvider(id: string): void {
     const prev = loadConfig() ?? defaults();
     const removed = customProviderFor(prev.customProviders ?? [], id);
-    const isBuiltin = PROVIDERS.some((provider) => provider.id === id);
-    if (!removed && !isBuiltin) return;
+    // 删除只服务自定义条目（渲染层已不给纯内置卡 ×）：到达这里的纯内置 id
+    // 一律静默返回——弹「已删除」而卡永远重渲回来，就是说谎的 UI（2026-10-09
+    // 用户实测：内置卡 × 弹已删除但删不掉）。内置卡的用户覆盖走各字段的
+    // 编辑/清除，不走删除。
+    if (!removed) return;
     if (removed && isTauriRuntime() && removed.hasApiKey) {
       void revokeCustomSecretFromRust(removed.id);
     }

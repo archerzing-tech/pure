@@ -5,6 +5,7 @@
 
 import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
+import { applyLanguageDirective, detectReplyLanguage, lastHumanUserText, replyLanguageDirective } from '../shared/langDetect';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
@@ -159,7 +160,7 @@ export class AgentLoopEngine {
   ): AsyncGenerator<EngineEvent, void, void> {
     const budget = new BudgetManager(input.budget);
     const messages: Message[] = [
-      { role: 'system', content: input.systemPrompt },
+      { role: 'system', content: applyLanguageDirective(input.systemPrompt, replyLanguageDirective(detectReplyLanguage(input.userPrompt))) },
       { role: 'user', content: input.userPrompt, images: input.images },
     ];
     budget.addTokens(input.systemPrompt + input.userPrompt);
@@ -177,6 +178,13 @@ export class AgentLoopEngine {
     const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt, images: input.images, internal: input.userInternal || undefined }];
     budget.addTokens(input.newUserPrompt);
     for (const m of input.messages) budget.addTokens(m.content);
+    // 语言对齐（2026-10-09）：语言指令按**最后一条真人输入**判定——newUserPrompt
+    // 常是宿主代劳的 internal 轮（语言不代表用户）；标记可替换，续跑重注入
+    // 不堆积。
+    const lang = detectReplyLanguage(lastHumanUserText(messages));
+    if (messages[0] && messages[0].role === 'system') {
+      messages[0] = { ...messages[0], content: applyLanguageDirective(messages[0].content, replyLanguageDirective(lang)) };
+    }
 
     yield* this.runLoop(messages, ctx, budget, 1);
   }

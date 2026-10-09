@@ -1796,4 +1796,48 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     expect(interrupted!.payload.reason).toBe('aborted');
     expect(toolSawAbort).toBe(true);
   });
+
+  it('injects a reply-language directive from the latest human input into the system prompt (2026-10-09)', async () => {
+    // 思考跑英文的机制对治：语言指令按**最后一条真人输入**判定（internal
+    // 机器轮跳过），挂在 system prompt 尾部的可替换标记里——续跑重注入
+    // 幂等替换，不一行行堆积。
+    const seen: Message[][] = [];
+    const capturing: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        seen.push(messages.map((m) => ({ ...m })));
+        yield { type: 'done', content: '好的', toolCalls: [] };
+      },
+      complete: async () => ({ content: '好的', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm: capturing });
+
+    await collect(engine.run(
+      { sessionId: 's_lang', systemPrompt: 'You are helpful.', userPrompt: '帮我看看这个崩溃怎么回事', budget: STD_BUDGET },
+      ctx,
+    ));
+    expect(seen[0]![0]!.role).toBe('system');
+    expect(seen[0]![0]!.content).toContain('<user_language>用户要求用中文来思考与输出。</user_language>');
+    expect(seen[0]![0]!.content).toContain('You are helpful.');
+
+    await collect(engine.continue({
+      sessionId: 's_lang',
+      messages: [
+        { role: 'system', content: 'You are helpful.\n<user_language>用户要求用中文来思考与输出。</user_language>' },
+        { role: 'user', content: '帮我看看这个崩溃怎么回事' },
+        { role: 'assistant', content: 'paused mid-way' },
+        { role: 'user', content: 'Resume the paused branch from its checkpoint.', internal: true },
+      ],
+      // 宿主代劳的续跑轮（internal）：语言不代表用户——判定必须跳过它，
+      // 落到最后一条真人输入（中文）。
+      newUserPrompt: 'retry the failed step',
+      userInternal: true,
+      budget: STD_BUDGET,
+    }, ctx));
+    const sys = seen[1]![0]!;
+    expect(sys.role).toBe('system');
+    expect(sys.content.match(/<user_language>/g)?.length).toBe(1); // 替换不堆积
+    // 最后一条真人输入是中文（internal 英文轮被跳过）→ 指令仍是中文。
+    expect(sys.content).toContain('用户要求用中文来思考与输出。');
+  });
 });
