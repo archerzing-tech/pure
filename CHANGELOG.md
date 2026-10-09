@@ -3,6 +3,29 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v3.1.1
+
+**自进化飞轮首圈转通 + 对话智能第 2 期分支级继续收官 + 四件真机体验修复**
+
+beta 毕业为正式版：进化闭环在真实项目上第一次完整走通——收割→起草→多数票门→A/B→落盘，首个 overlay 真实 ALLOW；插话协议第 2 期「分支级继续」落地，委派支可凭存档断点续跑。
+
+**进化轨道**
+- P1-1 首次真实 ALLOW 达成：收割→起草→门→A/B→落盘全环转通，code_reviewer overlay 首个落盘（2d49513）
+- 收割器补断点续收：盘上已过门的案例不覆盖不重收，编号接着排（15b2060）
+- overlay 驱动器显式 --provider 时跳过 config 顶层 model：别家的模型名喂过来就是 400（34556ca）
+
+**对话智能（插话协议第 2 期）**
+- 分支级继续收口：续跑收执诚实二分——命中存档明说「从存档断点（第 N 轮）接上」，没命中老实说「没找到存档，会重新跑一遍」，不再悄悄从头跑（d2d20bc）
+- 中止产出剥离从教学升为机制强制：被中止支的三路中止结算体剥离 finalOutput，父上下文没有材料可入账；失败路不动（d2d20bc）
+
+**真机体验**
+- 内置 provider 卡不再渲染删不掉的 × 删除钮（原「删不掉却弹已删除」是说谎的 UI）
+- 设置面板返回箭头顺收回方向翻转；附件预览关闭钮放大到可点清
+- 思考语言机制化：按用户输入的主要文字判定语言，显式指令幂等挂 system prompt 尾部——中英混杂看主要文字，思考不再习惯性跑英文（3c069dd）
+
+**测试基建**
+- notify 测试的 DOM 探测从 window 换成 document：残留 window 让 ubuntu CI 连红（c3b2b1b）
+
 ## v3.1.1-beta
 
 **双宿主全量测试集收官 + 产品核两 bug 修复 + 收割门结构断言化**
