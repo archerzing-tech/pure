@@ -43,7 +43,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -3374,6 +3374,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // The activity panel is task-scoped: a continuation keeps the existing
     // rows, while a new top-level task starts a fresh collaboration trace.
     const preserveAgentActivities = this.activeComplexPlan !== null && this.hasHistory;
+    // 刀 3（第 3 期持久性）：暂停恢复回合的锚。sessionEndedPaused 在本函数
+    // 后段才清零，此刻它还带着真值；停着的旧支名单在活动面板可能被清空前
+    // 抓下——回执据此区分「旧支重派」（存档没跟上要明说）与「本轮新委派」
+    // （不出声）。防重账随闭包：段内续 slice 的二次 onStart 不再出声。
+    const resumingPausedTurn = this.sessionEndedPaused;
+    const pausedBranchNames = new Set(
+      this.agentActivities
+        .filter((item) => item.status === 'paused' || item.lifecycle === 'paused')
+        .map((item) => item.agentName),
+    );
+    const resumeReceiptShown = new Set<string>();
     this.agentActivityHistorical = false;
     if (!preserveAgentActivities) {
       this.agentActivities = [];
@@ -3383,6 +3394,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       onStart: (a) => {
         if (gen !== this.generation) return;
         this.updateAgentActivity(a);
+        // 整树续跑的对话流回执（判定与话术同源 insertionMessaging，与分支级
+        // 继续共用 branchResumeReceipt 一个出处）：命中存档说从第几轮接，
+        // 旧支存档没跟上明说重跑。
+        const receipt = treeResumeReceipt(a, { resumingPausedTurn, pausedBranches: pausedBranchNames });
+        if (receipt && !resumeReceiptShown.has(a.callId)) {
+          resumeReceiptShown.add(a.callId);
+          this.addStatusBubble(receipt, false, false, 'info');
+        }
       },
       onState: (a) => {
         if (gen !== this.generation) return;

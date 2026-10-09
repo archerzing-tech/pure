@@ -108,6 +108,23 @@ export function branchResumeReceipt(
     : `续跑：「${label}」——没找到存档，会重新跑一遍。${tail}`;
 }
 
+/** 整树续跑的对话流回执判定（第 3 期刀 3）：send('继续') 引导的恢复回合里，
+ *  每个重派支起飞时宿主问一次本函数。命中存档说从第几轮接；停着的旧支存档
+ *  没跟上就明说重跑；本轮新委派不出声——回执替机制许愿就是说谎，噪音回执
+ *  稀释真信号同理。话术与分支级继续同源（branchResumeReceipt），两处不许
+ *  漂移。防重（段内续 slice 的二次 onStart 不再出声）是宿主按 callId 记的
+ *  账，纯函数只管单次判定。 */
+export function treeResumeReceipt(
+  activity: { resumed?: boolean; resumedTurns?: number; agentName: string },
+  ctx: { resumingPausedTurn: boolean; pausedBranches: ReadonlySet<string> },
+): string | null {
+  if (activity.resumed) return branchResumeReceipt(activity.agentName, { hit: true, turns: activity.resumedTurns ?? 0 }, false);
+  if (ctx.resumingPausedTurn && ctx.pausedBranches.has(activity.agentName)) {
+    return branchResumeReceipt(activity.agentName, { hit: false, turns: 0 }, false);
+  }
+  return null;
+}
+
 /** 三处口径的一致性锚（一致性测试读它，不读各处散文）——每条都是「取消」
  *  这个动作在系统里必须同时成立的三个面：宿主动手、产出出清、幸存者合并。 */
 export const CANCELLATION_INVARIANTS = {

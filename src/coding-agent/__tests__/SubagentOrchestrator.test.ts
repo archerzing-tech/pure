@@ -335,6 +335,55 @@ describe('SubagentOrchestrator P1', () => {
     expect(subSessionId).toBeDefined();
     expect(sessions.get(subSessionId!)!.checkpoints.length).toBeGreaterThan(0);
   });
+
+  it('carries the checkpoint turn count on onStart so the resume receipt can say which round it continues from (第 3 期刀 3)', async () => {
+    // 回执「从第 N 轮接上」的轮数来自 onStart payload（resumedTurns），不是
+    // 宿主再 probe 一次——预检/实际/回执三方共用 execute 这一份事实。
+    const sessions = new Map<string, { state: { messages: Message[]; turnCount: number }; checkpoints: Checkpoint[] }>();
+    const store: IStateStore = {
+      loadSession: (id) => sessions.get(id) ?? null,
+      saveCheckpoint: async (id, cp) => {
+        const cur = sessions.get(id) ?? { state: { messages: [{ role: 'user', content: '' }], turnCount: 0 }, checkpoints: [] };
+        cur.checkpoints.push(cp);
+        cur.state = { messages: cp.state.messages, turnCount: cp.state.turnCount };
+        sessions.set(id, cur);
+      },
+      deleteSession: async (id) => { sessions.delete(id); },
+    };
+    const parentSession = 'parent-turns';
+    const args = { prompt: 'research X' };
+    const starts: SubagentActivity[] = [];
+    const make = () => {
+      const orch = new SubagentOrchestrator({
+        llm: new MockLLMAdapter('findings'),
+        parentTools: stubAdapter,
+        parentToolsDefs: [],
+        defaultBudget: BUDGET,
+        stateStore: store,
+        parentSessionId: parentSession,
+        progress: { onStart: (a) => starts.push(a) },
+      });
+      orch.register(subagentDef('test_researcher'));
+      return orch;
+    };
+
+    // 第一轮：无存档 → resumed=false，轮数不上报。
+    await make().execute(toolCall('test_researcher', args));
+    expect(starts[0].resumed).toBe(false);
+    expect(starts[0].resumedTurns).toBeUndefined();
+
+    // 预置 7 轮存档（同 parent + 同名 + 同参 → 同 sessionId），重派即命中。
+    const subSessionId = SubagentOrchestrator.stableSessionId(parentSession, 'test_researcher', args);
+    await store.saveCheckpoint(subSessionId, {
+      version: 1,
+      label: 'test_researcher',
+      state: { messages: [{ role: 'user', content: 'x' }, { role: 'assistant', content: 'y' }], turnCount: 7 },
+      createdAt: Date.now(),
+    });
+    await make().execute(toolCall('test_researcher', args));
+    expect(starts.at(-1)?.resumed).toBe(true);
+    expect(starts.at(-1)?.resumedTurns).toBe(7);
+  });
 });
 
 describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {

@@ -23,6 +23,7 @@ import {
   foldInFollowUpText,
   CANCELLATION_INVARIANTS as INV,
   branchResumeReceipt,
+  treeResumeReceipt,
   RESUME_INVARIANTS as RESUME_INV,
 } from '../insertionMessaging';
 import { expectNoDefaultParams } from './arityLock';
@@ -257,5 +258,38 @@ describe('续跑收执诚实二分（第 2 期第三刀，判例 14）', () => {
     expect(t).toContain('会重新跑一遍');
     expect(t).not.toContain('断点');
     expect(t).not.toContain('等手头这批收齐接上'); // pending=false 无尾巴
+  });
+});
+
+describe('整树续跑回执判定（第 3 期刀 3）', () => {
+  // send('继续') 引导的恢复回合里，每个重派支起飞时宿主问一次判定：命中
+  // 带轮数、旧支存档丢失明说重跑、新委派闭嘴。话术与分支级继续同源
+  // （branchResumeReceipt）——漂移即打回。
+  const resuming = { resumingPausedTurn: true, pausedBranches: new Set(['竞品分析员']) };
+
+  it('命中存档：说从第几轮接上（轮数缺失兜 0 也要咬住 hit 语）', () => {
+    const t = treeResumeReceipt({ agentName: '竞品分析员', resumed: true, resumedTurns: 7 }, resuming);
+    expect(t).toMatch(RESUME_INV.hitSaysFromCheckpoint);
+    expect(t).toContain('第 7 轮');
+    expect(t).not.toContain('没找到存档');
+    // resumedTurns 没上报（旧宿主/旧事件）时 hit 语义不能丢。
+    expect(treeResumeReceipt({ agentName: '竞品分析员', resumed: true }, resuming))
+      .toMatch(RESUME_INV.hitSaysFromCheckpoint);
+  });
+
+  it('恢复回合 + 停着的旧支存档丢失：明说重跑，不预支断点', () => {
+    const t = treeResumeReceipt({ agentName: '竞品分析员', resumed: false }, resuming);
+    expect(t).toMatch(RESUME_INV.missAdmitsNoArchive);
+    expect(t).toContain('会重新跑一遍');
+    expect(t).not.toContain('断点');
+  });
+
+  it('恢复回合 + 名单外的新委派：null，不出声', () => {
+    expect(treeResumeReceipt({ agentName: '新调研员', resumed: false }, resuming)).toBeNull();
+  });
+
+  it('非恢复回合：一律 null——回执只随恢复回合出，防噪音', () => {
+    const notResuming = { resumingPausedTurn: false, pausedBranches: new Set(['竞品分析员']) };
+    expect(treeResumeReceipt({ agentName: '竞品分析员', resumed: false }, notResuming)).toBeNull();
   });
 });
