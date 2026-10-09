@@ -9,6 +9,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
+import { createSessionLedger, markPlanReplaced, recordAsked, recordAnswer, recordDone, recordPlan, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
@@ -29,7 +30,7 @@ import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinki
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
-import { describeTiming, formatInputDecision, type InputAction, type InputTiming } from '../coding-agent/inputDecision';
+import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
 import { InterjectOrchestrator } from '../coding-agent/interjectOrchestrator';
 import { sanitizeSkillName } from './skillHub';
 import { type SteerTarget } from '../shared/steerTargeting';
@@ -1570,6 +1571,13 @@ export class ChatController {
   /** 本会话内已生成的第几个独立规划（1、2、…）。同一规划的细化/续跑不递增，
    * 只有新请求在对话里再开一份计划才 +1；会话切换/新对话清零。 */
   private planSeqCounter = 0;
+  /** 期 4·会话账本（不重复问、不重复做、不重复规划）：asked/done/plans 三本
+   * 账跨回合跨重启存活（快照持久化），记账点=委派结算、计划卡、旁答/澄清问。
+   * 新对话/会话切换清零。 */
+  private sessionLedger: SessionLedger = createSessionLedger();
+  /** 澄清问的待回收句柄（UI 层细节，不进 shared 账本）：用户的回应被分类到
+   * 与澄清预期同族的方向时，回填为该条 asked 的答案。一条澄清只等一次回应。 */
+  private pendingClarification: { fingerprint: string; gatedFrom: 'stop' | 'replan'; ts: number } | null = null;
   /** 当前活动规划的会话内编号（applyPlanProgressSnapshot 从快照恢复）。 */
   private activePlanSeq = 1;
   /** Task-scoped collaboration trace shared by live execution and restore. */
@@ -1793,6 +1801,21 @@ export class ChatController {
       // 了」时不必等回合结束。三个值：judge（裁决器）/ rule（正则快路径）/ net
       //（字面安全网）。
       console.info(`[pure] 插话决策 ${formatInputDecision(decision)} via=${String(decision.signals.via ?? 'judge')}`);
+      // 澄清回答回收（窄启发式）：刚问过澄清且这句插话的分类方向与 gatedFrom
+      // 同族（stop→stop；replan→goal-change/premise-change），大概率就是回应。
+      // 旁答问答对确定直接回填；澄清这里是猜方向——误回收比不回收更糟，
+      // 所以窗口（10 分钟）与同族判定都收紧。句柄存在即消费（用完即弃）：
+      // 超窗只是不回填，不悬挂到下次覆盖。
+      const pending = this.pendingClarification;
+      if (pending) {
+        const sameDirection =
+          (pending.gatedFrom === 'stop' && decision.kind === 'stop') ||
+          (pending.gatedFrom === 'replan' && (decision.kind === 'goal-change' || decision.kind === 'premise-change'));
+        if (sameDirection && Date.now() - pending.ts < 10 * 60_000) {
+          this.sessionLedger = recordAnswer(this.sessionLedger, pending.fingerprint, text, Date.now());
+        }
+        this.pendingClarification = null;
+      }
     },
   });
   /** 插话重构 — REFLECT-phase adapter for the current turn, when 9.2 phase
@@ -2092,6 +2115,10 @@ export class ChatController {
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
+    // 会话账本随会话走：切会话/新对话换新账。
+    this.sessionLedger = createSessionLedger();
+    // 澄清句柄跟旧账一起作废——跨会话回收会把答案记到不相干的问题上。
+    this.pendingClarification = null;
     this.sessionId = id;
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
@@ -2798,7 +2825,19 @@ export class ChatController {
 
   /** 架构评审 v2 A1（S1-2）— 委派落定进会话事件日志（subagentProgress 的
    *  onDone/onError 单点；世代护栏由调用方的 gen 检查承担）。 */
-  private logDelegationSettled(a: import('../coding-agent/SubagentOrchestrator').SubagentActivity): void {    void getSessionEventSink(this.sessionId).append({
+  private logDelegationSettled(a: import('../coding-agent/SubagentOrchestrator').SubagentActivity): void {
+    // 账本 done 账：委派是重活（子代理几十秒起步），重复重派代价最高——
+    // 记指纹（意图+参数）与结果摘要，模型动手前先翻（提示+确认，不静默跳过）。
+    // 普通工具不进这本账：TaskScript 事实清单已覆盖同回合工具事实，轻工具
+    // 重复执行无妨，记了反而把重活挤出素材窗口。
+    this.sessionLedger = recordDone(this.sessionLedger, {
+      ts: Date.now(),
+      intent: `delegate:${a.agentName}`,
+      args: a.inputSnippet ?? '',
+      ok: a.success === true,
+      summary: a.output?.trim() || a.error || '',
+    });
+    void getSessionEventSink(this.sessionId).append({
       ts: Date.now(),
       kind: 'delegation_settled',
       actor: 'gui',
@@ -3106,10 +3145,16 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       const bubble = this.addBubble('assistant', '');
       bubble.textContent = `（边干边答）${answer}`;
       this.recordSideAnswer(text, answer);
+      // 账本 asked 账：旁答的问答对确定无疑，入账即回填。steerBus 的 internal
+      // 消息只在当前回合存活，账本才跨回合跨重启——用户再问同一件事，翻账即答。
+      const asked = recordAsked(this.sessionLedger, { ts: Date.now(), question: text, source: 'sideAnswer' });
+      this.sessionLedger = recordAnswer(asked, asked.asked.at(-1)!.fingerprint, answer, Date.now());
     } else {
       // 旁答失败不再静默：明说没答上，问题已入账，收尾时模型统一答。
       this.addStatusBubble('旁答未完成；问题已入账，收尾统一回答。', false, false, 'info');
       this.recordSideAnswer(text, '');
+      // 没答上：只记问题（settled=false）——没有答案的条目不进素材，零误导。
+      this.sessionLedger = recordAsked(this.sessionLedger, { ts: Date.now(), question: text, source: 'sideAnswer' });
     }
   }
 
@@ -3134,7 +3179,9 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * 再说。ask 是旁路一次 LLM 调用（秒级），pending 的 ack 撑住这段空档。 */
   private async askMidrunClarification(decision: DynamicInsertionDecision, text: string, images: MessageImage[], ack: HTMLElement | null): Promise<void> {
     const llm = this.turnPhaseLlm ?? this.turnLlm;
-    const gatedFrom = typeof decision.signals.gatedFrom === 'string' ? (decision.signals.gatedFrom as InputAction) : 'replan';
+    // gatedFrom 只取两族：stop / replan。其余值（如 ignore）按 replan 处理——
+    // 问询语义「推倒重来吗？」是缺省读法。
+    const gatedFrom: 'stop' | 'replan' = decision.signals.gatedFrom === 'stop' ? 'stop' : 'replan';
     const reading = gatedFrom === 'stop' ? '把当前任务停掉' : '推倒当前方向重来';
     const fallback = `先不动手——你是想${reading}吗？还是我理解偏了，说一声我就照办。手头的活先照旧。`;
     let question = '';
@@ -3156,7 +3203,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 临时回执的历史使命完成：问题气泡接管对话。
     this.discardAckRow(ack);
     const bubble = this.addBubble('assistant', '');
-    bubble.textContent = question || fallback;
+    const shown = question || fallback;
+    bubble.textContent = shown;
+    // 澄清问入账（settled=false）：挂上句柄等用户回应。句柄只等一次——
+    // logDecision 无论方向是否同族都消费掉它，误回收比不回收更糟。
+    const asked = recordAsked(this.sessionLedger, { ts: Date.now(), question: shown, source: 'clarification' });
+    this.sessionLedger = asked;
+    this.pendingClarification = { fingerprint: asked.asked.at(-1)!.fingerprint, gatedFrom, ts: Date.now() };
   }
 
   /** Queue an UNRELATED insert and make sure something will dispatch it. The
@@ -4704,10 +4757,26 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               this.activePlanSeq = planSeq;
               planProgress = new PlanProgressModel(plan, 'active', 1, 1, needsDeliveryGate, planSeq, userText);
               this.activeTaskScript = createTaskScript(plan);
+              // 账本 plans 账：新版本入链（指纹=计划内容，跨重启可比）。
+              this.sessionLedger = recordPlan(this.sessionLedger, {
+                ts: Date.now(),
+                planText: JSON.stringify(plan),
+                planSeq,
+                reason: userText,
+              });
             } else if (planProgress.getSnapshot().plan !== plan) {
               // 同一规划在细化中换了步骤（planReplaced）：编号沿用，不递增。
               planProgress.dispatch({ type: 'planReplaced', plan });
               this.recordTaskScript({ kind: 'planReplaced', plan });
+              // 账本 plans 状态链：先标旧条目被取代，再记新指纹（同编号）——
+              // 顺序反了会把新条目也标成已被取代。
+              this.sessionLedger = markPlanReplaced(this.sessionLedger, this.activePlanSeq);
+              this.sessionLedger = recordPlan(this.sessionLedger, {
+                ts: Date.now(),
+                planText: JSON.stringify(plan),
+                planSeq: this.activePlanSeq,
+                reason: userText,
+              });
             }
             if (planCard) {
               // Keep one stable, flat progress list in the transcript. Updating

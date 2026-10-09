@@ -1069,7 +1069,9 @@ describe('plan overview completion state', () => {
     expect(ask).toBeGreaterThan(-1);
     const askBody = src.slice(ask, src.indexOf('private steerRunningTurn', ask));
     expect(askBody.indexOf('const fallback =')).toBeGreaterThan(-1);
-    expect(askBody.indexOf("bubble.textContent = question || fallback;")).toBeGreaterThan(-1);
+    // 问句落屏走 shown（question || fallback）——账本接线改写后兜底语义不变。
+    expect(askBody.indexOf('const shown = question || fallback;')).toBeGreaterThan(-1);
+    expect(askBody.indexOf('bubble.textContent = shown;')).toBeGreaterThan(-1);
   });
 
   it('shows the queue as one live card and narrates the handoff when it drains', () => {
@@ -1093,6 +1095,43 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('正在跑的调研收齐后')).toBe(-1);
     expect(msg.indexOf('收齐后先补这项')).toBeGreaterThan(-1);
     expect(src.indexOf('正在跑的活收齐后先补这项')).toBe(-1);
+  });
+
+  it('wires the asked ledger at every question/recovery seam (blueprint knife 2/3)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const ledger = readSource(new URL('../../shared/sessionLedger.ts', import.meta.url));
+    // 第 4 期账本刀 2/3：四个提问/回收缝都必须落账——旁答两支（答上回填、
+    // 没答上只记问题）、澄清问入账 + 句柄、logDecision 回答回收、切会话清
+    // 账本和句柄。守卫对源码扫描：记账调用就是接缝本身。
+    // 旁答（answerMidrunQuestion）两支：答上即回填 settled=true。
+    const sideAnswer = src.indexOf('private async answerMidrunQuestion(');
+    expect(sideAnswer).toBeGreaterThan(-1);
+    const sideBody = src.slice(sideAnswer, src.indexOf('private async askMidrunClarification(', sideAnswer));
+    expect(sideBody.indexOf("recordAsked(this.sessionLedger, { ts: Date.now(), question: text, source: 'sideAnswer' })")).toBeGreaterThan(-1);
+    expect(sideBody.indexOf('recordAnswer(asked, asked.asked.at(-1)!.fingerprint, answer, Date.now())')).toBeGreaterThan(-1);
+    // 澄清问入账 + 句柄只等一次（同族回收后句柄用完即弃）。
+    const ask = src.indexOf('private async askMidrunClarification(');
+    const askBody = src.slice(ask, src.indexOf('private steerRunningTurn', ask));
+    expect(askBody.indexOf("recordAsked(this.sessionLedger, { ts: Date.now(), question: shown, source: 'clarification' })")).toBeGreaterThan(-1);
+    expect(askBody.indexOf('this.pendingClarification = { fingerprint: asked.asked.at(-1)!.fingerprint, gatedFrom, ts: Date.now() }')).toBeGreaterThan(-1);
+    const recovery = src.indexOf('澄清回答回收（窄启发式）');
+    expect(recovery).toBeGreaterThan(-1);
+    const recoveryBody = src.slice(recovery, recovery + 1_200);
+    // 正向：同族方向才回填；反向：句柄无条件消费（不存在跨回合滞留）。
+    expect(recoveryBody.indexOf('recordAnswer(this.sessionLedger, pending.fingerprint, text, Date.now())')).toBeGreaterThan(-1);
+    expect(recoveryBody.indexOf('this.pendingClarification = null;')).toBeGreaterThan(-1);
+    expect(recoveryBody.indexOf("pending.gatedFrom === 'stop' && decision.kind === 'stop'")).toBeGreaterThan(-1);
+    // 切会话：账本与句柄一起作废。
+    const reset = src.indexOf('this.sessionLedger = createSessionLedger();');
+    expect(reset).toBeGreaterThan(-1);
+    expect(src.indexOf('this.pendingClarification = null;', reset)).toBeGreaterThan(-1);
+    // 委派 done 账与 plans 状态链（先 mark 后 record——反了会误标新条目）。
+    expect(src.indexOf('this.sessionLedger = recordDone(this.sessionLedger,')).toBeGreaterThan(-1);
+    const replaced = src.indexOf('this.sessionLedger = markPlanReplaced(this.sessionLedger, this.activePlanSeq);');
+    expect(replaced).toBeGreaterThan(-1);
+    expect(src.indexOf('this.sessionLedger = recordPlan(this.sessionLedger,', replaced)).toBeGreaterThan(-1);
+    // 素材导出函数必须真实存在（接线不能指向不存在的缝）。
+    expect(ledger.indexOf('export function formatSessionLedgerFacts(')).toBeGreaterThan(-1);
   });
 
   it('folds mid-flight scope additions into the aggregation round, with a deterministic fallback', () => {
