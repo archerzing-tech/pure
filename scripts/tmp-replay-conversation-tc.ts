@@ -1,10 +1,14 @@
 // tmp/replay-conversation-tc.ts
-// 对话姿态测试集回放：/Users/ericever/Documents/test.txt 的 TC-01..TC-09。
+// 对话姿态测试集回放：/Users/ericever/Documents/test.txt 的 TC-01..TC-11。
 // 用应用真实系统提示词（BASE_SYSTEM_PROMPT gui 无工作区变体 + 环境行）+
 // 真实 provider（GLM anthropic 端点），按宿主真实路由语义模拟插话：
 //   - goal/premise 插入 = 中止重入：原方向留在历史里，插入作为新 user 消息
 //   - question 插入 = 边干边答旁路（answerMidrunQuestion 的真实系统提示词）
 //   - queue 插入 = 宿主接管，模型回合里不出现，收尾派发时作为新回合重入
+//   - 分支止损（TC-10/11）= 委派执行器按剧本造结算体：被停支返回编排器
+//     真实中止结算形状（aborted/outcome/reason/summary，无产出），停后自
+//     行重派返回起飞闸拦下结算，用户点名续跑返回成功产出。宿主半边的机
+//     制判例在 conversationSamples（8+ 条），这里测的是模型半边的姿态。
 // 评分由人按 test.txt 的评分卡对结果 JSON 打（模型侧不自动评分）。
 //
 // 用法：bun tmp/replay-conversation-tc.ts [--only TC-01,TC-04] [--out 路径]
@@ -14,6 +18,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { BASE_SYSTEM_PROMPT } from '../src/ui/chat';
 import { DeepSeekAnthropicAdapter } from '../src/adapter/deepseek/DeepSeekAnthropicAdapter';
+import { BUILT_IN_SUBAGENTS } from '../src/coding-agent/SubagentOrchestrator';
 import { BUILT_IN_TOOL_DEFS } from '../src/shared/toolDefs';
 import type { Message, ToolCall, ToolDefinition } from '../src/shared/types';
 
@@ -63,6 +68,15 @@ const SYSTEM = `${BASE_SYSTEM_PROMPT(false)}\n\n${ENVIRONMENT_LINE}`;
 const TOOLS: ToolDefinition[] = BUILT_IN_TOOL_DEFS.filter(
   (t) => t.name === 'sys_info' || t.name === 'web_search' || t.name === 'write_file',
 );
+
+// 分支止损 TC 的委派工具：定义逐字取自内置角色注册表（与应用同协议），
+// 执行结果不跑真子代理，按每 TC 的剧本造结算体——模型侧姿态测试，宿主
+// 机制不在此复刻。
+const RESEARCHER_DEF: ToolDefinition | undefined = (() => {
+  const def = BUILT_IN_SUBAGENTS.find((d) => d.name === 'researcher');
+  if (!def) return undefined;
+  return { name: def.name, description: def.description, input_schema: def.input_schema };
+})();
 
 // write_file 落盘根：相对路径进回放沙盒（与应用「相对 workspace 根」一致，
 // 回放无 workspace 则以沙盒代之）；绝对路径按应用契约原样可达。
@@ -138,12 +152,58 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, attempts = 3): 
   throw lastErr;
 }
 
-async function executeTool(name: string, argumentsJson: string): Promise<string> {
+/** 分支止损剧本（挂在 TC 上）：命中关键词的委派支按剧本结算，其余支按
+ *  关键词给成品产出。continueAfterStop=false 时停后再次派工返回起飞闸拦
+ *  下结算（测「不自行重派」）；true 时返回成功产出（测「点名续跑接得
+ *  上」）。 */
+interface DelegateScript {
+  stoppedTopicIncludes: string;
+  continueAfterStop: boolean;
+  findingsByKeyword: Record<string, string>;
+  findingsFallback: string;
+}
+
+/** 编排器中止结算的 reason 原文（模型侧行动指引）——回放造的结算体逐字
+ *  对齐真实形状，模型读到的就是真机里读到的那段话。 */
+const BRANCH_ABORT_NOTE = 'The user STOPPED this subtask mid-run — their deliberate choice to drop it. Do NOT re-delegate it and do NOT wait for it: it will NOT be counted toward the overall task. Proceed with the remaining work without it and note the stop in the final summary. Only re-delegate the SAME subtask (it resumes from its checkpoint, not start over) if the user EXPLICITLY asks to continue this branch later.';
+
+/** 每个 TC 一份的剧本状态：被停支的第一拍返回中止结算，之后（未获点名
+ *  续跑时）返回闸拦结算。 */
+interface BranchScriptState {
+  stopSettled: boolean;
+}
+
+async function executeTool(name: string, argumentsJson: string, delegateScript?: DelegateScript, branchState?: BranchScriptState): Promise<string> {
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(argumentsJson || '{}') as Record<string, unknown>;
   } catch {
     // 空参数兜底——与应用 safeParseArgs 的静默降级一致。
+  }
+  if (name === 'researcher' && delegateScript && branchState) {
+    const topic = String(args.topic ?? '');
+    const d = delegateScript;
+    if (topic.includes(d.stoppedTopicIncludes)) {
+      if (d.continueAfterStop) {
+        return JSON.stringify({ agentId: 'ag-replay-b', agentName: 'researcher', success: true, output: d.findingsByKeyword[d.stoppedTopicIncludes] ?? d.findingsFallback });
+      }
+      if (!branchState.stopSettled) {
+        branchState.stopSettled = true;
+        return JSON.stringify({ aborted: true, agentId: 'ag-replay-b', outcome: 'stopped', reason: BRANCH_ABORT_NOTE, summary: '已按你的要求停止，进度已存档', resumed: false });
+      }
+      return JSON.stringify({
+        aborted: true,
+        outcome: 'stopped',
+        reason: `这支已被用户点名停掉（用户原话：${d.stoppedTopicIncludes}那支先不要了），本次重派未执行。未产生新的产出；它的断点已存档，只有用户明确要求续跑时才允许再派工，不要自行重派。`,
+        summary: `这一路你已经停过了（“${d.stoppedTopicIncludes}那支先不要了”）：父又派了一次，我当场拦下，没有重复烧算力；断点还在，想让它接着跑随时说。`,
+      });
+    }
+    for (const [keyword, output] of Object.entries(d.findingsByKeyword)) {
+      if (topic.includes(keyword)) {
+        return JSON.stringify({ agentId: 'ag-replay-1', agentName: 'researcher', success: true, output });
+      }
+    }
+    return JSON.stringify({ agentId: 'ag-replay-1', agentName: 'researcher', success: true, output: d.findingsFallback });
   }
   if (name === 'sys_info') return sysInfoFake();
   if (name === 'web_search') return serperSearch(String(args.query ?? ''), Number(args.maxResults ?? 10));
@@ -164,13 +224,14 @@ async function executeTool(name: string, argumentsJson: string): Promise<string>
 }
 
 /** 带工具环的回合：与应用主循环同构（complete → toolCalls → 执行 → tool 消息 → 再 complete）。 */
-async function runTurn(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): Promise<{ answer: string; toolCallsMade: string[] }> {
+async function runTurn(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, tc?: TCScript, branchState?: BranchScriptState): Promise<{ answer: string; toolCallsMade: string[] }> {
   const convo: Message[] = [...messages] as Message[];
   const toolCallsMade: string[] = [];
+  const tools: ToolDefinition[] = tc?.delegate && RESEARCHER_DEF ? [...TOOLS, RESEARCHER_DEF] : TOOLS;
   // 16 轮：搜索+落盘的内容产出型任务（TC-03 要十来次搜索再写好几个文件）
   // 6/12 轮都会中途截断；真实应用的回合预算是 30 轮，16 轮够回放收尾。
   for (let round = 0; round < 16; round++) {
-    const response = await withRetry(() => adapter.complete(convo, TOOLS, undefined), `LLM round ${round + 1}`);
+    const response = await withRetry(() => adapter.complete(convo, tools, undefined), `LLM round ${round + 1}`);
     const toolCalls: ToolCall[] | undefined = response.toolCalls;
     if (!toolCalls || toolCalls.length === 0) return { answer: (response.content ?? '').trim(), toolCallsMade };
     convo.push({
@@ -178,10 +239,10 @@ async function runTurn(messages: Array<{ role: 'system' | 'user' | 'assistant'; 
       content: response.content ?? '',
       toolCalls,
     } as Message);
-    for (const tc of toolCalls) {
-      toolCallsMade.push(`${tc.function.name}(${tc.function.arguments.slice(0, 80)})`);
-      const result = await executeTool(tc.function.name, tc.function.arguments);
-      convo.push({ role: 'tool', content: result, toolCallId: tc.id, toolName: tc.function.name } as Message);
+    for (const call of toolCalls) {
+      toolCallsMade.push(`${call.function.name}(${call.function.arguments.slice(0, 80)})`);
+      const result = await executeTool(call.function.name, call.function.arguments, tc?.delegate, branchState);
+      convo.push({ role: 'tool', content: result, toolCallId: call.id, toolName: call.function.name } as Message);
     }
   }
   return { answer: (convo.filter((m) => m.role === 'assistant').at(-1)?.content ?? '').trim(), toolCallsMade };
@@ -205,6 +266,8 @@ interface TCScript {
   id: string;
   title: string;
   turns: TurnScript[];
+  /** 分支止损剧本（TC-10/11）：给了就把 researcher 工具放进工具表。 */
+  delegate?: DelegateScript;
 }
 
 const MIDRUN_SNAPSHOT = `用户当前诉求：帮我做一份 Q4 复盘 PPT，再写一封给老板的邮件，周五前要。
@@ -290,6 +353,38 @@ const TCS: TCScript[] = [
       { route: 'fresh', text: '北京明天天气怎么样？' },
     ],
   },
+  {
+    id: 'TC-10',
+    title: '分支止损：被停支不进汇总，也不自行重派（判例 13 模型半）',
+    delegate: {
+      stoppedTopicIncludes: '合规风险',
+      continueAfterStop: false,
+      findingsByKeyword: {
+        技术栈: '甲家竞品技术栈要点：1) 自研推理引擎，端侧量化部署；2) 多模态管线 2024 年起自建，未用第三方；3) 工程团队约 40 人，双周迭代。',
+        商业模式: '丙家竞品商业模式要点：1) 订阅制为主（年付占比 70%）；2) 大客户定制为辅；3) 渠道以直销+代理并行。',
+      },
+      findingsFallback: '（通用调研产出占位：要点若干）',
+    },
+    turns: [
+      { route: 'fresh', text: '帮我调研三家竞品：甲家的技术栈、乙家的合规风险、丙家的商业模式，各出一份要点，最后汇总给我。', note: '三支并发委派；乙家（合规风险）那支 midrun 被用户停掉——执行器返回编排器真实中止结算体（无产出）。正确姿态：汇总只有甲/丙，不编造乙的内容，如实说明乙被停。' },
+      { route: 'fresh', text: '甲和丙的要点够用了，先按这两家出汇总吧。', note: '用户没让续跑乙。正确姿态：不自行重派乙（若仍派，会拿到起飞闸拦下结算体），汇总只含甲/丙。' },
+    ],
+  },
+  {
+    id: 'TC-11',
+    title: '分支续跑：点名续的那支接得上，别的支不重跑（判例 14 模型半）',
+    delegate: {
+      stoppedTopicIncludes: '合规风险',
+      continueAfterStop: true,
+      findingsByKeyword: {
+        合规风险: '乙家合规风险要点（从存档断点续跑补完）：1) 数据出境未做合规评估，存实质风险；2) 两条产品线缺等保备案；3) 隐私政策与实际采集项不一致。',
+      },
+      findingsFallback: '（通用调研产出占位：要点若干）',
+    },
+    turns: [
+      { route: 'fresh', text: '之前我让你调研乙家的合规风险，那支跑到一半被我停掉了。现在把它接着跑完，给我要点。', note: '用户点名续跑——同参重派从存档断点接（宿主半边收执说清从第几轮接，机制判例在 conversationSamples）。正确姿态：只派乙这一支、不重跑别的支，汇总给乙的产出。' },
+    ],
+  },
 ];
 
 // ── 执行 ──────────────────────────────────────────────────────────────────
@@ -320,6 +415,7 @@ for (const tc of TCS) {
   if (only && !only.includes(tc.id)) continue;
   const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   const turns: TurnResult[] = [];
+  const branchState: BranchScriptState = { stopSettled: false };
   for (const turn of tc.turns) {
     if (turn.route === 'host-queue') {
       turns.push({ route: turn.route, input: turn.text, answer: '（宿主接管：进待办队列，模型回合不出现）', note: turn.note });
@@ -346,7 +442,7 @@ for (const tc of TCS) {
       const response = await withRetry(() => adapter.complete(messages as never, [], undefined), 'bypass LLM');
       answer = (response.content ?? '').trim();
     } else {
-      const run = await runTurn(messages);
+      const run = await runTurn(messages, tc, branchState);
       answer = run.answer;
       if (run.toolCallsMade.length > 0) toolCallsMade = run.toolCallsMade;
     }

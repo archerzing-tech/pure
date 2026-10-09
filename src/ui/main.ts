@@ -11,7 +11,7 @@ import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRou
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import type { SettingsPanel } from './settings';
-import { groupFileWrites, type SessionSnapshotV2, type ToolExecMeta } from './store';
+import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectCanonicalSession } from './sessionEvents';
 import type { TranscriptReplayBlock } from './transcriptProjection';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
@@ -2092,6 +2092,23 @@ function summarizeTurnTimings(timings: TurnTiming[]): { avgTtftMs: number | null
   };
 }
 
+/** 分支账一行的文案：与活动面板/trace 行同一套图标词汇（⏸ 暂停、⏹ 停、
+ *  🔄 重试、↻ 续跑），前面带时刻——铺平的多轮账靠时刻排序才读得出先后。 */
+function branchRowLabel(e: BranchEventRecord): string {
+  const time = formatTs(e.at);
+  const name = e.agentName || '?';
+  if (e.kind === 'branch_aborted') {
+    return `${time} — ${e.outcome === 'paused' ? '⏸' : '⏹'} ${name} ${e.outcome === 'paused' ? '暂停' : '被停'}`;
+  }
+  if (e.kind === 'branch_retrying') {
+    return `${time} — 🔄 ${name} 重试${typeof e.attempt === 'number' ? `#${e.attempt}` : ''}${e.cause ? `（${e.cause}）` : ''}`;
+  }
+  if (e.kind === 'branch_resumed') {
+    return `${time} — ↻ ${name} 续跑`;
+  }
+  return `${time} — ${name}`;
+}
+
 function renderSessionStats() {
   const stats = chat.getSessionStats();
   const provider = stats.provider ?? loadConfig()?.provider ?? 'deepseek-openai';
@@ -2127,6 +2144,12 @@ function renderSessionStats() {
   setText('stat-write-count', String(fileGroups.length));
   setText('stat-read-count', String(stats.fileReads.length));
   setText('stat-cmd-count', String(stats.commands.length));
+
+  // 分支账（第 2 期第四刀）：turnTimings 里逐轮记的分支事件铺平成一条时
+  // 间线——哪支被停/第几次重试/谁续了跑，账本写了就得有人看。
+  const branchRows = (stats.turnTimings ?? []).flatMap((tt) => tt.branches ?? []).sort((a, b) => a.at - b.at);
+  setText('stat-branch-count', String(branchRows.length));
+  renderStatsList('stat-branch-list', branchRows, branchRowLabel);
 
   renderStatsList('stat-search-list', stats.searches, (s) => s.query);
   // File writes are grouped by normalized path. Each row shows only the
@@ -2410,6 +2433,7 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
   const total = hit + miss;
   const rate = total > 0 ? `${Math.round((hit / total) * 100)}%` : '—';
   const { avgTtftMs, last } = summarizeTurnTimings(stats.turnTimings ?? []);
+  const branchRows = (stats.turnTimings ?? []).flatMap((tt) => tt.branches ?? []).sort((a, b) => a.at - b.at);
 
   const lines: string[] = [
     '# 会话统计',
@@ -2448,6 +2472,13 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
     '## 命令执行',
     ...(stats.commands.length
       ? stats.commands.map((c) => `- ${formatTs(c.ts)} — ${c.success ? '✓' : '✗'} \`${c.command}\``)
+      : ['暂无记录']),
+    '',
+    // 分支账（第 2 期第四刀）：与统计面板同源的铺平分支事件，导出的报告
+    // 自带「哪支被停、第几次重试、谁续了跑」。
+    '## 分支账',
+    ...(branchRows.length
+      ? branchRows.map((e) => `- ${branchRowLabel(e)}`)
       : ['暂无记录']),
     '',
   ];

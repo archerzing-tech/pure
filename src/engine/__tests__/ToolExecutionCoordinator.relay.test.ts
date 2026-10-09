@@ -170,6 +170,41 @@ describe('ToolExecutionCoordinator relay pipeline', () => {
     expect(String(skip.result.error)).not.toContain('被用户暂停');
   }, 5_000);
 
+  it('a birth-blocked upstream says 派出前已被收掉 rather than 执行失败（未知原因）(第 2 期第四刀)', async () => {
+    // 起飞闸拦下的上游不进 stageOutputs——下游消费者曾落进「执行失败（未知
+    // 原因）」兜底，把用户的收掉误报成执行故障。闸拦与故障要分话。
+    const coordinator = new ToolExecutionCoordinator();
+    let plannerRan = false;
+    const ctx = {
+      tools: {
+        getTools: () => [],
+        getMetadata: () => undefined,
+        execute: async (tc: ToolCall) => {
+          plannerRan = true;
+          return { id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 };
+        },
+      },
+      gateDelegations: async (calls: ToolCall[]) =>
+        calls.filter((c) => c.function.name === 'stage_a').map((c) => ({ callId: c.id, reason: '用户说「这个不要调研了」' })),
+    } as unknown as EngineContext;
+
+    const results = await collect(coordinator.executeStream([
+      call('c1', 'stage_a', { relay: { as: 'research' } }),
+      call('c2', 'planner', { relay: { from: { research: 'context' } } }),
+    ], ctx, BUDGET));
+
+    expect(plannerRan).toBe(false);
+    // 被拦上游自己拿合成取消结算（既有闸语义不动）。
+    const research = results.find((tr) => tr.toolCallId === 'c1')!;
+    expect(research.result.success).toBe(true);
+    expect((research.result.result as { outcome?: string }).outcome).toBe('stopped');
+    const skip = results.find((tr) => tr.toolCallId === 'c2')!;
+    expect(skip.result.success).toBe(false);
+    expect(String(skip.result.error)).toContain('派出前已被用户收掉');
+    expect(String(skip.result.error)).toContain('research');
+    expect(String(skip.result.error)).not.toContain('未知原因');
+  }, 5_000);
+
   it('a consumer failure keeps the upstream FULL output for re-planning', async () => {
     const coordinator = new ToolExecutionCoordinator();
     const ctx = makeContext(async (tc) => (

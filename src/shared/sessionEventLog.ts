@@ -126,6 +126,7 @@ interface EventPayloadShape {
   totalMs?: unknown;
   ttftMs?: unknown;
   branchEvents?: unknown;
+  branches?: unknown;
   style?: unknown;
   final?: unknown;
   kind?: unknown;
@@ -147,6 +148,27 @@ function ms(n: unknown): string {
   return typeof n === 'number' && Number.isFinite(n) ? `${Math.round(n / 100) / 10}s` : '?';
 }
 
+/** turn_settled 的分支账明细（第 2 期第四刀）：计数之后给出「哪支被停 /
+ *  第几次重试」的一行摘要——远端/回放视角靠它还原分支止损，不用翻账本。
+ *  payload 来自盘上/远端，字段全量守卫。 */
+function branchDigest(raw: unknown): string {
+  if (!Array.isArray(raw) || raw.length === 0) return '';
+  const parts: string[] = [];
+  for (const item of raw.slice(0, 8)) {
+    if (typeof item !== 'object' || item === null) continue;
+    const r = item as { agentName?: unknown; kind?: unknown; outcome?: unknown; attempt?: unknown };
+    const name = typeof r.agentName === 'string' ? r.agentName : '?';
+    if (r.kind === 'branch_aborted') {
+      parts.push(`${r.outcome === 'paused' ? '⏸' : '⏹'} ${name}${r.outcome === 'paused' ? ' 暂停' : ' 停'}`);
+    } else if (r.kind === 'branch_retrying') {
+      parts.push(`🔄 ${name}${typeof r.attempt === 'number' ? ` 重试#${r.attempt}` : ' 重试'}`);
+    } else if (r.kind === 'branch_resumed') {
+      parts.push(`↻ ${name} 续跑`);
+    }
+  }
+  return parts.length > 0 ? `：${parts.join(' / ')}` : '';
+}
+
 /** 把事件日志投影成时间线（每事件一条，保持日志序）。 */
 export function projectSessionTimeline(events: readonly SessionEvent[]): TimelineEntry[] {
   const out: TimelineEntry[] = [];
@@ -162,9 +184,11 @@ export function projectSessionTimeline(events: readonly SessionEvent[]): Timelin
         summary = `${p.isAuto === true ? '[自动]' : '用户'}${who}：${clip(p.text)}`;
         break;
       }
-      case 'turn_settled':
-        summary = `回合落定（${ms(p.totalMs)}，分支事件 ${typeof p.branchEvents === 'number' ? p.branchEvents : 0}）`;
+      case 'turn_settled': {
+        const count = typeof p.branchEvents === 'number' ? p.branchEvents : 0;
+        summary = `回合落定（${ms(p.totalMs)}，分支事件 ${count}${count > 0 ? branchDigest(p.branches) : ''}）`;
         break;
+      }
       case 'receipt':
         summary = `回执：${clip(p.text)}`;
         break;

@@ -107,12 +107,12 @@
 - **定向 abort 通路（宿主半边）✅（c8d68e3）**：BRANCH_STOP_RE 祈使式「停掉 X 那支」快路径 + LLM cancelsPart 两路都先试点名真停 → 按名字/callId 查 `branchView()` → 调 `abortBranch` → 子代理引擎 THINK 流秒停（既有 abort 链）；回执说清哪支被停、其余照跑
 - **原子顺序锁死**：✅（编排器半边已锁：persist → settle）；宿主半边：✅ 被中止支的部分产出不入账已从「提示词教学」升格为「机制强制」（2026-10-09）——三路中止结算体（点名叫停/点名暂停/整树取消）剥离 finalOutput，父上下文从此没有部分产出可写进汇总（不再靠 reason 劝阻）；断点在 checkpoint 全量在（续跑不丢），UI 卡面读 summary、徽标读事件流均不受影响；失败路（timeout/stalled 真 failed）不动；排队未起飞的同名支一并清除
 - **分支级继续**：✅（链路 2d49513 收执二分 2026-10-09）：用户「把 jev 那支接着跑完」→ 同参重派 → 稳定 sessionId 命中断点 → engine.continue；收执诚实二分（判例 14 验收语落地）：排队收执/派工收执/兜底指令三处同源 `branchResumeReceipt`——命中存档说「从存档断点（第 N 轮）接上」（凭据 = 编排器 `probeResumeCheckpoint` 预检，随 ResumeRecord 走），没命中明说「没找到存档，会重新跑一遍」绝不预支断点承诺（`RESUME_INVARIANTS` 锚正则锁住）；三种「继续」（整树/单支/计划续跑）统一入口命名与回执口径——用户永远知道点的是哪个继续；血缘号（第 N 次续跑计数）降级为余项：编排器实例单回合重建无处挂跨回合账，随第 3 期 checkpoint.runCount 落盘时一并做
-- **relay 失效定义**：被中止支是 relay 上游时，下游 `relay.from` 消费者立即以明确错误落定（不挂死）；分派前拓扑检查提前报
-- **卡片真实状态**：子代理卡片 paused/cancelled-by-user 真状态（状态机 describe 已供数），回放从事件流重建，historical 兜底保留
-- **账目与观测**：branch_aborted / branch_resumed / branch_retrying 成一等事件（活动面板 + turnTimings）
+- **relay 失效定义**：✅（2026-09-26 落 fail-fast，2026-10-09 补起飞闸文案）被中止支是 relay 上游时，下游 `relay.from` 消费者立即以明确错误落定（不挂死）；分派前拓扑检查提前报；出生即被闸拦下的上游支其消费者不再误报「执行失败（未知原因）」，改说「派出前已被用户收掉」
+- **卡片真实状态**：✅（2026-09-26）子代理卡片 paused/cancelled-by-user 真状态（状态机 describe 已供数），回放从活动档案（账本投影）重建——数据源用账本不另立管道（「从事件流重建」以账本口径落地），historical 兜底保留
+- **账目与观测**：✅（2026-09-26 一等化，2026-10-09 补可见性）branch_aborted / branch_resumed / branch_retrying 成一等事件（活动面板 + turnTimings）；分支账在统计面板成节、随导出 markdown 成章、turn_settled 事件带逐条明细（digest 可还原「哪支被停、第几次重试、谁续了跑」）
 - **不误伤**：单支中止是回合内分支级事件，回合与 autoContinue 照跑，父在 OBSERVE 知道这支提前结束并自己调整汇总口径
 
-**验收**：真机判例 13–14 + 单测（定向 abort 只杀目标支、persist-先于-settle 顺序、relay 下游 fail-fast、排队支清除）；回放器加 2 条分支止损判例。
+**验收**：真机判例 13–14 + 单测（定向 abort 只杀目标支、persist-先于-settle 顺序、relay 下游 fail-fast、排队支清除）；回放器加 2 条分支止损判例（✅ 2026-10-09：模型侧回放器 TC-10「停后不进汇总、不自行重派」+ TC-11「点名续跑接得上、别的支不重跑」，真 provider 手跑；宿主侧 conversationSamples 已有 8+ 条止损/续跑判例超额覆盖）。真机判例 13–14 实测仍待真机会话收官。
 **量级**：中大（本蓝图最大单体工程，但「停/续」底座全是现成的，新写的只有信号通路与语义收口）。
 
 ### 第 3 期「持久性」：关机不丢，随时接着聊

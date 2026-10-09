@@ -163,6 +163,13 @@ export class ToolExecutionCoordinator {
     const consumerOk = new Map<string, number>();
     const consumerSettled = new Map<string, number>();
     const held = new Map<string, ExecutedToolResult>();
+    // 阶段名 → 产出它的节点：上游「凭空缺席」时分辨两种死法——出生即被闸
+    // 拦下（该说话术），还是别的异常（兜底话术）。
+    const stageProducer = new Map<string, RelayNode>();
+    for (const node of nodes) {
+      const as = node.decl?.as;
+      if (as) stageProducer.set(as, node);
+    }
 
     // A consumer settled (ran, or was skipped because its upstream died):
     // count it, and release its held upstream once the last one lands. The
@@ -224,11 +231,19 @@ export class ToolExecutionCoordinator {
         if (deadStage !== undefined) {
           const upstream = stageOutputs.get(deadStage);
           const interrupted = branchOutcomeOf(upstream);
+          const producer = stageProducer.get(deadStage);
+          // 出生即拦（起飞闸）的上游从不进 stageOutputs——此前这里会落进
+          // 「执行失败（未知原因）」兜底，把用户的收掉误报成执行故障。
+          const birthBlocked = upstream === undefined
+            && producer !== undefined
+            && blockedReason.has(producer.call.id);
           const upstreamError = upstream?.result.error ?? '未知原因';
           const detail = upstreamError.length > 200 ? `${upstreamError.slice(0, 200)}…` : upstreamError;
-          const skipError = interrupted
-            ? `relay 上游阶段 "${deadStage}" 被用户${interrupted === 'paused' ? '暂停' : '停掉'}，本调用未执行——上游进度已存档（同参重派它续跑成功后再发这一跳）。`
-            : `relay 上游阶段 "${deadStage}" 执行失败（${detail}），本调用未执行——修复后可直接重新发起，上游完整产出见上方。`;
+          const skipError = birthBlocked
+            ? `relay 上游阶段 "${deadStage}" 在派出前已被用户收掉（未执行、无产出），本调用未执行——最终汇总不要包含这一跳；需要时连上游一起重新发起。`
+            : interrupted
+              ? `relay 上游阶段 "${deadStage}" 被用户${interrupted === 'paused' ? '暂停' : '停掉'}，本调用未执行——上游进度已存档（同参重派它续跑成功后再发这一跳）。`
+              : `relay 上游阶段 "${deadStage}" 执行失败（${detail}），本调用未执行——修复后可直接重新发起，上游完整产出见上方。`;
           const skip: ExecutedToolResult = {
             toolName: node.call.function.name,
             result: {

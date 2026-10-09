@@ -99,6 +99,40 @@ describe('projectSessionTimeline + recentTimelineDigest', () => {
     expect(timeline[4].summary).toContain('回合落定');
   });
 
+  it('spell out the branch ledger in turn_settled when branches rode along (第 2 期第四刀)', () => {
+    const events: SessionEvent[] = [
+      {
+        ts: 1, kind: 'turn_settled', actor: 'gui',
+        payload: {
+          totalMs: 34000, branchEvents: 3,
+          branches: [
+            { at: 1, callId: 'c1', agentName: 'researcher', kind: 'branch_aborted', outcome: 'stopped' },
+            { at: 2, callId: 'c2', agentName: 'code_reviewer', kind: 'branch_retrying', attempt: 2, cause: 'timeout' },
+            { at: 3, callId: 'c3', agentName: 'planner', kind: 'branch_resumed' },
+          ],
+        },
+      },
+    ];
+    const summary = projectSessionTimeline(events)[0].summary;
+    // 计数之外给「哪支被停 / 第几次重试 / 谁续了跑」——远端回放不用翻账本。
+    expect(summary).toContain('分支事件 3');
+    expect(summary).toContain('⏹ researcher 停');
+    expect(summary).toContain('🔄 code_reviewer 重试#2');
+    expect(summary).toContain('↻ planner 续跑');
+  });
+
+  it('tolerates malformed branch rows (payload comes off disk / remote)', () => {
+    const events: SessionEvent[] = [
+      { ts: 1, kind: 'turn_settled', actor: 'gui', payload: { totalMs: 1000, branchEvents: 9, branches: 'garbage' } },
+      { ts: 2, kind: 'turn_settled', actor: 'gui', payload: { totalMs: 1000, branchEvents: 1, branches: [42, { kind: 'mystery' }] } },
+    ];
+    const timeline = projectSessionTimeline(events);
+    expect(timeline[0].summary).toContain('分支事件 9'); // 非数组明细：退回纯计数
+    expect(timeline[0].summary).not.toBeUndefined();
+    expect(timeline[1].summary).toContain('分支事件 1');
+    expect(timeline[1].summary).not.toContain('：'); // 认不得的行不硬编
+  });
+
   it('marks channel-originated inputs with their surface', () => {
     const events: SessionEvent[] = [
       { ts: 1, kind: 'user_input', actor: 'gateway', origin: { surface: 'qq', peer: 'p1' }, payload: { text: '现在到哪了' } },

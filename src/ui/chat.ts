@@ -6551,6 +6551,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             totalMs: turnTiming.totalMs,
             ttftMs: turnTiming.ttftMs,
             branchEvents: turnTiming.branches?.length ?? 0,
+            // 逐条明细随事件日志走：digest/远端回放要还原「哪支被停、第几
+            // 次重试」，光有计数不够。
+            branches: turnTiming.branches,
           },
         });
       }
