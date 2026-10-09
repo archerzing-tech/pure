@@ -15287,6 +15287,105 @@ async fn open_path(path: String) -> Result<(), String> {
         .ok_or_else(|| format!("open failed: {}", target))
 }
 
+/// What `reveal_path` hands the OS: the path itself when it exists, else the
+/// NEAREST EXISTING ANCESTOR (walk all the way up, not one level — a stale
+/// download card must still land the user in a recognizable folder instead of
+/// erroring out).
+fn reveal_target(raw: &str) -> Option<String> {
+    let p = PathBuf::from(raw);
+    if p.exists() {
+        return Some(raw.to_string());
+    }
+    let mut cur = p.as_path();
+    while let Some(parent) = cur.parent() {
+        if parent.exists() {
+            return Some(parent.to_string_lossy().to_string());
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Reveal a file in its containing folder (download card's 打开所在文件夹).
+/// Unlike `open_path` (which opens the file in its default app), this always
+/// lands on the FOLDER: existing file → Finder reveal + select; stale path →
+/// open the nearest surviving ancestor directory. The card passes the full
+/// file path — the old string-strip-then-open-a-guessed-dir flow is gone.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err("reveal_path: path is empty".to_string());
+    }
+    if raw.contains('\0') {
+        return Err("reveal_path: path contains NUL".to_string());
+    }
+    // Same expansion as open_path: `~/…` written by the model must reach the real home.
+    let mut expanded = raw.to_string();
+    if expanded.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            expanded = format!("{}/{}", home.trim_end_matches('/'), &expanded[2..]);
+        }
+    }
+    let target = reveal_target(&expanded)
+        .ok_or_else(|| format!("reveal_path: nothing exists along {}", expanded))?;
+    let is_dir = std::path::Path::new(&target).is_dir();
+
+    #[cfg(target_os = "macos")]
+    let status = if is_dir {
+        // A directory: open it (−R would select it in the grandparent instead).
+        TokioCommand::new("/usr/bin/open").arg(&target).status().await
+    } else {
+        // A file: reveal it in its folder with selection.
+        TokioCommand::new("/usr/bin/open").arg("-R").arg(&target).status().await
+    };
+    #[cfg(target_os = "linux")]
+    let status = TokioCommand::new("/usr/bin/xdg-open").arg(&target).status().await;
+    // explorer /select highlights the file in its folder; for a directory
+    // fall through to the same `start` wrapper open_path uses.
+    #[cfg(target_os = "windows")]
+    let status = if is_dir {
+        silent_child_tokio(TokioCommand::new("cmd"))
+            .args(["/C", "start", ""])
+            .arg(&target)
+            .status()
+            .await
+    } else {
+        silent_child_tokio(TokioCommand::new("explorer"))
+            .arg("/select,")
+            .arg(&target)
+            .status()
+            .await
+    };
+
+    status
+        .map_err(|e| format!("reveal_path: {}", e))?
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("reveal failed: {}", target))
+}
+
+#[cfg(test)]
+mod reveal_path_tests {
+    use super::*;
+
+    #[test]
+    fn reveal_target_walks_up_to_nearest_existing_ancestor() {
+        let base = std::env::temp_dir().join(format!("pure_reveal_{}", std::process::id()));
+        let deep = base.join("a").join("b").join("gone.png");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a").join("b")).unwrap();
+        // 文件不存在：应落到最近存在的祖先（b 目录），而不是更上层
+        assert_eq!(reveal_target(deep.to_str().unwrap()), Some(base.join("a").join("b").to_string_lossy().to_string()));
+        // 文件存在：原样返回（Finder -R 定位选中）
+        std::fs::write(&deep, b"x").unwrap();
+        assert_eq!(reveal_target(deep.to_str().unwrap()), Some(deep.to_string_lossy().to_string()));
+        // 目录本身：原样返回（plain open）
+        assert_eq!(reveal_target(base.join("a").to_str().unwrap()), Some(base.join("a").to_string_lossy().to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  System notifications (roadmap 5.2)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -15765,6 +15864,7 @@ pub fn run() {
             save_config,
             // Open path (clickable transcript paths)
             open_path,
+    reveal_path,
             // LLM transport
             chat_stream,
             cancel_chat_stream,

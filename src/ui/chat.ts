@@ -82,7 +82,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
-import { linkifyPaths, setPathLinkWorkspace, openPathLink } from './pathLink';
+import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
@@ -1427,7 +1427,10 @@ function createDownloadCard(path: string, size: number, via?: string): HTMLEleme
   openFolder.type = 'button';
   openFolder.className = 'download-card-btn';
   openFolder.textContent = '打开所在文件夹';
-  openFolder.addEventListener('click', () => openPathLink(path.replace(/[\\/][^\\/]+$/, '')));
+  // 整个文件路径交给 Rust reveal_path：文件存在 → Finder 定位选中；路径
+  // 过期（文件被移走/目录被清）→ 上溯最近存在的祖先目录。不再在 TS 里字符串
+  // 剥名猜目录——猜错一次用户就站在一个没有文件的文件夹里。
+  openFolder.addEventListener('click', () => revealPath(path));
   actions.append(openFolder);
   card.append(icon, meta, actions);
   return card;

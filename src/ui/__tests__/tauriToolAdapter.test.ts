@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk } from '../TauriToolAdapter';
+import { spawnSync } from 'node:child_process';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk, resolveDownloadOutSpec, buildDownloadCommand } from '../TauriToolAdapter';
 import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
 
@@ -425,5 +426,48 @@ describe('native download cancel wiring', () => {
     expect(after).toContain('if (cancelled && code !== 0) {');
     expect(after).toContain("'Download cancelled by user.'");
     expect(after).toContain("signal?.removeEventListener('abort', onAbort);");
+  });
+});
+
+// ── download_file destination 解析（2026-10-09 真机修复回归）──────────
+// 两条下载链都把 outSpec 当「目录」拼 <dir>/<filename>；destination 的各种
+// 口味必须全部收敛为目录，且不能把文件落进 `_` 这类消毒垃圾目录。
+describe('resolveDownloadOutSpec', () => {
+  it('默认与 downloads 落用户下载目录，workspace 落 $PWD', () => {
+    expect(resolveDownloadOutSpec('')).toBe('$HOME/Downloads');
+    expect(resolveDownloadOutSpec('downloads')).toBe('$HOME/Downloads');
+    expect(resolveDownloadOutSpec('workspace')).toBe('$PWD');
+  });
+
+  it('~/… 保留 home-relative 语义，不再把 ~ 消毒成 _ 拼出嵌套垃圾目录', () => {
+    expect(resolveDownloadOutSpec('~/Downloads')).toBe('$HOME/Downloads');
+    expect(resolveDownloadOutSpec('~/Downloads/pics')).toBe('$HOME/Downloads/pics');
+    expect(resolveDownloadOutSpec('~')).toBe('$HOME');
+  });
+
+  it('文件路径形态取父目录（下载链把 outSpec 当目录用）', () => {
+    expect(resolveDownloadOutSpec('~/Downloads/pic.png')).toBe('$HOME/Downloads');
+    expect(resolveDownloadOutSpec('/tmp/pics/pic.png')).toBe('/tmp/pics');
+    expect(resolveDownloadOutSpec('pics/pic.png')).toBe('$HOME/Downloads/pics');
+    expect(resolveDownloadOutSpec('pic.png')).toBe('$HOME/Downloads');
+  });
+
+  it('绝对路径与普通子目录名仍按原语义消毒', () => {
+    expect(resolveDownloadOutSpec('/tmp/pics')).toBe('/tmp/pics');
+    expect(resolveDownloadOutSpec('pics')).toBe('$HOME/Downloads/pics');
+    expect(resolveDownloadOutSpec('下载 图片')).toBe('$HOME/Downloads/_____');
+  });
+
+  it('shell wrapper 的 outdir 行可被 sh 正确展开（bad substitution 回归）', () => {
+    // 老写法 `"${$HOME/Downloads}"` 在 sh 里是 bad substitution，outdir 恒为
+    // 空——整条 shell 链从未落成过一个文件。这里锁住「单引号字面量 + eval
+    // 二次解析」的形状，并实跑一次展开验证。
+    const cmd = buildDownloadCommand('http://example.com/a.zip', '$HOME/Downloads', 4, '', true);
+    const outdirLine = cmd.split('; ').find((l) => l.startsWith('outdir='))!;
+    expect(outdirLine).toBe("outdir=$(eval echo '$HOME/Downloads')");
+    const probe = outdirLine + '; echo "[$outdir]"';
+    // spawnSync 直传 argv，不经外层 shell——外层会把 $( ) 和 $outdir 抢先展开
+    const res = spawnSync('sh', ['-c', probe], { encoding: 'utf8', env: { ...process.env, HOME: '/tmp/fakehome-probe' } });
+    expect(res.stdout).toContain('[/tmp/fakehome-probe/Downloads]');
   });
 });

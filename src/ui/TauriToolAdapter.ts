@@ -189,21 +189,36 @@ function shellQuote(s: string): string {
 }
 
 /** Map the tool's destination arg to a shell-expandable directory expression.
- * User input is sanitized so it can't inject shell metacharacters. */
-function resolveDownloadOutSpec(destination: string): string {
-  if (destination && destination.startsWith('/')) {
-    const safe = destination.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
-    return safe;
+ * User input is sanitized so it can't inject shell metacharacters.
+ * 两条下载链（native download_file_stream / shell wrapper）都把返回值当「目录」
+ * 拼 `<dir>/<filename>`，所以这里必须永远吐目录：
+ *  - 最后一段带扩展名 = 模型把文件路径当 destination 传了 → 取父目录（裸
+ *    文件名 → 默认下载目录），否则文件名会被当目录再嵌一层；
+ *  - `~/…` 是模型写「下载文件夹」最自然的形状，`~` 不在消毒白名单里，老
+ *    逻辑会把它替换成 `_` 拼出 `$HOME/Downloads/_/…` 嵌套垃圾目录——文件
+ *    落进用户找不到的地方（2026-10-09 真机「打开所在文件夹路径是错的」排查所及）。 */
+export function resolveDownloadOutSpec(destination: string): string {
+  const raw = destination.trim();
+  if (/\.[A-Za-z0-9]+$/.test(raw)) {
+    if (/[\\/]/.test(raw)) return resolveDownloadOutSpec(raw.replace(/[\\/][^\\/]+$/, ''));
+    return '$HOME/Downloads';
   }
-  if (destination === 'workspace') return '$PWD';
-  if (destination && destination !== 'downloads') {
-    const safe = destination.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
+  if (raw.startsWith('~')) {
+    const rest = raw.slice(1).replace(/[^A-Za-z0-9_.\-\/]/g, '_');
+    return '$HOME' + rest;
+  }
+  if (raw.startsWith('/')) {
+    return raw.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
+  }
+  if (raw === 'workspace') return '$PWD';
+  if (raw && raw !== 'downloads') {
+    const safe = raw.replace(/[^A-Za-z0-9_.\-\/]/g, '_');
     return `$HOME/Downloads/${safe}`;
   }
   return '$HOME/Downloads';
 }
 
-function buildDownloadCommand(url: string, outSpec: string, connections: number, filenameArg: string, resume: boolean): string {
+export function buildDownloadCommand(url: string, outSpec: string, connections: number, filenameArg: string, resume: boolean): string {
   const u = shellQuote(url);
   const name = shellQuote(filenameArg);
   const conns = Math.max(1, Math.min(16, connections | 0));
@@ -213,7 +228,10 @@ function buildDownloadCommand(url: string, outSpec: string, connections: number,
   // Same-origin Referer — many CDNs / hotlink-protected hosts reject clients
   // that don't send one, a common "download fails silently" cause.
   lines.push('origin=$(printf "%s" "$url" | sed \'s#\\([a-z][a-z]*://[^/]*\\).*#\\1#\')');
-  lines.push('outdir="$(eval echo "${' + outSpec + '}")"');
+  // outSpec 以单引号字面量交给 eval 二次解析：`$HOME`/`$PWD` 由 shell 展开，
+  // 绝对路径原样通过。老写法 `"${<outSpec>}"` 拼出 `${$HOME/Downloads}` 这
+  // 种 bad substitution——outdir 恒为空，整条 shell 链从未落成过一个文件。
+  lines.push('outdir=$(eval echo ' + shellQuote(outSpec) + ')');
   lines.push('mkdir -p "$outdir"');
   lines.push('UA=' + shellQuote(BROWSER_UA));
   // File name: explicit arg → server Content-Disposition (one extra HEAD) →

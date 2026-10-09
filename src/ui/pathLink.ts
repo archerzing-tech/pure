@@ -182,6 +182,32 @@ export function openPathLink(rawPath: string, workspace?: string): void {
   }
 }
 
+/** Reveal a FILE in its containing folder (download card's 打开所在文件夹).
+ * Takes the full file path — the OS side (Rust reveal_path) does the folder
+ * math: existing file → reveal + select; stale path → nearest surviving
+ * ancestor. The old TS string-strip + open-a-guessed-dir flow hid real
+ * divergence between the reported path and where the file actually landed. */
+export function revealPath(rawPath: string): void {
+  const p = rawPath.trim();
+  if (!p) return;
+  if (isTauriRuntime()) {
+    (async () => {
+      try {
+        await tauriInvoke('reveal_path', { path: p });
+      } catch (err) {
+        toast(`${t('path.openFailed')}: ${p}`);
+        console.error('[pure] reveal_path failed:', err);
+      }
+    })();
+  } else {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) return;
+    void clipboard.writeText(p)
+      .then(() => toast(t('path.copied')))
+      .catch(() => { /* clipboard unavailable — ignore */ });
+  }
+}
+
 /**
  * Replace path-shaped text nodes inside `container` with `.path-link` spans.
  * Idempotent: text already inside an `.path-link`, `<a>` or `<button>` is left
