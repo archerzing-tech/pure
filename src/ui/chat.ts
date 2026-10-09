@@ -9,7 +9,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
-import { createSessionLedger, markPlanReplaced, recordAsked, recordAnswer, recordDone, recordPlan, type SessionLedger } from '../shared/sessionLedger';
+import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
@@ -2618,6 +2618,10 @@ export class ChatController {
     // 刀 2：暂停标记随快照回来（回放完成后由 restorePausedAffordance 重建
     // 「继续」条——这里只装状态，不碰 DOM，回放还没铺完）。
     this.sessionEndedPaused = snapshot.uiState.paused === true;
+    // 第 4 期：会话账本随快照回来（normalize 兜底——损坏档/旧档缺字段归一为
+    // 空账，读侧不崩）。澄清句柄不恢复：一个已死的进程收不到那个回答，句柄
+    // 跟着旧进程走。
+    this.sessionLedger = normalizeSessionLedger(snapshot.uiState.sessionLedger);
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
 
@@ -5369,6 +5373,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         plan: userPlan,
         contract: taskContract ? formatTaskContract(taskContract) : undefined,
         taskScriptFacts: formatTaskScriptFacts(this.getTaskScriptHandOver()),
+        // 会话账本素材（第 4 期）：空账导出空串，composeUserTurn 自动略过，
+        // 新会话零开销。
+        ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
         assessment: userAssessment,
         plausibilityOverride: userPlausibilityOverride,
         // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个
@@ -6858,6 +6865,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.pauseAssessmentFlow = null;
     // 新对话 = 新账本：状态叙述行不跨会话携带。
     this.statusLines = [];
+    // 会话账本与澄清句柄同理：不清的话旧对话的问答/动作账会跟着落进新会话
+    // 的快照（persistSession 只看账非空），恢复后模型对着新对话答「按你
+    // 刚才说的」——跨会话持久污染。
+    this.sessionLedger = createSessionLedger();
+    this.pendingClarification = null;
     // 押账的规划叙述同理：插入点属于旧会话的回合，不跨会话携带。
     this.pendingPlanNarration = null;
     // Invalidate any background pre-compaction from the previous session.
@@ -7159,6 +7171,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...nextSnapshotV2.uiState,
         agentActivities: this.agentActivities.length > 0 ? this.agentActivities.map((activity) => ({ ...activity })) : undefined,
         paused: this.sessionEndedPaused || undefined,
+        // 会话账本随快照走（第 4 期）：空账写 undefined 不留字段，快照不膨胀。
+        sessionLedger: this.sessionLedger.asked.length + this.sessionLedger.done.length + this.sessionLedger.plans.length > 0
+          ? this.sessionLedger
+          : undefined,
       },
     };
     await saveSession(sessionId, nextSnapshot, workspace);

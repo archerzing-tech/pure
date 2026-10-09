@@ -44,6 +44,36 @@ describe('composeUserTurn · 剧本事实素材', () => {
   });
 });
 
+describe('session ledger · 协议与素材（第 4 期刀 4/5）', () => {
+  it('有账时账本素材进 user turn，空账不生成空块', () => {
+    const prompt = composeUserTurn('继续', { ledgerFacts: '<session_ledger_facts>\n问答｜问：用哪个端口｜答：8080\n</session_ledger_facts>' });
+    expect(prompt).toContain('<session_ledger_facts>');
+    expect(prompt).toContain('8080');
+    expect(composeUserTurn('继续', {})).not.toContain('<session_ledger_facts>');
+  });
+
+  it('system 提示词带账本协议（教模型问前/做前/规划前先翻账）', () => {
+    const system = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'capabilities' });
+    expect(system).toContain('<session_ledger_protocol>');
+    expect(system).toContain('<session_ledger_facts>');
+    expect(system).toContain('never re-ask');
+  });
+
+  it('账本素材是 required：预算再紧也不能丢（丢了就重问重做）', () => {
+    // usedInputTokens 顶满窗口：user 侧预算恒为 1，required=false 时 optional
+    // 装箱必丢素材——此判例因此能杀死「required 误为 false」的变异（实测：
+    // 不加它时小素材照样装得下，判例对 required 与否免疫）。
+    const assembly = assembler.assemble({
+      surface: 'cli',
+      capabilities: 'capabilities',
+      budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
+    }, '继续', { ledgerFacts: '<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>', traps: 'trap '.repeat(4_000) });
+    expect(assembly.budget.omittedFragmentIds).toContain('traps');
+    expect(assembly.userPrompt).toContain('<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>');
+    expect(assembly.budget.includedFragmentIds).toContain('ledger_facts');
+  });
+});
+
 describe('PromptAssembler', () => {
   it('uses an injected observability sink for assembly traces', () => {
     const store = new InMemoryPromptObservationStore();

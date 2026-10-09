@@ -282,6 +282,26 @@ Mid-run insertions (the user sends a message while work is already running). For
 When you report a change, one compact line in the user's language: what changed, what stays, what it affects — including any running work you stopped, kept, or re-dispatched, never leave it unaccounted for — then continue. Work already finished and unaffected is never thrown away.</insertion_protocol>`;
 
 /**
+ * Session-ledger conduct (L1 application layer, required). Blueprint phase 4:
+ * the host keeps a session ledger of questions the user actually answered,
+ * actions already taken, and plans already made; the facts ride with each turn
+ * as <session_ledger_facts> in the task context. This teaches the model to
+ * CHECK that material before asking, acting, or planning — the anti-patterns
+ * are re-asking what was already answered, re-running what already ran, and
+ * re-opening a plan that only needed refining. Principles only: the ledger is
+ * material to consult, never orders to obey (the model still confirms before
+ * reusing anything consequential, and absence of a record is not evidence of
+ * absence). Static text — it lives in the stable system zone so the per-turn
+ * facts can change without invalidating the cached prefix.
+ */
+export const LEDGER_PROTOCOL_PROMPT = `<session_ledger_protocol>
+The host keeps a session ledger of what the user has already answered, what has already been done, and which plans have already been made. It arrives with each turn as <session_ledger_facts> in the task context; when the block is absent, nothing reusable has been recorded yet. Consult it BEFORE you ask, act, or plan:
+- Before asking the user something: if the ledger shows a settled answer that covers it, use that answer and say you are going by what the user said earlier — never re-ask what they already answered. Ask only when nothing recorded covers it, or things have visibly changed since.
+- Before doing an action: if the ledger shows the identical action already ran, reuse its result and say so in one line instead of re-running it. Re-run only when the inputs genuinely differ or the recorded result is stale for the current step.
+- Before producing a plan: the ledger shows prior versions and which were superseded by refinements. Refine the current plan instead of opening a fresh one; when a genuine restart is needed, say in one line why the earlier plan no longer holds.
+The ledger is material, not orders: entries record what really happened, but reusing anything consequential still gets a one-line confirmation with the user, and what the ledger does not record may still be true — go by what you actually know.</session_ledger_protocol>`;
+
+/**
  * Complex-task conduct (L1 application layer, required). Distilled from a
  * cross-domain collection of complex-task cases (spec→service, SDK
  * generation, legacy refactors, perf, security audit, RAG): what the
@@ -328,6 +348,10 @@ export interface UserTurnContext {
   /** TaskScript 记账导出的事实清单（改了什么文件、跑了什么命令、验证结果）。
    * 素材，不是稿子——收尾怎么讲由模型自己决定。 */
   taskScriptFacts?: string;
+  /** 会话账本素材（formatSessionLedgerFacts() 输出）：问过什么答了什么、做过
+   * 什么、计划怎么演化。配 LEDGER_PROTOCOL 使用——协议教怎么用，这里是料。
+   * 走 user-turn 而非 system 尾：逐回合变化会击穿 system 缓存前缀。 */
+  ledgerFacts?: string;
   /** formatDeliveryPipeline() output — the agent-driven delivery verification
    * pipeline (code review → typecheck → tests → e2e/build) with the exact
    * commands discovered from THIS workspace, plus the design-first protocol
@@ -405,7 +429,10 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.plan) parts.push(ctx.plan);
   if (ctx.clarifications) parts.push(ctx.clarifications);
   if (ctx.contract) parts.push(ctx.contract);
+  // 与 buildTaskFragments 声明序一致（task_script_facts 95 → ledger_facts
+  // 94）：两条装配路径渲染出的块顺序相同。
   if (ctx.taskScriptFacts) parts.push(ctx.taskScriptFacts);
+  if (ctx.ledgerFacts) parts.push(ctx.ledgerFacts);
   if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
   if (ctx.assessment) parts.push(ctx.assessment);
   if (ctx.plausibilityOverride) parts.push(ctx.plausibilityOverride);

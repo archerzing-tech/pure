@@ -18,6 +18,7 @@ import {
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   INSERTION_PROTOCOL_PROMPT,
+  LEDGER_PROTOCOL_PROMPT,
   LOGICAL_TRAPS_PROMPT,
   MULTI_AGENT_PROTOCOL,
   PLAUSIBILITY_REVIEW_PROMPT,
@@ -304,6 +305,11 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     // to prevent — the completion report then has no evidence and the model
     // falls back to claiming whatever feels right.
     ['task_script_facts', context.taskScriptFacts, 95, true],
+    // 会话账本素材与 task_script_facts 同性质（宿主记的真实事实），同样
+    // required：预算压力下被丢的正是「用户答过什么、做过什么」——丢了它
+    // 模型就该重问重做了，恰是这条素材要防的失败模式。体量有上限
+    // （sessionLedger 的 ASKED/DONE/PLANS_MAX + excerpt 截断），不会裸灌。
+    ['ledger_facts', context.ledgerFacts, 94, true],
     ['assessment', context.assessment, 90],
     // Fiction override is required: a detected fiction request must always
     // carry the skip directive, even when the budget is tight.
@@ -355,6 +361,12 @@ export class PromptAssembler {
       // user words or unneeded restarts) and STATIC (never changes mid-session),
       // so it lives in the stable zone, before the volatile tail.
       fragment('insertion_protocol', INSERTION_PROTOCOL_PROMPT, 106, true),
+      // Session-ledger conduct — REQUIRED for the same reason: dropped, the
+      // model re-asks answered questions and re-runs finished work. STATIC
+      // text, so it belongs in the stable zone (the per-turn facts it teaches
+      // the model to consult ride with the user turn instead — a system-tail
+      // change would invalidate the cached prefix on every turn).
+      fragment('ledger_protocol', LEDGER_PROTOCOL_PROMPT, 105, true),
       // Complex-task conduct — REQUIRED: on long tasks the kickoff/failure/
       // fencing moves are the difference between a colleague and a receipt
       // printer; dropping it under budget pressure is exactly the failure

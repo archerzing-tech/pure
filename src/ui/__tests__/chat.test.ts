@@ -1125,6 +1125,13 @@ describe('plan overview completion state', () => {
     const reset = src.indexOf('this.sessionLedger = createSessionLedger();');
     expect(reset).toBeGreaterThan(-1);
     expect(src.indexOf('this.pendingClarification = null;', reset)).toBeGreaterThan(-1);
+    // 新对话入口（clear）同样作废——漏了它，旧对话的账会随新会话快照落盘，
+    // 恢复后模型对着新对话答「按你刚才说的」（跨会话持久污染）。
+    const clearEntry = src.indexOf('this.statusLines = [];');
+    expect(clearEntry).toBeGreaterThan(-1);
+    const clearBody = src.slice(clearEntry, src.indexOf('this.sessionId = `session_', clearEntry));
+    expect(clearBody.indexOf('this.sessionLedger = createSessionLedger();')).toBeGreaterThan(-1);
+    expect(clearBody.indexOf('this.pendingClarification = null;')).toBeGreaterThan(-1);
     // 委派 done 账与 plans 状态链（先 mark 后 record——反了会误标新条目）。
     expect(src.indexOf('this.sessionLedger = recordDone(this.sessionLedger,')).toBeGreaterThan(-1);
     const replaced = src.indexOf('this.sessionLedger = markPlanReplaced(this.sessionLedger, this.activePlanSeq);');
@@ -1132,6 +1139,25 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('this.sessionLedger = recordPlan(this.sessionLedger,', replaced)).toBeGreaterThan(-1);
     // 素材导出函数必须真实存在（接线不能指向不存在的缝）。
     expect(ledger.indexOf('export function formatSessionLedgerFacts(')).toBeGreaterThan(-1);
+  });
+
+  it('persists the session ledger with the snapshot and restores it with normalization (knife 6)', () => {
+    const chat = readSource(new URL('../chat.ts', import.meta.url));
+    const store = readSource(new URL('../store.ts', import.meta.url));
+    // 跨重启「不重复问/不重复做/不重复规划」的前提是账本活过重启：落盘写
+    // 进快照 uiState，恢复读回并 normalize 兜底（损坏档归一为空账，不崩）。
+    // SessionUiState 是可选字段不升版本（旧 app 读新档无感，normalize 只认
+    // version===3，升号反而让旧 app 掉兜底清空会话）。
+    expect(store.indexOf('sessionLedger?: SessionLedger | null;')).toBeGreaterThan(-1);
+    // 落盘：空账写 undefined 不留字段（快照不膨胀）。
+    const save = chat.indexOf('sessionLedger: this.sessionLedger.asked.length + this.sessionLedger.done.length + this.sessionLedger.plans.length > 0');
+    expect(save).toBeGreaterThan(-1);
+    expect(chat.indexOf(': undefined,', save)).toBeGreaterThan(save);
+    // 恢复：normalizeSessionLedger 兜底读回；澄清句柄不跟着回来（旧进程收
+    // 不到那个回答）。
+    expect(chat.indexOf('this.sessionLedger = normalizeSessionLedger(snapshot.uiState.sessionLedger);')).toBeGreaterThan(-1);
+    expect(chat.indexOf('normalizeSessionLedger,')).toBeGreaterThan(-1);
+    expect(store.indexOf("import type { SessionLedger } from '../shared/sessionLedger';")).toBeGreaterThan(-1);
   });
 
   it('folds mid-flight scope additions into the aggregation round, with a deterministic fallback', () => {
