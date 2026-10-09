@@ -12613,6 +12613,51 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn checkpoint_save_load_cleanup_roundtrip() {
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let parent = format!("parent{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let branch = format!("sub_{}_researcher_ab12", parent);
+        let checkpoint = |turns: u64| serde_json::json!({
+            "version": 1,
+            "label": "subagent_interrupted",
+            "state": { "messages": [{ "role": "user", "content": "cp" }], "turnCount": turns },
+            "createdAt": 1
+        });
+        // 两支各存一档：本名（父回合）+ sub_ 前缀支。
+        assert!(save_checkpoint_impl(parent.clone(), checkpoint(3)).is_ok());
+        assert!(save_checkpoint_impl(branch.clone(), checkpoint(12)).is_ok());
+        let loaded = load_session_checkpoints_impl(parent.clone()).unwrap();
+        assert_eq!(loaded.len(), 2, "own + branch checkpoints both load: {loaded:?}");
+        let ids: Vec<&str> = loaded.iter().map(|e| e["sessionId"].as_str().unwrap()).collect();
+        assert!(ids.contains(&parent.as_str()));
+        assert!(ids.contains(&branch.as_str()));
+        // 覆写语义：同键重存（FSStore 同款 version 定名）后仍是一份、内容取新。
+        assert!(save_checkpoint_impl(branch.clone(), checkpoint(13)).is_ok());
+        let reloaded = load_session_checkpoints_impl(parent.clone()).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        let branch_entry = reloaded.iter().find(|e| e["sessionId"] == serde_json::json!(branch)).unwrap();
+        assert_eq!(branch_entry["checkpoint"]["state"]["turnCount"], 13);
+        // 别的会话的断点不被串走。
+        assert!(load_session_checkpoints_impl("otherparent".to_string()).unwrap().is_empty());
+        // 清扫：本名 + 前缀支一起走，别家不动。
+        assert!(cleanup_session_checkpoints(&parent).is_ok());
+        assert!(load_session_checkpoints_impl(parent.clone()).unwrap().is_empty());
+        assert!(save_checkpoint_impl(format!("sub_otherparent_x_y"), checkpoint(1)).is_ok());
+        assert!(cleanup_session_checkpoints(&parent).is_ok());
+        assert!(!load_session_checkpoints_impl("otherparent".to_string()).unwrap().is_empty());
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn workspace_override_wins_over_session_snapshot_workspace() {
         let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-session-workspace-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
@@ -13368,7 +13413,108 @@ fn cleanup_session_files(session_id: &str) -> Result<(), String> {
     if tmp_dir.exists() {
         fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
     }
+    // 子代理/父回合的 checkpoint 不住在 sessions 目录（独立根，见下方
+    // checkpoints_dir），会话删除时一并扫走——不留盘上幽灵断点。
+    let _ = cleanup_session_checkpoints(session_id);
     Ok(())
+}
+
+// ── 第 3 期持久性：子代理 checkpoint 落盘（~/.pure/checkpoints/）──
+// GUI 的 WebView 没有 node:fs，进不了 CLI 那份 FSStore，落盘走这三条命令
+// （TS 侧镜像 store 见 src/ui/checkpointStore.ts）。目录布局与 FSStore 同
+// 构：<root>/<sessionId>/checkpoints/v%03d.json——键是稳定派生的支
+// sessionId（sub_<父会话>_<tool>_<hash>，字符安全同 validate_session_id），
+// 外加父回合 checkpoint 用会话本名。随会话删除按「本名 + sub_<id>_ 前缀」
+// 清扫，delete_all 清整根。
+
+fn checkpoints_dir() -> PathBuf {
+    PathBuf::from(pure_home_dir()).join(".pure").join("checkpoints")
+}
+
+fn save_checkpoint_impl(session_id: String, checkpoint: serde_json::Value) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let version = checkpoint.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+    let dir = checkpoints_dir().join(&session_id).join("checkpoints");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    let serialized = serde_json::to_string(&checkpoint).map_err(|e| format!("serialize: {}", e))?;
+    // tmp + rename 原子落盘（session.json 同款）：半截 checkpoint 比没有更
+    // 糟——它会被续跑当真断点喂给引擎。
+    let final_path = dir.join(format!("v{:03}.json", version));
+    let temp_path = dir.join(format!("v{:03}.json.tmp", version));
+    fs::write(&temp_path, serialized).map_err(|e| format!("write temp: {}", e))?;
+    fs::rename(&temp_path, &final_path).map_err(|e| format!("rename: {}", e))
+}
+
+#[tauri::command]
+async fn save_checkpoint(session_id: String, checkpoint: serde_json::Value) -> Result<(), String> {
+    run_blocking(move || save_checkpoint_impl(session_id, checkpoint)).await
+}
+
+fn load_session_checkpoints_impl(parent_session_id: String) -> Result<Vec<serde_json::Value>, String> {
+    validate_session_id(&parent_session_id)?;
+    let root = checkpoints_dir();
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Ok(out);
+    };
+    let own_prefix = format!("sub_{}_", parent_session_id);
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        let owned = name == parent_session_id || name.starts_with(&own_prefix);
+        if !owned {
+            continue;
+        }
+        let cp_dir = entry.path().join("checkpoints");
+        let Ok(files) = fs::read_dir(&cp_dir) else { continue };
+        // version 升序排（FSStore 同语义：排尾是最新断点）。
+        let mut versions: Vec<(u64, std::path::PathBuf)> = files
+            .flatten()
+            .filter_map(|f| {
+                let n = f.file_name().to_str()?.to_string();
+                let v = n.strip_prefix('v')?.strip_suffix(".json")?.parse::<u64>().ok()?;
+                Some((v, f.path()))
+            })
+            .collect();
+        versions.sort();
+        for (_, path) in versions {
+            if let Ok(raw) = fs::read_to_string(&path) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    out.push(serde_json::json!({ "sessionId": name, "checkpoint": value }));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// openSession 预热用：一次把某会话名下（本名 + sub_ 前缀支）的全部断点
+/// 拉回。GUI 的 IStateStore.loadSession 是同步签名，异步盘 IO 只能靠预热
+/// 一次换平。
+#[tauri::command]
+async fn load_session_checkpoints(parent_session_id: String) -> Result<Vec<serde_json::Value>, String> {
+    run_blocking(move || load_session_checkpoints_impl(parent_session_id)).await
+}
+
+fn cleanup_session_checkpoints(session_id: &str) -> Result<(), String> {
+    validate_session_id(session_id)?;
+    let root = checkpoints_dir();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Ok(());
+    };
+    let prefix = format!("sub_{}_", session_id);
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else { continue };
+        if name == session_id || name.starts_with(&prefix) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_session_checkpoints(session_id: String) -> Result<(), String> {
+    run_blocking(move || cleanup_session_checkpoints(&session_id)).await
 }
 
 /// A conversation the user never talked to is not a session. Older versions
@@ -13447,6 +13593,13 @@ fn cleanup_all_session_files(dir: &std::path::Path, session_ids: &[String]) -> R
         let tmp_dir = application_tmp_dir().join(safe_session_component(session_id));
         if tmp_dir.exists() {
             let _ = fs::remove_dir_all(&tmp_dir);
+        }
+    }
+    // 断点整根清空（checkpoint 键与快照目录解耦，不在上面被扫到的集合里）。
+    let cp_root = checkpoints_dir();
+    if let Ok(entries) = fs::read_dir(&cp_root) {
+        for entry in entries.flatten() {
+            let _ = fs::remove_dir_all(entry.path());
         }
     }
     Ok(())
@@ -15882,6 +16035,10 @@ pub fn run() {
             save_session_workspace,
             delete_session,
             delete_all_sessions,
+            // Subagent/parent-turn checkpoint persistence (~/.pure/checkpoints)
+            save_checkpoint,
+            load_session_checkpoints,
+            delete_session_checkpoints,
             summarize_session_delegations,
             // Per-session usage stats
             save_session_stats,

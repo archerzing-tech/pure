@@ -946,7 +946,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 反面对照（判例 14 下半句）：「resume 找不到断点不许悄悄从头跑——
     // 明说『没找到存档，重新跑了』」。收执不能比机制许的愿更多。
     const llm = scriptedLlm([]);
-    const h = makeHarness(llm); // subagentStore 是空 MemoryStateStore：probe 必 miss
+    const h = makeHarness(llm); // subagentStore 是空镜像（测试无 Tauri invoker）：probe 必 miss
     h.chat.agentActivities = [
       { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'paused' },
     ];

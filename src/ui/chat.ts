@@ -50,7 +50,7 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type Suba
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from '../harness/overlayGuard';
 import { requestPermission } from './permission';
-import { MemoryStateStore } from '../adapter/storage/MemoryStateStore';
+import { TauriCheckpointStore } from '../adapter/storage/TauriCheckpointStore';
 import {
   requestPlanReview,
   formatPlanForPrompt,
@@ -1831,9 +1831,9 @@ export class ChatController {
   private sessionToolAdapter?: ToolAdapter;
   private sessionToolAdapterKey = '';
   private onSnapshotChanged?: (available: boolean) => void;
-  // In-memory subagent checkpoint store for this conversation — lets a sub-task
-  // resume after a user stop + continue within the same session.
-  private subagentStore = new MemoryStateStore();
+  // 持久子代理断点仓（第 3 期）：落盘 ~/.pure/checkpoints/，跨重启可续
+  // （setSessionId 预热进镜像；非 Tauri 环境退化为纯镜像，语义同旧内存仓）。
+  private subagentStore = new TauriCheckpointStore();
   private liveTranscript: LiveTranscriptWindow;
   private liveTurn: LiveTurnHandle | null = null;
 
@@ -2091,6 +2091,10 @@ export class ChatController {
     // stdio transport (killing the spawned subprocesses) instead of leaving
     // them running until the next send() notices the sessionId changed.
     this.disconnectMcpClient();
+    // 预热子代理断点（第 3 期持久性）：盘上一次拉进内存镜像——loadSession
+    // 是同步签名只能读镜像，不预热则重启后的续跑永远诚实 miss。晚到的预热
+    // 无污染：镜像键自带父会话前缀（sub_<parent>_…），跨会话不会误命中。
+    void this.subagentStore.warm(id);
   }
 
   /**
