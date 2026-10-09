@@ -14,6 +14,10 @@ import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import { MemoryStateStore } from '../../adapter/storage/MemoryStateStore';
+import { FSStore } from '../../adapter/storage/FSStore';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { abortPaused } from '../../shared/pauseSignal';
 import type { BudgetConfig, Checkpoint, IStateStore, LLMAdapter, LLMChunk, Message, ToolAdapter, ToolCall, ToolDefinition, ToolResult } from '../../shared/types';
 import type { SubagentDefinition, SubagentResult } from '../types';
@@ -384,6 +388,45 @@ describe('SubagentOrchestrator P1', () => {
     expect(starts.at(-1)?.resumed).toBe(true);
     expect(starts.at(-1)?.resumedTurns).toBe(7);
   });
+
+  it('survives a restart: a fresh orchestrator over FSStore resumes with an incremented lineage runCount (第 3 期刀 4)', async () => {
+    // 血缘号必须住盘上，不住编排器内存：跨重启（全新实例、同一 FSStore）
+    // 同参重派，runCount 从存档读回 +1——「第 N 次续跑」在重启后仍然数得清。
+    const base = await mkdtemp(join(tmpdir(), 'pure-lineage-'));
+    try {
+      const store = new FSStore(base);
+      const parentSession = 'parent-restart';
+      const args = { prompt: 'research X' };
+      const starts: SubagentActivity[] = [];
+      const make = () => {
+        const orch = new SubagentOrchestrator({
+          llm: new MockLLMAdapter('findings'),
+          parentTools: stubAdapter,
+          parentToolsDefs: [],
+          defaultBudget: BUDGET,
+          stateStore: store,
+          parentSessionId: parentSession,
+          progress: { onStart: (a) => starts.push(a) },
+        });
+        orch.register(subagentDef('test_researcher'));
+        return orch;
+      };
+
+      // 「重启前」：首派 runCount=1，存档落盘（含血缘号）。
+      await make().execute(toolCall('test_researcher', args));
+      expect(starts[0].resumed).toBe(false);
+      expect(starts[0].runCount).toBe(1);
+
+      // 「重启后」：全新 orchestrator 实例同参重派——续跑 + 血缘 2 + 断点
+      // 轮数全从盘上回来。
+      await make().execute(toolCall('test_researcher', args));
+      expect(starts.at(-1)?.resumed).toBe(true);
+      expect(starts.at(-1)?.runCount).toBe(2);
+      expect(starts.at(-1)?.resumedTurns).toBeGreaterThan(0);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('deriveSubagentBudget (code_reviewer timeout regression)', () => {
@@ -457,6 +500,7 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
   it('continues in a fresh slice when a segment exhausts its hard budget', async () => {
     let deliver = false;
     let starts = 0;
+    const lineage: SubagentActivity[] = [];
     const llm: LLMAdapter = {
       async *stream(): AsyncGenerator<LLMChunk, void, void> {
         if (!deliver) {
@@ -476,7 +520,7 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
       parentTools: stubAdapter,
       parentToolsDefs: [],
       defaultBudget: { ...BUDGET, maxExecutionTime: 150, graceTurns: 0 },
-      progress: { onStart: () => { starts++; if (starts >= 2) deliver = true; } },
+      progress: { onStart: (a) => { starts++; lineage.push(a); if (starts >= 2) deliver = true; } },
     });
     orch.register({ ...subagentDef('test_slicer'), defaultTimeoutMs: 5_000 });
     const result = await orch.execute(toolCall('test_slicer', { prompt: 'long task' }));
@@ -485,6 +529,10 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
     expect(String((result.result as SubagentResult).output)).toContain('slice-2');
     // A second slice actually began (the re-delegate-and-pray path never ran).
     expect(starts).toBeGreaterThanOrEqual(2);
+    // 刀 4：段内 re-mark 的 onStart 与首段同一份血缘事实——段切不改变这支
+    // 的血缘号/续跑标记，两段行文必须一致（打回修复的锁）。
+    expect(lineage[1]?.runCount).toBe(lineage[0]?.runCount);
+    expect(lineage[1]?.resumed).toBe(lineage[0]?.resumed);
   }, 15_000);
 
   it('aborts a wedged subagent via the no-progress watchdog instead of waiting out the wall', async () => {

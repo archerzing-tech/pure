@@ -468,6 +468,7 @@ export class CodingAgent {
         durationMs: a.durationMs,
         tokensUsed: a.tokensUsed,
         resumed: a.resumed,
+        runCount: a.runCount,
         attempt: a.attempt,
         cause: a.retryCause,
         // 第 2 期第四刀：中断结局随一等事件走（'stopped' = 点名停掉/整树取消，

@@ -1003,7 +1003,13 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
   // 分支级继续（第 2 期第三刀）：血缘号——同参重派命中断点的这次委派带
   // 「续跑」标记，行文从第一行就说清它不是从头跑（数据来自 onStart 的
   // resumed，随 trace 行落盘，重放同形）。
-  const resumeTag = e.resumed ? '（续跑·从存档断点）' : '';
+  // 刀 4（第 3 期）：血缘号 runCount 落盘后带次数——「第 N 次续跑」= 第
+  // runCount 轮 run；旧事件/旧快照没有 runCount，退化成不带次数的老文案。
+  const resumeTag = !e.resumed
+    ? ''
+    : e.runCount != null && e.runCount > 2
+      ? `（第 ${e.runCount - 1} 次续跑·从存档断点）`
+      : '（续跑·从存档断点）';
   switch (e.kind) {
     case 'start':
       return e.summary ? `▶ ${who}${resumeTag} 接活：${clipSummary(e.summary)}` : `▶ ${who}${resumeTag} 开工`;

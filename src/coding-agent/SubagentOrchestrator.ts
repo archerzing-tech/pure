@@ -116,6 +116,13 @@ export interface SubagentActivity {
    * 重派 → 稳定 sessionId），子引擎走的是 continue 而不是从头 run。血缘/
    * 续跑徽标的唯一事实来源，随 onStart / onDone 事件一起走。 */
   resumed?: boolean;
+  /** 第 3 期刀 3：命中存档时的断点轮数（随 resumed 一起走，不命中不带），
+   *  供宿主出「从第 N 轮接上」的对话流回执——与 probeResumeCheckpoint 同一
+   *  事实来源，预检/实际/回执三方不许分叉。 */
+  resumedTurns?: number;
+  /** 第 3 期刀 4：血缘号——这支累计跑过几轮（1 起），随 checkpoint 落盘跨
+   *  重启存活。trace 行「第 N 次续跑」= runCount - 1；首派恒为 1。 */
+  runCount?: number;
   /** 第 2 期第四刀：自愈重试的轮次（lifecycle 'retrying'）与原因摘要。 */
   attempt?: number;
   retryCause?: string;
@@ -483,8 +490,18 @@ export class SubagentOrchestrator implements ToolAdapter {
       : `subagent_${def.name}_${startTime}`;
     // 分支级继续（第 2 期第三刀）：同参重派命中上一条 checkpoint = 续跑，
     // 不是从头跑。这是血缘/续跑徽标的唯一事实来源，onStart 起可见。
-    const resumedFromCheckpoint = Boolean(this.config.stateStore?.loadSession(sessionId)?.state?.messages?.length);
-    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, ...machine.describe() });
+    // 刀 3（第 3 期）：命中时连断点轮数一起上报——回执「从第 N 轮接上」
+    // 与徽标同一事实来源。
+    // 刀 4（第 3 期）：血缘号 runCount——这支累计跑过几轮（1 起），随
+    // checkpoint 落盘跨重启存活。旧档没这个字段视作已跑 1 次（存上档就
+    // 意味着至少跑过一次），本次续跑从 2 起算。
+    const savedSession = this.config.stateStore?.loadSession(sessionId);
+    const savedCheckpoint = savedSession?.state;
+    const resumedFromCheckpoint = Boolean(savedCheckpoint?.messages?.length);
+    const resumedTurns = resumedFromCheckpoint ? savedCheckpoint?.turnCount : undefined;
+    const lastCheckpoint = savedSession?.checkpoints.at(-1);
+    const runCount = (lastCheckpoint?.runCount ?? (lastCheckpoint ? 1 : 0)) + 1;
+    emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, resumedTurns, runCount, ...machine.describe() });
 
     // Liveness watchdog: abort only when NO progress event (token / state /
     // tool) has arrived for a while — a wedged run dies in minutes while
@@ -609,6 +626,7 @@ export class SubagentOrchestrator implements ToolAdapter {
             version: 1,
             label,
             state: { messages: trimmed, turnCount },
+            runCount,
             createdAt: Date.now(),
           });
         } catch {
@@ -618,7 +636,8 @@ export class SubagentOrchestrator implements ToolAdapter {
 
       // Resume: when a checkpoint for this stable sessionId exists, continue the
       // previous sub-run instead of starting fresh (mirrors parent Harness.run).
-      const saved = this.config.stateStore?.loadSession(sessionId)?.state;
+      // 与上方 onStart 段共用同一次 loadSession（FSStore 下一次读盘）。
+      const saved = savedCheckpoint;
       const resumedMessages = saved && saved.messages.length > 0 ? saved.messages : undefined;
 
       // Segment slicing: each engine run gets a hard time slice; when it ends
@@ -643,8 +662,9 @@ export class SubagentOrchestrator implements ToolAdapter {
         const ctx: EngineContext = { ...baseCtx, budget };
         if (segment > 1) {
           // Re-mark the roster card active so a slice boundary never reads as
-          // the agent dying and respawning.
-          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, ...machine.describe() });
+          // the agent dying and respawning. 血缘三件（resumed/resumedTurns/
+          // runCount）与首段同一份闭包事实——段切不改变这支的血缘。
+          emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, resumedTurns, runCount, ...machine.describe() });
         }
         const stream = segment === 1
           ? (resumedMessages

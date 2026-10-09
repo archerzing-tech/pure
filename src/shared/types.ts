@@ -410,6 +410,10 @@ export interface Checkpoint {
   version: number;
   label: string;
   state: AgentLoopState;
+  /** 第 3 期刀 4（子代理 checkpoint 专用）：这支累计跑过几轮（1 起）。
+   *  可选——旧档无此字段，读侧视作已跑 1 次。父 Harness 的 checkpoint
+   *  不写它。 */
+  runCount?: number;
   createdAt: number;
 }
 
@@ -583,6 +587,9 @@ export interface SubagentActivityEvent {
   /** 分支级继续（第 2 期第三刀）：本次委派命中了上一条 checkpoint = 续跑
    *  而非从头跑。血缘/续跑徽标随事件走（onStart/onDone 均带）。 */
   resumed?: boolean;
+  /** 第 3 期刀 4：血缘号——这支累计跑过几轮（1 起），随 checkpoint 落盘。
+   *  trace 行「第 N 次续跑」= runCount - 1。 */
+  runCount?: number;
   /** branch_aborted 的结局：'stopped'（点名停掉/整树取消）或 'paused'
    *  （收掉一项先暂停）。用户的决定不是失败——账上要分得清。 */
   outcome?: 'paused' | 'stopped';

@@ -932,6 +932,18 @@ describe('formatSubagentTraceLine (delegation card interior trace)', () => {
       .toBe('▶ code_reviewer 开工');
   });
 
+  it('第 3 期刀 4：血缘号 runCount 落盘——二次续跑起带次数，旧事件退化老文案', () => {
+    // runCount=2 = 第 1 次续跑：保持简洁不带次数。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', resumed: true, runCount: 2 }))
+      .toBe('▶ code_reviewer（续跑·从存档断点） 开工');
+    // runCount=3 = 第 2 次续跑：次数有信息量，点名。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', resumed: true, runCount: 3 }))
+      .toBe('▶ code_reviewer（第 2 次续跑·从存档断点） 开工');
+    // 旧快照/旧事件没有 runCount：退化成老文案，续跑语义不丢。
+    expect(formatSubagentTraceLine({ callId: 'c1', agentName: 'code_reviewer', kind: 'start', resumed: true }))
+      .toBe('▶ code_reviewer（续跑·从存档断点） 开工');
+  });
+
   it('clips long asks and drops contentless kinds', () => {
     const longAsk = 'x'.repeat(200);
     const line = formatSubagentTraceLine({ callId: 'c1', agentName: 'code_editor', kind: 'start', summary: longAsk })!;
