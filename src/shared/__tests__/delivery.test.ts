@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker, type DeliveryVerificationResult } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -171,7 +171,7 @@ describe('verification plan timeout tiers（刀 1.5 超时分档）', () => {
 });
 
 describe('resolveGateSpecs（刀 1.1 验证清单的门禁裁决）', () => {
-  const profile = {
+  const profile: Omit<WorkspaceProfile, 'verification'> = {
     projectType: 'bun',
     packageManager: 'bun',
     manifests: ['package.json'],
@@ -179,7 +179,7 @@ describe('resolveGateSpecs（刀 1.1 验证清单的门禁裁决）', () => {
     testFilesFound: true,
     gitRepository: true,
     relevantFiles: [],
-  } as const;
+  };
   const fullProfile = buildVerificationPlan(profile);
 
   it('adopts a whitelisted plan list; final marks select the gate set', () => {
