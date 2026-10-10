@@ -159,29 +159,36 @@ function commandForScript(manager: PackageManager, script: string): string {
 }
 
 export function buildVerificationPlan(profile: Omit<WorkspaceProfile, 'verification'>): VerificationSpec[] {
+  // 刀 1.5 超时分档（2026-10-10）：误杀真测试/构建套件比超时本身贵得多——
+  // 一个 200s 的正经测试套被 180s 掐死，触发的是一整轮修复（模型重跑、再
+  // 失败、再复查）；而 lint 挂死多等一分钟只是白等。三档纯配置：快档
+  // （lint）120s、标准档（typecheck）180s、重档（test/build）300s。
+  const TIER_FAST_TIMEOUT_MS = 120_000;
+  const TIER_STANDARD_TIMEOUT_MS = 180_000;
+  const TIER_HEAVY_TIMEOUT_MS = 300_000;
   const specs: VerificationSpec[] = [];
-  const addScript = (id: string, label: string, script: string, reason: string, required: boolean): void => {
+  const addScript = (id: string, label: string, script: string, reason: string, required: boolean, timeoutMs: number): void => {
     if (!profile.scripts[script]) return;
-    specs.push({ id, label, command: commandForScript(profile.packageManager, script), required, reason });
+    specs.push({ id, label, command: commandForScript(profile.packageManager, script), required, reason, timeoutMs });
   };
 
   if (profile.projectType === 'rust') {
-    specs.push({ id: 'typecheck', label: '类型/编译检查', command: 'cargo check', required: true, reason: 'Rust 项目必须先通过编译检查。' });
-    specs.push({ id: 'test', label: '自动化测试', command: 'cargo test', required: true, reason: 'Rust 项目必须有真实测试结果。' });
-    specs.push({ id: 'build', label: '项目构建', command: 'cargo build', required: true, reason: 'Rust 项目必须能构建。' });
+    specs.push({ id: 'typecheck', label: '类型/编译检查', command: 'cargo check', required: true, reason: 'Rust 项目必须先通过编译检查。', timeoutMs: TIER_STANDARD_TIMEOUT_MS });
+    specs.push({ id: 'test', label: '自动化测试', command: 'cargo test', required: true, reason: 'Rust 项目必须有真实测试结果。', timeoutMs: TIER_HEAVY_TIMEOUT_MS });
+    specs.push({ id: 'build', label: '项目构建', command: 'cargo build', required: true, reason: 'Rust 项目必须能构建。', timeoutMs: TIER_HEAVY_TIMEOUT_MS });
     return specs;
   }
 
   if (profile.projectType === 'python') {
-    specs.push({ id: 'test', label: '自动化测试', command: 'pytest', required: profile.testFilesFound, reason: 'Python 项目使用 pytest 验证行为。' });
-    addScript('typecheck', '类型检查', 'typecheck', '项目声明了类型检查脚本。', true);
-    addScript('lint', '代码规范检查', 'lint', '项目声明了 lint 脚本。', true);
-    addScript('build', '项目构建', 'build', '项目声明了构建脚本。', true);
+    specs.push({ id: 'test', label: '自动化测试', command: 'pytest', required: profile.testFilesFound, reason: 'Python 项目使用 pytest 验证行为。', timeoutMs: TIER_HEAVY_TIMEOUT_MS });
+    addScript('typecheck', '类型检查', 'typecheck', '项目声明了类型检查脚本。', true, TIER_STANDARD_TIMEOUT_MS);
+    addScript('lint', '代码规范检查', 'lint', '项目声明了 lint 脚本。', true, TIER_FAST_TIMEOUT_MS);
+    addScript('build', '项目构建', 'build', '项目声明了生产构建脚本。', true, TIER_HEAVY_TIMEOUT_MS);
     return specs;
   }
 
-  addScript('typecheck', '类型检查', 'typecheck', '项目声明了类型检查脚本。', true);
-  addScript('lint', '代码规范检查', 'lint', '项目声明了 lint 脚本。', true);
+  addScript('typecheck', '类型检查', 'typecheck', '项目声明了类型检查脚本。', true, TIER_STANDARD_TIMEOUT_MS);
+  addScript('lint', '代码规范检查', 'lint', '项目声明了 lint 脚本。', true, TIER_FAST_TIMEOUT_MS);
   if (profile.scripts.test) {
     specs.push({
       id: 'test',
@@ -189,9 +196,10 @@ export function buildVerificationPlan(profile: Omit<WorkspaceProfile, 'verificat
       command: commandForScript(profile.packageManager, 'test'),
       required: profile.testFilesFound,
       reason: profile.testFilesFound ? '项目存在测试入口和测试文件。' : '项目声明了测试脚本，但没有发现可识别的测试文件。',
+      timeoutMs: TIER_HEAVY_TIMEOUT_MS,
     });
   }
-  addScript('build', '项目构建', 'build', '项目声明了生产构建脚本。', true);
+  addScript('build', '项目构建', 'build', '项目声明了生产构建脚本。', true, TIER_HEAVY_TIMEOUT_MS);
   return specs;
 }
 
@@ -499,12 +507,18 @@ export async function runDeliveryVerification(
   profile: WorkspaceProfile | undefined,
   signal?: AbortSignal,
   onStep?: (step: DeliveryStepResult) => void,
+  fromIndex = 0,
 ): Promise<DeliveryVerificationResult> {
   if (!profile || profile.verification.length === 0) {
     return { passed: true, steps: [] };
   }
   const steps: DeliveryStepResult[] = [];
-  for (const spec of profile.verification) {
+  // 刀 1.2（2026-10-10）：fromIndex > 0 = 修复轮复查只跑「失败步起重跑其后
+  // 全部」的后缀；前缀的证据由宿主持修复账拼接（裁决在 planVerification
+  // Resume，语义 = formatDeliveryFixPrompt 对模型的同一承诺）。fromIndex 按
+  // profile.verification 的全局下标对齐，宿主跨轮累加前缀后对齐不变。
+  for (let i = Math.max(0, Math.min(fromIndex, profile.verification.length)); i < profile.verification.length; i++) {
+    const spec = profile.verification[i];
     if (signal?.aborted) break;
     const start = Date.now();
     const { result, retried } = await runDeliveryStep(tools, spec, signal);
@@ -540,6 +554,30 @@ export async function runDeliveryVerification(
     if (step.status === 'failed' && spec.required) break;
   }
   return { passed: steps.every((s) => s.status !== 'failed'), steps };
+}
+
+/**
+ * 刀 1.2（2026-10-10）：修复轮复查的「失败步起重跑其后全部」判据。输入上
+ * 一轮的验证结果与「插话纪元未变」读数，输出本轮从哪一步重跑、哪些前缀
+ * 证据可免检。三条裁决全机械、零模型参与：
+ *  - 插话入回合即作废（顺序铁律）：插话可能改变代码或要求，之前轮次的
+ *    通过证据不再可信——回全量、清空修复账。宁可多跑一次全量，不作假免检。
+ *  - 前缀 = 从头连续的 passed 步；首个非 passed（failed 或 skipped）的步
+ *    起重跑其后全部——「只重跑失败步」是危险的（修好 typecheck 而 test
+ *    从未跑过就宣布通过），与 formatDeliveryFixPrompt 对模型的承诺同一语义。
+ *  - 全部通过却进了修复轮（不该发生）按防御回全量。
+ * 调用方持跨轮修复账：每轮把 returned verifiedPrefix 与本轮后缀里新通过
+ * 的部分累加（steps 与 profile.verification 全局下标保持对齐，fromIndex
+ * 直接可作 runDeliveryVerification 的入参）。
+ */
+export function planVerificationResume(
+  previous: DeliveryVerificationResult,
+  interjectEpochUnchanged: boolean,
+): { fromIndex: number; verifiedPrefix: DeliveryStepResult[] } {
+  if (!interjectEpochUnchanged) return { fromIndex: 0, verifiedPrefix: [] };
+  const firstNotPassed = previous.steps.findIndex((s) => s.status !== 'passed');
+  if (firstNotPassed <= 0) return { fromIndex: 0, verifiedPrefix: [] };
+  return { fromIndex: firstNotPassed, verifiedPrefix: previous.steps.slice(0, firstNotPassed) };
 }
 
 /** Compact human-readable summary of a backstop run for status bubbles. */

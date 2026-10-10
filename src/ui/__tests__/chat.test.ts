@@ -592,6 +592,21 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(backstop).toBeGreaterThan(-1);
     expect(fixRound).toBeGreaterThan(backstop);
     expect(src).toContain('const qualityPassed = !needsDeliveryGate || (deliveryResult?.passed === true && gen === this.generation);');
+    // 刀 1.2（2026-10-10）：修复轮复查从失败步起重跑其后全部——裁决在
+    // planVerificationResume（宿主无关，delivery.test 锁语义），宿主锁
+    // 「经判据 + 持跨轮修复账 + 拼接全局视图」的委托形状；作废条件
+    // （顺序铁律）的读数在进闸时取定，四个插话入口都要推高纪元。
+    const resumeCall = src.indexOf('planVerificationResume(deliveryResult, interjectUnchanged)');
+    expect(resumeCall).toBeGreaterThan(fixRound);
+    // 作废读数在进闸时取定（先于 round-0 全量跑），复查块在修复轮之后。
+    expect(src.indexOf('const interjectEpochAtGate = this.interjectEpoch;')).toBeGreaterThan(-1);
+    expect(src.indexOf('const interjectEpochAtGate = this.interjectEpoch;')).toBeLessThan(backstop);
+    expect(src.indexOf('deliveryResult = { passed: fresh.passed, steps: [...verifiedPrefix, ...fresh.steps] };')).toBeGreaterThan(resumeCall);
+    for (const head of ['private steerRunningTurn(', 'private recordSideAnswer(', 'private foldInScopeAddition(', 'private queueInterjectTask(']) {
+      const at = src.indexOf(head);
+      expect(at).toBeGreaterThan(-1);
+      expect(src.slice(at, at + 400).indexOf('this.interjectEpoch++')).toBeGreaterThan(-1);
+    }
     // 旧的 LLM VERDICT 门禁卡不再出现在 GUI 流程里。
     expect(src.indexOf('createQualityGateCard')).toBe(-1);
     expect(src.indexOf('runProjectQualityGate')).toBe(-1);

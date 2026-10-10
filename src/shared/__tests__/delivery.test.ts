@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker, type DeliveryVerificationResult } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -102,6 +102,65 @@ describe('delivery failure classification', () => {
     expect(classifyDeliveryFailure('expected 2 received 1')).toBe('test_failure');
     expect(classifyDeliveryFailure('TS2345: type error')).toBe('typecheck_failure');
     expect(classifyDeliveryFailure('vite build failed')).toBe('build_failure');
+  });
+});
+
+describe('planVerificationResume（刀 1.2 失败步起重跑其后全部）', () => {
+  const step = (id: string, status: 'passed' | 'failed' | 'skipped') =>
+    ({ id, label: id, command: id, status, exitCode: status === 'passed' ? 0 : undefined, durationMs: 1, output: '' });
+  const result = (steps: ReturnType<typeof step>[]): DeliveryVerificationResult => ({ passed: steps.every((s) => s.status !== 'failed'), steps });
+
+  it('resumes from the first non-passed step and holds the passed prefix as免检证据', () => {
+    const resume = planVerificationResume(result([step('typecheck', 'passed'), step('lint', 'passed'), step('test', 'failed')]), true);
+    expect(resume.fromIndex).toBe(2);
+    expect(resume.verifiedPrefix.map((s) => s.id)).toEqual(['typecheck', 'lint']);
+  });
+
+  it('never resumes from a later failure alone (test 从未跑过不能宣布通过)', () => {
+    // 前缀里只要有一个非 passed（skipped），它就是重跑起点——「只重跑失败步」
+    // 是附-5 钉死的危险方向。
+    const resume = planVerificationResume(result([step('typecheck', 'passed'), step('lint', 'skipped'), step('test', 'failed')]), true);
+    expect(resume.fromIndex).toBe(1);
+    expect(resume.verifiedPrefix.map((s) => s.id)).toEqual(['typecheck']);
+  });
+
+  it('interjection during repair voids the ledger and falls back to a full re-run', () => {
+    // 顺序铁律：插话入回合即修复账作废、回全量。
+    const resume = planVerificationResume(result([step('typecheck', 'passed'), step('test', 'failed')]), false);
+    expect(resume.fromIndex).toBe(0);
+    expect(resume.verifiedPrefix).toEqual([]);
+  });
+
+  it('all-passed or first-step failure never skips anything (防御)', () => {
+    expect(planVerificationResume(result([step('typecheck', 'passed'), step('test', 'passed')]), true).fromIndex).toBe(0);
+    expect(planVerificationResume(result([step('typecheck', 'failed')]), true)).toEqual({ fromIndex: 0, verifiedPrefix: [] });
+  });
+});
+
+describe('verification plan timeout tiers（刀 1.5 超时分档）', () => {
+  it('tiers node scripts: lint fast, typecheck standard, test/build heavy', () => {
+    const specs = buildVerificationPlan({
+      projectType: 'bun',
+      packageManager: 'bun',
+      manifests: ['package.json'],
+      scripts: { typecheck: 'tsc --noEmit', lint: 'eslint .', test: 'bun test', build: 'vite build' },
+      testFilesFound: true,
+      gitRepository: true,
+      relevantFiles: [],
+    });
+    expect(Object.fromEntries(specs.map((s) => [s.id, s.timeoutMs]))).toEqual({
+      typecheck: 180_000,
+      lint: 120_000,
+      test: 300_000,
+      build: 300_000,
+    });
+  });
+
+  it('tiers rust and python stacks the same way', () => {
+    const rust = buildVerificationPlan({ projectType: 'rust', packageManager: 'cargo', manifests: ['Cargo.toml'], scripts: {}, testFilesFound: true, gitRepository: true, relevantFiles: [] });
+    expect(rust.map((s) => [s.id, s.timeoutMs])).toEqual([['typecheck', 180_000], ['test', 300_000], ['build', 300_000]]);
+    const py = buildVerificationPlan({ projectType: 'python', packageManager: 'pip', manifests: ['pyproject.toml'], scripts: {}, testFilesFound: true, gitRepository: true, relevantFiles: [] });
+    expect(py.find((s) => s.id === 'test')?.timeoutMs).toBe(300_000);
   });
 });
 

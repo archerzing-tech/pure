@@ -89,7 +89,7 @@ import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, 
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
+import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, planVerificationResume, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -1735,6 +1735,11 @@ export class ChatController {
   /** 主任务原文：早派任务书要用，但 send() 闭包够不着插话路径——挂号时
    *  抄一份。插话只能发生在本回合内，不存在跨回合读到旧话的路径。 */
   private activeTurnUserText = '';
+  /** 插话纪元（刀 1.2 作废条件，2026-10-10）：任一插话入口挂号即 +1。
+   *  交付修复轮的「失败步起重跑」修复账以此为作废条件——纪元变了 = 修复
+   *  期间有插话进来，之前的通过证据不再免检、回全量（顺序铁律）。纯机械
+   *  计数，不做任何「这插话会不会影响代码」的判断——判断归保守规则。 */
+  private interjectEpoch = 0;
   /** S2 第五刀（P3-2）— 回合收尾派发序 + 待办账住 RoundClosePlane（宿主无
    * 关，CLI/通道同接）：待办队列与押账插话是 plane 私有态，收尾裁决序（回
    * 执结算 → 折入核验 → 续跑兜底 → 押账插话优先 → 残留 steer 重入 → 队列
@@ -3046,6 +3051,7 @@ export class ChatController {
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
    * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
   private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean): void {
+    this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     this.steerBus.enqueue({
       message: {
         role: 'user',
@@ -3248,6 +3254,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
    * 区分兜底在收尾派发（RoundClosePlane.dispatch）：答上的记录回合就结束了 = 账已清，残留即弃；
    * 没答上的把问题原话重入（「收尾时统一答」的承诺必须兑现）。 */
   private recordSideAnswer(question: string, answer: string): void {
+    this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     const content = answer
       ? `【边干边答记录】用户刚才问：「${question}」，宿主已旁答：「${answer}」。知悉即可，后续输出与此口径一致，不必再答一遍。`
       : `【边干边答记录】用户刚才问：「${question}」，宿主暂时没答上。收尾时在输出里把这个问题答了。`;
@@ -3303,6 +3310,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * finished (LLM judges can take seconds) would otherwise leave the queued
    * task or a RELATED insert frozen until the user's NEXT turn completed. */
   private queueInterjectTask(text: string, images: MessageImage[], displayText: string): void {
+    this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     this.roundClose.queueTask({ text, images, displayText, ts: Date.now() });
     this.renderQueueCard();
     if (!this.isStreaming()) this.roundClose.scheduleDispatch();
@@ -3373,6 +3381,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
   private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false): void {
+    this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
     this.folds.add(text, images, displayText, mechanical, cancels);
@@ -6176,6 +6185,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             let qualityRepairRounds = 0;
             const qualityRepairIssues: string[] = [];
             const MAX_QUALITY_REPAIR_ROUNDS = 3;
+            // 刀 1.2（2026-10-10）修复账：上轮已真通过、复查不再重跑的前缀，
+            // 跨修复轮累加（steps 与 profile.verification 全局下标对齐）。
+            // 作废读数在进闸时取定：此后任何插话挂号都会推高纪元。
+            let verifiedPrefix: DeliveryStepResult[] = [];
+            const interjectEpochAtGate = this.interjectEpoch;
             // 交付验证步骤气泡先收集到离屏容器，回合末再整体前置到“完成
             // 总结”之前（而非追加到末尾），避免“先声称完成、后验证”的顺序。
             const deliveryHolder = document.createElement('div');
@@ -6229,12 +6243,32 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 if (!fix.completed) {
                   qualityRepairIssues.push(`第 ${round} 轮修复未完成：修复 agent 未返回可继续验证的完成结果。`);
                   this.addStatusBubble(`第 ${round} 轮修复没有完成，仍先重新验证当前工作区；未达到三轮前不会让人工介入。`, true, true);
+                  // 修复没完成 = 工作区状态不明，修复账不可信，回全量。
+                  verifiedPrefix = [];
+                  // Every round closes with a real re-check, never the previous
+                  // round's evidence.
+                  deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
                 } else {
-                  this.addStatusBubble(`第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
+                  // 刀 1.2（2026-10-10）：复查从失败步起重跑其后全部——与
+                  // formatDeliveryFixPrompt 对模型的承诺同一语义，省掉每轮
+                  // 从头的全量重跑（A 类病灶「反复全量测」的主成本）。作废
+                  // 条件（顺序铁律）：插话纪元变了 = 修复期间有插话进来，
+                  // 之前的通过证据不再免检、回全量。每轮收尾都是真跑，
+                  // 从不吃上一轮的证据。裁决在 planVerificationResume
+                  // （宿主无关，delivery.test 锁语义），这里只执行。
+                  const interjectUnchanged = this.interjectEpoch === interjectEpochAtGate;
+                  const resume = planVerificationResume(deliveryResult, interjectUnchanged);
+                  verifiedPrefix = resume.verifiedPrefix;
+                  const resumedFrom = deliveryResult.steps[resume.fromIndex]?.label;
+                  this.addStatusBubble(!interjectUnchanged
+                    ? `第 ${round} 轮修复完成；期间有插话进来，之前的通过证据不再免检，回全量重跑…`
+                    : resume.fromIndex > 0
+                      ? `第 ${round} 轮修复完成：${verifiedPrefix.map((s) => s.label).join('、')} 上轮已通过，从「${resumedFrom}」起重跑其后全部…`
+                      : `第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
+                  const fresh = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep, resume.fromIndex);
+                  // 拼接全局视图：前缀是持账的免检证据，后缀是本轮真跑的。
+                  deliveryResult = { passed: fresh.passed, steps: [...verifiedPrefix, ...fresh.steps] };
                 }
-                // Every round closes with a real re-check, never the previous
-                // round's evidence.
-                deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
               }
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               if (!deliveryResult.passed && qualityRepairRounds >= MAX_QUALITY_REPAIR_ROUNDS) {
