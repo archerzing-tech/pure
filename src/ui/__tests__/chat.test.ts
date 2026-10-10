@@ -1999,6 +1999,37 @@ describe('plan-by-thinking flow', () => {
     expect(src).toContain('if (this.interjectOrchestrator.preflightWindowActive()) {');
   });
 
+  it('刀 3.1 事件驱动攒批：重想在飞不掐流，收尾见暂存作废重启（2026-10-10）', () => {
+    // 附-5 钉死的形状：不是 debounce 时间窗（单句插话白等一窗 = 负优化），
+    // 是事件驱动——重想在飞 → 只入暂存；原思考在飞 → 照旧早掐早省。
+    // 宿主纯机械：攒不攒由「有没有重想在飞」的流状态定，不判断、不计时。
+    const orch = readFileSync(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url), 'utf8');
+    // ① 吸收分支的分流：攒批寄存器在场 → 不置重启请求、不掐流。
+    const absorbIdx = orch.indexOf('if (this.preflightRethinkInFlight) {');
+    expect(absorbIdx).toBeGreaterThan(-1);
+    const batchBranch = orch.slice(absorbIdx, orch.indexOf('} else {', absorbIdx));
+    expect(batchBranch).not.toContain('preflightRestartRequested = true');
+    expect(batchBranch).not.toContain('abort()');
+    const elseBranch = orch.slice(orch.indexOf('} else {', absorbIdx), orch.indexOf('const isCorrection', absorbIdx));
+    expect(elseBranch).toContain('this.preflightRestartRequested = true');
+    expect(elseBranch).toContain('this.preflightAbort?.abort()');
+    // ② 挂号与复位：宿主并账重开时挂号；复位点齐备（字段声明 + 开窗 + 清场
+    // ——新窗第一轮是原思考轮，攒批寄存器必须归零）。
+    expect(orch).toContain('markPreflightRethink(): void');
+    expect(orch.match(/preflightRethinkInFlight = false/g)?.length).toBe(3);
+    // ③ 收尾作废：planByThinking 流完后见暂存非空——本轮请求不带它们，产出
+    // 作废（气泡收走）发重启哨兵，宿主并账重开一轮一次带上全部。
+    const seamIdx = src.indexOf('循环后兜底：重启请求落在流刚收尾的缝里');
+    expect(seamIdx).toBeGreaterThan(-1);
+    const tailCheck = src.slice(src.indexOf('if (this.interjectOrchestrator.pendingPreflightCount() > 0)', seamIdx), src.indexOf('let plan: Plan | null', seamIdx));
+    expect(tailCheck).toContain('bubble?.remove()');
+    expect(tailCheck).toContain("restarted: true");
+    // ④ 重启循环挂号：并账重开的那一轮起算重想。
+    const foldIdx = src.indexOf('userText = this.applyPreflightSupplements(userText, userImages);\n                // 刀 3.1');
+    expect(foldIdx).toBeGreaterThan(-1);
+    expect(src.slice(foldIdx, foldIdx + 400)).toContain('this.interjectOrchestrator.markPreflightRethink()');
+  });
+
   it('吸收即推倒重想：重启请求掐流、思考重开、N 句 N 轮（2026-09-27 用户定调）', () => {
     // "诗句里一定要出现明月"必须在构图里，不是旧思考上后贴——吸收分支置
     // 重启请求 + 掐掉在飞的思考流；send() 的重启循环见暂存非空/哨兵就并账

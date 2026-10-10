@@ -3110,8 +3110,9 @@ export class ChatController {
       { role: 'user', content: user, images: userImages },
     ];
     // 独立的超时与中止转发：用户点「停止」立刻掐断；掐断后手里有什么算什么，
-    // 判断全在收尾——这一层绝不冒噪音。preflightAbort 挂给吸收分支：插话
-    // 要推倒重想时掐的就是这一条流。每轮新思考开局都清掉上一轮的重启请求
+    // 判断全在收尾——这一层绝不冒噪音。preflightAbort 挂给吸收分支：原思考
+    // 在飞时插话要推倒重想掐的就是这一条流；重想在飞时攒批不掐（刀 3.1），
+    // 由收尾的暂存检查作废本轮。每轮新思考开局都清掉上一轮的重启请求
     // ——请求只对它打断的那条流有效，残留会把这个新 AbortController 的
     // 超时/中止误认成重启。（在飞把手与重启请求、叙述尾寄存在编排器——
     // S2 第六刀：吸收分支的置位面在那边。）
@@ -3182,6 +3183,13 @@ export class ChatController {
       // 循环后兜底：重启请求落在流刚收尾的缝里（最后一块之后、返回之前），
       // 循环内没机会吃掉。同样整体作废，气泡收走，restart 哨兵让 send() 重开。
       this.interjectOrchestrator.clearPreflightRestart();
+      bubble?.remove();
+      return { narration: '', plan: null, restarted: true };
+    }
+    if (this.interjectOrchestrator.pendingPreflightCount() > 0) {
+      // 刀 3.1 事件驱动攒批：补充落在这一轮在飞期间（重想在飞只入暂存不掐
+      // 流）——本轮请求不带它们，产出建立在旧构图上，整体作废（同重启缝
+      // 一路：气泡收走），restart 哨兵让 send() 并账重开一轮一次带上全部。
       bubble?.remove();
       return { narration: '', plan: null, restarted: true };
     }
@@ -4846,15 +4854,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           maybeShowAssessment();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
           // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
-          // 编排器的暂存（吸收分支），同时置重启请求、掐掉
-          // 在飞的思考流。重启循环：暂存非空 = 有一句思考途中吸收的话没进构图
-          // ——并进请求正文（【你在思考时补充】块，图随文走）重开一轮，连续
-          // N 句就重启 N 轮，每轮都带着之前并好的全部补充（2026-09-27 用户
-          // 定调：约束类的话必须长进构图里，旧思考推倒）。引擎第一轮、canonical、
-          // 暂停提交看到的都是同一段合并文本；补充是明文块不剥壳，回放也保得住
-          // 用户原话。必须在 aborted 检查之前并：暂停路径提交的同样是合并后
-          // 的文本。窗开着跨整段循环：吸收分支整个期间都能接住新插话。
-          // （窗与暂存、重启请求、在飞把手都寄存在 InterjectOrchestrator——S2 第六刀。）
+          // 编排器的暂存（吸收分支）。原思考在飞时照旧掐流重开；重想在飞时
+          // 攒批（刀 3.1 事件驱动：只入暂存不掐流）。重启循环：暂存非空或
+          // 重启哨兵 = 有思考途中吸收的话没进构图——并进请求正文（【你在思
+          // 考时补充】块，图随文走）重开一轮，一轮带上窗内攒下的全部补充
+          // （2026-09-27 用户定调：约束类的话必须长进构图里，旧思考推倒；
+          // 刀 3.1：N 句补充不再 N 次废生成 N 次重启，在飞的重想流完那次
+          // 收口并账）。引擎第一轮、canonical、暂停提交看到的都是同一段合并
+          // 文本；补充是明文块不剥壳，回放也保得住用户原话。必须在 aborted
+          // 检查之前并：暂停路径提交的同样是合并后的文本。窗开着跨整段循环：
+          // 吸收分支整个期间都能接住新插话。
+          // （窗与暂存、重启请求、在飞把手、攒批寄存器都寄存在
+          // InterjectOrchestrator——S2 第六刀。）
           this.interjectOrchestrator.openPreflightWindow();
           let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
           try {
@@ -4863,6 +4874,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (this.abortController?.signal.aborted) break;
               if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
                 userText = this.applyPreflightSupplements(userText, userImages);
+                // 刀 3.1：这一轮起是重想——在飞期间新到的补充只攒批不掐流，
+                // 由 planByThinking 收尾见暂存非空作废、回到这里并账。
+                this.interjectOrchestrator.markPreflightRethink();
                 this.addStatusBubble('已并入补充，重新规划…', false, false, 'info');
                 continue;
               }
@@ -7606,10 +7620,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     return narration ? { role: 'assistant', content: narration } : undefined;
   }
 
-  /** 思考窗吸收的五件寄存器（窗开关、暂存、在飞把手、重启请求、叙述尾）
-   * 已迁 InterjectOrchestrator（S2 第六刀）：吸收分支的置位面与 send() 的
-   * 重启循环经窄 API（openPreflightWindow/beginPreflightThought/take…
-   * 等）对接。并账消费（splice 语义）在这里：取走的补充并进请求正文。 */
+  /** 思考窗吸收的寄存器（窗开关、暂存、在飞把手、重启请求、叙述尾、攒批
+   * 寄存器）已迁 InterjectOrchestrator（S2 第六刀）：吸收分支的置位面与
+   * send() 的重启循环经窄 API（openPreflightWindow/beginPreflightThought/
+   * take… 等）对接。并账消费（splice 语义）在这里：取走的补充并进请求正文。 */
   private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
     const taken = this.interjectOrchestrator.takePreflightSupplements();
     if (taken.length === 0) return userText;

@@ -109,6 +109,11 @@ export class InterjectOrchestrator {
    * 重启循环用并账后的请求从头再想。 */
   private preflightAbort: AbortController | null = null;
   private preflightRestartRequested = false;
+  /** 刀 3.1 事件驱动攒批：当前窗内已经并账重开过（在飞/即将在飞的思考轮
+   * 是重想轮）——此间新到的补充只入暂存不掐流，在飞的重想流完后宿主一
+   * 次带上全部。原思考轮（窗开后的第一轮）不在此列：它不含任何补充，想
+   * 完也是白想，照旧早掐早省。开窗/清场归零。 */
+  private preflightRethinkInFlight = false;
   /** 在飞思考的叙述尾（最近 ~400 个可见字符）：插话裁决的时机证据——裁决
    * 器看到"思考最新说到……"才能自己发现叙述里的错误前提（jev 案例）。
    * 每轮新思考开局清空（旧轮的尾巴对新轮是假证据）。 */
@@ -218,8 +223,17 @@ export class InterjectOrchestrator {
     if (shouldAbsorbIntoThinkingWindow(decision, this.planPreflightActive)) {
       echoUserBubble();
       this.pendingPreflightSupplements.push({ text, images });
-      this.preflightRestartRequested = true;
-      this.preflightAbort?.abort();
+      if (this.preflightRethinkInFlight) {
+        // 刀 3.1 事件驱动攒批（附-5 事件版，非 debounce 时间窗——那会给单句
+        // 插话白加一个等待窗）：重想已在飞，只入暂存不掐流。在飞的重想流完，
+        // planByThinking 见暂存非空作废本轮产出发重启哨兵，宿主并账重开一
+        // 轮一次带上全部——N 句补充不再 N 次废生成 N 次重启。宿主纯机械：
+        // 攒不攒由「有没有重想在飞」这个流状态定，不判断、不计时。
+      } else {
+        // 原思考在飞（或轮间缝）：它不含任何补充，想完也是白想，照旧早掐早省。
+        this.preflightRestartRequested = true;
+        this.preflightAbort?.abort();
+      }
       const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
       this.deps.settleAck(ack, isCorrection
         ? '已按纠正重构思路，重新规划…'
@@ -508,9 +522,16 @@ export class InterjectOrchestrator {
   // ── 思考窗寄存器的宿主面（send() 重启循环 / planByThinking / 上下文投影用）─
 
   /** 窗开在 planByThinking 前、关在 finally（抛了也关）——整个预检循环期间
-   * 吸收分支都能接住新插话。 */
+   * 吸收分支都能接住新插话。新窗的第一轮是原思考轮：攒批寄存器归零。 */
   openPreflightWindow(): void {
     this.planPreflightActive = true;
+    this.preflightRethinkInFlight = false;
+  }
+
+  /** 刀 3.1：宿主并账重开时挂号——接下来在飞的思考轮是重想轮，此间新到
+   * 的补充走攒批（只入暂存不掐流）。 */
+  markPreflightRethink(): void {
+    this.preflightRethinkInFlight = true;
   }
 
   closePreflightWindow(): void {
@@ -564,12 +585,13 @@ export class InterjectOrchestrator {
     return this.pendingPreflightSupplements;
   }
 
-  /** 新会话清场：窗、暂存、在飞把手、重启请求、叙述尾一并归零。 */
+  /** 新会话清场：窗、暂存、在飞把手、重启请求、攒批寄存器、叙述尾一并归零。 */
   resetPreflight(): void {
     this.pendingPreflightSupplements = [];
     this.planPreflightActive = false;
     this.preflightAbort = null;
     this.preflightRestartRequested = false;
+    this.preflightRethinkInFlight = false;
     this.preflightNarrationTail = '';
   }
 }

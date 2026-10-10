@@ -1265,6 +1265,35 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(h.chat.roundClose.hasHeldInsert()).toBe(false);
   });
 
+  it('刀 3.1 攒批：重想在飞时新补充只入暂存不掐流；开窗复位后照走原路', async () => {
+    // 事件驱动攒批（附-5 事件版）：第一句补充已并账重开（markPreflightRethink
+    // 挂号）后，重想流在飞期间再到的补充只入暂存——在飞的重想流完，宿主一次
+    // 带上全部。N 句补充不再 N 次废生成 N 次重启。
+    const llm = scriptedLlm([
+      { match: '晚霞', cls: { kind: 'steer', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9, supplements_current: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.interjectOrchestrator.openPreflightWindow();
+    h.chat.interjectOrchestrator.markPreflightRethink();
+    const ac = new AbortController();
+    h.chat.interjectOrchestrator.beginPreflightThought(ac);
+
+    await h.chat.interject('天上再补一缕晚霞');
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
+    // 攒批的铁证：流没被掐、重启请求不挂号——收口靠 planByThinking 的暂存检查。
+    expect(ac.signal.aborted).toBe(false);
+    expect(h.chat.interjectOrchestrator.wasPreflightRestarted()).toBe(false);
+    expect(assistantJoined(h.root)).toContain('已并入补充，重新规划…');
+
+    // 开窗复位：新窗第一轮是原思考轮——同样的话照走原路（置重启请求 + 掐流）。
+    h.chat.interjectOrchestrator.closePreflightWindow();
+    h.chat.interjectOrchestrator.openPreflightWindow();
+    await h.chat.interject('云朵再加一朵');
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(2);
+    expect(h.chat.interjectOrchestrator.wasPreflightRestarted()).toBe(true);
+    expect(ac.signal.aborted).toBe(true);
+  });
+
   it('思考窗关了（思考已完、产出已在跑）：同样的补充不吸收，走普通 steer', async () => {
     // planByThinking 已经返回，请求正文并不进去了——此刻的补充只能转达给
     // 在跑的回合（下个 THINK 边界带上），收尾没被带走的按用户原话重入。
