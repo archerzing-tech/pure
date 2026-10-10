@@ -355,15 +355,9 @@ export interface InsertionClassification {
 
 const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what to do with it the way a sharp human colleague would — NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
 
-What you are working on right now — read the phase carefully, it decides what "taking it in stride" even means:
-<current_task>
-{{CONTEXT}}
-</current_task>
-
-What the user just said:
-<new_message>
-{{PROMPT}}
-</new_message>
+The next user message carries your live situation in two tagged sections — read both before judging:
+<current_task> — what you are working on right now; read the phase carefully, it decides what "taking it in stride" even means.
+<new_message> — what the user just said.
 
 The ways to take a remark (pick exactly one kind):
 
@@ -468,12 +462,19 @@ export async function classifyInsertion(
     fallbackUsed: true,
   };
   if (!prompt.trim() || signal?.aborted) return fallback;
-  const system = INSERTION_CLASSIFY_PROMPT
-    .replace('{{CONTEXT}}', context.slice(0, 3_200))
-    .replace('{{PROMPT}}', prompt.slice(0, 2_000));
+  // 刀 4.1 缓存固化：system 只留逐字稳定的指令模板（进程生命周期内
+  // byte-identical；anthropic 路径在 system 上打 cache_control，首次写后
+  // 全命中），易变现场（投影/消息）一律进 user 消息。原状把
+  // {{CONTEXT}}/{{PROMPT}} 拼进 system——每次判例 system 都不同，标记
+  // 等于每次一次缓存写（1.25×）且永不命中；自动前缀缓存路径也只能命中
+  // 变量块之前的指令头，JSON 契约尾巴永远打不中。
   const request: Message[] = [
-    { role: 'system', content: system },
-    { role: 'user', content: prompt, images },
+    { role: 'system', content: INSERTION_CLASSIFY_PROMPT },
+    {
+      role: 'user',
+      content: `<current_task>\n${context.slice(0, 3_200)}\n</current_task>\n\n<new_message>\n${prompt.slice(0, 2_000)}\n</new_message>`,
+      images,
+    },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'stop', 'task', 'chatter'];
   const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown }>(
@@ -528,20 +529,10 @@ export async function classifyInsertion(
  *  方退回保守折入。 */
 const STOP_TARGET_PROMPT = `The user, mid-task, is telling you to stop or cancel ONE piece of delegated work that is currently running as a parallel branch. You are the agent deciding WHICH branch they mean — judgment, not keyword matching: weigh the branch names, roles and task snippets against what the user said, including paraphrase (「评审」 may match a code_reviewer role, 「爆发点」 a task snippet).
 
-What you are working on:
-<current_task>
-{{CONTEXT}}
-</current_task>
-
-The branches currently running:
-<live_branches>
-{{ROSTER}}
-</live_branches>
-
-What the user just said:
-<new_message>
-{{PROMPT}}
-</new_message>
+The next user message carries your situation in three tagged sections:
+<current_task> — what you are working on.
+<live_branches> — the delegated branches currently running, each with its id, name, role and task snippet.
+<new_message> — what the user just said.
 
 Return ONLY one JSON object: {"call_id":"<the id copied EXACTLY from the roster>"} when exactly one branch clearly matches what the user wants stopped; {"call_id":null} when none does, or when two could. Never invent an id. When in doubt answer null — a wrong pick stops the wrong branch, while null just leaves the removal to be folded into the result.`;
 
@@ -557,13 +548,14 @@ export async function resolveStopBranchTarget(
   const rosterText = roster
     .map((b) => `- id=${b.callId} name=${b.name}${b.role ? ` role=${b.role}` : ''}${b.snippet ? ` task=${String(b.snippet).slice(0, 80)}` : ''}`)
     .join('\n');
-  const system = STOP_TARGET_PROMPT
-    .replace('{{CONTEXT}}', context.slice(0, 3_200))
-    .replace('{{ROSTER}}', rosterText)
-    .replace('{{PROMPT}}', prompt.slice(0, 2_000));
+  // 刀 4.1 缓存固化：与 classifyInsertion 同一纪律——system 逐字稳定，
+  // 现场（任务投影/花名册/消息）进 user 消息。
   const request: Message[] = [
-    { role: 'system', content: system },
-    { role: 'user', content: prompt },
+    { role: 'system', content: STOP_TARGET_PROMPT },
+    {
+      role: 'user',
+      content: `<current_task>\n${context.slice(0, 3_200)}\n</current_task>\n\n<live_branches>\n${rosterText}\n</live_branches>\n\n<new_message>\n${prompt.slice(0, 2_000)}\n</new_message>`,
+    },
   ];
   const parsed = await streamUntilParsed<{ call_id?: unknown; callId?: unknown }>(
     llm,

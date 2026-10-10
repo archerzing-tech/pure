@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
 
@@ -970,6 +970,69 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
       'context', '顺便查一下汇率',
     );
     expect(judged.fallbackUsed).toBeUndefined();
+  });
+});
+
+describe('刀 4.1 缓存固化 — 判例调用 system 逐字稳定，现场全在 user', () => {
+  /** mockLlm 的捕获版：记下每次收到的 messages 再回既定 JSON。 */
+  function captureLlm(content: string) {
+    const calls: Message[][] = [];
+    const stream = async function* (messages: Message[]) {
+      calls.push(messages);
+      const mid = Math.max(1, Math.floor(content.length / 2));
+      yield { type: 'content', content: content.slice(0, mid) };
+      yield { type: 'content', content: content.slice(mid) };
+    };
+    return { llm: { stream } as unknown as LLMAdapter, calls };
+  }
+
+  it('classifyInsertion: system carries the whole stable template, variables only in the user turn', async () => {
+    // 适配器在 system 上打 cache_control：system 里只要混进一次易变现场
+    // （投影/消息），每次判例都是一次缓存写（1.25×）且永不命中。所以指令
+    // 头与 JSON 契约尾必须同住一个逐字稳定的 system，投影/消息只许出现在
+    // user 消息里。
+    const { llm, calls } = captureLlm('{"kind":"task","reason":"x","confidence":0.9}');
+    await classifyInsertion(llm, '现场投影<LIVE-STATE>独一份', '用户插话<MSG-MARKER>独一份');
+    expect(calls).toHaveLength(1);
+    const [system, user] = calls[0];
+    expect(system.role).toBe('system');
+    expect(system.content).toContain('You are the agent, mid-task');
+    expect(system.content).toContain('Return ONLY one JSON object');
+    expect(system.content).not.toContain('<LIVE-STATE>');
+    expect(system.content).not.toContain('<MSG-MARKER>');
+    expect(system.content).not.toContain('{{');
+    expect(user.role).toBe('user');
+    expect(user.content).toContain('<current_task>\n现场投影<LIVE-STATE>独一份\n</current_task>');
+    expect(user.content).toContain('<new_message>\n用户插话<MSG-MARKER>独一份\n</new_message>');
+  });
+
+  it('resolveStopBranchTarget: same discipline — stable system, roster in the user turn', async () => {
+    const { llm, calls } = captureLlm('{"call_id":"call_abc"}');
+    const hit = await resolveStopBranchTarget(llm, '任务投影', '停掉竞品那支', [
+      { callId: 'call_abc', name: '竞品调研', role: 'researcher', snippet: '调研竞品' },
+    ]);
+    expect(hit).toEqual({ callId: 'call_abc' });
+    const [system, user] = calls[0];
+    expect(system.role).toBe('system');
+    expect(system.content).toContain('Return ONLY one JSON object');
+    expect(system.content).not.toContain('call_abc');
+    expect(system.content).not.toContain('竞品调研');
+    expect(system.content).not.toContain('{{');
+    expect(user.role).toBe('user');
+    expect(user.content).toContain('<live_branches>');
+    expect(user.content).toContain('id=call_abc name=竞品调研');
+    expect(user.content).toContain('<new_message>\n停掉竞品那支\n</new_message>');
+  });
+
+  it('source lock: neither judge template keeps any {{placeholder}} in the stable block', () => {
+    // 缓存锁的真身：模板里只要还留一个插值占位符，稳定块就是假的。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const classifyPrompt = src.slice(src.indexOf('const INSERTION_CLASSIFY_PROMPT'), src.indexOf('export async function classifyInsertion'));
+    expect(classifyPrompt).not.toContain('{{');
+    const stopStart = src.indexOf('const STOP_TARGET_PROMPT');
+    expect(stopStart).toBeGreaterThan(-1);
+    const stopPrompt = src.slice(stopStart, src.indexOf('export async function resolveStopBranchTarget'));
+    expect(stopPrompt).not.toContain('{{');
   });
 });
 
