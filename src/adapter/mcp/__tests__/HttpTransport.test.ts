@@ -194,6 +194,36 @@ describe('MCP Streamable HTTP transport', () => {
     }
   });
 
+  it('HTTP 出口走统一出口：请求带上出口选定的代理', async () => {
+    // 代理优先主机（直连确定不通）：出口的首选就是代理，第一次请求即可观察到。
+    // 不传 proxyUrl（走 fetch 路径而不是 Rust 中继），代理只从环境变量来。
+    const prevProxy = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:8888';
+    const originalFetch = globalThis.fetch;
+    const seen: Array<{ url: string; proxy: unknown }> = [];
+    globalThis.fetch = (async (input: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push({ url: String(input), proxy: init?.proxy });
+      const body = JSON.parse(String(init.body ?? '{}')) as { id?: number };
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0', id: body.id, result: { protocolVersion: MCP_HTTP_PROTOCOL_VERSION, capabilities: {} },
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    try {
+      const t = new HttpTransport('https://api.anthropic.com/mcp', '', 5000);
+      const init = await t.send('initialize', { protocolVersion: MCP_HTTP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'pure', version: 'test' } }) as { protocolVersion: string };
+      expect(init.protocolVersion).toBe(MCP_HTTP_PROTOCOL_VERSION);
+      // 断言的是「出口决策已经生效」：这条路径此前用裸 fetch，出口决策（代理、
+      // SOCKS 报错、NO_PROXY）全部绕开。
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.url).toBe('https://api.anthropic.com/mcp');
+      expect(seen[0]!.proxy).toBe('http://127.0.0.1:8888');
+      t.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevProxy === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = prevProxy;
+    }
+  });
+
   it('surfaces MCPAuthRequiredError (with the challenge) when no token is available', async () => {
     let authSeen: string | null | undefined;
     const server = serve({

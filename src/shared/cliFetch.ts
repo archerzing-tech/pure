@@ -78,11 +78,18 @@ export function parseProxy(proxy: string): { url: URL; scheme: string } | 'socks
   }
 }
 
+/** 读一个代理环境变量。纯浏览器构建里 `process` 不存在（这份出口也被 MCP 的
+ *  HTTP transport 在非 Tauri 环境使用），读不到就当没有代理——绝不让一次
+ *  ReferenceError 把本来能直连的请求变成失败。 */
+function envValue(key: string): string {
+  return typeof process === 'undefined' ? '' : (process.env[key] ?? '').trim();
+}
+
 /** 环境变量里的代理地址。Bun 自己也会读这些，但我们显式算一遍才知道当前
  *  到底有没有代理——否则无法为 SOCKS 给出可解释的错误。 */
 export function resolveEnvProxy(): string {
   for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
-    const v = process.env[key]?.trim();
+    const v = envValue(key);
     if (v) return v;
   }
   return '';
@@ -104,7 +111,7 @@ export function cliProxyFor(targetUrl: string, explicitProxy?: string): CliProxy
   } catch {
     return { proxy: '', direct: true };
   }
-  const noProxy = process.env['NO_PROXY'] || process.env['no_proxy'] || '';
+  const noProxy = envValue('NO_PROXY') || envValue('no_proxy');
   if (isPrivateHost(host) || hostMatchesNoProxy(host, noProxy)) {
     return { proxy: '', direct: true };
   }
@@ -134,7 +141,17 @@ export function cliProxyFor(targetUrl: string, explicitProxy?: string): CliProxy
  *
  * 打通优先：配了可用代理时，按「首选 → 反向 → 首选·退避重试」的 75% 预算
  * 依次试（与 GUI 侧 runRouted 同一口径）；未配代理、或目标为环回/私网时只有
- * 一次直连。只在幂等请求（GET/HEAD）上重试，避免把非幂等请求重复发出。
+ * 一次直连。
+ *
+ * 幂等请求（GET/HEAD）才有资格吃这份预算——**非幂等请求（POST 等）只有一次
+ * 机会，出口必须一次选对**，所以它们不走「直连优先」的分类面默认值，而是押
+ * 用户显式配置的代理（有代理且目标非私网就走代理）。否则会出现：配了代理的
+ * 用户在 POST 上只试一次直连、连兜底都没有（Firecrawl、MCP HTTP 都是 POST），
+ * 而这恰好是刀 2 之前 CLI 的行为——当时任何远程主机的请求都直接走代理。
+ *
+ * `proxyOverride` 给「调用方自己持有代理地址、但环境变量里没有」的出口用
+ * （MCP 的 HTTP transport 就是：代理来自配置，不是进程环境）。环回/私网与
+ * NO_PROXY 的绕过规则对它同样生效。
  */
 /** 取消 / 超时错误（AbortSignal）：信号已 abort，换路再试也会在同一信号上立即
  *  失败，所以不当作「可换路的网络失败」。（Bun 的 AbortSignal.timeout 拒绝为
@@ -145,14 +162,16 @@ function isAbortOrTimeout(err: unknown): boolean {
   return name === 'AbortError' || name === 'TimeoutError';
 }
 
-export async function cliFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const route = cliProxyFor(input);
+export async function cliFetch(input: string, init: RequestInit = {}, proxyOverride?: string): Promise<Response> {
+  const route = cliProxyFor(input, proxyOverride);
   if (route.unsupported) throw new Error(route.unsupported);
-  const plan = route.direct
-    ? ['']
-    : unblockAttemptsBeforeMirror(input, route.proxy).map((a) => a.proxyUrl);
   const method = (init.method ?? 'GET').toUpperCase();
-  const attempts = method === 'GET' || method === 'HEAD' ? plan : plan.slice(0, 1);
+  const idempotent = method === 'GET' || method === 'HEAD';
+  const attempts = !idempotent
+    ? [route.proxy]
+    : route.direct
+      ? ['']
+      : unblockAttemptsBeforeMirror(input, route.proxy).map((a) => a.proxyUrl);
   let lastErr: unknown = new Error('fetch failed');
   for (let i = 0; i < attempts.length; i++) {
     const proxy = attempts[i]!;

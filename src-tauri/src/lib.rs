@@ -473,6 +473,70 @@ mod llm_retry_tests {
 }
 
 #[cfg(test)]
+mod llm_route_switch_tests {
+    use super::*;
+    use std::io::Read as _;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// 一个「接受连接、读完请求后立刻断开」的服务器：客户端拿到的是连接层
+    /// 错误（而不是某个状态码），正是「这条出口不通」在代码里的样子。
+    fn spawn_dropping_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+            }
+        });
+        (addr, accepted)
+    }
+
+    fn chat_client() -> reqwest::Client {
+        build_llm_stream_client_resolved(None).expect("client")
+    }
+
+    fn chat_body() -> serde_json::Value {
+        serde_json::json!({"model": "m", "messages": [], "stream": true})
+    }
+
+    /// 配了反向路由时，首选出口的连接层失败必须立刻换路，而不是在原出口上
+    /// 退避重试（静默丢包下那是 10s 连接超时 × 3 + 退避 ≈ 32s 才轮到代理）。
+    #[tokio::test]
+    async fn connection_failure_switches_route_instead_of_retrying_the_dead_route() {
+        let (addr, accepted) = spawn_dropping_server();
+        let url = format!("http://{}/chat/completions", addr);
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", false).await;
+        assert!(result.is_err(), "a dropped connection must fail");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "有反向路由时不应在原出口上重试"
+        );
+    }
+
+    /// 只有一条出口（没配代理）时保留原有的退避重试阶梯——没有别的路可换。
+    #[tokio::test]
+    async fn single_route_keeps_the_backoff_retry_ladder() {
+        let (addr, accepted) = spawn_dropping_server();
+        let url = format!("http://{}/chat/completions", addr);
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", true).await;
+        assert!(result.is_err());
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            LLM_RETRY_MAX_ATTEMPTS as usize,
+            "只有一条出口时保留退避重试"
+        );
+    }
+}
+
+#[cfg(test)]
 mod llm_probe_tests {
     use super::*;
     use std::io::{Read as _, Write as _};
@@ -12532,12 +12596,19 @@ fn anthropic_usage_to_openai(usage: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// `retry_connection_failures` 决定「连接层失败（连接超时 / 网络错误 / 请求
+/// 超时）要不要在**同一条出口上**退避重试」。配了反向路由时传 false：连接层
+/// 失败说明这条出口不通，在原路加退避重试只是把换路的时间烧掉——静默丢包时
+/// 是 10s 连接超时 × 3 + 退避 ≈ 32s 才轮到代理，而工具出口在第 2 步就换路
+/// （netRoute.unblockAttemptPlan 把「首选·重试」排在第 3 步）。状态类失败
+/// （429/5xx）仍按原样退避重试：那说明链路是通的，重试才是正解。
 async fn send_chat_request(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
     anthropic: bool,
     api_key: &str,
+    retry_connection_failures: bool,
 ) -> Result<reqwest::Response, String> {
     let mut attempts: u32 = 0;
     loop {
@@ -12566,7 +12637,7 @@ async fn send_chat_request(
         .await;
         match send_result {
             Err(_) => {
-                if attempts < LLM_RETRY_MAX_ATTEMPTS {
+                if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     tokio::time::sleep(sleep_backoff(attempts, None)).await;
                     continue;
                 }
@@ -12577,7 +12648,7 @@ async fn send_chat_request(
                 ));
             }
             Ok(Err(e)) => {
-                if attempts < LLM_RETRY_MAX_ATTEMPTS {
+                if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     tokio::time::sleep(sleep_backoff(attempts, None)).await;
                     continue;
                 }
@@ -12773,7 +12844,9 @@ async fn chat_stream(
     match tokio::select! {
         biased;
         _ = &mut cancel_rx => return Err("cancelled".into()),
-        r = send_chat_request(&client, &url, &body, anthropic, &api_key) => r,
+        // 打通优先：有反向路由时，首选出口的连接层失败不原路重试——立刻换路，
+        // 与 netRoute.unblockAttemptPlan 的「首选 → 反向 → 首选·重试」同序。
+        r = send_chat_request(&client, &url, &body, anthropic, &api_key, fallback_spec.is_none()) => r,
     } {
         Ok(r) => {
             resp = r;
@@ -12789,7 +12862,9 @@ async fn chat_stream(
                     resp = tokio::select! {
                         biased;
                         _ = &mut cancel_rx => return Err("cancelled".into()),
-                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key) => r,
+                        // 反向出口已是最后一条路：它的连接层失败没有「下一条路」
+                        // 可换，退避重试是仅剩的杆杆，保留原有韧性。
+                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key, true) => r,
                     }
                     .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
                     served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
@@ -13072,7 +13147,9 @@ async fn chat_stream(
         if let Some(error) = stream_error {
             if should_retry_stream_failure(stream_emitted, stream_attempt) {
                 tokio::time::sleep(sleep_backoff(stream_attempt, None)).await;
-                resp = send_chat_request(&client, &url, &body, anthropic, &api_key).await?;
+                // 流中断重试：出口本身刚才是通的（已收到响应头与部分字节），
+                // 重试的是「同一个出口上的流」，因而照旧允许原路退避重试。
+                resp = send_chat_request(&client, &url, &body, anthropic, &api_key, true).await?;
                 continue 'stream_attempts;
             }
             return Err(format!(                "{} (stream attempt {} of {}; response body failed before output: {})",

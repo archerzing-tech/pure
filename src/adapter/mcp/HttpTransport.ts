@@ -16,6 +16,7 @@
 import type { MCPTransport } from './MCPTransport';
 import { makeRequest, MCPAuthRequiredError, type JSONRPCMessage } from './MCPTransport';
 import { isTauriRuntime, loadTauriCore } from '../../shared/tauri';
+import { cliFetch } from '../../shared/cliFetch';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 // Newest protocol this client speaks — offered during initialize.
@@ -100,15 +101,15 @@ export class HttpTransport implements MCPTransport {
     }
     if (this.legacyMode) {
       this.ensureLegacySse();
-      await postLegacy(this.baseUrl, notification, this.requestTimeoutMs, await this.authHeaders());
+      await postLegacy(this.baseUrl, notification, this.requestTimeoutMs, await this.authHeaders(), this.proxyUrl);
       return;
     }
-    const res = await fetchStreamable(this.baseUrl, notification, { ...this.buildHeaders(), ...(await this.authHeaders()) }, this.requestTimeoutMs);
+    const res = await fetchStreamable(this.baseUrl, notification, { ...this.buildHeaders(), ...(await this.authHeaders()) }, this.requestTimeoutMs, this.proxyUrl);
     if (res.status === 401) this.authRequired(res.headers.get('WWW-Authenticate') ?? undefined);
     if (res.status === 404 || res.status === 405) {
       this.legacyMode = true;
       this.ensureLegacySse();
-      await postLegacy(this.baseUrl, notification, this.requestTimeoutMs, await this.authHeaders());
+      await postLegacy(this.baseUrl, notification, this.requestTimeoutMs, await this.authHeaders(), this.proxyUrl);
       return;
     }
     // 202 Accepted (notification ack) or an SSE stream that carries no
@@ -195,18 +196,18 @@ export class HttpTransport implements MCPTransport {
     try {
       if (this.legacyMode) {
         this.ensureLegacySse();
-        const res = await postLegacy(this.baseUrl, request, this.requestTimeoutMs, await this.authHeaders());
+        const res = await postLegacy(this.baseUrl, request, this.requestTimeoutMs, await this.authHeaders(), this.proxyUrl);
         this.resolveFromBody(request.id, await res.text(), res.status, res.headers.get('WWW-Authenticate') ?? undefined);
         return await promise;
       }
 
-      const res = await fetchStreamable(this.baseUrl, request, { ...this.buildHeaders(), ...(await this.authHeaders()) }, this.requestTimeoutMs);
+      const res = await fetchStreamable(this.baseUrl, request, { ...this.buildHeaders(), ...(await this.authHeaders()) }, this.requestTimeoutMs, this.proxyUrl);
       if (res.status === 401) this.authRequired(res.headers.get('WWW-Authenticate') ?? undefined);
       if (res.status === 404 || res.status === 405) {
         // Legacy-only server: switch modes and retry over /message.
         this.legacyMode = true;
         this.ensureLegacySse();
-        const legacyRes = await postLegacy(this.baseUrl, request, this.requestTimeoutMs, await this.authHeaders());
+        const legacyRes = await postLegacy(this.baseUrl, request, this.requestTimeoutMs, await this.authHeaders(), this.proxyUrl);
         this.resolveFromBody(request.id, await legacyRes.text(), legacyRes.status, legacyRes.headers.get('WWW-Authenticate') ?? undefined);
         return await promise;
       }
@@ -396,23 +397,29 @@ export class HttpTransport implements MCPTransport {
 type JsonRpcBody = JSONRPCMessage | { id: number; method: string; params?: Record<string, unknown> };
 
 /** POST a JSON-RPC message to the streamable endpoint; returns the raw
- * Response so callers can branch on status / Content-Type / body stream. */
-async function fetchStreamable(baseUrl: string, message: JsonRpcBody, headers: Record<string, string>, timeoutMs: number): Promise<Response> {
-  return fetch(baseUrl, {
+ * Response so callers can branch on status / Content-Type / body stream.
+ *
+ * 走 cliFetch（统一出口）而不是裸 fetch：MCP 的 HTTP 服务常跑在
+ * `http://localhost:…`，而裸 fetch 在配了代理的环境里会把环回地址也发给
+ * 代理（Bun 不自动绕过环回）——本该是本地直连的连接被送去代理，通常直接失败
+ * 且看不出原因。统一出口同时带来 NO_PROXY 与 SOCKS 的人话报错；POST 是非幂等
+ * 请求，cliFetch 本来就不会换路重发，所以这里不会重复丢工具调用。 */
+async function fetchStreamable(baseUrl: string, message: JsonRpcBody, headers: Record<string, string>, timeoutMs: number, proxyUrl = ''): Promise<Response> {
+  return cliFetch(baseUrl, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(message),
     signal: AbortSignal.timeout(timeoutMs),
-  });
+  }, proxyUrl || undefined);
 }
 
-async function postLegacy(baseUrl: string, message: JsonRpcBody, timeoutMs: number, extraHeaders: Record<string, string> = {}): Promise<Response> {
-  return fetch(`${baseUrl}/message`, {
+async function postLegacy(baseUrl: string, message: JsonRpcBody, timeoutMs: number, extraHeaders: Record<string, string> = {}, proxyUrl = ''): Promise<Response> {
+  return cliFetch(`${baseUrl}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...extraHeaders },
     body: JSON.stringify(message),
     signal: AbortSignal.timeout(timeoutMs),
-  });
+  }, proxyUrl || undefined);
 }
 
 /** The Rust relay with `returnHeaders` wraps the body in a JSON envelope

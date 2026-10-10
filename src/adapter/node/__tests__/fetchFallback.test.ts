@@ -187,7 +187,7 @@ describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点�
     }
   });
 
-  it('非幂等请求（POST）不重试，避免重复副作用', async () => {
+  it('非幂等请求（POST）只发一次，且押用户配置的代理（没有第二次机会）', async () => {
     setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
     const seen: Array<string | undefined> = [];
     const originalFetch = globalThis.fetch;
@@ -197,7 +197,26 @@ describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点�
     }) as unknown as typeof fetch;
     try {
       await expect(cliFetch('https://cli-plan-post.test/x', { method: 'POST' })).rejects.toThrow();
-      expect(seen.length).toBe(1);
+      // 只发一次（不重复副作用），且这一次就走代理——未知主机默认 direct-first，
+      // 若按分类面选「直连」则配了代理的用户在 POST 上没有任何兜底
+      // （Firecrawl / MCP HTTP 都是 POST）。
+      expect(seen).toEqual(['http://127.0.0.1:7890']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('POST 到环回/私网仍然直连（本地服务不该被送去代理）', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new Error('fetch failed');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('http://localhost:5173/mcp', { method: 'POST' })).rejects.toThrow();
+      expect(seen).toEqual([undefined]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -262,6 +281,23 @@ describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点�
     try {
       await cliFetch('https://svc.internal.test/api');
       expect(seenProxy).toBe('absent');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('显式 proxyOverride 优先于环境变量（出口自己持有代理地址的场景）', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    let seen: unknown = 'unset';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen = init.proxy;
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      // 代理优先主机：首选就是代理，所以第一次调用就能看到选中的出口地址。
+      await cliFetch('https://cohere.ai/x', {}, 'http://127.0.0.1:8888');
+      expect(seen).toBe('http://127.0.0.1:8888');
     } finally {
       globalThis.fetch = originalFetch;
     }
