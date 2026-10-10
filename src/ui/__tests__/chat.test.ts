@@ -1388,30 +1388,30 @@ describe('plan overview completion state', () => {
     expect(src.split('this.delegationControl.settleRound()').length - 1).toBeGreaterThanOrEqual(2);
   });
 
-  it('clears same-named branches queued but not yet airborne (第 2 期「排队未起飞的同名支」)', () => {
+  it('host stops branches by the model-named id only — no text matching (2026-10-10 模型判断、宿主执行)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 层定位：委派起飞闸。池内调用一起开跑（不存在"排在池里"的委派），
-    // relay 下游由 fail-fast 管；真正「已排队、还没起飞」的委派只有一种
-    // ——下一批次里父又派的那一支。所以停支的效力不只落在在飞那支：
-    // 用户原话同时挂上同一道起飞闸，同回合的重派在出生点就被拦下。
-    // 挂闸在 plane.stopNamed 内部（registerBranchStop）——delegationControl.test 锁着；宿主锁委托形状：
-    const stopFn = src.indexOf('private stopNamedBranch(text: string, mode:');
+    // 层定位：宿主执行缝。宿主只按裁决器指认（或规则路径单支集合事实）的
+    // 确切 callId 真停——「停哪支」的匹配/指认一律不在宿主：旧的区分词
+    // 匹配器（matchInFlightBranch）不得回流进宿主停支半边。
+    const stopFn = src.indexOf('private stopBranchByCallId(callId: string, mode:');
     expect(stopFn).toBeGreaterThan(-1);
     const stopBody = src.slice(stopFn, src.indexOf('private branchLabel(', stopFn));
-    expect(stopBody.indexOf('this.delegationControl.stopNamed(')).toBeGreaterThan(-1);
-    // 两个停支入口（祈使停 + 取消型暂停）共用 stopNamedBranch，因此共用这道闸。
-    // S2 第六刀：两个入口都在编排器分发里——经引擎动作缝（stopNamedBranch）
-    // 回宿主，宿主再进 plane（真停把手）。
+    expect(stopBody).toContain('orchestrator.branchView()');
+    expect(stopBody).toContain('orchestrator.pauseBranch(callId)');
+    expect(stopBody).toContain('orchestrator.abortBranch(callId)');
+    expect(stopBody).not.toContain('matchInFlightBranch');
+    // 花名册（模型判断的地基）：分类上下文里在飞支必须带确切 id——裁决器
+    // 照抄 id，宿主照 id 执行。
+    expect(src).toContain('<live_branches>');
+    expect(src).toContain('id=${item.callId}');
+    // 两个停支入口（祈使停 + 取消型暂停）都在编排器分发里——经引擎动作缝
+    // （stopBranchByCallId）回宿主执行；目标统一先过 resolveStopTarget 指认。
     const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
-    expect(orch.split("this.deps.stopNamedBranch(text, pause ? 'pause' : 'abort')").length - 1).toBe(1);
-    expect(orch.split("this.deps.stopNamedBranch(text, 'pause')").length - 1).toBe(1);
-    // 闸读两本挂号簿住在 plane（gate 内 planTakeoffGate；挂闸在 stopNamed 内）。
-    // 合成重派豁免：resume_/foldin_ 承载用户**最新**的话（「接着跑」「再加
-    // 一个」），旧挂号无权否决——与挂号不跨回合同源纪律。
-    // 合成重派豁免住在 plane（gate 内）——delegationControl.test 锁着。
-    // 随回合清空（与 pendingCancels 同命）：回合收尾与 new chat 两条清扫都
-    // 要在——控制器跨会话单例，new chat 不摘簿子，旧会话的停支挂号会闯进
-    // 新会话把同话题的委派误杀在出生点。
+    expect(orch.split("this.deps.stopBranchByCallId(target, pause ? 'pause' : 'abort')").length - 1).toBe(1);
+    expect(orch.split("this.deps.stopBranchByCallId(target, 'pause')").length - 1).toBe(1);
+    // 取消挂号簿随回合清空（出生前取消的闸）：回合收尾与 new chat 两条清扫
+    // 都要在——控制器跨会话单例，new chat 不摘簿子，旧会话的取消挂号会闯
+    // 进新会话把同话题的委派误杀在出生点。
     expect(src.split('this.delegationControl.settleRound()').length - 1).toBeGreaterThanOrEqual(2);
   });
 

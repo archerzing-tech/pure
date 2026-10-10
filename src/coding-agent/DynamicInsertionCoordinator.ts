@@ -1,5 +1,5 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
-import { classifyInsertion, type InsertionClassification } from './Planner';
+import { classifyInsertion, resolveStopBranchTarget, type InsertionClassification } from './Planner';
 import {
   applyConfidenceGate,
   parseInputTiming,
@@ -80,6 +80,7 @@ export interface DynamicInsertionCoordinatorOptions {
     signal?: AbortSignal,
     images?: MessageImage[],
   ) => Promise<InsertionClassification>;
+  resolveStopBranchTarget?: typeof resolveStopBranchTarget;
 }
 
 // 导出只为可测/可回放（见 scripts/replay-insertion-decisor.ts）：这些常量
@@ -125,9 +126,11 @@ export const RESUME_BRANCH_RE = /(?:继续|接着|续上|接续)(?:帮?我?)?[^�
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
+  private readonly resolveStop: NonNullable<DynamicInsertionCoordinatorOptions['resolveStopBranchTarget']>;
 
   constructor(options: DynamicInsertionCoordinatorOptions = {}) {
     this.classify = options.classify ?? classifyInsertion;
+    this.resolveStop = options.resolveStopBranchTarget ?? resolveStopBranchTarget;
   }
 
   async decide(
@@ -219,10 +222,28 @@ export class DynamicInsertionCoordinator {
         ...(result.addsAlong ? { addsAlong: true } : {}),
         ...(result.resumesPart ? { resumesBranch: true } : {}),
         ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
+        // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
+        // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。
+        ...(result.stopBranch ? { stopBranchCallId: result.stopBranch.callId } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },
     });
+  }
+
+  /**
+   * 规则快路径的聚焦点名：BRANCH_STOP_RE 只裁「要不要停」（命令零延迟），
+   * 不裁「停哪支」——指认是理解，归裁决器。裁决器不可用或指认不出返回
+   * null，调用方退回取消折入（宁可折叠不误杀）。
+   */
+  resolveStopBranchTarget(
+    llm: LLMAdapter | null,
+    context: string,
+    insertion: DynamicInsertion,
+    roster: Array<{ callId: string; name: string; role?: string; snippet?: string }>,
+    signal?: AbortSignal,
+  ): Promise<{ callId: string } | null> {
+    return this.resolveStop(llm, context, insertion.text, roster, signal);
   }
 
   /** 安全网（2026-09-28 降级）：只裁决器倒下时用它——按字面族挑一个**不丢

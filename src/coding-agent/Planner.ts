@@ -331,6 +331,12 @@ export interface InsertionClassification {
    * 不等汇合轮。宿主先点名寻址（matchSteerRecipient），点到了就
    * abortBranch；点不到退回取消折入——宁可折叠不误杀。 */
   branchStop?: boolean;
+  /** 模型点名、宿主执行（2026-10-10 重构）：消息停/收掉某支**在飞**委派时，
+   * 裁决器从上下文 <live_branches> 花名册里指认那支的确切 id。宿主只按这
+   * 个 id 真停，不做任何自己的文本匹配——「停哪支」是理解，理解归模型。
+   * 指认不出（模糊/无所指/花名册缺席）留空，宿主退回保守折入。mode 不进
+   * 契约：祈使停=abort、收掉一项=pause 由宿主按判例口径从信号推导。 */
+  stopBranch?: { callId: string };
   /** 分支级继续（第 2 期第三刀）：「把 X 那支接着跑完」——宿主点名找到那支
    * 已暂停/已停的档案，用**原始参数**同参重派（稳定 sessionId 命中断点 →
    * 引擎 continue）；点不到具体支或拿不到原参退回让父模型重派。
@@ -369,7 +375,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -415,7 +421,18 @@ it for every other message.
 "supplements_current": include it as true ONLY when kind is "steer" AND the
 remark belongs INSIDE the one thing currently being produced — an added
 element, a reshaping constraint, the growing list — so the host merges it
-into the request and redoes the thought; omit it for every other message.`;
+into the request and redoes the thought; omit it for every other message.
+
+"stop_branch": the context may contain a <live_branches> block — the delegated
+branches currently running, each with its id, name, role and task snippet.
+When the message stops or cancels work that ONE of those branches is doing,
+set it to {"call_id": "<the id copied EXACTLY from the roster>"} — the host
+stops that branch for you the moment you name it. Copy the id verbatim, never
+invent or shorten one; name only ONE branch even when the wording is loose.
+When the roster is absent, or no live branch clearly matches what the message
+removes, OMIT the field entirely — a wrong id stops the wrong branch, an
+invented one stops nothing. Omitting it when you are genuinely unsure is the
+honest answer: the host folds the removal into the result instead of gambling.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -476,7 +493,13 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown };
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown };
+    // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
+    // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
+    const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
+    const rawStopId = rawStop && typeof rawStop === 'object'
+      ? (rawStop as { call_id?: unknown; callId?: unknown }).call_id ?? (rawStop as { callId?: unknown }).callId
+      : undefined;
     return {
       kind: parsed.kind as InsertionKind,
       reason: typeof parsed.reason === 'string' ? parsed.reason : '',
@@ -489,9 +512,74 @@ export async function classifyInsertion(
       ...(parsed.adds_along === true || parsed.addsAlong === true ? { addsAlong: true } : {}),
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
+      ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranch: { callId: rawStopId.trim() } } : {}),
     };
   }
   return fallback;
+}
+
+/** 规则快路径的聚焦点名（模型判断、宿主执行，2026-10-10）：BRANCH_STOP_RE
+ *  只裁「要不要停」（命令零延迟），不裁「停哪支」——指认是理解，归模型。
+ *  与 classifyInsertion 分开：这里只要一个确切 id，不要一次完整分类（kind
+ *  已由规则落定，再判一遍既浪费还会跟规则打架）。任何失败返回 null，调用
+ *  方退回保守折入。 */
+const STOP_TARGET_PROMPT = `The user, mid-task, is telling you to stop or cancel ONE piece of delegated work that is currently running as a parallel branch. You are the agent deciding WHICH branch they mean — judgment, not keyword matching: weigh the branch names, roles and task snippets against what the user said, including paraphrase (「评审」 may match a code_reviewer role, 「爆发点」 a task snippet).
+
+What you are working on:
+<current_task>
+{{CONTEXT}}
+</current_task>
+
+The branches currently running:
+<live_branches>
+{{ROSTER}}
+</live_branches>
+
+What the user just said:
+<new_message>
+{{PROMPT}}
+</new_message>
+
+Return ONLY one JSON object: {"call_id":"<the id copied EXACTLY from the roster>"} when exactly one branch clearly matches what the user wants stopped; {"call_id":null} when none does, or when two could. Never invent an id. When in doubt answer null — a wrong pick stops the wrong branch, while null just leaves the removal to be folded into the result.`;
+
+export async function resolveStopBranchTarget(
+  llm: LLMAdapter | null,
+  context: string,
+  prompt: string,
+  roster: Array<{ callId: string; name: string; role?: string; snippet?: string }>,
+  signal?: AbortSignal,
+  timeoutMs = 8_000,
+): Promise<{ callId: string } | null> {
+  if (!llm || !prompt.trim() || roster.length === 0 || signal?.aborted) return null;
+  const rosterText = roster
+    .map((b) => `- id=${b.callId} name=${b.name}${b.role ? ` role=${b.role}` : ''}${b.snippet ? ` task=${String(b.snippet).slice(0, 80)}` : ''}`)
+    .join('\n');
+  const system = STOP_TARGET_PROMPT
+    .replace('{{CONTEXT}}', context.slice(0, 3_200))
+    .replace('{{ROSTER}}', rosterText)
+    .replace('{{PROMPT}}', prompt.slice(0, 2_000));
+  const request: Message[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: prompt },
+  ];
+  const parsed = await streamUntilParsed<{ call_id?: unknown; callId?: unknown }>(
+    llm,
+    request,
+    signal,
+    timeoutMs,
+    (raw) => {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const value = JSON.parse(match[0]) as { call_id?: unknown; callId?: unknown };
+        return value && typeof value === 'object' ? value : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  const callId = parsed?.call_id ?? parsed?.callId;
+  return typeof callId === 'string' && callId.trim() ? { callId: callId.trim() } : null;
 }
 
 const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;

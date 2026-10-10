@@ -66,38 +66,25 @@ describe('planTakeoffGate — 排队未起飞的那支在出生点被拦下', ()
   ];
 
   it('出生前取消：区分词认出那一支，其余放行；命中即消费', () => {
-    const { blocked, consumed } = planTakeoffGate(pending, ['爆发点这个不要调研了'], []);
+    const { blocked, consumed } = planTakeoffGate(pending, ['爆发点这个不要调研了']);
     expect(blocked.map((b) => b.callId)).toEqual(['k3']);
     expect(blocked[0].kind).toBe('cancelled-before-dispatch');
     // 一次性：原话被兑现后调用方剪掉，不会拦住下一批无关的活。
     expect(consumed).toEqual(['爆发点这个不要调研了']);
   });
 
-  it('点名真停后的同回合重派：落到同一支上，收据改口径', () => {
-    // 用户说「停掉竞品那支」→ 编排器真停；父没听话，同回合又派了一次同一支
-    // ——待起飞的那一支就是「排队未起飞的同名支」，出生点拦下。
-    const redeployed: InFlightBranch[] = [
-      { callId: 'r1', name: 'researcher', snippet: '调研竞品定价策略' },
-      { callId: 'r2', name: 'code_editor', snippet: '把登录改成手机号验证' },
-    ];
-    const { blocked, consumed } = planTakeoffGate(redeployed, [], ['停掉竞品那支']);
-    expect(blocked.map((b) => b.callId)).toEqual(['r1']);
-    expect(blocked[0].kind).toBe('stopped-branch');
-    expect(consumed).toEqual(['停掉竞品那支']);
-  });
-
   it('认不出/打平 = 放行：宁可漏拦交给父边界，绝不误杀', () => {
     // 「调研」家家都有——指不出单支。
-    expect(planTakeoffGate(pending, ['调研不要了'], []).blocked).toEqual([]);
+    expect(planTakeoffGate(pending, ['调研不要了']).blocked).toEqual([]);
     // 没有待起飞候选（这轮没有委派）：挂号原样留着，等下一批。
-    const empty = planTakeoffGate([], ['爆发点不要了'], []);
+    const empty = planTakeoffGate([], ['爆发点不要了']);
     expect(empty.blocked).toEqual([]);
     expect(empty.consumed).toEqual([]);
   });
 
   it('一次挂号只拦一支：同名兄弟支照跑', () => {
     // 三支都叫 researcher、都以「调研」开头——只有「爆发点」能区分。
-    const { blocked } = planTakeoffGate(pending, ['爆发点不要了'], []);
+    const { blocked } = planTakeoffGate(pending, ['爆发点不要了']);
     expect(blocked).toHaveLength(1);
     expect(pending.filter((p) => !blocked.some((b) => b.callId === p.callId)).map((p) => p.callId)).toEqual(['k1', 'k2']);
   });

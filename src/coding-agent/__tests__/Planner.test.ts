@@ -762,6 +762,31 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(plain.cancelsPart).toBeUndefined();
   });
 
+  it('parses the stop_branch call_id through to the classification (2026-10-10 模型点名)', async () => {
+    // 模型判断、宿主执行：裁决器从 <live_branches> 花名册指认被停支的确切
+    // id，宿主只按这个 id 执行——id 解析必须一字不差过河。
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"stop the review branch","confidence":0.95,"cancels_part":true,"stop_branch":{"call_id":"call_review"}}'),
+      'context', '不要评审了',
+    );
+    expect(hit.stopBranch).toEqual({ callId: 'call_review' });
+    // 驼峰兜底：模型自行改写键名时照样收。
+    const camel = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"stop it","confidence":0.9,"stopBranch":{"callId":"call_a"}}'),
+      'context', '停掉那一支',
+    );
+    expect(camel.stopBranch).toEqual({ callId: 'call_a' });
+    // 残缺对象/空串/缺字段宁可当没点名——绝不拿半截 id 去停。
+    for (const junk of [
+      '{"kind":"steer","reason":"x","confidence":0.9,"stop_branch":{}}',
+      '{"kind":"steer","reason":"x","confidence":0.9,"stop_branch":{"call_id":"  "}}',
+      '{"kind":"steer","reason":"x","confidence":0.9}',
+    ]) {
+      const miss = await classifyInsertion(mockLlm(junk), 'context', 'x');
+      expect(miss.stopBranch).toBeUndefined();
+    }
+  });
+
   it('teaches the supplements_current carve-out: refining THE ONE deliverable in flight is not a second item (2026-09-27 排队事故)', () => {
     // 真实事故：画小鸟时补一句"背景上加一些会动的云朵"，被当成第二件活
     // 排队，队列的活又丢了——图上没有云。构图补充必须吸收进正在想的那一

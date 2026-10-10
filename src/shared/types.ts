@@ -290,12 +290,9 @@ export interface EngineContext {
    *  选集——区分词匹配器看到全部兄弟任务书，绝不会单支误杀），返回要拦下
    *  的 callId 与原因；协调器给这些调用直接发「用户已取消」的合成结果，
    *  分支根本不出生。Absent ⇒ 无闸（CLI / 子代理引擎照旧）。
-   *  kind 决定收据口径（2026-09-26 第 2 期「排队未起飞的同名支一并清除」）：
-   *  'cancelled-before-dispatch' = 用户赶在这支出生前就收掉了它；
-   *  'stopped-branch' = 用户已点名停掉那一支，这一路是父在同一回合里又派
-   *  的一次重派——话要说明白「你已经停过它，重派被拦下，断点还在能续」。
-   *  缺省按前者（历史行为）。 */
-  gateDelegations?: (calls: ToolCall[]) => Promise<Array<{ callId: string; reason: string; kind?: 'cancelled-before-dispatch' | 'stopped-branch' }>>;
+   *  在飞支的停（2026-10-10 起）不走这里——指认归裁决器（模型判断、宿主
+   *  执行），挂号簿只剩出生前取消一个消费者。 */
+  gateDelegations?: (calls: ToolCall[]) => Promise<Array<{ callId: string; reason: string; kind?: 'cancelled-before-dispatch' }>>;
   /**
    * Live subagent interior activity as FIRST-CLASS engine events (2026-09-19).
    * CodingAgent maps the orchestrator's progress-sink callbacks onto this

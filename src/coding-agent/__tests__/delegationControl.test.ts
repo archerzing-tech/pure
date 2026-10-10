@@ -1,9 +1,8 @@
 // S2 第二刀 — DelegationControlPlane：起飞闸消费、挂号簿纪律、参数捕获、
 // 点名停支匹配。语义锁从 chat.ts 闭包原样迁移（不发明第二种语义）。
 import { describe, expect, it } from 'bun:test';
-import { DelegationControlPlane, type LiveBranchView } from '../delegationControl';
+import { DelegationControlPlane } from '../delegationControl';
 import { RESUME_INVARIANTS as RESUME_INV } from '../../shared/insertionMessaging';
-import type { TakeoffBlock } from '../../shared/steerTargeting';
 import type { ToolCall } from '../../shared/types';
 
 function call(id: string, name: string, args: Record<string, unknown>): ToolCall {
@@ -42,7 +41,6 @@ describe('DelegationControlPlane gate', () => {
   it('settleRound clears registrations but keeps delegation args (resume points at history)', () => {
     const plane = new DelegationControlPlane();
     plane.registerCancel('x');
-    plane.registerBranchStop('停掉那支', 'researcher·1号');
     plane.gate([call('c1', 'researcher', { prompt: '查' })], ROLES);
     plane.settleRound();
     expect(plane.pendingCancelCount()).toBe(0);
@@ -51,83 +49,12 @@ describe('DelegationControlPlane gate', () => {
   });
 });
 
-describe('DelegationControlPlane stopNamed', () => {
-  const live: LiveBranchView[] = [
-    { callId: 'call_a', name: 'researcher', snippet: '调研竞品定价策略' },
-    { callId: 'call_b', name: 'code_reviewer', snippet: '审查安全模块' },
-  ];
-
-  it('routes a distinctive-word stop to the named branch via the act seam', () => {
-    const plane = new DelegationControlPlane();
-    const acted: Array<{ callId: string; mode: string }> = [];
-    const stopped = plane.stopNamed(
-      '停掉竞品那支',
-      live,
-      (callId, mode) => { acted.push({ callId, mode }); return true; },
-      (name) => name,
-      'abort',
-    );
-    expect(stopped).toEqual({ callId: 'call_a', label: 'researcher' });
-    expect(acted).toEqual([{ callId: 'call_a', mode: 'abort' }]);
-    // 停成功即挂起飞闸：同回合重派的同目标在出生点拦下。
-    expect(plane.gate([call('c_redo', 'researcher', { prompt: '再调研竞品定价' })], ROLES).map((b: TakeoffBlock) => b.callId)).toEqual(['c_redo']);
-  });
-
-  it('single live branch: a cancel with no distinctive word still stops that branch (2026-10-10 单支兜底)', () => {
-    // 「不要评审了」对「审查安全模块」——区分词点不中。只有一支在飞时，
-    // 取消必然指它：单支兜底直接真停，零误杀风险。
-    const plane = new DelegationControlPlane();
-    const single: LiveBranchView[] = [{ callId: 'call_r', name: 'code_reviewer', snippet: '审查安全模块' }];
-    const acted: Array<{ callId: string; mode: string }> = [];
-    const stopped = plane.stopNamed(
-      '不要评审了',
-      single,
-      (callId, mode) => { acted.push({ callId, mode }); return true; },
-      (name) => name,
-      'pause',
-    );
-    expect(stopped).toEqual({ callId: 'call_r', label: 'code_reviewer' });
-    expect(acted).toEqual([{ callId: 'call_r', mode: 'pause' }]);
-  });
-
-  it('multiple live branches with no distinctive hit still return null (fold-in, never guess)', () => {
-    // 多支打平的场景不在兜底范围内：宁可折叠不误杀，收执换诚实口径。
-    const plane = new DelegationControlPlane();
-    const acted: Array<{ callId: string; mode: string }> = [];
-    const stopped = plane.stopNamed(
-      '不要评审了',
-      live,
-      (callId, mode) => { acted.push({ callId, mode }); return true; },
-      (name) => name,
-      'pause',
-    );
-    expect(stopped).toBeNull();
-    expect(acted).toEqual([]);
-  });
-
-  it('passes the pause mode through when the host asks for a gentler stop', () => {
-    const plane = new DelegationControlPlane();
-    const acted: string[] = [];
-    plane.stopNamed('停掉竞品那支', live, (callId, mode) => { acted.push(mode); return true; }, (n) => n, 'pause');
-    expect(acted).toEqual(['pause']);
-  });
-
-  it('returns null when no distinctive word resolves (fold back, never misfire)', () => {
-    const plane = new DelegationControlPlane();
-    expect(plane.stopNamed('停掉那支', live, () => true, (n) => n, 'abort')).toBeNull();
-    // 真正的打平用例：两支的任务书都含「调研」（改 matching 面）。
-    const both: LiveBranchView[] = [
-      { callId: 'x1', name: 'researcher', snippet: '调研甲主题' },
-      { callId: 'x2', name: 'researcher', snippet: '调研乙主题' },
-    ];
-    expect(plane.stopNamed('停掉调研', both, () => true, (n) => n, 'abort')).toBeNull(); // 区分词打平 ⇒ 宁可不停
-  });
-
-  it('returns null when the act seam declines (branch just settled)', () => {
-    const plane = new DelegationControlPlane();
-    expect(plane.stopNamed('停掉竞品那支', live, () => false, (n) => n, 'abort')).toBeNull();
-  });
-});
+// 停支目标指认（2026-10-10 模型判断、宿主执行）：旧 stopNamed（区分词匹配
+// + 单支兜底）整刀拆除——「停哪支」是理解，归裁决器从花名册里指认确切
+// callId，plane 不再做任何停支匹配。指认编排（裁决器点名 → 校验在飞 →
+// 确切 id 执行真停）住在 interjectOrchestrator.resolveStopTarget，行为覆盖
+// 在 UI 侧 conversationSamples 与 DynamicInsertionCoordinator 测试；plane
+// 只剩出生前取消的挂号簿。
 
 describe('DelegationControlPlane resume ledger', () => {
   // checkpoint 凭据随记录走（第 2 期第三刀）：命中/未命中二分是收执诚实性

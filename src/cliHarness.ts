@@ -437,7 +437,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 时把这里换成通道宿主的真发送缝；空函数保证休眠期零副作用。
     send: () => {},
     abort: () => {},
-    stopNamedBranch: () => null,
+    stopBranchByCallId: () => null,
     steerRunningTurn: (text, images, ack, target, cancel) => steerBus.enqueue({ message: { role: 'user', content: steerFrameText(text, cancel), images }, target, displayText: text, images }),
     queueInterjectTask: (text, images, displayText) => roundClose.queueTask({ text, images, displayText, ts: Date.now() }),
     foldInScopeAddition: () => {},

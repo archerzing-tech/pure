@@ -90,22 +90,20 @@ export function matchInFlightBranch(text: string, branches: InFlightBranch[]): I
   return bestHits > 0 && !tied ? best : null;
 }
 
-/** 起飞闸的一条拦截记录：说给协调器发合成结果用。kind 决定收据口径——
- * 出生前被取消 vs 用户已点名停掉那一支后父又重派了一次。 */
+/** 起飞闸的一条拦截记录：说给协调器发合成结果用。 */
 export interface TakeoffBlock {
   callId: string;
   reason: string;
-  kind: 'cancelled-before-dispatch' | 'stopped-branch';
+  kind: 'cancelled-before-dispatch';
 }
 
 /**
  * 委派起飞闸：给一批**尚未起飞**的委派候选过闸，返回该在出生点拦下的那
- * 几支。两群挂号共用同一套区分词匹配器、同一份纪律（只认区分性命中，打平/
- * 认不出=放行——宁可漏拦交给父边界消化，绝不误杀）：
+ * 几支。纪律沿用区分词匹配器（只认区分性命中，打平/认不出=放行——宁可漏
+ * 拦交给父边界消化，绝不误杀）：
  * - cancelTexts：用户赶在这支出生之前收掉它的话（'cancelled-before-dispatch'）。
- * - stoppedTexts：用户已点名停掉某一支的话——同一回合里父若又派了一次同一
- *   目标，那一支就是「排队未起飞」的同名支（'stopped-branch'）。真停的效力
- *   因此不依赖父听不听话。
+ *   在飞支的停（2026-10-10 起）不再走这里的匹配——指认归裁决器（模型判断、
+ *   宿主执行），挂号簿只剩出生前取消这一个消费者。
  * 命中即消费（一次性）：返回的 consumed 是本次兑现掉的用户原话，调用方据此
  * 从挂号簿里剪掉。跨回合的挂号由调用方负责清空（新一轮的「继续/再跑」是
  * 用户最新的指令，旧挂号无权否决它）。
@@ -113,20 +111,17 @@ export interface TakeoffBlock {
 export function planTakeoffGate(
   candidates: InFlightBranch[],
   cancelTexts: string[],
-  stoppedTexts: string[],
 ): { blocked: TakeoffBlock[]; consumed: string[] } {
   const blocked: TakeoffBlock[] = [];
   const consumed: string[] = [];
   if (candidates.length === 0) return { blocked, consumed };
   const stillOpen = (): InFlightBranch[] => candidates.filter((c) => !blocked.some((b) => b.callId === c.callId));
-  const tryOne = (text: string, kind: TakeoffBlock['kind']): void => {
+  for (const text of cancelTexts) {
     const matched = matchInFlightBranch(text, stillOpen());
-    if (!matched) return;
-    blocked.push({ callId: matched.callId, reason: text, kind });
+    if (!matched) continue;
+    blocked.push({ callId: matched.callId, reason: text, kind: 'cancelled-before-dispatch' });
     consumed.push(text);
-  };
-  for (const text of cancelTexts) tryOne(text, 'cancelled-before-dispatch');
-  for (const text of stoppedTexts) tryOne(text, 'stopped-branch');
+  }
   return { blocked, consumed };
 }
 

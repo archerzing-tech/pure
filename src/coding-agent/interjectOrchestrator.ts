@@ -60,8 +60,10 @@ export interface InterjectOrchestratorDeps {
   // ── 引擎动作缝（宿主生命周期）─────────────────────────────────────
   send(text: string, images: MessageImage[], displayText: string): void;
   abort(reason?: string): void;
-  /** 点名真停支（匹配/挂闸在 DelegationControlPlane，引擎把手留宿主）。 */
-  stopNamedBranch(text: string, mode: 'abort' | 'pause'): string | null;
+  /** 模型点名、宿主执行（2026-10-10 重构）：callId 由裁决器从花名册里指认
+   * （或规则路径的单支集合事实），宿主只按这个确切 id 真停——不做任何自己
+   * 的文本匹配。支不在飞/已结算返回 null，调用方退回取消折入。 */
+  stopBranchByCallId(callId: string, mode: 'abort' | 'pause'): string | null;
   /** 转向通道入队 + 收执（框架文本与收执口径留宿主）。 */
   steerRunningTurn(text: string, images: MessageImage[], ack: InterjectAck, target: SteerTarget, cancel: boolean): void;
   /** 排队不相关插话（roundClose.queueTask + 队列卡渲染 + 补调度）。 */
@@ -301,12 +303,13 @@ export class InterjectOrchestrator {
           // 祈使「停掉那支」= 中止（判例 13 口径）；收掉一项「先停下」= 暂停
           // （复测案例二口径：立即止损不烧完，活口比中止更大）。
           const pause = decision.signals.branchStop !== true;
-          // addsAlong 闸对两 kind 一套口径（2026-10-10 对齐，此前只挂在
-          // task 分支）：同一句里还要求加活的话，停掉那支会把刚要求加进
-          // 来的活一并杀掉——steer 判定下同样只取消折入。
-          const stopped = decision.signals.addsAlong === true
+          // addsAlong 闸对两 kind 一套口径：同一句里还要求加活的话，停掉那支
+          // 会把刚要求加进来的活一并杀掉——立即停会让加活失去汇合轮，只取消
+          // 折入（砍与加都在汇合轮兑清）。
+          const target = decision.signals.addsAlong === true
             ? null
-            : this.deps.stopNamedBranch(text, pause ? 'pause' : 'abort');
+            : await this.resolveStopTarget(text, decision);
+          const stopped = target ? this.deps.stopBranchByCallId(target, pause ? 'pause' : 'abort') : null;
           if (stopped) {
             echoUserBubble();
             // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
@@ -314,13 +317,13 @@ export class InterjectOrchestrator {
             this.deps.settleAck(ack, branchStopReceipt(stopped, pause ? 'pause' : 'abort'));
             return;
           }
-          // 点不出具体支（或它刚好结算了）：退回取消折入——宁可折叠不误杀。
-          // 绝不能往下走 1a 广播：「停掉那支」广播给所有在飞支，每支都可能
-          // 把自己当成"那支"自己停（反向执行最伤，2026-09-24 取消案例同源）。
-          // 折入只守汇报步；同回合父若再为这个话题派工，起飞闸（挂号簿）
-          // 在出生点拦下。
+          // 没停成（裁决器没指认/指认已结算/执行缝缺席）：退回取消折入——
+          // 宁可折叠不误杀。绝不能往下走 1a 广播：「停掉那支」广播给所有在飞
+          // 支，每支都可能把自己当成"那支"自己停（反向执行最伤，2026-09-24
+          // 取消案例同源）。折入只守汇报步；同回合父若再为这个话题派工，
+          // 起飞闸（挂号簿）在出生点拦下。
           this.deps.delegation.registerCancel(text);
-          // stopMissed=true：支还在飞、但没停成（点不中/闸生效/编排器缺位）
+          // stopMissed=true：支还在飞、但没停成（没指认/闸生效/编排器缺位）
           // ——收执必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
           this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
           return;
@@ -371,14 +374,15 @@ export class InterjectOrchestrator {
         const cancelish = decision.signals.cancelsPart === true;
         if (cancelish) {
           if (this.deps.hasDelegationInFlight()) {
-            const stopped = decision.signals.addsAlong === true ? null : this.deps.stopNamedBranch(text, 'pause');
+            const target = decision.signals.addsAlong === true ? null : await this.resolveStopTarget(text, decision);
+            const stopped = target ? this.deps.stopBranchByCallId(target, 'pause') : null;
             if (stopped) {
               echoUserBubble();
               // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
               this.deps.settleAck(ack, branchStopReceipt(stopped, 'pause'));
               return;
             }
-            // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
+            // 没指认出来的取消折入：折入守汇报步，挂号守同回合再出生的支。
             // stopMissed=true（同 steer 分支）：收执如实说「没停」。
             this.deps.delegation.registerCancel(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
@@ -434,6 +438,36 @@ export class InterjectOrchestrator {
   private matchSteerRecipient(text: string): SteerTarget {
     const matched = matchInFlightBranch(text, this.deps.runningBranches());
     return matched ? { branchCallId: matched.callId, branchName: matched.name } : 'all';
+  }
+
+  /**
+   * 停支目标指认（模型判断、宿主执行，2026-10-10）。「停哪支」是理解，
+   * 归模型；宿主只执行，绝不自己猜：
+   * - 裁决器指认（stopBranchCallId）：主路。分类时上下文带着 <live_branches>
+   *   花名册，裁决器点名确切 id——这里只校验它还在飞（否则当没指认）。
+   *   裁决器**没**指认 = 它的判断就是「无所指/真模糊」，宿主不越权改判。
+   * - 规则/安全网路径（没经过花名册判断）：单支在飞是集合事实——要停的
+   *   支只有一支，所指必然是它，机械不为；多支交给裁决器聚焦点名
+   *   （resolveStopBranchTarget，只要一个 id 的窄判断）。
+   * 返回 null = 没指认出来，调用方退回取消折入（宁可折叠不误杀）。
+   */
+  private async resolveStopTarget(text: string, decision: DynamicInsertionDecision): Promise<string | null> {
+    // 没有确切 callId 的投影条目（迟到事件/缺字段）不进指认面——宁可不指认。
+    const live = this.deps.runningBranches().filter((b) => typeof b.callId === 'string' && b.callId.length > 0);
+    if (live.length === 0) return null;
+    const named = decision.signals.stopBranchCallId;
+    if (typeof named === 'string' && live.some((b) => b.callId === named)) return named;
+    if (decision.signals.via === 'judge') return null;
+    if (live.length === 1) return live[0].callId;
+    if (decision.signals.via !== 'rule') return null;
+    const resolved = await this.deps.decider.resolveStopBranchTarget(
+      this.deps.decideLlm(),
+      this.deps.insertionContext([]),
+      { text },
+      live,
+      this.deps.decideSignal(),
+    );
+    return resolved && live.some((b) => b.callId === resolved.callId) ? resolved.callId : null;
   }
 
   /** 分支级继续（第 2 期第三刀）：从用户话里点名一支**已暂停/已停**的委

@@ -34,7 +34,7 @@ export function steerFrameText(text: string, cancel: boolean): string {
     : `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`;
 }
 
-/** ③-a 停支收执（chat.ts stopNamedBranch 命中后，此时委派确实在飞）。宿主
+/** ③-a 停支收执（宿主按模型指认的 callId 真停成功后，此时委派确实在飞）。宿主
  *  已完成的动作的汇报——pause（收活「先停下」，活口大）与 abort（祈使
  *  「停掉那支」）两种。「产出」不预设这支在干调研还是写码。 */
 export function branchStopReceipt(label: string, mode: 'pause' | 'abort'): string {

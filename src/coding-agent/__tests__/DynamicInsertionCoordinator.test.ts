@@ -176,6 +176,43 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.cancelsPart).toBe(true);
   });
 
+  it('threads the judge stop_branch target into the decision signals (2026-10-10 模型点名)', async () => {
+    // 模型判断、宿主执行：裁决器指认的被停支 id 随 signals 过河，编排器只
+    // 按它执行真停——宿主不再做任何文本匹配。缺省绝不自己造 id。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({
+        kind: 'steer', reason: 'stop the review branch', confidence: 0.95,
+        cancelsPart: true, stopBranch: { callId: 'call_review' },
+      }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '不要评审了' });
+    expect(decision.signals.stopBranchCallId).toBe('call_review');
+    expect(decision.signals.cancelsPart).toBe(true);
+    // 没点名就没有这个字段——下游靠严格存在性判断，不容忍空串。
+    const plain = await new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'generic steer', confidence: 0.9, cancelsPart: true }),
+    }).decide(llm(), 'current task', { text: 'X 那支先放放' });
+    expect(plain.signals.stopBranchCallId).toBeUndefined();
+  });
+
+  it('delegates focused stop targeting to the injected resolver with the roster (2026-10-10)', async () => {
+    // 规则快路径只裁「要不要停」，「停哪支」聚焦点名归裁决器：协调器必须
+    // 把花名册原样递给 resolver、并原样带回它的指认（null 也照传——调用方
+    // 退回取消折入，宁可折叠不误杀）。
+    const roster = [{ callId: 'call_a', name: '调研员', snippet: '调研竞品' }];
+    let seen: unknown;
+    const coordinator = new DynamicInsertionCoordinator({
+      resolveStopBranchTarget: async (_llm, _context, text, given) => {
+        seen = { text, roster: given };
+        return { callId: 'call_a' };
+      },
+    });
+    expect(await coordinator.resolveStopBranchTarget(null, 'ctx', { text: '停掉竞品那支' }, roster)).toEqual({ callId: 'call_a' });
+    expect(seen).toEqual({ text: '停掉竞品那支', roster });
+    const decline = new DynamicInsertionCoordinator({ resolveStopBranchTarget: async () => null });
+    expect(await decline.resolveStopBranchTarget(null, 'ctx', { text: '停掉那支' }, roster)).toBeNull();
+  });
+
   it('threads a classifier addsAlong verdict — the gate that refuses a branch stop (2026-09-28)', async () => {
     // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——两个标记都得
     // 到宿主，少一个就会把要加的活一并停掉（停支闸已从宿主关键词改成这个）。

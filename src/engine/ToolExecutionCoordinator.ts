@@ -88,22 +88,13 @@ export class ToolExecutionCoordinator {
     // 不走 success:false——那是失败口径，会把用户决定污染成任务失败），
     // 不再进执行池，分支根本不出生。
     const gated = ctx.gateDelegations ? await ctx.gateDelegations(toolCalls) : [];
-    const blockedReason = new Map(gated.map((g) => [g.callId, { reason: g.reason, kind: g.kind ?? 'cancelled-before-dispatch' }]));
+    const blockedReason = new Map(gated.map((g) => [g.callId, g.reason]));
     if (blockedReason.size > 0) {
       for (const call of toolCalls) {
-        const gate = blockedReason.get(call.id);
-        if (gate === undefined) continue;
-        const reason = gate.reason;
-        // 两种拦截动机说两种话（第 2 期「排队未起飞的同名支一并清除」）：
-        // 出生前被取消 vs 用户已点名停掉那支后父又重派了一次。收据都要说清
-        // 断点还在、能续（用户停的不是「这条路永远作废」）。
-        const stoppedBranch = gate.kind === 'stopped-branch';
-        const modelReason = stoppedBranch
-          ? `这支已被用户点名停掉（用户原话：${reason}），本次重派未执行。未产生新的产出；它的断点已存档，只有用户明确要求续跑时才允许再派工，不要自行重派。`
-          : `用户在派出前收掉了这项（用户原话：${reason}）。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`;
-        const humanSummary = stoppedBranch
-          ? `这一路你已经停过了（“${reason}”）：父又派了一次，我当场拦下，没有重复烧算力；断点还在，想让它接着跑随时说。`
-          : `你在派出前收掉了这一路（“${reason}”）：没派出去、没有产出，也不会进最终汇总。`;
+        const reason = blockedReason.get(call.id);
+        if (reason === undefined) continue;
+        const modelReason = `用户在派出前收掉了这项（用户原话：${reason}）。未执行、无产出，最终汇总不要包含它，也不要再为它派工。`;
+        const humanSummary = `你在派出前收掉了这一路（“${reason}”）：没派出去、没有产出，也不会进最终汇总。`;
         yield {
           toolName: call.function.name,
           result: {

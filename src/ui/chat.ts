@@ -1768,7 +1768,7 @@ export class ChatController {
     probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(this.subagentStore, this.sessionId, name, args),
     send: (text, images, displayText) => { void this.send(text, images, displayText); },
     abort: (reason) => this.abortController?.abort(reason),
-    stopNamedBranch: (text, mode) => this.stopNamedBranch(text, mode),
+    stopBranchByCallId: (callId, mode) => this.stopBranchByCallId(callId, mode),
     steerRunningTurn: (text, images, ack, target, cancel) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel),
     queueInterjectTask: (text, images, displayText) => this.queueInterjectTask(text, images, displayText),
     foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels, stopMissed),
@@ -2832,9 +2832,20 @@ export class ChatController {
     // 委派在飞状态喂给分类器：steer 的承诺（"下个动作带上"）只有在真有
     // 下个动作时才可兑现——在飞/收尾的事实是 steer vs task 判定的关键输入。
     if (this.agentActivities.length > 0) {
-      const inFlight = this.agentActivities.filter((item) => item.status === 'running').length;
+      const running = this.agentActivities.filter((item) => item.status === 'running');
       const standby = this.agentActivities.filter((item) => item.status === 'paused' || item.status === 'cancelled');
-      parts.push(`并行委派：共 ${this.agentActivities.length} 个，在飞 ${inFlight} 个${inFlight === 0 ? '（已收齐，任务即将汇总收尾）' : ''}`);
+      parts.push(`并行委派：共 ${this.agentActivities.length} 个，在飞 ${running.length} 个${running.length === 0 ? '（已收齐，任务即将汇总收尾）' : ''}`);
+      // 在飞支花名册（模型点名、宿主执行的地基，2026-10-10）：裁决器从这
+      // 里指认「停掉那支」的确切 callId，宿主不再做任何文本匹配。id 必须
+      // 原样在册——裁决器照抄，宿主照 id 执行。名字是代号、主题在任务书
+      // 片段里，role 是第三条指认线索（「评审」→ code_reviewer）。
+      if (running.length > 0) {
+        parts.push('<live_branches>');
+        for (const item of running) {
+          parts.push(`- id=${item.callId} name=${item.agentName}${item.agentRole ? ` role=${item.agentRole}` : ''}${item.inputSnippet ? ` task=${item.inputSnippet.slice(0, 80)}` : ''}`);
+        }
+        parts.push('</live_branches>');
+      }
       // 分支级继续的判据输入：被暂停/被停的支是可续跑的候补，分类器只有
       // 看见它们存在，才能把「把 X 那支接着跑完」判成 resumes_part（第 2 期
       // 第三刀）。名单带任务书片段——名字是代号，用户点的是主题。
@@ -2970,32 +2981,21 @@ export class ChatController {
     this.interjectReceiptRows.clear();
   }
 
-  /** 第 2 期分支中断（宿主半边）：从用户话里点名一支在飞委派并真停它。
-   * 点名复用 1a 的区分词匹配器（只认只被一支含有的词，打平宁可不停）；
-   * 匹配面 = 分支名 + 任务书片段（branchView 供数）——名字是代号，主题
-   * 在任务书里（「不要调研爆发点了」的「爆发点」未必在名字上）。状态面
-   * 用编排器 branchView()（权威账）过滤在飞支。点不到/它刚好结算了 =
-   * 返回 null，调用方退回取消折入——宁可折叠不误杀。mode：abort = 祈使
-   * 「停掉那支」（判例 13 的口径）；pause = 收掉一项「先停下」（复测案
-   * 例二的口径，留的活口更大）。返回被停支的名字。 */
-  private stopNamedBranch(text: string, mode: 'abort' | 'pause'): string | null {
+  /** 模型点名、宿主执行（2026-10-10 重构）：callId 由裁决器从花名册里指认
+   * （或规则路径的单支集合事实），宿主只按这个确切 id 真停——不做任何自己
+   * 的文本匹配（旧 stopNamedBranch 的区分词匹配/单支兜底整刀拆除，「停哪
+   * 支」是理解，归模型）。状态面用编排器 branchView()（权威账）只认在飞
+   * 支；id 不在飞/已结算 = 返回 null，调用方退回取消折入——宁可折叠不误
+   * 杀。mode：abort = 祈使「停掉那支」（判例 13 的口径）；pause = 收掉一
+   * 项「先停下」（复测案例二的口径，留的活口更大）。返回被停支的展示名。 */
+  private stopBranchByCallId(callId: string, mode: 'abort' | 'pause'): string | null {
     const orchestrator = this.codingAgentRef?.subagentOrchestrator;
     if (!orchestrator) return null;
-    // S2 第三刀 — 匹配/派发/挂闸走 plane；宿主只供 live 匹配面、act 执行器
-    //（编排器的 pause/abort 分支把手）与 label 展示名。
-    const live = orchestrator.branchView()
-      .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing')
-      // role（def.description）是匹配面的另一半：任务书措辞未必含用户的词，
-      // 角色描述往往含（「评审」/「review」）。此前漏传，匹配面瘸了一条腿。
-      .map((b) => ({ callId: b.callId, name: b.agentName, role: b.role ?? '', snippet: b.inputSnippet ?? '' }));
-    const stopped = this.delegationControl.stopNamed(
-      text,
-      live,
-      (callId, m) => (m === 'pause' ? orchestrator.pauseBranch(callId) : orchestrator.abortBranch(callId)),
-      (name, callId) => this.branchLabel(name, callId),
-      mode,
-    );
-    return stopped ? stopped.label : null;
+    const branch = orchestrator.branchView()
+      .find((b) => b.callId === callId && (b.state === 'delegating' || b.state === 'running' || b.state === 'pausing'));
+    if (!branch) return null;
+    const ok = mode === 'pause' ? orchestrator.pauseBranch(callId) : orchestrator.abortBranch(callId);
+    return ok ? this.branchLabel(branch.agentName, callId) : null;
   }
 
   /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的
