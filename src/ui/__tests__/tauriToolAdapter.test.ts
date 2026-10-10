@@ -15,7 +15,6 @@ import {
 // GUI 侧的护栏/归因/渲染现在与 CLI 同源（shared/netProbeCore）：GUI 不再自带
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
-import { recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -1050,32 +1049,31 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('已知熔断的主机有镜像时，入口直接切镜像（真实 execute，走 shell 兜底）', async () => {
+  it('配了代理时：先试首选/反向/首选重试三步，预算用尽再切镜像（真实 execute，走 shell 兜底）', async () => {
+    const PROXY = 'http://127.0.0.1:7890';
     const commands: string[] = [];
+    const proxyArgs: (string | null)[] = [];
     const invoke = async (command: string, args?: Record<string, unknown>) => {
       if (command === 'execute_command') {
-        commands.push(String(args?.command ?? ''));
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify({ type: 'done', code: 0, path: '/tmp/left-pad-1.3.0.tgz', filename: 'left-pad-1.3.0.tgz', size: 14, via: 'curl' }),
-          stderr: '',
-        };
+        const cmd = String(args?.command ?? '');
+        commands.push(cmd);
+        proxyArgs.push((args?.proxyUrl as string) ?? null);
+        if (cmd.includes('registry.npmmirror.com')) {
+          return { exitCode: 0, stdout: JSON.stringify({ type: 'done', code: 0, path: '/tmp/lp.tgz', filename: 'lp.tgz', size: 14, via: 'curl' }), stderr: '' };
+        }
+        return { exitCode: 28, stdout: '', stderr: 'operation timed out' };
       }
       return 'x';
     };
-    recordNetFailure(NPM);
-    recordNetFailure(NPM);
-    try {
-      const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('download_file', { url: NPM, filename: 'left-pad-1.3.0.tgz' }));
-      expect(result.success).toBe(true);
-      const joined = commands.join('\n');
-      expect(joined).toContain('registry.npmmirror.com');
-      // 原站根本没被尝试。
-      expect(joined).not.toContain('registry.npmjs.org');
-      const parsed = JSON.parse(String(result.result)) as { rewrite?: { from: string; to: string; rule: string } };
-      expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
-    } finally {
-      recordNetSuccess(NPM);
-    }
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke, '', PROXY)
+      .execute(toolCall('download_file', { url: NPM, filename: 'left-pad-1.3.0.tgz' }));
+    expect(result.success).toBe(true);
+    // 原站三步：直连 → 代理 → 直连重试（75% 预算）。第四步是镜像（其首选路可能
+    // 因本文件其他用例记下的学习结果而翻面，故只钉原站这三步）。
+    expect(proxyArgs.slice(0, 3)).toEqual(['', PROXY, '']);
+    expect(commands[0]).toContain('registry.npmjs.org');
+    expect(commands[3]).toContain('registry.npmmirror.com');
+    const parsed = JSON.parse(String(result.result)) as { rewrite?: { from: string; to: string; rule: string } };
+    expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
   });
 });

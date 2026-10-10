@@ -16,7 +16,8 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../sh
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
-import { downloadAttemptUrls, primaryRewrite } from '../../shared/sourceRewrite';
+import { primaryRewrite } from '../../shared/sourceRewrite';
+import { recordNetOutcome, unblockAttemptsBeforeMirror } from '../../shared/netRoute';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
@@ -2262,17 +2263,6 @@ export class NodeToolAdapter implements ToolAdapter {
     return { ok: false, error: errors.filter(Boolean).join('；') || '未知错误' };
   }
 
-  /** 把「实际来自镜像端点」标注进下载成功结果（结果是一段 JSON）。 */
-  private withRewriteProvenance(result: ToolResult, from: string, rw: { url: string; rule: string }): ToolResult {
-    try {
-      const parsed = JSON.parse(String(result.result)) as Record<string, unknown>;
-      parsed.rewrite = { from, to: rw.url, rule: rw.rule };
-      return { ...result, result: JSON.stringify(parsed) };
-    } catch {
-      return result;
-    }
-  }
-
   private downloadOk(
     outPath: string,
     size: number,
@@ -2302,19 +2292,8 @@ export class NodeToolAdapter implements ToolAdapter {
   ): Promise<ToolResult> {
     const url = String(args.url ?? '').trim();
     if (!/^https?:\/\//i.test(url)) return this.fail(null, start, '请提供以 http(s):// 开头的下载链接');
-    // Host circuit breaker: a known-dead download source fails instantly —
-    // unless this URL has a byte-identical mirror, in which case go straight
-    // there instead of hitting the dead host first（这就是「开路」：已知桥在，
-    // 不必先探一次水）。镜像自己也熔断时不再转，递归只走一层。
-    if (hostBlocked(url)) {
-      const rw = primaryRewrite(url);
-      if (!rw) return this.fail(null, start, blockedHostMessage(url));
-      const retried = await this.execute(
-        { id: toolCallId, index: 0, function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) } },
-        signal,
-      );
-      return retried.success ? this.withRewriteProvenance(retried, url, rw) : retried;
-    }
+    // Host circuit breaker: a known-dead download source fails instantly.
+    if (hostBlocked(url)) return this.fail(null, start, blockedHostMessage(url));
 
     const proxyArg = typeof args.proxy === 'string' ? args.proxy.trim() : '';
     const { proxy } = this.resolveDownloadProxy(url, proxyArg);
@@ -2347,25 +2326,35 @@ export class NodeToolAdapter implements ToolAdapter {
       downloadHub.emitProgress(toolCallId, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'downloading', filename, ...p } as DownloadProgress);
 
     try {
-      // S2 单请求改写：首选原 URL；若它以网络类错误失败、而这个 URL 有字节一致
-      // 的镜像端点，把整条下载链换到镜像上再跑一次。无痕、退出即消失。404/403
-      // 这类「端点答了、只是资源有问题」不换——换镜像也答不出同一份字节。
-      const attempts = downloadAttemptUrls(url);
+      // 打通优先：先穷尽出口路线的 75% 预算（首选 → 反向 → 首选·退避重试），
+      // 镜像只是之后的兜底——不再一上来就绕开目标主机。
+      const routePlan = unblockAttemptsBeforeMirror(url, proxy);
       let allErrors = '';
-      for (let i = 0; i < attempts.length; i++) {
-        const attempt = attempts[i]!;
-        const chain = await this.downloadChain(attempt.url, outPath, { connections, resume, controller, emit, filename, proxy });
+      for (let i = 0; i < routePlan.length; i++) {
+        const attempt = routePlan[i]!;
+        const chain = await this.downloadChain(url, outPath, { connections, resume, controller, emit, filename, proxy: attempt.proxyUrl });
         if (chain.ok) {
-          if (attempt.rule) recordNetSuccess(attempt.url);
-          return this.downloadOk(outPath, chain.size ?? 0, Date.now() - start, chain.via ?? 'native', toolCallId, chain.expected,
-            attempt.rule ? { from: url, to: attempt.url, rule: attempt.rule } : undefined);
+          recordNetOutcome(url, attempt.route, true);
+          return this.downloadOk(outPath, chain.size ?? 0, Date.now() - start, chain.via ?? 'native', toolCallId, chain.expected);
         }
         const err = chain.error ?? '';
-        allErrors = allErrors ? `${allErrors}；[镜像 ${attempt.url}] ${err}` : err;
+        allErrors = allErrors ? `${allErrors}；[${attempt.route}${attempt.retry ? '·重试' : ''}] ${err}` : err;
+        recordNetOutcome(url, attempt.route, false);
+        // 非网络类失败（404/403）：换出口答不出同一份字节，直接收场。
+        if (!isNetworkError(err)) break;
+      }
+      // 出口预算用尽仍不行 → 字节一致的镜像端点兜底（仅限网络类失败）。
+      const rw = primaryRewrite(url);
+      if (rw && isNetworkError(allErrors)) {
+        const chain = await this.downloadChain(rw.url, outPath, { connections, resume, controller, emit, filename, proxy: routePlan[0]!.proxyUrl });
+        if (chain.ok) {
+          recordNetSuccess(rw.url);
+          return this.downloadOk(outPath, chain.size ?? 0, Date.now() - start, chain.via ?? 'native', toolCallId, chain.expected,
+            { from: url, to: rw.url, rule: rw.rule });
+        }
+        allErrors = `${allErrors}；[镜像 ${rw.url}] ${chain.error ?? ''}`;
         // 镜像自己也网络失败：把镜像主机一并计入熔断，下一次别再扑上去。
-        if (attempt.rule && isNetworkError(err)) recordNetFailure(attempt.url);
-        // 还有下一项（镜像）时，只有网络类失败才值得换端点。
-        if (i + 1 < attempts.length && !isNetworkError(err)) break;
+        if (isNetworkError(chain.error ?? '')) recordNetFailure(rw.url);
       }
       // 全部尝试都失败：移除进度条（失败的下载不应残留进度条，仅成功下载保留）。
       downloadHub.clearProgress(toolCallId);

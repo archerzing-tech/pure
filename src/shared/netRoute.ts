@@ -363,3 +363,48 @@ export function netRouteProxyPair(url: string, proxyUrl: string): NetRoutePair {
     ? { proxyUrl, fallbackProxyUrl: '', host }
     : { proxyUrl: '', fallbackProxyUrl: proxyUrl, host };
 }
+
+// ── 打通路径：枚举与预算 ─────────────────────────────────────────────────
+// 「打通」是让对**目标主机本身**的访问成立；镜像是它失败后的兵底，绝不是主路。
+// 但也不死磕到最后一步：用户定的口径是——在枚举的打通路径里试到 75% 仍不行，
+// 就迅速切镜像（效率优先：快速拿到资源）。
+//
+// 枚举按「出口路线 × 是否退避重试」展开成四步：
+//   1 首选出口  2 反向出口  3 首选出口·退避重试  4 反向出口·退避重试
+// 预算 = ceil(4 × 0.75) = 3：试到第 3 步还不行就切镜像（跳过第 4 步）。
+// 配了代理的路线上代理与直连互为反向；没配代理、或目标为本地/环回时，
+// 只有一个直连出口（不会凭空造出两条一样的路）。
+export const UNBLOCK_ATTEMPT_STEPS = 4;
+export const UNBLOCK_BUDGET_RATIO = 0.75;
+/** 切镜像之前应实试的出口尝试数（75% 预算）。 */
+export const MIRROR_AFTER_ATTEMPTS = Math.ceil(UNBLOCK_ATTEMPT_STEPS * UNBLOCK_BUDGET_RATIO);
+
+export interface UnblockAttempt {
+  route: NetRoute;
+  /** 这条出口的代理地址（'' = 直连）。 */
+  proxyUrl: string;
+  /** 是否为本轮的退避重试（枚举的第 3/4 步）。 */
+  retry: boolean;
+}
+
+/** 该目标的完整打通路径枚举（四步，或没有代理时的单一直连）。 */
+export function unblockAttemptPlan(hostOrUrl: string, proxyUrl: string): UnblockAttempt[] {
+  const host = normalizeRouteHost(hostOrUrl);
+  if (!host || !proxyUrl || classifyHostName(host) === 'neutral') {
+    return [{ route: 'direct', proxyUrl: '', retry: false }];
+  }
+  const primary: NetRoute = resolveNetRoute(host, true);
+  const opposite: NetRoute = primary === 'proxy' ? 'direct' : 'proxy';
+  const toUrl = (r: NetRoute): string => (r === 'proxy' ? proxyUrl : '');
+  return [
+    { route: primary, proxyUrl: toUrl(primary), retry: false },
+    { route: opposite, proxyUrl: toUrl(opposite), retry: false },
+    { route: primary, proxyUrl: toUrl(primary), retry: true },
+    { route: opposite, proxyUrl: toUrl(opposite), retry: true },
+  ];
+}
+
+/** 切镜像之前应该实试的那一段（枚举的前 75%）。 */
+export function unblockAttemptsBeforeMirror(hostOrUrl: string, proxyUrl: string): UnblockAttempt[] {
+  return unblockAttemptPlan(hostOrUrl, proxyUrl).slice(0, MIRROR_AFTER_ATTEMPTS);
+}

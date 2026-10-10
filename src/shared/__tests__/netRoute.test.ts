@@ -256,3 +256,43 @@ describe('netRouteSurfacePair (无单一目标 host 的出口)', () => {
     expect(netRoute.netRouteSurfacePair('web_search', '')).toEqual({ proxyUrl: '', fallbackProxyUrl: null });
   });
 });
+
+describe('unblockAttemptsBeforeMirror（打通路径的 75% 预算）', () => {
+  const PROXY = 'http://127.0.0.1:7890';
+
+  it('预算 = ceil(4 × 0.75) = 3：只试前三步就切镜像', () => {
+    expect(netRoute.UNBLOCK_ATTEMPT_STEPS).toBe(4);
+    expect(netRoute.MIRROR_AFTER_ATTEMPTS).toBe(3);
+  });
+
+  it('直连优先主机：直连 → 代理 → 直连重试（第四步反向重试被 75% 预算切掉）', () => {
+    const plan = netRoute.unblockAttemptsBeforeMirror('https://direct-first-plan.test/x', PROXY);
+    expect(plan.map((a) => a.proxyUrl)).toEqual(['', PROXY, '']);
+    expect(plan.map((a) => a.route)).toEqual(['direct', 'proxy', 'direct']);
+    expect(plan.map((a) => a.retry)).toEqual([false, false, true]);
+    // 完整枚举确实是四步（第四个是这个主机的反向重试）。
+    expect(netRoute.unblockAttemptPlan('https://direct-first-plan.test/x', PROXY)).toHaveLength(4);
+  });
+
+  it('代理优先主机：代理 → 直连 → 代理重试', () => {
+    // 用未被本文件其他用例记过学习结果的 host（学习表是模块状态、跨用例存活）。
+    const plan = netRoute.unblockAttemptsBeforeMirror('https://together.ai/x', PROXY);
+    expect(plan.map((a) => a.proxyUrl)).toEqual([PROXY, '', PROXY]);
+    expect(plan.map((a) => a.route)).toEqual(['proxy', 'direct', 'proxy']);
+  });
+
+  it('没配代理、或目标为环回/私网：只有一次直连，不凭空造出反向', () => {
+    expect(netRoute.unblockAttemptsBeforeMirror('https://no-proxy-plan.test/x', '')).toEqual([
+      { route: 'direct', proxyUrl: '', retry: false },
+    ]);
+    expect(netRoute.unblockAttemptsBeforeMirror('http://127.0.0.1:5173/api', PROXY)).toEqual([
+      { route: 'direct', proxyUrl: '', retry: false },
+    ]);
+  });
+
+  it('已学习首选路时，枚举跟随学习结果翻面', () => {
+    netRoute.recordNetOutcome('learned-plan.test', 'proxy', true);
+    const plan = netRoute.unblockAttemptsBeforeMirror('https://learned-plan.test/x', PROXY);
+    expect(plan.map((a) => a.proxyUrl)).toEqual([PROXY, '', PROXY]);
+  });
+});

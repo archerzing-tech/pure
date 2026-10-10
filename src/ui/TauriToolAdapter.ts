@@ -15,7 +15,7 @@ import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
-import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, type NetRoutePair } from '../shared/netRoute';
+import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
 import {
@@ -1187,20 +1187,9 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!/^https?:\/\//i.test(url)) {
             return { id: toolCall.id, toolName: 'download_file', result: '请提供以 http(s):// 开头的下载链接', success: false, duration: Date.now() - start };
           }
-          // Host circuit breaker: a known-dead download source fails instantly —
-          // unless this URL has a byte-identical mirror, in which case go
-          // straight there instead of hitting the dead host first（已知桥在，不必
-          // 先探一次水）。镜像自己也熔断时不再转，递归只走一层。
+          // Host circuit breaker: a known-dead download source fails instantly.
           if (hostBlocked(url)) {
-            const rw = primaryRewrite(url);
-            if (!rw) {
-              return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
-            }
-            const retried = await this.execute(
-              { id: toolCall.id, index: toolCall.index, function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) } },
-              signal,
-            );
-            return retried.success ? this.withRewriteProvenance(retried, url, rw) : retried;
+            return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
           }
           const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
           const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';
@@ -1209,10 +1198,10 @@ export class TauriToolAdapter implements ToolAdapter {
           const outSpec = resolveDownloadOutSpec(destination);
           const cmd = buildDownloadCommand(url, outSpec, connections, filenameArg, resume);
           const emit = (p: DownloadProgressEvent): void => dispatchDownloadProgress(toolCall.id, p);
-          // 下载有明确的 URL，走 host 决策而不是 command 面：直连优先 + 一次
-          // 反向兜底。以前这里直接把 this.proxyUrl 传下去（代理永远优先），
-          // 代理挂了就一个文件都下不下来，直连正常时又白白绕一圈。
-          const dlRoute = netRouteProxyPair(url, this.proxyUrl);
+          // 打通路径的 75% 预算（首选 → 反向 → 首选·退避重试）；镜像只在预算用尽
+          // 后兜底，不再一上来就绕开目标主机。以前这里只有「直连优先 + 一次反向
+          // 兜底」两步，且直接传 this.proxyUrl（代理永远优先），已收口。
+          const routeProxies = unblockAttemptsBeforeMirror(url, this.proxyUrl).map((a) => a.proxyUrl);
 
           // ── Native Rust downloader first ──
           // Proxy-aware (app proxy config), resume via Range, bounded retries,
@@ -1282,17 +1271,17 @@ export class TauriToolAdapter implements ToolAdapter {
                 maxAttempts: 3,
                 onOutput: channel,
               }) as Promise<number>;
-              let usedProxy = dlRoute.proxyUrl;
+              let usedProxy = routeProxies[0]!;
               let code = await runNative(usedProxy);
               const nativeDone = () => doneHolder.value;
-              if (code !== 0 && dlRoute.fallbackProxyUrl !== null && !cancelled) {
+              // 打通路径的 75% 预算：首选 → 反向 → 首选·退避重试；之后才轮到镜像。
+              for (let ri = 1; ri < routeProxies.length && code !== 0 && !cancelled; ri++) {
                 const detail0 = nativeDone()?.error ?? `退出码 ${code}`;
-                if (isNetworkError(detail0)) {
-                  recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-                  usedProxy = dlRoute.fallbackProxyUrl;
-                  doneHolder.value = null;
-                  code = await runNative(usedProxy);
-                }
+                if (!isNetworkError(detail0)) break;
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+                usedProxy = routeProxies[ri]!;
+                doneHolder.value = null;
+                code = await runNative(usedProxy);
               }
               const done = nativeDone();
               // Cancelled beats every other outcome: the backend answers -1 /
@@ -1389,13 +1378,12 @@ export class TauriToolAdapter implements ToolAdapter {
                 proxyUrl,
                 onOutput: channel,
               }) as Promise<number>;
-              let usedProxy = dlRoute.proxyUrl;
+              let usedProxy = routeProxies[0]!;
               let code = await runShell(usedProxy);
-              // 网络类退出码 + 有反向兜底 → 换路重下（下载可重跑；已取消的重试
-              // 只会让幽灵进程继续跑，所以 cancelled 时不重试）。
-              if (NET_DOWNLOAD_EXIT_CODES.has(code) && dlRoute.fallbackProxyUrl !== null && !cancelled) {
+              // 打通路径的 75% 预算（已取消的重试只会让幽灵进程继续跑，cancelled 不重试）。
+              for (let ri = 1; ri < routeProxies.length && NET_DOWNLOAD_EXIT_CODES.has(code) && !cancelled; ri++) {
                 recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-                usedProxy = dlRoute.fallbackProxyUrl;
+                usedProxy = routeProxies[ri]!;
                 doneHolder.value = null;
                 code = await runShell(usedProxy);
               }
@@ -1444,12 +1432,12 @@ export class TauriToolAdapter implements ToolAdapter {
             command: cmd,
             proxyUrl,
           }) as Promise<{ exitCode: number; stdout: string; stderr: string }>;
-          let usedProxy = dlRoute.proxyUrl;
+          let usedProxy = routeProxies[0]!;
           let exec = await runBuffered(usedProxy);
-          if ((NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? ''))
-            && dlRoute.fallbackProxyUrl !== null) {
+          for (let ri = 1; ri < routeProxies.length
+            && (NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? '')); ri++) {
             recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-            usedProxy = dlRoute.fallbackProxyUrl;
+            usedProxy = routeProxies[ri]!;
             exec = await runBuffered(usedProxy);
           }
           const doneFb = parseDownloadDone(exec.stdout ?? '');
