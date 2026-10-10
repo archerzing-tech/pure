@@ -21,6 +21,9 @@
 //   - Go module     → goproxy.cn（转发，字节一致）
 //   - raw 文件      → jsDelivr gh（CDN 回源，字节一致；有 20MB 上限）
 //   - HF 模型文件   → ModelScope（LFS 镜像，字节一致；未镜像的仓库会 404）
+//   - Maven Central → maven.aliyun.com（代理，字节一致）
+//   - crates.io     → USTC crates.io 镜像（同步，字节一致）
+//   - nodejs.org    → npmmirror 二进制镜像（同步，字节一致）
 // 刻意不收录的：GitHub release 二进制（jsDelivr 官方关闭了 release 端点，唯一的
 // 出路是 t2 公益代理，越界）。
 
@@ -154,6 +157,58 @@ function rawGithubRule(u: URL): RewriteCandidate | null {
   };
 }
 
+/** Maven Central → 阿里云 Maven 代理（T1，代理，字节一致）。 */
+function mavenCentralRule(u: URL): RewriteCandidate | null {
+  if (u.hostname.toLowerCase() !== 'repo1.maven.org') return null;
+  if (!u.pathname.startsWith('/maven2/')) return null;
+  const mirrored = new URL(u.toString());
+  mirrored.hostname = 'maven.aliyun.com';
+  // 阿里云代理把中央仓库挂在 /repository/public 下，比源少一个 /maven2 段。
+  mirrored.pathname = `/repository/public${u.pathname.slice('/maven2'.length)}`;
+  return {
+    url: mirrored.toString(),
+    trust: 't1',
+    operator: '阿里云 Maven 中央仓库代理',
+    rule: 'maven-central-to-aliyun',
+    why: '阿里云代理中央仓库，artifact 字节一致；只改单次请求，不写 ~/.m2/settings.xml。',
+  };
+}
+
+/** crates.io 包文件 → 中科大 crates.io 镜像（T1，同步，字节一致）。 */
+function cratesIoRule(u: URL): RewriteCandidate | null {
+  if (u.hostname.toLowerCase() !== 'static.crates.io') return null;
+  if (!u.pathname.startsWith('/crates/')) return null;
+  const mirrored = new URL(u.toString());
+  mirrored.hostname = 'mirrors.ustc.edu.cn';
+  // USTC 把 static.crates.io 的路径挂在 /crates.io 下。
+  mirrored.pathname = `/crates.io${u.pathname}`;
+  return {
+    url: mirrored.toString(),
+    trust: 't1',
+    operator: '中科大 USTC',
+    rule: 'crates-to-ustc',
+    why: 'USTC 同步 crates.io 包文件，字节一致；只改单次请求，不写 ~/.cargo/config.toml。',
+  };
+}
+
+/** nodejs.org 发行版文件 → npmmirror 二进制镜像（T1，同步，字节一致）。 */
+function nodeDistRule(u: URL): RewriteCandidate | null {
+  if (u.hostname.toLowerCase() !== 'nodejs.org') return null;
+  const m = /^\/(?:dist|download\/release)\/(.+)$/.exec(u.pathname);
+  if (!m) return null;
+  const mirrored = new URL(u.toString());
+  mirrored.hostname = 'registry.npmmirror.com';
+  // npmmirror 的二进制镜像把 node 发行版挂在 /-/binary/node 下。
+  mirrored.pathname = `/-/binary/node/${m[1]}`;
+  return {
+    url: mirrored.toString(),
+    trust: 't1',
+    operator: '阿里云 npmmirror',
+    rule: 'nodejs-dist-to-npmmirror',
+    why: 'npmmirror 同步 nodejs.org 发行版（含 SHASUMS），字节一致；只改单次请求。',
+  };
+}
+
 /** huggingface.co 模型/数据集文件 → ModelScope（T1，LFS 镜像，字节一致）。 */
 function huggingfaceRule(u: URL): RewriteCandidate | null {
   if (u.hostname.toLowerCase() !== 'huggingface.co') return null;
@@ -192,6 +247,9 @@ export function sourceRewriteCandidates(rawUrl: string, opts: RewriteOptions = {
     goSumdbRule(u),
     rawGithubRule(u),
     huggingfaceRule(u),
+    mavenCentralRule(u),
+    cratesIoRule(u),
+    nodeDistRule(u),
   ].filter((c): c is RewriteCandidate => c !== null);
 
   // 去重：同一目标 URL 只保留一条（理论上规则集内不会重复，防御性收口）。

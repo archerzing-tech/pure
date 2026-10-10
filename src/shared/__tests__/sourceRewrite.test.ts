@@ -87,6 +87,37 @@ describe('sourceRewrite · raw 与 HuggingFace（T1）', () => {
   });
 });
 
+describe('sourceRewrite · Maven / crates / Node 镜像（T1）', () => {
+  it('Maven Central → 阿里云 /repository/public（去掉 /maven2 段）', () => {
+    expect(only('https://repo1.maven.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar'))
+      .toBe('https://maven.aliyun.com/repository/public/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar');
+  });
+
+  it('Maven 非 /maven2 路径不改写', () => {
+    expect(sourceRewriteCandidates('https://repo1.maven.org/foo/bar.jar')).toEqual([]);
+  });
+
+  it('crates.io 包文件 → USTC /crates.io 前缀', () => {
+    expect(only('https://static.crates.io/crates/serde/serde-1.0.200.crate'))
+      .toBe('https://mirrors.ustc.edu.cn/crates.io/crates/serde/serde-1.0.200.crate');
+  });
+
+  it('nodejs.org /dist → npmmirror /-/binary/node', () => {
+    expect(only('https://nodejs.org/dist/v20.11.0/SHASUMS256.txt'))
+      .toBe('https://registry.npmmirror.com/-/binary/node/v20.11.0/SHASUMS256.txt');
+  });
+
+  it('nodejs.org /download/release 同样映射', () => {
+    expect(only('https://nodejs.org/download/release/v20.11.0/node-v20.11.0-darwin-x64.tar.gz'))
+      .toBe('https://registry.npmmirror.com/-/binary/node/v20.11.0/node-v20.11.0-darwin-x64.tar.gz');
+  });
+
+  it('nodejs.org 非发行版路径不改写（网站页面不是发行版文件）', () => {
+    expect(sourceRewriteCandidates('https://nodejs.org/en/download')).toEqual([]);
+    expect(sourceRewriteCandidates('https://nodejs.org/api/index.html')).toEqual([]);
+  });
+});
+
 describe('sourceRewrite · 信任边界与健壮性', () => {
   it('无关域名与非法协议一律无候选', () => {
     expect(sourceRewriteCandidates('https://example.com/a.tar.gz')).toEqual([]);
