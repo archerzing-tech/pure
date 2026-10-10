@@ -17,6 +17,7 @@ import {
   steerFrameText,
   branchStopReceipt,
   cancelBeforeDispatchReceipt,
+  cancelFoldUnmatchedReceipt,
   foldInReceipt,
   cancelFoldInstruction,
   foldInInstruction,
@@ -191,6 +192,16 @@ describe('收执场景矩阵（2026-10-01 泛化排查）', () => {
     const noTopic = cancelBeforeDispatchReceipt(null);
     expect(noTopic).toBe('好——这项不做了。');
     expect(noTopic).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('A4 委派在飞但点名停支没停成 → 收执如实说「没停」，把真停的说法交给用户（2026-10-10）', () => {
+    // 旧收执「这项不做了；其余照常」在这个场景失实：支一个没停，用户以为
+    // 已停。新口径只说真实发生的事：产出剔除在生效、在飞支没动、点名可停。
+    const receipt = cancelFoldUnmatchedReceipt();
+    expect(receipt).toContain('这项不做了');
+    expect(receipt).toContain('先没停');
+    expect(receipt).toContain('停掉');
+    // 委派真实在飞的场景，「那支」这类机制词允许在场。
   });
 
   // 追加类的对称场景

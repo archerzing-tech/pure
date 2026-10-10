@@ -260,7 +260,7 @@ export class SubagentOrchestrator implements ToolAdapter {
    * 按它定向叫停；结算出账后即删（暂停支的续跑 = 同参重派新调用，新账
    * 本）。这是「能 abort 的把手」账本，别与宿主 agentActivities（观测投
    * 影）混同。 */
-  private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle; inputSnippet?: string }>();
+  private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle; inputSnippet?: string; role?: string }>();
 
   constructor(config: SubagentOrchestratorConfig) {
     this.config = config;
@@ -401,7 +401,9 @@ export class SubagentOrchestrator implements ToolAdapter {
     // controller 并进 combinedSignal——abortBranch 只点这一支的火。
     const machine = new BranchLifecycle(toolCall.id, def.name);
     const branchController = new AbortController();
-    this.branches.set(toolCall.id, { controller: branchController, machine });
+    // role（def.description）进注册表：branchView 供宿主点名匹配面用——
+    // 「不要评审了」的「评审」未必在任务书开头，角色描述里往往就有。
+    this.branches.set(toolCall.id, { controller: branchController, machine, role: def.description });
 
     // Per-call tool trace: keyed by the subagent's internal toolCallId so
     // parallel tool calls inside one round cannot clobber each other. Derived
@@ -1012,14 +1014,15 @@ export class SubagentOrchestrator implements ToolAdapter {
 
   /** 在飞分支的只读视图（宿主点名寻址可用的权威面；宿主 agentActivities 是
    * 它的观测投影，不是反过来）。inputSnippet 是按主题点名的匹配面——名字
-   * 是代号，主题在任务书里。 */
-  branchView(): Array<{ callId: string; agentName: string; state: BranchState; cause?: string; inputSnippet?: string }> {
+   * 是代号，主题在任务书里；role 是角色描述，同一匹配面的另一半。 */
+  branchView(): Array<{ callId: string; agentName: string; state: BranchState; cause?: string; inputSnippet?: string; role?: string }> {
     return Array.from(this.branches.entries()).map(([callId, entry]) => ({
       callId,
       agentName: entry.machine.agentName,
       state: entry.machine.state(),
       cause: entry.machine.cause(),
       inputSnippet: entry.inputSnippet,
+      role: entry.role,
     }));
   }
 }

@@ -1046,7 +1046,7 @@ describe('plan overview completion state', () => {
       expect(body.indexOf('this.deps.settleAck(ack') !== -1 || body.indexOf('this.deps.discardAckRow(ack)') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
-    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false)')).toBeGreaterThan(-1);
     expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
   });
 
@@ -1290,7 +1290,10 @@ describe('plan overview completion state', () => {
     expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
     // 收执话术走共享模块（foldInReceipt）——原句的归属在 insertionMessaging，
     // chat.ts 侧锁住「必须经它」而不是自己内联。
-    expect(foldInBody.indexOf('this.settleAck(ack, foldInReceipt(cancels, this.hasDelegationInFlight()))')).toBeGreaterThan(-1);
+    // 2026-10-10：点名停支没停成的取消折入换诚实收执（cancelFoldUnmatchedReceipt）。
+    expect(foldInBody.indexOf('stopMissed')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('cancelFoldUnmatchedReceipt()')).toBeGreaterThan(-1);
+    expect(foldInBody.indexOf('foldInReceipt(cancels, this.hasDelegationInFlight())')).toBeGreaterThan(-1);
     // 汇合轮框架反着说死：不许为取消项派新委派、部分产出不进汇总、幸存分
     // 支照常合并——绝不能沿用追加口径（"派出去做完…覆盖所有对象"）。
     expect(src.indexOf('private cancelFoldInstruction(text: string): string')).toBeGreaterThan(-1);
@@ -1321,7 +1324,8 @@ describe('plan overview completion state', () => {
     const taskBody = orch.slice(task, orch.indexOf("case 'chatter':", task));
     expect(taskBody.indexOf('decision.signals.cancelsPart === true')).toBeGreaterThan(-1);
     const override = taskBody.indexOf('cancelsPart === true');
-    expect(taskBody.indexOf('this.deps.foldInScopeAddition(text, images, displayText, false, ack, true)', override)).toBeGreaterThan(-1);
+    // 末参 stopMissed=true（2026-10-10）：点名停支没停成的折入，收执换诚实口径。
+    expect(taskBody.indexOf('this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true)', override)).toBeGreaterThan(-1);
     // 委派未出生的窗口（2026-09-26）：转达引擎的调用挂 null ack——收执由
     // 挂号处点名（能抽出话题就点名），不再用泛泛的"已转达"；机制承诺（没派
     // 的不会派之类）2026-09-28 起不进收执——那个窗口可能根本没有委派可派

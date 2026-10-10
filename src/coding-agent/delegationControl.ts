@@ -131,6 +131,11 @@ export class DelegationControlPlane {
    * 含有的词，打平宁可不停），经 `act` 派发真停。点不到 = 返回 null，
    * 调用方退回取消折入——宁可折叠不误杀。停成功即挂上起飞闸（同回合
    * 重派的同目标支在出生点拦下）。
+   *
+   * 单支兜底（2026-10-10 修「取消类插话后子 agent 不停」）：在飞支恰好
+   * 一支时，取消/停支必然指它——区分词匹配是给多支点名用的，单支场景
+   * 再要求「区分性」等于要求用户猜编排器的内部命名（「不要评审了」对上
+   * 「审查员」这种措辞差就点不中）。单支零误杀风险，直接真停。
    */
   stopNamed(
     text: string,
@@ -139,7 +144,8 @@ export class DelegationControlPlane {
     label: (name: string, callId: string) => string,
     mode: BranchStopMode,
   ): NamedStopResult | null {
-    const matched = matchInFlightBranch(text, live as InFlightBranch[]);
+    const matched = matchInFlightBranch(text, live as InFlightBranch[])
+      ?? (live.length === 1 ? live[0] : null);
     if (!matched) return null;
     if (!act(matched.callId, mode)) return null;
     const branchLabel = label(matched.name, matched.callId);

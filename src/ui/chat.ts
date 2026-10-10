@@ -43,7 +43,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1771,7 +1771,7 @@ export class ChatController {
     stopNamedBranch: (text, mode) => this.stopNamedBranch(text, mode),
     steerRunningTurn: (text, images, ack, target, cancel) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel),
     queueInterjectTask: (text, images, displayText) => this.queueInterjectTask(text, images, displayText),
-    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels),
+    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels, stopMissed),
     answerMidrunQuestion: (text, images) => this.answerMidrunQuestion(text, images),
     askMidrunClarification: (decision, text, images, ack) => this.askMidrunClarification(decision, text, images, ack as HTMLElement | null),
     deferTimedInsert: (timing, text, images, displayText) => this.deferTimedInsert(timing, text, images, displayText),
@@ -2985,7 +2985,9 @@ export class ChatController {
     //（编排器的 pause/abort 分支把手）与 label 展示名。
     const live = orchestrator.branchView()
       .filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing')
-      .map((b) => ({ callId: b.callId, name: b.agentName, snippet: b.inputSnippet ?? '' }));
+      // role（def.description）是匹配面的另一半：任务书措辞未必含用户的词，
+      // 角色描述往往含（「评审」/「review」）。此前漏传，匹配面瘸了一条腿。
+      .map((b) => ({ callId: b.callId, name: b.agentName, role: b.role ?? '', snippet: b.inputSnippet ?? '' }));
     const stopped = this.delegationControl.stopNamed(
       text,
       live,
@@ -3343,14 +3345,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false): void {
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
     this.folds.add(text, images, displayText, mechanical, cancels);
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
-    this.settleAck(ack, foldInReceipt(cancels, this.hasDelegationInFlight()));
+    // stopMissed（2026-10-10）：点名停支没停成的取消折入，收执换诚实口径
+    // ——支还在跑，说「其余照常」是失实收执。
+    this.settleAck(ack, stopMissed
+      ? cancelFoldUnmatchedReceipt()
+      : foldInReceipt(cancels, this.hasDelegationInFlight()));
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到

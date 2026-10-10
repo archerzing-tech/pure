@@ -662,7 +662,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('jev 这个就不调研了');
     expect(llm.classifyCalls.length).toBe(1);
     // 回执必须说"拿掉"——案例里正是"先补这项"这句与意图相反的回执。
-    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了，产出不会进最终结果。不过正在跑的相关支我没点出是哪一支，先没停：要立刻停下的话，说「停掉 XX 那支」我就停。');
     expect(statusJoined(h.root)).not.toContain('先补这项');
     expect(userJoined(h.root)).toContain('jev 这个就不调研了');
     expect(h.chat.folds.entries()).toHaveLength(1);
@@ -726,8 +726,36 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.folds.entries()).toHaveLength(1);
     expect(h.chat.folds.entries()[0].cancels).toBe(true);
     expect(h.chat.folds.entries()[0].mechanical).toBe(false);
-    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了，产出不会进最终结果。不过正在跑的相关支我没点出是哪一支，先没停：要立刻停下的话，说「停掉 XX 那支」我就停。');
     expect(h.chat.steerBus.entries()).toHaveLength(0);
+  });
+
+  it('单支在飞时取消必然指它：措辞点不中也真停（2026-10-10 症状：不要评审了）', async () => {
+    // 真实症状：代码评审阶段唯一一支在飞，用户「不要评审了，直接给我看接
+    // 轨」——区分词点不中（任务书写「审查」）就退回取消折入，在飞支全程
+    // 不停、只承诺产出剔除。单支兜底：只有一支时取消必然指它，直接真停；
+    // 收执如实报暂停。
+    const llm = scriptedLlm([
+      { match: '评审', cls: { kind: 'steer', reason: 'removes the review part from the plan', confidence: 0.95, cancels_part: true } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push({ role: '审查员', status: 'running' });
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_review', agentName: '审查员', state: 'running', inputSnippet: '对照规范逐条审查代码' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('不要评审了，直接给我看接轨');
+    expect(llm.classifyCalls.length).toBe(1);
+    expect(paused).toEqual(['call_review']);
+    expect(assistantJoined(h.root)).toContain('明白——「审查员」那路我先暂停了');
+    expect(h.chat.folds.entries()).toHaveLength(0);
   });
 
   it('复测案例一（2026-09-25）：加的活某支已经在跑——回「已经在跑着了」，不重复派', async () => {
@@ -864,7 +892,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(paused).toHaveLength(0); // 闸生效：一句混话不停支
     expect(h.chat.folds.entries()).toHaveLength(1);
     expect(h.chat.folds.entries()[0].cancels).toBe(true);
-    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了，产出不会进最终结果。不过正在跑的相关支我没点出是哪一支，先没停：要立刻停下的话，说「停掉 XX 那支」我就停。');
   });
 
   it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
@@ -893,7 +921,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('知乎那项也收掉吧');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(assistantJoined(h.root)).toContain('收到——这项不做了；其余照常。');
+    expect(assistantJoined(h.root)).toContain('收到——这项不做了，产出不会进最终结果。不过正在跑的相关支我没点出是哪一支，先没停：要立刻停下的话，说「停掉 XX 那支」我就停。');
     expect(h.chat.folds.entries()).toHaveLength(1);
     expect(h.chat.folds.entries()[0].cancels).toBe(true);
     expect(h.chat.folds.entries()[0].mechanical).toBe(false);

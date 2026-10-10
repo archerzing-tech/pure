@@ -73,6 +73,38 @@ describe('DelegationControlPlane stopNamed', () => {
     expect(plane.gate([call('c_redo', 'researcher', { prompt: '再调研竞品定价' })], ROLES).map((b: TakeoffBlock) => b.callId)).toEqual(['c_redo']);
   });
 
+  it('single live branch: a cancel with no distinctive word still stops that branch (2026-10-10 单支兜底)', () => {
+    // 「不要评审了」对「审查安全模块」——区分词点不中。只有一支在飞时，
+    // 取消必然指它：单支兜底直接真停，零误杀风险。
+    const plane = new DelegationControlPlane();
+    const single: LiveBranchView[] = [{ callId: 'call_r', name: 'code_reviewer', snippet: '审查安全模块' }];
+    const acted: Array<{ callId: string; mode: string }> = [];
+    const stopped = plane.stopNamed(
+      '不要评审了',
+      single,
+      (callId, mode) => { acted.push({ callId, mode }); return true; },
+      (name) => name,
+      'pause',
+    );
+    expect(stopped).toEqual({ callId: 'call_r', label: 'code_reviewer' });
+    expect(acted).toEqual([{ callId: 'call_r', mode: 'pause' }]);
+  });
+
+  it('multiple live branches with no distinctive hit still return null (fold-in, never guess)', () => {
+    // 多支打平的场景不在兜底范围内：宁可折叠不误杀，收执换诚实口径。
+    const plane = new DelegationControlPlane();
+    const acted: Array<{ callId: string; mode: string }> = [];
+    const stopped = plane.stopNamed(
+      '不要评审了',
+      live,
+      (callId, mode) => { acted.push({ callId, mode }); return true; },
+      (name) => name,
+      'pause',
+    );
+    expect(stopped).toBeNull();
+    expect(acted).toEqual([]);
+  });
+
   it('passes the pause mode through when the host asks for a gentler stop', () => {
     const plane = new DelegationControlPlane();
     const acted: string[] = [];

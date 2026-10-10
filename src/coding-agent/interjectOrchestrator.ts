@@ -66,8 +66,10 @@ export interface InterjectOrchestratorDeps {
   steerRunningTurn(text: string, images: MessageImage[], ack: InterjectAck, target: SteerTarget, cancel: boolean): void;
   /** 排队不相关插话（roundClose.queueTask + 队列卡渲染 + 补调度）。 */
   queueInterjectTask(text: string, images: MessageImage[], displayText: string): void;
-  /** 折入汇合轮的铺排（回显 + folds.add + 收执——铺排留宿主）。 */
-  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean): void;
+  /** 折入汇合轮的铺排（回显 + folds.add + 收执——铺排留宿主）。stopMissed
+   *  （2026-10-10）：取消折入发生在「点名停支没停成」时置真——收执换诚实
+   *  口径（在跑的支没停、给出能真停的说法），不说「其余照常」了事。 */
+  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean, stopMissed?: boolean): void;
   answerMidrunQuestion(text: string, images: MessageImage[]): Promise<void>;
   askMidrunClarification(decision: DynamicInsertionDecision, text: string, images: MessageImage[], ack: InterjectAck): Promise<void>;
   /** 输入自带执行时刻的排期 sink（false = 没接 sink 或拒收）。 */
@@ -299,7 +301,12 @@ export class InterjectOrchestrator {
           // 祈使「停掉那支」= 中止（判例 13 口径）；收掉一项「先停下」= 暂停
           // （复测案例二口径：立即止损不烧完，活口比中止更大）。
           const pause = decision.signals.branchStop !== true;
-          const stopped = this.deps.stopNamedBranch(text, pause ? 'pause' : 'abort');
+          // addsAlong 闸对两 kind 一套口径（2026-10-10 对齐，此前只挂在
+          // task 分支）：同一句里还要求加活的话，停掉那支会把刚要求加进
+          // 来的活一并杀掉——steer 判定下同样只取消折入。
+          const stopped = decision.signals.addsAlong === true
+            ? null
+            : this.deps.stopNamedBranch(text, pause ? 'pause' : 'abort');
           if (stopped) {
             echoUserBubble();
             // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
@@ -313,7 +320,9 @@ export class InterjectOrchestrator {
           // 折入只守汇报步；同回合父若再为这个话题派工，起飞闸（挂号簿）
           // 在出生点拦下。
           this.deps.delegation.registerCancel(text);
-          this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+          // stopMissed=true：支还在飞、但没停成（点不中/闸生效/编排器缺位）
+          // ——收执必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
+          this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
           return;
         }
         // 非取消、非停支的 steer 走 1a 定向投递：委派在飞时按点名找收件人
@@ -370,8 +379,9 @@ export class InterjectOrchestrator {
               return;
             }
             // 点不出支的取消折入：折入守汇报步，挂号守同回合再出生的支。
+            // stopMissed=true（同 steer 分支）：收执如实说「没停」。
             this.deps.delegation.registerCancel(text);
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
             return;
           }
           // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
