@@ -106,11 +106,17 @@ describe('nonTtyDecision', () => {
 });
 
 describe('createCliPermissionHandler', () => {
-  it('auto-approves every call (even danger-level) when autoApprove is true', async () => {
+  it('auto-approves ordinary calls when autoApprove is true, but danger-level ops keep the interactive gate (2026-10-10)', async () => {
     const h = createCliPermissionHandler(true);
+    const ok = await h({ ...baseInfo, dangerLevel: 'caution', riskLevel: 'medium' });
+    expect(ok.allowed).toBe(true);
+    expect(ok.autoApproved).toBe(true);
+    // danger 档是唯一例外：不短路，落到确认门（bun test 非 TTY → 拒绝，
+    // reason 说清是「需要 TTY 确认」而不是「没有权限」）。
     const d = await h({ ...baseInfo, dangerLevel: 'danger', riskLevel: 'high' });
-    expect(d.allowed).toBe(true);
-    expect(d.autoApproved).toBe(true);
+    expect(d.allowed).toBe(false);
+    expect(d.autoApproved).toBeUndefined();
+    expect(d.reason).toContain('TTY');
   });
 
   it('still denies aborted requests even when autoApprove is true', async () => {

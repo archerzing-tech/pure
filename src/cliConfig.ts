@@ -279,7 +279,8 @@ export const DEFAULT_BUDGET: BudgetConfig = {
 // human who has already read the prompt — they own the consequences of ordinary
 // tool calls, so we auto-approve by default. `--prompt-on-tool` (handled in
 // parseArgs) inverts this for users who want the original interactive y/n/a flow.
-// High-risk assessments are always applied as an interactive override after
-// Planner runs; a model instruction must never be the only safeguard for a
-// destructive operation.
+// Request-risk assessments no longer flip the stance (2026-10-10, 修「做着做
+// 着突然没权限」）：高风险轮照常自动放行、风险提示行照打；唯一的交互门是
+// dangerLevel==='danger' 的操作本身（createCliPermissionHandler 的 carve-out）
+// ——对破坏性操作的护栏是操作分级，不是模型的每轮判词。
 export const DEFAULT_CLI_AUTO_APPROVE = true;

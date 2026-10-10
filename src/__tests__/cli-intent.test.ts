@@ -52,17 +52,19 @@ describe('CLI proactive intent assessment', () => {
     expect(resolveCliAutoApprove(false, false)).toBe(false);
   });
 
-  it('forces interactive confirmation for high-risk turns even without --prompt-on-tool', () => {
-    expect(resolveCliAutoApprove(false, true, highRisk)).toBe(false);
-    expect(resolveCliAutoApprove(false, true, mediumRisk)).toBe(true);
-    expect(resolveCliAutoApprove(false, true, lowRisk)).toBe(true);
+  it('keeps auto-approve on risky turns: risk is surfaced as a prompt line, the gate moved to danger-level ops (2026-10-10)', () => {
+    // 修「做着做着突然没权限」：风险评估不再翻转立场——高风险轮与普通轮
+    // 同一立场；dangerLevel==='danger' 的操作在 createCliPermissionHandler
+    // 里单独落交互门（见 cli-permission.test.ts）。
+    expect(resolveCliAutoApprove(false, true)).toBe(true);
+    expect(resolveCliAutoApprove(true, true)).toBe(false);
+    expect(resolveCliAutoApprove(false, false)).toBe(false);
   });
 
-  it('keeps both CLI execution paths applying the request-scoped permission policy', () => {
+  it('keeps both CLI execution paths applying the permission stance', () => {
     // Both run loops live in cliRepl.ts since the cli.ts split (audit ①).
     const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
-    expect((source.match(/applyCliIntentPermission\(tools, args, analysis\.intent\)/g) ?? []).length).toBe(2);
-    expect(source).toContain('assessment);');
+    expect((source.match(/applyCliIntentPermission\(tools, args\)/g) ?? []).length).toBe(2);
   });
 
   it('keeps both CLI execution paths wired to the shared assembler', () => {

@@ -62,7 +62,9 @@ export function nonTtyDecision(info: PermissionRequestInfo): PermissionDecision 
   if (info.dangerLevel === 'safe') {
     return { allowed: true, autoApproved: true, reason: 'non-interactive read (auto-approved)' };
   }
-  return { allowed: false, reason: 'Non-interactive: write/command requires a TTY confirmation' };
+  // 措辞自解释（2026-10-10）：拒绝原因是「非交互环境无法确认」，不是「没有
+  // 权限」——模型把上一版措辞转述成「没有权限了」，用户以为配置被改。
+  return { allowed: false, reason: 'Non-interactive: this operation requires TTY confirmation (write/command; danger-level operations are never auto-approved).' };
 }
 
 /**
@@ -70,14 +72,17 @@ export function nonTtyDecision(info: PermissionRequestInfo): PermissionDecision 
  * writes on piped stdin.
  *
  * `autoApprove`: `true` short-circuits every non-aborted call with
- * `{ allowed: true, autoApproved: true }`.
+ * `{ allowed: true, autoApproved: true }` — **except** danger-level operations
+ * (`dangerLevel === 'danger'`，不可逆/破坏性）：那一档永远落到交互门（TTY 确认
+ * / 非 TTY 拒绝）。这是 2026-10-10 的立场修正：请求级风险评估不再关闭
+ * autoApprove（那会把「做着做着突然没权限」暴露给用户），护栏换到操作分级
+ * ——模型说这轮有风险只影响提示行，操作本身危不危险由 dangerLevel 说了算。
  *
  * The function-level default is `false` (interactive prompt / non-tty
  * safe-reads-only fallback) — deliberately the *safer* path, so a future
  * caller who forgets to pass the arg will be asked instead of silently
  * approving. The CLI passes `true` for ordinary requests when its default
- * auto-approve policy is active, but the request-scoped Planner policy keeps
- * high-risk turns on this interactive path even without `--prompt-on-tool`.
+ * auto-approve policy is active.
  */
 export function createCliPermissionHandler(autoApprove = false): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
@@ -87,11 +92,10 @@ export function createCliPermissionHandler(autoApprove = false): PermissionReque
     if (info.signal?.aborted) return { allowed: false, reason: 'aborted by user' };
 
     // Ordinary CLI requests may trust the operator's prompt and approve every
-    // tool call. High-risk turns never reach this branch with autoApprove=true:
-    // cli.ts applies the request-scoped Planner policy before execution. Use
-    // `--prompt-on-tool` (handled in cli.ts parseArgs) to opt into the
-    // interactive confirmation flow for every request.
-    if (autoApprove) {
+    // tool call. Danger-level operations are the carve-out: the interactive
+    // gate below still applies to them. Use `--prompt-on-tool` (handled in
+    // cli.ts parseArgs) to opt into interactive confirmation for EVERY call.
+    if (autoApprove && info.dangerLevel !== 'danger') {
       return { allowed: true, autoApproved: true, reason: 'CLI auto-approve (operator reviewed the prompt)' };
     }
 

@@ -383,14 +383,15 @@ function printIntentAssessment(assessment: IntentAssessment): void {
   process.stdout.write(formatCliIntentAssessment(assessment));
 }
 
-/** Apply request-scoped CLI permissions after Planner has classified the turn. */
+/** Apply the CLI permission stance (per-run flag + global default). 请求风险
+ *  不再进来（2026-10-10）：风险轮照常自动放行，护栏在操作分级的 danger
+ *  档（createCliPermissionHandler），不在每轮重建的立场上。 */
 function applyCliIntentPermission(
   tools: ToolAdapter | undefined,
   args: CliArgs,
-  assessment: IntentAssessment,
 ): void {
   if (!(tools instanceof ToolRegistry)) return;
-  const autoApprove = resolveCliAutoApprove(!args.autoApprove, DEFAULT_CLI_AUTO_APPROVE, assessment);
+  const autoApprove = resolveCliAutoApprove(!args.autoApprove, DEFAULT_CLI_AUTO_APPROVE);
   tools.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
 }
 
@@ -671,7 +672,7 @@ async function runOneShot(args: CliArgs) {
   if (workflow.probeRequired && !workflow.probeAvailable) {
     process.stdout.write(`  ${yellow('⚠')} ${yellow('需要只读探针，但当前没有可用工作区工具，已诚实降级')}\n`);
   }
-  applyCliIntentPermission(tools, args, analysis.intent);
+  applyCliIntentPermission(tools, args);
   printModeSwitch(analysis.mode);
   const needsDeliveryGate = !!tools && workflow.needsDeliveryGate;
   const needsIntentProbe = workflow.needsProbe;
@@ -960,7 +961,7 @@ async function runRepl(args: CliArgs) {
     if (workflow.probeRequired && !workflow.probeAvailable) {
       process.stdout.write(`  ${yellow('⚠')} ${yellow('需要只读探针，但当前没有可用工作区工具，已诚实降级')}\n`);
     }
-    applyCliIntentPermission(tools, args, analysis.intent);
+    applyCliIntentPermission(tools, args);
     // Announce mode changes only (not every turn) so long complex sessions
     // stay quiet; the first complex turn switches from yolo and is announced.
     if (analysis.mode !== lastMode) {
