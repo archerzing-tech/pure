@@ -8719,9 +8719,14 @@ async fn scrape_fallback(url: &str, proxy_url: Option<&str>) -> Result<Option<St
     scrape_via_firecrawl(url, proxy_url).await
 }
 
-/// Detect a `<meta http-equiv="refresh" content="0; url=…">` redirect target
-/// (either attribute order, quoted/unquoted URL). Returns None when absent.
-fn extract_meta_refresh_url(html: &str) -> Option<String> {
+/// Detect a `<meta http-equiv="refresh" content="0; url=…">` redirect
+/// (either attribute order, quoted/unquoted URL) as (delay_secs, target).
+/// Returns None when absent.
+///
+/// 延迟秒数是给劫持判定层用的：0-3 秒的站外跳转是中间设备的典型形态，而站点自己
+/// 的「我们搬家了」页通常给 5 秒以上并且带正文。只取 URL 的老调用方走下面的
+/// `extract_meta_refresh_url`。
+fn extract_meta_refresh(html: &str) -> Option<(u32, String)> {
     let re = regex::Regex::new(r#"(?is)<meta[^>]*>"#).ok()?;
     for caps in re.captures_iter(html) {
         let tag = &caps[0];
@@ -8741,18 +8746,39 @@ fn extract_meta_refresh_url(html: &str) -> Option<String> {
         };
         let um = regex::Regex::new(r#"(?is)(?:^|;)\s*url\s*=\s*(.+)"#)
             .ok()?
-            .captures(&content)?;
-        let target = um.get(1)?.as_str().trim().to_string();
+            .captures(&content);
+        // 这里必须 continue 而不是 `?`：`<meta http-equiv="refresh" content="5">`
+        // 这种没有 url= 的标签会命中 captures=None，老代码的 `?` 会让整个函数当场
+        // 返回 None，后面真正的跳转目标再也扫不到。
+        let Some(um) = um else { continue };
+        let Some(target) = um.get(1).map(|m| m.as_str().trim().to_string()) else {
+            continue;
+        };
         let trimmed = target
             .strip_prefix('\'')
             .and_then(|t| t.strip_suffix('\''))
             .or_else(|| target.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
             .unwrap_or(&target);
         if !trimmed.is_empty() {
-            return Some(decode_basic_entities(trimmed));
+            return Some((
+                meta_refresh_delay_secs(&content),
+                decode_basic_entities(trimmed),
+            ));
         }
     }
     None
+}
+
+/// The `content` of a meta refresh starts with the delay in seconds, then an
+/// optional `;` or `,` separator, then the url. No digits means "immediately".
+fn meta_refresh_delay_secs(content: &str) -> u32 {
+    let digits: String = content.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+/// Redirect target only — the follow loop has no use for the delay.
+fn extract_meta_refresh_url(html: &str) -> Option<String> {
+    extract_meta_refresh(html).map(|(_, target)| target)
 }
 
 /// Resolve a possibly-relative meta-refresh target against the page URL.
@@ -8770,15 +8796,364 @@ fn resolve_redirect_target(base: &str, target: &str) -> String {
     target.to_string()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  应答劫持判定：DNS 污染 / 中间设备把请求改写成 200 广告页或 403 挡板页
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// 为什么必须在这一层判：只有 Rust 能同时拿到「follow 之后的 final_url」「原始
+// Content-Type」和**未经抽取的原始 body**。JS 侧拿到的已经是抽好的纯文本，meta
+// refresh 与 title 全被丢掉了，只能靠残留的 HTML 特征做双保险（src/shared/
+// netGuard.ts 的 detectHijack，抓不到就放过）。
+//
+// 为什么这一类失败最毒：这里历史上只判 status.is_success()，于是被改写的 200 广告
+// 页被当成真内容交给模型（模型会把广告当事实写进答案），更糟的是上层 JS 看到这个
+// 「成功」就 recordNetOutcome(direct, true) 把 direct 路由钉死——proxy 那条能救的
+// 路再也翻不回来，至少污染一个 TTL 窗口。其他网络失败至少会报错，只有这种失败
+// **伪装成成功**。
+//
+// 取向：宁可漏判不可误判。误判的代价是让本来能成功的抓取变成网络失败——触发兜底
+// 重试（多烧一个超时）并 unlearn 一条其实没问题的路由，正常的镜像/代理路径被无故
+// 跳过；漏判的代价只是这一次没抓到。所以每条判据都是多条信号叠加，单条弱信号绝不
+// 下判定。
+
+/// 可见正文短于这个字符数才算「正文小」。与 JS 侧 detectHijack 的 200 刻意对齐：
+/// 两层用同一阈值，口径漂移会让「Rust 放过、JS 判死」在排查时变成玄学。
+const HIJACK_VISIBLE_TEXT_MAX_CHARS: usize = 200;
+
+/// meta refresh 延迟 ≤ 这个秒数才算「立即跳转」。劫持页用 0；站点自己的「我们搬家
+/// 了」页通常给 5 秒以上并且带正文。
+const HIJACK_META_REFRESH_MAX_DELAY_SECS: u32 = 3;
+
+/// JS 跳转赋值只在文档头部这么多个字符内找。劫持页的跳转脚本紧跟 <head>；正文
+/// 中间的 location.href 更可能是正常站点自己的跳转或分享控件。
+const HIJACK_JS_SCAN_CHARS: usize = 4096;
+
+/// 多标签公共后缀表。默认规则是「最后一段是公共后缀」（`*.tld`），这在
+/// `github.co.uk` vs `evil.co.uk` 上会把两个不同站点算成同一个 registrable
+/// domain，从而漏判后缀拼接钓鱼；表里的条目让这些需要多切一段。
+///
+/// 收录标准：只收**确定**属于公共后缀的域。宁可不收（漏判，安全方向），也不误收
+/// （把同一个站点拆成不同 registrable domain，造成误杀）。不引 psl crate 是为了
+/// 不给判定层增加依赖面——这里越少依赖越好审计，表的规模本来也只有几十条。
+const MULTI_LABEL_PUBLIC_SUFFIXES: &[&str] = &[
+    // ── ccTLD 下的二级公共后缀（缺了它们，最常见的钓鱼拼接就判不出来）──
+    "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "net.uk", "sch.uk", "ltd.uk", "plc.uk",
+    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "re.kr",
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+    "com.hk", "org.hk", "net.hk", "edu.hk", "gov.hk", "idv.hk",
+    "com.tw", "org.tw", "net.tw", "edu.tw", "gov.tw", "idv.tw",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "school.nz",
+    "co.za", "org.za", "net.za", "gov.za", "ac.za", "web.za",
+    "co.in", "net.in", "org.in", "gov.in", "ac.in", "edu.in", "firm.in",
+    "com.br", "net.br", "org.br", "gov.br", "edu.br",
+    "com.mx", "net.mx", "org.mx", "gob.mx", "edu.mx",
+    "com.ar", "net.ar", "org.ar", "gob.ar", "edu.ar",
+    "com.tr", "net.tr", "org.tr", "gov.tr", "edu.tr", "bel.tr",
+    "com.pl", "net.pl", "org.pl", "gov.pl", "edu.pl", "waw.pl",
+    "com.ua", "net.ua", "org.ua", "gov.ua", "edu.ua", "in.ua", "kiev.ua",
+    "co.il", "org.il", "net.il", "ac.il", "gov.il", "muni.il",
+    "com.sg", "net.sg", "org.sg", "edu.sg", "gov.sg", "per.sg",
+    "com.my", "net.my", "org.my", "gov.my", "edu.my",
+    "co.th", "in.th", "ac.th", "go.th", "or.th",
+    "co.id", "or.id", "web.id", "go.id", "ac.id",
+    "com.es", "org.es", "nom.es", "gob.es", "edu.es",
+    "com.pt", "com.vn", "net.vn", "org.vn", "gov.vn", "edu.vn",
+    "com.ru", "net.ru", "org.ru", "msk.ru", "spb.ru",
+    "com.pe", "com.ec", "com.uy", "com.ve", "com.bo", "com.py",
+    "com.do", "com.gt", "com.cy", "com.mt", "com.ee", "com.lv", "com.hr",
+    "com.ro", "com.eg", "com.sa", "com.ng", "com.gh", "com.pk", "com.bd",
+    "com.kh", "com.la", "com.mm", "com.np", "com.lk", "com.co",
+    "co.zm", "co.zw", "co.tz", "co.ke", "co.ug", "co.mz",
+    // ── 托管平台：每个子目录/子桶都是独立站点，不能按同一个 registrable domain
+    //    看待，否则 A 信号在这些平台上永远为假 ──
+    "github.io", "gitlab.io", "blogspot.com", "herokuapp.com", "appspot.com",
+    "cloudfront.net", "s3.amazonaws.com", "azurewebsites.net", "web.app",
+    "firebaseapp.com", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
+    "r2.dev", "surge.sh", "gitbook.io", "notion.site", "readthedocs.io",
+    "sourceforge.io", "repl.co", "replit.dev", "glitch.me", "neocities.org",
+];
+
+// nginx 默认 403 挡板：部分劫持设备直接把它当应答吐回来。
+static_regex!(hijack_403_title_re, r"(?is)<title>\s*403\s+Forbidden\s*</title>");
+static_regex!(hijack_403_h1_re, r"(?is)<h1>\s*403\s+Forbidden\s*</h1>");
+// 运营商 / 云厂商的「访问受限」模板。
+static_regex!(hijack_cn_blocked_re, r"(网页无法打开|该页面暂时无法访问|访问被拒绝|您的访问被拒绝)");
+static_regex!(hijack_cn_blocked_why_re, r"(?s)由于以下原因.{0,120}无法访问");
+// Cloudflare / Akamai 人机墙。正常站点偶尔也会弹出来，所以只在正文几乎为空时
+// 才采信（见 detect_response_hijack 的 C && B 组合）。
+static_regex!(hijack_cf_title_re, r"(?is)<title>\s*Just a moment\.\.\.\s*</title>");
+static_regex!(hijack_cf_checking_re, r"(?i)Checking your browser before accessing");
+static_regex!(hijack_cf_cookies_re, r"(?i)Enable JavaScript and cookies to continue");
+// 脚本立即跳站外：location.href = "https://ad.example/" 等。
+static_regex!(hijack_js_assign_re, r#"(?is)(?:window\.)?location(?:\.href)?\s*=\s*["']?(https?://[^"'\s<>]+)"#);
+static_regex!(hijack_js_replace_re, r#"(?is)(?:window\.)?location\.replace\(\s*["']?(https?://[^"'\s<>]+)"#);
+
+/// 已知挡板/拦截页指纹。要求组合出现——单个词（"无法访问"、"403"）会误伤正常
+/// 页面，所以这里每条都是「标签 + 文案」或「短语」这种正常页面几乎不会原样长出
+/// 来的形态。
+fn hijack_blockpage_patterns() -> &'static [&'static regex::Regex] {
+    static PATTERNS: std::sync::OnceLock<Vec<&'static regex::Regex>> = std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            hijack_403_title_re(),
+            hijack_403_h1_re(),
+            hijack_cn_blocked_re(),
+            hijack_cn_blocked_why_re(),
+            hijack_cf_title_re(),
+            hijack_cf_checking_re(),
+            hijack_cf_cookies_re(),
+        ]
+    })
+}
+
+/// 判定输入。单独抽出来是为了单元测试能不联网直接构造每一组信号。
+pub struct HijackProbe<'a> {
+    /// 工具请求的原始 URL。
+    pub request_url: &'a str,
+    /// follow（HTTP 重定向 + meta refresh）之后的最终 URL。
+    pub final_url: &'a str,
+    /// 最后一跳响应的原始 Content-Type 头。
+    pub content_type: &'a str,
+    /// 最后一跳响应的原始 body（未经抽取，meta refresh 与 title 都在里面）。
+    pub body: &'a str,
+}
+
+pub struct HijackVerdict {
+    /// 触发的信号名，进错误信息便于排查。
+    pub signal: &'static str,
+    /// 一句话说明这一组信号为什么足以定罪。
+    pub why: &'static str,
+}
+
+impl HijackVerdict {
+    /// 面向模型/上层的错误文案。
+    ///
+    /// 这里**必须**出现 `network` 这个词：上层 netGuard 的 `isNetworkError` 与
+    /// `classifyFailure` 都靠它把这次失败归类成网络类，才会去跑兜底路由重试并
+    /// `recordNetOutcome(路由, false)`。靠错误文本传递分类是隐式契约，所以下面
+    /// 的测试把它钉死。
+    fn error_message(&self, probe: &HijackProbe) -> String {
+        format!(
+            "Network interception (hijack: {}): {}. Requested {} but the response was served by {} (content-type: {}). This is NOT the content the site would serve — do not trust it and do not retry the same URL directly: retry through the configured proxy, use a mirror, or switch to another source.",
+            self.signal,
+            self.why,
+            probe.request_url,
+            probe.final_url,
+            if probe.content_type.is_empty() {
+                "(none)"
+            } else {
+                probe.content_type
+            },
+        )
+    }
+}
+
+/// 取出 URL 的 host（小写、去端口、去尾点、去掉 userinfo）。非 http(s) 或解析不
+/// 出来时返回 None——判定层拿不到 host 就等于拿不到 A 信号，按「没有这个信号」
+/// 处理（宁可漏判）。
+fn url_host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // userinfo 里的 @ 也会出现在 authority 里，取最后一个 @ 之后的部分。
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    if host_port.is_empty() {
+        return None;
+    }
+    // IPv6 字面量：[::1]:8080 —— 方括号内整体是 host。
+    let host = match host_port.find(']') {
+        Some(end) => &host_port[..=end],
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// 可注册域（registrable domain）= 公共后缀 + 其上的那一个标签。跨可注册域才可能
+/// 是劫持，跨子域不算（`github.com` → `api.github.com` 是站点自己的事）。
+fn registrable_domain(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.len() <= 1 {
+        return labels.join(".");
+    }
+    // host 本身就是一条公共后缀时（`s3.amazonaws.com`），它就是可注册域。
+    if MULTI_LABEL_PUBLIC_SUFFIXES.contains(&host.as_str()) {
+        return host;
+    }
+    // 从最长后缀往回找；命中后取后缀之上的那一个标签。`github.com.evil.net` 走不到
+    // 任何一条表项，落到下面的「最后两段」兜底 → `evil.net`，与 `github.com` 不同，
+    // 后缀拼接钓鱼因此判得出来。
+    for i in 0..labels.len() {
+        if i == 0 {
+            continue; // 公共后缀之上至少要还有一个标签
+        }
+        let suffix = labels[i..].join(".");
+        if MULTI_LABEL_PUBLIC_SUFFIXES.contains(&suffix.as_str()) {
+            return labels[i - 1..].join(".");
+        }
+    }
+    labels[labels.len() - 2..].join(".")
+}
+
+/// 两个 host 是否属于同一个可注册域。解析不出 host、或任一侧是 IP 字面量时一律
+/// 返回 true（视为同站）：A 信号缺失不能被当成「跨域」，否则会把内网地址、CDN 的
+/// IP 直连等等正常请求误杀。
+fn same_registrable_site(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    if a.parse::<std::net::IpAddr>().is_ok() || b.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    registrable_domain(a) == registrable_domain(b)
+}
+
+/// text/html 与 xhtml；**空的 Content-Type 也算 html**——与 `is_textual_content_type`
+/// 「缺头不当二进制」的口径一致，而挡板页几乎必然带 text/html，缺头不该成为漏网
+/// 的理由。
+fn is_html_content_type(content_type: &str) -> bool {
+    let main = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    main.is_empty() || main == "text/html" || main == "application/xhtml+xml"
+}
+
+/// 可见正文长度：剥掉 script/style/标签、折叠空白之后还剩多少字符。用
+/// strip_html_full 而不是自己再写一套，是为了让「正文多短」这个数和真正交给模型
+/// 的文本口径一致。
+fn visible_text_len(html: &str) -> usize {
+    strip_html_full(html).chars().count()
+}
+
+/// 判定一个「2xx 成功」响应是否其实是被劫持/挡板页。返回 None 表示放过。
+///
+/// 四条信号（全部满足才算数，单条弱信号绝不下判定）：
+///
+/// ```text
+/// A 跨可注册域      final_url 的 registrable domain ≠ request host 的
+/// B 短 html 正文   content-type 是 html/xhtml 且可见正文 < 200 字符
+/// C 挡板指纹       正文命中已知拦截/劫持页的组合正则
+/// D 立即跳站外      meta refresh(延迟 ≤ 3s) 或头部脚本里的 location 指向站外域
+///
+/// 判定为劫持：C && B            挡板页（人机墙/403 模板，同域出现即可定罪）
+///             A && (B || C)    跨可注册域 + 正文小或命中指纹
+///             A && D            跨可注册域 + 立即跳站外
+/// 其余一律放过。
+/// ```
+///
+/// 为什么 D 必须配 A：正常站点做跨站跳转是常事（短链展开、SSO、合并后的品牌
+/// 改名），单看「文档里有站外跳转」会误杀。只在**应答本身就来自另一个可注册域**
+/// 的前提下，D 才说明这次应答有问题。
+pub fn detect_response_hijack(probe: &HijackProbe) -> Option<HijackVerdict> {
+    let request_host = url_host(probe.request_url);
+    let final_host = url_host(probe.final_url);
+    let base_host = request_host
+        .clone()
+        .or_else(|| final_host.clone())
+        .unwrap_or_default();
+    let cross_site = match (&request_host, &final_host) {
+        (Some(r), Some(f)) => !same_registrable_site(r, f),
+        _ => false,
+    };
+    let html = is_html_content_type(probe.content_type);
+    let short = html && visible_text_len(probe.body) < HIJACK_VISIBLE_TEXT_MAX_CHARS;
+    let fingerprint = html && hijack_blockpage_patterns().iter().any(|re| re.is_match(probe.body));
+    let offsite = cross_site && immediate_offsite_redirect_host(probe, &base_host).is_some();
+
+    let verdict = if fingerprint && short {
+        HijackVerdict {
+            signal: "blockpage-fingerprint",
+            why: "命中已知拦截/挡板页指纹，且可见正文几乎为空——正常内容页不会长这样",
+        }
+    } else if cross_site && (short || fingerprint) {
+        let (signal, why) = if fingerprint {
+            (
+                "cross-domain-blockpage",
+                "应答来自另一个可注册域，且命中已知拦截/挡板页指纹",
+            )
+        } else {
+            (
+                "cross-domain-short-html",
+                "应答来自另一个可注册域，且是一张几乎空白的 html 页面",
+            )
+        };
+        HijackVerdict { signal, why }
+    } else if offsite {
+        HijackVerdict {
+            signal: "cross-domain-immediate-redirect",
+            why: "应答来自另一个可注册域，且文档自身要求立即跳转到站外地址",
+        }
+    } else {
+        return None;
+    };
+    Some(verdict)
+}
+
+/// 文档里的「立即跳站外」目标 host：延迟够短的 meta refresh，或文档头部的
+/// location 赋值。只认绝对 URL——相对跳转必然同站，没有判定价值。
+fn immediate_offsite_redirect_host(probe: &HijackProbe, base_host: &str) -> Option<String> {
+    if let Some((delay, target)) = extract_meta_refresh(probe.body) {
+        if delay <= HIJACK_META_REFRESH_MAX_DELAY_SECS {
+            if let Some(host) = url_host(&target) {
+                if !same_registrable_site(&host, base_host) {
+                    return Some(host);
+                }
+            }
+        }
+    }
+    let head: String = probe.body.chars().take(HIJACK_JS_SCAN_CHARS).collect();
+    for re in [hijack_js_assign_re(), hijack_js_replace_re()] {
+        for caps in re.captures_iter(&head) {
+            if let Some(host) = caps.get(1).and_then(|m| url_host(m.as_str())) {
+                if !same_registrable_site(&host, base_host) {
+                    return Some(host);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 一次 direct fetch 的完整结果。
+///
+/// 为什么不是老的 `(body, content_type, ok)` 三元组：三元组把 `final_url` 扔在了
+/// 函数内部，而它恰恰是判定「应答是不是从另一个域来的」的唯一依据。判定层要用它，
+/// JS 侧的 detectHijack 双保险也要用它，所以它必须跟着结果一起出来。
+pub struct FetchedPage {
+    pub body: String,
+    pub content_type: String,
+    /// HTTP 重定向 + meta refresh 都走完之后的最终 URL。
+    pub final_url: String,
+    /// 最后一跳是否为 2xx。
+    pub ok: bool,
+    /// 命中劫持判定时的裁决；None 表示未命中。
+    pub hijack: Option<HijackVerdict>,
+}
+
 /// Direct fetch with browser-like headers, one transient-error retry, and
-/// meta-refresh redirect following (up to 3 hops). Returns the final page as
-/// (body, content_type, ok) where `ok` is whether the last response was 2xx;
-/// non-2xx bodies are returned as-is so callers can fall through to the
-/// rendering tiers.
+/// meta-refresh redirect following (up to 3 hops). `ok` is whether the last
+/// response was 2xx; non-2xx bodies are returned as-is so callers can fall
+/// through to the rendering tiers.
+///
+/// A 2xx response that the hijack verdict layer condemns comes back with
+/// `ok: false` and `hijack: Some(..)` — the body is still returned so callers can
+/// log it, but every caller must check `hijack` **before** touching `body`: a
+/// rewritten 200 ad page must never reach the model or the page cache.
 async fn fetch_page_with_follow(
     url: &str,
     proxy_url: Option<&str>,
-) -> Result<(String, String, bool), String> {
+) -> Result<FetchedPage, String> {
     let client = build_http_client(std::time::Duration::from_secs(30), proxy_url)?;
     let mut current = url.to_string();
     let mut hops = 0u8;
@@ -8798,6 +9173,9 @@ async fn fetch_page_with_follow(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        // reqwest 的默认策略已经把 HTTP 重定向链走完了，resp.url() 就是最后一跳
+        // 真正落地的 URL——中间设备把请求改写到别处时，这里就是现场。
+        let final_url = resp.url().to_string();
         let body = response_text_with_charset(resp).await.map_err(|e| format!("read: {}", e))?;
         // Retry transient 429/5xx once.
         if (status.as_u16() == 429 || status.as_u16() >= 500) && !retried {
@@ -8814,8 +9192,29 @@ async fn fetch_page_with_follow(
                     continue;
                 }
             }
+            let probe = HijackProbe {
+                request_url: url,
+                final_url: &final_url,
+                content_type: &content_type,
+                body: &body,
+            };
+            if let Some(hijack) = detect_response_hijack(&probe) {
+                return Ok(FetchedPage {
+                    body,
+                    content_type,
+                    final_url,
+                    ok: false,
+                    hijack: Some(hijack),
+                });
+            }
         }
-        return Ok((body, content_type, status.is_success()));
+        return Ok(FetchedPage {
+            body,
+            content_type,
+            final_url,
+            ok: status.is_success(),
+            hijack: None,
+        });
     }
 }
 
@@ -8840,7 +9239,26 @@ async fn web_scrape(
         return Ok(hit);
     }
 
-    let (body, content_type, ok) = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
+    let fetched = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
+    // 劫持判定排在一切之前：被改写的 200 广告页既不能进正文，也不能进缓存，否则
+    // 上层会 recordNetOutcome(direct, true) 把这条错路钉死。也不去试兜底渲染层
+    // ——那次请求的失败原因已经确定（路由不对，不是页面难抓），兜底该由上层的
+    // 反向路由重试来接，它还能顺带 unlearn 这条错路。
+    if let Some(hijack) = fetched.hijack.as_ref() {
+        return Err(hijack.error_message(&HijackProbe {
+            request_url: &url,
+            final_url: &fetched.final_url,
+            content_type: &fetched.content_type,
+            body: &fetched.body,
+        }));
+    }
+    let FetchedPage {
+        body,
+        content_type,
+        final_url: _,
+        ok,
+        hijack: _,
+    } = fetched;
 
     if !ok {
         // Blocked / anti-bot / removed page: the rendering tiers.
@@ -9193,7 +9611,23 @@ async fn web_fetch(
         return Ok(hit);
     }
 
-    let (html, content_type, ok) = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
+    let fetched = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
+    // 见 web_scrape：劫持判定优先于一切，且不去烧兜底渲染层。
+    if let Some(hijack) = fetched.hijack.as_ref() {
+        return Err(hijack.error_message(&HijackProbe {
+            request_url: &url,
+            final_url: &fetched.final_url,
+            content_type: &fetched.content_type,
+            body: &fetched.body,
+        }));
+    }
+    let FetchedPage {
+        body: html,
+        content_type,
+        final_url: _,
+        ok,
+        hijack: _,
+    } = fetched;
 
     if !ok {
         // Blocked / anti-bot / removed page: the rendering tiers.
@@ -9253,6 +9687,45 @@ async fn web_fetch(
         web_cache().lock().unwrap().set(&page_key, &truncated, PAGE_TTL_MS);
         Ok(truncated)
     }
+}
+
+/// `web_fetch` 的**信号探针**：抓同一个 URL，但把 `finalUrl` / `contentType` /
+/// `hijackSignal` 一并回传，供 JS 侧的 `detectHijack` 双保险使用——它拿到的纯文本
+/// 已经丢掉了 meta refresh 与 title，只能看残留特征。
+///
+/// 为什么是新增命令而不是改 `web_fetch` 的返回类型：`TauriToolAdapter` 把结果
+/// `as Promise<string>` 直接塞进 `ToolResult.result`，改成对象会静默改变交给模型的
+/// 形状，而那个文件正由另一个 worker 改动。既有命令的签名一个都没动，兼容性零风险；
+/// 想用这两个信号的调用方自己切到这个命令。
+///
+/// 这是探针不是替代品：只走 direct 一层，不跑 Jina / Wayback / Firecrawl 兜底，也
+/// 不写页面缓存。判出劫持时返回 `hijackSignal` 且 `text` 为空——被劫持的正文绝不
+/// 从这里流出去。
+#[tauri::command]
+async fn web_fetch_probe(
+    _workspace: String,
+    url: String,
+    max_chars: Option<usize>,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let max = max_chars.unwrap_or(20000).min(50000);
+    let fetched = fetch_page_with_follow(&url, proxy_url.as_deref()).await?;
+    let usable = fetched.hijack.is_none()
+        && fetched.ok
+        && is_textual_content_type(&fetched.content_type);
+    let text = if usable {
+        truncate_text(&strip_html_full(&fetched.body), max)
+    } else {
+        String::new()
+    };
+    Ok(serde_json::json!({
+        "url": url,
+        "finalUrl": fetched.final_url,
+        "contentType": fetched.content_type,
+        "statusOk": fetched.ok,
+        "hijackSignal": fetched.hijack.map(|h| h.signal),
+        "text": text,
+    }))
 }
 
 /// True when a Content-Type header is a text-like payload web_fetch can read.
@@ -9488,6 +9961,247 @@ mod web_fetch_tests {
         // <br class="…">); this side breaks at every tag. Intentional (see
         // module header).
         assert_eq!(strip_html_full("a<br class=\"x\">b"), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod net_hijack_tests {
+    use super::*;
+
+    fn probe<'a>(request: &'a str, final_url: &'a str, ct: &'a str, body: &'a str) -> HijackProbe<'a> {
+        HijackProbe {
+            request_url: request,
+            final_url,
+            content_type: ct,
+            body,
+        }
+    }
+
+    fn verdict<'a>(p: &HijackProbe) -> Option<&'static str> {
+        detect_response_hijack(p).map(|v| v.signal)
+    }
+
+    const SHORT_HTML: &str = "<html><body><div>请下载我们的APP</div></body></html>";
+    const LONG_HTML: &str = "<html><body><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p></body></html>";
+
+    // ── 可注册域计算 ──
+
+    #[test]
+    fn registrable_domain_handles_multi_level_suffixes() {
+        assert_eq!(registrable_domain("github.com"), "github.com");
+        assert_eq!(registrable_domain("api.github.com"), "github.com");
+        assert_eq!(registrable_domain("www.example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("deep.sub.example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("bucket.s3.amazonaws.com"), "bucket.s3.amazonaws.com");
+        // host 本身就是一条公共后缀时没有「之上的一级」，它自己就是可注册域。
+        assert_eq!(registrable_domain("s3.amazonaws.com"), "s3.amazonaws.com");
+        assert_eq!(registrable_domain("user.github.io"), "user.github.io");
+    }
+
+    #[test]
+    fn same_site_covers_subdomains_and_refuses_ip_literals() {
+        assert!(same_registrable_site("github.com", "api.github.com"));
+        assert!(same_registrable_site("example.co.uk", "api.example.co.uk"));
+        assert!(!same_registrable_site("example.co.uk", "evil.co.uk"));
+        assert!(!same_registrable_site("github.com", "example.com"));
+        assert!(!same_registrable_site("github.com", "github.com.evil.net"));
+        // 拿不到域语义时视为同站：宁可不判，也不把内网/CDN 直连误杀。
+        assert!(same_registrable_site("192.168.1.1", "10.0.0.1"));
+        assert!(same_registrable_site("", "github.com"));
+    }
+
+    #[test]
+    fn url_host_strips_userinfo_port_case_and_trailing_dot() {
+        assert_eq!(url_host("https://user:pw@GitHub.COM:443/a?b#c").as_deref(), Some("github.com"));
+        assert_eq!(url_host("http://example.com./").as_deref(), Some("example.com"));
+        assert_eq!(url_host("https://[::1]:8080/x").as_deref(), Some("[::1]"));
+        assert_eq!(url_host("mailto:a@b.com"), None);
+        assert_eq!(url_host("not a url"), None);
+    }
+
+    // ── 判定规则：必须多信号叠加 ──
+
+    #[test]
+    fn same_registrable_domain_hop_is_not_hijack() {
+        // github.com → api.github.com：站点自己的子域，正文短也不判。
+        assert_eq!(verdict(&probe("https://github.com/a", "https://api.github.com/a", "text/html; charset=utf-8", SHORT_HTML)), None);
+        // 多级公共后缀下的子域同理。
+        assert_eq!(verdict(&probe("https://example.co.uk/a", "https://api.example.co.uk/a", "text/html", SHORT_HTML)), None);
+    }
+
+    #[test]
+    fn cross_registrable_domain_with_short_html_is_hijack() {
+        assert_eq!(
+            verdict(&probe("https://github.com/a", "https://ad.example.net/promo", "text/html", SHORT_HTML)),
+            Some("cross-domain-short-html")
+        );
+    }
+
+    #[test]
+    fn cross_registrable_domain_with_real_content_is_left_alone() {
+        // 防误判的核心用例：短链展开、SSO、跨站合并都会让 final_url 换域，但
+        // 正常内容页的正文长度不会过阈值，单凭 A 信号绝不能定罪。
+        assert_eq!(
+            verdict(&probe("https://github.com/a", "https://blog.example.net/post", "text/html", LONG_HTML)),
+            None
+        );
+    }
+
+    #[test]
+    fn suffix_splicing_phishing_is_hijack() {
+        // github.com.evil.net 的可注册域是 evil.net，不是 github.com——按最后两段
+        // 切和按整串比较都容易在这里放过。
+        assert_eq!(
+            verdict(&probe("https://github.com/a", "https://github.com.evil.net/login", "text/html", SHORT_HTML)),
+            Some("cross-domain-short-html")
+        );
+        // 同一条多级后缀规则也让 co.uk 这类后缀钓鱼成立：按最后两段切会把
+        // github.co.uk 与 evil.co.uk 都算成 co.uk，从而漏判。
+        assert_eq!(
+            verdict(&probe("https://github.co.uk/a", "https://evil.co.uk/a", "text/html", SHORT_HTML)),
+            Some("cross-domain-short-html")
+        );
+        // 但真正的子域（evil.github.co.uk 是 github.co.uk 的子域）仍按同站放过。
+        assert_eq!(
+            verdict(&probe("https://github.co.uk/a", "https://evil.github.co.uk/a", "text/html", SHORT_HTML)),
+            None
+        );
+    }
+
+    #[test]
+    fn short_non_html_response_is_not_hijack() {
+        assert_eq!(
+            verdict(&probe("https://api.github.com/x", "https://api.github.com/x", "application/json", r#"{"ok":true}"#)),
+            None
+        );
+        assert_eq!(
+            verdict(&probe("https://api.github.com/x", "https://api.github.com/x", "text/plain", "404 not found")),
+            None
+        );
+        // 挡板文案出现在非 html 载荷里也不采信：C 信号要求 html。
+        assert_eq!(
+            verdict(&probe("https://api.github.com/x", "https://api.github.com/x", "text/plain", "<title>403 Forbidden</title>")),
+            None
+        );
+    }
+
+    #[test]
+    fn same_domain_blockpage_fingerprint_is_hijack() {
+        // Cloudflare 人机墙不换域，只靠 C && B 抓。
+        let cf = "<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing</body></html>";
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://example.com/a", "text/html", cf)),
+            Some("blockpage-fingerprint")
+        );
+        let nginx = "<html><head><title>403 Forbidden</title></head><body><h1>403 Forbidden</h1><p>nginx</p></body></html>";
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://example.com/a", "text/html", nginx)),
+            Some("blockpage-fingerprint")
+        );
+        let cn = "<html><body>您访问的页面因违规被屏蔽。该页面暂时无法访问。</body></html>";
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://example.com/a", "text/html", cn)),
+            Some("blockpage-fingerprint")
+        );
+    }
+
+    #[test]
+    fn fingerprint_without_empty_body_is_left_alone() {
+        // 正常文章里引用一句挡板文案不是被劫持——C 必须配 B。
+        let article = format!("<html><body><p>{}</p><p>Just a moment...</p></body></html>", "正文内容".repeat(100));
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://example.com/a", "text/html", &article)),
+            None
+        );
+    }
+
+    #[test]
+    fn immediate_offsite_redirect_needs_a_cross_domain_response() {
+        // 这组夹具都用长正文，好把 D 从 A && B 那条臂里单独拎出来测。
+        fn long_body(head: &str) -> String {
+            format!(
+                "<html><head>{}</head><body><p>{}</p></body></html>",
+                head,
+                "这是一段足够长的正常正文，用来把可见正文长度顶到阈值以上。"
+                    .repeat(20)
+            )
+        }
+        // A && D：应答已经在别的域，且文档自己要求 0 秒跳走。
+        let meta = long_body(
+            r#"<meta http-equiv="refresh" content="0; url=https://ad.example.net/y">"#,
+        );
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://ad.example.net/x", "text/html", &meta)),
+            Some("cross-domain-immediate-redirect")
+        );
+        // 同站的 0 秒跳转是站点自己的事。
+        let same_site = long_body(
+            r#"<meta http-equiv="refresh" content="0; url=https://www.example.com/b">"#,
+        );
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://example.com/a", "text/html", &same_site)),
+            None
+        );
+        // 延迟够长的「我们搬家了」页不算立即跳转。
+        let slow = long_body(r#"<meta http-equiv="refresh" content="30; url=https://ad.example.net/y">"#);
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://ad.example.net/x", "text/html", &slow)),
+            None
+        );
+        // 头部脚本里的 location 赋值同 D。
+        let js = long_body(r#"<script>window.location.href="https://ad.example.net/y";</script>"#);
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://ad.example.net/x", "text/html", &js)),
+            Some("cross-domain-immediate-redirect")
+        );
+        // 相对跳转必然同站，不参与判定。
+        let relative = long_body(r#"<meta http-equiv="refresh" content="0; url=/real">"#);
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://ad.example.net/x", "text/html", &relative)),
+            None
+        );
+        // 正文中间（头部窗口之外）的站外跳转不算「立即」。
+        let deep_js = format!(
+            "<html><head><title>t</title></head><body><p>{}</p><script>window.location=\"https://ad.example.net/y\"</script></body></html>",
+            "占位正文。".repeat(2000)
+        );
+        assert_eq!(
+            verdict(&probe("https://example.com/a", "https://ad.example.net/x", "text/html", &deep_js)),
+            None
+        );
+    }
+
+    #[test]
+    fn visible_text_len_matches_what_the_model_would_see() {
+        // script/style 不算可见正文，否则一个塞满 JS 的挡板页会被当成「有内容」。
+        let js_only = "<html><script>var a=1;</script><style>.x{}</style><body> </body></html>";
+        assert!(visible_text_len(js_only) < HIJACK_VISIBLE_TEXT_MAX_CHARS);
+        assert!(visible_text_len(LONG_HTML) >= HIJACK_VISIBLE_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn hijack_error_message_is_classified_as_a_network_failure() {
+        // 上层 netGuard 的 isNetworkError / classifyFailure 靠这个 token 把失败归到
+        // network 类，才会触发兜底路由重试并 recordNetOutcome(route, false)。
+        // 改文案时这条测试会红。
+        let p = probe("https://github.com/a", "https://ad.example.net/x", "text/html", SHORT_HTML);
+        let msg = detect_response_hijack(&p).unwrap().error_message(&p);
+        assert!(msg.contains("network") || msg.contains("Network"), "{}", msg);
+        assert!(msg.contains("cross-domain-short-html"), "{}", msg);
+        assert!(msg.contains("https://ad.example.net/x"), "{}", msg);
+    }
+
+    #[test]
+    fn meta_refresh_keeps_past_a_delay_only_refresh_tag() {
+        // 老实现用 `?` 直接从函数返回：前面一个没有 url= 的 refresh 标签会把后面
+        // 真正的跳转目标一起吃掉。
+        let html = r#"<meta http-equiv="refresh" content="5"><meta http-equiv="refresh" content="0; url=https://a.com/x">"#;
+        assert_eq!(extract_meta_refresh(html), Some((0, "https://a.com/x".to_string())));
+        assert_eq!(extract_meta_refresh_url(html).as_deref(), Some("https://a.com/x"));
+        assert_eq!(meta_refresh_delay_secs("12; url=/x"), 12);
+        assert_eq!(meta_refresh_delay_secs("; url=/x"), 0);
+        assert_eq!(extract_meta_refresh(r#"<meta http-equiv="refresh" content="5">"#), None);
     }
 }
 
@@ -15962,6 +16676,7 @@ pub fn run() {
             // Web tools
             web_search,
             web_fetch,
+            web_fetch_probe,
             web_public_api,
             web_scrape,
             // Map tile disk cache (offline basemap)

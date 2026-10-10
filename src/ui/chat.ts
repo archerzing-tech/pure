@@ -11,7 +11,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
-import { hostOf, resolveNetRoute, netRouteProxyPair, recordNetOutcome } from '../shared/netRoute';
+import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
 import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
 import { harvestUserPreferences } from '../shared/memory';
@@ -618,33 +618,35 @@ function buildEnvironmentContext(config: PureConfig | null): string {
   return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.${formatTimeContextLine(currentTimeContext())}${netNote}`;
 }
 
-/** Smart LLM proxy routing (see netRoute.ts): bypass lists force direct;
- *  otherwise the destination host is classified (known-foreign → proxy,
- *  known-domestic → direct) and the learned per-host route decides when a
- *  proxy source exists. Returns '' (direct) whenever no proxy is configured. */
-function llmProxyUrlFor(config: PureConfig | null, baseURL: string, providerId: string): string {
+/** LLM 主对话的代理路由（见 netRoute.ts）：唯一决策点是 netRouteProxyPair。
+ *
+ *  历史 bug：这里先自己调 resolveNetRoute 判一次路由，直连路由下返回空串，
+ *  于是 llmProxyPairFor 拿到空串立刻 `return { proxyUrl: '' }` —— fallback
+ *  被整个丢掉，RustLLMAdapter 的 fallbackProxyUrl 变 undefined，lib.rs 的
+ *  `_ => return Err(primary_err)` 直接失败。而设置页的「测试连接」走的是完整
+ *  netRouteProxyPair（兜底齐备），所以现象是「设置页绿灯、真实对话红灯」。
+ *  现在两个出口共用同一个决策：分类面只回答谁是首选，兜底由通用契约给出。 */
+function llmProxyPairFor(config: PureConfig | null, baseURL: string, providerId: string): { proxyUrl: string; fallbackProxyUrl?: string } {
   const proxy = config?.proxy;
-  if (!proxy) return '';
-  const base = effectiveProxyUrl(proxy);
-  if (!base) return '';
+  const base = proxy ? effectiveProxyUrl(proxy) : '';
+  if (!base) return { proxyUrl: '' };
   // Bypass is provider-level by design (shouldBypassProxy): a model-level
   // list existed once but was two deciders disagreeing — removed.
-  if (proxy.bypassProviders?.includes(providerId)) return '';
-  const route = resolveNetRoute(hostOf(baseURL) ?? '', true);
-  return route === 'proxy' ? base : '';
+  // Bypass is also the one case where NO fallback is right: the user asked for
+  // this provider never to touch a proxy, so the reverse route must not smuggle
+  // it back in after a direct failure.
+  if (proxy?.bypassProviders?.includes(providerId)) return { proxyUrl: '' };
+  const pair = netRouteProxyPair(baseURL, base);
+  return { proxyUrl: pair.proxyUrl, fallbackProxyUrl: pair.fallbackProxyUrl ?? undefined };
 }
 
-/** Proxy route PAIR for the LLM turn: the classified route goes first, and —
- *  when a proxy exists at all — the OPPOSITE route rides along as the
- *  one-shot fallback (netRouteProxyPair). Rust re-sends once on the fallback
- *  after the primary exhausts its attempts, so a wrong classification or a
- *  system proxy that changed/died mid-session self-heals on the same turn
- *  instead of erroring. */
-function llmProxyPairFor(config: PureConfig | null, baseURL: string, providerId: string): { proxyUrl: string; fallbackProxyUrl?: string } {
-  const proxyUrl = llmProxyUrlFor(config, baseURL, providerId);
-  if (!proxyUrl) return { proxyUrl: '' };
-  const pair = netRouteProxyPair(baseURL, proxyUrl);
-  return { proxyUrl: pair.proxyUrl, fallbackProxyUrl: pair.fallbackProxyUrl ?? undefined };
+/** MCP 的代理路由：和别的出口走同一张决策面，只是分类对象是「出口面」而不是
+ *  某个 host——MCP 可能同时挂着 stdio 子进程和 HTTP 远端服务，没有单一目标。
+ *  stdio 走的是给子进程注入 HTTP_PROXY，无法安全换路重跑（重跑一个 MCP
+ *  server 是有害的），所以这个面不提供反向兜底，见 netRoute 的 NO_RETRY_SURFACES。 */
+function mcpProxyUrl(config: PureConfig | null): string {
+  const base = config ? effectiveProxyUrl(config.proxy) : '';
+  return base ? netRouteSurfacePair('mcp', base).proxyUrl : '';
 }
 
 function buildModelIdentity(config: PureConfig | null): { provider: string; model: string } | undefined {
@@ -1156,10 +1158,12 @@ export function createLLMAdapter(
       fallbackProxyUrl: llmProxy.fallbackProxyUrl,
       // 实测学习：这条路由真的通了（或真的失败）就按主机记住，下次直接走
       // 可行的路。没配代理时不学——所有轮次都是直连，记了只是噪声。
+      // 传完整 baseURL 而不是 host：recordNetOutcome 内部自己归一化，
+      // 两侧永远落在同一个 key 上（历史上这里传 host、工具侧传 URL，
+      // 学习表写的是死条目）。
       onNetOutcome: (outcome) => {
         if (!effectiveProxyUrl(config.proxy)) return;
-        const host = hostOf(baseURL);
-        if (host) recordNetOutcome(host, outcome.route, outcome.ok);
+        recordNetOutcome(baseURL, outcome.route, outcome.ok);
       },
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
@@ -1290,9 +1294,9 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
     secretKey: custom ? customSecretKey(custom.id)
       : providerOverrideFor(config.providerOverrides, config.provider)?.hasApiKey ? customSecretKey(config.provider)
       : undefined,
-    // Image generation hits the provider's LLM-family API — route it through
-    // the same proxy scope (and bypass rules) as chat traffic.
-    proxyUrl: llmProxyUrlFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider),
+    // Image generation hits the provider's LLM-family API — same decision point
+    // as chat traffic, so a direct-first host also gets the proxy fallback.
+    proxyUrl: llmProxyPairFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider).proxyUrl,
     proxyBypassProviders: config.proxy?.bypassProviders ?? [],
   };
 }
@@ -2287,7 +2291,7 @@ export class ChatController {
     if (!config) return null;
     const servers = config.mcpServers ?? [];
     if (servers.length === 0) return null;
-    const proxyUrl = effectiveProxyUrl(config.proxy);
+    const proxyUrl = mcpProxyUrl(config);
     if (!this.mcpClient) {
       this.mcpClient = new MCPClient({
         servers: [],
@@ -4260,7 +4264,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // new sessionId/config.
       if (this.deferredInitDone && (
         this.mcpSessionId !== sendSessionId ||
-        this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy)])
+        this.mcpConfigSnapshot !== JSON.stringify([config.mcpServers ?? [], mcpProxyUrl(config)])
       )) {
         this.disconnectMcpClient();
       }
@@ -4400,7 +4404,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
         mcpExcludedPrefixes: config.mcpExcludedPrefixes,
-        proxyUrl: effectiveProxyUrl(config.proxy),
+        proxyUrl: mcpProxyUrl(config),
         permissionManager: this.permissionManager,
         // The engine verifier stays purely rule-based (non-empty-output check);
         // a hard failure there triggers an in-engine rewrite. No LLM re-check of
@@ -4433,7 +4437,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       let mcpConnectPromise: Promise<void> | null = null;
       if (!this.deferredInitDone) {
         this.mcpSessionId = sendSessionId;
-        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], effectiveProxyUrl(config.proxy)]);
+        this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], mcpProxyUrl(config)]);
         this.mcpClient = codingAgent.mcpClient;
         this.codingAgentRef = codingAgent;
         if (this.mcpClient && !fastConversationalTurn) {
@@ -4466,7 +4470,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             servers: [],
             sessionId: sendSessionId,
             onToolDiscovered: (tool) => codingAgent.toolRegistry.register(tool),
-            proxyUrl: effectiveProxyUrl(config.proxy),
+            proxyUrl: mcpProxyUrl(config),
             excludedPrefixes: config.mcpExcludedPrefixes,
           });
           codingAgent.toolRegistry.setMCPExecutor(client);
@@ -4481,7 +4485,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (existing >= 0) servers[existing] = server;
         else servers.push(server);
         persistConfig({ ...current, mcpServers: servers });
-        this.mcpConfigSnapshot = JSON.stringify([servers, effectiveProxyUrl(current.proxy)]);
+        this.mcpConfigSnapshot = JSON.stringify([servers, mcpProxyUrl(current)]);
         return { tools: client.getTools(), persisted: true };
       };
       const promptTools = effectiveWorkspace

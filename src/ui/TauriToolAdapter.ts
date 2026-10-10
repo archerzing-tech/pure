@@ -13,9 +13,18 @@ import { filterResearchSources, isOfficialDocumentationSource, makeResearchPaylo
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
-import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
-import { recordNetOutcome } from '../shared/netRoute';
-import { netRouteProxyPair } from '../shared/netRoute';
+import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, type NetRoutePair } from '../shared/netRoute';
+// 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
+// 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
+import {
+  AUTO_TRUST_TIERS,
+  MIRROR_SOURCES,
+  candidatesFor,
+  fileScopeAllowed,
+  type Ecosystem,
+  type TrustTier,
+} from '../shared/mirrorSources';
 import { generateDocument, toBase64 } from '../shared/docGen';
 
 /** curl/wget exit codes that mean "network-level failure" (resolve/connect/
@@ -287,6 +296,99 @@ function cacheGeneratedImages(toolCallId: string, images: GeneratedImage[]): voi
   }
 }
 
+import {
+  ProbeGuardError,
+  checkProbeTarget,
+  diagnoseNetwork,
+  httpStepFromClassified,
+  isReservedIPv4,
+  renderProbeReport,
+  renderProbeReportForHuman,
+  type NetVerdict,
+  type ProbeStepResult,
+} from '../shared/netProbeCore';
+
+// ── diagnose_network 的 GUI 侧接线 ─────────────────────────────────────────
+//
+// 判定核心（护栏 / DoH 判定 / 归因合并 / 置信度 / 报告渲染）直接用
+// shared/netProbeCore.ts，与 CLI 同源；本文件只提供 WebView 拿得到的那两个
+// 原语：DoH（WebView fetch）与 HTTP（Rust 的 web_fetch_probe，它有代理与
+// 劫持判定）。TCP / TLS 两步在浏览器里**真的做不了**（没有套接字、不给读对端
+// 证书），如实标 skipped 并自陈，置信度由核心统一降档。
+//
+// 为什么核心与 node 适配层要分开：shared/node/netProbe.ts 在模块作用域
+// import node:net / node:tls，Vite 会把 node:* 变成 __vite-browser-external
+// 空壳，rollup 在**解析期**就报 "connect is not exported"，整个 WebView 构建
+// 失败（不是运行期降级，已用最小 vite 工程复现）。所以拨号原语住在
+// src/shared/node/（路径本身说明「仅 node 宿主」），GUI 永远只碰 core。
+//
+// 被放弃的方案：让 core 动态 import('node:net') —— Vite 仍会把同样的 external
+// 桩打进 chunk，解析期报错不变。
+
+/** 换源测速的单请求预算；并发跑完所有候选，最坏也只花这一个数。 */
+const GUI_BENCH_TIMEOUT_MS = 8_000;
+
+/** 测速路径与拼接规则在 shared/mirrorSources（纯函数，CLI 同一份）。 */
+import { benchmarkUrlFor } from '../shared/mirrorSources';
+export { benchmarkUrlFor };
+
+/** DoH 端点：WebView 里少了裸 IP 那家（1.12.12.12 的证书在浏览器侧校验不
+ *  过），其余三家与 core 同一张表——「四家并行、任意一家成功即可」的判据不变，
+ * 少一家只是少摊一份概率性阻断。 */
+const GUI_DOH_ENDPOINTS: readonly string[] = [
+  'https://dns.alidns.com/resolve',
+  'https://doh.pub/resolve',
+  'https://dns.google/resolve',
+];
+
+/** 护栏直接用 core 的 checkProbeTarget：护栏不一致 = GUI 上留了一个能扫内网
+ * 的工具（业界已有 network-mcp 因此被当扫描器用的教训），不能因为宿主不同就
+ * 各写一份。 */
+export const checkGuiProbeTarget = checkProbeTarget;
+
+/** RFC1918 + 回环 + 链路本地 + CGNAT 的判定同样只有一份（DoH 污染判定用）。 */
+export const isReservedProbeIp = isReservedIPv4;
+
+/**
+ * 把一次 Rust web_fetch_probe 的结果翻译成 HTTP 层**步骤读数**。
+ *
+ * 归因（哪一层失败、结论是什么）由 netProbeCore 统一合并，这里只回答一件事：
+ * 这一步自己读到了什么。`verdict` 是这一步的读数（step-level），不是整份报告
+ * 的结论——报告的 verdict 由 core 从四步合成。
+ *
+ * 关键在于**区分「链路断了」与「链路通了但被拒」**：403 证明 TLS 握手成功 +
+ * 请求往返完成（网络层完全正常），把它算成网络失败会让模型去换镜像，而镜像
+ * 同样会 403——方向就整个反了。
+ */
+export function classifyGuiHttpProbe(outcome: {
+  ok: boolean;
+  error?: string;
+  hijackSignal?: string | null;
+}): { status: 'pass' | 'fail'; verdict: NetVerdict; summary: string } {
+  if (outcome.hijackSignal) {
+    return {
+      status: 'fail',
+      verdict: 'http-fail',
+      summary: `应答被判定为劫持/挡板页（${outcome.hijackSignal}）——链路本身是通的，问题在链路中间设备，不在目标站`,
+    };
+  }
+  if (outcome.ok) {
+    return { status: 'pass', verdict: 'reachable', summary: '目标站点给出了正常应答（HTTP 层可达）' };
+  }
+  const msg = outcome.error ?? '未知错误';
+  // 403 / 401 / 429 仍属「链路通」：只说明业务层拒绝，换源无济于事。
+  if (/\b(401|403|407|429)\b/.test(msg)) {
+    return { status: 'fail', verdict: 'http-fail', summary: `HTTP ${msg}——链路是通的（TLS 握手完成、请求往返完成），被业务层/风控拒绝；换镜像无济于事，应换凭据或换用户` };
+  }
+  if (/\b5\d\d\b/.test(msg)) {
+    return { status: 'fail', verdict: 'http-fail', summary: `HTTP ${msg}——服务端 5xx：源侧问题，不是本机网络问题` };
+  }
+  if (isNetworkError(msg)) {
+    return { status: 'fail', verdict: 'inconclusive', summary: `请求失败：${msg}。本宿主无法判定卡在哪一层（TCP/TLS 步已跳过），只能确认 HTTP 层没拿到应答` };
+  }
+  return { status: 'fail', verdict: 'http-fail', summary: `HTTP 层失败：${msg}` };
+}
+
 export interface ImageGenContext {
   /** Provider id (used for proxy-bypass matching). */
   provider: string;
@@ -344,6 +446,389 @@ export class TauriToolAdapter implements ToolAdapter {
     return invoke(command, args);
   }
 
+  /**
+   * execute_command / git_* 传给 Rust 的 proxyUrl 会变成子进程的
+   * HTTP(S)_PROXY 环境变量，作用于子进程会访问的**任意**主机——没有单一目标
+   * 可分类，所以走 command 出口面决策。这个面不提供反向兜底：把同一条命令
+   * 换条路重跑是有害的（`git push`、`npm publish`、`rm`），所以一旦押错，
+   * 只能靠真失败后的学习翻面，而不是悄悄重跑。
+   */
+  private shellProxy(): string {
+    return netRouteSurfacePair('command', this.proxyUrl).proxyUrl;
+  }
+
+  /**
+   * diagnose_network 的 GUI 实现：判定完全委托 shared/netProbeCore，这里只
+   * 注入 WebView 拿得到的两个原语（DoH 走 WebView fetch，HTTP 走 Rust 的
+   * web_fetch_probe），TCP / TLS 如实 skipped。
+   *
+   * HTTP 层走 Rust 而不是 WebView fetch：后者受 CORS 限制且不认应用代理配置，
+   * 而「用户配了代理」正是这个工具最常被调用的场景。
+   */
+  private async runGuiNetworkProbe(
+    toolId: string,
+    toolName: string,
+    start: number,
+    target: string,
+    humanReadable: boolean,
+  ): Promise<ToolResult> {
+    const tcpNote = 'TCP：本宿主（GUI/WebView）没有套接字原语，无法区分 SYN 被丢弃与端口被拒';
+    const tlsNote = 'TLS：本宿主无法读取对端证书，无法校验证书与域名是否匹配';
+    try {
+      const report = await diagnoseNetwork(target, {
+        dohEndpoints: GUI_DOH_ENDPOINTS,
+        unavailableNotes: {
+          dns: 'DNS/DoH：WebView 没有可用的 fetch 原语（CORS 会掐掉 DoH 端点）',
+          tcp: tcpNote,
+          tls: tlsNote,
+        },
+        deps: {
+          fetchImpl: typeof fetch === 'function' ? fetch : null,
+          // 显式 null = 本宿主没有该原语（能力自陈要看这个区别）。
+          tcpProbe: null,
+          tlsProbe: null,
+          // 单次尝试，不走 runRouted 的反向兜底：诊断要回答的是「**当前这条
+          // 路径**通不通」，自动换一条路重跑会把故障证据洗掉。
+          httpProbe: async (url): Promise<ProbeStepResult> => {
+            let outcome: { ok: boolean; error?: string; hijackSignal?: string | null };
+            try {
+              const payload = await this.call('web_fetch_probe', {
+                workspace: this.workspace,
+                url,
+                maxChars: 2000,
+                proxyUrl: this.proxyUrl || null,
+              }) as { statusOk?: boolean; hijackSignal?: string | null };
+              outcome = { ok: payload?.statusOk === true, hijackSignal: payload?.hijackSignal ?? null };
+            } catch (err) {
+              outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+            }
+            const step = classifyGuiHttpProbe(outcome);
+            if (step.status === 'pass') {
+              return { step: 'http', status: 'pass', ms: 0, summary: step.summary };
+            }
+            // inconclusive = 宿主无法定位成因：交回 core，它会如实报
+            // inconclusive 而不是硬凑一个「HTTP 层失败」的结论。
+            if (step.verdict === 'inconclusive') {
+              return { step: 'http', status: 'fail', ms: 0, summary: step.summary };
+            }
+            return httpStepFromClassified(step.summary, step.verdict, [
+              outcome.hijackSignal
+                ? '这是链路中间设备改写应答，不是目标站的问题；换镜像无效，应检查本机网络出口（代理 / DNS / 运营商）。'
+                : '先区分「源侧问题」与「本机网络问题」：换一个已知可达的源对照测试最快。',
+            ]);
+          },
+        },
+      });
+      const text = humanReadable ? renderProbeReportForHuman(report) : renderProbeReport(report);
+      // 不可达不是「工具坏了」：success:true 让模型读到归因，而不是把它当成
+      // 需要重试的执行错误（与 CLI 侧同一处理）。
+      return { id: toolId, toolName, result: text, success: true, duration: Date.now() - start };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ProbeGuardError || /拒绝|不在允许名单/.test(msg)) {
+        return { id: toolId, toolName, error: `diagnose_network: ${msg}`, success: false, duration: Date.now() - start };
+      }
+      return { id: toolId, toolName, error: `diagnose_network: ${msg}`, success: false, duration: Date.now() - start };
+    }
+  }
+
+  /**
+   * switch_package_source 的 GUI 实现。
+   *
+   * 边界与 CLI 侧完全一致：默认 session 档（纯计算，零落盘零 spawn），
+   * file 档必须 confirm:true 且非 dry-run。
+   *
+   * file 档为什么在这里降级为「去 CLI 执行」：GUI 侧写文件要走 Rust 的
+   * write_file，而它的入参是 (workspace, path) 且受 path_policy 约束；
+   * ~/.npmrc 这类**用户主目录之外**的路径虽然允许绝对路径，但那样等于让
+   * 模型经由 write_file 改写任意外部文件——而 sourceSwitcher 的 journal
+   * 契约（写前读旧值 → 记 journal → 才写）依赖 node:fs 的原子追加，WebView
+   * 里没有等价原语。所以这里**不假装成功**，而是给出确切的 CLI 命令。
+   */
+  private async runGuiSwitchSource(
+    toolId: string,
+    toolName: string,
+    start: number,
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
+    const ecosystemRaw = String(args.ecosystem ?? '').trim();
+    const ecosystem = ecosystemRaw as Ecosystem;
+    if (!(ecosystemRaw in MIRROR_SOURCES)) {
+      return {
+        id: toolId, toolName, success: false, duration: Date.now() - start,
+        error: `switch_package_source: 未知生态：${ecosystemRaw || '（空）'}。可用：${Object.keys(MIRROR_SOURCES).join(', ')}`,
+      };
+    }
+    const tiers = Array.isArray(args.enabledTrustTiers)
+      ? (args.enabledTrustTiers.map(String).filter((t): t is TrustTier => t === 't0' || t === 't1' || t === 't2' || t === 't3'))
+      : undefined;
+    const enabledTiers = tiers ?? AUTO_TRUST_TIERS;
+    const scope = args.scope === 'file' ? 'file' : 'session';
+    const mirrors = MIRROR_SOURCES[ecosystem];
+    const requested = String(args.source ?? 'auto').trim();
+
+    // ── 选源 ──
+    const candidates = candidatesFor(ecosystem, { enabledTiers });
+    let selected = candidates[0];
+    let fromInventory = true;
+    const warnings: string[] = [];
+    let benchmarkLines: string[] = [];
+    if (requested === 'auto') {
+      // source:'auto' 是**默认档**，不能跳过测速直接取首选项——那等于让 GUI
+      // 用户永远拿到「清单里排第一」而不是「当前真的最快的那个」，而 CLI
+      // 用户拿到的是测速结果。同一份清单在两端给出不同答案，比不做还糟。
+      // 并发跑（不是串行）：串行 8s×N 意味着用户干等 40s。
+      const results = await Promise.all(candidates.map(async (c) => {
+        const url = benchmarkUrlFor(ecosystem, c.url);
+        const started = Date.now();
+        try {
+          const payload = await this.call('fetch_url_text', {
+            url,
+            accept: '*/*',
+            proxyUrl: netRouteProxyPair(url, this.proxyUrl).proxyUrl || null,
+            timeoutSecs: Math.ceil(GUI_BENCH_TIMEOUT_MS / 1000),
+          }) as string;
+          return `${c.url}\tOK  \t${Date.now() - started}ms\t${String(payload).slice(0, 40).replace(/\s+/g, ' ')}`;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // 「拿到了任何状态码」即证明链路通：401/403 说明 TLS 握手成功 +
+          // 往返完成，正是最该换源的场景，绝不能算失败。
+          const status = /\b([45]\d\d)\b/.exec(msg)?.[1];
+          const reachable = Boolean(status) && Number(status) < 500;
+          return `${c.url}\t${reachable ? 'OK  ' : 'FAIL'}\t${Date.now() - started}ms\t${reachable ? `HTTP ${status}` : msg.slice(0, 60)}`;
+        }
+      }));
+      // 有有效响应的按延迟升序，没有的排后面——判据与 sourceSwitcher.pickBest
+      // 一致（先看「有没有回答」，再比「多快」），否则死源会因为回得快而胜出。
+      const ranked = [...results].sort((a, b) => {
+        const okA = a.includes('\tOK  ') ? 0 : 1;
+        const okB = b.includes('\tOK  ') ? 0 : 1;
+        return okA !== okB ? okA - okB : Number(/\t(\d+)ms/.exec(a)?.[1] ?? 1e9) - Number(/\t(\d+)ms/.exec(b)?.[1] ?? 1e9);
+      });
+      benchmarkLines = ranked;
+      const best = ranked.find((r) => r.includes('\tOK  '));
+      if (best) {
+        const bestUrl = best.split('\t')[0];
+        selected = candidates.find((c) => c.url === bestUrl) ?? selected;
+      } else {
+        warnings.push(`所有候选源测速均未拿到有效响应，回落为生态默认首选 ${selected.url}——请用 diagnose_network 确认是本机网络问题还是源侧问题`);
+      }
+    } else if (requested && requested !== 'default') {
+      const inList = candidates.find((c) => c.url === requested);
+      if (inList) {
+        selected = inList;
+      } else if (requested === candidates[0]?.url) {
+        selected = candidates[0];
+      } else {
+        // 手工 URL 不在**已授权候选集**内：允许，但必须显式说明信任层级未知。
+        const looksLikeUrl = /^https?:\/\//.test(requested) || /^sparse\+https?:\/\//.test(requested);
+        if (!looksLikeUrl) {
+          return {
+            id: toolId, toolName, success: false, duration: Date.now() - start,
+            error: `switch_package_source: source 必须是合法 URL（收到：${requested}）`,
+          };
+        }
+        // 用户显式点名某个 URL **本身就是这一次的显式选择**，所以 session 档
+        // 放行（进程退出即消失，可回退性最高）；file 档要落盘、会长期影响该
+        // 用户所有项目，仍需设置里开启 t3。
+        if (scope === 'file') {
+          return {
+            id: toolId, toolName, success: false, duration: Date.now() - start,
+            error: 'switch_package_source: file 级写入不接受清单外的自配源：请先显式开启 T3 信任分层，或改用 session 档（不落盘、进程退出即消失）。',
+          };
+        }
+        selected = { url: requested, trust: 't3', notes: '用户手工指定，不在受信任清单内；未做来源核验' };
+        // 「在清单内」与「在已授权候选集内」是两件事：T2 源在清单里，但默认
+        // 被 AUTO_TRUST_TIERS 过滤掉，于是它落到这条分支并被降级成 t3 自配。
+        // 判据必须与 sourceSwitcher 同义（按 URL 查全量清单），否则会出现
+        // 「GUI 拒了、CLI 放行」这种两端不一致。
+        fromInventory = MIRROR_SOURCES[ecosystem].sources.some((s) => s.url === requested);
+        warnings.push(fromInventory
+          ? '该源在清单内但其信任分层未获授权，按 T3 用户自配处理：未核验运营方，内容可被任意替换'
+          : '该源不在受信任清单内，按 T3 用户自配处理：未核验运营方，内容可被任意替换');
+      }
+    }
+    if (!selected) {
+      return { id: toolId, toolName, success: false, duration: Date.now() - start, error: 'switch_package_source: 没有可用候选源' };
+    }
+    // 只对**清单内**的源卡信任分层闸门：清单外的自配 URL 已在上一步按 scope
+    // 分别处理过了，这里再拦一次就是把 session 档也堵死，与 CLI 侧不一致。
+    if (fromInventory && (selected.trust === 't2' || selected.trust === 't3') && !enabledTiers.includes(selected.trust)) {
+      return {
+        id: toolId, toolName, success: false, duration: Date.now() - start,
+        error: `switch_package_source: 该源属 ${selected.trust} 信任分层（第三方公益代理 / 用户自配），默认关闭。请在设置里显式开启后再试；开启后下载二进制仍必须校验 sha256。`,
+      };
+    }
+    if (selected.trust === 't2' || selected.trust === 't3') {
+      warnings.push(`${selected.trust} 源已由你显式指定：无 SLA、响应体可被任意替换。下载任何二进制后必须校验 sha256。`);
+    }
+
+    // ── 生态级陷阱（与 CLI 侧逐字对齐，避免同一模型在两端学到不同的坑）──
+    if (ecosystem === 'npm') {
+      warnings.push('npm lockfile 陷阱：package-lock.json 里每个包固化了 resolved 完整 URL。换源前生成的 lockfile 会让 npm ci 继续走老 URL——必须重新生成 lockfile，或用 npm install --registry=<url> 单次指定。');
+    }
+    if (ecosystem === 'pip') {
+      warnings.push('影响该用户的所有 Python 项目（不只是当前目录）；绝不要改用 extra-index-url，pip 官方明确警告它会引入依赖混淆。');
+    }
+    if (ecosystem === 'go') {
+      warnings.push('GOPROXY 已补 ,direct 回退：代理全挂时回落到 VCS 直连（慢但不会彻底失败）。');
+    }
+    const hasEnvSwitch = mirrors.sessionEnvKeys.length > 0;
+    if (!hasEnvSwitch) {
+      warnings.push(`${mirrors.displayName} 没有环境变量换法：已改为给出命令/配置建议，不做任何注入`);
+    }
+    if (ecosystem === 'docker' && mirrors.fileScopeBlockedReason) warnings.push(mirrors.fileScopeBlockedReason);
+
+    const envLines = hasEnvSwitch
+      ? mirrors.sessionEnvKeys.map((key) => {
+          const value = key === 'npm_config_registry' ? selected!.url
+            : key === 'GOPROXY' ? (selected!.url.includes(',') ? selected!.url : `${selected!.url},direct`)
+              : key === 'CARGO_REGISTRIES_CRATES_IO_INDEX' ? (selected!.url.startsWith('sparse+') ? selected!.url : `sparse+${selected!.url}`)
+                : selected!.url;
+          return `  ${key}=${value}`;
+        })
+      : ['  （无）'];
+
+    const summary: string[] = [];
+    summary.push(`${mirrors.displayName} → ${selected.url}（信任分层 ${selected.trust}${selected.operator ? ` · ${selected.operator}` : ''}）`);
+
+    if (scope === 'session') {
+      if (hasEnvSwitch) {
+        summary.push(
+          '会话级换源（不落盘、未写入任何文件、未 spawn 任何命令）：',
+          ...envLines,
+          '要生效，请把这些变量注入子进程（进程退出即失效）。',
+          '未写入任何文件；未 spawn 任何命令。',
+        );
+      } else {
+        // 没有环境变量换法的生态（docker / maven / github）：说清「什么都没改」，
+        // 而不是列一个空的「注入以下变量」——那会让模型以为注入成功过。
+        summary.push(
+          `会话级换源：${mirrors.displayName} → ${selected.url}。该生态没有环境变量换法，未做任何改动。`,
+          '未写入任何文件；未 spawn 任何命令。',
+          '可用的做法见下方「建议」。',
+        );
+      }
+    } else {
+      // file 档：护栏与降级说明。绝不在这里「假装写成功了」。
+      if (!fileScopeAllowed(ecosystem)) {
+        summary.push(`file 级换源被拒绝：${mirrors.fileScopeBlockedReason ?? '该生态不支持 file 级写入'}。未做任何改动。`);
+      } else if (args.confirm !== true || args.dryRun !== false) {
+        // dry_run 缺省为 true，所以「真要写」必须同时满足 confirm:true 且
+        // dry_run:false。任一不满足就只给计划，绝不落盘。
+        const gate = args.confirm !== true
+          ? '缺少 confirm:true（用户未显式批准）'
+          : '缺少 dry_run:false（仍处于 dry-run，未要求真正写入）';
+        summary.push(`file 级换源被拒绝：${gate}。未做任何改动。`);
+      } else {
+        summary.push(
+          `file 级换源在 GUI（桌面版）下不可执行，需要在 CLI 环境执行。未做任何改动。`,
+          '',
+          '确切命令：',
+          `  pure --print 换源 ${ecosystem} --source ${selected.url} --scope file --confirm`,
+          '',
+          '或直接手改配置文件（键名见下）：',
+          `  ${ecosystem === 'npm' ? '~/.npmrc' : ecosystem === 'pip' ? '~/.config/pip/pip.conf' : ecosystem === 'cargo' ? '~/.cargo/config.toml' : ecosystem === 'go' ? '~/.config/go/env' : ecosystem === 'composer' ? '~/.config/composer/config.json' : ecosystem === 'rubygems' ? '~/.gemrc' : '~/.huggingface/mirror.env'}`,
+          '',
+          'CLI 侧会先写 journal（~/.pure/source-switch-journal.jsonl）再落盘，回滚语义是「删键」而不是把上游 URL 写回去。',
+          '注意：GUI 不做这次写入，是因为它必须遵守「写前读旧值 → 记 journal → 才写」的契约，而该契约依赖 CLI 的原子文件操作；GUI 侧宁可拒绝，也不做一次没有回滚依据的写入。',
+        );
+      }
+    }
+
+    const lines = [
+      ...summary,
+      ...(benchmarkLines.length > 0 ? ['', '测速明细（按「先看有没有回答，再比多快」排序）：', ...benchmarkLines.map((r) => `  ${r.split('\t').join('  ')}`)] : []),
+      ...(warnings.length > 0 ? ['', '注意：', ...warnings.map((w) => `- ${w}`)] : []),
+    ];
+    return { id: toolId, toolName, result: lines.join('\n'), success: true, duration: Date.now() - start };
+  }
+
+  /**
+   * 统一的「先试首选路由、网络类失败（或被劫持伪装成的成功）再试一次反向
+   * 路由」执行器。所有 HTTP 出口都走这里，保证「配了代理一定有兜底」这条
+   * 契约在工具侧同样成立——历史上 web_search / web_public_api /
+   * download_file 直接把 this.proxyUrl 传下去（代理永远优先），而
+   * web_fetch 走 netRouteProxyPair（直连优先 + 兜底），同一个配置在两个
+   * 出口得到两种相反的答案：代理挂了这几个出口全挂，代理只是备用时它们
+   * 又白白绕一圈。
+   *
+   * `inspect` 用于在「成功」之后仍然判定内容是否为劫持页：Rust 只看
+   * status.is_success()，200 的广告页会被当成真内容交给模型。
+   */
+  private async runRouted<T>(
+    route: NetRoutePair,
+    run: (proxyUrl: string) => Promise<T>,
+    inspect?: (value: T) => string | null,
+  ): Promise<T> {
+    const host = route.host ?? '';
+    // 劫持页是一个「成功但不可信」的结局：HTTP 200，内容不是用户要的东西。
+    // 它必须走网络失败那条路（兜底重试 + unlearn 这条错路），但不靠错误文本
+    // 传递——那是隐式契约，改一个词就静默失效。
+    type Attempt = { ok: true; value: T } | { ok: false; network: boolean; msg: string };
+    const attempt = async (proxyUrl: string): Promise<Attempt> => {
+      try {
+        const value = await run(proxyUrl);
+        const hijack = inspect?.(value) ?? null;
+        if (!hijack) return { ok: true, value };
+        return { ok: false, network: true, msg: `${hijackReason({ hijacked: true, signal: hijack })}（${hijack}）` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, network: isNetworkError(msg), msg };
+      }
+    };
+    const learn = (proxyUrl: string, ok: boolean): void => {
+      if (host) recordNetOutcome(host, proxyUrl ? 'proxy' : 'direct', ok);
+    };
+
+    const first = await attempt(route.proxyUrl);
+    if (first.ok) {
+      if (host) recordNetSuccess(host);
+      learn(route.proxyUrl, true);
+      return first.value;
+    }
+    // 没有兜底（未配代理 / neutral 主机）或不是网络类失败 —— 原样上报。
+    if (route.fallbackProxyUrl === null || !host || !first.network) throw new Error(first.msg);
+    learn(route.proxyUrl, false);
+
+    const second = await attempt(route.fallbackProxyUrl);
+    if (second.ok) {
+      recordNetSuccess(host);
+      learn(route.fallbackProxyUrl, true);
+      return second.value;
+    }
+    learn(route.fallbackProxyUrl, false);
+    const { tripped } = recordNetFailure(host);
+    throw new Error(tripped ? blockedHostMessage(host, second.msg) : second.msg);
+  }
+
+  /** 无单一目标 host 的出口（搜索/公共 API 扇出到几十个后端）：用出口面
+   *  决策而不是 host 决策，兜底契约不变。 */
+  private async runRoutedSurface<T>(
+    surface: 'web_search' | 'web_public_api',
+    run: (proxyUrl: string) => Promise<T>,
+  ): Promise<T> {
+    const pair = netRouteSurfacePair(surface, this.proxyUrl);
+    const learn = (proxyUrl: string, ok: boolean): void => recordNetSurfaceOutcome(surface, proxyUrl ? 'proxy' : 'direct', ok);
+    try {
+      const value = await run(pair.proxyUrl);
+      learn(pair.proxyUrl, true);
+      return value;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (pair.fallbackProxyUrl === null || !isNetworkError(msg)) throw err;
+      learn(pair.proxyUrl, false);
+      try {
+        const value = await run(pair.fallbackProxyUrl);
+        learn(pair.fallbackProxyUrl, true);
+        return value;
+      } catch (err2) {
+        learn(pair.fallbackProxyUrl, false);
+        throw err2 instanceof Error ? err2 : new Error(String(err2));
+      }
+    }
+  }
+
   getTools(): ToolDefinition[] {
     return (tauriInvoke || this.invokeFn)
       ? TOOL_DEFINITIONS.filter((tool) => isPublicToolName(tool.name) || isDynamicCapabilityTool(tool.name))
@@ -385,9 +870,15 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!query) return { id: toolCall.id, toolName: name, error: 'search_agent_skills requires a query', success: false, duration: Date.now() - start };
           const maxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults) ? Math.min(20, Math.max(1, Math.floor(args.maxResults))) : 8;
           // Hub indexes live on raw.githubusercontent.com — classify that host
-          // so a configured proxy actually gets used (same as web_scrape).
+          // so a configured proxy actually gets used, and keep the reverse
+          // route as a real fallback (it used to be computed then dropped).
           const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
-          const candidates = await searchHubSkills(query, maxResults, undefined, hubRoute.proxyUrl);
+          const candidates = await this.runRouted(
+            hubRoute,
+            (proxyUrl) => searchHubSkills(query, maxResults, undefined, proxyUrl),
+            // 空结果不是劫持（skill 搜索无命中是常态），只看内容是否像挡板页。
+            () => null,
+          );
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, candidates }, null, 2), success: true, duration: Date.now() - start };
         }
         case 'install_agent_skill': {
@@ -400,11 +891,14 @@ export class TauriToolAdapter implements ToolAdapter {
           // user pasted — normalize both to owner/repo for the fetch ladder.
           const repo = normalizeHubRepo(source) || source;
           const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
-          const raw = await fetchSkillBody(repo, nameArg, hubRoute.proxyUrl);
-          // Route learning (approximate by design): the ladder tries several
-          // GitHub routes internally — record against the classified host so
-          // a totally dead first route gets re-probed next time.
-          recordNetOutcome('raw.githubusercontent.com', hubRoute.proxyUrl ? 'proxy' : 'direct', !!raw);
+          const raw = await this.runRouted(
+            hubRoute,
+            (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl),
+            (text) => detectHijack(text, { url: 'https://raw.githubusercontent.com/', expectContent: true }).signal,
+          );
+          // Route learning: runRouted 已经按真实结局记过学习；这里额外把
+          // 「三条路全灭」也记一次失败，免得一条死记忆长期钉住 raw CDN。
+          if (!raw) recordNetOutcome('raw.githubusercontent.com', hubRoute.proxyUrl ? 'proxy' : 'direct', false);
           if (!raw) {
             return {
               id: toolCall.id,
@@ -435,19 +929,27 @@ export class TauriToolAdapter implements ToolAdapter {
           const query = String(args.query ?? '').trim();
           if (!query) return { id: toolCall.id, toolName: name, error: 'search_mcp_servers requires a query', success: false, duration: Date.now() - start };
           const maxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults) ? Math.min(20, Math.max(1, Math.floor(args.maxResults))) : 8;
-          const officialRaw = await this.call('web_fetch', {
-            workspace: this.workspace,
-            url: mcpRegistrySearchUrl(query, Math.max(12, maxResults * 2)),
-            maxChars: 100_000,
-            proxyUrl: this.proxyUrl,
-          }) as string;
+          const registryUrl = mcpRegistrySearchUrl(query, Math.max(12, maxResults * 2));
+          const officialRaw = await this.runRouted(
+            netRouteProxyPair(registryUrl, this.proxyUrl),
+            (proxyUrl) => this.call('web_fetch', {
+              workspace: this.workspace,
+              url: registryUrl,
+              maxChars: 100_000,
+              proxyUrl,
+            }) as Promise<string>,
+            (text) => detectHijack(text, { url: registryUrl, expectContent: true }).signal,
+          );
           const official = parseMcpRegistryPayload(officialRaw, maxResults);
           let community = [] as McpCandidate[];
           try {
-            const communityRaw = await this.call('web_search', buildWebSearchArgs(this.workspace, {
-              query: `${query} MCP server (Smithery OR mcp.so)`,
-              maxResults: Math.min(8, maxResults),
-            }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
+            const communityRaw = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
+              'web_search',
+              buildWebSearchArgs(this.workspace, {
+                query: `${query} MCP server (Smithery OR mcp.so)`,
+                maxResults: Math.min(8, maxResults),
+              }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
+            ) as Promise<string>);
             community = communityMcpCandidates(parseWebSearchText(communityRaw), maxResults);
           } catch {
             // The official Registry remains useful when community search is unavailable.
@@ -560,7 +1062,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // holds the tool call's pipes open.
           if (args.background === true) {
             const plan = buildBackgroundLaunchPlan(String(args.command ?? ''));
-            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
             const pid = parseBackgroundPid(launch.stdout ?? '');
             return {
               id: toolCall.id,
@@ -609,7 +1111,7 @@ export class TauriToolAdapter implements ToolAdapter {
                 id: toolCall.id,
                 workspace: ws,
                 command: String(args.command ?? ''),
-                proxyUrl: this.proxyUrl,
+                proxyUrl: this.shellProxy(),
                 sandbox: this.sandbox,
                 onOutput: channel,
               }) as number;
@@ -631,7 +1133,7 @@ export class TauriToolAdapter implements ToolAdapter {
               signal?.removeEventListener('abort', onAbort);
             }
           }
-          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
           const execLines: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [
             ...(exec.stdout ? [{ kind: 'stdout' as const, line: exec.stdout }] : []),
             ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
@@ -654,6 +1156,10 @@ export class TauriToolAdapter implements ToolAdapter {
           const outSpec = resolveDownloadOutSpec(destination);
           const cmd = buildDownloadCommand(url, outSpec, connections, filenameArg, resume);
           const emit = (p: DownloadProgressEvent): void => dispatchDownloadProgress(toolCall.id, p);
+          // 下载有明确的 URL，走 host 决策而不是 command 面：直连优先 + 一次
+          // 反向兜底。以前这里直接把 this.proxyUrl 传下去（代理永远优先），
+          // 代理挂了就一个文件都下不下来，直连正常时又白白绕一圈。
+          const dlRoute = netRouteProxyPair(url, this.proxyUrl);
 
           // ── Native Rust downloader first ──
           // Proxy-aware (app proxy config), resume via Range, bounded retries,
@@ -712,16 +1218,30 @@ export class TauriToolAdapter implements ToolAdapter {
                   doneHolder.value = ev as { code: number; path?: string; size?: number; filename?: string; via?: string; error?: string };
                 }
               };
-              const code = (await this.call('download_file_stream', {
+              // 首选路由失败且是网络类问题时，用反向路由整体重下一次（下载可重跑，与
+              // shell 命令不同）。canceled 不重试。
+              const runNative = (proxyUrl: string): Promise<number> => this.call('download_file_stream', {
                 id: toolCall.id,
                 url,
                 path: nativePath,
                 workspace: ws,
-                proxyUrl: this.proxyUrl,
+                proxyUrl,
                 maxAttempts: 3,
                 onOutput: channel,
-              })) as number;
-              const done = doneHolder.value;
+              }) as Promise<number>;
+              let usedProxy = dlRoute.proxyUrl;
+              let code = await runNative(usedProxy);
+              const nativeDone = () => doneHolder.value;
+              if (code !== 0 && dlRoute.fallbackProxyUrl !== null && !cancelled) {
+                const detail0 = nativeDone()?.error ?? `退出码 ${code}`;
+                if (isNetworkError(detail0)) {
+                  recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+                  usedProxy = dlRoute.fallbackProxyUrl;
+                  doneHolder.value = null;
+                  code = await runNative(usedProxy);
+                }
+              }
+              const done = nativeDone();
               // Cancelled beats every other outcome: the backend answers -1 /
               // "cancelled" after the kill_command fired, and the shell-chain
               // fallback must stay out of the way.
@@ -737,6 +1257,7 @@ export class TauriToolAdapter implements ToolAdapter {
               }
               if (code === 0 && done?.path) {
                 recordNetSuccess(url);
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', true);
                 emit({ downloaded: Number(done.size ?? 0), total: Number(done.size ?? 0), percent: 100, speed: 0, state: 'done', path: done.path, filename: done.filename, via: done.via ?? 'native' });
                 return {
                   id: toolCall.id,
@@ -748,6 +1269,7 @@ export class TauriToolAdapter implements ToolAdapter {
               }
               const detail = done?.error ?? `退出码 ${code}`;
               if (isNetworkError(detail)) {
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
                 const { tripped } = recordNetFailure(url);
                 return {
                   id: toolCall.id,
@@ -805,13 +1327,23 @@ export class TauriToolAdapter implements ToolAdapter {
             if (signal?.aborted) onAbort();
             else signal?.addEventListener('abort', onAbort, { once: true });
             try {
-              const code = (await this.call('execute_command_stream', {
+              const runShell = (proxyUrl: string): Promise<number> => this.call('execute_command_stream', {
                 id: toolCall.id,
                 workspace: ws,
                 command: cmd,
-                proxyUrl: this.proxyUrl,
+                proxyUrl,
                 onOutput: channel,
-              })) as number;
+              }) as Promise<number>;
+              let usedProxy = dlRoute.proxyUrl;
+              let code = await runShell(usedProxy);
+              // 网络类退出码 + 有反向兜底 → 换路重下（下载可重跑；已取消的重试
+              // 只会让幽灵进程继续跑，所以 cancelled 时不重试）。
+              if (NET_DOWNLOAD_EXIT_CODES.has(code) && dlRoute.fallbackProxyUrl !== null && !cancelled) {
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+                usedProxy = dlRoute.fallbackProxyUrl;
+                doneHolder.value = null;
+                code = await runShell(usedProxy);
+              }
               if (cancelled) {
                 emit({ downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneHolder.value?.filename });
                 return { id: toolCall.id, toolName: 'download_file', result: '下载已取消。', error: '下载已取消。', success: false, duration: Date.now() - start };
@@ -821,6 +1353,7 @@ export class TauriToolAdapter implements ToolAdapter {
               const size = Number(done?.size ?? 0);
               if (code === 0 && path) {
                 recordNetSuccess(url);
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', true);
                 emit({ downloaded: size, total: size, percent: 100, speed: 0, state: 'done', path, filename: done?.filename, via: done?.via });
                 return {
                   id: toolCall.id,
@@ -833,6 +1366,7 @@ export class TauriToolAdapter implements ToolAdapter {
               emit({ downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: done?.filename });
               // curl/wget network-class exit codes trip the host breaker.
               if (NET_DOWNLOAD_EXIT_CODES.has(code)) {
+                recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
                 const { tripped } = recordNetFailure(url);
                 return {
                   id: toolCall.id,
@@ -848,14 +1382,23 @@ export class TauriToolAdapter implements ToolAdapter {
             }
           }
           // Fallback (no channel): run buffered and parse the done line from stdout.
-          const exec = (await this.call('execute_command', { workspace: ws, command: cmd, proxyUrl: this.proxyUrl })) as {
-            exitCode: number;
-            stdout: string;
-            stderr: string;
-          };
+          const runBuffered = (proxyUrl: string): Promise<{ exitCode: number; stdout: string; stderr: string }> => this.call('execute_command', {
+            workspace: ws,
+            command: cmd,
+            proxyUrl,
+          }) as Promise<{ exitCode: number; stdout: string; stderr: string }>;
+          let usedProxy = dlRoute.proxyUrl;
+          let exec = await runBuffered(usedProxy);
+          if ((NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? ''))
+            && dlRoute.fallbackProxyUrl !== null) {
+            recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+            usedProxy = dlRoute.fallbackProxyUrl;
+            exec = await runBuffered(usedProxy);
+          }
           const doneFb = parseDownloadDone(exec.stdout ?? '');
           if (exec.exitCode === 0 && doneFb?.path) {
             recordNetSuccess(url);
+            recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', true);
             return {
               id: toolCall.id,
               toolName: 'download_file',
@@ -866,6 +1409,7 @@ export class TauriToolAdapter implements ToolAdapter {
           }
           dispatchDownloadProgress(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
           if (NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? '')) {
+            recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
             const { tripped } = recordNetFailure(url);
             return {
               id: toolCall.id,
@@ -900,11 +1444,11 @@ export class TauriToolAdapter implements ToolAdapter {
           // complete escaping story for exactly the two shells the backend
           // picks (`sh -c` on Unix, PowerShell on Windows).
           const addCmd = commitPaths.length > 0 ? `git add -- ${commitPaths.map(quoteShellArg).join(' ')}` : 'git add -A';
-          const add = await this.call('execute_command', { workspace: ws, command: addCmd, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          const add = await this.call('execute_command', { workspace: ws, command: addCmd, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
           if (add.exitCode !== 0) {
             return { id: toolCall.id, toolName: name, error: add.stderr || add.stdout || 'git add failed', success: false, duration: Date.now() - start };
           }
-          const commit = await this.call('execute_command', { workspace: ws, command: `git commit -m ${quoteShellArg(message)}`, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          const commit = await this.call('execute_command', { workspace: ws, command: `git commit -m ${quoteShellArg(message)}`, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
           if (commit.exitCode !== 0) {
             return { id: toolCall.id, toolName: name, error: commit.stderr || commit.stdout || 'git commit failed', success: false, duration: Date.now() - start };
           }
@@ -922,7 +1466,7 @@ export class TauriToolAdapter implements ToolAdapter {
           const branchCmd = action === 'create' ? `git checkout -b ${quoteShellArg(branchName)}`
             : action === 'switch' ? `git checkout ${quoteShellArg(branchName)}`
             : 'git branch';
-          const branchOut = await this.call('execute_command', { workspace: ws, command: branchCmd, proxyUrl: this.proxyUrl, sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          const branchOut = await this.call('execute_command', { workspace: ws, command: branchCmd, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
           if (branchOut.exitCode !== 0) {
             return { id: toolCall.id, toolName: name, error: branchOut.stderr || branchOut.stdout || 'git branch failed', success: false, duration: Date.now() - start };
           }
@@ -946,7 +1490,10 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'researcher_web': {
           const prompt = String(args.prompt ?? args.query ?? '').trim();
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
+            'web_search',
+            buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
+          ) as Promise<string>);
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -956,7 +1503,13 @@ export class TauriToolAdapter implements ToolAdapter {
           if (args.fetchContent !== false) {
             const enriched = await Promise.all(selected.map(async (source): Promise<ResearchSource> => {
               try {
-                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl: this.proxyUrl }) as string;
+                // 逐源走 host 决策：搜索命中可能同时包含国内站与境外站，
+                // 统一传 this.proxyUrl 会让其中一半白绕代理。
+                const content = await this.runRouted(
+                  netRouteProxyPair(source.url, this.proxyUrl),
+                  (proxyUrl) => this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl }) as Promise<string>,
+                  (text) => detectHijack(text, { url: source.url, expectContent: true }).signal,
+                );
                 return { ...source, content };
               } catch (error) {
                 failed.push(`${source.url}: ${error instanceof Error ? error.message : String(error)}`);
@@ -986,7 +1539,10 @@ export class TauriToolAdapter implements ToolAdapter {
             return researchFailure(toolCall.id, name, start, 'researcher_docs requires both library and topic');
           }
           const limits = researchLimits(args);
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
+            'web_search',
+            buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
+          ) as Promise<string>);
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -996,7 +1552,11 @@ export class TauriToolAdapter implements ToolAdapter {
           if (args.fetchContent !== false) {
             const enriched = await Promise.all(selected.map(async (source): Promise<ResearchSource> => {
               try {
-                const content = await this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl: this.proxyUrl }) as string;
+                const content = await this.runRouted(
+                  netRouteProxyPair(source.url, this.proxyUrl),
+                  (proxyUrl) => this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl }) as Promise<string>,
+                  (text) => detectHijack(text, { url: source.url, expectContent: true }).signal,
+                );
                 return { ...source, content };
               } catch (error) {
                 failed.push(`${source.url}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1029,7 +1589,14 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: raw, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
-          const searchData = await this.call('web_search', buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, this.proxyUrl, this.location, this.searxngUrl)) as string;
+          // 搜索后端是一整个扇出（API + 结构化 + HTML 多引擎），没有单一目标
+          // host：走 web_search 出口面 —— 直连优先 + 一次反向兜底。以前是
+          // this.proxyUrl 直传，代理一挂所有后端一起死（web_search 尤其惨：
+          // 同一个坏代理喂给全部后端，无一幸免）。
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
+            'web_search',
+            buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
+          ) as Promise<string>);
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -1039,55 +1606,33 @@ export class TauriToolAdapter implements ToolAdapter {
           if (hostBlocked(fetchUrl)) {
             return { id: toolCall.id, toolName: name, result: blockedHostMessage(fetchUrl), success: false, duration: Date.now() - start };
           }
-          // Smart route: netRoute picks direct/proxy per destination host and
-          // remembers which route worked; the opposite route is the one-shot
-          // fallback for network-class failures.
+          // 唯一决策点：netRouteProxyPair 决定首选并给出反向兜底。200 的
+          // 劫持页在这里被 inspect 拦下（Rust 只看 status.is_success），
+          // 归类为网络失败 → 走兜底路由重试 → unlearn 这条错路。
           const route = netRouteProxyPair(fetchUrl, this.proxyUrl);
-          const runFetch = (proxyUrl: string): Promise<string> =>
-            this.call('web_fetch', {
-              workspace: ws,
-              url: fetchUrl,
-              maxChars: args.maxChars ?? 20000,
-              proxyUrl,
-            }) as Promise<string>;
           try {
-            const pageText = await runFetch(route.proxyUrl);
-            recordNetSuccess(fetchUrl);
-            // Route learning: pin the route that actually served this fetch.
-            recordNetOutcome(fetchUrl, route.proxyUrl ? 'proxy' : 'direct', true);
+            const pageText = await this.runRouted(
+              route,
+              (proxyUrl) => this.call('web_fetch', {
+                workspace: ws,
+                url: fetchUrl,
+                maxChars: args.maxChars ?? 20000,
+                proxyUrl,
+              }) as Promise<string>,
+              (text) => detectHijack(text, { url: fetchUrl, expectContent: true }).signal,
+            );
             return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            if (!isNetworkError(msg) || route.fallbackProxyUrl === null) {
-              // Non-network failure — not the proxy's fault; surface as-is.
-              return { id: toolCall.id, toolName: name, result: netFailureHint(fetchUrl, msg), success: false, duration: Date.now() - start };
-            }
-            // Network-class failure on the primary route — unlearn it so the
-            // fallback's outcome decides what gets pinned.
-            recordNetOutcome(fetchUrl, route.proxyUrl ? 'proxy' : 'direct', false);
-            try {
-              const pageText = await runFetch(route.fallbackProxyUrl);
-              recordNetSuccess(fetchUrl);
-              recordNetOutcome(fetchUrl, route.fallbackProxyUrl ? 'proxy' : 'direct', true);
-              return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
-            } catch (err2) {
-              const msg2 = err2 instanceof Error ? err2.message : String(err2);
-              const { tripped } = recordNetFailure(fetchUrl);
-              recordNetOutcome(fetchUrl, route.fallbackProxyUrl ? 'proxy' : 'direct', false);
-              return {
-                id: toolCall.id,
-                toolName: name,
-                result: tripped ? blockedHostMessage(fetchUrl, msg2) : netFailureHint(fetchUrl, msg2),
-                success: false,
-                duration: Date.now() - start,
-              };
-            }
+            // Non-network failure — not the proxy's fault; surface as-is.
+            return { id: toolCall.id, toolName: name, result: netFailureHint(fetchUrl, msg), success: false, duration: Date.now() - start };
           }
         }
         case 'web_public_api': {
           // Structured direct lookups (Tier-2) with the same search keys so
           // searchOnMiss escalation hits Serper/Tavily first, like web_search.
-          const data = await this.call('web_public_api', {
+          // 同样是「多后端 + searchOnMiss 升级」的扇出，出口面决策。
+          const data = await this.runRoutedSurface('web_public_api', (proxyUrl) => this.call('web_public_api', {
             workspace: ws,
             query: String(args.query ?? ''),
             category: typeof args.category === 'string' ? args.category : null,
@@ -1095,39 +1640,26 @@ export class TauriToolAdapter implements ToolAdapter {
             apiKey: this.tavilyApiKey,
             serperApiKey: this.serperApiKey,
             searchOnMiss: args.searchOnMiss !== false,
-            proxyUrl: this.proxyUrl,
+            proxyUrl,
             searxngUrl: this.searxngUrl || null,
-          }) as string;
+          }) as Promise<string>);
           return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
         case 'web_scrape': {
-          // Smart route: netRoute picks direct/proxy per destination host; the
-          // opposite route is the one-shot fallback for network-class failures
-          // (same pattern as web_fetch above).
+          // 与 web_fetch 同一个执行器：首选路由 → 网络类失败/劫持页 → 反向兜底。
           const scrapeUrl = String(args.url ?? '');
-          const scrapeRoute = netRouteProxyPair(scrapeUrl, this.proxyUrl);
-          const runScrape = (proxyUrl: string): Promise<string> =>
-            this.call('web_scrape', {
+          const data = await this.runRouted(
+            netRouteProxyPair(scrapeUrl, this.proxyUrl),
+            (proxyUrl) => this.call('web_scrape', {
               workspace: ws,
               url: scrapeUrl,
               selector: typeof args.selector === 'string' ? args.selector : null,
               maxChars: args.maxChars ?? 20000,
               proxyUrl: proxyUrl || null,
-            }) as Promise<string>;
-          try {
-            const data = await runScrape(scrapeRoute.proxyUrl);
-            recordNetOutcome(scrapeUrl, scrapeRoute.proxyUrl ? 'proxy' : 'direct', true);
-            return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (!isNetworkError(msg) || scrapeRoute.fallbackProxyUrl === null) {
-              throw err;
-            }
-            recordNetOutcome(scrapeUrl, scrapeRoute.proxyUrl ? 'proxy' : 'direct', false);
-            const data = await runScrape(scrapeRoute.fallbackProxyUrl);
-            recordNetOutcome(scrapeUrl, scrapeRoute.fallbackProxyUrl ? 'proxy' : 'direct', true);
-            return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
-          }
+            }) as Promise<string>,
+            (text) => detectHijack(text, { url: scrapeUrl, expectContent: true }).signal,
+          );
+          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
         }
         case 'glob_files': {
           const globResult = await this.call('glob_files', {
@@ -1236,11 +1768,21 @@ export class TauriToolAdapter implements ToolAdapter {
             duration: Date.now() - start,
           };
         }
+        case 'diagnose_network': {
+          const target = String(args.target ?? '').trim();
+          if (!target) {
+            return { id: toolCall.id, toolName: name, error: 'diagnose_network: target must not be empty — pass the URL or domain that is failing.', success: false, duration: Date.now() - start };
+          }
+          return await this.runGuiNetworkProbe(toolCall.id, name, start, target, args.humanReadable === true);
+        }
+        case 'switch_package_source': {
+          return await this.runGuiSwitchSource(toolCall.id, name, start, args);
+        }
         default:
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, git_commit, git_branch, sys_info`,
+            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, git_commit, git_branch, sys_info, diagnose_network, switch_package_source`,
             success: false,
             duration: Date.now() - start,
           };
