@@ -1,6 +1,6 @@
 // 9.2 — phase-model override normalization shared by the GUI and the CLI.
 import { describe, expect, test } from 'bun:test';
-import { mergePhaseModelConfig, phaseModelOverrides, reflectModelFor } from '../phaseModels';
+import { judgeModelFor, mergePhaseModelConfig, phaseModelOverrides, reflectModelFor, sanitizePhaseModelConfig } from '../phaseModels';
 
 describe('phaseModelOverrides', () => {
   test('keeps only phases that actually reroute', () => {
@@ -65,5 +65,30 @@ describe('reflectModelFor', () => {
 
   test('other phases never leak into the reflect slot', () => {
     expect(reflectModelFor({ think: 'glm-5.3' }, 'glm-5.3-flash')).toBeUndefined();
+  });
+});
+
+// 刀 4.2 — 判例轻档（插话分类/聚焦点名/语义路由）的模型解析：配置门控，
+// 未配置/配了主模型本身时调用方回退现有链，行为与轻档引入前一致。
+describe('judgeModelFor', () => {
+  test('returns the judge override when set and different from the main model', () => {
+    expect(judgeModelFor({ judge: 'glm-4.5-flash' }, 'glm-5.3-flash')).toBe('glm-4.5-flash');
+  });
+
+  test('undefined when unset, blank, or equal to the main model (no shadow adapter)', () => {
+    expect(judgeModelFor(undefined, 'glm-5.3-flash')).toBeUndefined();
+    expect(judgeModelFor({ judge: '  ' }, 'glm-5.3-flash')).toBeUndefined();
+    expect(judgeModelFor({ judge: 'glm-5.3-flash' }, 'glm-5.3-flash')).toBeUndefined();
+  });
+
+  test('engine phases never leak into the judge slot', () => {
+    expect(judgeModelFor({ reflect: 'glm-4.5-flash', think: 'glm-4.5-air' }, 'glm-5.3-flash')).toBeUndefined();
+  });
+
+  test('sanitize and merge both carry the judge field (config + --judge-model)', () => {
+    expect(sanitizePhaseModelConfig({ judge: '  glm-4.5-flash ', reflect: '' })).toEqual({ judge: 'glm-4.5-flash' });
+    expect(mergePhaseModelConfig({ reflect: 'glm-4.5-flash' }, { judge: 'glm-4.5-air' })).toEqual({ reflect: 'glm-4.5-flash', judge: 'glm-4.5-air' });
+    // 空串 flag 不抹掉持久化值。
+    expect(mergePhaseModelConfig({ judge: 'glm-4.5-flash' }, { judge: '  ' })).toEqual({ judge: 'glm-4.5-flash' });
   });
 });

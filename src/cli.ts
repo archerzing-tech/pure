@@ -128,12 +128,14 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   ];
 
   // 9.2 — per-phase model routing (experimental): config.json phaseModels
-  // first, one-off --think-model / --handover-model / --reflect-model flags
-  // win per field (same precedence as provider/model).
+  // first, one-off --think-model / --handover-model / --reflect-model /
+  // --judge-model (刀 4.2 判例轻档) flags win per field (same precedence as
+  // provider/model).
   const phaseModels = mergePhaseModelConfig(fileCfg?.phaseModels, {
     think: flags['think-model'],
     handover: flags['handover-model'],
     reflect: flags['reflect-model'],
+    judge: flags['judge-model'],
   });
 
   return {

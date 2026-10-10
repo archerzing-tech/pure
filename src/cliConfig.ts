@@ -156,7 +156,8 @@ export interface CliArgs {
   /** MCP tool-name prefixes to hide (config.json + --mcp-exclude-prefix). */
   mcpExcludedPrefixes?: string[];
   /** 9.2 — phase-model overrides after merging config.json with
-   * --think-model / --handover-model / --reflect-model (flags win). */
+   * --think-model / --handover-model / --reflect-model / --judge-model
+   * (flags win). */
   phaseModels?: PhaseModelConfig;
   /**
    * True when every tool call (read, write, execute_command, web_search, …)

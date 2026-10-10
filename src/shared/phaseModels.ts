@@ -14,6 +14,10 @@ export interface PhaseModelConfig {
   think?: string;
   handover?: string;
   reflect?: string;
+  /** 刀 4.2 判例轻档：插话分类/聚焦点名/语义路由这类「判断但轻」的宿主调用
+   * 用的模型 id（同 provider 换 model，关暗思考）。不是引擎相位——宿主侧
+   * 判例没有 EngineLlmPhase 槽位，走 judgeModelFor 独立解析。 */
+  judge?: string;
 }
 
 /** Normalized phase → model map, only entries that actually reroute. */
@@ -50,7 +54,7 @@ export function mergePhaseModelConfig(
   flags: Partial<PhaseModelConfig>,
 ): PhaseModelConfig | undefined {
   const merged: PhaseModelConfig = { ...base };
-  for (const key of ['think', 'handover', 'reflect'] as const) {
+  for (const key of ['think', 'handover', 'reflect', 'judge'] as const) {
     const value = flags[key]?.trim();
     if (value) merged[key] = value;
   }
@@ -63,7 +67,7 @@ export function sanitizePhaseModelConfig(raw: unknown): PhaseModelConfig | undef
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const source = raw as Record<string, unknown>;
   const out: PhaseModelConfig = {};
-  for (const key of ['think', 'handover', 'reflect'] as const) {
+  for (const key of ['think', 'handover', 'reflect', 'judge'] as const) {
     const value = source[key];
     if (typeof value === 'string' && value.trim()) out[key] = value.trim();
   }
@@ -80,4 +84,16 @@ export function reflectModelFor(
   mainModel: string,
 ): string | undefined {
   return phaseModelOverrides(cfg, mainModel).REFLECT;
+}
+
+/** 刀 4.2（2026-10-10）— 判例轻档的模型 id：插话分类/聚焦点名/语义路由这类
+ * 「判断但轻」的宿主调用。配置了且不等于主模型时返回它；否则 undefined
+ * （调用方回退现有链：插话分类/聚焦点名回裁决实例，路由留主适配器）——
+ * 未配置时行为与轻档引入前逐字节一致。 */
+export function judgeModelFor(
+  cfg: PhaseModelConfig | undefined,
+  mainModel: string,
+): string | undefined {
+  const model = cfg?.judge?.trim();
+  return model && model !== mainModel ? model : undefined;
 }

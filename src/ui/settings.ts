@@ -950,6 +950,8 @@ export class SettingsPanel {
       '#cfg-map-tile-cache-mb', '#cfg-map-tianditu-key',
       // 9.2 — per-phase model routing ids (text inputs, debounced save).
       '#cfg-phase-think', '#cfg-phase-handover', '#cfg-phase-reflect',
+      // 刀 4.2 — judge-tier model id rides the same debounced save.
+      '#cfg-phase-judge',
       // Memory evolution thresholds (number inputs save on change/blur).
       '#cfg-mem-half-life', '#cfg-mem-active-min', '#cfg-mem-dormant-max',
       '#cfg-mem-delete-floor', '#cfg-mem-grace', '#cfg-mem-supersede-sim'
@@ -1920,17 +1922,19 @@ export class SettingsPanel {
     datalist.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
   }
 
-  /** Gather the three phase inputs; empty strings collapse to a missing
-   * config (routing off), not an empty object. */
+  /** Gather the phase inputs (含刀 4.2 判断轻档); empty strings collapse to a
+   * missing config (routing off), not an empty object. */
   private gatherPhaseModels(): PhaseModelConfig | undefined {
     const read = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() ?? '';
     const cfg: PhaseModelConfig = {};
     const think = read('cfg-phase-think');
     const handover = read('cfg-phase-handover');
     const reflect = read('cfg-phase-reflect');
+    const judge = read('cfg-phase-judge');
     if (think) cfg.think = think;
     if (handover) cfg.handover = handover;
     if (reflect) cfg.reflect = reflect;
+    if (judge) cfg.judge = judge;
     return Object.keys(cfg).length > 0 ? cfg : undefined;
   }
 
@@ -2265,9 +2269,11 @@ export class SettingsPanel {
     const phaseThinkEl = document.getElementById('cfg-phase-think') as HTMLInputElement | null;
     const phaseHandoverEl = document.getElementById('cfg-phase-handover') as HTMLInputElement | null;
     const phaseReflectEl = document.getElementById('cfg-phase-reflect') as HTMLInputElement | null;
+    const phaseJudgeEl = document.getElementById('cfg-phase-judge') as HTMLInputElement | null;
     if (phaseThinkEl) phaseThinkEl.value = cfg.phaseModels?.think ?? '';
     if (phaseHandoverEl) phaseHandoverEl.value = cfg.phaseModels?.handover ?? '';
     if (phaseReflectEl) phaseReflectEl.value = cfg.phaseModels?.reflect ?? '';
+    if (phaseJudgeEl) phaseJudgeEl.value = cfg.phaseModels?.judge ?? '';
     this.refreshPhaseModelOptions();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;

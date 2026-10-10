@@ -121,7 +121,7 @@ import type {
   SubagentActivityEvent,
 } from '../shared/types';
 import { EventFanout } from '../shared/asyncQueue';
-import { phaseModelOverrides } from '../shared/phaseModels';
+import { judgeModelFor, phaseModelOverrides } from '../shared/phaseModels';
 import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, PlanVerificationSpec, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
@@ -4298,7 +4298,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       this.planLlm = createLLMAdapter(config, { disableThinking: true });
       // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
       // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
-      this.judgeLlm = createLLMAdapter(config, { disableThinking: true });
+      // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时，这个缝整体换轻模型
+      // ——插话分类/聚焦点名（同一 decideLlm 缝）这类「判断但轻」的调用走轻
+      // 档；没配时保持关暗思考的主模型，行为与轻档引入前一致。
+      const judgeModel = judgeModelFor(config.phaseModels, config.model);
+      this.judgeLlm = judgeModel
+        ? createLLMAdapter({ ...config, model: judgeModel }, { disableThinking: true })
+        : createLLMAdapter(config, { disableThinking: true });
       // 9.2 — per-phase model routing (experimental). Each phase naming a
       // different model gets its own same-provider adapter through the shared
       // factory; blank / main-model entries fall through to `llm` via the E0.3
@@ -4682,7 +4688,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // below consume `route` / `workflow` exactly as the five separate
       // derivations used to produce them.
       const routeStartMs = performance.now();
-      const turnRoute = await decideTurnRoute(routePrefetch, llm, {
+      // 刀 4.2：判例轻档配了轻模型时，语义路由也走轻档（路由是「判断但轻」
+      // 的一次性调用）；没配留主适配器，路由行为与引入前一致。
+      const turnRoute = await decideTurnRoute(routePrefetch, judgeModel ? this.judgeLlm ?? llm : llm, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
         continuingPlan,

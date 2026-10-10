@@ -2076,7 +2076,14 @@ describe('plan-by-thinking flow', () => {
     // 「时机×内容」这一步就没了。与规划路径同款（planLlm）。档位选择是宿主
     // 读数缝（decideLlm）——判据锁在宿主绑定上。
     expect(src).toContain('decideLlm: () => this.judgeLlm ?? this.turnLlm ?? null');
-    expect(src).toMatch(/this\.judgeLlm = createLLMAdapter\(config, \{ disableThinking: true \}\);/);
+    // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时裁决缝整体换轻模型
+    // （插话分类/聚焦点名同走 decideLlm 缝），没配保持关暗思考主模型——
+    // 未配置行为与轻档引入前一致。
+    expect(src).toMatch(/const judgeModel = judgeModelFor\(config\.phaseModels, config\.model\);/);
+    expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, \{ disableThinking: true \}\)\s*:\s*createLLMAdapter\(config, \{ disableThinking: true \}\);/);
+    // 路由同门控：路由是「判断但轻」的一次性调用，配了轻档才换，没配留主
+    // 适配器（inferSemanticRoute 行为不变）。
+    expect(src).toMatch(/decideTurnRoute\(routePrefetch, judgeModel \? this\.judgeLlm \?\? llm : llm,/);
     // 裁决器看得见"此刻在思考"与思考最新说到哪：时机证据随上下文过河。
     expect(src).toContain("parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');");
     expect(src).toContain('思考最新说到：');
