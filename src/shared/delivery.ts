@@ -212,7 +212,82 @@ export function buildVerificationPlan(profile: Omit<WorkspaceProfile, 'verificat
   return specs;
 }
 
+// ── 刀 1.4：discoverWorkspace 会话内缓存 ──
+// 探针每轮全量递归扫描（~2s，工具级 8s 超时封顶），而一个会话里工作区的
+// 「骨架」——manifest 布局、package.json scripts、测试文件存在性，即
+// profile 的全部输入——极少变。缓存按机械指纹校验，指纹不变直接复用：
+// - git_status --short 全文：git 工作区的强信号，任何深度的增删改都翻面；
+// - 根目录非递归清单：非 git 工作区唯一可得的结构信号（退路）；
+// - package.json 内容复读：提交可能藏住已跟踪文件的改动，scripts 直接进
+//   验证计划，必须逐字比对兜底。
+// 附-5 已言明指纹会静默失效（未跟踪目录深处的增删两边都看不见），这是
+// 接受的残余风险：宿主不判「哪些改动影响 profile」——那是判断，不是缓存。
+// 任何校验读取失败（超时/中止/通道坏）一律回全量：宁可重扫，不给陈旧
+// profile。缓存随 ToolAdapter 实例走（WeakMap）——宿主一个会话一个实例，
+// 会话结束实例即弃，天然会话内作用域。
+
+interface WorkspaceFingerprint {
+  /** git_status 全文；null = 非 git 仓库或捕获时 git 通道失灵。 */
+  gitStatus: string | null;
+  /** 根目录非递归清单。 */
+  rootListing: string;
+  /** package.json 实际路径（嵌套 manifest 也认）与捕获时内容。 */
+  packageJsonPath: string | null;
+  packageJson: string;
+}
+
+const workspaceProfileCache = new WeakMap<ToolAdapter, { profile: WorkspaceProfile; fingerprint: WorkspaceFingerprint }>();
+
+function workspacePackageJsonPath(profile: Omit<WorkspaceProfile, 'verification'>): string | null {
+  return profile.manifestPaths?.find((entry) => entry === 'package.json' || entry.endsWith('/package.json')) ?? null;
+}
+
+async function captureWorkspaceFingerprint(tools: ToolAdapter, profile: WorkspaceProfile, signal?: AbortSignal): Promise<WorkspaceFingerprint | null> {
+  const status = await execute(tools, 'git_status', {}, signal);
+  const root = await execute(tools, 'list_files', { path: '.', recursive: false }, signal);
+  if (root?.success !== true) return null;
+  const packageJsonPath = workspacePackageJsonPath(profile);
+  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath }, signal)) : '';
+  return {
+    gitStatus: status?.success === true ? resultString(status) : null,
+    rootListing: resultString(root),
+    packageJsonPath,
+    packageJson,
+  };
+}
+
+async function workspaceUnchanged(tools: ToolAdapter, prev: WorkspaceFingerprint, signal?: AbortSignal): Promise<boolean> {
+  if (prev.gitStatus !== null) {
+    // 捕获时有 git 信号、校验时失灵——不赌，回全量（指纹强度不许悄悄降级）。
+    const status = await execute(tools, 'git_status', {}, signal);
+    if (status?.success !== true || resultString(status) !== prev.gitStatus) return false;
+  }
+  const root = await execute(tools, 'list_files', { path: '.', recursive: false }, signal);
+  if (root?.success !== true || resultString(root) !== prev.rootListing) return false;
+  if (prev.packageJsonPath) {
+    const packageJson = resultString(await execute(tools, 'read_file', { path: prev.packageJsonPath }, signal));
+    if (packageJson !== prev.packageJson) return false;
+  }
+  return true;
+}
+
 export async function discoverWorkspace(tools: ToolAdapter, signal?: AbortSignal): Promise<WorkspaceProfile> {
+  const cached = workspaceProfileCache.get(tools);
+  if (cached && await workspaceUnchanged(tools, cached.fingerprint, signal)) {
+    // 浅拷贝隔离：调用方拿到的是快照，改坏它也毒不到缓存。
+    return { ...cached.profile };
+  }
+  const profile = await scanWorkspace(tools, signal);
+  // 探索本身失败的 profile 不进缓存（下一轮照常重试）；指纹抓不到（根清单
+  // 读失败）同样放弃——有缓存但校验不动等于白背状态。
+  if (profile.explorationComplete === true) {
+    const fingerprint = await captureWorkspaceFingerprint(tools, profile, signal);
+    if (fingerprint) workspaceProfileCache.set(tools, { profile, fingerprint });
+  }
+  return profile;
+}
+
+async function scanWorkspace(tools: ToolAdapter, signal?: AbortSignal): Promise<WorkspaceProfile> {
   const listingResult = await execute(tools, 'list_files', { path: '.', recursive: true }, signal);
   const rawListing = resultString(listingResult).slice(0, 40_000);
   const listing = projectListing(rawListing);

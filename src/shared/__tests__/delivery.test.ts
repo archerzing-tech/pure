@@ -95,6 +95,114 @@ describe('delivery workspace discovery', () => {
   });
 });
 
+// 刀 1.4 会话内缓存的指纹 mock：状态可变（测试中途翻面），调用全记账。
+// gitStatus 缺省 = 非 git 仓库（通道失败）；gitBroken = 捕获时有信号、校验时失灵。
+function statefulAdapter(state: { listing: string; root?: string; packageJson?: string; gitStatus?: string; gitBroken?: boolean }) {
+  const calls: string[] = [];
+  const adapter: ToolAdapter = {
+    getTools: () => [],
+    getMetadata: () => undefined,
+    execute: async (call: ToolCall): Promise<ToolResult> => {
+      const name = call.function.name;
+      const args = JSON.parse(call.function.arguments) as { path?: string; recursive?: boolean };
+      if (name === 'list_files') {
+        calls.push(args.recursive ? 'list_files:recursive' : 'list_files:flat');
+        return { id: call.id, toolName: name, result: args.recursive ? state.listing : (state.root ?? state.listing), success: true, duration: 1 };
+      }
+      if (name === 'read_file' && args.path === 'package.json') {
+        calls.push('read_file');
+        return { id: call.id, toolName: name, result: state.packageJson ?? '', success: true, duration: 1 };
+      }
+      if (name === 'git_status') {
+        calls.push('git_status');
+        if (state.gitStatus === undefined || state.gitBroken) return { id: call.id, toolName: name, result: '', success: false, error: 'not a git repository', duration: 1 };
+        return { id: call.id, toolName: name, result: state.gitStatus, success: true, duration: 1 };
+      }
+      calls.push(name);
+      return { id: call.id, toolName: name, result: '', success: false, error: 'not found', duration: 1 };
+    },
+  };
+  return { adapter, calls };
+}
+
+describe('discoverWorkspace 会话内缓存（刀 1.4）', () => {
+  const LISTING = 'package.json\nbun.lock\nsrc/index.ts\nsrc/index.test.ts';
+  const SCRIPTS = JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'bun test' } });
+
+  it('指纹不变直接复用：命中轮只有指纹读取，没有递归扫描，且快照与缓存隔离', async () => {
+    const { adapter, calls } = statefulAdapter({ listing: LISTING, packageJson: SCRIPTS, gitStatus: '?? notes.md' });
+    const first = await discoverWorkspace(adapter);
+    expect(calls.slice(0, 5)).toEqual(['list_files:recursive', 'read_file', 'git_status', 'list_files:flat', 'read_file']);
+    const before = calls.length;
+    const second = await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toEqual(['git_status', 'list_files:flat', 'read_file']);
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+  });
+
+  it('git_status 翻面即重扫：任何深度的增删改都不吃陈旧 profile', async () => {
+    const state = { listing: LISTING, packageJson: SCRIPTS, gitStatus: '?? notes.md' };
+    const { adapter, calls } = statefulAdapter(state);
+    await discoverWorkspace(adapter);
+    state.gitStatus = ' M src/index.ts\n?? src/extra.test.ts';
+    const before = calls.length;
+    await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toContain('list_files:recursive');
+  });
+
+  it('git 信号校验时失灵不赌：捕获时有、验证时无 → 回全量', async () => {
+    const state = { listing: LISTING, packageJson: SCRIPTS, gitStatus: '?? notes.md', gitBroken: false };
+    const { adapter, calls } = statefulAdapter(state);
+    await discoverWorkspace(adapter);
+    state.gitBroken = true;
+    const before = calls.length;
+    await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toContain('list_files:recursive');
+  });
+
+  it('非 git 工作区退路：根清单翻面重扫、内容静默复用、package.json 逐字比对兜底', async () => {
+    const state: { listing: string; packageJson: string; root?: string } = { listing: LISTING, packageJson: SCRIPTS };
+    const { adapter, calls } = statefulAdapter(state);
+    await discoverWorkspace(adapter);
+    let before = calls.length;
+    // 根清单没变、无 git 信号 → 复用（指纹只有 flat 清单 + package.json）。
+    await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toEqual(['list_files:flat', 'read_file']);
+    // 根清单翻面（新建了根级文件）→ 重扫。
+    state.root = 'README.md\n' + LISTING;
+    before = calls.length;
+    await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toContain('list_files:recursive');
+    // git 不可用挡不住 scripts 漂移的兜底：package.json 内容变了 → 重扫。
+    state.packageJson = JSON.stringify({ scripts: { test: 'vitest run' } });
+    before = calls.length;
+    const third = await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toContain('list_files:recursive');
+    expect(third.scripts.test).toBe('vitest run');
+  });
+
+  it('探索本身失败的 profile 不进缓存：下一轮照常全量重试', async () => {
+    const state = { listing: '' };
+    const { adapter, calls } = statefulAdapter(state);
+    // 递归清单 success=false → explorationComplete=false → 不缓存。
+    const brokenExecute = adapter.execute;
+    adapter.execute = async (call, signal) => {
+      const name = call.function.name;
+      const args = JSON.parse(call.function.arguments) as { recursive?: boolean };
+      if (name === 'list_files' && args.recursive) return { id: call.id, toolName: name, result: '', success: false, error: 'listing failed', duration: 1 };
+      return brokenExecute(call, signal);
+    };
+    const failed = await discoverWorkspace(adapter);
+    expect(failed.explorationComplete).toBe(false);
+    const before = calls.length;
+    adapter.execute = brokenExecute;
+    state.listing = LISTING;
+    const recovered = await discoverWorkspace(adapter);
+    expect(calls.slice(before)).toContain('list_files:recursive');
+    expect(recovered.explorationComplete).toBe(true);
+  });
+});
+
 describe('delivery failure classification', () => {
   it('separates environment blocks from code failures', () => {
     expect(classifyDeliveryFailure('command not found: pytest')).toBe('tool_unavailable');
