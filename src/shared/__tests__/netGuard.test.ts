@@ -49,6 +49,15 @@ describe('host circuit breaker', () => {
     expect(isNetworkError('HTTP 404 not found')).toBe(false);
   });
 
+  it('recognizes Bun 的真实连接失败措辞（连接拒绝 / DNS / 坏代理同一句）', () => {
+    // Bun fetch 对 connection refused / DNS 失败 / 代理不可达 实测都吐同一句。
+    // 只认 `connection` 会漏掉最常见的真实失败，兜底重试与熔断会静默失效。
+    const bunMsg = 'Unable to connect. Is the computer able to access the url?';
+    expect(isNetworkError(bunMsg)).toBe(true);
+    expect(classifyFailure(bunMsg)).toBe('network');
+    expect(isNetworkError('Unable to resolve host')).toBe(true);
+  });
+
   it('trips after two consecutive network failures and blocks the host', () => {
     const url = 'https://dead-host.example.com/file.zip';
     expect(hostBlocked(url)).toBe(false);

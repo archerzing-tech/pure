@@ -203,6 +203,38 @@ describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点�
     }
   });
 
+  it('真实连接失败措辞（Bun「Unable to connect」）也触发换路兜底', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new Error('Unable to connect. Is the computer able to access the url?');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('https://cli-plan-real.test/x')).rejects.toThrow();
+      expect(seen).toEqual([undefined, 'http://127.0.0.1:7890', undefined]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('取消/超时（AbortSignal）不换路重试：信号已 abort，重试只会立即再失败', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('https://cli-plan-timeout.test/x', { signal: AbortSignal.timeout(50) })).rejects.toThrow();
+      expect(seen.length).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('非网络类失败不换出口（换条路也答不出同一份字节）', async () => {
     setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
     const seen: Array<string | undefined> = [];

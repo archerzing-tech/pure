@@ -136,6 +136,15 @@ export function cliProxyFor(targetUrl: string, explicitProxy?: string): CliProxy
  * 依次试（与 GUI 侧 runRouted 同一口径）；未配代理、或目标为环回/私网时只有
  * 一次直连。只在幂等请求（GET/HEAD）上重试，避免把非幂等请求重复发出。
  */
+/** 取消 / 超时错误（AbortSignal）：信号已 abort，换路再试也会在同一信号上立即
+ *  失败，所以不当作「可换路的网络失败」。（Bun 的 AbortSignal.timeout 拒绝为
+ *  TimeoutError "The operation timed out."，其文本匹配 isNetworkError——必须
+ *  先在这里拦下，否则会对一个已死的信号无意义地重试。） */
+function isAbortOrTimeout(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
 export async function cliFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const route = cliProxyFor(input);
   if (route.unsupported) throw new Error(route.unsupported);
@@ -151,6 +160,7 @@ export async function cliFetch(input: string, init: RequestInit = {}): Promise<R
       return proxy ? await fetch(input, { ...init, proxy }) : await fetch(input, init);
     } catch (err) {
       lastErr = err;
+      if (isAbortOrTimeout(err) || init.signal?.aborted) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       if (!isNetworkError(msg)) throw err;
     }

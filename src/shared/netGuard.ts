@@ -75,7 +75,10 @@ export function hostOf(url: string): string | null {
 /** Connection-level failures trip the breaker; HTTP status errors (404/403/…)
  *  do NOT — the host is clearly reachable, the resource is the problem. */
 export function isNetworkError(message: string): boolean {
-  return /error sending request|connection|timed?[\s-]?out|unreachable|\bdns\b|econn|reset by peer|socket|certificate|tls|fetch failed|network|代理|连接|超时/i.test(message);
+  // `unable to connect` / `unable to resolve` 是 Bun fetch 对连接拒绝、DNS 失败、
+  // 坏代理的统一措辞（实测四种失败都吐这一句）；只认 `connection` 会漏掉最常见的
+  // 真实失败，导致兜底路由重试、熔断、失败分类全都静默失效。
+  return /error sending request|connection|unable to connect|unable to resolve|timed?[\s-]?out|unreachable|\bdns\b|econn|reset by peer|socket|certificate|tls|fetch failed|network|代理|连接|超时/i.test(message);
 }
 
 // ── 应答劫持检测 ────────────────────────────────────────────────────────────
@@ -539,7 +542,7 @@ export type FailureClass =
 
 export function classifyFailure(message: string): FailureClass {
   const m = message.toLowerCase();
-  if (/error sending request|connection|unreachable|\bdns\b|econn|reset by peer|fetch failed|network|证书|certificate|tls|连接/.test(m)) return 'network';
+  if (/error sending request|connection|unable to connect|unable to resolve|unreachable|\bdns\b|econn|reset by peer|fetch failed|network|证书|certificate|tls|连接/.test(m)) return 'network';
   if (/timed?[\s-]?out|超时/.test(m)) return 'timeout';
   if (/401|403|unauthorized|forbidden|api[- ]?key|invalid.*key|凭证|未授权/.test(m)) return 'auth';
   if (/permission denied|eacces|eperm|access denied|权限/.test(m)) return 'permission';
