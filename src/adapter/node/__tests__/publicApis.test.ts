@@ -322,4 +322,41 @@ describe('tryDirectPublicApi (mocked network)', () => {
     const outcome = await tryDirectPublicApi('react 状态管理最佳实践');
     expect(outcome).toBeNull();
   });
+
+  // 结构化 API 后端此前是裸 fetch：用户配了代理，web_search 走上去了而
+  // 汇率/天气/维基全部直连失败，最终以「查不到数据」的形式呈现给模型——
+  // 比直接报错更糟，因为模型会把「查不到」当成事实。
+  it('结构化 API 请求走与 CLI 出口一致的代理语义', async () => {
+    const saved = { proxy: process.env.HTTPS_PROXY, noProxy: process.env.NO_PROXY };
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
+    delete process.env.NO_PROXY;
+    const seen: Array<string | undefined> = [];
+    globalThis.fetch = (async (_input: any, init: RequestInit & { proxy?: string }) => {
+      seen.push(init.proxy);
+      return new Response(JSON.stringify({ rates: { CNY: 7.2 }, date: '2026-08-16' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    try {
+      const outcome = await tryDirectPublicApi('100 usd to cny');
+      expect(outcome?.source).toBe('Frankfurter (ECB)');
+      expect(seen).toEqual(['http://127.0.0.1:7890']);
+    } finally {
+      if (saved.proxy === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = saved.proxy;
+      if (saved.noProxy !== undefined) process.env.NO_PROXY = saved.noProxy;
+    }
+  });
+
+  it('SOCKS 代理下结构化 API 失败而不是静默直连', async () => {
+    const saved = process.env.ALL_PROXY;
+    process.env.ALL_PROXY = 'socks5://127.0.0.1:1080';
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return new Response('{}', { status: 200 }); }) as unknown as typeof fetch;
+    try {
+      // fetchJson 吞掉异常并返回 null，所以「查不到」正是错误被静默的证据；
+      // 断言点是：请求根本没发出去（没有假装成功的直连兜底）。
+      expect(await tryDirectPublicApi('100 usd to cny')).toBeNull();
+      expect(called).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.ALL_PROXY; else process.env.ALL_PROXY = saved;
+    }
+  });
 });

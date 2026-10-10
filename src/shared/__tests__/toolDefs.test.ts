@@ -52,4 +52,29 @@ describe('tool table consistency', () => {
       expect(tagged?.tags).toContain('write');
     }
   });
+
+  // switch_package_source at scope=file rewrites the user's ~/.npmrc / pip.conf /
+  // cargo config.toml. Its own confirm flag is set by the model, so it is NOT a
+  // user-facing gate — if the permission layer classified this as a plain read,
+  // a file write would land with the user never asked and PLAN/DONT_ASK unable
+  // to stop it. Locked here because the classification is metadata that no
+  // typecheck guard can catch: it was silently wrong once already.
+  it('classifies switch_package_source as a write while keeping it low-risk', () => {
+    expect(TOOL_METADATA.switch_package_source?.isWrite).toBe(true);
+    expect(TOOL_METADATA.switch_package_source?.sideEffects).toBe(true);
+    const tagged = BUILT_IN_TOOLS.find((t) => t.name === 'switch_package_source');
+    expect(tagged?.tags).toContain('write');
+    expect(tagged?.riskLevel).toBe('low');
+  });
+
+  // The counterpart: a tool that only ever observes the network must stay a
+  // plain read, or every diagnosis gets gated behind a confirmation card —
+  // exactly the moment the agent most needs to be allowed to look.
+  it('keeps diagnose_network a pure read', () => {
+    expect(TOOL_METADATA.diagnose_network?.isWrite).toBe(false);
+    expect(TOOL_METADATA.diagnose_network?.sideEffects).toBe(false);
+    const tagged = BUILT_IN_TOOLS.find((t) => t.name === 'diagnose_network');
+    expect(tagged?.tags).toContain('read');
+    expect(tagged?.tags).not.toContain('write');
+  });
 });

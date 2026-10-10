@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
-import { blockedHostMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
+import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
@@ -26,10 +26,14 @@ import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotE
 import { cachedDirectPublicApi, parseRssItems, quota } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, searchCacheKey, SEARCH_TTL_MS, webCache } from './webCache';
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
+import { cliFetch, hostMatchesNoProxy, isPrivateHost, parseProxy } from '../../shared/cliFetch';
 import { extractMetaRefreshUrl, extractPdfText, extractPdfViaPdftotext, fetchWithRetry, refererFor, resolveRedirectTarget, scrapeViaFirecrawl, scrapeViaWayback } from './fetchFallback';
 import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
 import { BROWSER_UA } from '../../shared/platformUa';
 import { isThirdPartyPath, THIRD_PARTY_DIR_NAMES } from '../../shared/thirdPartyScope';
+import { ProbeGuardError, diagnoseNetwork, renderProbeReport, renderProbeReportForHuman } from '../../shared/node/netProbe';
+import { switchPackageSource } from '../../shared/node/sourceSwitcher';
+import type { TrustTier } from '../../shared/mirrorSources';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — PowerShell / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -113,6 +117,20 @@ export interface NodeToolConfig {
    */
   location?: string;
 }
+
+// ── 代理 / 内网识别 ──
+// 实现住在 src/shared/cliFetch.ts（此前这里与 fetchFallback.ts 各有一份，两份
+// 都在用，SOCKS 文案已经漂移）。这里只做 re-export：调用点（下载链的 node:http
+// 路径、搜索后端、结构化 API）都从这一个入口拿，语义不可能再分叉。
+export {
+  cliFetch,
+  cliProxyFor,
+  hostMatchesNoProxy,
+  isPrivateHost,
+  parseProxy,
+  resolveEnvProxy,
+  type CliProxyRoute,
+} from '../../shared/cliFetch';
 
 export class NodeToolAdapter implements ToolAdapter {
   private workspace: string;
@@ -198,6 +216,8 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'git_commit': return await this.handleGitCommit(args, signal, start);
         case 'git_branch': return await this.handleGitBranch(args, signal, start);
         case 'sys_info': return await this.handleSysInfo(start);
+        case 'diagnose_network': return await this.handleDiagnoseNetwork(args, start);
+        case 'switch_package_source': return await this.handleSwitchPackageSource(args, start);
         default:
           return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
       }
@@ -1546,13 +1566,14 @@ export class NodeToolAdapter implements ToolAdapter {
    *   2. Jina Reader (r.jina.ai) — blocked / JS-heavy / binary pages
    *   3. Wayback Machine — the closest archived snapshot of a dead/blocked page
    *   4. Firecrawl (opt-in FIRECRAWL_API_KEY) — the hardest anti-bot pages
-   * Returns { text, via } on success or null when every tier failed, so both
-   * callers degrade uniformly instead of failing on the first obstacle.
+   * Returns { text, via } on success, { hijack } when the direct answer was
+   * condemned by the response-hijack verdict, or null when every tier failed, so
+   * both callers degrade uniformly instead of failing on the first obstacle.
    */
   private async fetchPageWithFallbacks(
     url: string,
     opts: { selector?: string; signal?: AbortSignal },
-  ): Promise<{ text: string; via: string } | null> {
+  ): Promise<{ text: string; via: string } | { hijack: string } | null> {
     // 1) Direct fetch.
     try {
       const resp = await fetchWithRetry(url, { signal: opts.signal });
@@ -1568,6 +1589,7 @@ export class NodeToolAdapter implements ToolAdapter {
           let html = await readResponseText(resp);
           // Landing pages that JS-redirect via <meta http-equiv="refresh"> extract
           // to nothing — follow up to 3 hops until the page carries real content.
+          let finalUrl = resp.url || url;
           for (let hop = 0; hop < 3; hop++) {
             const target = extractMetaRefreshUrl(html);
             if (!target) break;
@@ -1576,6 +1598,14 @@ export class NodeToolAdapter implements ToolAdapter {
             const nextResp = await fetchWithRetry(nextUrl, { signal: opts.signal });
             if (!nextResp.ok) break;
             html = await readResponseText(nextResp);
+            finalUrl = nextResp.url || nextUrl;
+          }
+          // 判定排在一切之前，且用的是**抽文本之前**的原始 body。被改写的 200
+          // 广告页既不能进正文，也不能进页面缓存：否则上层会把这次“成功”记到 netRoute，
+          // 把 direct 路由钉死。Rust 侧同样在 fetch_page_with_follow 里拒绝继续试兜底渲染层。
+          const hijack = detectResponseHijack({ requestUrl: url, finalUrl, contentType, body: html });
+          if (hijack) {
+            return { hijack: hijackErrorMessage(hijack, { requestUrl: url, finalUrl, contentType, body: html }) };
           }
           const text = formatPageBody(html, contentType, opts.selector);
           if (text.trim()) return { text: text.trim(), via: 'direct' };
@@ -1661,6 +1691,13 @@ export class NodeToolAdapter implements ToolAdapter {
           'web_fetch',
         );
       }
+      // 被判定为劫持：不记成功、不进缓存，并把这次失败记给熔断器——
+      // recordNetFailure 让 netRoute 把 direct 翻面（走代理），那才是真正能把页面拿回来的路径。
+      // 错误文案里必须出现“Network interception”：isNetworkError / classifyFailure 靠它把这次失败归类成网络类。
+      if ('hijack' in outcome) {
+        recordNetFailure(url);
+        return this.fail(null, start, outcome.hijack, 'web_fetch');
+      }
       recordNetSuccess(url);
       const truncated = outcome.text.length > maxChars ? outcome.text.slice(0, maxChars) + '\n\n[truncated]' : outcome.text;
       webCache().set(pageKey, truncated || '(empty page)', PAGE_TTL_MS);
@@ -1692,47 +1729,7 @@ export class NodeToolAdapter implements ToolAdapter {
     if (cookies) headers.Cookie = cookies;
     return { ...headers, ...(extra ?? {}) };
   }
-
-  // ── 代理 / 内网识别 ──
-  // 下载应区分「内网直连」与「外网走代理」：命中私有地址或 NO_PROXY 的 URL 直接
-  // 连接，其余外部地址才经过代理（命令行显式 proxy 参数 → 标准环境变量）。
-
-  /** 判断主机是否为私有/内网地址（直连，不经代理）。 */
-  private isPrivateHost(host: string): boolean {
-    const h = host.toLowerCase();
-    if (h === 'localhost' || h === '::1' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
-    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (m) {
-      const a = Number(m[1]);
-      const b = Number(m[2]);
-      if (a === 10) return true;
-      if (a === 127) return true;
-      if (a === 169 && b === 254) return true;
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      if (a === 192 && b === 168) return true;
-      if (a === 100 && b >= 64 && b <= 127) return true;
-      if (a === 0) return true;
-    }
-    return false;
-  }
-
-  /** 主机是否匹配 NO_PROXY（支持域名后缀与 `*`）。 */
-  private hostMatchesNoProxy(host: string, noProxy: string): boolean {
-    const h = host.toLowerCase();
-    return noProxy
-      .split(/[,\s]/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .some((entry) => {
-        const e = entry.toLowerCase();
-        if (e === '*') return true;
-        if (e.startsWith('.')) return h === e.slice(1) || h.endsWith(e);
-        return h === e;
-      });
-  }
-
-  /** 解析下载应使用的代理：显式 proxy 参数优先，其次环境变量；内网/匹配
-   * NO_PROXY 时返回空串（直连）。返回 undefined 表示无法用标准代理（如 SOCKS）。 */
+  /** 下载专用：显式 proxy 参数优先，其次环境变量。 */
   private resolveDownloadProxy(targetUrl: string, proxyArg?: string): { proxy: string; bypass: boolean } {
     let proxy = (proxyArg && proxyArg.trim()) || '';
     if (!proxy) {
@@ -1751,23 +1748,8 @@ export class NodeToolAdapter implements ToolAdapter {
     } catch {
       /* ignore malformed url */
     }
-    const bypass = !proxy || this.isPrivateHost(host) || this.hostMatchesNoProxy(host, noProxy);
+    const bypass = !proxy || isPrivateHost(host) || hostMatchesNoProxy(host, noProxy);
     return { proxy: bypass ? '' : proxy, bypass };
-  }
-
-  /** 将代理字符串规范为 URL；SOCKS 代理返回 'socks'（原生请求无法处理，需交给
-   * curl/aria2c），非法值返回 null。 */
-  private parseProxy(proxy: string): { url: URL; scheme: string } | 'socks' | null {
-    try {
-      const u = new URL(proxy);
-      if (u.protocol === 'socks5:' || u.protocol === 'socks5h:' || u.protocol === 'socks4:' || u.protocol === 'socks4a:') {
-        return 'socks';
-      }
-      if (['http:', 'https:'].includes(u.protocol)) return { url: u, scheme: u.protocol };
-      return null;
-    } catch {
-      return null;
-    }
   }
 
   private requestOnce(
@@ -1794,7 +1776,7 @@ export class NodeToolAdapter implements ToolAdapter {
         }
         resolve(res);
       };
-      const pu = proxy ? this.parseProxy(proxy) : null;
+      const pu = proxy ? parseProxy(proxy) : null;
       // SOCKS 代理原生请求无法处理 —— 返回明确错误，让下载链回退到 curl/aria2c。
       if (pu === 'socks') {
         reject(new Error('SOCKS 代理需由 curl/aria2c 处理'));
@@ -2240,7 +2222,7 @@ export class NodeToolAdapter implements ToolAdapter {
     proxy?: string,
   ): Promise<{ ok: boolean; size?: number; error?: string }> {
     try {
-      const res = await fetch(url, { signal: controller.signal, headers: this.downloadHeaders(url) });
+      const res = await cliFetch(url, { signal: controller.signal, headers: this.downloadHeaders(url) });
       if (!res.ok || !res.body) return { ok: false, error: `HTTP ${res.status}` };
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length > 50 * 1024 * 1024) return { ok: false, error: '文件过大，fetch 兜底仅支持小文件' };
@@ -2392,6 +2374,10 @@ export class NodeToolAdapter implements ToolAdapter {
 
     try {
       const outcome = await this.fetchPageWithFallbacks(url, { selector, signal: abort.signal });
+      if (outcome && 'hijack' in outcome) {
+        recordNetFailure(url);
+        return this.fail(null, start, outcome.hijack, 'web_scrape');
+      }
       if (!outcome) {
         return this.fail(null, start, `No readable content could be obtained from ${url} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');
       }
@@ -2411,6 +2397,79 @@ export class NodeToolAdapter implements ToolAdapter {
       success: true,
       duration: Date.now() - start,
     };
+  }
+
+  // ── 网络诊断 / 换源 ──
+  // 两者都默认「只读」：诊断不改任何东西，换源默认 session 档（不落盘），
+  // file 档必须由模型同时传 confirm:true 与 dry_run:false 才放行。
+
+  private async handleDiagnoseNetwork(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const target = String(args.target ?? '').trim();
+    if (!target) {
+      return this.fail(null, start, 'diagnose_network: target must not be empty — pass the URL or domain that is failing.', 'diagnose_network');
+    }
+    const asStrings = (v: unknown): string[] | undefined =>
+      Array.isArray(v) ? v.map(String).filter(Boolean) : undefined;
+    try {
+      const report = await diagnoseNetwork(target, {
+        ...(asStrings(args.allowlist) ? { allowlist: asStrings(args.allowlist) } : {}),
+        ...(asStrings(args.denylist) ? { denylist: asStrings(args.denylist) } : {}),
+        ...(typeof args.port === 'number' ? { port: args.port } : {}),
+        // 探测走同一条出口路由：用户配了代理却在诊断「不配代理时通不通」，
+        // 得到的结论会与真实下载路径不一致。
+        deps: { fetchImpl: ((input: any, init?: RequestInit) => cliFetch(String(input), init ?? {})) as unknown as typeof fetch },
+      });
+      const text = args.humanReadable
+        ? renderProbeReportForHuman(report)
+        : renderProbeReport(report);
+      // 不可达不是「工具坏了」：用 success:true + 结构化结论返回，让模型读到
+      // 归因而不是把它当成需要重试的执行错误。
+      return this.okResult('diagnose_network', text, start);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ProbeGuardError || /拒绝|不在允许名单/.test(msg)) {
+        return this.fail(null, start, `diagnose_network: ${msg}`, 'diagnose_network');
+      }
+      return this.fail(null, start, `diagnose_network failed: ${msg}`, 'diagnose_network');
+    }
+  }
+
+  private async handleSwitchPackageSource(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const tiers = Array.isArray(args.enabledTrustTiers)
+      ? (args.enabledTrustTiers.map(String).filter((t): t is TrustTier => t === 't0' || t === 't1' || t === 't2' || t === 't3'))
+      : undefined;
+    const scope = args.scope === 'file' ? 'file' : args.scope === 'session' ? 'session' : undefined;
+    try {
+      const result = await switchPackageSource({
+        ecosystem: String(args.ecosystem ?? ''),
+        ...(typeof args.source === 'string' ? { source: args.source } : {}),
+        ...(scope ? { scope } : {}),
+        // 默认 true：只产出计划。模型要真写必须显式关掉它。
+        dryRun: args.dryRun !== false,
+        confirm: args.confirm === true,
+        ...(tiers ? { enabledTiers: tiers } : {}),
+      });
+      // 报告给人，也给模型：先结论，再 warnings，再细节。
+      const lines = [
+        result.summary ?? (result.ok ? `${result.ecosystem} → ${result.source?.url}` : '换源未成功'),
+        ...(result.warnings.length > 0 ? ['', '注意：', ...result.warnings.map((w) => `- ${w}`)] : []),
+        ...(result.sessionEnv && Object.keys(result.sessionEnv).length > 0
+          ? ['', '要生效，请把这些变量注入子进程（进程退出即失效）：', ...Object.entries(result.sessionEnv).map(([k, v]) => `  ${k}=${v}`)]
+          : []),
+        ...(result.benchmark && result.benchmark.length > 0
+          ? ['', '测速明细：', ...result.benchmark.map((b) => `  ${b.ok ? 'OK  ' : b.skipped ? 'SKIP' : 'FAIL'} ${String(b.status ?? '-').padEnd(4)} ${String(b.ms).padStart(5)}ms  ${b.url}${b.skipped ? `  （${b.skipped}）` : ''}`)]
+          : []),
+        ...(result.files && result.files.length > 0
+          ? ['', '涉及文件：', ...result.files.map((f) => `  ${f.path}（${f.fileExisted ? '已存在' : '将新建'}，旧值 ${f.previousValue ?? '（未配置）'} → 新值 ${f.newValue}，回滚 ${f.undo.kind}）`)]
+          : []),
+        ...(result.undoCommand ? ['', `回滚命令：${result.undoCommand}`] : []),
+      ];
+      return result.ok
+        ? this.okResult('switch_package_source', lines.join('\n'), start)
+        : this.fail(null, start, `switch_package_source: ${result.error ?? '失败'}\n${result.warnings.join('\n')}`, 'switch_package_source');
+    } catch (err: unknown) {
+      return this.fail(null, start, `switch_package_source failed: ${err instanceof Error ? err.message : String(err)}`, 'switch_package_source');
+    }
   }
 
   private async handleGlobFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
@@ -3035,7 +3094,7 @@ async function detectReachability(): Promise<string> {
   if (cachedReach && now - cachedReach.at < REACH_TTL_MS) return cachedReach.value;
   const probe = async (url: string): Promise<boolean> => {
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(2000) });
+      const res = await cliFetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(2000) });
       return res.ok;
     } catch {
       return false;
@@ -3098,7 +3157,7 @@ async function fetchIpGeoLine(): Promise<string> {
   for (const url of backends) {
     let data: any;
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(3000) });
+      const res = await cliFetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(3000) });
       if (!res.ok) continue;
       data = await res.json();
     } catch {
@@ -3241,7 +3300,7 @@ async function searchFetch(url: string, init: RequestInit = {}): Promise<Respons
   const headers = new Headers(init.headers);
   const cookies = cookieHeaderFor(url);
   if (cookies) headers.set('Cookie', cookies);
-  const resp = await fetch(url, { ...init, headers });
+  const resp = await cliFetch(url, { ...init, headers });
   storeCookies(url, resp.headers.get('set-cookie'));
   return resp;
 }
@@ -3330,7 +3389,7 @@ export async function serperSearch(query: string, maxResults: number): Promise<S
   const apiKey = process.env.SERPER_API_KEY?.trim();
   if (!apiKey) throw new Error('SERPER_API_KEY not set');
   const cjk = containsCJK(query);
-  const resp = await fetch('https://google.serper.dev/search', {
+  const resp = await cliFetch('https://google.serper.dev/search', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3359,7 +3418,7 @@ export async function serperSearch(query: string, maxResults: number): Promise<S
 export async function tavilySearch(query: string, maxResults: number): Promise<SearchResult[]> {
   const apiKey = process.env.TAVILY_API_KEY?.trim();
   if (!apiKey) throw new Error('TAVILY_API_KEY not set');
-  const resp = await fetch('https://api.tavily.com/search', {
+  const resp = await cliFetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3390,7 +3449,7 @@ export async function tavilySearch(query: string, maxResults: number): Promise<S
 export async function exaSearch(query: string, maxResults: number): Promise<SearchResult[]> {
   const apiKey = process.env.EXA_API_KEY?.trim();
   if (!apiKey) throw new Error('EXA_API_KEY not set');
-  const resp = await fetch('https://api.exa.ai/search', {
+  const resp = await cliFetch('https://api.exa.ai/search', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3423,7 +3482,7 @@ export async function exaSearch(query: string, maxResults: number): Promise<Sear
 export async function searxngSearch(query: string, maxResults: number): Promise<SearchResult[]> {
   const base = process.env.SEARXNG_URL?.trim();
   if (!base) throw new Error('SEARXNG_URL not set');
-  const resp = await fetch(
+  const resp = await cliFetch(
     `${base.replace(/\/+$/, '')}/search?q=${encodeURIComponent(query)}&format=json&safesearch=0`,
     {
       headers: { 'User-Agent': BROWSER_UA },

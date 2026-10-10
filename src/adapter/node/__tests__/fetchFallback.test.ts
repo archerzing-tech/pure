@@ -3,7 +3,7 @@
 // follow / Wayback / Firecrawl / PDF text). All network is mocked; the PDF
 // fixture is generated in-memory with zlib so no binary fixture file is needed.
 
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { deflateSync } from 'node:zlib';
 import {
   fetchWithRetry,
@@ -12,6 +12,10 @@ import {
   scrapeViaWayback,
   scrapeViaFirecrawl,
   extractPdfText,
+  cliFetch,
+  cliProxyFor,
+  hostMatchesNoProxy,
+  resolveEnvProxy,
 } from '../fetchFallback';
 
 /** Build a minimal single-page PDF whose content stream holds `content`. */
@@ -73,6 +77,138 @@ describe('fetchWithRetry', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe('三处调用点的语义必须逐条一致（cliFetch 收口后的回归锁）', () => {
+  // 收口前 fetchFallback 与 NodeToolAdapter 各有一份 cliProxyFor，两份都在用，且 SOCKS 文案已经漂移。
+  // 现在定义唯一（shared/cliFetch.ts），三处只做 re-export。这里用“对对的公式身份”把这一点
+  // 锁死：任何一处回开自己的实现，这里立即失败。
+  it('fetchFallback 与 NodeToolAdapter 导出的是同一个函数对象', async () => {
+    const shared = await import('../../../shared/cliFetch');
+    const fallback = await import('../fetchFallback');
+    const adapter = await import('../NodeToolAdapter');
+    expect(fallback.cliFetch).toBe(shared.cliFetch);
+    expect(fallback.cliProxyFor).toBe(shared.cliProxyFor);
+    expect(fallback.hostMatchesNoProxy).toBe(shared.hostMatchesNoProxy);
+    expect(fallback.resolveEnvProxy).toBe(shared.resolveEnvProxy);
+    expect(adapter.cliFetch).toBe(shared.cliFetch);
+    expect(adapter.cliProxyFor).toBe(shared.cliProxyFor);
+    expect(adapter.hostMatchesNoProxy).toBe(shared.hostMatchesNoProxy);
+    expect(adapter.resolveEnvProxy).toBe(shared.resolveEnvProxy);
+    expect(adapter.parseProxy).toBe(shared.parseProxy);
+    expect(adapter.isPrivateHost).toBe(shared.isPrivateHost);
+  });
+
+  it('publicApis 也导出同一个函数（静态查源码里的 import）', async () => {
+    // publicApis 不重导出 cliFetch，只导入使用；用源码表达式把它扎在收口的那一份上。
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../publicApis.ts', import.meta.url), 'utf8');
+    expect(src).toContain("import { cliFetch } from '../../shared/cliFetch'");
+    expect(src).not.toContain("from './fetchFallback'");
+  });
+
+  it('三个调用点对同一个 URL 得到同一个出口路由', async () => {
+    const shared = await import('../../../shared/cliFetch');
+    const fallback = await import('../fetchFallback');
+    const adapter = await import('../NodeToolAdapter');
+    for (const url of ['https://example.com/a', 'http://127.0.0.1:8080/x', 'not a url']) {
+      const viaShared = shared.cliProxyFor(url);
+      expect(fallback.cliProxyFor(url)).toEqual(viaShared);
+      expect(adapter.cliProxyFor(url)).toEqual(viaShared);
+    }
+  });
+});
+
+describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点共用）', () => {
+  // 实现已从本文件与 NodeToolAdapter 收口到 shared/cliFetch.ts；下面这些断言三处调用
+  // 点共用同一份实现，不再需要两份对齐。
+  const ENV_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+  let saved: Record<string, string | undefined> = {};
+
+  function setEnv(vars: Record<string, string>): void {
+    for (const key of ENV_KEYS) delete process.env[key];
+    Object.assign(process.env, vars);
+  }
+
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    setEnv({});
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it('没有配置时代理恒为空（直连）', () => {
+    expect(cliProxyFor('https://example.com/x')).toEqual({ proxy: '', direct: true });
+    expect(resolveEnvProxy()).toBe('');
+  });
+
+  it('从环境变量取代理，并回传到 fetch 的原生 proxy 选项', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    expect(cliProxyFor('https://example.com/x')).toEqual({ proxy: 'http://127.0.0.1:7890', direct: false });
+
+    let seenProxy: unknown;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seenProxy = init.proxy;
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await cliFetch('https://example.com/x');
+      // 必须用原生 proxy 选项：undici ProxyAgent 与 Bun 的 proxy 选项是两套
+      // 栈，混用会出现「搜索走代理、下载不走」这种最难排查的不一致。
+      expect(seenProxy).toBe('http://127.0.0.1:7890');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('直连时完全不传 proxy（Bun 把 proxy:"" 当作「回退读环境变量」）', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890', NO_PROXY: '.internal.test' });
+    let seenProxy: unknown = 'unset';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seenProxy = 'proxy' in init ? init.proxy : 'absent';
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await cliFetch('https://svc.internal.test/api');
+      expect(seenProxy).toBe('absent');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('环回/私网地址永不走代理（走代理访问本机会形成自指死循环）', () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    for (const host of ['127.0.0.1:5173', '10.1.2.3', '192.168.0.9', 'localhost', 'foo.local']) {
+      expect(cliProxyFor(`http://${host}/x`).direct).toBe(true);
+    }
+  });
+
+  it('NO_PROXY 支持精确、后缀与通配', () => {
+    expect(hostMatchesNoProxy('a.example.com', 'example.com')).toBe(false);
+    expect(hostMatchesNoProxy('a.example.com', '.example.com')).toBe(true);
+    expect(hostMatchesNoProxy('a.example.com', 'a.example.com')).toBe(true);
+    expect(hostMatchesNoProxy('a.example.com', '*')).toBe(true);
+  });
+
+  it('SOCKS 明确报错而不是悄悄直连', async () => {
+    setEnv({ ALL_PROXY: 'socks5://127.0.0.1:1080' });
+    const route = cliProxyFor('https://example.com/x');
+    expect(route.direct).toBe(false);
+    expect(route.unsupported).toContain('SOCKS');
+    await expect(cliFetch('https://example.com/x')).rejects.toThrow(/SOCKS/);
+  });
+
+  it('无法解析的代理地址同样拒绝执行', () => {
+    setEnv({ ALL_PROXY: 'not a url' });
+    expect(cliProxyFor('https://example.com/x').unsupported).toContain('无法解析');
   });
 });
 

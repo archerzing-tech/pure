@@ -17,6 +17,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── 出口代理路由 ────────────────────────────────────────────────────────────
+// 定义在 src/shared/cliFetch.ts：本模块与 publicApis.ts 曾是整条 web 工具链上
+// 最后两个裸 fetch 的栖身地——用户在设置里配了代理，web_search / web_public_api
+// 走了代理，而 web_fetch 的兜底链（Wayback / Memento / Firecrawl）与结构化 API
+// 全部直连——于是「代理能上的搜索上不去、能下的下载下不来」，同一份配置在同一次
+// 会话里给出两种相反的答案。收口到一处后 NodeToolAdapter 也用同一份实现，
+// 不再各写一遍（两份实现的 SOCKS 文案此前就已经漂移了）。
+export {
+  cliFetch,
+  cliProxyFor,
+  hostMatchesNoProxy,
+  isPrivateHost,
+  parseProxy,
+  resolveEnvProxy,
+  type CliProxyRoute,
+} from '../../shared/cliFetch';
+
+import { cliFetch } from '../../shared/cliFetch';
+
 /** Origin of a URL (for a same-site Referer) or undefined when unparsable. */
 export function refererFor(url: string): string | undefined {
   try {
@@ -45,7 +64,7 @@ export async function fetchWithRetry(
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const referer = refererFor(url);
-      const resp = await fetch(url, {
+      const resp = await cliFetch(url, {
         headers: {
           'User-Agent': BROWSER_UA,
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5',
@@ -139,7 +158,7 @@ async function waybackAvailable(url: string): Promise<string | null> {
   try {
     const now = new Date();
     const ts = now.toISOString().replace(/[-:]/g, '').slice(0, 14);
-    const resp = await fetch(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}&timestamp=${ts}`, {
+    const resp = await cliFetch(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}&timestamp=${ts}`, {
       headers: { 'User-Agent': BROWSER_UA },
       signal: AbortSignal.timeout(10000),
     });
@@ -147,7 +166,7 @@ async function waybackAvailable(url: string): Promise<string | null> {
     const data = (await resp.json()) as { archived_snapshots?: { closest?: { url?: string; status?: string } } };
     const snap = data.archived_snapshots?.closest;
     if (!snap?.url || (snap.status && snap.status !== '200')) return null;
-    const page = await fetch(snap.url, {
+    const page = await cliFetch(snap.url, {
       headers: { 'User-Agent': BROWSER_UA },
       redirect: 'follow',
       signal: AbortSignal.timeout(20000),
@@ -163,7 +182,7 @@ async function waybackAvailable(url: string): Promise<string | null> {
 async function waybackViaMemento(url: string): Promise<string | null> {
   try {
     const day = new Date().toISOString().slice(0, 10);
-    const resp = await fetch(`https://timetravel.mementoweb.org/api/json/${day}/${encodeURIComponent(url)}`, {
+    const resp = await cliFetch(`https://timetravel.mementoweb.org/api/json/${day}/${encodeURIComponent(url)}`, {
       headers: { 'User-Agent': BROWSER_UA },
       signal: AbortSignal.timeout(10000),
     });
@@ -171,7 +190,7 @@ async function waybackViaMemento(url: string): Promise<string | null> {
     const data = (await resp.json()) as { mementos?: { closest?: { uri?: string } } };
     const uri = data.mementos?.closest?.uri;
     if (!uri) return null;
-    const page = await fetch(uri, {
+    const page = await cliFetch(uri, {
       headers: { 'User-Agent': BROWSER_UA },
       redirect: 'follow',
       signal: AbortSignal.timeout(20000),
@@ -193,7 +212,7 @@ export async function scrapeViaFirecrawl(url: string, apiKey?: string): Promise<
   const key = apiKey?.trim();
   if (!key) return null;
   try {
-    const resp = await fetch('https://api.firecrawl.dev/v1/scrape', {
+    const resp = await cliFetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

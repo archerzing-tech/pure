@@ -23,6 +23,10 @@
 // and key scheme the Rust GUI mirror uses, so CLI and GUI share warm results.
 
 import { publicApiCacheKey, webCache } from './webCache';
+// 出口代理语义与 web_fetch 的兜底链共用同一份实现：结构化 API 后端
+// （Open-Meteo / ipify / Frankfurter / 腾讯行情）在墙内同样可能不可达，
+// 直连死掉时不能让它们静默降级成「查不到数据」——那会被模型读成事实。
+import { cliFetch } from '../../shared/cliFetch';
 
 export type IntentKind = 'weather' | 'airquality' | 'geocode' | 'news' | 'wiki' | 'ip' | 'fx' | 'stock' | 'github' | 'worldbank';
 
@@ -295,7 +299,7 @@ import { BROWSER_UA } from '../../shared/platformUa';
 
 async function fetchJson(url: string, timeoutMs = 8000, headers: Record<string, string> = {}): Promise<any | null> {
   try {
-    const resp = await fetch(url, {
+    const resp = await cliFetch(url, {
       headers: { 'User-Agent': BROWSER_UA, ...headers },
       redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
@@ -541,7 +545,7 @@ async function resolveNews(query: string): Promise<PublicApiOutcome | null> {
   const q = query.replace(NEWS_WORDS, '').trim() || (zh ? '热点新闻' : 'top news');
   const fetchFeed = async (url: string): Promise<string | null> => {
     try {
-      const resp = await fetch(url, {
+      const resp = await cliFetch(url, {
         headers: { 'User-Agent': BROWSER_UA },
         redirect: 'follow',
         signal: AbortSignal.timeout(8000),
@@ -631,7 +635,7 @@ async function resolveStock(symbol: string, query: string): Promise<PublicApiOut
 /** Tencent qt.gtimg.cn quote (GBK body, China-reachable, no key). */
 export async function fetchStockTencent(symbol: string): Promise<string | null> {
   try {
-    const resp = await fetch(`http://qt.gtimg.cn/q=${encodeURIComponent(symbol)}`, {
+    const resp = await cliFetch(`http://qt.gtimg.cn/q=${encodeURIComponent(symbol)}`, {
       headers: { 'User-Agent': BROWSER_UA },
       redirect: 'follow',
       signal: AbortSignal.timeout(8000),
@@ -663,7 +667,7 @@ export async function fetchStockTencent(symbol: string): Promise<string | null> 
 /** Sina hq.sinajs.cn quote fallback (GBK body; needs a finance Referer). */
 export async function fetchStockSina(symbol: string): Promise<string | null> {
   try {
-    const resp = await fetch(`https://hq.sinajs.cn/list=${encodeURIComponent(symbol)}`, {
+    const resp = await cliFetch(`https://hq.sinajs.cn/list=${encodeURIComponent(symbol)}`, {
       headers: { 'User-Agent': BROWSER_UA, Referer: 'https://finance.sina.com.cn' },
       redirect: 'follow',
       signal: AbortSignal.timeout(8000),

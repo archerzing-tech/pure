@@ -351,6 +351,37 @@ export const BUILT_IN_TOOL_DEFS = [
       required: ['format', 'path', 'spec'],
     },
   },
+{
+    name: 'diagnose_network',
+    description: 'Diagnose WHY a URL is unreachable, layer by layer: DNS (via four parallel DoH resolvers — never getaddrinfo, which asks a possibly-poisoned resolver) → TCP :443 → TLS handshake with SNI and certificate-to-hostname match → real HTTP GET. Use it the moment a fetch/download/clone fails instead of retrying or blindly switching mirrors: it is the only way to tell DNS poisoning apart from silently-dropped SYNs, a refused port, a TLS reset, and a CDN 403. Reports which layer failed, the confidence, the real IPs from DoH (report only — never dial them with hand-built Host/SNI headers), what could not be checked on this machine, and actionable fixes. Verdict is deliberately conservative: all four steps must pass to call a target reachable, because calling "unreachable" reachable costs a slow-but-working mirror, while calling "unreachable" reachable-cost-free costs a 10-minute download timeout. Private/loopback/link-local and bare-IP targets are refused (this is not an intranet scanner or an SSRF vector). DNS is diagnosed only, never taken over: it will not edit /etc/hosts, install a CA, or change system DNS.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'The URL or domain to diagnose, e.g. "https://registry.npmjs.org" or "registry.npmjs.org". http/https only; private addresses and bare IPs are refused.' },
+        allowlist: { type: 'array', items: { type: 'string' }, description: 'Optional host allowlist — only these hosts (and their subdomains) will be probed.' },
+        denylist: { type: 'array', items: { type: 'string' }, description: 'Optional host denylist; takes precedence over the allowlist.' },
+        port: { type: 'number', description: 'TCP/TLS port to probe. Default: 443.' },
+        humanReadable: { type: 'boolean', description: 'Append a numbered, human-facing fix list (change proxy / change mirror / who to ask) below the structured result. Default: false' },
+      },
+      required: ['target'],
+    },
+  },
+  {
+    name: 'switch_package_source',
+    description: 'Find a faster/reachable package or code source (npm, pip, cargo, go, docker, maven, composer, rubygems, huggingface, github) and switch to it — the chsrc capability, reimplemented as a tool rather than a forked CLI. Defaults to scope:"session", which only returns environment variables to inject into child processes: nothing is written to disk, no command is spawned, and everything disappears when the process exits. scope:"file" writes a real config file and is refused unless you pass confirm:true AND dry_run:false, and it always records an undo entry in ~/.pure/source-switch-journal.jsonl first (rollback means deleting the key, not writing the upstream URL back). With source:"auto" it benchmarks candidates in parallel (concurrent, inside one 8s budget) and only ranks sources that returned a real response — a 401/403/404 still proves the link works, but a "200 Connection established" CONNECT-tunnel reply is not a real response. Trust tiers: T0 official-origin and T1 institutional mirrors are automatic; T2 third-party charity proxies (ghfast.top and friends — roughly half are dead) are OFF by default and require an explicit opt-in, and even then binaries must be sha256-verified. Never writes OS package-manager, docker daemon, nix, brew/nvm/rustup or NuGet configuration. IMPORTANT for npm: package-lock.json pins every resolved URL, so switching the registry alone does nothing until the lockfile is regenerated or you pass --registry= for that one command.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ecosystem: { type: 'string', enum: ['npm', 'pip', 'cargo', 'go', 'docker', 'maven', 'composer', 'rubygems', 'huggingface', 'github'], description: 'Which ecosystem to re-source.' },
+        source: { type: 'string', description: '"auto" (benchmark the candidate mirrors and pick the fastest that actually answers — the default), "default" (the ecosystem\'s first choice), or an exact registry/index URL. A URL outside the vetted list is treated as T3 user-supplied: allowed at session scope, refused at file scope.' },
+        scope: { type: 'string', enum: ['session', 'file'], description: 'session (default) = return environment variables only, nothing persisted. file = really write the config file; requires confirm:true and dry_run:false.' },
+        dry_run: { type: 'boolean', description: 'Produce the plan without applying it. Default: true.' },
+        confirm: { type: 'boolean', description: 'The user has explicitly approved a file-level change. Required for scope:"file"; without it nothing is written.' },
+        enabledTrustTiers: { type: 'array', items: { type: 'string', enum: ['t0', 't1', 't2', 't3'] }, description: 'Trust tiers to unlock. Defaults to ["t0","t1"]; T2 (third-party charity proxies) and T3 (user-supplied) are off unless listed here.' },
+      },
+      required: ['ecosystem'],
+    },
+  },
 ] as const satisfies readonly ToolDefinition[];
 
 /** Side-effect / write classification per tool (same table the CLI and GUI
@@ -360,6 +391,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'create_directory', 'diff_files', 'researcher_web', 'researcher_docs',
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
   'git_status', 'git_commit', 'git_branch', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file', 'create_document',
+  'diagnose_network', 'switch_package_source',
 ]);
 
 /**
@@ -433,6 +465,15 @@ const TOOL_METADATA_TABLE = {
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },
+  // diagnose_network only observes the network, so it stays a pure read.
+  //
+  // switch_package_source can rewrite the user's ~/.npmrc / pip.conf /
+  // config.toml at scope=file, so it is declared a write. The scope-sensitive
+  // split lives in ToolRegistry's tags + riskLevel (see the note there): this
+  // map feeds UI affordances, and reporting it as read-only there would hide
+  // the write from anyone reading the metadata instead of gating on it.
+  diagnose_network: { sideEffects: false, isWrite: false },
+  switch_package_source: { sideEffects: true, isWrite: true },
   // `generate_image` is not in the defs array (it is advertised conditionally
   // from IMAGE_GEN_TOOL_DEF), but adapters still look up its metadata, so the
   // key union extends the def names by exactly that one name — anything else

@@ -74,6 +74,17 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   download_file: { tags: [Tags.DOWNLOAD, Tags.WRITE], riskLevel: 'medium' },
   glob_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   replace_files: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
+  // diagnose_network 只观测网络，纯只读，永远自动放行。
+  //
+  // switch_package_source 的风险随 scope 变：session 档不落盘，file 档会改用户
+  // 的 ~/.npmrc / pip.conf。原先把它标成 READ + low 是错的——low 会被
+  // PermissionManager 直接自动放行，于是「file 级必须显式批准」这道产品决定
+  // 在权限层完全落空：confirm:true 是模型自己能填的字段，用户全程没有参与。
+  // 改法沿用 git_commit / git_branch 的既有模式（见上方那条断言）：WRITE tag
+  // 让 PLAN 与 DONT_ASK 真正拦住它（只读计划期不该被改配置），riskLevel 保持
+  // low 以免把 session 档那类零落盘调用也堵在确认卡后面。
+  diagnose_network: { tags: [Tags.READ], riskLevel: 'low' },
+  switch_package_source: { tags: [Tags.WRITE], riskLevel: 'low' },
 };
 
 export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(

@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NodeToolAdapter } from '../NodeToolAdapter';
+import { isNetworkError } from '../../../shared/netGuard';
 import { quota } from '../publicApis';
 import { resetWebCache } from '../webCache';
 import type { ToolCall } from '../../../shared/types';
@@ -266,6 +267,49 @@ describe('CLI Tier-2/3 web tool wiring', () => {
     const result = await adapter.execute(call('web_fetch', { url: 'https://example.com/landing' }));
     expect(result.success).toBe(true);
     expect(String(result.result)).toContain('Real content here');
+  });
+
+  it('web_fetch 拒绝被改写的 200 挡板页（不进正文、不记成功）', async () => {
+    // 旧行为：只看 resp.ok，被中间设备改写的 200 广告页被当成真内容交给模型，
+    // 更坏的是上层会把这次“成功”记到 netRoute，把 direct 路由钉死。
+    // 现在 CLI 走与 Rust 同源的四信号判定（shared/netGuard.detectResponseHijack）。
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://example.com/hijacked')) {
+        return new Response('<html><head><title>403 Forbidden</title></head><body><h1>403 Forbidden</h1><hr><center>nginx</center></body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        });
+      }
+      if (url.startsWith('https://r.jina.ai/')) return new Response('', { status: 503 });
+      if (url.startsWith('https://archive.org/wayback/available')) return new Response('{}', { status: 200 });
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+    const result = await adapter.execute(call('web_fetch', { url: 'https://example.com/hijacked' }));
+    expect(result.success).toBe(false);
+    const msg = String(result.error ?? '');
+    // 文案里必须出现 Network interception：上层 isNetworkError / classifyFailure 靠它归类。
+    expect(msg).toContain('Network interception');
+    expect(msg).toContain('blockpage-fingerprint');
+    expect(isNetworkError(msg)).toBe(true);
+  });
+
+  it('正文足长时不得被误杀（与 Rust 一致：指纹只在正文几乎为空时才定罪）', async () => {
+    // 一张带 <title>Just a moment...</title> 但正文很长的页面：Rust 侧 C && B 不成立、且不跨域，
+    // 故放过。正文里提到 403 的文档页也必须放过——误杀的代价是一次无效重试。
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://example.com/mentions')) {
+        return new Response(`<html><head><title>Just a moment...</title></head><body><p>${'Real documentation prose about proxies and retries. '.repeat(10)}</p><p>403 Forbidden is documented behavior.</p></body></html>`, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        });
+      }
+      return new Response('', { status: 404 });
+    }) as unknown as typeof fetch;
+    const result = await adapter.execute(call('web_fetch', { url: 'https://example.com/mentions' }));
+    expect(result.success).toBe(true);
+    expect(String(result.result)).toContain('Real documentation prose');
   });
 
   it('web_scrape extracts text directly from a fetched PDF without Jina', async () => {
