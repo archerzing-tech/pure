@@ -31,10 +31,14 @@ describe('buildPlanThinkingPrompt — 不给提纲，只给实质约束', () => 
     expect(system).toContain('never generic filler');
   });
 
-  it('项目级构建：最后一步必须是交付验证管线', () => {
+  it('项目级构建：最后一步必须是交付验证管线，且按改动面声明验证清单（刀 1.1）', () => {
     const { system } = buildPlanThinkingPrompt('做个项目', { projectBuild: true });
     expect(system).toContain('delivery verification pipeline');
     expect(system).toContain('typecheck');
+    // 清单要按本轮改动面声明（不凑数），final 标收尾必跑集。
+    expect(system).toContain('"verification"');
+    expect(system).toContain('"final": true');
+    expect(system).toContain('tailored to THIS round');
   });
 
   it('用户消息原样透传，带图时提示模型把图算进去', () => {
@@ -103,6 +107,27 @@ describe('planThinkingContext — 思考原文必须嵌进引擎语境', () => {
 
   it('项目级交付仍要真实验证证据', () => {
     expect(planThinkingContext('思考', { projectBuild: true })).toContain('真实验证证据');
+  });
+
+  it('刀 1.1：声明了清单就带进执行语境——整份是迭代最小集，final 子集是收尾闸', () => {
+    const g = planThinkingContext('思考', {
+      projectBuild: true,
+      verification: [
+        { command: 'bun run typecheck', reason: '类型风险面', final: true },
+        { command: 'bun run test src/auth', reason: '定向就够' },
+      ],
+    });
+    expect(g).toContain('bun run typecheck');
+    expect(g).toContain('bun run test src/auth');
+    // 收尾闸只点名 final 子集——模型清楚哪部分由宿主机械重跑、不许攒到最后。
+    expect(g).toContain('机械重跑最终验证（bun run typecheck）');
+    expect(g).toContain('迭代中每次改动后就地重跑');
+  });
+
+  it('刀 1.1：没声明清单时保持原通用表述（不假装有清单）', () => {
+    const g = planThinkingContext('思考', { projectBuild: true });
+    expect(g).toContain('代码评审、类型检查、单测、构建');
+    expect(g).not.toContain('你声明的验证清单');
   });
 });
 

@@ -5,9 +5,9 @@
 // 这里只放纯函数：提示词拼装、思考/计划分流、流式展示裁剪、无卡时的执行指引。
 // 编排（流式、超时、中止、气泡）在 chat.ts 的 planByThinking()。
 
-import type { Plan } from '../coding-agent/types';
+import type { Plan, PlanVerificationSpec } from '../coding-agent/types';
 
-const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}]}`;
+const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}], "verification": [{"command": "the exact command", "reason": "why running this proves the changes", "final": false}]}`;
 
 /**
  * 规划思考的提示词。刻意的克制：不规定思考的提纲、顺序、段数——一旦规定，
@@ -27,7 +27,7 @@ export function buildPlanThinkingPrompt(
     PLAN_JSON_SHAPE,
     'Give 2-6 steps. Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.',
     opts.projectBuild
-      ? 'This is a project-level build: the LAST step must be the delivery verification pipeline (code review, then typecheck, then unit tests, then e2e/build checks — fix failures and re-run until ALL pass).'
+      ? 'This is a project-level build: the LAST step must be the delivery verification pipeline (run the checks, fix failures, re-run until ALL pass). Alongside "steps", declare a "verification" list tailored to THIS round\'s changes — the exact commands that prove the work (typecheck / lint / tests / build as applicable), each with a one-line reason why running it is enough. Mark "final": true on the entries that must form the end-of-turn mechanical gate; keep the rest lean so they can re-run on every change during the loop. Don\'t just list the project\'s full pipeline because it exists — declare what this round needs.'
       : '',
   ].filter(Boolean).join('\n');
   const user = opts.hasImages
@@ -81,8 +81,15 @@ export function liveNarrationPortion(full: string): string {
  */
 export function planThinkingContext(
   narration: string,
-  opts: { projectBuild?: boolean; hasPlanCard?: boolean } = {},
+  opts: { projectBuild?: boolean; hasPlanCard?: boolean; verification?: PlanVerificationSpec[] } = {},
 ): string {
+  // 刀 1.1：清单在执行语境里的两种身份——整份是迭代环的最小验证集（改动后
+  // 就地重跑适用的，别攒到最后）；final 子集是收尾宿主机械重跑的闸门清单
+  // （不过闸不许交付）。没有声明清单时退回通用表述。
+  const declared = (opts.verification ?? []).filter((item) => item.command);
+  const finalSet = declared.some((item) => item.final === true)
+    ? declared.filter((item) => item.final === true)
+    : declared;
   return [
     '<plan_thinking>',
     '你规划时当着用户把这个任务想清楚了，思考原文如下——用户已经看到，绝不要再复述一遍：',
@@ -93,9 +100,11 @@ export function planThinkingContext(
     opts.hasPlanCard
       ? ''
       : '没有结构化计划卡这回事，不要输出「## 计划 n：…」这类阶段标记——界面上没有卡片在等它们。',
-    opts.projectBuild
-      ? '这是项目级交付：完成必须给出真实验证证据（代码评审、类型检查、单测、构建任一适用的组合，失败要修到过）。'
-      : '',
+    opts.projectBuild && declared.length > 0
+      ? `这是项目级交付：完成必须给出真实验证证据（失败要修到过）。你声明的验证清单：${declared.map((item) => item.command).join('、')}——迭代中每次改动后就地重跑适用的命令，别攒到最后才发现坏了；收尾时宿主会机械重跑最终验证（${finalSet.map((item) => item.command).join('、')}），那道闸不解析你的任何声称，过不了就不交付。`
+      : opts.projectBuild
+        ? '这是项目级交付：完成必须给出真实验证证据（代码评审、类型检查、单测、构建任一适用的组合，失败要修到过）。'
+        : '',
     '</plan_thinking>',
   ].filter(Boolean).join('\n');
 }

@@ -519,6 +519,21 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     expect(plan?.steps).toHaveLength(1);
   });
 
+  it('carries the declared verification list (刀 1.1) with final marks intact', () => {
+    const plan = parsePlanJson('{"steps":[{"action":"A","description":"d"}],"verification":[{"command":"bun run typecheck","reason":"类型是本轮风险面","final":true},{"command":"bun run test src/auth","reason":"定向测试就够"}]}');
+    expect(plan?.verification).toHaveLength(2);
+    expect(plan?.verification?.[0]).toEqual({ command: 'bun run typecheck', reason: '类型是本轮风险面', final: true });
+    expect(plan?.verification?.[1]).toEqual({ command: 'bun run test src/auth', reason: '定向测试就够' });
+  });
+
+  it('drops broken verification items but keeps the good ones; no list means no field', () => {
+    const mixed = parsePlanJson('{"steps":[{"action":"A","description":"d"}],"verification":[{"reason":"没有命令"},{"command":"  ","reason":"空白命令"},{"command":"bun run test","reason":"ok"}]}');
+    expect(mixed?.verification).toEqual([{ command: 'bun run test', reason: 'ok' }]);
+    // 纯数组形态无处挂清单；对象形态没声明也不占字段。
+    expect(parsePlanJson('[{"action":"A","description":"d"}]')?.verification).toBeUndefined();
+    expect(parsePlanJson('{"steps":[{"action":"A","description":"d"}]}')?.verification).toBeUndefined();
+  });
+
   it('preserves the planner decision to omit Todos for an atomic plan', () => {
     const plan = parsePlanJson('{"steps":[{"action":"A","description":"d","todosRequired":false,"substeps":[{"action":"noise","description":"should not render"}]}]}');
     expect(plan?.steps[0].todosRequired).toBe(false);

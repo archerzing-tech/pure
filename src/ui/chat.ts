@@ -89,7 +89,7 @@ import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, 
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, planVerificationResume, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
+import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -122,7 +122,7 @@ import type {
 } from '../shared/types';
 import { EventFanout } from '../shared/asyncQueue';
 import { phaseModelOverrides } from '../shared/phaseModels';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, TaskMode, IntentAssessment } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, PlanVerificationSpec, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
@@ -4273,6 +4273,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       let userTraps: string | undefined;
       let userBuildProtocol: string | undefined;
       let userPlan: string | undefined;
+      // 刀 1.1：本回合计划声明的验证清单，从规划块带回收尾闸门（规划块与
+      // 事件循环不同层作用域，清单经这里过桥）。
+      let gatePlanVerification: PlanVerificationSpec[] | undefined;
       let userAssessment: string | undefined;
       let userPlausibilityOverride: string | undefined;
       let taskContract: TaskContract | undefined;
@@ -4905,6 +4908,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           });
           if (planForReview) {
             planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
+            // 刀 1.1：清单随定稿计划过桥到收尾闸门（gateSpecs 的裁决在闸门口）。
+            gatePlanVerification = planForReview.verification;
           } else if (thought?.narration && !needsInteractiveApproval) {
             // 有思考、没解析出结构化步骤：不放假卡。把思考本身当执行指引交给
             // 引擎——写死步骤冒充规划正是这次要根除的模式。
@@ -5009,7 +5014,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // → approved=true，模型第一轮必须立即开始执行，不能再要求“等用户下一条
             // 消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
             userPlan = (thought?.narration
-              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })}\n\n`
+              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification })}\n\n`
               : '') + formatPlanForPrompt(approvedPlan, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
             if (modeBubble) {
@@ -6207,8 +6212,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               return bubble;
             };
             let deliveryResult: DeliveryVerificationResult | null = null;
+            // 刀 1.1（2026-10-10）验证清单：收尾闸跑谁的清单由 resolveGateSpecs
+            // 裁决（纯函数，delivery.test 锁语义）——计划声明且逐条过了宿主
+            // 白名单才采用，否则回退工作区全量 profile。证据充足性（跑哪些、
+            // 为什么够）由模型在计划阶段判断（刀 5 的分寸），证据真实性仍全在
+            // 宿主：清单只是参数，每条命令、每个退出码都在这里机械发生。
+            const gateSpecs = resolveGateSpecs(gatePlanVerification, workspaceProfile);
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
-              addDeliveryBubble('🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
+              addDeliveryBubble(gateSpecs.source === 'plan'
+                ? `🧪 交付验证：按计划声明的清单机械重跑（${gateSpecs.specs.map((s) => s.command).join('、')}）…`
+                : '🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);
               this.scrollUi(chatEl);
               // Surface each mechanical check as it finishes so the user can see
               // the verification actually running (instead of a static bubble
@@ -6224,7 +6237,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 this.addStatusBubble(`${icon} 交付验证 · ${step.label}（${step.command}）${dur}`, false, step.status === 'failed', step.status === 'passed' ? 'success' : undefined);
                 this.scrollUi(chatEl);
               };
-              deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
+              deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, gateSpecs.specs, turnSignal, onDeliveryStep);
               while (
                 !deliveryResult.passed &&
                 !turnSignal.aborted &&
@@ -6247,7 +6260,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   verifiedPrefix = [];
                   // Every round closes with a real re-check, never the previous
                   // round's evidence.
-                  deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep);
+                  deliveryResult = await runDeliveryVerification(codingAgent.toolRegistry, gateSpecs.specs, turnSignal, onDeliveryStep);
                 } else {
                   // 刀 1.2（2026-10-10）：复查从失败步起重跑其后全部——与
                   // formatDeliveryFixPrompt 对模型的承诺同一语义，省掉每轮
@@ -6265,7 +6278,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     : resume.fromIndex > 0
                       ? `第 ${round} 轮修复完成：${verifiedPrefix.map((s) => s.label).join('、')} 上轮已通过，从「${resumedFrom}」起重跑其后全部…`
                       : `第 ${round} 轮修复完成，重新执行全部交付验证…`, true, false, 'info');
-                  const fresh = await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep, resume.fromIndex);
+                  const fresh = await runDeliveryVerification(codingAgent.toolRegistry, gateSpecs.specs, turnSignal, onDeliveryStep, resume.fromIndex);
                   // 拼接全局视图：前缀是持账的免检证据，后缀是本轮真跑的。
                   deliveryResult = { passed: fresh.passed, steps: [...verifiedPrefix, ...fresh.steps] };
                 }

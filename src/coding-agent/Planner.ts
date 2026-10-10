@@ -5,7 +5,7 @@
 //        can verify them before execution and escape the trap by switching
 //        approach after a failed round instead of repeating the same one.
 
-import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, TrapWarning } from './types';
+import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, PlanVerificationSpec, TrapWarning } from './types';
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
@@ -17,6 +17,9 @@ import { INPUT_DEFAULT_CONFIDENCE, clampConfidence } from './inputDecision';
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
 const MAX_PLAN_STEPS = 10;
 const MAX_PLAN_SUBSTEPS = 8;
+/** 刀 1.1：验证清单条数上限——清单是收尾门禁的执行参数，不设上限会让
+ *  不合规模型把门禁撑成自由命令队列。 */
+const MAX_PLAN_VERIFICATION_ITEMS = 8;
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -1176,6 +1179,23 @@ function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> 
   return substeps;
 }
 
+/** 刀 1.1：归一化模型声明的验证清单。只留带非空 command 的项（坏项丢弃
+ *  而非整体作废——一条写坏不该陪葬整份清单），reason/final 按声明保留。
+ *  白名单把关不在这里：那是宿主门禁的职责（delivery.resolveGateSpecs），
+ *  解析层只负责把声明如实带出来。 */
+function normalizePlanVerification(raw: unknown): PlanVerificationSpec[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item): PlanVerificationSpec[] => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as { command?: unknown; reason?: unknown; final?: unknown };
+    const command = typeof value.command === 'string' ? value.command.trim() : '';
+    if (!command) return [];
+    return [value.final === true
+      ? { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '', final: true }
+      : { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '' }];
+  }).slice(0, MAX_PLAN_VERIFICATION_ITEMS);
+}
+
 function parsePlanJsonCore(text: string): PlanParseResult {
   if (!text) return { plan: null, repaired: false };
   let cleaned = text.trim();
@@ -1231,10 +1251,16 @@ function parsePlanJsonCore(text: string): PlanParseResult {
   // Re-index ids after the cap (parsePlanJson assigned sequential ids above).
   const indexed = capped.map((s, i) => ({ ...s, id: String(i + 1) }));
 
+  // 刀 1.1：验证清单只在对象形态下存在（纯数组形态无处挂它），如实归一化
+  // 后随计划带出；空清单不占字段。
+  const rawVerification: unknown = Array.isArray(parsed) ? undefined : (parsed as { verification?: unknown }).verification;
+  const verification = normalizePlanVerification(rawVerification);
+
   return {
     plan: {
       steps: indexed,
       reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
+      verification: verification.length > 0 ? verification : undefined,
     },
     repaired,
   };

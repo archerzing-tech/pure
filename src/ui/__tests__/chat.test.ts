@@ -587,7 +587,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 回合末必须真实重跑机械验证（runDeliveryVerification），失败后用真实失败
     // 输出驱动有界修复轮（runDeliveryFixRound），每轮修复后重新验证。
-    const backstop = src.indexOf('await runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile, turnSignal, onDeliveryStep)');
+    const backstop = src.indexOf('await runDeliveryVerification(codingAgent.toolRegistry, gateSpecs.specs, turnSignal, onDeliveryStep)');
     const fixRound = src.indexOf('await runDeliveryFixRound(completionMessages, deliveryResult)');
     expect(backstop).toBeGreaterThan(-1);
     expect(fixRound).toBeGreaterThan(backstop);
@@ -610,6 +610,32 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 旧的 LLM VERDICT 门禁卡不再出现在 GUI 流程里。
     expect(src.indexOf('createQualityGateCard')).toBe(-1);
     expect(src.indexOf('runProjectQualityGate')).toBe(-1);
+  });
+
+  it('gate runs the plan-declared verification list through the host whitelist, never raw（刀 1.1）', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 清单裁决在纯函数 resolveGateSpecs（delivery.test 锁语义：白名单逐条
+    // 把关、非空否则回退 profile 全量、final 子集为收尾必跑集）；宿主锁
+    // 「经裁决 + 清单当参数 + 来源如实入气泡」的消费形状。
+    const gate = src.indexOf('const gateSpecs = resolveGateSpecs(gatePlanVerification, workspaceProfile);');
+    expect(gate).toBeGreaterThan(-1);
+    // 清单从规划块过桥到收尾闸门（两处不同层作用域）。
+    const bridge = src.indexOf('gatePlanVerification = planForReview.verification;');
+    expect(bridge).toBeGreaterThan(-1);
+    expect(bridge).toBeLessThan(gate);
+    // 三处执行点全部吃裁决后的清单，没有旁路直接吃 workspaceProfile。
+    expect(src.indexOf('runDeliveryVerification(codingAgent.toolRegistry, workspaceProfile')).toBe(-1);
+    let at = gate;
+    for (let i = 0; i < 3; i++) {
+      const call = src.indexOf('runDeliveryVerification(codingAgent.toolRegistry, gateSpecs.specs', at);
+      expect(call).toBeGreaterThan(gate);
+      at = call + 10;
+    }
+    // 来源如实交代：plan 来源点名清单内容，profile 来源维持原话。
+    expect(src).toContain('按计划声明的清单机械重跑');
+    expect(src).toContain("'🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…'");
+    // 执行语境带着定稿计划的清单进引擎（迭代环的最小验证集）。
+    expect(src).toContain('verification: approvedPlan.verification');
   });
 
   it('presents probe findings once, only via reportProbeFindings', () => {
@@ -1860,7 +1886,8 @@ describe('plan-by-thinking flow', () => {
     expect(src).toContain('this.pendingPlanNarration = thought.narration;');
     expect(src).not.toContain("this.messages.push({ role: 'assistant', content: thought.narration })");
     expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });');
-    expect(src).toContain("planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true })");
+    // 刀 1.1：有卡路径带着定稿计划的验证清单进执行语境（迭代环最小集）。
+    expect(src).toContain('planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification })');
     // 无卡路径跳过了 approvePlan：评估卡阶段必须同样落定，不能悬在半空。
     expect(src).toContain("assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');");
   });

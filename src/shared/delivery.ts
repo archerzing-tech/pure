@@ -158,14 +158,23 @@ function commandForScript(manager: PackageManager, script: string): string {
   return `npm run ${script}`;
 }
 
+// 刀 1.5 超时分档（2026-10-10）：误杀真测试/构建套件比超时本身贵得多——
+// 一个 200s 的正经测试套被 180s 掐死，触发的是一整轮修复（模型重跑、再
+// 失败、再复查）；而 lint 挂死多等一分钟只是白等。三档纯配置：快档
+// （lint）120s、标准档（typecheck）180s、重档（test/build）300s。
+export const TIER_FAST_TIMEOUT_MS = 120_000;
+export const TIER_STANDARD_TIMEOUT_MS = 180_000;
+export const TIER_HEAVY_TIMEOUT_MS = 300_000;
+
+/** 刀 1.1：按命令关键词套超时分档——模型声明的清单项没有 profile 那份
+ *  逐项标注，这里给同一套档位，避免清单项吃 180s 一刀切的默认值。 */
+export function verificationTimeoutFor(command: string): number {
+  if (/lint/i.test(command)) return TIER_FAST_TIMEOUT_MS;
+  if (/(?:typecheck|\btsc\b|check|clippy|analyze)/i.test(command)) return TIER_STANDARD_TIMEOUT_MS;
+  return TIER_HEAVY_TIMEOUT_MS;
+}
+
 export function buildVerificationPlan(profile: Omit<WorkspaceProfile, 'verification'>): VerificationSpec[] {
-  // 刀 1.5 超时分档（2026-10-10）：误杀真测试/构建套件比超时本身贵得多——
-  // 一个 200s 的正经测试套被 180s 掐死，触发的是一整轮修复（模型重跑、再
-  // 失败、再复查）；而 lint 挂死多等一分钟只是白等。三档纯配置：快档
-  // （lint）120s、标准档（typecheck）180s、重档（test/build）300s。
-  const TIER_FAST_TIMEOUT_MS = 120_000;
-  const TIER_STANDARD_TIMEOUT_MS = 180_000;
-  const TIER_HEAVY_TIMEOUT_MS = 300_000;
   const specs: VerificationSpec[] = [];
   const addScript = (id: string, label: string, script: string, reason: string, required: boolean, timeoutMs: number): void => {
     if (!profile.scripts[script]) return;
@@ -447,14 +456,6 @@ function deliveryCall(toolName: string, args: Record<string, unknown>): ToolCall
   };
 }
 
-/**
- * Run the workspace's mechanical verification specs (typecheck → lint → test →
- * build) one by one and collect real evidence for each. This is the
- * deterministic stop-gate behind the agent-driven pipeline: it never parses
- * model claims, only command results. A missing verification plan or a
- * bare/static workspace counts as not_applicable → passed (nothing mechanical
- * to verify), matching the honest "no standard entry" reporting upstream.
- */
 /** Run one verification spec exactly once, resolving null on timeout/abort. */
 async function runDeliveryStepOnce(
   tools: ToolAdapter,
@@ -502,23 +503,32 @@ async function runDeliveryStep(
   return { result: again, retried: true };
 }
 
+/**
+ * Run the given mechanical verification specs one by one and collect real
+ * evidence for each. This is the deterministic stop-gate behind the
+ * agent-driven pipeline: it never parses model claims, only command results.
+ * 刀 1.1（2026-10-10）：清单参数化——跑哪几条由调用方裁决（工作区 profile
+ * 全量，或模型声明并过了宿主白名单的计划清单，见 resolveGateSpecs），这里
+ * 只对参数负责。空清单 = 没有机械可验证项 → passed（not_applicable），
+ * matching the honest "no standard entry" reporting upstream.
+ */
 export async function runDeliveryVerification(
   tools: ToolAdapter,
-  profile: WorkspaceProfile | undefined,
+  specs: VerificationSpec[],
   signal?: AbortSignal,
   onStep?: (step: DeliveryStepResult) => void,
   fromIndex = 0,
 ): Promise<DeliveryVerificationResult> {
-  if (!profile || profile.verification.length === 0) {
+  if (specs.length === 0) {
     return { passed: true, steps: [] };
   }
   const steps: DeliveryStepResult[] = [];
   // 刀 1.2（2026-10-10）：fromIndex > 0 = 修复轮复查只跑「失败步起重跑其后
   // 全部」的后缀；前缀的证据由宿主持修复账拼接（裁决在 planVerification
   // Resume，语义 = formatDeliveryFixPrompt 对模型的同一承诺）。fromIndex 按
-  // profile.verification 的全局下标对齐，宿主跨轮累加前缀后对齐不变。
-  for (let i = Math.max(0, Math.min(fromIndex, profile.verification.length)); i < profile.verification.length; i++) {
-    const spec = profile.verification[i];
+  // 传入清单的全局下标对齐，宿主跨轮累加前缀后对齐不变。
+  for (let i = Math.max(0, Math.min(fromIndex, specs.length)); i < specs.length; i++) {
+    const spec = specs[i];
     if (signal?.aborted) break;
     const start = Date.now();
     const { result, retried } = await runDeliveryStep(tools, spec, signal);
@@ -578,6 +588,48 @@ export function planVerificationResume(
   const firstNotPassed = previous.steps.findIndex((s) => s.status !== 'passed');
   if (firstNotPassed <= 0) return { fromIndex: 0, verifiedPrefix: [] };
   return { fromIndex: firstNotPassed, verifiedPrefix: previous.steps.slice(0, firstNotPassed) };
+}
+
+/**
+ * 刀 1.1（2026-10-10）验证清单的门禁裁决（纯函数）：模型在计划里声明的
+ * 清单经宿主逐条把关后成为收尾门禁的执行清单；任何一关不过都回退工作区
+ * profile 全量。附-5 三条铁律的前两条落在这里（第三条「planTerminal 机械
+ * 锚」由回合末闸门本体承担）：
+ *  - 白名单（isVerificationCommand）：宿主只执行「长得像验证命令」的项。
+ *    门禁是唯一不解析模型声称的机械闸——清单若不过闸直接执行，等于把闸
+ *    交给被评判的一方。
+ *  - 非空强制：没声明、坏项全滤、白名单全滤——任何一种空都回退 profile
+ *    全量，绝不空清单放行。
+ *  - final 语义：标了 final 的项构成收尾必跑集（刀 5.2 的分寸——低风险
+ *    任务的收尾验证可以不是全量；全量保留给 profile 兜底与用户点名）；
+ *    没有任何 final 标记时整份清单就是收尾集（向后兼容）。
+ * source 如实回报清单来源，供门禁气泡向用户交代「这次闸跑的是谁的清单」。
+ */
+export function resolveGateSpecs(
+  planVerification: ReadonlyArray<{ command?: unknown; reason?: unknown; final?: unknown }> | undefined,
+  profile: WorkspaceProfile | undefined,
+): { specs: VerificationSpec[]; source: 'plan' | 'profile' } {
+  const declared = (planVerification ?? []).filter(
+    (item): item is { command: string; reason: string; final?: boolean } =>
+      typeof item?.command === 'string' && item.command.trim().length > 0,
+  ).filter((item) => isVerificationCommand(item.command));
+  if (declared.length === 0) {
+    return { specs: profile?.verification ?? [], source: 'profile' };
+  }
+  const gateSet = declared.some((item) => item.final === true)
+    ? declared.filter((item) => item.final === true)
+    : declared;
+  return {
+    specs: gateSet.map((item, index) => ({
+      id: `plan_${index + 1}`,
+      label: item.command,
+      command: item.command,
+      required: true,
+      reason: item.reason || '模型声明的验证清单项（已过宿主白名单）。',
+      timeoutMs: verificationTimeoutFor(item.command),
+    })),
+    source: 'plan',
+  };
 }
 
 /** Compact human-readable summary of a backstop run for status bubbles. */

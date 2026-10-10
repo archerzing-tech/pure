@@ -51,9 +51,21 @@ export interface PlanStep {
   parallel?: boolean;
 }
 
+/** 刀 1.1 验证清单（2026-10-10）：计划阶段模型按本轮改动面声明的验证项。
+ *  证据充足性（跑哪些、为什么够）由模型判断——这正是刀 5 的方式方法字段在
+ *  验证子问题上的落地；证据真实性仍全在宿主（清单只是参数，白名单把关后
+ *  机械执行）。final=true 的项构成收尾门禁的必跑集；整份清单是迭代环的
+ *  最小验证集（宿主把它并进执行语境）。 */
+export interface PlanVerificationSpec {
+  command: string;
+  reason: string;
+  final?: boolean;
+}
+
 export interface Plan {
   steps: PlanStep[];
   reasoning: string;
+  verification?: PlanVerificationSpec[];
 }
 
 export type TaskComplexity = 'simple' | 'complex';
