@@ -1077,3 +1077,14 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
   });
 });
+
+// 打通路径的 75% 预算必须贯通到 GUI 的 HTTP 出口执行器（runRouted /
+// runRoutedSurface）：不只下载面吃。这里以源码锚点钉住三步序列，防回归。
+describe('runRouted 打通预算（75%）', () => {
+  const src = readFileSync(new URL('../TauriToolAdapter.ts', import.meta.url), 'utf8');
+
+  it('host 出口与 surface 出口都按 [首选, 反向, 首选·重试] 三步', () => {
+    expect(src).toContain('[route.proxyUrl, route.fallbackProxyUrl, route.proxyUrl]');
+    expect(src).toContain('[pair.proxyUrl, pair.fallbackProxyUrl, pair.proxyUrl]');
+  });
+});

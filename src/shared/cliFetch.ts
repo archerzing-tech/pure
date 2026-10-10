@@ -17,6 +17,9 @@
 // 明确不做的事：不用 undici ProxyAgent / setGlobalDispatcher（Bun 下静默失效，
 // 已实测），不假装支持 SOCKS（那会让「代理配错了」变成一个查不出原因的玄学故障）。
 
+import { isNetworkError } from './netGuard';
+import { unblockAttemptsBeforeMirror } from './netRoute';
+
 export interface CliProxyRoute {
   /** 要传给 fetch 原生 `proxy` 选项的地址；直连时为空串。 */
   proxy: string;
@@ -128,9 +131,29 @@ export function cliProxyFor(targetUrl: string, explicitProxy?: string): CliProxy
  * Bun 没有「强制直连」开关（proxy:'' 仍会退回读环境变量，实测），所以直连
  * 只能靠**不传 proxy** 实现。Bun 每次 fetch 都重读 process.env，所以改环境
  * 变量下一次请求即生效——这正是这里不做任何全局 dispatcher 设置的原因。
+ *
+ * 打通优先：配了可用代理时，按「首选 → 反向 → 首选·退避重试」的 75% 预算
+ * 依次试（与 GUI 侧 runRouted 同一口径）；未配代理、或目标为环回/私网时只有
+ * 一次直连。只在幂等请求（GET/HEAD）上重试，避免把非幂等请求重复发出。
  */
-export function cliFetch(input: string, init: RequestInit = {}): Promise<Response> {
+export async function cliFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const route = cliProxyFor(input);
-  if (route.unsupported) return Promise.reject(new Error(route.unsupported));
-  return route.direct ? fetch(input, init) : fetch(input, { ...init, proxy: route.proxy });
+  if (route.unsupported) throw new Error(route.unsupported);
+  const plan = route.direct
+    ? ['']
+    : unblockAttemptsBeforeMirror(input, route.proxy).map((a) => a.proxyUrl);
+  const method = (init.method ?? 'GET').toUpperCase();
+  const attempts = method === 'GET' || method === 'HEAD' ? plan : plan.slice(0, 1);
+  let lastErr: unknown = new Error('fetch failed');
+  for (let i = 0; i < attempts.length; i++) {
+    const proxy = attempts[i]!;
+    try {
+      return proxy ? await fetch(input, { ...init, proxy }) : await fetch(input, init);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isNetworkError(msg)) throw err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }

@@ -159,10 +159,61 @@ describe('CLI 出口代理路由（定义在 shared/cliFetch，三处调用点�
       return new Response('ok', { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      await cliFetch('https://example.com/x');
+      // 代理优先主机（cohere.ai 在分类面里）：首选就是代理，所以第一次调用
+      // 就应带上原生 proxy 选项。direct-first 主机的首选直连另有用例覆盖。
+      await cliFetch('https://cohere.ai/x');
       // 必须用原生 proxy 选项：undici ProxyAgent 与 Bun 的 proxy 选项是两套
       // 栈，混用会出现「搜索走代理、下载不走」这种最难排查的不一致。
       expect(seenProxy).toBe('http://127.0.0.1:7890');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('direct-first 主机：直连 → 代理 → 直连·重试（75% 预算）', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new Error('fetch failed');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('https://cli-plan-direct.test/x')).rejects.toThrow();
+      // 首选直连（不传 proxy）→ 反向代理 → 首选·重试（再直连）。
+      expect(seen).toEqual([undefined, 'http://127.0.0.1:7890', undefined]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('非幂等请求（POST）不重试，避免重复副作用', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new Error('fetch failed');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('https://cli-plan-post.test/x', { method: 'POST' })).rejects.toThrow();
+      expect(seen.length).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('非网络类失败不换出口（换条路也答不出同一份字节）', async () => {
+    setEnv({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    const seen: Array<string | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: unknown, init: RequestInit & { proxy?: string }) => {
+      seen.push(init?.proxy);
+      throw new Error('JSON parse error');
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cliFetch('https://cli-plan-content.test/x')).rejects.toThrow();
+      expect(seen.length).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

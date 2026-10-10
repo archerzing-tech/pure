@@ -325,7 +325,8 @@ describe('tryDirectPublicApi (mocked network)', () => {
 
   // 结构化 API 后端此前是裸 fetch：用户配了代理，web_search 走上去了而
   // 汇率/天气/维基全部直连失败，最终以「查不到数据」的形式呈现给模型——
-  // 比直接报错更糟，因为模型会把「查不到」当成事实。
+  // 比直接报错更糟，因为模型会把「查不到」当成事实。现在与 CLI 出口同一份
+  // 路由：direct-first 主机先直连，网络类失败后用代理兜底。
   it('结构化 API 请求走与 CLI 出口一致的代理语义', async () => {
     const saved = { proxy: process.env.HTTPS_PROXY, noProxy: process.env.NO_PROXY };
     process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
@@ -333,12 +334,14 @@ describe('tryDirectPublicApi (mocked network)', () => {
     const seen: Array<string | undefined> = [];
     globalThis.fetch = (async (_input: any, init: RequestInit & { proxy?: string }) => {
       seen.push(init.proxy);
+      if (!init.proxy) throw new Error('fetch failed');
       return new Response(JSON.stringify({ rates: { CNY: 7.2 }, date: '2026-08-16' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as unknown as typeof fetch;
     try {
       const outcome = await tryDirectPublicApi('100 usd to cny');
       expect(outcome?.source).toBe('Frankfurter (ECB)');
-      expect(seen).toEqual(['http://127.0.0.1:7890']);
+      // 先直连（不带 proxy）→ 网络失败 → 代理兜底成功。
+      expect(seen).toEqual([undefined, 'http://127.0.0.1:7890']);
     } finally {
       if (saved.proxy === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = saved.proxy;
       if (saved.noProxy !== undefined) process.env.NO_PROXY = saved.noProxy;

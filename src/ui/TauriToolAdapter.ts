@@ -782,25 +782,28 @@ export class TauriToolAdapter implements ToolAdapter {
       if (host) recordNetOutcome(host, proxyUrl ? 'proxy' : 'direct', ok);
     };
 
-    const first = await attempt(route.proxyUrl);
-    if (first.ok) {
-      if (host) recordNetSuccess(host);
-      learn(route.proxyUrl, true);
-      return first.value;
+    // 打通路径的 75% 预算：首选 → 反向 → 首选·退避重试（未配代理时只有直连）。
+    // netRouteProxyPair 已给出「首选 + 反向」，从中展开三步即用户定的口径。
+    const seq = route.fallbackProxyUrl === null
+      ? [route.proxyUrl]
+      : [route.proxyUrl, route.fallbackProxyUrl, route.proxyUrl];
+    let lastMsg = '';
+    for (let i = 0; i < seq.length; i++) {
+      const res = await attempt(seq[i]!);
+      if (res.ok) {
+        if (host) recordNetSuccess(host);
+        learn(seq[i]!, true);
+        return res.value;
+      }
+      lastMsg = res.msg;
+      // 没有 host、或非网络类失败（内容不对等）——换出口没有意义，原样上报。
+      if (!host || !res.network) throw new Error(res.msg);
+      learn(seq[i]!, false);
     }
-    // 没有兜底（未配代理 / neutral 主机）或不是网络类失败 —— 原样上报。
-    if (route.fallbackProxyUrl === null || !host || !first.network) throw new Error(first.msg);
-    learn(route.proxyUrl, false);
-
-    const second = await attempt(route.fallbackProxyUrl);
-    if (second.ok) {
-      recordNetSuccess(host);
-      learn(route.fallbackProxyUrl, true);
-      return second.value;
-    }
-    learn(route.fallbackProxyUrl, false);
+    // 有反向兜底（配了代理）且预算用尽仍失败：记熔断；没配代理则原样上报。
+    if (route.fallbackProxyUrl === null) throw new Error(lastMsg);
     const { tripped } = recordNetFailure(host);
-    throw new Error(tripped ? blockedHostMessage(host, second.msg) : second.msg);
+    throw new Error(tripped ? blockedHostMessage(host, lastMsg) : lastMsg);
   }
 
   /** 无单一目标 host 的出口（搜索/公共 API 扇出到几十个后端）：用出口面
@@ -811,23 +814,24 @@ export class TauriToolAdapter implements ToolAdapter {
   ): Promise<T> {
     const pair = netRouteSurfacePair(surface, this.proxyUrl);
     const learn = (proxyUrl: string, ok: boolean): void => recordNetSurfaceOutcome(surface, proxyUrl ? 'proxy' : 'direct', ok);
-    try {
-      const value = await run(pair.proxyUrl);
-      learn(pair.proxyUrl, true);
-      return value;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (pair.fallbackProxyUrl === null || !isNetworkError(msg)) throw err;
-      learn(pair.proxyUrl, false);
+    // 打通路径的 75% 预算：首选 → 反向 → 首选·退避重试。
+    const seq = pair.fallbackProxyUrl === null
+      ? [pair.proxyUrl]
+      : [pair.proxyUrl, pair.fallbackProxyUrl, pair.proxyUrl];
+    let lastErr: unknown = new Error(`${surface} network failed`);
+    for (let i = 0; i < seq.length; i++) {
       try {
-        const value = await run(pair.fallbackProxyUrl);
-        learn(pair.fallbackProxyUrl, true);
+        const value = await run(seq[i]!);
+        learn(seq[i]!, true);
         return value;
-      } catch (err2) {
-        learn(pair.fallbackProxyUrl, false);
-        throw err2 instanceof Error ? err2 : new Error(String(err2));
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        learn(seq[i]!, false);
+        if (pair.fallbackProxyUrl === null || !isNetworkError(msg)) throw err;
       }
     }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
   getTools(): ToolDefinition[] {
