@@ -15,6 +15,7 @@ import {
 // GUI 侧的护栏/归因/渲染现在与 CLI 同源（shared/netProbeCore）：GUI 不再自带
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
+import { recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -1047,5 +1048,34 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: NPM }, undefined);
     expect(out).toBeNull();
     expect(calls).toHaveLength(1);
+  });
+
+  it('已知熔断的主机有镜像时，入口直接切镜像（真实 execute，走 shell 兜底）', async () => {
+    const commands: string[] = [];
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'execute_command') {
+        commands.push(String(args?.command ?? ''));
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ type: 'done', code: 0, path: '/tmp/left-pad-1.3.0.tgz', filename: 'left-pad-1.3.0.tgz', size: 14, via: 'curl' }),
+          stderr: '',
+        };
+      }
+      return 'x';
+    };
+    recordNetFailure(NPM);
+    recordNetFailure(NPM);
+    try {
+      const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('download_file', { url: NPM, filename: 'left-pad-1.3.0.tgz' }));
+      expect(result.success).toBe(true);
+      const joined = commands.join('\n');
+      expect(joined).toContain('registry.npmmirror.com');
+      // 原站根本没被尝试。
+      expect(joined).not.toContain('registry.npmjs.org');
+      const parsed = JSON.parse(String(result.result)) as { rewrite?: { from: string; to: string; rule: string } };
+      expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
+    } finally {
+      recordNetSuccess(NPM);
+    }
   });
 });

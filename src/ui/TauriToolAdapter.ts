@@ -874,13 +874,18 @@ export class TauriToolAdapter implements ToolAdapter {
       signal,
     );
     if (!retried.success) return null;
-    // 如实标注实际来源：不让一次字节等价的静默改写被当成「就是原站给的」。
+    return this.withRewriteProvenance(retried, originalUrl, rw);
+  }
+
+  /** 把「实际来自镜像端点」标注进下载成功结果（结果是一段 JSON），不让一次
+   *  字节等价的静默改写被当成「就是原站给的」。 */
+  private withRewriteProvenance(result: ToolResult, from: string, rw: { url: string; rule: string }): ToolResult {
     try {
-      const parsed = JSON.parse(String(retried.result)) as Record<string, unknown>;
-      parsed.rewrite = { from: originalUrl, to: rw.url, rule: rw.rule };
-      return { ...retried, result: JSON.stringify(parsed) };
+      const parsed = JSON.parse(String(result.result)) as Record<string, unknown>;
+      parsed.rewrite = { from, to: rw.url, rule: rw.rule };
+      return { ...result, result: JSON.stringify(parsed) };
     } catch {
-      return retried;
+      return result;
     }
   }
 
@@ -1182,9 +1187,20 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!/^https?:\/\//i.test(url)) {
             return { id: toolCall.id, toolName: 'download_file', result: '请提供以 http(s):// 开头的下载链接', success: false, duration: Date.now() - start };
           }
-          // Host circuit breaker: a known-dead download source fails instantly.
+          // Host circuit breaker: a known-dead download source fails instantly —
+          // unless this URL has a byte-identical mirror, in which case go
+          // straight there instead of hitting the dead host first（已知桥在，不必
+          // 先探一次水）。镜像自己也熔断时不再转，递归只走一层。
           if (hostBlocked(url)) {
-            return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
+            const rw = primaryRewrite(url);
+            if (!rw) {
+              return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
+            }
+            const retried = await this.execute(
+              { id: toolCall.id, index: toolCall.index, function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) } },
+              signal,
+            );
+            return retried.success ? this.withRewriteProvenance(retried, url, rw) : retried;
           }
           const destination = typeof args.destination === 'string' ? args.destination.trim() : '';
           const filenameArg = typeof args.filename === 'string' ? args.filename.trim() : '';

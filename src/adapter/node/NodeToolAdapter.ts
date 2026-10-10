@@ -16,7 +16,7 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../sh
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
-import { downloadAttemptUrls } from '../../shared/sourceRewrite';
+import { downloadAttemptUrls, primaryRewrite } from '../../shared/sourceRewrite';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
@@ -2262,6 +2262,17 @@ export class NodeToolAdapter implements ToolAdapter {
     return { ok: false, error: errors.filter(Boolean).join('；') || '未知错误' };
   }
 
+  /** 把「实际来自镜像端点」标注进下载成功结果（结果是一段 JSON）。 */
+  private withRewriteProvenance(result: ToolResult, from: string, rw: { url: string; rule: string }): ToolResult {
+    try {
+      const parsed = JSON.parse(String(result.result)) as Record<string, unknown>;
+      parsed.rewrite = { from, to: rw.url, rule: rw.rule };
+      return { ...result, result: JSON.stringify(parsed) };
+    } catch {
+      return result;
+    }
+  }
+
   private downloadOk(
     outPath: string,
     size: number,
@@ -2291,8 +2302,19 @@ export class NodeToolAdapter implements ToolAdapter {
   ): Promise<ToolResult> {
     const url = String(args.url ?? '').trim();
     if (!/^https?:\/\//i.test(url)) return this.fail(null, start, '请提供以 http(s):// 开头的下载链接');
-    // Host circuit breaker: a known-dead download source fails instantly.
-    if (hostBlocked(url)) return this.fail(null, start, blockedHostMessage(url));
+    // Host circuit breaker: a known-dead download source fails instantly —
+    // unless this URL has a byte-identical mirror, in which case go straight
+    // there instead of hitting the dead host first（这就是「开路」：已知桥在，
+    // 不必先探一次水）。镜像自己也熔断时不再转，递归只走一层。
+    if (hostBlocked(url)) {
+      const rw = primaryRewrite(url);
+      if (!rw) return this.fail(null, start, blockedHostMessage(url));
+      const retried = await this.execute(
+        { id: toolCallId, index: 0, function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) } },
+        signal,
+      );
+      return retried.success ? this.withRewriteProvenance(retried, url, rw) : retried;
+    }
 
     const proxyArg = typeof args.proxy === 'string' ? args.proxy.trim() : '';
     const { proxy } = this.resolveDownloadProxy(url, proxyArg);

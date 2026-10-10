@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter } from '../NodeToolAdapter';
+import { recordNetFailure, recordNetSuccess } from '../../../shared/netGuard';
 
 const FILE_BODY = 'hello from the download test\n';
 const DISPOSITION = 'attachment; filename="custom-name.txt"';
@@ -164,5 +165,31 @@ describe('download_file · S2 单请求改写（镜像端点）', () => {
     expect(calls).toEqual([NPM]);
     expect(String(result.result)).not.toContain('npmmirror');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('已知熔断的主机有镜像时，入口直接切镜像（不再先撞原站）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pure-mirror-entry-'));
+    const adapter = new NodeToolAdapter({ workspace: dir });
+    const calls: string[] = [];
+    stubChain(adapter, calls, 'network-then-ok');
+    // 先把这个主机打到熔断（两次网络失败）。
+    recordNetFailure(NPM);
+    recordNetFailure(NPM);
+    try {
+      const result = await adapter.execute({
+        id: 'dl_entry',
+        index: 0,
+        function: { name: 'download_file', arguments: JSON.stringify({ url: NPM, destination: dir, filename: 'left-pad-1.3.0.tgz' }) },
+      });
+      expect(result.success).toBe(true);
+      // 只走了镜像一次：原站根本没被尝试。
+      expect(calls).toEqual([MIRROR]);
+      const summary = JSON.parse(String(result.result)) as { rewrite?: { from: string; to: string; rule: string } };
+      expect(summary.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
+    } finally {
+      // 不把熔断状态留给后续用例。
+      recordNetSuccess(NPM);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
