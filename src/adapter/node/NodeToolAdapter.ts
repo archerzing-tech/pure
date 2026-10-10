@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
+import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
@@ -270,7 +271,29 @@ export class NodeToolAdapter implements ToolAdapter {
     const endLine = typeof args.endLine === 'number' ? Math.min(args.endLine, lines.length) : lines.length;
 
     if (startLine > 1 || endLine < lines.length) {
-      text = lines.slice(startLine - 1, endLine).join('\n');
+      // 模型点名要的范围：原样给，不加脚注。
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'read_file',
+        result: lines.slice(startLine - 1, endLine).join('\n'),
+        success: true,
+        duration: Date.now() - start,
+      };
+    }
+
+    // 刀 D1（2026-10-10）真杠杆：默认（未给范围）大文件只回头部切片 + 总行数
+    // + 建议范围，不做硬截断——小文件零变化，真大文件不再整份进上下文逼出
+    // 引擎 40k 盲截（截掉的尾巴连总行数都不知道）。头部预算按引擎
+    // capToolResult 的 40k chars 留足余量，脚注在引擎截断下也能存活。
+    const head = readFileHeadSlice(lines);
+    if (head.count < lines.length) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'read_file',
+        result: `${head.text}\n\n${readFileHeadFooter(head.count, lines.length)}`,
+        success: true,
+        duration: Date.now() - start,
+      };
     }
 
     return {

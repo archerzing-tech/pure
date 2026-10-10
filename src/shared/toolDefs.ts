@@ -21,7 +21,7 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Optionally specify startLine and endLine to read a range.',
+    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Optionally specify startLine and endLine to read a range. Very large files: without a range only the head is returned, with a footer stating the total line count — continue from the suggested startLine or use code_searcher to pinpoint, instead of loading the whole file.',
     input_schema: {
       type: 'object',
       properties: {

@@ -533,3 +533,66 @@ describe('detectNetworkSummary', () => {
     expect(out).not.toContain('\n');
   });
 });
+
+// 刀 D1（2026-10-10）read_file 真杠杆：默认（未给范围）大文件只回头部切片
+// + 总行数 + 建议范围，不做硬截断；显式范围原样给、不加脚注；小文件零变化。
+describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-readhead-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  const read = async (args: Record<string, unknown>): Promise<ToolResult> =>
+    adapter.execute({
+      id: 'call-readhead',
+      index: 0,
+      function: { name: 'read_file', arguments: JSON.stringify(args) },
+    });
+
+  it('returns small files whole with no footer', async () => {
+    writeFileSync(join(workspace, 'small.txt'), 'l1\nl2\nl3');
+    const r = await read({ path: 'small.txt' });
+    expect(r.success).toBe(true);
+    expect(r.result).toBe('l1\nl2\nl3');
+    expect(String(r.result)).not.toContain('read_file：');
+  });
+
+  it('returns only the head plus total-lines footer for a big file without a range', async () => {
+    const big = Array.from({ length: 2500 }, (_, i) => `line-${i + 1}`).join('\n');
+    writeFileSync(join(workspace, 'big.txt'), big);
+    const r = await read({ path: 'big.txt' });
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text).toContain('line-1\n');
+    expect(text).toContain('line-2000');
+    expect(text).not.toContain('line-2001');
+    // 脚注如实交代总行数 + 建议续读起点。
+    expect(text).toContain('[read_file：以上是前 2000 行，文件共 2500 行。继续读用 startLine=2001');
+  });
+
+  it('returns an explicitly requested range verbatim with no footer', async () => {
+    const r = await read({ path: 'big.txt', startLine: 2400, endLine: 2402 });
+    expect(r.success).toBe(true);
+    expect(r.result).toBe('line-2400\nline-2401\nline-2402');
+    expect(String(r.result)).not.toContain('read_file：');
+  });
+
+  it('stops the head at the char budget by whole lines, never mid-line', async () => {
+    // 每行 8000 字符：第 4 行会撞上 32000 预算 → 只取前 3 行（按行整体取）。
+    const fat = Array.from({ length: 10 }, (_, i) => `f${i}-${'a'.repeat(8000)}`).join('\n');
+    writeFileSync(join(workspace, 'fat.txt'), fat);
+    const r = await read({ path: 'fat.txt' });
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text).toContain('f2-aaa');
+    expect(text).not.toContain('f3-aaa');
+    expect(text).toContain('[read_file：以上是前 3 行，文件共 10 行。继续读用 startLine=4');
+  });
+});

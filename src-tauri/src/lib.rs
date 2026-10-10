@@ -877,12 +877,31 @@ fn has_symlink_component(workspace: &str, path: &str) -> bool {
 }
 
 
+// 刀 D1（2026-10-10）read_file 真杠杆的 Rust 镜像常数，TS 侧同款在
+// src/shared/readFileHead.ts——改这里必须同步改那边。默认头部行数上限让
+// 绝大多数源码文件全文返回零变化；头部字符预算给引擎 40k 截断留足余量，
+// 保证脚注（总行数 + 建议范围）在引擎截断下也能存活。
+const READ_FILE_HEAD_LINES: usize = 2000;
+const READ_FILE_HEAD_MAX_CHARS: usize = 32_000;
+
 #[tauri::command]
-async fn read_file(workspace: String, path: String) -> Result<String, String> {
-    run_blocking(move || read_file_impl(workspace, path)).await
+async fn read_file(
+    workspace: String,
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    head_lines: Option<usize>,
+) -> Result<String, String> {
+    run_blocking(move || read_file_impl(workspace, path, start_line, end_line, head_lines)).await
 }
 
-fn read_file_impl(workspace: String, path: String) -> Result<String, String> {
+fn read_file_impl(
+    workspace: String,
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    head_lines: Option<usize>,
+) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
     let meta = fs::metadata(&full).map_err(|e| format!("read_file: {}", e))?;
     if meta.is_dir() {
@@ -906,7 +925,122 @@ fn read_file_impl(workspace: String, path: String) -> Result<String, String> {
     if text.is_empty() {
         return Ok("(empty file)".to_string());
     }
-    Ok(text)
+    slice_read_file_text(text, start_line, end_line, head_lines)
+}
+
+/// 刀 D1（2026-10-10）read_file 的行范围语义（纯函数，单测锁定）：
+///  - 显式范围（start_line/end_line 任一给出）：切片在 IPC 之前——大文件
+///    不再整份过桥。原样给，不加脚注（模型点名要的范围）。1 基、含端点；
+///    起点越过 EOF 返回空串（沿用旧 TS 侧切片的退化语义）。
+///  - head_lines：默认读（模型未给范围）只回头部切片 + 总行数 + 建议范围
+///    脚注，不做硬截断。不给 head_lines 时全文返回——撤销快照 / artifact
+///    预览 / overlay 守卫等内部调用方走这条路，语义与旧版完全一致。
+fn slice_read_file_text(
+    text: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    head_lines: Option<usize>,
+) -> Result<String, String> {
+    if start_line.is_none() && end_line.is_none() && head_lines.is_none() {
+        return Ok(text);
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if start_line.is_some() || end_line.is_some() {
+        let s = start_line.unwrap_or(1).max(1);
+        let e = end_line.unwrap_or(total).min(total);
+        if s > e {
+            return Ok(String::new());
+        }
+        return Ok(lines[s - 1..e].join("\n"));
+    }
+    let head = head_lines.unwrap_or(READ_FILE_HEAD_LINES);
+    let mut take = 0usize;
+    let mut chars = 0usize;
+    for line in lines.iter().take(head) {
+        if chars + line.len() + 1 > READ_FILE_HEAD_MAX_CHARS {
+            break;
+        }
+        chars += line.len() + 1;
+        take += 1;
+    }
+    if take >= total {
+        return Ok(text);
+    }
+    // 脚注格式与 src/shared/readFileHead.ts 的 readFileHeadFooter 保持一致。
+    Ok(format!(
+        "{}\n\n[read_file：以上是前 {} 行，文件共 {} 行。继续读用 startLine={}（可配 endLine）；定位内容用 code_searcher。]",
+        lines[..take].join("\n"),
+        take,
+        total,
+        take + 1
+    ))
+}
+
+#[cfg(test)]
+mod read_file_slice_tests {
+    use super::*;
+
+    /// 造一个临时 workspace + 固定内容文件，返回 workspace 路径。
+    fn write_fixture(name: &str, content: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("pure-readfile-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("f.txt"), content).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn returns_full_text_when_no_range_or_head_is_given() {
+        // 内部调用方（撤销快照 / artifact 预览 / overlay 守卫）依赖全文语义。
+        let ws = write_fixture("full", "l1\nl2\nl3");
+        let out = read_file_impl(ws, "f.txt".into(), None, None, None).unwrap();
+        assert_eq!(out, "l1\nl2\nl3");
+    }
+
+    #[test]
+    fn slices_explicit_ranges_before_ipc_without_footer() {
+        let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("range", &content);
+        let out = read_file_impl(ws, "f.txt".into(), Some(2400), Some(2402), None).unwrap();
+        assert_eq!(out, "line-2400\nline-2401\nline-2402");
+    }
+
+    #[test]
+    fn range_starting_past_eof_returns_empty() {
+        let ws = write_fixture("past-eof", "l1\nl2");
+        let out = read_file_impl(ws, "f.txt".into(), Some(9), None, None).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn head_default_returns_head_plus_total_lines_footer() {
+        let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("head", &content);
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        assert!(out.starts_with("line-1\n"));
+        assert!(out.contains("line-2000\n"));
+        assert!(!out.contains("line-2001"));
+        assert!(out.contains("以上是前 2000 行，文件共 2500 行。继续读用 startLine=2001"));
+    }
+
+    #[test]
+    fn head_covering_the_whole_file_returns_text_without_footer() {
+        let ws = write_fixture("head-all", "l1\nl2\nl3");
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        assert_eq!(out, "l1\nl2\nl3");
+    }
+
+    #[test]
+    fn head_stops_at_the_char_budget_by_whole_lines() {
+        // 每行 8000 字符：第 4 行撞上 32000 预算 → 只取前 3 行（行中不截断）。
+        let content = (0..10).map(|i| format!("f{}-{}", i, "a".repeat(8000))).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("head-budget", &content);
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        assert!(out.contains("f2-aaa"));
+        assert!(!out.contains("f3-aaa"));
+        assert!(out.contains("以上是前 3 行，文件共 10 行。继续读用 startLine=4"));
+    }
 }
 
 #[tauri::command]

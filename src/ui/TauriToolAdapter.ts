@@ -6,6 +6,7 @@
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage } from '../shared/types';
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
+import { READ_FILE_HEAD_LINES } from '../shared/readFileHead';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload, communityMcpCandidates, type McpCandidate } from '../shared/mcpRegistry';
 import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName, normalizeHubRepo } from './skillHub';
@@ -1016,13 +1017,15 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ candidateId, name: candidate.title, persisted: connected.persisted, tools: connected.tools.map((tool) => tool.name) }), success: true, duration: Date.now() - start };
         }
         case 'read_file': {
-          const content = await this.call('read_file', { workspace: ws, path: String(args.path ?? '') }) as string;
-          const s = typeof args.startLine === 'number' ? args.startLine - 1 : 0;
-          const e = typeof args.endLine === 'number' ? args.endLine : undefined;
-          if (s > 0 || e !== undefined) {
-            const lines = content.split('\n');
-            return { id: toolCall.id, toolName: name, result: lines.slice(s, e).join('\n'), success: true, duration: Date.now() - start };
-          }
+          // 刀 D1（2026-10-10）：行范围在 Rust 侧切（IPC 之前），大文件不再
+          // 整份过桥。显式范围原样给、不加脚注；默认（未给范围）传 headLines
+          // ——Rust 只回头部切片 + 总行数 + 建议范围脚注（真杠杆：小文件零
+          // 变化，真大文件不再整份进上下文逼出引擎 40k 盲截）。
+          const s = typeof args.startLine === 'number' ? args.startLine : null;
+          const e = typeof args.endLine === 'number' ? args.endLine : null;
+          const content = await this.call('read_file', s !== null || e !== null
+            ? { workspace: ws, path: String(args.path ?? ''), startLine: s, endLine: e }
+            : { workspace: ws, path: String(args.path ?? ''), headLines: READ_FILE_HEAD_LINES }) as string;
           return { id: toolCall.id, toolName: name, result: content, success: true, duration: Date.now() - start };
         }
         case 'write_file': {
