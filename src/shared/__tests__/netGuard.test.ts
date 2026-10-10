@@ -79,6 +79,19 @@ describe('host circuit breaker', () => {
     expect(netFailureHint(url, 'timeout')).toContain('请勿原样重试');
   });
 
+  it('S2 改写建议：有镜像端点的 URL 在失败文案里给出确切替代地址（无则不加）', () => {
+    // npm tarball 有 npmmirror 镜像：文案必须带上确切 URL，而不是只教「换镜像」。
+    const npm = netFailureHint('https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz', 'timeout');
+    expect(npm).toContain('https://registry.npmmirror.com/left-pad/-/left-pad-1.3.0.tgz');
+    expect(npm).toContain('无需先配代理');
+    // 熔断文案同样带上确切端点。
+    expect(blockedHostMessage('https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz'))
+      .toContain('https://registry.npmmirror.com/left-pad/-/left-pad-1.3.0.tgz');
+    // 没有镜像端点的普通 URL 不出现任何替代 URL。
+    const plain = netFailureHint('https://no-mirror.example.com/a.tgz', 'timeout');
+    expect(plain).not.toContain('可直接改用');
+  });
+
   it('persists trip history so a NEW session inherits the planning knowledge', () => {
     const url = 'https://persist-dead.example.com/x';
     recordNetFailure(url);

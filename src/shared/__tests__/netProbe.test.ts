@@ -217,6 +217,21 @@ describe('netProbe 四步分层判据', () => {
     restoreFetch();
   });
 
+  it('证书不匹配给出专用归因，而非泛化的「TLS 握手失败」', async () => {
+    const fetchImpl = stubFetch({
+      ...goodDoh(),
+      'https://example.com/': () => new Response('ok', { status: 200 }),
+    });
+    const report = await diagnoseNetwork('https://example.com/', {
+      deps: deps({ fetchImpl, tlsProbe: () => Promise.resolve<TlsProbeOk>({ ok: true, ms: 200, certMatches: false, certSubject: 'other.com' }) }),
+    });
+    expect(report.verdict).toBe('tls-fail');
+    // 死代码回归锚：证书不匹配曾因判成 status=pass 而落进泛化分支，专用文案永不触发。
+    expect(report.attribution).toContain('证书不匹配目标域名');
+    expect(report.attribution).not.toContain('TCP 通了但 TLS 握手失败');
+    restoreFetch();
+  });
+
   it('证书匹配：SAN 优先、通配符按标签数对齐、CN 兜底', () => {
     expect(certMatchesHost('DNS:example.com, DNS:*.example.com', undefined, 'example.com')).toBe(true);
     expect(certMatchesHost('DNS:*.example.com', undefined, 'cdn.example.com')).toBe(true);
@@ -316,6 +331,57 @@ describe('netProbe 四步分层判据', () => {
     expect(report.attribution).toContain('与网络无关');
     // 后续层不该在域名不存在时白跑。
     expect(report.steps.find((s) => s.step === 'http')?.status).toBe('skipped');
+    restoreFetch();
+  });
+
+  it('DoH 有应答但没有 A 记录 → DNS 步 fail，且绝不判可达', async () => {
+    // Status:0 且无 Answer = NOERROR 空应答（真实场景如域名只有 AAAA 记录，
+    // 或解析器 SERVFAIL 后 DoH 归一化为空）。此前这会被判成「DNS 正常」
+    // 并因为 TCP 通过而在尾部 fallthrough 成 reachable。
+    const empty = () => new Response(JSON.stringify({ Status: 0 }), { status: 200 });
+    const fetchImpl = stubFetch({
+      'https://dns.alidns.com/resolve': empty,
+      'https://doh.pub/resolve': empty,
+      'https://1.12.12.12/resolve': empty,
+      'https://dns.google/resolve': empty,
+      'https://empty.example.com/': () => new Response('ok', { status: 200 }),
+    });
+    const report = await diagnoseNetwork('https://empty.example.com/', { deps: deps({ fetchImpl }) });
+    expect(report.steps.find((s) => s.step === 'dns')?.status).toBe('fail');
+    expect(report.verdict).toBe('dns-empty');
+    expect(report.reachable).toBe(false);
+    expect(report.failedStep).toBe('dns');
+    expect(report.attribution).toContain('没有一条 A 记录');
+    // 解析不出地址时不该假装查过 TLS/HTTP。
+    expect(report.steps.find((s) => s.step === 'tls')?.status).toBe('skipped');
+    restoreFetch();
+  });
+
+  it('不可达目标带 S2 单请求改写建议：换到镜像端点，而不是「去配代理」', async () => {
+    // GitHub 归档 + SYN 被静默丢弃：最便宜的解药是 codeload 官方端点。
+    const fetchImpl = stubFetch({ ...goodDoh() });
+    const report = await diagnoseNetwork('https://github.com/o/r/archive/v1.tar.gz', {
+      deps: deps({
+        fetchImpl,
+        tcpProbe: () => Promise.resolve<TcpProbeErr>({ ok: false, ms: 3000, code: 'ETIMEDOUT', kind: 'timeout' }),
+      }),
+    });
+    expect(report.verdict).toBe('tcp-timeout');
+    expect(report.rewrites?.[0]?.url).toBe('https://codeload.github.com/o/r/tar.gz/v1');
+    expect(report.rewrites?.[0]?.trust).toBe('t0');
+    expect(report.advice[0]).toContain('codeload.github.com/o/r/tar.gz/v1');
+    expect(renderProbeReport(report)).toContain('可改写路径');
+    restoreFetch();
+  });
+
+  it('宿主自陈的探测出口路径随报告呈现（TCP/TLS 直连不透明问题）', async () => {
+    const fetchImpl = stubFetch({ ...goodDoh(), 'https://example.com/': () => new Response('ok', { status: 200 }) });
+    const report = await diagnoseNetwork('https://example.com/', {
+      exitPathNote: 'TCP/TLS 为直连拨号（不经应用代理）',
+      deps: deps({ fetchImpl }),
+    });
+    expect(report.exitPathNote).toContain('直连拨号');
+    expect(renderProbeReport(report)).toContain('探测出口：TCP/TLS 为直连拨号');
     restoreFetch();
   });
 });

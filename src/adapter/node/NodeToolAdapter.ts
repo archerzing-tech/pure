@@ -16,6 +16,7 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../sh
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
+import { downloadAttemptUrls } from '../../shared/sourceRewrite';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
@@ -2234,12 +2235,50 @@ export class NodeToolAdapter implements ToolAdapter {
     }
   }
 
-  private downloadOk(outPath: string, size: number, duration: number, via: string, toolCallId: string, expected?: number): ToolResult {
+  /** 对**单个** URL 跑完整条下载链（native → curl → aria2c → wget → fetch），
+   *  返回首个成功或聚合错误。抽出成方法是为了让 S2 改写能在原 URL 与镜像
+   *  端点之间复用同一条链，而不是各写一份。 */
+  private async downloadChain(
+    url: string,
+    outPath: string,
+    opts: { connections: number; resume: boolean; controller: DownloadController; emit: (p: Partial<DownloadProgress>) => void; filename: string; proxy?: string },
+  ): Promise<{ ok: boolean; size?: number; via?: string; error?: string; expected?: number }> {
+    const errors: string[] = [];
+    const native = await this.downloadNative(url, outPath, opts);
+    if (native.ok) return { ...native, via: native.via ?? 'native' };
+    errors.push(native.error ?? '');
+    const curl = await this.downloadViaCurl(url, outPath, opts);
+    if (curl.ok) return { ...curl, via: 'curl' };
+    errors.push(curl.error ?? '');
+    const aria2 = await this.downloadViaAria2(url, outPath, opts);
+    if (aria2.ok) return { ...aria2, via: 'aria2c' };
+    errors.push(aria2.error ?? '');
+    const wget = await this.downloadViaWget(url, outPath, opts);
+    if (wget.ok) return { ...wget, via: 'wget' };
+    errors.push(wget.error ?? '');
+    const fetched = await this.downloadViaFetch(url, outPath, opts.controller, opts.emit, opts.proxy);
+    if (fetched.ok) return { ...fetched, via: 'fetch' };
+    errors.push(fetched.error ?? '');
+    return { ok: false, error: errors.filter(Boolean).join('；') || '未知错误' };
+  }
+
+  private downloadOk(
+    outPath: string,
+    size: number,
+    duration: number,
+    via: string,
+    toolCallId: string,
+    expected?: number,
+    rewrite?: { from: string; to: string; rule: string },
+  ): ToolResult {
     // Known content-length but a shorter file → the transfer did not complete
     // cleanly; surface it (informational, not a hard failure).
     const sizeMismatch = typeof expected === 'number' && expected > 0 && size < expected;
     const summary: Record<string, unknown> = { kind: 'download', path: outPath, size, durationMs: duration, via };
     if (sizeMismatch) summary.sizeMismatch = true;
+    // S2 单请求改写：成功时如实标注「实际是从镜像端点取的」，不让字节等价被
+    // 静默默认成「就是原站给的」。
+    if (rewrite) summary.rewrite = rewrite;
     downloadHub.emitProgress(toolCallId, { downloaded: size, total: size, percent: 100, speed: 0, state: 'done', filename: basename(outPath), via });
     return { id: toolCallId, toolName: 'download_file', result: JSON.stringify(summary), success: true, duration };
   }
@@ -2286,30 +2325,29 @@ export class NodeToolAdapter implements ToolAdapter {
       downloadHub.emitProgress(toolCallId, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'downloading', filename, ...p } as DownloadProgress);
 
     try {
-      const errors: string[] = [];
-      // 1) Native multi-threaded downloader (Range + resume + pause).
-      const native = await this.downloadNative(url, outPath, { connections, resume, controller, emit, filename, proxy });
-      if (native.ok) return this.downloadOk(outPath, native.size ?? 0, Date.now() - start, native.via ?? 'native', toolCallId, native.expected);
-      errors.push(native.error ?? '');
-      // 2) curl (resume via -C -).
-      const curl = await this.downloadViaCurl(url, outPath, { resume, controller, emit, filename, proxy });
-      if (curl.ok) return this.downloadOk(outPath, curl.size ?? 0, Date.now() - start, 'curl', toolCallId);
-      errors.push(curl.error ?? '');
-      // 3) aria2c (parallel + resume), when installed.
-      const aria2 = await this.downloadViaAria2(url, outPath, { controller, emit, filename, proxy });
-      if (aria2.ok) return this.downloadOk(outPath, aria2.size ?? 0, Date.now() - start, 'aria2c', toolCallId);
-      errors.push(aria2.error ?? '');
-      // 4) wget (resume via -c), when installed.
-      const wget = await this.downloadViaWget(url, outPath, { controller, emit, filename, proxy });
-      if (wget.ok) return this.downloadOk(outPath, wget.size ?? 0, Date.now() - start, 'wget', toolCallId);
-      errors.push(wget.error ?? '');
-      // 5) Plain fetch (small files only).
-      const fetched = await this.downloadViaFetch(url, outPath, controller, emit, proxy);
-      if (fetched.ok) return this.downloadOk(outPath, fetched.size ?? 0, Date.now() - start, 'fetch', toolCallId);
-      errors.push(fetched.error ?? '');
-      // 全部方式都失败：移除进度条（失败的下载不应残留进度条，仅成功下载保留）。
+      // S2 单请求改写：首选原 URL；若它以网络类错误失败、而这个 URL 有字节一致
+      // 的镜像端点，把整条下载链换到镜像上再跑一次。无痕、退出即消失。404/403
+      // 这类「端点答了、只是资源有问题」不换——换镜像也答不出同一份字节。
+      const attempts = downloadAttemptUrls(url);
+      let allErrors = '';
+      for (let i = 0; i < attempts.length; i++) {
+        const attempt = attempts[i]!;
+        const chain = await this.downloadChain(attempt.url, outPath, { connections, resume, controller, emit, filename, proxy });
+        if (chain.ok) {
+          if (attempt.rule) recordNetSuccess(attempt.url);
+          return this.downloadOk(outPath, chain.size ?? 0, Date.now() - start, chain.via ?? 'native', toolCallId, chain.expected,
+            attempt.rule ? { from: url, to: attempt.url, rule: attempt.rule } : undefined);
+        }
+        const err = chain.error ?? '';
+        allErrors = allErrors ? `${allErrors}；[镜像 ${attempt.url}] ${err}` : err;
+        // 镜像自己也网络失败：把镜像主机一并计入熔断，下一次别再扑上去。
+        if (attempt.rule && isNetworkError(err)) recordNetFailure(attempt.url);
+        // 还有下一项（镜像）时，只有网络类失败才值得换端点。
+        if (i + 1 < attempts.length && !isNetworkError(err)) break;
+      }
+      // 全部尝试都失败：移除进度条（失败的下载不应残留进度条，仅成功下载保留）。
       downloadHub.clearProgress(toolCallId);
-      const allErrors = errors.filter(Boolean).join('；') || '未知错误';
+      allErrors = allErrors || '未知错误';
       if (isNetworkError(allErrors)) {
         const { tripped } = recordNetFailure(url);
         return this.fail(null, start, tripped ? blockedHostMessage(url, allErrors) : netFailureHint(url, allErrors));
@@ -2415,8 +2453,10 @@ export class NodeToolAdapter implements ToolAdapter {
         ...(asStrings(args.allowlist) ? { allowlist: asStrings(args.allowlist) } : {}),
         ...(asStrings(args.denylist) ? { denylist: asStrings(args.denylist) } : {}),
         ...(typeof args.port === 'number' ? { port: args.port } : {}),
-        // 探测走同一条出口路由：用户配了代理却在诊断「不配代理时通不通」，
-        // 得到的结论会与真实下载路径不一致。
+        // DNS/DoH 与 HTTP 走同一条出口路由（含用户配的代理），但 TCP/TLS 是裸
+        // 套接字拨号、**不经过代理**。如实声明，否则「必须走代理才通」的网络里
+        // 会得到「tcp-timeout → 改用代理」的结论，而代理本来就已经配好了。
+        exitPathNote: 'TCP/TLS 为直连拨号（不经应用代理）；DNS/DoH 与 HTTP 走应用出口路由（含代理）',
         deps: { fetchImpl: ((input: any, init?: RequestInit) => cliFetch(String(input), init ?? {})) as unknown as typeof fetch },
       });
       const text = args.humanReadable

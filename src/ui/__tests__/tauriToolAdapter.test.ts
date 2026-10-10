@@ -434,7 +434,9 @@ describe('native download cancel wiring', () => {
     // Look forwards: the cancelled outcome wins over the failure path, and a
     // normal completion removes the listener so a reused signal can't fire a
     // stale kill.
-    const after = src.slice(nativeIdx, nativeIdx + 3600);
+    // Window widened (3600→4400) when S2 mirror retry added lines inside the
+    // block; the assertions themselves are unchanged.
+    const after = src.slice(nativeIdx, nativeIdx + 4400);
     expect(after).toContain('if (cancelled && code !== 0) {');
     expect(after).toContain("'Download cancelled by user.'");
     expect(after).toContain("signal?.removeEventListener('abort', onAbort);");
@@ -992,5 +994,58 @@ describe('GUI 侧 source:auto 测速（默认档不能跳过）', () => {
     expect(text).toContain('diagnose_network');
     // 仍然要给出可执行的 env 映射，不能空手而归
     expect(text).toContain('npm_config_registry=');
+  });
+});
+
+// ── S2 单请求改写：GUI 下载网络失败时换镜像端点 ───────────────────────────
+// 直接驱动私有编排 retryDownloadViaMirror（桩替 execute），验证「有镜像才换、
+// 换到哪、成功后标注来源」。镜像 URL 不在改写表内，真跑也只递归一层。
+describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
+  const NPM = 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz';
+  const MIRROR = 'https://registry.npmmirror.com/left-pad/-/left-pad-1.3.0.tgz';
+  type MirrorHost = {
+    retryDownloadViaMirror: (toolCall: { id: string; index: number }, args: Record<string, unknown>, signal?: AbortSignal) => Promise<{ result?: string } | null>;
+  };
+
+  function adapterWithStubExecute(calls: ToolCall[], ok: (url: string) => boolean): TauriToolAdapter {
+    const adapter = new TauriToolAdapter('/ws', '', '', '', async () => 'x');
+    (adapter as unknown as Record<string, unknown>)['execute'] = async (call: ToolCall) => {
+      calls.push(call);
+      const url = JSON.parse(call.function.arguments).url as string;
+      return {
+        id: call.id,
+        toolName: 'download_file',
+        result: JSON.stringify({ kind: 'download', path: '/tmp/left-pad.tgz', size: 14, durationMs: 1, via: 'stub' }),
+        success: ok(url),
+        duration: 1,
+      };
+    };
+    return adapter;
+  }
+
+  it('原站网络失败后换镜像成功，结果带上 rewrite 来源', async () => {
+    const calls: ToolCall[] = [];
+    const adapter = adapterWithStubExecute(calls, () => true);
+    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: NPM }, undefined);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.function.arguments).url).toBe(MIRROR);
+    const parsed = JSON.parse(String(out?.result)) as { rewrite?: { from: string; to: string; rule: string } };
+    expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
+  });
+
+  it('无镜像端点时不做任何改写（返回 null，调用方按原样报错）', async () => {
+    const calls: ToolCall[] = [];
+    const adapter = adapterWithStubExecute(calls, () => true);
+    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: 'https://example.com/x.tgz' }, undefined);
+    expect(out).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('镜像也失败时返回 null（不假装成功）', async () => {
+    const calls: ToolCall[] = [];
+    const adapter = adapterWithStubExecute(calls, () => false);
+    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: NPM }, undefined);
+    expect(out).toBeNull();
+    expect(calls).toHaveLength(1);
   });
 });

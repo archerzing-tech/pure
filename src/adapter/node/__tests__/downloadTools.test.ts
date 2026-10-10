@@ -5,7 +5,7 @@
 
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter } from '../NodeToolAdapter';
@@ -110,5 +110,59 @@ describe('download_file (real local HTTP server)', () => {
       if (prev === undefined) delete process.env['HTTPS_PROXY'];
       else process.env['HTTPS_PROXY'] = prev;
     }
+  });
+});
+
+// ── S2 单请求改写：下载网络失败时自动换到字节一致的镜像端点 ──────────────────
+// 桩替 downloadChain（真实下载链要打公网），只验证「换不换、换到哪、结果标不标」
+// 这层编排；规则集本身由 sourceRewrite.test 锁。
+function stubChain(adapter: NodeToolAdapter, calls: string[], behavior: 'network-then-ok' | 'not-found'): void {
+  (adapter as unknown as { downloadChain: (url: string, outPath: string) => Promise<unknown> }).downloadChain =
+    async (url: string, outPath: string) => {
+      calls.push(url);
+      if (behavior === 'network-then-ok' && url.startsWith('https://registry.npmmirror.com/')) {
+        writeFileSync(outPath, 'mirrored bytes');
+        return { ok: true, size: 14, via: 'stub' };
+      }
+      return { ok: false, error: behavior === 'network-then-ok' ? 'ECONNRESET' : 'HTTP 404' };
+    };
+}
+
+describe('download_file · S2 单请求改写（镜像端点）', () => {
+  const NPM = 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz';
+  const MIRROR = 'https://registry.npmmirror.com/left-pad/-/left-pad-1.3.0.tgz';
+
+  it('原站网络失败时换到镜像端点，并在结果里标注改写来源', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pure-mirror-'));
+    const adapter = new NodeToolAdapter({ workspace: dir });
+    const calls: string[] = [];
+    stubChain(adapter, calls, 'network-then-ok');
+    const result = await adapter.execute({
+      id: 'dl_mirror',
+      index: 0,
+      function: { name: 'download_file', arguments: JSON.stringify({ url: NPM, destination: dir, filename: 'left-pad-1.3.0.tgz' }) },
+    });
+    expect(result.success).toBe(true);
+    expect(calls).toEqual([NPM, MIRROR]);
+    const summary = JSON.parse(String(result.result)) as { path: string; rewrite?: { from: string; to: string; rule: string } };
+    expect(summary.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
+    expect(readFileSync(summary.path, 'utf8')).toBe('mirrored bytes');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('非网络类失败（404）不换镜像——换端点答不出同一份字节', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pure-mirror404-'));
+    const adapter = new NodeToolAdapter({ workspace: dir });
+    const calls: string[] = [];
+    stubChain(adapter, calls, 'not-found');
+    const result = await adapter.execute({
+      id: 'dl_404',
+      index: 0,
+      function: { name: 'download_file', arguments: JSON.stringify({ url: NPM, destination: dir, filename: 'left-pad-1.3.0.tgz' }) },
+    });
+    expect(result.success).toBe(false);
+    expect(calls).toEqual([NPM]);
+    expect(String(result.result)).not.toContain('npmmirror');
+    rmSync(dir, { recursive: true, force: true });
   });
 });

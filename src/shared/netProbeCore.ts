@@ -25,6 +25,8 @@
 // 全行业没有第二家把分层网络诊断做成模型可直接调用的工具（Cursor 只有按钮、
 // Claude Code 只教用户敲 curl），这就是这个模块存在的理由。
 
+import { sourceRewriteCandidates } from './sourceRewrite';
+
 // ── 探测预算 ──
 // 每步独立超时，且**总预算 < 任何一次 10 分钟下载超时**的零头。串行四步的最坏
 // 情况是 19s，远小于「拿错误的自信去跑大文件下载」的代价。
@@ -186,6 +188,8 @@ export type NetVerdict =
   | 'dns-polluted'
   | 'dns-nxdomain'
   | 'dns-fail'
+  /** DoH 通道拿到了应答，但没有 A 记录（NOERROR 空应答或 SERVFAIL）：解析器此刻给不出可用地址。 */
+  | 'dns-empty'
   | 'tcp-refused'
   | 'tcp-timeout'
   | 'tls-fail'
@@ -221,6 +225,10 @@ export interface NetProbeReport {
   realIps?: string[];
   /** 可执行修复建议（给人看）。 */
   advice: string[];
+  /** 宿主对探测出口路径的自陈（见 ProbeOptions.exitPathNote）。 */
+  exitPathNote?: string;
+  /** S2 单请求改写候选（t0/t1）：目标 URL 若有字节一致的镜像端点，列在这里。 */
+  rewrites?: Array<{ url: string; trust: string; rule: string }>;
 }
 
 export class ProbeGuardError extends Error {
@@ -400,13 +408,26 @@ export async function probeDnsStep(
             summary: `DNS 污染：${okCount}/${endpoints.length} 家 DoH 一致返回保留段地址 ${ips.join(', ')}`,
             detail: { answered: okCount, realIps: ips, pollution: 'all-reserved' },
           }
-        : {
-            step: 'dns',
-            status: 'pass',
-            ms,
-            summary: `DNS 正常：${okCount}/${endpoints.length} 家 DoH 返回 ${ips.join(', ')}`,
-            detail: { answered: okCount, realIps: ips },
-          };
+        // 「拿到了应答」不等于「拿到了地址」：NOERROR 空应答（域名只有 AAAA）
+        // 与 SERVFAIL(2) 都会走到这里，两者都没有 A 记录。判成 pass 会让报告
+        // 自相矛盾——DNS 步写着「正常」却一个 IP 都没有，而后续层因非 clean
+        // 全被跳过，只剩 TCP 通过就能落进尾部的 reachable 分支，最终对一个
+        // 根本解析不出地址的域名报「可达」。宁可当失败，让它走到 dns-empty 归因。
+        : ips.length === 0
+          ? {
+              step: 'dns',
+              status: 'fail',
+              ms,
+              summary: `${okCount}/${endpoints.length} 家 DoH 给出了应答，但没有一条 A 记录（NOERROR 空应答或 SERVFAIL）——解析器此刻给不出可用地址`,
+              detail: { answered: okCount, realIps: [] },
+            }
+          : {
+              step: 'dns',
+              status: 'pass',
+              ms,
+              summary: `DNS 正常：${okCount}/${endpoints.length} 家 DoH 返回 ${ips.join(', ')}`,
+              detail: { answered: okCount, realIps: ips },
+            };
   return { step, ips, state, answered: okCount, nxdomain: nxdomain === okCount && okCount > 0 };
 }
 
@@ -558,6 +579,23 @@ function attribute(
       ],
     };
   }
+  // 空应答：DoH 通道是通的（answered > 0）但给不出 A 记录。它不是污染，也
+  // 不是「DNS 被阻断」，因此既不能判可达也不能借用别的层结论——只能如实说
+  // 「此刻解析不出地址」。此分支必须在 tcp/tls/http 之前：解析不出地址就无从
+  // 谈「DNS 正常但 SYN 被丢弃」之类。
+  if (dnsState === 'empty') {
+    return {
+      verdict: 'dns-empty',
+      failedStep: 'dns',
+      confidence: 'medium',
+      attribution: 'DoH 通道拿到了应答，但没有一条 A 记录（NOERROR 空应答或 SERVFAIL）：解析器此刻给不出可用地址，因此**无法判定**目标是否可达——这不等于目标不可达，也不等于 DNS 污染。',
+      advice: [
+        '先核对域名：只有 AAAA 记录、或解析器临时 SERVFAIL，都会长这样；用 diagnose_network 换一个 type 或稍后重试即可。',
+        '若域名确定有 A 记录，说明当前 DoH 上游答不出来（被限流/故障），换代理或换网络再试。',
+        '不要据此改 /etc/hosts 或系统 DNS：本工具不接管 DNS，也没有证据表明本地解析被污染。',
+      ],
+    };
+  }
 
   const tcp = byStep('tcp');
   if (tcp?.status === 'fail') {
@@ -597,7 +635,25 @@ function attribute(
     };
   }
 
+  // 证书不匹配必须先于泛化的 TLS 失败判定：握手本身是通的（步骤带 certMatches
+  // 字段），只是拿到的证书不是目标域名——这是「IP 指向了别的站（劫持/CDN 回
+  // 错站）」的强信号，与「握手被 RST」是两个方向完全不同的修法。此前这条分支
+  // 写在 `status === 'pass' && certMatches === false` 下，而 certMatches 为假时
+  // 该步已被写成 fail，条件恒不成立，专用归因成了死代码——证书不匹配一律被
+  // 泛化成「TLS 握手失败」。
   const tls = byStep('tls');
+  if (tls?.status === 'fail' && tls.detail?.certMatches === false) {
+    return {
+      verdict: 'tls-fail',
+      failedStep: 'tls',
+      confidence: 'high',
+      attribution: 'TLS 握手成功但证书不匹配目标域名：SNI 拿到了另一张证书，说明这个 IP 不是你要的那个站（典型是 DNS 指向了被劫持的地址，或 CDN 回错了默认站点）。',
+      advice: [
+        '这已经接近「被劫持」而非「不通」：先换镜像源或代理，DNS 层已判定非污染，所以更可能是目标侧的调度问题。',
+        '把上面的 realIps 与 diagnose_network 探测到的实际握手对象一起报告给用户，不要自行拼 Host 头硬连。',
+      ],
+    };
+  }
   if (tls?.status === 'fail') {
     return {
       verdict: 'tls-fail',
@@ -608,18 +664,6 @@ function attribute(
         '若是证书错误（如 SELF_SIGNED_CERT_CHAIN）：站点证书链有问题或本机 CA 库过期，本工具**不会**建议安装自签 CA 或跳过校验。',
         '若是连接被重置：典型的 TLS 阻断（按 SNI 识别并 RST），改用代理或换镜像源。',
         '企业网络做 TLS 审计时会替换证书；此时所有 https 目标都会失败，请对照探测一个已知可信的站点确认。',
-      ],
-    };
-  }
-  if (tls?.status === 'pass' && tls.detail?.certMatches === false) {
-    return {
-      verdict: 'tls-fail',
-      failedStep: 'tls',
-      confidence: 'high',
-      attribution: 'TLS 握手成功但证书不匹配目标域名：SNI 拿到了另一张证书，说明这个 IP 不是你要的那个站（典型是 DNS 指向了被劫持的地址，或 CDN 回错了默认站点）。',
-      advice: [
-        '这已经接近「被劫持」而非「不通」：先换镜像源或代理，DNS 层已判定非污染，所以更可能是目标侧的调度问题。',
-        '把上面的 realIps 与 diagnose_network 探测到的实际握手对象一起报告给用户，不要自行拼 Host 头硬连。',
       ],
     };
   }
@@ -714,6 +758,15 @@ export interface ProbeOptions {
   unavailableNotes?: UnavailableNotes;
   /** DoH 端点覆盖（宿主特有，例如 WebView 只敢列其中几家）。 */
   dohEndpoints?: readonly string[];
+  /**
+   * 宿主对「探测拨号走哪条出口」的自陈。设置后随报告一起呈现给模型。
+   *
+   * 存在的理由是一处会让归因指错方向的现实：TCP / TLS 是裸套接字拨号，**不经过
+   * 应用代理**，而 DoH 与 HTTP 走宿主的出口路由（含代理）。在「必须走代理才通」
+   * 的网络里，直连 TCP 会超时并把结论写成 tcp-timeout，可真实下载路径其实是通的。
+   * 核心不知道宿主怎么拨号，只能由宿主如实声明。
+   */
+  exitPathNote?: string;
 }
 
 /**
@@ -848,6 +901,16 @@ export async function diagnoseNetwork(rawTarget: string, opts: ProbeOptions = {}
   const hasSkip = steps.some((s) => s.status === 'skipped');
   const reachable = verdictInfo.verdict === 'reachable'
     && !steps.some((s) => s.status === 'fail');
+  // S2 单请求改写：诊断出「不可达」之后，最便宜的解药往往不是配代理，而是把
+  // 这一次请求换到一个字节一致的镜像端点上。这里只把候选列进报告与建议，
+  // 不替模型做决定（本工具只诊断，不接管）——但把「有什么现成改法」摆到它眼前。
+  const rewrites = sourceRewriteCandidates(target);
+  const advice = (!reachable && rewrites.length > 0)
+    ? [
+        `无需先配代理：这个 URL 有一个字节一致的镜像端点——单请求改写为 ${rewrites[0].url}（${rewrites[0].rule}），不落盘、可自回退。`,
+        ...verdictInfo.advice,
+      ]
+    : verdictInfo.advice;
   return {
     target,
     host,
@@ -861,7 +924,9 @@ export async function diagnoseNetwork(rawTarget: string, opts: ProbeOptions = {}
     steps,
     capabilities,
     ...(ips.length > 0 ? { realIps: ips } : {}),
-    advice: verdictInfo.advice,
+    advice,
+    ...(opts.exitPathNote ? { exitPathNote: opts.exitPathNote } : {}),
+    ...(rewrites.length > 0 ? { rewrites: rewrites.map((r) => ({ url: r.url, trust: r.trust, rule: r.rule })) } : {}),
   };
 }
 
@@ -884,6 +949,12 @@ export function renderProbeReport(report: NetProbeReport): string {
   }
   if (report.capabilities.unavailable.length > 0) {
     lines.push(`能力自陈：${report.capabilities.unavailable.join('；')}`);
+  }
+  if (report.exitPathNote) {
+    lines.push(`探测出口：${report.exitPathNote}`);
+  }
+  if (report.rewrites?.length) {
+    lines.push(`可改写路径（单请求，字节一致的镜像端点）：${report.rewrites.map((r) => `${r.url} [${r.trust}]`).join('；')}`);
   }
   lines.push(`归因：${report.attribution}`);
   return lines.join('\n');

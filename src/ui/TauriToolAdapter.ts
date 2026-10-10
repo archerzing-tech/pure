@@ -14,6 +14,7 @@ export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+import { primaryRewrite } from '../shared/sourceRewrite';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, type NetRoutePair } from '../shared/netRoute';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
@@ -847,6 +848,42 @@ export class TauriToolAdapter implements ToolAdapter {
     };
   }
 
+  /**
+   * S2 单请求改写：下载在网络类错误上失败后，若该 URL 有字节一致的镜像端点，
+   * 把整次下载换到镜像上重来一遍（无痕、退出即消失）。成功则返回带改写来源的
+   * 成功结果；无镜像或镜像也失败时返回 null，由调用方按原样报错。
+   *
+   * 只在三处网络失败点调用，不在 case 顶部一律重试：404/403/取消换端点没有
+   * 意义（镜像答不出同一份字节）。镜像 URL 自身不在改写表内，递归只走一层。
+   * 复用 execute 重进同一条下载链，避免把整段 GUI 下载逻辑再抄一遍。
+   */
+  private async retryDownloadViaMirror(
+    toolCall: { id: string; index: number },
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<ToolResult | null> {
+    const originalUrl = String(args.url ?? '').trim();
+    const rw = primaryRewrite(originalUrl);
+    if (!rw || rw.url === originalUrl) return null;
+    const retried = await this.execute(
+      {
+        id: toolCall.id,
+        index: toolCall.index,
+        function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) },
+      },
+      signal,
+    );
+    if (!retried.success) return null;
+    // 如实标注实际来源：不让一次字节等价的静默改写被当成「就是原站给的」。
+    try {
+      const parsed = JSON.parse(String(retried.result)) as Record<string, unknown>;
+      parsed.rewrite = { from: originalUrl, to: rw.url, rule: rw.rule };
+      return { ...retried, result: JSON.stringify(parsed) };
+    } catch {
+      return retried;
+    }
+  }
+
   async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
     if (!tauriInvoke && !this.invokeFn) {
       return {
@@ -1270,6 +1307,8 @@ export class TauriToolAdapter implements ToolAdapter {
               const detail = done?.error ?? `退出码 ${code}`;
               if (isNetworkError(detail)) {
                 recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+                const mirrored = await this.retryDownloadViaMirror(toolCall, args, signal);
+                if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
                 return {
                   id: toolCall.id,
@@ -1367,6 +1406,8 @@ export class TauriToolAdapter implements ToolAdapter {
               // curl/wget network-class exit codes trip the host breaker.
               if (NET_DOWNLOAD_EXIT_CODES.has(code)) {
                 recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+                const mirrored = await this.retryDownloadViaMirror(toolCall, args, signal);
+                if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
                 return {
                   id: toolCall.id,
@@ -1410,6 +1451,8 @@ export class TauriToolAdapter implements ToolAdapter {
           dispatchDownloadProgress(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
           if (NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? '')) {
             recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
+            const mirrored = await this.retryDownloadViaMirror(toolCall, args, signal);
+            if (mirrored) return mirrored;
             const { tripped } = recordNetFailure(url);
             return {
               id: toolCall.id,

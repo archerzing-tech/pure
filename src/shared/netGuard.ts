@@ -10,6 +10,8 @@
 // State is per app-run (in-memory); the geocode resolver in Rust keeps its
 // own cooldowns for its backends.
 
+import { primaryRewrite } from './sourceRewrite';
+
 const HOST_COOLDOWN_MS = 5 * 60_000;
 const HOST_TRIP_THRESHOLD = 2;
 
@@ -506,13 +508,21 @@ export function blockedHosts(): string[] {
  *  directive (mirrors the failure policy's degrade wording). */
 export function blockedHostMessage(url: string, lastError?: string): string {
   const host = hostOf(url) ?? url;
-  return `此来源（${host}）连续网络失败，已熔断 5 分钟——请勿再请求该主机上的任何地址。改用替代来源、内联或本地替代内容，或跳过此资源继续任务。${lastError ? `最近错误：${lastError}` : ''}`;
+  // S2：若该 URL 有一个字节一致的镜像端点，把确切地址直接给出——比「改用替代
+  // 来源」这类泛泛措辞可执行得多，且不需要模型再去猜/再花一轮搜索。
+  const rw = primaryRewrite(url);
+  const rewrite = rw ? `字节一致的替代端点（单请求改写、不落盘）：${rw.url}` : '';
+  return `此来源（${host}）连续网络失败，已熔断 5 分钟——请勿再请求该主机上的任何地址。改用替代来源、内联或本地替代内容，或跳过此资源继续任务。${rewrite}${lastError ? `最近错误：${lastError}` : ''}`;
 }
 
 /** One-line guidance appended to a FIRST network failure of a host, so the
  *  model self-corrects before the breaker even trips. */
 export function netFailureHint(url: string, message: string): string {
-  return `${message} — 若为网络不可达，请勿原样重试：换镜像/来源、内联替代或跳过此资源继续任务。`;
+  // S2：把「换到哪个镜像」具体化到 URL 级——诊断出被墙后最便宜的解药常常不是
+  // 去配代理，而是把这一次请求换成字节一致的镜像端点。
+  const rw = primaryRewrite(url);
+  const rewrite = rw ? ` 这个 URL 有字节一致的镜像端点，可直接改用 ${rw.url}（${rw.rule}，单请求改写、不落盘），无需先配代理。` : '';
+  return `${message} — 若为网络不可达，请勿原样重试：换镜像/来源、内联替代或跳过此资源继续任务。${rewrite}`;
 }
 
 /** Failure classes for the failure policy's class-level loop detection. */
