@@ -73,6 +73,14 @@ export function foldInReceipt(cancels: boolean, hasDelegation: boolean): string 
   return '收到——做完手头的就带上这句。';
 }
 
+/** ③-c 早派收执（刀 2.2 早派版，2026-10-10）：追加在挂号时已经真的派出
+ *  去了——沿用「收齐后先补这项」就是失实收执（它不等收齐，现在就在跑）。
+ *  诚实口径说清三件事：已在跑、与其余几路并行、产出仍并入最终汇总。
+ *  只在宿主真的当场派出时才用；回落汇合路由时仍用 foldInReceipt。 */
+export function foldInEarlyReceipt(): string {
+  return '已收到——这项不用等收齐，我已经直接派出去补跑了，与其余几路并行，产出照样并入最终汇总。';
+}
+
 /** ④ 取消型折入的引擎侧框架（chat.ts cancelFoldInstruction）。与追加框架
  *  反着说死：不许派新委派、部分产出不算结论不进汇总、幸存分支照常合并。 */
 export function cancelFoldInstruction(text: string): string {

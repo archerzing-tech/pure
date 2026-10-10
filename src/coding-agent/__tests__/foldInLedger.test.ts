@@ -71,6 +71,50 @@ describe('FoldInLedger claimForSynthetic', () => {
   });
 });
 
+describe('FoldInLedger claimImmediate（刀 2.2 早派）', () => {
+  it('claims the newest pending mechanical fold with delivery marking, watermark and synthetic id', () => {
+    const l = new FoldInLedger();
+    l.add('第一笔追加', IMG, '第一笔追加', true, false);
+    l.add('再加一个爱奇艺', IMG, '再加一个爱奇艺', true, false);
+    const claimed = l.claimImmediate({ activityCount: 5, syntheticCallId: 'foldin_early0' });
+    expect(claimed?.text).toBe('再加一个爱奇艺'); // 最新一条——早派认的是刚挂号的这笔
+    expect(claimed?.delivered).toBe(true);
+    expect(claimed?.activityCountAtDelivery).toBe(5);
+    expect(claimed?.syntheticCallId).toBe('foldin_early0');
+  });
+
+  it('never claims instruction or cancellation folds', () => {
+    const l = new FoldInLedger();
+    l.add('方向再收紧一点', IMG, '方向再收紧一点', false, false);
+    expect(l.claimImmediate({ activityCount: 3, syntheticCallId: 'x' })).toBeNull();
+    const l2 = new FoldInLedger();
+    l2.add('jev 这个就不调研了', IMG, 'jev 这个就不调研了', true, true);
+    expect(l2.claimImmediate({ activityCount: 3, syntheticCallId: 'x' })).toBeNull(); // 停活没有「并行补跑」
+    expect(l2.entries()[0].delivered).toBe(false);
+  });
+
+  it('early-claimed folds are not re-dispatched by claimForSynthetic and settle via markMechanicallyDone', () => {
+    const l = new FoldInLedger();
+    l.add('再加一个爱奇艺', IMG, '再加一个爱奇艺', true, false);
+    l.claimImmediate({ activityCount: 5, syntheticCallId: 'foldin_early1' });
+    // 汇合路由的领用跳过已投递的账——不会二次派发。
+    expect(l.claimForSynthetic({ activityCount: 6, lastAgentRole: () => 'researcher', assignId: () => 'foldin_join' })).toEqual([]);
+    // 兑现回写与汇合路由同账；水位无新增也不算残差。
+    l.markMechanicallyDone('foldin_early1');
+    expect(l.settle(5)).toEqual([]);
+  });
+
+  it('un-acked early dispatch still settles as residual when no activity followed (报告没落地不能算兑现)', () => {
+    const l = new FoldInLedger();
+    l.add('再加一个爱奇艺', IMG, '再加一个爱奇艺', true, false);
+    l.claimImmediate({ activityCount: 5, syntheticCallId: 'foldin_early2' });
+    // 没等到 markMechanicallyDone（补跑没成功/回合早夭）且投递后无新委派
+    // 活动 → 残差转排队，话不丢。（补跑真跑起来会推高活动水位，那条路
+    // 按既有水位核验算兑现——两条核验并存，与汇合路由同账。）
+    expect(l.settle(5)).toHaveLength(1);
+  });
+});
+
 describe('FoldInLedger settle', () => {
   it('honors a mechanical fold once its synthetic call reported success', () => {
     const l = new FoldInLedger();

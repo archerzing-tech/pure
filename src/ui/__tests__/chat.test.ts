@@ -1216,14 +1216,19 @@ describe('plan overview completion state', () => {
     expect(synthBody.indexOf('用户的主任务：「${userText}」')).toBeGreaterThan(-1);
     expect(synthBody.indexOf('${fold.text}')).toBeGreaterThan(-1);
     // S2 第一刀后：投递/消费语义住进 SteerBus（宿主无关），闭包只剩委托；
-    // 折入铺排住进 deliverDueFoldIns（父边界回调，在飞判断在回调里）。
-    // 语义锁不变：定向投递语义在 bus 源里、折入闸门在回调里、此前所有手搓
-    // UI 补丁（宿主内直接 orchestrator.execute / 合成卡片 / 事件泵 / 思考卡
-    // 接管）必须不存在。
+    // 折入铺排住进 prepareFoldDelivery（父边界回调，在飞判断在回调里）。
+    // 刀 2.2 早派（2026-10-10）：闭包先等在途早派支落地再铺排，分支拉取
+    // 直通 bus（不为别人的追加买单）；「宿主内直接 orchestrator.execute」
+    // 的禁令只属于折入铺排钩子——早派是宿主驱动的机械执行
+    // （dispatchFoldImmediately：领账、派发、记账，判断全在挂号时已定），
+    // 是「判断在模型、动作在宿主」的既定分工，不算手搓 UI 补丁。合成
+    // 卡片/事件泵/思考卡接管仍然必须不存在。
     const closure = src.indexOf('takeSteerMessages: async (recipient) =>');
     const closureBody = src.slice(closure, synth);
-    expect(closureBody.indexOf('this.steerBus.drain(recipient, () => this.deliverDueFoldIns())')).toBeGreaterThan(-1);
-    const foldHook = src.indexOf('private deliverDueFoldIns()');
+    expect(closureBody.indexOf('await this.prepareFoldDelivery()')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('this.steerBus.drain(recipient, () => folded)')).toBeGreaterThan(-1);
+    expect(closureBody.indexOf('recipient?.branchCallId')).toBeGreaterThan(-1);
+    const foldHook = src.indexOf('private async prepareFoldDelivery()');
     const foldBody = src.slice(foldHook, foldHook + 2200);
     // 闸门住账本（在飞读数由宿主注入）——语义锁扫 foldInLedger 源；注入
     // 锚锁宿主喂的是实时读数（硬编码 false 会让闸死掉而测试全绿）。
@@ -1234,7 +1239,27 @@ describe('plan overview completion state', () => {
     expect(foldBody.indexOf('delegationInFlight: this.hasDelegationInFlight()')).toBeGreaterThan(-1);
     expect(foldBody.indexOf('activityCount: this.agentActivities.length')).toBeGreaterThan(-1);
     expect(foldBody.indexOf('lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName')).toBeGreaterThan(-1);
+    // 早派 hold 住在铺排最前：产出报告注入先于折入框架（模型在汇合轮看到
+    // 的是「追加已完成」，不是「还有一项没跑完」）。
+    expect(foldBody.indexOf('await this.awaitEarlyDispatches()')).toBeGreaterThan(-1);
     expect(foldBody.indexOf('subagentOrchestrator.execute(')).toBe(-1);
+    // 早派锁（刀 2.2，2026-10-10）：在飞机械追加挂号即派——claimImmediate
+    // 领账 → orchestrator.execute 派发（回合中断信号要带上）→
+    // markMechanicallyDone 兑现回写与汇合路由同账；任务书带主任务原文。
+    const earlyFn = src.indexOf('private dispatchFoldImmediately(');
+    expect(earlyFn).toBeGreaterThan(-1);
+    const earlyBody = src.slice(earlyFn, earlyFn + 2_600);
+    expect(earlyBody.indexOf('this.folds.claimImmediate(')).toBeGreaterThan(-1);
+    expect(earlyBody.indexOf('orchestrator.execute(call, this.abortController?.signal)')).toBeGreaterThan(-1);
+    expect(earlyBody.indexOf('this.folds.markMechanicallyDone(callId)')).toBeGreaterThan(-1);
+    expect(earlyBody.indexOf('用户的主任务：「${this.activeTurnUserText}」')).toBeGreaterThan(-1);
+    expect(ledger.indexOf('claimImmediate(input:')).toBeGreaterThan(-1);
+    // 早派收执换诚实口径（foldInEarlyReceipt）——「收齐后先补这项」在它已经
+    // 在跑的时候就是失实收执；回落路径仍用 foldInReceipt。
+    const additionFn = src.indexOf('private foldInScopeAddition(');
+    expect(src.slice(additionFn, additionFn + 1_200).indexOf('foldInEarlyReceipt()')).toBeGreaterThan(-1);
+    // 代执行接缝同边界 hold：其余代执行与追加产出的注入同轮发生。
+    expect(synthBody.indexOf('await this.awaitEarlyDispatches()')).toBeGreaterThan(-1);
     expect(foldBody.indexOf('appendToolRow(')).toBe(-1);
     expect(foldBody.indexOf('finalizeToolRow(')).toBe(-1);
     expect(foldBody.indexOf('subagentEventFanout.subscribe()')).toBe(-1);

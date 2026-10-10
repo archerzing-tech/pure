@@ -43,7 +43,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1669,22 +1669,34 @@ export class ChatController {
    * 门住在 FoldInLedger（宿主无关，CLI/通道同接）。本方法只剩铺排：照账本
    * 给出的铺排指令铺框架消息（指令/取消/合并口径），交付与水位的记账全在
    * 账本；机械追加的代执行交付标记留给代执行闭包。
+   * 早派注入（刀 2.2 早派版，2026-10-10）：先等在途早派支落地，把产出报告
+   * 铺在最前——模型在汇合轮看到的是「追加已完成的产出」，不是「还有一项
+   * 没跑完」。报告落进用户角色消息，与折入框架同通道。
    */
-  private deliverDueFoldIns(): import('../shared/types').Message[] {
+  private async prepareFoldDelivery(): Promise<import('../shared/types').Message[]> {
+    await this.awaitEarlyDispatches();
+    const messages: import('../shared/types').Message[] = this.earlyFoldDispatches.splice(0).map((r) => ({
+      role: 'user' as const,
+      images: r.images,
+      content: r.report?.ok
+        ? `【追加产出】用户中途追加的「${r.foldText}」已由 ${r.role} 并行补跑完成，产出如下，请把它并入本次任务的最终汇总（不要为它重复派工）：\n${r.report.output}`
+        : `【追加产出】用户中途追加的「${r.foldText}」的补跑没有成功（${r.report?.output || '原因不明'}）。汇总时如实交代这项未完成，不要编造它的结果，也不要为它再派工。`,
+    }));
     const plans = this.folds.beginDelivery({
       delegationInFlight: this.hasDelegationInFlight(),
       activityCount: this.agentActivities.length,
       lastAgentRole: () => this.agentActivities[this.agentActivities.length - 1]?.agentName,
     });
-    return plans.map((plan) =>
+    messages.push(...plans.map((plan) =>
       plan.kind === 'instruction'
-        ? { role: 'user', content: plan.fold.cancels ? this.cancelFoldInstruction(plan.fold.text) : this.foldInInstruction(plan.fold.text), images: plan.fold.images }
+        ? { role: 'user' as const, content: plan.fold.cancels ? this.cancelFoldInstruction(plan.fold.text) : this.foldInInstruction(plan.fold.text), images: plan.fold.images }
         : {
-            role: 'user',
+            role: 'user' as const,
             content: `【系统接管执行】用户中途追加的任务「${plan.fold.text}」将在本轮由系统直接委派给 ${plan.role} 执行，结果稍后回收到本对话。请在追加结果回收后，把本次任务全部产出（含这项追加）合并，输出一份覆盖所有对象的最终汇总。`,
             images: plan.fold.images,
           },
-    );
+    ));
+    return messages;
   }
   /**
    * 委派起飞闸的挂号簿（2026-09-26 用户实测）：取消型插话落在委派出生之
@@ -1708,6 +1720,21 @@ export class ChatController {
    * /取消框架/合并口径文案与代执行任务书构造留在宿主（铺排）。分支级继续
    * 的待重派账住 DelegationControlPlane（与 delegationArgs 同账本）。 */
   private folds = new FoldInLedger();
+  /** 早派在途账（刀 2.2 早派版，2026-10-10）：挂号即由宿主直接派出的机械
+   *  追加支。promise 供汇合边界 hold；产出报告落地后由 prepareFoldDelivery
+   *  取走注入。换会话清场（folds.reset 同点）。 */
+  private earlyFoldDispatches: {
+    callId: string;
+    role: string;
+    foldText: string;
+    images: MessageImage[];
+    promise: Promise<void>;
+    report?: { ok: boolean; output: string };
+  }[] = [];
+  private earlyFoldDispatchSeq = 0;
+  /** 主任务原文：早派任务书要用，但 send() 闭包够不着插话路径——挂号时
+   *  抄一份。插话只能发生在本回合内，不存在跨回合读到旧话的路径。 */
+  private activeTurnUserText = '';
   /** S2 第五刀（P3-2）— 回合收尾派发序 + 待办账住 RoundClosePlane（宿主无
    * 关，CLI/通道同接）：待办队列与押账插话是 plane 私有态，收尾裁决序（回
    * 执结算 → 折入核验 → 续跑兜底 → 押账插话优先 → 残留 steer 重入 → 队列
@@ -3349,14 +3376,85 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
     this.folds.add(text, images, displayText, mechanical, cancels);
+    // 早派（刀 2.2 早派版，2026-10-10）：在飞期间挂号的机械追加当场由宿主
+    // 直接派出，与在飞支并行——不再等汇合轮串行补跑。只认追加型：取消/
+    // 指令型是给模型的框架不是活，照旧走汇合路由。早派不成（无编排器/
+    // 无末位角色）静默回落原路由，收执口径随之不撒谎。
+    const earlyDispatched = mechanical && !cancels && this.dispatchFoldImmediately(text, images);
     // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
     // stopMissed（2026-10-10）：点名停支没停成的取消折入，收执换诚实口径
     // ——支还在跑，说「其余照常」是失实收执。
+    // 早派成功：收执换 foldInEarlyReceipt——「收齐后先补这项」在它已经在
+    // 跑的时候就是失实收执（收执纪律：只说真实发生的事）。
     this.settleAck(ack, stopMissed
       ? cancelFoldUnmatchedReceipt()
-      : foldInReceipt(cancels, this.hasDelegationInFlight()));
+      : earlyDispatched
+        ? foldInEarlyReceipt()
+        : foldInReceipt(cancels, this.hasDelegationInFlight()));
+  }
+
+  /** 早派（刀 2.2 早派版，2026-10-10）：委派在飞时挂号进来的机械追加，宿主
+   *  当场直接派出与其余几路并行。原路径的等待是「最慢原支收齐 → 汇合轮再
+   *  派追加 → 再等它跑完」，早派把追加的执行与在飞支重叠，汇合等待变成
+   *  max(最慢原支, 追加)。产出报告落地进 earlyFoldDispatches，由父边界
+   *  （prepareFoldDelivery）注入；兑现回写与汇合路由同账
+   *  （markMechanicallyDone，早派支不走引擎批次、ToolResult 事件不会来，
+   *  记账由这里的完成回调补上）。 */
+  private dispatchFoldImmediately(text: string, images: MessageImage[]): boolean {
+    if (!this.hasDelegationInFlight()) return false;
+    const orchestrator = this.codingAgentRef?.subagentOrchestrator;
+    if (!orchestrator) return false;
+    const role = this.agentActivities[this.agentActivities.length - 1]?.agentName;
+    if (!role) return false;
+    const callId = `foldin_${Date.now()}_early${this.earlyFoldDispatchSeq++}`;
+    const claimed = this.folds.claimImmediate({ activityCount: this.agentActivities.length, syntheticCallId: callId });
+    if (!claimed) return false;
+    this.addStatusBubble(`追加委派：${role} 立即补跑（与其余几路并行），产出并入最终汇总。`, false, false, 'info');
+    // 任务书与汇合路由同口径：子代理没有对话上下文，必须带上主任务原文，
+    // 并约束它只补追加项、口径对齐（2026-09-22 实测跑成爱奇艺开放平台文档）。
+    const brief = `用户的主任务：「${this.activeTurnUserText}」。任务进行中用户追加了新要求：${text}。请只针对这项追加内容完成工作，口径与主任务其他部分一致（如调研需给出时间范围、来源、关键事实与遗留风险），不要重复主任务已覆盖的其他对象。`;
+    const call: ToolCall = { id: callId, index: 0, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } };
+    const record: {
+      callId: string;
+      role: string;
+      foldText: string;
+      images: MessageImage[];
+      promise: Promise<void>;
+      report?: { ok: boolean; output: string };
+    } = { callId, role, foldText: text, images, promise: Promise.resolve() };
+    record.promise = (async () => {
+      try {
+        const result = await orchestrator.execute(call, this.abortController?.signal);
+        if (result.success) this.folds.markMechanicallyDone(callId);
+        // 产出文本提取与宿主侧 execute 的既有消费方同形（result.result 是
+        // 子代理结果对象，文本在 output/finalOutput；字符串形状兼容）。
+        const inner: unknown = result.result;
+        const output = typeof inner === 'string'
+          ? inner
+          : ((inner as { output?: string; finalOutput?: string } | null)?.output
+            ?? (inner as { finalOutput?: string } | null)?.finalOutput
+            ?? '');
+        record.report = {
+          ok: result.success === true,
+          output: output.length > 40_000 ? `${output.slice(0, 40_000)}…（后文截断）` : output,
+        };
+      } catch (error) {
+        record.report = { ok: false, output: error instanceof Error ? error.message : String(error) };
+      }
+    })();
+    this.earlyFoldDispatches.push(record);
+    return true;
+  }
+
+  /** 早派 hold（刀 2.2）：汇合边界等所有在途早派支落地。join 的等待从
+   *  「最慢原支 + 追加串行」变成「max(最慢原支, 追加)」；中断/异常都会落
+   *  report，hold 不会挂死。 */
+  private async awaitEarlyDispatches(): Promise<void> {
+    while (this.earlyFoldDispatches.some((r) => !r.report)) {
+      await Promise.all(this.earlyFoldDispatches.filter((r) => !r.report).map((r) => r.promise));
+    }
   }
 
   /** 引擎侧的折入指令：命令式框架，把"别光汇总"说死——模型在汇合轮看到
@@ -3402,6 +3500,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // A fresh turn's signals supersede any that were never consumed (defensive;
     // the finally of a completed turn always consumes them).
     this.pendingAutoContinue = null;
+    // 早派任务书的原料（刀 2.2）：主任务原文给中途追加的补跑支用。
+    this.activeTurnUserText = userText;
 
     // First-token observability: one timing record per send attempt. The stage
     // stamps are filled in at each pre-request await below; the record is
@@ -4293,7 +4393,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // S2 第一刀 — 队列本体已抽住宿主无关的 SteerBus（语义真相一份）；
         // 这里只剩 GUI 特有的折入铺排，经父边界回调缝交给 bus（bus 不猜
         // 在飞状态，回调里自己判）。
-        takeSteerMessages: async (recipient) => this.steerBus.drain(recipient, () => this.deliverDueFoldIns()),
+        takeSteerMessages: async (recipient) => {
+          // 分支拉取不铺排折入（bus 的身份检查本来会跳过回调）；早派 hold
+          // 也只该等在父边界——分支的 THINK 不为别人的追加买单（刀 2.2）。
+          if (recipient?.branchCallId) return this.steerBus.drain(recipient);
+          const folded = await this.prepareFoldDelivery();
+          return this.steerBus.drain(recipient, () => folded);
+        },
         // 代执行回合（2026-09-22 插话重设计）：委派收齐后的第一个 THINK 边界，
         // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，
         // 让这些调用走原生 ACT 管线（ToolStarted 出卡片、SubagentActivity 流
@@ -4301,6 +4407,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 落地前模型不会被咨询，"先汇总再补跑"没有发生的材料；卡片和正常委派
         // 完全同源，不再手搓任何 UI（此前的合成卡片/事件泵/思考卡接管全删）。
         takeSyntheticToolCalls: async () => {
+          // 早派 hold（刀 2.2 早派版）：同一边界先等在途早派支落地——早派
+          // 账已被 claimImmediate 领走（claimForSynthetic 的 delivered 跳过
+          // 不会二次派发），这里等是为了其余代执行与追加产出的注入同轮发生。
+          await this.awaitEarlyDispatches();
           if (this.hasDelegationInFlight()) return [];
           const calls: ToolCall[] = [];
           let foldinSeq = 0;
@@ -6904,6 +7014,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）
     this.delegationControl.settleRound();
     this.folds.reset();
+    // 早派在途账同点清场：旧会话的追加产出不闯新会话（在途 promise 落地时
+    // 记录已不在账上，报告自然丢弃）。
+    this.earlyFoldDispatches = [];
+    this.activeTurnUserText = '';
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
     this.activePlanStarted = false;

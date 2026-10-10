@@ -654,6 +654,89 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(queueCard(h.root)).toBeUndefined();
   });
 
+  it('委派在飞时加活且有编排器（刀 2.2 早派）：当场派出并行补跑，产出汇合轮注入', async () => {
+    // 旧路径的等待是「最慢原支收齐 → 汇合轮再派追加 → 再等它跑完」；早派
+    // 把追加的执行与在飞支重叠，汇合等待变成 max(最慢原支, 追加)。宿主只
+    // 做机械动作（领账、派发、记账）；无编排器时上一条测试的原路由不变。
+    const h = makeHarness(scriptedLlm([]));
+    h.chat.agentActivities.push({ callId: 'call_a', agentName: '平台调研员', status: 'running', inputSnippet: '调研平台技术栈' });
+    const executed: Array<{ id: string; function: { name: string; arguments: string } }> = [];
+    let resolveExecute: (result: unknown) => void = () => {};
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        execute: (call: { id: string; function: { name: string; arguments: string } }) => {
+          executed.push(call);
+          return new Promise((resolve) => { resolveExecute = resolve; });
+        },
+      },
+    };
+    // 测试不经 send()，主任务原文手工抄——早派任务书的原料（send() 里是
+    // activeTurnUserText = userText 这一行）。
+    h.chat.activeTurnUserText = '调研三大视频平台的技术栈';
+
+    await h.chat.interject('再加一个小红书');
+    // 收执说真话：已在跑，绝不再说「收齐后先补这项」。
+    expect(assistantJoined(h.root)).toContain('已经直接派出去补跑了');
+    expect(assistantJoined(h.root)).not.toContain('收齐后先补这项');
+    // 宿主当场派出：foldin_ id、末位角色、带主任务原文的任务书；因果叙述
+    // 气泡与汇合路由同族，但说的是「立即」。
+    expect(executed).toHaveLength(1);
+    expect(executed[0].id.startsWith('foldin_')).toBe(true);
+    expect(executed[0].function.name).toBe('平台调研员');
+    const brief = JSON.parse(executed[0].function.arguments).prompt as string;
+    expect(brief).toContain('调研三大视频平台的技术栈');
+    expect(brief).toContain('再加一个小红书');
+    expect(statusJoined(h.root)).toContain('立即补跑');
+    // 账本：已被早派领走（syntheticCallId 已发，汇合路由不会二次派发）。
+    expect(h.chat.folds.entries()).toHaveLength(1);
+    expect(h.chat.folds.entries()[0].syntheticCallId).toBe(executed[0].id);
+
+    // 汇合边界 hold：补跑未落地时铺排等待；落地后追加产出注入最前。
+    const delivery = (h.chat as Record<string, any>).prepareFoldDelivery() as Promise<Array<{ role: string; content: string }>>;
+    let delivered: Array<{ role: string; content: string }> | undefined;
+    void delivery.then((m) => { delivered = m; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(delivered).toBeUndefined(); // 还在等早派支
+    resolveExecute({ success: true, result: { output: '爱奇艺：技术栈以 H5 为主，客户端混合渲染…' } });
+    await delivery;
+    expect(delivered).toHaveLength(1);
+    expect(delivered?.[0].role).toBe('user');
+    expect(delivered?.[0].content).toContain('【追加产出】');
+    expect(delivered?.[0].content).toContain('爱奇艺：技术栈以 H5 为主');
+    expect(delivered?.[0].content).toContain('并入本次任务的最终汇总');
+    // 兑现回写与汇合路由同账：机器核验兑现，收尾核验无残差（不转排队）。
+    expect(h.chat.folds.settle(h.chat.agentActivities.length)).toHaveLength(0);
+  });
+
+  it('早派补跑失败：收执与派出照旧，汇合轮注入失败报告让汇总如实交代', async () => {
+    const h = makeHarness(scriptedLlm([]));
+    h.chat.agentActivities.push({ callId: 'call_a', agentName: '平台调研员', status: 'running', inputSnippet: '调研平台技术栈' });
+    let rejectExecute: (error: unknown) => void = () => {};
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        execute: () => new Promise((_resolve, reject) => { rejectExecute = reject; }),
+      },
+    };
+    h.chat.activeTurnUserText = '调研三大视频平台的技术栈';
+
+    await h.chat.interject('再加一个小红书');
+    expect(assistantJoined(h.root)).toContain('已经直接派出去补跑了');
+    const delivery = (h.chat as Record<string, any>).prepareFoldDelivery() as Promise<Array<{ role: string; content: string }>>;
+    let delivered: Array<{ role: string; content: string }> | undefined;
+    void delivery.then((m) => { delivered = m; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(delivered).toBeUndefined();
+    rejectExecute(new Error('分支已中断'));
+    await delivery;
+    // 失败也是产出：hold 不挂死，报告让模型如实交代，不许编造。
+    expect(delivered?.[0].content).toContain('补跑没有成功');
+    expect(delivered?.[0].content).toContain('分支已中断');
+    expect(delivered?.[0].content).toContain('不要编造');
+    // 没兑现 → 残差转排队兜底，话不丢。
+    const residuals = h.chat.folds.settle(h.chat.agentActivities.length);
+    expect(residuals).toHaveLength(1);
+  });
+
   it('委派在飞时收掉一项（2026-09-24 取消案例）：折入按取消口径，不按加活', async () => {
     // 裁决器判 steer + cancels_part（新提示词教的收活裁决），宿主点名停不
     // 中（'jev' 对不上「调研 Agent」）→ 退回取消折入——宁可折叠不误杀。

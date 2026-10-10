@@ -110,6 +110,27 @@ export class FoldInLedger {
     return claimed;
   }
 
+  /**
+   * 早派领用（刀 2.2 早派版，2026-10-10）：机械追加挂号即由宿主直接派出、
+   * 与在飞兄弟支并行——不等汇合轮串行补跑。核验链与汇合路由共用一份账：
+   * 投递 + 水位 + 发 syntheticCallId，兑现回写仍走 markMechanicallyDone，
+   * claimForSynthetic 的 delivered 跳过保证不会二次派发。只认「最新一条未
+   * 投递的机械非取消折入」——取消型永不早派（停活没有「并行补跑」可言，
+   * 指令型是给模型的框架不是活）；无匹配返回 null，宿主回落汇合路由
+   * （调用点闸门：在飞 + 有编排器 + 有末位角色）。
+   */
+  claimImmediate(input: { activityCount: number; syntheticCallId: string }): FoldInRecord | null {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const fold = this.queue[i];
+      if (fold.delivered || !fold.mechanical || fold.cancels) continue;
+      fold.delivered = true;
+      fold.activityCountAtDelivery = input.activityCount;
+      fold.syntheticCallId = input.syntheticCallId;
+      return fold;
+    }
+    return null;
+  }
+
   /** 代执行回写的机器核验（ToolResult 事件按 syntheticCallId 找账）。 */
   markMechanicallyDone(callId: string): void {
     const fold = this.queue.find((f) => f.syntheticCallId === callId);
