@@ -12,7 +12,8 @@
 > `character_expression`）。其中与本审计直接相关的一点：P1-3 担心的「例句进 prompt
 > 后被逐字复用」这一半风险在刀 3 就被移出——进 prompt 的是义务 + 禁止清单，例句只
 > 进人读账，并有测试反向锁死（例句出现在注入文本里即红）；剩下的是判例集闸门本身
-> （刀 4）与双语（P1-4）。
+> （刀 4）与双语（P1-4）。**再后续（刀 4，2026-10-12）**：判例集闸门已落
+> （`eval:character`，见 P1-3），双语（P1-4）仍未做。
 
 ## 结论
 
@@ -101,7 +102,16 @@ required fragment `character_core`（priority 119）注入；镜像改为「内�
 - **P1-3 刀 4 验收对主观人格会退化。** 「固定断言」用在性格上会塌成字符串匹配（项目自己
   在 `promptLayers.ts:246` 警告过引文被逐字复用），「人工抽查」不进 CI 必被跳过。应改成
   **行为探针**（是否先给结论 / 是否拒绝谄媚 / 协议控制行是否原样保留），挂
-  `scripts/run-evals.ts` / `eval:roles`。
+  `scripts/run-evals.ts` / `eval:roles`。**✅ 已修复**（2026-10-12，刀 4）：
+  行为探针集落在 `bun run eval:character`（`scripts/run-character-probes.ts` +
+  `src/evaluation/characterProbe.ts` + `evals/character/`）——七类断言判结构
+  与位置（首屏实质信号 / 谄媚词面 / 陪伴话术 / 罐头收尾 / 限制信号 / 道歉
+  计数 / 控制行逐字），词表只活在判定函数内部、不进判例 JSON。挂载点没选
+  `run-evals` 而是独立 suite：run-evals 的判据是验证命令的退出码，套不上
+  文本姿态；同目录新建保持了「每套判据一种语义」的纪律，退出码语义
+  与之对齐。replay 层（免 key）进 CI 守「断言可控 + 语料漂移」，live 层
+  （--agent）跑真 provider + 真实装配的 system prompt 供人工抽查；
+  LLM-as-judge 按原建议未采用。
 - **P1-4 双语 / i18n 未覆盖。** `SYSTEM_CORE_PROMPT` 要求按用户语言作答
   （`promptLayers.ts` response_format），`HUMAN_TONE_PROMPT` 的禁语举例却是全中文
   （如「好的，以下是」）。投影 B 的语气按语言落点不同，需按 locale 出稿。
@@ -146,11 +156,12 @@ required fragment `character_core`（priority 119）注入；镜像改为「内�
 2. ~~铁律 2 补「结构性可保底 / 只能靠 prompt」旋钮对照表；修掉红线 5 矛盾（P0-3、P0-4）~~
    ✅ 已完成。
 3. ~~铁律 1 接 `check-conventions`~~ ✅ 已落（2026-10-11，以 TS 强制 + 静态测试的形态，
-   见 P1-2）；刀 4 探针接 `run-evals`（P1-3）——**待做**。
+   见 P1-2）；~~刀 4 探针接 `run-evals`（P1-3）~~ ✅ 已落（2026-10-12，形态为独立
+   suite `eval:character`，理由见 P1-3）。
 4. ~~更正 Wang 2026 引用~~ ✅ 已更正为 Peter 2025（PMC12146756）。
-5. 鉴于诉求是「服务意识」，**先只落投影 B 一个最小切片并跑通判例**，再决定是否上五刀。
+5. ~~鉴于诉求是「服务意识」，**先只落投影 B 一个最小切片并跑通判例**，再决定是否上五刀。~~
    投影 B 的切片已落（刀 3，2026-10-11）：五场景的义务 / 禁止 / 源句账进 prompt，
-   例句留人读账；**判例那一半仍待做**（刀 4）。
+   例句留人读账；判例那一半亦已落（刀 4，2026-10-12，见 P1-3）。
 
 ## 核验方法与未核项
 

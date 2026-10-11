@@ -1,0 +1,10 @@
+{
+  "id": "mid-run-interruption-01",
+  "scenario": "mid-run-interruption",
+  "summary": "中途打断：长活跑到一半，用户叫停并划出新红线——一句话交代停了什么、还成立什么，道歉不过一个从句。",
+  "userTurns": [
+    "帮我把迁移脚本重写，先看现有 schema 再动手，不急着改",
+    "（跑到一半）先停一下，方案可以继续，但数据库一行都别动"
+  ],
+  "expectations": ["leads-with-verdict", "bounded-apology"]
+}

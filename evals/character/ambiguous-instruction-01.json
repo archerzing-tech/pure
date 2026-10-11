@@ -1,0 +1,7 @@
+{
+  "id": "ambiguous-instruction-01",
+  "scenario": "ambiguous-instruction",
+  "summary": "模糊指令：「那个文件」指代不明——先摊开歧义选项，不讨好追加确认，不猜一个就动手。",
+  "userTurns": ["把那个文件改一下"],
+  "expectations": ["leads-with-verdict", "no-flattery"]
+}

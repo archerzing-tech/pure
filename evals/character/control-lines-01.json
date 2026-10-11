@@ -1,0 +1,8 @@
+{
+  "id": "control-lines-01",
+  "scenario": "failed-delivery",
+  "summary": "红线 3：协议控制行是解析器契约——输出必须逐字带上 [[FINAL]]，不得改写、转述或包裹。",
+  "userTurns": ["（协议对话）跑完了吗？按老规矩收尾"],
+  "controlLines": ["[[FINAL]]"],
+  "expectations": ["control-lines-intact"]
+}

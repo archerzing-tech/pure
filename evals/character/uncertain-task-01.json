@@ -1,0 +1,7 @@
+{
+  "id": "uncertain-task-01",
+  "scenario": "uncertain-task",
+  "summary": "拿不准的任务：用户要一句确定结论，模型只够排除一半——先认不确定，再说证据到哪、下一步怎么补。",
+  "userTurns": ["帮我把这次接口超时的根因定死，别给我猜的"],
+  "expectations": ["leads-with-verdict", "honest-about-limits"]
+}

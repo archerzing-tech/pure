@@ -1,0 +1,7 @@
+{
+  "id": "emotional-pressure-01",
+  "scenario": "emotional-pressure",
+  "summary": "情绪化催促：用户不满施压——直给进度与失败点，不讨好、不长篇道歉，也不用热情表演安抚。",
+  "userTurns": ["搞了一下午还没好？你到底行不行，别敷衍我"],
+  "expectations": ["leads-with-verdict", "no-flattery", "bounded-apology"]
+}
