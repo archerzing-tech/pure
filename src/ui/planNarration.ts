@@ -24,6 +24,7 @@ export function buildPlanThinkingPrompt(
     'There is no required outline. Think the way a sharp colleague thinks out loud before committing to an approach, and let THIS task decide what needs saying: what the request hinges on, which constraints shape the work, what you assume about anything left unsaid (state the assumption and proceed — never stall on questions here), how you intend to approach it and why, and anything the user would want to veto before you start. Skip whatever does not deserve the words.',
     'Never pad, never repeat the request back verbatim, never open with ritual phrases, never end with "let me know if this looks good" — the plan below is the handoff.',
     'When the thinking is done, commit to the plan: a ```json fenced block, and nothing after it.',
+    'The thinking itself must be plain spoken prose in the user\'s language — never raw JSON, never a bare JSON object; the only JSON allowed in the entire reply is that final ```json fence.',
     PLAN_JSON_SHAPE,
     'Give 2-6 steps. Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.',
     opts.projectBuild
@@ -37,10 +38,24 @@ export function buildPlanThinkingPrompt(
 }
 
 /**
+ * 裸 JSON 兜底识别：整条回复没有围栏、直接以计划 JSON 开场——弱模型的常见
+ * 姿势（2026-10-11 真机：nemotron 把整段思考写成 {"reasoning":…,"steps":…}
+ * 裸吐上屏）。认两条硬记号：以 { 开头 + 同时含 "reasoning" 与 "steps" 两个
+ * schema 键；正常散文叙述不可能同时踩中，误伤面收得非常窄。
+ */
+export function isBarePlanJson(text: string): boolean {
+  const t = text.trimStart();
+  if (!t.startsWith('{')) return false;
+  return t.includes('"reasoning"') && t.includes('"steps"');
+}
+
+/**
  * 把一条完整回复拆成「思考叙述」与「计划 JSON 原文」。计划围栏按约定在回复
  * 末尾，所以认最后一次出现的 ``` 开栏：叙述里 legitimately 出现过代码示例时
  * 不会被它截断。没有围栏 → planText 为空；只有开栏没闭合 → 取开栏之后全部
- * （交 parsePlanJsonWithMeta 的修复通道碰运气）。
+ * （交 parsePlanJsonWithMeta 的修复通道碰运气）。无围栏但整条回复是裸计划
+ * JSON 的退化形态 → 整段转交解析通道、叙述留空（气泡不落屏，计划卡照出），
+ * 不让 JSON 以「叙述」的名义原样上屏。
  */
 export function splitNarrationAndPlan(full: string): { narration: string; planText: string } {
   // 围栏按出现次序开合交替（0 基偶位=开栏）：最后一个开栏才是计划围栏——
@@ -53,7 +68,10 @@ export function splitNarrationAndPlan(full: string): { narration: string; planTe
   for (let i = markers.length - 1; i >= 0; i--) {
     if (i % 2 === 0) { open = markers[i]; break; }
   }
-  if (open < 0) return { narration: full, planText: '' };
+  if (open < 0) {
+    if (isBarePlanJson(full)) return { narration: '', planText: full.trim() };
+    return { narration: full, planText: '' };
+  }
   const narration = full.slice(0, open);
   const rest = full.slice(open + 3);
   // 跳过语言标记行（```json / ``` JSON …），取围栏体。

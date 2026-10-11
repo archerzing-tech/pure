@@ -4,7 +4,7 @@
 // 的分流、流式期绝不闪现计划 JSON、无卡时把思考当执行指引。
 
 import { describe, expect, it } from 'bun:test';
-import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from '../planNarration';
+import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from '../planNarration';
 
 describe('buildPlanThinkingPrompt — 不给提纲，只给实质约束', () => {
   it('要求用户语言、假设明说、不许复述请求与套话', () => {
@@ -73,10 +73,61 @@ describe('splitNarrationAndPlan — 思考在前，计划围栏认最后一次',
     expect(planText).toContain('"steps"');
   });
 
-  it('没有围栏：全部算叙述，计划为空', () => {
+  it('没有围栏：散文全部算叙述，计划为空', () => {
     const { narration, planText } = splitNarrationAndPlan('就是想不出靠谱的分步。');
     expect(narration).toContain('想不出');
     expect(planText).toBe('');
+  });
+
+  it('没有围栏但整条回复是裸计划 JSON：转交解析通道，叙述留空（2026-10-11 真机退化形态）', () => {
+    // nemotron 真机原样（节选）：不守 ```json 围栏约定，整段思考+步骤直接
+    // 裸吐成一条 JSON——原样上屏用户完全看不懂。
+    const full = `{
+  "reasoning": "We need to first read the provided design file, then create a prototype project structure.",
+  "steps": [
+    {
+      "action": "read_file",
+      "description": "Read the design file at the absolute path to capture its content.",
+      "expectedOutcome": "File content retrieved and stored for analysis.",
+      "substeps": [],
+      "todosRequired": false
+    },
+    {
+      "action": "analyze_design",
+      "description": "Parse the retrieved design to identify main modules.",
+      "expectedOutcome": "A summary of components and relationships.",
+      "substeps": [
+        { "action": "extract_key_elements", "description": "Identify core classes.", "expectedOutcome": "List of key elements." }
+      ]
+    }
+  ]
+}`;
+    const { narration, planText } = splitNarrationAndPlan(full);
+    expect(narration).toBe('');
+    expect(planText).toContain('"reasoning"');
+    expect(planText).toContain('analyze_design');
+    // 转交的原文必须能走通既有的解析+可用性判定。
+    expect(isUsablePlan({ reasoning: 'r', steps: [{ id: '1', action: 'read_file', description: 'd', expectedOutcome: 'o' }] })).toBe(true);
+  });
+});
+
+describe('isBarePlanJson — 裸计划 JSON 识别（流式抑制与无围栏收尾共用）', () => {
+  it('真机退化形态：{ 开头 + reasoning/steps 两记号 → 认', () => {
+    expect(isBarePlanJson('{"reasoning": "We need to first read the file.", "steps": [{"action":"a"}]}')).toBe(true);
+    expect(isBarePlanJson('\n\n{ "reasoning":"r",\n "steps": [] }')).toBe(true);
+  });
+
+  it('散文、只有 { 开头、缺任一记号：都不认（流式期不误伤正常叙述）', () => {
+    expect(isBarePlanJson('这个任务的关键在于先读设计文档。')).toBe(false);
+    expect(isBarePlanJson('{"note": "一个不以计划开场也会出现的 JSON 例子"}')).toBe(false);
+    expect(isBarePlanJson('{"steps": [{"action":"a"}]}')).toBe(false);
+    expect(isBarePlanJson('{"reasoning": "只有 reasoning 没有 steps"}')).toBe(false);
+  });
+
+  it('提示词明确禁止思考写成 JSON：只许围栏里出现', () => {
+    const { system } = buildPlanThinkingPrompt('任务');
+    expect(system).toContain('never raw JSON');
+    expect(system).toContain('only JSON allowed');
   });
 });
 

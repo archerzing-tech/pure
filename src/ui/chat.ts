@@ -26,7 +26,7 @@ import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/Tool
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
 import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
-import { buildPlanThinkingPrompt, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
+import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
@@ -3145,7 +3145,16 @@ export class ChatController {
         if (chunk.type === 'content' && chunk.content) {
           full += chunk.content;
           this.lastStreamActivityAt = Date.now();
-          const live = liveNarrationPortion(full);
+          // 裸 JSON 抑制（2026-10-11 真机）：弱模型不守围栏约定、直接以计划
+          // JSON 开场时，一个字都不上屏——liveNarrationPortion 只防得了带
+          // 围栏的，防不了没围栏的。两层闸：以 { 开场先按疑似处理不建气泡
+          // （"reasoning"/"steps" 记号没凑齐前不闪字），记号凑齐转确认抑制；
+          // 抑制期思考卡保持活着（首字未落屏，onFirstVisible 不触发）。收尾
+          // 由 splitNarrationAndPlan 的裸 JSON 支路转交解析通道出计划卡；
+          // 解出来真是散文（{ 开头的正常叙述）时由收尾补上屏。
+          const bareJson = isBarePlanJson(full);
+          const maybeBareJson = !bareJson && full.trimStart().startsWith('{');
+          const live = bareJson || maybeBareJson ? '' : liveNarrationPortion(full);
           // 叙述尾实时保鲜：插话裁决的时机证据（见编排器 preflightNarrationTail 注）。
           this.interjectOrchestrator.setPreflightNarrationTail(live.trim().slice(-400));
           if (!bubble && live.trim()) {
@@ -3210,6 +3219,11 @@ export class ChatController {
       } else {
         bubble.remove();
       }
+    } else if (narrationText) {
+      // 裸 JSON 抑制期没建过气泡：解出来真是散文叙述（不是计划 JSON），
+      // 这里补上屏——抑制不能把用户的思考吞掉。
+      bubble = this.addBubble('assistant', narrationText);
+      this.scrollUi(chatEl);
     }
     return { narration: narrationText, plan };
   }
