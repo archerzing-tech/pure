@@ -7018,7 +7018,10 @@ body.window-maximized #boot-splash {
 }
 
 body {
-  background: var(--bg);
+  /* 透明窗口的圆角四角靠 body 透明让位（critical.css 同款约束）：这里若垫
+     var(--bg)，方角 body 会把窗口四角填死，整窗圆角就地失效——2026-10-11
+     真机抓包定位。页面底色由 window-root / 各列自己画，body 无需底色。 */
+  background: transparent;
 }
 
 button,
