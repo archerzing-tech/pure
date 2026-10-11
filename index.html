@@ -884,10 +884,12 @@
               <div class="settings-page" data-page="channels">
                 <h2 class="settings-page-title" data-i18n="channel.title">网关&amp;频道</h2>
                 <p class="settings-page-desc" data-i18n="channel.desc">把 agent 接进飞书 / 钉钉 / QQ / WebChat；凭据改动在 gateway 重启后生效</p>
-                <div class="settings-section">
+                <!-- 不再包 settings-section 外壳：gateway 状态卡/依赖卡、频道卡
+                     各自就是完整卡片，外面再框一层就是卡里套卡（2026-10-11） -->
+                <div>
                   <div id="gateway-dashboard"></div>
                 </div>
-                <div class="settings-section">
+                <div>
                   <div id="channels-dashboard"></div>
                 </div>
               </div>

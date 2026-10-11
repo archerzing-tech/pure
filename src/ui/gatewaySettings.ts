@@ -229,8 +229,10 @@ export function renderGatewaySettings(host: HTMLElement): void {
 
   void refreshDeps();
 
+  // 启停按钮收进状态卡：状态和操控它的按钮本来就是一个整体，散在页面
+  // 背景上会像掉出来的元素。
   actions.append(startBtn, stopBtn, restartBtn, testBtn);
-  host.appendChild(actions);
+  section.appendChild(actions);
 
   const output = document.createElement('pre');
   output.className = 'gateway-output';
