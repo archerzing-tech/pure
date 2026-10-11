@@ -7413,9 +7413,7 @@ select:focus-visible,
 
 #settings-header {
   min-height: 60px;
-  /* 左右按钮各距边缘 20px（用户定稿）：返回钮与关闭钮对称，icon-btn
-   * 样式零改动。 */
-  padding: 14px 20px;
+  padding: 14px 24px;
   background: var(--bg-header);
   backdrop-filter: blur(16px);
 }
@@ -10741,7 +10739,10 @@ button svg,
 #settings-header {
   height: 68px;
   min-height: 68px;
-  padding-inline: clamp(18px, 4vw, 52px);
+  /* 左右各 20px（用户定稿）：返回钮距左、关闭钮距右对称。此前 clamp(18px,
+   * 4vw, 52px) 在宽视口给到 ~51.6px，中间层的 padding 改动全被这条级联
+   * 位置更靠后的规则压住——按钮位置只认这里。≤720px 窄窗仍走 14px。 */
+  padding-inline: 20px;
 }
 
 #settings-nav {
