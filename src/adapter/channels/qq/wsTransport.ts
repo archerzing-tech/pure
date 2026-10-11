@@ -55,8 +55,17 @@ class QQTokenKeeper {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ appId: this.appId, clientSecret: this.appSecret }),
     });
-    const data = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: string | number };
-    if (!data.access_token) throw new Error(`QQ getAppAccessToken 失败：HTTP ${res.status}`);
+    // QQ 惯用 HTTP 200 包错误（{"code":..,"message":..}），真实原因只在 body 里
+    // ——不带上它，「HTTP 200 失败」无法诊断（2026-10-11 真机：appId/secret 疑似
+    // 不匹配，但日志只剩状态码）。
+    const text = await res.text();
+    let data: { access_token?: string; expires_in?: string | number } = {};
+    try {
+      data = JSON.parse(text) as typeof data;
+    } catch {
+      // body 非 JSON 时保持空对象，走下面的抛错并带原文片段。
+    }
+    if (!data.access_token) throw new Error(`QQ getAppAccessToken 失败：HTTP ${res.status} ${text.slice(0, 200)}`);
     const ttl = Number(data.expires_in ?? 7200);
     this.token = data.access_token;
     this.expiresAt = Date.now() + Math.max(60, Math.floor(ttl * 1000 * 2 / 3));
