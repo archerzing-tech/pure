@@ -193,7 +193,10 @@ export function revealPath(rawPath: string): void {
   if (isTauriRuntime()) {
     (async () => {
       try {
-        await tauriInvoke('reveal_path', { path: p });
+        const res = await tauriInvoke<{ opened: string; stale: boolean }>('reveal_path', { path: p });
+        // 路径过期不说破，用户就站在一个没有文件的文件夹里怀疑自己点错了。
+        // 上溯祖先兜底照旧，但必须讲清楚「文件已不在」。
+        if (res?.stale) toast('文件已不在原位置（可能被移动或删除了），已打开它所在的目录');
       } catch (err) {
         toast(`${t('path.openFailed')}: ${p}`);
         console.error('[pure] reveal_path failed:', err);

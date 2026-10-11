@@ -3773,6 +3773,40 @@ async fn execute_command_stream(
     execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref(), sandbox).await
 }
 
+/// Expand the downloader's path spec into a concrete absolute file path.
+/// `$HOME` / `$PWD` are the WebView's shell-style specs; `~/` is what the
+/// model sometimes writes through. `workspace` gives `$PWD` its meaning.
+/// Anything that still lands on a non-absolute path falls back to
+/// `~/Downloads/<basename>`: the GUI's CWD is not the workspace (launched
+/// from Finder it is `/`), so a CWD-relative write would silently create the
+/// file somewhere the card's reported path never points at — the 2026-10-11
+/// 「打开所在文件夹里没有文件」 bug class. Reports and writes must share one
+/// path, so this is the single expansion both sides go through.
+fn expand_download_path(spec: &str, workspace: &str, home: &str) -> String {
+    let ws = workspace.trim_end_matches(['/', '\\']);
+    let expanded = if let Some(rest) = spec.strip_prefix("$HOME") {
+        format!("{home}{rest}")
+    } else if let Some(rest) = spec.strip_prefix("$PWD") {
+        if ws.is_empty() {
+            format!("{home}/Downloads{rest}")
+        } else {
+            format!("{ws}{rest}")
+        }
+    } else if let Some(rest) = spec.strip_prefix("~/") {
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        spec.to_string()
+    };
+    if std::path::Path::new(&expanded).is_absolute() {
+        return expanded;
+    }
+    let name = std::path::Path::new(&expanded)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+    format!("{home}/Downloads/{name}")
+}
+
 /// Native downloader for the GUI's download_file tool. Replaces the fragile
 /// POSIX shell pipeline (curl HEAD probes + awk field parsing + stat polling —
 /// broken on Windows, blind to the app's proxy config, one shot with no
@@ -3813,20 +3847,11 @@ async fn download_file_stream(
     let _cancel_guard = ChatCancelGuard { registry: state.inner().0.clone(), key: cancel_id };
     let mut cancelled = false;
 
-    // ── Path expansion ($HOME / $PWD) + parent dirs ──
-    let expand = |spec: &str| -> String {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".into());
-        if let Some(rest) = spec.strip_prefix("$HOME") {
-            return format!("{home}{rest}");
-        }
-        if let Some(rest) = spec.strip_prefix("$PWD") {
-            return format!("{}{rest}", workspace.trim_end_matches('/'));
-        }
-        spec.to_string()
-    };
-    let file_path = expand(&path);
+    // ── Path expansion ($HOME / $PWD / ~) + parent dirs ──
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    let file_path = expand_download_path(&path, &workspace, &home);
     if let Some(parent) = std::path::Path::new(&file_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -16384,13 +16409,27 @@ fn reveal_target(raw: &str) -> Option<String> {
     None
 }
 
+/// What `reveal_path` did, so the download card can say「文件已不在原位置」
+/// instead of silently opening a folder that reads as a bug (2026-10-11 user
+/// report: the card's path was right when the file was written; the asset was
+/// later cleaned up and the ancestor fallback opened a folder without it).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevealOutcome {
+    opened: String,
+    /// True when the requested path itself no longer exists and the nearest
+    /// surviving ancestor was opened instead.
+    stale: bool,
+}
+
 /// Reveal a file in its containing folder (download card's 打开所在文件夹).
 /// Unlike `open_path` (which opens the file in its default app), this always
 /// lands on the FOLDER: existing file → Finder reveal + select; stale path →
-/// open the nearest surviving ancestor directory. The card passes the full
-/// file path — the old string-strip-then-open-a-guessed-dir flow is gone.
+/// open the nearest surviving ancestor directory and report it as `stale` so
+/// the card can say so. The card passes the full file path — the old
+/// string-strip-then-open-a-guessed-dir flow is gone.
 #[tauri::command]
-async fn reveal_path(path: String) -> Result<(), String> {
+async fn reveal_path(path: String) -> Result<RevealOutcome, String> {
     let raw = path.trim();
     if raw.is_empty() {
         return Err("reveal_path: path is empty".to_string());
@@ -16398,13 +16437,20 @@ async fn reveal_path(path: String) -> Result<(), String> {
     if raw.contains('\0') {
         return Err("reveal_path: path contains NUL".to_string());
     }
-    // Same expansion as open_path: `~/…` written by the model must reach the real home.
+    // Same expansion as open_path: `~/…` written by the model must reach the
+    // real home; `$HOME…` is the downloader's own vocabulary and cards can
+    // carry it, so expand it identically instead of treating it as relative.
     let mut expanded = raw.to_string();
-    if expanded.starts_with("~/") {
+    if let Some(rest) = expanded.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
-            expanded = format!("{}/{}", home.trim_end_matches('/'), &expanded[2..]);
+            expanded = format!("{}/{}", home.trim_end_matches('/'), rest);
+        }
+    } else if let Some(rest) = expanded.strip_prefix("$HOME") {
+        if let Ok(home) = std::env::var("HOME") {
+            expanded = format!("{home}{rest}");
         }
     }
+    let stale = !std::path::Path::new(&expanded).exists();
     let target = reveal_target(&expanded)
         .ok_or_else(|| format!("reveal_path: nothing exists along {}", expanded))?;
     let is_dir = std::path::Path::new(&target).is_dir();
@@ -16439,7 +16485,7 @@ async fn reveal_path(path: String) -> Result<(), String> {
     status
         .map_err(|e| format!("reveal_path: {}", e))?
         .success()
-        .then_some(())
+        .then_some(RevealOutcome { opened: target.clone(), stale })
         .ok_or_else(|| format!("reveal failed: {}", target))
 }
 
@@ -16461,6 +16507,24 @@ mod reveal_path_tests {
         // 目录本身：原样返回（plain open）
         assert_eq!(reveal_target(base.join("a").to_str().unwrap()), Some(base.join("a").to_string_lossy().to_string()));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn expand_download_path_never_lands_on_a_cwd_relative_literal() {
+        let home = "/Users/tester";
+        // 常规 $HOME / $PWD 展开
+        assert_eq!(expand_download_path("$HOME/Downloads/a.png", "", home), "/Users/tester/Downloads/a.png");
+        assert_eq!(expand_download_path("$PWD/a.png", "/ws/dir", home), "/ws/dir/a.png");
+        assert_eq!(expand_download_path("$PWD/a.png", "/ws/dir/", home), "/ws/dir/a.png");
+        // 模型写 `~/`：展开到真实 home，不许落到字面量 `~` 目录
+        assert_eq!(expand_download_path("~/Downloads/a.png", "", home), "/Users/tester/Downloads/a.png");
+        // 空 workspace + $PWD：宁可落 Downloads，也不拼出 `/a.png` 这种根路径
+        assert_eq!(expand_download_path("$PWD/a.png", "", home), "/Users/tester/Downloads/a.png");
+        // 绝对路径原样通过
+        assert_eq!(expand_download_path("/data/a.png", "/ws", home), "/data/a.png");
+        // 兜底：任何剩余的非绝对 spec 都折回 ~/Downloads/<名>，
+        // 报出去的路径必须就是写入的路径
+        assert_eq!(expand_download_path("relative/a.png", "", home), "/Users/tester/Downloads/a.png");
     }
 }
 

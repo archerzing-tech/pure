@@ -96,6 +96,32 @@ export function tokenizeFindQuery(query: string): string[] {
 // where callers (and the Windows quality-gate tests) expect to find it.
 export { stripPowerShellStartupProgress };
 
+/** Resolve the download destination directory for the Node chain (CLI /
+ * sidecar). 口径与 GUI 的 resolveDownloadOutSpec 对齐（2026-10-11）：裸文件名
+ * 是「名字」不是目录——落 ~/Downloads，不再套出 `name.ext/name.ext` 一层同
+ * 名嵌套；`~/…` 按真实 home 展开，不再在 Downloads 里孵出字面量 `~` 目录；
+ * 带扩展名的绝对路径视作文件本身、落点取其父目录。 */
+export function resolveDownloadOutDir(destination: string, home: string, cwd: string): string {
+  const raw = destination.trim();
+  if (!raw || raw === 'downloads') return join(home, 'Downloads');
+  const inner = raw === '~' ? '' : raw.slice(2);
+  const expanded = raw.startsWith('~/') || raw === '~'
+    ? join(home, inner.replace(/[^A-Za-z0-9_.\-\/]/g, '_'))
+    : raw;
+  if (isAbsolute(expanded)) {
+    // `/a/b/c.png` 读作文件本身：下载进它的父目录。
+    if (/\.[A-Za-z0-9]+$/.test(expanded)) {
+      const parent = expanded.replace(/[\\/][^\\/]+$/, '');
+      return parent && isAbsolute(parent) ? parent : join(home, 'Downloads');
+    }
+    return expanded;
+  }
+  if (expanded === 'workspace') return cwd;
+  // 裸文件名（无路径分隔）：是文件名，落 Downloads。
+  if (/\.[A-Za-z0-9]+$/.test(expanded) && !expanded.includes('/')) return join(home, 'Downloads');
+  return join(home, 'Downloads', expanded.replace(/[^A-Za-z0-9_.\-\/]/g, '_'));
+}
+
 /** Size of a file for ordering find_files scans, or Number.MAX_SAFE_INTEGER
  * if the stat fails (unreadable files sort last and get skipped). */
 function statSafeSize(p: string): number {
@@ -2327,11 +2353,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const resume = args.resume !== false;
 
     const home = homedir();
-    let outDir: string;
-    if (destination && isAbsolute(destination)) outDir = destination;
-    else if (destination === 'workspace') outDir = process.cwd();
-    else if (destination && destination !== 'downloads') outDir = join(home, 'Downloads', destination);
-    else outDir = join(home, 'Downloads');
+    const outDir = resolveDownloadOutDir(destination, home, process.cwd());
 
     // File name: explicit arg \u2192 URL basename refined by the server's
     // Content-Disposition header (best-effort) \u2192 'download'.
