@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { AgentSession, type BuildSessionSpec, type ChannelHarness, type HarnessBundle } from '../agentSession';
 import type { ChannelCapabilities, InboundEvent, OutboundMessage } from '../types';
 import type { EngineEvent } from '../../shared/types';
+import type { SessionEvent, SessionEventSink } from '../../shared/sessionEventLog';
 
 const CAPS: ChannelCapabilities = {
   chatTypes: ['dm'],
@@ -51,7 +52,10 @@ function harnessFor(events: EngineEvent[]): ChannelHarness {
 function makeSession(
   events: EngineEvent[],
   delivered: Array<{ message: OutboundMessage; id: string }>,
-  extra: { projection?: (text: string, caps: ChannelCapabilities) => Promise<{ messages: OutboundMessage[]; notes: string[] } | null> } = {},
+  extra: {
+    projection?: (text: string, caps: ChannelCapabilities) => Promise<{ messages: OutboundMessage[]; notes: string[] } | null>;
+    eventSinkFor?: (sessionKey: string, sessionId: string) => SessionEventSink;
+  } = {},
 ): AgentSession {
   let counter = 0;
   return new AgentSession('k', { accountId: 'a', peerId: 'p', peerKind: 'dm' }, spec(), {
@@ -59,6 +63,7 @@ function makeSession(
     throttleMs: 0,
     ackPlaceholder: false,
     projection: extra.projection,
+    eventSinkFor: extra.eventSinkFor,
     factory: async (s): Promise<HarnessBundle> => ({ harness: harnessFor(events), systemPrompt: 'sys', sessionId: s.sessionId, projectPath: '' }),
     deliver: async (_target, message) => {
       const id = `m${++counter}`;
@@ -66,6 +71,10 @@ function makeSession(
       return id;
     },
   });
+}
+
+function memorySink(logged: SessionEvent[]): SessionEventSink {
+  return { append: async (event) => { logged.push(event); } };
 }
 
 describe('AgentSession streaming delivery', () => {
@@ -101,5 +110,76 @@ describe('AgentSession streaming delivery', () => {
     const image = delivered.find((entry) => entry.message.attachments?.length);
     expect(text!.message.messageId).toBe('m1');
     expect(image!.message.messageId).toBeUndefined();
+  });
+});
+
+describe('AgentSession event log', () => {
+  it('records user_input and turn_settled around a successful turn', async () => {
+    const logged: SessionEvent[] = [];
+    const sinks: string[] = [];
+    const session = makeSession([completed('你好')], [], {
+      eventSinkFor: (sessionKey, sessionId) => {
+        sinks.push(`${sessionKey}/${sessionId}`);
+        return memorySink(logged);
+      },
+    });
+    await session.runTurn(inbound());
+
+    // sink 按会话记忆：一个回合只找宿主要一次。
+    expect(sinks).toEqual(['k/s1']);
+    expect(logged.map((e) => e.kind)).toEqual(['user_input', 'turn_settled']);
+    expect(logged[0].origin).toEqual({ surface: 'c', peer: 'p' });
+    expect(logged[0].payload).toEqual({ text: 'hi' });
+    expect(logged[1].actor).toBe('gateway');
+    const settled = logged[1].payload as { totalMs: number };
+    expect(typeof settled.totalMs).toBe('number');
+    expect(settled.totalMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('marks turn_settled as failed when the stream throws mid-turn', async () => {
+    const logged: SessionEvent[] = [];
+    const throwing: ChannelHarness = {
+      async *run(): AsyncGenerator<EngineEvent, void, void> {
+        yield completed('半截');
+        throw new Error('引擎超时');
+      },
+      async *continueTurn(): AsyncGenerator<EngineEvent, void, void> {},
+    };
+    const session = new AgentSession('k', { accountId: 'a', peerId: 'p', peerKind: 'dm' }, spec(), {
+      capabilities: CAPS,
+      throttleMs: 0,
+      ackPlaceholder: false,
+      eventSinkFor: () => memorySink(logged),
+      factory: async (s): Promise<HarnessBundle> => ({ harness: throwing, systemPrompt: 'sys', sessionId: s.sessionId, projectPath: '' }),
+      deliver: async () => undefined,
+    });
+    await session.runTurn(inbound());
+
+    expect(logged.map((e) => e.kind)).toEqual(['user_input', 'turn_settled']);
+    const settled = logged[1].payload as { failed?: boolean; error?: string };
+    expect(settled.failed).toBe(true);
+    expect(settled.error).toBe('引擎超时');
+  });
+
+  it('logs nothing when the factory fails before a session exists', async () => {
+    const logged: SessionEvent[] = [];
+    const session = new AgentSession('k', { accountId: 'a', peerId: 'p', peerKind: 'dm' }, spec(), {
+      capabilities: CAPS,
+      throttleMs: 0,
+      ackPlaceholder: false,
+      eventSinkFor: () => memorySink(logged),
+      factory: async (): Promise<HarnessBundle> => { throw new Error('boom'); },
+      deliver: async () => undefined,
+    });
+    await session.runTurn(inbound());
+    // 工厂抛错 = 会话没建成：无 sessionId 可挂账，账本不记（错误仍投递给用户）。
+    expect(logged).toEqual([]);
+  });
+
+  it('runs turns normally when no sink is wired', async () => {
+    const delivered: Array<{ message: OutboundMessage; id: string }> = [];
+    const session = makeSession([completed('你好')], delivered);
+    await session.runTurn(inbound());
+    expect(delivered.some((entry) => entry.message.kind === 'final')).toBe(true);
   });
 });

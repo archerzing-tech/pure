@@ -16,6 +16,8 @@ import { PairingGate } from './channels/pairing';
 import { ChannelAuditLog } from './channels/audit';
 import { DailyTokenBudget, PeerRateLimiter } from './channels/limits';
 import { isCustomProviderId } from './shared/providers';
+import { createFileSessionEventSink } from './shared/node/sessionEventFile';
+import { listSessionViews, readSessionTimeline } from './shared/node/sessionViews';
 import { existsSync, readFileSync } from 'node:fs';
 
 const CHANNELS_CONFIG_PATH = `${PURE_DIR}/channels.json`;
@@ -81,7 +83,15 @@ export async function runGateway(args: CliArgs): Promise<void> {
   if (!ensureProviderConfigured(args)) process.exit(1);
 
   const registry = new ChannelRegistry({ log: channelsLog });
-  registry.register(createWebChatAdapter({ host: config.gateway.host, port: config.gateway.port }));
+  registry.register(createWebChatAdapter({
+    host: config.gateway.host,
+    port: config.gateway.port,
+    // 手机端「会话」栏：总览/时间线直接读 ~/.pure 的索引与事件日志（只读）。
+    sessions: {
+      list: () => listSessionViews(PURE_DIR),
+      timeline: (id) => readSessionTimeline(PURE_DIR, id),
+    },
+  }));
   await registerConfiguredFeishu(registry, config);
   await registerConfiguredDingTalk(registry, config);
   await registerConfiguredQQ(registry, config);
@@ -138,6 +148,8 @@ export async function runGateway(args: CliArgs): Promise<void> {
     audit: new ChannelAuditLog({ path: `${PURE_DIR}/channels/audit.jsonl`, log: channelsLog }),
     limiter: new PeerRateLimiter({ perMinute: config.limits.perPeerPerMinute }),
     budget: new DailyTokenBudget({ dailyTokens: config.limits.dailyTokens }),
+    // A1 事件账本落盘（手机端总览/时间线的事实源；写失败由 sink 内部降级）。
+    eventSinkFor: (_sessionKey, sessionId) => createFileSessionEventSink(PURE_DIR, sessionId),
     log: channelsLog,
   });
 

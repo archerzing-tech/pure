@@ -3,6 +3,8 @@
 // 一个极简页面 + WebSocket：没有飞书/企微的时限与频控，是最干净的参考实现。
 //
 // 适配器只做「平台协议 ↔ 规范类型」，不做渲染、分片、权限判断。
+// 2026-10-11 起页面多一个「会话」栏（手机看服务端哪些会话在跑），数据走
+// 同端口两个只读端点；options.sessions 缺省时端点 404，老宿主零感知。
 import type {
   ChannelAdapter,
   ChannelCapabilities,
@@ -15,6 +17,8 @@ import type {
   SendOptions,
   SendResult,
 } from '../../../channels/types';
+import type { SessionView } from '../../../shared/node/sessionViews';
+import type { TimelineEntry } from '../../../shared/sessionEventLog';
 
 type ClientData = { peer: string };
 
@@ -28,9 +32,12 @@ interface WireFrame {
 }
 
 const PAGE = `<!doctype html>
-<html><head><meta charset="utf-8"><title>pure webchat</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>pure webchat</title>
 <style>
   body { font: 15px/1.6 -apple-system, system-ui, sans-serif; max-width: 720px; margin: 0 auto; padding: 16px; }
+  #tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tab { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; font-size: 15px; }
+  .tab.on { background: #d7f0ff; border-color: #8ccdee; font-weight: 600; }
   #log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
   .bubble { padding: 8px 12px; border-radius: 10px; background: #f2f2f2; white-space: pre-wrap; word-break: break-word; }
   .bubble img.att { max-width: 100%; display: block; margin-top: 6px; border-radius: 8px; }
@@ -39,11 +46,33 @@ const PAGE = `<!doctype html>
   input { flex: 1; padding: 8px; font-size: 15px; }
   button { padding: 8px 14px; }
   #status { color: #888; font-size: 13px; margin-bottom: 8px; }
+  .sess { padding: 10px 12px; border: 1px solid #e2e2e2; border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
+  .sess:active { background: #f4f4f4; }
+  .sess .row1 { display: flex; align-items: center; gap: 8px; }
+  .sess .meta { color: #888; font-size: 13px; margin-top: 2px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .dot.running { background: #2fa66a; }
+  .dot.settled { background: #b5b5b5; }
+  .dot.failed { background: #d5493f; }
+  .dot.idle { background: #d8d8d8; }
+  .tl-entry { padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; word-break: break-word; }
+  .tl-ts { color: #999; font-size: 12px; margin-right: 6px; }
+  #back { margin: 0 0 10px; }
 </style></head>
 <body>
-<div id="status">连接中…</div>
-<div id="log"></div>
-<form id="composer"><input id="text" autocomplete="off" placeholder="说点什么…"><button>发送</button></form>
+<div id="tabs">
+  <button class="tab on" id="tab-chat" type="button">对话</button>
+  <button class="tab" id="tab-sess" type="button">会话</button>
+</div>
+<div id="view-chat">
+  <div id="status">连接中…</div>
+  <div id="log"></div>
+  <form id="composer"><input id="text" autocomplete="off" placeholder="说点什么…"><button>发送</button></form>
+</div>
+<div id="view-sess" hidden>
+  <div id="sess-head" style="display:none"><button id="back" type="button">← 返回列表</button></div>
+  <div id="sess-list">加载中…</div>
+</div>
 <script>
   const peerKey = 'pure-webchat-peer';
   let peer = localStorage.getItem(peerKey);
@@ -91,6 +120,87 @@ const PAGE = `<!doctype html>
     log.appendChild(el);
     ws.send(JSON.stringify({ text }));
   });
+
+  // ── 会话总览：哪些会话在跑 / 落定了，点进去看时间线 ──
+  const sessList = document.getElementById('sess-list');
+  const sessHead = document.getElementById('sess-head');
+  const views = { chat: document.getElementById('view-chat'), sess: document.getElementById('view-sess') };
+  let timelineOpen = false;
+  function switchTab(name) {
+    document.getElementById('tab-chat').className = 'tab' + (name === 'chat' ? ' on' : '');
+    document.getElementById('tab-sess').className = 'tab' + (name === 'sess' ? ' on' : '');
+    views.chat.hidden = name !== 'chat';
+    views.sess.hidden = name !== 'sess';
+  }
+  document.getElementById('tab-chat').addEventListener('click', () => switchTab('chat'));
+  document.getElementById('tab-sess').addEventListener('click', () => { switchTab('sess'); loadSessions(); });
+  function fmtAge(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, (Date.now() - ts) / 1000);
+    if (s < 60) return Math.round(s) + ' 秒前';
+    if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+    if (s < 86400) return Math.round(s / 3600) + ' 小时前';
+    return Math.round(s / 86400) + ' 天前';
+  }
+  function sessTitle(s) {
+    let t = s.surface || '?';
+    if (s.peer) t += ' · ' + s.peer;
+    return t;
+  }
+  function loadSessions() {
+    timelineOpen = false;
+    sessHead.style.display = 'none';
+    sessList.textContent = '加载中…';
+    fetch('/sessions').then((r) => r.json()).then((items) => {
+      if (timelineOpen) return;
+      sessList.textContent = '';
+      if (!items.length) { sessList.textContent = '还没有会话'; return; }
+      items.forEach((s) => {
+        const card = document.createElement('div');
+        card.className = 'sess';
+        const row1 = document.createElement('div');
+        row1.className = 'row1';
+        const dot = document.createElement('span');
+        dot.className = 'dot ' + (s.status || 'idle');
+        const title = document.createElement('span');
+        title.textContent = sessTitle(s);
+        row1.appendChild(dot);
+        row1.appendChild(title);
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = (s.statusDetail || s.status || '') + (s.lastActivityAt ? ' · ' + fmtAge(s.lastActivityAt) : '');
+        card.appendChild(row1);
+        card.appendChild(meta);
+        card.addEventListener('click', () => loadTimeline(s.sessionId));
+        sessList.appendChild(card);
+      });
+    }).catch(() => { if (!timelineOpen) sessList.textContent = '加载失败'; });
+  }
+  function loadTimeline(id) {
+    timelineOpen = true;
+    sessHead.style.display = '';
+    sessList.textContent = '加载中…';
+    fetch('/sessions/' + encodeURIComponent(id) + '/timeline').then((r) => r.json()).then((entries) => {
+      if (!timelineOpen) return;
+      sessList.textContent = '';
+      if (!entries.length) { sessList.textContent = '暂无事件'; return; }
+      entries.forEach((e) => {
+        const row = document.createElement('div');
+        row.className = 'tl-entry';
+        const ts = document.createElement('span');
+        ts.className = 'tl-ts';
+        const d = new Date(e.ts);
+        const pad = (n) => (n < 10 ? '0' + n : '' + n);
+        ts.textContent = (d.getMonth() + 1) + '-' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        const body = document.createElement('span');
+        body.textContent = e.summary || e.kind || '';
+        row.appendChild(ts);
+        row.appendChild(body);
+        sessList.appendChild(row);
+      });
+    }).catch(() => { if (timelineOpen) sessList.textContent = '加载失败'; });
+  }
+  document.querySelector('#sess-head button').addEventListener('click', loadSessions);
 </script>
 </body></html>`;
 
@@ -106,9 +216,19 @@ export const WEBCHAT_CAPABILITIES: ChannelCapabilities = {
   requiresMentionInGroup: false,
 };
 
+/** 手机端「会话」栏的数据源（实现：shared/node/sessionViews，宿主注入）。 */
+export interface WebChatSessionsApi {
+  /** 总览（通道索引 ∪ 事件目录，最近活动倒序）。 */
+  list(): SessionView[];
+  /** 单会话时间线投影；未知 id 返回空数组。 */
+  timeline(sessionId: string): TimelineEntry[];
+}
+
 export interface WebChatOptions {
   host: string;
   port: number;
+  /** 缺省 = /sessions 两端点 404（老宿主零感知）。 */
+  sessions?: WebChatSessionsApi;
 }
 
 export function createWebChatAdapter(options: WebChatOptions): ChannelAdapter {
@@ -168,6 +288,14 @@ export function createWebChatAdapter(options: WebChatOptions): ChannelAdapter {
             // 不依赖 webchat 是否被禁用（禁用时由 cliChannels 的极简应答器答）。
             if (url.pathname === '/healthz') {
               return new Response('ok', { headers: { 'content-type': 'text/plain' } });
+            }
+            // 只读会话总览/时间线（手机端「会话」栏）。缺数据源一律 404。
+            if (url.pathname === '/sessions' && options.sessions) {
+              return Response.json(options.sessions.list());
+            }
+            const timelineMatch = url.pathname.match(/^\/sessions\/([A-Za-z0-9_-]+)\/timeline$/);
+            if (timelineMatch && options.sessions) {
+              return Response.json(options.sessions.timeline(timelineMatch[1]));
             }
             if (url.pathname === '/ws') {
               const peer = url.searchParams.get('peer') || `web-${Math.random().toString(36).slice(2, 10)}`;

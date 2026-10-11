@@ -4,6 +4,7 @@
 // continueTurn()；空闲 TTL 由 router 负责驱逐并落 checkpoint。
 import type { EngineEvent, Message, TokenUsage } from '../shared/types';
 import type { PermissionMode, PermissionRequestHandler } from '../coding-agent/types';
+import { capEventText, type SessionEvent, type SessionEventSink } from '../shared/sessionEventLog';
 import type {
   ChannelCapabilities,
   ChannelTarget,
@@ -63,6 +64,12 @@ export interface AgentSessionDeps {
    * 的一串消息。返回 null 表示这次不该投影（无富块 / 发不了图 / 渲染页不可用）。
    */
   projection?: (text: string, capabilities: ChannelCapabilities) => Promise<ProjectionResult | null>;
+  /**
+   * 事件日志 sink（A1 账本，docs/remote-office-bridge-design.md §2）：回合开头的
+   * user_input 与 finally 里的 turn_settled 在这里落盘，手机端总览/时间线读的就是
+   * 它。缺省 = 不记账（老宿主零感知）。日志永不挡正事：append 内部已降级。
+   */
+  eventSinkFor?: (sessionKey: string, sessionId: string) => SessionEventSink;
 }
 
 export class AgentSession {
@@ -73,6 +80,7 @@ export class AgentSession {
   private busy = false;
   private streamMessageId?: string;
   private disposed = false;
+  private eventSink?: SessionEventSink;
   lastActivityAt: number;
 
   constructor(
@@ -107,8 +115,19 @@ export class AgentSession {
     this.busy = true;
     this.lastActivityAt = Date.now();
     this.streamMessageId = undefined;
+    const startedAt = this.lastActivityAt;
+    let failure: string | undefined;
     try {
       const bundle = await this.ensureBundle();
+      // user_input 记在 bundle 就绪之后：sessionId 由工厂产生，工厂抛错时该回合
+      // 无会话可记。ts 仍取 startedAt——输入时刻是用户开口那一刻，不是恢复完成时。
+      this.recordEvent({
+        ts: startedAt,
+        kind: 'user_input',
+        actor: 'gateway',
+        origin: { surface: inbound.channelId, peer: inbound.peer.id },
+        payload: { text: capEventText(inbound.text) },
+      });
       let delivery = Promise.resolve();
       const enqueueFrame = (message: OutboundMessage) => {
         delivery = delivery.then(() => this.deliverFrame(message)).catch(() => undefined);
@@ -136,12 +155,31 @@ export class AgentSession {
       await delivery;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      failure = message;
       this.deps.log?.(`session ${this.sessionKey} turn failed: ${message}`);
       await this.deps.deliver(this.target, { kind: 'error', text: `出错了：${message}`, final: true }).catch(() => undefined);
     } finally {
+      this.recordEvent({
+        ts: Date.now(),
+        kind: 'turn_settled',
+        actor: 'gateway',
+        payload: {
+          totalMs: Date.now() - startedAt,
+          ...(failure ? { failed: true, error: failure.slice(0, 200) } : {}),
+        },
+      });
       this.busy = false;
       this.lastActivityAt = Date.now();
     }
+  }
+
+  /** sink 惰性创建（首个回合拿到 sessionId 后）并按会话记忆。 */
+  private recordEvent(event: SessionEvent): void {
+    if (!this.deps.eventSinkFor) return;
+    const sessionId = this.bundle?.sessionId;
+    if (!sessionId) return;
+    if (!this.eventSink) this.eventSink = this.deps.eventSinkFor(this.sessionKey, sessionId);
+    void this.eventSink.append(event);
   }
 
   private async ensureBundle(): Promise<HarnessBundle> {

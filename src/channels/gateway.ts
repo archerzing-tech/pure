@@ -43,6 +43,8 @@ export interface GatewayOptions {
    * 只走 richOutput 的图表降级路径。
    */
   projection?: AnswerProjection | null;
+  /** A1 事件日志 sink（透传给 AgentSession；缺省不记账）。 */
+  eventSinkFor?: (sessionKey: string, sessionId: string) => import('../shared/sessionEventLog').SessionEventSink;
   /** 空闲驱逐周期（默认 60s），测试可注入小值或关闭。 */
   evictionIntervalMs?: number;
   sessionTtlMs?: number;
@@ -112,6 +114,7 @@ export class Gateway {
       onUsage: (sessionKey, usage) => this.options.budget?.record(sessionKey, usage),
       richOutput: (text, capabilities) => renderRichOutput(text, capabilities, this.richRenderers),
       projection: this.projection,
+      eventSinkFor: options.eventSinkFor,
     });
   }
 

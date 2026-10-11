@@ -23,6 +23,8 @@ export interface SessionRouterDeps {
   richOutput?: (text: string, capabilities: ChannelCapabilities) => Promise<import('./richOutput').RichRenderResult>;
   /** 通道投影（优先于 richOutput，透传给 AgentSession 的最终帧）。 */
   projection?: import('./projection/projection').AnswerProjection;
+  /** A1 事件日志 sink（透传给 AgentSession，user_input/turn_settled 落盘）。 */
+  eventSinkFor?: (sessionKey: string, sessionId: string) => import('../shared/sessionEventLog').SessionEventSink;
 }
 
 export function buildSessionKey(inbound: InboundEvent): string {
@@ -130,6 +132,7 @@ export class SessionRouter {
         onUsage: (usage) => this.deps.onUsage?.(sessionKey, usage),
         richOutput: this.deps.richOutput,
         projection: this.deps.projection,
+        eventSinkFor: this.deps.eventSinkFor,
       },
     );
     this.deps.log?.(`new session ${sessionKey} → workspace ${binding.workspace ?? '(none)'} [${binding.permissionMode}]`);
