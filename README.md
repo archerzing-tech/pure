@@ -3,8 +3,8 @@
 **Pure** is an immersive AI agent: everything you need to get, see, and use lives inside one continuous conversation — files, commands, search results, charts, and decisions surface right where you are, so you never have to jump to a terminal, a browser, or another app to move your work forward. It is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, searches the web, renders structured results, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app. Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.2.0--alpha-blue" alt="version">
-  <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
+  <img src="https://img.shields.io/badge/version-3.2.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
@@ -176,8 +176,9 @@ Retrieval uses local WASM embeddings when available, with a keyword-search fallb
 ### Features
 
 - **Terminal CLI** — One-shot prompts or interactive REPL with streaming output
-- **Desktop GUI** — Native macOS app (Tauri) with Notion-style sidebar and settings
+- **Desktop GUI** — Native macOS / Windows app (Tauri) with Notion-style sidebar and settings
 - **Multi-provider** — DeepSeek, Qwen (Tongyi), GLM (Zhipu), plus custom OpenAI-compatible endpoints
+- **IM channel gateway** — Reach the agent from Feishu / DingTalk / QQ / built-in WebChat over outbound WebSocket long connections — no public IP or callback URL needed. Includes a pairing gate, per-peer rate limits, permission-bound session bindings, and a read-only **session dashboard** served on the WebChat page (see which sessions are running or done from your phone). See [docs/channel-setup.md](docs/channel-setup.md)
 - **Self-correcting Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE with budgets, hooks, locks, and recovery policy
 - **Evolving project memory** — Semantic retrieval, keyword fallback, decay, superseding, diagnostics, and export/import
 - **Subagent Orchestration** — Spawn file-pickers, code-searchers, web researchers in parallel
@@ -227,9 +228,9 @@ Or download the pre-built binary from [Releases](https://github.com/archerzing-t
 ./pure --resume abc123                 # Resume a previous session
 ```
 
-### GUI (macOS)
+### GUI (macOS / Windows)
 
-Download `pure_*.dmg` from [Releases](https://github.com/archerzing-tech/pure/releases), mount, and drag to `/Applications`. Or build from source:
+Download from [Releases](https://github.com/archerzing-tech/pure/releases): on macOS grab `pure_*.dmg`, mount, and drag to `/Applications`; on Windows run the `pure_*-setup.exe` installer. Or build from source:
 
 ```bash
 bun install

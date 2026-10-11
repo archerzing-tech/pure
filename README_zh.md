@@ -1,10 +1,10 @@
 # Pure
 
-**Pure** 是一个沉浸式的 AI Agent：你所需的「获取、查看、使用」都在**同一个对话**里完成 —— 文件、命令、搜索结果、图表与决策都直接出现在你当前的位置，你不必跳转到终端、浏览器或其他应用，就能把工作向前推进。它是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它的 Agent Loop 灵感来自 JavaScript 引擎中的 Event Loop：借鉴事件驱动、分阶段调度和持续推进的思路，让编码任务不断消费工具结果，直到获得可验证的完成证据。Pure 可以读取、写入和编辑文件，执行 Shell 命令，联网搜索，渲染结构化结果，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS 桌面应用完成。它的对话窗口是会话状态的映射，不是长期记忆的直接倾倒：已保存的会话转录会被映射成界面内容，而检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
+**Pure** 是一个沉浸式的 AI Agent：你所需的「获取、查看、使用」都在**同一个对话**里完成 —— 文件、命令、搜索结果、图表与决策都直接出现在你当前的位置，你不必跳转到终端、浏览器或其他应用，就能把工作向前推进。它是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它的 Agent Loop 灵感来自 JavaScript 引擎中的 Event Loop：借鉴事件驱动、分阶段调度和持续推进的思路，让编码任务不断消费工具结果，直到获得可验证的完成证据。Pure 可以读取、写入和编辑文件，执行 Shell 命令，联网搜索，渲染结构化结果，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS / Windows 桌面应用完成。它的对话窗口是会话状态的映射，不是长期记忆的直接倾倒：已保存的会话转录会被映射成界面内容，而检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.2.0--alpha-blue" alt="version">
-  <img src="https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey" alt="platform">
+  <img src="https://img.shields.io/badge/version-3.2.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
@@ -170,8 +170,9 @@ Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩�
 ### 功能特性
 
 - **终端 CLI** — 一次性问答或交互式 REPL，支持流式输出
-- **桌面 GUI** — 原生 macOS 应用（Tauri），Notion 风格侧边栏和设置面板
+- **桌面 GUI** — 原生 macOS / Windows 应用（Tauri），Notion 风格侧边栏和设置面板
 - **多供应商** — DeepSeek、Qwen（通义）、GLM（智谱），以及自定义 OpenAI 兼容端点
+- **IM 通道网关** — 从飞书 / 钉钉 / QQ / 内置 WebChat 直接对话 agent：出站 WebSocket 长连接接入，无需公网 IP 与回调地址；带配对门、按对端限速与权限绑定，WebChat 页面自带只读**会话总览**（手机上即可看到哪些会话在跑、哪些已完成）。详见 [docs/channel-setup.md](docs/channel-setup.md)
 - **自纠错 Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE，带预算、Hook、锁和恢复策略
 - **进化项目记忆** — 语义检索、关键词回退、衰减、取代、诊断和导入导出
 - **子智能体编排** — 并行调度文件搜索、代码搜索、Web 研究等子智能体
@@ -221,9 +222,9 @@ bun run cli -- "解释一下这个项目的架构"
 ./pure --resume abc123                 # 恢复之前的会话
 ```
 
-### GUI（macOS）
+### GUI（macOS / Windows）
 
-从 [Releases](https://github.com/archerzing-tech/pure/releases) 下载 `pure_*.dmg`，挂载后拖入 `/Applications`。或者从源码构建：
+从 [Releases](https://github.com/archerzing-tech/pure/releases) 下载 `pure_*.dmg`（macOS）或 `pure_*_setup.exe`（Windows NSIS 安装包），分别拖入 `/Applications` 或按向导安装。或者从源码构建：
 
 ```bash
 bun install
