@@ -22,6 +22,10 @@
     </div>
   </div>
 
+  <!-- ═══ 自绘窗口壳根：圆角裁剪在这里做一次，标题栏与 app-shell 都被
+       裁进同一颗圆角矩形——标题栏透明，侧栏/主列的底色各自顶到窗口
+       顶端，交界处没有线也没有色差（亮暗同理）。 ═══ -->
+  <div id="window-root">
   <!-- ═══ 自绘窗口标题栏：decorations 关掉后的统一皮肤。整条是拖拽区
        （data-tauri-drag-region，双击=最大化切换），右侧三枚窗口键在
        Windows / macOS 表现一致（2026-10-11 定稿）；浏览器预览没有窗口，
@@ -1003,6 +1007,7 @@
       </div>
     </div>
   </div>
+  </div><!-- /window-root -->
 
   <!-- ═══ Inline action cards (permission / plan / confirm) are built in
        JS and appended to the chat transcript (see src/ui/inlineCard.ts) —

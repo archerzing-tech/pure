@@ -103,16 +103,13 @@
 
 body {
   font-family: var(--font-sans);
-  /* 窗口透明（tauri.conf.json transparent:true）+ app-shell 画底出圆角：
+  /* 窗口透明（tauri.conf.json transparent:true）+ window-root 画底出圆角：
      body 自己必须透，否则四角会被 body 的方角底色垫出来。浏览器预览里
-     app-shell 照样把页面铺满，观感不变。 */
+     window-root 照样把页面铺满，观感不变。 */
   background: transparent;
   color: var(--text);
   height: 100vh;
   overflow: hidden;
-  /* 标题栏走文档流顶在 app-shell 上方，body 变纵向 flex。 */
-  display: flex;
-  flex-direction: column;
   -webkit-font-smoothing: antialiased;
   transition: color var(--transition);
 }
@@ -121,34 +118,62 @@ body {
    APP SHELL LAYOUT (sidebar + main)
    ════════════════════════════════════════ */
 
-#app-shell {
-  display: flex;
-  width: 100vw;
-  /* 原 100vh 让位给标题栏：body 纵向 flex 里占剩余高度。 */
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--bg);
+/* 圆角裁剪的唯一入口：标题栏（透明浮层）+ app-shell 被裁进同一颗圆角
+   矩形；透明窗口下四角由这颗矩形的圆角决定。 */
+#window-root {
+  position: relative;
+  height: 100vh;
   border-radius: var(--radius);
-  transition: background var(--transition);
+  overflow: hidden;
 }
 /* 最大化时铺满屏幕，圆角会在四角露出透明底，归零。 */
-body.window-maximized #app-shell,
+body.window-maximized #window-root,
 body.window-maximized #boot-splash {
   border-radius: 0;
 }
 
+#app-shell {
+  display: flex;
+  width: 100vw;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  transition: background var(--transition);
+}
+
 /* ── 自绘窗口标题栏（decorations:false）── */
+/* 透明浮层：自身不画底色。左段压在侧栏底色上、右段压在主列底色上
+   （两列各自 padding-top 把底色顶到窗口最顶端），与 body 的交界处
+   没有分割线也没有色差——融合是像素级的，不是配色对出来的。 */
 #window-titlebar {
-  flex: 0 0 40px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  /* 低于模态/弹层（1000+），高于 app-shell 静态内容。 */
+  z-index: 600;
   display: flex;
   align-items: stretch;
   justify-content: space-between;
-  height: 40px;
-  background: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border-light);
+  background: transparent;
   user-select: none;
   -webkit-user-select: none;
+}
+/* 各视图把底色顶到窗口最顶端：标题栏浮在其上，交界处是同一列自己的
+   像素。侧栏收起（width→0）时左段自然只剩主列色，无需 JS 同步状态；
+   view-container 的让位条在聊天态露的是 #main 的 --bg-chat，与
+   chat-view 同色无缝；设置面板负 margin 自己顶到 y=0，开着的时有
+   自己的 --bg 盖住让位条，关着时 width:0 不可见。 */
+#sidebar {
+  padding-top: 40px;
+}
+#view-container {
+  padding-top: 40px;
+}
+#settings-view {
+  margin-top: -40px;
+  padding-top: 40px;
 }
 .titlebar-brand {
   display: flex;
@@ -697,7 +722,8 @@ body.window-maximized #boot-splash {
 
 #sidebar-toggle {
   position: absolute;
-  top: 4px;
+  /* 40px 自绘标题栏浮在列顶之上，悬浮件从标题栏下缘起步（4 + 40）。 */
+  top: 44px;
   left: 4px;
   z-index: 10;
   /* Solid chip, no backdrop-filter: blur() makes WKWebView re-blur the layers
@@ -729,7 +755,7 @@ body.window-maximized #boot-splash {
    the sidebar is collapsed; the hamburger reappears in #main. */
 #sidebar-close {
   position: absolute;
-  top: 12px;
+  top: 52px;
   right: 12px;
   z-index: 12;
   display: none;
@@ -771,7 +797,7 @@ body.window-maximized #boot-splash {
 
 #right-settings-btn {
   position: absolute;
-  top: 4px;
+  top: 44px;
   right: 4px;
   z-index: 20;
   /* Same no-backdrop-filter treatment as #sidebar-toggle — see there for the
@@ -7124,7 +7150,7 @@ select:focus-visible,
 
 #sidebar-toggle,
 #right-settings-btn {
-  top: 12px;
+  top: 52px;
   background: color-mix(in srgb, var(--bg) 72%, transparent);
   border-color: var(--border-light);
   box-shadow: var(--shadow-sm);
@@ -7135,7 +7161,7 @@ select:focus-visible,
 }
 
 #right-settings-btn {
-  top: 12px;
+  top: 52px;
   right: 12px;
   transition: right 0.35s var(--ease-out), opacity 0.2s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
 }

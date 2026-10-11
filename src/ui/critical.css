@@ -64,26 +64,34 @@
 body {
   height: 100vh;
   overflow: hidden;
-  /* 标题栏占文档流顶部、app-shell 占剩余高度；body 透明配合透明窗口的
-     圆角（styles.css 里详述）。feature CSS 未载入时也保持这副骨架，
-     避免标题栏裸奔闪一下。 */
+  /* 标题栏是透明浮层、列底色各自顶到窗口顶（styles.css 里详述）；
+     body 透明配合透明窗口的圆角。feature CSS 未载入时也保持这副
+     骨架，避免标题栏裸奔闪一下。 */
   background: transparent;
   color: var(--text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  display: flex;
-  flex-direction: column;
   transition: color var(--transition);
 }
 
-/* 自绘窗口标题栏的关键路径骨架（完整样式在 styles.css）。 */
+/* 自绘窗口壳的关键路径骨架（完整样式在 styles.css）：window-root 统一
+   裁圆角，标题栏绝对定位浮在顶端，app-shell 铺满。 */
+#window-root {
+  position: relative;
+  height: 100vh;
+  border-radius: 12px;
+  overflow: hidden;
+}
 #window-titlebar {
-  flex: 0 0 40px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   height: 40px;
   display: flex;
   align-items: stretch;
   justify-content: space-between;
-  background: var(--bg-sidebar);
+  background: transparent;
 }
 
 .composer-select {
@@ -108,11 +116,15 @@ body {
 #app-shell {
   display: flex;
   width: 100vw;
-  flex: 1 1 auto;
-  min-height: 0;
+  height: 100%;
   overflow: hidden;
   background: var(--bg);
-  border-radius: 12px;
+}
+
+/* 列内容给透明标题栏让出 40px（底色照常顶到窗口顶）。 */
+#sidebar,
+#view-container {
+  padding-top: 40px;
 }
 
 #sidebar {
