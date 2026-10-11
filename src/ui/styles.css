@@ -5827,6 +5827,18 @@ body {
    + 原话 + 理由。通道配色就是重点：绿=裁决器（正常），灰=机械正则（合法但
    不经过判断），红=安全网（裁决器没顶上，要回看）。 */
 
+/* 动作组是四个纯按钮（刷新/复制/收割/清空 ≈ 280px），吃不下 input 组的
+ * 全局硬宽度（flex: 0 0 220px + min-width: 220px）——盒子被钉在 220px，
+ * 最后一个「清空」被挤出卡片边界。按内容取宽、放不下时换行。
+ * 复合选择器压过同权重的全局规则，位置无关。 */
+.setting-input-group.insertion-diag-actions {
+  height: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .insertion-diag-empty {
   font-size: 12px;
   color: var(--text-tertiary);
