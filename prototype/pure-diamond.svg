@@ -1,46 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- pure 桌面/应用内统一标识：墨蓝夜色底 + 冰蓝钻石（2026-10-11 用户定稿
+       去紫）。色板与 app 的墨色文字 / 青色 accent 同族：深底衬冰钻，精致感
+       来自高对比 + 冷色系的克制。改色后跑 gui:build 会经 build-gui-mac.sh
+       自动重出全套平台图标（tauri icon）。 -->
   <defs>
     <linearGradient id="icn-bg" x1="0" y1="0" x2="0.9" y2="1">
-      <stop offset="0%" stop-color="#6A5DE0"/>
-      <stop offset="55%" stop-color="#7B6FF0"/>
-      <stop offset="100%" stop-color="#9A8FFF"/>
+      <stop offset="0%" stop-color="#14273A"/>
+      <stop offset="55%" stop-color="#1E4060"/>
+      <stop offset="100%" stop-color="#2C5F8A"/>
     </linearGradient>
     <radialGradient id="icn-halo" cx="50%" cy="45%" r="58%">
-      <stop offset="0%" stop-color="#D2CCFF" stop-opacity="0.24"/>
-      <stop offset="65%" stop-color="#A89BFF" stop-opacity="0.08"/>
-      <stop offset="100%" stop-color="#A89BFF" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#BFEFFF" stop-opacity="0.22"/>
+      <stop offset="65%" stop-color="#7FD0FF" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="#7FD0FF" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="icn-crown" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="42%" stop-color="#E8E5FF"/>
-      <stop offset="100%" stop-color="#9E94FF"/>
+      <stop offset="42%" stop-color="#E6F6FF"/>
+      <stop offset="100%" stop-color="#9CD8F8"/>
     </linearGradient>
     <linearGradient id="icn-crown-shadow" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#D0CAFF"/>
-      <stop offset="100%" stop-color="#7167D8"/>
+      <stop offset="0%" stop-color="#BFE3F8"/>
+      <stop offset="100%" stop-color="#3E7FB0"/>
     </linearGradient>
     <linearGradient id="icn-pavilion-left" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#F0EEFF"/>
-      <stop offset="100%" stop-color="#A49BFF"/>
+      <stop offset="0%" stop-color="#EFFAFF"/>
+      <stop offset="100%" stop-color="#7CC4EE"/>
     </linearGradient>
     <linearGradient id="icn-pavilion-right" x1="1" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#D7D2FF"/>
-      <stop offset="100%" stop-color="#665BD0"/>
+      <stop offset="0%" stop-color="#C9E9FC"/>
+      <stop offset="100%" stop-color="#2C6B99"/>
     </linearGradient>
     <linearGradient id="icn-star" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="55%" stop-color="#F5F3FF"/>
-      <stop offset="100%" stop-color="#C9C3FF"/>
+      <stop offset="55%" stop-color="#EAF7FF"/>
+      <stop offset="100%" stop-color="#BFE3F8"/>
     </linearGradient>
     <g id="icon-gem">
       <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
       <rect width="1024" height="1024" rx="224" fill="url(#icn-halo)"/>
-      <rect x="14" y="14" width="996" height="996" rx="210" fill="none" stroke="#BFEFFF" stroke-opacity="0.2" stroke-width="5"/>
+      <rect x="14" y="14" width="996" height="996" rx="210" fill="none" stroke="#BFEFFF" stroke-opacity="0.25" stroke-width="5"/>
 
       <g transform="translate(512 512) scale(1.1) translate(-512 -512)">
-      <ellipse cx="512" cy="855" rx="248" ry="28" fill="#D2CCFF" fill-opacity="0.16"/>
+      <ellipse cx="512" cy="855" rx="248" ry="28" fill="#9CD3F5" fill-opacity="0.16"/>
 
-      <g stroke="#F5F3FF" stroke-opacity="0.42" stroke-width="5" stroke-linejoin="round">
+      <g stroke="#EAF6FF" stroke-opacity="0.42" stroke-width="5" stroke-linejoin="round">
         <polygon points="214,356 326,184 698,184 810,356 512,474" fill="url(#icn-crown)"/>
         <polygon points="214,356 326,184 512,356" fill="#FFFFFF" fill-opacity="0.42"/>
         <polygon points="326,184 698,184 512,356" fill="#FFFFFF" fill-opacity="0.78"/>
@@ -50,8 +54,8 @@
         <polygon points="214,356 512,474 512,850" fill="url(#icn-pavilion-left)"/>
         <polygon points="214,356 512,474 366,598" fill="#FFFFFF" fill-opacity="0.48"/>
         <polygon points="512,474 810,356 658,598" fill="url(#icn-pavilion-right)"/>
-        <polygon points="512,474 658,598 512,850" fill="#5147B8" fill-opacity="0.66"/>
-        <polygon points="366,598 512,474 512,850" fill="#DED9FF" fill-opacity="0.34"/>
+        <polygon points="512,474 658,598 512,850" fill="#175A8C" fill-opacity="0.66"/>
+        <polygon points="366,598 512,474 512,850" fill="#D6EEFC" fill-opacity="0.34"/>
       </g>
 
       <g fill="url(#icn-star)">
