@@ -14601,28 +14601,40 @@ button svg,
   margin-top: 18px;
 }
 .gateway-deps-header {
-  min-height: 52px;
+  min-height: 56px;
   align-items: center;
 }
 .gateway-deps-header .setting-label {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .gateway-deps-warning {
   color: var(--text);
   font-weight: 500;
 }
 .gateway-deps-hint {
-  font-size: 11px;
-  color: var(--text-tertiary);
+  /* 「装了 CLI 才能连完整通道」是可操作信息，用二级色而非三级淡色；11px 在
+     白卡上看不清（2026-10-11 反馈），提到 12px。 */
+  font-size: 12px;
+  color: var(--text-secondary);
   margin-top: 2px;
 }
 .gateway-deps-arrow {
-  font-size: 14px;
-  color: var(--text-tertiary);
-  transition: transform 0.15s;
+  /* 整行可点但视觉上没有「这是按钮」的暗示，14px 浅色小三角几乎隐形；
+     放大成 17px、给感应区和 hover 底，让展开/收起一眼可辨（2026-10-11）。 */
+  font-size: 17px;
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  margin-right: -8px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  transition: transform 0.15s, background 0.15s;
+}
+.gateway-deps-arrow:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 .gateway-deps-table {
   padding: 0 16px 10px;
@@ -14634,7 +14646,7 @@ button svg,
 }
 .gateway-deps-table-inner th {
   text-align: left;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-tertiary);
   text-transform: uppercase;
@@ -14652,7 +14664,7 @@ button svg,
 }
 .gateway-dep-path {
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   max-width: 280px;
   overflow: hidden;
@@ -14663,18 +14675,18 @@ button svg,
 }
 .gateway-dep-badge {
   display: inline-block;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-tertiary);
   border: 1px solid var(--border-light);
   border-radius: 4px;
-  padding: 0 4px;
+  padding: 1px 5px;
   margin-left: 6px;
   vertical-align: 1px;
 }
 .gateway-dep-install-btn {
-  font-size: 12px;
-  padding: 5px 12px;
+  font-size: 12.5px;
+  padding: 6px 14px;
   border-radius: 7px;
   white-space: nowrap;
 }

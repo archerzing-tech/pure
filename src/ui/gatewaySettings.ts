@@ -96,7 +96,6 @@ export function renderGatewaySettings(host: HTMLElement): void {
   const depsHeaderArrow = document.createElement('span');
   depsHeaderArrow.className = 'gateway-deps-arrow';
   depsHeaderArrow.textContent = '▸';
-  depsCard.appendChild(depsHeaderLabel);
   depsCard.appendChild(depsHeaderArrow);
 
   const depsTable = document.createElement('div');
