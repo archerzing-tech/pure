@@ -9,17 +9,20 @@ import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDeci
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
+import { activeCharacterProfile } from '../character';
 // Shared confidence vocabulary + gate. One-way dependency (inputDecision knows
 // nothing about Planner) so the router and the insertion classifier can be
 // judged by the same threshold without a cycle.
 import { INPUT_DEFAULT_CONFIDENCE, clampConfidence } from './inputDecision';
 
+/** 性格内核（刀 1）：步子大小 / 验证密度从 profile 读；默认值 = 现行为原样。 */
+const CHARACTER = activeCharacterProfile();
 /** Upper bound on LLM-plan steps kept in the review card / system prompt. */
-const MAX_PLAN_STEPS = 10;
-const MAX_PLAN_SUBSTEPS = 8;
+const MAX_PLAN_STEPS = CHARACTER.decision.stepSize.maxPlanSteps;
+const MAX_PLAN_SUBSTEPS = CHARACTER.decision.stepSize.maxPlanSubsteps;
 /** 刀 1.1：验证清单条数上限——清单是收尾门禁的执行参数，不设上限会让
  *  不合规模型把门禁撑成自由命令队列。 */
-const MAX_PLAN_VERIFICATION_ITEMS = 8;
+const MAX_PLAN_VERIFICATION_ITEMS = CHARACTER.decision.verifyDensity.maxVerificationItems;
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -592,7 +595,7 @@ export class Planner {
 
   constructor(config?: PlannerConfig) {
     this.config = {
-      complexFileThreshold: config?.complexFileThreshold ?? 3,
+      complexFileThreshold: config?.complexFileThreshold ?? CHARACTER.decision.modeThreshold.complexFileThreshold,
     };
   }
 
@@ -631,7 +634,7 @@ export class Planner {
   /** The model chooses build vs plan. The synchronous fallback never infers a
    * user's desired outcome from artifact nouns or isolated verbs. */
   private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
-    return detectProjectRequest(prompt) ? 'build' : complexity === 'complex' ? 'plan' : 'yolo';
+    return detectProjectRequest(prompt) ? 'build' : complexity === CHARACTER.decision.modeThreshold.planAtComplexity ? 'plan' : 'yolo';
   }
 
   /**

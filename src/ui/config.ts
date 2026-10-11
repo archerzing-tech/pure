@@ -14,6 +14,7 @@ import type { ProxyConfig } from '../shared/proxy';
 import { normalizeProxyConfig } from '../shared/proxy';
 import type { PhaseModelConfig } from '../shared/phaseModels';
 import { sanitizePhaseModelConfig } from '../shared/phaseModels';
+import { DEFAULT_CHARACTER_PROFILE } from '../character';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -297,12 +298,12 @@ export function defaults(): PureConfig {
     fontSize: 'medium',
     density: 'comfortable',
     toolCardsExpanded: true,
-    permissionMode: 'auto',
+    permissionMode: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.permissionMode,
     sandboxCommands: false,
-    autoPermRead: true,
-    autoPermWrite: true,
-    autoPermCmd: true,
-    autoPermGit: true,
+    autoPermRead: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.read,
+    autoPermWrite: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.write,
+    autoPermCmd: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.cmd,
+    autoPermGit: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.git,
     toolFS: true,
     toolCmd: true,
     toolGit: true,

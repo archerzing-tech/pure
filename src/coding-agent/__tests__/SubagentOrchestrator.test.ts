@@ -12,6 +12,7 @@ import { SubagentOrchestrator, deriveSubagentBudget, makeAgentId, BUILT_IN_SUBAG
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
 import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
+import { DEFAULT_CHARACTER_PROFILE, VETERAN_FAST_LINES } from '../../character';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import { MemoryStateStore } from '../../adapter/storage/MemoryStateStore';
 import { FSStore } from '../../adapter/storage/FSStore';
@@ -969,8 +970,12 @@ describe('SubagentOrchestrator persona overlays (北极星第 6 步 13.3)', () =
     orch.register(subagentDef('test_researcher'));
     const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
     expect(result.success).toBe(true);
-    // base 一字打头，overlay 紧随其后，汇报格式说明垫底。
-    expect(captured.system.startsWith('You are test_researcher. Task: research X')).toBe(true);
+    // 性格内核打头（铁律 4：同一性格、不同分工），角色 base 紧随其后，
+    // overlay 再后，汇报格式说明垫底。
+    expect(captured.system.startsWith(DEFAULT_CHARACTER_PROFILE.core)).toBe(true);
+    const baseAt = captured.system.indexOf('You are test_researcher. Task: research X');
+    expect(baseAt).toBeGreaterThan(-1);
+    expect(baseAt).toBeLessThan(captured.system.indexOf('新增约束'));
     expect(captured.system).toContain('新增约束：结论必须给出文件:行号证据。');
     expect(captured.system).toContain(ZH_NOTE);
     expect(captured.system.indexOf('新增约束')).toBeLessThan(captured.system.indexOf(ZH_NOTE));
@@ -999,7 +1004,8 @@ describe('SubagentOrchestrator persona overlays (北极星第 6 步 13.3)', () =
     await orchB.execute(toolCall('test_researcher', { prompt: 'research X' }));
 
     expect(withEmpty.system).toBe(withoutConfig.system);
-    expect(withEmpty.system.startsWith('You are test_researcher. Task: research X')).toBe(true);
+    expect(withEmpty.system.startsWith(DEFAULT_CHARACTER_PROFILE.core)).toBe(true);
+    expect(withEmpty.system).toContain('You are test_researcher. Task: research X');
     expect(withEmpty.system).toContain(ZH_NOTE);
   });
 });
@@ -1312,6 +1318,31 @@ describe('SubagentOrchestrator delegation memory (P0-3)', () => {
     expect(result.success).toBe(true);
     expect(llm.systemPrompts[0]).not.toContain('<delegated_task_memory>');
     expect((result.result as SubagentResult).memoryInjected).toBeUndefined();
+  });
+});
+
+// 铁律 4（人格轨道刀 2）：支线继承主线性格内核，不自带人格。角色 prompt 垫在
+// 内核之后（同一性格、不同分工）；角色层 personaOverlays 只补能力，不改人格。
+describe('SubagentOrchestrator 继承性格内核（铁律 4）', () => {
+  it('spawn 出去的 system prompt 带性格内核，且排在角色 prompt 之前', async () => {
+    const llm = new SystemPromptCapturingLLM();
+    const orch = new SubagentOrchestrator({
+      llm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    const spawned = llm.systemPrompts[0]!;
+    expect(spawned).toContain('<character_core>');
+    for (const line of Object.values(VETERAN_FAST_LINES)) {
+      expect(spawned).toContain(line);
+    }
+    expect(spawned.indexOf('<character_core>')).toBeLessThan(spawned.indexOf('You are test_researcher'));
+  });
+
+  it('与主对话同源：注入的就是激活内核的 core（不是第二份手抄）', () => {
+    expect(DEFAULT_CHARACTER_PROFILE.core).toContain('<character_core>');
+    expect(DEFAULT_CHARACTER_PROFILE.core).toContain(VETERAN_FAST_LINES.K10);
   });
 });
 

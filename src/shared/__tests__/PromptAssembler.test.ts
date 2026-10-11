@@ -6,6 +6,7 @@ import {
 } from '../PromptAssembler';
 import { composeUserTurn } from '../promptLayers';
 import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
+import { VETERAN_FAST_EXPRESSION_PROMPT, VETERAN_FAST_LINES } from '../../character';
 
 function estimateLength(systemPrompt: string, userPrompt?: string): number {
   return Math.ceil((systemPrompt.length + (userPrompt?.length ?? 0)) / 4);
@@ -484,5 +485,79 @@ describe('PromptAssembler', () => {
       const assembly = assembler.assemble({ surface: 'cli', capabilities: 'capabilities' }, blank);
       expect(assembly.userPrompt).toContain('(the user sent an empty message)');
     }
+  });
+});
+
+describe('性格内核注入（人格轨道 刀 2）', () => {
+  it('三条装配路径都默认带内核，且只带一份', () => {
+    for (const surface of ['gui', 'cli', 'channel'] as const) {
+      const assembly = assembler.assemble({ surface, capabilities: 'capabilities' }, 'hello');
+      expect(assembly.budget.includedFragmentIds).toContain('character_core');
+      expect(assembly.systemPrompt.split('<character_core>').length - 1).toBe(1);
+      expect(assembly.systemPrompt).toContain(VETERAN_FAST_LINES.K3);
+    }
+  });
+
+  it('内核排在身份骨架之后、模型身份之前（priority 119 的位置契约）', () => {
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      modelIdentity: { provider: 'deepseek-openai', model: 'deepseek-v4-flash' },
+      conventions: 'project rule',
+    });
+    const core = prompt.indexOf('<character_core>');
+    expect(prompt.indexOf('<agent_identity>')).toBeLessThan(core);
+    expect(core).toBeLessThan(prompt.indexOf('<model_identity>'));
+    // required：即使预算顶满也不得静默丢人格。
+    const tight = assembler.assemble({
+      surface: 'cli',
+      capabilities: 'capabilities',
+      budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
+    }, 'do it', { traps: 'trap '.repeat(4_000) });
+    expect(tight.systemPrompt).toContain('<character_core>');
+    expect(tight.budget.omittedFragmentIds).toContain('traps');
+  });
+
+  it('显式传 null 才关闭内核（对照实验用），空白串视同未传', () => {
+    const off = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'capabilities', characterCore: null });
+    expect(off).not.toContain('<character_core>');
+    const blank = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'capabilities', characterCore: '   ' });
+    expect(blank).toContain('<character_core>');
+  });
+});
+
+describe('表达投影注入（人格轨道 刀 3）', () => {
+  it('三条装配路径都默认带表达投影，且只带一份', () => {
+    for (const surface of ['gui', 'cli', 'channel'] as const) {
+      const assembly = assembler.assemble({ surface, capabilities: 'capabilities' }, 'hello');
+      expect(assembly.budget.includedFragmentIds).toContain('character_expression');
+      expect(assembly.systemPrompt.split('<character_expression>').length - 1).toBe(1);
+      expect(assembly.systemPrompt).toContain(VETERAN_FAST_EXPRESSION_PROMPT);
+    }
+  });
+
+  it('表达投影紧跟人味基调之后（priority 107 的位置契约）', () => {
+    const prompt = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'capabilities' });
+    const tone = prompt.indexOf('Communication tone:');
+    const expression = prompt.indexOf('<character_expression>');
+    expect(tone).toBeGreaterThanOrEqual(0);
+    expect(expression).toBeGreaterThan(tone);
+    // required：预算顶满也不得静默丢掉「怎么说」的那一面。
+    const tight = assembler.assemble({
+      surface: 'cli',
+      capabilities: 'capabilities',
+      budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
+    }, 'do it', { traps: 'trap '.repeat(4_000) });
+    expect(tight.systemPrompt).toContain('<character_expression>');
+    expect(tight.budget.omittedFragmentIds).toContain('traps');
+  });
+
+  it('显式传 null 才关闭表达投影（对照实验用），空白串视同未传', () => {
+    const off = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'capabilities', characterExpression: null });
+    expect(off).not.toContain('<character_expression>');
+    // 两张投影各自独立可关：关一张不连坐另一张。
+    expect(off).toContain('<character_core>');
+    const blank = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'capabilities', characterExpression: '   ' });
+    expect(blank).toContain('<character_expression>');
   });
 });

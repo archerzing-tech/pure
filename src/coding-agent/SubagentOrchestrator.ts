@@ -25,6 +25,7 @@ import type { TokenUsage } from '../shared/types';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
+import { activeCharacterCore } from '../character';
 import { retrieveDelegationMemory } from './subagentMemory';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeContext';
@@ -602,7 +603,11 @@ export class SubagentOrchestrator implements ToolAdapter {
       // 汇报格式说明 +（P0-3）委派记忆块。删 overlay 文件即回滚——下一个会话
       // 自然回原样。
       const overlay = this.config.personaOverlays?.get(def.name);
-      const systemPrompt = applyPersonaOverlay(def.createSystemPrompt(args), overlay) + subagentReportNote(def.name) + memoryBlock;
+      // 铁律 4（人格轨道刀 2）：支线继承主线**性格内核**，不自带人格——否则各干
+      // 各的，用户感知就是精神分裂。内核垫在角色 prompt 之前：同一性格、不同
+      // 分工（角色层 personaOverlays 只补能力，不改人格；见蓝图 §1 命名裁定）。
+      // 与主对话（PromptAssembler）读的是同一个解析点，换内核时两处同源。
+      const systemPrompt = `${activeCharacterCore()}\n\n${applyPersonaOverlay(def.createSystemPrompt(args), overlay)}${subagentReportNote(def.name)}${memoryBlock}`;
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);

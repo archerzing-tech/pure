@@ -1,4 +1,5 @@
 import type { VerificationSummary } from './types';
+import { activeCharacterProfile } from '../character';
 
 export type AdaptiveExploration = 'targeted' | 'broad';
 export type AdaptiveVerification = 'focused' | 'standard' | 'thorough';
@@ -174,8 +175,8 @@ export const KNOWN_SUBAGENT_ROLES = new Set([
 /** 代码修改/执行类角色：非代码任务（旅游、问答、调研）永远不该拿到——语义路径
  * 上镜像关键词路径的 involvesCode 门，保证即便路由误判也防住误配。 */
 const CODE_OR_EXEC_ROLES = new Set(['task_planner', 'code_editor', 'code_reviewer', 'bash_executor']);
-/** 语义推荐的角色数量上限。 */
-const MAX_SUBAGENT_ROLES = 4;
+/** 语义推荐的角色数量上限（刀 1：并行的上界从性格内核读，默认 = 现行为原样）。 */
+const MAX_SUBAGENT_ROLES = activeCharacterProfile().decision.parallelTendency.maxSubagentRoles;
 
 function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity'], prompt: string): string[] {
   const roles: string[] = [];

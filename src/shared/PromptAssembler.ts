@@ -6,6 +6,7 @@ import {
   type ResolvedPromptBudget,
 } from './providers';
 import type { ToolDefinition } from './types';
+import { activeCharacterCore, activeCharacterExpression } from '../character';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
   CAPABILITY_GAP_PROMPT,
@@ -94,6 +95,20 @@ export interface PromptAssemblyContext {
    * by the caller via mergeConventions().
    */
   conventions?: string;
+  /**
+   * 性格内核（Character Core）的注入文本，fragment `character_core`。默认取当前
+   * 激活内核的 `core`（src/character）——人格轨道刀 2 定：内核是所有宿主共享的
+   * 第 0 层，GUI / CLI / 通道三条装配路径同源，调用方不必各自接线。显式传 `null`
+   * 才关闭（对照实验 / 测试用）；传空串视同未传。
+   */
+  characterCore?: string | null;
+  /**
+   * 性格内核的**表达面投影**注入文本，fragment `character_expression`（刀 3）。
+   * 默认取当前激活内核的 `expression.scenarios` 装配结果——与 characterCore
+   * 同源同一次选择（蓝图 §0：两张投影必须同一出典）。显式传 `null` 才关闭
+   * （对照实验 / 测试用）；传空串视同未传。
+   */
+  characterExpression?: string | null;
 }
 
 export interface PromptFragment {
@@ -344,8 +359,24 @@ export class PromptAssembler {
 
   buildSystemFragments(context: PromptAssemblyContext): PromptFragment[] {
     const capabilities = context.capabilities.trim();
+    // null = 显式关闭；未传 / 空白 = 取当前激活内核。空内容经 fragment() 收口。
+    const characterCore = context.characterCore === null
+      ? ''
+      : (context.characterCore?.trim() || activeCharacterCore());
+    // 表达面投影与内核同源：同一次 activeCharacterProfile() 选择决定两张投影
+    // （蓝图 §0）。缺了它，性格只在「怎么做」上一致，「怎么说」仍会飘回默认腔。
+    const characterExpression = context.characterExpression === null
+      ? ''
+      : (context.characterExpression?.trim() || activeCharacterExpression());
     return [
       fragment('system_core', SYSTEM_CORE_PROMPT, 120, true),
+      // ── 性格内核（人格轨道刀 2）───────────────────────────────────────
+      // "pure 是谁"的统一出典：决策面与表达面都从它派生，子代理分支也继承它
+      // （docs/persona-core-upgrade.md 铁律 4）。priority 119 卡在 system_core
+      // (120) 与 model_identity (118) 之间，required —— 预算压力下丢人格是
+      // 静默的性格漂移，正是本 fragment 存在要防的失败模式。稳定区（不随回合
+      // 变化），不破坏 provider 的缓存前缀。
+      fragment('character_core', characterCore, 119, true),
       ...(context.conventions
         ? [fragment('project_conventions', `<project_conventions>\n${context.conventions}\n</project_conventions>`, 250, true)]
         : []),
@@ -357,6 +388,12 @@ export class PromptAssembler {
       // below delivery_contract (112) on purpose: evidence discipline
       // outranks tone when the two ever conflict.
       fragment('human_tone', HUMAN_TONE_PROMPT, 108, true),
+      // ── 性格内核的表达面投影（人格轨道刀 3）───────────────────────────
+      // 五个高权重场景该怎么说（失败 / 等待 / 打断 / 交付 / 拒绝），内核的
+      // 「怎么说」投影；紧跟 human_tone 之下，是同一件事的细化而不是另立一套
+      // 语气。priority 107，required 同理由：预算压力下丢它就是性格在长尾
+      // 情境里漂回默认腔。稳定区（不随回合变化），不破坏缓存前缀。
+      fragment('character_expression', characterExpression, 107, true),
       // Mid-run insertion protocol — REQUIRED (a dropped protocol means lost
       // user words or unneeded restarts) and STATIC (never changes mid-session),
       // so it lives in the stable zone, before the volatile tail.

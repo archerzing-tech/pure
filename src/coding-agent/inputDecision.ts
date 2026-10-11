@@ -20,6 +20,8 @@
 /** Where the decision was made. Three producers share this shape and this log:
  *  the turn-level producer, the mid-run insert classifier, and the host's
  *  hold/queue decision for an input that named its own run time. */
+import { activeCharacterProfile } from '../character';
+
 export type InputSource = 'turn-route' | 'mid-run-insert' | 'host-schedule';
 
 /**
@@ -140,7 +142,7 @@ export const INPUT_CLARIFY_CONFIDENCE = 0.6;
  * (`signals.confidenceDefaulted`), so a log filled with that flag is the
  * evidence needed to revisit this number.
  */
-export const INPUT_DEFAULT_CONFIDENCE = 0.7;
+export const INPUT_DEFAULT_CONFIDENCE = activeCharacterProfile().decision.insertionThreshold.confidenceGate;
 
 export function clampConfidence(value: unknown, fallback = INPUT_DEFAULT_CONFIDENCE): number {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
