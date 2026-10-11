@@ -5,6 +5,11 @@
   "permissions": [
     "core:default",
     "core:window:allow-create",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized",
     "core:webview:allow-create-webview-window",
     "shell:allow-open",
     "shell:allow-execute",

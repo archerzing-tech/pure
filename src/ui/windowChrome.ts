@@ -36,9 +36,12 @@ export function setupWindowChrome(): void {
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
-      min?.addEventListener('click', () => { void win.minimize(); });
-      max?.addEventListener('click', () => { void win.toggleMaximize(); });
-      close?.addEventListener('click', () => { void win.close(); });
+      // 权限缺失等失败必须落日志：capabilities 漏授权时窗口键会「点了没
+      // 反应」，静默吞掉就成了无头案（2026-10-11 真机踩过）。
+      const safe = (p: Promise<void>): Promise<void> => p.catch((e) => console.warn('[window-chrome]', e));
+      min?.addEventListener('click', () => void safe(win.minimize()));
+      max?.addEventListener('click', () => void safe(win.toggleMaximize()));
+      close?.addEventListener('click', () => void safe(win.close()));
 
       // 最大化态把 maximize 图标换成 restore，并去掉窗口圆角（铺满屏幕时
       // 圆角会在四角露出底色）。菜单/系统改变窗口尺寸时也会走到 onResized。
