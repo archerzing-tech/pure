@@ -1,8 +1,9 @@
 // src/ui/gatewaySettings.ts
-// 设置 → Gateway 页：管理独立的 `pure gateway` 守护进程（channels 宿主）。
+// 频道页的 gateway 运行时区块：管理独立的 `pure gateway` 守护进程（channels 宿主）。
 // 状态/启停走 Rust 端 gateway_status / gateway_start / gateway_stop 命令——
 // 它们只碰 gateway 进程与 webchat 端口，与 WebView 里的 agent 会话完全无关，
 // 本地对话/做任务能力不受影响。状态每 5 秒自动刷新（页面可见时）。
+// 页面壳的标题与描述由 index.html 的频道页持有，这里只渲染状态区块。
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { t } from '../shared/i18n';
 
@@ -30,11 +31,6 @@ function fmtTime(ts: number | null): string {
 
 export function renderGatewaySettings(host: HTMLElement): void {
   host.replaceChildren();
-
-  const desc = document.createElement('p');
-  desc.className = 'settings-page-desc';
-  desc.textContent = t('gateway.desc');
-  host.appendChild(desc);
 
   const section = document.createElement('div');
   section.className = 'settings-section';

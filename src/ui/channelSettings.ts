@@ -1,5 +1,5 @@
 // src/ui/channelSettings.ts
-// 设置 → 频道页：飞书 / 钉钉 / 企业微信 / webchat 的接入卡片（手风琴式）。
+// 设置 → 频道页的频道卡片（手风琴式）：飞书 / 钉钉 / QQ / WebChat 的接入配置。
 // 单一事实源是 ~/.pure/channels.json（gateway 读的就是它），本页用 Tauri 的
 // read_file/write_file 直接编辑该文件；密钥不进 localStorage/channels.json，
 // 走 Rust secret_set/secret_get 落在 ~/.pure/secrets.json（0600）——
@@ -8,7 +8,7 @@
 // 交互：每个频道一张卡，头部一行 = 图标 + 名称 + 状态徽标 + 启用开关；
 // 默认全部收起，点头部展开（同时只展开一个），表单改动即改即存，
 // 「完成」收起。收起时也能从徽标一眼看出「已启用/未启用 + 凭据是否已设」。
-import { isTauriRuntime, loadTauriCore, tauriInvoke } from '../shared/tauri';
+import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
 import { t } from '../shared/i18n';
 
@@ -147,43 +147,20 @@ async function secretSet(key: string, value: string): Promise<void> {
   await core.invoke('secret_set', { key, value });
 }
 
-async function gatewayRunning(): Promise<boolean> {
-  // 2026-10-01 真机：webview 裸 fetch 打 127.0.0.1 是跨源请求，网关不回
-  // CORS 头 ⇒ 浏览器直接拒（Gateway 明明在跑，频道页却报「未运行」）。
-  // 与 Gateway 页同一真相：Rust gateway_status（no_proxy、无 CORS 之说）。
-  try {
-    const status = await tauriInvoke<{ running?: boolean }>('gateway_status');
-    return status?.running === true;
-  } catch {
-    return false;
-  }
-}
-
 export function renderChannelSettings(host: HTMLElement, onChange: () => void): void {
   void onChange;
   host.replaceChildren();
-  const desc = document.createElement('p');
-  desc.className = 'settings-page-desc';
-  desc.textContent = t('channel.desc');
-  host.appendChild(desc);
 
   const wrap = document.createElement('div');
   wrap.className = 'channel-cards';
   host.appendChild(wrap);
 
-  const note = document.createElement('p');
-  note.className = 'settings-page-desc channel-note';
-  host.appendChild(note);
-
   // 手风琴状态：同时只展开一张卡（undefined = 全收起）。
   let expandedId: string | undefined;
 
   async function renderAll(): Promise<void> {
-    // 频道列表立即渲染——不等 gateway 探测（2026-10-01 Windows 真机：网关
-    // 没跑时 127.0.0.1 空端口不走快速拒绝，HTTP 探测超时 ≈ 5s 白屏）。
     const cfg = await readChannelsFile();
     cfg.channels = cfg.channels ?? {};
-    note.textContent = t('channel.gatewayChecking', '检查 gateway 状态…');
     wrap.replaceChildren();
     for (const spec of SPECS) {
       wrap.appendChild(await buildCard(spec, cfg, () => {
@@ -191,10 +168,6 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
         void renderAll();
       }));
     }
-    // 网关状态异步补上（列表已经在了，这行只改顶部徽章文案）。
-    void gatewayRunning().then((running) => {
-      note.textContent = running ? t('channel.gatewayRunning') : t('channel.gatewayStopped');
-    });
   }
 
   async function buildCard(spec: ChannelSpec, cfg: ChannelsFile, onDone: () => void): Promise<HTMLElement> {

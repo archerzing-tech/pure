@@ -327,15 +327,13 @@ export class SettingsPanel {
       const el = document.getElementById('schedules-dashboard');
       if (el) renderSchedulesSettings(el, () => this.onSave());
     }
-    // 频道页：每次进入重建（反映 channels.json 与 gateway 的最新状态）。
+    // 频道页（已并入原 Gateway 页）：每次进入重建两块——gateway 运行时进页
+    // 即拉状态开轮询，频道卡重读 channels.json 与密钥的最新状态。
     if (category === 'channels') {
+      const gatewayEl = document.getElementById('gateway-dashboard');
+      if (gatewayEl) renderGatewaySettings(gatewayEl);
       const el = document.getElementById('channels-dashboard');
       if (el) renderChannelSettings(el, () => this.onSave());
-    }
-    // Gateway 页：进入即拉状态并开始轮询。
-    if (category === 'gateway') {
-      const el = document.getElementById('gateway-dashboard');
-      if (el) renderGatewaySettings(el);
     }
     // 进化仪表盘：切过来就重读观测日志 + 记忆库（刚跑完的会话立刻反映在趋势里）。
     if (category === 'evolution') void this.renderEvolutionDashboard();
