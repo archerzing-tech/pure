@@ -273,7 +273,17 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
           void (async () => {
             try {
               if (field.secret && secretKey) {
-                if (input.value.trim()) await secretSet(secretKey, input.value.trim());
+                if (input.value.trim()) {
+                  await secretSet(secretKey, input.value.trim());
+                  // 指针必须同步写进账户条目：gateway 只认 account.appSecret
+                  // （明文，GUI 契约上不写）或 account.appSecretRef（指针）。
+                  // 只落 secrets.json 不补指针，gateway 会以「缺少 appSecret」
+                  // 跳过该通道，设置页却显示已启用——2026-10-11 真机 qq 卡在
+                  // 「未接入任何通道」就是这么来的。Ref 名 = 字段名 + Ref
+                  // （appSecret→appSecretRef / clientSecret→clientSecretRef），
+                  // 与 cliChannels 的解析约定逐字对齐。
+                  await updateChannelAccount(cfg, spec.id, (acc) => { acc[`${field.key}Ref`] = secretKey; });
+                }
                 input.value = '';
                 input.placeholder = t('channel.secretSet');
               } else {
