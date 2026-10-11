@@ -13537,22 +13537,20 @@ button svg,
 
 .schedule-hint { margin-bottom: 14px; }
 .schedule-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+/* 行不再是卡：外层 settings-section 已经是卡片，行里每个控件又各带一圈框，
+   三层框叠出来没法看（2026-10-11 反馈「边框太多」）。行降为扁平一行，边界
+   靠间距与 hover 底表达；控件平时无线框，focus 才描边。 */
 .schedule-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-light);
+  padding: 6px 8px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
 }
+.schedule-row:hover { background: var(--bg-hover); }
 .schedule-kind {
   flex-shrink: 0;
   padding: 4px 6px;
-  border: 1px solid var(--border-light);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
   font-size: 13px;
 }
 .schedule-trigger { flex-shrink: 0; }
@@ -13560,21 +13558,22 @@ button svg,
 .schedule-minutes {
   width: 96px;
   padding: 4px 6px;
-  border: 1px solid var(--border-light);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
-  color: var(--text);
   font-size: 13px;
 }
 .schedule-text {
   flex: 1;
   min-width: 0;
   padding: 5px 8px;
-  border: 1px solid var(--border-light);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-input) 92%, var(--bg));
-  color: var(--text);
   font-size: 13px;
+}
+.schedule-kind,
+.schedule-time,
+.schedule-minutes,
+.schedule-text {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
 }
 .schedule-kind:focus,
 .schedule-time:focus,
@@ -13582,6 +13581,7 @@ button svg,
 .schedule-text:focus {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--bg-input);
 }
 .schedule-enabled {
   flex-shrink: 0;
