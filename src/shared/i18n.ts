@@ -133,6 +133,9 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Main ──
     'main.toggleSidebar': '切换侧边栏',
     'main.rightSettings': '设置 (⌘,)',
+    'win.minimize': '最小化',
+    'win.maximize': '最大化 / 还原',
+    'win.close': '关闭',
     'landing.placeholder': '描述您的任务...',
     'landing.placeholderDisabled': '先描述任务，发送时再配置 API Key',
     'input.placeholder': '尽情提问...',
@@ -1407,6 +1410,9 @@ const translations: Record<Language, Record<string, string>> = {
     // ── Main ──
     'main.toggleSidebar': 'Toggle sidebar',
     'main.rightSettings': 'Settings (⌘,)',
+    'win.minimize': 'Minimize',
+    'win.maximize': 'Maximize / Restore',
+    'win.close': 'Close',
     'landing.placeholder': 'Describe your task...',
     'landing.placeholderDisabled': 'Describe your task; set an API key when you send',
     'input.placeholder': 'Ask pure anything...',

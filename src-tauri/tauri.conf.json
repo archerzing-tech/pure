@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "pure",
@@ -19,7 +20,8 @@
         "minHeight": 600,
         "center": true,
         "resizable": true,
-        "decorations": true
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

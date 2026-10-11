@@ -103,12 +103,18 @@
 
 body {
   font-family: var(--font-sans);
-  background: var(--bg);
+  /* 窗口透明（tauri.conf.json transparent:true）+ app-shell 画底出圆角：
+     body 自己必须透，否则四角会被 body 的方角底色垫出来。浏览器预览里
+     app-shell 照样把页面铺满，观感不变。 */
+  background: transparent;
   color: var(--text);
   height: 100vh;
   overflow: hidden;
+  /* 标题栏走文档流顶在 app-shell 上方，body 变纵向 flex。 */
+  display: flex;
+  flex-direction: column;
   -webkit-font-smoothing: antialiased;
-  transition: background var(--transition), color var(--transition);
+  transition: color var(--transition);
 }
 
 /* ════════════════════════════════════════
@@ -118,9 +124,77 @@ body {
 #app-shell {
   display: flex;
   width: 100vw;
-  height: 100vh;
+  /* 原 100vh 让位给标题栏：body 纵向 flex 里占剩余高度。 */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
+  background: var(--bg);
+  border-radius: var(--radius);
+  transition: background var(--transition);
 }
+/* 最大化时铺满屏幕，圆角会在四角露出透明底，归零。 */
+body.window-maximized #app-shell,
+body.window-maximized #boot-splash {
+  border-radius: 0;
+}
+
+/* ── 自绘窗口标题栏（decorations:false）── */
+#window-titlebar {
+  flex: 0 0 40px;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 40px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-light);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+.titlebar-brand .app-icon {
+  color: var(--text-secondary);
+}
+.titlebar-controls {
+  display: flex;
+  align-items: stretch;
+}
+.titlebar-controls button {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: default;
+}
+.titlebar-controls button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.titlebar-controls button:active {
+  background: color-mix(in srgb, var(--bg-hover) 60%, var(--border-light));
+}
+.titlebar-controls #win-close:hover {
+  background: var(--danger);
+  color: var(--danger-contrast);
+}
+/* 最大化态换还原图标 */
+.titlebar-controls .glyph-restore { display: none; }
+.titlebar-controls .is-max .glyph-max { display: none; }
+.titlebar-controls .is-max .glyph-restore { display: block; }
+/* 浏览器预览 / 窗口 API 不可用：没有窗口可管，整组隐藏。 */
+#window-titlebar.browser-preview .titlebar-controls { display: none; }
 
 /* ── Sidebar ── */
 
@@ -11434,6 +11508,9 @@ button svg,
   position: fixed;
   inset: 0;
   z-index: 9999;
+  /* 透明窗口下启动画面也要圆角，不然开机一瞬四角是方的。 */
+  border-radius: var(--radius);
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;

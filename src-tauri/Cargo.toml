@@ -11,7 +11,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# macos-private-api：透明窗口在 macOS 侧的前置（自绘窗口壳的圆角依赖它；
+# 自分发应用，无 App Store 审核顾虑）。
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-shell = { version = "2" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

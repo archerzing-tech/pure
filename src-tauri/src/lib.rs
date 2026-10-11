@@ -16732,6 +16732,11 @@ pub fn run() {
                         )
                         .title("pure")
                         .inner_size(1280.0, 860.0)
+                        // 与主窗同皮：decorations 关掉后走 index.html 里的自绘
+                        // 标题栏（window-titlebar），否则新窗会带着原生边框和
+                        // 主窗两副面孔。transparent 供 macOS 侧圆角。
+                        .decorations(false)
+                        .transparent(true)
                         .build();
                         if let Err(e) = window {
                             eprintln!("[pure] menu new-window failed: {e}");

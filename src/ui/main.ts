@@ -42,6 +42,7 @@ import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
+import { setupWindowChrome } from './windowChrome';
 import { getWebToolDefs, getSysInfoToolDefs } from './TauriToolAdapter';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../shared/dynamicCapabilityTools';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
@@ -828,6 +829,7 @@ function deferToIdle(fn: () => void): void {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') void flushSessionSaves();
   });
+  setupWindowChrome();
   dismissBootSplash();
   // Preload the memory embedder (WASM + model) so the first message of a new
   // chat never blocks on the one-time load. Deferred to an idle slot (NOT run

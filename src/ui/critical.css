@@ -64,11 +64,26 @@
 body {
   height: 100vh;
   overflow: hidden;
-  background: var(--bg);
+  /* 标题栏占文档流顶部、app-shell 占剩余高度；body 透明配合透明窗口的
+     圆角（styles.css 里详述）。feature CSS 未载入时也保持这副骨架，
+     避免标题栏裸奔闪一下。 */
+  background: transparent;
   color: var(--text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  transition: background var(--transition), color var(--transition);
+  display: flex;
+  flex-direction: column;
+  transition: color var(--transition);
+}
+
+/* 自绘窗口标题栏的关键路径骨架（完整样式在 styles.css）。 */
+#window-titlebar {
+  flex: 0 0 40px;
+  height: 40px;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  background: var(--bg-sidebar);
 }
 
 .composer-select {
@@ -93,8 +108,11 @@ body {
 #app-shell {
   display: flex;
   width: 100vw;
-  height: 100vh;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
+  background: var(--bg);
+  border-radius: 12px;
 }
 
 #sidebar {
@@ -349,6 +367,8 @@ body {
   position: fixed;
   inset: 0;
   z-index: 20000;
+  border-radius: 12px;
+  overflow: hidden;
   display: grid;
   place-items: center;
   background: var(--bg);
