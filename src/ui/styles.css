@@ -123,7 +123,8 @@ body {
 #window-root {
   position: relative;
   height: 100vh;
-  border-radius: var(--radius);
+  /* 整窗四角 4px（2026-10-11 用户定稿）；boot-splash 与这里必须一致。 */
+  border-radius: 4px;
   overflow: hidden;
 }
 /* 最大化时铺满屏幕，圆角会在四角露出透明底，归零。 */
@@ -11534,8 +11535,8 @@ button svg,
   position: fixed;
   inset: 0;
   z-index: 9999;
-  /* 透明窗口下启动画面也要圆角，不然开机一瞬四角是方的。 */
-  border-radius: var(--radius);
+  /* 透明窗口下启动画面也要圆角，不然开机一瞬四角是方的；与 window-root 同值。 */
+  border-radius: 4px;
   overflow: hidden;
   display: flex;
   align-items: center;
