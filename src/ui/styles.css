@@ -7401,7 +7401,10 @@ select:focus-visible,
 
 #settings-header {
   min-height: 60px;
-  padding: 14px 24px;
+  /* 左缘收窄到 12px：返回按钮贴左是工具栏惯例，24px 时按钮离窗口左缘太远；
+   * 右侧保持 24px 与关闭钮的呼吸感。左组（返回+标题）作为整体左移，组内
+   * 间距与 icon-btn 样式不动。 */
+  padding: 14px 24px 14px 12px;
   background: var(--bg-header);
   backdrop-filter: blur(16px);
 }
@@ -14422,6 +14425,24 @@ button svg,
 }
 
 /* ── Settings → Gateway ────────────────────────────────────── */
+/* 运行状态 / 已接通道 / 进程一行三列。横向 padding 归零：行自带的 16px
+ * 内边距直接对齐其他 setting-row 的文字基准（外层 :not(.setting-row) 补的
+ * 16px 不叠加，否则行内文字比全页其它行多缩进一级）。窄面板回落单列。 */
+.settings-section > .gateway-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-left: 0;
+  padding-right: 0;
+}
+.gateway-status-grid .setting-row {
+  gap: 8px;
+}
+@media (max-width: 720px) {
+  .settings-section > .gateway-status-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .gateway-actions {
   display: flex;
   gap: 10px;

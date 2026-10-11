@@ -36,6 +36,11 @@ export function renderGatewaySettings(host: HTMLElement): void {
   section.className = 'settings-section';
   host.appendChild(section);
 
+  // 运行状态 / 已接通道 / 进程：一行三列（窄面板回落单列，见 styles.css）。
+  const statusGrid = document.createElement('div');
+  statusGrid.className = 'gateway-status-grid';
+  section.appendChild(statusGrid);
+
   const statusRow = document.createElement('div');
   statusRow.className = 'setting-row';
   statusRow.innerHTML = `
@@ -43,7 +48,7 @@ export function renderGatewaySettings(host: HTMLElement): void {
       <span class="setting-label"><span class="gateway-dot" id="gateway-dot"></span>${t('gateway.status')}</span>
       <span class="setting-hint">…</span>
     </div>`;
-  section.appendChild(statusRow);
+  statusGrid.appendChild(statusRow);
   const dot = statusRow.querySelector<HTMLSpanElement>('#gateway-dot');
 
   const hint = statusRow.querySelector<HTMLSpanElement>('.setting-hint');
@@ -55,7 +60,7 @@ export function renderGatewaySettings(host: HTMLElement): void {
       <span class="setting-label">${t('gateway.channels')}</span>
       <span class="setting-hint">—</span>
     </div>`;
-  section.appendChild(channelsRow);
+  statusGrid.appendChild(channelsRow);
   const channelsHint = channelsRow.querySelector<HTMLSpanElement>('.setting-hint');
 
   const pidRow = document.createElement('div');
@@ -65,7 +70,7 @@ export function renderGatewaySettings(host: HTMLElement): void {
       <span class="setting-label">${t('gateway.process')}</span>
       <span class="setting-hint">—</span>
     </div>`;
-  section.appendChild(pidRow);
+  statusGrid.appendChild(pidRow);
   const pidHint = pidRow.querySelector<HTMLSpanElement>('.setting-hint');
 
   const actions = document.createElement('div');
