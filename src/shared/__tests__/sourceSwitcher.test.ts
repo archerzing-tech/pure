@@ -556,7 +556,8 @@ describe('生态全覆盖冒烟：每个生态的 file 目标都可解析', () =
         continue;
       }
       const t = fileTargetFor(eco, 'https://x.example.com/', '/home/u');
-      expect(t.path.startsWith('/home/u')).toBe(true);
+      // Windows 的 join 把路径归一成反斜杠：断言前翻回 posix 形态，语义不变。
+      expect(t.path.replace(/\\/g, '/').startsWith('/home/u')).toBe(true);
       expect(t.key.length).toBeGreaterThan(0);
     }
   });

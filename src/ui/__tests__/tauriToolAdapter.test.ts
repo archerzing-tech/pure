@@ -15,6 +15,7 @@ import {
 // GUI 侧的护栏/归因/渲染现在与 CLI 同源（shared/netProbeCore）：GUI 不再自带
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
+import { recordNetOutcome } from '../../shared/netRoute';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -494,6 +495,11 @@ describe('resolveDownloadOutSpec', () => {
 
 describe('Tauri egress routing', () => {
   const PROXY = 'http://127.0.0.1:7890';
+  // 学习表是进程级模块状态（CI 的 bun 跨测试文件共享）：知名代理优先主机若
+  // 先被别的文件学成 direct，静态分类断言就会被记忆压过。开跑前沿既定的
+  // 「失败即擦除」路径显式清掉 direct 记忆——无记忆时是无操作。
+  recordNetOutcome('github.com', 'direct', false);
+  recordNetOutcome('raw.githubusercontent.com', 'direct', false);
 
   it('web_fetch 直连优先，直连网络失败后用代理兜底重试一次', async () => {
     const seen: Array<string | undefined> = [];

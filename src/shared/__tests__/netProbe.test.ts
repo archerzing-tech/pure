@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   ProbeGuardError,
   certMatchesHost,
@@ -438,7 +439,9 @@ describe('netProbe 报告渲染', () => {
 // ratchet：结构不对时下一次修改就会在这里报错，而不是等到 vite build 时。
 
 describe('宿主边界（结构性约束，不只靠 vite build 拆链才发现）', () => {
-  const SRC = new URL('../../', import.meta.url).pathname;
+  // pathname 在 Windows 上给出 /D:/... （前导斜杠把路径打断），必须走
+  // fileURLToPath 才是文件系统真实路径。
+  const SRC = fileURLToPath(new URL('../../', import.meta.url));
 
   it('netProbeCore 不引入任何 node:* 模块', () => {
     const core = readFileSync(`${SRC}shared/netProbeCore.ts`, 'utf8');

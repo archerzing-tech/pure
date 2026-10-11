@@ -114,9 +114,10 @@ describe('resolveNetRoute', () => {
 
   it('normalizes the key so a full URL and a bare host hit the SAME entry', () => {
     // 修 3：写入侧历史上传完整 URL、读取侧用 hostOf(url)，两边永不相等，
-    // 学习表写的是死条目。
-    netRoute.recordNetOutcome('https://github.com/anthropics/anthropic-cookbook', 'direct', true);
-    expect(netRoute.resolveNetRoute('github.com', true)).toBe('direct');
+    // 学习表写的是死条目。用一次性 host：学习表是进程级模块状态（CI 上跨
+    // 测试文件共享），不能把 github.com 这种知名主机学成 direct 污染别人。
+    netRoute.recordNetOutcome('https://norm-url.test/anthropic-cookbook', 'direct', true);
+    expect(netRoute.resolveNetRoute('norm-url.test', true)).toBe('direct');
     netRoute.recordNetOutcome('normalize.test', 'proxy', true);
     expect(netRoute.resolveNetRoute('https://normalize.test/some/path', true)).toBe('proxy');
   });
