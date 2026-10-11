@@ -7401,10 +7401,10 @@ select:focus-visible,
 
 #settings-header {
   min-height: 60px;
-  /* 左缘收窄到 12px：返回按钮贴左是工具栏惯例，24px 时按钮离窗口左缘太远；
-   * 右侧保持 24px 与关闭钮的呼吸感。左组（返回+标题）作为整体左移，组内
-   * 间距与 icon-btn 样式不动。 */
-  padding: 14px 24px 14px 12px;
+  /* 左缘收到 4px：返回按钮贴窗口左角是工具栏惯例（12px 用户实测仍嫌远；
+   * 36px 命中区里图标居中，观感位置由按钮左缘决定）。右侧保持 24px 与
+   * 关闭钮的呼吸感。icon-btn 样式零改动。 */
+  padding: 14px 24px 14px 4px;
   background: var(--bg-header);
   backdrop-filter: blur(16px);
 }
