@@ -2,10 +2,12 @@ import { describe, expect, it } from 'bun:test';
 import {
   CHARACTER_PROFILES,
   detectWorkOrderRegister,
+  hasPendingQuestion,
   listCharacterProfiles,
   registerScaledDecision,
   resetActiveCharacterProfile,
   resetActiveWorkOrderRegister,
+  resolveWorkOrderRegister,
   setActiveCharacterProfile,
   setActiveWorkOrderRegister,
   activeCharacterProfile,
@@ -207,5 +209,98 @@ describe('activeWorkOrderNote：子代理档位注', () => {
     } finally {
       resetActiveWorkOrderRegister();
     }
+  });
+});
+
+// 刀 7：反问-答复断点的会话级档位携带。真机判例（2026-10-12 GUI 验收）：
+// spike 任务模型反问澄清，答复回合无信号重判回落 production，按全量分量跑。
+// 裁决规则在此落成断言：显式信号永远赢、接续通道原样、问句收尾才继承、
+// 链条自限（不问号就断）。
+describe('resolveWorkOrderRegister：反问-答复断点', () => {
+  const base = {
+    activeRegister: 'spike' as const,
+    lastAssistantText: null as string | null,
+    continuingPlan: false,
+    planPauseRequested: false,
+  };
+
+  it('答复回合无信号 → 继承会话档位（真机判例：反问后答复不再掉回 production）', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      userText: '流程：用户打开页面 → 点登录 → 进列表 → 点卡片进详情。就验这条主线。',
+      lastAssistantText: '工作区是空的，「这个交互流程」我还无从下手。你把流程发我就行——想要单页 HTML 还是带后端的版本？',
+    });
+    expect(r.register).toBe('spike');
+    expect(r.matched).toBe('');
+    expect(r.carried).toBe(true);
+  });
+
+  it('显式信号永远赢继承：答复里说「正式做」→ production（纠正通道不受污染）', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      userText: '正式做，流程发你了',
+      lastAssistantText: '要我按原型档办吗？',
+    });
+    expect(r.register).toBe('production');
+    expect(r.matched).toBe('正式做');
+    expect(r.carried).toBe(false);
+  });
+
+  it('答复带新档位信号 → 按新信号判（换档不是继承）', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      userText: '快速出几个版本的设计稿',
+      lastAssistantText: '想要什么载体？',
+    });
+    expect(r.register).toBe('draft');
+    expect(r.carried).toBe(false);
+  });
+
+  it('上一轮不以问句收尾 → 链条断，默认 production（自限，不无限携带）', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      userText: '很好，就这样',
+      lastAssistantText: '原型已就绪，主流程 9/9 全过。边界：登录没鉴权、刷新不保状态。',
+    });
+    expect(r.register).toBe('production');
+    expect(r.carried).toBe(false);
+  });
+
+  it('production 档不继承（现行为无需携带，机制面不搅浑水）', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      activeRegister: 'production',
+      userText: '嗯，按你说的来',
+      lastAssistantText: '要我把部署脚本也写上吗？',
+    });
+    expect(r.register).toBe('production');
+    expect(r.carried).toBe(false);
+  });
+
+  it('接续通道原样：continuingPlan 直接继承，不看问号', () => {
+    const r = resolveWorkOrderRegister({
+      ...base,
+      userText: '继续',
+      lastAssistantText: '第二版出好了。',
+      continuingPlan: true,
+    });
+    expect(r.register).toBe('spike');
+    expect(r.carried).toBe(true);
+  });
+
+  it('问句收尾的形状：中英文问号、容忍收尾引号；句号/叹号不算', () => {
+    expect(hasPendingQuestion('你想要哪种载体？')).toBe(true);
+    expect(hasPendingQuestion('哪个方案更贴近你的场景?"')).toBe(true);
+    expect(hasPendingQuestion('should I scaffold the project?')).toBe(true);
+    expect(hasPendingQuestion('三版出好了，看完了说一声。')).toBe(false);
+    expect(hasPendingQuestion('这就去办！')).toBe(false);
+    expect(hasPendingQuestion('')).toBe(false);
+    expect(hasPendingQuestion(null)).toBe(false);
+  });
+
+  it('无历史（lastAssistantText=null）→ 无继承，默认 production', () => {
+    const r = resolveWorkOrderRegister({ ...base, userText: '嗯，好的' });
+    expect(r.register).toBe('production');
+    expect(r.carried).toBe(false);
   });
 });

@@ -2127,3 +2127,31 @@ describe('delegation accounting wiring', () => {
     expect(src.split('observability: promptObservability').length - 1).toBe(1);
   });
 });
+
+// 刀 7（2026-10-12）：反问-答复断点的会话级档位携带。GUI 真机判例：spike 任务
+// 模型反问澄清，答复回合无信号重判回落 production，按全量分量跑（headless
+// 真浏览器 9 项验证）。裁决逻辑在 register.ts（行为测试在那边）；这里守接线
+// 面形状——回合裁决走 resolver、档位进 turnTimings 诊断（气泡已撤后唯一
+// 可观察面）、activePlanRegister 生命周期不动。
+describe('work-order register resolution wiring (刀 7)', () => {
+  it('judgment site goes through resolveWorkOrderRegister with the clarification carry inputs', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain('const workOrderResolution = resolveWorkOrderRegister({');
+    expect(src).toContain('activeRegister: this.activePlanRegister,');
+    // 上一条 assistant 终稿喂给裁决（问句收尾 = 球在用户手里）。
+    expect(src).toContain("[...this.messages].reverse().find((m) => m.role === 'assistant')?.content ?? null");
+    expect(src).toContain('continuingPlan,');
+    expect(src).toContain('planPauseRequested,');
+    const judgmentIdx = src.indexOf('const workOrderResolution = resolveWorkOrderRegister({');
+    expect(judgmentIdx).toBeGreaterThan(-1);
+    // 旧的行内三元判定不许残存（残存 = 两处判定面，继承形同虚设）。
+    expect(src).not.toContain('? this.activePlanRegister\n        : detectWorkOrderRegister(userText).register;');
+  });
+
+  it('resolved register lands in turnTiming diagnostics and the active-register slot', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    expect(src).toContain('turnTiming.workOrderRegister = workOrderRegister;');
+    expect(src).toContain('setActiveWorkOrderRegister(workOrderRegister);');
+    expect(src).toContain('if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;');
+  });
+});

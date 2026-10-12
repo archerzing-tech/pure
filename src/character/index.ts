@@ -27,8 +27,9 @@ export type {
   WorkOrderRegister,
 } from './types';
 // 分量判读（刀 6）：档位类型与判定/缩放（verdict 类型与函数同住 ./register.ts）。
-export type { WorkOrderVerdict } from './register';
-export { detectWorkOrderRegister, registerScaledDecision } from './register';
+// 刀 7：反问-答复断点的回合裁决（resolveWorkOrderRegister）同住这里。
+export type { WorkOrderVerdict, WorkOrderResolution, WorkOrderResolutionInput } from './register';
+export { detectWorkOrderRegister, registerScaledDecision, resolveWorkOrderRegister, hasPendingQuestion } from './register';
 export type { CharacterKernelLineId, CharacterKernelLines } from './core';
 export { buildCharacterCorePrompt } from './core';
 export type { CharacterScenarioId, CharacterScenarioLedger, CharacterScenarioProjection } from './expression';

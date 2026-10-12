@@ -1,0 +1,7 @@
+{
+  "id": "production-formal-do-01",
+  "register": "production",
+  "expectMatched": true,
+  "summary": "反问-答复断点里的纠正口吻：模型问「按原型档办吗？」→ 答复「正式做」必须赢继承（刀 7）",
+  "userTurns": ["正式做，流程发你了"]
+}

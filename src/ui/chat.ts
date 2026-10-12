@@ -26,7 +26,7 @@ import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/Tool
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
 import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
-import { detectWorkOrderRegister, resetActiveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
+import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
@@ -4702,9 +4702,20 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 判定即注入子代理读取点（active.ts 全局，spawn 时读走）。判定保持内部：
       // 不向对话窗口出回执气泡（2026-10-12 用户真机定调——内部的档位认定不该
       // 显形，判轻的纠正通道是用户回一句"正式做"重新判定，机制不变）。
-      const workOrderRegister: WorkOrderRegister = continuingPlan || planPauseRequested
-        ? this.activePlanRegister
-        : detectWorkOrderRegister(userText).register;
+      // 刀 7：反问-答复断点——轻档回合模型反问澄清（无计划产出），答复回合
+      // 无档位信号时旧逻辑重判回落 production，spike 案真机实跑成全量分量。
+      // 裁决收敛进 resolveWorkOrderRegister：显式信号 > 接续通道 > 问句收尾
+      // 继承 > production；档位仍住 activePlanRegister，生命周期不动。
+      const workOrderResolution = resolveWorkOrderRegister({
+        userText,
+        activeRegister: this.activePlanRegister,
+        lastAssistantText:
+          [...this.messages].reverse().find((m) => m.role === 'assistant')?.content ?? null,
+        continuingPlan,
+        planPauseRequested,
+      });
+      const workOrderRegister: WorkOrderRegister = workOrderResolution.register;
+      turnTiming.workOrderRegister = workOrderRegister;
       setActiveWorkOrderRegister(workOrderRegister);
       if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;
       // Semantic routing is the primary decision for ordinary turns. The

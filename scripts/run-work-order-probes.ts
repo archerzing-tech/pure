@@ -31,6 +31,7 @@ import {
   CHARACTER_PROFILES,
   detectWorkOrderRegister,
   registerScaledDecision,
+  resolveWorkOrderRegister,
   resetActiveCharacterProfile,
   setActiveCharacterProfile,
   type WorkOrderRegister,
@@ -127,6 +128,37 @@ function runReplay(cases: WorkOrderCase[]): void {
     JSON.stringify(parseDeliveryMarkers('## 产物已就绪：a.html\n## 产物已就绪：b.html\n## 产物已就绪：a.html'))
       === JSON.stringify(['a.html', 'b.html']),
     '交付标记：多份全收、去重、按序',
+  );
+
+  // 刀 7 冒烟：反问-答复断点的回合裁决（GUI 真机判例固化为机制断言）。
+  console.log('\nreplay：刀 7 冒烟（反问-答复断点的档位携带）');
+  const QUESTION = '想要单页 HTML 还是带后端的版本？';
+  const answer = (userText: string, lastAssistantText: string | null, activeRegister: WorkOrderRegister) =>
+    resolveWorkOrderRegister({
+      userText,
+      activeRegister,
+      lastAssistantText,
+      continuingPlan: false,
+      planPauseRequested: false,
+    });
+  const carried = answer(
+    '流程：打开页面 → 点登录 → 进列表 → 点卡片进详情。就验这条主线。',
+    QUESTION,
+    'spike',
+  );
+  check(
+    carried.register === 'spike' && carried.carried,
+    `断点继承：反问后无信号答复 → ${carried.register}（carried=${carried.carried}），不再掉回 production`,
+  );
+  const overridden = answer('正式做，流程发你了', QUESTION, 'spike');
+  check(
+    overridden.register === 'production' && !overridden.carried && overridden.matched === '正式做',
+    `显式信号赢继承：答复「正式做」→ ${overridden.register}（命中「${overridden.matched}」）`,
+  );
+  const broken = answer('很好，就这样', '原型已就绪，主流程全过。', 'spike');
+  check(
+    broken.register === 'production' && !broken.carried,
+    `链条自限：上一轮非问句收尾 → ${broken.register}，不无限携带`,
   );
 }
 

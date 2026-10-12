@@ -69,7 +69,9 @@ const SPIKE_PATTERNS: readonly RegExp[] = [
  * 不进——「修完这个 bug 就能上线」里它们是任务内容，不是档位声明。
  */
 const PRODUCTION_PATTERNS: readonly RegExp[] = [
-  /正式(项目|版本|交付|发布|环境|功能)/,
+  // 「正式做」是反问-答复断点里最自然的纠正口吻（模型问「按原型档办吗？」→
+  // 用户答「正式做」），刀 7 验收判例回填。
+  /正式(做|项目|版本|交付|发布|环境|功能)/,
   /生产(环境|级)/,
   /\bproduction[- ](ready|grade|code|quality)\b/i,
   /\bgo[ -]?live\b/i,
@@ -98,6 +100,64 @@ export function detectWorkOrderRegister(input: string): WorkOrderVerdict {
   const draft = firstMatch(DRAFT_PATTERNS, text);
   if (draft) return { register: 'draft', matched: draft };
   return { register: 'production', matched: '' };
+}
+
+// ── 刀 7：反问-答复断点的会话级档位携带 ──
+//
+// 真机判例（2026-10-12 GUI 验收，draft/spike 两案各自然复现一次）：轻档任务
+// 模型先反问澄清 → 用户的答复没有档位信号 → 每回合重判回落 production——
+// spike 案实际按全量分量跑（headless 真浏览器 9 项验证，档位表只允许 1–2 项）。
+// activePlanRegister 的既有接续通道（continuingPlan/planPauseRequested）盖不住
+// 这个断点：反问回合没产计划，答复回合不构成 plan 接续。
+//
+// 修法不加新状态：档位仍住 activePlanRegister（生命周期沿用五处清理点——
+// 新会话/切会话/恢复快照/计划交付都收回 production，继承自动失效），只把
+// 「答复回合该继承」的形状判出来——上一条 assistant 终稿以问句收尾 = 球在
+// 用户手里，下一句无信号时按答复读，继承会话档位。链条自限：模型哪轮不以
+// 问句收尾，继承就断，不会无限携带。
+
+/** 继承判定结果：档位 + 信号 + 是否走了继承（诊断面，进 turnTimings）。 */
+export interface WorkOrderResolution extends WorkOrderVerdict {
+  /** true = 本回合没判新档，档位来自接续通道或反问-答复继承。 */
+  carried: boolean;
+}
+
+export interface WorkOrderResolutionInput {
+  userText: string;
+  /** 会话当前档位（宿主的 activePlanRegister）。 */
+  activeRegister: WorkOrderRegister;
+  /** 上一条 assistant 终稿全文（无历史时 null）。 */
+  lastAssistantText: string | null;
+  continuingPlan: boolean;
+  planPauseRequested: boolean;
+}
+
+/** 问句收尾：中英文问号，容忍收尾引号/括号。「吗。」「呢！」不算——球不在
+ * 用户手里（陈述+反问混排时只有问号收尾才算数，防误携带）。 */
+const PENDING_QUESTION_RE = /[？?][」』\)）"']*$/;
+
+export function hasPendingQuestion(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return PENDING_QUESTION_RE.test(text.trimEnd());
+}
+
+/**
+ * 回合档位裁决。优先级：显式信号 > 接续通道 > 反问-答复继承 > 默认 production。
+ * 显式信号永远赢（「正式做」纠正通道不受继承污染）；继承只在轻档上生效——
+ * production 是现行为，无需携带（且防「production 反问 → 答复」把机制面搅进
+ * 无收益的地方）。
+ */
+export function resolveWorkOrderRegister(input: WorkOrderResolutionInput): WorkOrderResolution {
+  const verdict = detectWorkOrderRegister(input.userText);
+  if (verdict.matched) return { ...verdict, carried: false };
+  if (input.continuingPlan || input.planPauseRequested) {
+    return { register: input.activeRegister, matched: '', carried: true };
+  }
+  const light = input.activeRegister === 'draft' || input.activeRegister === 'spike';
+  if (light && hasPendingQuestion(input.lastAssistantText)) {
+    return { register: input.activeRegister, matched: '', carried: true };
+  }
+  return { register: 'production', matched: '', carried: false };
 }
 
 /**
