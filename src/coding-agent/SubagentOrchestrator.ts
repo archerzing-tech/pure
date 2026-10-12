@@ -369,6 +369,24 @@ export class SubagentOrchestrator implements ToolAdapter {
     return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
   }
 
+  /** 引擎终态事件里的部分产出提取（四问题①，2026-10-12）。finalOutput 只有
+   *  最后一轮 THINK 的文本——空应答（推理模型把输出预算烧在思考上）时卡片
+   *  已 done 而输出面板空白，两视图失同步；回落到转录里最接近的非空
+   *  assistant 文本，这是可用的最好综述声音——只是最后手段，永远不覆盖真的
+   *  finalOutput。Completed 与 Interrupted 共用：Interrupted 的 payload 没有
+   *  finalOutput 字段（类型上缺席），真失败结算体靠这里带回中断前的产出，
+   *  timeout/stalled 的 "partial output was produced" 才能如实挂上。 */
+  private partialOutputFrom(payload: { finalOutput?: string; messages?: Message[] }): string | undefined {
+    if (payload.finalOutput && payload.finalOutput.trim()) return payload.finalOutput;
+    const transcript = payload.messages ?? [];
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      const m = transcript[i];
+      if (m.role !== 'assistant' || m.internal) continue;
+      if (typeof m.content === 'string' && m.content.trim()) return m.content;
+    }
+    return undefined;
+  }
+
   async execute(toolCall: ToolCall, parentSignal?: AbortSignal): Promise<ToolResult> {
     const def = this.defs.get(toolCall.function.name);
     const startTime = Date.now();
@@ -582,6 +600,11 @@ export class SubagentOrchestrator implements ToolAdapter {
         : undefined,
     };
 
+    // 部分产出的账跨 try 存活（四问题①，2026-10-12）：失败结算体（timeout/
+    // stalled/真失败）要带回中断前已生成的内容，catch 出口也够得着它——
+    // 声明在 try 内时 catch 只能交出 { agentId }，部分产出就地蒸发。
+    let finalOutput: string | undefined;
+
     try {
       // P0-3 两柱焊点 — spawn 时检索一次与「角色 + 委派参数」相关的经验，拼在
       // 该支 system prompt 尾部（overlay 之后）。每支只此一次（同父会话的会话内
@@ -612,7 +635,6 @@ export class SubagentOrchestrator implements ToolAdapter {
         ? args.prompt
         : JSON.stringify(args);
 
-      let finalOutput: string | undefined;
       let tokensUsed = 0;
       let usage: TokenUsage | undefined;
       // 第 2 期第四刀：子代理内部自愈重试的轮次（failurePolicy retry/reflect）。
@@ -742,30 +764,11 @@ export class SubagentOrchestrator implements ToolAdapter {
           if (entry) entry.status = event.payload.result?.success ? 'completed' : 'failed';
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
         } else if (event.type === 'Completed') {
-          finalOutput = event.payload.finalOutput;
           // T1 — copy the delegation's own token split for per-role cost
           // accounting. `tokensUsed` (the TokenDelta count) stays as-is: both
           // observers keep their existing semantics.
           usage = event.payload.usage;
-          // finalOutput is only the LAST THINK round's text — empty when the
-          // sub-agent ended on an empty response (reasoning models burning the
-          // whole output budget on thinking are the known case). The rail card
-          // still turns done via onDone, so an empty payload desyncs the two
-          // views (done card above, blank tool-row Output below). Fall back to
-          // the transcript: the closest preceding non-empty assistant text is
-          // the best available summary voice — last resort only, it never
-          // overrides a real finalOutput.
-          if (!finalOutput || !finalOutput.trim()) {
-            const transcript = event.payload.messages ?? [];
-            for (let i = transcript.length - 1; i >= 0; i--) {
-              const m = transcript[i];
-              if (m.role !== 'assistant' || m.internal) continue;
-              if (typeof m.content === 'string' && m.content.trim()) {
-                finalOutput = m.content;
-                break;
-              }
-            }
-          }
+          finalOutput = this.partialOutputFrom(event.payload) ?? finalOutput;
           await persist('subagent_completed', event.payload.messages, event.payload.turnCount ?? 0);
           machine.apply('complete');
           emit(progress?.onDone, { success: true, output: finalOutput, ...machine.describe(), durationMs: done(0), tokensUsed, toolTrace: [...toolTrace.values()] });
@@ -789,6 +792,13 @@ export class SubagentOrchestrator implements ToolAdapter {
           };
         } else if (event.type === 'Interrupted') {
           await persist('subagent_interrupted', event.payload.messages, event.payload.turnCount ?? 0);
+          // 部分产出抢救（四问题①，2026-10-12）：Interrupted 的 payload 没有
+          // finalOutput 字段，此前这里的 finalOutput 恒为 undefined——timeout/
+          // stalled 的 "partial output was produced" 永远挂不上，真失败结算体
+          // 带回的也是空。与 Completed 同一口径从转录里取最接近的非空 assistant
+          // 文本；「不入账」三路（stopped/paused/cancelled）的结算体照旧不带，
+          // 抢救只为失败呈现与父模型恢复视野服务。
+          finalOutput = this.partialOutputFrom(event.payload) ?? finalOutput;
           if (combinedSignal.aborted) {
             // 第 2 期分支中断（persist-before-settle：存档已在上一行落盘，才
             // 结算）。branchController 是 abortBranch/pauseBranch 的私有把手
@@ -943,7 +953,9 @@ export class SubagentOrchestrator implements ToolAdapter {
             id: toolCall.id,
             toolName: def.name,
             error: errorText,
-            result: { agentId },
+            // 部分产出随结算体走（四问题①）：父模型恢复与 UI 失败卡都靠它，
+            // 与 timeout/stalled/真失败三出口同形。
+            result: { agentId, ...(finalOutput ? { finalOutput } : {}) },
             success: false,
             duration: done(0),
           };
@@ -980,7 +992,9 @@ export class SubagentOrchestrator implements ToolAdapter {
         id: toolCall.id,
         toolName: def.name,
         error: err?.message ?? String(err),
-        result: { agentId },
+        // 部分产出随结算体走（四问题①）：finalOutput 的声明在 try 外，此处
+        // 是它最后还够得着的出口——不带走就就地蒸发。
+        result: { agentId, ...(finalOutput ? { finalOutput } : {}) },
         success: false,
         duration: done(0),
       };

@@ -86,7 +86,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -5530,7 +5530,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               toolName: fixEvent.payload.toolName,
               success: ok,
               duration: fixEvent.payload.duration,
-              resultText: typeof fixEvent.payload.result.result === 'string' ? fixEvent.payload.result.result.slice(0, 800) : fixEvent.payload.result.error,
+              // 失败臂同主路径抢救部分产出（四问题①）：修复轮里的委派挂了，
+              // 已生成的部分也不该被 error 一行吞掉。
+              resultText: typeof fixEvent.payload.result.result === 'string'
+                ? fixEvent.payload.result.result.slice(0, 800)
+                : failureResultPreview(fixEvent.payload.result.error, fixEvent.payload.result.result),
             });
             this.recordToolActivity(fixEvent.payload.toolName, undefined, ok);
             this.addStatusBubble(`修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
@@ -6159,7 +6163,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 resultPreview = resultText.slice(0, 800);
               }
             } else {
-              resultPreview = String(event.payload.result.error ?? '');
+              // 部分产出抢救（四问题①）：失败出口带回的 finalOutput 不被
+              // error 文本吞掉——错因在前，中断前已生成的部分随卡呈现。
+              resultPreview = failureResultPreview(event.payload.result.error, rawResult);
             }
             // Record the outcome so a session reload (main.ts flushToolExecs)
             // can replay the same tool row with full args + result preview.

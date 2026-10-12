@@ -1359,3 +1359,26 @@ describe('tool row interior follow-tail (subagent trace panels)', () => {
     }
   });
 });
+
+describe('failureResultPreview (四问题① 子代理失败卡的部分产出抢救)', () => {
+  const { failureResultPreview } = require('../toolRow') as typeof import('../toolRow');
+
+  it('attaches the partial output beneath the error head', () => {
+    const text = failureResultPreview(
+      'no progress for 3 minutes — the subagent appeared wedged; partial output was produced.',
+      { aborted: true, agentId: 'sub_x', finalOutput: '已盘点依赖 A/B/C,剩余 D 未跑' },
+    );
+    expect(text).toContain('no progress for 3 minutes');
+    expect(text).toContain('── 中断前已产出的部分内容 ──');
+    expect(text).toContain('已盘点依赖 A/B/C');
+  });
+
+  it('falls back to the bare error when nothing came back', () => {
+    expect(failureResultPreview('工具炸了', { agentId: 'sub_x' })).toBe('工具炸了');
+    expect(failureResultPreview(undefined, null)).toBe('子代理失败');
+  });
+
+  it('ignores empty or whitespace-only finalOutput', () => {
+    expect(failureResultPreview('err', { finalOutput: '   ' })).toBe('err');
+  });
+});

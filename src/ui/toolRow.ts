@@ -321,6 +321,19 @@ export function truncateResultLines(text: string, maxLines = MAX_LIVE_STREAM_LIN
   return `${lines.slice(0, maxLines).join('\n')}\n… (${cut.toLocaleString()} lines truncated)`;
 }
 
+/** 子代理失败卡的部分产出抢救（四问题①，2026-10-12）：失败出口带回的
+ *  finalOutput（中断/超时前已生成的内容）不该被 error 文本吞掉——卡上先说
+ *  错因，再附已产出的部分，用户不用重跑就知道这支跑到了哪。rawResult 是
+ *  结算体对象；无 finalOutput 时退回纯 error，普通工具失败不受影响。 */
+export function failureResultPreview(error: string | undefined, rawResult: unknown): string {
+  const head = String(error ?? '子代理失败');
+  const partial = rawResult && typeof rawResult === 'object' && 'finalOutput' in rawResult
+    ? String((rawResult as { finalOutput?: unknown }).finalOutput ?? '').trim()
+    : '';
+  if (!partial) return head;
+  return `${head}\n\n── 中断前已产出的部分内容 ──\n${truncateResultLines(partial)}`;
+}
+
 // ── Structured (JSON/YAML) detection + formatting ──
 // Tool input/output that happens to be JSON or YAML (cat package.json in
 // Bash, read_file of a config, a web_fetch API payload, a JSON-typed arg) is

@@ -558,6 +558,56 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
     expect(JSON.stringify(result)).toContain('no progress');
   }, 10_000);
 
+  it('carries the partial output of a stalled run into the failure settlement (四问题①)', async () => {
+    // 轮 1 正常完成:产出文本 + 调一次工具;轮 2 流式挂死 → no-progress
+    // watchdog 掐停 → stalled 失败结算体必须带回轮 1 已生成的产出,且
+    // reason 如实挂上 "partial output was produced"。此前的病根是 Interrupted
+    // 分支从不填 finalOutput(引擎 Interrupted payload 类型上就没有这个
+    // 字段),结算体永远空手、呈现把跑到的部分一并吞掉。
+    let round = 0;
+    const llm: LLMAdapter = {
+      async *stream(): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const tc = { id: 'call_probe', index: 0, function: { name: 'probe', arguments: '{}' } };
+          yield { type: 'content', content: '第一轮结论:依赖已盘点完毕' };
+          yield { type: 'tool_call', index: 0, id: 'call_probe', name: 'probe', arguments: '{}' };
+          yield { type: 'done', content: '第一轮结论:依赖已盘点完毕', toolCalls: [tc] };
+          return;
+        }
+        yield { type: 'content', content: '第二轮开头' };
+        await new Promise<void>(() => {});
+      },
+      async complete() { throw new Error('not used'); },
+    };
+    const tools: ToolAdapter = {
+      getTools: () => [{ name: 'probe', description: 'f', input_schema: {} }],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (tc: ToolCall): Promise<ToolResult> => ({
+        id: tc.id, toolName: tc.function.name, success: true, result: 'ok', duration: 1,
+      }),
+    };
+    const orch = new SubagentOrchestrator({
+      llm,
+      parentTools: tools,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      noProgressTimeoutMs: 80,
+    });
+    orch.register(subagentDef('test_partial'));
+    const result = await orch.execute(toolCall('test_partial', { prompt: 'x' }));
+
+    expect(result.success).toBe(false);
+    const payload = result.result as { aborted?: boolean; agentId?: string; reason?: string; finalOutput?: string };
+    expect(payload.aborted).toBe(true);
+    expect(String(payload.reason)).toContain('no progress');
+    // 中断前的产出随失败结算体带回;timeoutNote 的部分产出如实挂上。
+    // partialOutputFrom 取转录里离中断最近的非空 assistant 文本——轮 2 已
+    // 流出的「第二轮开头」比轮 1 的结论更贴近中断点,正是它该交出的声音。
+    expect(String(payload.reason)).toContain('partial output was produced');
+    expect(String(payload.finalOutput)).toContain('第二轮开头');
+  }, 10_000);
+
   it('trims unresolved toolCalls from subagent checkpoints so re-delegation resumes safely', async () => {
     // The delegation times out while a tool call is still executing: the
     // transcript ends in an assistant message whose toolCalls never got
