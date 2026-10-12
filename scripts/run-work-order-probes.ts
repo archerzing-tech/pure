@@ -25,6 +25,7 @@
 // 退出码：0 = 全过，1 = 有失败，2 = 用法 / 环境错误（与 eval:character 对齐）。
 
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   CHARACTER_PROFILES,
@@ -131,6 +132,21 @@ function runReplay(cases: WorkOrderCase[]): void {
 
 // ── live：真 provider 的档位服从度 ──
 
+/** key 三级回退：显式环境变量 → provider 专属变量 → pure 自己的 secret 存放点
+ * （~/.pure/secrets.json 的 llm.apiKey.<provider>，与 GUI 同源）。验收用用户
+ * 已配好的 key，不要求再导出一份环境变量。 */
+function apiKeyForProvider(provider: string): string | undefined {
+  if (process.env.PURE_EVAL_API_KEY) return process.env.PURE_EVAL_API_KEY;
+  if (provider === 'deepseek-openai' && process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY;
+  if (provider === 'glm' && process.env.ZHIPU_API_KEY) return process.env.ZHIPU_API_KEY;
+  try {
+    const secrets = JSON.parse(readFileSync(resolve(process.env.HOME ?? '', '.pure', 'secrets.json'), 'utf8')) as Record<string, string>;
+    return secrets[`llm.apiKey.${provider}`] ?? secrets['llm.apiKey'];
+  } catch {
+    return undefined;
+  }
+}
+
 interface LiveGrade {
   id: string;
   register: WorkOrderRegister;
@@ -139,26 +155,52 @@ interface LiveGrade {
   honest: boolean;
   pass: boolean;
   notes: string;
+  /** 模型原文（判卷证据）：人工抽查「跳过声明」失败时直接读它定性——是
+   * HONEST_HINTS 词表漏检，还是模型真的没说。全存，报告落盘供人翻。 */
+  output?: string;
 }
 
-const HONEST_HINTS = [/跳过/, /没(有)?(跑|做|验|测)/, /未(做|验|跑|测)/, /skip(ped)?/i, /not (been )?(verified|tested|run)/i, /light(er)? (pass|version)/i];
+// 跳过声明的词面：真机（deepseek-flash）回填——模型的标准句式是「不做响应式 /
+// 不做多浏览器验证 / 全留给选定之后」，首版只认「没X」漏了「不X」族（2026-10-12
+// 验收教训：两条 fail 全是 grader 漏检，模型原文里义务履行得很完整）。
+const HONEST_HINTS = [
+  /跳过/,
+  /没(有)?(跑|做|验|测)/,
+  /不(做|跑|调|搞|验|测|硬化|铺)/,
+  /未(做|验|跑|测)/,
+  /留给(选定|之后|后续|下一步)/,
+  /skip(ped|ping)?/i,
+  /not (been )?(verified|tested|run)/i,
+  /leav(e|ing) (it |them )?(out|for (later|after))/i,
+  /light(er)? (pass|version)/i,
+];
 
 async function runLive(cases: WorkOrderCase[]): Promise<void> {
-  const model = modelFlag ?? defaultModelFor(agentFlag!);
-  const llm = createAdapter(agentFlag!, model);
+  const apiKey = apiKeyForProvider(agentFlag!);
+  if (agentFlag !== 'mock' && !apiKey) {
+    console.error(`provider ${agentFlag} 没有 key（PURE_EVAL_API_KEY / 专属环境变量 / ~/.pure/secrets.json 的 llm.apiKey.${agentFlag}）`);
+    process.exit(2);
+  }
+  const model = modelFlag ?? process.env.PURE_EVAL_MODEL ?? defaultModelFor(agentFlag!);
+  const llm = createAdapter({ provider: agentFlag!, model, apiKey });
   console.log(`\nlive：${agentFlag} / ${model} — ${cases.length} 条判例（只跑轻档：production 恒等现行为，没有可测的新行为）`);
   const grades: LiveGrade[] = [];
-  for (const c of cases.filter((x) => x.register !== 'production')) {
+  const onlyFlag = flag('--only');
+  const selected = onlyFlag ? cases.filter((c) => c.id === onlyFlag) : cases.filter((x) => x.register !== 'production');
+  if (onlyFlag && selected.length === 0) {
+    console.error(`no case with id "${onlyFlag}"`);
+    process.exit(2);
+  }
+  for (const c of selected) {
     const caps = registerScaledDecision(CHARACTER_PROFILES['veteran-fast'], c.register);
     const { system, user } = buildPlanThinkingPrompt(c.userTurns[0]!, { register: c.register });
     let output = '';
     try {
-      const res = await llm.chat([
+      const res = await llm.complete([
         { role: 'system', content: system },
         { role: 'user', content: user },
-      ], {});
-      const last = res.messages[res.messages.length - 1];
-      output = typeof last?.content === 'string' ? last.content : '';
+      ], []);
+      output = res.content ?? '';
     } catch (err) {
       check(false, `${c.id}: provider 调用失败（${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}）`);
       continue;
@@ -169,11 +211,16 @@ async function runLive(cases: WorkOrderCase[]): Promise<void> {
     // b) 诚实义务：跳过声明。
     const honest = HONEST_HINTS.some((re) => re.test(output));
     const pass = steps !== null && steps <= caps.maxPlanSteps && honest;
-    const grade: LiveGrade = { id: c.id, register: c.register, steps, stepCap: caps.maxPlanSteps, honest, pass, notes: '' };
+    const grade: LiveGrade = { id: c.id, register: c.register, steps, stepCap: caps.maxPlanSteps, honest, pass, notes: '', output };
     grades.push(grade);
     check(pass, `${c.id}: 自发步数 ${steps ?? '无计划'}/${caps.maxPlanSteps}、跳过声明 ${honest ? '有' : '无'}`);
   }
   if (reportPath) {
+    // 防呆：报告别落进判例目录——下轮 loadCases 会把它当判例装载，直接炸。
+    if (resolve(reportPath).startsWith(casesDir)) {
+      console.error(`--report 不能落在判例目录（${casesDir}）内——会污染下一轮装载，换个别处。`);
+      process.exit(2);
+    }
     await mkdir(resolve(reportPath, '..'), { recursive: true });
     await writeFile(reportPath, JSON.stringify({ agent: agentFlag, model, grades, failures }, null, 2));
     console.log(`报告已落盘：${reportPath}`);
