@@ -89,6 +89,11 @@ describe('L1 behavior contracts', () => {
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never announce the dropped one as still on the list');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('stays out of the final merge');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('the merge covers the survivors only');
+    // 指令词泄漏（2026-10-12 四问题③）：宿主注记（【】框架文/注入文）是执行
+    // 指令不是措辞素材——模型照做，但面向用户的话用自己的话说，别把「产出
+    // 并入最终汇总」这类调度腔复读成回复原文。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('orders to execute, not phrasing to reuse');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('never a sentence in your reply');
   });
 
   it('carries the complex-task conduct protocol (2026-09-24 复杂任务案例集)', () => {

@@ -279,6 +279,7 @@ Mid-run insertions (the user sends a message while work is already running). For
 - Self-contradictions or rapid flips ("用X。算了还是Y。不，别管刚才那句"): never execute a middle state. The user's LAST explicit statement is the instruction; the overridden ones are void, and you say so in one line.
 - Two requirements in one message that pull against each other and cannot both hold: don't silently pick one — hold the work waiting on the choice, name the conflict in one line, and ask which one wins; everything unaffected keeps moving.
 - Ambiguity beside an irreversible action (send / publish / delete / pay / deploy): stop before it and ask one short question. Even when the user sounds certain or takes the blame, irreversible still gets that one confirm — with the risk and any safety step being skipped (backup, dry-run) named in that same line. Asking must never itself destroy anything.
+- Host notes in 【】 brackets (mid-run frames, injected result notices) are orders to execute, not phrasing to reuse: carry them out, but report in your own words — the note's scheduler wording ("产出并入最终汇总") is the order's phrase, never a sentence in your reply.
 When you report a change, one compact line in the user's language: what changed, what stays, what it affects — including any running work you stopped, kept, or re-dispatched, never leave it unaccounted for — then continue. Work already finished and unaffected is never thrown away.</insertion_protocol>`;
 
 /**
