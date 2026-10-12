@@ -21,7 +21,7 @@ import { primaryRewrite } from '../../shared/sourceRewrite';
 import { recordNetOutcome, unblockAttemptsBeforeMirror } from '../../shared/netRoute';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
-import { buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript } from '../../shared/backgroundCommand';
+import { BACKGROUND_LOG_MISS_HINT, buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript, isBackgroundLogPath } from '../../shared/backgroundCommand';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
@@ -261,6 +261,11 @@ export class NodeToolAdapter implements ToolAdapter {
     const path = this.resolve(String(args.path));
 
     if (!existsSync(path)) {
+      // 后台日志的引用悬空（见 BACKGROUND_LOG_MISS_HINT）：给结构化出路，别让
+      // 模型对同一路径反复重试绕圈。
+      if (isBackgroundLogPath(String(args.path))) {
+        return this.fail(null, start, `read_file: ${BACKGROUND_LOG_MISS_HINT}`);
+      }
       return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
 
@@ -268,6 +273,9 @@ export class NodeToolAdapter implements ToolAdapter {
     try {
       meta = statSync(path);
     } catch {
+      if (isBackgroundLogPath(String(args.path))) {
+        return this.fail(null, start, `read_file: ${BACKGROUND_LOG_MISS_HINT}`);
+      }
       return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
     if (meta.isDirectory()) {

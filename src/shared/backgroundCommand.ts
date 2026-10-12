@@ -45,6 +45,22 @@ export function isWindowsPlatform(isWindows?: boolean): boolean {
   return isWindows ?? (typeof navigator !== 'undefined' ? /Win/i.test(navigator.platform || navigator.userAgent) : false);
 }
 
+/** 后台命令日志的 basename 模式：pure-bg-<id>.log。read_file 的 miss 分支
+ *  据此识别「引用悬空」——日志路径随工具结果写进对话记录成为永久引用，文件
+ *  本身却没有任何保留机制（无会话绑定、无过期策略），系统定期清理临时目录
+ *  （macOS 每日清 3 天未访问的 /tmp）、期间跑过的清理命令都可能移走它。pure
+ *  应用内从不清这些文件（git 历史也无），消失永远来自外力——提示要点是给
+ *  模型结构化出路，别对同一路径反复重试绕圈。Rust 侧 lib.rs 的
+ *  is_background_log_path 与此同构，改必须同步。 */
+export function isBackgroundLogPath(path: string): boolean {
+  const base = path.split(/[\\/]/).pop() ?? '';
+  return base.startsWith('pure-bg-') && base.endsWith('.log');
+}
+
+export const BACKGROUND_LOG_MISS_HINT =
+  '后台命令日志已不存在——临时目录会被系统定期清理（macOS 清 3 天未访问的 /tmp 文件），之前的清理命令也可能删过它。' +
+  '日志消失不代表任务失败：先验证任务实际效果（ps 查进程 / curl 探端口）；确需日志就重跑命令拿新日志，别重试同一路径。';
+
 /** Temp directory WITHOUT node APIs. Node/Bun resolve the real tmpdir through
  *  require (guarded — undefined in ESM browser bundles); browsers fall back to
  *  /tmp for unix targets. Windows never uses this value (it emits $env:TEMP /

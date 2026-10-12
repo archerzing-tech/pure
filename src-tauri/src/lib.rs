@@ -884,6 +884,13 @@ fn has_symlink_component(workspace: &str, path: &str) -> bool {
 const READ_FILE_HEAD_LINES: usize = 2000;
 const READ_FILE_HEAD_MAX_CHARS: usize = 32_000;
 
+/// 后台命令日志的 basename 模式（pure-bg-<id>.log）。与
+/// src/shared/backgroundCommand.ts 的 isBackgroundLogPath 同构，改必须同步。
+fn is_background_log_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or("");
+    base.starts_with("pure-bg-") && base.ends_with(".log")
+}
+
 #[tauri::command]
 async fn read_file(
     workspace: String,
@@ -903,7 +910,17 @@ fn read_file_impl(
     head_lines: Option<usize>,
 ) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
-    let meta = fs::metadata(&full).map_err(|e| format!("read_file: {}", e))?;
+    let meta = fs::metadata(&full).map_err(|e| {
+        // 后台日志的引用悬空：路径随工具结果写进对话记录成为永久引用，文件却
+        // 无任何保留机制——系统定期清临时目录（macOS 每日清 3 天未访问的
+        // /tmp）、期间跑过的清理命令都可能移走它（pure 自己从不清）。给模型
+        // 结构化出路，别对同一路径反复重试绕圈（E3 真机判例）。文案与
+        // backgroundCommand.ts 的 BACKGROUND_LOG_MISS_HINT 同源，改必须同步。
+        if e.kind() == std::io::ErrorKind::NotFound && is_background_log_path(&path) {
+            return "read_file: 后台命令日志已不存在——临时目录会被系统定期清理（macOS 清 3 天未访问的 /tmp 文件），之前的清理命令也可能删过它。日志消失不代表任务失败：先验证任务实际效果（ps 查进程 / curl 探端口）；确需日志就重跑命令拿新日志，别重试同一路径。".to_string();
+        }
+        format!("read_file: {}", e)
+    })?;
     if meta.is_dir() {
         return Err(format!(
             "read_file: '{}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。",

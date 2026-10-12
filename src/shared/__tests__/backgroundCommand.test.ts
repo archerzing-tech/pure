@@ -5,10 +5,12 @@
 
 import { describe, expect, it } from 'bun:test';
 import {
+  BACKGROUND_LOG_MISS_HINT,
   buildBackgroundLaunchPlan,
   buildWrapperScript,
   parseBackgroundPid,
   buildBackgroundResult,
+  isBackgroundLogPath,
 } from '../backgroundCommand';
 
 describe('buildBackgroundLaunchPlan', () => {
@@ -71,5 +73,24 @@ describe('buildBackgroundResult', () => {
     const failed = JSON.parse(buildBackgroundResult(null, '/tmp/l.log'));
     expect(failed.started).toBe(false);
     expect(failed.note).toBeTruthy();
+  });
+});
+
+describe('isBackgroundLogPath (E3 引用悬空识别)', () => {
+  it('matches the pure-bg-*.log basename pattern on both path flavors', () => {
+    expect(isBackgroundLogPath('/tmp/pure-bg-mx1abc-7-k3.log')).toBe(true);
+    expect(isBackgroundLogPath('C:\\Temp\\pure-bg-mx1abc-7-k3.log')).toBe(true);
+    expect(isBackgroundLogPath('/tmp/pure-bg-mx1abc-7-k3.sh')).toBe(false);
+    expect(isBackgroundLogPath('/tmp/other.log')).toBe(false);
+    expect(isBackgroundLogPath('/tmp/pure-bg-not-a-log')).toBe(false);
+    expect(isBackgroundLogPath('')).toBe(false);
+  });
+
+  it('miss hint names the outer cause and gives the model a way out, not a retry loop', () => {
+    // 提示必须回答模型排查时真正需要的三件事：为什么没了（外力清理，不是
+    // 任务失败）、先做什么（验证任务实际效果）、别做什么（重试同一路径）。
+    expect(BACKGROUND_LOG_MISS_HINT).toContain('定期清理');
+    expect(BACKGROUND_LOG_MISS_HINT).toContain('不代表任务失败');
+    expect(BACKGROUND_LOG_MISS_HINT).toContain('别重试同一路径');
   });
 });
