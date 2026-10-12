@@ -2672,6 +2672,48 @@ export class ChatController {
     this.onStatsChanged?.(this.sessionStats);
   }
 
+  /** 回合落定三件套一次提交：耗时账入 turnTimings、转录增量落 turn_messages、
+   *  落定事件写 turn_settled。成功路径必须在 setStreaming(false) 之前同步调用
+   *  ——那一行会拉响收尾派发定时器（40ms），队列 reenter 一旦赶在 finally 之前
+   *  bump generation，finally 的世代守卫就把同会话的落定一起杀掉（真机：队列
+   *  派发后主任务的 SETTLED 与耗时账消失）。世代守卫原本只防跨会话污染——切走
+   *  会话后不得写进别人的 stats；同会话被接替时 sessionId 未变，落定照记无害
+   *  且必要。失败/中断路径仍走 finally 提交：那里的 scheduleDispatch 在提交
+   *  之后，顺序天然安全。 */
+  private commitTurnSettled(turnStartMs: number, turnTiming: TurnTiming, turnMessageBaseline: number): void {
+    turnTiming.totalMs = Math.round(performance.now() - turnStartMs);
+    const timings = this.sessionStats.turnTimings ?? (this.sessionStats.turnTimings = []);
+    timings.push(turnTiming);
+    if (timings.length > 20) timings.splice(0, timings.length - 20);
+    this.persistStats();
+    // 架构评审 v2 A1（S1-3）— 转录增量落日志：本提交点处 this.messages 已由
+    // 本回合的提交点（完成/中断路径，都在 try 内）写入终态，切片即本回合新增。
+    // 与 turn_settled 同一世代护栏（由调用方的 gen 守卫保证）。
+    const turnDelta = this.messages.slice(turnMessageBaseline);
+    if (turnDelta.length > 0) {
+      const transcriptEventTs = Date.now();
+      this.logFoldedThrough = transcriptEventTs;
+      void getSessionEventSink(this.sessionId).append({
+        ts: transcriptEventTs,
+        kind: 'turn_messages',
+        actor: 'gui',
+        payload: { messages: turnDelta },
+      });
+    }
+    // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志。ttft/分支账给远端 digest 用。
+    void getSessionEventSink(this.sessionId).append({
+      ts: Date.now(),
+      kind: 'turn_settled',
+      actor: 'gui',
+      payload: {
+        totalMs: turnTiming.totalMs,
+        ttftMs: turnTiming.ttftMs,
+        branchEvents: turnTiming.branches?.length ?? 0,
+        branches: turnTiming.branches,
+      },
+    });
+  }
+
   /** Load stored messages into the agent's internal state so subsequent turns use history. */
   loadFromStorage(snapshot: SessionSnapshotV2) {
     this.liveTranscript.reset();
@@ -3551,6 +3593,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // by a session switch never writes into the session the user switched TO).
     const turnStartMs = performance.now();
     const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, totalMs: null };
+    // 落定账已提交过没有：成功路径在 setStreaming(false) 之前提交（见该调用点），
+    // finally 只补失败/中断路径的账，防双写。
+    let turnSettledCommitted = false;
     // 架构评审 v2 A1（S1-3）— 转录增量基线：回合入口的窗口长度。finally 里
     // 以此切片出「本回合新增的消息」落 turn_messages 事件——日志自此带上
     // 引擎转录，快照可降级为日志的 fold。窗口若在回合中发生头部裁剪
@@ -6908,6 +6953,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // the JSON is serialized + written. chat.send() still awaits the write
         // below, so doSend's finally (sidebar refresh / queued send) keeps its
         // ordering — only the visual streaming state flips early.
+        // 落定三件套必须赶在这一行之前同步提交：setStreaming(false) 拉响收尾
+        // 派发定时器（40ms），persistSession 写大会话一旦超时，队列 reenter 先
+        // bump generation，finally 的提交就被世代守卫杀掉——主任务 SETTLED
+        // 消失的病根。此刻同步执行无 await，世代必然还是本回合的。
+        turnSettledCommitted = true;
+        this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline);
         this.setStreaming(false);
         await this.persistSession(
           finalMessages,
@@ -7023,41 +7074,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // three carry attribution). Superseded turns are dropped: their session
       // id now points at the session the user switched TO, and writing there
       // would pollute another conversation's stats.
-      if (gen === this.generation) {
-        turnTiming.totalMs = Math.round(performance.now() - turnStartMs);
-        const timings = this.sessionStats.turnTimings ?? (this.sessionStats.turnTimings = []);
-        timings.push(turnTiming);
-        if (timings.length > 20) timings.splice(0, timings.length - 20);
-        this.persistStats();
-        // 架构评审 v2 A1（S1-3）— 转录增量落日志：finally 时 this.messages 已由
-        // 本回合的提交点（完成/中断/硬停三条路径都在 try 内）写入终态，切片即
-        // 本回合新增。与 turn_settled 同一世代护栏。
-        const turnDelta = this.messages.slice(turnMessageBaseline);
-        if (turnDelta.length > 0) {
-          const transcriptEventTs = Date.now();
-          this.logFoldedThrough = transcriptEventTs;
-          void getSessionEventSink(this.sessionId).append({
-            ts: transcriptEventTs,
-            kind: 'turn_messages',
-            actor: 'gui',
-            payload: { messages: turnDelta },
-          });
-        }
-        // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志（与 turnTimings 同一
-        // 生成代护栏：被会话切换作废的回合不写）。ttft/分支账给远端 digest 用。
-        void getSessionEventSink(this.sessionId).append({
-          ts: Date.now(),
-          kind: 'turn_settled',
-          actor: 'gui',
-          payload: {
-            totalMs: turnTiming.totalMs,
-            ttftMs: turnTiming.ttftMs,
-            branchEvents: turnTiming.branches?.length ?? 0,
-            // 逐条明细随事件日志走：digest/远端回放要还原「哪支被停、第几
-            // 次重试」，光有计数不够。
-            branches: turnTiming.branches,
-          },
-        });
+      // 成功路径已在 setStreaming(false) 之前提交过（turnSettledCommitted）：
+      // 队列 reenter 接替后这里的世代守卫会误杀同会话落定，防双写即可。这里
+      // 只补失败/中断路径——它们的 scheduleDispatch 在提交之后，顺序安全。
+      if (!turnSettledCommitted && gen === this.generation) {
+        this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline);
       }
       if (liveToolOutputFrame !== undefined) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(liveToolOutputFrame);

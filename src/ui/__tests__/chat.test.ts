@@ -1030,6 +1030,32 @@ describe('plan overview completion state', () => {
     expect(src.slice(terminal, terminal + 400)).toContain('|| this.activeComplexPlan === null');
   });
 
+  it('commits the turn-settled ledger before releasing streaming, so a queue reenter cannot kill it', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 真机判例（2026-10-12，session_1791809107149_1）：落定提交原本住在 finally，
+    // 而成功路径的 setStreaming(false) 在 try 尾就拉响收尾派发定时器（40ms）。
+    // persistSession 写大会话一旦超过 40ms，队列 reenter 先 bump generation，
+    // finally 的 gen 守卫就把同会话的落定一起杀掉——主任务的 SETTLED 与耗时账
+    // 消失。世代守卫只该防跨会话污染（写进切过去的会话），同会话被接替时
+    // sessionId 未变，落定照记无害且必要。所以成功路径必须赶在 setStreaming(false)
+    // 之前同步提交（此刻无 await，世代必然还是本回合的），finally 只补失败/
+    // 中断路径的账并防双写。
+    const success = src.indexOf('turnSettledCommitted = true;');
+    expect(success).toBeGreaterThan(-1);
+    const release = src.indexOf('this.setStreaming(false);', success);
+    expect(release).toBeGreaterThan(-1);
+    expect(release - success).toBeLessThan(600);
+    const finallyGate = src.indexOf('if (!turnSettledCommitted && gen === this.generation) {');
+    expect(finallyGate).toBeGreaterThan(-1);
+    expect(src.slice(finallyGate, finallyGate + 200)).toContain('this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline)');
+    const method = src.indexOf('private commitTurnSettled(');
+    expect(method).toBeGreaterThan(-1);
+    const methodBody = src.slice(method, method + 2500);
+    expect(methodBody).toContain("kind: 'turn_settled'");
+    expect(methodBody).toContain("kind: 'turn_messages'");
+    expect(methodBody).toContain('this.persistStats()');
+  });
+
   it('never records a clean end for an interrupted round, so Stop kills the auto-continue chain', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 用户在多步计划执行中途点停止：引擎仍会补发一个 Completed(interrupted=true)，
