@@ -4096,7 +4096,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // single-card run is full-width (grid collapses to one column). Closed by
     // the next StateChange → THINK.
     let roundGrid: { el: HTMLElement; kind: ToolCardKind } | null = null;
+    // 本回合是否出现过工具/委派行（appendToolRow 是唯一入口）。轻轮次思考
+    // ghost 撤除（endThinking 的 'answer' 模式）拿它当护栏：工作轮永远留卡。
+    let turnToolActivity = false;
     const appendToolRow = (toolName: string, args: Record<string, unknown>, kind: ToolCardKind): ToolRowHandle => {
+      turnToolActivity = true;
       // Tool calls interrupt text streaming — the bubble above the new row
       // stops blinking now, not at turn completion (see above).
       finalizeStreamingSegments();
@@ -4198,7 +4202,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         scheduleToolGapCard();
       }
     }, 3000);
-    const endThinking = () => {
+    // 轻轮次思考 ghost 的阈值。基准是模型真实思考量：glm 直答轮的一句话思考
+    // 是英文，实测 ~320 字符（「1+1 等于几」真机判例），中文估的 160 会被它
+    // 打穿。600 = 一两句琐碎思考的上沿——工作轮有工具护栏，纯文本深度思考
+    // 轮（推理展示有价值）远超此数，都不受影响。
+    const LIGHT_TURN_THINKING_CHARS = 600;
+    const endThinking = (mode: 'answer' | 'handoff' = 'handoff') => {
       cancelToolGapCard();
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
@@ -4216,6 +4225,25 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // received zero text. Finalizing it leaves an empty "思考完成" ghost
       // that cluttered the transcript. Drop it instead.
       if (!thinkingCard.textEl.textContent) {
+        thinkingCard.el.remove();
+        thinkingCard = null;
+        return;
+      }
+      // 轻轮次不留思考 ghost（发现 #6 割裂感，2026-10-12 用户真机指认——
+      // 「答个 2 中间隔了一个思考？？？」）。仅 'answer' 模式（首个答案 token
+      // 时刻）裁定：一句话思考 + 无工具/计划/评估的直答轮，「思考完成 · 6s」
+      // 块头夹在气泡和两字符答案之间读作打断。撤卡不留尸——完整思考仍在
+      // thinkingPhases（session.json / 重放）里，丢的只是屏上展位；与撤回执
+      // 气泡同一哲学（内部认定不外显）。'handoff'（工具行/计划卡接管的时刻）
+      // 一律照常 finalize：工作轮的思考是可回看的决策叙述。
+      const thinkingTextLength = (thinkingCard.textEl.textContent ?? '').length;
+      if (
+        mode === 'answer'
+        && thinkingTextLength <= LIGHT_TURN_THINKING_CHARS
+        && !turnToolActivity
+        && !planCard
+        && !assessmentFlow
+      ) {
         thinkingCard.el.remove();
         thinkingCard = null;
         return;
@@ -4263,6 +4291,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // narrowing assessmentFlow to null and the later `if (assessmentFlow)`
     // reads see type `never` (same pattern as planCard below).
     let assessmentFlow: AssessmentFlowHandle | null = null as AssessmentFlowHandle | null;
+    // planCard 住 try 块外：endThinking 的轻轮次撤除护栏要在闭包里读它
+    // （工作轮留卡）。同款 widening cast，理由同上——赋值发生在下方闭包里。
+    let planCard: PlanCardHandle | null = null as PlanCardHandle | null;
     try {
       if (turnController.signal.aborted) {
         keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
@@ -4865,11 +4896,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 兜底的噪音留给用户，还拖慢启动。项目级构建和高风险请求
       // 仍然要求用户在确认卡上批准计划后才开始写入；只有用户强制指定的计划/
       // 构建模式保留同样的确认对话框（显式选择进入的规划流程）。
-      // `as PlanCardHandle | null`: TS control-flow can't see assignments made
-      // inside the closures below (showPlanCard / discardPlanCard), so without
-      // the widening cast it keeps narrowing the variable to null and the
-      // handlers that read the plan model would see type `never`.
-      let planCard: PlanCardHandle | null = null as PlanCardHandle | null;
       let planProgress: PlanProgressModel | null = null;
       const discardPlanCard = (): void => {
         if (!planCard) return;
@@ -5749,8 +5775,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 // 1s linger BEFORE endThinking finalizes the card, so a showing
                 // hint survives finalize and completes its own fade.
                 if (thinkingCard) dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
-                // First visible answer token closes the thinking phase.
-                endThinking();
+                // First visible answer token closes the thinking phase —
+                // 'answer' 模式：轻轮次（短思考直答）在此刻撤卡不留 ghost。
+                endThinking('answer');
                 const seg = ensureSegment();
                 seg.text += delta;
                 // Scan newly-appended text for `阶段 n/m` plan markers so the

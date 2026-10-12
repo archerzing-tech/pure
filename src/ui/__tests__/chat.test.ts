@@ -1720,7 +1720,8 @@ describe('generate_image text-to-image wiring', () => {
     expect(src).toContain('scheduleToolGapCard();');
     expect(src).toContain('cancelToolGapCard();');
     // A clean turn end cancels any armed watchdog (no ghost card after Completed).
-    const endThinking = src.indexOf('const endThinking = () => {');
+    // （刀 8：签名加了 mode 参数——'answer' 撤轻轮次 ghost，'handoff' 默认。）
+    const endThinking = src.indexOf("const endThinking = (mode: 'answer' | 'handoff' = 'handoff') => {");
     expect(src.slice(endThinking, endThinking + 300)).toContain('cancelToolGapCard();');
   });
 
@@ -2153,5 +2154,36 @@ describe('work-order register resolution wiring (刀 7)', () => {
     expect(src).toContain('turnTiming.workOrderRegister = workOrderRegister;');
     expect(src).toContain('setActiveWorkOrderRegister(workOrderRegister);');
     expect(src).toContain('if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;');
+  });
+});
+
+// 刀 8（2026-10-12 晚）：轻轮次思考 ghost 撤除（发现 #6 割裂感）。真机判例：
+// 「1+1 等于几」的显示是 气泡 →「思考完成 · 6s」块 →「2。」——一句话思考撑一个
+// 块头，夹在问答中间读作打断。裁定与空思考 ghost 撤除、回执气泡撤除同源
+// （内部认定不外显）：短思考直答轮撤卡不留尸，工作轮（工具/计划/评估在场）
+// 一律留卡。逻辑在 DOM 组件里，测试守接线形状；行为面 GUI 真机验收。
+describe('light-turn thinking ghost suppression wiring (刀 8)', () => {
+  it('suppression lives only in the answer mode of endThinking, behind work-turn guards', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // endThinking 分两态：'answer'（首个答案 token，唯一可撤时刻）与
+    // 'handoff'（工具行/计划卡接管的时刻，永远 finalize 留卡）。
+    expect(src).toContain("const endThinking = (mode: 'answer' | 'handoff' = 'handoff')");
+    expect(src).toContain("endThinking('answer')");
+    // 护栏四件套：阈值 + 无工具活动 + 无计划卡 + 无评估流。
+    expect(src).toContain('const LIGHT_TURN_THINKING_CHARS = 600;');
+    expect(src).toContain('mode === \'answer\'');
+    expect(src).toContain('!turnToolActivity');
+    expect(src).toContain('!planCard');
+    expect(src).toContain('!assessmentFlow');
+    // 工具行唯一入口置位回合活动标志（委派行同走此路）。
+    expect(src).toContain('let turnToolActivity = false;');
+    expect(src.match(/const appendToolRow = [\s\S]{0,200}turnToolActivity = true;/)).not.toBeNull();
+    // planCard 必须住 try 块外（endThinking 闭包可及）——声明在 try 之前，
+    // planProgress 仍在 try 内。
+    const declIdx = src.indexOf('let planCard: PlanCardHandle | null = null as PlanCardHandle | null;');
+    const tryIdx = src.indexOf('    try {', declIdx);
+    expect(declIdx).toBeGreaterThan(-1);
+    expect(tryIdx).toBeGreaterThan(declIdx);
+    expect(src.indexOf('let planProgress', tryIdx)).toBeGreaterThan(-1);
   });
 });
