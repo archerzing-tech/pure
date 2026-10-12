@@ -6778,8 +6778,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // Mid-plan stages are partial work (e.g. stage 1 "set up project
               // structure" has no complete code to review); blocking the chain
               // there froze multi-stage builds on stage 1 forever.
+              // activeComplexPlan 已被清走本身就是 terminal——fire 的第一件事
+              // 就是检查它（!activeComplexPlan 拒发）。快照 complete 标志没跟
+              // 上时（真机判例：装完 skill 队列忘），这条链挂上也必然开不了
+              // 火，只会让队列派发 hold 1.2s 后搁浅；所以不再要求快照标志，
+              // null 即 terminal，Gate1 直接不放行，队列收尾 +40ms 照常派发。
               planTerminal: planMarkedCompleted
-                || (this.activeComplexPlan === null && this.activePlanCardSnapshot?.complete === true)
+                || this.activeComplexPlan === null
                 || (needsDeliveryGate && !qualityPassed && onFinalStage)
                 // Design-first pause is a hard stop: the chain must wait for
                 // the user's design confirmation, never auto-continue into
@@ -7370,9 +7375,21 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   }
 
   private fireAutoContinue(): void {
+    // 链的死亡必须补派发一刀。dispatch 在 autoPending 上给队列放行让路
+    // （hold），定时器 fire 是那条路上唯一的后续触发点：这里静默 return 的
+    // 话 pending 已随回调清空，却再没有任何东西会装上派发定时器——待办
+    // 队列就此搁浅（真机判例：装完 dashi-ppt-skill，排队的 handraw-style
+    // 永远没人做）。所以每个「不续跑」出口都补一次 scheduleDispatch，让
+    // hold 中的队列立刻获得派发机会（此时 autoPending 已为 false）。
     const cfg = loadConfig();
-    if (!cfg || cfg.autoContinue !== true) return;
-    if (!this.activeComplexPlan || this.pausePlanCard) return;
+    if (!cfg || cfg.autoContinue !== true) {
+      this.roundClose.scheduleDispatch();
+      return;
+    }
+    if (!this.activeComplexPlan || this.pausePlanCard) {
+      this.roundClose.scheduleDispatch();
+      return;
+    }
     // Round/max hint: the scheduler already bumped its counter to this round,
     // so the bubble tells the user how far along the auto chain is — and the
     // plan card shows the same N/M on its live badge.

@@ -1003,6 +1003,33 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('|| designPreviewShown,')).toBeGreaterThan(-1);
   });
 
+  it('re-arms the queue dispatch on every path where the auto-continue chain dies silently', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 真机判例（2026-10-12，装完 dashi-ppt-skill 队列忘）：dispatch 在
+    // autoPending 上给队列放行让路（hold），fire 是那条路上唯一的后续触发
+    // 点。fire 的「不续跑」出口若静默 return，pending 已随回调清空，却再没
+    // 有任何东西会装上派发定时器——排队的活永久搁浅。每个出口都必须补一次
+    // scheduleDispatch（此时 autoPending 已为 false，队列立刻获得派发）。
+    const fire = src.indexOf('private fireAutoContinue(): void {');
+    expect(fire).toBeGreaterThan(-1);
+    const fireBody = src.slice(fire, src.indexOf('void this.send(\'继续\'', fire));
+    expect(fireBody).toContain('this.roundClose.scheduleDispatch()');
+    const cfgGate = fireBody.indexOf('if (!cfg || cfg.autoContinue !== true) {');
+    expect(cfgGate).toBeGreaterThan(-1);
+    expect(fireBody.slice(cfgGate, cfgGate + 120)).toContain('this.roundClose.scheduleDispatch()');
+    const planGate = fireBody.indexOf('if (!this.activeComplexPlan || this.pausePlanCard) {');
+    expect(planGate).toBeGreaterThan(-1);
+    expect(fireBody.slice(planGate, planGate + 120)).toContain('this.roundClose.scheduleDispatch()');
+    // 收尾信号的另一半：activeComplexPlan 已被清走本身就是 terminal——fire
+    // 的第一件事就是检查它（!activeComplexPlan 拒发），这种链挂上必然开不了
+    // 火。planTerminal 若不接住（旧代码要求快照 complete 标志同时为真），
+    // 假链照样挂起，队列白 hold 1.2s 后搁浅。null 即 terminal，Gate1 直接
+    // 不放行，队列收尾 +40ms 照常派发。
+    const terminal = src.indexOf('planTerminal: planMarkedCompleted');
+    expect(terminal).toBeGreaterThan(-1);
+    expect(src.slice(terminal, terminal + 400)).toContain('|| this.activeComplexPlan === null');
+  });
+
   it('never records a clean end for an interrupted round, so Stop kills the auto-continue chain', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 用户在多步计划执行中途点停止：引擎仍会补发一个 Completed(interrupted=true)，
