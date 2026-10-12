@@ -2187,3 +2187,31 @@ describe('light-turn thinking ghost suppression wiring (刀 8)', () => {
     expect(src.indexOf('let planProgress', tryIdx)).toBeGreaterThan(-1);
   });
 });
+
+// 刀 9（2026-10-12 深夜）：产物形态信号（刀 6 立项偏差②补课）。真机判例：
+// 「我让 pure 做 ppt」无措辞信号 → production → 全量交付闸 + 「已建立任务契约」
+// 气泡 + 质量门禁全套伺候一份 PPT（用户原话「做完了还要校验，质量，验收之类的，
+// 为什么这么麻烦」）。判定器信号收演示文稿族（register.ts，行为面那里测）；
+// 这里守宿主切面：任务契约只随 production 建、轻档发现面不外显。行为面 GUI
+// 真机验收。
+describe('artifact-shape register wiring (刀 9)', () => {
+  it('task contract is built only on the production register', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 探针照跑（grounding），契约按档位条件构建——轻档 taskContract 保持
+    // undefined，下游折叠与气泡守卫自然跳过。
+    expect(src).toContain("if (workOrderRegister === 'production') {");
+    expect(src).toContain('taskContract = buildTaskContract(userText, workspaceProfile);');
+  });
+
+  it('probe findings stay silent on light registers', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 降级警告（无工具）保留在轻档免显之前——诚实警告不分档。
+    const warnIdx = src.indexOf('probeFindingsReported = true;\n          this.addStatusBubble(');
+    const lightIdx = src.indexOf("if (workOrderRegister !== 'production') {");
+    expect(warnIdx).toBeGreaterThan(-1);
+    expect(lightIdx).toBeGreaterThan(warnIdx);
+    // 免显块先置位再返回（不重入），契约气泡行仍在免显块之后（production 路径不残缺）。
+    expect(src.slice(lightIdx, lightIdx + 200)).toContain('probeFindingsReported = true;');
+    expect(src).toContain('已建立任务契约：');
+  });
+});

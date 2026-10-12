@@ -1,0 +1,7 @@
+{
+  "id": "production-multi-task-deck-01",
+  "register": "production",
+  "expectMatched": false,
+  "summary": "刀 9 防线：多任务句里产物词不是句首主交付，形态信号不命中（句首锚定）",
+  "userTurns": ["修好登录功能，顺带做个 PPT"]
+}

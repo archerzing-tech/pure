@@ -4805,6 +4805,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           this.addStatusBubble('这项请求需要先做只读探针，但当前没有可用工作区工具，已降级为有限上下文执行。', false, false, 'warn');
           return;
         }
+        // 刀 9：轻档（含产物形态降档——「做个 PPT」）的发现面不外显。探针照样
+        // 跑（只读，给 LLM 分析做 grounding），但「已完成项目探索 / 已建立任务
+        // 契约」是 production 交付管线的伴生陈述——轻产物吃这套全套，就是用户
+        // 抱怨的「做完了还要校验、质量、验收」的体感来源。轻档的验证由计划的
+        // 最小清单承担（刀 6 定的分工），契约这层结构在轻档不存在。
+        if (workOrderRegister !== 'production') {
+          probeFindingsReported = true;
+          return;
+        }
         if (!workspaceProfile || !taskContract) return;
         probeFindingsReported = true;
         if (isBareWorkspace(workspaceProfile)) {
@@ -4867,7 +4876,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 结论气泡不再此刻弹出——等 LLM 分析完成后由 reportProbeFindings() 统一呈现。
       if (effectiveWorkspace && (needsDeliveryGate || needsIntentProbe || analysis.complexity === 'complex')) {
         workspaceProfile = await discoverWorkspace(codingAgent.toolRegistry, this.abortController?.signal);
-        taskContract = buildTaskContract(userText, workspaceProfile);
+        // 刀 9：任务契约只随 production 建。轻档的验证清单就是计划的 verification
+        // spec（planThinkingContext 档位段已教学），契约的 acceptanceCriteria 在
+        // 轻档是第二套平行标准——「N 项验收标准」气泡加 prompt 里的折叠段，都是
+        // 「做个 PPT」不该吃的重量。taskContract 保持 undefined，下游折叠
+        // （formatTaskContract）与气泡守卫自然跳过。
+        if (workOrderRegister === 'production') {
+          taskContract = buildTaskContract(userText, workspaceProfile);
+        }
         if (needsIntentProbe) {
           probeGateDone = true;
         }

@@ -160,6 +160,19 @@ function runReplay(cases: WorkOrderCase[]): void {
     broken.register === 'production' && !broken.carried,
     `链条自限：上一轮非问句收尾 → ${broken.register}，不无限携带`,
   );
+
+  // 刀 9 冒烟：产物形态信号（刀 6 偏差②补课——「做个 PPT」不再吃全量交付闸）。
+  console.log('\nreplay：刀 9 冒烟（产物形态信号）');
+  const deck = detectWorkOrderRegister('做个 PPT');
+  check(
+    deck.register === 'draft' && deck.matched.length > 0,
+    `演示文稿族：「做个 PPT」→ ${deck.register}（命中「${deck.matched}」）`,
+  );
+  const multi = detectWorkOrderRegister('修好登录功能，顺带做个 PPT');
+  check(
+    multi.register === 'production',
+    `句首锚定防线：多任务句「修好登录功能，顺带做个 PPT」→ ${multi.register}，代码活不被降档`,
+  );
 }
 
 // ── live：真 provider 的档位服从度 ──

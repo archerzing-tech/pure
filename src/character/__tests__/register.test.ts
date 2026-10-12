@@ -78,6 +78,49 @@ describe('detectWorkOrderRegister：措辞 → 档位', () => {
     expect(detectWorkOrderRegister('').register).toBe('production');
     expect(detectWorkOrderRegister(undefined as unknown as string).register).toBe('production');
   });
+
+  // ── 刀 9：产物形态信号（刀 6 立项偏差②补课）──
+  // 真机判例（2026-10-12 用户反馈）：「我让 pure 做 ppt」无措辞信号 → production
+  // → 全量交付闸 + 任务契约 + 质量门禁全套伺候一份 PPT。演示文稿族是第一组
+  // 形态信号：句首锚定（制作动词+产物词领起全句）防多任务句误降。
+  it('产物形态：演示文稿族判 draft（用户判例「做个 ppt」）', () => {
+    for (const text of [
+      '做个 PPT',
+      '做个 ppt 介绍下这个项目',
+      '帮我做个 PPT 介绍下架构',
+      '请生成一份演示文稿',
+      '先做个 PPT 大纲再说',
+      '出个 slides',
+      '来一份 keynote',
+      '做一份幻灯片',
+      'make a ppt',
+      'please create a slide deck for the review',
+      'generate a presentation',
+    ]) {
+      const verdict = detectWorkOrderRegister(text);
+      expect(verdict.register).toBe('draft');
+      expect(verdict.matched.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('产物形态：pptx 不被 ppt 的前缀截胡，matched 报完整词', () => {
+    const verdict = detectWorkOrderRegister('做个 pptx');
+    expect(verdict.register).toBe('draft');
+    expect(verdict.matched.toLowerCase()).toContain('pptx');
+  });
+
+  it('产物形态：多任务句不降档——句首不是制作动词就不命中（loss-of-trust 防线）', () => {
+    // 主交付是登录修复：形态信号全句扫描会把代码活的验证也砍掉，所以锚定句首。
+    expect(detectWorkOrderRegister('修好登录功能，顺带做个 PPT').register).toBe('production');
+    expect(detectWorkOrderRegister('把项目重构完，然后生成一份演示文稿汇报').register).toBe('production');
+  });
+
+  it('产物形态与其他措辞同句：重者赢的顺序不变', () => {
+    // spike 措辞在场 → spike（「做个 PPT 原型」的产物只是原型载体）
+    expect(detectWorkOrderRegister('做个 PPT 原型验证一下流程').register).toBe('spike');
+    // draft 措辞在场 → draft，matched 报措辞不报形态
+    expect(detectWorkOrderRegister('快速做个 PPT').matched).toBe('快速做');
+  });
 });
 
 describe('registerScaledDecision：档位 → 结构上限', () => {

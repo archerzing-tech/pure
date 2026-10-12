@@ -47,6 +47,30 @@ const DRAFT_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * draft 档的**产物形态**信号（刀 9，刀 6 立项偏差②补课）：交付物本身就是轻产物
+ * 的措辞形状。真机判例（2026-10-12 用户反馈）：「我让 pure 做 ppt」没命中任何
+ * 措辞信号，落 production——全量交付闸 + 任务契约 + 质量门禁全套伺候一份
+ * PPT，「做完了还要校验、质量、验收」的体感直接来自这里。蓝图刀 6 信号三类里
+ * 本来就有「产物形态（设计稿/示例页/一次性脚本 vs 服务/库/功能）」，首版保守
+ * 未做；本刀收第一族：演示文稿。演示文稿没有「生产/上线」概念，交付即看即用，
+ * draft 的做法形状（大纲一两步、生成文件、产物卡直递、验证 0–1 项）就是它的
+ * 正确做法。
+ *
+ * 为什么句首锚定（制作动词 + 产物词必须领起全句）：「修好登录功能，顺带做个
+ * PPT」的主交付是登录修复——形态信号若全句扫描会把代码活的验证也砍掉，那是
+ * 误判代价不对称里「损失信任」的一侧。句首锚定后这类多任务句天然不命中，
+ * 落 production 兜底；倒装（「这个 PPT 帮我做了」）漏判的代价只是多验证几下，
+ * 可以接受。首版只收演示文稿族，海报/logo 等有真机判例再收。
+ */
+const ARTIFACT_DRAFT_PATTERNS: readonly RegExp[] = [
+  // 结尾用 (?![a-z0-9]) 而不是 \b：JS 的 \b 以 \w 划界，中文字符不算 \w，
+  // 「演示文稿\b」「幻灯片\b」永远不命中；英文词也一并换成负向断言防粘连
+  // （ppt 不吃 pptx 是靠 alternation 顺序，pptx 在前）。
+  /^\s*(请|麻烦|帮我|给我|先)*\s*(做|生成|制作|出|来)(一?个|一?份)?\s*(pptx?|演示文稿|幻灯片|slides?|slide\s*decks?|deck|keynote)(?![a-z0-9])/i,
+  /^\s*(please\s+)?(help\s+me\s+)?(kindly\s+)?(make|create|generate|build|put\s+together)\s+(me\s+)?(a\s+|an\s+|the\s+)?(pptx?|slide\s*decks?|slides|presentation|keynote)(?![a-z0-9])/i,
+];
+
+/**
  * spike 档信号：原型/穿刺的措辞。「试试」裸词不进（「试试这个 bug 能不能复现」
  * 是任务内容不是档位声明）；「示范」「demo」收高置信形态。
  */
@@ -86,10 +110,12 @@ function firstMatch(patterns: readonly RegExp[], input: string): string | null {
 }
 
 /**
- * 判任务分量档位。规则顺序即优先级：显式 production > spike > draft > 默认
- * production——同句混合时重者赢（「快速出个原型」= draft 词 + spike 词 → spike，
- * 原型比草稿重），显式「正式」压一切。首版纯规则、可解释、可关；判不出返回
- * production + 空信号（不问不猜，蓝图刀 6 纪律 1）。
+ * 判任务分量档位。规则顺序即优先级：显式 production > spike > draft 措辞 >
+ * draft 产物形态 > 默认 production——同句混合时重者赢（「快速出个原型」=
+ * draft 词 + spike 词 → spike，原型比草稿重），显式「正式」压一切，形态信号
+ * 排在措辞之后（「做个 PPT 原型」按 spike 办，产物只是原型的载体）。首版纯
+ * 规则、可解释、可关；判不出返回 production + 空信号（不问不猜，蓝图刀 6
+ * 纪律 1）。
  */
 export function detectWorkOrderRegister(input: string): WorkOrderVerdict {
   const text = input ?? '';
@@ -99,6 +125,8 @@ export function detectWorkOrderRegister(input: string): WorkOrderVerdict {
   if (spike) return { register: 'spike', matched: spike };
   const draft = firstMatch(DRAFT_PATTERNS, text);
   if (draft) return { register: 'draft', matched: draft };
+  const artifact = firstMatch(ARTIFACT_DRAFT_PATTERNS, text);
+  if (artifact) return { register: 'draft', matched: artifact.trim() };
   return { register: 'production', matched: '' };
 }
 
