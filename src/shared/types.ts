@@ -391,6 +391,11 @@ export interface FailureRecord {
   message: string;
   turnNumber: number;
   toolName?: string;
+  /** 四问题②（2026-10-12）——同一调用的 args 原文，transient 豁免的比对
+   *  材料：此前豁免只按 toolName 匹配，同工具任意一次成功就洗掉全部失败
+   *  教训（write_file 权限失败的「勿重试」被写别的文件的成功抵消）。缺席
+   *  时豁免退回旧口径（保守，不漏真 transient）。 */
+  callArgs?: string;
 }
 
 export type FailureAction =

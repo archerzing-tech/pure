@@ -167,6 +167,196 @@ export interface HarnessConfig {
   onCharacterDrift?: (report: DriftReport) => void;
 }
 
+/**
+ * v2.0（四问题②，2026-10-12）——工具失败教训的观察账本，run() 与
+ * continueTurn() 共用同一套（此前两处手抄，已经养出 v0.11/v1.9.7 双份
+ * 注释）。三个缺口三针：
+ * 1. 落库时机——retry 路径的「勿重试」第二𐌥同样失败就即时落库（此前
+ *    defer 到 Completed flush，会话半路崩掉教训全丢、只剩本会话模型看得见
+ *    的 policy hint）；transient 成立时 removeById 撤回——「写了再删」与
+ *    「不写」语义等价，但中断的窗口里教训已经活着。
+ * 2. 豁免粒度——transient 豁免从 toolName 收窄到同一调用（args 相同）：
+ *    此前同工具任意一次成功就洗掉全部失败教训，write_file 权限失败的
+ *    「勿重试」被写别的文件的成功抵消；args 不可知时退回旧口径（保守，
+ *    不漏真 transient）。
+ * 3. 教训资格——探索性失败（文件不存在/无匹配/命令名猜错）不配单失败
+ *    教训：一次 read 落空是正常试错，落「勿重试」只会吓唬下一会话；重复
+ *    失败不受挡——同参硬试两次没改参数，对下一会话是真实信号。
+ */
+class FailureLedger {
+  readonly retriedFailures: FailureRecord[] = [];
+  private readonly argsByCallId = new Map<string, string>();
+  private readonly argsByKey = new Map<string, string>();
+  private readonly seenFailures = new Set<string>();
+  private readonly pendingRepeats = new Map<string, FailureRecord>();
+  private readonly pendingMemoryIds = new Map<string, string>();
+  private readonly recoveredRepeats = new Set<string>();
+  private readonly failedCalls = new Map<string, FailureRecord>();
+  private readonly stopWrittenKeys = new Set<string>();
+
+  constructor(private readonly write: {
+    repeated(failure: FailureRecord, symptom?: string): Promise<string | undefined>;
+    single(failure: FailureRecord, symptom?: string): Promise<void>;
+    stopped(action: FailureAction, failure: FailureRecord, symptom?: string): Promise<void>;
+    remove(id: string): Promise<boolean>;
+  }) {}
+
+  /** Consume one engine event. Only the immediate "勿重试" write inside a
+   *  FailurePolicyDecision is async — every other branch returns inline. */
+  async observe(event: EngineEvent, symptom: string): Promise<void> {
+    if (event.type === 'ToolStarted') {
+      // 同参豁免的原料：callId → args。args 缺席的调用不登记（豁免走旧口径）。
+      if (event.payload.toolCallArgs !== undefined) {
+        this.argsByCallId.set(event.payload.toolCallId, event.payload.toolCallArgs);
+      }
+      return;
+    }
+    if (event.type === 'ToolResult' && event.payload.result.success) {
+      const okArgs = this.argsByCallId.get(event.payload.toolCallId);
+      for (const [key, failure] of this.pendingRepeats) {
+        if (this.isTransientRecovery(failure, event.payload.toolName, okArgs)) this.recoveredRepeats.add(key);
+      }
+      // v1.9.7 — the transient-fault exemption also covers single failures:
+      // a tool that later succeeds was failing transiently, not a dead-end.
+      for (const [key, failure] of this.failedCalls) {
+        if (this.isTransientRecovery(failure, event.payload.toolName, okArgs)) this.recoveredRepeats.add(key);
+      }
+      // 即时落库的「勿重试」在 transient 成立时撤回：中断窗口里教训活着，
+      // 恢复的证据一到就删——教训库不该只进不出。
+      for (const key of this.recoveredRepeats) {
+        const id = this.pendingMemoryIds.get(key);
+        if (id !== undefined) {
+          this.pendingMemoryIds.delete(key);
+          void this.write.remove(id).catch(() => {});
+        }
+      }
+      return;
+    }
+    if (event.type === 'ToolResult' && !event.payload.result.success) {
+      const key = `${event.payload.toolName}::${event.payload.result.error ?? 'unknown'}`;
+      if (!this.failedCalls.has(key)) {
+        this.failedCalls.set(key, {
+          type: 'tool_error',
+          message: event.payload.result.error ?? 'unknown',
+          turnNumber: 0,
+          toolName: event.payload.toolName,
+          callArgs: this.argsByCallId.get(event.payload.toolCallId),
+        });
+      }
+      // FailurePolicyDecision 的 failure 由引擎构造（不带 args）——按同形
+      // key 关联最近一次失败的 args（tool_error 的 message 就是 error 原文）。
+      this.argsByKey.set(key, this.argsByCallId.get(event.payload.toolCallId) ?? '');
+      return;
+    }
+    if (event.type === 'FailurePolicyDecision') {
+      const failure = event.payload.failure;
+      const repeatKey = `${failure.toolName ?? ''}::${failure.message}`;
+      if (this.seenFailures.has(repeatKey)) {
+        if (!this.pendingRepeats.has(repeatKey)) {
+          failure.callArgs = this.argsByKey.get(repeatKey) || undefined;
+          this.pendingRepeats.set(repeatKey, failure);
+          // 针 1 — 第二𐌥同样失败立即落「勿重试」：教训在会话崩掉时也活着。
+          const id = await this.write.repeated(failure, symptom).catch(() => undefined);
+          if (id) this.pendingMemoryIds.set(repeatKey, id);
+        }
+      } else {
+        this.seenFailures.add(repeatKey);
+      }
+      // A stop OR a degrade on repeated identical failures is a proven
+      // dead-end worth persisting immediately — the degrade path keeps the
+      // turn alive (skip + continue), but the "don't repeat this call"
+      // lesson must survive even a successful session. Written once per
+      // failure key.
+      if (event.payload.action.kind === 'stop' || event.payload.action.kind === 'degrade') {
+        if (!this.stopWrittenKeys.has(repeatKey)) {
+          this.stopWrittenKeys.add(repeatKey);
+          await this.write.stopped(event.payload.action, failure, symptom).catch(() => {});
+        }
+      }
+      if (event.payload.action.kind === 'retry') {
+        this.retriedFailures.push(failure);
+      }
+    }
+  }
+
+  /** 「Recovered after retry」的资格（四问题② 针3 的另一半）：真 overcome
+   *  ——该失败后来同参成功过（recoveredRepeats 是同一把尺子），且非探索性
+   *  （read 落空后换路径成功不值得记）。v2.0 前 Harness 对「policy 说
+   *  retry」的失败一律写「Recovered」——没 overcome 也写，假教训与黑名单
+   *  架空同源，一并收紧。 */
+  overcameFailures(): FailureRecord[] {
+    return this.retriedFailures.filter(f => {
+      if (isExploratoryFailure(f.message)) return false;
+      // 工具失败：同参成功才算真 overcome（与豁免同一把尺子）；llm_error
+      // 没有调用可比——其后流能跑完本身就是恢复证据，保持旧口径。
+      if (!f.toolName) return true;
+      return this.recoveredRepeats.has(`${f.toolName}::${f.message}`);
+    });
+  }
+
+  /** Completed 与不可恢 Error 出口共用的死路教训 flush。返回全部单失败
+   *  记录（含被豁免/黑名单跳过的——那是反射器的证据材料，不是教训本身）。 */
+  async flushDeadEnds(symptom: string): Promise<FailureRecord[]> {
+    // v0.12 — skip repeat keys whose tool later succeeded (transient fault)
+    // and keys already written immediately (stop/degrade, 针 1 的即时落库)。
+    const writtenRepeatKeys = new Set<string>();
+    for (const [key, failure] of this.pendingRepeats) {
+      if (this.recoveredRepeats.has(key)) continue;
+      if (this.stopWrittenKeys.has(key)) continue;
+      if (this.pendingMemoryIds.has(key)) continue; // 即时已写（或已撤回），不重写不复活
+      writtenRepeatKeys.add(key);
+      await this.write.repeated(failure, symptom).then(() => undefined).catch(() => {});
+    }
+    this.pendingRepeats.clear();
+    this.pendingMemoryIds.clear();
+    // v1.9.7 — single (non-repeated) failed calls persist as error_pattern
+    // too; transient faults are exempt, and 针 3 挡掉探索性失败。retried 过的
+    // key 只有真 overcome（写了「Recovered after retry」）才让位——v2.0 前
+    // 「policy 说 retry」一律让位，配合 Recovered 的假写正好两头都吞掉
+    // retried-but-never-overcame 的失败（一条假教训 + 一条丢失的真痕迹）。
+    const overcameKeys = new Set(this.overcameFailures().map(f => `${f.toolName ?? ''}::${f.message}`));
+    for (const [key, failure] of this.failedCalls) {
+      if (this.recoveredRepeats.has(key)) continue;
+      if (writtenRepeatKeys.has(key)) continue;
+      if (this.pendingMemoryIds.has(key)) continue; // 重复教训已即时写，一条死路一条教训
+      if (overcameKeys.has(key)) continue;
+      if (this.stopWrittenKeys.has(key)) continue;
+      if (isExploratoryFailure(failure.message)) continue;
+      await this.write.single(failure, symptom).catch(() => {});
+    }
+    const drained = [...this.failedCalls.values()];
+    this.failedCalls.clear();
+    return drained;
+  }
+
+  /** 针 2 — transient 豁免=同一调用：工具相同且 args 相同才算。args 不可知
+   *  （ToolStarted 没带、或失败根本不来自工具调用）时退回旧口径——保守侧，
+   *  宁可多豁免也不把真 transient 写成勿重试。 */
+  private isTransientRecovery(failure: FailureRecord, succeededTool: string, succeededArgs: string | undefined): boolean {
+    if (failure.toolName !== succeededTool) return false;
+    if (!failure.callArgs || succeededArgs === undefined) return true;
+    return failure.callArgs === succeededArgs;
+  }
+}
+
+/** 针 3 — 探索性失败的教训资格黑名单：这些错误是正常试错的一部分（读一个
+ *  可能不存在的文件、grep 一个没命中的 pattern、猜一个命令名），单次发生
+ *  落「勿重试」只会拿噪声淹没教训库、吓唬下一会话。只挡单失败教训；重复
+ *  失败（同参硬试两次没改参数）仍留教训。 */
+const LESSON_NOISE: RegExp[] = [
+  /file (or directory )?not found/i,
+  /no such file/i,
+  /does not exist/i,
+  /\bENOENT\b/,
+  /no matches?/i,
+  /command not found/i,
+  /is not recognized/i,
+];
+
+function isExploratoryFailure(message: string): boolean {
+  return LESSON_NOISE.some(re => re.test(message));
+}
+
 export class Harness {
   /** Memories older than this (14 days) get decayed at the start of a turn. */
   static readonly MEMORY_DECAY_MS = 14 * 24 * 60 * 60 * 1000;
@@ -416,25 +606,10 @@ export class Harness {
       this.observability.finishRun(traceId);
     };
 
-    // §12.3: failures the policy chose to retry — if the session later
-    // completes successfully they become error_pattern memories ("retry 且
-    // 最终成功"). Reset per run() invocation.
-    const retriedFailures: FailureRecord[] = [];
-    // v0.11/v0.12 — repeated-failure learning with transient-fault exemption:
-    // when the SAME call (tool + error) fails again, the "勿重试" memory is
-    // DEFERRED to session end. seenFailures marks the first occurrence;
-    // pendingRepeats records each repeated call (dedupe per key); a repeat
-    // whose tool LATER succeeds (3rd retry) is a transient fault — recovered
-    // via recoveredRepeats — so only "Recovered after retry" is kept, not
-    // "Do not make this exact call again".
-    const seenFailures = new Set<string>();
-    const pendingRepeats = new Map<string, FailureRecord>();
-    const recoveredRepeats = new Set<string>();
-    // v1.9.7 — every failed tool call this run (single failures included), so
-    // abandoned dead-ends persist as error_pattern at session end; plus the
-    // set of failure keys already written by an immediate stop decision.
-    const failedCalls = new Map<string, FailureRecord>();
-    const stopWrittenKeys = new Set<string>();
+    // §12.3 error_pattern learning (四问题② v2.0 起由 FailureLedger 承担):
+    // retry-lesson timing, transient-fault exemption, lesson eligibility —
+    // one ledger per run() invocation, shared with continueTurn().
+    const ledger = this.newFailureLedger();
 
     try {
       for await (const event of stream) {
@@ -443,66 +618,16 @@ export class Harness {
         finishTrace();
       } else if (event.type === 'Error' && !event.payload.recoverable) {
         finishTrace();
+        // 会话死也要把死路教训带走（四问题②）：此前死路 flush 只挂在
+        // Completed 分支，policy 之外的引擎死亡出口把 failedCalls 全丢。
+        await ledger.flushDeadEnds(userPrompt);
       }
 
-      // v0.12 — observe tool success: a repeated failure whose tool later
-      // succeeds was transient. Mark the matching pending repeat key(s)
-      // recovered so the "勿重试" memory is skipped at session end.
-      if (event.type === 'ToolResult' && event.payload.result.success) {
-        for (const [key, failure] of pendingRepeats) {
-          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
-        }
-        // v1.9.7 — the transient-fault exemption also covers single failures:
-        // a tool that later succeeds was failing transiently, not a dead-end.
-        for (const [key, failure] of failedCalls) {
-          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
-        }
-      }
-      // v1.9.7 — observe tool FAILURE: every failed execution is recorded so a
-      // single (non-repeated) dead-end call is still persisted as an
-      // error_pattern at session end — degradation must survive the session.
-      if (event.type === 'ToolResult' && !event.payload.result.success) {
-        const key = `${event.payload.toolName}::${event.payload.result.error ?? 'unknown'}`;
-        if (!failedCalls.has(key)) {
-          failedCalls.set(key, {
-            type: 'tool_error',
-            message: event.payload.result.error ?? 'unknown',
-            turnNumber: 0,
-            toolName: event.payload.toolName,
-          });
-        }
-      }
-
-      // Memory write driven by the failure policy (Adapter Layer 设计文档 §12.3):
-      // decide() → stop   → write error_pattern now (session can't proceed)
-      // decide() → retry  → remember the failure; written on eventual success
-      if (event.type === 'FailurePolicyDecision' && this.config.memory) {
-        const failure = event.payload.failure;
-        const repeatKey = `${failure.toolName ?? ''}::${failure.message}`;
-        if (seenFailures.has(repeatKey)) {
-          // Defer the "勿重试" write: at session end we skip it if the tool
-          // later succeeded (transient fault).
-          if (!pendingRepeats.has(repeatKey)) {
-            pendingRepeats.set(repeatKey, failure);
-          }
-        } else {
-          seenFailures.add(repeatKey);
-        }
-        // A stop OR a degrade on repeated identical failures is a proven
-        // dead-end worth persisting immediately — the degrade path keeps the
-        // turn alive (skip + continue), but the "don't repeat this call"
-        // lesson must survive even a successful session. Written once per
-        // failure key.
-        if (event.payload.action.kind === 'stop' || event.payload.action.kind === 'degrade') {
-          if (!stopWrittenKeys.has(repeatKey)) {
-            stopWrittenKeys.add(repeatKey);
-            await this.writeErrorPattern(event.payload.action, failure, userPrompt).catch(() => {});
-          }
-        }
-        if (event.payload.action.kind === 'retry') {
-          retriedFailures.push(failure);
-        }
-      }
+      // §12.3 — failure lessons (v0.12/v1.9.7/四问题② v2.0): one ledger call
+      // replaces the hand-copied observation blocks. Immediate "勿重试" write
+      // on the second identical failure, transient recovery scoped to the
+      // SAME call, exploratory failures kept out of single-failure lessons.
+      await ledger.observe(event, userPrompt);
 
       // Track messages for checkpoint saving
       if (event.type === 'Completed' && event.payload.messages) {
@@ -526,33 +651,7 @@ export class Harness {
         // the policy retried and that eventually succeeded become error_pattern
         // memories. Failures never block the session.
         if (this.config.memory) {
-          // v0.12 — flush deferred "勿重试" memories: skip repeat keys whose
-          // tool later succeeded (transient fault) — those keep only the
-          // "Recovered after retry" memory written below.
-          const writtenRepeatKeys = new Set<string>();
-          for (const [key, failure] of pendingRepeats) {
-            if (recoveredRepeats.has(key)) continue;
-            // Already persisted immediately by the stop/degrade decision —
-            // one lesson per dead-end, not two.
-            if (stopWrittenKeys.has(key)) continue;
-            writtenRepeatKeys.add(key);
-            await this.writeRepeatedFailureMemory(failure, userPrompt).catch(() => {});
-          }
-          pendingRepeats.clear();
-          // v1.9.7 — every failed execution is a candidate lesson: single
-          // (non-repeated) failed calls the session abandoned are written as
-          // error_pattern too — degradation must persist into new sessions,
-          // not just for repeated or fatal failures. Transient faults (the
-          // tool later succeeded) keep the v0.12 exemption.
-          for (const [key, failure] of failedCalls) {
-            if (recoveredRepeats.has(key)) continue;
-            if (writtenRepeatKeys.has(key)) continue;
-            if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
-            if (stopWrittenKeys.has(key)) continue;
-            await this.writeSingleFailureMemory(failure, userPrompt).catch(() => {});
-          }
-          const drainedFailures = [...failedCalls.values()];
-          failedCalls.clear();
+          const drainedFailures = await ledger.flushDeadEnds(userPrompt);
           if (event.payload.isComplete) {
             // E1.1 — reflection-triggered turns write their lesson through the
             // reflector (fire-and-forget); everything else keeps the template.
@@ -560,14 +659,17 @@ export class Harness {
               userPrompt,
               event.payload.finalOutput,
               event.payload.messages,
-              retriedFailures,
+              ledger.retriedFailures,
               drainedFailures,
             );
             // 刀 5 — 漂移探针与反思同一条缝（fire-and-forget，退出前排空）。
             this.observeCharacterDrift(event.payload.finalOutput);
           }
-          if (event.payload.isComplete && retriedFailures.length > 0) {
-            await this.writeRetriedErrorPatterns(retriedFailures, userPrompt).catch(() => {});
+          if (event.payload.isComplete) {
+            const overcame = ledger.overcameFailures();
+            if (overcame.length > 0) {
+              await this.writeRetriedErrorPatterns(overcame, userPrompt).catch(() => {});
+            }
           }
         }
       }
@@ -670,18 +772,9 @@ export class Harness {
     };
 
     // Same §12.3 error_pattern handling as run(): a stop in a continuation
-    // turn is a real failure worth remembering too.
-    const retriedFailures: FailureRecord[] = [];
-    // v0.11/v0.12 — same repeated-failure learning as run() (deferred "勿重试"
-    // write with transient-fault exemption).
-    const seenFailures = new Set<string>();
-    const pendingRepeats = new Map<string, FailureRecord>();
-    const recoveredRepeats = new Set<string>();
-    // v1.9.7 — every failed tool call this run (single failures included), so
-    // abandoned dead-ends persist as error_pattern at session end; plus the
-    // set of failure keys already written by an immediate stop decision.
-    const failedCalls = new Map<string, FailureRecord>();
-    const stopWrittenKeys = new Set<string>();
+    // turn is a real failure worth remembering too. (v2.0 — the shared
+    // FailureLedger, one per turn.)
+    const ledger = this.newFailureLedger();
 
     try {
       for await (const event of stream) {
@@ -690,53 +783,13 @@ export class Harness {
         finishTrace();
       } else if (event.type === 'Error' && !event.payload.recoverable) {
         finishTrace();
+        // Same dead-end flush on the error exit as run()（四问题②）。
+        await ledger.flushDeadEnds(newUserPrompt);
       }
 
-      // v0.12 — observe tool success (transient-fault exemption, same as run()).
-      if (event.type === 'ToolResult' && event.payload.result.success) {
-        for (const [key, failure] of pendingRepeats) {
-          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
-        }
-        // v1.9.7 — the transient-fault exemption also covers single failures:
-        // a tool that later succeeds was failing transiently, not a dead-end.
-        for (const [key, failure] of failedCalls) {
-          if (failure.toolName === event.payload.toolName) recoveredRepeats.add(key);
-        }
-      }
-      // v1.9.7 — observe tool FAILURE: every failed execution is recorded so a
-      // single (non-repeated) dead-end call is still persisted as an
-      // error_pattern at session end — degradation must survive the session.
-      if (event.type === 'ToolResult' && !event.payload.result.success) {
-        const key = `${event.payload.toolName}::${event.payload.result.error ?? 'unknown'}`;
-        if (!failedCalls.has(key)) {
-          failedCalls.set(key, {
-            type: 'tool_error',
-            message: event.payload.result.error ?? 'unknown',
-            turnNumber: 0,
-            toolName: event.payload.toolName,
-          });
-        }
-      }
-
-      if (event.type === 'FailurePolicyDecision' && this.config.memory) {
-        const failure = event.payload.failure;
-        const repeatKey = `${failure.toolName ?? ''}::${failure.message}`;
-        if (seenFailures.has(repeatKey)) {
-          // Defer the "勿重试" write: at session end we skip it if the tool
-          // later succeeded (transient fault).
-          if (!pendingRepeats.has(repeatKey)) {
-            pendingRepeats.set(repeatKey, failure);
-          }
-        } else {
-          seenFailures.add(repeatKey);
-        }
-        if (event.payload.action.kind === 'stop') {
-          stopWrittenKeys.add(repeatKey);
-          await this.writeErrorPattern(event.payload.action, failure, newUserPrompt).catch(() => {});
-        } else if (event.payload.action.kind === 'retry') {
-          retriedFailures.push(failure);
-        }
-      }
+      // §12.3 — failure lessons via the shared FailureLedger (same contract
+      // as run(), including the degrade branch continueTurn used to miss).
+      await ledger.observe(event, newUserPrompt);
 
       if (event.type === 'Completed' && event.payload.messages) {
         this.updateVerificationSummary(event.payload.messages, event.payload.verification);
@@ -747,27 +800,7 @@ export class Harness {
       // §12.3 retried-error write — NOT gated on stateMgr: the GUI runs
       // continuation turns without a state store but with memory.
       if (event.type === 'Completed' && this.config.memory) {
-        // v0.12 — flush deferred "勿重试" memories (transient-fault exemption).
-        const writtenRepeatKeys = new Set<string>();
-        for (const [key, failure] of pendingRepeats) {
-          if (recoveredRepeats.has(key)) continue;
-          // Already persisted immediately by the stop/degrade decision.
-          if (stopWrittenKeys.has(key)) continue;
-          writtenRepeatKeys.add(key);
-          await this.writeRepeatedFailureMemory(failure, newUserPrompt).catch(() => {});
-        }
-        pendingRepeats.clear();
-        // v1.9.7 — single (non-repeated) failed calls persist as error_pattern
-        // too (see run() for the same flush); transient faults are exempt.
-        for (const [key, failure] of failedCalls) {
-          if (recoveredRepeats.has(key)) continue;
-          if (writtenRepeatKeys.has(key)) continue;
-          if (retriedFailures.some(f => f.toolName === failure.toolName && f.message === failure.message)) continue;
-          if (stopWrittenKeys.has(key)) continue;
-          await this.writeSingleFailureMemory(failure, newUserPrompt).catch(() => {});
-        }
-        const drainedFailures = [...failedCalls.values()];
-        failedCalls.clear();
+        const drainedFailures = await ledger.flushDeadEnds(newUserPrompt);
         if (event.payload.isComplete) {
           // E1.1 — same Completed seam as run(): reflector for triggered
           // turns (fire-and-forget), template write for the rest.
@@ -775,13 +808,14 @@ export class Harness {
             newUserPrompt,
             event.payload.finalOutput,
             event.payload.messages,
-            retriedFailures,
+            ledger.retriedFailures,
             drainedFailures,
           );
           // 刀 5 — 与 run() 同一条缝：真实回答的免层抽查 + 按间隔的黄金探针。
           this.observeCharacterDrift(event.payload.finalOutput);
-          if (retriedFailures.length > 0) {
-            await this.writeRetriedErrorPatterns(retriedFailures, newUserPrompt).catch(() => {});
+          const overcame = ledger.overcameFailures();
+          if (overcame.length > 0) {
+            await this.writeRetriedErrorPatterns(overcame, newUserPrompt).catch(() => {});
           }
         }
       }
@@ -1001,6 +1035,18 @@ export class Harness {
     return composed;
   }
 
+  /** The shared failure-lesson ledger (四问题② v2.0): writing stays in the
+   *  Harness's private methods (same memory/session plumbing as before); the
+   *  ledger owns the observation state and the three-policy semantics. */
+  private newFailureLedger(): FailureLedger {
+    return new FailureLedger({
+      repeated: (failure, symptom) => this.writeRepeatedFailureMemory(failure, symptom),
+      single: (failure, symptom) => this.writeSingleFailureMemory(failure, symptom),
+      stopped: (action, failure, symptom) => this.writeErrorPattern(action, failure, symptom),
+      remove: (id) => (this.config.memory ? this.config.memory.removeById(id) : Promise.resolve(false)),
+    });
+  }
+
   /**
    * Write an error_pattern memory when the failure policy stops the session
    * (Adapter Layer 设计文档 §12.3: decide() → stop). Non-fatal.
@@ -1053,11 +1099,13 @@ export class Harness {
    * future sessions (via the <session_memory> injection) not to repeat the
    * exact call. Non-fatal.
    */
-  private async writeRepeatedFailureMemory(failure: FailureRecord, symptom?: string): Promise<void> {
-    if (!this.config.memory) return;
+  private async writeRepeatedFailureMemory(failure: FailureRecord, symptom?: string): Promise<string | undefined> {
+    if (!this.config.memory) return undefined;
     const tool = failure.toolName ? ` (tool: ${failure.toolName})` : '';
     const content = this.withSymptom(symptom, `Repeated failure: ${failure.message}${tool}. Do not make this exact call again — switch to a different approach.`).slice(0, 300);
-    await this.config.memory.add({
+    // 返回 id（四问题②）：教训改为第二𐌥失败即时落库，transient 成立时
+    // 按 id 撤回——没有 id 就撤不了。
+    return await this.config.memory.add({
       type: 'error_pattern',
       content,
       timestamp: Date.now(),

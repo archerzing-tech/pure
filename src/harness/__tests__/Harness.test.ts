@@ -22,6 +22,7 @@ import type {
   MemoryEntry,
   Message,
   ToolAdapter,
+  ToolCall,
   ToolResult,
 } from '../../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../../shared/types';
@@ -561,6 +562,209 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
     expect(repeated[0].content).toContain('web_fetch');
     expect(repeated[0].content).toContain('SKIP it now');
     expect(repeated[0].projectPath).toBe('/ws');
+  });
+
+  it('writes the repeated-failure lesson immediately and retracts it when the SAME call later succeeds (四问题② 针1+针2)', async () => {
+    // v2.0 前:retry 路径的「勿重试」defer 到 Completed flush——会话半路崩掉
+    // 教训全丢。v2.0:第二𐌥同样失败即时落库;同参成功(transient)按 id 撤回。
+    const memStore = new FakeMemoryStore();
+    let round = 0;
+    let writtenMidSession = false;
+    let retractedMidSession = false;
+    const args = '{"url":"https://x/api"}';
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round <= 2) {
+          const tc = { id: `call_${round}`, index: 0, function: { name: 'web_fetch', arguments: args } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: args };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        if (round === 3) {
+          // 第二𐌥失败已结算、同参成功尚未发生:教训必须已在库。
+          writtenMidSession = memStore.entries.some(e => e.content.includes('Repeated failure'));
+          const tc = { id: `call_${round}`, index: 0, function: { name: 'web_fetch', arguments: args } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: args };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        // 同参成功已结算:transient 成立,撤回应已发生(不等 flush)。
+        retractedMidSession = !memStore.entries.some(e => e.content.includes('Repeated failure'));
+        yield { type: 'content', content: 'final answer' };
+        yield { type: 'done', content: 'final answer', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    let calls = 0;
+    const flakyTool: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        calls++;
+        return calls <= 2
+          ? { id: tc.id, toolName: 'web_fetch', error: 'Unsupported content type: application/json', success: false, duration: 3 }
+          : { id: tc.id, toolName: 'web_fetch', result: 'ok', success: true, duration: 3 };
+      },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    const harness = new Harness({
+      sessionId: 'sess-retract',
+      llm, tools: flakyTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET, memory: memStore, projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    const events = await collect(harness.run('SYS', 'get the data'));
+    expect(events.find(e => e.type === 'Completed')).toBeDefined();
+    // 即时落库:教训在第二次失败结算后就活着,不等会话结束。
+    expect(writtenMidSession).toBe(true);
+    // 同参成功 = transient:按 id 撤回,不留给下一会话吓唬人。
+    expect(retractedMidSession).toBe(true);
+    expect(memStore.entries.filter(e => e.content.includes('Repeated failure'))).toHaveLength(0);
+    // v0.12 语义保留:transient 只留「Recovered after retry」正向教训。
+    expect(memStore.entries.some(e => e.content.includes('Recovered after retry'))).toBe(true);
+  });
+
+  it('keeps the repeated-failure lesson when a DIFFERENT call of the same tool succeeds (四问题② 针2)', async () => {
+    // 旧口径:同工具任意一次成功就豁免全部失败教训——write_file 权限失败的
+    // 「勿重试」被写别的文件的成功洗掉。收窄后只有同参成功才算 transient。
+    const memStore = new FakeMemoryStore();
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round <= 2) {
+          const args = '{"url":"https://x/api"}';
+          const tc = { id: `call_${round}`, index: 0, function: { name: 'web_fetch', arguments: args } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: args };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        if (round === 3) {
+          // 同工具、不同参数的成功——不是这条失败的 transient 证据。
+          const other = '{"url":"https://other/api"}';
+          const tc = { id: `call_${round}`, index: 0, function: { name: 'web_fetch', arguments: other } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: other };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        yield { type: 'content', content: 'final answer' };
+        yield { type: 'done', content: 'final answer', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const flakyTool: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> =>
+        tc.function.arguments === '{"url":"https://x/api"}'
+          ? { id: tc.id, toolName: 'web_fetch', error: 'Unsupported content type: application/json', success: false, duration: 3 }
+          : { id: tc.id, toolName: 'web_fetch', result: 'ok', success: true, duration: 3 },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    const harness = new Harness({
+      sessionId: 'sess-different-args',
+      llm, tools: flakyTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET, memory: memStore, projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    await collect(harness.run('SYS', 'get the data'));
+    // 教训存活:不同参的成功不洗掉它(即时落库,flush 不重写)。
+    const lessons = memStore.entries.filter(e => e.content.includes('Repeated failure'));
+    expect(lessons).toHaveLength(1);
+    expect(lessons[0].content).toContain('Unsupported content type');
+  });
+
+  it('keeps exploratory single failures out of the lesson store, but keeps repeated ones (四问题② 针3)', async () => {
+    // 一次 read 落空(文件不存在)是正常试错,落「勿重试」只会吓唬下一会话;
+    // 同参硬试两次没改参数才是真实信号。黑名单只挡单失败,不误伤真错误。
+    const memStore = new FakeMemoryStore();
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          // 探索性失败:read_file 落空,之后不再碰它。
+          const tc = { id: 'call_probe', index: 0, function: { name: 'read_file', arguments: '{"path":"/tmp/x"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'read_file', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        if (round === 2) {
+          // 真错误:web_fetch 权限拒绝,同样只发生一次。
+          const tc = { id: 'call_perm', index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://y"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        yield { type: 'content', content: 'final answer' };
+        yield { type: 'done', content: 'final answer', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const mixedTool: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> =>
+        tc.function.name === 'read_file'
+          ? { id: tc.id, toolName: 'read_file', error: 'File not found: /tmp/x', success: false, duration: 2 }
+          : { id: tc.id, toolName: 'web_fetch', error: 'Permission denied: https://y', success: false, duration: 2 },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [
+        { name: 'read_file', description: 'read', input_schema: {} },
+        { name: 'web_fetch', description: 'fetch', input_schema: {} },
+      ],
+    };
+    const harness = new Harness({
+      sessionId: 'sess-exploratory',
+      llm, tools: mixedTool,
+      toolsDefs: mixedTool.getTools(),
+      budget: STD_BUDGET, memory: memStore, projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    await collect(harness.run('SYS', 'try things'));
+    // 探索性单失败不落教训（「勿重试」/「Recovered」都轮不到它——会话总结
+    // 类记忆里的错误原文不算教训）;真错误的单失败照落。
+    expect(memStore.entries.some(e => e.type === 'error_pattern' && e.content.includes('File not found'))).toBe(false);
+    expect(memStore.entries.some(e => e.content.includes('Failed during execution') && e.content.includes('Permission denied'))).toBe(true);
+  });
+
+  it('flushes dead-end lessons on a fatal error exit, not only on Completed (四问题② 针1)', async () => {
+    // 会话死(LLM 流不可恢错误)也把死路教训带走:此前死路 flush 只挂在
+    // Completed 分支,引擎死亡出口把 failedCalls 全丢。
+    const memStore = new FakeMemoryStore();
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const tc = { id: 'call_perm', index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://y"}' } };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        throw new Error('provider connection reset');
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const deniedTool: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> =>
+        ({ id: tc.id, toolName: 'web_fetch', error: 'Permission denied: https://y', success: false, duration: 2 }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    // 不传 failurePolicy:引擎对 LLM 流错误走不可恢 Error 出口(LLM_STREAM_ERROR)。
+    const harness = new Harness({
+      sessionId: 'sess-fatal',
+      llm, tools: deniedTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET, memory: memStore, projectPath: '/ws',
+    });
+
+    const events = await collect(harness.run('SYS', 'do the thing'));
+    expect(events.find(e => e.type === 'Completed')).toBeUndefined();
+    expect(memStore.entries.some(e => e.content.includes('Failed during execution') && e.content.includes('Permission denied'))).toBe(true);
   });
 
   it('persists platform-bound tool preferences from executed commands (auto-discovery)', async () => {
