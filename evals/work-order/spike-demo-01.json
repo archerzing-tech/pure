@@ -1,0 +1,7 @@
+{
+  "id": "spike-demo-01",
+  "register": "spike",
+  "expectMatched": true,
+  "summary": "demo 是轻档信号",
+  "userTurns": ["出个 demo 给客户看"]
+}

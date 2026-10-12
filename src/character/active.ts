@@ -13,7 +13,7 @@
 //
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
-import type { CharacterProfile } from './types';
+import type { CharacterProfile, WorkOrderRegister } from './types';
 import { DEFAULT_CHARACTER_PROFILE } from './defaultProfile';
 import { isCharacterProfileId, resolveCharacterProfile } from './registry';
 
@@ -60,4 +60,49 @@ export function activeCharacterProfile(): CharacterProfile {
 /** 当前激活内核的 id（决策日志 / 事件账 / 漂移探针都用它记「这一轮是谁在台上」）。 */
 export function activeCharacterProfileId(): string {
   return activeCharacterProfile().id;
+}
+
+// ── 分量档位（刀 6）：子代理继承的读取点 ──
+// 内核是「会话级」背景事实（启动注入一次），分量档位是「回合级」判定结果——
+// 宿主每回合判定后注入，子代理 spawn 时（SubagentOrchestrator）读走。为什么
+// 全局可变量而不是逐层穿参：档位注的消费点在 orchestrator 的 spawn 深处，
+// 逐层穿参要贯穿 CodingAgent→Harness→engine ctx 三层签名；而错档的后果只是
+// 子代理 systemPrompt 多/少一句分量注（prompt 层软偏差），窗口又只有「本回合
+// set 之后、spawn 之前被并发回合覆盖」——多会话并行时存在，与切内核共享同一
+// 份已接受的取舍（见本文件头注释）。计划解析等硬结构行为不走这里：那些点
+// （Planner.parsePlanJson 家族）穿参数，同步调用栈内没有交错窗口。
+
+let activeWorkOrderRegister: WorkOrderRegister = 'production';
+
+/** 注入本回合的分量档位（宿主回合下发时判定后调）。 */
+export function setActiveWorkOrderRegister(register: WorkOrderRegister): void {
+  activeWorkOrderRegister = register;
+}
+
+/**
+ * 当前回合的分量档位（子代理 spawn 时读）。没人注入过 = production——安全底：
+ * 漏注入的行为与刀 6 之前逐字节一致。
+ */
+export function activeWorkOrderRegisterState(): WorkOrderRegister {
+  return activeWorkOrderRegister;
+}
+
+/** 重置为 production（回合收尾 / 会话切换 / 测试隔离钩子）。 */
+export function resetActiveWorkOrderRegister(): void {
+  activeWorkOrderRegister = 'production';
+}
+
+/**
+ * 子代理 systemPrompt 尾部的分量注（非 production 才有内容）。与内核垫同点
+ * 拼接（铁律 4：支线继承主线性格；分量是性格对「这份活多重」的当下判断）。
+ */
+export function activeWorkOrderNote(): string {
+  switch (activeWorkOrderRegister) {
+    case 'draft':
+      return '\n\nThis branch is part of a DRAFT job (the user asked for something quick to react to): produce your piece fast, skip long verification loops and polish, and name what you skipped.';
+    case 'spike':
+      return '\n\nThis branch is part of a SPIKE job (a throwaway prototype): walk the main path only, skip production polish and full verification, and name what you skipped.';
+    default:
+      return '';
+  }
 }

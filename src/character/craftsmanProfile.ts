@@ -62,6 +62,12 @@ export const CRAFTSMAN_SLOW_PROFILE: CharacterProfile = {
     insertionThreshold: {
       confidenceGate: 0.85,
     },
+    // 分量档位表（刀 6）：慢线的档位表整体比快线重一档——draft 档计划 4/3（快线
+    // 3/2），但验证底线同为 1（C3 每步证据的底线不破，蓝图刀 6 节钉死 draft ≥1）。
+    registerTendency: {
+      draft: { maxVerificationItems: 1, maxPlanSteps: 4, maxPlanSubsteps: 3 },
+      spike: { maxVerificationItems: 2, maxPlanSteps: 5, maxPlanSubsteps: 4 },
+    },
   },
   // 铁律 1：每个旋钮的内核源句。理由与推导链见 kernels/craftsman-slow.md §三。
   decisionDerivation: {
@@ -72,6 +78,7 @@ export const CRAFTSMAN_SLOW_PROFILE: CharacterProfile = {
     reportRhythm: ['C2', 'C6'],
     parallelTendency: ['C4'],
     insertionThreshold: ['C5'],
+    registerTendency: ['C11', 'C3'],
   },
   // 表达面（投影 B）：五场景的义务 / 禁止 / 源句，见 kernels/craftsman-slow-expression.md。
   expression: {

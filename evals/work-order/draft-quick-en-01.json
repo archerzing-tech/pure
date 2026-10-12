@@ -1,0 +1,7 @@
+{
+  "id": "draft-quick-en-01",
+  "register": "draft",
+  "expectMatched": true,
+  "summary": "英文词表同权",
+  "userTurns": ["give me a quick draft"]
+}

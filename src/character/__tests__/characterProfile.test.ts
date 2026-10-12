@@ -10,7 +10,7 @@ describe('CharacterProfile 默认内核「老手快线」（刀 1 零行为变�
 
   it('decision 每个值 = 现行为原样（逐值锁定）', () => {
     expect(profile.id).toBe('veteran-fast');
-    expect(profile.version).toBe('v0');
+    expect(profile.version).toBe('v1');
     expect(profile.decision.modeThreshold).toEqual({ planAtComplexity: 'complex', complexFileThreshold: 3 });
     expect(profile.decision.verifyDensity).toEqual({ maxVerificationItems: 8 });
     expect(profile.decision.stepSize).toEqual({ maxPlanSteps: 10, maxPlanSubsteps: 8 });
@@ -21,6 +21,11 @@ describe('CharacterProfile 默认内核「老手快线」（刀 1 零行为变�
     expect(profile.decision.reportRhythm).toBe('meaningful-nodes-only');
     expect(profile.decision.parallelTendency).toEqual({ maxSubagentRoles: 4 });
     expect(profile.decision.insertionThreshold).toEqual({ confidenceGate: 0.7 });
+    // 刀 6 档位表：production 不入表；draft/spike 是唯一比现行为轻的两档。
+    expect(profile.decision.registerTendency).toEqual({
+      draft: { maxVerificationItems: 1, maxPlanSteps: 3, maxPlanSubsteps: 2 },
+      spike: { maxVerificationItems: 2, maxPlanSteps: 5, maxPlanSubsteps: 4 },
+    });
   });
 
   it('没人注入活跃内核时回退默认内核（刀 1–4 的行为逐字节不变）', () => {

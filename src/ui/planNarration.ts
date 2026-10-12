@@ -6,6 +6,7 @@
 // 编排（流式、超时、中止、气泡）在 chat.ts 的 planByThinking()。
 
 import type { Plan, PlanVerificationSpec } from '../coding-agent/types';
+import type { WorkOrderRegister } from '../character';
 
 const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}], "verification": [{"command": "the exact command", "reason": "why running this proves the changes", "final": false}]}`;
 
@@ -14,11 +15,26 @@ const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "st
  * 就又回到「固定模式」。只规定实质约束：用用户的语言、以自己的口吻想清楚、
  * 假设要明说并直接往下走（不许停下来等答案）、不许复述请求、不许套话、
  * 思考结束以 ```json 围栏交出自己承诺的步骤、步骤必须被上面的思考挣出来。
+ *
+ * 刀 6 分量判读：`register` 是宿主从用户措辞判出的分量档位。production 不带
+ * 任何档位句（现行为原样）；draft/spike 换步数词、换交付标准——判轻了给快，
+ * 判重了照旧，误差方向安全。
  */
 export function buildPlanThinkingPrompt(
   userText: string,
-  opts: { projectBuild?: boolean; hasImages?: boolean } = {},
+  opts: { projectBuild?: boolean; hasImages?: boolean; register?: WorkOrderRegister } = {},
 ): { system: string; user: string } {
+  const register = opts.register ?? 'production';
+  const stepAsk = register === 'draft'
+    ? 'Give 1-3 steps — the user asked for something quick to react to (a draft, a few versions to choose from): speed of iteration beats completeness.'
+    : register === 'spike'
+      ? 'Give 2-5 steps — this is a throwaway prototype/spike: walking the main path end to end IS the deliverable.'
+      : 'Give 2-6 steps.';
+  const registerBrief = register === 'draft'
+    ? 'Register: DRAFT. Treat the output as a decision aid the user will react to, not a finished deliverable. Skip long verification loops and exhaustive polish; say what you skipped.'
+    : register === 'spike'
+      ? 'Register: SPIKE. Prove the approach works end to end on the main path; skip production polish, edge-case hardening and full verification. Say what you skipped.'
+      : '';
   const system = [
     'You are taking on this task yourself. Before doing anything, think it through in front of the user — in the user\'s language, as yourself.',
     'There is no required outline. Think the way a sharp colleague thinks out loud before committing to an approach, and let THIS task decide what needs saying: what the request hinges on, which constraints shape the work, what you assume about anything left unsaid (state the assumption and proceed — never stall on questions here), how you intend to approach it and why, and anything the user would want to veto before you start. Skip whatever does not deserve the words.',
@@ -26,9 +42,12 @@ export function buildPlanThinkingPrompt(
     'When the thinking is done, commit to the plan: a ```json fenced block, and nothing after it.',
     'The thinking itself must be plain spoken prose in the user\'s language — never raw JSON, never a bare JSON object; the only JSON allowed in the entire reply is that final ```json fence.',
     PLAN_JSON_SHAPE,
-    'Give 2-6 steps. Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.',
+    `${stepAsk} Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.`,
+    registerBrief,
     opts.projectBuild
-      ? 'This is a project-level build: the LAST step must be the delivery verification pipeline (run the checks, fix failures, re-run until ALL pass). Alongside "steps", declare a "verification" list tailored to THIS round\'s changes — the exact commands that prove the work (typecheck / lint / tests / build as applicable), each with a one-line reason why running it is enough. Mark "final": true on the entries that must form the end-of-turn mechanical gate; keep the rest lean so they can re-run on every change during the loop. Don\'t just list the project\'s full pipeline because it exists — declare what this round needs.'
+      ? (register === 'production'
+        ? 'This is a project-level build: the LAST step must be the delivery verification pipeline (run the checks, fix failures, re-run until ALL pass). Alongside "steps", declare a "verification" list tailored to THIS round\'s changes — the exact commands that prove the work (typecheck / lint / tests / build as applicable), each with a one-line reason why running it is enough. Mark "final": true on the entries that must form the end-of-turn mechanical gate; keep the rest lean so they can re-run on every change during the loop. Don\'t just list the project\'s full pipeline because it exists — declare what this round needs.'
+        : 'This is a project-level build at light register: declare a small "verification" list that proves the MAIN PATH runs (one or two commands at most). Do NOT run the full delivery pipeline; do not mark anything "final": true — there is no end-of-turn gate at this register. Name in your thinking what the light pass leaves unverified.')
       : '',
   ].filter(Boolean).join('\n');
   const user = opts.hasImages
@@ -99,7 +118,7 @@ export function liveNarrationPortion(full: string): string {
  */
 export function planThinkingContext(
   narration: string,
-  opts: { projectBuild?: boolean; hasPlanCard?: boolean; verification?: PlanVerificationSpec[] } = {},
+  opts: { projectBuild?: boolean; hasPlanCard?: boolean; verification?: PlanVerificationSpec[]; register?: WorkOrderRegister } = {},
 ): string {
   // 刀 1.1：清单在执行语境里的两种身份——整份是迭代环的最小验证集（改动后
   // 就地重跑适用的，别攒到最后）；final 子集是收尾宿主机械重跑的闸门清单
@@ -108,6 +127,29 @@ export function planThinkingContext(
   const finalSet = declared.some((item) => item.final === true)
     ? declared.filter((item) => item.final === true)
     : declared;
+  // 刀 6：分量档位执行段。production 一字不加（现行为原样）；draft/spike 带两
+  // 句——诚实义务（轻做≠装完，跳过什么要明说）与交付标记教学（产物卡靠模型
+  // 报路径，工具收集面之外的产物也照卡送达）。教学只进轻档：正式档有完整的
+  // 交付管线与闸门，不需要模型自报家门。
+  const register = opts.register ?? 'production';
+  const registerSection = register === 'production' ? '' : [
+    register === 'draft'
+      ? '分量档位：草稿。这份活是给用户快速决策用的——轻做不等于装完：没验的、跳过的、粗糙的地方，收尾说明里一样样明说，不许把草稿当成品交。'
+      : '分量档位：原型穿刺。这份活是验证可行性的——主路径端到端走通即为达标，边缘加固与生产级打磨明确跳过；同样，跳过了什么在收尾说明里明说。',
+    '每份产物完成后，在回复末尾单独输出一行「## 产物已就绪：<路径>」（相对路径，一份一行）——界面据此直接把产物卡送到用户面前，不需要用户自己翻目录找。',
+  ].join('\n');
+  // projectBuild 段按档位分叉：production 有宿主机械重跑的收尾闸（照旧）；
+  // 轻档的闸已在宿主侧关闭（needsDeliveryGate=false），语境里不能再宣称有闸
+  // ——声明的最小清单就是全部验证，说有闸就是说谎。
+  const projectBuildSection = !opts.projectBuild
+    ? ''
+    : register !== 'production'
+      ? (declared.length > 0
+        ? `轻档项目交付：跑你声明的最小验证（${declared.map((item) => item.command).join('、')}）证明主路径能跑，跳过全量管线；宿主不设收尾闸，这份清单就是全部验证。`
+        : '轻档项目交付：证明主路径能跑（启动、构建或演示任一适用的组合），跳过全量管线；宿主不设收尾闸。')
+      : (declared.length > 0
+        ? `这是项目级交付：完成必须给出真实验证证据（失败要修到过）。你声明的验证清单：${declared.map((item) => item.command).join('、')}——迭代中每次改动后就地重跑适用的命令，别攒到最后才发现坏了；收尾时宿主会机械重跑最终验证（${finalSet.map((item) => item.command).join('、')}），那道闸不解析你的任何声称，过不了就不交付。`
+        : '这是项目级交付：完成必须给出真实验证证据（代码评审、类型检查、单测、构建任一适用的组合，失败要修到过）。');
   return [
     '<plan_thinking>',
     '你规划时当着用户把这个任务想清楚了，思考原文如下——用户已经看到，绝不要再复述一遍：',
@@ -118,11 +160,8 @@ export function planThinkingContext(
     opts.hasPlanCard
       ? ''
       : '没有结构化计划卡这回事，不要输出「## 计划 n：…」这类阶段标记——界面上没有卡片在等它们。',
-    opts.projectBuild && declared.length > 0
-      ? `这是项目级交付：完成必须给出真实验证证据（失败要修到过）。你声明的验证清单：${declared.map((item) => item.command).join('、')}——迭代中每次改动后就地重跑适用的命令，别攒到最后才发现坏了；收尾时宿主会机械重跑最终验证（${finalSet.map((item) => item.command).join('、')}），那道闸不解析你的任何声称，过不了就不交付。`
-      : opts.projectBuild
-        ? '这是项目级交付：完成必须给出真实验证证据（代码评审、类型检查、单测、构建任一适用的组合，失败要修到过）。'
-        : '',
+    projectBuildSection,
+    registerSection,
     '</plan_thinking>',
   ].filter(Boolean).join('\n');
 }

@@ -1,0 +1,7 @@
+{
+  "id": "production-default-01",
+  "register": "production",
+  "expectMatched": false,
+  "summary": "判不出=正式：默认档不靠词命中",
+  "userTurns": ["修复登录页在 Safari 下白屏的问题"]
+}

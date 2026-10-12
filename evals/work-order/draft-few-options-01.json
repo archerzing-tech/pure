@@ -1,0 +1,7 @@
+{
+  "id": "draft-few-options-01",
+  "register": "draft",
+  "expectMatched": true,
+  "summary": "「几个方案」= 多版本决策稿",
+  "userTurns": ["给我几个方案选选"]
+}

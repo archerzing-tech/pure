@@ -452,6 +452,36 @@ export function parseDesignReadyMarker(text: string): string | null {
   return match ? match[1] : null;
 }
 
+// ── 交付直达卡（人格轨道刀 6b）：产物标记协议 ──
+// 产物卡的收集面此前只认 write/edit 类工具调用——bash heredoc、生成器脚本、
+// 或模型在无工具路径下给出的文件都会漏卡，用户被迫自己去翻文件系统找「东西
+// 在哪」。泛化 DESIGN_READY_MARKER 的先例：模型明说「产物已就绪：<路径>」
+// （每份一行），宿主解析后与工具收集并集去重，实时渲染与重载回放走同一个
+// 解析函数（重载渲染纪律：实时=重放，不许两套口径）。
+
+/** Deliverable marker the model emits when a finished artifact is ready for
+ * the user — the text-side collection channel that complements the write/edit
+ * tool side. One line per deliverable. */
+export const DELIVERY_MARKER = '## 产物已就绪：';
+
+/** Extract every deliverable path from DELIVERY_MARKER lines in the assistant
+ * output (e.g. `## 产物已就绪：designs/v2.html`), in order of appearance,
+ * deduplicated. Empty when the marker is absent or names no file. */
+export function parseDeliveryMarkers(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /##\s*产物已就绪：[^\S\n]*([^\s\n]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const path = match[1];
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      out.push(path);
+    }
+  }
+  return out;
+}
+
 /** True when the request looks like a UI-building task that should go through
  * the design-first phase (design mockup → user confirmation → implement). */
 export function detectUiDesignRequest(prompt: string): boolean {

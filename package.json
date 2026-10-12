@@ -32,6 +32,7 @@
     "eval:snapshot": "bun run scripts/build-baseline-snapshot.ts",
     "eval:roles": "bun run scripts/run-role-regression.ts",
     "eval:character": "bun run scripts/run-character-probes.ts",
+    "eval:work-order": "bun run scripts/run-work-order-probes.ts",
     "eval:harvest": "bun run scripts/harvest-role-samples.ts",
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "e2e:evolution": "bun run scripts/e2e-evolution-dashboard.ts",

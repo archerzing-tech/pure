@@ -463,7 +463,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 流式把思考讲出来，再从同一条回复解析计划；规则步骤只在确认对话兜底。
     // 曾经的 LLM 预分析死于「静默 complete + 失败噪音」，这里必须是流式且安静。
     const probe = src.indexOf('await discoverWorkspace(');
-    const thinking = src.indexOf('await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
+    const thinking = src.indexOf('await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister);');
     const planRender = src.indexOf('showPlanCard(approvedPlan);');
     expect(probe).toBeGreaterThan(-1);
     expect(thinking).toBeGreaterThan(probe);
@@ -475,7 +475,7 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 怎么做…」），第一个可见字落屏才收卡（removeThinkingCard 作揭卡回调传入），
     // 规划调用走关暗思考的专用适配器（this.planLlm）。
     expect(src).toMatch(/if \(thinkingCard\) setThinkingLabel\(thinkingCard, '正在想这个任务怎么做…'\)/);
-    expect(src).toMatch(/planByThinking\(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard\)/);
+    expect(src).toMatch(/planByThinking\(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister\)/);
     expect(src).toMatch(/const llm = this\.planLlm \?\? this\.turnLlm;/);
     expect(src).toMatch(/this\.planLlm = createLLMAdapter\(config, \{ disableThinking: true \}\);/);
   });
@@ -1867,7 +1867,7 @@ describe('plan-by-thinking flow', () => {
   it('plans with a streaming model call before the plan card, not from rule steps', () => {
     // 出卡之前必须先有 planByThinking；思考完全没落地才允许规则兜底。
     // 2026-09-27 思考窗吸收：调用包在 planPreflightActive 的开/关窗里。
-    const thinkingIdx = src.indexOf('thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);');
+    const thinkingIdx = src.indexOf('thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister);');
     expect(thinkingIdx).toBeGreaterThan(-1);
     const cardIdx = src.indexOf('showPlanCard(approvedPlan);');
     expect(cardIdx).toBeGreaterThan(thinkingIdx);
@@ -1885,9 +1885,10 @@ describe('plan-by-thinking flow', () => {
     // 落账时插到它后面；直接 push 会让回放里思考抢在用户请求前面。
     expect(src).toContain('this.pendingPlanNarration = thought.narration;');
     expect(src).not.toContain("this.messages.push({ role: 'assistant', content: thought.narration })");
-    expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });');
+    expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, register: workOrderRegister });');
     // 刀 1.1：有卡路径带着定稿计划的验证清单进执行语境（迭代环最小集）。
-    expect(src).toContain('planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification })');
+    // 刀 6：两条路径都带分量档位（执行语境的诚实义务与交付标记教学挂在档位上）。
+    expect(src).toContain('planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification, register: workOrderRegister })');
     // 无卡路径跳过了 approvePlan：评估卡阶段必须同样落定，不能悬在半空。
     expect(src).toContain("assessmentFlow.setPhase('execute', '边界已确认，准备按小步策略执行…');");
   });
@@ -1903,7 +1904,7 @@ describe('plan-by-thinking flow', () => {
     expect(fn).not.toContain('addStatusBubble');
     expect(fn).not.toContain('showError');
     expect(fn).toContain('PLAN_THINKING_TIMEOUT_MS');
-    expect(fn).toContain('parsePlanJsonWithMeta(planText)');
+    expect(fn).toContain('parsePlanJsonWithMeta(planText, register)');
     // 思考与中止路径都要收干净计时器与转发监听。
     expect(fn).toContain('clearTimeout(timer);');
     expect(fn).toContain("removeEventListener('abort', forwardAbort);");

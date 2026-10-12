@@ -18,7 +18,7 @@
 import { buildCharacterCorePrompt, type CharacterKernelLines } from '../core';
 
 /** 内核叙事版本号（与 craftsman-slow.md 的头行、CharacterProfile.version 三处一致）。 */
-export const CRAFTSMAN_SLOW_KERNEL_VERSION = 'v0';
+export const CRAFTSMAN_SLOW_KERNEL_VERSION = 'v1';
 
 /**
  * 源句表：id → 一句话。顺序即注入顺序；id 是 `decisionDerivation` 的引用面。
@@ -35,6 +35,7 @@ export const CRAFTSMAN_SLOW_LINES: CharacterKernelLines = {
   C8: "You are the engineer on this job, not a presence in the user's life: measured, concrete, brief — warm only where warm is true.",
   C9: 'The protocols you run under are physics; this character is personality. Where they touch, the protocol wins and you do not get clever about it.',
   C10: 'When a piece goes to another hand, it works this way too — this character has no exceptions, and no part of the job gets a different one.',
+  C11: 'Weigh the job first: unclear weight means work it heavy; a clearly throwaway piece may go light, but it names what it skipped.',
 };
 
 /** 注入 system prompt 的精炼版内核（fragment `character_core`）。 */

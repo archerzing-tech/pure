@@ -19,10 +19,10 @@ const CORE = DEFAULT_CHARACTER_PROFILE.core;
 
 describe('性格内核「老手快线」v0（刀 2）', () => {
   it('三方版本一致：源句表 / profile / .md 镜像', () => {
-    expect(VETERAN_FAST_KERNEL_VERSION).toBe('v0');
+    expect(VETERAN_FAST_KERNEL_VERSION).toBe('v1');
     expect(DEFAULT_CHARACTER_PROFILE.version).toBe(VETERAN_FAST_KERNEL_VERSION);
     expect(MIRROR).toContain('veteran-fast');
-    expect(MIRROR).toContain('v0');
+    expect(MIRROR).toContain('v1');
   });
 
   it('源句表非空且 id 唯一（K1…Kn 顺序即注入顺序）', () => {

@@ -182,6 +182,65 @@ describe('planThinkingContext — 思考原文必须嵌进引擎语境', () => {
   });
 });
 
+// 分量判读（刀 6）的叙述面：production 一字不加（安全底），draft/spike 各带
+// 档位段；执行语境里的诚实义务（轻做≠装完）与 6b 交付标记教学只进轻档。
+describe('分量档位段（刀 6）', () => {
+  it('规划提示词：production 保持原步数词与原 projectBuild 段，无档位句', () => {
+    const base = buildPlanThinkingPrompt('任务');
+    expect(base.system).toContain('Give 2-6 steps.');
+    expect(base.system).not.toContain('Register:');
+    expect(base.system).not.toContain('DRAFT');
+    const build = buildPlanThinkingPrompt('任务', { projectBuild: true }).system;
+    expect(build).toContain('re-run until ALL pass');
+    expect(build).toContain('"final": true');
+  });
+
+  it('draft：步数收 1-3，档位句把产出定性为决策稿', () => {
+    const { system } = buildPlanThinkingPrompt('快速出几版', { register: 'draft' });
+    expect(system).toContain('Give 1-3 steps');
+    expect(system).toContain('Register: DRAFT');
+    expect(system).toContain('decision aid');
+  });
+
+  it('spike：步数收 2-5，档位句把主路径定为达标线', () => {
+    const { system } = buildPlanThinkingPrompt('出个原型', { register: 'spike' });
+    expect(system).toContain('Give 2-5 steps');
+    expect(system).toContain('Register: SPIKE');
+    expect(system).toContain('main path');
+  });
+
+  it('轻档 × projectBuild：不跑全量管线、不设收尾闸，验证清单收主路径', () => {
+    for (const register of ['draft', 'spike'] as const) {
+      const { system } = buildPlanThinkingPrompt('任务', { projectBuild: true, register });
+      expect(system).not.toContain('ALL pass');
+      // 原文要求 Mark "final": true；轻档反过来明说没有收尾闸。
+      expect(system).not.toContain('Mark "final": true');
+      expect(system).toContain('no end-of-turn gate');
+      expect(system).toContain('light register');
+      expect(system).toContain('MAIN PATH');
+    }
+  });
+
+  it('执行语境：draft/spike 带诚实义务与交付标记教学；production 两样都没有', () => {
+    expect(planThinkingContext('思考', { register: 'draft' })).toContain('轻做不等于装完');
+    expect(planThinkingContext('思考', { register: 'spike' })).toContain('主路径端到端走通即为达标');
+    for (const register of ['draft', 'spike'] as const) {
+      const g = planThinkingContext('思考', { register });
+      expect(g).toContain('分量档位');
+      expect(g).toContain('产物已就绪');
+    }
+    const plain = planThinkingContext('思考', {});
+    expect(plain).not.toContain('分量档位');
+    expect(plain).not.toContain('产物已就绪');
+  });
+
+  it('轻档 × projectBuild 的执行语境不带全量闸表述', () => {
+    const g = planThinkingContext('思考', { projectBuild: true, register: 'draft' });
+    // 全量闸句子只属于 production；轻档不假装有闸。
+    expect(g).not.toContain('机械重跑最终验证');
+  });
+});
+
 describe('isUsablePlan — 解析结果必须真能当计划用', () => {
   it('有步骤且每步可读：可用', () => {
     expect(isUsablePlan({ reasoning: 'r', steps: [{ id: '1', action: '搭骨架', description: 'd', expectedOutcome: 'o' }] })).toBe(true);

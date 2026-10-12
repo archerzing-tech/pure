@@ -9,7 +9,7 @@ import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDeci
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
-import { activeCharacterProfile } from '../character';
+import { activeCharacterProfile, registerScaledDecision, type RegisterScaledCaps, type WorkOrderRegister } from '../character';
 // Shared confidence vocabulary + gate. One-way dependency (inputDecision knows
 // nothing about Planner) so the router and the insertion classifier can be
 // judged by the same threshold without a cycle.
@@ -1141,8 +1141,8 @@ export interface PlanParseResult {
  * automatically before validation. Returns null on any malformed input so the
  * caller can fall back to the heuristic generic plan.
  */
-export function parsePlanJson(text: string): Plan | null {
-  return parsePlanJsonCore(text).plan;
+export function parsePlanJson(text: string, register?: WorkOrderRegister): Plan | null {
+  return parsePlanJsonCore(text, register).plan;
 }
 
 /**
@@ -1150,12 +1150,16 @@ export function parsePlanJson(text: string): Plan | null {
  * Repaired step text is a reconstruction of the model's broken output — it may
  * be shown to the user for approval, but must NOT be re-injected into the LLM
  * context window as "the approved plan" (see chat.ts's plan gate).
+ *
+ * 刀 6 分量判读：`register` 是本回合的分量档位（宿主判定后穿参进来——参数
+ * 而非全局，多会话并发时各自的回合各带各的档位）。production 缺省 = 现行为
+ * 逐字节不变；draft/spike 把步骤/子步/验证三个 slice 收进档位表（只轻不重）。
  */
-export function parsePlanJsonWithMeta(text: string): PlanParseResult {
-  return parsePlanJsonCore(text);
+export function parsePlanJsonWithMeta(text: string, register?: WorkOrderRegister): PlanParseResult {
+  return parsePlanJsonCore(text, register);
 }
 
-function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> {
+function normalizePlanSubsteps(raw: unknown, cap: number): NonNullable<PlanStep['substeps']> {
   if (!Array.isArray(raw)) return [];
   const substeps = raw.flatMap((item, index) => {
     if (!item || typeof item !== 'object') return [];
@@ -1169,7 +1173,7 @@ function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> 
       description: description || action,
       expectedOutcome: typeof value.expectedOutcome === 'string' ? value.expectedOutcome.trim() : description || action,
     }];
-  }).slice(0, characterDecision().stepSize.maxPlanSubsteps);
+  }).slice(0, cap);
   return substeps;
 }
 
@@ -1177,7 +1181,7 @@ function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> 
  *  而非整体作废——一条写坏不该陪葬整份清单），reason/final 按声明保留。
  *  白名单把关不在这里：那是宿主门禁的职责（delivery.resolveGateSpecs），
  *  解析层只负责把声明如实带出来。 */
-function normalizePlanVerification(raw: unknown): PlanVerificationSpec[] {
+function normalizePlanVerification(raw: unknown, cap: number): PlanVerificationSpec[] {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((item): PlanVerificationSpec[] => {
     if (!item || typeof item !== 'object') return [];
@@ -1187,10 +1191,13 @@ function normalizePlanVerification(raw: unknown): PlanVerificationSpec[] {
     return [value.final === true
       ? { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '', final: true }
       : { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '' }];
-  }).slice(0, characterDecision().verifyDensity.maxVerificationItems);
+  }).slice(0, cap);
 }
 
-function parsePlanJsonCore(text: string): PlanParseResult {
+function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'production'): PlanParseResult {
+  // 刀 6：production 走现值原样（registerScaledDecision 恒等复制），draft/spike
+  // 收进档位表——三个 slice 消费同一份 caps，判定器与缩放器之间没有第二处映射。
+  const caps: RegisterScaledCaps = registerScaledDecision(activeCharacterProfile(), register);
   if (!text) return { plan: null, repaired: false };
   let cleaned = text.trim();
   // Strip ```json ... ``` fences (some models wrap structured output).
@@ -1225,7 +1232,7 @@ function parsePlanJsonCore(text: string): PlanParseResult {
     const action = typeof step.action === 'string' ? step.action.trim() : '';
     const description = typeof step.description === 'string' ? step.description.trim() : '';
     if (!action && !description) continue;
-    const normalizedSubsteps = normalizePlanSubsteps(step.substeps);
+    const normalizedSubsteps = normalizePlanSubsteps(step.substeps, caps.maxPlanSubsteps);
     const todosRequired = typeof step.todosRequired === 'boolean'
       ? step.todosRequired
       : normalizedSubsteps.length > 0;
@@ -1240,15 +1247,16 @@ function parsePlanJsonCore(text: string): PlanParseResult {
   }
   if (steps.length === 0) return { plan: null, repaired };
   // Hard cap so a non-compliant model can't balloon the review card / system
-  // prompt with dozens of micro-steps (the prompt asks for 4-8).
-  const capped = steps.slice(0, characterDecision().stepSize.maxPlanSteps);
+  // prompt with dozens of micro-steps (the prompt asks for 4-8). 刀 6：cap 从
+  // 档位 caps 读——production 与原值相同，draft/spike 收进各自档位表。
+  const capped = steps.slice(0, caps.maxPlanSteps);
   // Re-index ids after the cap (parsePlanJson assigned sequential ids above).
   const indexed = capped.map((s, i) => ({ ...s, id: String(i + 1) }));
 
   // 刀 1.1：验证清单只在对象形态下存在（纯数组形态无处挂它），如实归一化
   // 后随计划带出；空清单不占字段。
   const rawVerification: unknown = Array.isArray(parsed) ? undefined : (parsed as { verification?: unknown }).verification;
-  const verification = normalizePlanVerification(rawVerification);
+  const verification = normalizePlanVerification(rawVerification, caps.maxVerificationItems);
 
   return {
     plan: {

@@ -19,6 +19,23 @@ import type { CharacterScenarioLedger } from './expression';
 export type CharacterPermissionMode = 'auto' | 'confirm' | 'restricted';
 
 /**
+ * 任务分量档位（刀 6 分量判读）：同一性格下「这件事该用多重的做法」。
+ *   · draft  决策稿——速度第一、数量>精度、形式轻（快速出几版供挑选）；
+ *   · spike  原型穿刺——主路径走通即可、不硬化、明说没做啥；
+ *   · production 正式交付——现行为，默认档，判不出明显信号就落它（档位只下调
+ *     不上调：往重判损失时间，往轻判损失信任）。
+ * 档位是**任务属性**不是会话/内核属性，判定与传播见 ./register.ts。
+ */
+export type WorkOrderRegister = 'draft' | 'spike' | 'production';
+
+/** 档位缩放的结构上限：只收三个真有结构钩子的 cap（蓝图 §1 的 🟢/🟡 结构部分）。 */
+export interface RegisterScaledCaps {
+  maxVerificationItems: number;
+  maxPlanSteps: number;
+  maxPlanSubsteps: number;
+}
+
+/**
  * 决策面（投影 A）——「怎么做」。每个字段都对应一个真实存在的结构钩子，
  * 值等于现行为原样。刀 1 只把这些散落的旋钮收拢到一处。
  */
@@ -60,6 +77,17 @@ export interface CharacterDecisionProfile {
   /** 插话阈值：路由与插话分类共用的置信门。 */
   insertionThreshold: {
     confidenceGate: number;
+  };
+  /**
+   * 分量档位表（刀 6）：draft / spike 两档的结构上限缩放。production **不入表**
+   * ——production 恒等于本 decision 的现值（刀 1 同款安全底：档位只可能比现行为
+   * 轻，不可能更重；registerScaledDecision 用 min() 再锁一层）。确认倾向刻意
+   * 不进档位表：任务级自动批准会踩红线 4 的地盘，且误判降档时连确认一起丢，
+   * 双重放大误判代价。
+   */
+  registerTendency: {
+    draft: RegisterScaledCaps;
+    spike: RegisterScaledCaps;
   };
 }
 

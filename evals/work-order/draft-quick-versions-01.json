@@ -1,0 +1,7 @@
+{
+  "id": "draft-quick-versions-01",
+  "register": "draft",
+  "expectMatched": true,
+  "summary": "快出多版供用户决策，是分量判读的种子判例",
+  "userTurns": ["快速出几个版本的设计稿，我挑一下"]
+}

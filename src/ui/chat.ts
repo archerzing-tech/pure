@@ -26,6 +26,7 @@ import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/Tool
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
 import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { detectWorkOrderRegister, resetActiveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
@@ -89,7 +90,7 @@ import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, 
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
+import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -1549,6 +1550,10 @@ export class ChatController {
   // end of send() so the next user message continues the same Todo instead of
   // reopening the planning preflight.
   private activeComplexPlan: Plan | null = null;
+  // 刀 6 分量判读：活跃计划的分量档位。判定发生在计划诞生的那个回合（宿主从
+  // 用户措辞判出），「继续」回合不从继续提示词重判（"继续"没有分量信号，重判
+  // 会把草稿任务顶回正式档）——与 activePlanProjectBuild 的 gate 同款纪律。
+  private activePlanRegister: WorkOrderRegister = 'production';
   private activePlanNumber = 1;
   private activeTodoNumber = 1;
   private activePlanStarted = false;
@@ -2140,6 +2145,8 @@ export class ChatController {
     this.activePlanProgress = null;
     this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
+    this.activePlanRegister = 'production';
+    resetActiveWorkOrderRegister();
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
@@ -2460,6 +2467,7 @@ export class ChatController {
     this.activePlanProgress = null;
     this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
+    this.activePlanRegister = 'production';
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
@@ -2682,6 +2690,8 @@ export class ChatController {
     this.activePlanProgress = null;
     this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
+    this.activePlanRegister = 'production';
+    resetActiveWorkOrderRegister();
     this.activeComplexPlan = null;
     this.activePlanNumber = 1;
     this.activeTodoNumber = 1;
@@ -3101,10 +3111,11 @@ export class ChatController {
     userImages: MessageImage[],
     projectBuild: boolean,
     onFirstVisible?: () => void,
+    register: WorkOrderRegister = 'production',
   ): Promise<{ narration: string; plan: Plan | null; restarted?: true } | null> {
     const llm = this.planLlm ?? this.turnLlm;
     if (!llm) return null;
-    const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0 });
+    const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0, register });
     const request: import('../shared/types').Message[] = [
       { role: 'system', content: system },
       { role: 'user', content: user, images: userImages },
@@ -3204,7 +3215,7 @@ export class ChatController {
     }
     let plan: Plan | null = null;
     if (planText.trim()) {
-      const parsed = parsePlanJsonWithMeta(planText);
+      const parsed = parsePlanJsonWithMeta(planText, register);
       if (isUsablePlan(parsed.plan)) plan = parsed.plan;
     }
     if (!narrationText && !plan) {
@@ -4685,6 +4696,25 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.activePlanCardSnapshot?.complete === true;
       const continuingPlan = !activePlanFinished && this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
       const planPauseRequested = !activePlanFinished && this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      // 刀 6 分量判读：从用户措辞判这份活的分量（draft 决策稿 / spike 原型穿刺 /
+      // production 正式）。接续回合不重判——"继续"没有分量信号，重判会把草稿
+      // 任务的后续回合顶回正式档（与上面 continuingProjectBuild 同款纪律）。
+      // 判定即注入子代理读取点（active.ts 全局，spawn 时读走）；判轻了回执给
+      // 用户（可纠正），判不出=production 静默（默认档不刷存在感）。
+      const workOrderRegister: WorkOrderRegister = continuingPlan || planPauseRequested
+        ? this.activePlanRegister
+        : detectWorkOrderRegister(userText).register;
+      setActiveWorkOrderRegister(workOrderRegister);
+      if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;
+      if ((workOrderRegister === 'draft' || workOrderRegister === 'spike') && !continuingPlan) {
+        const verdict = detectWorkOrderRegister(userText);
+        this.addStatusBubble(
+          workOrderRegister === 'draft'
+            ? t('workOrder.registerDraft', `已按「${verdict.matched}」判为草稿档：少步骤、轻验证、快出多版供你决策；判重了回复"正式做"即可。`)
+            : t('workOrder.registerSpike', `已按「${verdict.matched}」判为原型档：主路径走通即为达标，跳过生产级打磨；判重了回复"正式做"即可。`),
+          false, false, 'info',
+        );
+      }
       // Semantic routing is the primary decision for ordinary turns. The
       // synchronous Planner remains only a safety floor; it must not decide
       // that a design critique is a build, or that a creative constraint needs
@@ -4782,7 +4812,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // first, one verifiable step at a time, per-step report + verification,
       // next-step recommendation) — composed into the user turn on artifact
       // requests only, so plain Q&A turns don't carry its token cost.
-      const needsDeliveryGate = workflow.needsDeliveryGate;
+      // 刀 6：轻档不进全量交付闸——typecheck/单测/e2e 修到全过的正式管线正是
+      // 「快速出几版」不该吃的全套伺候；轻档的验证由计划的最小清单承担（主路径
+      // 走通），跳过了什么由执行语境的诚实义务段落逼着说明。production 恒等。
+      const needsDeliveryGate = workflow.needsDeliveryGate && workOrderRegister === 'production';
       const needsIntentProbe = workflow.needsProbe;
       const shouldRunTaskAnalysis = !continuingPlan && (
         workflow.requiresPlanReview
@@ -4892,7 +4925,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
           try {
             for (;;) {
-              thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard);
+              thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister);
               if (this.abortController?.signal.aborted) break;
               if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
                 userText = this.applyPreflightSupplements(userText, userImages);
@@ -4953,7 +4986,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               t('plan.narrationNoPlan', '思路讲完了，结构化步骤没能从里面解析出来——不硬凑卡片了，我按刚才的思路直接开工。'),
               false, false, 'info',
             );
-            userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate });
+            userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, register: workOrderRegister });
             if (assessmentFlow) {
               // 跳过了 approvePlan，评估卡的阶段不能悬在半空：同样落定。
               assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
@@ -5050,7 +5083,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // → approved=true，模型第一轮必须立即开始执行，不能再要求“等用户下一条
             // 消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
             userPlan = (thought?.narration
-              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification })}\n\n`
+              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification, register: workOrderRegister })}\n\n`
               : '') + formatPlanForPrompt(approvedPlan, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
             if (modeBubble) {
@@ -6496,6 +6529,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               const isLast = i === assistantSegments.length - 1;
               const finalText = seg.text || (isLast ? (event.payload.finalOutput || '') : '');
               if (!finalText) continue;
+              // 6b 交付直达卡：模型按标记协议自报的产物（「## 产物已就绪：<路径>」）
+              // 并进本回合产物收集——工具收集面（write/edit）之外的产物（bash 生成的、
+              // 脚本落盘的）也照卡送达，用户不用自己翻目录找。与重放投影共用
+              // parseDeliveryMarkers（重载渲染纪律：实时=重放，同源解析）。
+              if (!event.payload.interrupted && gen === this.generation) {
+                for (const markerPath of parseDeliveryMarkers(finalText)) {
+                  addArtifact(markerPath, 'create');
+                }
+              }
               // Render markdown + code highlights + mermaid + plantuml. Fire-and-forget so
               // the for-await loop doesn't block on the async mermaid render; the bubble is
               // visibly replaced as soon as innerHTML is set synchronously inside renderMarkdown.
@@ -6590,7 +6632,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // gate → 强制重新规划。交付后用户的话该由语义路由按它自己
             // 的意思读（运营/维护还是新构建），不再被上一轮的构建身份
             // 绑架。activeComplexPlan 已由完成路径置空，这里补齐同批状态。
-            if (projectDelivered && isPlanBuild) this.activePlanProjectBuild = false;
+            if (projectDelivered && isPlanBuild) {
+              this.activePlanProjectBuild = false;
+              // 刀 6：计划交付完成，分量档位一并收回 production——下一条消息
+              // 是新任务，由它自己的措辞重新判定，不被上一份活的身份绑架。
+              this.activePlanRegister = 'production';
+              resetActiveWorkOrderRegister();
+            }
             // 目录/路径卡片是「项目在哪」的信息，不是「交付合格」的声明：
             // 只要本轮正常结束且产生过文件就显示。此前它被交付门禁拦住——
             // 而会话恢复路径按 write 记录无条件重建卡片，导致「实时不显示、
@@ -7114,6 +7162,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.activePlanProgress = null;
     this.activeTaskScript = null;
     this.activePlanProjectBuild = false;
+    this.activePlanRegister = 'production';
+    resetActiveWorkOrderRegister();
     // 新对话 = 新的一次会话：规划编号重新起算。
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;

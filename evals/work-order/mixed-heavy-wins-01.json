@@ -1,0 +1,7 @@
+{
+  "id": "mixed-heavy-wins-01",
+  "register": "spike",
+  "expectMatched": true,
+  "summary": "同句混合时重者赢：draft 信号+spike 信号=spike",
+  "userTurns": ["快速出个原型看看"]
+}

@@ -104,6 +104,30 @@ describe('projectTranscript', () => {
     expect(blocks.at(-1)).toEqual({ type: 'artifact', items: [{ path: 'src/app.ts' }] });
   });
 
+  it('刀 6b：模型自报的「产物已就绪」标记与工具收集并集成卡（重放与实时同源）', () => {
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '快速出几个版本' },
+      {
+        id: 'a1',
+        modelMessageIndex: 1,
+        role: 'assistant',
+        content: '三版都好了。\n## 产物已就绪：designs/v1.html\n## 产物已就绪：designs/v2.html',
+      },
+      { id: 'a2', modelMessageIndex: 2, role: 'assistant', content: '## 产物已就绪：designs/v1.html' },
+    ]);
+
+    const artifact = blocks.find((b) => b.type === 'artifact') as Extract<TranscriptReplayBlock, { type: 'artifact' }>;
+    expect(artifact.items).toEqual([{ path: 'designs/v1.html' }, { path: 'designs/v2.html' }]);
+  });
+
+  it('刀 6b：无标记的普通回复不产卡（production 行为不变）', () => {
+    const blocks = projectTranscript([
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '解释一下这段代码' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '这段代码做了 X。' },
+    ]);
+    expect(blocks.find((b) => b.type === 'artifact')).toBeUndefined();
+  });
+
   it('carries the preceding user request into artifact replay context', () => {
     const blocks = projectTranscript([
       { id: 'u1', modelMessageIndex: 0, role: 'user', content: '画一幅图' },

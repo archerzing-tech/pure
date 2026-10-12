@@ -1,5 +1,6 @@
 import type { IntentAssessment } from '../coding-agent/types';
 import type { MessageAttachment, MessageImage } from '../shared/types';
+import { parseDeliveryMarkers } from '../shared/delivery';
 import type { PathRepair } from './pathIndex';
 import {
   buildTranscriptToolExec,
@@ -206,6 +207,11 @@ export function projectTranscript(entries: TranscriptEntry[], agentActivities?: 
     const content = getTranscriptContent(entry);
     if (content) {
       blocks.push({ type: 'assistant', content, isPlanPause: !!entry.isPlanPause });
+      // 6b 交付直达卡：模型自报的「## 产物已就绪：<路径>」与工具收集并集——
+      // 与实时渲染同一个解析函数（重载渲染纪律：实时=重放，不许两套口径）。
+      for (const markerPath of parseDeliveryMarkers(content)) {
+        if (!turnArtifactPaths.has(markerPath)) turnArtifactPaths.set(markerPath, { path: markerPath });
+      }
     }
     if (entry.artifacts?.length) {
       turnHasExplicitArtifacts = true;

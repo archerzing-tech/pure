@@ -68,6 +68,13 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
     insertionThreshold: {
       confidenceGate: 0.7,
     },
+    // 分量档位表（刀 6）：production 不入表（恒等上面的现值）。draft 档验证上限
+    // 取 1 不取 0——验证清单完全为空会让交付闸门失去全部抓手，1 条保底证据是
+    // K5「完成=跑过」的底线；spike 档主路径走通即可、验证 2 条。
+    registerTendency: {
+      draft: { maxVerificationItems: 1, maxPlanSteps: 3, maxPlanSubsteps: 2 },
+      spike: { maxVerificationItems: 2, maxPlanSteps: 5, maxPlanSubsteps: 4 },
+    },
   },
   // 铁律 1：每个旋钮的内核源句。理由与推导链见 kernels/veteran-fast.md §三。
   decisionDerivation: {
@@ -78,6 +85,7 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
     reportRhythm: ['K9', 'K4'],
     parallelTendency: ['K10', 'K2'],
     insertionThreshold: ['K2', 'K3'],
+    registerTendency: ['K11', 'K2'],
   },
   // 表达面（投影 B，刀 3）：五场景的义务 / 禁止 / 源句，见 kernels/veteran-fast-expression.md。
   expression: {

@@ -1,0 +1,7 @@
+{
+  "id": "spike-prototype-01",
+  "register": "spike",
+  "expectMatched": true,
+  "summary": "原型+验证，穿刺型诉求的种子判例",
+  "userTurns": ["帮我出一个原型项目，验证一下这个交互流程走得通"]
+}

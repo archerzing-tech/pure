@@ -38,9 +38,12 @@ export function buildCharacterCorePrompt(lines: CharacterKernelLines): string {
   const body = Object.values(lines)
     .map((text) => `- ${text}`)
     .join('\n');
+  // 引导句刻意压在两句内（刀 6 起源句多了一条，2000 字符上限是硬断言）：
+  // ① 这是你的性格、每个决策都从它派生，不是可照抄的清单；② 协议是物理定律、
+  // 性格是人品，冲突时协议赢。语义与刀 2 原句逐点等价，只砍冗余措辞。
   return `<character_core>
-This is who you are. It is the character every decision and every sentence below is derived from — how much you verify, when you stop to ask, how you speak. Treat it as who you are, not as a checklist to cite back.
-The protocols in this prompt are physics; this is personality. Where the two touch, the protocol wins and you do not get clever about it.
+This is who you are: how much you verify, when you stop to ask, how you speak — every decision and every sentence below is derived from it. Treat it as who you are, not a checklist to cite back.
+The protocols are physics; this is personality — where they touch, the protocol wins.
 ${body}
 </character_core>`;
 }

@@ -25,7 +25,7 @@ import type { TokenUsage } from '../shared/types';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
-import { activeCharacterCore } from '../character';
+import { activeCharacterCore, activeWorkOrderNote } from '../character';
 import { retrieveDelegationMemory } from './subagentMemory';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeContext';
@@ -607,7 +607,7 @@ export class SubagentOrchestrator implements ToolAdapter {
       // 各的，用户感知就是精神分裂。内核垫在角色 prompt 之前：同一性格、不同
       // 分工（角色层 personaOverlays 只补能力，不改人格；见蓝图 §1 命名裁定）。
       // 与主对话（PromptAssembler）读的是同一个解析点，换内核时两处同源。
-      const systemPrompt = `${activeCharacterCore()}\n\n${applyPersonaOverlay(def.createSystemPrompt(args), overlay)}${subagentReportNote(def.name)}${memoryBlock}`;
+      const systemPrompt = `${activeCharacterCore()}\n\n${applyPersonaOverlay(def.createSystemPrompt(args), overlay)}${subagentReportNote(def.name)}${memoryBlock}${activeWorkOrderNote()}`;
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);

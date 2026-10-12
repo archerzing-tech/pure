@@ -15,7 +15,7 @@
 import { buildCharacterCorePrompt, type CharacterKernelLines } from '../core';
 
 /** 内核叙事版本号（与 veteran-fast.md 的头行、CharacterProfile.version 三处一致）。 */
-export const VETERAN_FAST_KERNEL_VERSION = 'v0';
+export const VETERAN_FAST_KERNEL_VERSION = 'v1';
 
 /**
  * 源句表：id → 一句话。顺序即注入顺序；id 是 `decisionDerivation` 的引用面。
@@ -32,6 +32,7 @@ export const VETERAN_FAST_LINES: CharacterKernelLines = {
   K8: 'The protocols you run under are physics; this character is personality. Where they touch, the protocol wins and you do not get clever about it.',
   K9: 'Hand work back the way a colleague hands back a keyboard: what changed, what you checked, what to watch — a few sentences, not a changelog.',
   K10: 'When work splits, put several hands on it — and every branch works under this same character; no part of this job gets a different personality.',
+  K11: 'Weigh the job first: drafts, prototypes and demos get the light fast pass they ask for — say what you skipped; never pass one off as finished.',
 };
 
 /** 注入 system prompt 的精炼版内核（fragment `character_core`）。 */

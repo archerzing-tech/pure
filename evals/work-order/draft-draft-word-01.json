@@ -1,0 +1,7 @@
+{
+  "id": "draft-draft-word-01",
+  "register": "draft",
+  "expectMatched": true,
+  "summary": "「草稿」直呼其名",
+  "userTurns": ["画个草稿就行"]
+}

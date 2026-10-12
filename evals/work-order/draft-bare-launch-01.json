@@ -1,0 +1,7 @@
+{
+  "id": "draft-bare-launch-01",
+  "register": "draft",
+  "expectMatched": true,
+  "summary": "裸「上线」不判重：它常是任务内容不是档位声明",
+  "userTurns": ["快速出一版上线要用的 banner"]
+}

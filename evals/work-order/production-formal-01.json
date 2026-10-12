@@ -1,0 +1,7 @@
+{
+  "id": "production-formal-01",
+  "register": "production",
+  "expectMatched": true,
+  "summary": "正式词命中，恒等现行为",
+  "userTurns": ["做一个正式的项目，要上生产环境的"]
+}

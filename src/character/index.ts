@@ -23,7 +23,12 @@ export type {
   CharacterDecisionDerivation,
   CharacterExpressionProfile,
   CharacterPermissionMode,
+  RegisterScaledCaps,
+  WorkOrderRegister,
 } from './types';
+// 分量判读（刀 6）：档位类型与判定/缩放（verdict 类型与函数同住 ./register.ts）。
+export type { WorkOrderVerdict } from './register';
+export { detectWorkOrderRegister, registerScaledDecision } from './register';
 export type { CharacterKernelLineId, CharacterKernelLines } from './core';
 export { buildCharacterCorePrompt } from './core';
 export type { CharacterScenarioId, CharacterScenarioLedger, CharacterScenarioProjection } from './expression';
@@ -35,6 +40,14 @@ export {
   activeCharacterProfileId,
   resetActiveCharacterProfile,
   setActiveCharacterProfile,
+} from './active';
+
+// 分量档位的回合级状态（刀 6）：宿主每回合判定后注入，子代理 spawn 时读走。
+export {
+  activeWorkOrderNote,
+  activeWorkOrderRegisterState,
+  resetActiveWorkOrderRegister,
+  setActiveWorkOrderRegister,
 } from './active';
 
 // 名册：id → profile 的解析与列举。

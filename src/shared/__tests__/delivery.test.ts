@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -358,5 +358,29 @@ describe('design-first phase (UI builds)', () => {
 
   it('footgun 回归：formatDeliveryPipeline 无默认形参（needsDesignPhase 场景必填）', () => {
     expectNoDefaultParams([['formatDeliveryPipeline', 2, formatDeliveryPipeline]]);
+  });
+});
+
+// 交付直达卡（人格轨道刀 6b）：产物标记协议的解析面。实时渲染（chat.ts 的
+// Completed 分支）与重载回放（transcriptProjection）共用这一个函数——重载
+// 渲染纪律：实时=重放，两边不许各写一套正则。
+describe('parseDeliveryMarkers（刀 6b 产物标记协议）', () => {
+  it('单份产物：取行内路径，忽略前后散文', () => {
+    expect(parseDeliveryMarkers('做完了。\n## 产物已就绪：designs/v2.html\n每份都可以直接打开。')).toEqual(['designs/v2.html']);
+  });
+
+  it('多份产物：按出现顺序全收，重复路径去重', () => {
+    const text = '## 产物已就绪：a.html\n中间的话\n## 产物已就绪：b.html\n## 产物已就绪：a.html';
+    expect(parseDeliveryMarkers(text)).toEqual(['a.html', 'b.html']);
+  });
+
+  it('无标记 / 空行 / 只有标记没有路径 → 空', () => {
+    expect(parseDeliveryMarkers('没有标记的普通回复')).toEqual([]);
+    expect(parseDeliveryMarkers('')).toEqual([]);
+    expect(parseDeliveryMarkers('## 产物已就绪：\n(无文件名)')).toEqual([]);
+  });
+
+  it('允许标记行内多一个空格（模型排版的抖动不炸解析）', () => {
+    expect(parseDeliveryMarkers('##  产物已就绪：  x.html')).toEqual(['x.html']);
   });
 });
