@@ -12,7 +12,8 @@ import { resolveCliAutoApprove } from './cliIntent';
 import { CUSTOM_PRESETS, customProviderFor, customProviderLabel, isCustomProviderId, nextCustomProviderId, providerOverrideFor } from './shared/providers';
 import { bold, cyan, dim, green, red } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import { autoDetectProvider, DEFAULT_CLI_AUTO_APPROVE, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, CONFIG_PATH } from './cliConfig';
+import { autoDetectProvider, defaultCliAutoApprove, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, resolveCharacterProfileId, CONFIG_PATH } from './cliConfig';
+import { setActiveCharacterProfile } from './character';
 import type { CliArgs } from './cliConfig';
 import { mergePhaseModelConfig } from './shared/phaseModels';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
@@ -83,6 +84,10 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   }
 
   const fileCfg = loadConfig();
+  // 人格轨道 刀 5：活跃性格内核由配置（--character > config.json）注入运行时。
+  // 必须在下面读 defaultCliAutoApprove() 之前完成——那个默认值就来自内核的
+  // 确认倾向。认不出的 id 不生效（保持默认内核）且不报错：手改配置不该炸启动。
+  setActiveCharacterProfile(resolveCharacterProfileId(flags.character, fileCfg?.characterProfileId));
 
   // Precedence for provider: --flag > env (auto-detect) > config > default.
   const envProvider = autoDetectProvider();
@@ -110,7 +115,7 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // a one-way opt-out (`--prompt-on-tool`) so users who want the original
   // interactive confirmation flow can still get it. No positive opt-in
   // flag is needed because the default already matches the common case.
-  const autoApprove = resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE);
+  const autoApprove = resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, defaultCliAutoApprove());
 
   // MCP servers: GUI-written ~/.pure/config.json entries first, then any
   // repeatable --mcp-server flags (a flag with the same name replaces the

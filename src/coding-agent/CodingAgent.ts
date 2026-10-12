@@ -352,6 +352,10 @@ export class CodingAgent {
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,
+      // 人格轨道 刀 5 — 长会话人格漂移探针（每个回合免层抽查 + 每 8 轮/命中时
+      // 一次黄金探针短调用）。GUI 与 CLI 在这里同源打开，关也关在同一处；
+      // 触发时机 / 判定口径 / 成本上界见 src/character/drift.ts。
+      characterDrift: true,
     });
   }
 

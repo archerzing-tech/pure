@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   INPUT_CLARIFY_CONFIDENCE,
-  INPUT_DEFAULT_CONFIDENCE,
+  inputDefaultConfidence,
   INPUT_DECISION_LOG_LIMIT,
   applyConfidenceGate,
   clampConfidence,
@@ -42,8 +42,8 @@ describe('InputDecision confidence gate', () => {
     expect(clampConfidence('0.8')).toBe(0.8);
     expect(clampConfidence(1.7)).toBe(1);
     expect(clampConfidence(-3)).toBe(0);
-    expect(clampConfidence(undefined)).toBe(INPUT_DEFAULT_CONFIDENCE);
-    expect(clampConfidence('high')).toBe(INPUT_DEFAULT_CONFIDENCE);
+    expect(clampConfidence(undefined)).toBe(inputDefaultConfidence());
+    expect(clampConfidence('high')).toBe(inputDefaultConfidence());
   });
 
   it('turns a doubtful verdict into a question and clears the abort flag', () => {

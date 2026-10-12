@@ -141,10 +141,15 @@ export const INPUT_CLARIFY_CONFIDENCE = 0.6;
  * a worse regression than the one being fixed. The decision is flagged
  * (`signals.confidenceDefaulted`), so a log filled with that flag is the
  * evidence needed to revisit this number.
+ *
+ * 值来自当前活跃性格内核的决策面（刀 1 收拢，刀 5 改**函数**）：内核的置信门
+ * 是可切换的，做成模块级常量会在宿主注入活跃内核之前就被固化。
  */
-export const INPUT_DEFAULT_CONFIDENCE = activeCharacterProfile().decision.insertionThreshold.confidenceGate;
+export function inputDefaultConfidence(): number {
+  return activeCharacterProfile().decision.insertionThreshold.confidenceGate;
+}
 
-export function clampConfidence(value: unknown, fallback = INPUT_DEFAULT_CONFIDENCE): number {
+export function clampConfidence(value: unknown, fallback = inputDefaultConfidence()): number {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   if (!Number.isFinite(n)) return fallback;
   return Math.min(1, Math.max(0, n));

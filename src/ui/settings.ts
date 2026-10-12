@@ -4,6 +4,7 @@
 // ./config.ts (needed at startup by chat.ts / main.ts) and provider defaults
 // come from ../shared/providers.ts.
 
+import { DEFAULT_CHARACTER_PROFILE_ID, isCharacterProfileId, listCharacterProfiles, setActiveCharacterProfile } from '../character';
 import { fetchAndDisplayVersion, checkForUpdatesManual } from './updater';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { escapeHtml } from '../shared/html';
@@ -932,6 +933,8 @@ export class SettingsPanel {
       // handled by the grid-delegated listeners above — the panel is
       // re-rendered on every save, so a static binding would go stale.
       '#cfg-language',
+      // '#cfg-character' 不在这里：它的 change 除了存盘还要**立刻注入运行时**
+      // （见 renderCharacterOptions），自己接管监听。
       '#cfg-city',
       '#cfg-fontsize', '#cfg-density', '#cfg-tool-cards-expanded',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
@@ -2252,6 +2255,46 @@ export class SettingsPanel {
 
   // ── Load config into form ──
 
+  /**
+   * 性格内核选择器（人格轨道 刀 5）。选项来自名册（src/character/registry.ts），
+   * 不是静态标记——加内核只需在名册登记，这里自动出现，也不会漏进没登记的 id。
+   *
+   * 选中值落 `PureConfig.characterProfileId`，并**立刻**注入运行时（不必重启）。
+   *
+   * 生效面分两半，写清楚免得被误读成「当场全换」：
+   *   · 决策面（mode 阈值 / 计划上限 / 验证条数 / 并行上限 / 插话置信门）是每次
+   *     真读（见 src/character/active.ts 的分工说明），本会话下一次调用就是新值；
+   *   · 两张提示词投影（character_core / character_expression）在本会话里已被
+   *     Harness 逐字冻结（sessionSystemPrompt，保 provider 侧 prompt 缓存前缀
+   *     稳定），所以它们从**下一个会话**起生效；当前活跃内核也会被子代理继承
+   *     （spawn 时读当前值），这是「同一性格」铁律 4 的代价面。
+   *
+   * 陈旧值（手改过配置 / 老版本留下的 id）不静默改配置、也不假装选中了别的内核：
+   * 回显默认内核，用户一保存就被写正（gatherConfig 写的是同一个回退值）。
+   */
+  private renderCharacterOptions(cfg: PureConfig) {
+    const select = document.getElementById('cfg-character') as HTMLSelectElement | null;
+    if (!select) return;
+    select.replaceChildren(...listCharacterProfiles().map((profile) => {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.name;
+      option.title = profile.description;
+      return option;
+    }));
+    select.value = isCharacterProfileId(cfg.characterProfileId)
+      ? cfg.characterProfileId
+      : DEFAULT_CHARACTER_PROFILE_ID;
+    // 面板每次打开都会重跑本方法（select 元素不重建），所以监听只挂一次。
+    if (select.dataset.bound !== '1') {
+      select.dataset.bound = '1';
+      select.addEventListener('change', () => {
+        setActiveCharacterProfile(select.value);
+        this.autoSave();
+      });
+    }
+  }
+
   private loadToForm() {
     // Re-apply translations for dynamic content
     applyTranslations();
@@ -2274,6 +2317,7 @@ export class SettingsPanel {
     if (phaseJudgeEl) phaseJudgeEl.value = cfg.phaseModels?.judge ?? '';
     this.refreshPhaseModelOptions();
     (document.getElementById('cfg-language') as HTMLSelectElement).value = cfg.language;
+    this.renderCharacterOptions(cfg);
     const cityEl = document.getElementById('cfg-city') as HTMLInputElement | null;
     if (cityEl) cityEl.value = cfg.city ?? '';
 
@@ -4330,6 +4374,8 @@ export class SettingsPanel {
       // land in providerOverrides via gatherProviderOverrides().
       baseURL: prev.baseURL,
       language: (document.getElementById('cfg-language') as HTMLSelectElement).value as PureConfig['language'],
+      characterProfileId: (document.getElementById('cfg-character') as HTMLSelectElement | null)?.value
+        || DEFAULT_CHARACTER_PROFILE_ID,
       city: (document.getElementById('cfg-city') as HTMLInputElement | null)?.value.trim() ?? '',
       theme: (document.querySelector('.theme-option.active')?.getAttribute('data-theme') || 'light') as PureConfig['theme'],
       fontSize: (document.getElementById('cfg-fontsize') as HTMLSelectElement).value as PureConfig['fontSize'],

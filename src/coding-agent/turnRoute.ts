@@ -36,7 +36,7 @@ import { inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } 
 import type { SemanticRouteDecision, TaskMode } from './types';
 import {
   INPUT_CLARIFY_CONFIDENCE,
-  INPUT_DEFAULT_CONFIDENCE,
+  inputDefaultConfidence,
   detectScheduledInput,
   recordInputDecision,
   type InputAction,
@@ -250,7 +250,7 @@ export async function decideTurnRoute(
   // decision, taken and recorded by whoever can hold it (see `defer` above).
   const { action, scope } = classifyTurnWorkflow(workflow);
   const confidence = route
-    ? route.confidence ?? INPUT_DEFAULT_CONFIDENCE
+    ? route.confidence ?? inputDefaultConfidence()
     : 1;
   const agreement = route === null || readsAsChat(route) === prefetch.floorChat;
   // Advisory only (see the field): the gate's verdict is reported, the action

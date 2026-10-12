@@ -271,6 +271,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.autoContinue.hint': '复杂计划任务每完成一个阶段后自动继续执行，无需手动回复「继续」',
     'general.autoContinueRounds': '单条消息最大续跑轮数',
     'general.autoContinueRounds.hint': '自动续跑最多连续执行的轮数（1–20，默认 8），触顶即停，防止无限循环',
+    'general.character': '性格',
+    'general.character.hint': '决定 pure 怎么做与怎么说（换内核 = 换做事方式与汇报节奏）；提示词部分从下一个会话起生效，计划与确认阈值当场生效',
 
     // ── Environment (Settings → General) ──
     'env.title': '环境上下文',
@@ -1548,6 +1550,8 @@ const translations: Record<Language, Record<string, string>> = {
     'general.autoContinue.hint': 'Automatically keep executing after each plan stage instead of waiting for “继续”',
     'general.autoContinueRounds': 'Max auto rounds per message',
     'general.autoContinueRounds.hint': 'How many auto-continue rounds may chain per message (1–20, default 8); stops at the cap to prevent endless looping',
+    'general.character': 'Character',
+    'general.character.hint': 'Decides how pure works and how it talks; the prompt side applies from the next session on, planning and approval thresholds take effect immediately',
 
     // ── Environment (Settings → General) ──
     'env.title': 'Environment',

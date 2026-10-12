@@ -6,6 +6,7 @@ import { AgentLoopEngine } from '../engine/AgentLoopEngine';
 import { StateManager } from './StateManager';
 import { ContextEngine, type ContextCompactionResult } from './ContextEngine';
 import { PromptAssembler, promptAssembler, resolvePromptBudget, estimatePromptTokens, estimateToolDefinitionTokens, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { CharacterDriftGuard, type DriftReport } from '../character';
 import { promptObservability, promptVersion, observeStrategy, type MemoryInjectionObservation, type PromptObservability } from '../shared/promptObservability';
 import { AdaptiveControlPlane, adaptiveControlPlane, type AdaptiveStrategy } from '../shared/adaptiveControl';
 import type {
@@ -151,9 +152,19 @@ export interface HarnessConfig {
    *  记账语义由字段缺席兜底（stash 不发生 ⇒ 记录无字段）。 */
   evolutionEnabled?: boolean;
   /** P0 棘轮 — 本次会话注入的技能名单（SKILL.md 侧，宿主装配系统提示时点
-   * 名）。与记忆条目 id 一起进 memoryInjection 观测，供贡献切片聚合。
-   * Omitted = 无技能可记（CLI 装配点接线前的过渡形态）。 */
+   *  名）。与记忆条目 id 一起进 memoryInjection 观测，供贡献切片聚合。
+   *  Omitted = 无技能可记（CLI 装配点接线前的过渡形态）。 */
   injectedSkills?: string[];
+  /**
+   * 人格轨道 刀 5 — 长会话人格漂移探针（omitted = 关）。开启后，每个助手回合
+   * 的收尾（与 E1.1 反思同一条 Completed 缝）会对**真实回答**跑三条红线断言
+   * （零额外调用），并按间隔/命中用**本会话冻结的 system prompt** 单独问一条
+   * 黄金探针（一次短调用，不进用户消息流、不入 transcript）。
+   * 触发时机 / 判定口径 / 成本上界见 src/character/drift.ts 头注释。
+   */
+  characterDrift?: boolean;
+  /** 漂移记账回调（宿主落事件账 / 遥测）。Omitted = 只往 stderr 打一行警告。 */
+  onCharacterDrift?: (report: DriftReport) => void;
 }
 
 export class Harness {
@@ -191,6 +202,11 @@ export class Harness {
   // one-shot turn can drain them (settleReflections) instead of killing the
   // reflection call mid-flight.
   private readonly inFlightReflections = new Set<Promise<void>>();
+  // 人格轨道 刀 5 — 漂移探针（config.characterDrift 开启时才建）。与反思同一
+  // 语义：回合收尾 fire-and-forget，但被追踪，退出前由 settleReflections 一并排空。
+  private readonly driftGuard?: CharacterDriftGuard;
+  private readonly inFlightDrift = new Set<Promise<unknown>>();
+  private characterDriftTurn = 0;
   private readonly reflection: Required<ReflectionConfig>;
 
   constructor(config: HarnessConfig) {
@@ -223,6 +239,23 @@ export class Harness {
     }
     if (config.stateStore) {
       this.stateMgr = new StateManager(config.stateStore, config.sessionId);
+    }
+    if (config.characterDrift) {
+      // 贵层用宿主自己的 llm：探针与主线走同一家provider、同一份模型预算，
+      // 不另开渠道。omit onDrift 时只打一行警告（开发者能看到，UI 不被打扰）——
+      // 人格漂移是「这次变更让人格在某场景漂了」的线索，不是用户要处理的错误。
+      this.driftGuard = new CharacterDriftGuard({
+        probe: (systemPrompt, userText) => config.llm
+          .complete([{ role: 'system', content: systemPrompt }, { role: 'user', content: userText }], [])
+          .then((response) => response.content),
+        onDrift: config.onCharacterDrift ?? ((report) => {
+          const failures = [
+            ...report.turnGrade.failures,
+            ...(report.probeGrade?.failures ?? []),
+          ].join('; ');
+          console.warn(`[pure] character drift (${report.characterProfileId}, turn ${report.turnIndex}): ${failures}`);
+        }),
+      });
     }
   }
 
@@ -530,6 +563,8 @@ export class Harness {
               retriedFailures,
               drainedFailures,
             );
+            // 刀 5 — 漂移探针与反思同一条缝（fire-and-forget，退出前排空）。
+            this.observeCharacterDrift(event.payload.finalOutput);
           }
           if (event.payload.isComplete && retriedFailures.length > 0) {
             await this.writeRetriedErrorPatterns(retriedFailures, userPrompt).catch(() => {});
@@ -743,6 +778,8 @@ export class Harness {
             retriedFailures,
             drainedFailures,
           );
+          // 刀 5 — 与 run() 同一条缝：真实回答的免层抽查 + 按间隔的黄金探针。
+          this.observeCharacterDrift(event.payload.finalOutput);
           if (retriedFailures.length > 0) {
             await this.writeRetriedErrorPatterns(retriedFailures, newUserPrompt).catch(() => {});
           }
@@ -1170,11 +1207,32 @@ export class Harness {
    * when nothing is in flight.
    */
   async settleReflections(timeoutMs = 30_000): Promise<void> {
-    if (this.inFlightReflections.size === 0) return;
+    // 漂移探针也算在飞（刀 5）：它同样是回合末的后台调用，退出前该排空——否则
+    // 一条-shot 场景下探针永远报不出来。
+    const inFlight = [...this.inFlightReflections, ...this.inFlightDrift];
+    if (inFlight.length === 0) return;
     await Promise.race([
-      Promise.allSettled([...this.inFlightReflections]),
+      Promise.allSettled(inFlight),
       new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
     ]);
+  }
+
+  /**
+   * 人格轨道 刀 5 — 观测一个已完成回合并记账。fire-and-forget：探针的那一次
+   * 短调用不该拖慢也没必要拖慢用户这一轮（observeTurn 自身永不抛）。
+   * 用**冻结的会话提示**（sessionSystemPrompt）而不是当前重算的提示：探针要探的
+   * 是「模型这几轮实际看到的那份人设还在不在」，不是「如果现在重新装配会怎样」。
+   */
+  private observeCharacterDrift(finalOutput: string | undefined): void {
+    if (!this.driftGuard) return;
+    this.characterDriftTurn += 1;
+    const task = this.driftGuard.observeTurn({
+      turnIndex: this.characterDriftTurn,
+      output: finalOutput ?? '',
+      systemPrompt: this.sessionSystemPrompt ?? '',
+    });
+    this.inFlightDrift.add(task);
+    void task.finally(() => { this.inFlightDrift.delete(task); });
   }
 
   private async writeSessionMemory(

@@ -41,7 +41,7 @@ import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
-import { loadConfig, DEFAULT_CLI_AUTO_APPROVE, PURE_DIR } from './cliConfig';
+import { loadConfig, defaultCliAutoApprove, PURE_DIR } from './cliConfig';
 import { runCliSleepCycle } from './evolution/cliHost';
 
 /**
@@ -391,7 +391,7 @@ function applyCliIntentPermission(
   args: CliArgs,
 ): void {
   if (!(tools instanceof ToolRegistry)) return;
-  const autoApprove = resolveCliAutoApprove(!args.autoApprove, DEFAULT_CLI_AUTO_APPROVE);
+  const autoApprove = resolveCliAutoApprove(!args.autoApprove, defaultCliAutoApprove());
   tools.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
 }
 

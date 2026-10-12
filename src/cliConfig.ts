@@ -11,6 +11,7 @@ import { red } from './termcolors';
 import { customProviderFor, defaultModelFor } from './shared/providers';
 import type { CustomProvider, ProviderOverride } from './shared/providers';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
+import { activeCharacterProfile } from './character';
 import type { EvolutionConfig } from './adapter/memory/evolution';
 import type { BudgetConfig } from './shared/types';
 import type { PhaseModelConfig } from './shared/phaseModels';
@@ -69,6 +70,14 @@ export interface PureConfig {
    * configured provider.
    */
   phaseModels?: PhaseModelConfig;
+  /**
+   * 活跃性格内核 id（人格轨道 刀 5）。与 GUI 同源：两边读写 ~/.pure/config.json
+   * 的同一个字段（GUI 的 localStorage 镜像见 src/ui/config.ts）。
+   *
+   * 终端侧还有 `--character <id>` 可以单次覆盖（parseArgs 里 flag 优先于配置）。
+   * 不认识的值一律回退默认内核「老手快线」，不报错——手改配置不该炸启动。
+   */
+  characterProfileId?: string;
 }
 
 export function loadConfig(): PureConfig | null {
@@ -284,4 +293,26 @@ export const DEFAULT_BUDGET: BudgetConfig = {
 // 着突然没权限」）：高风险轮照常自动放行、风险提示行照打；唯一的交互门是
 // dangerLevel==='danger' 的操作本身（createCliPermissionHandler 的 carve-out）
 // ——对破坏性操作的护栏是操作分级，不是模型的每轮判词。
-export const DEFAULT_CLI_AUTO_APPROVE = true;
+//
+// 刀 5（人格轨道）：这个默认值现在由**当前活跃性格内核**给出。默认内核
+// （老手快线）的确认倾向是 auto，所以上面的立场逐字不变；把「工匠慢线」放在
+// 台上时它的确认倾向是 confirm，终端默认就该逐步问——那是那个内核的定义，
+// 不是全局默认被改了（蓝图 §4 红线 4）。函数而非常量：宿主注入活跃内核晚于
+// 模块加载，常量会在那一刻之前就被固化。
+export function defaultCliAutoApprove(): boolean {
+  return activeCharacterProfile().decision.confirmTendency.permissionMode === 'auto';
+}
+
+/**
+ * 活跃性格内核 id 的取值级次：`--character <id>` > config.json。`--character`
+ * 后面不带值时 flag 解析器给的是字面 'true'（见 cli.ts 的 parseArgs），那不是
+ * 合法 id，当没给。返回值交给 `setActiveCharacterProfile()`——认不出的 id 由它
+ * 挡下（保持默认内核），本函数不管校验。
+ */
+export function resolveCharacterProfileId(
+  flagValue: string | undefined,
+  configured: string | undefined,
+): string | undefined {
+  const picked = flagValue && flagValue !== 'true' ? flagValue : undefined;
+  return picked ?? configured;
+}

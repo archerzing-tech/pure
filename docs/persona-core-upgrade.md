@@ -93,9 +93,15 @@ Card）但纯 prompt 弱模型不稳，工程侧有参数化（Claude Code permi
   ——`src/character/kernels/<id>.md` 自带版本号与**独立内容快照测试**，不再写进
   `system-prompt.md`（否则每换一次内核都要改人读契约与硬断言）。
 - 活跃内核 id 存 `PureConfig`，GUI / CLI 同源读取；切换内核 = 换一个 fragment 源，
-  不触碰 L0。（**待做**：刀 2 只有一个内核对候选，选择器没有可选的第二项，故
-  `activeCharacterProfile()` / `activeCharacterCore()` 是唯一读取点、恒返回默认；
-  刀 5 上第二内核时在此接线。）
+  不触碰 L0。**✅ 已落地（2026-10-12，刀 5）**：字段 `characterProfileId`（GUI
+  LocalStorage 配置 + CLI `~/.pure/config.json` 同源；终端另有 `--character` 单次
+  覆盖）；名册 `src/character/registry.ts`；活跃状态住 `src/character/active.ts`，
+  宿主在启动时注入（`src/ui/main.ts` / `src/cli.ts`），GUI 设置页（Settings →
+  General → 性格）当场调用同一个注入函数。
+  **生效面分两半，不许混着说**：决策面阈值是每次真读（懒读改造见下），本会话内
+  立即生效；两张提示词投影会被 `Harness.sessionSystemPrompt` 逐字冻结（保
+  provider 侧缓存前缀稳定），所以要到**下一个会话**才换——这不是人格层的限制，
+  是既有的会话契约。
 - 内核文本变更是**行为变更**，按 §4 闸门跑探针集后才许上线。
 - **刀 2 实现状态（2026-10-11）**：以上四条中，fragment 注入、镜像自守（.md 与
   源句表逐字同文的快照测试）已按本文落地；活跃 id 存 `PureConfig` 待刀 5。
@@ -106,7 +112,7 @@ Card）但纯 prompt 弱模型不稳，工程侧有参数化（Claude Code permi
 
 | 决策面旋钮 | 今天的形态（代码证据） | 保底等级 | 能否落成代码闸门 |
 |---|---|---|---|
-| 确认倾向 | `PermissionManager` + 分类自动批准 read/write/cmd/git（`src/ui/chat.ts:1034` `createPermissionHandler`；`src/cliHarness.ts:284`） | 🟢 结构 | 已是；内核只调默认值 |
+| 确认倾向 | `PermissionManager` + 分类自动批准 read/write/cmd/git（`src/ui/chat.ts:1034` `createPermissionHandler`；`src/cliHarness.ts:284`） | 🟢 结构 | **已是默认值通道**（刀 5）：GUI `defaults()` / CLI `defaultCliAutoApprove()` 从活跃内核取默认；用户显式设过的权限模式与自动开关**永远优先**——内核不覆盖人的决定 |
 | mode 判定阈值 | `Planner.detectMode`（`src/coding-agent/Planner.ts:634`）确定性规则 + 语义路由 LLM + `forcedMode` 覆盖（`src/shared/requestWorkflow.ts:59`） | 🟢 结构（有规则兜底） | 已是；内核只调阈值 |
 | 验证密度 | 结构上限 `MAX_PLAN_VERIFICATION_ITEMS=8`（`Planner.ts:20`）、`verificationTimeoutFor`（`src/shared/delivery.ts:171`）、`resolveGateSpecs` 裁决；清单内容由 LLM 计划给 | 🟡 混合 | 可落：把「最少验证项 / 必跑清单」提为 gate 参数 |
 | 步子大小 | 结构上限 `MAX_PLAN_STEPS=10` / `MAX_PLAN_SUBSTEPS=8`（`Planner.ts:19-20`）；计划粒度本身由 LLM | 🟡 混合 | 可落：粒度阈值进 `PlannerConfig`（`complexFileThreshold` 已具雏形） |
@@ -116,6 +122,13 @@ Card）但纯 prompt 弱模型不稳，工程侧有参数化（Claude Code permi
 
 **边界（补铁律 2）**：保底只承诺 🟢 全量与 🟡 的**结构部分**（上限、裁决、守卫）；
 🟡 的生成内容与 🔴 全量，本质是长尾表达，**只对强模型承诺**，不设也不要求结构闸门。
+
+**✅ 刀 5 的懒读改造（表里前五行现在真的跟着活跃内核走）**：刀 1 把旋钮收拢成
+「从 profile 读」时，Planner / adaptiveControl / inputDecision 三处是在**模块加载时**
+取一次常量。多内核之前这没问题（只有一个内核）；有了选择器，宿主注入活跃内核发生在
+启动读配置之后、晚于模块加载，早读会让「切内核」静默失效。故三处改为**每次真读**
+（`characterDecision()` / `maxSubagentRoles()` / `inputDefaultConfidence()`），
+并留一句「为什么不能做成常量」的注释在各自的取值点。
 
 ## 2. 调研结论（2025–2026，已核来源）
 
@@ -216,12 +229,44 @@ Card）但纯 prompt 弱模型不稳，工程侧有参数化（Claude Code permi
 - **未做**：北极星指标（「服务意识提升」的度量，审计 P2）仍缺——本刀是变更
   闸门，不等于效果度量；漂移探针随刀 5 再立。
 
-### 刀 5｜第二内核 + 漂移探针
-- 第二人格「工匠慢线」（高危改动：先方案后动手、步步验证、多确认），验证
-  多内核切换与子代理继承链。
-- 长会话漂移探针：会话中定期注入黄金探针，检测回答是否仍在内核画像内
-  （assistant axis 证据：therapy 式/元反思输入是高危区，pure 的插话场景
-  要重点盯）。
+### 刀 5｜第二内核 + 漂移探针 ✅（2026-10-12 落地）
+
+**第二人格「工匠慢线」（高危，需显式激活）**
+- 内容：`src/character/kernels/craftsmanSlow.ts`（源句表 C1–C10，C 前缀以免与
+  老手快线的 K 编号混读）+ `craftsman-slow.md`（人读源）+
+  `craftsmanSlowExpression.ts` / `craftsman-slow-expression.md`（表达面五场景账）；
+  profile 落 `src/character/craftsmanProfile.ts`。
+- 决策面**刻意不等于**快线（否则第二个内核是个同义词）：简单任务也先规划 + 1 个
+  文件证据即算复杂、验证清单上限 12、计划 6 步 / 子步骤 5、默认 `confirm` 且读写跑
+  全不自动批准、逐阶段交代、并行上限 2、插话门 0.85。逐条锁死在
+  `characterKernels.test.ts`（改回快线同值即红）。
+- 选择器：名册 `registry.ts` + 活跃状态 `active.ts`（唯一可变状态）+ `index.ts`
+  转发面；配置字段 `characterProfileId`（GUI + CLI 同源）、`--character` 单次覆盖；
+  GUI 设置页 Settings → General → 性格 当场注入。未知 id **不生效且不报错**
+  （保持现状，回值 false），陈旧配置不炸启动、也不静默变成别的内核。
+- 子代理继承（铁律 4）：`SubagentOrchestrator` 读同一个活跃内核，无需改动。
+
+**长会话漂移探针**（触发时机 / 判定口径 / 成本三项定义在
+`src/character/drift.ts` 头注释里，审计 P2 要的就是这三项）
+- 两层：① 免层每轮对**真实回答**跑三条红线断言（零额外调用、零上下文污染）；
+  ② 贵层每 8 轮或免层命中时，用**本会话冻结的 system prompt** 单独问一条黄金探针
+  ——这次调用不进用户消息流、不入 transcript，用户看不到也不污染上下文。
+- 判定复用 `gradeCharacterProbe`：运行时探针与 `eval:character` 判例集**同一套判定
+  函数**，不会出现「CI 判过、线上判不过」的双口径；仍然禁止 LLM-as-judge。
+- 成本上界：每会话最多 4 次探针调用（免层 0），整层可关（宿主不传 probe）。
+- 接线：`HarnessConfig.characterDrift`（默认关）→ Harness 在 Completed 缝上
+  fire-and-forget 观测，与 E1.1 反思一起被 `settleReflections` 排空；GUI 与 CLI
+  在同源两处打开。漂移命中 → 一行警告 + 可注入的 `onCharacterDrift` 记账回调。
+- 探针语料在代码里（运行时必须随包走，读不了 `evals/*.json`），评测面用
+  `eval:character --drift` 跑同一份定义。
+
+**未做（诚实边界）**：
+- 命中只报警、不自动纠偏（不重注入内核、不打断用户）；有没有必要自动干预，
+  要先用真机数据看误报率——现在没有数据。
+- 黄金探针的误报风险没被量化：判定是启发式词面 + 位置分析，红线类断言在极端
+  措辞上可能误判；live 跑完必须人工抽查（同刀 4 纪律）。
+- 多内核的**效果**对比（快线 vs 慢线谁更合用）仍无北极星指标（审计 P2），
+  本刀只把「可切换 + 可切换后仍守红线」的机制面立住。
 
 ## 4. 红线（写死，任何刀不得越过）
 
@@ -233,7 +278,10 @@ Card）但纯 prompt 弱模型不稳，工程侧有参数化（Claude Code permi
    内核/投影不得触碰其语义。
 4. **安全取向不变**：2026-09-17 定调（不做安全/权限加固、确认弹卡尽量自动
    允许）继续有效，内核叙事与之对齐；「工匠慢线」的多确认只在该内核激活时
-   生效，不改全局默认。
+   生效，不改全局默认。**✅ 已落（2026-10-12，刀 5）**：默认内核仍是
+   「老手快线」（`defaults()` / `defaultCliAutoApprove()` 逐字不变）；慢线的
+   `confirm` 只走「默认值通道」，且**用户显式设过的**权限模式与自动批准开关
+   永远优先——那一步的降级/加固不因换内核而发生。
 5. **弱模型保底走结构（限硬要求）**：凡「弱模型也必须遵守」的人格硬要求——安全
    取向、协议语义、强制度门槛——都必须有结构通道兜底；弱模型不听 prompt 是已
    验证事实（2026-10-11 裸 JSON 事故）。长尾语气/决策微调（铁律 2 的**内核通道**）

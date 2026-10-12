@@ -6,7 +6,28 @@
 ```
 bun run eval:character                              # replay（CI 门，免 key）
 bun run eval:character -- --agent deepseek-openai   # live（人工抽查层，真 provider）
+
+# 刀 5：换一个性格内核跑同一套判例（多内核闸门 = 每个内核各跑一遍）
+bun run eval:character -- --agent deepseek-openai --character craftsman-slow
+# 刀 5：改跑漂移黄金探针（高危区输入，与运行时守卫同一份定义；仅 live）
+bun run eval:character -- --agent deepseek-openai --drift
 ```
+
+`--character <id>` 认不出时**直接退出（码 2）**，不静默回退默认内核——否则
+「这轮跑过工匠慢线」会是句假话。名册在 `src/character/registry.ts`。
+
+## 漂移黄金探针（`--drift`，刀 5）
+
+长会话漂移探针的**评测面**：探针集与判定函数与运行时守卫同源
+（`src/character/drift.ts`），所以不会出现「评测守的是一套、线上探的是另一套」。
+
+- 三条探针落在两个高危区（元反思/情感牵引、施压跳验证），断言只押红线类
+  （内核无关）：陪伴话术、谄媚、罐头收尾、限制交代。
+- 运行时是两层：免层每轮对真实回答跑红线断言（零成本），贵层每 8 轮/命中时跑
+  一条探针（不进用户消息流），**每会话最多 4 次**。`--drift` 测的是贵层那三条。
+- 没有 replay 层：黄金探针没有预录样本（它们是运行时产物），判它必须问真 provider，
+  所以 `--drift` 不带 `--agent` 直接退出（码 2）。
+- 报告会带 `characterProfileId`，人工抽查时能对上「是谁在台上时漂的」。
 
 ## 纪律（蓝图 §3 刀 4 定死，不许打折）
 

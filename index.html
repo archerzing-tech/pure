@@ -422,6 +422,15 @@
                     </div>
                   </div>
                 </div>
+                <h3 class="settings-section-title" data-i18n="general.character">Character</h3>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="general.character">Character</span><span class="setting-hint" data-i18n="general.character.hint">Decides how pure works and how it talks; the prompt side applies from the next session on</span></div>
+                    <!-- Options 由 settings.ts 从性格内核名册（src/character/registry.ts）
+                         渲染：加内核不需要改这份静态标记，也不会漏进没登记的 id。 -->
+                    <select id="cfg-character" class="setting-select" aria-label="Character"></select>
+                  </div>
+                </div>
                 <h3 class="settings-section-title" data-i18n="env.title">Environment</h3>
                 <div class="settings-section">
                   <div class="setting-row">

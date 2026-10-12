@@ -609,6 +609,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 今天无插话输入路，挂号簿恒空 = 与省略时行为一致；通道宿主经暴露的
     // delegationControl 挂号即生效）。
     gateDelegations: async (calls) => delegationControl.gate(calls, cliSubagentNames),
+    // 人格轨道 刀 5 — 长会话人格漂移探针（与 GUI 的 CodingAgent 同源打开）。
+    // 触发时机 / 判定口径 / 成本上界见 src/character/drift.ts。
+    characterDrift: true,
   });
 
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus, delegationControl, folds, roundClose, interjectOrchestrator };

@@ -175,8 +175,9 @@ export const KNOWN_SUBAGENT_ROLES = new Set([
 /** 代码修改/执行类角色：非代码任务（旅游、问答、调研）永远不该拿到——语义路径
  * 上镜像关键词路径的 involvesCode 门，保证即便路由误判也防住误配。 */
 const CODE_OR_EXEC_ROLES = new Set(['task_planner', 'code_editor', 'code_reviewer', 'bash_executor']);
-/** 语义推荐的角色数量上限（刀 1：并行的上界从性格内核读，默认 = 现行为原样）。 */
-const MAX_SUBAGENT_ROLES = activeCharacterProfile().decision.parallelTendency.maxSubagentRoles;
+/** 语义推荐的角色数量上限（刀 1：并行的上界从性格内核读，默认 = 现行为原样；
+ *  刀 5 改懒读——宿主注入活跃内核晚于模块加载，早读会让切内核静默失效）。 */
+const maxSubagentRoles = () => activeCharacterProfile().decision.parallelTendency.maxSubagentRoles;
 
 function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['complexity'], prompt: string): string[] {
   const roles: string[] = [];
@@ -295,7 +296,7 @@ export class AdaptiveControlPlane {
     if (semanticRoles !== undefined) {
       let roles = Array.from(new Set(
         semanticRoles.filter((r) => KNOWN_SUBAGENT_ROLES.has(r)),
-      )).slice(0, MAX_SUBAGENT_ROLES);
+      )).slice(0, maxSubagentRoles());
       // 语义路径的防误配镜像门：非代码任务（旅游/问答/调研）永远剔除代码/执行角色，
       // 即使路由误选了也兜住——与关键词路径的 involvesCode 门对称。
       if (!involvesCode(intent, input.prompt)) {

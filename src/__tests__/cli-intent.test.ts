@@ -4,6 +4,8 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { assessIntent } from '../coding-agent/Planner';
+import { activeCharacterProfileId, setActiveCharacterProfile } from '../character';
+import { defaultCliAutoApprove, resolveCharacterProfileId } from '../cliConfig';
 import {
   composeCliIntentUserTurn,
   formatCliIntentAssessment,
@@ -61,6 +63,33 @@ describe('CLI proactive intent assessment', () => {
     expect(resolveCliAutoApprove(false, false)).toBe(false);
   });
 
+  it('刀 5 — 终端默认立场来自活跃性格内核：工匠慢线在台上时默认逐步确认', () => {
+    // 默认内核（老手快线）的确认倾向是 auto：上面的「默认自动放行」逐字不变。
+    // 换上「工匠慢线」后它的确认倾向是 confirm，终端默认就该逐步问——那是那个
+    // 内核的定义，不是全局默认被改（蓝图 §4 红线 4）。
+    const original = activeCharacterProfileId();
+    try {
+      expect(defaultCliAutoApprove()).toBe(true);
+      setActiveCharacterProfile('craftsman-slow');
+      expect(defaultCliAutoApprove()).toBe(false);
+    } finally {
+      setActiveCharacterProfile(original);
+    }
+  });
+
+  it('刀 5 — 入口真的把性格内核注入运行时（--character > config.json）', () => {
+    const entry = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    expect(entry).toContain('setActiveCharacterProfile(resolveCharacterProfileId(flags.character, fileCfg?.characterProfileId))');
+  });
+
+  it('刀 5 — --character 单次覆盖赢过 config.json；不带值时当没给', () => {
+    expect(resolveCharacterProfileId('craftsman-slow', 'veteran-fast')).toBe('craftsman-slow');
+    expect(resolveCharacterProfileId(undefined, 'craftsman-slow')).toBe('craftsman-slow');
+    // parseArgs 给不带值的 flag 补的是字面 'true'，那不是合法 id。
+    expect(resolveCharacterProfileId('true', 'craftsman-slow')).toBe('craftsman-slow');
+    expect(resolveCharacterProfileId(undefined, undefined)).toBeUndefined();
+  });
+
   it('keeps both CLI execution paths applying the permission stance', () => {
     // Both run loops live in cliRepl.ts since the cli.ts split (audit ①).
     const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
@@ -74,7 +103,8 @@ describe('CLI proactive intent assessment', () => {
     expect((repl.match(/const assembly = await? assembleCliPrompt\(/g) ?? []).length).toBe(2);
     expect(repl).toContain('toolDefinitions: toolsDefs');
     const entry = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
-    expect(entry).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, DEFAULT_CLI_AUTO_APPROVE)");
+    // 刀 5 起默认立场由活跃性格内核给出（defaultCliAutoApprove()），不再是常量。
+    expect(entry).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, defaultCliAutoApprove())");
   });
 
   it('routes both CLI paths through the one shared turn-route producer', () => {

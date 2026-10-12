@@ -15,10 +15,18 @@
 //     集要守的注入面）问一次真 provider，grader 判分、--report 落盘供人按
 //     各条失败原因抽查。禁 LLM-as-judge：判卷的只有固定行为断言。
 //
+// 刀 5 加了两个开关，服务的都是同一个闸门：
+//   · `--character <id>`：整轮评测跑在指定性格内核上（多内核闸门 = 每个内核各跑
+//     一遍）。未知 id 直接退出，不允许静默回退默认内核——否则「跑过工匠慢线」会
+//     是句假话。
+//   · `--drift`：改成跑**漂移黄金探针**（高危区输入，定义在 src/character/drift.ts，
+//     与运行时守卫同源），live 专用：黄金探针没有预录样本，判它必须问真 provider。
+//
 // 用法：
 //   bun run eval:character                                   # replay（CI）
 //   bun run eval:character -- --agent deepseek-openai        # live
 //       [--model deepseek-chat] [--only <caseId>] [--report path]
+//       [--character craftsman-slow] [--drift]
 //       [--cases evals/character] [--samples evals/character/samples]
 //
 // 退出码：0 = 全过，1 = 有失败，2 = 用法 / 环境错误（与 run-evals 对齐）。
@@ -32,6 +40,12 @@ import {
   isCharacterProbeCase,
   type CharacterProbeCase,
 } from '../src/evaluation/characterProbe';
+import {
+  activeCharacterProfile,
+  characterProfileIds,
+  DRIFT_GOLDEN_PROBES,
+  setActiveCharacterProfile,
+} from '../src/character';
 import { createAdapter } from '../src/evaluation/codingAgentExecutor';
 import { promptAssembler } from '../src/shared/PromptAssembler';
 import { defaultModelFor } from '../src/shared/providers';
@@ -46,8 +60,18 @@ const agentFlag = flag('--agent');
 const modelFlag = flag('--model');
 const onlyFlag = flag('--only');
 const reportFlag = flag('--report');
+const characterFlag = flag('--character');
+const driftFlag = argv.includes('--drift');
 const casesDir = resolve(flag('--cases') ?? 'evals/character');
 const samplesDir = resolve(flag('--samples') ?? 'evals/character/samples');
+
+// 活跃内核先落定：它决定两张注入投影、决策面阈值与子代理继承——本轮所有断言
+// 都在这个内核上判。未知 id 不退让：评测跑错内核等于没跑。
+if (characterFlag !== undefined && !setActiveCharacterProfile(characterFlag)) {
+  console.error(`unknown character profile "${characterFlag}" — known: ${characterProfileIds().join(', ')}`);
+  process.exit(2);
+}
+const activeProfile = activeCharacterProfile();
 
 function apiKeyForProvider(provider: string): string | undefined {
   if (process.env.PURE_EVAL_API_KEY) return process.env.PURE_EVAL_API_KEY;
@@ -76,11 +100,18 @@ for (const entry of (await readdir(casesDir)).sort()) {
   }
   cases.push(parsed);
 }
-if (cases.length === 0) {
+if (!driftFlag && cases.length === 0) {
   console.error(`no probe cases in ${casesDir} — see evals/character/README.md for the format`);
   process.exit(2);
 }
-const selected = onlyFlag ? cases.filter((c) => c.id === onlyFlag) : cases;
+// --drift 换成黄金探针集（与运行时守卫同一份定义，所以不会出现「评测守的是一套、
+// 线上探的是另一套」）。黄金探针没有预录样本，只能 live。
+if (driftFlag && !agentFlag) {
+  console.error('--drift requires --agent: 黄金探针没有预录样本，判它必须问真 provider。');
+  process.exit(2);
+}
+const pool: CharacterProbeCase[] = driftFlag ? [...DRIFT_GOLDEN_PROBES] : cases;
+const selected = onlyFlag ? pool.filter((c) => c.id === onlyFlag) : pool;
 if (selected.length === 0) {
   console.error(`no case with id "${onlyFlag}" — known: ${cases.map((c) => c.id).join(', ')}`);
   process.exit(2);
@@ -88,7 +119,7 @@ if (selected.length === 0) {
 // id 重复会导致 --only 与报告张冠李戴——装载时就拦，不等到判卷。
 const ids = new Set(selected.map((c) => c.id));
 if (ids.size !== selected.length) {
-  console.error(`duplicate case ids in ${casesDir} — every case needs a unique id`);
+  console.error(`duplicate case ids${driftFlag ? ' in the drift probe set' : ` in ${casesDir}`} — every case needs a unique id`);
   process.exit(2);
 }
 
@@ -149,7 +180,7 @@ if (!agentFlag) {
     console.log(`${passed ? '✓' : '✗'} ${probe.id} (${probe.scenario})${passed ? '' : ` — ${probeFailures.join('; ')}`}`);
     if (!good && bads.length === 0) console.log(`    （该判例在 samples/ 无任何配对样本：${samplesDir}）`);
   }
-  console.log(`\nreplay: ${selected.length - failures}/${selected.length} 判例的语料与判定一致（${sampleCount} 个样本）`);
+  console.log(`\nreplay: ${selected.length - failures}/${selected.length} 判例的语料与判定一致（${sampleCount} 个样本）· 活跃内核=${activeProfile.id}`);
   console.log('边界：本模式不碰模型——它证明判例集完整、行为判定可控；模型侧人格结论请用 --agent 跑 live。');
 } else {
   // ── live 模式（人工抽查层） ──
@@ -162,7 +193,7 @@ if (!agentFlag) {
   const adapter = createAdapter({ provider: requestedAgent, model, apiKey: apiKeyForProvider(requestedAgent) });
   const systemPrompt = assembledSystemPrompt();
 
-  console.log(`character probes: ${selected.length} cases · agent=${requestedAgent} · model=${model}`);
+  console.log(`character probes: ${selected.length} cases${driftFlag ? '（drift 黄金探针）' : ''} · agent=${requestedAgent} · model=${model} · character=${activeProfile.id}(${activeProfile.name})`);
   console.log(`cases: ${casesDir} · system prompt: ${systemPrompt.length} chars（含 character_core / character_expression）`);
   if (!systemPrompt.includes('<character_core>') || !systemPrompt.includes('<character_expression>')) {
     // 探针还没开跑，注入面就丢了——这种情况跑出来的 pass 毫无意义。
@@ -192,7 +223,7 @@ if (!agentFlag) {
     console.log(`${mark} ${probe.id} (${probe.scenario}) (${Math.round((Date.now() - started) / 1000)}s)${grade.passed ? '' : `\n    ${grade.failures.join('\n    ')}`}`);
   }
   const score = characterProbeScore(results);
-  console.log(`\nlive: ${score.passed}/${score.total} 通过 — 未过项请按各条 [assertion] 原因人工抽查`);
+  console.log(`\nlive: ${score.passed}/${score.total} 通过（character=${activeProfile.id}）— 未过项请按各条 [assertion] 原因人工抽查`);
   console.log('（判定只有固定行为断言；LLM-as-judge 按蓝图禁止）');
 }
 
@@ -200,7 +231,7 @@ if (reportFlag) {
   await mkdir(resolve(reportFlag, '..'), { recursive: true });
   await writeFile(
     resolve(reportFlag),
-    `${JSON.stringify({ suiteVersion: 'character-probes-v1', mode: agentFlag ? 'live' : 'replay', agent: agentFlag ?? null, model: modelFlag ?? null, caseCount: selected.length, results, ranAt: new Date().toISOString() }, null, 2)}\n`,
+    `${JSON.stringify({ suiteVersion: driftFlag ? 'character-drift-probes-v1' : 'character-probes-v1', mode: agentFlag ? 'live' : 'replay', agent: agentFlag ?? null, model: modelFlag ?? null, characterProfileId: activeProfile.id, caseCount: selected.length, results, ranAt: new Date().toISOString() }, null, 2)}\n`,
   );
   console.log(`report: ${resolve(reportFlag)}`);
 }

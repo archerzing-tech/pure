@@ -106,6 +106,8 @@ Before a coding request reaches the execution loop, `Planner` performs a lightwe
 | **Medium risk** | Explore the workspace read-only first, then make a narrow change and verify it before expanding scope. |
 | **High risk** | Explain impact, reversibility, and a safer/narrower alternative; both GUI and CLI require explicit interactive approval before any write or destructive command. The CLI remains auto-approved by default for ordinary turns, while `--prompt-on-tool` adds interactive confirmation for every tool call. |
 
+Both surfaces also run a **character kernel** whose decision face feeds these thresholds (see the Character kernels note in the CLI section): the default kernel keeps every value above byte-for-byte, while the opt-in 工匠慢线 plans simple jobs and confirms each step.
+
 This is a strategy layer, not a replacement for per-tool permissions. CLI and GUI may present the assessment differently, but both receive the same functional contract in the request context. A new high-risk follow-up also reopens the safety review instead of silently continuing an earlier plan.
 
 ### 1.55 Unified request workflow: evidence before action
@@ -509,7 +511,21 @@ To add interactive confirmation before individual tool calls:
 
 ```bash
 pure --prompt-on-tool "Run the migration"
+
+# Pick a character kernel (how the agent works, not just how it talks)
+pure --character craftsman-slow "Refactor the auth module"
 ```
+
+Character kernels (人格轨道) — Settings → General → Character, or CLI `--character <id>`.
+The default is 老手快线 (veteran-fast): land a small correct change now, say the bad news
+first, don't ask leave for each step. 工匠慢线 (craftsman-slow) is the opt-in opposite:
+understand before acting, plan the simple jobs too, verify every step, and confirm each one
+(it only changes the approval *defaults* — permissions you set yourself always win). A
+kernel decides the two injected prompt projections and the structural knobs (planning
+thresholds, verification-capped checklists, plan step size, parallel role cap, insertion
+confidence gate). Changes to kernel text are behaviour changes: `bun run eval:character`
+is the gate, and a long-session drift probe (one short call per 8 turns at most) watches
+whether the answer is still inside the kernel's red lines.
 
 ### Coding-task evaluation
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { activeCharacterProfile, DEFAULT_CHARACTER_PROFILE } from '../index';
-import { INPUT_DEFAULT_CONFIDENCE } from '../../coding-agent/inputDecision';
+import { inputDefaultConfidence } from '../../coding-agent/inputDecision';
 import { defaults } from '../../ui/config';
 
 // 人格轨道 刀 1 的安全底：默认内核「老手快线」的每个值 = 现行为原样。
@@ -23,17 +23,18 @@ describe('CharacterProfile 默认内核「老手快线」（刀 1 零行为变�
     expect(profile.decision.insertionThreshold).toEqual({ confidenceGate: 0.7 });
   });
 
-  it('刀 1 无选择器：activeCharacterProfile() 恒为默认内核', () => {
+  it('没人注入活跃内核时回退默认内核（刀 1–4 的行为逐字节不变）', () => {
     expect(activeCharacterProfile()).toBe(DEFAULT_CHARACTER_PROFILE);
   });
 
   it('插话置信门从内核读（不再是散落字面量）', () => {
-    expect(INPUT_DEFAULT_CONFIDENCE).toBe(profile.decision.insertionThreshold.confidenceGate);
-    expect(INPUT_DEFAULT_CONFIDENCE).toBe(0.7);
+    expect(inputDefaultConfidence()).toBe(profile.decision.insertionThreshold.confidenceGate);
+    expect(inputDefaultConfidence()).toBe(0.7);
   });
 
   it('确认默认从内核读：默认配置 = 现行为原样', () => {
     const cfg = defaults();
+    expect(cfg.characterProfileId).toBe(profile.id);
     expect(cfg.permissionMode).toBe(profile.decision.confirmTendency.permissionMode);
     expect(cfg.autoPermRead).toBe(profile.decision.confirmTendency.autoApprove.read);
     expect(cfg.autoPermWrite).toBe(profile.decision.confirmTendency.autoApprove.write);

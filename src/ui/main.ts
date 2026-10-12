@@ -10,6 +10,7 @@ import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, r
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
+import { setActiveCharacterProfile } from '../character';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectCanonicalSession } from './sessionEvents';
@@ -774,6 +775,7 @@ function deferToIdle(fn: () => void): void {
   tagPlatform();
   await initConfigFile();
   applySavedAppearance();
+  applySavedCharacterProfile();
   // 冷启动就把运行时/网络探测放到后台：用户阅读 landing 页期间 sys_info 已完成，
   // 首条消息不再在关键路径上等环境探针（与 memoryStore.warmUp() 同一预热模式）。
   void ensureRuntimesProbed();
@@ -985,6 +987,25 @@ function applySavedAppearance() {
     cfg.fontSize === 'small' ? '13px' : cfg.fontSize === 'large' ? '15px' : '14px');
   document.documentElement.style.setProperty('--spacing',
     cfg.density === 'compact' ? '8px' : cfg.density === 'spacious' ? '16px' : '12px');
+}
+
+/**
+ * 人格轨道 刀 5 — 把配置里的活跃性格内核注入运行时。
+ *
+ * 必须在**任何一轮对话之前**跑（critical path 里紧跟 applySavedAppearance），
+ * 否则第一轮用的还是默认内核。注入只影响之后取值的人，读者分两类：
+ *   · 决策面阈值（Planner / adaptiveControl / inputDecision）**每次真读**，本会话
+ *     下一次调用就是新值；
+ *   · 提示词两张投影（PromptAssembler 的 character_core / character_expression）
+ *     与子代理继承（SubagentOrchestrator）在会话开始后取值——Harness 会把首次
+ *     装配的 system prompt 逐字冻结（保 provider 侧缓存前缀稳定），所以同一个
+ *     会话中途换内核，提示词要到下个会话才换。
+ *
+ * 认不出的 id 由 setActiveCharacterProfile 挡下（保持默认内核），这里不报错：
+ * 手改配置或版本回退留下的陈旧值不该炸启动。
+ */
+function applySavedCharacterProfile(): void {
+  setActiveCharacterProfile(loadConfig()?.characterProfileId);
 }
 
 let sessionRestoreToken = 0;

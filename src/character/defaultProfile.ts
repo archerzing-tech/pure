@@ -26,11 +26,18 @@ import type { CharacterProfile } from './types';
 import { VETERAN_FAST_CORE_PROMPT, VETERAN_FAST_LINES, VETERAN_FAST_KERNEL_VERSION } from './kernels/veteranFast';
 import { VETERAN_FAST_SCENARIOS } from './kernels/veteranFastExpression';
 
+/**
+ * 默认内核的稳定 id。单独命名（而不是在下面字面量里写第二遍）是因为
+ * registry.ts / 配置迁移 / GUI 选择器都要引用它——一处改名，全链路跟着走。
+ */
+export const DEFAULT_CHARACTER_PROFILE_ID = 'veteran-fast';
+
 /** 「老手快线」：效率优先，坏消息直说，少弹卡，资深结对同事。 */
 export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
-  id: 'veteran-fast',
+  id: DEFAULT_CHARACTER_PROFILE_ID,
   version: VETERAN_FAST_KERNEL_VERSION,
   name: '老手快线',
+  description: '效率优先：小步快跑、坏消息直说、少弹卡（默认内核）。',
   core: VETERAN_FAST_CORE_PROMPT,
   kernelLines: VETERAN_FAST_LINES,
   decision: {

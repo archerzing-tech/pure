@@ -13,16 +13,15 @@ import { activeCharacterProfile } from '../character';
 // Shared confidence vocabulary + gate. One-way dependency (inputDecision knows
 // nothing about Planner) so the router and the insertion classifier can be
 // judged by the same threshold without a cycle.
-import { INPUT_DEFAULT_CONFIDENCE, clampConfidence } from './inputDecision';
+import { clampConfidence, inputDefaultConfidence } from './inputDecision';
 
-/** 性格内核（刀 1）：步子大小 / 验证密度从 profile 读；默认值 = 现行为原样。 */
-const CHARACTER = activeCharacterProfile();
-/** Upper bound on LLM-plan steps kept in the review card / system prompt. */
-const MAX_PLAN_STEPS = CHARACTER.decision.stepSize.maxPlanSteps;
-const MAX_PLAN_SUBSTEPS = CHARACTER.decision.stepSize.maxPlanSubsteps;
-/** 刀 1.1：验证清单条数上限——清单是收尾门禁的执行参数，不设上限会让
- *  不合规模型把门禁撑成自由命令队列。 */
-const MAX_PLAN_VERIFICATION_ITEMS = CHARACTER.decision.verifyDensity.maxVerificationItems;
+/**
+ * 性格内核（刀 1 收拢，刀 5 改懒读）：步子大小 / 验证密度 / mode 阈值都从
+ * 当前活跃内核的决策面读。**每次真读，不在模块加载时取一次**——宿主是在启动、
+ * 读完配置之后才注入活跃内核（见 src/character/active.ts），模块加载早于那一刻，
+ * 早读会把「切内核」变成静默失效。默认内核的值 = 现行为原样。
+ */
+const characterDecision = () => activeCharacterProfile().decision;
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -302,11 +301,11 @@ export interface InsertionClassification {
   reason: string;
   /** The model's OWN confidence in `kind` (0..1). It is what lets the caller
    *  ask instead of gambling — see applyConfidenceGate in inputDecision.ts.
-   *  Absent/ignored by a provider → INPUT_DEFAULT_CONFIDENCE (see there for why
+   *  Absent/ignored by a provider → inputDefaultConfidence() (see there for why
    *  the default sits ABOVE the gate). */
   confidence: number;
   /** True when the model answered WITHOUT a confidence number, so the value
-   *  above is INPUT_DEFAULT_CONFIDENCE rather than its own judgement. Without
+   *  above is inputDefaultConfidence() rather than its own judgement. Without
    *  this flag a default that keeps the app quiet would be indistinguishable
    *  from a model that actually said "I am sure". */
   confidenceDefaulted?: boolean;
@@ -459,9 +458,9 @@ export async function classifyInsertion(
     kind: 'task',
     reason: 'classification unavailable; queued so the words can never be lost',
     // Queueing IS the confident action when no label could be produced — see
-    // INPUT_DEFAULT_CONFIDENCE (inputDecision.ts). This is the parse/timeout
+    // inputDefaultConfidence() (inputDecision.ts). This is the parse/timeout
     // fallback; the no-classifier-at-all policy is the coordinator's.
-    confidence: INPUT_DEFAULT_CONFIDENCE,
+    confidence: inputDefaultConfidence(),
     fallbackUsed: true,
   };
   if (!prompt.trim() || signal?.aborted) return fallback;
@@ -595,7 +594,7 @@ export class Planner {
 
   constructor(config?: PlannerConfig) {
     this.config = {
-      complexFileThreshold: config?.complexFileThreshold ?? CHARACTER.decision.modeThreshold.complexFileThreshold,
+      complexFileThreshold: config?.complexFileThreshold ?? characterDecision().modeThreshold.complexFileThreshold,
     };
   }
 
@@ -634,7 +633,7 @@ export class Planner {
   /** The model chooses build vs plan. The synchronous fallback never infers a
    * user's desired outcome from artifact nouns or isolated verbs. */
   private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
-    return detectProjectRequest(prompt) ? 'build' : complexity === CHARACTER.decision.modeThreshold.planAtComplexity ? 'plan' : 'yolo';
+    return detectProjectRequest(prompt) ? 'build' : complexity === characterDecision().modeThreshold.planAtComplexity ? 'plan' : 'yolo';
   }
 
   /**
@@ -1170,7 +1169,7 @@ function normalizePlanSubsteps(raw: unknown): NonNullable<PlanStep['substeps']> 
       description: description || action,
       expectedOutcome: typeof value.expectedOutcome === 'string' ? value.expectedOutcome.trim() : description || action,
     }];
-  }).slice(0, MAX_PLAN_SUBSTEPS);
+  }).slice(0, characterDecision().stepSize.maxPlanSubsteps);
   return substeps;
 }
 
@@ -1188,7 +1187,7 @@ function normalizePlanVerification(raw: unknown): PlanVerificationSpec[] {
     return [value.final === true
       ? { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '', final: true }
       : { command, reason: typeof value.reason === 'string' ? value.reason.trim() : '' }];
-  }).slice(0, MAX_PLAN_VERIFICATION_ITEMS);
+  }).slice(0, characterDecision().verifyDensity.maxVerificationItems);
 }
 
 function parsePlanJsonCore(text: string): PlanParseResult {
@@ -1242,7 +1241,7 @@ function parsePlanJsonCore(text: string): PlanParseResult {
   if (steps.length === 0) return { plan: null, repaired };
   // Hard cap so a non-compliant model can't balloon the review card / system
   // prompt with dozens of micro-steps (the prompt asks for 4-8).
-  const capped = steps.slice(0, MAX_PLAN_STEPS);
+  const capped = steps.slice(0, characterDecision().stepSize.maxPlanSteps);
   // Re-index ids after the cap (parsePlanJson assigned sequential ids above).
   const indexed = capped.map((s, i) => ({ ...s, id: String(i + 1) }));
 

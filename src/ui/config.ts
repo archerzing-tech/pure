@@ -14,7 +14,7 @@ import type { ProxyConfig } from '../shared/proxy';
 import { normalizeProxyConfig } from '../shared/proxy';
 import type { PhaseModelConfig } from '../shared/phaseModels';
 import { sanitizePhaseModelConfig } from '../shared/phaseModels';
-import { DEFAULT_CHARACTER_PROFILE } from '../character';
+import { activeCharacterProfile } from '../character';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -71,6 +71,20 @@ export interface PureConfig {
    * still opens it. Applies at creation time in both live chat and replay.
    */
   toolCardsExpanded: boolean;
+  /**
+   * 活跃性格内核 id（人格轨道 刀 5，Settings → General → 性格）。内核决定「怎么做」
+   * （决策面：mode 阈值 / 验证密度 / 步子大小 / 确认倾向 / 并行上限 / 插话门）
+   * 与「怎么说」（表达面）两张投影，同一内核出典保证跨情境一致。
+   *
+   * 值是名册里的稳定 id（src/character/registry.ts）；缺失或不认识的值回退
+   * 默认内核「老手快线」，不会抛——手改配置或版本回退留下的陈旧值不该炸启动。
+   * 宿主在启动时把它注入运行时（src/ui/main.ts），不在此处直接生效。
+   */
+  characterProfileId: string;
+  /**
+   * Tool-call approval policy. 缺省来源是活跃内核的 confirmTendency（见 defaults）；
+   * 用户在这里存下的值优先，内核不覆盖人的决定。
+   */
   permissionMode: 'auto' | 'confirm' | 'restricted';
   /**
    * Optional macOS Seatbelt sandbox for agent shell commands. When enabled,
@@ -298,12 +312,16 @@ export function defaults(): PureConfig {
     fontSize: 'medium',
     density: 'comfortable',
     toolCardsExpanded: true,
-    permissionMode: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.permissionMode,
+    // 性格内核（刀 1 收拢，刀 5 改活读）：这五个默认值 = **当前活跃内核**的确认倾向。
+    // 「工匠慢线」在台上时，新装的默认就是逐步确认——但用户自己存过的值仍然优先
+    // （defaults() 只在没有存储、或字段缺失时管用），内核不覆盖人的决定。
+    characterProfileId: activeCharacterProfile().id,
+    permissionMode: activeCharacterProfile().decision.confirmTendency.permissionMode,
     sandboxCommands: false,
-    autoPermRead: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.read,
-    autoPermWrite: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.write,
-    autoPermCmd: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.cmd,
-    autoPermGit: DEFAULT_CHARACTER_PROFILE.decision.confirmTendency.autoApprove.git,
+    autoPermRead: activeCharacterProfile().decision.confirmTendency.autoApprove.read,
+    autoPermWrite: activeCharacterProfile().decision.confirmTendency.autoApprove.write,
+    autoPermCmd: activeCharacterProfile().decision.confirmTendency.autoApprove.cmd,
+    autoPermGit: activeCharacterProfile().decision.confirmTendency.autoApprove.git,
     toolFS: true,
     toolCmd: true,
     toolGit: true,

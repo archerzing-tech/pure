@@ -47,8 +47,12 @@ export interface CharacterDecisionProfile {
       git: boolean;
     };
   };
-  /** 汇报节奏：在哪些节点开口（现行为：只在有意义的节点）。 */
-  reportRhythm: 'meaningful-nodes-only';
+  /**
+   * 汇报节奏：在哪些节点开口。「老手快线」= 只在有意义的节点（现行为原样）；
+   * 「工匠慢线」= 逐阶段交代（动手前说打算、每步验完报一次）。
+   * 唯一消费者是 prompt（蓝图 §1 的 🔴 仅 prompt 档），所以这里换值不改结构行为。
+   */
+  reportRhythm: 'meaningful-nodes-only' | 'stage-by-stage';
   /** 并行倾向：一次可委派 / 并行的子代理角色上限。 */
   parallelTendency: {
     maxSubagentRoles: number;
@@ -88,8 +92,13 @@ export interface CharacterProfile {
   id: string;
   /** 内核叙事版本号（刀 2 起与 src/character/kernels/<id>.md 对齐）。 */
   version: string;
-  /** 人读名。 */
+  /** 人读名（GUI 选择器 / 文档用）。 */
   name: string;
+  /**
+   * 人读一句话摘要：在哪些地方与别的内核不同（GUI 选择器的副标题）。
+   * 不进 prompt——进 prompt 的是 core / expression 两张投影。
+   */
+  description: string;
   /**
    * 注入 system prompt 的精炼版内核（fragment `character_core`，priority 119）。
    * 由该内核的源句表装配（buildCharacterCorePrompt），不是正文抄写。
