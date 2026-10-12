@@ -4699,22 +4699,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 刀 6 分量判读：从用户措辞判这份活的分量（draft 决策稿 / spike 原型穿刺 /
       // production 正式）。接续回合不重判——"继续"没有分量信号，重判会把草稿
       // 任务的后续回合顶回正式档（与上面 continuingProjectBuild 同款纪律）。
-      // 判定即注入子代理读取点（active.ts 全局，spawn 时读走）；判轻了回执给
-      // 用户（可纠正），判不出=production 静默（默认档不刷存在感）。
+      // 判定即注入子代理读取点（active.ts 全局，spawn 时读走）。判定保持内部：
+      // 不向对话窗口出回执气泡（2026-10-12 用户真机定调——内部的档位认定不该
+      // 显形，判轻的纠正通道是用户回一句"正式做"重新判定，机制不变）。
       const workOrderRegister: WorkOrderRegister = continuingPlan || planPauseRequested
         ? this.activePlanRegister
         : detectWorkOrderRegister(userText).register;
       setActiveWorkOrderRegister(workOrderRegister);
       if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;
-      if ((workOrderRegister === 'draft' || workOrderRegister === 'spike') && !continuingPlan) {
-        const verdict = detectWorkOrderRegister(userText);
-        this.addStatusBubble(
-          workOrderRegister === 'draft'
-            ? t('workOrder.registerDraft', `已按「${verdict.matched}」判为草稿档：少步骤、轻验证、快出多版供你决策；判重了回复"正式做"即可。`)
-            : t('workOrder.registerSpike', `已按「${verdict.matched}」判为原型档：主路径走通即为达标，跳过生产级打磨；判重了回复"正式做"即可。`),
-          false, false, 'info',
-        );
-      }
       // Semantic routing is the primary decision for ordinary turns. The
       // synchronous Planner remains only a safety floor; it must not decide
       // that a design critique is a build, or that a creative constraint needs
