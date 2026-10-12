@@ -1763,11 +1763,14 @@ export class TauriToolAdapter implements ToolAdapter {
           // Tauri v2 matches JS keys as the camelCase form of the Rust param
           // (data_base64) — the snake_case spelling is rejected as a missing
           // required key. Same call shape as markdown.ts / toolRow.ts.
-          await this.call('save_file_binary', { path: docPath, dataBase64: b64 });
+          // 返回值是落盘实路径（相对路径已收口：有工作区锚工作区、没工作区落
+          // ~/Downloads，见 Rust 侧 resolve_document_path）——报告必须用实路径，
+          // 用模型输入报就是「卡片在、文件不在」的 2026-10-11 bug 类。
+          const savedPath = await this.call('save_file_binary', { path: docPath, dataBase64: b64, workspace: this.workspace }) as string;
           return {
             id: toolCall.id,
             toolName: name,
-            result: `文档已生成：${docPath}（${format.toUpperCase()}，${(bytes.length / 1024).toFixed(1)} KB）`,
+            result: `文档已生成：${typeof savedPath === 'string' && savedPath ? savedPath : docPath}（${format.toUpperCase()}，${(bytes.length / 1024).toFixed(1)} KB）`,
             success: true,
             duration: Date.now() - start,
           };

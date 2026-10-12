@@ -342,7 +342,7 @@ export const BUILT_IN_TOOL_DEFS = [
       type: 'object',
       properties: {
         format: { type: 'string', enum: ['pptx', 'docx', 'xlsx'], description: 'Output file format' },
-        path: { type: 'string', description: 'Output file path (absolute or workspace-relative), e.g. "output.pptx" or "~/Documents/report.docx"' },
+        path: { type: 'string', description: 'Output file path. Absolute paths land exactly there. A relative path is anchored to the session workspace when one is active, and to ~/Downloads otherwise (a bare desktop session has no workspace — "output.pptx" means ~/Downloads/output.pptx there). "~/..." and "$HOME/..." also work. The tool result reports the concrete path — quote THAT, never restate your input path.' },
         spec: {
           type: 'object',
           description: 'Document content specification. For pptx: { slides: [{ title, content: [bullet1, bullet2, …] }] }. For docx: { sections: [{ type: "heading"|"paragraph"|"bullet"|"pageBreak", text, level? }] }. For xlsx: { sheets: [{ name, rows: [[cell,…],…] }] }.',

@@ -1181,21 +1181,69 @@ fn save_file(path: String, content: String) -> Result<(), String> {
 /// PNG image exports, where the payload isn't UTF-8 text. Mirrors save_file's
 /// mkdir-parent behavior; the payload is decoded by the same helper that
 /// handles pasted screenshots, so malformed input can never persist garbage.
-#[tauri::command]
-async fn save_file_binary(path: String, data_base64: String) -> Result<(), String> {
-    run_blocking(move || save_file_binary_impl(path, data_base64)).await
+/// Returns the concrete absolute path the file landed on — callers that report
+/// a path to the user (create_document's delivery card) must report THIS, not
+/// their input, or the card points at a file that does not exist.
+///
+/// 刀 9 验收发现的坑（2026-10-12 真机判例）：GUI 首页会话没选工作区，模型的
+/// 相对路径在这里按进程 cwd 落盘（dev = src-tauri/），「PPT 已生成（工作区根
+/// 目录）」而文件在没人找得到的地方 —— 与 2026-10-11 download_file 的
+/// 「打开所在文件夹里没有文件」同一类。绝对路径原样（全盘可达契约不变）；
+/// 相对路径有工作区锚工作区、没工作区落 ~/Downloads（保相对结构）。
+///
+/// 不复用 expand_download_path：downloader 的 spec 是 shell 风格（$PWD 必须
+/// 显式，裸相对 = 残缺输入，只留 basename 防垃圾嵌套）；create_document 的
+/// path 是模型的工作区相对引用，语义就是「相对工作区」，`docs/deck.pptx`
+/// 必须保住 docs/ 层。`~/`、`$HOME` 前缀（模型有时写）同款展开。
+fn resolve_document_path(spec: &str, workspace: &str, home: &str) -> String {
+    let expanded = if let Some(rest) = spec.strip_prefix("$HOME") {
+        format!("{home}{rest}")
+    } else if let Some(rest) = spec.strip_prefix("~/") {
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        spec.to_string()
+    };
+    if std::path::Path::new(&expanded).is_absolute() {
+        return expanded;
+    }
+    let ws = workspace.trim_end_matches(['/', '\\']);
+    if ws.is_empty() {
+        format!("{home}/Downloads/{expanded}")
+    } else {
+        format!("{ws}/{expanded}")
+    }
 }
 
-fn save_file_binary_impl(path: String, data_base64: String) -> Result<(), String> {
+#[tauri::command]
+async fn save_file_binary(
+    path: String,
+    data_base64: String,
+    workspace: Option<String>,
+) -> Result<String, String> {
+    run_blocking(move || save_file_binary_impl(path, data_base64, workspace)).await
+}
+
+fn save_file_binary_impl(
+    path: String,
+    data_base64: String,
+    workspace: Option<String>,
+) -> Result<String, String> {
     let bytes = decode_paste_image(&data_base64)?;
-    let p = PathBuf::from(&path);
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    let p = PathBuf::from(resolve_document_path(
+        &path,
+        workspace.as_deref().unwrap_or(""),
+        &home,
+    ));
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
     }
     fs::write(&p, &bytes).map_err(|e| format!("save_file_binary: {}", e))?;
-    Ok(())
+    Ok(p.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -16510,6 +16558,49 @@ mod reveal_path_tests {
     }
 
     #[test]
+    // 刀 9 验收真机判例（2026-10-12）：「做个 PPT」没选工作区，模型给的相对
+    // 路径按进程 cwd 落盘（dev = src-tauri/），交付卡报「工作区根目录」而文件
+    // 在没人找得到的地方。save_file_binary 必须收口到可预期的落点，并把落盘
+    // 实路径返回给调用方去报。
+    fn save_file_binary_impl_anchors_relative_paths_and_reports_the_real_one() {
+        let base = std::env::temp_dir().join(format!("pure_sfb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = base.to_string_lossy().to_string();
+        // 相对路径锚进 workspace（保相对结构），返回值就是落盘实路径
+        let landed = save_file_binary_impl(
+            "docs/deck.pptx".into(),
+            "aGVsbG8=".into(), // "hello"
+            Some(ws.clone()),
+        )
+        .unwrap();
+        assert_eq!(landed, format!("{ws}/docs/deck.pptx"));
+        assert_eq!(std::fs::read(&landed).unwrap(), b"hello");
+        // 绝对路径原样落盘，返回同一路径
+        let abs = base.join("直接.pptx").to_string_lossy().to_string();
+        let landed2 = save_file_binary_impl(abs.clone(), "aGVsbG8=".into(), None).unwrap();
+        assert_eq!(landed2, abs);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_document_path_matches_the_delivery_semantics() {
+        let home = "/Users/tester";
+        // 有工作区：相对路径锚工作区，子目录结构保留
+        assert_eq!(resolve_document_path("docs/deck.pptx", "/ws/dir", home), "/ws/dir/docs/deck.pptx");
+        // 工作区尾斜杠不拼出双斜杠
+        assert_eq!(resolve_document_path("a.pptx", "/ws/dir/", home), "/ws/dir/a.pptx");
+        // 没工作区：落 ~/Downloads（保结构），绝不落进程 cwd
+        assert_eq!(resolve_document_path("docs/deck.pptx", "", home), "/Users/tester/Downloads/docs/deck.pptx");
+        // `~/` 前缀展开到真实 home，不许落字面量 `~` 目录
+        assert_eq!(resolve_document_path("~/Documents/r.docx", "", home), "/Users/tester/Documents/r.docx");
+        // `$HOME` 前缀同款
+        assert_eq!(resolve_document_path("$HOME/Downloads/a.xlsx", "/ws", home), "/Users/tester/Downloads/a.xlsx");
+        // 绝对路径原样（全盘可达契约）
+        assert_eq!(resolve_document_path("/data/a.pptx", "/ws", home), "/data/a.pptx");
+    }
+
+    #[test]
     fn expand_download_path_never_lands_on_a_cwd_relative_literal() {
         let home = "/Users/tester";
         // 常规 $HOME / $PWD 展开
@@ -17353,7 +17444,9 @@ mod save_paste_file_tests {
         let path = dir.join("chart.png");
         let bytes = vec![0x89u8, b'P', b'N', b'G', 13, 10, 26, 10, 42, 43, 44];
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        save_file_binary_impl(path.to_string_lossy().to_string(), b64).unwrap();
+        let landed = save_file_binary_impl(path.to_string_lossy().to_string(), b64, None).unwrap();
+        // 返回值 = 落盘实路径（绝对输入原样）
+        assert_eq!(landed, path.to_string_lossy().to_string());
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
@@ -17362,7 +17455,7 @@ mod save_paste_file_tests {
         let dir = temp_paste_dir("save-file-binary-bad");
         let path = dir.join("bad.png");
         assert!(
-            save_file_binary_impl(path.to_string_lossy().to_string(), "@@nope@@".to_string()).is_err()
+            save_file_binary_impl(path.to_string_lossy().to_string(), "@@nope@@".to_string(), None).is_err()
         );
         assert!(!path.exists());
     }
