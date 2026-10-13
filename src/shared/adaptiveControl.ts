@@ -189,8 +189,12 @@ function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['com
   }
   if (intent.research) roles.push('researcher', 'deep_thinker');
   if (intent.design) roles.push('ui_designer');
-  if (intent.audit) roles.push('project_auditor', 'code_reviewer');
-  if (intent.review) roles.push('code_reviewer');
+  // 评审/审计角色同样跟着代码走（与上方管线、下方兜底同门）：「评审这份合
+  // 同」「审计我的计划」不是 code_reviewer/project_auditor 的活——它们读的
+  // 是代码库，非代码 review/audit 推过去是同款误配，且正是 code_reviewer 描述
+  // 收窄为 CODE 后唯一残留的绕行口（评审问题 6）。
+  if (codeTask && intent.audit) roles.push('project_auditor', 'code_reviewer');
+  if (codeTask && intent.review) roles.push('code_reviewer');
   // 兜底同样只在代码任务上补 code 角色，避免把非代码复杂任务误派。
   if (roles.length === 0 && codeTask) {
     if (complexity === 'complex') roles.push('task_planner', 'researcher');

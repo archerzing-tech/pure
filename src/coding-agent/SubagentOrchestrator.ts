@@ -1051,7 +1051,12 @@ export class SubagentOrchestrator implements ToolAdapter {
 export const BUILT_IN_SUBAGENTS: SubagentDefinition[] = [
   {
     name: 'code_reviewer',
-    description: 'Review code changes for correctness, style, and security — the independent quality gate (T1 role separation): use whenever a deliverable needs a verdict that should NOT come from its own author (never grade your own work). Returns a structured review with issues and suggestions.',
+    // 「CODE deliverable」限定是 2026-10-13 真机判例收窄的：用户让 pure 生成
+    // PPT，模型照着旧描述里普适的 "use whenever a deliverable needs a verdict"
+    // 给生成脚本派了代码评审——非代码产物（文档/演示/设计）的正确检验是亲手
+    // 验产物（开文档/渲幻灯/跑脚本），评审角色跟着代码走。工具描述是模型看到
+    // 的唯一引导面，措辞必须把适用边界说死。
+    description: 'Review CODE changes (source, scripts, configs) for correctness, style, and security — the independent quality gate (T1 role separation): use whenever a code deliverable needs a verdict that should NOT come from its own author (never grade your own work). NOT for non-code deliverables (documents, slides, designs) — verify those directly (open the document, render the slides, run the script). Returns a structured review with issues and suggestions.',
     input_schema: {
       type: 'object',
       properties: {
