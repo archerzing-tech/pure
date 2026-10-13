@@ -353,6 +353,11 @@ export interface InsertionClassification {
    * 不是第二件活。宿主在预检思考还活着时据此把它并进请求一起想，第一版
    * 产出就带上；不排队（排队=拆成两件事，构图就断了）。 */
   supplementsCurrent?: boolean;
+  /** 方法切换（2026-10-13 REA 判例）：「你刚才不是已经装了 X 吗」这类资源
+   * 提醒 = 换做法，不是纯取消——交付物不变，换的是路。宿主照 pause 口径
+   * 止损在飞支并让插话重入，绝不落取消收执（「这项不做了」会把用户真正
+   * 要的「换成 X」那半句扔掉）。 */
+  methodSwitch?: boolean;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what to do with it the way a sharp human colleague would — NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
@@ -365,7 +370,7 @@ The ways to take a remark (pick exactly one kind):
 
 - "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when that list lives INSIDE the one deliverable, so the remark changes what the deliverable covers and nothing else — it is NOT this when the added thing is another OBJECT of the kind already being worked on in parallel (three platforms being researched and the user names a fourth): that object is a unit of work of its own, not a detail of the current one, and it is a TASK (see below). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
 - "premise-change" — the remark corrects a FACT the work is built on: place, dates, environment, versions, budget, who owns what, what something IS ("其实我在西安，不是广东", "预算只有三千", "你对jev的理解是错误的，jev是2026年9月新发布的模型"). The goal stands, but everything computed from the wrong fact comes out worthless — the work must be redone from the corrected fact. Judge this over steer whenever the correction would change the ANSWER, not just its wording. Especially while THINKING: if the thought-so-far (shown in the context) rests on the wrong fact, redoing the thought is the only honest move.
-- "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this.
+- "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this. A RESOURCE REMINDER is 换方案 said sideways, and it lands HERE with "method_switch": true: the user points at something you ALREADY have — an installed tool, a skill, a server, a package ("你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的", "不是有现成的X吗，用X来做") — meaning "stop the approach it replaces and use it instead". The deliverable stands; only the way of producing it changes. This holds even when the reminder touches only one part of the work — the switch outranks the scope test above. It is NEVER a plain removal — "cancels_part" must stay OFF for it: answering a resource reminder with "这项不做了" throws away the very half the user asked for (switch to the named resource), and that reading is the single most confusing reply an insertion can produce.
 - "stop" — the running work ends and NOTHING takes its place ("先缓一缓", "这个就到这儿吧", "停掉整个任务", "不用继续了", "够了，先这样"). The whole question is what happens to the work: a stop leaves no answer to build, a goal-change replaces it with a different one, and a steer reshapes it. Phrases that look like stopping but are not: a constraint on how the work proceeds ("别停下来", "先别改这部分") is steer; asking where things stand ("跑完了吗") is question; a removal of ONE named branch or part while the rest continues is steer with "cancels_part" (the work as a whole carries on).
 - "task" — a NEW, completable piece of work, even one that extends the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理", "再写一首五言绝句" alongside an essay). Queuing runs it right after the current task so it can never be lost; when torn between steer and task over ADDED work, pick task. The test needs NO deliberation — ask what has to come BACK: something that must be fetched, looked up, researched or produced on its own is a task however small, even when it is worded as an addition ("再加一个爱奇艺平台" while three platforms are being researched = one more unit of work of that kind, not a detail of the 对比汇总; "把爱奇艺也查一下", "芒果TV也来一份", "also check Douban" all ask for something brought back). But what has to come back must ALSO be outside the current job: a step the current work itself has to take anyway — verifying it, running its tests, checking the result, keeping a style — adds no scope and is guidance, i.e. steer ("记得跑测试", "文案再口语一点"); it is not a second piece of work just because it names an action. Only a remark that changes the ONE thing you are already producing — its shape, its content, a constraint on it — is steer. ONE exception outranks this test: when the SAME message also REMOVES work that was already asked for (see "cancels_part"), the removal decides the kind — that message is steer, its addition is folded into the join, and nothing is queued ("B站那支别查了，再加一个爱奇艺" drops one branch and grows another in the same breath — the insert is reshaped, not deferred). A removal sent to the queue runs the exact opposite of what was asked. The user's expectation draws the same line otherwise: ONE deliverable that now carries the remark (steer), or a SECOND deliverable after this one (task).
 - "question" — the user asks something and expects an answer NOW ("跑完了吗", "现在到哪了"), or asks for a decision only they can make. Answering must not disturb the running work.
@@ -374,7 +379,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -402,7 +407,13 @@ removed and cancels_part stays off. Report it
 EVEN WHEN you pick "task" for the same message: the host routes removals away
 from the queue on this flag alone, and a removal that reaches the queue runs the
 exact opposite of what was asked — a misjudged kind is survivable, a missing
-flag is not. Omit it for messages that only add or adjust work.
+flag is not. And a message that names a REPLACEMENT for the work it stops
+(stop this way, use X instead of it) removes nothing from the result — the
+result now comes from X — so it is goal-change with "method_switch": true,
+never cancels_part. This covers only a replacement that takes the removed
+work's place; a message that ALSO cancels some unrelated part is different:
+the unrelated removal still reports "cancels_part" as usual ("换成X来做，
+另外知乎那支别查了"). Omit it for messages that only add or adjust work.
 
 "adds_along": include it as true ONLY together with "cancels_part" — when the
 same message does BOTH jobs: it removes one named part AND asks for new work
@@ -421,6 +432,11 @@ it for every other message.
 remark belongs INSIDE the one thing currently being produced — an added
 element, a reshaping constraint, the growing list — so the host merges it
 into the request and redoes the thought; omit it for every other message.
+
+"method_switch": include it as true ONLY with kind "goal-change", when the
+message switches HOW the work is done by pointing at a resource you already
+have ("你不是已经装了X吗", "用X来做") — the goal stands, the approach is
+replaced. For goal changes that change WHAT is being made, omit it.
 
 "stop_branch": the context may contain a <live_branches> block — the delegated
 branches currently running, each with its id, name, role and task snippet.
@@ -479,7 +495,7 @@ export async function classifyInsertion(
     },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'stop', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown }>(
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown; methodSwitch?: unknown; method_switch?: unknown }>(
     llm,
     request,
     signal,
@@ -499,7 +515,7 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown };
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown };
     // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
     // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
     const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
@@ -518,6 +534,7 @@ export async function classifyInsertion(
       ...(parsed.adds_along === true || parsed.addsAlong === true ? { addsAlong: true } : {}),
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
+      ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
       ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranch: { callId: rawStopId.trim() } } : {}),
     };
   }

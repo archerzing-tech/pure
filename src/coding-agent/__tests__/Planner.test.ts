@@ -959,6 +959,57 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(plain.supplementsCurrent).toBeUndefined();
   });
 
+  it('teaches the judge the resource-reminder method switch, and parses method_switch through (2026-10-13 REA case)', () => {
+    // 真机判例：pure 正用传统办法反编译，用户插「你刚才不是已经安装了REA
+    // 这个工具了吗」。旧词表里没有「资源提醒=换做法」这一档，裁决器把它读
+    // 成砍掉"传统办法"这一项（steer/task + cancels_part），宿主回了
+    // 「好——这项不做了」——只接住停的那半，扔掉用户真正要的「换成REA」。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    // goal-change 收这类话，且带 method_switch 契约字段。
+    expect(prompt).toContain('A RESOURCE REMINDER is 换方案 said sideways');
+    expect(prompt).toContain('"method_switch": true');
+    // 硬要求：绝不能落 cancels_part——「这项不做了」丢掉要换的那半句。
+    expect(prompt).toContain('"cancels_part" must stay OFF for it');
+    expect(prompt).toContain('answering a resource reminder with "这项不做了"');
+    // JSON 样例与契约段落都在。
+    expect(prompt).toContain('"supplements_current":true,"method_switch":true');
+    expect(prompt).toContain('"method_switch": include it as true ONLY with kind "goal-change"');
+    // 移除段的护栏：点名替换方案的句子不是移除；但顺带取消无关支的混合句
+    // 照常报 cancels_part（评审 1b：绝对化会压住合法移除）。
+    expect(prompt).toContain('never cancels_part. This covers only a replacement');
+    expect(prompt).toContain('the unrelated removal still reports "cancels_part" as usual');
+  });
+
+  it('parses the method_switch contract field through to the classification (2026-10-13 REA case)', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"goal-change","reason":"method switch: use the installed REA tool instead","confidence":0.9,"method_switch":true}'),
+      'context', '你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的',
+    );
+    expect(hit.kind).toBe('goal-change');
+    expect(hit.methodSwitch).toBe(true);
+    // 驼峰兜底（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"kind":"goal-change","reason":"same","confidence":0.9,"methodSwitch":true}'),
+      'context', '同样的话',
+    );
+    expect(camel.methodSwitch).toBe(true);
+    // 缺省/非 true 都不带标记——推翻方向的 goal-change 不该被当成换做法。
+    const plain = await classifyInsertion(
+      mockLlm('{"kind":"goal-change","reason":"overturn: make a poster instead","confidence":0.9}'),
+      'context', '别做这个了，改成做海报',
+    );
+    expect(plain.methodSwitch).toBeUndefined();
+    // 蛇形字段只在 goal-change 上有意义，但解析层不拦——契约语义由提示词
+    // 兜住（与 supplements_current 同款分层）。
+    const onSteer = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"misrouted","confidence":0.9,"method_switch":true}'),
+      'context', '同样的话',
+    );
+    expect(onSteer.methodSwitch).toBe(true);
+  });
+
   it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {
     // 内部兜底（空话/中止/超时/解析失败）必须自我表白：协调器据此改用
     // 字面安全网，而不是把"task"当成一份裁决来信。真裁决绝不带这个标记。

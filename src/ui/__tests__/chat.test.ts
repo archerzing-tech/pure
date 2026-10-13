@@ -1102,9 +1102,10 @@ describe('plan overview completion state', () => {
     // 结束后才突然执行。判定落定时若已不在流式中，必须补一次 scheduleDispatch；
     // dispatch 的 isStreaming 守卫保证重复调度不会开出第二个并发回合。
     expect(src.indexOf('if (!this.isStreaming()) this.roundClose.scheduleDispatch()')).toBeGreaterThan(-1);
-    // S2 第六刀：同类补派搬进了编排器（goal-change / premise-change 两处判定
-    // 落地补派）——恰两处，删掉任何一处的 mutant 都要被这条计数抓住。
-    expect(orch.split('if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();').length - 1).toBe(2);
+    // S2 第六刀：同类补派搬进了编排器——恰三处，删掉任何一处的 mutant 都要
+    // 被这条计数抓住：goal-change 的方法切换支（2026-10-13 REA 判例，押账重
+    // 入同样的迟到风险）、goal-change 的推翻支、premise-change。
+    expect(orch.split('if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();').length - 1).toBe(3);
     const dispatch = plane.indexOf('  dispatch(): void {');
     expect(dispatch).toBeGreaterThan(-1);
     const dispatchBody = plane.slice(dispatch, dispatch + 400);
@@ -1143,6 +1144,31 @@ describe('plan overview completion state', () => {
     // 折入 / steer / 队列路径通过方法参数收场 ack。
     expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false)')).toBeGreaterThan(-1);
     expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
+  });
+
+  it('routes the method switch through pause-and-reenter, never the cancel receipt (2026-10-13 REA case)', () => {
+    // 真机判例：「你刚才不是已经安装了REA了吗」被判成取消，宿主回了
+    // 「好——这项不做了」。方法切换（method_switch 契约字段）现在在
+    // goal-change case 里先走专属路：在飞 PAUSE 存档、无飞直接重排，两路
+    // 都押账重入让模型叙述「换用什么」，且绝不碰取消收执。
+    const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
+    const gc = orch.indexOf("case 'goal-change': {");
+    expect(gc).toBeGreaterThan(-1);
+    const body = orch.slice(gc, orch.indexOf("case 'premise-change':", gc));
+    // 专属路先于通用重排路，由契约字段驱动（宿主不嗅措辞）。
+    const methodAt = body.indexOf('decision.signals.methodSwitch === true');
+    expect(methodAt).toBeGreaterThan(-1);
+    expect(methodAt).toBeLessThan(body.indexOf('方向变了——'));
+    // 在飞走 PAUSE（进度存档，不是失败证据），无飞直接重排——两路都收场。
+    const methodBody = body.slice(methodAt, body.indexOf('不在这里回显'));
+    expect(methodBody.indexOf('PAUSE_ABORT_REASON')).toBeGreaterThan(-1);
+    expect((methodBody.match(/this\.deps\.settleAck\(ack/g) ?? []).length).toBe(2);
+    // 收执说「换方法」不说「不做了」；方法切换路绝不产生取消收执。
+    expect(methodBody).toContain('换成新的方法来做');
+    expect(methodBody).toContain('换新的方法做');
+    expect(methodBody.indexOf('cancelBeforeDispatchReceipt')).toBe(-1);
+    // 押账重入的迟到派发风险同款兜底。
+    expect(methodBody.indexOf('scheduleDispatch()')).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {

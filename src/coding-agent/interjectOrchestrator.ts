@@ -252,7 +252,25 @@ export class InterjectOrchestrator {
         this.deps.settleAck(ack, '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
         this.deps.abort();
         return;
-      case 'goal-change':
+      case 'goal-change': {
+        // 方法切换（2026-10-13 REA 判例）先走：目标没变、换的是路——在飞支
+        // 照 premise-change 的口径 PAUSE 存档而非硬 abort，旧做法的活结算成
+        // 「已暂停·进度已存档」而不是失败证据，重入回合自己决定弃用还是续
+        // 跑。收执只说宿主真实做的事（暂停+换路重排），点不了资源名——名字
+        // 由重入回合的模型叙述，它才看得到装没装上。
+        if (decision.signals.methodSwitch === true) {
+          this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
+          if (this.deps.hasDelegationInFlight()) {
+            this.deps.settleAck(ack, '收到——手头这套做法先暂停存档，换成新的方法来做；已完成的不丢。', true, 'info');
+            this.deps.abort(PAUSE_ABORT_REASON);
+          } else {
+            this.deps.settleAck(ack, '收到——这套做法就到这里，接下来换新的方法做；已完成的不丢。', true, 'info');
+            this.deps.abort();
+          }
+          // 与下方同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
+          if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
+          return;
+        }
         // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
         // 先回显再重入 = 同一句话上两遍。
         this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
@@ -263,6 +281,7 @@ export class InterjectOrchestrator {
         // the held insert — re-arm the deferred dispatch here.
         if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
         return;
+      }
       case 'premise-change': {
         // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
         // 下去全是白跑——先止损。

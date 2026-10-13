@@ -104,6 +104,12 @@ export const SCENARIOS: Record<string, string> = {
     '（当前状态：模型正在思考这个任务的规划、还未开始执行）',
     '思考最新说到：先读现有那一节，找出说不清的地方再动笔',
   ].join('\n'),
+  /** 反编译分析（2026-10-13 REA 真机判例的原场景）：执行中、正用传统手工
+   *  办法逐步做，此前装好的 REA 工具闲着——资源提醒就发生在执行途中。 */
+  'reverse-engineering': [
+    '用户当前诉求：帮我反编译分析一个软件，讲清它的模块结构和关键逻辑',
+    '（当前状态：模型正在执行中，正用传统的手工办法逐步做反编译分析；此前已经安装了 REA 工具，一个专门用来反编译分析的 agent 工具集）',
+  ].join('\n'),
 };
 
 export const DEFAULT_SCENARIO = 'platform-research';
@@ -139,6 +145,13 @@ export const CASES: Case[] = [
   { text: '换个方案', kind: 'goal-change', source: 'INSERTION_CLASSIFY_PROMPT goal-change 例' },
   { text: '这个方向走不通，换个做法吧', kind: 'goal-change', source: 'DynamicInsertionCoordinator.test.ts' },
   { text: '不要了，全部重来', kind: 'goal-change', source: 'DynamicInsertionCoordinator.test.ts' },
+
+  // ── 资源提醒族（2026-10-13 REA 判例）：「不是已装了X吗」= 换做法，
+  //    不是取消——期望 kind goal-change 且不报 cancels_part（报了就落
+  //    「这项不做了」，丢掉要换的那半句）。机械正则必须继续不接这句：
+  //    反问句里没有命令词，接了就是抢答。 ──
+  { text: '你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的', kind: 'goal-change', source: '改进进度记录 2026-10-13 REA 判例', scenario: 'reverse-engineering' },
+  { text: '不是有现成的X吗，用X来做', kind: 'goal-change', source: 'INSERTION_CLASSIFY_PROMPT 资源提醒例', scenario: 'reverse-engineering' },
 
   // ── 加活族：已降级为安全网（往在飞产出物里加还是第二件活，只有裁决器分得清）──
   { text: '再加一个 爱奇艺平台', kind: 'task', source: '改进进度记录 2026-09-22 实测' },

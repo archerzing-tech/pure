@@ -222,6 +222,7 @@ export class DynamicInsertionCoordinator {
         ...(result.addsAlong ? { addsAlong: true } : {}),
         ...(result.resumesPart ? { resumesBranch: true } : {}),
         ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
+        ...(result.methodSwitch ? { methodSwitch: true } : {}),
         // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
         // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。
         ...(result.stopBranch ? { stopBranchCallId: result.stopBranch.callId } : {}),
