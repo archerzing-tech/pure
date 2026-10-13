@@ -4791,10 +4791,12 @@ fn parse_exa_results(body: &serde_json::Value, max: usize) -> Vec<SearchResult> 
                 continue;
             }
             let date = item.get("publishedDate").and_then(|v| v.as_str()).unwrap_or("");
+            // publishedDate 由远端控制，可能是任意文本（如「2024年1月1日」）。
+            // 字节切片会切进多字节字符中间直接 panic，按字符截断才安全。
             let suffix = if date.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", &date[..date.len().min(10)])
+                format!(" ({})", date.chars().take(10).collect::<String>())
             };
             let snippet = item.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
             out.push(SearchResult {
@@ -8518,7 +8520,15 @@ impl WebCache {
             .unwrap_or(0);
         let mut value = value.to_string();
         if value.len() > WEB_CACHE_MAX_VALUE_BYTES {
-            value.truncate(WEB_CACHE_MAX_VALUE_BYTES);
+            // String::truncate 只能落在字符边界。30_000 恰被 3 字节 CJK 整除，
+            // 纯中文/纯 ASCII 永远撞不上；中英混排（真实网页的常态）才会切进
+            // 多字节字符中间 panic——且发生在全局锁内，mutex 中毒后所有
+            // web_cache().lock().unwrap() 永久 panic，web 工具瘫痪到重启。
+            let mut end = WEB_CACHE_MAX_VALUE_BYTES;
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
         }
         self.records.insert(
             key.to_string(),
@@ -9648,6 +9658,44 @@ mod web_tier_2_3_tests {
         c.set("big", &big, 60_000);
         assert!(c.get("big").map(|v| v.len() <= WEB_CACHE_MAX_VALUE_BYTES).unwrap_or(false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_truncation_lands_on_a_char_boundary_for_mixed_scripts() {
+        // 回归（2026-10 审计 P0）：30_000 字节上限对 3 字节 CJK 恰好整除，纯
+        // 中文/纯 ASCII 都撞不上非边界截断；中英混排（真实网页的常态）才会
+        // panic，且发生在全局锁内 → mutex 中毒瘫痪。这里让 ASCII 前缀把
+        // 截断点推进多字节字符内部，旧行为必崩。
+        let dir = std::env::temp_dir().join(format!("pure-cache-test-boundary-{}", std::process::id()));
+        let file = dir.join("web-cache.json");
+        let mut c = WebCache::new(file.clone());
+        for over in 1..3usize {
+            let body = format!("{}{}", "x".repeat(WEB_CACHE_MAX_VALUE_BYTES - over), "中".repeat(10));
+            c.set(&format!("k{}", over), &body, 60_000);
+            let stored = c.get(&format!("k{}", over)).expect("value must survive truncation");
+            assert!(stored.len() <= WEB_CACHE_MAX_VALUE_BYTES);
+            assert!(stored.is_char_boundary(stored.len()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exa_published_date_never_sliced_mid_character() {
+        // 回归（2026-10 审计 P0）：publishedDate 由远端控制，字节切片
+        // `&date[..min(10)]` 遇到「2024年1月1日」切进多字节字符中间 panic。
+        // 按字符截断后：非 ISO 日期整串保留，ISO 时间戳仍只留日期段。
+        let body = serde_json::json!({
+            "results": [
+                { "title": "t1", "url": "https://a.example/", "publishedDate": "2024年1月1日", "text": "s1" },
+                { "title": "t2", "url": "https://b.example/", "publishedDate": "2024-01-02T12:34:56Z", "text": "s2" },
+                { "title": "t3", "url": "https://c.example/", "text": "s3" }
+            ]
+        });
+        let out = parse_exa_results(&body, 10);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].title.starts_with("t1 (2024年1月1日)"), "got {}", out[0].title);
+        assert!(out[1].title.starts_with("t2 (2024-01-02)"), "got {}", out[1].title);
+        assert_eq!(out[2].title, "t3");
     }
 
     #[test]

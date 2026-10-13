@@ -9,6 +9,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter } from '../NodeToolAdapter';
+import { DownloadController } from '../../../shared/downloadHub';
+import type { ToolResult } from '../../../shared/types';
 
 const FILE_BODY = 'hello from the download test\n';
 const DISPOSITION = 'attachment; filename="custom-name.txt"';
@@ -166,4 +168,121 @@ describe('download_file · S2 单请求改写（镜像端点）', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+});
+
+// ── 分块下载 fd 收口（2026-10 审计 P0 回归）─────────────────────────────────
+// 分块路径（>1MB + Accept-Ranges + connections>1）曾有两处洞：Promise.all
+// 早退跳过 fd.close()（句柄泄漏），残余 worker 与 fallback 双写同一文件
+// （静默损坏）。失败路径直测 downloadChunked（桩掉 getRangeBuffer，不与
+// curl 兜底缠斗——curl -C - 会从残缺文件续传，端到端复现注定不稳）：
+// 分块成功必须字节一致；中途失败必须等全部在飞分片落定才返回，且返回后
+// fd 已关、迟到写入被丢弃、文件内容永不再变。
+describe('download_file · chunked fd teardown', () => {
+  const TOTAL = 2 * 1024 * 1024;
+  const mk = (f: (i: number) => number): Buffer => {
+    const b = Buffer.alloc(TOTAL);
+    for (let i = 0; i < TOTAL; i++) b[i] = f(i);
+    return b;
+  };
+  const body = mk((i) => (i * 31 + 7) % 256);
+
+  let server: Server;
+  let baseUrl = '';
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      if (req.method === 'HEAD') {
+        res.writeHead(200, { 'Content-Length': String(body.length), 'Accept-Ranges': 'bytes' });
+        res.end();
+        return;
+      }
+      const m = /bytes=(\d+)-(\d*)/.exec(String(req.headers.range ?? ''));
+      const s = m ? Number(m[1]) : 0;
+      const e = m && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
+      // 越界 range 按真服务器语义回 416（curl -C - 在文件已满时会发
+      // bytes=<size>-，本机 curl 对 416 退出码为 0，视为「无需续传」）。
+      if (s >= body.length || s > e) {
+        res.writeHead(416, { 'Content-Range': `bytes */${body.length}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Range': `bytes ${s}-${e}/${body.length}`,
+        'Content-Length': String(e - s + 1),
+        'Accept-Ranges': 'bytes',
+      });
+      res.end(body.subarray(s, e + 1));
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    server?.close();
+  });
+
+  it('chunks assemble byte-identically on the happy path', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pure-chunked-ok-'));
+    try {
+      const adapter = new NodeToolAdapter({ workspace: dir });
+      const result = await adapter.execute({
+        id: 'dl_chunked_ok',
+        index: 0,
+        function: { name: 'download_file', arguments: JSON.stringify({ url: `${baseUrl}/chunked.bin`, destination: dir, filename: 'ok.bin', connections: 3, resume: false }) },
+      });
+      expect(result.success).toBe(true);
+      const summary = JSON.parse(String(result.result)) as { via: string; size: number };
+      expect(summary.via).toBe('native-chunked');
+      expect(summary.size).toBe(TOTAL);
+      expect(readFileSync(join(dir, 'ok.bin')).equals(body)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('a mid-flight chunk failure waits for in-flight chunks, closes the fd, and lets no late write through', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pure-chunked-fail-'));
+    try {
+      const adapter = new NodeToolAdapter({ workspace: dir });
+      const outPath = join(dir, 'unit.bin');
+      const CHUNK = 1000;
+      const chunk = (n: number): Buffer => Buffer.alloc(CHUNK, n);
+      let lastSettleAt = 0;
+      (adapter as unknown as { getRangeBuffer: (url: string, s: number, e: number) => Promise<Buffer> }).getRangeBuffer =
+        async (_url: string, s: number) => {
+          const i = s / CHUNK;
+          if (i === 0) throw new Error('boom-chunk0');
+          await new Promise((r) => setTimeout(r, 300));
+          lastSettleAt = Date.now();
+          return chunk(i);
+        };
+      const t0 = Date.now();
+      let err: unknown;
+      await (adapter as unknown as { downloadChunked: (...a: unknown[]) => Promise<number> })
+        .downloadChunked('http://stub/', outPath, 3 * CHUNK, 3, new DownloadController(), () => {}, 'unit.bin')
+        .catch((e: unknown) => { err = e; });
+
+      // 错误原样传播，不被吞掉也不被换掉。
+      expect((err as Error).message).toBe('boom-chunk0');
+      // 失败也必须等全部在飞分片收尾：旧代码在 ~0ms 就返回，把两个 300ms
+      // 后才落地的分片留在无人 await 的 promise 上、往已半死的 fd 里写。
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
+      // fd 已关、迟到写入被丢弃：返回之后的文件内容必须永远不再变化。
+      const snap1 = readFileSync(outPath);
+      await new Promise((r) => setTimeout(r, 400));
+      const snap2 = readFileSync(outPath);
+      expect(snap2.equals(snap1)).toBe(true);
+      // 已落盘的部分各就各位：块 1、2 在自己的偏移上，块 0 失败留洞。
+      expect(snap1.length).toBe(3 * CHUNK);
+      expect(snap1.subarray(CHUNK, 2 * CHUNK).equals(chunk(1))).toBe(true);
+      expect(snap1.subarray(2 * CHUNK, 3 * CHUNK).equals(chunk(2))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });

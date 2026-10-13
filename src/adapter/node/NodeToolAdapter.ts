@@ -2037,33 +2037,58 @@ export class NodeToolAdapter implements ToolAdapter {
   ): Promise<number> {
     const chunkSize = Math.ceil(total / connections);
     const fd = await open(outPath, 'w');
+    // fd 生命周期收口（2026-10 审计 P0）：任何一条路径都必须关掉句柄，且
+    // 关闭后残余 worker 的迟到写入必须被丢弃——否则 fallback 会与幽灵
+    // worker 双写同一文件，产出静默损坏。
+    let fdOpen = true;
+    const closeOnce = async (): Promise<void> => {
+      if (!fdOpen) return;
+      fdOpen = false;
+      await fd.close();
+    };
     const done = new Array<boolean>(connections).fill(false);
     let written = 0;
+    let firstError: unknown;
+    // runOne 不向外抛：错误记进 firstError，让 Promise.all 等全部 worker 落
+    // 定。早退会把残余 worker 挂在无人 await 的 promise 上，fd 关闭后还在写。
     const runOne = async (i: number): Promise<void> => {
       if (done[i]) return;
       const s = i * chunkSize;
       const e = Math.min(total - 1, s + chunkSize - 1);
-       let buf: Buffer;
-       try {
-         buf = await this.getRangeBuffer(url, s, e, controller.signal, proxy);
-       } catch (err) {
+      let buf: Buffer;
+      try {
+        buf = await this.getRangeBuffer(url, s, e, controller.signal, proxy);
+      } catch (err) {
         if (controller.paused && !controller.aborted) return;
-        throw err;
+        firstError ??= err;
+        return;
       }
-      await fd.write(buf, 0, buf.length, s);
+      try {
+        await fd.write(buf, 0, buf.length, s);
+      } catch (err) {
+        if (!fdOpen) return; // 关闭后的迟到写入：下载已在失败收场，静默丢弃
+        firstError ??= err;
+        return;
+      }
       done[i] = true;
       written += buf.length;
       emit({ downloaded: written, total, percent: Math.min(100, Math.floor((written / total) * 100)), state: controller.paused ? 'paused' : 'downloading', filename });
     };
-    const workers: Promise<void>[] = [];
-    for (let i = 0; i < connections; i++) workers.push(runOne(i));
-    await Promise.all(workers);
-    while (done.includes(false) && !controller.aborted) {
-      if (controller.paused) await controller.waitWhilePaused();
-      if (controller.aborted) break;
-      for (let i = 0; i < connections; i++) if (!done[i]) await runOne(i);
+    try {
+      const workers: Promise<void>[] = [];
+      for (let i = 0; i < connections; i++) workers.push(runOne(i));
+      await Promise.all(workers);
+      // 重试环只在没有真实错误时进入；出错后已决定整体失败，继续重试只会
+      // 把失败拖成死循环。
+      while (done.includes(false) && !controller.aborted && !firstError) {
+        if (controller.paused) await controller.waitWhilePaused();
+        if (controller.aborted) break;
+        for (let i = 0; i < connections; i++) if (!done[i]) await runOne(i);
+      }
+    } finally {
+      await closeOnce();
     }
-    await fd.close();
+    if (firstError) throw firstError;
     if (controller.aborted && done.includes(false)) throw new Error('已取消');
     return total;
   }

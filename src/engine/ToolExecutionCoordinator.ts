@@ -441,10 +441,15 @@ export class ToolExecutionCoordinator {
     ctx.hardStopSignal?.addEventListener('abort', escalateHardStop, { once: true });
     const lockManager = ctx.lockManager ?? this.fallbackLock;
     let executed: ToolResult | undefined;
+    let lockHeld = false;
     try {
       if (path) {
         if (write) await lockManager.acquireWrite(path, toolStop.signal);
         else await lockManager.acquireRead(path, toolStop.signal);
+        // 拿到锁才登记持有：acquire 被 abort 拒绝时若照旧 release，会把仍
+        // 持锁的调用者的计数减掉，队列头的等待者被提前放行（2026-10 审计
+        // P0 实测：A 还拿着写锁，C 的 acquire 被 abort 后 D 立刻被授予）。
+        lockHeld = true;
       }
       try {
         const cap = Math.min(
@@ -497,7 +502,7 @@ export class ToolExecutionCoordinator {
         };
       }
     } finally {
-      if (path) lockManager.release(path);
+      if (path && lockHeld) lockManager.release(path);
     }
     // on_post_tool runs after the lock is released, on both success and
     // failure. stdout the model should see on its next THINK is appended to a

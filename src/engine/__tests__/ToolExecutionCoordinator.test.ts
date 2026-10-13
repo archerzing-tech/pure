@@ -13,6 +13,7 @@ import {
   type ExecutedToolResult,
 } from '../ToolExecutionCoordinator';
 import { abortPaused } from '../../shared/pauseSignal';
+import { FileLockManager } from '../FileLockManager';
 import type { EngineContext, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
 
 const BUDGET = {
@@ -542,5 +543,90 @@ describe('ToolExecutionCoordinator pause semantics (阶段 12 + 1c 暂停真即�
     expect(toolSawAbort).toBe(true);
     expect(yielded).toHaveLength(1);
     expect(yielded[0].result.success).toBe(false);
+  }, 5_000);
+});
+
+// ── 路径锁完整性（2026-10 审计 P0 回归）──────────────────────────────────
+// acquire 被 abort 拒绝时，finally 若照旧 release，会把仍持锁调用者的计数
+// 减掉——队列头的等待者被提前放行，实测「A 还拿着写锁，D 已被授予」。锁
+// 管理器跨引擎上下文共享（ctx.lockManager），所以这是真实拓扑，不是构造。
+describe('ToolExecutionCoordinator path locks', () => {
+  class RecordingLock extends FileLockManager {
+    acquires = 0;
+    releases = 0;
+    override async acquireWrite(path: string, signal?: AbortSignal): Promise<void> {
+      await super.acquireWrite(path, signal);
+      this.acquires++;
+    }
+    override release(path: string): void {
+      this.releases++;
+      super.release(path);
+    }
+  }
+
+  const PATH = '/tmp/pure-lock-breach-regression.txt';
+  const callPath = (name: string): ToolCall => ({
+    id: `call_${name}`,
+    index: 0,
+    function: { name, arguments: JSON.stringify({ path: PATH }) },
+  });
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function until(pred: () => boolean, what: string): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (!pred()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await sleep(5);
+    }
+  }
+
+  it('a rejected acquire must not release the lock another call still holds', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const lock = new RecordingLock();
+    const makeCtx = (execute: (tc: ToolCall) => Promise<ToolResult>): EngineContext =>
+      ({ tools: {
+          getTools: () => [],
+          getMetadata: () => ({ isWrite: true }),
+          execute,
+        }, lockManager: lock }) as unknown as EngineContext;
+
+    let aHolding = false;
+    let dRanWhileAHeld = false;
+    const ctxA = makeCtx(async (tc) => {
+      aHolding = true;
+      // 800ms：给 C 的入队留足余量——若 A 释放早于 C 入队，C 会直接拿到锁，
+      // releases==0 断言就失去意义（评审指出高负载 CI 下的理论误报）。
+      await sleep(800);
+      aHolding = false;
+      return ok(tc);
+    });
+    const ctxC = makeCtx(async (tc) => ok(tc));
+    const ctxD = makeCtx(async (tc) => {
+      // D 的工具体只在 acquire 成功后才运行：此刻 aHolding 为真即是击穿。
+      if (aHolding) dRanWhileAHeld = true;
+      return ok(tc);
+    });
+
+    const pA = coordinator.execute([callPath('a_tool')], ctxA, BUDGET);
+    await until(
+      () => (lock as unknown as { locks: Map<string, { count: number }> }).locks.get(PATH)?.count === 1,
+      'A taking the write lock',
+    );
+
+    const ac = new AbortController();
+    (ctxC as unknown as { signal: AbortSignal }).signal = ac.signal;
+    const pC = coordinator.execute([callPath('c_tool')], ctxC, BUDGET);
+    await until(
+      () => ((lock as unknown as { locks: Map<string, { queue: unknown[] }> }).locks.get(PATH)?.queue.length ?? 0) >= 1,
+      'C parking in the queue',
+    );
+    ac.abort(new Error('test stop'));
+    await pC;
+    // C 被 abort 拒绝：修复后它没拿到过锁，也就绝不能产生 release。
+    expect(lock.acquires).toBe(1); // 只有 A
+    expect(lock.releases).toBe(0); // A 还没放，C 的拒绝不算持有
+
+    const pD = coordinator.execute([callPath('d_tool')], ctxD, BUDGET);
+    await Promise.all([pA, pD]);
+    expect(dRanWhileAHeld).toBe(false);
   }, 5_000);
 });
