@@ -45,10 +45,15 @@ describe('ToolExecutionCoordinator user hooks', () => {
   let workspace: string;
   let runner: UserHookRunner;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     workspace = mkdtempSync(join(tmpdir(), 'pure-coordinator-hooks-'));
     runner = createNodeUserHookRunner({ cwd: workspace });
-  });
+    // Windows 冷 runner 的第一发 powershell 要付模块预热 + AV 扫描（注释上方
+    // 实测 >5s；v3.3.1 两次 Release 在 10s 钩子预算到期处连红同一用例，
+    // [10022ms] 即预算钟）。这笔开销必须付在断言外：满额超时的空钩子把进程
+    // 首启烧掉，带默认预算的断言用例只摸暖后的系统缓存。2026-10-13。
+    await runner({ command: 'echo warm-up', timeoutMs: 60_000 }, { event: 'on_pre_tool', tool: 'warm_up' });
+  }, 70_000);
 
   afterAll(() => {
     rmSync(workspace, { recursive: true, force: true });
