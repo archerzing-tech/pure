@@ -2232,6 +2232,13 @@ export class NodeToolAdapter implements ToolAdapter {
       if (opts.proxy) args.push('--proxy', opts.proxy);
       args.push('-o', outPath, url);
       const child = spawn('curl', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      // Bun 1.4.3 Linux：子进程退出后 stdio 管道里滞留未读数据时，child
+      // 'close' 事件永不触发——curl 往 stderr 写的进度条（几百字节）就足以
+      // 卡死整条兜底链（2026-10 CI 实证：有 data 监听、-s 静默或 stdio
+      // ignore 都正常，唯独有输出且无人读必挂；macOS/Windows 不复现）。
+      // resume 排干两侧，close 恢复照常。
+      child.stdout?.resume();
+      child.stderr?.resume();
       const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
       child.on('error', (e) => {
         stop();
@@ -2269,6 +2276,10 @@ export class NodeToolAdapter implements ToolAdapter {
       if (opts.proxy) args.push('--all-proxy', opts.proxy);
       args.push('-d', dirname(outPath), '-o', basename(outPath), url);
       const child = spawn('aria2c', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      // 同 downloadViaCurl：Bun 1.4.3 Linux 下无人读的 stdio 管道会让
+      // 'close' 永不触发，aria2c 的控制台输出更多，更是必挂。
+      child.stdout?.resume();
+      child.stderr?.resume();
       const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
       child.on('error', (e) => {
         stop();
@@ -2300,6 +2311,10 @@ export class NodeToolAdapter implements ToolAdapter {
     return new Promise((resolve) => {
       const args = ['-c', '-q', '--tries=5', '--timeout=30', '-O', outPath, url];
       const child = spawn('wget', args, { signal: opts.controller.signal, env: this.proxyEnv(opts.proxy) } as { signal: AbortSignal; env: NodeJS.ProcessEnv });
+      // 同 downloadViaCurl：Bun 1.4.3 Linux 下无人读的 stdio 管道会让
+      // 'close' 永不触发（wget -q 时输出少但残留仍足以踩雷）。
+      child.stdout?.resume();
+      child.stderr?.resume();
       const stop = this.startDownloadProgressPoller(outPath, opts.controller, opts.emit, opts.filename);
       child.on('error', (e) => {
         stop();
