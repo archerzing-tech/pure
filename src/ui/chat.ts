@@ -90,7 +90,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScro
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -926,6 +926,41 @@ function withAbortTimeout<T>(
       (error) => finish(() => reject(error)),
     );
   });
+}
+
+// ── Pending-announce echo for the tool-gap waiting card ──
+// 多轮工作（如「基于文档生成 PPT」）中，模型常在正文里预告下一步（「现在写
+// 生成脚本——这是纯代码产出，直接落盘」），随后进入长静默：长内容（脚本/
+// 文档）作为 tool call 参数要等模型整轮生成，动辄 30-60s 无事件。空档卡若只
+// 说「正在思考下一步…」，用户刚看过预告却等来泛化等待文案，无从分辨 pure 是
+// 在干活还是卡死（2026-10-13 用户真机指认「体验非常不好」）。取正文最后一个
+// 非空行作预告原话回指进 hint——预告是模型自己的话，回指它不是编造进度，是
+// 把「在等什么」如实说出口。
+function tailAnnounceLine(text: string): string {
+  // 逐行扫，跟踪 ``` 围栏开合：模型动笔前常先贴一段代码，回指代码内部行
+  // 是胡话外显（评审 P2）。XML 工具调用碎片段（seg.text 是原始流，渲染路径
+  // 有 stripToolCallXml 而这里直读）同理跳过。
+  let inFence = false;
+  let last = '';
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || !line) continue;
+    if (/^<\/?[a-zA-Z_][\w.-]*>?$/.test(line)) continue; // <parameter>/</code> 等碎片行
+    last = line;
+  }
+  if (!last) return '';
+  const stripped = last
+    .replace(/^#{1,6}\s+/, '') // 标题
+    .replace(/^[-*+]\s+/, '') // 无序列表
+    .replace(/^\d+[.)]\s+/, '') // 有序列表
+    .replace(/^>\s*/, ''); // 引用
+  if (!stripped) return '';
+  const capped = [...stripped].slice(0, 50).join('');
+  return capped.length < stripped.length ? `${capped}…` : capped;
 }
 
 // ── Environment probe: installed runtimes + network state ──
@@ -4241,6 +4276,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (pendingRows.size > 0 || pendingByName.size > 0) return;
         thinkingCard = openThinkingCard();
         setThinkingLabel(thinkingCard, '正在思考下一步…');
+        // 模型刚在正文里预告过下一步（如「现在写生成脚本」）时回指原话：
+        // 15s 后的长静默 hint 从泛化「等模型」变成「在等它说的这一步」，
+        // 用户能对上账（tailAnnounceLine 注释里有完整动机）。
+        const announce = tailAnnounceLine(currentSegment?.text ?? '');
+        if (announce) setThinkingPendingIntent(thinkingCard, announce);
         // Mark the card as a silence-waiter so the first real reasoning delta
         // resets this label back to the default thinking state.
         thinkingCard.card.classList.add('waiting');

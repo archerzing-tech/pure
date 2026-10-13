@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, resetThinkingLabelForOutput } from '../thinkingCard';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput } from '../thinkingCard';
 
 beforeAll(() => {
   if (typeof document === 'undefined') GlobalRegistrator.register();
@@ -114,6 +114,89 @@ describe('live thinking card timer (long-silence feedback)', () => {
     expect(hint).toContain('深度思考或服务端排队');
     expect(hint).toContain('暂未发现请求失败');
     expect(hint).not.toContain('重试');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('echoes the model\'s pending announce in the hint so a long wait reads as "waiting for the announced step"', async () => {
+    const handle = attachedCard();
+    // chat.ts 记录模型正文最后一句预告（如「现在写生成脚本」）后开空档卡——
+    // hint 必须回指原话，而不是泛化的「深度思考或服务端排队」。
+    setThinkingLabel(handle, '正在思考下一步…');
+    setThinkingPendingIntent(handle, '现在写生成脚本——这是纯代码产出，直接落盘');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    await sleep(150);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toContain('现在写生成脚本');
+    expect(hint).toContain('要等这轮开口才真正动手');
+    expect(hint).not.toContain('深度思考或服务端排队');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('escalates the same hint in place after escalateAfterMs, seconds ticking live', async () => {
+    const handle = attachedCard();
+    setThinkingLabel(handle, '等待模型首字返回…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60, escalateAfterMs: 140 });
+    await sleep(100);
+    const hintEl = () => handle.card.querySelector<HTMLElement>('.thinking-hint')!;
+    expect(hintEl()).not.toBeNull();
+    const firstCopy = hintEl().textContent ?? '';
+    expect(firstCopy).toContain('仍在等待模型返回首个内容');
+    await sleep(150);
+    const escalated = hintEl()?.textContent ?? '';
+    // 同一元素原地替换（不是新 hint），带实时秒数与弱断言。
+    expect(escalated).toContain('已经等了');
+    expect(escalated).toMatch(/已经等了 \d+ 秒/);
+    expect(escalated).toContain('暂未发现请求失败');
+    expect(hintEl().classList.contains('fading')).toBe(false);
+    // 秒数不是一次性快照：继续等，hint 里的秒数跟着 chip 一起涨（评审 P1：
+    // 冻结在升级时刻的秒数与持续走秒的 chip 自相矛盾）。秒粒度是 1s，两次
+    // 读取必须跨过整秒边界才必然可比。
+    await sleep(1100);
+    const later = parseInt((hintEl()?.textContent ?? '').match(/已经等了 (\d+) 秒/)?.[1] ?? '0', 10);
+    const earlier = parseInt(escalated.match(/已经等了 (\d+) 秒/)?.[1] ?? '0', 10);
+    expect(later).toBeGreaterThan(earlier);
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('falls back to retry copy when the retry notice arrives AFTER escalation', async () => {
+    const handle = attachedCard();
+    setThinkingLabel(handle, '等待模型首字返回…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60, escalateAfterMs: 140 });
+    await sleep(200);
+    expect(handle.card.querySelector('.thinking-hint')?.textContent).toContain('已经等了');
+    // 升级已发生后 label 才翻成重试态（FailurePolicy 决定晚到）——下一 tick
+    // 必须回落到重试专属文案，不能让「暂未发现请求失败」和「正在重试」同卡互斥。
+    setThinkingLabel(handle, '模型请求未成功，正在重试（连续第 1 次）…');
+    await sleep(100);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toContain('上一阶段未成功');
+    expect(hint).not.toContain('已经等了');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('never escalates a custom hintText (caller-owned copy stays)', async () => {
+    const handle = attachedCard();
+    setThinkingLabel(handle, '等待模型首字返回…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60, hintText: '定制等待文案', escalateAfterMs: 140 });
+    await sleep(300);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toBe('定制等待文案');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('escalation skips retry-state cards (they already have dedicated copy)', async () => {
+    const handle = attachedCard();
+    setThinkingLabel(handle, '模型请求未成功，正在重试（连续第 2 次）…');
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60, escalateAfterMs: 140 });
+    await sleep(300);
+    const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
+    expect(hint).toContain('上一阶段未成功');
+    expect(hint).not.toContain('已经等了');
     stopThinkingTimer(handle);
     handle.el.remove();
   });

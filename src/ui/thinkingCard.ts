@@ -87,7 +87,28 @@ function defaultHintFor(handle: ThinkingCardHandle): string {
   if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) {
     return '上一阶段未成功，正在自动调整处理方式；这不表示你的网络已断开。若持续失败，请查看具体错误信息或停止本轮。';
   }
+  const intent = pendingIntentFor(handle);
+  if (intent) {
+    return `还在等模型这轮返回——它刚说的「${intent}」要等这轮开口才真正动手。暂未发现请求失败，可随时停止本轮。`;
+  }
   return '仍在等待模型返回首个内容：通常是模型深度思考或服务端排队，暂未发现请求失败。可随时停止本轮。';
+}
+
+// ── Escalated wait expectation ──
+// 第一级 hint（15s）解释「为什么还没动静」；长内容轮的静默远不止 15s，
+// 用户会从「有点慢」滑向「是不是卡死了」。45s 起 hint 原地换成时间预期管理
+// （长内容动笔前的思考常要一两分钟 + 实时秒数）——不是轮播表演：同一张卡
+// 同一条 hint，内容随真实等待时长变得更有信息量。秒数每个 tick 刷新，不是
+// 一次性快照（评审 P1：冻结的「已经等了 45 秒」旁边是持续走秒的 chip，自相
+// 矛盾）；label 翻成重试态后下一 tick 自动回落到重试专属文案。
+const ESCALATE_DEFAULT_MS = 45_000;
+
+function escalateHintFor(handle: ThinkingCardHandle, elapsedSec: number): string | null {
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label')?.textContent ?? '';
+  if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) return null;
+  // 否定性弱断言（与两条旧 hint 同纪律）：UI 验证不了「请求仍然活跃」，
+  // 只能如实说「暂未发现失败」——传输层静默挂死时卡片不能替请求撒谎。
+  return `已经等了 ${elapsedSec} 秒：写代码、长文档这类产出，模型动笔前的思考常要一两分钟。暂未发现请求失败，不是无响应的卡死；等不及可以停止本轮。`;
 }
 
 export function resetThinkingLabelForOutput(handle: ThinkingCardHandle): void {
@@ -96,6 +117,27 @@ export function resetThinkingLabelForOutput(handle: ThinkingCardHandle): void {
     handle.card.classList.remove('waiting');
     setThinkingLabel(handle, t('thinking.thinking'));
   }
+}
+
+// ── Pending-intent echo ──
+// 多轮工作（如「基于文档生成 PPT」）中，模型常在正文里预告下一步（「现在写
+// 生成脚本——这是纯代码产出，直接落盘」），然后进入下一轮 THINK：长内容
+// （脚本/文档）作为 tool call 参数要等模型整轮生成才出现，这段静默动辄
+// 30-60s。等待 hint 若仍是泛化的「深度思考或服务端排队」，用户刚看过预告
+// 却只看到「等待模型」，无从分辨 pure 是在干活还是卡死。预告是模型自己的
+// 话——回指它不是编造进度，是把「在等什么」如实说出口。
+const pendingIntents = new WeakMap<ThinkingCardHandle, string>();
+
+/** Record what the model just announced it would do next (last sentence of
+ *  its own answer). The silence hint echoes it so a long wait reads as
+ *  "waiting for the announced step" instead of a generic stall. */
+export function setThinkingPendingIntent(handle: ThinkingCardHandle, text: string): void {
+  const trimmed = text.trim();
+  if (trimmed) pendingIntents.set(handle, trimmed);
+}
+
+function pendingIntentFor(handle: ThinkingCardHandle): string {
+  return pendingIntents.get(handle) ?? '';
 }
 
 const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
@@ -109,11 +151,14 @@ const hintFadeTimeouts = new WeakMap<ThinkingCardHandle, number>();
  *  detaches (interval self-cancels), or stopThinkingTimer runs. */
 export function startThinkingTimer(
   handle: ThinkingCardHandle,
-  opts: { intervalMs?: number; hintAfterMs?: number; hintText?: string } = {},
+  opts: { intervalMs?: number; hintAfterMs?: number; hintText?: string; escalateAfterMs?: number } = {},
 ): void {
   stopThinkingTimer(handle);
-  const { intervalMs, hintAfterMs } = { ...THINKING_TIMER_DEFAULTS, ...opts };
+  const { intervalMs, hintAfterMs, escalateAfterMs = ESCALATE_DEFAULT_MS } = { ...THINKING_TIMER_DEFAULTS, ...opts };
   const hintText = opts.hintText ?? null; // null → state-aware default at fire time
+  // 升级线只在默认 hint 语义下运行：调用方显式给了定制文案，说明它知道自己
+  // 要什么，45s 的通用时间预期不该悄悄盖掉它（评审 latent 边界）。
+  const customHint = hintText !== null;
   const label = handle.card.querySelector<HTMLElement>('.thinking-label');
   if (!label || !handle.card.isConnected) return;
   const chip = document.createElement('span');
@@ -122,6 +167,9 @@ export function startThinkingTimer(
   label.insertAdjacentElement('afterend', chip);
   const startedAt = Date.now();
   let hinted = false;
+  // 升级线不早于首级 hint：escalateAfterMs 被调用方配小时仍保证首级文案
+  // 至少能活过一个 interval（评审 latent 边界）。
+  const escalateAt = Math.max(escalateAfterMs, hintAfterMs);
   const iv = window.setInterval(() => {
     // Self-cleanup for cards removed without stopThinkingTimer (abort paths).
     if (!handle.card.isConnected) {
@@ -138,6 +186,18 @@ export function startThinkingTimer(
       // retry notice between start and hint, so the copy names the actual cause.
       hint.textContent = hintText ?? defaultHintFor(handle);
       handle.body.insertBefore(hint, handle.scrollEl);
+    }
+    // 长静默升级线：同一 hint 原地维护，秒数每 tick 实时刷新；label 翻成
+    // 重试态（retry 通知晚于升级到达）时下一 tick 自动回落到重试专属文案。
+    // 真实输出已开始（textEl 非空）或 hint 正在淡出时不动。
+    if (hinted && !customHint && !handle.textEl.textContent) {
+      const hint = handle.card.querySelector<HTMLElement>('.thinking-hint');
+      if (hint && hint.dataset.dismissing !== '1') {
+        if (ms >= escalateAt) {
+          const upgrade = escalateHintFor(handle, Math.floor(ms / 1000));
+          hint.textContent = upgrade ?? (hintText ?? defaultHintFor(handle));
+        }
+      }
     }
   }, intervalMs);
   timerIntervals.set(handle, iv);
