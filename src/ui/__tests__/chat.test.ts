@@ -1163,12 +1163,27 @@ describe('plan overview completion state', () => {
     const methodBody = body.slice(methodAt, body.indexOf('不在这里回显'));
     expect(methodBody.indexOf('PAUSE_ABORT_REASON')).toBeGreaterThan(-1);
     expect((methodBody.match(/this\.deps\.settleAck\(ack/g) ?? []).length).toBe(2);
-    // 收执说「换方法」不说「不做了」；方法切换路绝不产生取消收执。
-    expect(methodBody).toContain('换成新的方法来做');
-    expect(methodBody).toContain('换新的方法做');
+    // 收执只说宿主真实做的机械动作（暂停+押话重排），绝不替现场下结论——
+    // 2026-10-13 用户纠偏：不是所有回答都要说「换方法」，插的是什么事由
+    // 看得见现场的模型在重入回合说。收执里不许出现解释性模板（「换方法」
+    // 「改用」「换成」）。
+    expect(methodBody).toContain('手头的活先暂停存档');
+    expect(methodBody).toContain('先停在这里');
+    expect((methodBody.match(/带着你这句话重新安排/g) ?? []).length).toBe(2);
+    for (const interpretive of ['换成', '改用', '换方法']) {
+      expect(methodBody.indexOf(interpretive)).toBe(-1);
+    }
+    // 方法切换路绝不产生取消收执（REA 案的原始事故形状）。
     expect(methodBody.indexOf('cancelBeforeDispatchReceipt')).toBe(-1);
     // 押账重入的迟到派发风险同款兜底。
     expect(methodBody.indexOf('scheduleDispatch()')).toBeGreaterThan(-1);
+    // 「怎么说」的总规则在协议层（2026-10-13 用户纠偏）：插话回话必须对接
+    // 上下文、承上启下——贴进任何对话都成立的模板句按构照就是错的；方法
+    // 切换类只教动作，实质话由模型按现场说。
+    const proto = readSource(new URL('../../shared/promptLayers.ts', import.meta.url));
+    expect(proto.indexOf('continues THIS conversation')).toBeGreaterThan(-1);
+    expect(proto.indexOf('A reply that would fit any other conversation is wrong by construction')).toBeGreaterThan(-1);
+    expect(proto.indexOf('say in one line what you switched to and why')).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {

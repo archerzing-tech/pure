@@ -256,15 +256,17 @@ export class InterjectOrchestrator {
         // 方法切换（2026-10-13 REA 判例）先走：目标没变、换的是路——在飞支
         // 照 premise-change 的口径 PAUSE 存档而非硬 abort，旧做法的活结算成
         // 「已暂停·进度已存档」而不是失败证据，重入回合自己决定弃用还是续
-        // 跑。收执只说宿主真实做的事（暂停+换路重排），点不了资源名——名字
-        // 由重入回合的模型叙述，它才看得到装没装上。
+        // 跑。收执只说宿主真实做的机械动作（暂停+押话重排），绝不替现场下
+        // 结论——插的是什么事、该怎么接，由重入回合看得见现场的模型说
+        // （2026-10-13 用户纠偏：不是所有回答都要说「换方法」，模板话贴进
+        // 任何对话都成立就是错的）。
         if (decision.signals.methodSwitch === true) {
           this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
           if (this.deps.hasDelegationInFlight()) {
-            this.deps.settleAck(ack, '收到——手头这套做法先暂停存档，换成新的方法来做；已完成的不丢。', true, 'info');
+            this.deps.settleAck(ack, '收到——手头的活先暂停存档，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
             this.deps.abort(PAUSE_ABORT_REASON);
           } else {
-            this.deps.settleAck(ack, '收到——这套做法就到这里，接下来换新的方法做；已完成的不丢。', true, 'info');
+            this.deps.settleAck(ack, '收到——正在做的先停在这里，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
             this.deps.abort();
           }
           // 与下方同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
