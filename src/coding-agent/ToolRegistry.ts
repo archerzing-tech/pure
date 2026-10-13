@@ -11,6 +11,7 @@ import type { TaggedTool, PermissionContext } from './types';
 import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
 import { BUILT_IN_TOOL_DEFS, isPublicToolName } from '../shared/toolDefs';
+import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { withRelaySchema } from '../engine/relayPipeline';
 
@@ -150,8 +151,14 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   getTools(): ToolDefinition[] {
+    // 动态能力工具（pure-capabilities）与 MCP 发现工具「注册即可见」——
+    // 2026-10-13 真机判例：workspace 模式的模型清单走本方法，旧的纯
+    // isPublicToolName 过滤把注册过的动态/MCP 工具全滤掉，执行路是通的、
+    // 模型却看不见，只能答「pure 没有暴露 MCP 注册工具」。与 toolInventory
+    // 的既有开口（isPublicToolName || isDynamicCapabilityTool）同款；MCP
+    // 工具的排除面在连接层（mcpExcludedPrefixes），这里不再滤第二次。
     return this.tools
-      .filter(({ name }) => isPublicToolName(name))
+      .filter(({ name, tags }) => isPublicToolName(name) || isDynamicCapabilityTool(name) || tags.includes(Tags.MCP))
       .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
 

@@ -10,8 +10,11 @@ import { createDefaultHarnessConfig } from './coding-agent/defaultHarnessConfig'
 import { NodeToolAdapter } from './adapter/node/NodeToolAdapter';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
-import { ToolRegistry } from './coding-agent/ToolRegistry';
+import { ToolRegistry, Tags } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
+import { CliCapabilityToolAdapter, withConnectTimeout } from './harness/cliCapabilityTools';
+import { DYNAMIC_CAPABILITY_TOOL_DEFS } from './shared/dynamicCapabilityTools';
+import { loadConfig, saveConfig, type PureConfig } from './cliConfig';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { SteerBus } from './coding-agent/steerBus';
 import { DelegationControlPlane } from './coding-agent/delegationControl';
@@ -272,13 +275,48 @@ async function createTools(
   // path. The engine executes tools through ctx.tools; wrapping the adapter
   // in a ToolRegistry puts every call behind the same permission gate the GUI
   // uses (read auto-approve / write + command confirm / session cache).
-  // toolsDefs stay the adapter's own (the 6 CLI-available tools) so the LLM
-  // never sees registry-only git_* tools it cannot actually call.
+  // toolsDefs are the composite adapter's own (the CLI-available built-ins
+  // plus the five dynamic capability tools) so the LLM never sees
+  // registry-only git_* tools it cannot actually call.
   //
   // `autoApprove` (driven by --auto-approve) flips that gate to fully open:
   // every tool call is allowed without prompting. Useful for piped / scripted
   // invocations where no human is at the keyboard to answer y/n/a.
-  const registry = new ToolRegistry(adapter);
+  const mcpDefs: ToolDefinition[] = [];
+  let mcpClient: MCPClient | undefined;
+  // 动态能力工具（skill 搜索/安装、MCP 搜索/连接/自定义注册）的 CLI 宿主：
+  // 连接与持久化闭包在这里（才有 MCPClient、registry 与共享 config.json 的
+  // 装配语境），registry 的 delegate 换成组合适配器后五个动态名被它拦下
+  // 执行，其余工具照旧走 NodeToolAdapter。GUI 在 TauriToolAdapter 内联实现
+  // 同一组工具——两侧的 registry 注册（下方循环）与权限门同构。
+  let registry: ToolRegistry;
+  const capAdapter = new CliCapabilityToolAdapter(adapter, {
+    connectMcp: async (server, signal) => {
+      let client = mcpClient;
+      if (!client) {
+        client = new MCPClient({
+          servers: [],
+          sessionId,
+          excludedPrefixes: mcpExcludedPrefixes,
+          onToolDiscovered: (tool) => registry.register(tool),
+        });
+        registerActiveMcpClient(client);
+        registry.setMCPExecutor(client);
+        mcpClient = client;
+      }
+      await withConnectTimeout(client.connectServer(server), `MCP ${server.name} connection`);
+      // 持久化进共享 config.json（GUI Settings → MCP 写同一份数据），下次
+      // 启动 connectAll 自动重连。
+      const current = loadConfig() ?? ({} as PureConfig);
+      const servers = [...(current.mcpServers ?? [])];
+      const existing = servers.findIndex((item) => item.name === server.name);
+      if (existing >= 0) servers[existing] = server;
+      else servers.push(server);
+      saveConfig({ ...current, mcpServers: servers });
+      return { tools: client.getTools(), persisted: true };
+    },
+  });
+  registry = new ToolRegistry(capAdapter);
   // 通道来源默认 PLAN（只读）并由 gateway 注入审批 handler；CLI 保持 NORMAL +
   // 终端 y/n/a。同一接口，两个表面，PermissionManager 本身零改动。
   registry.setPermissionManager(new PermissionManager(permissionMode, permissionHandler ?? createCliPermissionHandler(autoApprove)));
@@ -288,8 +326,6 @@ async function createTools(
   // built-ins (permission-gated like the GUI) and routed to the MCPClient.
   // Prefix exclusions (mcpExcludedPrefixes) keep third-party tool lists from
   // crowding out the built-in selection.
-  const mcpDefs: ToolDefinition[] = [];
-  let mcpClient: MCPClient | undefined;
   if (mcpServers && mcpServers.length > 0) {
     mcpClient = new MCPClient({
       servers: mcpServers,
@@ -306,7 +342,20 @@ async function createTools(
     mcpDefs.push(...mcpClient.getTools());
   }
 
-  return { tools: registry, toolsDefs: [...adapter.getTools(), ...mcpDefs], mcpClient };
+  // 动态能力五工具注册进 registry：known 才能过 registry.execute 的查找，
+  // tags 决定权限门（连接/注册会启动第三方进程或连远程服务，与 GUI 同为
+  // DESTRUCTIVE/high 弹确认）。
+  for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
+    const risky = tool.name === 'connect_mcp_server' || tool.name === 'register_mcp_server';
+    registry.register({
+      ...tool,
+      tags: risky ? [Tags.DESTRUCTIVE] : [Tags.READ],
+      riskLevel: risky ? 'high' : 'low',
+      serverName: 'pure-capabilities',
+    });
+  }
+
+  return { tools: registry, toolsDefs: [...capAdapter.getTools(), ...mcpDefs], mcpClient };
 }
 
 // ── Storage factory ──
