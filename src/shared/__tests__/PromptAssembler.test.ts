@@ -323,6 +323,21 @@ describe('PromptAssembler', () => {
     expect(prompt.indexOf('Proven successful approaches')).toBeLessThan(prompt.indexOf('Known error patterns'));
   });
 
+  it('injects machine-level lessons as an always-on section (E1 落地, 2026-10-13)', () => {
+    const prompt = assembler.composeMemoryPrompt({
+      template: 'Base',
+      memory: {
+        preferences: [],
+        errorPatterns: [],
+        machineLessons: ['On this network prefer GitHub API file listing over full clone for large repos'],
+      },
+    });
+
+    expect(prompt).toContain('Machine-level lessons (environment/network/platform facts about THIS computer');
+    expect(prompt).toContain('- On this network prefer GitHub API file listing over full clone for large repos');
+    expect(prompt).toContain('<session_memory>');
+  });
+
   it('injects a runtime adaptive strategy even when no long-term memory is available', () => {
     const prompt = assembler.composeMemoryPrompt({
       template: 'Base',

@@ -161,6 +161,10 @@ export interface PromptMemoryContext {
    *  filtered to the CURRENT platform. Injected so the model prefers tools
    *  that actually work well on this machine — without being limited to them. */
   toolPreferences?: string[];
+  /** E1 落地（2026-10-13）——机器级教训（反思器判 scope:'machine' 的条目，
+   *  全局库无条件注入，与 toolPreferences 同构）：环境/网络/平台/工具链类
+   *  事实在本机跨项目成立，关键词检索够不着它们，只能常驻。 */
+  machineLessons?: string[];
   project?: string;
   /** Runtime-selected strategy compiled from current environment and feedback. */
   adaptiveStrategy?: string;
@@ -529,6 +533,7 @@ export class PromptAssembler {
       || (memory.procedures?.length ?? 0) > 0
       || (memory.projectConventions?.length ?? 0) > 0
       || (memory.toolPreferences?.length ?? 0) > 0
+      || (memory.machineLessons?.length ?? 0) > 0
       || Boolean(memory.adaptiveStrategy?.trim())
     );
     if (!hasMemory) return input.template;
@@ -540,6 +545,9 @@ export class PromptAssembler {
       // things the user TOLD us to do, not things we inferred.
       fragment('memory_project_conventions', memory?.projectConventions?.length ? `Project conventions you corrected or confirmed (always follow in this project):\n${memory.projectConventions.map((value) => `- ${value}`).join('\n')}` : '', 46),
       fragment('memory_tools', memory?.toolPreferences?.length ? `Platform-verified tools (prefer these on this machine when the situation fits — you are not limited to them):\n${memory.toolPreferences.map((value) => `- ${value}`).join('\n')}` : '', 58),
+      // E1 落地（2026-10-13）——机器级教训紧跟工具偏好：同为无条件注入的
+      // 机器域事实，先讲「这台机器有什么工具」，再讲「这台机器有什么坑」。
+      fragment('memory_machine_lessons', memory?.machineLessons?.length ? `Machine-level lessons (environment/network/platform facts about THIS computer — they hold across projects, apply them when the situation fits):\n${memory.machineLessons.map((value) => `- ${value}`).join('\n')}` : '', 58),
       // Same-project proven approaches rank FIRST among the success signals:
       // they were verified in THIS project, so the model should reach for them
       // before generic or cross-project approaches.

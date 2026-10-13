@@ -10,6 +10,7 @@ import {
   REFLECT_DEDUPE_PREFIX,
   buildTurnEvidence,
   countReflectionsToday,
+  lessonToMemoryAdds,
   parseReflectedLesson,
   reflectTurn,
   shouldReflect,
@@ -278,5 +279,76 @@ describe('reflectTurn', () => {
 
   it('resolves undefined for an unusable reply (parse-level fallback)', async () => {
     expect(await reflectTurn(llmReturning('I cannot help with that.'), input)).toBeUndefined();
+  });
+});
+
+describe('lesson scope (E1 机器级教训通道, 2026-10-13)', () => {
+  const evidence: TurnEvidence[] = buildTurnEvidence([
+    toolCallMessage('web_fetch', '{"url":"https://x"}', 'c1'),
+  ]);
+  const ctx = {
+    sessionId: 'sess-scope',
+    projectPath: '/ws/project-a',
+    dedupeKey: 'reflect:sess-scope:task',
+    verificationSummary: 'passed',
+    verificationPassed: true,
+  };
+
+  it('parses scope:"machine" and defaults/invalid values to project', () => {
+    const machine = parseReflectedLesson(JSON.stringify({
+      symptom: 'full clone of a large repo timed out',
+      rootCause: 'github direct access is slow on this network',
+      prevention: 'prefer GitHub API file listing + raw batched download',
+      recovery: 'switched to API listing and succeeded',
+      evidence: [evidence[0].id],
+      scope: 'machine',
+    }), evidence);
+    expect(machine?.scope).toBe('machine');
+
+    const project = parseReflectedLesson(JSON.stringify({
+      symptom: 's', rootCause: 'r', prevention: 'p', recovery: 'r',
+      evidence: [evidence[0].id],
+    }), evidence);
+    expect(project?.scope).toBeUndefined(); // 缺省不写 = project
+
+    const typo = parseReflectedLesson(JSON.stringify({
+      symptom: 's', rootCause: 'r', prevention: 'p', recovery: 'r',
+      evidence: [evidence[0].id],
+      scope: 'Machine ', // 拼写偏差 → 回落 project
+    }), evidence);
+    expect(typo?.scope).toBeUndefined();
+  });
+
+  it('persists machine-scoped lesson and procedure into the global scope, correction stays project-scoped', () => {
+    const lesson = parseReflectedLesson(JSON.stringify({
+      symptom: 'full clone timed out on this network',
+      rootCause: 'slow github direct access on this machine',
+      prevention: 'prefer API file listing + raw batched download',
+      recovery: 'switched and succeeded',
+      evidence: [evidence[0].id],
+      procedure: 'list files via API -> batch raw downloads -> verify',
+      correction: { kind: 'project_convention', statement: 'never full-clone here' },
+      scope: 'machine',
+    }), evidence)!;
+
+    const adds = lessonToMemoryAdds(lesson, ctx);
+    // 主条目与 procedure 跟机器走;correction 留在项目域。
+    for (const add of adds) {
+      if (add.type === 'project_convention' || add.type === 'user_preference') {
+        expect(add.projectPath).toBe('/ws/project-a');
+      } else {
+        expect(add.projectPath).toBe('__machine__');
+      }
+    }
+    expect(adds.some(a => a.type === 'procedure' && a.projectPath === '__machine__')).toBe(true);
+  });
+
+  it('keeps project-scoped lessons in the project path (no behavior change)', () => {
+    const lesson = parseReflectedLesson(JSON.stringify({
+      symptom: 's', rootCause: 'r', prevention: 'p', recovery: 'r',
+      evidence: [evidence[0].id],
+    }), evidence)!;
+    const adds = lessonToMemoryAdds(lesson, ctx);
+    expect(adds.every(a => a.projectPath === '/ws/project-a')).toBe(true);
   });
 });

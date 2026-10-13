@@ -12,6 +12,7 @@
 // 浏览器安全哈希：共享内核的纯 TS sha256，而不是 node:crypto —— Harness 在 GUI
 // 路径上是静态导入的，node:crypto 会让整个 Vite 浏览器构建失败。
 import { sha256Hex } from '../shared/sha256';
+import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 import type { LLMAdapter, Message } from '../shared/types';
 import type { IMemoryStore, MemoryEntry } from '../shared/types';
 
@@ -87,6 +88,12 @@ export interface ReflectedLesson {
   procedure?: string;
   /** E3.1 便车：本轮里用户明确纠正过的做法/规矩（草稿，待用户确认）。 */
   correction?: ReflectedCorrection;
+  /** E1 落地（2026-10-13）——教训的适用域：'project'（默认）= 只对当前项目
+   *  成立；'machine' = 环境/网络/平台/工具链类事实，在本机跨项目成立（装大
+   *  repo 该走 API 分批、某工具本机缺失……）。machine 条目落全局库并走无
+   *  条件注入通道（与 tool_preference 同构）；解析缺省/非法值一律回落
+   *  project——误标 machine 会污染每个会话的注入面，宁可漏标。 */
+  scope?: 'project' | 'machine';
 }
 
 const REFLECT_SYSTEM_PROMPT = `You are a meticulous engineering retrospective analyst. You receive the transcript facts of one completed agent turn (the user request, the tool calls it made, any failures, and the final outcome). Produce ONE reusable lesson for future sessions on this project.
@@ -99,6 +106,7 @@ Respond with STRICT JSON only — no markdown fences, no prose outside the JSON:
   "recovery": "how the turn recovered, or 'not needed'",
   "evidence": ["id1", "id2"],
   "procedure": "optional: for a SUCCESSFUL multi-step task, a compact step skeleton (intent -> steps -> how it was verified), under 600 chars; omit for trivial or failed turns",
+  "scope": "optional: 'machine' ONLY when the lesson is about this machine's environment, network, platform, or installed toolchain (it would hold in ANY project on this computer — e.g. GitHub is slow here, a tool is missing); omit for everything project-specific",
   "correction": "optional: if the user explicitly corrected how the agent should work, {\"kind\": \"project_convention\" or \"user_preference\", \"statement\": \"the rule as the user stated it, under 200 chars\"}; omit otherwise"
 }
 
@@ -215,6 +223,8 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
   const recovery = asString(parsed.recovery, 300) || 'not needed';
   const procedure = asString(parsed.procedure, 600);
   const correction = parseCorrection(parsed.correction);
+  // 白名单校验：缺省/拼错一律 project（见 ReflectedLesson.scope 注）。
+  const scope = parsed.scope === 'machine' ? 'machine' : 'project';
 
   return {
     symptom,
@@ -225,6 +235,7 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
     confidence: evidence.length > 0 ? 'high' : 'low',
     ...(procedure ? { procedure } : {}),
     ...(correction ? { correction } : {}),
+    ...(scope === 'machine' ? { scope } : {}),
   };
 }
 
@@ -266,6 +277,11 @@ export interface LessonPersistContext {
  * ctx.verificationPassed 时跟随；correction 草稿一律 confidence:'low'。
  */
 export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistContext): Omit<MemoryEntry, 'id'>[] {
+  // E1 落地（2026-10-13）：机器级教训（scope:'machine'）落全局库
+  // （GLOBAL_MEMORY_SCOPE）——网络/环境/平台类事实跟机器走，不跟项目走；
+  // 注入端走无条件通道（Harness 的 machineLessons，与 tool_preference 同构）。
+  // correction 不跟随：用户纠正的是项目规矩/个人偏好，留在项目域。
+  const persistPath = lesson.scope === 'machine' ? GLOBAL_MEMORY_SCOPE : ctx.projectPath;
   const evidenceNote = lesson.evidence.length > 0
     ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.join(', ')}).`
     : '';
@@ -281,7 +297,7 @@ export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistCo
       content: `Reflected lesson — ${parts.join('. ')}.${evidenceNote}`.slice(0, 900),
       timestamp: Date.now(),
       sessionId: ctx.sessionId,
-      projectPath: ctx.projectPath,
+      projectPath: persistPath,
       lesson: {
         symptom: lesson.symptom,
         rootCause: lesson.rootCause,
@@ -301,7 +317,7 @@ export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistCo
       content: lesson.procedure.slice(0, 600),
       timestamp: Date.now(),
       sessionId: ctx.sessionId,
-      projectPath: ctx.projectPath,
+      projectPath: persistPath,
       dedupeKey: `procedure:${ctx.dedupeKey}`,
     });
   }

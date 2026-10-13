@@ -948,6 +948,24 @@ export class Harness {
     } catch {
       globalToolPrefs = [];
     }
+    // E1 落地（2026-10-13）——机器级教训的无条件注入通道（与上面的
+    // tool_preference 同构）：反思器判 scope:'machine' 的条目落全局库，这里
+    // 常驻注入。环境/网络/平台类事实与工具偏好一样够不着关键词检索（教训
+    // 文本与新 prompt 几乎不共享 token），只能常驻；cap 5 + activeOnly 控制
+    // 注入面，decay/棘轮负责淘汰。correction 类草稿与 tool_preference 在
+    // 此滤除——前者是项目域、后者有自己的通道。
+    let globalLessons: Awaited<ReturnType<IMemoryStore['list']>> = [];
+    try {
+      if (this.config.memory) {
+        globalLessons = this.config.memory
+          .list({ projectPath: GLOBAL_MEMORY_SCOPE, activeOnly: true })
+          .filter(m => m.type === 'successful_pattern' || m.type === 'error_pattern' || m.type === 'procedure')
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, 5);
+      }
+    } catch {
+      globalLessons = [];
+    }
     const toolPreferenceSeen = new Set<string>();
     const toolPreferences: string[] = [];
     for (const m of [...globalToolPrefs, ...memories]) {
@@ -1004,6 +1022,7 @@ export class Harness {
         procedures,
         projectConventions,
         toolPreferences,
+        machineLessons: globalLessons.map(m => m.content),
         project: this.config.memory ? this.projectPath() : undefined,
         adaptiveStrategy: strategy.directive,
       },
@@ -1019,7 +1038,7 @@ export class Harness {
       const entryIds: string[] = [];
       const entryTypes: Record<string, number> = {};
       const seen = new Set<string>();
-      for (const m of [...globalToolPrefs, ...memories]) {
+      for (const m of [...globalToolPrefs, ...globalLessons, ...memories]) {
         if (seen.has(m.id)) continue;
         seen.add(m.id);
         entryIds.push(m.id);
