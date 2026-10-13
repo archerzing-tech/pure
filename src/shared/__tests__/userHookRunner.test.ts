@@ -108,6 +108,19 @@ describe('createNodeUserHookRunner', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   }, SPAWN_TIMEOUT_MS);
 
+  // 审计批 6② — 杀直子进程不等于 EOF：hook 的后台孙进程（`sleep 60 &` 之类）
+  // 继承了 stdout/stderr 写端时，等流尾要等孙进程死掉，「超时必返回」的契约
+  // 被一个无关进程扣住。修复是读侧逐 read 竞速截止钟（cancel 实测不解挂起
+  // read）。Windows 的 PowerShell 后台作业不继承控制台句柄，这个 bug 形态
+  // 本身是 POSIX fork 语义的，故 POSIX-only。
+  it.skipIf(isWindows)('returns on timeout even when a grandchild keeps the stdout pipe open', async () => {
+    const run = createNodeUserHookRunner({ cwd: workspace });
+    const started = Date.now();
+    const result = await run({ command: 'sleep 60 & echo done', timeoutMs: 1000 }, { event: 'on_turn_complete' });
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(10_000); // 旧代码被孙进程扣满 60s
+  }, SPAWN_TIMEOUT_MS);
+
   it('clamps sub-minimum overrides up to 1s', async () => {
     const run = createNodeUserHookRunner({ cwd: workspace });
     const started = Date.now();

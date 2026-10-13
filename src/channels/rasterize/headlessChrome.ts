@@ -188,8 +188,9 @@ export class HeadlessChrome {
   }
 }
 
-/** 从 Chrome 的 stderr 里读 `DevTools listening on ws://127.0.0.1:<port>/…`。 */
-async function readDevToolsPort(proc: import('bun').Subprocess, timeoutMs: number): Promise<number | null> {
+/** 从 Chrome 的 stderr 里读 `DevTools listening on ws://127.0.0.1:<port>/…`。
+ *  导出仅为测试（launch 用假进程不可行，deadline 行为必须真测）。 */
+export async function readDevToolsPort(proc: import('bun').Subprocess, timeoutMs: number): Promise<number | null> {
   const stderr = proc.stderr;
   if (!(stderr instanceof ReadableStream)) return null;
   const reader = stderr.getReader();
@@ -198,7 +199,18 @@ async function readDevToolsPort(proc: import('bun').Subprocess, timeoutMs: numbe
   const deadline = Date.now() + timeoutMs;
   try {
     while (Date.now() < deadline) {
-      const { value, done } = await reader.read();
+      // 截止时间必须约束到 read 本身（审计批 6①）：Chrome 启动挂死时
+      // stderr 一个字节都不来，旧的「读间隙查表」让 await 永远悬着，
+      // startupTimeoutMs 形同虚设，launch 永不返回。竞速一把钟，输了
+      // 就按超时收场（悬着的 read 由 Promise.race 挂着 handler，后续
+      // 进程死亡导致的 rejection 不会变成 unhandled）。
+      const remainingMs = deadline - Date.now();
+      const tick = new Promise<'deadline'>((resolve) => {
+        setTimeout(() => resolve('deadline'), Math.max(remainingMs, 0)).unref?.();
+      });
+      const raced = await Promise.race([reader.read(), tick]);
+      if (raced === 'deadline') return null;
+      const { value, done } = raced;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const match = buffer.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);

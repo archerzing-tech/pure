@@ -19,6 +19,7 @@ import { mergePhaseModelConfig } from './shared/phaseModels';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
 import { renderLogo, runOneShot, runRepl } from './cliRepl';
 import { runGateway, runChannelsCommand } from './cliChannels';
+import { reapCliMcp } from './cliHarness';
 
 type SubCommand = 'config' | 'gateway' | 'channels' | '';
 
@@ -395,4 +396,15 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// 审计批 6③：`main().catch(console.error)` 有两个洞——抛错路径退出码仍是 0
+// （脚本/CI 看到「成功」），且 throw 跳过了成功路径之后的 MCP 收尾，stdio
+// server 进程变孤儿。两条路径都 reap（尽力而为、不再抛）；用 exitCode 而不是
+// process.exit，让 stdout 自然冲刷。
+main().then(
+  () => reapCliMcp(),
+  (err) => {
+    console.error(err);
+    reapCliMcp();
+    process.exitCode = 1;
+  },
+);

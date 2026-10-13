@@ -297,6 +297,7 @@ async function createTools(
       excludedPrefixes: mcpExcludedPrefixes,
       onToolDiscovered: (tool) => registry.register(tool),
     });
+    registerActiveMcpClient(mcpClient);
     registry.setMCPExecutor(mcpClient);
     await mcpClient.connectAll();
     // Register tools from any server that connected (allSettled tolerates
@@ -615,6 +616,27 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   });
 
   return { harness, tools, toolsDefs, store, sessionId, projectPath, mcpClient: createdTools.mcpClient, steerBus, delegationControl, folds, roundClose, interjectOrchestrator };
+}
+
+// ── cli.ts 顶层兜底的 MCP 收口（审计批 6③）──
+// runRepl / runOneShot 中途抛错时，它们各自出口的 disconnectAll 全部跳过，
+// MCP stdio 子进程挂着管道成孤儿；同时 main().catch(console.error) 让失败
+// 进程仍以 0 退出，脚本调用无从分辨成败。createTools 是 CLI 侧唯一创建点，
+// 在这里登记当前客户端，供入口兜底统一 reap（成功路径的常规 disconnectAll
+// 与本 reap 幂等互容：StdioTransport.close 置空 proc，HttpTransport 释放
+// 读端，二次调用皆安全）。
+let activeMcpClient: MCPClient | undefined;
+
+export function registerActiveMcpClient(client: MCPClient | undefined): void {
+  activeMcpClient = client;
+}
+
+/** 断开登记的 MCP 客户端并清登记。吞错——退出兜底路径自己不能再抛。 */
+export function reapCliMcp(): void {
+  try {
+    activeMcpClient?.disconnectAll();
+  } catch { /* best effort：收尾不再抛 */ }
+  activeMcpClient = undefined;
 }
 
 export { memoryStore, learnFromInput, cliSubagentProgress, createTools, createStore, createHarness, printToolCorrectionHints, distillSkillFromMemory };

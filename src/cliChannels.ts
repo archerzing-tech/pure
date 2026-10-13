@@ -18,6 +18,7 @@ import { DailyTokenBudget, PeerRateLimiter } from './channels/limits';
 import { isCustomProviderId } from './shared/providers';
 import { createFileSessionEventSink } from './shared/node/sessionEventFile';
 import { listSessionViews, readSessionTimeline } from './shared/node/sessionViews';
+import { createSignalShutdown } from './shared/signalShutdown';
 import { existsSync, readFileSync } from 'node:fs';
 
 const CHANNELS_CONFIG_PATH = `${PURE_DIR}/channels.json`;
@@ -167,17 +168,19 @@ export async function runGateway(args: CliArgs): Promise<void> {
     process.stdout.write(`    ${dim('·')} ${adapter.id} ${state}${adapter.id === 'webchat' ? dim(` http://${config.gateway.host}:${config.gateway.port}`) : ''}\n`);
   }
 
-  let stopping = false;
-  const shutdown = async (signal: string) => {
-    if (stopping) return;
-    stopping = true;
-    channelsLog(`收到 ${signal}，正在停止…`);
-    try { healthServer?.stop(true); } catch { /* already down */ }
-    await gateway.stop();
-    process.exit(0);
-  };
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // 审计批 6④：旧写法 `if (stopping) return` 把第二个 Ctrl-C 整个吞掉，
+  // gateway.stop() 挂死时进程只能被外部 kill。双信号状态机给了逃生门。
+  const shutdown = createSignalShutdown(
+    async () => {
+      try { healthServer?.stop(true); } catch { /* already down */ }
+      await gateway.stop();
+      process.exit(0);
+    },
+    (code) => process.exit(code),
+    channelsLog,
+  );
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
   await new Promise<void>(() => { /* keep the process alive until a signal */ });
 }
 
