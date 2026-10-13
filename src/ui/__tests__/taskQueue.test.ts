@@ -405,3 +405,34 @@ describe('TaskQueue scheduled input (dueAt)', () => {
     queue.cancelAll();
   });
 });
+
+// 审计批 4①：冷会话回收的否决依据。逐出一个还有队列活的会话会让
+// controllerFor 返 null、任务搁浅到「被访问才跑」，所以 pending/running
+// 都必须挡住回收；done/cancelled 不挡。
+describe('TaskQueue reap veto signal', () => {
+  it('hasActiveWorkFor counts pending and running work for the session only', async () => {
+    installStorage(fakeStorage([]));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queue = new TaskQueue({
+      chat: { send: () => gate },
+      storageKey: 'pure_task_queue_test',
+      getContext: () => ({ workspace: '/proj', sessionId: 'sess-a' }),
+    });
+    expect(queue.hasActiveWorkFor('sess-a')).toBe(false);
+
+    queue.enqueue(['第一件', '第二件']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    // 第一件 running（lane 押着 gate），第二件 pending——两个状态都算活。
+    expect(queue.hasActiveWorkFor('sess-a')).toBe(true);
+    expect(queue.hasActiveWorkFor('sess-other')).toBe(false);
+
+    release();
+    await gate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    // 全部 done：不再挡回收。
+    expect(queue.hasActiveWorkFor('sess-a')).toBe(false);
+  });
+});

@@ -40,6 +40,10 @@ pub async fn spawn_mcp(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // registry 同键覆盖（重复 spawn / 关服重建）时旧 handle 被 Arc drop——
+    // 没有 kill_on_drop，被覆盖的子进程从此无人引用也无人杀，泄漏成永生
+    // 进程（审计批 4⑥）。
+    cmd.kill_on_drop(true);
     if let Some(extra) = &env {
         cmd.envs(extra);
     }

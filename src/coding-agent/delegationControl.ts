@@ -65,7 +65,9 @@ function snippetFromArgs(rawArgs: string): string {
 
 export class DelegationControlPlane {
   private cancels: string[] = [];
-  /** callId → 原始参数。跨回合保留（续跑点名的是上一回合停下的支）。 */
+  /** callId → 原始参数。跨回合保留（续跑点名的是上一回合停下的支）。
+   *  跨回合保留 ≠ 无界：超限按插入序淘汰最旧者（审计批 4④），最近点名的
+   *  支永远在册——真要续跑几十支之前的委派，参数本就在转写里可查。 */
   readonly delegationArgs = new Map<string, DelegationArgsRecord>();
   /** 待同参重派的分支。跨回合保留（与 delegationArgs 同命：点名的是历史支，
    *  new chat 不清——旧字段 pendingResumes（原 chat.ts）的 clear() 从未清
@@ -97,6 +99,7 @@ export class DelegationControlPlane {
       if (!subagentNames.has(c.function.name) || this.delegationArgs.has(c.id)) continue;
       this.delegationArgs.set(c.id, { name: c.function.name, args: c.function.arguments });
     }
+    this.pruneDelegationArgs();
     if (this.cancels.length === 0) return [];
     const candidates = calls
       .filter((c) => subagentNames.has(c.function.name) && !c.id.startsWith('resume_') && !c.id.startsWith('foldin_'))
@@ -107,6 +110,20 @@ export class DelegationControlPlane {
       this.cancels = this.cancels.filter((t) => !consumed.includes(t));
     }
     return blocked;
+  }
+
+  /** 在册上限：一次重委派批次几十支是常态上限之上，50 支已远超「用户点名
+   *  历史支」的合理回忆窗，而每条存的是 args 全文（几 KB 级），无界攒下去
+   *  就是纯泄漏。 */
+  private static readonly MAX_DELEGATION_ARGS = 50;
+
+  private pruneDelegationArgs(): void {
+    // Map 迭代序 = 插入序：从头删即删最旧。
+    while (this.delegationArgs.size > DelegationControlPlane.MAX_DELEGATION_ARGS) {
+      const oldest = this.delegationArgs.keys().next().value;
+      if (oldest === undefined) break;
+      this.delegationArgs.delete(oldest);
+    }
   }
 
   /** 诊断/收据叙述用。 */

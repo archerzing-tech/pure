@@ -506,6 +506,36 @@ export function disposeMap(target: HTMLElement): void {
   mapInstances.delete(target);
 }
 
+/** 把 root 子树里仍挂着的活地图全部回收（审计批 4②：转写卡片地图从不
+ *  map.remove()，echarts 有脱离回收器而 Leaflet 这边漏了）。只许在**真
+ *  丢弃**路径调用——会话删除、转写清空、从盘重建前；切换会话的摘挂不在
+ *  此列（暖重挂要原样交互，地图必须活过挂载周期）。子树必须完整（宿主
+ *  整体摘除没关系，孩子还在就能扫到）；若调用方会先 innerHTML='' 清空
+ *  子树，改用 collectMapCanvases + disposeCanvases。 */
+export function disposeMapsUnder(root: HTMLElement): void {
+  disposeCanvases(collectMapCanvases(root));
+}
+
+/** 扫出 root（含自身）子树里的地图画布。mapInstances 是 WeakMap 不可枚举，
+ *  画布只能按类名从子树里找（转写卡槽位 .map-canvas、灯箱
+ *  .map-lightbox-canvas）。 */
+export function collectMapCanvases(root: HTMLElement): HTMLElement[] {
+  const found: HTMLElement[] = [];
+  if (root.classList.contains('map-canvas') || root.classList.contains('map-lightbox-canvas')) {
+    found.push(root);
+  }
+  for (const canvas of root.querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')) {
+    found.push(canvas);
+  }
+  return found;
+}
+
+/** 按册回收：元素可以已脱离 DOM（innerHTML='' 清出来的场景），disposeMap
+ *  按引用查 WeakMap，对未注册元素幂等早退。 */
+export function disposeCanvases(canvases: readonly HTMLElement[]): void {
+  for (const canvas of canvases) disposeMap(canvas);
+}
+
 /** Re-request every tile on the EXISTING map instance: no dispose, no map
  *  rebuild, no overlay repaint — markers, route and camera stay exactly as
  *  they are. This is what the silent retry loop drives, so a transient
@@ -566,4 +596,12 @@ export function openMapLightbox(spec: MapSpec): void {
   overlay.addEventListener('mousedown', (e) => {
     if (e.target === overlay) close();
   });
+}
+
+/** 关掉正开着的灯箱（审计批 4②：灯箱挂在 body，不在任何会话宿主子树
+ *  里，会话清场的子树扫描罩不到它——宿主没了它就成了僵尸视图）。走 ✕
+ *  的 click 复用 close() 全链（键盘监听摘除 + disposeMap + overlay 移除），
+ *  不在旁边另写一份清理。 */
+export function closeMapLightbox(): void {
+  document.body.querySelector<HTMLElement>(':scope > .map-lightbox .map-lightbox-close')?.click();
 }

@@ -474,3 +474,47 @@ describe('taskScript · 收尾素材只出事实', () => {
     expect(second.steps[0]?.status).toBe('pending');
   });
 });
+
+describe('taskScript · fold 记忆化（审计批 4⑤）', () => {
+  it('账本没长时重复 derive 结果逐位一致；追加信号立即入账，不串旧账', () => {
+    let script = createTaskScript(plan('A', 'B'));
+    script = applyTaskScriptSignal(script, { kind: 'tool', toolName: 'write_file', ok: true, artifact: 'a.ts' });
+    const first = deriveTaskScript(script);
+    expect(first.steps[0]?.status).toBe('active');
+    // 渲染路径：同一 script 对象反复 derive（卡片刷新、活动面板更新……），
+    // memo 命中必须给出与首算完全相同的结果。
+    expect(deriveTaskScript(script)).toEqual(first);
+    expect(deriveTaskScript(script)).toEqual(first);
+
+    // 追加（新账本引用）：memo 失效，新信号立刻反映。
+    const advanced = applyTaskScriptSignal(script, { kind: 'control', marker: 'phaseDone', phase: 1 });
+    const grown = deriveTaskScript(advanced);
+    expect(grown.steps[0]?.status).toBe('done');
+    expect(grown.steps[0]?.closure).toBe('control');
+
+    // 单槽缓存在两个账本间翻转也不能串：旧引用再 derive 还是旧账。
+    expect(deriveTaskScript(script).steps[0]?.status).toBe('active');
+    expect(deriveTaskScript(advanced).steps[0]?.status).toBe('done');
+  });
+
+  it('渲染高频 derive 不再全账重放（审计复现：每信号 K 次刷新的 O(n²) 被摊平）', () => {
+    // 流式期间每个信号都触发一串卡片刷新：账本没长的那 15 次 derive 必须
+    // 命中 memo（O(1) 折叠 + O(步数) 投影）；只有随追加的那一次做全账重放。
+    // 旧代码每次 derive 都重放全账，artifacts 去重的 O(n) 扫描把
+    // 「n 信号 × K 刷新」放大成 O(K·n²)。
+    let script = createTaskScript(plan('长任务'));
+    const total = 800;
+    const rendersPerSignal = 32;
+    const started = performance.now();
+    for (let i = 0; i < total; i++) {
+      script = applyTaskScriptSignal(script, { kind: 'tool', toolName: 'write_file', ok: true, artifact: `f${i}.ts` });
+      for (let k = 0; k < rendersPerSignal; k++) deriveTaskScript(script);
+    }
+    const steps = deriveTaskScript(script).steps;
+    const elapsed = performance.now() - started;
+    expect(steps[0]?.evidence.tools).toBe(total);
+    // 有 memo：32 次 derive 里 31 次命中，只剩随追加的重放 ≈ 0.4s。
+    // 无 memo：每次 derive 全账重放，≈ 32 倍 ≈ 10s+。
+    expect(elapsed).toBeLessThan(1_200);
+  });
+});

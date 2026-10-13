@@ -13,6 +13,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 export class TauriStdioTransport implements MCPTransport {
   private spawned = false;
+  /** 在飞的首次 spawn：并发首调的单飞闸（审计批 4⑥）。没有它，两个请求
+   *  各看到 spawned=false 就各 invoke 一遍 spawn_mcp，Rust 侧同键覆盖旧
+   *  handle——旧子进程从此没人杀，每个重复 spawn 泄漏一个进程。 */
+  private spawning?: Promise<void>;
   private closed = false;
   private readonly requestTimeoutMs: number;
 
@@ -30,6 +34,15 @@ export class TauriStdioTransport implements MCPTransport {
   private async ensureSpawned(): Promise<void> {
     if (this.spawned) return;
     if (this.closed) throw new Error('Transport closed');
+    this.spawning ??= this.doSpawn().catch((err: unknown) => {
+      // 失败不锁门：清掉在飞凭据，下次调用可以重试 spawn。
+      this.spawning = undefined;
+      throw err;
+    });
+    return this.spawning;
+  }
+
+  private async doSpawn(): Promise<void> {
     const core = await loadTauriCore();
     if (!core) throw new Error('MCP stdio requires the Tauri runtime');
     const args: Record<string, unknown> = {

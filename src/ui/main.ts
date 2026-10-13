@@ -410,6 +410,9 @@ const taskQueue = new TaskQueue({
   chatFor: (ctx) => chat.controllerFor(ctx.sessionId),
   getContext: () => ({ workspace: chat.getWorkspace(), sessionId: chat.getSessionId() }),
 });
+// 冷会话回收的否决钩子（审计批 4①）：队列在此会话上还有待跑/在跑任务时，
+// 回收必须让路，否则 lane 的 controllerFor 拿到 null，任务当场搁浅。
+chat.onReapGuard((sessionId) => taskQueue.hasActiveWorkFor(sessionId));
 
 // ── Input-level time semantics ────────────────────────────────────────────
 // "下午三点再跑一遍测试" must not start now. Only the queue can actually WAIT
@@ -1072,7 +1075,17 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
   // pinning/auto-scroll stays on the shared #chat scroll box.
   const scrollContainer = document.getElementById('chat')!;
   const chatEl = hostEl ?? scrollContainer;
+  // 从盘重建前回收旧子树里的地图：这一步是真丢弃（内容马上重渲染），不回收
+  // 的活 Leaflet 实例跟着每次重建漏一个（审计批 4②）。先同步收册再清空——
+  // 回收是懒加载异步的，等 import 落定画布已被清出子树，扫描必空。有图才
+  // 懒加载模块——leafletMap eager import leaflet，无脑引入会把启动拖上地图包。
+  const canvases = [...chatEl.querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')];
   chatEl.innerHTML = '';
+  if (canvases.length > 0) {
+    void import('./leafletMap')
+      .then((m) => m.disposeCanvases(canvases))
+      .catch(() => {});
+  }
   chat.mountAgentActivityPanel();
   // A disk restore is 'pending' until it finishes while still current. A
   // superseded restore stays 'pending' so a later warm re-open rebuilds the

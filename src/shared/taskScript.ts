@@ -193,7 +193,34 @@ function blankSteps(plan: Plan): FoldedStep[] {
   }));
 }
 
-function fold(script: TaskScript): { folded: FoldedStep[]; cursor: number; earlier: TaskStepEvidence } {
+/**
+ * fold 是全部信号的纯重放（O(n)）。账本只追加：同一 signals 数组引用且长度
+ * 未变，重放结果必然相同——按「引用+长度+计划引用」记忆上一次折叠，长会话
+ * 里每次状态行/进度/收尾素材的推导从 O(n) 重放压成 O(1) 命中。消费方
+ * （deriveTaskScript）只读不写折叠结果，缓存共享安全。
+ */
+interface FoldResult {
+  folded: FoldedStep[];
+  cursor: number;
+  earlier: TaskStepEvidence;
+}
+let foldCache: { signalsRef: TaskScriptSignal[]; length: number; planRef: Plan; value: FoldResult } | null = null;
+
+function fold(script: TaskScript): FoldResult {
+  const cached =
+    foldCache !== null
+    && foldCache.signalsRef === script.signals
+    && foldCache.length === script.signals.length
+    && foldCache.planRef === script.plan
+      ? foldCache.value
+      : null;
+  if (cached) return cached;
+  const value = rebuildFold(script);
+  foldCache = { signalsRef: script.signals, length: script.signals.length, planRef: script.plan, value };
+  return value;
+}
+
+function rebuildFold(script: TaskScript): FoldResult {
   let folded = blankSteps(script.plan);
   let cursor = 1;
   let openSubstep: number | null = null;

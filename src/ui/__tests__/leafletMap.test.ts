@@ -134,3 +134,57 @@ describe('parseMapSource', () => {
     expect(spec.routeWarningText).toBeUndefined();
   });
 });
+
+// 审计批 4②：转写卡片地图从不 map.remove()（echarts 有脱离回收器，Leaflet
+// 这边漏了），会话切换 innerHTML='' 时整张卡连同活地图一起被丢出 DOM。
+// 收口形状：mapInstances 是 WeakMap 不可枚举，只能在三个**真丢弃**路径
+// （forgetSession / 转写清空 / 会话重建前）按类名扫描子树回收；切换会话的
+// 摘挂不在列——暖重挂要原样交互，地图必须活过挂载周期。
+describe('live-map disposal on true-discard paths (审计批 4②)', () => {
+  it('disposeMapsUnder scans the subtree by canvas class instead of enumerating the WeakMap', () => {
+    expect(leafletSource).toContain(".querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')");
+    expect(leafletSource).not.toContain('mapInstances.keys()');
+  });
+
+  it('chat.ts disposes maps in forgetSession and on transcript clear, via the lazy import', () => {
+    const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    // 两处真丢弃点都要挂；且必须走动态 import——leafletMap 顶层 eager 加载
+    // leaflet，chat 模块不许被它拖累。
+    const forgetBlock = chatSource.slice(chatSource.indexOf('forgetSession(sessionId: string)'));
+    expect(forgetBlock).toContain("import('./leafletMap')");
+    expect(forgetBlock).toContain('disposeMapsUnder');
+    expect(chatSource).toContain("import('./leafletMap')");
+  });
+
+  it('transcript clear collects canvases BEFORE the innerHTML wipe (异步回收扫的是清空后的子树，必空)', () => {
+    const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const collect = chatSource.indexOf("const canvases = [...transcript.querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')]");
+    const wipe = chatSource.indexOf("transcript.innerHTML = ''");
+    expect(collect).toBeGreaterThan(-1);
+    expect(wipe).toBeGreaterThan(collect); // 收册在清空之前——顺序即正确性
+    expect(chatSource).toContain('m.disposeCanvases(canvases)');
+  });
+
+  it('main.ts collects canvases before its wipe and registers the reap guard', () => {
+    const mainSource = readFileSync(new URL('../main.ts', import.meta.url), 'utf8');
+    const collect = mainSource.indexOf("const canvases = [...chatEl.querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')]");
+    const wipe = mainSource.indexOf('chatEl.innerHTML = \'\'');
+    expect(collect).toBeGreaterThan(-1);
+    expect(wipe).toBeGreaterThan(collect);
+    expect(mainSource).toContain('m.disposeCanvases(canvases)');
+    expect(mainSource).toContain('onReapGuard'); // 冷会话回收的队列否决（批 4①）
+  });
+});
+
+describe('lightbox ownership (审计批 4②补)', () => {
+  it('forgetSession force-closes the body-mounted lightbox (宿主子树罩不到它)', () => {
+    const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const forgetBlock = chatSource.slice(chatSource.indexOf('forgetSession(sessionId: string)'));
+    expect(forgetBlock).toContain('.map-lightbox');
+    expect(forgetBlock).toContain('closeMapLightbox');
+    // 必须走 ✕ click 复用 close() 全链，不许旁写清理。
+    const leafletSource2 = readFileSync(new URL('../leafletMap.ts', import.meta.url), 'utf8');
+    const closeFn = leafletSource2.slice(leafletSource2.indexOf('export function closeMapLightbox'));
+    expect(closeFn).toContain("map-lightbox-close')?.click()");
+  });
+});

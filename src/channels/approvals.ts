@@ -124,11 +124,18 @@ export class ChannelApprovalBroker {
     return true;
   }
 
+  /** 唯一的决策材料清理点：pending 之外的 infos/targets 必须同点删除，
+   *  否则超时/回复之外的任何出口（会话清场）都会留下永不回收的旧条目
+   *  （审计批 4③：cancelSession 曾绕开这里）。 */
+  private dropDecisionArtifacts(id: string): void {
+    this.infos.delete(id);
+    this.targets.delete(id);
+  }
+
   private emitDecision(id: string, decision: PermissionDecision): void {
     const info = this.infos.get(id);
     const target = this.targets.get(id);
-    this.infos.delete(id);
-    this.targets.delete(id);
+    this.dropDecisionArtifacts(id);
     if (!info || !target || !this.onDecision) return;
     this.onDecision(target, info, decision);
   }
@@ -139,6 +146,7 @@ export class ChannelApprovalBroker {
       if (entry.sessionKey !== sessionKey) continue;
       clearTimeout(entry.timer);
       this.pending.delete(entry.id);
+      this.dropDecisionArtifacts(entry.id);
       entry.resolve({ allowed: false, reason });
     }
   }

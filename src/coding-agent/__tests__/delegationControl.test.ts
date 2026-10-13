@@ -47,6 +47,19 @@ describe('DelegationControlPlane gate', () => {
     expect(plane.gate([call('c2', 'researcher', { prompt: '查那支' })], ROLES)).toEqual([]);
     expect(plane.delegationArgs.size).toBe(2); // c1 + c2 都捕获（续跑凭据跨回合）
   });
+
+  it('caps the args ledger at 50, evicting the oldest (跨回合保留 ≠ 无界，审计批 4④)', () => {
+    const plane = new DelegationControlPlane();
+    for (let i = 1; i <= 60; i++) {
+      plane.gate([call(`c${i}`, 'researcher', { prompt: `任务${i}` })], ROLES);
+    }
+    expect(plane.delegationArgs.size).toBe(50);
+    // Map 迭代序 = 插入序：挤掉的是最老的 10 条，最近的凭据原样在册
+    expect(plane.delegationArgs.has('c1')).toBe(false);
+    expect(plane.delegationArgs.has('c10')).toBe(false);
+    expect(plane.delegationArgs.has('c11')).toBe(true);
+    expect(plane.delegationArgs.has('c60')).toBe(true);
+  });
 });
 
 // 停支目标指认（2026-10-10 模型判断、宿主执行）：旧 stopNamed（区分词匹配

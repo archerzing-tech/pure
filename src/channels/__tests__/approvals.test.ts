@@ -78,4 +78,16 @@ describe('ChannelApprovalBroker', () => {
     expect((await decision).allowed).toBe(false);
     expect(broker.pendingCount).toBe(0);
   });
+
+  it('cancelSession drops the decision artifacts too, not just pending (审计批 4③)', async () => {
+    // infos/targets 是永久 Map：清场若不同点删，超时之外的一切出口都会留
+    // 下永不回收的旧条目。cancelSession 必须走同一个清理点。
+    const broker = new ChannelApprovalBroker(async () => {});
+    const decision = broker.request(target, 's1', info);
+    broker.cancelSession('s1');
+    await decision;
+    const ledger = broker as unknown as { infos: Map<string, unknown>; targets: Map<string, unknown> };
+    expect(ledger.infos.size).toBe(0);
+    expect(ledger.targets.size).toBe(0);
+  });
 });

@@ -1751,6 +1751,11 @@ export class ChatController {
    * 执结算 → 折入核验 → 续跑兜底 → 押账插话优先 → 残留 steer 重入 → 队列
    * 派发）在 plane；队列卡/交接叙述/回执行的 DOM 投影与回合生命周期
    * （autoContinue/统计/事件日志）经动作缝留给宿主。 */
+  /** 落盘在飞深度 + 落定回调（审计批 4① 评审 P2）：写盘窗口内逐出会话，
+   *  用户切回走冷恢复会读到缺最后回合的旧快照——在飞就否决回收，落定补收。 */
+  private persistDepth = 0;
+  private persistSettledCb: (() => void) | null = null;
+
   private roundClose = new RoundClosePlane({
     activityCount: () => this.agentActivities.length,
     isStreaming: () => this.isStreaming(),
@@ -3390,6 +3395,38 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.roundClose.queueTask({ text, images, displayText, ts: Date.now() });
     this.renderQueueCard();
     if (!this.isStreaming()) this.roundClose.scheduleDispatch();
+  }
+
+  /** 回合收尾还有活没派：待办账、押账插话、残留 steer、折入账、待续跑
+   *  凭据、自动续跑链——前五笔在收尾派发（roundClose.dispatch，40ms 定时器）
+   *  里被消费并重入/派发。冷会话回收的否决依据（审计批 4① 评审 P1）：此刻
+   *  逐出，dispatch 照跑在被逐 controller 上，LLM 调用、工具执行、写盘全在
+   *  脱离 DOM 的宿主里进行——僵尸回合，插话「被记得执行而非忘掉」的主轴被
+   *  打破。续跑链是第六笔（评审批 4 终审）：1.2s 回合间隙在飞时逐出，
+   *  forgetSession 的 cancel 递增 token 掐断定时器，N/20 轮的计划半途静默
+   *  停摆；fire 后交棒给 streaming 否决，链终了账自然清空。 */
+  hasPendingCloseWork(): boolean {
+    return this.roundClose.queueView().length > 0
+      || this.roundClose.hasHeldInsert()
+      // internal 且无原话的是已答上的旁答记录，dispatch 会按账弃，不算活。
+      || this.steerBus.entries().some((entry) => !entry.message.internal || entry.displayText)
+      // 折入账：dispatch 的收尾核验（folds.settle）把没被照办的转排队重入。
+      || this.folds.entries().length > 0
+      // 分支级继续凭据：dispatch 的兜底（settleResumesFallback）转排队重入。
+      || this.delegationControl.pendingResumesView().length > 0
+      // 自动续跑链在间隙窗口：pending 只盖住 1.2s 定时器，fire 后 send 拉起
+      // streaming，由 streaming 否决接棒——两段无缝，链终了即恢复可逐。
+      || this.autoContinue.pending;
+  }
+
+  /** 落盘是否在飞（审计批 4① 评审 P2）：写盘窗口内逐出，冷恢复读到旧快照。 */
+  isPersisting(): boolean {
+    return this.persistDepth > 0;
+  }
+
+  /** 落盘全部落定的一拍（深度归零时触发）：回收的补收点。 */
+  onPersistSettled(cb: () => void): void {
+    this.persistSettledCb = cb;
   }
 
   /** The visible to-do queue: ONE card in the transcript that re-renders as
@@ -7279,7 +7316,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.disconnectMcpClient();
     // Clear only this session's own transcript column (host mode) or the
     // shared #chat element in single-session mode.
-    this.transcriptElement().innerHTML = '';
+    const transcript = this.transcriptElement();
+    // 清空即丢弃：子树里的活地图一并收（审计批 4②）。必须**先同步收册**
+    // 再 innerHTML=''——回收是懒加载异步的，等 import 落定画布已被清出
+    // 子树，扫描必空；按册 disposeMap 不依赖 DOM 连接。
+    const canvases = [...transcript.querySelectorAll<HTMLElement>('.map-canvas, .map-lightbox-canvas')];
+    transcript.innerHTML = '';
+    if (canvases.length > 0) {
+      void import('./leafletMap')
+        .then((m) => m.disposeCanvases(canvases))
+        .catch(() => {});
+    }
   }
 
   cancel() {
@@ -7427,7 +7474,34 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     void this.send('继续', [], `🔁 自动续跑 ${round}/${max}：继续处理计划 ${this.activePlanNumber}`, true);
   }
 
+  /** 落盘的唯一入口：在飞深度计数 + 归零一拍回调（审计批 4① 评审 P2）。
+   *  回收在写盘窗口内逐出会话，冷恢复会读到缺最后回合的旧快照——在飞就
+   *  否决，落定补收。真实写盘在 doPersistSession。 */
   private async persistSession(
+    messages: Message[],
+    toolResults: Map<string, ToolExecMeta>,
+    thinkingPhases: Array<{ text: string; assistantIndex: number }>,
+    sessionId = this.sessionId,
+    workspace = this.workspace,
+    planPause = false,
+    pauseAssessment?: IntentAssessment,
+    taskAnalysisText = '',
+    renderedAssistantTexts: string[] = [],
+    artifacts: Array<{ path: string; op?: 'edit' | 'create' }> = [],
+    visibleUserText = '',
+    pathRepairs: PathRepair[] = [],
+    artifactsDelivered = false,
+  ): Promise<void> {
+    this.persistDepth += 1;
+    try {
+      await this.doPersistSession(messages, toolResults, thinkingPhases, sessionId, workspace, planPause, pauseAssessment, taskAnalysisText, renderedAssistantTexts, artifacts, visibleUserText, pathRepairs, artifactsDelivered);
+    } finally {
+      this.persistDepth -= 1;
+      if (this.persistDepth === 0) this.persistSettledCb?.();
+    }
+  }
+
+  private async doPersistSession(
     messages: Message[],
     toolResults: Map<string, ToolExecMeta>,
     thinkingPhases: Array<{ text: string; assistantIndex: number }>,
@@ -7993,6 +8067,12 @@ export function buildStatusRow(
   return { row, bubble };
 }
 
+/** 冷会话在册上限（审计批 4①）：controllers/hosts 曾只进不出——keepRunning
+ *  跳过的会话流结束无人清扫、侧栏点过的全程常驻，每个隐会话连转写 DOM 带
+ *  消息账本一挂几十 MB，长跑实例攒到数百 MB。上限内的照旧暖开；超限才逐
+ *  最旧冷者。 */
+const MAX_WARM_SESSIONS = 6;
+
 export class SessionChatManager {
   private controllers = new Map<string, ChatController>();
   private hosts = new Map<string, HTMLElement>();
@@ -8000,12 +8080,20 @@ export class SessionChatManager {
   private current: ChatController | null = null;
   private currentHost: HTMLElement | null = null;
   private nextSessionSeq = 1;
+  /** 冷会话回收的否决钩子（main 注册）：返回 true = 队列仍在此会话上有
+   *  在册/在跑任务，逐出会搁浅它们（controllerFor 返 null 即挂起）。 */
+  private reapGuard: ((sessionId: string) => boolean) | null = null;
 
   private streamingCb?: (streaming: boolean) => void;
   private statsCb?: (stats: SessionStats) => void;
   private snapshotCb?: (available: boolean) => void;
   private restoreDraftCb?: (text: string) => void;
   private activeSessionCb?: (sessionId: string) => void;
+
+  /** Register the reap veto (taskQueue ownership check). */
+  onReapGuard(fn: (sessionId: string) => boolean): void {
+    this.reapGuard = fn;
+  }
 
   private container(): HTMLElement {
     return document.getElementById('chat')!;
@@ -8035,6 +8123,15 @@ export class SessionChatManager {
       if (streaming && controller === this.current) this.activeSessionCb?.(sessionId);
       // Only the visible conversation drives the shared streaming UI.
       if (controller === this.current) this.streamingCb?.(streaming);
+      // 收口审计批 4① 的正洞：keepRunning 留下的后台会话流一结束就是冷账，
+      // 此刻正是它该被清扫的点——不扫就永远挂在 controllers/hosts 上。
+      if (!streaming) this.reapColdSessions();
+    });
+    // 写盘落定的一拍补收（评审 P2）：流结束点写盘还在飞，此刻逐出会让
+    // 切回的用户冷恢复到旧快照；落定回调兜住「流结束但 persist 在飞」
+    // 的会话——被否决跳过，等这一拍再收。
+    controller.onPersistSettled(() => {
+      if (controller !== this.current) this.reapColdSessions();
     });
     controller.onSessionStatsChanged((stats) => {
       if (controller === this.current) this.statsCb?.(stats);
@@ -8123,7 +8220,29 @@ export class SessionChatManager {
     }
     this.makeActive(controller, host!, sessionId);
     this.onSessionIdChanged?.(sessionId);
+    this.reapColdSessions();
     return { controller, host: host!, warm };
+  }
+
+  /** 冷会话回收（审计批 4①）：在册超上限时按打开序逐出「不可见、没在跑、
+   *  没收尾活、没在写盘、队列不要」的最旧者。被逐者随时可从盘上冷恢复
+   *  （openSession 的 cold 路径照旧）；在跑的绝不逐——后台 lane 依赖隐会话
+   *  持续流式是既定设计。收尾活（待办/押账/残留 steer）与写盘在飞同样
+   *  绝不逐：前者逐了就是僵尸回合（dispatch 照跑在脱离 DOM 的宿主里），
+   *  后者逐了冷恢复会读到旧快照（评审 P1/P2）。 */
+  private reapColdSessions(): void {
+    let excess = this.controllers.size - MAX_WARM_SESSIONS;
+    if (excess <= 0) return;
+    for (const [sessionId, controller] of this.controllers) {
+      if (excess <= 0) break;
+      if (controller === this.current) continue;
+      if (controller.isStreaming()) continue;
+      if (controller.hasPendingCloseWork()) continue;
+      if (controller.isPersisting()) continue;
+      if (this.reapGuard?.(sessionId)) continue;
+      this.forgetSession(sessionId);
+      excess -= 1;
+    }
   }
 
   /** Switch to an already-open session (sidebar click on a live one). */
@@ -8192,7 +8311,21 @@ export class SessionChatManager {
     if (!controller) return;
     controller.cancel();
     controller.setViewActive(false);
-    this.hosts.get(sessionId)?.remove();
+    const host = this.hosts.get(sessionId);
+    // 会话一去不回，宿主子树里挂着的活地图一起收（审计批 4②）：不收的话
+    // mapInstances 强引用着 Leaflet 实例，删一个会话漏一个。
+    if (host) {
+      if (host.querySelector('.map-canvas') !== null || document.querySelector('.map-lightbox') !== null) {
+        void import('./leafletMap')
+          .then((m) => {
+            m.disposeMapsUnder(host);
+            // 灯箱挂在 body 不在宿主子树里，会话没了它就是僵尸视图。
+            m.closeMapLightbox();
+          })
+          .catch(() => {});
+      }
+      host.remove();
+    }
     this.hosts.delete(sessionId);
     this.controllers.delete(sessionId);
     if (runningSessionIds.delete(sessionId)) runningSessionsListeners.forEach((cb) => cb());
