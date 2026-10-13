@@ -51,6 +51,7 @@ describe('CI diag: chunked fallback chain', () => {
         return;
       }
       const m = /bytes=(\d+)-(\d*)/.exec(String(req.headers.range ?? ''));
+      log(`[server] ${req.method} range=${JSON.stringify(req.headers.range ?? null)} -> ${m ? `s=${m[1]}` : 'no-range'}`);
       const s = m ? Number(m[1]) : 0;
       const e = m && m[2] ? Math.min(Number(m[2]), TOTAL - 1) : TOTAL - 1;
       if (m && failRange0DelayMs > 0 && s === 0) {
