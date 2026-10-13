@@ -351,8 +351,8 @@ export interface EngineContext {
 }
 
 export interface LockManager {
-  acquireRead(path: string): Promise<void>;
-  acquireWrite(path: string): Promise<void>;
+  acquireRead(path: string, signal?: AbortSignal): Promise<void>;
+  acquireWrite(path: string, signal?: AbortSignal): Promise<void>;
   release(path: string): void;
 }
 

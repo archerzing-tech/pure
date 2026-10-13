@@ -188,6 +188,13 @@ describe('download_file · chunked fd teardown', () => {
 
   let server: Server;
   let baseUrl = '';
+  // 故障开关（各测试自理收支，finally 复位）：
+  // failRange0DelayMs —— s=0 的分片延迟 N ms 后掐断（分片 1、2 先落地，
+  //   复现「失败时文件已带洞」）；ignoreRange —— 无视 Range 回 200 全量；
+  // shortRange —— 每个分片少给 1 字节（206 短供）。
+  let failRange0DelayMs = 0;
+  let ignoreRange = false;
+  let shortRange = false;
 
   beforeAll(async () => {
     server = createServer((req, res) => {
@@ -196,23 +203,35 @@ describe('download_file · chunked fd teardown', () => {
         res.end();
         return;
       }
-      const m = /bytes=(\d+)-(\d*)/.exec(String(req.headers.range ?? ''));
+      const m = ignoreRange ? null : /bytes=(\d+)-(\d*)/.exec(String(req.headers.range ?? ''));
       const s = m ? Number(m[1]) : 0;
       const e = m && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
       // 越界 range 按真服务器语义回 416（curl -C - 在文件已满时会发
       // bytes=<size>-，本机 curl 对 416 退出码为 0，视为「无需续传」）。
-      if (s >= body.length || s > e) {
+      if (m && (s >= body.length || s > e)) {
         res.writeHead(416, { 'Content-Range': `bytes */${body.length}` });
         res.end();
         return;
       }
+      if (m && failRange0DelayMs > 0 && s === 0) {
+        const t = setTimeout(() => res.destroy(), failRange0DelayMs);
+        t.unref?.();
+        return;
+      }
+      if (!m) {
+        // 无 Range 的整文件 GET：正常 200 全量（curl/fetch 兜底走这条）。
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length) });
+        res.end(body);
+        return;
+      }
+      const end = shortRange ? e - 1 : e;
       res.writeHead(206, {
         'Content-Type': 'application/octet-stream',
-        'Content-Range': `bytes ${s}-${e}/${body.length}`,
-        'Content-Length': String(e - s + 1),
+        'Content-Range': `bytes ${s}-${end}/${body.length}`,
+        'Content-Length': String(end - s + 1),
         'Accept-Ranges': 'bytes',
       });
-      res.end(body.subarray(s, e + 1));
+      res.end(body.subarray(s, end + 1));
     });
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => {
@@ -281,6 +300,72 @@ describe('download_file · chunked fd teardown', () => {
       expect(snap1.length).toBe(3 * CHUNK);
       expect(snap1.subarray(CHUNK, 2 * CHUNK).equals(chunk(1))).toBe(true);
       expect(snap1.subarray(2 * CHUNK, 3 * CHUNK).equals(chunk(2))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  // ── 审计批 2：分块失败后的完整性（稀疏洞 / 无视 Range / 短供）──────────
+  function dlTool(dir: string, name: string): Promise<ToolResult> {
+    const adapter = new NodeToolAdapter({ workspace: dir });
+    return adapter.execute({
+      id: `dl_${name}`,
+      index: 0,
+      function: { name: 'download_file', arguments: JSON.stringify({ url: `${baseUrl}/chunked.bin`, destination: dir, filename: name, connections: 3, resume: false }) },
+    });
+  }
+
+  it('a chunked failure deletes the holey partial so the fallback lands clean bytes', async () => {
+    // 分片 0 迟 100ms 才断、分片 1、2 立即落地：失败发生时文件已带洞。
+    // 旧代码留下带洞件，curl -C - 按尺寸续传发现「已满」→ 416 退出码 0 →
+    // 带洞文件被标成下载成功；修复后残缺件被删，兜底从零重下。
+    const dir = mkdtempSync(join(tmpdir(), 'pure-chunked-hole-'));
+    failRange0DelayMs = 100;
+    try {
+      const result = await dlTool(dir, 'hole.bin');
+      expect(result.success).toBe(true);
+      expect(readFileSync(join(dir, 'hole.bin')).equals(body)).toBe(true);
+    } finally {
+      failRange0DelayMs = 0;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('a server that ignores Range fails chunked cleanly and the fallback still lands clean bytes', async () => {
+    // 服务器无视 Range 回 200 全量：旧代码把整个文件按三个偏移各写一遍，
+    // 照样「成功」落一个花文件；修复后分块路径报错、兜底从零重下。
+    const dir = mkdtempSync(join(tmpdir(), 'pure-chunked-ignore-'));
+    ignoreRange = true;
+    try {
+      const result = await dlTool(dir, 'ignore.bin');
+      expect(result.success).toBe(true);
+      expect(readFileSync(join(dir, 'ignore.bin')).equals(body)).toBe(true);
+    } finally {
+      ignoreRange = false;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('a short-supplied chunk is an error, not a silently done chunk', async () => {
+    // 206 但字节数不足：旧代码照单全收、done 标记虚真、返回 total 虚报；
+    // 修复后判错走失败路径。
+    const dir = mkdtempSync(join(tmpdir(), 'pure-chunked-short-'));
+    try {
+      const adapter = new NodeToolAdapter({ workspace: dir });
+      const outPath = join(dir, 'short.bin');
+      const CHUNK = 1000;
+      const chunk = (n: number): Buffer => Buffer.alloc(CHUNK, n);
+      (adapter as unknown as { getRangeBuffer: (url: string, s: number, e: number) => Promise<Buffer> }).getRangeBuffer =
+        async (_url: string, s: number) => {
+          const i = s / CHUNK;
+          if (i === 1) return chunk(1).subarray(0, CHUNK - 1); // 短 1 字节
+          return chunk(i);
+        };
+      let err: unknown;
+      await (adapter as unknown as { downloadChunked: (...a: unknown[]) => Promise<number> })
+        .downloadChunked('http://stub/', outPath, 3 * CHUNK, 3, new DownloadController(), () => {}, 'short.bin')
+        .catch((e: unknown) => { err = e; });
+      expect(String((err as Error)?.message)).toContain('短供');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

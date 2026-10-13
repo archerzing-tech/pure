@@ -1942,9 +1942,16 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async getRangeBuffer(url: string, start: number, end: number, signal?: AbortSignal, proxy?: string): Promise<Buffer> {
     const res = await this.requestOnce(url, { method: 'GET', headers: { Range: `bytes=${start}-${end}` }, signal }, proxy);
-    if ((res.statusCode ?? 200) >= 400) {
+    const status = res.statusCode ?? 200;
+    if (status >= 400) {
       res.resume();
-      throw new Error(`HTTP ${res.statusCode}`);
+      throw new Error(`HTTP ${status}`);
+    }
+    // 服务器无视 Range 回 200 全量 body：喂进分块会把整个文件写错位。报错
+    // 让分块路径下走兜底链——单流与外部工具都天然兼容 200。
+    if (status !== 206) {
+      res.resume();
+      throw new Error(`HTTP ${status}（服务器未按 Range 返回分片）`);
     }
     const chunks: Buffer[] = [];
     for await (const c of res as unknown as AsyncIterable<Buffer>) chunks.push(c as Buffer);
@@ -2063,6 +2070,12 @@ export class NodeToolAdapter implements ToolAdapter {
         firstError ??= err;
         return;
       }
+      // 短供分片（206 但字节数不足）：照单全收会让 done 标记虚真、written
+      // 虚报，最终以「成功」落一个带洞文件。判错走失败路径，由兜底链重下。
+      if (buf.length !== e - s + 1) {
+        firstError ??= new Error(`分片 ${i} 短供：要 ${e - s + 1} 字节，实得 ${buf.length}`);
+        return;
+      }
       try {
         await fd.write(buf, 0, buf.length, s);
       } catch (err) {
@@ -2090,7 +2103,9 @@ export class NodeToolAdapter implements ToolAdapter {
     }
     if (firstError) throw firstError;
     if (controller.aborted && done.includes(false)) throw new Error('已取消');
-    return total;
+    // 成功路径 written === total（每片都验过字节数）；返回真实写入量，
+    // 不再拿 total 虚报。
+    return written;
   }
 
   private async downloadNative(
@@ -2119,9 +2134,17 @@ export class NodeToolAdapter implements ToolAdapter {
           const size = await this.downloadChunked(url, outPath, total, opts.connections, opts.controller, opts.emit, opts.filename, opts.proxy);
           return { ok: true, size, via: 'native-chunked', expected };
         } catch (e: unknown) {
+          // 分块失败留下的是稀疏带洞文件：已写分片推高文件尺寸、洞在中途。
+          // 所有兜底（curl -C -/wget -c/streamRange）都按尺寸续传，只补尾部
+          // 不补洞；尺寸一旦填满 total，兜底拿到的 416 还会被当「无需续传」，
+          // 带洞文件就此标成下载成功。删掉残缺件，所有兜底从零开始。
+          await unlink(outPath).catch(() => {});
           if (opts.controller.paused || opts.controller.aborted) {
-          const size = await this.streamRange(url, outPath, (await stat(outPath)).size, opts.controller, opts.emit, total, opts.filename, opts.proxy);
-          return { ok: true, size, via: 'native-resume', expected };
+            const size = await this.streamRange(url, outPath, 0, opts.controller, opts.emit, total, opts.filename, opts.proxy);
+            // 取消不再走成功路径：abort 下的 streamRange 立即返回 0，报 ok
+            // 会把「用户取消」虚报成 0 字节成功。
+            if (opts.controller.aborted && !opts.controller.paused) return { ok: false, error: (e as Error)?.message || '已取消' };
+            return { ok: true, size, via: 'native-resume', expected };
           }
           return { ok: false, error: (e as Error)?.message };
         }
