@@ -13,6 +13,7 @@
 // SubagentResult.memoryInjected 随结果上抛（DelegationObservation 记账）。
 
 import type { IMemoryStore, MemoryEntry } from '../shared/types';
+import { settleWithin } from '../shared/timing';
 
 /** 检索条数：远小于父会话的 k=12 —— 子代理上下文预算紧，且只需要与这一件活
  *  直接相关的经验，不是会话身份层。 */
@@ -102,14 +103,14 @@ export interface DelegationMemory {
 export async function retrieveDelegationMemory(input: DelegationMemoryInput): Promise<DelegationMemory> {
   let entries: MemoryEntry[] = [];
   try {
-    entries = await Promise.race([
+    entries = await settleWithin(
       input.store.search(input.query, {
         k: SUBAGENT_MEMORY_K,
         ...(input.projectPath ? { projectPath: input.projectPath } : {}),
       }),
-      new Promise<MemoryEntry[]>((resolve) =>
-        setTimeout(() => resolve([]), input.timeoutMs ?? SUBAGENT_MEMORY_SEARCH_TIMEOUT_MS)),
-    ]);
+      input.timeoutMs ?? SUBAGENT_MEMORY_SEARCH_TIMEOUT_MS,
+      () => [],
+    );
   } catch {
     return { block: '', entryIds: [] };
   }

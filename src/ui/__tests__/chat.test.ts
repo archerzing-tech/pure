@@ -323,10 +323,11 @@ describe('send feedback timing', () => {
 
   it('keeps the env probe and load-time compaction off the send critical path', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // ⑤ 探针软等待：send 只 race 一个有上限的计时器；输掉竞争的一侧（探针慢、
-    // 或中止事件后到）不得变成未处理 rejection。
+    // ⑤ 探针软等待：send 只等一个有上限的计时器；输掉竞争的一侧（探针慢、
+    // 或中止事件后到）不得变成未处理 rejection。批 3 起走 settleWithin——
+    // race 输了的定时器必被清掉，不再留孤儿 timer 拖住进程退出。
     expect(src).toContain('const PROBE_SOFT_WAIT_MS');
-    expect(src).toContain('await Promise.race([probe, new Promise<void>((resolve) => setTimeout(resolve, PROBE_SOFT_WAIT_MS))]);');
+    expect(src).toContain('await settleWithin(probe, PROBE_SOFT_WAIT_MS);');
     expect(src).toContain('probe.catch(() => {})');
     // ⑥ 载入期预压实：loadFromStorage 触发；占位系统提示词 + 廉价豁免闸 +
     // 引擎/适配器惰性工厂，空闲窗口守卫与写缓存复用同一调度器。

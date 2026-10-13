@@ -11,6 +11,7 @@
 // 后者只做超时/失败兜底（失败返回 undefined，绝不让起草失败影响仪表盘渲染）。
 
 import { MAX_OVERLAY_CHARS } from './personaOverlays';
+import { withTimeout } from '../shared/timing';
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/subagentAdvisory';
 import type { LLMAdapter } from '../shared/types';
 
@@ -80,7 +81,7 @@ export async function draftPersonaOverlay(
   input: OverlayDraftInput,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  const reply = await Promise.race([
+  const reply = await withTimeout(
     llm.complete(
       [
         { role: 'system', content: DRAFT_SYSTEM_PROMPT },
@@ -89,9 +90,8 @@ export async function draftPersonaOverlay(
       [],
       signal,
     ),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`overlay draft timed out after ${DRAFT_TIMEOUT_MS}ms`)), DRAFT_TIMEOUT_MS),
-    ),
-  ]);
+    DRAFT_TIMEOUT_MS,
+    'overlay draft',
+  );
   return parseOverlayDraft(reply.content);
 }

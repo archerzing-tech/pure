@@ -42,6 +42,7 @@ import {
 } from './LessonReflector';
 import { runUserHooksForEvent } from '../shared/userHookRunner';
 import type { UserHookRunner } from '../shared/userHookRunner';
+import { settleWithin, withTimeout } from '../shared/timing';
 import type { UserHooksConfig } from '../shared/userHooks';
 import type { SemanticRouteDecision } from '../coding-agent/types';
 
@@ -51,16 +52,8 @@ import type { SemanticRouteDecision } from '../coding-agent/types';
 // critical path. A timeout degrades to the plain system prompt (memories are
 // an enhancement, never a prerequisite).
 const MEMORY_SEARCH_TIMEOUT_MS = 1500;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-      promise.finally(() => clearTimeout(timer)).catch(() => {});
-    }),
-  ]);
-}
+// withTimeout 本体已提为共享实现（src/shared/timing.ts）——本文件的这版是
+// 审计批 3 认定的正确样板，七处漏清定时器的同型竞速全部收编到它上面。
 
 export interface HarnessConfig {
   sessionId: string;
@@ -1278,10 +1271,9 @@ export class Harness {
     // 一条-shot 场景下探针永远报不出来。
     const inFlight = [...this.inFlightReflections, ...this.inFlightDrift];
     if (inFlight.length === 0) return;
-    await Promise.race([
-      Promise.allSettled(inFlight),
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
+    // 输掉竞速的定时器必须被清掉：runOneShot await 完这里的返回就该退进程，
+    // 挂着 30s 孤儿 timer 会让每次 CLI 单发都白停满额（审计实测复现）。
+    await settleWithin(Promise.allSettled(inFlight), timeoutMs);
   }
 
   /**

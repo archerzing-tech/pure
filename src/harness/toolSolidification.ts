@@ -16,6 +16,7 @@
 // 测试全 fake。写盘缝（Rust write_file / node:fs）与宿主确认缝由调用方注入。
 
 import { compileExternalTools } from './externalTools';
+import { withTimeout } from '../shared/timing';
 import type { MemoryEntry } from '../shared/types';
 import type { LLMAdapter } from '../shared/types';
 
@@ -178,7 +179,7 @@ export async function runSolidifyFlow(
     // ① 起草
     let reply: string;
     try {
-      const result = await Promise.race([
+      const result = await withTimeout(
         input.llm.complete(
           [
             { role: 'system', content: DRAFT_SYSTEM_PROMPT },
@@ -187,9 +188,9 @@ export async function runSolidifyFlow(
           [],
           input.signal,
         ),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`draft timed out after ${DRAFT_TIMEOUT_MS}ms`)), DRAFT_TIMEOUT_MS)),
-      ]);
+        DRAFT_TIMEOUT_MS,
+        'draft',
+      );
       reply = result.content;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);

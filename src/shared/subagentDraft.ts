@@ -14,6 +14,7 @@
 // 确定性路径的调用方里，加厚后两条路径共用，不新增第四道门。
 
 import { compileExternalSubagents } from '../harness/externalSubagents';
+import { withTimeout } from './timing';
 import type { LLMAdapter } from './types';
 import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from './subagentAdvisory';
 
@@ -200,7 +201,7 @@ export async function runRoleDraftFlow(input: {
   for (let attempt = 1; attempt <= MAX_ROLE_DRAFT_ATTEMPTS; attempt++) {
     let reply: string;
     try {
-      const result = await Promise.race([
+      const result = await withTimeout(
         input.llm.complete(
           [
             { role: 'system', content: ROLE_DRAFT_SYSTEM_PROMPT },
@@ -209,9 +210,9 @@ export async function runRoleDraftFlow(input: {
           [],
           input.signal,
         ),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`draft timed out after ${ROLE_DRAFT_TIMEOUT_MS}ms`)), ROLE_DRAFT_TIMEOUT_MS)),
-      ]);
+        ROLE_DRAFT_TIMEOUT_MS,
+        'draft',
+      );
       reply = result.content;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);

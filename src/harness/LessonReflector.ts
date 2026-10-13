@@ -12,6 +12,7 @@
 // 浏览器安全哈希：共享内核的纯 TS sha256，而不是 node:crypto —— Harness 在 GUI
 // 路径上是静态导入的，node:crypto 会让整个 Vite 浏览器构建失败。
 import { sha256Hex } from '../shared/sha256';
+import { withTimeout } from '../shared/timing';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
 import type { LLMAdapter, Message } from '../shared/types';
 import type { IMemoryStore, MemoryEntry } from '../shared/types';
@@ -365,7 +366,7 @@ export async function reflectTurn(
   input: ReflectTurnInput,
   signal?: AbortSignal,
 ): Promise<ReflectedLesson | undefined> {
-  const reply = await Promise.race([
+  const reply = await withTimeout(
     llm.complete(
       [
         { role: 'system', content: REFLECT_SYSTEM_PROMPT },
@@ -374,12 +375,8 @@ export async function reflectTurn(
       [],
       signal,
     ),
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`lesson reflection timed out after ${REFLECTION_TIMEOUT_MS}ms`)),
-        REFLECTION_TIMEOUT_MS,
-      ),
-    ),
-  ]);
+    REFLECTION_TIMEOUT_MS,
+    'lesson reflection',
+  );
   return parseReflectedLesson(reply.content, input.evidence);
 }

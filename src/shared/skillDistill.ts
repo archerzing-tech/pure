@@ -6,6 +6,7 @@
 // E4.1。本模块保持纯函数：正则识别、来源挑选、提示词、解析校验，fs 归入口。
 
 import { parseSkillMarkdown } from './skillFiles';
+import { withTimeout } from './timing';
 import type { MemoryEntry, Message, ToolDefinition } from './types';
 
 /** 指令识别：短语锚定，宁可漏配不可误触（误触会吞掉一条正常消息）。 */
@@ -122,14 +123,11 @@ export async function distillSkill(
 
   let reply: string | undefined;
   try {
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('skill distill timed out')), timeoutMs),
-    );
     const messages: Message[] = [
       { role: 'system', content: DISTILL_SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },
     ];
-    reply = (await Promise.race([llm.complete(messages, [], signal), timeout])).content;
+    reply = (await withTimeout(llm.complete(messages, [], signal), timeoutMs, 'skill distill')).content;
   } catch {
     return undefined;
   }

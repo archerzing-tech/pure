@@ -4,6 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
 import { abortPaused, upgradeToHardStop } from '../shared/pauseSignal';
+import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
@@ -4374,7 +4375,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const probe = ensureRuntimesProbed(this.abortController?.signal);
       // 输在竞争里的那一侧（探针慢于软等待、或中止事件后到）不得变成未处理 rejection。
       probe.catch(() => {});
-      await Promise.race([probe, new Promise<void>((resolve) => setTimeout(resolve, PROBE_SOFT_WAIT_MS))]);
+      await settleWithin(probe, PROBE_SOFT_WAIT_MS);
       turnTiming.probeMs = Math.round(performance.now() - probeStartMs);
       let systemPrompt = '';
       // L2 per-request context (promptLayers.ts): task-specific fragments ride

@@ -9,6 +9,7 @@
 // 与 LessonReflector 的纪律一致：模型没有最终决定权。
 
 import type { LLMAdapter } from '../shared/types';
+import { withTimeout } from '../shared/timing';
 import { normalizeGraderText } from './roleRegression';
 
 export interface AssertionDraftInput {
@@ -154,7 +155,7 @@ export async function draftRoleAssertions(
   input: AssertionDraftInput,
   signal?: AbortSignal,
 ): Promise<AssertionDraft | undefined> {
-  const reply = await Promise.race([
+  const reply = await withTimeout(
     llm.complete(
       [
         { role: 'system', content: DRAFT_SYSTEM_PROMPT },
@@ -163,9 +164,8 @@ export async function draftRoleAssertions(
       [],
       signal,
     ),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`assertion draft timed out after ${DRAFT_TIMEOUT_MS}ms`)), DRAFT_TIMEOUT_MS),
-    ),
-  ]);
+    DRAFT_TIMEOUT_MS,
+    'assertion draft',
+  );
   return parseAssertionDraft(reply.content);
 }

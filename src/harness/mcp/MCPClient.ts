@@ -8,6 +8,7 @@ import { McpOAuthSession } from '../../adapter/mcp/oauth';
 import { oauthBindings } from '../../adapter/mcp/oauthBindings';
 import { TauriStdioTransport } from '../../adapter/mcp/TauriStdioTransport';
 import { isTauriRuntime } from '../../shared/tauri';
+import { settleWithin } from '../../shared/timing';
 import { parseToolArguments } from '../../shared/parseRepair';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import type { TaggedTool } from '../../coding-agent/types';
@@ -350,10 +351,7 @@ export class MCPClient implements ToolAdapter {
   private async awaitPrefetches(waitMs: number, ...maps: Array<Map<string, Promise<void>>>): Promise<void> {
     const pending = maps.flatMap((map) => [...map.values()]);
     if (pending.length === 0) return;
-    await Promise.race([
-      Promise.allSettled(pending),
-      new Promise((resolve) => setTimeout(resolve, waitMs)),
-    ]);
+    await settleWithin(Promise.allSettled(pending), waitMs);
   }
 
   /** Prompt templates from every connected server, addressed by `server__name`. */
