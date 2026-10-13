@@ -842,7 +842,7 @@ export class TauriToolAdapter implements ToolAdapter {
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
-    if (toolName === 'connect_mcp_server' || toolName === 'install_agent_skill') return { sideEffects: true, isWrite: true };
+    if (toolName === 'connect_mcp_server' || toolName === 'register_mcp_server' || toolName === 'install_agent_skill') return { sideEffects: true, isWrite: true };
     return TOOL_METADATA[toolName];
   }
 
@@ -1015,6 +1015,36 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!this.capabilityHooks) return { id: toolCall.id, toolName: name, error: 'Dynamic MCP connection is not available in this runtime.', success: false, duration: Date.now() - start };
           const connected = await this.capabilityHooks.connectMcpServer(candidate.config, signal);
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ candidateId, name: candidate.title, persisted: connected.persisted, tools: connected.tools.map((tool) => tool.name) }), success: true, duration: Date.now() - start };
+        }
+        case 'register_mcp_server': {
+          // 自定义注册（connect 的候选路径之外）：用户点名 repo/命令时，模型读
+          // 文档定出启动命令后直接注册+连接+持久化。参数在这层校验成合法
+          // MCPServerConfig，连接与持久化复用 connect 同一条 hook 管线（高危
+          // 弹卡也同级）。
+          const serverName = String(args.name ?? '').trim();
+          if (!serverName) return { id: toolCall.id, toolName: name, error: 'register_mcp_server requires a server name', success: false, duration: Date.now() - start };
+          const transport = String(args.transport ?? '').trim();
+          const env = (args.env && typeof args.env === 'object' && !Array.isArray(args.env))
+            ? Object.fromEntries(Object.entries(args.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+            : undefined;
+          const requestTimeoutMs = typeof args.requestTimeoutMs === 'number' && Number.isFinite(args.requestTimeoutMs) && args.requestTimeoutMs >= 1000
+            ? Math.floor(args.requestTimeoutMs)
+            : undefined;
+          let serverConfig;
+          if (transport === 'stdio') {
+            const command = Array.isArray(args.command) ? args.command.map((part) => String(part).trim()).filter(Boolean) : [];
+            if (command.length === 0) return { id: toolCall.id, toolName: name, error: 'stdio transport requires a command array, e.g. ["npx", "-y", "pkg"]', success: false, duration: Date.now() - start };
+            serverConfig = { name: serverName, transport: 'stdio' as const, command, env, requestTimeoutMs };
+          } else if (transport === 'http') {
+            const url = String(args.url ?? '').trim();
+            if (!/^https?:\/\//i.test(url)) return { id: toolCall.id, toolName: name, error: 'http transport requires an http(s) URL', success: false, duration: Date.now() - start };
+            serverConfig = { name: serverName, transport: 'http' as const, url, env, requestTimeoutMs };
+          } else {
+            return { id: toolCall.id, toolName: name, error: 'transport must be "stdio" or "http"', success: false, duration: Date.now() - start };
+          }
+          if (!this.capabilityHooks) return { id: toolCall.id, toolName: name, error: 'Dynamic MCP connection is not available in this runtime.', success: false, duration: Date.now() - start };
+          const registered = await this.capabilityHooks.connectMcpServer(serverConfig, signal);
+          return { id: toolCall.id, toolName: name, result: JSON.stringify({ name: serverName, transport, persisted: registered.persisted, tools: registered.tools.map((tool) => tool.name) }), success: true, duration: Date.now() - start };
         }
         case 'read_file': {
           // 刀 D1（2026-10-10）：行范围在 Rust 侧切（IPC 之前），大文件不再

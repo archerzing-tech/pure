@@ -58,6 +58,22 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
       required: ['candidateId'],
     },
   },
+  {
+    name: 'register_mcp_server',
+    description: 'Register a custom MCP server by name and connection details (a user-named repo, a command, or a URL), persist it to configuration, and connect it in the same step — its tools become available immediately. Use this when the user names a specific MCP project that search_mcp_servers does not return (new or niche projects are often absent from the directories); a search hit is NOT required. Before registering, determine the exact launch command from that project\'s README or docs (web_fetch the repo page) instead of guessing one. This launches a third-party process or opens a remote service; the user must approve before it runs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Short unique server name, e.g. rea or github' },
+        transport: { type: 'string', enum: ['stdio', 'http'], description: 'stdio for a local command, http for a remote URL' },
+        command: { type: 'array', items: { type: 'string' }, description: 'stdio only: command and args, e.g. ["npx", "-y", "rea-agents@latest", "mcp"]' },
+        url: { type: 'string', description: 'http only: base URL, e.g. https://mcp.example.com' },
+        env: { type: 'object', additionalProperties: { type: 'string' }, description: 'Optional environment variables for the subprocess' },
+        requestTimeoutMs: { type: 'integer', description: 'Optional per-request timeout in ms (default 30000; browser-automation servers often need 120000)' },
+      },
+      required: ['name', 'transport'],
+    },
+  },
 ] as const;
 
 export const DYNAMIC_CAPABILITY_NAMES = new Set(

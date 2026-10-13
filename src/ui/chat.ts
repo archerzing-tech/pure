@@ -4782,8 +4782,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
         codingAgent.toolRegistry.register({
           ...tool,
-          tags: tool.name === 'connect_mcp_server' ? [Tags.DESTRUCTIVE] : [Tags.READ],
-          riskLevel: tool.name === 'connect_mcp_server' ? 'high' : 'low',
+          // 注册自定义 server 和连接候选同级危险：都会启动第三方进程/连远程
+          // 服务，同为 DESTRUCTIVE/high 弹卡。
+          tags: tool.name === 'connect_mcp_server' || tool.name === 'register_mcp_server' ? [Tags.DESTRUCTIVE] : [Tags.READ],
+          riskLevel: tool.name === 'connect_mcp_server' || tool.name === 'register_mcp_server' ? 'high' : 'low',
           serverName: 'pure-capabilities',
         });
       }

@@ -230,6 +230,64 @@ describe('dynamic capability tools', () => {
     expect(connectedName).toBe('com.example/crm');
     expect(String(result.result)).toContain('com.example/crm__lookup');
   });
+
+  it('registers a custom stdio server without a search hit and hands the exact config to the connector', async () => {
+    // 真机判例（2026-10-13）：用户点名 GitHub 上的 MCP 项目，目录搜不到，
+    // 旧工具面只有「候选 id」一条路 → 模型答「pure 没有暴露 MCP 注册工具」。
+    // register_mcp_server 接受用户给的名字+命令，无需候选。
+    let seenConfig: { name: string; transport: string; command?: string[]; env?: Record<string, string>; requestTimeoutMs?: number } | null = null;
+    const invoke = async () => '';
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, 'session-1', '', undefined, '', {
+      connectMcpServer: async (config) => {
+        seenConfig = config;
+        return { tools: [{ name: 'rea__trace', description: 'trace', input_schema: { type: 'object' } }], persisted: true };
+      },
+    });
+    const result = await adapter.execute(toolCall('register_mcp_server', {
+      name: 'rea',
+      transport: 'stdio',
+      command: ['npx', '-y', 'rea-agents@latest', 'mcp'],
+      env: { REA_LOG: 'info' },
+      requestTimeoutMs: 120000,
+    }));
+    expect(result.success).toBe(true);
+    expect(seenConfig!).toEqual({ name: 'rea', transport: 'stdio', command: ['npx', '-y', 'rea-agents@latest', 'mcp'], env: { REA_LOG: 'info' }, requestTimeoutMs: 120000 });
+    expect(String(result.result)).toContain('rea__trace');
+    expect(String(result.result)).toContain('"persisted":true');
+  });
+
+  it('registers a custom http server from a bare URL', async () => {
+    let seenUrl = '';
+    const adapter = new TauriToolAdapter('/ws', '', '', '', async () => '', 'session-1', '', undefined, '', {
+      connectMcpServer: async (config) => {
+        seenUrl = config.url ?? '';
+        return { tools: [], persisted: true };
+      },
+    });
+    const result = await adapter.execute(toolCall('register_mcp_server', { name: 'docs', transport: 'http', url: 'https://mcp.example.com' }));
+    expect(result.success).toBe(true);
+    expect(seenUrl).toBe('https://mcp.example.com');
+  });
+
+  it('rejects malformed register_mcp_server args before any process launches', async () => {
+    const adapter = new TauriToolAdapter('/ws', '', '', '', async () => '', 'session-1', '', undefined, '', {
+      connectMcpServer: async () => {
+        throw new Error('connector must never be reached for invalid args');
+      },
+    });
+    for (const args of [
+      { transport: 'stdio', command: ['npx'] },                    // 缺 name
+      { name: 'x', transport: 'stdio' },                           // stdio 缺 command
+      { name: 'x', transport: 'stdio', command: [] },              // command 空数组
+      { name: 'x', transport: 'http' },                            // http 缺 url
+      { name: 'x', transport: 'http', url: 'ftp://nope' },         // url 非 http(s)
+      { name: 'x', transport: 'websocket' },                       // 未知 transport
+    ]) {
+      const result = await adapter.execute(toolCall('register_mcp_server', args));
+      expect(result.success).toBe(false);
+      expect(result.error).toBeTypeOf('string');
+    }
+  });
 });
 
 describe('Tauri Tier-2/3 web tool execution paths', () => {
