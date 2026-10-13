@@ -751,6 +751,14 @@ export class AgentLoopEngine {
           // not silently retry without guidance).
           const toolGuidance = action.kind === 'degrade' ? action.reason : action.hint;
           messages.push({ role: 'user' as const, content: toolGuidance, internal: true });
+          // 失败的检索轮同样推进守卫（审计批 5⑧）：全检索轮全失败也要在
+          // 上限处触发收束指令，否则模型可以无限循环失败搜索。
+          const failedBump = this.bumpResearchStreak(researchStreak, toolCalls);
+          researchStreak = failedBump.streak;
+          if (failedBump.wrapUp) {
+            messages.push({ role: 'user' as const, content: failedBump.wrapUp, internal: true });
+            budget.addTokens(failedBump.wrapUp);
+          }
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
@@ -789,14 +797,13 @@ export class AgentLoopEngine {
         // research rounds, tell the model to stop searching and synthesize from
         // the evidence it already has. The streak resets on any non-research
         // tool round (real work) and after the nudge, so it re-fires if the
-        // model keeps researching instead of answering.
-        const allResearch = toolCalls.length > 0 && toolCalls.every((tc) => isWebResearchTool(tc.function.name));
-        researchStreak = allResearch ? researchStreak + 1 : 0;
-        if (researchStreak >= RESEARCH_ROUND_LIMIT) {
-          researchStreak = 0;
-          const wrapUp = `You have made ${RESEARCH_ROUND_LIMIT} consecutive web research rounds for this request. Stop issuing more searches and deliver a complete, well-organized answer now from the evidence you have already gathered. If a specific fact is still missing, state the assumption or the gap plainly instead of searching again.`;
-          messages.push({ role: 'user' as const, content: wrapUp, internal: true });
-          budget.addTokens(wrapUp);
+        // model keeps researching instead of answering. 推进逻辑收编到
+        // bumpResearchStreak（审计批 5⑧），与失败路径共用同一机制。
+        const bump = this.bumpResearchStreak(researchStreak, toolCalls);
+        researchStreak = bump.streak;
+        if (bump.wrapUp) {
+          messages.push({ role: 'user' as const, content: bump.wrapUp, internal: true });
+          budget.addTokens(bump.wrapUp);
         }
 
         turnCount++;
@@ -884,7 +891,10 @@ export class AgentLoopEngine {
               };
               // hint already resolves degrade → action.reason, so the degraded
               // directive reaches the model instead of vanishing.
-              messages.push({ role: 'user' as const, content: hint });
+              // internal: true（审计批 5③）——这是给模型的机制指令，不是用户
+              // 说话：漏标会渲染成用户气泡，且 lastHumanUserText 拿它当最近
+              // 人话做语言判定，后续回复语言被一条验证器反馈带跑。
+              messages.push({ role: 'user' as const, content: hint, internal: true });
             } else {
               yield {
                 type: 'Error',
@@ -990,6 +1000,25 @@ export class AgentLoopEngine {
    */
   private degradationNote(te: { toolName: string; result: ToolResult }): string {
     return `Tool call ${te.toolName} failed: ${te.result.error ?? 'unknown error'}. Degrade this approach — do NOT repeat the exact same call: either adapt it (different arguments) or use a different tool or strategy. Prefer approaches that have already proven successful this session.`;
+  }
+
+  /**
+   * v1.9.15 — research-loop guard streak advance (审计批 5⑧): a round made up
+   * entirely of web-research tools advances the streak; hitting the limit
+   * returns the wrap-up directive instead. Shared by the success path AND the
+   * failure-policy path — a failed research round is still a research round,
+   * and an all-research-all-failing loop is exactly where "stop searching,
+   * synthesize" matters most (previously the failure branch's `continue`
+   * skipped the update, so the guard never fired there).
+   */
+  private bumpResearchStreak(streak: number, toolCalls: ToolCall[]): { streak: number; wrapUp: string | null } {
+    const allResearch = toolCalls.length > 0 && toolCalls.every((tc) => isWebResearchTool(tc.function.name));
+    const next = allResearch ? streak + 1 : 0;
+    if (next < RESEARCH_ROUND_LIMIT) return { streak: next, wrapUp: null };
+    return {
+      streak: 0,
+      wrapUp: `You have made ${RESEARCH_ROUND_LIMIT} consecutive web research rounds for this request. Stop issuing more searches and deliver a complete, well-organized answer now from the evidence you have already gathered. If a specific fact is still missing, state the assumption or the gap plainly instead of searching again.`,
+    };
   }
 
 

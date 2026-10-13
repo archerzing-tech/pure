@@ -89,4 +89,86 @@ describe('substituteExec', () => {
   it('does not touch shell brace expansion syntax when no matching arg name', () => {
     expect(substituteExec('echo {1..5} && ls {,*}.txt', {})).toBe('echo {1..5} && ls {,*}.txt');
   });
+
+  // 审计批 5②：裸插值让 `foo; rm -rf /` 这样的参数值直接成为命令文本。
+  // 不安全值必须整体引住；安全 token 保持裸露（与历史命令逐字节一致）。
+  it('keeps safe tokens bare so common commands stay byte-identical', () => {
+    expect(substituteExec('grep {q} {path}', { q: 'error', path: 'src/app.ts' }))
+      .toBe('grep error src/app.ts');
+  });
+
+  it('quotes an unsafe value so metacharacters stay data, not control', () => {
+    const cmd = substituteExec('grep {q} log.txt', { q: 'a; rm -rf /' });
+    expect(cmd).toBe(`grep 'a; rm -rf /' log.txt`);
+  });
+
+  // 咬合必须咬字面：旧的 round-trip 断言在「根本没引」时是空操作，防不住
+  // 回归。POSIX: 'it'\''s here'；PowerShell: 'it''s here'——两种都还原为原值。
+  it('escapes embedded single quotes (exact platform form)', () => {
+    const cmd = substituteExec('echo {msg}', { msg: "it's here" });
+    expect(cmd).toBe(process.platform === 'win32' ? `echo 'it''s here'` : `echo 'it'\\''s here'`);
+  });
+
+  // ── 审计批 5② 续刀：两类豁免。全量引号打破了三个真实已装工具——
+  // run_with_timeout 的 {command} 契约就是命令行碎片（引住 = 单个词，必坏），
+  // check_hello/diagnose_* 的占位符被模板自带引号包住（二次引号改变行为）。
+  describe('quoting exemptions', () => {
+    it('rawParams bypass quoting — a command-fragment arg stays verbatim', () => {
+      expect(substituteExec('{cmd} > /tmp/log & pid=$!', { cmd: 'python3 x.py 10086' }, new Set(['cmd'])))
+        .toBe('python3 x.py 10086 > /tmp/log & pid=$!');
+    });
+
+    it('without rawParams the same value gets quoted (default stays safe)', () => {
+      expect(substituteExec('{cmd}', { cmd: 'echo a b' })).toBe(`'echo a b'`);
+    });
+
+    it('a placeholder wrapped in the template quotes substitutes raw (author-quoted forms)', () => {
+      expect(substituteExec('[ "{s}" = "hello" ] && echo passed', { s: 'hello world' }))
+        .toBe('[ "hello world" = "hello" ] && echo passed');
+      expect(substituteExec(`node -e "const f='{file}'"`, { file: '/tmp/my dir/a.js' }))
+        .toBe(`node -e "const f='/tmp/my dir/a.js'"`);
+    });
+
+    it('mixed: the rawParam stays bare while a plain arg still gets quoted', () => {
+      expect(substituteExec('{cmd} {arg}', { cmd: 'echo a', arg: 'a;b' }, new Set(['cmd'])))
+        .toBe(`echo a 'a;b'`);
+    });
+
+    it('rawParams declared but safe values stay byte-identical', () => {
+      expect(substituteExec('grep {q} f', { q: 'err' }, new Set(['q']))).toBe('grep err f');
+    });
+  });
+
+  it('rawParams entries must reference declared properties', () => {
+    const base = {
+      name: 'run_with_timeout',
+      description: 'Run a command under a hard timeout here',
+      input_schema: { type: 'object' as const, properties: { command: { type: 'string' as const } } },
+    };
+    const ok = compileExternalTool(
+      { file: 'rt/TOOL.json', text: JSON.stringify(manifest({ ...base, exec: '{command} & pid=$!', rawParams: ['command'] })) },
+      alwaysDir,
+    );
+    expect(ok.errors).toEqual([]);
+    const bad = compileExternalTool(
+      { file: 'rt/TOOL.json', text: JSON.stringify(manifest({ ...base, exec: '{command} &', rawParams: ['cmmand'] })) },
+      alwaysDir,
+    );
+    expect(bad.errors[0]).toMatch(/rawParams entry "cmmand" is not a declared input_schema property/);
+  });
+
+  // 终审 P2：非数组 rawParams（JSON 侧无类型护栏）在 for..of 直接抛
+  // TypeError 且无人承接——宿主外层 catch 会静默弃掉整批外部工具。必须降级
+  // 成 per-file error，守住「坏文件不拖垮整批」。
+  it('a non-array rawParams degrades to a per-file error, not a thrown batch-killer', () => {
+    const base = { name: 'rt_malformed', description: 'Raw params malformed here', exec: '{command}' };
+    for (const bad of [5, true, { command: true }, 'command']) {
+      const { tools, errors } = compileExternalTool(
+        { file: 'rtbad/TOOL.json', text: JSON.stringify(manifest({ ...base, rawParams: bad as unknown as string[] })) },
+        alwaysDir,
+      );
+      expect(tools).toEqual([]);
+      expect(errors[0]).toMatch(/rawParams must be an array/);
+    }
+  });
 });

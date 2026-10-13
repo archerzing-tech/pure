@@ -228,12 +228,21 @@ export class ToolRegistry implements ToolAdapter {
     if (this.permissionManager) {
       const args = safeParseArgs(toolCall.function.arguments);
       const isWrite = known.tags.includes(Tags.WRITE) || known.tags.includes(Tags.DESTRUCTIVE);
+      // 写性未知 ≠ 只读（审计批 5①）：MCP 工具的写性客户端永远无从得知
+      // （注册恒 [Tags.MCP]），外部脚本工具执行的是模板+模型参数拼出的任意
+      // 命令——两者缺省都不是可证明的读。判成 isRead 让 PLAN/DONT_ASK
+      // 放行 MCP 服务的写工具和任意脚本执行（只读模式形同虚设，且外部
+      // 执行器把翻译出的 execute_command 直打裸 adapter，不再有第二道闸）。
+      // 显式声明 Tags.READ 的外部工具仍算读；NORMAL 不受影响（中风险照旧
+      // 弹卡）。
+      const unknownSideEffects = known.tags.includes(Tags.MCP)
+        || (known.tags.includes(Tags.EXTERNAL) && !known.tags.includes(Tags.READ));
       const preview = buildWritePreview(toolCall.function.name, args);
       const ctx: PermissionContext = {
         tool: toolCall.function.name,
         command: typeof args.command === 'string' ? args.command : undefined,
         description: known.description,
-        isRead: !isWrite,
+        isRead: !isWrite && !unknownSideEffects,
         riskLevel: known.riskLevel ?? 'medium',
         serverName: known.serverName,
         path: preview?.path,

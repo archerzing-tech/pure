@@ -13,7 +13,7 @@ import { createDefaultHarnessConfig } from './defaultHarnessConfig';
 import { ToolRegistry } from './ToolRegistry';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
-import { substituteExec } from '../harness/externalTools';
+import { substituteExec, type ExternalToolExec } from '../harness/externalTools';
 import {
   buildQuarantineCard,
   classifyExternalToolOutcome,
@@ -140,8 +140,8 @@ export interface CodingAgentConfig {
    * 传入）；经 ToolRegistry.register 注册（MCP 同款通路），执行路由到
    * execute_command 信任模型。 */
   externalTools?: TaggedTool[];
-  /** 阶段 13.4 — 外部工具的 exec 模板（name → { exec, timeoutMs }）。 */
-  externalToolExecs?: Map<string, { exec: string; timeoutMs: number }>;
+  /** 阶段 13.4 — 外部工具的 exec 模板（name → { exec, timeoutMs, rawParams? }）。 */
+  externalToolExecs?: Map<string, ExternalToolExec>;
   /** 阶段 13.4 — 停用看门狗的宿主缝。**不接就等于没有这道门**（执行面完全
    *  不计数），这是刻意的：CLI 等未接缝的宿主不该被半截门误伤。 */
   externalToolQuarantine?: ExternalToolQuarantineHost;
@@ -366,7 +366,7 @@ export class CodingAgent {
    * execute_command pipeline — no new security surface, design stance 3).
    */
   private createExternalToolsExecutor(
-    execs: Map<string, { exec: string; timeoutMs: number }>,
+    execs: Map<string, ExternalToolExec>,
     quarantine?: ExternalToolQuarantineHost,
   ): ToolAdapter {
     const delegate = this.toolRegistry.getDelegate();
@@ -405,7 +405,7 @@ export class CodingAgent {
         } catch {
           args = {};
         }
-        const command = substituteExec(entry.exec, args);
+        const command = substituteExec(entry.exec, args, entry.rawParams ? new Set(entry.rawParams) : undefined);
         // Route as an execute_command call through the same adapter — the
         // permission gate already ran for the tool call itself (Tags.EXTERNAL
         // in the registry), and the adapter's execute_command path handles

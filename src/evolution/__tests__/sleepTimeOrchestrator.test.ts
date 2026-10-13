@@ -376,6 +376,27 @@ describe('runSleepTimeCycle', () => {
     expect(result.lessonsWritten).toBe(1);
     expect(f.memory.entries.some((e) => e.dedupeKey === `reflect:cli-oneshot:fix the bug`)).toBe(true);
   });
+
+  // 审计批 5⑥：水位语义是「档案里在此之前的会话都已处理」。directSession
+  // 是宿主内存直喂的当轮会话、不是档案来源，updatedAt 还是本轮的 now()——
+  // 若推共享水位，GUI 侧档案里所有更早的未处理会话从此沉底永不见天日
+  // （CLI 与 GUI 共用同一份游标文件）。
+  it('a directSession cycle must NOT advance the shared watermark (cursor is CLI/GUI shared)', async () => {
+    const f = fixture({ now: () => NOW }, []);
+    f.deps.directSession = { ...sessionTurn(), id: 'cli-oneshot' };
+    await runSleepTimeCycle(f.deps);
+    expect(f.cursor.processedSessionIds).toContain('cli-oneshot'); // 尾表照记
+    expect(f.cursor.lastProcessedAt).toBe(0); // 水位纹丝不动
+
+    // 反证：同一游标下，档案里水位之前的会话下一轮仍会被处理——
+    // 只有档案来源才许推水位。
+    f.deps.directSession = undefined;
+    f.deps.listPendingSessions = async () => [{ id: 'archived', updatedAt: NOW - 1000 }];
+    f.deps.loadSession = async () => sessionTurn();
+    const second = await runSleepTimeCycle(f.deps);
+    expect(second.sessionsProcessed).toEqual(['archived']);
+    expect(f.cursor.lastProcessedAt).toBe(NOW - 1000);
+  });
 });
 
 // ── 建议路由 ──

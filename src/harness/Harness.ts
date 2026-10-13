@@ -953,6 +953,11 @@ export class Harness {
         globalLessons = this.config.memory
           .list({ projectPath: GLOBAL_MEMORY_SCOPE, activeOnly: true })
           .filter(m => m.type === 'successful_pattern' || m.type === 'error_pattern' || m.type === 'procedure')
+          // E1.1 同一道防幻觉闸门（审计批 5④）：反思器拿不出证据的 lesson
+          // 打 confidence:'low'，机器通道此前只按 type 过滤、漏了这一刀，
+          // 低置信条目借常驻通道绕过闸门直接进每个会话的 system prompt。
+          // 模板条目不带 confidence 字段，照旧注入（与项目通道同口径）。
+          .filter(m => m.confidence !== 'low')
           .sort((a, b) => b.timestamp - a.timestamp)
           .slice(0, 5);
       }

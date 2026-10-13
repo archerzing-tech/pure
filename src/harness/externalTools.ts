@@ -32,6 +32,11 @@ export interface ExternalToolManifest {
   riskLevel?: 'low' | 'medium' | 'high';
   /** 命令墙钟上限（ms）。 */
   timeoutMs?: number;
+  /** 逐参数豁免引号（审计批 5② 续刀）：列出的参数原样替换、不加引号。
+   *  契约就是「参数 = 一条命令行」的工具（run_with_timeout 的 {command}）
+   *  必须声明，否则整条命令被引成一个词；模板自带引号包住占位符的形态
+   *  （sed 's|{x}|{y}|g' 的 x/y）不用声明——邻接豁免自动覆盖。 */
+  rawParams?: string[];
 }
 
 const MANIFEST_VERSION = 1;
@@ -75,6 +80,21 @@ export function compileExternalTool(
   // 目录名与工具名同构：~/.pure/tools/<name>/TOOL.json。
   if (!dirExists(parsed.name)) {
     return { tools: [], errors: [`${source.file}: tool directory "~/.pure/tools/${parsed.name}/" not found (name must match the directory)`] };
+  }
+  // rawParams 必须是数组：非数组值（数字/对象）在下面的 for..of 直接抛
+  // TypeError，而本函数的契约是「坏文件返回 errors 不抛」——不拦的话一个坏
+  // manifest 会经宿主的外层 catch 静默弃掉整批外部工具（终审 P2）。字符串
+  // 会被逐字符遍历，同样是错的，一并拦。
+  if (parsed.rawParams !== undefined && !Array.isArray(parsed.rawParams)) {
+    return { tools: [], errors: [`${source.file}: rawParams must be an array of parameter names`] };
+  }
+  // rawParams 逐项必须是声明过的参数名：豁免是作者对「这个参数是命令碎片
+  // / 已在模板引号里」的显式声明，写错名字等于静默放弃豁免，宁可编译期拦。
+  const propertyNames = new Set(Object.keys(parsed.input_schema?.properties ?? {}));
+  for (const raw of parsed.rawParams ?? []) {
+    if (typeof raw !== 'string' || !propertyNames.has(raw)) {
+      return { tools: [], errors: [`${source.file}: rawParams entry "${String(raw)}" is not a declared input_schema property`] };
+    }
   }
 
   const declared = new Set((parsed.tags ?? []).filter((t) => typeof t === 'string'));
@@ -129,16 +149,41 @@ export interface ExternalToolExec {
   name: string;
   exec: string;
   timeoutMs: number;
+  /** 逐参数引号豁免（manifest 的 rawParams 原样透传）。 */
+  rawParams?: string[];
 }
 
-/** `{param}` 替换：输入参数的字符串值嵌入命令。非字符串的 String() 化。
- *  未知占位符原样保留（命令自己的 shell 变量语法 `{}` 不受影响——只匹配
- *  已知参数名）。 */
-export function substituteExec(exec: string, args: Record<string, unknown>): string {
-  return exec.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (whole, key: string) => {
+const SAFE_BARE_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** 参数值的 shell 安全嵌入（审计批 5②）：裸插值让 `foo; rm -rf /` 这样的
+ *  参数值直接成为命令文本。非安全 token 一律加引号——POSIX 用单引号
+ *  （`'` → `'\''`），Windows 走 PowerShell 单引号（`'` → `''`；execute_command
+ *  的 Windows 面是 powershell -EncodedCommand）。安全 token 保持裸露，让
+ *  常见命令与历史逐字节一致。 */
+export function shellQuoteValue(value: string): string {
+  if (SAFE_BARE_TOKEN.test(value)) return value;
+  if (process.platform === 'win32') {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** `{param}` 替换（审计批 5② 续刀收口）：缺省经 shellQuoteValue 嵌入；两类
+ *  豁免原样替换——(1) `rawParams` 点名的参数，其契约就是命令碎片（引住即
+ *  变单个词，工具必坏）；(2) 模板自带同款引号紧贴占位符两侧的（`"{x}"`、
+ *  `'{y}'`），作者是按值逐字进引号里写的，二次引号反而改变行为——这是已
+ *  装工具库里的真实形态（check_hello / diagnose_node_*）。非字符串 String()
+ *  化；未知占位符原样保留。 */
+export function substituteExec(exec: string, args: Record<string, unknown>, rawParams?: ReadonlySet<string>): string {
+  return exec.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (whole, key: string, offset: number, full: string) => {
     if (!(key in args)) return whole;
-    const v = args[key];
-    return typeof v === 'string' ? v : String(v);
+    const v = typeof args[key] === 'string' ? args[key] as string : String(args[key]);
+    const before = offset > 0 ? full[offset - 1] : '';
+    const after = full[offset + whole.length] ?? '';
+    if (rawParams?.has(key) || (before === after && (before === '"' || before === "'"))) {
+      return v;
+    }
+    return shellQuoteValue(v);
   });
 }
 
@@ -146,6 +191,7 @@ export function toolCallToCommand(
   exec: string,
   toolCallId: string,
   args: Record<string, unknown>,
+  rawParams?: ReadonlySet<string>,
 ): { id: string; command: string } {
-  return { id: toolCallId, command: substituteExec(exec, args) };
+  return { id: toolCallId, command: substituteExec(exec, args, rawParams) };
 }

@@ -40,7 +40,7 @@ import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { FoldInLedger } from '../coding-agent/foldInLedger';
 import { RoundClosePlane } from '../coding-agent/roundClosePlane';
-import { compileExternalTools } from '../harness/externalTools';
+import { compileExternalTools, type ExternalToolExec } from '../harness/externalTools';
 import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuarantineHost';
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
@@ -752,7 +752,7 @@ const loadGuiGeneratedRoles = loadGeneratedRoles;
 // (which would read to the model like a missing manifest, not a stopped tool).
 interface GuiExternalTools {
   tools: TaggedTool[];
-  execs: Map<string, { exec: string; timeoutMs: number }>;
+  execs: Map<string, ExternalToolExec>;
   /** Every tool carrying a marker, quarantined or not — the counters of a
    *  not-yet-quarantined tool live here too, which is what lets "consecutive"
    *  span turns. Dropping these would reset the gate's memory each turn. */
@@ -774,15 +774,18 @@ function loadGuiExternalTools(): Promise<GuiExternalTools> {
       );
       for (const line of errors) console.warn(`[external-tools] ${line}`);
       // exec 模板从原始 manifest 里提取（编译器只出 TaggedTool，exec 模板留在
-      // 这里拆——两件同源、一次扫描产出）。
-      const execs = new Map<string, { exec: string; timeoutMs: number }>();
+      // 这里拆——两件同源、一次扫描产出）。rawParams 随行（编译器已验证过
+      // 每项都是声明过的参数名）。
+      const execs = new Map<string, ExternalToolExec>();
       for (const source of live) {
         try {
-          const m = JSON.parse(source.text) as { name?: string; exec?: string; timeoutMs?: number };
+          const m = JSON.parse(source.text) as { name?: string; exec?: string; timeoutMs?: number; rawParams?: string[] };
           if (m.name && m.exec && tools.some((t) => t.name === m.name)) {
             execs.set(m.name, {
+              name: m.name,
               exec: m.exec,
               timeoutMs: Math.min(600_000, Math.max(5_000, Math.floor(m.timeoutMs ?? 120_000))),
+              ...(Array.isArray(m.rawParams) ? { rawParams: m.rawParams.filter((p): p is string => typeof p === 'string') } : {}),
             });
           }
         } catch { /* 坏 manifest 编译器已报 */ }

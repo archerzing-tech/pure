@@ -6,13 +6,17 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PURE_DIR } from './cliConfig';
 import type { DistilledSkill } from './shared/skillDistill';
 
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,119}$/;
 
 export function skillsRootDir(): string {
-  const home = process.env.HOME || '';
-  const base = process.env.PURE_SKILLS_DIR?.trim() || `${home}/.pure`;
+  // 家目录口径收口（审计批 5⑤）：`HOME || ''` 在 Windows（USERPROFILE 而
+  // 非 HOME）或无 HOME 的环境落到 `/.pure/skills`——写「成功」却永远没人
+  // 读（cliRepl 的读取面用 os.homedir()）。cliConfig 的 HOME/PURE_DIR 已经
+  // 是 `HOME || os.homedir()` 的正解口径，直接复用，写读同源不再分叉。
+  const base = process.env.PURE_SKILLS_DIR?.trim() || PURE_DIR;
   return join(base, 'skills');
 }
 

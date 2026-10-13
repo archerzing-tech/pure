@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryEntry } from '../types';
 import {
@@ -16,7 +16,8 @@ import {
   type DistillLlm,
 } from '../skillDistill';
 import { parseSkillMarkdown } from '../skillFiles';
-import { writeAutoSkillDir } from '../../cliSkillStore';
+import { skillsRootDir, writeAutoSkillDir } from '../../cliSkillStore';
+import { PURE_DIR } from '../../cliConfig';
 
 function entry(overrides: Partial<MemoryEntry>): MemoryEntry {
   return {
@@ -156,6 +157,44 @@ describe('writeAutoSkillDir (CLI 落盘闭环)', () => {
       expect(() => writeAutoSkillDir(skill, root)).toThrow(/unsafe skill name/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 审计批 5⑤：根目录口径必须与 cliRepl 的读取面同源（cliConfig 的
+  // HOME || os.homedir()）。旧口径 HOME || '' 在无 HOME 的环境落到
+  // /.pure/skills——写「成功」却永远没人读。
+  //
+  // 判别性说明（评审批 5 P2-2）：本进程里 HOME 恒有值，进程内断言
+  // `skillsRootDir() === join(PURE_DIR, 'skills')` 对新旧代码同样成立，咬不动
+  // 这条回归。基座口径在模块加载期定格，无法进程内模拟「无 HOME」——用子
+  // 进程把 HOME 整个摘掉：新代码落 os.homedir() 的家目录，旧代码落 '/.pure'。
+  // 这个测试在任何开发机上都判得动红绿。
+  it('skillsRootDir falls back to os.homedir() when HOME is missing (subprocess)', () => {
+    const probe = `
+      import { skillsRootDir } from ${JSON.stringify(join(import.meta.dir, '..', '..', 'cliSkillStore.ts'))};
+      console.log(skillsRootDir());
+    `;
+    const { HOME: _drop, ...envWithoutHome } = process.env;
+    const proc = Bun.spawnSync(['bun', '-e', probe], {
+      env: envWithoutHome as Record<string, string>,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(proc.exitCode).toBe(0);
+    // 与 cliConfig 同源：无 HOME 时读 os.homedir()，而不是落 '/.pure/skills'。
+    expect(proc.stdout.toString().trim()).toBe(join(homedir(), '.pure', 'skills'));
+  });
+
+  it('skillsRootDir honors PURE_SKILLS_DIR overrides at call time', () => {
+    const prev = process.env.PURE_SKILLS_DIR;
+    try {
+      process.env.PURE_SKILLS_DIR = '   ';
+      expect(skillsRootDir()).toBe(join(PURE_DIR, 'skills')); // 纯空白不算覆盖
+      process.env.PURE_SKILLS_DIR = '/tmp/pure-skills-elsewhere';
+      expect(skillsRootDir()).toBe(join('/tmp/pure-skills-elsewhere', 'skills'));
+    } finally {
+      if (prev === undefined) delete process.env.PURE_SKILLS_DIR;
+      else process.env.PURE_SKILLS_DIR = prev;
     }
   });
 });

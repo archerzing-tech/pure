@@ -69,7 +69,11 @@ function agentFor(behaviour: Parameters<typeof delegateReturning>[0], host?: Ext
     llm: {} as CodingAgentConfig['llm'],
     budget: { maxTurns: 1, maxTotalTokens: 1000, maxExecutionTime: 1000, warningThreshold: 0.8, graceTurns: 0 },
     externalTools: [TOOL],
-    externalToolExecs: new Map([[TOOL.name, { exec: 'run.sh {x}', timeoutMs: 5000 }]]),
+    externalToolExecs: new Map([[TOOL.name, { name: TOOL.name, exec: 'run.sh {x}', timeoutMs: 5000 }]]),
+    // 审计批 5① 之后外部脚本工具缺省不判读——无 handler 的 NORMAL 会默认
+    // 拒绝它。这些测试只锁隔离舱接线、不锁权限语义，显式 YOLO 让权限门
+    // 让路（与 evaluation 执行器的真实无头配置同款）。
+    permissionMode: 'YOLO',
     ...(host ? { externalToolQuarantine: host } : {}),
   });
   return agent;

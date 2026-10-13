@@ -143,6 +143,11 @@ export type MCPPromptResult =
 
 export class MCPClient implements ToolAdapter {
   private servers = new Map<string, ServerState>();
+  /** 每服务器串行链（审计批 5⑦）：MCP 工具的写性客户端无从得知（注册恒
+   *  [Tags.MCP]），同一 server 是一个进程、一份共享状态，它的两个工具并发
+   *  跑就是竞态——「写操作混进并发读池」的正确性机制建在知识真正所在的
+   *  这一层：同服串行、跨服照旧并行。 */
+  private serverChains = new Map<string, Promise<unknown>>();
   private toolToServer = new Map<string, string>(); // toolName → serverName
   /** 6.3 poisoning scan verdicts per tool (keyed by full registered name).
    *  Informational only — consumed by the Settings probe; never gates. */
@@ -189,6 +194,9 @@ export class MCPClient implements ToolAdapter {
     if (previous) {
       previous.transport.close();
       this.removeServerTools(config.name);
+      // 重连复位串行链（审计批 5⑦ 评审 P2）：断连即弃——旧链上的僵尸任务
+      // 属于已关的 transport，新 transport 的调用不该排在它后面。
+      this.serverChains.delete(config.name);
     }
 
     const transport: MCPTransport =
@@ -314,6 +322,10 @@ export class MCPClient implements ToolAdapter {
   }
 
   disconnectAll(): void {
+    // 串行链随断连一起清（审计批 5⑦ 评审 P2）：断连时 StdioTransport.close
+    // 会 reject 全部 pending，链会沉降，但僵尸条目会把重连后的首个调用拖到
+    // 旧超时上——与同函数里其他 Map 的清理保持对称。
+    this.serverChains.clear();
     for (const [, state] of this.servers) {
       state.transport.close();
       state.connected = false;
@@ -563,9 +575,14 @@ export class MCPClient implements ToolAdapter {
     for (const [, state] of this.servers) {
       const tool = state.tools.find((t) => t.name === toolName);
       if (tool) {
+        // isWrite 恒 false 不是「证明是读」，而是「无法分级」：MCP 协议不
+        // 向客户端暴露每工具写性（旧实现查 tags.includes('destructive')，
+        // 但注册恒 [Tags.MCP]，是恒假的死逻辑）。真正的同源安全由
+        // execute() 的每服务器串行链兜住——并发池把同服调用放行到这层，
+        // 在这里排队。
         return {
           sideEffects: true,
-          isWrite: tool.tags.includes('destructive'),
+          isWrite: false,
         };
       }
     }
@@ -607,10 +624,10 @@ export class MCPClient implements ToolAdapter {
       // no longer strips every argument from the MCP tool call.
       const args = parseToolArguments(toolCall.function.arguments);
 
-      const result = await state.transport.send('tools/call', {
+      const result = await this.enqueueOnServer(serverName, () => state.transport.send('tools/call', {
         name: mcpToolName,
         arguments: args,
-      });
+      }));
 
       return {
         id: toolCall.id,
@@ -628,5 +645,14 @@ export class MCPClient implements ToolAdapter {
         duration: Date.now() - start,
       };
     }
+  }
+
+  /** 同服调用进同一条 promise 链：前驱失败不断链（吞掉 rejection 只为排
+   *  队，任务自身的失败由调用方接）。返回给调用方的 promise 正常抛错。 */
+  private enqueueOnServer<T>(serverName: string, task: () => Promise<T>): Promise<T> {
+    const prev = this.serverChains.get(serverName) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(task);
+    this.serverChains.set(serverName, next);
+    return next;
   }
 }

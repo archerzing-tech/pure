@@ -224,6 +224,33 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(llm.received[0].length).toBeGreaterThanOrEqual(2); // system + user
   });
 
+  // 审计批 5④：机器教训通道是无条件常驻注入，E1.1 打 confidence:'low' 的
+  // 防幻觉闸门必须同样管住它——否则拿不出证据的反思产物借这条通道绕过
+  // 闸门，直进每个会话的 system prompt（项目通道此前已过滤，机器通道漏刀）。
+  it('keeps low-confidence machine lessons out of the always-on channel', async () => {
+    const memStore = new FakeMemoryStore();
+    const now = Date.now();
+    await memStore.add({ type: 'error_pattern', content: 'LOWCONF the flaky printer daemon needs a replug', timestamp: now, sessionId: 's', projectPath: GLOBAL_MEMORY_SCOPE, confidence: 'low' });
+    await memStore.add({ type: 'error_pattern', content: 'HIGHCONF this machine needs HTTPS_PROXY set for the registry', timestamp: now + 1, sessionId: 's', projectPath: GLOBAL_MEMORY_SCOPE, confidence: 'high' });
+
+    const llm = recordingLLM('answer');
+    const harness = new Harness({
+      sessionId: 'sess-machine-lessons',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('BASE SYSTEM', 'inspect the project'));
+
+    const sys = llm.received[0][0].content;
+    expect(sys).toContain('Machine-level lessons');
+    expect(sys).toContain('HIGHCONF');
+    expect(sys).not.toContain('LOWCONF');
+  });
+
   it('writes a successful_pattern when a session completes', async () => {
     const memStore = new FakeMemoryStore();
     const llm = recordingLLM('final output here');

@@ -3,8 +3,10 @@
 // and passthrough of path/contentPreview to the request handler.
 
 import { describe, it, expect } from 'bun:test';
-import { buildWritePreview, isGitMutationCommand, ToolRegistry } from '../ToolRegistry';
+import { buildWritePreview, isGitMutationCommand, Tags, ToolRegistry } from '../ToolRegistry';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
+import type { PermissionMode } from '../types';
+import type { TaggedTool } from '../types';
 import { PermissionManager } from '../PermissionManager';
 import type { PermissionContext, PermissionRequestInfo } from '../types';
 
@@ -308,6 +310,101 @@ describe('git write tools permission flow', () => {
     });
     const decision = await pm.askUser({ tool: 'write_file', isRead: false, riskLevel: 'medium' });
     expect(decision.allowed).toBe(true);
+    expect(asked).toBe(1);
+  });
+});
+
+// 审计批 5①：写性未知 ≠ 只读。MCP 工具注册恒 [Tags.MCP]、外部脚本工具缺省
+// [SHELL, EXTERNAL]——两者此前都被 isRead=!isWrite 判成读，PLAN/DONT_ASK
+// 硬只读档放行 MCP 服务的写工具和任意脚本执行（外部执行器把翻译出的
+// execute_command 直打裸 adapter，没有第二道闸）。缺省改判非读；显式声明
+// Tags.READ 的外部工具仍算读；NORMAL 照旧弹卡不收紧。
+describe('unknown-side-effect families never count as reads (审计批 5①)', () => {
+  function registryWith(tool: TaggedTool, mode: PermissionMode): { registry: ToolRegistry; ran: () => boolean } {
+    let executed = false;
+    const executor: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => ({}),
+      execute: async (): Promise<ToolResult> => {
+        executed = true;
+        return { id: 'ran', toolName: tool.name, result: 'ok', success: true, duration: 0 };
+      },
+    };
+    const registry = new ToolRegistry(executor);
+    registry.register(tool);
+    registry.setPermissionManager(new PermissionManager(mode));
+    return { registry, ran: () => executed };
+  }
+
+  function call(name: string): ToolCall {
+    return { id: 'c1', index: 0, function: { name, arguments: '{}' } };
+  }
+
+  it('PLAN blocks an undeclared external script tool (its executor never runs)', async () => {
+    const { registry, ran } = registryWith({
+      name: 'my_script', description: 'user-authored script tool',
+      input_schema: { type: 'object' },
+      tags: [Tags.SHELL, Tags.EXTERNAL], riskLevel: 'medium',
+    }, 'PLAN');
+    const result = await registry.execute(call('my_script'));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('PLAN');
+    expect(ran()).toBe(false);
+  });
+
+  it('DONT_ASK blocks an undeclared external script tool too', async () => {
+    const { registry, ran } = registryWith({
+      name: 'my_script', description: 'user-authored script tool',
+      input_schema: { type: 'object' },
+      tags: [Tags.SHELL, Tags.EXTERNAL], riskLevel: 'medium',
+    }, 'DONT_ASK');
+    const result = await registry.execute(call('my_script'));
+    expect(result.success).toBe(false);
+    expect(ran()).toBe(false);
+  });
+
+  it('an external tool explicitly declared READ stays a read under PLAN', async () => {
+    const { registry, ran } = registryWith({
+      name: 'log_tail', description: 'read-only log viewer',
+      input_schema: { type: 'object' },
+      tags: [Tags.SHELL, Tags.EXTERNAL, Tags.READ], riskLevel: 'medium',
+    }, 'PLAN');
+    const result = await registry.execute(call('log_tail'));
+    expect(result.success).toBe(true);
+    expect(ran()).toBe(true);
+  });
+
+  it('PLAN blocks MCP tools (write-ness unknowable client-side)', async () => {
+    const { registry, ran } = registryWith({
+      name: 'srv__write_note', description: 'MCP tool that may write',
+      input_schema: { type: 'object' },
+      tags: [Tags.MCP], riskLevel: 'medium', serverName: 'srv',
+    }, 'PLAN');
+    const result = await registry.execute(call('srv__write_note'));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('PLAN');
+    expect(ran()).toBe(false);
+  });
+
+  it('NORMAL still prompts for MCP/external tools (no over-blocking)', async () => {
+    let asked = 0;
+    const executor: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => ({}),
+      execute: async (): Promise<ToolResult> => ({ id: 'ran', toolName: 'srv__read', result: 'ok', success: true, duration: 0 }),
+    };
+    const registry = new ToolRegistry(executor);
+    registry.register({
+      name: 'srv__read', description: 'MCP tool',
+      input_schema: { type: 'object' },
+      tags: [Tags.MCP], riskLevel: 'medium', serverName: 'srv',
+    });
+    registry.setPermissionManager(new PermissionManager('NORMAL', async () => {
+      asked++;
+      return { allowed: true };
+    }));
+    const result = await registry.execute(call('srv__read'));
+    expect(result.success).toBe(true);
     expect(asked).toBe(1);
   });
 });

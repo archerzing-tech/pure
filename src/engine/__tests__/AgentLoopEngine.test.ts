@@ -488,6 +488,88 @@ describe('AgentLoopEngine', () => {
     expect(wrapUp!.content).toContain('Stop issuing more searches');
   });
 
+  // 审计批 5⑧：失败的检索轮同样是检索轮。此前失败策略分支的 continue 跳过
+  // streak 更新——全检索轮全失败（搜索服务挂了、全被限流）恰是最需要「别再
+  // 搜了，用手头证据收束」的时刻，守卫却在那里永不触发。
+  it('fires the research wrap-up through the FAILURE branch too when failed rounds pile up', async () => {
+    const engine = new AgentLoopEngine();
+    const tools: ToolDefinition[] = [
+      { name: 'web_search', description: 'search', input_schema: { type: 'object', properties: { query: { type: 'string' } } } },
+      { name: 'researcher_web', description: 'research', input_schema: { type: 'object', properties: { prompt: { type: 'string' } } } },
+    ];
+    const allFail: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> => ({
+        id: tc.id,
+        toolName: tc.function.name,
+        error: 'search backend down',
+        success: false,
+        duration: 5,
+      }),
+      getMetadata: () => undefined,
+      getTools: () => tools,
+    };
+    const ctx = baseCtx({
+      llm: multiRoundLLM(
+        [
+          { toolName: 'web_search', toolArgs: '{"query":"a"}' },
+          { toolName: 'web_search', toolArgs: '{"query":"b"}' },
+          { toolName: 'researcher_web', toolArgs: '{"prompt":"c"}' },
+          { toolName: 'web_search', toolArgs: '{"query":"d"}' },
+        ],
+        'Giving up gracefully.',
+      ),
+      tools: allFail,
+      toolsDefs: tools,
+      failurePolicy: { decide: () => ({ kind: 'retry' as const, hint: 'adapt the call' }) },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-research-fail', systemPrompt: 'You are helpful.', userPrompt: 'Research this', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const completed = events.find(e => e.type === 'Completed') as any;
+    expect(completed).toBeDefined();
+    const messages = completed.payload.messages as Message[];
+    const wrapUp = messages.find((m) => m.role === 'user' && m.content.includes('consecutive web research rounds'));
+    expect(wrapUp).toBeDefined();
+    expect(wrapUp!.content).toContain('Stop issuing more searches');
+  });
+
+  // 审计批 5③：验证失败的恢复提示是给模型的机制指令。漏标 internal 会渲染
+  // 成用户气泡，且 lastHumanUserText 把它当最近人话做语言判定——后续回复
+  // 语言被一条验证器反馈带跑。
+  it('marks the VERIFY recovery hint internal so it is not mistaken for user speech', async () => {
+    const engine = new AgentLoopEngine();
+    let decideCalls = 0;
+    const ctx = baseCtx({
+      llm: textLLM('buggy code'),
+      verifier: {
+        evaluate: async () => ({ passed: false, feedback: 'missing null check', evidence: [] }),
+      },
+      failurePolicy: {
+        decide: () => {
+          decideCalls++;
+          return decideCalls >= 2
+            ? { kind: 'stop' as const, reason: 'verify kept failing' }
+            : { kind: 'retry' as const, hint: 'fix the null check and resubmit' };
+        },
+      },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-verify-hint', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted') as any;
+    expect(interrupted).toBeDefined();
+    const messages = interrupted.payload.messages as Message[];
+    const hints = messages.filter((m) => m.role === 'user' && m.content.includes('fix the null check and resubmit'));
+    expect(hints.length).toBe(1);
+    expect(hints[0].internal).toBe(true);
+  });
+
   // ═══ LLM error handling ═══
 
   it('emits Error event when LLM stream throws', async () => {

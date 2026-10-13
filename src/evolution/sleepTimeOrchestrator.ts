@@ -344,9 +344,10 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
 
   try {
     // ── 会话反思（directSession 优先，然后按 updatedAt 新→旧排水）──
-    const candidates: Array<SleepTimeSessionRef & { turn?: SleepTimeTurnInput }> = [];
+    const candidates: Array<SleepTimeSessionRef & { turn?: SleepTimeTurnInput; direct?: boolean }> = [];
     if (deps.directSession) {
-      candidates.push({ id: deps.directSession.id ?? 'direct-session', updatedAt: startedAt, turn: deps.directSession });
+      // direct: true = 非档案来源，markProcessed 只记尾表不推共享水位。
+      candidates.push({ id: deps.directSession.id ?? 'direct-session', updatedAt: startedAt, turn: deps.directSession, direct: true });
     }
     if (deps.listPendingSessions) {
       let listed: SleepTimeSessionRef[] = [];
@@ -611,8 +612,20 @@ export async function runSleepTimeCycle(deps: SleepTimeDeps): Promise<CycleResul
   return result;
 }
 
-function markProcessed(cursor: OrchestratorCursor, session: SleepTimeSessionRef): void {
-  cursor.lastProcessedAt = Math.max(cursor.lastProcessedAt, session.updatedAt);
+/**
+ * 水位语义（审计批 5⑥）：lastProcessedAt 的含义是「档案里在此之前的会话
+ * 都已处理过」——这个断言只有档案会话（listPendingSessions 出来的）有资格
+ * 做。directSession 是宿主内存里直喂的当轮会话，updatedAt 是刚刚的 now：
+ * 拿它推共享水位，水位就跳到当下，GUI 档案里所有待反思会话（updatedAt <
+ * now）被 `<= 水位` 永久跳过且无任何日志——CLI 跑一轮就孤儿化整个档案。
+ * direct 只进尾表（幂等去重仍有效），不推水位。
+ */
+type MarkCandidate = SleepTimeSessionRef & { turn?: SleepTimeTurnInput; direct?: boolean };
+
+function markProcessed(cursor: OrchestratorCursor, session: MarkCandidate): void {
+  if (!session.direct) {
+    cursor.lastProcessedAt = Math.max(cursor.lastProcessedAt, session.updatedAt);
+  }
   cursor.processedSessionIds.push(session.id);
   if (cursor.processedSessionIds.length > CURSOR_SESSION_TAIL) {
     cursor.processedSessionIds = cursor.processedSessionIds.slice(-CURSOR_SESSION_TAIL);
