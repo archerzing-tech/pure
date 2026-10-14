@@ -4,9 +4,14 @@
 // 过滤把注册过的动态/MCP 工具全滤掉——执行路通而模型看不见）。
 
 import { describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import { ToolRegistry, Tags } from '../coding-agent/ToolRegistry';
 import { CliCapabilityToolAdapter, type CliCapabilityHost } from '../harness/cliCapabilityTools';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../shared/dynamicCapabilityTools';
+import { skillContentHash } from '../ui/skillHub';
+import { readSkillSidecar, skillsRootDir } from '../cliSkillStore';
 import type { ToolAdapter, ToolCall, ToolResult } from '../shared/types';
 
 function stubInner(): ToolAdapter & { calls: string[] } {
@@ -122,5 +127,127 @@ describe('CliCapabilityToolAdapter', () => {
     const result = await adapter.execute(toolCall('register_mcp_server', { name: 'rea', transport: 'stdio', command: ['npx'] }));
     expect(result.success).toBe(false);
     expect(result.error).toContain('npx not found');
+  });
+});
+
+// ── install_agent_skill 的版本戳闭环 ──
+// 同名即更新而非拒绝：sidecar（.pure-skill.json）里的内容 hash 决定「同版本
+// 不动」「覆盖并报旧→新」。fetch 打桩走 raw CDN 候选位，落盘指到临时目录。
+describe('install_agent_skill version stamping (CLI tool path)', () => {
+  const RAW_V1 = '---\nname: vision-ocr\ndescription: Extract text from images\n---\n\nDo OCR on images.\n';
+  const BODY = 'Do OCR on images.';
+
+  function withTempSkillsDir(): { base: string; restore: () => void } {
+    const base = mkdtempSync(join(os.tmpdir(), 'pure-cli-skill-install-'));
+    const prev = process.env.PURE_SKILLS_DIR;
+    process.env.PURE_SKILLS_DIR = base;
+    return { base, restore: () => { if (prev === undefined) delete process.env.PURE_SKILLS_DIR; else process.env.PURE_SKILLS_DIR = prev; rmSync(base, { recursive: true, force: true }); } };
+  }
+
+  function stubHubFetch(raw: string): { restore: () => void } {
+    return stubHubFetchRaw(() => raw);
+  }
+
+  function stubHubFetchRaw(servedRaw: () => string): { restore: () => void } {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const target = String(url);
+      if (target.includes('raw.githubusercontent.com')) {
+        return new Response(servedRaw(), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as unknown as typeof fetch;
+    return { restore: () => { globalThis.fetch = original; } };
+  }
+
+  function skillDir(): string {
+    return join(skillsRootDir(), 'vision-ocr');
+  }
+
+  it('installs fresh and stamps the sidecar with source/hash/installedAt', async () => {
+    const env = withTempSkillsDir();
+    const hub = stubHubFetch(RAW_V1);
+    try {
+      const adapter = new CliCapabilityToolAdapter(stubInner(), stubHost());
+      const result = await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      expect(result.success).toBe(true);
+      const text = String(result.result);
+      expect(text).toContain(`Installed skill vision-ocr from vercel-labs/agent-skills at ${skillDir()}`);
+      expect(text).toContain('<installed_skill name="vision-ocr">');
+      // SKILL.md 落盘（存原始 frontmatter），sidecar 与 Rust write_app_skill 同形。
+      expect(readFileSync(join(skillDir(), 'SKILL.md'), 'utf8')).toBe(RAW_V1);
+      const sidecar = readSkillSidecar(skillDir());
+      expect(sidecar).toEqual({ source: 'vercel-labs/agent-skills', hash: skillContentHash(BODY), installedAt: expect.any(String) });
+      expect(sidecar!.installedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      hub.restore();
+      env.restore();
+    }
+  });
+
+  it('same-content reinstall is a no-op that says so', async () => {
+    const env = withTempSkillsDir();
+    const hub = stubHubFetch(RAW_V1);
+    try {
+      const adapter = new CliCapabilityToolAdapter(stubInner(), stubHost());
+      await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      // 手工破坏 SKILL.md：真重写会把它治好，no-op 必须原样保留。
+      const skillFile = join(skillDir(), 'SKILL.md');
+      writeFileSync(skillFile, 'hand-edited, a no-op must not heal this');
+      const before = readSkillSidecar(skillDir());
+
+      const result = await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      expect(result.success).toBe(true);
+      const text = String(result.result);
+      expect(text).toContain(`Skill vision-ocr is already at this version (hash ${skillContentHash(BODY)}`);
+      expect(text).toContain('nothing was changed');
+      expect(text).toContain('<installed_skill name="vision-ocr">'); // 本轮仍拿得到正文
+      expect(readFileSync(skillFile, 'utf8')).toBe('hand-edited, a no-op must not heal this');
+      expect(readSkillSidecar(skillDir())).toEqual(before);
+    } finally {
+      hub.restore();
+      env.restore();
+    }
+  });
+
+  it('changed content overwrites and reports old → new hash', async () => {
+    const env = withTempSkillsDir();
+    const RAW_V2 = RAW_V1.replace('Do OCR on images.', 'Do OCR on images, v2.');
+    let servedRaw = RAW_V1;
+    const hub = stubHubFetchRaw(() => servedRaw);
+    try {
+      const adapter = new CliCapabilityToolAdapter(stubInner(), stubHost());
+      await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      const oldHash = skillContentHash(BODY);
+      servedRaw = RAW_V2;
+
+      const result = await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      expect(result.success).toBe(true);
+      const text = String(result.result);
+      expect(text).toContain(`Updated skill vision-ocr from vercel-labs/agent-skills at ${skillDir()} (skill hash ${oldHash} → ${skillContentHash('Do OCR on images, v2.')})`);
+      expect(readSkillSidecar(skillDir())!.hash).toBe(skillContentHash('Do OCR on images, v2.'));
+      expect(readFileSync(join(skillDir(), 'SKILL.md'), 'utf8')).toBe(RAW_V2);
+    } finally {
+      hub.restore();
+      env.restore();
+    }
+  });
+
+  it('leaves the skill loaders untouched: the sidecar is a plain file next to SKILL.md', async () => {
+    const env = withTempSkillsDir();
+    const hub = stubHubFetch(RAW_V1);
+    try {
+      const adapter = new CliCapabilityToolAdapter(stubInner(), stubHost());
+      await adapter.execute(toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }));
+      // 装载器（cliRepl/chat/list_app_skills）只认 <dir>/SKILL.md；sidecar 是
+      // 技能目录里的一个普通文件，不会成为扫描条目，也不影响 SKILL.md 解析。
+      expect(existsSync(join(skillDir(), '.pure-skill.json'))).toBe(true);
+      const sidecarStat = (await import('node:fs')).statSync(join(skillDir(), '.pure-skill.json'));
+      expect(sidecarStat.isFile()).toBe(true);
+      expect(readFileSync(join(skillDir(), 'SKILL.md'), 'utf8')).toContain('name: vision-ocr');
+    } finally {
+      hub.restore();
+      env.restore();
+    }
   });
 });

@@ -19,6 +19,7 @@
 // agent behaves per the skill's instructions.
 
 import { isTauriRuntime } from '../shared/tauri';
+import { sha256Hex } from '../shared/sha256';
 
 /** Proxy-aware text fetch for hub resources. In Tauri runtime, routes through
  *  the lean Rust `fetch_url_text` command (app proxy + netRoute classification,
@@ -65,6 +66,11 @@ export interface HubSkill {
   body: string;
   /** Whether the skill is currently enabled. */
   enabled: boolean;
+  /** skillContentHash of `body` at install time — the config-side twin of the
+   *  on-disk .pure-skill.json sidecar. Lets a reinstall tell "same version"
+   *  from "content changed" instead of flat-out refusing same-name installs.
+   *  Absent on entries installed before version stamping existed. */
+  hash?: string;
 }
 
 export interface HubSkillSummary {
@@ -343,6 +349,17 @@ export function splitSkillMarkdown(md: string): { description?: string; body: st
  * and path components like `.` / `..`). */
 export function sanitizeSkillName(name: string): string {
   return name.replace(/[^A-Za-z0-9_.-]/g, '_');
+}
+
+/** Content fingerprint for installed skills: sha256 of the trimmed instruction
+ *  body, shortened to 12 hex chars. This — not the SKILL.md bytes — is the
+ *  version stamp all three install paths (CLI tool, GUI tool, Settings Hub)
+ *  compare on: the CLI stores the raw file with its original frontmatter while
+ *  the Rust write_app_skill rebuilds the frontmatter, so the on-disk bytes
+ *  legitimately differ for the same skill, but the body is the same thing
+ *  every path hashes and injects into the prompt. */
+export function skillContentHash(body: string): string {
+  return sha256Hex(body.trim()).slice(0, 12);
 }
 
 /** Build the HubSkill record persisted into PureConfig.hubSkills. */

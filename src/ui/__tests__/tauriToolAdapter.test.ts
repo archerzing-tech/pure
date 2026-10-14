@@ -1152,3 +1152,75 @@ describe('runRouted 打通预算（75%）', () => {
     expect(src).toContain('[pair.proxyUrl, pair.fallbackProxyUrl, pair.proxyUrl]');
   });
 });
+
+// ── install_agent_skill 的版本戳闭环（GUI 工具路）──
+// write_app_skill 比对 sidecar hash 后回 {path, hash, previousHash, updated}，
+// 适配器据此说「全新安装 / 已更新（旧→新）/ 已是同版本」。旧后端回字符串
+// path，按全新安装降级表述。
+describe('install_agent_skill version stamping (GUI tool path)', () => {
+  const RAW = '---\nname: vision-ocr\ndescription: Extract text from images\n---\n\nDo OCR on images.\n';
+
+  function stubHubFetch(): () => void {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      if (String(url).includes('raw.githubusercontent.com')) return new Response(RAW, { status: 200 });
+      return new Response('not found', { status: 404 });
+    }) as unknown as typeof fetch;
+    return () => { globalThis.fetch = original; };
+  }
+
+  it('updated 回包 → 报「Updated（旧 hash → 新 hash）」并把 source 传给 Rust', async () => {
+    const restoreFetch = stubHubFetch();
+    try {
+      const seen: Record<string, unknown> = {};
+      const invoke = async (command: string, args?: Record<string, unknown>) => {
+        expect(command).toBe('write_app_skill');
+        Object.assign(seen, args ?? {});
+        return { path: '/home/u/.pure/skills/vision-ocr', hash: 'bbbb22223333', previousHash: 'aaaa00001111', updated: true };
+      };
+      const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
+        toolCall('install_agent_skill', { source: 'https://github.com/vercel-labs/agent-skills', name: 'vision-ocr' }),
+      );
+      expect(result.success).toBe(true);
+      const text = String(result.result);
+      expect(text).toContain('Updated skill vision-ocr from https://github.com/vercel-labs/agent-skills at /home/u/.pure/skills/vision-ocr (skill hash aaaa00001111 → bbbb22223333)');
+      expect(text).toContain('<installed_skill name="vision-ocr">');
+      // Rust 侧拿到规范化 owner/repo 与去 frontmatter 正文，自算 hash。
+      expect(seen.source).toBe('vercel-labs/agent-skills');
+      expect(seen.body).toBe('Do OCR on images.');
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  it('updated:false → 报「已是同版本，未改动」，不误报更新', async () => {
+    const restoreFetch = stubHubFetch();
+    try {
+      const invoke = async () => ({ path: '/home/u/.pure/skills/vision-ocr', hash: 'ba7816bf8f01', previousHash: 'ba7816bf8f01', updated: false });
+      const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
+        toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }),
+      );
+      expect(result.success).toBe(true);
+      const text = String(result.result);
+      expect(text).toContain('Skill vision-ocr is already at this version (hash ba7816bf8f01, from vercel-labs/agent-skills)');
+      expect(text).toContain('nothing was changed');
+      expect(text).not.toContain('→');
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  it('旧后端回字符串 path → 按全新安装表述，不报错', async () => {
+    const restoreFetch = stubHubFetch();
+    try {
+      const invoke = async () => '/home/u/.pure/skills/vision-ocr';
+      const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
+        toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }),
+      );
+      expect(result.success).toBe(true);
+      expect(String(result.result)).toContain('Installed skill vision-ocr from vercel-labs/agent-skills at /home/u/.pure/skills/vision-ocr');
+    } finally {
+      restoreFetch();
+    }
+  });
+});

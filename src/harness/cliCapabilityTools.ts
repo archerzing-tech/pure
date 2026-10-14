@@ -15,8 +15,8 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool } from '../shared
 import type { DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload } from '../shared/mcpRegistry';
-import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName, normalizeHubRepo } from '../ui/skillHub';
-import { skillsRootDir } from '../cliSkillStore';
+import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName, normalizeHubRepo, skillContentHash } from '../ui/skillHub';
+import { skillsRootDir, readSkillSidecar, writeSkillSidecar } from '../cliSkillStore';
 
 /** CLI 宿主注入口：MCP 连接 + 持久化在 cliHarness 闭包里实现（那里才有
  *  MCPClient、registry 与 ~/.pure/config.json 的装配语境），适配器只编排。 */
@@ -115,13 +115,27 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
     // PURE_SKILLS_DIR 可覆盖）：cliRepl 的 loadAppSkills 读同一目录，本轮
     // 结束后即可用；写读同源由 cliSkillStore 单点保证。
     const dir = join(skillsRootDir(), sanitizeSkillName(nameArg));
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'SKILL.md'), raw, 'utf8');
+    // 同名即更新而非拒绝（与 GUI 工具路、Settings Hub 三处同语义）：
+    // 比对 sidecar 里的内容 hash——相同就原样保留并说明，不同（或没有
+    // 记录）就覆盖安装，结果里写明旧 hash → 新 hash。
+    const hash = skillContentHash(body);
+    const previous = readSkillSidecar(dir);
+    let headline: string;
+    if (previous && previous.hash === hash) {
+      headline = `Skill ${nameArg} is already at this version (hash ${hash}, from ${previous.source ?? repo}) at ${dir} — nothing was changed.`;
+    } else {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'SKILL.md'), raw, 'utf8');
+      writeSkillSidecar(dir, { source: repo, hash, installedAt: new Date().toISOString() });
+      headline = previous
+        ? `Updated skill ${nameArg} from ${repo} at ${dir} (skill hash ${previous.hash} → ${hash}).`
+        : `Installed skill ${nameArg} from ${repo} at ${dir}.`;
+    }
     const promptBody = body.length > 30_000 ? `${body.slice(0, 30_000)}\n[skill body truncated; continue using the installed skill on the next turn]` : body;
     return {
       id: toolCall.id,
       toolName: 'install_agent_skill',
-      result: `Installed skill ${nameArg} from ${repo} at ${dir}. Apply these instructions to the current task, then verify the result:\n\n<installed_skill name="${sanitizeSkillName(nameArg)}">\n${promptBody}\n</installed_skill>`,
+      result: `${headline} Apply these instructions to the current task, then verify the result:\n\n<installed_skill name="${sanitizeSkillName(nameArg)}">\n${promptBody}\n</installed_skill>`,
       success: true,
       duration: Date.now() - start,
     };

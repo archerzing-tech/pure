@@ -7916,11 +7916,155 @@ fn app_skills_dirs(workspace: String) -> serde_json::Value {
     })
 }
 
+// ── Skill install version stamp ──
+// 三个安装入口（CLI 工具、GUI 工具、Settings Hub）的同一语义：同名即更新而
+// 非拒绝。落盘的两路在技能目录里写一份 .pure-skill.json sidecar（Settings
+// Hub 存配置，hash 记在 HubSkill 记录上），重装时比对内容 hash——相同就不动
+// 并如实报告，不同就覆盖并回传旧 hash → 新 hash。hash 口径与 TS 侧
+// skillContentHash 一致：对去掉 frontmatter 的正文 trim 后取 sha256 前 12 位
+// 十六进制（CLI 存原始文件、Rust 重建 frontmatter，磁盘字节本就不同，正文才
+// 是所有路径共同哈希、共同注入提示词的东西）。
+
+/// Sidecar file name — shared with TS cliSkillStore.SKILL_SIDECAR_NAME.
+const SKILL_SIDECAR_FILE: &str = ".pure-skill.json";
+
+/// What write_app_skill reports back: `updated` is true whenever SKILL.md was
+/// (re)written; `previousHash` is None when there was no readable sidecar
+/// record (fresh install, or an install that predates version stamping).
+#[derive(serde::Serialize)]
+struct AppSkillWriteOutcome {
+    path: String,
+    hash: String,
+    #[serde(rename = "previousHash")]
+    previous_hash: Option<String>,
+    updated: bool,
+}
+
+/// Textbook FIPS 180-4 SHA-256, lowercase hex. Deliberately dependency-free —
+/// same reasoning as src/shared/sha256.ts on the TS side, and both sides must
+/// agree byte-for-byte since a skill installed via the CLI is later
+/// reinstalled via write_app_skill and the hashes have to match.
+fn sha256_hex(bytes: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    let mut msg = bytes.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut w = [0u32; 64];
+    for block in msg.chunks_exact(64) {
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            *word = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj).wrapping_add(temp1);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp2;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    h.iter().map(|x| format!("{x:08x}")).collect()
+}
+
+/// skillContentHash on the TS side — sha256 of the trimmed body, shortened to
+/// 12 hex chars. Keep the two in lockstep.
+fn skill_content_hash(body: &str) -> String {
+    sha256_hex(body.trim().as_bytes())[..12].to_string()
+}
+
+/// UTC RFC 3339 timestamp (`1970-01-01T00:00:00Z` shape) from unix seconds —
+/// no chrono dependency, civil-from-days per Hinnant's algorithm.
+fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe as i64 + era * 400 + if month <= 2 { 1 } else { 0 };
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Read a skill directory's install sidecar hash — None when absent or
+/// unreadable, which just means "no known previous version".
+fn read_skill_sidecar_hash(dir: &std::path::Path) -> Option<String> {
+    let text = fs::read_to_string(dir.join(SKILL_SIDECAR_FILE)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("hash")?.as_str().map(str::to_string)
+}
+
 /// Persist a downloaded skill into the application-owned skills directory.
 /// The name is deliberately limited to one safe directory component so a
 /// community catalog cannot turn an install into an arbitrary file write.
+/// Same-name installs are updates, not rejections: the previous sidecar hash
+/// decides between "identical content, touch nothing" and "overwrite and
+/// report old → new". The hash covers the instruction body only, so a
+/// description-only difference is not treated as a new version.
 #[tauri::command]
-fn write_app_skill(name: String, description: String, body: String) -> Result<String, String> {
+fn write_app_skill(name: String, description: String, body: String, source: Option<String>) -> Result<AppSkillWriteOutcome, String> {
     let name = name.trim();
     if name.is_empty()
         || name.len() > 120
@@ -7933,12 +8077,38 @@ fn write_app_skill(name: String, description: String, body: String) -> Result<St
     if body.trim().is_empty() || body.len() > 2 * 1024 * 1024 {
         return Err("skill body is empty or exceeds the 2MB limit".to_string());
     }
+    let hash = skill_content_hash(&body);
     let dir = app_skills_dir().join(name);
+    let previous_hash = read_skill_sidecar_hash(&dir);
+    if previous_hash.as_deref() == Some(hash.as_str()) {
+        // Same content as the recorded install — rewrite nothing (the sidecar's
+        // installedAt staying put is the observable proof the write was
+        // skipped), the caller relays "already at this version".
+        return Ok(AppSkillWriteOutcome {
+            path: dir.to_string_lossy().into_owned(),
+            hash,
+            previous_hash: previous_hash.clone(),
+            updated: false,
+        });
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("create skill directory: {}", e))?;
     let description = description.trim().replace('\r', " ").replace('\n', " ");
     let markdown = format!("---\nname: {}\ndescription: {}\n---\n\n{}\n", name, description, body.trim());
     fs::write(dir.join("SKILL.md"), markdown).map_err(|e| format!("write SKILL.md: {}", e))?;
-    Ok(dir.to_string_lossy().into_owned())
+    let sidecar = serde_json::json!({
+        "source": source.filter(|s| !s.trim().is_empty()),
+        "hash": hash,
+        "installedAt": rfc3339_utc(unix_secs_now()),
+    });
+    let sidecar_text = serde_json::to_string_pretty(&sidecar).unwrap_or_default();
+    fs::write(dir.join(SKILL_SIDECAR_FILE), format!("{sidecar_text}\n"))
+        .map_err(|e| format!("write {} : {}", SKILL_SIDECAR_FILE, e))?;
+    Ok(AppSkillWriteOutcome {
+        path: dir.to_string_lossy().into_owned(),
+        hash,
+        previous_hash,
+        updated: true,
+    })
 }
 
 /// Remove a skill directory from the app-owned skills directory. Same
@@ -8189,12 +8359,12 @@ mod app_skills_tests {
         std::env::set_var("PURE_SKILLS_DIR", &base);
 
         // `..` and `.` would escape the skills directory via PathBuf::join.
-        assert!(write_app_skill("..".to_string(), "d".to_string(), "body".to_string()).is_err());
-        assert!(write_app_skill(".".to_string(), "d".to_string(), "body".to_string()).is_err());
+        assert!(write_app_skill("..".to_string(), "d".to_string(), "body".to_string(), None).is_err());
+        assert!(write_app_skill(".".to_string(), "d".to_string(), "body".to_string(), None).is_err());
         // Slashes are rejected (single safe directory component only).
-        assert!(write_app_skill("a/b".to_string(), "d".to_string(), "body".to_string()).is_err());
+        assert!(write_app_skill("a/b".to_string(), "d".to_string(), "body".to_string(), None).is_err());
         // A normal name still installs.
-        assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string()).is_ok());
+        assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string(), None).is_ok());
         let installed = app_skills_dir().join("vision-ocr").join("SKILL.md");
         assert!(installed.exists());
 
@@ -8219,7 +8389,7 @@ mod app_skills_tests {
         // A missing but well-formed name is an honest error, not a panic.
         assert!(delete_app_skill("auto-nope".to_string()).is_err());
         // Install → delete round trip removes the whole directory.
-        assert!(write_app_skill("auto-demo".to_string(), "d".to_string(), "body".to_string()).is_ok());
+        assert!(write_app_skill("auto-demo".to_string(), "d".to_string(), "body".to_string(), None).is_ok());
         assert!(app_skills_dir().join("auto-demo").join("SKILL.md").exists());
         let removed = delete_app_skill("auto-demo".to_string()).expect("deletes");
         assert!(removed.ends_with("auto-demo"));
@@ -8335,6 +8505,191 @@ mod app_skills_tests {
             dirs["project"].as_str().unwrap(),
             ws.join(".agents").join("skills").to_string_lossy().as_ref()
         );
+    }
+
+    #[test]
+    fn sha256_matches_known_vectors() {
+        // NIST FIPS 180-4 vectors; must agree byte-for-byte with the TS
+        // sha256Hex (src/shared/sha256.ts) — a CLI-installed skill is later
+        // reinstalled through write_app_skill and the two hashes meet.
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // 448-bit boundary (padding crosses a block).
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // The short form both install paths actually store.
+        assert_eq!(skill_content_hash("abc"), "ba7816bf8f01");
+        // Trim-insensitive, matching skillContentHash's body.trim().
+        assert_eq!(skill_content_hash("  abc\n"), "ba7816bf8f01");
+    }
+
+    #[test]
+    fn rfc3339_utc_formats_known_timestamps() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+        // Leap-year day (2024-02-29).
+        assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn write_app_skill_stamps_sidecar_and_reports_fresh_install() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-stamp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        let outcome = write_app_skill(
+            "vision-ocr".to_string(),
+            "Extract text".to_string(),
+            "Do OCR on images.".to_string(),
+            Some("vercel-labs/agent-skills".to_string()),
+        )
+        .expect("installs");
+        assert!(outcome.updated);
+        assert_eq!(outcome.previous_hash, None);
+        assert_eq!(outcome.hash.len(), 12);
+        assert!(outcome.hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let sidecar: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(app_skills_dir().join("vision-ocr").join(SKILL_SIDECAR_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["hash"], outcome.hash.as_str());
+        assert_eq!(sidecar["source"], "vercel-labs/agent-skills");
+        // RFC 3339 UTC, e.g. 2026-10-14T08:30:00Z.
+        let stamp = sidecar["installedAt"].as_str().unwrap();
+        assert!(stamp.ends_with('Z') && stamp.len() == 20, "unexpected installedAt: {stamp}");
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_app_skill_same_content_is_a_noop() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-noop-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        let first = write_app_skill(
+            "same-skill".to_string(),
+            "d".to_string(),
+            "stable body".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("first install");
+        // Hand-mangle SKILL.md under the recorded hash: a real rewrite would
+        // heal it, the no-op path must leave it exactly as-is.
+        let skill_file = app_skills_dir().join("same-skill").join("SKILL.md");
+        std::fs::write(&skill_file, "hand-edited, should survive a no-op reinstall").unwrap();
+
+        let second = write_app_skill(
+            "same-skill".to_string(),
+            "d".to_string(),
+            "stable body".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("second install");
+        assert!(!second.updated, "identical content must not rewrite");
+        assert_eq!(second.previous_hash.as_deref(), Some(first.hash.as_str()));
+        assert_eq!(std::fs::read_to_string(&skill_file).unwrap(), "hand-edited, should survive a no-op reinstall");
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_app_skill_changed_content_reports_previous_hash() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-update-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        let first = write_app_skill(
+            "growing-skill".to_string(),
+            "d".to_string(),
+            "version one body".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("first install");
+        let second = write_app_skill(
+            "growing-skill".to_string(),
+            "d".to_string(),
+            "version two body".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("second install");
+        assert!(second.updated);
+        assert_eq!(second.previous_hash.as_deref(), Some(first.hash.as_str()));
+        assert_ne!(second.hash, first.hash);
+        // A record-less install (pre-sidecar skill on disk) also counts as an
+        // update and reports the new hash with no previous one.
+        std::fs::remove_file(app_skills_dir().join("growing-skill").join(SKILL_SIDECAR_FILE)).unwrap();
+        let third = write_app_skill(
+            "growing-skill".to_string(),
+            "d".to_string(),
+            "version two body".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("third install");
+        assert!(third.updated);
+        assert_eq!(third.previous_hash, None);
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_app_skills_ignores_the_install_sidecar() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("pure-skills-sidecar-load-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prev = std::env::var("PURE_SKILLS_DIR").ok();
+        std::env::set_var("PURE_SKILLS_DIR", &base);
+
+        write_app_skill(
+            "sidecar-skill".to_string(),
+            "Sidecar tolerance".to_string(),
+            "Body for the sidecar tolerance check.".to_string(),
+            Some("owner/repo".to_string()),
+        )
+        .expect("installs");
+        assert!(app_skills_dir().join("sidecar-skill").join(SKILL_SIDECAR_FILE).is_file());
+
+        // The loader must keep seeing exactly one valid skill: the sidecar is
+        // a plain file inside the skill directory and SKILL.md still parses.
+        let list = list_app_skills(String::new());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["name"], "sidecar-skill");
+        assert_eq!(list[0]["description"], "Sidecar tolerance");
+        assert!(list[0]["body"].as_str().unwrap().contains("sidecar tolerance check"));
+
+        match prev {
+            Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
+            None => std::env::remove_var("PURE_SKILLS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

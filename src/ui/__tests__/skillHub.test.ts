@@ -10,9 +10,11 @@ import {
   splitSkillMarkdown,
   makeHubSkill,
   sanitizeSkillName,
+  skillContentHash,
   SEARCH_HUB_REPOS,
   DEFAULT_HUB_REPO,
 } from '../skillHub';
+import { sha256Hex } from '../../shared/sha256';
 
 describe('normalizeHubRepo', () => {
   it('passes through owner/repo', () => {
@@ -157,6 +159,26 @@ describe('sanitizeSkillName', () => {
     expect(sanitizeSkillName('foo.bar/baz-1')).toBe('foo.bar_baz-1');
     expect(sanitizeSkillName('bad">x')).toBe('bad__x');
     expect(sanitizeSkillName('a b<c>')).toBe('a_b_c_');
+  });
+});
+
+describe('skillContentHash', () => {
+  it('is the 12-hex prefix of sha256 over the trimmed body', () => {
+    expect(skillContentHash('abc')).toBe(sha256Hex('abc').slice(0, 12));
+    // NIST vector, shared with the Rust skill_content_hash — a skill installed
+    // via the CLI is reinstalled through write_app_skill and the two must agree.
+    expect(skillContentHash('abc')).toBe('ba7816bf8f01');
+  });
+
+  it('ignores surrounding whitespace so every install path hashes alike', () => {
+    expect(skillContentHash('  body\n')).toBe(skillContentHash('body'));
+  });
+
+  it('is deterministic, 12 lowercase hex chars, and content-sensitive', () => {
+    const h = skillContentHash('# Guidelines\nDo the thing.');
+    expect(h).toMatch(/^[0-9a-f]{12}$/);
+    expect(skillContentHash('# Guidelines\nDo the thing.')).toBe(h);
+    expect(skillContentHash('# Guidelines\nDo the other thing.')).not.toBe(h);
   });
 });
 

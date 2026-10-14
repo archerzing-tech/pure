@@ -57,6 +57,17 @@ export function getSysInfoToolDefs(): ToolDefinition[] {
 
 export type InvokeFunction = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
+/** What Rust write_app_skill reports back: the sidecar hash comparison result.
+ *  `updated` is true whenever SKILL.md was (re)written; `previousHash` is null
+ *  when there was no readable .pure-skill.json record (fresh install, or an
+ *  install that predates version stamping). */
+export interface AppSkillWriteOutcome {
+  path: string;
+  hash: string;
+  previousHash: string | null;
+  updated: boolean;
+}
+
 // Single-quote escaping for the two shells the Rust execute_command backend
 // uses (`sh -c` on Unix, PowerShell on Windows): inside single quotes every
 // byte is literal except the quote itself — written as '\'' for sh, '' for
@@ -961,16 +972,28 @@ export class TauriToolAdapter implements ToolAdapter {
           const split = splitSkillMarkdown(raw);
           const body = split.body.trim();
           if (!body) return { id: toolCall.id, toolName: name, error: 'Downloaded SKILL.md has no instruction body', success: false, duration: Date.now() - start };
-          const path = await this.call('write_app_skill', {
+          // write_app_skill 比对已装 sidecar 的内容 hash：相同跳过写入并回
+          // updated:false，不同（或没有记录）覆盖安装。旧后端回字符串 path，
+          // 按全新安装表述——同语义降级，不报错。
+          const outcome = await this.call('write_app_skill', {
             name: sanitizeSkillName(nameArg),
             description: split.description ?? '',
             body,
-          }) as string;
+            source: repo,
+          }) as AppSkillWriteOutcome | string;
+          const path = typeof outcome === 'string' ? outcome : outcome.path;
+          const headline = typeof outcome === 'string'
+            ? `Installed skill ${nameArg} from ${source} at ${path}`
+            : outcome.previousHash && outcome.updated
+              ? `Updated skill ${nameArg} from ${source} at ${path} (skill hash ${outcome.previousHash} → ${outcome.hash})`
+              : outcome.previousHash
+                ? `Skill ${nameArg} is already at this version (hash ${outcome.hash}, from ${source}) at ${path} — nothing was changed`
+                : `Installed skill ${nameArg} from ${source} at ${path}`;
           const promptBody = body.length > 30_000 ? `${body.slice(0, 30_000)}\n[skill body truncated; continue using the installed skill on the next turn]` : body;
           return {
             id: toolCall.id,
             toolName: name,
-            result: `Installed skill ${nameArg} from ${source} at ${path}. Apply these instructions to the current task, then verify the result:\n\n<installed_skill name="${sanitizeSkillName(nameArg)}">\n${promptBody}\n</installed_skill>`,
+            result: `${headline}. Apply these instructions to the current task, then verify the result:\n\n<installed_skill name="${sanitizeSkillName(nameArg)}">\n${promptBody}\n</installed_skill>`,
             success: true,
             duration: Date.now() - start,
           };

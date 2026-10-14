@@ -133,6 +133,7 @@ import {
   fetchSkillBody,
   makeHubSkill,
   normalizeHubRepo,
+  skillContentHash,
   splitSkillMarkdown,
   type HubSkill,
 } from './skillHub';
@@ -557,7 +558,7 @@ export class SettingsPanel {
                     ${installed.has(s.name) ? `<span class="hub-badge hub-badge-installed" data-i18n="hub.installedBadge">已安装</span>` : ''}
                   </div>
                   <p class="skill-desc">${escapeHtml(s.description || '')}</p>
-                  <button class="setting-btn hub-install-btn" data-repo="${escapeHtml(repo)}" data-skill="${escapeHtml(s.name)}" ${installed.has(s.name) ? 'disabled' : ''} data-i18n="hub.install">安装</button>
+                  <button class="setting-btn hub-install-btn" data-repo="${escapeHtml(repo)}" data-skill="${escapeHtml(s.name)}" data-i18n="${installed.has(s.name) ? 'hub.update' : 'hub.install'}">${installed.has(s.name) ? '更新' : '安装'}</button>
                 </div>`).join('')}
             </div>
           </div>`).join('');
@@ -589,39 +590,61 @@ export class SettingsPanel {
           setHubStatus(t('hub.bodyFailed').replace('{s}', skill), true);
           return;
         }
+        const split = splitSkillMarkdown(raw);
+        const body = split.body || raw;
+        // 同名即更新而非拒绝（与 CLI/GUI 工具路同语义）：比对内容 hash——
+        // 相同就明说「已是同版本」，不同（或旧记录没有 hash）就覆盖更新，
+        // toast 里写明旧 hash → 新 hash。
+        const hash = skillContentHash(body);
         const cfg = loadConfig() ?? defaults();
         const skills = [...(cfg.hubSkills ?? [])];
-        if (skills.some(s => s.name === skill)) {
-          setHubStatus(t('hub.alreadyInstalled').replace('{s}', skill), true);
+        const idx = skills.findIndex(s => s.name === skill);
+        if (idx >= 0 && skills[idx].hash && skills[idx].hash === hash) {
+          setHubStatus(t('hub.upToDate').replace('{s}', skill));
+          btn.setAttribute('data-i18n', 'hub.update');
+          btn.textContent = t('hub.update');
           return;
         }
-        const split = splitSkillMarkdown(raw);
         const summary = { name: skill, description: split.description ?? '', hasDescription: !!split.description };
-        skills.push(makeHubSkill(repo, summary, split.body || raw));
+        const entry: HubSkill = { ...makeHubSkill(repo, summary, body), hash };
+        let updatedToast: string | null = null;
+        if (idx >= 0) {
+          const oldHash = skills[idx].hash || '—';
+          // 更新：保留用户自己的启停开关，只换内容与版本戳。
+          entry.enabled = skills[idx].enabled;
+          skills[idx] = entry;
+          updatedToast = t('hub.updatedToast').replace('{s}', skill).replace('{old}', oldHash).replace('{new}', hash);
+        } else {
+          skills.push(entry);
+        }
         cfg.hubSkills = skills;
         persistConfig(cfg);
         invalidateConfigCache();
         renderInstalled();
-        // Mark the card installed IN PLACE (badge + disabled) instead of
+        // Mark the card installed IN PLACE (badge + update button) instead of
         // re-fetching the whole index — no extra network round-trip, and the
-        // success toast below is not overwritten by a browse status.
+        // success toast below is not overwritten by a browse status. The
+        // button stays enabled: the same-name semantic is update, not reject.
         const card = hubGroupedEl?.querySelector(`.hub-skill-card[data-skill="${CSS.escape(skill)}"]`);
         const cardBtn = card?.querySelector<HTMLButtonElement>('.hub-install-btn');
-        if (card) {
+        if (card && idx < 0) {
           card.querySelector('.skill-card-header')?.insertAdjacentHTML('beforeend',
             `<span class="hub-badge hub-badge-installed" data-i18n="hub.installedBadge">已安装</span>`);
           applyTranslations();
         }
         if (cardBtn) {
-          cardBtn.disabled = true;
-          cardBtn.textContent = t('hub.installedBadge');
+          cardBtn.setAttribute('data-i18n', 'hub.update');
+          cardBtn.textContent = t('hub.update');
         }
-        setHubStatus(t('hub.installedToast').replace('{s}', skill));
+        setHubStatus(updatedToast ?? t('hub.installedToast').replace('{s}', skill));
       } catch (err) {
         console.error('[pure] skill hub install failed:', err);
         setHubStatus((err as Error)?.message || t('hub.failed'), true);
         btn.disabled = false;
-        btn.textContent = t('hub.install');
+        // 已装过的技能失败后回到「更新」，没装过才是「安装」。
+        const stillInstalled = (loadConfig()?.hubSkills ?? []).some(s => s.name === skill);
+        btn.setAttribute('data-i18n', stillInstalled ? 'hub.update' : 'hub.install');
+        btn.textContent = t(stillInstalled ? 'hub.update' : 'hub.install');
       }
     });
 
