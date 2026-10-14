@@ -1162,11 +1162,20 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
 
   function stubHubFetch(): () => void {
     const original = globalThis.fetch;
+    // Windows CI 三个用例齐挂且拿不到 result.error——把关键事实打进日志：
+    // fetch 阶梯用 AbortSignal.timeout 包住，若该全局在 bun-Windows 缺失，
+    // 每个候选都在 fetch 之前抛 TypeError 被吞，ladder 返回 null。
+    console.error('[diag] AbortSignal.timeout =', typeof AbortSignal !== 'undefined' ? typeof AbortSignal.timeout : 'AbortSignal missing');
     globalThis.fetch = (async (url: any) => {
+      console.error('[diag] stub fetch ←', String(url));
       if (String(url).includes('raw.githubusercontent.com')) return new Response(RAW, { status: 200 });
       return new Response('not found', { status: 404 });
     }) as unknown as typeof fetch;
     return () => { globalThis.fetch = original; };
+  }
+
+  function diagFail(result: { success: boolean; error?: string }): void {
+    if (!result.success) console.error('[diag] install_agent_skill failed:', result.error);
   }
 
   it('updated 回包 → 报「Updated（旧 hash → 新 hash）」并把 source 传给 Rust', async () => {
@@ -1181,6 +1190,7 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
       const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
         toolCall('install_agent_skill', { source: 'https://github.com/vercel-labs/agent-skills', name: 'vision-ocr' }),
       );
+      diagFail(result);
       expect(result.success).toBe(true);
       const text = String(result.result);
       expect(text).toContain('Updated skill vision-ocr from https://github.com/vercel-labs/agent-skills at /home/u/.pure/skills/vision-ocr (skill hash aaaa00001111 → bbbb22223333)');
@@ -1200,6 +1210,7 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
       const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
         toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }),
       );
+      diagFail(result);
       expect(result.success).toBe(true);
       const text = String(result.result);
       expect(text).toContain('Skill vision-ocr is already at this version (hash ba7816bf8f01, from vercel-labs/agent-skills)');
@@ -1217,6 +1228,7 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
       const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
         toolCall('install_agent_skill', { source: 'vercel-labs/agent-skills', name: 'vision-ocr' }),
       );
+      diagFail(result);
       expect(result.success).toBe(true);
       expect(String(result.result)).toContain('Installed skill vision-ocr from vercel-labs/agent-skills at /home/u/.pure/skills/vision-ocr');
     } finally {

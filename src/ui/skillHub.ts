@@ -21,6 +21,20 @@
 import { isTauriRuntime } from '../shared/tauri';
 import { sha256Hex } from '../shared/sha256';
 
+/** AbortSignal.timeout needs Safari 16+ (macOS 13) in the WebView and is also
+ *  the one suspect that explains the 2026-10-14 Windows CI failure of every
+ *  stub-fetch test through this module's ladder (all candidates would throw
+ *  before fetch is ever reached, get swallowed, and the ladder returns null).
+ *  Same fallback as llmProbe.ts / settings.ts: AbortController + setTimeout. */
+function abortSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl.signal;
+}
+
 /** Proxy-aware text fetch for hub resources. In Tauri runtime, routes through
  *  the lean Rust `fetch_url_text` command (app proxy + netRoute classification,
  *  NO rendering tiers) so raw.githubusercontent.com works behind restricted
@@ -44,7 +58,7 @@ async function hubFetchText(url: string, timeoutMs = 10000, proxyUrl = ''): Prom
     }
   }
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const resp = await fetch(url, { signal: abortSignal(timeoutMs) });
     if (!resp.ok) return null;
     return await resp.text();
   } catch {
@@ -172,7 +186,7 @@ async function fetchSkillsDirListing(repo: string, proxyUrl = ''): Promise<HubSk
     text = await hubFetchText(url, 10000, proxyUrl);
   } else {
     try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/vnd.github+json' } });
+      const resp = await fetch(url, { signal: abortSignal(10000), headers: { Accept: 'application/vnd.github+json' } });
       if (!resp.ok) return [];
       text = await resp.text();
     } catch {
@@ -203,7 +217,7 @@ export async function fetchHubIndex(repo: string, proxyUrl = ''): Promise<HubInd
     } else {
       let resp: Response;
       try {
-        resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+        resp = await fetch(url, { signal: abortSignal(10000) });
       } catch {
         continue;
       }
@@ -320,7 +334,7 @@ export async function fetchSkillBody(repo: string, skillName: string, proxyUrl =
   ];
   for (const url of candidates) {
     try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const resp = await fetch(url, { signal: abortSignal(10000) });
       if (resp.status === 404) continue;
       if (!resp.ok) continue;
       const text = await resp.text();
