@@ -29,7 +29,6 @@ const stubFetch = (
 
 const ok200 = () => new Response('ok', { status: 200 });
 const unauthorized = () => new Response('', { status: 401 });
-const notFound = () => new Response('', { status: 404 });
 const alwaysFail = () => { throw new Error('connect ETIMEDOUT'); };
 
 function makeHome(): string {
@@ -246,22 +245,36 @@ describe('switchPackageSource：默认档 = 会话级 + dry-run', () => {
     }
   });
 
-  it('auto 模式并发测速：只有拿到有效响应的候选参与选优', async () => {
+  it('auto 模式并发测速：测不通的候选不参与选优（抛错与 CONNECT 隧道两种坏法都排除）', async () => {
     const home = makeHome();
     try {
       const r = await switchPackageSource(
         { ecosystem: 'npm', source: 'auto' },
         {
           homeDir: home,
-          // 腾讯源根路径实测 404（根不是资源），华为源可用 —— 只有拿到有效
-          // 响应的候选才该胜出，这正是与 chsrc「不看状态码」的关键差别。
-          fetchImpl: stubFetch((url) => (url.includes('npmmirror') ? ok200() : url.includes('huaweicloud') ? ok200() : notFound())),
+          // 按 mirrorSources.isEffectiveResponse 的契约，「测不通」只有两种：
+          // 请求抛错（超时/拒连）与 200 Connection established（代理 CONNECT
+          // 隧道应答，根本不是目标站点的响应）。404/401/403 反而是有效响应
+          // ——腾讯源根路径实测 404（根不是资源），把它当失败会把最该换源的
+          // 场景判成最不该换源。旧版这里用 404 当「无效」，可契约下 404 照样
+          // 入围，谁胜出全看测速时序的巧合，在 Windows CI 上翻过车（腾讯源
+          // 按延迟赢走）。改成两种真坏法后，唯一合格的候选必须胜出，结果
+          // 与时序无关。
+          fetchImpl: stubFetch((url) =>
+            url.includes('npmmirror')
+              ? ok200()
+              : url.includes('huaweicloud')
+                ? new Response('Connection established', { status: 200 })
+                : alwaysFail(),
+          ),
         },
       );
       expect(r.ok).toBe(true);
-      expect(['https://registry.npmmirror.com', 'https://mirrors.huaweicloud.com/repository/npm/']).toContain(String(r.source?.url));
-      expect(r.benchmark?.length).toBeGreaterThan(0);
-      expect(r.benchmark?.every((b) => b.ok)).toBe(true);
+      expect(r.source?.url).toBe('https://registry.npmmirror.com');
+      const bench = r.benchmark ?? [];
+      expect(bench.find((b) => b.url.includes('npmmirror'))?.ok).toBe(true);
+      expect(bench.find((b) => b.url.includes('huaweicloud'))?.ok).toBe(false);
+      expect(bench.find((b) => b.url.includes('tencent'))?.ok).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
