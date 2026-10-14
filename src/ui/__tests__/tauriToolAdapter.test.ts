@@ -1162,12 +1162,7 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
 
   function stubHubFetch(): () => void {
     const original = globalThis.fetch;
-    // Windows CI 三个用例齐挂且拿不到 result.error——把关键事实打进日志：
-    // fetch 阶梯用 AbortSignal.timeout 包住，若该全局在 bun-Windows 缺失，
-    // 每个候选都在 fetch 之前抛 TypeError 被吞，ladder 返回 null。
-    console.error('[diag] AbortSignal.timeout =', typeof AbortSignal !== 'undefined' ? typeof AbortSignal.timeout : 'AbortSignal missing');
     globalThis.fetch = (async (url: any) => {
-      console.error('[diag] stub fetch ←', String(url));
       if (String(url).includes('raw.githubusercontent.com')) return new Response(RAW, { status: 200 });
       return new Response('not found', { status: 404 });
     }) as unknown as typeof fetch;

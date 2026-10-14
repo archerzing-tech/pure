@@ -210,8 +210,8 @@ describe('createTools CLI 装配（真跑）', () => {
       const created = await createTools(ws, true, 'session_ext_run');
       const registry = created.tools as ToolRegistry;
       const result = await registry.execute(toolCall('hello_tool', { name: 'cli world' }));
-      // 真跑失败时把执行器的原始报错打出来（Windows CI 上 powershell 的
-      // 退出码/编码问题只在日志里看得见，expect 的 true/false 不够定位）。
+      // 真跑失败时把执行器的原始报错打出来（Windows CI 的 ENOENT 现场只在
+      // 日志里看得见，expect 的 true/false 不够定位）。
       if (!result.success) console.error('[diag] execute_command failed:', result.error, JSON.stringify(result.result));
       expect(result.success).toBe(true);
       // 带空格的参数值不是安全裸 token，翻译层加单引号（审计批 5② 契约），

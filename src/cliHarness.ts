@@ -31,7 +31,7 @@ import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
 import { readdirSync, readFileSync } from 'node:fs';
 import { readFile as readFileContent } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler, createCliHookGate } from './cli_permission';
 import type { PermissionMode, PermissionRequestHandler } from './coding-agent/types';
@@ -330,7 +330,11 @@ async function createTools(
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
-  const resolved = workspace.startsWith('/') ? workspace : `${process.cwd()}/${workspace}`;
+  // 绝对性判断必须平台感知：Windows 的 'C:\…' 不以 '/' 开头，老的
+  // startsWith('/') 会把绝对路径当相对名拼出「cwd + C:\…」的畸形路径——
+  // spawn 的 cwd 因此不存在，bun 的报错却把 ENOENT 嫁接给可执行文件
+  // （oven-sh/bun#24012），2026-10-14 四轮 Windows CI 红全由它而来。
+  const resolved = isAbsolute(workspace) ? workspace : `${process.cwd()}/${workspace}`;
   // Pass the user-configured location (PURE_LOCATION / PURE_CITY env var) so
   // sys_info() reports it as the location baseline, mirroring the GUI.
   const adapter = new NodeToolAdapter({
@@ -500,7 +504,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   const evolutionEnabled = overrides.evolutionEnabled ?? (process.env.PURE_EVOLUTION_DISABLED !== '1');
   // Project-scoped memory: resolved workspace (same as createTools uses).
   const projectPath = args.workspace
-    ? (args.workspace.startsWith('/') ? args.workspace : `${process.cwd()}/${args.workspace}`)
+    ? (isAbsolute(args.workspace) ? args.workspace : `${process.cwd()}/${args.workspace}`)
     : process.cwd();
   // 9.2 — per-phase model routing (experimental): each phase naming a
   // different model rebuilds through createAdapter ({ ...args, model }), so
