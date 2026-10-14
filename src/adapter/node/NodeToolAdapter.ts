@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative a
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
+import type { Readable } from 'node:stream';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
@@ -61,6 +62,19 @@ function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
  * escaping) a plain -Command argument is subject to. Exported for tests. */
 export function encodePowerShellCommand(command: string): string {
   return Buffer.from(`${command}; if ($?) { exit $LASTEXITCODE } else { exit 1 }`, 'utf16le').toString('base64');
+}
+
+/** Drain a child-process stream to a UTF-8 string (node:child_process shape,
+ * where stdout/stderr are node Readables rather than bun's Response-compatible
+ * streams). */
+function collectStreamText(stream: Readable | null): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    if (!stream) return resolvePromise('');
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolvePromise(Buffer.concat(chunks).toString('utf8')));
+  });
 }
 
 const DEFAULT_MAX_LIST_RESULTS = 2000;
@@ -755,20 +769,32 @@ export class NodeToolAdapter implements ToolAdapter {
       // PATH (IDE integrated terminal, GUI-spawned launcher) — mirrors Rust
       // execute_command. Windows inherits the full system PATH.
       const spawnEnv = IS_WINDOWS ? undefined : { ...process.env, PATH: extendedProbePath() };
-      const proc = Bun.spawn(shellArgs, {
+      // node:child_process 而不是 Bun.spawn：后者在 Windows 不做 PATH 搜索、
+      // 不补 .exe，连系统目录绝对路径都报 ENOENT（2026-10-14 CI 两轮实锤，
+      // bun 的 spawn 层自身问题）；node 这条路在本仓库有 Windows CI 在跑的
+      // 先例（tauriToolAdapter.test.ts 的 sh 展开探针）。语义对齐旧形态：
+      // stdin 不喂（PowerShell -NonInteractive / sh -c 都不读），stdout/
+      // stderr 全量收管，abort.signal 保留超时取消。
+      const proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
         cwd: this.workspace,
-        stdout: 'pipe',
-        stderr: 'pipe',
+        env: spawnEnv ?? undefined,
         signal: abort.signal,
-        env: spawnEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
+      const [stdoutRaw, stderrRaw, exitCode] = await Promise.all([
+        collectStreamText(proc.stdout),
+        collectStreamText(proc.stderr),
+        new Promise<number>((resolve, reject) => {
+          proc.on('error', reject);
+          proc.on('exit', (code) => resolve(code ?? -1));
+        }),
+      ]);
 
       // Strip ANSI color codes from captured output so logs / colored command
       // output render as plain text instead of mojibake.
-      const stdout = stripAnsi((await new Response(proc.stdout).text()).trim());
-      const stderr = stripAnsi(stripPowerShellStartupProgress((await new Response(proc.stderr).text()).trim()));
-      await proc.exited;
-      const exitCode = proc.exitCode ?? -1;
+      const stdout = stripAnsi(stdoutRaw.trim());
+      const stderr = stripAnsi(stripPowerShellStartupProgress(stderrRaw.trim()));
 
       const result = { stdout, stderr, exitCode };
       // Exit code is the single source of truth for success: a command that
@@ -830,20 +856,21 @@ export class NodeToolAdapter implements ToolAdapter {
       writeFileSync(scriptFile, buildWrapperScript(command, logFile, { isWindows: true }));
     }
     const shellArgs = IS_WINDOWS ? [windowsSystemShell('cmd.exe'), '/c', scriptFile] : ['sh', scriptFile];
+    // 与上面的主路同因：Bun.spawn 在 Windows 无法启动进程，走 node 的 spawn
+    // （detached + stdio ignore + unref，子进程脱离本进程存活，语义不变）。
     try {
-      const proc = Bun.spawn(shellArgs, {
+      const child = spawn(shellArgs[0]!, shellArgs.slice(1), {
         cwd: this.workspace,
-        stdin: 'ignore',
-        stdout: 'ignore',
-        stderr: 'ignore',
-        detached: true,
         env: IS_WINDOWS ? undefined : { ...process.env, PATH: extendedProbePath() },
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
       });
-      proc.unref();
+      child.unref();
       return {
         id: `tool_${Date.now()}`,
         toolName: 'execute_command',
-        result: buildBackgroundResult(proc.pid ?? null, logFile),
+        result: buildBackgroundResult(child.pid ?? null, logFile),
         success: true,
         duration: Date.now() - start,
       };
