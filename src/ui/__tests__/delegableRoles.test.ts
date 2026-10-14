@@ -60,6 +60,7 @@ mock.module('../../shared/tauri', () => ({
       if (cmd === 'write_file') {
         writes.push({ path: String(args?.path ?? ''), content: String(args?.content ?? '') });
         files[String(args?.path ?? '')] = String(args?.content ?? '');
+        return 'Written';
       }
       if (cmd === 'remove_path') {
         // 真命令（lib.rs remove_path）对不存在的路径返回 Ok，不是报错：删除侧
@@ -69,7 +70,13 @@ mock.module('../../shared/tauri', () => ({
         delete files[path];
         return 'Removed';
       }
-      return undefined;
+      // 未列举的命令必须炸，不能静默 undefined：mock.module 是进程全局的
+      // （bun 单进程跑全部文件），本文件的 mock 会毒化任何排在后面的测试
+      // 文件——Windows CI 的文件发现顺序与 Linux 不同，tauriToolAdapter 的
+      // install_agent_skill 曾因此拿到 undefined（fetch_skill_markdown 被吞
+      // 成 null →「empty-body」）。抛错让上游的 catch 落回真实阶梯，顺序再
+      // 怎么排都能自愈；真要有新命令被本文件用到，这里会立刻显形。
+      throw new Error(`delegableRoles fake invoke got unexpected command: ${cmd}`);
     },
   }),
 }));

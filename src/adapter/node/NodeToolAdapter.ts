@@ -43,6 +43,17 @@ import type { TrustTier } from '../../shared/mirrorSources';
  * consistently. */
 const IS_WINDOWS = process.platform === 'win32';
 
+/** Bun 的 Windows spawn 不做 PATH 搜索也不补 .exe（CreateProcess 的
+ * lpApplicationName 形态）——裸 `'powershell'` 直接 ENOENT，2026-10-14 CI
+ * 实测。所以 Windows 的两个内建 shell 都用系统目录绝对路径：PowerShell 与
+ * cmd 自 XP 起钉在这两个位置，不依赖用户 PATH。 */
+function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
+  const root = process.env.SystemRoot || 'C:\\Windows';
+  return name === 'cmd.exe'
+    ? join(root, 'System32', 'cmd.exe')
+    : join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
 /** Encode a command for powershell.exe -EncodedCommand (base64 of UTF-16LE),
  * with the exit-code wrapper appended so a failing command reports non-zero
  * (mirrors Rust powershell_encoded_command). The encoded form bypasses the
@@ -737,7 +748,7 @@ export class NodeToolAdapter implements ToolAdapter {
       // failing native command and a failing cmdlet, so either reports as
       // non-zero (mirrors Rust powershell_encoded_command).
       const shellArgs = IS_WINDOWS
-        ? ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellCommand(command)]
+        ? [windowsSystemShell('powershell.exe'), '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellCommand(command)]
         : ['sh', '-c', command];
       // Inject the extended probe PATH on Unix so `node` / `bun` / nvm /
       // Homebrew commands resolve even when this process inherited a minimal
@@ -818,7 +829,7 @@ export class NodeToolAdapter implements ToolAdapter {
       logFile = logFile.replace(/^%TEMP%/, winTemp);
       writeFileSync(scriptFile, buildWrapperScript(command, logFile, { isWindows: true }));
     }
-    const shellArgs = IS_WINDOWS ? ['cmd', '/c', scriptFile] : ['sh', scriptFile];
+    const shellArgs = IS_WINDOWS ? [windowsSystemShell('cmd.exe'), '/c', scriptFile] : ['sh', scriptFile];
     try {
       const proc = Bun.spawn(shellArgs, {
         cwd: this.workspace,
