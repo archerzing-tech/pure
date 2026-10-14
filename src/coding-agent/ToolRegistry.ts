@@ -151,14 +151,20 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   getTools(): ToolDefinition[] {
-    // 动态能力工具（pure-capabilities）与 MCP 发现工具「注册即可见」——
-    // 2026-10-13 真机判例：workspace 模式的模型清单走本方法，旧的纯
-    // isPublicToolName 过滤把注册过的动态/MCP 工具全滤掉，执行路是通的、
-    // 模型却看不见，只能答「pure 没有暴露 MCP 注册工具」。与 toolInventory
-    // 的既有开口（isPublicToolName || isDynamicCapabilityTool）同款；MCP
-    // 工具的排除面在连接层（mcpExcludedPrefixes），这里不再滤第二次。
+    // 动态能力工具（pure-capabilities）、MCP 发现工具与外部脚本工具（13.4）
+    // 「注册即可见」——2026-10-13 真机判例：workspace 模式的模型清单走本方
+    // 法，旧的纯 isPublicToolName 过滤把注册过的动态/MCP 工具全滤掉，执行
+    // 路是通的、模型却看不见，只能答「pure 没有暴露 MCP 注册工具」。与
+    // toolInventory 的既有开口（isPublicToolName || isDynamicCapabilityTool）
+    // 同款；EXTERNAL 同刀治本：两端宿主装载进 registry 的外部工具若在此被
+    // 滤，就是「注册了却看不见」的同款缺陷。MCP 工具的排除面在连接层
+    // （mcpExcludedPrefixes），这里不再滤第二次。
     return this.tools
-      .filter(({ name, tags }) => isPublicToolName(name) || isDynamicCapabilityTool(name) || tags.includes(Tags.MCP))
+      .filter(({ name, tags }) =>
+        isPublicToolName(name)
+        || isDynamicCapabilityTool(name)
+        || tags.includes(Tags.MCP)
+        || tags.includes(Tags.EXTERNAL))
       .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
 

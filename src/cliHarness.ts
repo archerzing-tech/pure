@@ -10,10 +10,13 @@ import { createDefaultHarnessConfig } from './coding-agent/defaultHarnessConfig'
 import { NodeToolAdapter } from './adapter/node/NodeToolAdapter';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
-import { ToolRegistry, Tags } from './coding-agent/ToolRegistry';
+import { ToolRegistry, Tags, BUILT_IN_TOOLS } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { CliCapabilityToolAdapter, withConnectTimeout } from './harness/cliCapabilityTools';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from './shared/dynamicCapabilityTools';
+import { compileExternalTools, createExternalToolsCommandExecutor, type ExternalToolExec } from './harness/externalTools';
+import { QUARANTINE_MARKER_FILE } from './harness/toolQuarantine';
+import type { TaggedTool } from './coding-agent/types';
 import { loadConfig, saveConfig, type PureConfig } from './cliConfig';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { SteerBus } from './coding-agent/steerBus';
@@ -98,6 +101,71 @@ function readFileOrNull(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ── 阶段 13.4 CLI 半边 — external script tools ──
+// ~/.pure/tools/<name>/TOOL.json 与 GUI 同路装载：node:fs 做 IO，共享编译器
+// compileExternalTools 校验（与 loadCliPersonaOverlays / Rust list_external_tools
+// 同一款拆分）。此前只有 GUI（Tauri invoke）装载，CLI 完全不载——同一份
+// manifest 两端能力面不一致。无目录/空目录安静跳过；单个坏 manifest 降级为
+// 告警行，不拖垮整批（编译器既有容错）。PURE_TOOLS_DIR env 覆盖目录（Rust
+// 扫描同款，测试用）。
+export interface CliExternalTools {
+  tools: TaggedTool[];
+  /** name → exec 模板（编译器只出 TaggedTool，模板从这里随行）。 */
+  execs: Map<string, ExternalToolExec>;
+}
+
+export function loadCliExternalTools(evolutionEnabled = true): CliExternalTools {
+  const empty: CliExternalTools = { tools: [], execs: new Map() };
+  // 进化总开关关 = 不装载（CLI 形态是 PURE_EVOLUTION_DISABLED，GUI 同一刀走
+  // config.skills.evolution === false）。默认两侧都开。
+  if (!evolutionEnabled) return empty;
+  const dir = process.env.PURE_TOOLS_DIR
+    ?? join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.pure', 'tools');
+  let names: string[];
+  try {
+    names = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return empty; // 无目录安静跳过
+  }
+  const sources: { file: string; text: string }[] = [];
+  for (const name of names) {
+    // 停用门（13.4）：QUARANTINED.json 标 quarantined:true 的工具两端同停——
+    // 停用是盘上事实，不读它等于 CLI 把 GUI 已停的工具偷偷装回来。读不到/
+    // 坏标记一律当没停用（Rust 侧同款：标记坏了不该让工具永久死掉）。
+    try {
+      const marker = JSON.parse(readFileSync(join(dir, name, QUARANTINE_MARKER_FILE), 'utf8')) as { quarantined?: unknown };
+      if (marker?.quarantined === true) continue;
+    } catch { /* 没有标记 = 没停用 */ }
+    try {
+      sources.push({ file: `${name}/TOOL.json`, text: readFileSync(join(dir, name, 'TOOL.json'), 'utf8') });
+    } catch { /* 无 TOOL.json 的目录不是工具 */ }
+  }
+  const { tools, errors } = compileExternalTools(sources, (toolName) => names.includes(toolName));
+  for (const line of errors) {
+    process.stderr.write(`  ${yellow('[external-tools]')} ${dim(line)}\n`);
+  }
+  // exec 模板从原始 manifest 提取（与 GUI 的 loadGuiExternalTools 同源拆法）：
+  // 编译器已验证每个名字，这里只挑装载成功的那份；rawParams 随行。
+  const execs = new Map<string, ExternalToolExec>();
+  for (const source of sources) {
+    try {
+      const m = JSON.parse(source.text) as { name?: string; exec?: string; timeoutMs?: number; rawParams?: string[] };
+      if (m.name && m.exec && tools.some((t) => t.name === m.name)) {
+        execs.set(m.name, {
+          name: m.name,
+          exec: m.exec,
+          timeoutMs: Math.min(600_000, Math.max(5_000, Math.floor(m.timeoutMs ?? 120_000))),
+          ...(Array.isArray(m.rawParams) ? { rawParams: m.rawParams.filter((p): p is string => typeof p === 'string') } : {}),
+        });
+      }
+    } catch { /* 坏 manifest 编译器已报 */ }
+  }
+  return { tools, execs };
 }
 
 // ── CLI cross-session memory (IMemoryStore) ──
@@ -353,6 +421,26 @@ async function createTools(
       riskLevel: risky ? 'high' : 'low',
       serverName: 'pure-capabilities',
     });
+  }
+
+  // 阶段 13.4 CLI 半边 — 外部脚本工具与 GUI 同路装载（MCP 同款通路）：
+  // 编译 → 注册进 registry（与 GUI 同款内建同名拒收，register 否则会静默
+  // 顶掉内建）→ 绑执行器（翻译成 execute_command 打 registry 的 delegate）。
+  // 模型可见性走 registry.getTools() 的 EXTERNAL 开口，createHarness 末尾
+  // 重算 toolsDefs 时自然带上，这里不用另拼清单。
+  const external = loadCliExternalTools(evolutionEnabled);
+  if (external.tools.length > 0) {
+    const builtinToolNames = new Set(BUILT_IN_TOOLS.map((t) => t.name));
+    for (const tool of external.tools) {
+      if (builtinToolNames.has(tool.name)) {
+        process.stderr.write(`  ${yellow('[external-tools]')} ${dim(`"${tool.name}" collides with a built-in — skipped`)}\n`);
+        continue;
+      }
+      registry.register(tool);
+    }
+    if (external.execs.size > 0) {
+      registry.setExternalToolsExecutor(createExternalToolsCommandExecutor(external.execs, registry.getDelegate()));
+    }
   }
 
   return { tools: registry, toolsDefs: [...capAdapter.getTools(), ...mcpDefs], mcpClient };

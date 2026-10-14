@@ -12,7 +12,7 @@
 
 import { Tags } from '../coding-agent/ToolRegistry';
 import type { TaggedTool } from '../coding-agent/types';
-import type { ToolDefinition } from '../shared/types';
+import type { ToolAdapter, ToolDefinition } from '../shared/types';
 
 /** 磁盘上的 manifest 形状。`version` 存在的意义：将来格式变了能检测到而不是
  * 静默错读（原则一：版本化 manifest）。 */
@@ -194,4 +194,52 @@ export function toolCallToCommand(
   rawParams?: ReadonlySet<string>,
 ): { id: string; command: string } {
   return { id: toolCallId, command: substituteExec(exec, args, rawParams) };
+}
+
+/** 执行器适配器（CLI 半边）：把外部工具调用翻译成 execute_command 打宿主
+ *  传入的 delegate——权限门/超时/取消/输出格式全部走 execute_command 既有
+ *  体系（设计立场 3：不新建安全面）。GUI 的执行器住 CodingAgent（带 13.4
+ *  停用看门狗的逐次记账），宿主特异性太强不抽共用；这里是同一条翻译链的
+ *  无看门狗形态，CLI 装配直接绑进 registry（停用工具在装载层已被
+ *  QUARANTINED.json 拦下，执行路不再记第二次账）。 */
+export function createExternalToolsCommandExecutor(
+  execs: Map<string, ExternalToolExec>,
+  delegate: ToolAdapter,
+): ToolAdapter {
+  return {
+    getTools: () => [],
+    getMetadata: () => ({ isWrite: false }),
+    execute: async (toolCall, signal) => {
+      const name = toolCall.function.name;
+      const entry = execs.get(name);
+      if (!entry) {
+        return {
+          id: toolCall.id,
+          toolName: name,
+          error: `External tool "${name}" has no exec template`,
+          success: false,
+          duration: 0,
+        };
+      }
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      // Route as an execute_command call through the same adapter — the
+      // permission gate already ran for the tool call itself (Tags.EXTERNAL
+      // in the registry), and the adapter's execute_command path handles
+      // shell execution, timeout, and output formatting.
+      const { command } = toolCallToCommand(entry.exec, toolCall.id, args, entry.rawParams ? new Set(entry.rawParams) : undefined);
+      return delegate.execute({
+        id: toolCall.id,
+        index: toolCall.index,
+        function: {
+          name: 'execute_command',
+          arguments: JSON.stringify({ command, timeout_ms: entry.timeoutMs }),
+        },
+      }, signal);
+    },
+  };
 }
