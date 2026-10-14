@@ -602,6 +602,9 @@ export class TauriToolAdapter implements ToolAdapter {
       }));
       // 有有效响应的按延迟升序，没有的排后面——判据与 sourceSwitcher.pickBest
       // 一致（先看「有没有回答」，再比「多快」），否则死源会因为回得快而胜出。
+      // 一处刻意的差异：GUI 把 5xx 直接记 FAIL（源不可用即出局），CLI/shared
+      // 的 pickBest 让 5xx 垫底参赛——两者都保证健康源照赢，只在没有健康源
+      // 时分叉（GUI 回落首选并告警，CLI 选出最快的 5xx 并带着状态码明细）。
       const ranked = [...results].sort((a, b) => {
         const okA = a.includes('\tOK  ') ? 0 : 1;
         const okB = b.includes('\tOK  ') ? 0 : 1;

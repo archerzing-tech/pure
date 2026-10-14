@@ -19,6 +19,7 @@ import {
   readJournal,
   sessionEnvFor,
   switchPackageSource,
+  type BenchmarkResult,
   type JournalEntry,
 } from '../node/sourceSwitcher';
 import { ECOSYSTEMS, candidatesFor, type Ecosystem } from '../mirrorSources';
@@ -125,6 +126,17 @@ describe('测速判据', () => {
     const fetchImpl = stubFetch(() => unauthorized());
     const results = await benchmarkSources('docker', candidatesFor('docker'), { fetchImpl });
     expect(results.every((r) => r.ok && r.status === 401)).toBe(true);
+  });
+
+  it('pickBest：5xx 垫底——健康源再慢也不让 5xx 抢走；全是 5xx 时选最快的', () => {
+    const bench = (url: string, status: number, ms: number): BenchmarkResult => ({ url, trust: 't1', ok: true, status, ms });
+    const healthySlow = bench('https://slow.example.com', 200, 900);
+    const unhealthyFast = bench('https://5xx.example.com', 502, 5);
+    // 「排在可用源之后」落到实现：降级位先比，ms 后比，且与入参顺序无关。
+    expect(pickBest([healthySlow, unhealthyFast], [])?.url).toBe('https://slow.example.com');
+    expect(pickBest([unhealthyFast, healthySlow], [])?.url).toBe('https://slow.example.com');
+    const only5xx = [bench('https://a.example.com', 500, 30), bench('https://b.example.com', 503, 10)];
+    expect(pickBest(only5xx, [])?.url).toBe('https://b.example.com');
   });
 
   it('测速 URL 合并重叠分段，不再拼出 /npm/npm', async () => {
@@ -275,6 +287,26 @@ describe('switchPackageSource：默认档 = 会话级 + dry-run', () => {
       expect(bench.find((b) => b.url.includes('npmmirror'))?.ok).toBe(true);
       expect(bench.find((b) => b.url.includes('huaweicloud'))?.ok).toBe(false);
       expect(bench.find((b) => b.url.includes('tencent'))?.ok).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('auto 模式：5xx 源回得再快也排在健康源之后', async () => {
+    const home = makeHome();
+    try {
+      const r = await switchPackageSource(
+        { ecosystem: 'npm', source: 'auto' },
+        {
+          homeDir: home,
+          // 腾讯源假装 5xx 且回得快（stub 全零延迟，旧实现下谁赢看时序）；
+          // 5xx 是「网络可达但源不可用」，健康源必须照赢——降级位先比。
+          fetchImpl: stubFetch((url) => (url.includes('npmmirror') ? ok200() : new Response('bad gateway', { status: 502 }))),
+        },
+      );
+      expect(r.ok).toBe(true);
+      expect(r.source?.url).toBe('https://registry.npmmirror.com');
+      expect(r.benchmark?.find((b) => b.url.includes('tencent'))?.status).toBe(502);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

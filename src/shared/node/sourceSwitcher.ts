@@ -191,9 +191,12 @@ export async function benchmarkSources(
   }));
 }
 
-/** 选优：有效响应优先，其次延迟。没有有效响应时退回首选（让上层如实报告失败）。 */
+/** 选优：有效响应优先，其次延迟；5xx（网络可达但源不可用）整体垫底再比延迟。没有有效响应时退回首选（让上层如实报告失败）。 */
 export function pickBest(results: readonly BenchmarkResult[], candidates: readonly MirrorSource[]): BenchmarkResult | undefined {
-  const ok = results.filter((r) => r.ok).sort((a, b) => a.ms - b.ms);
+  // 5xx 不是丢弃而是垫底：服务端确实收到了请求，只是源这会不可用——有健康
+  // 源时绝不让它凭更快抢走，全是 5xx 时仍选出最快的（明细里带着状态码）。
+  const demoted = (r: BenchmarkResult) => (r.status !== undefined && r.status >= 500 ? 1 : 0);
+  const ok = results.filter((r) => r.ok).sort((a, b) => demoted(a) - demoted(b) || a.ms - b.ms);
   if (ok.length > 0) return ok[0];
   return results.length > 0 ? results[0] : undefined;
 }
