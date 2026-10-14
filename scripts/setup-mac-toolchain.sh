@@ -259,17 +259,30 @@ fi
 # ════════════════════════════════════════════════════════════════════════
 hdr "5. Bun runtime"
 # ════════════════════════════════════════════════════════════════════════
+# 与 CI/release workflow 钉死的版本对齐（.github/workflows 里 bun-version）。
+# 官方安装器装的是 latest——本地浮动到比 CI 新的版本，会重现「本地绿 CI 红」
+# 的反向漂移（2026-10-13 的 Linux stdio 缺陷正是 latest 漂到 1.4.3 才暴露）。
+# 升级 Bun 时这里连着 workflow 一起改。
+PURE_BUN_PINNED="1.4.3"
 if has bun; then
   BV="$(bun --version 2>/dev/null)"
-  ok "bun $BV"
-  if [[ "$(echo "$BV" | cut -d. -f1)" -lt 1 ]]; then
-    warn "bun $BV is stale — upgrading"
-    doit "bun upgrade" bun upgrade
+  if [[ "$BV" == "$PURE_BUN_PINNED" ]]; then
+    ok "bun $BV (matches CI pin)"
+  else
+    warn "bun $BV != CI pin $PURE_BUN_PINNED — aligning"
+    doit "bun upgrade $PURE_BUN_PINNED" bun upgrade "$PURE_BUN_PINNED"
   fi
 else
   if confirm; then
     pipeit "install bun (https://bun.sh)" \
       "curl -fsSL https://bun.sh/install | bash"
+    # 安装器装的是 latest；PATH 里还没有 bun，直接用绝对路径钉到对齐版。
+    if [[ -x "$HOME/.bun/bin/bun" ]]; then
+      BV="$("$HOME/.bun/bin/bun" --version 2>/dev/null)"
+      if [[ "$BV" != "$PURE_BUN_PINNED" ]]; then
+        doit "pin bun $PURE_BUN_PINNED" "$HOME/.bun/bin/bun" upgrade "$PURE_BUN_PINNED"
+      fi
+    fi
     warn "bun installed to ~/.bun/bin — add it to PATH:  export PATH=\"\$HOME/.bun/bin:\$PATH\""
   else
     warn "skipped bun install (the project requires bun for every npm script)"

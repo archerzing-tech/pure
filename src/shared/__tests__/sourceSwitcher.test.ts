@@ -307,6 +307,22 @@ describe('switchPackageSource：默认档 = 会话级 + dry-run', () => {
       expect(r.ok).toBe(true);
       expect(r.source?.url).toBe('https://registry.npmmirror.com');
       expect(r.benchmark?.find((b) => b.url.includes('tencent'))?.status).toBe(502);
+      expect(r.warnings.join()).not.toContain('HTTP 502');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('auto 模式：全体候选只剩 5xx 时选出最快的，并在 warnings 里说破口径', async () => {
+    const home = makeHome();
+    try {
+      const r = await switchPackageSource(
+        { ecosystem: 'npm', source: 'auto' },
+        { homeDir: home, fetchImpl: stubFetch(() => new Response('bad gateway', { status: 502 })) },
+      );
+      expect(r.ok).toBe(true);
+      expect(['https://registry.npmmirror.com', 'https://mirrors.huaweicloud.com/repository/npm/', 'https://mirrors.cloud.tencent.com/npm/']).toContain(String(r.source?.url));
+      expect(r.warnings.join()).toContain('HTTP 502');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

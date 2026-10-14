@@ -496,6 +496,11 @@ export async function switchPackageSource(
       if (!selected) {
         warnings.push('测速结果与候选集不匹配，回落为生态默认首选');
         selected = undefined;
+      } else if (best.status !== undefined && best.status >= 500) {
+        // 只有全体候选都剩不下健康源，选优才会落到 5xx 头上（健康源在位时
+        // 它垫底赢不了）。结果照给——网络可达，源这会不可用——但口径必须
+        // 说破，不能让上层把这个 source 默认当健康源。
+        warnings.push(`所有候选源都没有健康响应，选了响应最快的 ${best.url}（HTTP ${best.status}）——源侧可能故障，可用 diagnose_network 复查或稍后重试`);
       }
     }
     if (!selected) {
