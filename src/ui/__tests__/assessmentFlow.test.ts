@@ -60,9 +60,18 @@ describe('dynamic intent assessment flow', () => {
   it('only renders the decision points relevant to a medium-risk task', () => {
     const stages = getAssessmentFlowStages(assessment());
     expect(stages.map((stage) => stage.phase)).toEqual(['intent', 'risk']);
-    expect(stages[0]?.label).toContain('修改功能');
-    expect(stages[1]?.label).toBe('需要注意的影响');
-    expect(stages[1]?.description).toContain('先读取真实结构');
+    // 卡片上的内容就是这次分析自己的结论（impact / recommendation），代码只出
+    // 结构性的短标签——不再把 intent 枚举套进模板拼成「我判断这是一次 X 请求」。
+    expect(stages[0]?.description).toBe('可能波及多个模块。');
+    expect(stages[0]?.label).toBe('这次请求会动到什么');
+    expect(stages[1]?.label).toBe('打算怎么做');
+    expect(stages[1]?.description).toBe('先读取真实结构，再决定改动。');
+  });
+
+  it('never invents content the analysis did not produce', () => {
+    const stages = getAssessmentFlowStages(assessment({ impact: '', recommendation: '', intent: 'delete' }));
+    expect(stages[0]?.description).toBe('');
+    expect(stages[1]?.description).toBe('');
   });
 
   it('adds an explicit confirmation point only for high-risk work', () => {
@@ -73,8 +82,9 @@ describe('dynamic intent assessment flow', () => {
       requiresConfirmation: true,
     }));
     expect(stages.map((stage) => stage.phase)).toEqual(['intent', 'risk', 'gate']);
-    expect(stages[2]?.label).toBe('执行前需要你的确认');
-    expect(stages[2]?.description).toContain('先读取真实结构');
+    expect(stages[2]?.label).toBe('需要你确认');
+    // 闸门节点只报状态，不自编「为什么拦在这里」，也不复述风险节点的建议。
+    expect(stages[2]?.description).toBe('');
   });
 
   it('does not invent a safety gate for a low-risk task', () => {
@@ -110,14 +120,30 @@ describe('dynamic intent assessment flow', () => {
       }));
       handle.setPhase('gate', '等待确认');
       handle.setPhase('execute', '错误地尝试执行');
-      expect(findNode(handle.el, '执行前需要你的确认')?.dataset.status).toBe('active');
+      expect(findNode(handle.el, '需要你确认')?.dataset.status).toBe('active');
       handle.cancel('未批准');
       expect(handle.el.children[0]?.classList.contains('cancelled')).toBe(true);
-      expect(findNode(handle.el, '执行前需要你的确认')?.dataset.status).toBe('blocked');
+      expect(findNode(handle.el, '需要你确认')?.dataset.status).toBe('blocked');
       expect(findNode(handle.el, '错误地尝试执行')).toBeNull();
     } finally {
       restore();
     }
+  });
+
+  it('shows the judgement before asking for confirmation, and never narrates for the user', () => {
+    const chat = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    const card = chat.indexOf('assessmentFlow = createAssessmentFlowCard(effectiveIntent);');
+    expect(card).toBeGreaterThan(-1);
+    const intentDone = chat.indexOf("assessmentFlow.completePhase('intent');", card);
+    const gateAwait = chat.indexOf("assessmentFlow.awaitPhase('gate');", card);
+    const review = chat.indexOf('const decision = await requestPlanReview(', card);
+    // 节点只落状态：过去这里传「已完成需求分析」这类回执，等于把判断盖成一句
+    // 「已完成」，用户在确认前看不到任何推理内容。
+    expect(intentDone).toBeGreaterThan(card);
+    expect(chat.indexOf("assessmentFlow.completePhase('intent', '已完成需求分析")).toBe(-1);
+    // 需要确认的请求：闸门停在「等你回复」，且它排在确认卡之前——先亮判断，再要确认。
+    expect(gateAwait).toBeGreaterThan(intentDone);
+    expect(review).toBeGreaterThan(gateAwait);
   });
 
   it('keeps chat approval ahead of the execution transition', () => {
@@ -160,9 +186,9 @@ describe('dynamic intent assessment flow', () => {
       }));
       handle.completePhase('gate');
       handle.awaitPhase('execute', '计划已就绪，等待你回复后开始…');
-      expect(findNode(handle.el, '我判断这是一次删除请求')?.dataset.status).toBe('done');
-      expect(findNode(handle.el, '需要注意的影响')?.dataset.status).toBe('done');
-      expect(findNode(handle.el, '执行前需要你的确认')?.dataset.status).toBe('done');
+      expect(findNode(handle.el, '这次请求会动到什么')?.dataset.status).toBe('done');
+      expect(findNode(handle.el, '打算怎么做')?.dataset.status).toBe('done');
+      expect(findNode(handle.el, '需要你确认')?.dataset.status).toBe('done');
     } finally {
       restore();
     }

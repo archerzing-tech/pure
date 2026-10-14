@@ -28,16 +28,13 @@ export const RISK_LABELS: Record<IntentAssessment['riskLevel'], string> = {
   high: '高风险',
 };
 
-export const INTENT_LABELS: Record<IntentAssessment['intent'], string> = {
-  question: '咨询',
-  research: '调研',
-  add: '新增功能',
-  modify: '修改功能',
-  debug: '排查问题',
-  refactor: '重构',
-  migrate: '迁移',
-  delete: '删除',
-  build: '项目构建',
+/** 内部枚举 → 用户能读的档位。以前卡片和确认卡都把 `irreversible` 这样的
+ *  原始值直接印在界面上。 */
+export const REVERSIBILITY_LABELS: Record<IntentAssessment['reversibility'], string> = {
+  reversible: '可以撤销',
+  'partially-reversible': '只能部分回退',
+  'hard-to-reverse': '回退代价高',
+  irreversible: '基本不可恢复',
 };
 
 const STATUS_LABELS: Record<AssessmentFlowStatus, string> = {
@@ -48,28 +45,32 @@ const STATUS_LABELS: Record<AssessmentFlowStatus, string> = {
   skipped: '已跳过',
   blocked: '等待确认',
   failed: '未完成',
-};
-
+};/** 卡片上的每一句实质内容都取自这次分析自己的结论（impact / recommendation，
+ *  由模型按用户原话写），代码只出结构性的短标签。这里刻意不拼内容：
+ *  「我判断这是一次删除请求」这类句子是把 intent 枚举套进模板生成的，一旦判断
+ *  出错（把「你帮我看下如何重置」读成删除指令）卡片就当着用户的面说错话，
+ *  而且看不出判断是怎么来的。
+ *  某一段没有结论时也不编：闸门节点只报状态，不自己编一句「为什么」。 */
 function relevantStages(assessment: IntentAssessment): AssessmentFlowStage[] {
   const stages: AssessmentFlowStage[] = [{
     phase: 'intent',
-    label: `我判断这是一次${INTENT_LABELS[assessment.intent]}请求`,
-    description: assessment.impact || '正在根据任务目标判断影响范围。',
+    label: '这次请求会动到什么',
+    description: assessment.impact.trim(),
     status: 'pending',
   }];
   if (assessment.riskLevel !== 'low') {
     stages.push({
       phase: 'risk',
-      label: '需要注意的影响',
-      description: assessment.recommendation || `${RISK_LABELS[assessment.riskLevel]}，执行时会保留验证证据。`,
+      label: '打算怎么做',
+      description: assessment.recommendation.trim(),
       status: 'pending',
     });
   }
   if (assessment.requiresConfirmation) {
     stages.push({
       phase: 'gate',
-      label: '执行前需要你的确认',
-      description: assessment.recommendation || '确认影响范围后才会执行写入或破坏性操作。',
+      label: '需要你确认',
+      description: '',
       status: 'pending',
     });
   }
@@ -137,7 +138,7 @@ export function createAssessmentFlowCard(assessment: IntentAssessment): Assessme
   if (assessment.reversibility) {
     const recovery = document.createElement('span');
     recovery.className = 'assessment-flow-recovery';
-    recovery.textContent = `可逆性：${assessment.reversibility}`;
+    recovery.textContent = `可逆性：${REVERSIBILITY_LABELS[assessment.reversibility] ?? assessment.reversibility}`;
     context.appendChild(recovery);
   }
 
@@ -145,9 +146,11 @@ export function createAssessmentFlowCard(assessment: IntentAssessment): Assessme
   activity.className = 'assessment-flow-activity';
   activity.setAttribute('role', 'status');
   activity.setAttribute('aria-live', 'polite');
-  activity.textContent = assessment.requiresConfirmation
-    ? '我会先把影响和方案说清楚，确认后才开始执行。'
-    : '这条信息只保留与当前任务有关的影响判断。';
+  // 展开区的状态行同样引用这次的判断，不另编一句说明——模型写的判断就是卡片
+  // 要说的话，找不到就退回纯状态。
+  activity.textContent = assessment.impact.trim()
+    || assessment.recommendation.trim()
+    || (assessment.requiresConfirmation ? '等待你确认后再动手。' : '正在结合任务继续判断。');
 
   const diagram = document.createElement('div');
   diagram.className = 'assessment-flow-diagram';
@@ -167,13 +170,17 @@ export function createAssessmentFlowCard(assessment: IntentAssessment): Assessme
     const nodeLabel = document.createElement('strong');
     nodeLabel.className = 'assessment-flow-node-label';
     nodeLabel.textContent = stage.label;
-    const nodeDescription = document.createElement('small');
-    nodeDescription.className = 'assessment-flow-node-description';
-    nodeDescription.textContent = stage.description;
     const status = document.createElement('span');
     status.className = 'assessment-flow-node-status';
     status.textContent = STATUS_LABELS.pending;
-    nodeBody.append(nodeLabel, nodeDescription, status);
+    if (stage.description) {
+      const nodeDescription = document.createElement('small');
+      nodeDescription.className = 'assessment-flow-node-description';
+      nodeDescription.textContent = stage.description;
+      nodeBody.append(nodeLabel, nodeDescription, status);
+    } else {
+      nodeBody.append(nodeLabel, status);
+    }
     row.append(icon, nodeBody);
     diagram.appendChild(row);
     rows.set(stage.phase, { row, icon, status, index });

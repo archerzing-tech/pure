@@ -1112,9 +1112,6 @@ const translations: Record<Language, Record<string, string>> = {
     'confirm.deleteSession': '确定删除此会话？',
     'confirm.deleteSessionDelegations': '该会话包含 {n} 条子 Agent 委派存档——它们是角色样本收割与回归评测的原料，删除后将无法再回收。仍要删除？',
     'confirm.deleteAllSessions': '确定删除全部会话？此操作不可撤销。',
-    'preflight.title': '高危操作确认',
-    'preflight.ok': '我确认，继续执行',
-    'preflight.typo': '注意到疑似错别字：{pairs} —— 按这个意思读，这次操作属于高危，所以先跟你确认一次。你的原话不会被改写（只做了等价的字符归一化）；想改字就直接取消，草稿还在输入框里。',
 
     // ── 11.2 path repair note (under the user bubble) ──
     'repair.pathNote': '已按工作区里真实存在的路径理解：{pairs}',
@@ -2392,9 +2389,6 @@ const translations: Record<Language, Record<string, string>> = {
     'confirm.deleteSession': 'Delete this session?',
     'confirm.deleteSessionDelegations': 'This session holds {n} sub-agent delegation archive(s) — raw material for role sample harvesting and regression evals. Once deleted they cannot be recovered. Delete anyway?',
     'confirm.deleteAllSessions': 'Delete all sessions? This cannot be undone.',
-    'preflight.title': 'Confirm high-risk action',
-    'preflight.ok': 'Yes, proceed',
-    'preflight.typo': 'Possible typo: {pairs} — read that way this is a high-risk action, so it asks first. Nothing in your wording was rewritten (only lossless character normalization); cancel to fix the text — your draft stays in the box.',
 
     // ── 11.2 path repair note (under the user bubble) ──
     'repair.pathNote': 'Read as the path that exists in the workspace: {pairs}',

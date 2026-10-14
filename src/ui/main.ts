@@ -52,7 +52,6 @@ import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
-import { checkPreflight, type PreflightGate } from './preflight';
 import { normalizeDraft } from './inputRepair';
 import { correctWorkspacePaths, getPathIndex, warmPathIndex } from './pathIndex';
 import { createPathRepairNote } from './pathRepairNote';
@@ -1741,8 +1740,8 @@ function handleLandingSendOrStop() {
 async function sendMessage(sourceEl: HTMLTextAreaElement) {
   // 阶段 11.1：先做无损归一化，后面每一步都用它 —— 全角字母/数字、零宽字符和
   // 全角标点会让 `/mcp-prompt` 名字、路径和高危词全部匹配失手。归一化不改变
-  // 语义，所以不上屏解释、也不问用户；风险判定若因此读到更高档，由确认框
-  // （confirmHighRiskDraft）解释一句。取消发送时输入框原文原样留着。
+  // 语义，所以不上屏解释、也不问用户；风险判定若因此读到更高档，由模型在
+  // 回合内说清楚（评估卡）。取消发送时输入框原文原样留着。
   const normalized = normalizeDraft(sourceEl.value);
   // Empty typed text is fine when pasted file chips carry the message.
   if ((!normalized && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
@@ -1782,13 +1781,12 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   const pathRepairs = correction.repairs;
   void warmPathIndex(chat.getWorkspace());
 
-  // Error prediction & prevention: a destructive intent (delete / clear /
-  // reset / drop…) must be explicitly confirmed before the draft leaves the
-  // composer. Cancelling returns here with the draft untouched. 阶段 11.1：
-  // 同音错字（"闪除"）也算破坏性意图 —— 门后用的是原文与错字展开文本中更高的
-  // 风险档，但发给模型的始终是用户原话。
-  const gate = checkPreflight(text);
-  if (gate && !(await confirmHighRiskDraft(gate))) return;
+  // 这里原本有一道发送前的高危门（checkPreflight + 模态确认窗）：本地关键词
+  // 单命里就弹窗拦人，模型连这句话都没见过，用户看不到任何判断过程。
+  // 2026-10-14 用户定调：高风险由模型判（语义路由的 requiresConfirmation），
+  // 拦的位置从「发送前」挑到「执行前」——请求先发出去，模型先把理解与风险
+  // 说清楚（思考卡 + 评估卡），回合停在对话里等用户一句话；用户说确认就继续，
+  // 说别的就重新想。本地规则不再决定能不能发出。
 
   // MCP prompt command (6.2): expanded HERE, before the composer is cleared,
   // so a typo in the prompt name or a missing required argument shows a toast
@@ -2859,27 +2857,6 @@ function confirmDialog(message: string): Promise<boolean> {
     title: t('confirm.title'),
     message,
     okLabel: t('confirm.ok'),
-    cancelLabel: t('confirm.cancel'),
-    danger: true,
-  });
-}
-
-/** Preflight confirmation for a high-risk draft. The assessment's impact /
- * recommendation strings are already localized by assessIntent. Focus stays on
- * Cancel: Esc / Enter-on-cancel can never confirm a destructive send.
- *
- * 阶段 11.1：只有当门是「错字展开」读出来的才解释一句（用户原话本身就高危时
- * 不啰嗦）。文案要同时说清两件事：为什么突然拦截，以及**没有替你改写输入** ——
- * 否则用户会以为 pure 擅自改了他的话，或者根本不知道自己打错了字。 */
-function confirmHighRiskDraft(gate: PreflightGate): Promise<boolean> {
-  const a = gate.assessment;
-  const typoNote = gate.repairs?.length
-    ? `${t('preflight.typo').replace('{pairs}', gate.repairs.map((r) => `${r.from} → ${r.to}`).join('，'))}\n\n`
-    : '';
-  return showConfirmModal({
-    title: t('preflight.title'),
-    message: `${typoNote}${a.impact}\n\n${a.recommendation}`,
-    okLabel: t('preflight.ok'),
     cancelLabel: t('confirm.cancel'),
     danger: true,
   });

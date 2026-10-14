@@ -78,7 +78,7 @@ Return ONLY one JSON object with this shape:
 - bash_executor — 跑命令、构建/验证（有真实命令要执行时）
 A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
 
-Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
+Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Asking HOW is not asking you to DO it: "如何重置 X" / "怎么删掉 Y" / "how do I rotate the key" asks for a procedure, so classify it intent "question" with low risk and requiresConfirmation false even though the sentence names a destructive operation; reserve intent "delete" and requiresConfirmation for a request to perform that action now on a named target. Write "impact" as the concrete reasoning behind the safety decision rather than a category label — what this request would touch and why it cannot be undone (or why a probe comes first). The GUI shows impact verbatim as your assessment, so a label like "this is a delete request" tells the user nothing about why you stopped. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
 
 /** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
  * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
@@ -962,7 +962,18 @@ export function assessIntent(prompt: string): IntentAssessment {
   // 覆写）。误判的代价不只是一次确认：CLI 会把整轮的自动批准关掉
   // （cliRepl.ts 的 applyCliIntentPermission），所以这条底线宁窄勿宽——宁可漏掉
   // 一个含糊说法，也不把日常请求拉进高危通道。
-  const destructive = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉)|删库|删表|清库|清表|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.test(lower);
+  // 2026-10-14 再收窄一档：问「怎么做」不是「让你动手做」。以前只挡住紧跟在
+  // 「重置」后面的名词（重置密码），「你帮我看下如何重置」「怎么才能清空缓存」这类
+  // 求助句里的破坏词仍算高危——代价不是多问一句，而是确认卡把一句提问读成了删除
+  // 指令（卡片上还写着「我判断这是一次删除请求」）。判据分强弱两档：方式/可行性
+  // 疑问（如何、怎么、为什么…）本身就是求一段说明，直接豁免。这里刻意只豁免
+  // 「问方法 / 问原因」：句末的「可以吗 / 好吗」（"删除整个项目的文件，可以吗？"）
+  // 是在征求执行的许可，不是问怎么做，仍然留在高危通道上（保住那条既有判例：
+  // 破坏性措辞一律交给语义路由/确认通道，本地不自己拍低）。
+  const mannerQuestion = /(?:如何|怎么|怎样|咋(?:办|样)|为什么|求(?:教|助)|请教|请问|该怎么|要怎么做|能否|能不能|可不可以|how\s+(?:do|can|should|to|would)|why|can\s+i|could\s+i|should\s+i|what'?s\s+the\s+way)/i.test(lower);
+  const askingHow = mannerQuestion;
+  const destructiveHit = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉)|删库|删表|清库|清表|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.exec(lower)?.[0];
+  const destructive = Boolean(destructiveHit) && !askingHow;
   const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
   const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
   const riskLevel: IntentAssessment['riskLevel'] = destructive ? 'high' : migration || refactor ? 'medium' : 'low';
@@ -976,14 +987,17 @@ export function assessIntent(prompt: string): IntentAssessment {
         : 'reversible';
   const requiresProbe = riskLevel !== 'low';
   const requiresConfirmation = riskLevel === 'high';
+  // impact 是被卡片直接展示给用户的那句话（见 ui/assessmentFlow.ts）——它要讲清
+  // 「这次请求会动到什么」，而不是给请求贴一个类别。带上命中的那个词，用户才看
+  // 得出判断是怎么来的。
   const impact = chinese
     ? (destructive
-      ? '可能删除或覆盖现有数据、文件或历史状态，影响范围需要先确认。'
+      ? `请求里有「${destructiveHit}」这类动作：它会删掉或覆盖现有的数据、配置或文件，往往不可恢复，所以先把会动到的对象列清楚。`
       : riskLevel === 'medium'
         ? '改动可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
         : '不根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
     : (destructive
-      ? 'This may delete or overwrite existing data, files, or history; confirm the blast radius first.'
+      ? `The request contains "${destructiveHit}", which deletes or overwrites existing data, config, or files and usually cannot be undone — so list what it would touch first.`
       : riskLevel === 'medium'
         ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
         : 'No task type is inferred from keywords; semantic routing will use the complete request.');

@@ -1,4 +1,9 @@
 // src/ui/preflight.ts
+// 2026-10-14 下线调用方：发送路径不再用本地关键词拦人——判断归模型，拦的位置
+// 从「发送前」挑到「执行前」（请求先发出去，模型说清判断与风险后在对话里等
+// 一句确认）。函数与单测保留：错字展开 + 原文取高档这套是恢复同步硬门时唯一
+// 可靠的本地信号，但现在没有调用者，改它不再影响用户路径。
+//
 // Submit-time error prediction & prevention for the GUI composer. Unlike the
 // planner's full in-turn analysis, this runs synchronously BEFORE send so a
 // destructive intent never leaves the composer without explicit confirmation.

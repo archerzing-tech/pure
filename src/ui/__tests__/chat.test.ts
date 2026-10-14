@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -504,19 +504,44 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(src).not.toContain('needsDeliveryGate && forcedMode !== \'yolo\'');
   });
 
-  it('runs without waiting for authorization: high risk no longer gates, plans start at once', () => {
-    // 2026-09-17 产品决策：不必要的授权停等全部取消（默认自动允许）——
-    // 高风险不再触发确认卡，风险只影响评估卡的展示；计划就绪即开工，
-    // 不再保留“计划批准暂停”状态。只有用户主动选择的计划/构建模式
-    // 保留确认流程（那是模式本身的语义），以及不可逆 UI 确认。
+  it('stops a model-judged high-risk request in the conversation instead of starting at once', () => {
+    // 2026-10-14 用户定调：判断归模型（语义路由的 requiresConfirmation），拦的
+    // 位置从「发送前」挪到「执行前」。发送前那道本地关键词模态窗已下线
+    //（见下面的 main.ts 断言）；高风险回合停在对话里等一句确认，只有用户主动
+    // 选择的计划/构建模式仍保留按钮式确认卡（那是模式本身的语义）。
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const gate = src.indexOf("const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';");
-    expect(gate).toBeGreaterThan(-1);
-    // The old `riskReview ||` prefix must be gone — risk only shapes display.
+    const buttonGate = src.indexOf("const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';");
+    expect(buttonGate).toBeGreaterThan(-1);
+    // The old `riskReview ||` prefix is still gone — risk no longer forces the
+    // button card; the text gate below is the general path.
     expect(src.indexOf('needsInteractiveApproval = riskReview')).toBe(-1);
-    // pauseAfterPlanning（计划就绪→等一句“开工”）fully retired — covered by
-    // the plan-prompt test below (approved=true on every path).
     expect(src.indexOf('pauseAfterPlanning')).toBe(-1);
+    const textGate = src.indexOf('} else if (effectiveIntent.requiresConfirmation && !this.abortController?.signal.aborted) {');
+    expect(textGate).toBeGreaterThan(buttonGate);
+    expect(src.slice(textGate, textGate + 700)).toContain('this.pendingHighRiskConfirmation = true;');
+    // 暂停形态与「计划就绪等开工」共用同一段：等你回复的状态、气泡、持久化都在那里。
+    expect(src).toContain('if ((planPauseRequested || this.pendingHighRiskConfirmation) && this.activeComplexPlan) {');
+    expect(src).toContain('formatConfirmationPauseMessage(this.activeComplexPlan)');
+    expect(src).toContain('this.confirmationAwaitingReply = true;');
+  });
+
+  it('no longer blocks a high-risk draft behind a pre-send modal', () => {
+    // 发送前不再用本地关键词判能不能发出：模型连这句话都没见过就先弹窗，
+    // 用户看不到任何判断过程。判断与拦停都挪到了回合内（评估卡 + 上面那条）。
+    const main = readSource(new URL('../main.ts', import.meta.url));
+    expect(main.indexOf('checkPreflight(')).toBe(-1);
+    expect(main.indexOf('confirmHighRiskDraft')).toBe(-1);
+  });
+
+  it('reads a plain confirmation as go-ahead only when it was asked for', () => {
+    for (const draft of ['确认', '可以', '行', '好的', 'ok', 'yes', '确认执行', '没问题']) {
+      expect([draft, isConfirmationReply(draft)]).toEqual([draft, true]);
+    }
+    // 带后续内容的句子不是批准：它要么是别的问题，要么是改方向 —— 两种情况都
+    // 应该交回模型重新理解，而不是被当成放行。
+    for (const draft of ['确认一下这个文件在哪', '行，就这样吧', '我想换个更稳的做法', '好的，但是我只要改一点点']) {
+      expect([draft, isConfirmationReply(draft)]).toEqual([draft, false]);
+    }
   });
 
   it('keeps explicit plan/build mode as the opt-in approval path', () => {
@@ -1971,7 +1996,9 @@ describe('plan-by-thinking flow', () => {
     expect(src).toContain('let planForReview: Plan | null = thought?.plan ?? null;');
     const fallbackIdx = src.indexOf('planForReview = analysis.plan ?? deriveFallbackPlan(userText);');
     expect(fallbackIdx).toBeGreaterThan(thinkingIdx);
-    expect(src).toContain('} else if (thought?.narration && !needsInteractiveApproval) {');
+    // 需要确认的请求不走「无卡直接开工」：确认闸门需要一个可被确认的对象，
+    // 没有结构化步骤时落进上面那条兜底起步安排（否则用户说了「确认」没东西可续）。
+    expect(src).toContain('} else if (thought?.narration && !needsInteractiveApproval && !effectiveIntent.requiresConfirmation) {');
   });
 
   it('thinking lands in the model context; both paths embed it into userPlan', () => {

@@ -39,6 +39,31 @@ describe('Planner', () => {
     expect(assessIntent('删掉这些临时文件').requiresConfirmation).toBe(true);
   });
 
+  it('reads a question about how to reset as advice, not an order to delete', () => {
+    // 2026-10-14 真机案例：「本机装了一个应用叫 UNIvpn，输入用户名密码总是报错，你帮我看
+    // 下如何重置」被兜底规则判成删除请求 + 高危确认卡，卡片上还写着「我判断这是一次删
+    // 除请求」——问「怎么做」被读成了让人动手。
+    for (const draft of [
+      '本机装了一个应用叫 UNIvpn，输入用户名密码总是报错，你帮我看下如何重置',
+      '如何重置 UNIvpn 的账号',
+      '怎么才能清空这个目录',
+      '为什么删掉这个文件这么慢',
+      '如何清空这台机器的缓存',
+    ]) {
+      const verdict = assessIntent(draft);
+      expect([draft, verdict.intent, verdict.riskLevel, verdict.requiresConfirmation])
+        .toEqual([draft, 'question', 'low', false]);
+    }
+  });
+
+  it('keeps an imperative or permission-seeking destruction request in the high-risk lane', () => {
+    // 豁免只覆盖「问怎么做 / 问为什么」：命令式施动（把/帮我/给我 + 动作）与
+    // 句末征求许可（…可以吗）仍然留在高危通道上。
+    for (const draft of ['帮我把这个应用重置一下', '把缓存清掉吧', '帮我删掉这些临时文件', '给我把日志清理掉', '删除整个项目的文件，可以吗？']) {
+      expect([draft, assessIntent(draft).riskLevel]).toEqual([draft, 'high']);
+    }
+  });
+
   it('keeps the benign engineering senses of those words out of the gate', () => {
     // A UI behaviour, a password-reset feature, and test coverage — each one
     // would otherwise cost a confirmation and, in the CLI, a whole turn of

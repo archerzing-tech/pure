@@ -58,6 +58,7 @@ import {
   formatPlanForPrompt,
   formatPlanContinuation,
   formatPlanPauseMessage,
+  formatConfirmationPauseMessage,
   createPlanCard,
   updatePlanCard,
   clearPlanCardRefining,
@@ -286,6 +287,22 @@ function isExplicitContinuation(text: string): boolean {
   return ['继续', '接着', '往下', 'continue', 'resume', 'go on', 'keep going'].includes(
     t.replace(/[。.，,！!？?~～\s]/g, ''),
   );
+}
+
+/** 停在执行前等确认时，哪些回复算「可以，开始」。整句匹配为主：一句「确认 /
+ * 可以 / 行 / ok」是放行；带后续内容的句子（「确认一下这个文件在哪」）不是。
+ * 词表以外的说法不当批准——它会被当成普通回复交给模型重新理解，这正是另一个
+ * 分支（「还有没有更稳的做法，我只想改一点点」）。 */
+const CONFIRMATION_REPLIES = new Set([
+  '确认', '确认执行', '确定', '同意', '批准', '可以', '可以了', '行', '好的', '好',
+  '没问题', '就这样', '开始吧', '执行吧', '动手吧', '干吧', '继续', 'ok', 'okay', 'fine',
+  'yes', 'y', 'approve', 'approved', 'confirm', 'confirmed', 'goahead', 'proceed', 'doit',
+]);
+export function isConfirmationReply(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/[。.，,！!？?~～、；;：:]/g, '').replace(/\s+/g, '');
+  if (!t) return false;
+  if (CONFIRMATION_REPLIES.has(t)) return true;
+  return /^(确认|同意|批准)(执行|开始|继续|吧|一下)?$/.test(t);
 }
 
 // Kept as a compatibility hook for the app shell. Transcript rows must not be
@@ -1615,6 +1632,12 @@ export class ChatController {
   /** Whether the active plan was approved as a project build — carried across
    * continuation turns so the delivery gate follows the plan, not the prompt. */
   private activePlanProjectBuild = false;
+  /** 本轮该停在哪等一句确认（模型判的高风险请求）。置位后本轮不再自动开工，
+   *  而是把计划与评估卡留在屏幕上、以「等你回复」的形态收尾；下一轮入口清零。 */
+  private pendingHighRiskConfirmation = false;
+  /** 上一轮是不是停在了「执行前等确认」。让下一轮的回复能被读成批准（一句
+   *  「可以 / 行 / ok」）——而平时对话里的一句「好的」绝不会被当成开工指令。 */
+  private confirmationAwaitingReply = false;
   /** 会话级交付证据：构建计划曾在某一回合真实通过机械验证（typecheck/测试/构建）。
    * 后续纯总结轮没有工具调用、不会重跑验证，收尾时仍可据此把计划置为完成，
    * 避免计划卡在项目交付后仍停在「执行中」。新对话/会话切换清零。 */
@@ -3660,6 +3683,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // A fresh turn's signals supersede any that were never consumed (defensive;
     // the finally of a completed turn always consumes them).
     this.pendingAutoContinue = null;
+    // 上一轮的「等你确认」标记只在本轮生命周期内有效：那条回复已经到账，
+    // 这轮按它自己的判断重设。而「上一轮停着等你一句确认」是跨轮事实——它
+    // 决定这条回复能不能被读成批准，取走即失效。
+    this.pendingHighRiskConfirmation = false;
+    const confirmationReplyExpected = this.confirmationAwaitingReply;
+    this.confirmationAwaitingReply = false;
     // 早派任务书的原料（刀 2.2）：主任务原文给中途追加的补跑支用。
     this.activeTurnUserText = userText;
 
@@ -4967,12 +4996,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         if (!showAssessmentFlow) return;
         assessmentFlow = createAssessmentFlowCard(effectiveIntent);
         this.appendToTranscript(assessmentFlow.el);
-        assessmentFlow.completePhase('intent', '已完成需求分析，明确了任务目标与边界。');
-        assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
-        // 前置检查已完成的（探针跑完、或本就不需要探针）且不是高风险：闸门落定；
-        // 高风险仍保持等待，直到用户在确认卡上明确批准。
-        if ((probeGateDone || !effectiveIntent.requiresProbe) && !effectiveIntent.requiresConfirmation) {
-          assessmentFlow.completePhase('gate', '前置检查已通过，可以进入执行阶段。');
+        // 节点只落状态，不往卡片里塞编好的句子：卡片要说的内容（这次会动到
+        // 什么、打算怎么做）是分析自己的结论，早已随 assessment 写进节点描述。
+        // 之前这里传的是「已完成需求分析」这类过程回执，等于把判断盖成一句
+        // 「已完成」，用户在确认前看不到任何推理。
+        assessmentFlow.completePhase('intent');
+        assessmentFlow.completePhase('risk');
+        // 需要确认的：闸门停在「等你回复」，看清影响之前不宣布已经通过；
+        // 其余（探针跑完或本就不需要探针）才落定进执行阶段。
+        if (effectiveIntent.requiresConfirmation) {
+          assessmentFlow.awaitPhase('gate');
+        } else if (probeGateDone || !effectiveIntent.requiresProbe) {
+          assessmentFlow.completePhase('gate');
         }
         // 探索/契约结论跟随评估卡一起呈现：先看到真实分析，再看到基于它的发现。
         reportProbeFindings();
@@ -5152,9 +5187,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
             // 刀 1.1：清单随定稿计划过桥到收尾闸门（gateSpecs 的裁决在闸门口）。
             gatePlanVerification = planForReview.verification;
-          } else if (thought?.narration && !needsInteractiveApproval) {
+          } else if (thought?.narration && !needsInteractiveApproval && !effectiveIntent.requiresConfirmation) {
             // 有思考、没解析出结构化步骤：不放假卡。把思考本身当执行指引交给
             // 引擎——写死步骤冒充规划正是这次要根除的模式。
+            // 判为需要确认的请求不走这条：确认闸门需要一个可被确认的对象，
+            // 否则用户说了“确认”之后没有东西可以续跑（下面走完兜底起步安排）。
             this.addStatusBubble(
               t('plan.narrationNoPlan', '思路讲完了，结构化步骤没能从里面解析出来——不硬凑卡片了，我按刚才的思路直接开工。'),
               false, false, 'info',
@@ -5313,6 +5350,21 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             } else {
               approvePlan();
             }
+          } else if (effectiveIntent.requiresConfirmation && !this.abortController?.signal.aborted) {
+            // 模型判为需要确认的请求：不自动开工，停在对话里等一句话。
+            // 判断与影响已经在思考卡和评估卡上（模型自己写的 impact /
+            // recommendation），计划卡也摆好了——这里只记下游标并置位，真正的
+            // 暂停渲染在下面与「计划就绪等开工」共用同一段。
+            // 过去这里是直接 approvePlan() 开工（风险只影响展示），发送前另有一道
+            // 模态窗。现在闸门挪到执行前、由模型判断，形态是对话而不是弹窗。
+            this.pendingHighRiskConfirmation = true;
+            this.activeComplexPlan = approvedPlan;
+            this.activePlanNumber = 1;
+            this.activeTodoNumber = 1;
+            this.activePlanStarted = false;
+            planCard?.setActivity('停在执行之前：等你说一声确认。');
+            modeBubble?.remove();
+            this.removeStatusLine(modeBubble);
           } else {
             // Auto-detected work keeps moving. The plan is visible context,
             // not a second confirmation prompt the user has to dismiss.
@@ -5341,7 +5393,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // rounds looped until maxRounds.
         // 明确的“继续/接着做”才注入续跑框架（计划作为上下文、模型按 Todo 推进）；
         // 中途的“新诉求”则不注入，让模型直接基于既有对话与计划卡自然理解处理。
-        userPlan = isExplicitContinuation(userText)
+        // 上一轮停在执行前等确认时，一句普通的确认（“可以/行/ok”）也算开工——
+        // 用户说的是想不想干，不是“继续”这个词。
+        const resumeApproved = isExplicitContinuation(userText)
+          || (confirmationReplyExpected && isConfirmationReply(userText));
+        userPlan = resumeApproved
           ? formatPlanContinuation(this.activeComplexPlan, this.activePlanNumber, this.activeTodoNumber, needsDeliveryGate)
           : undefined;
         planProgress = new PlanProgressModel(this.activeComplexPlan, 'active', this.activePlanNumber, this.activeTodoNumber, this.activePlanProjectBuild, this.activePlanSeq);
@@ -5372,7 +5428,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.bindActivePlanProgress(planProgress, sendSessionId, sendWorkspace);
         // 仅当是明确续跑指令时才输出“继续处理第 x 阶段第 y 个 Todo”的生硬框架；
         // 中途的新诉求沿用计划上下文，但不套用该文案，直接自然处理。
-        if (isExplicitContinuation(userText)) {
+        if (resumeApproved) {
           this.addStatusBubble(`继续：第 ${this.activePlanNumber} 阶段 · 第 ${this.activeTodoNumber} 个 Todo。`, false, false);
         }
         // 用户回复即明确“开工”：聊天中的计划卡从「等待回复」切回「正在执行」。
@@ -5698,13 +5754,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         turnTiming.contextMs = (turnTiming.contextMs ?? 0) + Math.round(performance.now() - mcpConnectStartMs);
       }
 
-      if (planPauseRequested && this.activeComplexPlan) {
-        // 计划就绪并停在第一个 Todo 前：明确切到「等待你回复」状态，而不是
-        // 让执行节点一直“进行中”地空转。计划卡、暂停气泡、评估卡三处联动。
+      if ((planPauseRequested || this.pendingHighRiskConfirmation) && this.activeComplexPlan) {
+        // 两种「等你回复」共用这一段形态：计划就绪等一句开工，以及模型判为高风险
+        // 的请求停在执行之前等一句确认。两者都切到「等待你回复」，而不是让执行
+        // 节点“进行中”地空转。计划卡、暂停气泡、评估卡三处联动。
+        const confirmationPause = this.pendingHighRiskConfirmation;
+        if (confirmationPause) this.confirmationAwaitingReply = true;
         assessmentFlow?.awaitPhase('execute', '计划已就绪，等待你回复后开始第一个可验证步骤…');
         endThinking();
         this.activePlanStarted = false;
-        const pauseMessage = formatPlanPauseMessage(this.activeComplexPlan);
+        const pauseMessage = confirmationPause
+          ? formatConfirmationPauseMessage(this.activeComplexPlan)
+          : formatPlanPauseMessage(this.activeComplexPlan);
         const pauseSnapshot: Message[] = [
           ...this.messages,
           { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments, internal: isAuto || undefined },
@@ -5732,7 +5793,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         planProgress?.dispatch({ type: 'statusChanged', status: 'waiting' });
         // 一个脉冲状态气泡放在最后：明确告诉用户“一切就绪，等你回复开工”，
         // 避免输入框恢复后看起来像流程悄悄停止了。
-        this.addStatusBubble(`已暂停在这里：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
+        this.addStatusBubble(confirmationPause
+          ? '停在执行之前：回复一句确认（或者说你想改成什么），我再继续。'
+          : `已暂停在这里：直接回复即可开始第 1 项「${firstLabel}」。`, true, false);
         this.scrollUi(chatEl);
         await this.persistSession(
           pauseSnapshot,

@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, evaluatePlanContinuation, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
+import { createPlanCard, createRestoredPlanCard, dedupePlanAnnouncements, evaluatePlanContinuation, formatConfirmationPauseMessage, formatPlanForPrompt, formatPlanContinuation, formatPlanPauseMessage, matchPlanPhaseMarker, matchPlanProgressMarkers, matchPlanSubstepMarker, matchPlanSubstepMarkers } from '../plan';
 import { expectNoDefaultParams } from '../../shared/__tests__/arityLock';
 import { t } from '../../shared/i18n';
 import type { Plan } from '../../coding-agent/types';
@@ -189,6 +189,13 @@ describe('dedupePlanAnnouncements', () => {
     const pause = formatPlanPauseMessage(plan);
     const continuation = formatPlanContinuation(plan, 1, 1, false);
     expect(pause).toContain('安排先放这儿');
+    // 高风险停在执行前等确认时用另一条：它不复述判断（那是评估卡的事），
+    // 只回答两件事——动过东西没有，以及现在能拿什么回。
+    const confirmationPause = formatConfirmationPauseMessage(plan);
+    expect(confirmationPause).toContain('什么都还没动');
+    expect(confirmationPause).toContain('说一声确认');
+    expect(confirmationPause).toContain('需求深挖');
+    expect(confirmationPause).not.toContain('□ 1.');
     expect(pause).toContain('□ 1. 确认用户画像');
     expect(continuation).toContain('<plan_continuation>');
     expect(continuation).toContain('当前阶段 Todos');

@@ -765,7 +765,7 @@ async function main(): Promise<number> {
       // 1) Review gate decisions + real card DOM.
       if (gate === 'all' || gate === 'review') {
         const review = await evaluate(`(async () => {
-          const { shouldEnterPlanReview } = await import('/src/ui/chat.ts');
+          const { shouldEnterPlanReview, isConfirmationReply } = await import('/src/ui/chat.ts');
           const { createAssessmentFlowCard } = await import('/src/ui/assessmentFlow.ts');
           const assessment = {
             intent: 'delete', riskLevel: 'high', reversibility: 'irreversible',
@@ -785,7 +785,11 @@ async function main(): Promise<number> {
             forcedYoloHighRisk: shouldEnterPlanReview(true, false, false, false, true, false),
             assessmentCard: !!host.querySelector('.assessment-flow-card'),
             riskNode: !!host.querySelector('.assessment-flow-node'),
-            gateNode: !!host.querySelector('.assessment-flow-node[data-status]') && Array.from(host.querySelectorAll('.assessment-flow-node')).some((node) => (node.textContent || '').includes('执行前需要你的确认')),
+            gateNode: !!host.querySelector('.assessment-flow-node[data-status]') && Array.from(host.querySelectorAll('.assessment-flow-node')).some((node) => (node.textContent || '').includes('需要你确认')),
+            judgementNode: Array.from(host.querySelectorAll('.assessment-flow-node-description')).some((node) => (node.textContent || '').includes('会删除现有数据')),
+            // 停在执行前等的那句回复：一句确认是放行，带后续内容的句子不是。
+            confirmationReply: isConfirmationReply('确认'),
+            strayConfirmation: isConfirmationReply('确认一下这个文件在哪'),
           };
         })()`);
         const checks: Array<[string, boolean]> = [
@@ -797,6 +801,9 @@ async function main(): Promise<number> {
           ['真实评估卡已渲染', review.assessmentCard, true],
           ['评估卡包含风险节点', review.riskNode, true],
           ['评估卡包含执行确认节点', review.gateNode, true],
+          ['评估卡展示分析自己的判断（impact）', review.judgementNode, true],
+          ['一句确认被读成放行', review.confirmationReply, true],
+          ['带后续内容的句子不当放行', review.strayConfirmation, false],
         ];
         let ok = true;
         for (const [name, actual, want] of checks) {

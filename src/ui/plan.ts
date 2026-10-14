@@ -7,6 +7,7 @@ import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
 import { parseDesignReadyMarker } from '../shared/delivery';
+import { REVERSIBILITY_LABELS } from './assessmentFlow';
 import { showInlineCard } from './inlineCard';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 import { deriveTaskScript, formatTaskStepEvidence, type TaskScript } from '../shared/taskScript';
@@ -126,6 +127,18 @@ export function formatPlanPauseMessage(plan: Plan): string {
   const first = plan.steps[0];
   const todoLines = (first?.substeps ?? []).map((todo, index) => `□ ${index + 1}. ${todo.action}：${todo.description}`).join('\n');
   return `这个任务一口气做完容易翻车，我拆成了几步，先把整体安排给你过目：\n\n${planLines}\n\n我准备先做第 1 项「${first?.action ?? '当前阶段'}」。${todoLines ? `这一阶段拆成这几件小事：\n${todoLines}` : ''}\n\n安排先放这儿——有想调整的直接说；觉得没问题就回我一声，我按这个顺序开工。`;
+}
+
+/** Build the assistant-side entry for "高风险请求停在执行前，等一句回复".
+ *
+ * 判断与影响不在这里——它们在评估卡上，是这次分析自己写的话（impact /
+ * recommendation）。这条消息只回答用户此刻最想知道的两个问题：你动过东西没有
+ *（没有），以及我现在能拿什么回你（一句确认，或者一句改方向的说明）。 */
+export function formatConfirmationPauseMessage(plan: Plan): string {
+  const first = plan.steps[0]?.action;
+  return `判断和影响都在上面了，我停在这里——什么都还没动。\n\n`
+    + `说一声确认，我就按这个方向开始${first ? `（先做第 1 项「${first}」）` : ''}；`
+    + `如果你其实只想改其中一点点、或者想换个更稳的做法，直接说，我重新想。`;
 }
 
 /** Context for a later user turn that continues an already-approved complex plan. */
@@ -746,7 +759,9 @@ function showPlanDialog(analysis: AnalysisResult, options: PlanReviewOptions): P
 
   const intent = analysis.intent;
   const riskSummary = intent
-    ? `<div class="plan-risk-summary"><strong>${intent.requiresConfirmation ? '⚠️ 高风险操作' : '🧭 主动评估'}</strong><br><span>影响：${escapeHtml(intent.impact)}</span><br><span>可逆性：${escapeHtml(intent.reversibility)}</span><br><span>建议：${escapeHtml(intent.recommendation)}</span></div>`
+    // 影响 / 建议是分析自己的结论，原样展示；可逆性只是把内部枚举翻成档位，
+    // 不再把 `irreversible` 这样的原始值印给用户。
+    ? `<div class="plan-risk-summary"><strong>${intent.requiresConfirmation ? '⚠️ 高风险操作' : '🧭 主动评估'}</strong><br><span>影响：${escapeHtml(intent.impact)}</span><br><span>可逆性：${escapeHtml(REVERSIBILITY_LABELS[intent.reversibility] ?? intent.reversibility)}</span><br><span>建议：${escapeHtml(intent.recommendation)}</span></div>`
     : '';
   return showInlineCard({
     host: options.host,
