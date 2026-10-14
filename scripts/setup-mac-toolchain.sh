@@ -269,20 +269,17 @@ if has bun; then
   if [[ "$BV" == "$PURE_BUN_PINNED" ]]; then
     ok "bun $BV (matches CI pin)"
   else
-    warn "bun $BV != CI pin $PURE_BUN_PINNED — aligning"
-    doit "bun upgrade $PURE_BUN_PINNED" bun upgrade "$PURE_BUN_PINNED"
+    warn "bun $BV != CI pin $PURE_BUN_PINNED — reinstalling pinned"
+    # `bun upgrade` 不收版本参数（实测 exit 1，它只升级自身）；钉版/降版走
+    # 官方安装器的 bun-v<version> 位置参数，原地替换 ~/.bun/bin/bun。
+    pipeit "install bun $PURE_BUN_PINNED (https://bun.sh)" \
+      "curl -fsSL https://bun.sh/install | bash -s \"bun-v$PURE_BUN_PINNED\""
   fi
 else
   if confirm; then
-    pipeit "install bun (https://bun.sh)" \
-      "curl -fsSL https://bun.sh/install | bash"
-    # 安装器装的是 latest；PATH 里还没有 bun，直接用绝对路径钉到对齐版。
-    if [[ -x "$HOME/.bun/bin/bun" ]]; then
-      BV="$("$HOME/.bun/bin/bun" --version 2>/dev/null)"
-      if [[ "$BV" != "$PURE_BUN_PINNED" ]]; then
-        doit "pin bun $PURE_BUN_PINNED" "$HOME/.bun/bin/bun" upgrade "$PURE_BUN_PINNED"
-      fi
-    fi
+    # 安装器默认装 latest，直接用 bun-v<version> 钉到与 CI 一致的版本。
+    pipeit "install bun $PURE_BUN_PINNED (https://bun.sh)" \
+      "curl -fsSL https://bun.sh/install | bash -s \"bun-v$PURE_BUN_PINNED\""
     warn "bun installed to ~/.bun/bin — add it to PATH:  export PATH=\"\$HOME/.bun/bin:\$PATH\""
   else
     warn "skipped bun install (the project requires bun for every npm script)"
