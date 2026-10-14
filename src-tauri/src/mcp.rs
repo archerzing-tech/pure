@@ -349,6 +349,47 @@ pub fn mcp_oauth_token_delete(server: String) -> Result<(), String> {
     }
 }
 
+/// 稳定错误前缀：stdio 子进程已死，且本次调用已把它在注册表里的句柄丢掉
+/// ——下一次 spawn_mcp 从零重生。TS 侧 TauriStdioTransport 以这个前缀摘掉
+/// spawned 闩实现懒重生（GUI 版的 CLI StdioTransport「exit→teardown→下次
+/// send 重生」）。改这个字符串必须同步 TauriStdioTransport.ts 的
+/// CHILD_GONE_PREFIX。
+const CHILD_GONE_PREFIX: &str = "MCP server process gone";
+
+/// 请求/通知失败后判死：子进程确实退出了，就丢掉注册表句柄并把错误改写
+/// 成 CHILD_GONE_PREFIX 前缀（原错误细节保留在后面）；还活着就原样透传
+/// ——JSON-RPC 错误、普通写失败与重生无关，不该摘闩。判死只信
+/// try_wait：自行退出的进程由它 waitpid 收割；600s 楔死兜底路径的
+/// kill().await 在 tokio 里等进程退出并收割后才返回，随后 try_wait 必得
+/// Some。Arc::ptr_eq 保证只删自己这一代句柄，不误删并发 spawn_mcp 刚插
+/// 进来的新一代（同键覆盖是合法的重生路径）。
+async fn drop_handle_if_dead(
+    registry: &McpRegistry,
+    key: &str,
+    handle: &Arc<McpHandle>,
+    err: String,
+) -> String {
+    let exited = handle
+        .child
+        .lock()
+        .await
+        .try_wait()
+        .map(|status| status.is_some())
+        .unwrap_or(false);
+    if !exited {
+        return err;
+    }
+    let mut registry = registry.lock().await;
+    if registry
+        .get(key)
+        .map(|h| Arc::ptr_eq(h, handle))
+        .unwrap_or(false)
+    {
+        registry.remove(key);
+    }
+    format!("{CHILD_GONE_PREFIX}: {err}")
+}
+
 #[tauri::command]
 pub async fn mcp_request(
     state: tauri::State<'_, McpRegistry>,
@@ -364,7 +405,10 @@ pub async fn mcp_request(
             .ok_or_else(|| format!("MCP not found: {}", key))?
             .clone()
     };
-    mcp_call_inner(&handle, &request).await
+    match mcp_call_inner(&handle, &request).await {
+        Ok(response) => Ok(response),
+        Err(err) => Err(drop_handle_if_dead(&state, &key, &handle, err).await),
+    }
 }
 
 /// Send an MCP JSON-RPC notification (write-only — the server sends no
@@ -384,20 +428,26 @@ pub async fn mcp_notify(
             .ok_or_else(|| format!("MCP not found: {}", key))?
             .clone()
     };
-    let mut stdin = handle.stdin.lock().await;
-    stdin
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| format!("write stdin: {}", e))?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .map_err(|e| format!("write newline: {}", e))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|e| format!("flush stdin: {}", e))?;
-    Ok(())
+    let write = async {
+        let mut stdin = handle.stdin.lock().await;
+        stdin
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| format!("write stdin: {}", e))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("write newline: {}", e))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("flush stdin: {}", e))?;
+        Ok(())
+    };
+    match write.await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(drop_handle_if_dead(&state, &key, &handle, err).await),
+    }
 }
 
 #[tauri::command]
@@ -430,4 +480,149 @@ pub async fn mcp_list(
         .cloned()
         .collect();
     Ok(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pipe_handle(cmd: TokioCommand) -> McpHandle {
+        let mut cmd = silent_child_tokio(cmd);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().expect("spawn test child");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        McpHandle {
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(stdin),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_child_is_dropped_and_error_marked() {
+        // 立即退出的服务端：判死必须丢句柄并打上 CHILD_GONE_PREFIX，原始
+        // 错误细节保留，TS 侧靠前缀摘 spawned 闩、下次请求重生。
+        let mut cmd = TokioCommand::new("sh");
+        cmd.arg("-c").arg("exit 0");
+        let handle = Arc::new(pipe_handle(cmd));
+        // 等 sh 真正退出（try_wait 收割），判死才判得出来。
+        loop {
+            if handle
+                .child
+                .lock()
+                .await
+                .try_wait()
+                .expect("try_wait")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let registry: McpRegistry = tokio::sync::Mutex::new(BTreeMap::new());
+        registry
+            .lock()
+            .await
+            .insert("sess:svc".into(), handle.clone());
+
+        let marked = drop_handle_if_dead(
+            &registry,
+            "sess:svc",
+            &handle,
+            "write stdin: Broken pipe".into(),
+        )
+        .await;
+
+        assert!(
+            marked.starts_with(CHILD_GONE_PREFIX),
+            "error must carry the respawn marker, got: {marked}"
+        );
+        assert!(
+            marked.contains("write stdin"),
+            "original detail must survive the rewrite, got: {marked}"
+        );
+        assert!(
+            registry.lock().await.get("sess:svc").is_none(),
+            "dead handle must be dropped so the next spawn_mcp starts fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_child_keeps_handle_and_error_passes_through() {
+        // 常驻回显服务端：普通失败不该判死——句柄留下、错误原样透传，
+        // spawned 闩不该被无关失败摘掉。
+        let mut cmd = TokioCommand::new("sh");
+        cmd.arg("-c").arg("cat");
+        let handle = Arc::new(pipe_handle(cmd));
+        let registry: McpRegistry = tokio::sync::Mutex::new(BTreeMap::new());
+        registry
+            .lock()
+            .await
+            .insert("sess:svc".into(), handle.clone());
+
+        let passthrough = drop_handle_if_dead(
+            &registry,
+            "sess:svc",
+            &handle,
+            "write stdin: broken".into(),
+        )
+        .await;
+
+        assert_eq!(passthrough, "write stdin: broken");
+        assert!(
+            registry.lock().await.get("sess:svc").is_some(),
+            "live handle must stay registered"
+        );
+
+        let mut child = handle.child.lock().await;
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_newer_generation_handle_survives_an_old_dead_one() {
+        // 并发重生守卫：判死的是上一代死句柄，注册表里已是新一代活句柄
+        // 时不得误删（Arc::ptr_eq 守卫）。
+        let mut dead_cmd = TokioCommand::new("sh");
+        dead_cmd.arg("-c").arg("exit 0");
+        let dead = Arc::new(pipe_handle(dead_cmd));
+        loop {
+            if dead
+                .child
+                .lock()
+                .await
+                .try_wait()
+                .expect("try_wait")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut fresh_cmd = TokioCommand::new("sh");
+        fresh_cmd.arg("-c").arg("cat");
+        let fresh = Arc::new(pipe_handle(fresh_cmd));
+        let registry: McpRegistry = tokio::sync::Mutex::new(BTreeMap::new());
+        registry.lock().await.insert("sess:svc".into(), fresh.clone());
+
+        let marked =
+            drop_handle_if_dead(&registry, "sess:svc", &dead, "read stdout: eof".into()).await;
+
+        assert!(marked.starts_with(CHILD_GONE_PREFIX), "got: {marked}");
+        let current = registry
+            .lock()
+            .await
+            .get("sess:svc")
+            .cloned()
+            .expect("newer handle must survive");
+        assert!(
+            Arc::ptr_eq(&current, &fresh),
+            "the freshly spawned handle must not be dropped for an older generation's death"
+        );
+
+        let mut child = fresh.child.lock().await;
+        let _ = child.kill().await;
+    }
 }
