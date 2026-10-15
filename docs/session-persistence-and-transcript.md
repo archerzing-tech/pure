@@ -3,6 +3,8 @@
 > 本文说明 GUI 会话在运行时、持久化和历史恢复之间的职责边界。
 > 规范依据：`src/ui/store.ts`、`src/ui/chat.ts`、`src/ui/transcriptProjection.ts`、`src/ui/main.ts`。
 >
+> 当前 GUI 快照主格式为 **V3**（`SessionSnapshotV3`，`version: 3`，含 `events` / `statusLines` / `uiState.pendingQueue` 等）；V1/V2 为可读旧格式，读入时经 `normalizeSessionSnapshot()` 归一化迁移到 V3。
+>
 > 本文讨论的是 GUI 会话快照，不替代 Engine/Harness 内部用于下一轮执行的 `Message[]` 检查点契约。
 
 ## 1. 核心原则
@@ -53,27 +55,27 @@ UI DOM
 
 `analysis`、`thinking`、`toolExec`、`artifacts`、`assessment` 和 `planState` 都不能添加到 `Message` 上，也不能通过 UI 展示字段回填 `modelContext.messages`。
 
-## 2. V2 会话快照
+## 2. V3 会话快照
 
-当前 GUI 持久化的主格式是 `SessionSnapshotV2`：
+当前 GUI 持久化的主格式是 `SessionSnapshotV3`（兼容名 `SessionSnapshotV2` 现已指向 V3）：
 
 ```typescript
-interface SessionSnapshotV2 {
-  version: 2;
+interface SessionSnapshotV3 {
+  version: 3;
+  revision?: number;
   modelContext: {
     messages: Message[];
   };
+  /** A1 fold 水位：快照已含事件日志中 ts ≤ 此值的 turn_messages。 */
+  foldedThrough?: number;
+  events: SessionEvent[];
+  uiState: SessionUiState;
   transcript: TranscriptEntry[];
-  uiState: {
-    planState?: {
-      plan: Plan;
-      planNumber: number;
-      todoNumber: number;
-      started: boolean;
-    } | null;
-  };
+  statusLines?: StatusLineRecord[];
 }
 ```
+
+`events` 是 V3 相对 V2 的核心增量：转录/UI 状态改由「事件序列」表达，回放按事件顺序直接铺开；`statusLines` 是状态叙述行的锚点账（按 `afterIndex` 插回消息与工具卡之间），`foldedThrough` 是快照与事件日志的 fold 水位。V2 无 `events`，读入时由 `snapshotV2ToV3()` 从 `transcript` 派生。
 
 ### 2.1 `modelContext.messages`
 
@@ -110,6 +112,8 @@ interface SessionSnapshotV2 {
 - 计划是否已经开始执行。
 - `null` 表示计划已被明确取消或不存在。
 
+此外 V3 的 `uiState` 还承载重启恢复所需的运行态（均为可选字段，对 V3 向后兼容、不升版本号）：`agentActivities`（多 agent 活动快照）、`taskScript`（TaskScript 结构账）、`sessionLedger`（会话账本）、`paused`（回合以暂停收场的显式标记，恢复侧据此重建「继续」条）、`pendingQueue`（待办队列与押账插话）。
+
 恢复时 `ChatController.loadFromStorage()` 会根据这一层重建右侧计划总览；转录投影则负责恢复聊天内容中的评估卡和暂停操作。
 
 ## 3. 保存链路
@@ -143,7 +147,7 @@ saveSession()
 - **纯浏览器开发模式**：localStorage 保存 `{ snapshot, updatedAt, messageCount, workspace }`。
 - 保存前会对 `modelContext.messages` 做有界裁剪，当前上限为 `MAX_PERSISTED_MESSAGES = 400`；转录只保留仍对应于该模型窗口的条目。
 
-Rust 的 `session.json` 外层仍保留 `messages` 字段用于旧版本索引和读取兼容，但 V2 的真实快照位于 `snapshot` 字段。新的前端读取优先使用 `snapshot`，不能把外层 `messages` 当成 V2 的完整 UI 数据。
+Rust 的 `session.json` 外层仍保留 `messages` 字段用于旧版本索引和读取兼容，但 V3 的真实快照位于 `snapshot` 字段。新的前端读取优先使用 `snapshot`，不能把外层 `messages` 当成 V3 的完整 UI 数据。
 
 ## 4. 历史恢复链路
 
@@ -155,7 +159,8 @@ SessionSidebar.load()
 loadSession()
     ↓
 normalizeSessionSnapshot()
-    ├─ V2：直接读取 modelContext / transcript / uiState
+    ├─ V3：直接读取 modelContext / events / transcript / uiState（+ statusLines）
+    ├─ V2：snapshotV2ToV3() 由 transcript 派生 events 后升级为 V3
     └─ V1：createSessionSnapshotFromLegacy()
     ↓
 ChatController.loadFromStorage(snapshot)
@@ -193,6 +198,8 @@ LLM 看到：请求 + 本轮必要的 task_context
 两者不同是有意设计，不是数据丢失。
 
 ## 5. 旧会话迁移
+
+除 V1 外，还存在 **V2 旧快照**（有 `transcript` / `uiState`、无 `events`）：读入时经 `snapshotV2ToV3()` 由转录派生事件、升级为 V3；旧档不会就地重写，落回 `version: 3` 要等到下一次持久化。
 
 V1 旧格式通常是：
 
