@@ -32,6 +32,7 @@ import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeCo
 import type { SubagentDefinition, SubagentResult } from './types';
 import { Tags } from './ToolRegistry';
 import { createDefaultVerifier, type Verifier } from './Verifier';
+import { appendTrace } from '../evolution/trace';
 
 /** Terminal outcome of a subagent, used by the UI to color the badge and by
  * the orchestrator to distinguish a timeout/cancel from an ordinary failure.
@@ -497,6 +498,8 @@ export class SubagentOrchestrator implements ToolAdapter {
     // Parse args — slightly-broken LLM JSON is repaired first, so a single
     // trailing comma or unquoted key no longer drops the whole prompt payload.
     const args = parseToolArguments(toolCall.function.arguments);
+    // 最小 trace：委派启动
+    try { appendTrace({ type: 'delegate', subagentId: toolCall.id, reason: toolCall.function.name, snippet: this.inputSnippet(args).slice(0, 60) }); } catch {}
     // 注册表补点名匹配面（第 2 期）：branchView 的 snippet 供宿主按主题
     // 点名停/续一支——名字是代号（researcher），主题在任务书里。
     const registered = this.branches.get(toolCall.id);

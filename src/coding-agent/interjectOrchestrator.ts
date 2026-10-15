@@ -193,6 +193,7 @@ export class InterjectOrchestrator {
     if (!this.deps.isStreaming()) {
       // The turn is over; a normal send renders the user's own bubble, so the
       // provisional ack would only orphan a promise nobody keeps.
+      try { appendTrace({ type: 'interject_block', reason: 'not_streaming', snippet: text.slice(0, 60) }); } catch {}
       this.deps.discardAckRow(ack);
       this.deps.send(text, images, displayText);
       return;
@@ -214,11 +215,19 @@ export class InterjectOrchestrator {
     // 它至少让 decide 拿到一个 llm）。档位选择留宿主（decideLlm 缝）。
     const decision = await this.deps.decider.decide(this.deps.decideLlm(), this.deps.insertionContext(images), { text, images, displayText }, this.deps.decideSignal());
     this.deps.logDecision(decision, text);
+    // 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
+    // 做」）：裁决器判的那一刻就在现场，由它顺手写好给用户看的那两句。只在
+    // 路线与收执语义一致的臂（steer / 折入）采用；规则与安全网路径没有裁决
+    // 器在场，天然没有它——固定口径仍是兜底，不再是无条件的唯一话术。
+    const receipt = typeof decision.signals.receipt === 'string' && decision.signals.receipt.trim()
+      ? decision.signals.receipt
+      : undefined;
     if (this.deps.isAborted()) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
       // queueInterjectTask renders is the receipt; the provisional ack would
       // only duplicate it.
+      try { appendTrace({ type: 'interject_block', reason: 'aborted_during_classify', snippet: text.slice(0, 60) }); } catch {}
       this.deps.discardAckRow(ack);
       this.deps.queueInterjectTask(text, images, displayText);
       return;

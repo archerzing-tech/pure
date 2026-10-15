@@ -97,6 +97,7 @@ import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { formatBytes } from '../shared/format';
+import { summarizeToolResult } from '../shared/toolDigest';
 import { showToast } from '../shared/toast';
 import { mergeTranscriptWithTurn } from '../shared/conversation';
 import { t } from '../shared/i18n';
@@ -6339,6 +6340,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (resultText.length >= THINK_DIGEST_CHARS) {
               digestNote = { tool: toolDisplayName(toolName), chars: resultText.length };
             }
+            // 附加：最小化工具结果摘要（不改现有 UI 文案）
+            try { void summarizeToolResult(toolName, resultText); } catch {}
             // Special-parse web_search / web_fetch results for rich body
             // rendering; generated images render as <img> cards. Other tools
             // fall back to a raw preview in <pre>.
