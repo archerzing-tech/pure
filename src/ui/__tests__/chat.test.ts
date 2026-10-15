@@ -1470,6 +1470,47 @@ describe('plan overview completion state', () => {
     expect(plane.indexOf('for (const task of this.deps.foldSettle(this.deps.activityCount())) this.queueTask(task);')).toBeGreaterThan(-1);
   });
 
+  it('strips a named settled branch output from the request path on aggregation-window cancels (缺口②机械排除)', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
+    const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
+    // 不对称的由来：在飞停支=结算体不带产出（机制强制，SubagentOrchestrator
+    // 不带 finalOutput），已收工支被点名取消=只有 cancelFoldInstruction 的
+    // 提示词约束——产出还在父上下文里，模型听话与否全凭祈祷。机械排除把
+    // 「不进汇总」升格为数据不在场。
+    // 宿主执行缝：手术只动引擎上下文（role=tool + toolCallId 定位那路结果，
+    // content 换墓碑），转写渲染是另一条通道不受影响；找不到按没剔处理。
+    const stripFn = src.indexOf('private stripSettledBranchOutput(callId: string): boolean {');
+    expect(stripFn).toBeGreaterThan(-1);
+    const stripBody = src.slice(stripFn, stripFn + 800);
+    expect(stripBody.indexOf("m.role === 'tool' && m.toolCallId === callId")).toBeGreaterThan(-1);
+    expect(stripBody.indexOf('hit.content = settledBranchCancelNote();')).toBeGreaterThan(-1);
+    expect(stripBody.indexOf('return false;')).toBeGreaterThan(-1);
+    // 墓碑住 insertionMessaging（协议文本单一出处）：取消语义 + 宣布职责。
+    expect(msg.indexOf('export function settledBranchCancelNote(')).toBeGreaterThan(-1);
+    expect(msg.indexOf('【已按用户要求取消】')).toBeGreaterThan(-1);
+    // 候选面只认产出已回的支：暂停/停掉的支结算不带产出，无从剔除。
+    expect(src.indexOf("settledBranches: () => this.agentActivities\n      .filter((item) => item.status === 'done')")).toBeGreaterThan(-1);
+    // 编排器判定缝：整理窗取消臂先认已结算支再折入（两臂同形）；匹配纪律
+    // 复用 1a 区分词匹配器（打平不赌=宁可漏剔不误剔），fold 不因此省。
+    const stripTarget = orch.indexOf('private stripSettledTarget(text: string): void {');
+    expect(stripTarget).toBeGreaterThan(-1);
+    const stripTargetBody = orch.slice(stripTarget, stripTarget + 900);
+    expect(stripTargetBody.indexOf('matchInFlightBranch(text, this.deps.settledBranches())')).toBeGreaterThan(-1);
+    expect(stripTargetBody.indexOf('this.deps.stripSettledBranchOutput(matched.callId)')).toBeGreaterThan(-1);
+    // 整理窗两臂（steer 取消 + task 取消）都在折入前先剔除；strip 与 fold
+    // 同拍出现=宣布职责（「已取消」一句话）仍由框架文本承担。机械追加臂
+    // （task 的非取消路径）不带剔除——追加没有「产出不在场」的语义。
+    const armCount = orch.split('this.stripSettledTarget(text);').length - 1;
+    expect(armCount).toBe(2);
+    const steerCase = orch.indexOf("case 'steer': {");
+    const steerBody = orch.slice(steerCase, orch.indexOf("case 'question':", steerCase));
+    expect(steerBody.indexOf('this.stripSettledTarget(text);')).toBeGreaterThan(-1);
+    const taskCase = orch.indexOf("case 'task': {");
+    const taskBody = orch.slice(taskCase, orch.indexOf("case 'chatter':", taskCase));
+    expect(taskBody.indexOf('this.stripSettledTarget(text);')).toBeGreaterThan(-1);
+  });
+
   it('handles a cancelled branch of parallel work as a removal, never an addition (2026-09-24 取消案例)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));

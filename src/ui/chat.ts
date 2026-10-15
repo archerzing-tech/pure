@@ -45,7 +45,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1870,6 +1870,12 @@ export class ChatController {
     coveringCandidates: () => this.agentActivities
       .filter((item) => item.status === 'running' || item.status === 'done')
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet, status: item.status === 'running' ? 'running' as const : 'done' as const })),
+    // 缺口②机械排除（2026-10-15）：已收工且产出已回的支（暂停/停掉的支结
+    // 算不带产出，无从剔除）——整理窗取消的剔除候选面。
+    settledBranches: () => this.agentActivities
+      .filter((item) => item.status === 'done')
+      .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet })),
+    stripSettledBranchOutput: (callId) => this.stripSettledBranchOutput(callId),
     branchLabel: (name, callId) => this.branchLabel(name, callId),
     // 阶段 C 窗读数（2026-10-15 样本口径接入）：委派已出生且一支不在飞、回合
     // 仍在流式——汇合后的整理/汇总窗。此刻追加/取消折入汇聚轮而非排队/转达。
@@ -3180,6 +3186,19 @@ export class ChatController {
     if (!branch) return null;
     const ok = mode === 'pause' ? orchestrator.pauseBranch(callId) : orchestrator.abortBranch(callId);
     return ok ? this.branchLabel(branch.agentName, callId) : null;
+  }
+
+  /** 缺口②机械排除（2026-10-15）：把已收工委派支在父上下文里的产出整体换
+   *  成墓碑（settledBranchCancelNote）——后续请求从此看不见那路产出，与在
+   *  飞停支「结算体不带产出」同一语义。引擎上下文与转写渲染是两条通道：这
+   *  里只动 this.messages，用户界面上的委派卡与转写不受影响。返回 false =
+   *  messages 里没有那路的工具结果（迟到/缺账），调用方按没剔处理，不预支
+   *  任何「已剔除」的说法。 */
+  private stripSettledBranchOutput(callId: string): boolean {
+    const hit = this.messages.find((m) => m.role === 'tool' && m.toolCallId === callId);
+    if (!hit) return false;
+    hit.content = settledBranchCancelNote();
+    return true;
   }
 
   /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的

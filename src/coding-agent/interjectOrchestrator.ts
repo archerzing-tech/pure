@@ -52,6 +52,12 @@ export interface InterjectOrchestratorDeps {
   stoppedBranches(): InFlightBranch[];
   /** 覆盖去重的匹配面：在飞 + 已收工（结果已在汇总里同样不重派）。 */
   coveringCandidates(): CoveringBranch[];
+  /** 已收工支的匹配面（缺口②机械排除，2026-10-15）：产出已回、结果已在父
+   *  上下文里的支（status=done；暂停/停掉的支结算不带产出，无从剔除）。 */
+  settledBranches(): InFlightBranch[];
+  /** 已收工支的产出剔除（宿主执行，返回 false = 上下文里没找到那路的
+   *  结果——迟到/缺账，调用方按没剔处理，不预支收执）。 */
+  stripSettledBranchOutput(callId: string): boolean;
   /** 收执里引用支名时带同任务第几号（同名多支消歧）。 */
   branchLabel(name: string, callId: string): string;
   /** 阶段 C 窗口（2026-10-15 用户定调「冲突按样本执行」并行委派都收齐、汇总
@@ -389,6 +395,7 @@ export class InterjectOrchestrator {
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
           if (this.deps.atAggregationWindow()) {
+            this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
           } else {
             // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
@@ -453,6 +460,7 @@ export class InterjectOrchestrator {
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
           if (this.deps.atAggregationWindow()) {
+            this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
           } else {
             try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
@@ -574,6 +582,22 @@ export class InterjectOrchestrator {
     if (!matched) return null;
     const hit = candidates.find((item) => item.callId === matched.callId);
     return hit ? { name: hit.name, callId: hit.callId, status: hit.status } : null;
+  }
+
+  /** 缺口②机械排除（2026-10-15）：整理窗的取消点中了某支**已收工**的支时，
+   *  宿主把那路的产出从父上下文里整体剔除（换墓碑）——「不进最终汇总」从
+   *  cancelFoldInstruction 的劝阻升格为数据不在场，与在飞停支「结算体不带
+   *  产出」的机制强制抹平不对称。匹配纪律复用点名续跑的先例（1a 区分词匹
+   *  配器：只认区分性命中，打平/认不出 = 宁可漏剔不误剔，fold 的提示词约
+   *  束照旧兜底）；候选只认产出已回的支（settledBranches——暂停/停掉的支
+   *  结算不带产出，无从剔除）。fold 不因此省：最终汇总宣布「已取消」的
+   *  职责仍在框架文本里。 */
+  private stripSettledTarget(text: string): void {
+    const matched = matchInFlightBranch(text, this.deps.settledBranches());
+    if (!matched) return;
+    if (this.deps.stripSettledBranchOutput(matched.callId)) {
+      try { appendTrace({ type: 'cancel_strip_settled', snippet: text.slice(0, 80) }); } catch {}
+    }
   }
 
   // ── 思考窗寄存器的宿主面（send() 重启循环 / planByThinking / 上下文投影用）─
