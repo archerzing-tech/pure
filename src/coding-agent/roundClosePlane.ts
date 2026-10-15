@@ -150,4 +150,25 @@ export class RoundClosePlane {
     this.queue = [];
     this.heldInsert = null;
   }
+
+  /** 持久化快照（第 3 期最小核心，E6）：待办队列与押账插话的原话账，与
+   *  SessionUiState.pendingQueue 同形。深拷贝出账——宿主落盘后还会继续改
+   *  账，不能共享引用。 */
+  snapshot(): { queue: QueuedTask[]; heldInsert: QueuedTask | null } {
+    return {
+      queue: this.queue.map((t) => ({ ...t })),
+      heldInsert: this.heldInsert ? { ...this.heldInsert } : null,
+    };
+  }
+
+  /** 从快照收账（会话恢复点调用）。只在空账上收：恢复发生在会话切换之后，
+   *  reset 已清场；非空拒收——宁可丢一份旧话，不养双真相。恢复只装账不
+   *  派发：重启的会话没有「回合收尾」这一刻，排队的活等下一个自然派发点
+   *  （用户下一句话的收尾扫除接手）——被记得 ≠ 此刻抢跑；队列卡的 DOM
+   *  重建同样留给宿主回放后的 restoreQueueAffordance（与「继续」条同拍）。 */
+  restore(state: { queue: QueuedTask[]; heldInsert: QueuedTask | null }): void {
+    if (this.queue.length > 0 || this.heldInsert !== null) return;
+    this.queue = state.queue.map((t) => ({ ...t }));
+    this.heldInsert = state.heldInsert ? { ...state.heldInsert } : null;
+  }
 }

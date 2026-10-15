@@ -11,6 +11,7 @@
 
 import type { Message, MessageAttachment, MessageImage, TokenUsage, GeneratedImage } from '../shared/types';
 import type { IntentAssessment, Plan } from '../coding-agent/types';
+import type { QueuedTask } from '../coding-agent/roundClosePlane';
 import type { PlanProgressSnapshot } from './planProgress';
 import type { TaskScript } from '../shared/taskScript';
 import type { SessionLedger } from '../shared/sessionLedger';
@@ -116,6 +117,13 @@ export interface SessionUiState {
    *  可选字段对 v3 完全向后兼容（旧 app 读新档无感），故不升快照版本号——
    *  normalize 只认 version===3，升号反而让旧 app 读新档掉兜底清空会话。 */
   paused?: boolean;
+  /** 第 3 期最小核心（E6，2026-10-15）：回合收尾待办队列与押账插话随快照
+   *  走。此前二者纯内存（"a restored session has none"），重启即丢——插话
+   *  「被记得执行而非忘掉」的主轴跨不过重启。恢复侧装回 RoundClosePlane，
+   *  队列卡由 restoreQueueAffordance 在回放后重建；派发不抢跑，等下一个
+   *  自然收尾点。可选字段对 v3 向后兼容（paused/sessionLedger 同款先例，
+   *  不升快照版本号——normalize 只认 version===3）。 */
+  pendingQueue?: { queue: QueuedTask[]; heldInsert: QueuedTask | null };
 }
 
 export interface PlanState {

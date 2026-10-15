@@ -2847,6 +2847,17 @@ export class ChatController {
     // 空账，读侧不崩）。澄清句柄不恢复：一个已死的进程收不到那个回答，句柄
     // 跟着旧进程走。
     this.sessionLedger = normalizeSessionLedger(snapshot.uiState.sessionLedger);
+    // E6：账随会话走——旧会话的活账在此弃掉（切走前已随快照落盘；在飞队列
+    // 账有 hasPendingCloseWork 否决冷回收兜着），再从新会话的快照收账。不弃
+    // 账的后果：上一会话排队的活在本会话的收尾派发里重入，还会被本会话的下
+    // 一次落盘写成自己的 pendingQueue——跨会话串账落盘。卡引用一并作废：旧
+    // 卡随旧转写子树丢弃，留着它，restoreQueueAffordance 重建的卡会渲染进
+    // 已脱管的节点（不可见）。队列卡等回放铺完再建（restoreQueueAffordance，
+    // 与「继续」条同拍）；派发不抢跑，等下一个自然收尾点。
+    this.roundClose.reset();
+    this.queueCardEl?.parentElement?.remove();
+    this.queueCardEl = null;
+    if (snapshot.uiState.pendingQueue) this.roundClose.restore(snapshot.uiState.pendingQueue);
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
 
@@ -3515,9 +3526,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   /** The visible to-do queue: ONE card in the transcript that re-renders as
    * items queue up and drain, instead of a system line per enqueue. A
    * colleague keeps a running list you can glance at — "待办队列更新：1… 2…"
-   * — not a receipt for every entry. DOM-only by design: the queue ledger is
-   * live state (a restored session has none), so there is nothing to re-render on
-   * disk restore and nothing stale to clean up. */
+   * — not a receipt for every entry. E6 起账随快照走（SessionUiState.pendingQueue，
+   * 不再是 DOM-only）：恢复会话经 restoreQueueAffordance 在回放后重建本卡，
+   * 派发不抢跑——等下一个自然收尾点。 */
   private renderQueueCard(): void {
     if (this.roundClose.queueView().length === 0) {
       this.queueCardEl?.parentElement?.remove();
@@ -7579,6 +7590,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.showPausedResumeBar();
   }
 
+  /** E6：回放完成后由宿主调用——快照带待办队列时重建队列卡。与「继续」条
+   *  同拍同理由：回放期间建卡会铺进回放内容中间，回放后建则自然落在转写
+   *  尾部。押账插话不建卡（实况中它也从不上卡），但账已在恢复时装回，下一
+   *  个收尾派发点的押账优先臂会消费它。派发不抢跑：排队的活等下一个自然
+   *  派发点（用户下一句话的收尾扫除接手）。 */
+  restoreQueueAffordance(): void {
+    if (this.roundClose.queueView().length === 0) return;
+    this.renderQueueCard();
+  }
+
   private dismissPausedResumeBar(): void {
     this.pausedResumeBar?.remove();
     this.pausedResumeBar = null;
@@ -7806,6 +7827,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 会话账本随快照走（第 4 期）：空账写 undefined 不留字段，快照不膨胀。
         sessionLedger: this.sessionLedger.asked.length + this.sessionLedger.done.length + this.sessionLedger.plans.length > 0
           ? this.sessionLedger
+          : undefined,
+        // E6（第 3 期最小核心）：待办队列与押账插话随快照走——重启不再丢
+        // 排队的话。空账写 undefined 不留字段，快照不膨胀。
+        pendingQueue: this.roundClose.queueView().length > 0 || this.roundClose.hasHeldInsert()
+          ? this.roundClose.snapshot()
           : undefined,
       },
     };
@@ -8596,6 +8622,11 @@ export class SessionChatManager {
   /** 刀 2：回放收尾转发——「继续」条住在可见会话的 controller 里。 */
   restorePausedAffordance(): void {
     this.activeNow().restorePausedAffordance();
+  }
+
+  /** E6：回放收尾转发——待办队列卡住在可见会话的 controller 里。 */
+  restoreQueueAffordance(): void {
+    this.activeNow().restoreQueueAffordance();
   }
 
   registerPausedAssessment(flow: AssessmentFlowHandle | null): void {

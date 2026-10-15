@@ -167,3 +167,67 @@ describe('RoundClosePlane 调度与清场', () => {
     expect(r.reentered).toEqual([]);
   });
 });
+
+// ── E6（第 3 期最小核心）：账随快照走（SessionUiState.pendingQueue）────
+describe('RoundClosePlane snapshot/restore（E6 持久化）', () => {
+  it('snapshot deep-copies out: later ledger mutations leave the snapshot untouched', () => {
+    const r = rig();
+    r.plane.queueTask(task('排队的活'));
+    r.plane.holdInsert(task('押账'));
+    const snap = r.plane.snapshot();
+    expect(snap.queue.map((t) => t.text)).toEqual(['排队的活']);
+    expect(snap.heldInsert?.text).toBe('押账');
+    // 深拷贝出账：宿主落盘后还会继续改账，不能共享引用。
+    r.plane.queueTask(task('又一件'));
+    expect(snap.queue).toHaveLength(1);
+    snap.queue[0].text = '被改过的快照';
+    expect(r.plane.queueView()[0].text).toBe('排队的活');
+  });
+
+  it('restore round-trips through a reset (session switch) and the restored ledger has live-ledger rights', () => {
+    const r = rig();
+    r.plane.queueTask(task('排队的活', { displayText: '排队的活（原话）' }));
+    r.plane.holdInsert(task('押账'));
+    const snap = r.plane.snapshot();
+    r.plane.reset(); // 切会话清场
+    expect(r.plane.queueView()).toHaveLength(0);
+    r.plane.restore(snap); // 回到会话，从快照收账
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['排队的活']);
+    expect(r.plane.queueView()[0].displayText).toBe('排队的活（原话）');
+    expect(r.plane.hasHeldInsert()).toBe(true);
+    // 恢复后的账与实况同权：押账照旧优先重入 + 取消续跑链；队列原位不动。
+    r.plane.dispatch();
+    expect(r.calls).toContain('supersede');
+    expect(r.reentered.map((t) => t.text)).toEqual(['押账']);
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['排队的活']);
+  });
+
+  it('restore refuses a non-empty ledger (宁可丢一份旧话，不养双真相)', () => {
+    const r = rig();
+    r.plane.queueTask(task('实况里已有的一件'));
+    r.plane.restore({ queue: [task('快照里的一件')], heldInsert: null });
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['实况里已有的一件']);
+    r.plane.holdInsert(task('实况押账'));
+    r.plane.restore({ queue: [], heldInsert: task('快照押账') });
+    expect(r.plane.hasHeldInsert()).toBe(true);
+    // 拒收是把账守干净：dispatch 只重入实况的那条押账。
+    r.plane.dispatch();
+    expect(r.reentered.map((t) => t.text)).toEqual(['实况押账']);
+  });
+
+  it('restore only loads the ledger: no auto-dispatch, and the 继续 chain still gates the next close', () => {
+    const r = rig();
+    r.plane.restore({ queue: [task('恢复的一件')], heldInsert: null });
+    // 装账不抢跑：restore 不触发任何收尾序（重启的会话没有「回合收尾」这一刻）。
+    expect(r.reentered).toEqual([]);
+    expect(r.calls).toEqual([]);
+    // 下一个自然派发点照旧受让位规则管：续跑链挂着就让位，落定后才交接。
+    r.setPending(true);
+    r.plane.dispatch();
+    expect(r.reentered).toEqual([]);
+    r.setPending(false);
+    r.plane.dispatch();
+    expect(r.reentered.map((t) => t.text)).toEqual(['恢复的一件']);
+    expect(r.calls).toContain('narrate:0');
+  });
+});
