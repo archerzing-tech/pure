@@ -421,6 +421,20 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       return '正在编辑文件…';
     case 'replace_files':
       return '正在替换文件内容…';
+    case 'read_file': {
+      // 长读的行内实时态（2026-10-15）：path 在 args 里一到就亮出来——参数
+      // 流式期间行头不再是空的「等待输出」，用户能对上「在读哪个文件」。
+      const path = typeof args?.path === 'string' ? args.path : '';
+      return path ? `正在读取 ${path}…` : '正在读取文件…';
+    }
+    case 'engine.read_file': {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      return path ? `正在读取 ${path}…` : '正在读取文件…';
+    }
+    case 'read_files': {
+      const paths = Array.isArray(args?.paths) ? args.paths : undefined;
+      return paths && paths.length > 0 ? `正在读取 ${paths.length} 个文件…` : '正在读取文件…';
+    }
     case 'execute_command':
       return '正在执行命令…';
     case 'researcher_web':

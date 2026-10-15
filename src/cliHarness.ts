@@ -572,6 +572,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     stoppedBranches: () => [],
     coveringCandidates: () => [],
     branchLabel: (name) => name,
+    // 整理窗读数（GUI 权威参照）：CLI 插话输入路休眠中（流态恒 false），
+    // 恒 false 即休眠语义；输入路接通时换成通道宿主的真读数。
+    atAggregationWindow: () => false,
     // 续跑预检同接（第 2 期第三刀）：store 在下方才建（const store），缝延
     // 迟求值没问题；CLI 的 checkpoint 走 FSStore 落盘，重启后 probe 仍命中。
     probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(store, sessionId, name, args),

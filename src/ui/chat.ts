@@ -88,7 +88,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -898,6 +898,11 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides),
     conventions,
   });
+}
+
+function formatDigestSize(chars: number): string {
+  // 消化笔记的体量口吻（中文界面）：大结果「12.3 万字符」，小些的「8k 字符」。
+  return chars >= 10_000 ? `${(chars / 10_000).toFixed(1)} 万字符` : `${chars} 字符`;
 }
 
 function makeAbortError(message: string): Error {
@@ -1866,6 +1871,12 @@ export class ChatController {
       .filter((item) => item.status === 'running' || item.status === 'done')
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet, status: item.status === 'running' ? 'running' as const : 'done' as const })),
     branchLabel: (name, callId) => this.branchLabel(name, callId),
+    // 阶段 C 窗读数（2026-10-15 样本口径接入）：委派已出生且一支不在飞、回合
+    // 仍在流式——汇合后的整理/汇总窗。此刻追加/取消折入汇聚轮而非排队/转达。
+    atAggregationWindow: () =>
+      this.isStreaming()
+      && this.agentActivities.length > 0
+      && this.agentActivities.every((item) => item.status !== 'running'),
     // 续跑预检（第 2 期第三刀）：static 直摸 store 字段——不经过回合金的
     // 编排器实例（续跑常发生在会话恢复后，那时没有实例）；口径与 execute
     // 的 sessionId 生成同源（stableSessionId）。
@@ -4277,6 +4288,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // first content/tool delta, and nulled so a later reasoning phase (after
     // tool results) opens a fresh card below whatever it followed.
     let thinkingCard: ThinkingCardHandle | null = null;
+    // 长结果的消化笔记（2026-10-15 用户实测：读很长文件/写很大文件后下一问
+    // 的首字等待拉得很长，屏幕上却只剩「等待模型…」，读作卡死）。每个
+    // ToolResult 落定时记下「最近一次大结果的工具公体量」，工具间隔卡与
+    // 首字等待卡把泛化「等模型」换成具体「正在消化 read_file 的结果」——
+    // 中间过程本身上屏。>= THINK_DIGEST_CHARS 才记（小结果不值得点名）。
+    const THINK_DIGEST_CHARS = 8_000;
+    let digestNote: { tool: string; chars: number } | null = null;
     // Consecutive LLM retry/reflect/degrade notices this turn (FailurePolicy
     // decisions) — shown on the live thinking card so silent retries become
     // visible feedback.
@@ -4315,7 +4333,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // shows its own spinner — never stack a "正在思考下一步…" card on top.
         if (pendingRows.size > 0 || pendingByName.size > 0) return;
         thinkingCard = openThinkingCard();
-        setThinkingLabel(thinkingCard, '正在思考下一步…');
+        setThinkingLabel(thinkingCard, digestNote
+          ? `正在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}）…`
+          : '正在思考下一步…');
         // 模型刚在正文里预告过下一步（如「现在写生成脚本」）时回指原话：
         // 15s 后的长静默 hint 从泛化「等模型」变成「在等它说的这一步」，
         // 用户能对上账（tailAnnounceLine 注释里有完整动机）。
@@ -6274,6 +6294,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   ? String((rawResult as { output?: unknown }).output ?? '')
                   : String(rawResult ?? '')
               : String(rawResult ?? '');
+            // 消化笔记登记（2026-10-15）：大结果记 tool+体量，供工具间隔卡与
+            // 首字卡点名「正在消化 read_file 的结果」；小结果不值得点名，
+            // 不覆盖旧笔记（旧笔记比空笔记信息多）。
+            if (resultText.length >= THINK_DIGEST_CHARS) {
+              digestNote = { tool: toolDisplayName(toolName), chars: resultText.length };
+            }
             // Special-parse web_search / web_fetch results for rich body
             // rendering; generated images render as <img> cards. Other tools
             // fall back to a raw preview in <pre>.

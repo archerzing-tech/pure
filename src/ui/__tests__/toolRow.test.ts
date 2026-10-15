@@ -507,7 +507,10 @@ describe('pendingActionLabel', () => {
     expect(pendingActionLabel('web_search', {})).toBe('正在搜索…');
     expect(pendingActionLabel('web_fetch', {})).toBe('正在获取页面…');
     expect(pendingActionLabel('web_researcher', {})).toBe('正在研究网页资料…');
-    expect(pendingActionLabel('read_file', {})).toBe('等待输出');
+    // 长读也有专用实时态（2026-10-15）：path 一到就亮，别再丢在通用「等待输出」里。
+    expect(pendingActionLabel('read_file', {})).toBe('正在读取文件…');
+    expect(pendingActionLabel('read_file', { path: 'src/big/log.log' })).toBe('正在读取 src/big/log.log…');
+    expect(pendingActionLabel('read_files', { paths: ['a.ts', 'b.ts', 'c.ts'] })).toBe('正在读取 3 个文件…');
   });
 
   it('keeps all web tools on the pale-blue non-terminal surface', () => {

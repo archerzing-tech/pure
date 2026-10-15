@@ -52,6 +52,13 @@ export interface InterjectOrchestratorDeps {
   coveringCandidates(): CoveringBranch[];
   /** 收执里引用支名时带同任务第几号（同名多支消歧）。 */
   branchLabel(name: string, callId: string): string;
+  /** 阶段 C 窗口（2026-10-15 用户定调「冲突按样本执行」并行委派都收齐、汇总
+   *  还没写完的整理窗）：此刻委派已存在但一支不在飞。追加/取消在这个窗口
+   *  不排队——折入汇聚轮（补这项/剔除后再重整），改的是旧定稿「收齐就排队、
+   *  先出已有汇总再补跑」——样本口径的「暂停汇总，补完重整一份完整输出」
+   *  胜出（两段输出的取舍被明确推翻）。单任务流（本就没派过委派）不在此
+   *  窗口，照旧排队。 */
+  atAggregationWindow(): boolean;
   /** 续跑预检（第 2 期第三刀）：同参重派会不会命中 checkpoint（编排器
    *  probeResumeCheckpoint 的同口径读数）。无必填默认——凭据缺失会让收执
    *  退回「无脑许愿从断点续」，正是本刀要收掉的谎。 */
@@ -367,15 +374,25 @@ export class InterjectOrchestrator {
         // ——点到某一支就直达那一支（其余照跑），没点名就广播给所有在飞的
         // 活。委派不在飞时照旧：父引擎下个 THINK 边界顺路带上。
         if (stopish && !this.deps.hasDelegationInFlight()) {
-          // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
-          // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
-          // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
-          // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
-          // （2026-09-28：这个窗口可能压根没有委派可派）。
+          // 整理窗（委派收齐、汇总未完）的取消：无支可停，但「不进最终汇总」
+          // 这个承诺此刻真实在场——折 cancelFoldInstruction 进汇聚轮（剔除后
+          // 重整），不再依赖父引擎下个 THINK 边界转达（2026-10-15 样本
+          // 「剔除并继续」口径：旧路在父已流中输出时可能收不过来）。收执只
+          // 说砍了什么——foldInScopeAddition 自带收执；起飞闸照挂——同回合
+          // 若还会为这个话题再派工，出生点拦下。
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
-          this.deps.steerRunningTurn(text, images, null, 'parent', true);
-          this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+          if (this.deps.atAggregationWindow()) {
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+          } else {
+            // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
+            // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
+            // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
+            // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
+            // （2026-09-28：这个窗口可能压根没有委派可派）。
+            this.deps.steerRunningTurn(text, images, null, 'parent', true);
+            this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+          }
           return;
         }
         echoUserBubble();
@@ -423,11 +440,17 @@ export class InterjectOrchestrator {
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
             return;
           }
-          // 委派还没出生（2026-09-26 用户实测窗口）：话挂起飞闸 + 转达父引擎。
+          // 整理窗的取消折入汇聚轮（同上方 steer 取消口径，2026-10-15 样本
+          // 「剔除并继续」）；委派还没出生（2026-09-26 用户实测窗口）：话挂
+          // 起飞闸 + 转达父引擎。
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
-          this.deps.steerRunningTurn(text, images, null, 'parent', true);
-          this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+          if (this.deps.atAggregationWindow()) {
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+          } else {
+            this.deps.steerRunningTurn(text, images, null, 'parent', true);
+            this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+          }
           return;
         }
         // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
@@ -445,11 +468,16 @@ export class InterjectOrchestrator {
             : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
           return;
         }
-        // 阶段感知（2026-09-22 用户定稿）：并行委派还没收齐时插进来的追加活，
-        // 不进"当前任务完成后处理"的队列——那会先输出一份没有它的汇总。折入
-        // 汇合轮：正在跑的收齐后先补这项，再合并输出一份覆盖全部的汇总。
-        // 委派都收齐了才插的，照旧排队（先出已有结果，再单独补跑）。
-        if (this.deps.hasDelegationInFlight()) {
+        // 阶段感知（2026-09-22 用户定稿；整理窗口 2026-10-15 用户定调改派）：
+        // ① B 窗（并行委派在飞）：插进来的追加活不进"当前任务完成后处理"的
+        //   队列——那会先输出一份没有它的汇总。折入汇合轮：收齐后先补这项，
+        //   再合并输出一份覆盖全部的汇总。
+        // ② C 窗（委派收齐、汇总还在整理）：追加折入汇聚轮——暂停汇总、保留
+        //   中间结果，把这项像其他委派一样补跑，返回后重整一份覆盖全部的
+        //   输出（样本「新增平台」C 档口径；旧定稿「先出已有汇总再补跑」的
+        //   两段输出被明确推翻）。收尾核验没折入就转排队兜底，机制已有。
+        // ③ 单任务流（本就没派过委派）：没有汇合轮可折，照旧排队。
+        if (this.deps.hasDelegationInFlight() || this.deps.atAggregationWindow()) {
           this.deps.foldInScopeAddition(text, images, displayText, true, ack, false); // scope 追加：机械执行
         } else {
           // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。

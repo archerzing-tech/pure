@@ -57,6 +57,24 @@ describe('matchInFlightBranch — 用户这句话点名了谁', () => {
   });
 });
 
+describe('matchInFlightBranch — 别名/主题点已停的支（mid-run 案例 12 径）', () => {
+  // 插话样本案例 12（反复变更）径：第一轮用户加的支第二轮改主意了——别名点
+  // 名匹配面是 名+职+任务书片段（steerTargeting.ts 的 haystack），不是代号
+  // 独角戏：名字是代号（researcher_2）时，主题词要靠任务书片段里的「芒果TV」
+  // 才能区分出那一支。已停支点名（续跑/停助力）走同一个匹配器。
+  const codenameOnly: InFlightBranch[] = [
+    { callId: 'call_x', name: 'researcher_2', role: '负责调研', snippet: '调研芒果TV平台的国漫资讯' },
+  ];
+  it('任务书片段里的专有名词是点名面：命中已停支', () => {
+    expect(matchInFlightBranch('芒果TV 那支接着跑完', codenameOnly)?.callId).toBe('call_x');
+    expect(matchInFlightBranch('算了，芒果TV 那路不用了', codenameOnly)?.callId).toBe('call_x');
+  });
+  it('主题词不提升名面（任务书里没有）：不赌，落回广播/裁决器', () => {
+    const other: InFlightBranch[] = [{ callId: 'call_y', name: 'researcher_3', role: '负责调研', snippet: '调研优酷平台的国漫资讯' }];
+    expect(matchInFlightBranch('芒果TV 那支接着跑完', other)).toBeNull();
+  });
+});
+
 describe('planTakeoffGate — 排队未起飞的那支在出生点被拦下', () => {
   // 待起飞的候选：一批委派的缩影，任务书就是匹配面。
   const pending: InFlightBranch[] = [

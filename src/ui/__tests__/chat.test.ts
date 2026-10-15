@@ -1325,7 +1325,9 @@ describe('plan overview completion state', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 用户三次实测暴露 + 定稿阶段语义：委派没收齐时插的追加活不能排到
     // "汇总输出之后"——要折入汇合轮（先补这项，再合并汇总）；委派收齐才
-    // 插的照旧排队。折入不是祈祷模型听话：投递时记录委派水位，收尾核验
+    // 插的，2026-10-15 起按样本口径折入整理窗的汇聚轮（见 taskBody 的
+    // atAggregationWindow 断言），不再两段输出。
+    // 折入不是祈祷模型听话：投递时记录委派水位，收尾核验
     // 没有新委派就转排队兜底，话绝不丢。
     const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
     const task = orch.indexOf("case 'task': {");
@@ -1334,6 +1336,10 @@ describe('plan overview completion state', () => {
     expect(taskBody.indexOf('this.deps.hasDelegationInFlight()')).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.deps.foldInScopeAddition(')).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.deps.queueInterjectTask(')).toBeGreaterThan(-1);
+    // 2026-10-15 样本口径定调「冲突按新的来」：整理窗（委派收齐、汇总未完）
+    // 的追加不再排队（两段输出被推翻）——与 B 窗同一条 fold 路径，暂停汇总、
+    // 补这项、重整一份覆盖全部的输出；只有单任务流（本就没派过委派）才排队。
+    expect(taskBody.indexOf('this.deps.atAggregationWindow()')).toBeGreaterThan(-1);
     // 2026-09-22 重新设计：委派在飞期间 steer 不再是合法目的地——steer 判定
     // 也走折入（承诺不可兑现的"转达"就是丢话的根源）；分类器不可用不再旁路
     // 成 steer，交给 decide(null) 的 task 兜底。
@@ -1342,6 +1348,9 @@ describe('plan overview completion state', () => {
     const steerBody = orch.slice(steer, orch.indexOf("case 'question':", steer));
     expect(steerBody.indexOf('this.deps.hasDelegationInFlight()')).toBeGreaterThan(-1);
     expect(steerBody.indexOf('this.deps.foldInScopeAddition(')).toBeGreaterThan(-1);
+    // 整理窗的取消同样折入汇聚轮（剔除后重整，「剔除并继续」）；出生前窗口
+    // 照旧挂起飞闸+转达，收执只说砍了什么。
+    expect(steerBody.indexOf('this.deps.atAggregationWindow()')).toBeGreaterThan(-1);
     expect(src.indexOf('No classifier for this turn')).toBe(-1);
     expect(orch.indexOf('No classifier for this turn')).toBe(-1);
     // 折入三件套：原话上屏（宿主铺排）+ 投递记录水位（账本）+ 收尾核验
@@ -1832,7 +1841,8 @@ describe('generate_image text-to-image wiring', () => {
     // card so a slow model's silent re-read of the result never reads as stuck.
     const gapCard = src.indexOf('scheduleToolGapCard');
     expect(gapCard).toBeGreaterThan(-1);
-    expect(src).toContain("setThinkingLabel(thinkingCard, '正在思考下一步…');");
+    // 2026-10-15 消化笔记：本体保留泛化默认，但开了 digestNote 就点名工具与体量。
+    expect(src).toContain("'正在思考下一步…'");
     // The watchdog is debounced (back-to-back tool calls don't flash a card).
     expect(src).toContain('const TOOL_GAP_DEBOUNCE_MS = 600;');
     // ToolResult finalization arms it; the next reasoning/token/tool event
@@ -1843,6 +1853,13 @@ describe('generate_image text-to-image wiring', () => {
     // （刀 8：签名加了 mode 参数——'answer' 撤轻轮次 ghost，'handoff' 默认。）
     const endThinking = src.indexOf("const endThinking = (mode: 'answer' | 'handoff' = 'handoff') => {");
     expect(src.slice(endThinking, endThinking + 300)).toContain('cancelToolGapCard();');
+    // 消化笔记（2026-10-15）：大结果是下一问首字等待变长的真因——间隔卡把
+    // 泛化「思考下一步」换成「正在消化 read_file 的结果（…万字符）」，中间
+    // 过程上屏。登记面在 ToolResult（≥THINK_DIGEST_CHARS 才记），标签面在
+    // 间隔卡开卡处——两处用同一 closure 变量，旱不砖接第二份。
+    expect(src).toContain('const THINK_DIGEST_CHARS = 8_000;');
+    expect(src).toContain('digestNote = { tool: toolDisplayName(toolName), chars: resultText.length };');
+    expect(src).toContain('`正在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}）…`');
   });
 
   it('keeps long silences legible: elapsed timer, retry surfacing, label reset', () => {
