@@ -200,7 +200,11 @@ describe('createTools CLI 装配（真跑）', () => {
     }
   });
 
-  it('CLI 路执行真通：registry 调外部工具翻译成 execute_command 跑出结果', async () => {
+  // 全套件里唯一走完整 PowerShell 阶梯的真跑用例：冷启动平时 1–3s，但
+  // bun test 缺省单测超时 5s 是零余量——v3.3.3 release 在抢翻的 Windows
+  // runner 上破 5s 被掐（abort 杀进程 → 流空 + exit -1），连烧两轮发布。
+  // 显式给 60s 余量（工具自身墙钟 120s 的一半），不跟 runner 车速赌运气。
+  it('CLI 路执行真通：registry 调外部工具翻译成 execute_command 跑出结果', { timeout: 60_000 }, async () => {
     const home = mkdtempSync(join(tmpdir(), 'pure-cli-tools-'));
     const ws = mkdtempSync(join(tmpdir(), 'pure-cli-ws-'));
     const prev = process.env.PURE_TOOLS_DIR;
