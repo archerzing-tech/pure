@@ -1118,6 +1118,12 @@ const translations: Record<Language, Record<string, string>> = {
     'repair.useOriginal': '用我的原话',
     'repair.restored': '已把原话放回输入框，可修改后再发',
 
+    // ── 11.3 ambiguity hint (composer corner, read-only) ──
+    'repair.ambiguityHint': '这个路径在工作区里有多个可能，不敢替你猜（不改你的原话）：',
+    'repair.ambiguityKeys': 'Tab 采纳为提示 · Esc 忽略 · 回车按原话发送',
+    'repair.ambiguityAnnotationHeader': '[路径歧义提示] 下面是用户提到、但无法唯一确定的路径，请先向用户确认，不要猜：',
+    'repair.ambiguityAnnotation': '「{token}」在工作区不存在，可能是：{candidates}',
+
     // ── Plan review dialog ──
     'plan.title': '执行方案',
     'plan.complex': '复杂任务',
@@ -2394,6 +2400,12 @@ const translations: Record<Language, Record<string, string>> = {
     'repair.pathNote': 'Read as the path that exists in the workspace: {pairs}',
     'repair.useOriginal': 'Use my original words',
     'repair.restored': 'Your original text is back in the composer — edit it and send again',
+
+    // ── 11.3 ambiguity hint (composer corner, read-only) ──
+    'repair.ambiguityHint': 'This path matches several files in the workspace — we will not guess (your wording stays untouched):',
+    'repair.ambiguityKeys': 'Tab adopt as a note · Esc ignore · Enter sends as written',
+    'repair.ambiguityAnnotationHeader': '[Ambiguous path] The paths below could not be resolved to a single file — ask the user which one, do not guess:',
+    'repair.ambiguityAnnotation': '"{token}" does not exist in the workspace; it may be: {candidates}',
 
     // ── Plan review dialog ──
     'plan.title': 'Plan review',

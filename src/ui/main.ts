@@ -53,8 +53,9 @@ import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { normalizeDraft } from './inputRepair';
-import { correctWorkspacePaths, getPathIndex, warmPathIndex } from './pathIndex';
+import { correctWorkspacePaths, getPathIndex, warmPathIndex, findAmbiguousPaths, type AmbiguityHint } from './pathIndex';
 import { createPathRepairNote } from './pathRepairNote';
+import { ComposerAmbiguityHint, composeAmbiguitySend } from './ambiguityHint';
 import { InlineAutocomplete, type AutocompleteCandidate } from './inlineAutocomplete';
 import { ComposerInputHistory, SessionInputHistoryStore } from './inputHistory';
 import { MCP_PROMPT_COMMAND, describeMcpPrompt } from '../shared/mcpPrompt';
@@ -384,6 +385,24 @@ const composerExtraCandidates = async (): Promise<AutocompleteCandidate[]> => [
 ];
 new InlineAutocomplete(promptEl, { extraCandidates: composerExtraCandidates });
 if (landingPrompt) new InlineAutocomplete(landingPrompt, { extraCandidates: composerExtraCandidates });
+
+// ── 11.3 ambiguity hint (read-only: show, never rewrite) ────────────────────
+// When a typed path fits ≥2 files equally well, correction declines (no unique
+// reading) and this shows the candidates instead. It reads the SAME warm,
+// in-memory index correction uses — never awaited, never a glob on the keystroke
+// path — and only after the chat has started (a cold index means "no hint",
+// mirroring 11.2's honest failure mode). Same address as the autocomplete above;
+// the two layers yield to each other (see ComposerAmbiguityHint).
+const ambiguityHintsFor = (el: HTMLTextAreaElement) => (): AmbiguityHint[] => {
+  if (!hasStartedChat) return [];
+  const index = getPathIndex();
+  if (index.length === 0) return [];
+  // Same normalization the send path applies, so hint and correction agree on
+  // what the token is.
+  return findAmbiguousPaths(normalizeDraft(el.value), index);
+};
+const promptAmbiguity = new ComposerAmbiguityHint(promptEl, ambiguityHintsFor(promptEl));
+const landingAmbiguity = landingPrompt ? new ComposerAmbiguityHint(landingPrompt, ambiguityHintsFor(landingPrompt)) : null;
 
 // ── 输入历史（↑/↓ 翻回之前发过的指令，shell 口径，按会话分桶）──
 // A 会话翻不到 B 会话发过的内容：每会话一份 ~/.pure/input-history/<id>.json
@@ -1801,6 +1820,12 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
     return;
   }
 
+  // 11.3 — Tab-adopted ambiguity hints. The note is appended to the MODEL's copy
+  // of the draft; the transcript still shows the user's own words (display
+  // override below). Only Tab populates this, so a plain Enter carries nothing.
+  const ambiguityHint = (sourceEl === promptEl ? promptAmbiguity : landingAmbiguity)?.consumeAccepted() ?? [];
+  const ambiguity = composeAmbiguitySend(text, ambiguityHint);
+
   // 过了所有门，这条指令真的要发了 —— 记进输入历史（之后 ↑ 可以翻回来）。
   (sourceEl === promptEl ? promptHistory : landingHistory)?.remember(sourceEl.value);
   sourceEl.value = '';
@@ -1811,10 +1836,10 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   }
   sendBtn.disabled = true;
   // Display channel: an expanded `/mcp-prompt` shows the command the user typed,
-  // a repaired path shows their ORIGINAL words with the note underneath (the
-  // engine still receives the corrected text).
-  const displayOverride = expansion?.ok ? text : pathRepairs.length > 0 ? normalized : undefined;
-  await doSend(expansion?.ok ? expansion.text : text, displayOverride, expansion?.ok ? [] : pathRepairs);
+  // a repaired path or an adopted ambiguity note shows their ORIGINAL words
+  // (the engine still receives the corrected / annotated text).
+  const displayOverride = expansion?.ok ? text : pathRepairs.length > 0 || ambiguityHint.length > 0 ? normalized : undefined;
+  await doSend(expansion?.ok ? expansion.text : ambiguity.text, displayOverride, expansion?.ok ? [] : pathRepairs);
 }
 
 /**

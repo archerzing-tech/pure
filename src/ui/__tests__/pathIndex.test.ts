@@ -4,7 +4,7 @@
 // the wrong file, which is worse than not correcting anything.
 
 import { describe, expect, it } from 'bun:test';
-import { correctWorkspacePaths, getPathIndex, resetPathIndex, warmPathIndex } from '../pathIndex';
+import { correctWorkspacePaths, findAmbiguousPaths, getPathIndex, resetPathIndex, warmPathIndex } from '../pathIndex';
 
 const INDEX = [
   'README.md',
@@ -88,6 +88,41 @@ describe('correctWorkspacePaths (pure)', () => {
   it('does nothing without a warm index', () => {
     const draft = '看一下 src/ui/mian.ts';
     expect(correctWorkspacePaths(draft, []).text).toBe(draft);
+  });
+});
+
+describe('findAmbiguousPaths (pure, 11.3)', () => {
+  it('reports the candidates when two files fit equally well', () => {
+    // src/ap.ts is one slip from both src/app.ts and src/api.ts.
+    expect(findAmbiguousPaths('改一下 src/ap.ts', INDEX)).toEqual([
+      { token: 'src/ap.ts', candidates: ['src/app.ts', 'src/api.ts'] },
+    ]);
+  });
+
+  it('stays silent when exactly one candidate fits (that one gets corrected instead)', () => {
+    expect(findAmbiguousPaths('看一下 src/ui/mian.ts', INDEX)).toEqual([]);
+  });
+
+  it('stays silent when nothing is close enough', () => {
+    expect(findAmbiguousPaths('看一下 src/ui/nowhere.ts', INDEX)).toEqual([]);
+  });
+
+  it('excludes exact paths, creation intents, fences, absolute paths and URLs', () => {
+    expect(findAmbiguousPaths('改一下 src/app.ts', INDEX)).toEqual([]); // exists exactly
+    expect(findAmbiguousPaths('新建 src/ap.ts', INDEX)).toEqual([]); // about to create it
+    expect(findAmbiguousPaths('```\nimport x from "src/ap.ts"\n```', INDEX)).toEqual([]); // fenced
+    expect(findAmbiguousPaths('看看 /src/ap.ts', INDEX)).toEqual([]); // absolute
+    expect(findAmbiguousPaths('看看 https://x.test/src/ap.ts', INDEX)).toEqual([]); // URL
+  });
+
+  it('reports each distinct token once, in first-appearance order', () => {
+    expect(findAmbiguousPaths('src/ap.ts 和 src/ap.ts 都是', INDEX)).toEqual([
+      { token: 'src/ap.ts', candidates: ['src/app.ts', 'src/api.ts'] },
+    ]);
+  });
+
+  it('does nothing without a warm index', () => {
+    expect(findAmbiguousPaths('改一下 src/ap.ts', [])).toEqual([]);
   });
 });
 

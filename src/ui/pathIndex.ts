@@ -16,6 +16,11 @@
 // meant, so the draft goes out untouched. Absolute paths, URLs, globs, fenced
 // code and bare filenames are never touched either: this repairs a path the
 // user typed, it does not guess which file they meant.
+//
+// 阶段 11.3 (P2) reuses the same matcher for the OTHER half of that refusal:
+// when two or more candidates are within range, the composer shows them as a
+// hint (findAmbiguousPaths) instead of rewriting. Still no guessing, still the
+// user's own words in the draft.
 
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { buildContextCandidates } from './inlineAutocomplete';
@@ -30,6 +35,16 @@ export interface PathCorrection {
   text: string;
   /** What changed — feeds the transcript note and "use my original words". */
   repairs: PathRepair[];
+}
+
+/** 阶段 11.3 — a typed path token that two or more existing files fit equally
+ *  well. We cannot know which one the user meant, so nothing is rewritten: the
+ *  composer shows the candidates and the model is asked to clarify. */
+export interface AmbiguityHint {
+  /** The token exactly as it appears in the draft (no trailing punctuation). */
+  token: string;
+  /** Workspace paths within the edit-distance limit, closest first. */
+  candidates: string[];
 }
 
 // ── Index (async side) ──
@@ -208,25 +223,34 @@ function boundedDistance(a: string, b: string, limit: number): number {
   return previous[b.length];
 }
 
-/** The single closest index path, or null when nothing (or more than one thing)
- *  is close enough to be certain. */
-function nearestPath(token: string, paths: readonly string[]): string | null {
+/** Every workspace path within the edit-distance limit of `token`, closest
+ *  first. This is the shared primitive: correction takes it only when it holds
+ *  exactly one path (a unique reading), the ambiguity hint takes it when it
+ *  holds two or more. Linear over the (bounded) index, so the composer can call
+ *  it on every keystroke. */
+function nearPathCandidates(token: string, paths: readonly string[]): string[] {
   const limit = distanceLimit(token);
   const lower = token.toLowerCase();
-  let best: string | null = null;
-  let bestDistance = limit + 1;
+  const found: Array<{ path: string; distance: number }> = [];
   for (const candidate of paths) {
-    const haystack = candidate.toLowerCase();
-    const distance = boundedDistance(lower, haystack, limit);
+    const distance = boundedDistance(lower, candidate.toLowerCase(), limit);
     if (distance > limit) continue;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = candidate;
-      continue;
-    }
-    if (distance === bestDistance) best = null; // tie → ambiguous → leave it alone
+    found.push({ path: candidate, distance });
   }
-  return best;
+  // Stable by distance: ties keep index order, which is what the hint list
+  // shows (closest first). Array.prototype.sort is stable in every runtime we
+  // target (V8 / JSC / WebKit).
+  found.sort((a, b) => a.distance - b.distance);
+  return found.map((entry) => entry.path);
+}
+
+/** The single closest index path — and ONLY when it is the single one close
+ *  enough to be certain. Nothing close and two-or-more close (a tie, or several
+ *  plausible files) both mean "we cannot know", so both return null: correction
+ *  stays off and 11.3 offers the candidates as a hint instead. */
+function nearestPath(token: string, paths: readonly string[]): string | null {
+  const candidates = nearPathCandidates(token, paths);
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function insideSpan(index: number, spans: Array<[number, number]>): boolean {
@@ -273,4 +297,39 @@ export function correctWorkspacePaths(text: string, paths: readonly string[]): P
     repairs.push({ from: edit.from, to: edit.to });
   }
   return { text: out, repairs };
+}
+
+/**
+ * 阶段 11.3 — find path tokens we deliberately refused to rewrite because two or
+ * more existing files fit. Same gate as correctWorkspacePaths (token not an
+ * exact path ∧ path-shaped ∧ not a creation intent ∧ outside fenced code), with
+ * the one difference that is the whole point of this pass: it fires exactly when
+ * correction declines for lack of a unique reading.
+ *
+ * Read-only: the caller shows the candidates and never edits the draft. Each
+ * distinct token is reported once, in first-appearance order.
+ */
+export function findAmbiguousPaths(text: string, paths: readonly string[]): AmbiguityHint[] {
+  if (!text || paths.length === 0) return [];
+  const exact = new Set(paths);
+  const fences: Array<[number, number]> = [...text.matchAll(FENCE_RE)]
+    .map((match) => [match.index ?? 0, (match.index ?? 0) + match[0].length] as [number, number]);
+  const memo = new Map<string, string[]>();
+  const hints: AmbiguityHint[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(TOKEN_RE)) {
+    const start = match.index ?? 0;
+    const token = match[0].replace(TRAILING_PUNCT, '');
+    if (!token || insideSpan(start, fences)) continue;
+    if (exact.has(token)) continue;
+    if (!looksLikePath(token)) continue;
+    if (CREATION_INTENT_RE.test(enclosingClause(text, start))) continue;
+    if (seen.has(token)) continue;
+    if (!memo.has(token)) memo.set(token, nearPathCandidates(token, paths));
+    const candidates = memo.get(token) ?? [];
+    if (candidates.length < 2) continue;
+    seen.add(token);
+    hints.push({ token, candidates });
+  }
+  return hints;
 }
