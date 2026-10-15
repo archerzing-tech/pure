@@ -72,7 +72,7 @@ async function waitForScheduledInput(timing: InputTiming, signal?: AbortSignal):
   });
 }
 import type { CliArgs } from './cliConfig';
-import { createAdapter, resolveReflectAdapter } from './cliAdapter';
+import { createAdapter, resolveJudgeAdapter, resolveReflectAdapter } from './cliAdapter';
 import { createHarness, distillSkillFromMemory, learnFromInput, printToolCorrectionHints } from './cliHarness';
 import { matchSkillDistillInstruction } from './shared/skillDistill';
 
@@ -656,7 +656,12 @@ async function runOneShot(args: CliArgs) {
   // One producer, shared with the GUI (turnRoute.ts): the same rules, the same
   // recorded decision. The CLI used to re-derive this inline, which is how the
   // two surfaces could drift apart.
-  const route = await decideTurnRoute(prefetchTurnRoute(args.prompt), adapter, { hasTools });
+  // Routing runs on the judge flavour of the adapter (hidden reasoning off) —
+  // the same class of "judge but light" call as insert classification. On a
+  // thinking-enabled adapter the route call takes 12–38s (measured) against a
+  // 12s cap, so the verdict was decided by provider latency and a lost race
+  // silently handed the turn to the keyword floor.
+  const route = await decideTurnRoute(prefetchTurnRoute(args.prompt), resolveJudgeAdapter(args, adapter), { hasTools });
   const workflow = route.workflow;
   const analysis = workflow.analysis;
   if (route.defer && !(await waitForScheduledInput(route.timing))) {
@@ -735,6 +740,7 @@ async function runOneShot(args: CliArgs) {
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
+  const judgeAdapter = resolveJudgeAdapter(args, adapter);
   const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
   const hasTools = toolsDefs.length > 0;
 
@@ -936,8 +942,14 @@ async function runRepl(args: CliArgs) {
     // inject it into the system prompt so the model verifies the premise.
     const route = await decideTurnRoute(
       prefetchTurnRoute(turnInput),
-      adapter,
-      { hasTools: toolsDefs.length > 0 },
+      judgeAdapter,
+      {
+        hasTools: toolsDefs.length > 0,
+        // 追问要在对话里读（「还是不行」alone 什么也说明不了）。
+        history: messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' })),
+      },
       currentAbort.signal,
     );
     const semanticRoute = route.route;

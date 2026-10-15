@@ -2205,9 +2205,15 @@ describe('plan-by-thinking flow', () => {
     // 未配置行为与轻档引入前一致。
     expect(src).toMatch(/const judgeModel = judgeModelFor\(config\.phaseModels, config\.model\);/);
     expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, \{ disableThinking: true \}\)\s*:\s*createLLMAdapter\(config, \{ disableThinking: true \}\);/);
-    // 路由同门控：路由是「判断但轻」的一次性调用，配了轻档才换，没配留主
-    // 适配器（inferSemanticRoute 行为不变）。
-    expect(src).toMatch(/decideTurnRoute\(routePrefetch, judgeModel \? this\.judgeLlm \?\? llm : llm,/);
+    // 路由不走门控：路由与插话裁决同为「判断但轻」的一次性调用，一律关暗
+    // 推理。旧门控（配了轻档才换 judgeLlm）默认路径下（没配轻档）把路由绑在
+    // 主适配器上，2026-10-14 实测 glm-5.3-flash 同一段路由提示词：暗思考开
+    // 首字 10.9–35.1s / 出全 12.2–38.3s，对上 12s 超时帽 ⇒ 判定由延迟抽签，
+    // 输的那次静默退回关键词地板（debug / 加功能 / 要方案的请求全被读成
+    // question）。judgeLlm 本身就是同一 provider+model 的关思考适配器，语义
+    // 不变，只是让这一跳回得来。
+    expect(src).toMatch(/decideTurnRoute\(routePrefetch, this\.judgeLlm \?\? llm,/);
+    expect(src).not.toMatch(/decideTurnRoute\(routePrefetch, judgeModel \?/);
     // 裁决器看得见"此刻在思考"与思考最新说到哪：时机证据随上下文过河。
     expect(src).toContain("parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');");
     expect(src).toContain('思考最新说到：');

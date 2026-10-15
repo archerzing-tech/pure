@@ -19,9 +19,16 @@ import {
   COMPLEX_TASK_PROTOCOL_PROMPT,
   FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
+  CAPABILITY_GAP_CORE,
+  CAPABILITY_GAP_LADDER,
+  MULTI_AGENT_PROTOCOL,
+  MULTI_AGENT_CORE,
+  MULTI_AGENT_MECHANICS,
   PRE_COMMIT_REVIEW_CONTRACT,
   composeUserTurn,
   stripUserTurnContext,
+  wantsCapabilityLadder,
+  wantsDelegationMechanics,
 } from '../promptLayers';
 import { INCREMENTAL_BUILD_PROMPT } from '../agentBehavior';
 
@@ -250,6 +257,29 @@ describe('L1 behavior contracts', () => {
   it('reports finished work like a colleague, not a changelog', () => {
     expect(HUMAN_TONE_PROMPT).toContain('flowing sentences');
     expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
+  });
+
+  it('derives the resident cores and the on-demand details from one source', () => {
+    // 大头①②（2026-10-14）：常驻核心与按需细则由同一个常量切片而来——改一处
+    // 不可能只改半边，拼接回原文逐字相等就是这条不变式的锚。
+    expect(CAPABILITY_GAP_CORE + CAPABILITY_GAP_LADDER).toBe(CAPABILITY_GAP_PROMPT);
+    expect(CAPABILITY_GAP_CORE).toContain('do NOT refuse, do NOT pretend to have the capability, and do NOT invent results');
+    expect(CAPABILITY_GAP_CORE).toContain('~/.pure/skills/');
+    expect(CAPABILITY_GAP_CORE).not.toContain('codeload.github.com');
+    expect(CAPABILITY_GAP_LADDER).toContain('codeload.github.com');
+    const mechanicsStart = MULTI_AGENT_PROTOCOL.indexOf('Artifact fit: ');
+    expect(mechanicsStart).toBeGreaterThan(0);
+    expect(MULTI_AGENT_CORE.slice(0, mechanicsStart) + MULTI_AGENT_MECHANICS + MULTI_AGENT_CORE.slice(mechanicsStart))
+      .toBe(MULTI_AGENT_PROTOCOL);
+    expect(MULTI_AGENT_CORE).toContain('T3 · context isolation');
+    expect(MULTI_AGENT_CORE).toContain('Exception (do NOT delegate)');
+    expect(MULTI_AGENT_MECHANICS).toContain('Relay rule');
+    // 闸门：普通请求不带细则，装东西/缺能力或多主题的请求带。
+    expect(wantsCapabilityLadder('把 README 里的 typo 修一下')).toBe(false);
+    expect(wantsCapabilityLadder('帮我装 ffmpeg')).toBe(true);
+    expect(wantsDelegationMechanics('改一下标题', false)).toBe(false);
+    expect(wantsDelegationMechanics('改一下标题', true)).toBe(true);
+    expect(wantsDelegationMechanics('分别研究 A、B、C 三个方向', false)).toBe(true);
   });
 
   it('uses dynamic capability tools for skills and MCP services', () => {

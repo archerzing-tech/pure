@@ -176,6 +176,36 @@ This protocol also covers the user asking you to INSTALL, set up, or upgrade a t
 - Installing downloads and runs third-party code: follow the same permission rules as any other command execution — when the user must approve commands, ask before installing.
 - When the user asks you to CREATE or GENERATE a skill, an MCP tool, or another reusable agent capability (e.g. "给我生成一个 skill", "写一个 MCP 工具"), write it into the app's own space — NOT the project workspace: skills → ~/.pure/skills/<name>/SKILL.md (YAML frontmatter \`name:\` + \`description:\` followed by the instructions body), tools / MCP programs → ~/.pure/tools/ (runnable scripts in ~/.pure/tools/bin). These belong to the application itself and are available across projects; only write them into the workspace when the user explicitly asks.`;
 
+/**
+ * 大头①（2026-10-14）— capability-gap 的常驻核心与按需安装路径梯。
+ *
+ * 这条 5,927 字符里真正「任何请求都可能用得上」的只有开头两段：缺能力时不许
+ * 拒绝 / 假装 / 编造，以及动手前先看已装的技能与工具。其余是**真要装东西时**
+ * 才用得到的路线（四条递补路径、软件安装的文档梯、MCP 检索、装完验证、
+ * skill/MCP 的落点）——问「这张图里写了什么」之前不需要先读完整本安装手册。
+ *
+ * 按标记切片而不是复制：两段由同一个常量派生，改一处不可能漂移；拼接回原文
+ * 有测试锁（CORE + LADDER 逐字等于 CAPABILITY_GAP_PROMPT）。闸门漏判的后果
+ * 是「路径梯缺失」，不是行为翻车——拒绝禁令在常驻核心，路线切换的通用规则在
+ * workflow（"A network failure … is a ROUTE problem, not a dead end"）。
+ */
+const CAPABILITY_GAP_LADDER_MARKER = '\n- If nothing fits, INSTALL it yourself';
+export const CAPABILITY_GAP_CORE = CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER_MARKER)
+  ? CAPABILITY_GAP_PROMPT.slice(0, CAPABILITY_GAP_PROMPT.indexOf(CAPABILITY_GAP_LADDER_MARKER))
+  : CAPABILITY_GAP_PROMPT;
+export const CAPABILITY_GAP_LADDER = CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER_MARKER)
+  ? CAPABILITY_GAP_PROMPT.slice(CAPABILITY_GAP_PROMPT.indexOf(CAPABILITY_GAP_LADDER_MARKER))
+  : '';
+
+/** 装东西 / 缺能力的请求信号——闸门（召回优先：多带一次细则好过该装有装不上）。
+ * 漏判的两种代价都不翻车：装一条路线失败时 workflow 仍教「换路线，不是死路」，
+ * 而 skill/MCP 的落点在用户真的要求创建时必然命中（「skill」「技能」「mcp」）。
+ * 「装」后直接跟英文工具名（帮我装 ffmpeg）不带「一下」，单列 "装\\s" 兜住。 */
+export function wantsCapabilityLadder(prompt: string): boolean {
+  return /(?:安装|装一?下|装\s|装个|装好|配好|配置|环境|依赖|install|setup|没有.{0,6}(?:工具|能力|方法)|识别|提取|读取|ocr|文字里|图片里|截图|pdf|扫描|文档|表格|音频|视频|语音|转录|字幕|skill|技能|mcp|插件|扩展|工具链)/i
+    .test(prompt ?? '');
+}
+
 /** 公开 API 目录 — 当内置 web 工具拿不到所需信息时的兜底数据源。目录本身
  * 无需 key，列出大量按分类组织的免费/自托管公共 API（天气、地理、交通、
  * 旅游、金融、行业统计等）。模型应在此处找到合适端点后直接 web_fetch /
@@ -184,6 +214,43 @@ export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ON
 - https://github.com/public-apis/public-apis — large curated list of public APIs by category (weather, geocoding, transportation, travel, finance, industry, …). Some entries are stale or need a key; prefer endpoints marked auth: "No" / apiKey: "".
 - https://github.com/n0shake/Public-APIs — supplementary list of public JSON APIs by category.
 When a lookup fails or no built-in tool fits (e.g. hotel availability, transit schedules, industry statistics), find a suitable no-key public API in one of these directories, then fetch its documented endpoint directly with web_fetch / web_scrape (or execute_command curl when you need raw JSON). NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.`;
+
+/**
+ * 可视化交付的常驻一行契约（2026-10-14 ⑦ 低风险子集）。
+ *
+ * 背景：五段可视化细则（svg / mermaid·puml 说明、```chart DSL、```map DSL、
+ * generate_image）合计约 4.3k 字符，对所有请求常驻——而只有少数请求会产出图、
+ * 图、地图。但「常驻→按需」的风险落在两件事上：交付形态（写文件 / 用脚本画图）
+ * 与块标签写错。所以常驻这一行把这两件事守住（含 chart/map 的最小可用语法），
+ * 细则只在请求可能用到时随附（见 PromptAssembler 的 detectVisualRequest 闸门）。
+ * 闸门漏判的后果因此是「细则缺失」而不是「行为错」——不是那条会翻车的清空边界。
+ *
+ * 放尾部：它随请求变化，尾巴变动只让尾巴重预填（同 capabilities / task_mode）。
+ */
+export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply, and never as a file or a script:
+- \`\`\`svg — a picture/icon/illustration/diagram you draw by hand (one complete standalone <svg> document per block).
+- \`\`\`mermaid or \`\`\`puml — structural diagrams (flowchart/sequence/state/ER/gantt/pie/mindmap/timeline; PlantUML for class/component/deployment/activity/use-case).
+- \`\`\`chart — data as a chart: a \`type:\` line (bar/hbar/line/pie/scatter/kline/radar/tree/treemap/sunburst, default bar), optional \`title:\` / \`unit:\`, then one \`label value\` row per line.
+- \`\`\`map — routes/places as ONE JSON object {title, center:[lat,lng], zoom, markers:[{lat,lng,title,label}], route:[[lat,lng],…]} with REAL coordinates.
+NEVER save a picture/chart/map with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable.`;
+
+/** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
+export interface VisualRequestParts {
+  /** 手绘图片/图标/插画/示意图（→ SVG 或 generate_image 契约）。 */
+  picture: boolean;
+  /** 数据图表（→ ```chart DSL）。 */
+  chart: boolean;
+  /** 地图/路线/地点（→ ```map DSL）。 */
+  map: boolean;
+}
+
+export function detectVisualRequest(prompt: string): VisualRequestParts {
+  const text = prompt ?? '';
+  const picture = /(?:画一?[张个幅副]|画个|绘制|手绘|画出来|绘图|生成一?[张个幅副](?:图|图片)|做一?[张个幅副]图|配图|插画|海报|封面|图标|logo|icon|贴纸|壁纸|svg|示意图|流程图|架构图|时序图|类图|思维导图|甘特图|uml|diagram|flow ?chart|draw|sketch|illustration|poster|thumbnail|mockup)/i.test(text);
+  const chart = /(?:图表|柱状图|条形图|折线图|饼图|散点图|k线|candlestick|雷达图|树图|矩形树图|旭日图|可视化|数据图|画个图|做成图|趋势图|占比图|统计图|chart|graph|plot|visuali[sz])/i.test(text);
+  const map = /(?:地图|路线|路径规划|导航|行程路线|骑行|自驾|怎么走|在哪[里儿]|坐标|经纬度|markers?|route|map\b|itinerary|directions)/i.test(text);
+  return { picture, chart, map };
+}
 
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
  * renders fenced ```svg blocks inline as the PICTURE (single images full
@@ -399,6 +466,38 @@ Relay rule (dependent chains made declarative): when the task is a SERIAL CHAIN 
 If you delegate: stay the orchestrator and the SINGLE voice that replies to the user (subagents work; they do not chat). Narrate the orchestration naturally and progressively, in the user's own language, like a colleague delegating inside a team: one sentence on the overall intent before the first hand-off, then one sentence as each helper starts or returns — what it is doing and why. Never recite a fixed role list, a "role → role" arrow chain, or canned delegation scripts; find your own words each time. Prefer running independent read-only roles in parallel. Scale effort to complexity: estimate the difficulty and decide how many subagents yourself — do NOT wait for the user to request it. If subagent conclusions conflict, surface the disagreement instead of silently choosing a side; a failing review/verification is a gate — fix and re-run before moving on.
 Exception (do NOT delegate): only a task that is single-line, short, can be described in one breath, and has no independent verification need. Otherwise lean toward delegation.
 </multi_agent_protocol>`;
+
+/**
+ * 大头②（2026-10-14）— multi_agent 的常驻触发测试与按需机制段。
+ *
+ * 常驻：**什么时候该委派**（T1/T2/T3）、你是唯一对用户开口的人、独立只读角色
+ * 并行、结论冲突要暴露、复核失败是门禁、以及「什么情况下不该委派」。按需：
+ * 产物形态适配、fan-out 批量规则、relay 链表规则、叙述写法——这些只有在你真的
+ * 委派出去时才用得上，随「像要拆成多块」的请求装配（mode 已是 build/plan，或
+ * 请求里带多主题信号）。漏判的后果是多块任务委派得朴素（逐个串行、没有 relay），
+ * 不是「不委派」——触发测试与例外条款常驻。
+ *
+ * 同样切片派生：CORE 与 MECHANICS 拼回原文逐字相等（测试锁）。
+ */
+const MULTI_AGENT_MECHANICS_START = 'Artifact fit: ';
+const MULTI_AGENT_MECHANICS_END = 'Prefer running independent read-only roles in parallel.';
+const multiAgentMechanicsStart = MULTI_AGENT_PROTOCOL.indexOf(MULTI_AGENT_MECHANICS_START);
+const multiAgentMechanicsEnd = MULTI_AGENT_PROTOCOL.indexOf(MULTI_AGENT_MECHANICS_END);
+const multiAgentSplitValid = multiAgentMechanicsStart > 0 && multiAgentMechanicsEnd > multiAgentMechanicsStart;
+export const MULTI_AGENT_CORE = multiAgentSplitValid
+  ? MULTI_AGENT_PROTOCOL.slice(0, multiAgentMechanicsStart) + MULTI_AGENT_PROTOCOL.slice(multiAgentMechanicsEnd)
+  : MULTI_AGENT_PROTOCOL;
+export const MULTI_AGENT_MECHANICS = multiAgentSplitValid
+  ? MULTI_AGENT_PROTOCOL.slice(multiAgentMechanicsStart, multiAgentMechanicsEnd)
+  : '';
+
+/** 委派机制段的闸门：复杂任务（路由已判 build/plan）或请求自带多主题信号。
+ * 判据宽一点无害——多带一次是 2.4k 字符，少带一次是 fan-out 变逐个串行。 */
+export function wantsDelegationMechanics(prompt: string, complexTask: boolean): boolean {
+  if (complexTask) return true;
+  return /(?:分别|各自|并行|同时|多路|多个方向|几个方向|多个方案|几个方案|三个方面|三个方向|多条线|对比|调研|分工|多文件|多模块|多个子|每个方向)/i
+    .test(prompt ?? '');
+}
 
 /**
  * Pre-commit review contract (L1 application layer). Gated on subagent

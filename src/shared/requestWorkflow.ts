@@ -27,6 +27,20 @@ export interface RequestWorkflowOptions {
    * supplies only a conservative fallback and does not infer ordinary intent
    * from artifact nouns. */
   semanticRoute?: SemanticRouteDecision | null;
+  /** The turn reached the router because the deterministic floor could NOT
+   * settle it (work-shaped input: an edit, a malfunction report, a plan ask),
+   * and the router produced no verdict (timeout / unusable JSON).
+   *
+   * The floor's read of such a turn is a DEFAULT, not a verdict — `assessIntent`
+   * answers `question` for everything it does not recognise — so falling back to
+   * it here would answer a different question than the one asked: the turn gets
+   * carried as an "answer" with no assessment, no probe, no plan review and no
+   * delivery gate, i.e. the harness abstains precisely where the request asks
+   * for work. Set this instead: the turn is carried as work, and the one move
+   * that is right under EVERY work reading is the cheap read-only probe
+   * ("look before you leap"). It does not invent a plan, a mode, or a risk
+   * level — only refuses to claim the cheap reading it already rejected. */
+  workShapedFallback?: boolean;
 }
 
 export interface CompiledRequestWorkflow {
@@ -41,6 +55,11 @@ export interface CompiledRequestWorkflow {
   probeAvailable: boolean;
   needsProbe: boolean;
   requiresPlanReview: boolean;
+  /** The router was asked because the floor could not settle this turn and
+   *  returned nothing — the turn is carried as work on the conservative
+   *  reading (see RequestWorkflowOptions.workShapedFallback). Exposed so the
+   *  action classifier cannot report it to the user as an "answer" turn. */
+  workShapedFallback: boolean;
   userContext: UserTurnContext;
 }
 
@@ -82,6 +101,7 @@ export function compileRequestWorkflow(
 ): CompiledRequestWorkflow {
   const planner = options.planner ?? new Planner();
   const semantic = options.semanticRoute ?? null;
+  const workShapedFallback = !semantic && options.workShapedFallback === true;
 
   // 语义路由可用 → 它是理解用户意图的唯一来源，不调用任何关键词分类逻辑。
   // 语义路由不可用（null）→ 才退回关键词启发式（planner.analyzeTask），这是最后的兜底。
@@ -103,7 +123,8 @@ export function compileRequestWorkflow(
   // matters for the FIRST implementation turn).
   const needsDesignPhase = needsDeliveryGate && !options.continuingPlan
     && detectUiDesignRequest(prompt);
-  const probeRequired = assessment.requiresProbe
+  const probeRequired = workShapedFallback
+    || assessment.requiresProbe
     || semantic?.requiresPlan === true
     || needsDeliveryGate;
   const probeAvailable = options.hasTools !== false;
@@ -115,6 +136,13 @@ export function compileRequestWorkflow(
     || options.forcedMode === 'plan'
     || options.forcedMode === 'build'
     || semantic?.requiresPlan
+    // 路由器自身矛盾的优先级（2026-10-14 定死一处）：它可以一边给 mode=plan
+    // 一边留 requiresPlan=false——实测「我想给这个项目加一个离线缓存层，先给我
+    // 一个方案」正是如此，于是这一轮直接走成回答，一个计划都没有。规则：
+    // complex + plan 模式 ⇒ 要计划；simple + plan 模式不罢（小改动上 mode=plan
+    // 很常见，强制出卡就是本仓库一直在拒的过度规划）。不一致本身进 signals
+    // 记录（routerPlanFlagInconsistent），不静默选边。
+    || (semantic?.mode === 'plan' && semantic.complexity === 'complex')
     || (!semantic && analysis.complexity === 'complex' && analysis.plan),
   );
   const buildRequested = analysis.mode === 'build'
@@ -148,6 +176,7 @@ export function compileRequestWorkflow(
     probeAvailable,
     needsProbe,
     requiresPlanReview,
+    workShapedFallback,
     userContext,
   };
 }

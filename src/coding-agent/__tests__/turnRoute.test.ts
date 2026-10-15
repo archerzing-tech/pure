@@ -240,3 +240,92 @@ describe('decideTurnRoute (stage 2)', () => {
     expect(getInputDecisionLog()).toHaveLength(0);
   });
 });
+
+// ── Work-frame veto + the work-shaped fallback (2026-10-14) ───────────────
+// Field shape: the synchronous floor reads `question` by DEFAULT (assessIntent
+// answers `question` for everything it does not recognise as destructive /
+// migrate / refactor), `isPlainConversational` trusted that default as proof
+// that the floor had reproduced the router's verdict, and the hidden router was
+// therefore skipped — so a debug request, an add-a-feature request and a
+// "give me a plan" request were all carried as chit-chat: no assessment, no
+// probe, no plan review, no delivery gate. When the router DID run and lost its
+// race, the same flat default carried the turn, so the routing verdict was
+// decided by provider latency. Both halves are pinned here.
+const WORK_SHAPED = [
+  '登录页在我点登录后没有反应，帮我查一下为什么，然后修掉',
+  '给这个登录页加上「记住我」和退出登录，并且补上测试',
+  '我想给这个项目加一个离线缓存层，先给我一个方案',
+  '再加一个导出按钮',
+  '还是不行',
+  '你之前不是已经装了 ffmpeg 了吗，用它做',
+  '把 README 里那行版本号改成 3.3.3',
+  '这个页面不太行，你看看',
+  '为什么线上会偶发 502，日志我贴在下面了',
+];
+
+const CONVERSATIONAL = [
+  '今天几号，星期几，天气如何',
+  '给我做一首诗',
+  '写个关于秋天的故事',
+  '现有页面很难看，我应该从哪些设计方向改善？',
+  '为什么？',
+];
+
+describe('work-frame veto', () => {
+  it('sends every work-shaped phrasing to the router', () => {
+    for (const text of WORK_SHAPED) {
+      const prefetch = prefetchTurnRoute(text);
+      expect(`${text} → ${prefetch.kind}`).toBe(`${text} → needs-router`);
+      expect(prefetch.needsRouter).toBe(true);
+      expect(prefetch.signals.rule).toBe('SEMANTIC_ROUTE');
+    }
+  });
+
+  it('keeps genuinely conversational turns on the fast path', () => {
+    for (const text of CONVERSATIONAL) {
+      const prefetch = prefetchTurnRoute(text);
+      expect(`${text} → ${prefetch.kind}`).toBe(`${text} → conversational`);
+      expect(prefetch.signals.workFrameVeto).toBeUndefined();
+    }
+  });
+});
+
+describe('work-shaped fallback when the router answers nothing', () => {
+  const DEBUG_REQUEST = '登录页在我点登录后没有反应，帮我查一下为什么，然后修掉';
+
+  it('carries the turn as work instead of defaulting it to chat', async () => {
+    const prefetch = prefetchTurnRoute(DEBUG_REQUEST);
+    // The floor's own read — kept honest in the record rather than rewritten.
+    expect(prefetch.floorChat).toBe(true);
+    expect(prefetch.signals.workFrameVeto).toBe(true);
+
+    const decision = await decideTurnRoute(prefetch, fakeRouter(null), { hasTools: true });
+    expect(decision.kind).toBe('router-skipped');
+    expect(decision.route).toBeNull();
+    expect(decision.signals.workShapedFallback).toBe(true);
+    // Not an "answer" turn any more, and the cheap move that is right under
+    // every work reading — read the workspace first — is on.
+    expect(decision.action).toBe('proceed');
+    expect(decision.workflow.stage).toBe('probe');
+    expect(decision.workflow.needsProbe).toBe(true);
+    // It does not invent a plan or a risk level out of the keyword frame.
+    expect(decision.workflow.requiresPlanReview).toBe(false);
+    expect(decision.workflow.analysis.intent.riskLevel).toBe('low');
+  });
+
+  it('still reports work when there is no workspace to probe', async () => {
+    const decision = await decideTurnRoute(prefetchTurnRoute('再加一个导出按钮'), fakeRouter(null), { hasTools: false });
+    expect(decision.workflow.needsProbe).toBe(false);
+    expect(decision.workflow.stage).toBe('direct');
+    // ...but it is still not an "answer": nothing settled this turn's shape.
+    expect(decision.action).toBe('proceed');
+  });
+
+  it('does not ask for a probe or flag work on a purely conversational turn', async () => {
+    const decision = await decideTurnRoute(prefetchTurnRoute('今天几号，星期几，天气如何'), fakeRouter(null), { hasTools: true });
+    expect(decision.kind).toBe('conversational');
+    expect(decision.signals.workShapedFallback).toBeUndefined();
+    expect(decision.action).toBe('answer');
+    expect(decision.workflow.needsProbe).toBe(false);
+  });
+});

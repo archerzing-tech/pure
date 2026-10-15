@@ -32,7 +32,7 @@
 
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { compileRequestWorkflow, type CompiledRequestWorkflow, type RequestWorkflowStage } from '../shared/requestWorkflow';
-import { inferSemanticRoute, isPlainConversational, shouldBypassSemanticRoute } from './Planner';
+import { inferSemanticRoute, isPlainConversational, namesWorkFrame, shouldBypassSemanticRoute, type RouteContextTurn } from './Planner';
 import type { SemanticRouteDecision, TaskMode } from './types';
 import {
   INPUT_CLARIFY_CONFIDENCE,
@@ -105,6 +105,25 @@ function namesAnEdit(text: string): boolean {
   return EDIT_VERB_RE.test(text) && EDIT_TARGET_RE.test(text);
 }
 
+/** How long the router may take on a turn the floor could NOT settle.
+ *
+ *  Measured on the configured provider (glm-5.3-flash, 2026-10-14): first
+ *  content byte at 8.9s / 13.1s / 19.1s / 21.9s across runs, verdict JSON at
+ *  10.8s–23.0s — and a 238-character route prompt was NOT faster than the
+ *  4.7k-character one (13.1s vs 21.9s), so the wait is provider-side thinking,
+ *  not payload. A blocking pre-turn verdict therefore cannot be afforded here
+ *  at all.
+ *
+ *  The cap is deliberately kept BELOW those latencies rather than raised to
+ *  cover them: the router is an optimization (a verdict that arrives outranks
+ *  the keyword floor), while the turn's correctness no longer depends on it —
+ *  a lost race is carried as work via `workShapedFallback` below. Waiting 20s+
+ *  in front of every work-shaped turn to win that lottery is a worse product
+ *  than starting promptly on the safe reading. The way to get the verdict back
+ *  on a slow provider is to run this phase on a fast model (the per-phase
+ *  adapter seam in phaseModels.ts), not to make the user wait. */
+const ROUTER_TIMEOUT_MS = 8_000;
+
 /**
  * Stage 1 — synchronous, no I/O, no LLM. Everything needed before the first
  * await of a turn: the small-talk bypass, the conversational skip, and whether
@@ -123,7 +142,10 @@ export function prefetchTurnRoute(
   // only visible if the overridden read is still in the record.
   const floorChat = pleasantry || isPlainConversational(text, imgs);
   const editVeto = !pleasantry && floorChat && namesAnEdit(text);
-  const conversational = floorChat && !editVeto;
+  // The floor's `question` is a default, not a verdict (see namesWorkFrame):
+  // when the message names work, the fast path may not settle the turn.
+  const workFrameVeto = !pleasantry && floorChat && !editVeto && namesWorkFrame(text);
+  const conversational = floorChat && !editVeto && !workFrameVeto;
   const kind: TurnRoutePrefetch['kind'] = pleasantry
     ? 'pleasantry'
     : conversational
@@ -143,6 +165,7 @@ export function prefetchTurnRoute(
       rule: pleasantry ? 'PLEASANTRY_BYPASS' : conversational ? 'PLAIN_CONVERSATIONAL' : 'SEMANTIC_ROUTE',
       floor: floorChat ? 'chat' : 'work',
       ...(editVeto ? { editFrameVeto: true } : {}),
+      ...(workFrameVeto ? { workFrameVeto: true } : {}),
       ...(timing ? { scheduledAt: timing.at, scheduledText: timing.text } : {}),
     },
   };
@@ -157,6 +180,10 @@ export interface TurnRouteOptions {
   /** Record into the replayable log (inputDecision.ts). Off for probes: a log
    *  full of probe noise is not evidence. */
   log?: boolean;
+  /** The tail of the conversation, so a follow-up is routed as a continuation
+   *  rather than as a standalone sentence (see routeHistoryMessages). Absent
+   *  for a first turn — there is nothing to continue. */
+  history?: readonly RouteContextTurn[];
 }
 
 export interface TurnRouteDecision extends InputDecision {
@@ -195,7 +222,12 @@ function classifyTurnWorkflow(workflow: CompiledRequestWorkflow): { action: Inpu
   if (workflow.needsDeliveryGate) scope.push('output-format');
   if (workflow.analysis.intent.requiresConfirmation) scope.push('constraints');
   if (scope.length === 0) scope.push('none');
-  const directQuestion = workflow.stage === 'direct' && workflow.analysis.intent.intent === 'question';
+  // An unclassified work-shaped turn is NOT an answer turn even when it has no
+  // probe to run: the floor's `question` is what it could not settle, not a
+  // verdict the user should be handed back.
+  const directQuestion = workflow.stage === 'direct'
+    && workflow.analysis.intent.intent === 'question'
+    && !workflow.workShapedFallback;
   return { action: directQuestion ? 'answer' : 'proceed', scope };
 }
 
@@ -226,9 +258,15 @@ export async function decideTurnRoute(
   // A continuing plan keeps its already-approved route: re-routing "继续" would
   // let the router turn a mid-plan nudge into a fresh plan.
   if (!continuing && prefetch.needsRouter && llm) {
-    route = await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images);
+    route = await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, options.history);
   }
   const deterministic = route === null;
+  // The router was ASKED because the floor could not settle this turn — so if
+  // it produced nothing, the floor's read is not the fallback, it is the same
+  // guess that was already rejected. Carrying it as work is the conservative
+  // reading and the one that keeps the turn's structure (read first, never
+  // report an unclassified work request to the user as an "answer").
+  const workShapedFallback = route === null && prefetch.needsRouter && !continuing;
   const kind: TurnRouteKind = route
     ? 'router-decided'
     : prefetch.kind === 'pleasantry'
@@ -244,6 +282,7 @@ export async function decideTurnRoute(
     planPauseRequested: options.planPauseRequested,
     continuingProjectBuild: options.continuingProjectBuild,
     semanticRoute: route,
+    workShapedFallback,
   });
 
   // What the turn IS. Whether it runs now or at the named moment is a separate
@@ -275,14 +314,19 @@ export async function decideTurnRoute(
     reason: route
       ? `semantic router: ${route.intent}/${route.complexity}/${route.mode}`
       : prefetch.kind === 'pleasantry'
-        ? 'deterministic small talk; no router call and no workspace needed'
-        : prefetch.kind === 'conversational'
+        ? 'deterministic small talk; no router call and no workspace needed'          : prefetch.kind === 'conversational'
           ? 'synchronous floor already reproduced the router verdict; round trip skipped'
-          : 'router produced no verdict; the Planner floor carries the turn',
+          : 'router produced no verdict on a work-shaped turn; carried as work (read first) rather than defaulted to chat',
     signals: {
       ...prefetch.signals,
       ...(route ? { routerIntent: route.intent, routerMode: route.mode, routerComplexity: route.complexity } : {}),
       ...(route && route.confidence === undefined ? { confidenceDefaulted: true } : {}),
+      ...(workShapedFallback ? { workShapedFallback: true, routerTimeoutMs: ROUTER_TIMEOUT_MS } : {}),
+      ...(route ? { routeHistoryTurns: options.history?.length ?? 0 } : {}),
+      // The router contradicting itself is recorded, not hidden: it is the rate
+      // that tells us whether the route prompt needs fixing (see the precedence
+      // rule in requestWorkflow.compileRequestWorkflow).
+      ...(route && route.mode === 'plan' && !route.requiresPlan ? { routerPlanFlagInconsistent: true } : {}),
       continuing,
       stage: workflow.stage,
       agreement,

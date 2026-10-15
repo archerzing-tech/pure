@@ -149,11 +149,20 @@ describe('PromptAssembler', () => {
     expect(assembly).toContain('<skill name="app-ocr">');
   });
 
-  it('keeps the capability-gap protocol when budget allows', () => {
+  it('keeps the capability-gap protocol when budget allows, with install details on demand', () => {
     const assembly = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'test' });
+    // 大头①（2026-10-14）：常驻守门线永远在；安装路径梯只剩按需段——普通
+    // 请求不带（省量），装东西/缺能力的请求带（闸门放行）。
     expect(assembly).toContain('Capability-gap protocol:');
-    expect(assembly).toContain('npx skills find');
+    expect(assembly).toContain('do NOT refuse, do NOT pretend to have the capability, and do NOT invent results');
     expect(assembly).toContain('~/.pure/skills/');
+    expect(assembly).not.toContain('npx skills find');
+    const withLadder = assembler.buildSystemPrompt(
+      { surface: 'cli', capabilities: 'test' },
+      '帮我把 png 转成 webp，装一下需要的库',
+    );
+    expect(withLadder).toContain('Capability-gap protocol:');
+    expect(withLadder).toContain('npx skills find');
   });
 
   it('tells the CLI to emit mermaid/puml and explains the wireframe rendering', () => {
@@ -459,13 +468,33 @@ describe('PromptAssembler', () => {
   });
 
   it('keeps the SVG output contract when image generation is off (default)', () => {
+    // 2026-10-14（⑦ 低风险子集）：svg 细则改为按请求装配，所以这里必须真的给出
+    // 一个求图的请求——不带请求文本的装配只带常驻指针，不该有细则。
     const prompt = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: buildGuiCapabilities(true),
-    });
+    }, '画一只鸟');
     expect(prompt).toContain('fenced code block tagged svg');
     expect(prompt).not.toContain('generate_image(');
     expect(prompt).not.toContain('NEVER emit fenced svg code blocks');
+  });
+
+  it('carries the visual pointer always, and the DSL detail only for a request that needs it', () => {
+    // 常驻：块标签 + 「不写文件 / 不用脚本画」守门线（漏判闸门时行为不会翻车）。
+    const chat = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '这个函数是干什么的？');
+    expect(chat).toContain('Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply');
+    // 细则特有的句子（就在细则段里，指针段没有），用来区分「细则到位/没到位」。
+    expect(chat).not.toContain('A JSON payload');
+    expect(chat).not.toContain('A MAP IS NEVER SVG');
+    expect(chat).not.toContain('NEVER combine several subjects into a single');
+    // 按需：图表/地图细则随请求到位。
+    const chart = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '把这些数据做成柱状图');
+    expect(chart).toContain('A JSON payload');
+    const map = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '给我一条西安到上海的骑行路线');
+    expect(map).toContain('A MAP IS NEVER SVG');
+    // 尾巴纪律：细则接在末尾，所以不带细则的提示词是带细则的前缀——
+    // 前缀逐字不变，供应商的前缀缓存只重预填尾巴。
+    expect(chart.startsWith(chat)).toBe(true);
   });
 
   it('swaps SVG for generate_image when the provider supports text-to-image', () => {
@@ -473,7 +502,7 @@ describe('PromptAssembler', () => {
       surface: 'gui',
       capabilities: buildGuiCapabilities(true, false, { imageGeneration: true }),
       imageGeneration: true,
-    });
+    }, '生成一个小狗图标');
     expect(prompt).toContain('generate_image(prompt, n?, size?)');
     expect(prompt).toContain('NEVER emit fenced svg code blocks for image requests');
     expect(prompt).toContain('fall back to svg code blocks');
@@ -490,7 +519,7 @@ describe('PromptAssembler', () => {
       surface: 'gui',
       capabilities: buildGuiCapabilities(false, false, { imageGeneration: true }),
       imageGeneration: true,
-    });
+    }, '生成一个小狗图标');
     expect(plain).toContain('generate_image(prompt');
     expect(plain).not.toContain('write_file(path, content)');
   });

@@ -26,7 +26,7 @@ import { ContextEngine, estimateTokens, type ContextCompactionResult, type Conte
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta } from '../coding-agent/Planner';
+import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, type RouteContextTurn } from '../coding-agent/Planner';
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
@@ -2682,6 +2682,17 @@ export class ChatController {
     return this.messages;
   }
 
+  /** The tail of the conversation for the semantic router (2026-10-14): a
+   *  follow-up (「还是不行」「再加一个导出按钮」) has no meaning on its own, so
+   *  routing it as a standalone sentence is what let a debugging continuation
+   *  be carried as chit-chat. User/assistant text only — tool noise is not
+   *  context a router can use. Truncation happens in routeHistoryMessages. */
+  private routeHistory(): RouteContextTurn[] {
+    return this.messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' }));
+  }
+
   /** 最近一次 send 装配的上下文固定开销（系统提示词 + 工具定义 token 估算），
    * 与底部上下文窗口进度条共用口径。 */
   getContextOverheadTokens(): { system: number; tools: number } {
@@ -4925,7 +4936,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const routeStartMs = performance.now();
       // 刀 4.2：判例轻档配了轻模型时，语义路由也走轻档（路由是「判断但轻」
       // 的一次性调用）；没配留主适配器，路由行为与引入前一致。
-      const turnRoute = await decideTurnRoute(routePrefetch, judgeModel ? this.judgeLlm ?? llm : llm, {
+      // 路由走裁决实例（暗思考关），不随「有没有配轻档」开关切换。
+      // 2026-10-14 实测（glm-5.3-flash，同一段路由提示词，四个真实请求）：
+      //   thinking 关 → 首字 2.4–3.9s、出全 3.1–6.0s
+      //   thinking 开 → 首字 10.9–35.1s、出全 12.2–38.3s
+      // 而已配置的默认路径下 judgeModelFor 返回 undefined（没有轻档），于是
+      // 路由一直跑在主 adapter（暗思考开）上，10–38s 对上 12s 的超时帽——判定
+      // 结果由供应商延迟抽签：输了就静默退回关键词地板，而地板把 debug / 加功能 /
+      // 要方案的请求全读成 question。judgeLlm 本来就是主模型 + 关暗思考，
+      // 语义不变，只是让这一跳来得回来（插话裁决与聚焦点名早就无条件走它）。
+      const turnRoute = await decideTurnRoute(routePrefetch, this.judgeLlm ?? llm, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
         continuingPlan,
@@ -4934,6 +4954,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // turns, not the continuation prompt ("继续" must not silently lose
         // the gate, and an ordinary complex plan must not gain it).
         continuingProjectBuild: this.activePlanProjectBuild,
+        // 追问只有放在对话里才读得懂：「还是不行」本身什么也说明不了。
+        history: this.routeHistory(),
       }, this.abortController?.signal);
       // The hidden router round trip is the single largest pre-request cost
       // (6-12s on slow providers) — timing it is what makes that visible.

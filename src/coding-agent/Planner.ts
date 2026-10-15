@@ -60,7 +60,7 @@ export interface PlannerConfig {
   complexFileThreshold?: number;
 }
 
-const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
+const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. When earlier turns are included they are CONTEXT, not requests: what you classify is always the LAST user message, read as the continuation of that conversation. A short follow-up ("还是不行", "再加一个导出按钮", "用它做", "就先这样") takes its meaning from the preceding turn — judge what it asks for IN that conversation (a repeat of a failed fix, another change to the same deliverable, a switch to a resource the assistant already has), never as a standalone sentence with no subject. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
 
 Return ONLY one JSON object with this shape:
 {"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"subagents":["researcher","deep_thinker"],"confidence":0.9,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
@@ -114,6 +114,60 @@ const QUESTION_SHAPED = /[?？]|几号|几月|几点|星期|周几|多久|多(?:
  * guard below can still see an embedded build request. */
 function stripQuestionPrefix(text: string): string {
   return text.replace(/^(?:请问|能不能|可不可以|可以|能否|是否|我想问|想问|麻烦问|帮我看看|how(?:(?:\s+can|\s+could|\s+do|\s+should|\s+would)?\s+i)?|can\s+you|could\s+you|please)\s*/i, '');
+}
+
+// ── Work-frame veto (2026-10-14) ──────────────────────────────────────────
+// `isPlainConversational` below asks the KEYWORD FLOOR whether it already
+// reproduced the router's verdict. The floor cannot answer that: `assessIntent`
+// defaults every request it does not recognise as destructive/migrate/refactor
+// to `intent: 'question'`, risk low — a DEFAULT, not a verdict. Measured on the
+// product's own request set (scripts/tmp-route-census.ts, 15 real phrasings),
+// the floor read 14 of them as question/simple/yolo, including:
+//
+//   登录页在我点登录后没有反应，帮我查一下为什么，然后修掉   → chat
+//   给这个登录页加上「记住我」和退出登录，并且补上测试         → chat
+//   我想给这个项目加一个离线缓存层，先给我一个方案            → chat
+//   这个页面不太行，你看看                                    → chat
+//   还是不行                                                  → chat
+//
+// so the hidden router was never called and the turn was carried as chit-chat:
+// no assessment, no read-only probe, no plan review, no delivery gate — the
+// harness abstaining exactly where the request asks for work. The two vetoes
+// below are the corrective: `namesAnEdit` (verb × target) catches the explicit
+// edit, and `namesWorkFrame` catches the rest of the work shapes. Both are
+// NEGATIVE signals on a floor that can only say "question" — they never claim
+// what the turn is, only that the fast path may not settle it.
+//
+// Bias: recall over precision, deliberately. A false veto costs one router
+// round trip (a few seconds, and only on that turn); a false skip costs the
+// whole turn's structure (probe / plan / delivery gate / assessment), which is
+// the failure this exists to prevent. The line is drawn so that genuine
+// conversational turns — questions, small talk, creative asks, design-direction
+// questions — carry none of these signals and keep the fast path.
+
+/** Change-shaped verbs: naming one is naming work to do, not a question. */
+const WORK_VERB_RE = /(?:改(?:成|为|一下|一改|掉|好|得|动|起来)|修改|修正|改动|修复|修好|修掉|修了|修一下|修下|调试|排查|定位|复现|加上|加一个|加个|新增|添加|插入|补上|补齐|补充|删掉|删了|删除|移除|去掉|替换|换成|重构|重写|重命名|拆分|抽出|抽取|迁移|升级|降级|实现|接入|接上|接进去|部署|打包|优化一下|简化|整理|清理|调整|装上|安装|用它做)/;
+
+/** Functional-failure words: the user is reporting something that does not
+ *  work — that is a diagnosis request even when phrased as an observation.
+ *  Deliberately excludes aesthetic opinions (难看 / 不好看): those are design
+ *  feedback, and the product routes design direction as a question on purpose. */
+const WORK_SYMPTOM_RE = /(?:没反应|不响应|点不了|点不动|点了没|没效果|没生效|不生效|不起作用|不工作|跑不起来|起不来|打不开|加载不出来|报错|出错|报异常|崩溃|卡住|卡死|失效|失灵|坏了|挂了|不太行|不对劲|不好用|不行了|还是不行|又不行|不通过|没过|构建失败|测试失败|偶发)/;
+
+/** Requests for a plan / an assessment of a concrete target — asking for the
+ *  shape of the work is not chit-chat. */
+const WORK_PLAN_RE = /(?:给我(?:一个|个|一份)?\s*(?:方案|计划|思路|建议)|先给(?:我)?(?:一个|个)?\s*(?:方案|计划)|规划一下|设计一下|评估一下|分析一下|排查一下|找找原因|定位一下|看看问题|你看看|你看一下|帮我看)/;
+
+/** Does this turn name work (a change, a malfunction, or a plan request)?
+ *
+ *  Exported so `prefetchTurnRoute` can veto the chit-chat fast path with it.
+ *  It answers ONE question — "may the floor's `question` default be trusted?" —
+ *  and deliberately does not attempt to classify the turn: the LLM router is
+ *  the only layer allowed to say what the request IS. */
+export function namesWorkFrame(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  return WORK_VERB_RE.test(text) || WORK_SYMPTOM_RE.test(text) || WORK_PLAN_RE.test(text);
 }
 
 /** True when a request is SO plainly a low-stakes conversational turn — a
@@ -208,16 +262,68 @@ async function streamUntilParsed<T>(
   return result;
 }
 
+/** One prior turn handed to the router. Declared structural rather than reusing
+ *  Message so a caller cannot smuggle tool results or images into the context. */
+export interface RouteContextTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** How many prior turns the router may see, and how much of each. Small on
+ *  purpose: the router needs WHAT the conversation is working on, not the
+ *  transcript — and this call rides in front of every non-trivial turn. */
+export const ROUTE_HISTORY_TURNS = 6;
+export const ROUTE_HISTORY_CHARS = 600;
+
+/**
+ * Build the router's context messages from the tail of the conversation.
+ *
+ * Field shape this exists for: a follow-up ("还是不行" / "再加一个导出按钮" /
+ * "用它做") carries almost none of its meaning by itself — routed as a standalone
+ * sentence it reads as a fresh, tiny, unclassifiable request, which is how a
+ * debugging continuation got carried as chit-chat. The last user message is the
+ * request being classified; everything before it is context only.
+ *
+ * A trailing user turn identical to the current prompt is dropped: the caller's
+ * transcript already contains the message being routed, and feeding it twice
+ * reads as "the user said this twice".
+ */
+export function routeHistoryMessages(
+  turns: readonly RouteContextTurn[] | undefined,
+  current: string,
+): Message[] {
+  if (!turns?.length) return [];
+  const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const target = normalize(current);
+  const usable = turns.filter((turn) => turn.role === 'user' || turn.role === 'assistant');
+  while (usable.length > 0) {
+    const last = usable[usable.length - 1];
+    if (last.role === 'user' && normalize(last.content) === target) usable.pop();
+    else break;
+  }
+  return usable
+    .filter((turn) => turn.content.trim().length > 0)
+    .slice(-ROUTE_HISTORY_TURNS)
+    .map((turn) => ({
+      role: turn.role,
+      content: turn.content.length > ROUTE_HISTORY_CHARS
+        ? `${turn.content.slice(0, ROUTE_HISTORY_CHARS)}…`
+        : turn.content,
+    }));
+}
+
 export async function inferSemanticRoute(
   llm: LLMAdapter,
   prompt: string,
   signal?: AbortSignal,
   images?: MessageImage[],
   timeoutMs = 12_000,
+  history?: readonly RouteContextTurn[],
 ): Promise<SemanticRouteDecision | null> {
   if (!prompt.trim() || signal?.aborted) return null;
   const request: Message[] = [
     { role: 'system', content: SEMANTIC_ROUTE_PROMPT },
+    ...routeHistoryMessages(history, prompt),
     { role: 'user', content: prompt, images },
   ];
   const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute);
@@ -710,6 +816,18 @@ export class Planner {
     const absTrap = prompt.match(/(?:永远|从不|绝不|任何情况下都)(?:不要|不能|禁止|不允许|必须|要)?([^。；,]{2,20}?)(?:，|,)?(?:但|却|同时)(?:又要|还要|仍然要|必须|要)\1/);
     if (absTrap) {
       add('impossible-constraint', `The request makes an absolute statement about "${absTrap[1].trim()}" and simultaneously demands its opposite — impossible as stated.`);
+    }
+
+    // 任务级矛盾（2026-10-14）：「不要改任何文件，但把这个函数里的 bug 修掉」。
+    // 这不是名词回指（上面几条要求同一个名词出现两次），而是任务级：两句话各自
+    // 都清楚，放一起才不可能——只有读懂「修掉 bug 必然要改文件」才看得出来。
+    // 判据刻意收窄在前半句是整类封禁（任何/所有/整个 + 文件/代码/项目），否则
+    // 「不要改配置，但把 README 补上」这类正常分工会被误报；命中只代表「先验证
+    // 前提」，不代表请求一定不可能。
+    const forbidWholeClass = /(?:不要|不能|别|禁止|不允许|不许)\s*(?:改|修改|动|碰|编辑|变更|写)\s*(?:任何|所有|全部|一切|整[个套])?\s*(?:的)?\s*(?:文件|代码|源码|代码库|项目|仓库|工程)/.test(prompt);
+    const laterAsksChange = /(?:但|却|同时|又要|还得|另外|顺便)[^。；]{0,24}(?:修|改|加|删|换|补|重构|实现|去掉|移除|替换|加上|统一)/.test(prompt);
+    if (forbidWholeClass && laterAsksChange) {
+      add('self-contradiction', 'The request forbids touching any file/code and then asks for a change that cannot be made without touching them — both cannot hold as stated; say so and settle what the boundary really is.');
     }
 
     // English: "do not X but also X" (back-reference on the same action).

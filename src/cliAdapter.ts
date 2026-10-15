@@ -7,13 +7,22 @@
 import { MockLLMAdapter } from './adapter/mock/MockLLMAdapter';
 import { createDeepSeekAdapter, createQwenAdapter, createGLMAdapter, OpenAICompatibleAdapter } from './adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from './adapter/deepseek/DeepSeekAnthropicAdapter';
-import { baseURLFor, customProviderFor, customProviderLabel, providerOverrideFor, promptBudgetForProvider, protocolForURL, resolvePromptBudget } from './shared/providers';
+import { baseURLFor, customBaseURL, customProviderFor, customProviderLabel, planThinkingOffExtraBody, providerOverrideFor, promptBudgetForProvider, protocolForURL, resolvePromptBudget } from './shared/providers';
 import { reflectModelFor } from './shared/phaseModels';
 import { bold, cyan, dim, red } from './termcolors';
 import type { LLMAdapter } from './shared/types';
 import type { CliArgs } from './cliConfig';
 
-function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
+/** `opts.disableThinking` builds the JUDGE flavour of the same adapter: identical
+ *  provider / model / endpoint resolution, with the vendor's hidden reasoning
+ *  switched off. Used for the "judge but light" host calls (turn routing, insert
+ *  classification), whose whole output is a small JSON — measured on
+ *  glm-5.3-flash (2026-10-14, same route prompt, four real requests): thinking
+ *  off → 2.4–3.9s to first byte / 3.1–6.0s complete; thinking on → 10.9–35.1s /
+ *  12.2–38.3s. At the old 12s cap that difference alone decided whether the turn
+ *  got routed at all. Providers without a thinking switch get no extra body and
+ *  behave exactly as before. */
+function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}): { adapter: LLMAdapter; label: string } {
   if (args.provider === 'mock') {
     return { adapter: new MockLLMAdapter(), label: 'Mock (v0.1)' };
   }
@@ -22,6 +31,10 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
   // /v1/chat/completions endpoint). Keyless entries send no Authorization
   // header; keyed ones use their own key from the custom entry.
   const custom = customProviderFor(args.customProviders, args.provider);
+  /** Vendor extra body for the judge flavour; undefined = provider has no switch. */
+  const judgeExtraBody = (endpoint?: string): Record<string, unknown> | undefined => (opts.disableThinking
+    ? planThinkingOffExtraBody(args.provider, endpoint ?? customBaseURL(args.customProviders, args.provider, args.providerOverrides))
+    : undefined);
   if (custom) {
     if (!custom.baseURL) {
       console.error(`${red('❌')} Custom provider ${cyan(custom.name)} is missing a base URL. Run ${bold('pure config')} to fix it.`);
@@ -33,7 +46,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
     ).outputReserveTokens;
     const apiKey = custom.apiKey || args.apiKey;
     return {
-      adapter: new OpenAICompatibleAdapter({ baseURL: custom.baseURL, apiKey, model, maxTokens }),
+      adapter: new OpenAICompatibleAdapter({ baseURL: custom.baseURL, apiKey, model, maxTokens, extraBody: judgeExtraBody(custom.baseURL) }),
       label: `${custom.name} (${model})`,
     };
   }
@@ -75,7 +88,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
       if (endpoint && protocolForURL(endpoint) === 'anthropic') {
         return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model, baseURL: endpoint, maxTokens }), label: `${displayName} (${args.model})` };
       }
-      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
+      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens, judgeExtraBody(endpoint)), label: `${displayName} (${args.model})` };
     }
     case 'deepseek-openai':
       return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
@@ -86,7 +99,7 @@ function createAdapter(args: CliArgs): { adapter: LLMAdapter; label: string } {
     case 'openrouter':
     case 'nvidia':
       return {
-        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model, maxTokens }),
+        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model, maxTokens, extraBody: judgeExtraBody(endpoint) }),
         label: `${displayName} (${args.model})`,
       };
     default:
@@ -129,4 +142,17 @@ function resolveReflectAdapter(args: CliArgs, main: LLMAdapter): LLMAdapter {
   return model ? createAdapter({ ...args, model }).adapter : main;
 }
 
-export { createAdapter, resolveReflectAdapter, PROVIDER_LABELS, PROVIDER_ENV_HINT };
+/** The judge flavour of the main adapter (same provider / model / endpoint, no
+ *  hidden reasoning) for turn routing and insert classification. See
+ *  createAdapter's `disableThinking` note for why the routing call cannot ride
+ *  the main adapter. A provider with no thinking switch returns the caller's
+ *  own adapter — no reconstructed-but-identical shadow adapter (same discipline
+ *  as resolveReflectAdapter). */
+function resolveJudgeAdapter(args: CliArgs, main: LLMAdapter): LLMAdapter {
+  if (args.provider === 'mock') return main;
+  const endpoint = customBaseURL(args.customProviders, args.provider, args.providerOverrides);
+  if (!planThinkingOffExtraBody(args.provider, endpoint)) return main;
+  return createAdapter(args, { disableThinking: true }).adapter;
+}
+
+export { createAdapter, resolveReflectAdapter, resolveJudgeAdapter, PROVIDER_LABELS, PROVIDER_ENV_HINT };

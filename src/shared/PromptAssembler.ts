@@ -9,7 +9,8 @@ import type { ToolDefinition } from './types';
 import { activeCharacterCore, activeCharacterExpression } from '../character';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
-  CAPABILITY_GAP_PROMPT,
+  CAPABILITY_GAP_CORE,
+  CAPABILITY_GAP_LADDER,
   CHART_DSL_PROMPT,
   COMPLEX_TASK_PROTOCOL_PROMPT,
   MAP_DSL_PROMPT,
@@ -21,15 +22,20 @@ import {
   INSERTION_PROTOCOL_PROMPT,
   LEDGER_PROTOCOL_PROMPT,
   LOGICAL_TRAPS_PROMPT,
-  MULTI_AGENT_PROTOCOL,
+  MULTI_AGENT_CORE,
+  MULTI_AGENT_MECHANICS,
   PLAUSIBILITY_REVIEW_PROMPT,
   PRE_COMMIT_REVIEW_CONTRACT,
   PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
   TYPO_TOLERANCE_PROMPT,
+  VISUAL_BLOCK_POINTER,
   WORKFLOW_PROMPT,
   composeUserTurn,
+  detectVisualRequest,
+  wantsCapabilityLadder,
+  wantsDelegationMechanics,
   type UserTurnContext,
 } from './promptLayers';
 
@@ -212,10 +218,15 @@ export function buildCliCapabilities(): string {
 }
 
 function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
-  const visualOutput = surface === 'gui'
+  // 可视化细则（chart / map / svg / image）已从常驻块搬出，见 buildVisualFragments：
+  // 那四段约 4.3k 字符只对少数请求有用，常驻代价却是每轮都付。常驻这一段只留
+  // 一句指针 + 各形态的一句话定位，形态与「不写成文件/不用脚本画」的守门线
+  // 不随请求变化。
+  const isGui = surface === 'gui';
+  const visualOutput = isGui
     ? imageGeneration
-      ? `- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. To EXPLAIN an image the user attached (what it is, what it shows), answer directly and never call generate_image. For diagrams (flowcharts, architecture, logic, deployment, UML), emit fenced code blocks tagged svg, mermaid or puml/plantuml — ALL of them render locally in the app with no network: mermaid (default) for flowchart/sequence/state/ER/gantt/pie/mindmap/timeline, puml/plantuml when PlantUML's layout is better (class / component / deployment / activity / use-case diagrams).\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
-      : `- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (structural diagrams default to fenced mermaid blocks: flowchart/sequence/class/state/ER/gantt/pie/mindmap/timeline; fenced puml/plantuml blocks render locally too — use them for class / component / deployment / activity / use-case UML). All of these render offline. A picture request is DELIVERED as the fenced svg/mermaid/puml block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.\n- ${CHART_DSL_PROMPT}\n- ${MAP_DSL_PROMPT}`
+      ? '- To SHOW a picture/icon/illustration/photo, call generate_image — the app renders the result as a real image. To EXPLAIN an image the user attached (what it is, what it shows), answer directly and never call generate_image. For diagrams (flowcharts, architecture, logic, deployment, UML), emit fenced code blocks tagged svg, mermaid or puml/plantuml — ALL of them render locally in the app with no network: mermaid (default) for flowchart/sequence/state/ER/gantt/pie/mindmap/timeline, puml/plantuml when PlantUML\'s layout is better (class / component / deployment / activity / use-case diagrams).'
+      : '- To SHOW a picture/diagram, emit it as a fenced code block tagged svg containing complete standalone SVG — the app renders it inline as an image (structural diagrams default to fenced mermaid blocks: flowchart/sequence/class/state/ER/gantt/pie/mindmap/timeline; fenced puml/plantuml blocks render locally too — use them for class / component / deployment / activity / use-case UML). All of these render offline. A picture request is DELIVERED as the fenced svg/mermaid/puml block itself — never save it with write_file as an .svg/.png file, and never emit SVG as plain text or in a non-svg code block.'
     : surface === 'channel'
       ? '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the channel host rasterizes or degrades them per the platform\'s capabilities. Keep the response readable as a chat message, not as a terminal dump.'
       : '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the CLI renders these as a wireframe with boxes and connecting lines. Keep the response readable in a terminal.';
@@ -230,6 +241,66 @@ ${visualOutput}
 - COMPLETE runnable artifacts go to disk by default: when the user asks you to BUILD a full game, mini-game, web page/site, app, tool, script, or small project ("写一个小游戏", "做一个网页", "开发一个工具" — even without naming a path), WRITE it to a file instead of printing the whole source inline. Single-file artifact → a new file like index.html / game.html / app.py in the workspace; multi-file project → a new directory with the files. After writing, state the path(s) and how to run/open it.
 - When the user reports that an existing result is poor, or asks how to get a better result, first infer the outcome they want from the whole request and conversation. Choose a useful response that can combine diagnosis, concrete design directions, trade-offs, relevant specialist skills/tools, and an offer to inspect or implement the improvement. For visual or product-quality problems, make the advice concrete by discussing hierarchy, typography, spacing, color, content, interaction, and responsive behavior as relevant, then propose a small number of directions with trade-offs. Do not force a fixed advice-only or build-only route from isolated words. If the request is genuinely ambiguous, present the most useful options and ask one focused question; if implementation is clearly wanted, inspect the existing artifact and proceed through the normal plan, permission, and verification flow.
 - When you do write a file, briefly state where it landed and confirm the user actually wanted persistence; the EXISTENCE of a workspace does NOT imply "save everything to disk".`;
+}
+
+/**
+ * 可视化细则的按需装配（2026-10-14 ⑦ 低风险子集）。
+ *
+ * 四段细节（```chart DSL、```map DSL、svg 输出规范、generate_image 契约）只对
+ * 「会产出图/图表/地图」的请求有用；此前它们对所有请求常驻。这里按请求闸门
+ * （detectVisualRequest）装配，并放在系统提示词的**尾巴**——文件顶部那条
+ * 「volatile fragments LAST」的纪律：随回合变化的内容变动尾巴，供应商的前缀
+ * 缓存只重预填尾巴。同一次请求里常驻段逐字不变（有测试钉住「非可视请求的
+ * 系统提示词是可视请求的前缀」）。
+ *
+ * 守门线不强依赖闸门：常驻段已有 VISUAL_BLOCK_POINTER（块标签 +「不写文件 /
+ * 不用脚本画」+ chart/map 最小语法），所以漏判的后果是细则缺失，不是行为错。
+ */
+function buildVisualFragments(
+  surface: PromptSurface,
+  imageGeneration: boolean,
+  userText: string | undefined,
+): PromptFragment[] {
+  const wants = detectVisualRequest(userText ?? '');
+  // 常驻指针不分面：块标签与「不写文件 / 不用脚本画」在 CLI / 渠道同样成立
+  // （以前 svg_output 是对所有面注入的，只有细则才是 GUI 专属）。
+  const parts: Array<[string, string | undefined, number]> = [
+    ['visual_pointer', VISUAL_BLOCK_POINTER, 64],
+  ];
+  if (surface === 'gui') {
+    parts.push(
+      ['chart_dsl', wants.chart ? CHART_DSL_PROMPT : undefined, 63],
+      ['map_dsl', wants.map ? MAP_DSL_PROMPT : undefined, 62],
+      ['image_gen', imageGeneration && wants.picture ? IMAGE_GEN_OUTPUT_PROMPT : undefined, 61],
+      ['svg_output', !imageGeneration && wants.picture ? SVG_OUTPUT_PROMPT : undefined, 60],
+    );
+  }
+  return parts
+    .map(([id, content, priority]) => fragment(id, content ?? '', priority))
+    .filter((item): item is PromptFragment => item !== null);
+}
+
+/**
+ * 「大头」细则的按需装配（2026-10-14）：capability-gap 的安装路径梯（约 4.6k）
+ * 与 multi_agent 的机制段（约 2.4k）只对一部分请求有用，常驻代价却是每轮都付。
+ * 两条闸门都放在系统提示词的**尾巴**（同 buildVisualFragments 的理由：随回合
+ * 变化的内容住尾部，供应商的前缀缓存只重预填尾巴），且两支的**核心**始终常驻
+ * ——漏判的后果是细则缺失（装得朴素 / 委派得朴素），不是不装、不委派。
+ */
+function buildRequestDetailFragments(
+  context: PromptAssemblyContext,
+  userText: string | undefined,
+): PromptFragment[] {
+  const text = userText ?? '';
+  const complexTask = context.mode === 'build' || context.mode === 'plan';
+  return [
+    fragment('capability_gap_ladder', wantsCapabilityLadder(text) ? CAPABILITY_GAP_LADDER : '', 59),
+    fragment(
+      'multi_agent_mechanics',
+      context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS : '',
+      58,
+    ),
+  ].filter((item): item is PromptFragment => item !== null);
 }
 
 function buildToolCallingRules(surface: PromptSurface): string {
@@ -361,7 +432,11 @@ export class PromptAssembler {
     return this.observability;
   }
 
-  buildSystemFragments(context: PromptAssemblyContext): PromptFragment[] {
+  /** `userText` is the request the prompt is being assembled FOR: the visual
+   *  detail fragments ride only when that request may need them (see
+   *  buildVisualFragments). Omitted → the always-on pointer only, so a caller
+   *  that does not know the request pays nothing for the DSL detail. */
+  buildSystemFragments(context: PromptAssemblyContext, userText?: string): PromptFragment[] {
     const capabilities = context.capabilities.trim();
     // null = 显式关闭；未传 / 空白 = 取当前激活内核。空内容经 fragment() 收口。
     const characterCore = context.characterCore === null
@@ -422,7 +497,7 @@ export class PromptAssembler {
       // delegate; delivery_contract is safe to always include.
       ...(context.hasSubagents
         ? [
-            fragment('multi_agent', MULTI_AGENT_PROTOCOL, 115, true),
+            fragment('multi_agent', MULTI_AGENT_CORE, 115, true),
             // Pre-commit review delegates to code_reviewer, so it shares the
             // subagent gate: no subagents → no reviewer to run → no contract.
             fragment('pre_commit_review', PRE_COMMIT_REVIEW_CONTRACT, 113, true),
@@ -432,12 +507,13 @@ export class PromptAssembler {
       fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),
       // Image requests follow ONE contract: the generate_image tool when the
       // provider supports it, otherwise the multi-SVG grid contract. Never both.
-      fragment(context.imageGeneration === true ? 'image_gen' : 'svg_output', context.imageGeneration === true ? IMAGE_GEN_OUTPUT_PROMPT : SVG_OUTPUT_PROMPT, 50),
+      // 契约与 DSL 细则一起搬到尾巴按需装配（见 buildVisualFragments）——它们的
+      // 常驻部分（块标签 + 禁令）在 VISUAL_BLOCK_POINTER 里。
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
       fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
       fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),
       fragment('plausibility_review', PLAUSIBILITY_REVIEW_PROMPT, 72),
-      fragment('capability_gap', CAPABILITY_GAP_PROMPT, 75),
+      fragment('capability_gap', CAPABILITY_GAP_CORE, 75),
       fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
       fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
@@ -454,14 +530,18 @@ export class PromptAssembler {
       // invalidating ~25KB of stable instructions behind it.
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('task_mode', buildMode(context.mode), 85),
+      // ── 按请求装配的可视化细则（尾区，随回合变化）──
+      ...buildVisualFragments(context.surface, context.imageGeneration === true, userText),
+      // ── 按请求装配的「大头」细则（尾区）：安装路径梯 + 委派机制段 ──
+      ...buildRequestDetailFragments(context, userText),
     ].filter((item): item is PromptFragment => item !== null);
   }
 
-  buildSystemPrompt(context: PromptAssemblyContext): string {
+  buildSystemPrompt(context: PromptAssemblyContext, userText?: string): string {
     const budget = resolvePromptBudget(context.budget);
     const toolTokens = estimateToolDefinitionTokens(context.toolDefinitions);
     const selection = selectFragments(
-      this.buildSystemFragments(context),
+      this.buildSystemFragments(context, userText),
       Math.max(1, budget.availableInputTokens - toolTokens),
     );
     return joinFragments(selection.fragments);
@@ -487,7 +567,7 @@ export class PromptAssembler {
     const budget = resolvePromptBudget(context.budget);
     const estimatedToolTokens = estimateToolDefinitionTokens(context.toolDefinitions);
     const messageBudget = Math.max(1, budget.availableInputTokens - estimatedToolTokens);
-    const systemSelection = selectFragments(this.buildSystemFragments(context), messageBudget);
+    const systemSelection = selectFragments(this.buildSystemFragments(context, userText), messageBudget);
     const systemPrompt = joinFragments(systemSelection.fragments);
     const systemTokens = estimatePromptTokens(systemPrompt);
     const userSelection = userText === undefined

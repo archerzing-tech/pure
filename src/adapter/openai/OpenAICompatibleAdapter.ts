@@ -204,11 +204,21 @@ export function createQwenAdapter(apiKey: string, workspaceId: string, model = '
   });
 }
 
-export function createGLMAdapter(apiKey: string, model = 'glm-5.3-flash', baseURL?: string, maxTokens?: number) {
+export function createGLMAdapter(
+  apiKey: string,
+  model = 'glm-5.3-flash',
+  baseURL?: string,
+  maxTokens?: number,
+  /** Vendor extra body — the judge/routing call sites pass
+   *  planThinkingOffExtraBody() here, because hidden reasoning turns a 3-6s
+   *  classification into a 12-38s one (measured on glm-5.3-flash, 2026-10-14). */
+  extraBody?: Record<string, unknown>,
+) {
   return new OpenAICompatibleAdapter({
     baseURL: baseURL || 'https://api.z.ai/api/coding/paas/v4',
     apiKey,
     model,
     maxTokens: maxTokens ?? 32768,
+    extraBody,
   });
 }
