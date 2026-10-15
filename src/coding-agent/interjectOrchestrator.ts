@@ -21,6 +21,8 @@ import { PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import type { DelegationControlPlane } from './delegationControl';
 import type { RoundClosePlane } from './roundClosePlane';
 import type { MessageImage, LLMAdapter } from '../shared/types';
+import { detectTaskKind, isFileMutating } from '../shared/taskKind';
+import { appendTrace } from '../evolution/trace';
 
 /** 插话临时回执句柄：不透明（宿主投影）。 */
 export type InterjectAck = unknown;
@@ -162,6 +164,7 @@ export class InterjectOrchestrator {
     // ack is ONE pending status line that the final receipt REPLACES in
     // place, so the transcript never shows two lines for one insert.
     const ack = this.deps.createAck();
+    try { appendTrace({ type: 'interject', snippet: text.slice(0, 80) }); } catch {}
     const run = this.chain.then(() => this.classifyAndApply(text, images, displayText, ack));
     // A rejected link must never poison the chain for later inserts.
     this.chain = run.catch(() => {
@@ -175,6 +178,9 @@ export class InterjectOrchestrator {
    * aborts the turn — by the time this link runs, the insert may belong to a
    * fresh send instead. */
   private async classifyAndApply(text: string, images: MessageImage[], displayText: string, ack: InterjectAck): Promise<void> {
+    // 轻微 taskKind 提示（仅用于未来保守过滤，不改现有分发）
+    const _taskKind = detectTaskKind(text);
+    const _fileMutating = isFileMutating(text);
     if (!this.deps.isStreaming()) {
       // The turn is over; a normal send renders the user's own bubble, so the
       // provisional ack would only orphan a promise nobody keeps.
@@ -390,6 +396,7 @@ export class InterjectOrchestrator {
             // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
             // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
             // （2026-09-28：这个窗口可能压根没有委派可派）。
+            try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
             this.deps.steerRunningTurn(text, images, null, 'parent', true);
             this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
           }
@@ -448,6 +455,7 @@ export class InterjectOrchestrator {
           if (this.deps.atAggregationWindow()) {
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
           } else {
+            try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
             this.deps.steerRunningTurn(text, images, null, 'parent', true);
             this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
           }

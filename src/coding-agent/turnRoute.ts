@@ -33,6 +33,8 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { compileRequestWorkflow, type CompiledRequestWorkflow, type RequestWorkflowStage } from '../shared/requestWorkflow';
 import { inferSemanticRoute, isPlainConversational, namesWorkFrame, shouldBypassSemanticRoute, type RouteContextTurn } from './Planner';
+import { detectTaskKind, isFileMutating, type TaskKind } from '../shared/taskKind';
+import { appendTrace } from '../evolution/trace';
 import type { SemanticRouteDecision, TaskMode } from './types';
 import {
   INPUT_CLARIFY_CONFIDENCE,
@@ -61,6 +63,8 @@ export interface TurnRoutePrefetch {
   text: string;
   images: MessageImage[];
   kind: 'pleasantry' | 'conversational' | 'needs-router';
+  taskKind?: TaskKind;
+  fileMutating?: boolean;
   /** True when only the LLM router can settle this turn's shape. */
   needsRouter: boolean;
   /** The turn can run with NO workspace and NO tools: the rules already proved
@@ -135,6 +139,8 @@ export function prefetchTurnRoute(
   now = Date.now(),
 ): TurnRoutePrefetch {
   const imgs = images ?? [];
+  const taskKind = detectTaskKind(text);
+  const fileMutating = isFileMutating(text);
   const timing = detectScheduledInput(text, now);
   const pleasantry = shouldBypassSemanticRoute(text, imgs);
   // The floor's RAW verdict, kept even when the veto below overrides it: the
@@ -151,10 +157,13 @@ export function prefetchTurnRoute(
     : conversational
       ? 'conversational'
       : 'needs-router';
+  try { appendTrace({ type: 'turn_route_prefetch', reason: kind, snippet: text.slice(0, 80) }); } catch {}
   return {
     text,
     images: imgs,
     kind,
+    taskKind,
+    fileMutating,
     needsRouter: kind === 'needs-router',
     workspaceFree: pleasantry,
     floorChat,
@@ -164,6 +173,8 @@ export function prefetchTurnRoute(
       // 命中的规则名——回放一条日志时，先看它就知道是哪一层做的决定。
       rule: pleasantry ? 'PLEASANTRY_BYPASS' : conversational ? 'PLAIN_CONVERSATIONAL' : 'SEMANTIC_ROUTE',
       floor: floorChat ? 'chat' : 'work',
+      taskKind,
+      fileMutating,
       ...(editVeto ? { editFrameVeto: true } : {}),
       ...(workFrameVeto ? { workFrameVeto: true } : {}),
       ...(timing ? { scheduledAt: timing.at, scheduledText: timing.text } : {}),
@@ -174,6 +185,7 @@ export function prefetchTurnRoute(
 export interface TurnRouteOptions {
   forcedMode?: TaskMode;
   hasTools: boolean;
+  hasSubagents?: boolean;
   continuingPlan?: boolean;
   planPauseRequested?: boolean;
   continuingProjectBuild?: boolean;
@@ -332,11 +344,14 @@ export async function decideTurnRoute(
       agreement,
       deterministic,
       ...(advisoryClarify ? { advisoryClarify: true } : {}),
+      ...(prefetch.fileMutating ? { fileMutating: true } : {}),
+      ...(options.hasSubagents ? { hasSubagents: true } : {}),
     },
     defer: prefetch.defer,
     advisoryClarify,
   };
 
+  try { appendTrace({ type: 'turn_route_decided', route: kind, reason: decision.reason, snippet: prefetch.text.slice(0, 80) }); } catch {}
   if (options.log !== false) recordInputDecision(decision, now);
   return decision;
 }
