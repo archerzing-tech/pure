@@ -88,3 +88,48 @@ jobs:
 
       - name: Run tests
         run: bun test
+
+  # Rust gate. The Tauri crate (src-tauri) is ~18k lines with 47 test modules,
+  # but until now it was only compiled at tag time — a Rust-side break surfaced
+  # during release, the most expensive possible moment (the same failure mode
+  # the windows job warns about above). This job compiles the crate and runs
+  # its unit tests on every push/PR so a break shows up here first.
+  #
+  # Deliberately NOT gates yet: `cargo fmt --check` (the tree is not
+  # rustfmt-clean) and `cargo clippy -- -D warnings` (47 pre-existing lints) —
+  # either would be red on day one and train people to ignore the gate. Tighten
+  # once the tree is cleaned up (see 改进进度记录.md, 2026-10-15).
+  rust:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tauri v2 Linux prerequisites: webkit2gtk for the webview and
+      # ayatana-appindicator for the tray icon.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
