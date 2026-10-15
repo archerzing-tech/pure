@@ -3,6 +3,183 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 
+## v3.3.4
+
+**蓝图第 3 期开刀：待办队列随快照走 + 缺口②机械排除 + 现场收执 + 观测埋点**
+
+插话框架审计之后的「最小化改进」落在三刀上：E6 让重启不再丢排队与押账的活，缺口②把「已收工支被点名取消」从提示词约束升为宿主数据移除，收执则从放之四海皆准的固定话术改由裁决器结合现场写。另一路在飞的观测埋点与路由 advisory 信号同期收进本版。
+
+**持久性（E6 最小核心）**
+- 待办队列与押账插话随会话快照走：`RoundClosePlane.snapshot()/restore()` 深拷贝出账、只装空账（非空拒收，宁可丢一份旧话也不养双真相），`SessionUiState.pendingQueue` 以可选字段向后兼容；重启后按「继续」条同拍重建队列卡，押账不建卡（d0c2da4）
+- 顺带堵两处既有缺口：切会话不再把上一会话排队的活带进本会话收尾派发、也不再把重建的卡渲染进已脱管节点（d0c2da4）
+
+**插话协议**
+- 缺口②机械排除：已收工支被点名取消时产出整体离场——按 `toolCallId` 定位那路的工具结果换墓碑，引擎上下文看不到产出，界面委派卡与转写不动；`strip` 落空按没剔处理，不预支「已剔除」的说法（2469be2）
+- 现场收执：裁决器判的那一刻顺手写好给用户看的一两句（点名实际对象、手头的怎么办、接下来怎么做），解析非空才收、封顶 240 字，固定口径降为兜底——停支没停成、已早派这类只有宿主知道的事实仍由固定口径压过现场话术（d092dd8）
+
+**观测与路由**
+- 委派启动与插话阻塞埋点进 evolution trace、工具结果摘要走旁路收集，不改现有 UI 文案与呈现（8bdc369）
+- 文件改动 × 多 agent 的 advisory 信号 `fileMutateWithSubagents`：只做轻微倾向标记，不改路由判定本身（34b5084）
+
+## v3.3.3
+
+**常驻提示词大头切片 + GUI 生产构建闸 + 任务类型打点**
+
+把每轮都在付的常驻上下文瘦身：capability_gap 与 multi_agent 两块大头改成「守门常驻 + 细则按需」。同时补上 GUI 生产构建闸——v3.3.3 首轮 release 三平台全红暴露的流程缺口，bun test 全在 node 侧跑、ci.yml 不跑 vite build，浏览器图的污染只有 tag 时点才踩到。
+
+**常驻切片（capability_gap / multi_agent）**
+- 安装路径梯与委派机制段改为尾区按需装配，常驻只留行为的守门句（拒绝禁令、触发测试与例外）；切片与原文逐字相等有测试锁，闸门补「装＋空格＋英文工具名」高频漏型（487f9dd）
+- 同口径四树 A/B 实测：普通请求系统头 -4.75k（CLI）/ -7.0k（GUI），要装/要识别的请求几乎回到旧全量口径；同批随入 turn 路由硬化与 GLM 判类走关暗思考（487f9dd）
+
+**构建与 CI**
+- trace.ts 改浏览器安全：演化痕迹打点原静态引入 node:fs/node:path 被卷进浏览器 bundle，vite 具名导入判死；改动态引入 + process 守卫，node 侧行为不变、WebView 静默 no-op（92a3b8c）
+- ci.yml 补 GUI 生产构建闸，放在 ubuntu job 的 typecheck/conventions 之后（33d44d6）
+- 真跑用例显式 60s 超时、`{ timeout }` 归位到 fn 之后（bun-types 契约是 `(label, fn, options)`）（cbea1b0、3cf871d）
+
+**最小化改进**
+- 任务类型识别（taskKind，通用任务保守降级）、演化痕迹只读打点、大结果摘要 toolDigest（502f49c）
+- 工具消化窗口从泛化等待细化为「点名工具 + 体量 + 秒数」，read_file/read_files 补长读实时行头（ee62061）
+
+## v3.3.2
+
+**能力面审计三缺口全修 + Windows CI 五连红清零 + 评估卡确认闸**
+
+自获/自修摸底之后，能力面三处缺口一次补齐（CLI 装载外部脚本工具、GUI MCP stdio 运行期自愈、skill 安装版本戳），随批把「高风险确认」从发送前弹窗挪回对话里等一句。发布前后则清掉了 Windows 上连红五轮的根因。
+
+**能力面（审计三缺口 + 两小遗留）**
+- CLI 装载 `~/.pure/tools` 外部脚本工具，补齐与 GUI 同一能力面；`getTools()` 顺带给 EXTERNAL 开可见性口（13af027）
+- GUI MCP stdio 传输补运行期自愈：Rust 侧判死丢句柄、TS 侧摘 spawned 闩，子进程死后下次 send 懒重生（42a4a8f）
+- skill 安装加版本戳（正文 sha256 前 12 位，TS/Rust 同算法），三入口统一「同名即更新」：同 hash 说未改动、异 hash 报旧→新（25bf140）
+- 换源：全 5xx 选优时 warnings 说破口径；工具链脚本不再 `bun upgrade` 浮动，改走安装器 `bun-v` 参数（fb73f82、d6834ac）
+
+**评估卡与确认闸**
+- 节点内容全部取自这次分析自己的结论（impact/recommendation），代码只出结构标签；高风险回合先把判断与影响摆在屏幕上、停在对话里等一句回复再继续；发送前的本地关键词模态窗下线（58fea99）
+
+**Windows CI**
+- 两枚真凶：`createTools` 的 workspace 绝对性判断改平台感知 `isAbsolute()`；测试里假 `invoke` 对未列举命令改抛错，掐掉跨文件 mock 污染（68e2ba4）
+- 沿途加固：Windows 内建 shell 走系统目录绝对路径、`execute_command` 迁 node 子进程 API、skillHub 四处 AbortSignal 补特性检测回退（44b6541、f64a25b、f8a2c5d）
+
+## v3.3.1
+
+**MCP 动态能力工具补 register + 插话资源提醒与收执纪律 + PPT 等待反馈与评审边界**
+
+在 3.3.0 六批审计之后，一批真机判例驱动的小刀：MCP 走出「搜不到候选就无路可走」，插话收执不再写死模板，长内容生成的空档有可读反馈，非代码产物不再被套上代码评审。
+
+**MCP**
+- 新增 `register_mcp_server`：name+transport+command/url 直接注册、持久化进 `config.mcpServers`、当场连接，无需候选命中（0d2a440）
+- 治本发现：`ToolRegistry.getTools()` 的纯公开名过滤把动态能力五工具与 MCP 发现工具全滤掉——workspace 模式的模型清单走这条路，「没有工具」在那种模式下是实话；开口为 `isPublicToolName || isDynamicCapabilityTool || Tags.MCP`（222913a）
+- CLI 接线动态能力工具：`CliCapabilityToolAdapter` 组合适配器 + skill/MCP 搜索复用既有出口，与 GUI 对称（222913a）
+
+**插话协议**
+- 资源提醒按「方法切换」处理：分类器新增 `method_switch`、硬要求 `cancels_part` 对它 OFF，宿主走专属路（在飞支 PAUSE 存档、押账重入），收执绝不碰取消话术（00c7c9b）
+- 收执去解释化、协议层立「怎么说」总规则：回话要续着本场对话说、点名它碰到的具体那件事，反模板硬句收尾（47dc0d8）
+
+**真机判例**
+- PPT 判例两刀：长静默 hint 回指模型正文最后一句预告并原地升级时间预期（守否定性弱断言纪律）；语义路由补 `code_reviewer` 的 `involvesCode` 门，非代码产物不再被派代码评审（f48024b、5ce6c1e）
+
+**CI**
+- 外部下载器 stdio 无人读导致 Bun 1.4.3 Linux 下 child 'close' 永不触发：三处 spawn 后排干两侧管道（07c2b40）
+- 换源测速用例按「有效响应」契约重写坏候选、去掉时序依赖（35515f3）；钩子用例把 Windows 冷启动烧在断言外（9df0565）；CI 的 Bun 版本钉死 1.4.3、5xx 源垫底参赛（7105c74、713f5ec）
+
+## v3.3.0
+
+**人格轨道六刀落地 + 真跑错误清单收口 + 代码审计六批**
+
+人格轨道从立项走到可分档做事：内核、表达、判例、第二内核、分量判读依次落地。同期把一份真跑错误清单里的断档逐条修掉（错误学习、失败产出抢救、队列搁浅），并对全仓做了一轮分七批的独立代码审计。
+
+**人格轨道**
+- 性格内核落 v3.3.0：CharacterProfile 收拢散落旋钮（默认值 = 现行为原样）+ 内核叙事与表达面两条注入通道（`character_core` / `character_expression` 两张 fragment）（7e08441）
+- 人格判例集：行为探针替代金句匹配，`eval:character` 上任（b7b2769）
+- 第二内核「工匠慢线」：决策面刻意不等于快线，选择器接通 GUI/CLI，漂移探针上岗（7ba1f62）
+- 分量判读（刀 6）：draft/spike/production 三档做事方式 + 交付直达卡，轻档不进全量交付闸（9a0c815、c7b67d7、ba9a657、ebb821c、7cff9ca）
+- 反问-答复断点的会话级档位携带（刀 7）（d9bfd17）
+- 轻轮次思考 ghost 撤除（刀 8）（2f575d3）
+- 产物形态信号：轻档交付标记与任务类型识别，让「做个 PPT」不吃全量交付链（刀 9）（e2660d5）
+
+**真跑错误清单修复**
+- 子代理失败结算体带回部分产出，失败卡不再吞掉跑到的内容（b943494）
+- 错误学习三缺口收口：教训即时落库、transient 豁免收窄到同参、探索性失败不配教训（c216ebf）
+- 机器级教训通道：环境/网络类教训跨项目可见，大 repo 安装策略成第一条种子（3ed6dce）
+- 待办队列搁浅：auto-continue 链每个死亡出口都补派发一刀（df4ac10）
+- 回合落定赶在收尾派发前提交，队列接替不再吞掉主任务的 SETTLED（57f8b93）
+- save_file_binary 路径收口：相对路径锚工作区，报告与写入同一路径（0bea3ec）
+- 后台日志「引用悬空」给结构化出路、排队文案改「自动处理」、插话协议补「注记是指令不是措辞」（728f34a、a7cb41a、bd4ff95）
+
+**代码审计（六批）**
+- P0 四缺陷：web 缓存截断落非字符边界 panic、Exa 日期字节切片、分块下载 fd 泄漏双写、工具执行协调器误释放他人锁（57a4698）
+- 分块下载完整性三缺口与锁接口签名（4606f79）
+- 悬挂定时器 ×10 收编共享 `settleWithin`/`withTimeout`（3d5f4df）
+- 内存泄露六项收口：冷会话回收、Leaflet 地图持有、approvals / 委派账 / taskScript / MCP 子进程（1151899）
+- 逻辑 bug ×8：权限门把 MCP/外部脚本判只读最重，另含外部工具裸插值、机器教训漏 confidence 闸等（aca276a）
+- P1×4：headlessChrome 启动截止、userHook 孙进程扣住超时、cli 入口吞错退 0、二次 Ctrl-C 被吞（3976db2）
+
+## v3.2.0
+
+**手机只读会话总览 + 频道密钥断桥修复 + 下载卡片路径收口**
+
+3.1.2 之后的四笔真机修复与新页面，外加 README 补上 Windows 与通道网关叙事。
+
+**手机只读会话总览**
+- gateway 事件账本落盘 + webchat「会话」栏与只读端点：`eventSinkFor` 透传、`sessionViews` 状态推导、`GET /sessions` 与 timeline（6394845）
+
+**通道与凭据**
+- 频道密钥断桥修复：GUI 落 secret 时同步补账户 Ref 指针（channelSettings.ts 一处，三家通道同刀）——此前 gateway 只认明文或 Ref，两头断桥直接跳过通道（8143452）
+- QQ 取 token 报错带响应体：HTTP 200 包错误不再丢真因（4a9492b）
+
+**下载路径收口**
+- 下载卡片报的路径必须就是写入的路径：`expand_download_path` 抽成可测纯函数，`reveal_path` 返回 `{opened, stale}`，`resolveDownloadOutDir` 对齐 GUI 口径（8bdcd25）
+- downloadOutDir 测试归一 Windows 路径：期望值由 `node:path` 推导（85ceef1）
+
+**文档**
+- 版本定稿 3.2.0：四处版本号同步，README 双语补 Windows（NSIS）与 IM 通道网关叙事（476e59d）
+
+## v3.1.2
+
+**设置页合并与打磨 + 自绘窗口皮肤 + 人格轨道立项**
+
+窗口与设置面的一批体感收拾，加上 CI 发布闸门修复与人格轨道立项。
+
+**设置页**
+- 频道与 Gateway 两页合一（菜单更名「网关&频道」、状态三列、返回按钮贴左），header 左右内边距、依赖项区块、定时任务页、网关页去卡套卡逐处收口（f98bb15、92f4844、56c86d1、362eb11、a1e56b9、448a05d、9567228、b0f4e1f）
+- 计划裸 JSON 上屏修复、插话决策日志动作组溢出卡片边界修复（73893e6、28ab3a3）
+
+**窗口皮肤**
+- 换自绘皮肤：去原生边框，统一标题栏与三枚窗口键；标题栏与 body 融为一体、整窗圆角收到 4px→6px，补 Tauri 能力授权与 capabilities 再生成；标识去紫（墨蓝夜色底 + 冰蓝钻石），图标位图重出（d85ca1b、87cf967、f3187b9、3a53de0、cd91eca、5b00c1d、fe43d8b、6a71f98）
+
+**人格轨道**
+- 立项：性格内核蓝图落 `docs/persona-core-upgrade.md`——第 0 层性格内核 → 双投影，刀序列五刀、红线五条，调研证据来源全部核实（e2f3f46）
+
+**CI**
+- 发布闸门修复与版本定稿：CI 自 2026-10-09 起连红（bun `latest` 浮动 + Windows 独有病灶），学习表跨文件污染改一次性 host、四处 Windows 路径病改 `fileURLToPath`/posix 归一，产品代码零改动（94057e3、6884987）
+
+## v3.1.2-alpha
+
+**网络打通（诊断 + 换源 + 镜像改写 + 统一出口预算）+ 执行效率改造八刀**
+
+本窗口先以 3.2.0-alpha 开线，做的是网络打通与执行效率两批结构改造，收版时按「3.1 线上的效率与编排打磨」改回 3.1.2-alpha。网络面从根因诊断走到统一出口预算，效率面把执行链上的八处病灶逐一收掉。
+
+**网络打通**
+- 路由层修复：`HOST_CLASS_RULES` 三层分类 + 后缀卡点边界、学习键归一 + 30min TTL、全部出口统一走 `runRouted`；另落 `diagnose_network` 四步分层诊断与 `switch_package_source`（chsrc 核心能力做成工具，journal 先于写入）（5d4aea1、afb6ed1）
+- S2 单请求改写：`sourceRewrite.ts` 只做字节一致改写（GitHub→codeload、npm→npmmirror、PyPI→阿里云、Go→goproxy.cn、HF→ModelScope），下载链网络类失败后自动换镜像重跑一次（1a84b18）
+- 改写扩表：Maven Central / crates.io / nodejs.org 三条，逐条用全文件 sha256 比对原站与镜像（963619a）
+- 方向修正：镜像退为兜底、打通优先——出口路线 × 退避重试展开四步、预算 75% 后切镜像（89c167f），撤销「入口即切镜像」（27fdead）
+- 打通预算推到全部 HTTP 出口：GUI `runRouted`/`runRoutedSurface` 三步、CLI `cliFetch` 同口径且只对幂等方法重试（7a0db40）
+- 出口分类面两处缺陷修复、MCP HTTP 出口纳入统一出口、LLM 连接层失败立刻换路、修掉刀 2 的 POST 回归（7eafbc5、e7b8fdf）
+
+**执行效率改造（附-6 八刀）**
+- 刀 2.2 插话追加早派：挂号即派，汇合等待从串行叠加变并行取 max（a3e1fa6）
+- 刀 1.2+1.5 修复轮失败步起重跑其后全部 + 验证超时分档（b443987）
+- 刀 1.1 验证清单：计划声明、宿主白名单把关、按参数执行（5be1be3，8e8e989 补 typecheck）
+- 刀 D1 read_file 真杠杆：默认头 N 行 + 总行数 + 建议范围，Rust 入口补行范围参数（cd9b098）
+- 刀 4.1 缓存固化：插话判例 system 逐字稳定，现场投影移 user 消息（245f15a）
+- 刀 3.1 事件驱动攒批：思考窗重想在飞不掐流，收口一次带上全部（cd36cf6）
+- 刀 4.2 判例轻档：插话分类 / 聚焦点名 / 语义路由接 `phaseModels.judge` 轻模型（9a10313）
+- 刀 1.4 工作区探针会话内缓存：机械指纹不变直接复用（0443519）
+
+**插话与权限**
+- 取消类插话真正停住在飞支：单支兜底、匹配面补 role、收执诚实化（0917428），随后重做为「模型指认 callId、宿主执行」，删尽宿主侧停支文本匹配（a34c04b）
+- 权限立场不再随请求风险翻转，高危护栏移到操作分级的 danger 档（e7b3752）
+
 ## v3.1.1
 
 **自进化飞轮首圈转通 + 插话协议第 3/4 期收官（持久性 + 会话账本）+ 上下文 9.1 反应式压缩与重注水 + 真机体验修复**
