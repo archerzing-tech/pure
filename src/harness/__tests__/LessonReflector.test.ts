@@ -14,6 +14,7 @@ import {
   parseReflectedLesson,
   reflectTurn,
   shouldReflect,
+  type ReflectedLesson,
   type ReflectionConfig,
   type TurnEvidence,
 } from '../LessonReflector';
@@ -207,6 +208,126 @@ describe('parseReflectedLesson corrections (E3.1)', () => {
       correction: { kind: 'project_convention', statement: `${'x'.repeat(300)}` },
     }), evidence);
     expect(lesson?.correction?.statement).toHaveLength(200);
+  });
+});
+
+describe('parseReflectedLesson term_alias corrections (阶段 11.4 纠错记忆闭环)', () => {
+  const evidence: TurnEvidence[] = buildTurnEvidence([
+    toolCallMessage('read_file', '{"path":"oldname.ts"}', 'c1'),
+    toolCallMessage('read_file', '{"path":"newname.ts"}', 'c2'),
+  ]);
+  const base = {
+    symptom: 'user named a file that does not exist',
+    rootCause: 'guessed the wrong path',
+    evidence: [] as string[],
+  };
+
+  it('accepts a grounded term_alias and generates a canonical statement from from/to', () => {
+    const lesson = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'term_alias', from: 'oldname.ts', to: 'newname.ts' },
+    }), evidence);
+    expect(lesson?.correction?.kind).toBe('term_alias');
+    expect(lesson?.correction).toMatchObject({ from: 'oldname.ts', to: 'newname.ts' });
+    // statement 由 from/to 规范化生成，而不是采信模型措辞。
+    expect(lesson?.correction?.statement).toBe('The user writes "oldname.ts" to mean the real path "newname.ts".');
+  });
+
+  it('ignores any model-supplied statement for term_alias (stable dedupeKey)', () => {
+    const a = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'term_alias', from: 'oldname.ts', to: 'newname.ts', statement: 'first wording' },
+    }), evidence);
+    const b = parseReflectedLesson(JSON.stringify({
+      ...base,
+      correction: { kind: 'term_alias', from: 'oldname.ts', to: 'newname.ts', statement: 'totally different wording' },
+    }), evidence);
+    expect(a?.correction?.statement).toBe(b?.correction?.statement);
+  });
+
+  it('drops term_alias with a missing/empty field or from === to', () => {
+    const missingTo = parseReflectedLesson(JSON.stringify({
+      ...base, correction: { kind: 'term_alias', from: 'oldname.ts' },
+    }), evidence);
+    expect(missingTo?.correction).toBeUndefined();
+
+    const emptyFrom = parseReflectedLesson(JSON.stringify({
+      ...base, correction: { kind: 'term_alias', from: '   ', to: 'newname.ts' },
+    }), evidence);
+    expect(emptyFrom?.correction).toBeUndefined();
+
+    const same = parseReflectedLesson(JSON.stringify({
+      ...base, correction: { kind: 'term_alias', from: 'newname.ts', to: 'newname.ts' },
+    }), evidence);
+    expect(same?.correction).toBeUndefined();
+  });
+
+  it('drops term_alias when from or to cannot be grounded in the turn catalog', () => {
+    const ungroundedFrom = parseReflectedLesson(JSON.stringify({
+      ...base, correction: { kind: 'term_alias', from: 'ghost.ts', to: 'newname.ts' },
+    }), evidence);
+    expect(ungroundedFrom?.correction).toBeUndefined();
+
+    const ungroundedTo = parseReflectedLesson(JSON.stringify({
+      ...base, correction: { kind: 'term_alias', from: 'oldname.ts', to: 'ghost.ts' },
+    }), evidence);
+    expect(ungroundedTo?.correction).toBeUndefined();
+    // 别名被丢弃，但 lesson 主体照旧解析（correction 只是可选的便车）。
+    expect(ungroundedTo?.symptom).toBe(base.symptom);
+  });
+});
+
+describe('lessonToMemoryAdds term_alias mapping (阶段 11.4)', () => {
+  const ctx = {
+    sessionId: 'sess-alias',
+    projectPath: '/ws/project-a',
+    dedupeKey: 'reflect:sess-alias:open the file',
+    verificationSummary: 'not needed',
+    verificationPassed: false,
+  };
+
+  function aliasLesson(scope?: 'project' | 'machine'): ReflectedLesson {
+    return {
+      symptom: 'user named a missing file',
+      rootCause: 'guessed the path',
+      prevention: 'resolve the real path first',
+      recovery: 'used the real path',
+      evidence: ['abc123'],
+      confidence: 'low',
+      correction: { kind: 'term_alias', statement: 'ignored', from: 'oldname.ts', to: 'newname.ts' },
+      ...(scope ? { scope } : {}),
+    };
+  }
+
+  it('maps term_alias onto an existing project_convention draft (no new MemoryType)', () => {
+    const adds = lessonToMemoryAdds(aliasLesson(), ctx);
+    const draft = adds.find((a) => a.dedupeKey?.startsWith('correction:term_alias:'));
+    expect(draft).toBeDefined();
+    expect(draft!.type).toBe('project_convention');
+    expect(draft!.confidence).toBe('low');
+    expect(draft!.projectPath).toBe('/ws/project-a');
+    // content 是可读的「本工作区词条」，包含 from/to 两个 token。
+    expect(draft!.content).toContain('oldname.ts');
+    expect(draft!.content).toContain('newname.ts');
+    expect(draft!.content).toContain('本工作区词条');
+  });
+
+  it('keeps the alias in the project domain even when the lesson is scope:machine', () => {
+    const adds = lessonToMemoryAdds(aliasLesson('machine'), ctx);
+    const draft = adds.find((a) => a.dedupeKey?.startsWith('correction:term_alias:'));
+    expect(draft!.projectPath).toBe('/ws/project-a');
+    // 主 lesson 才随 machine 走全局。
+    const main = adds.find((a) => a.type === 'successful_pattern');
+    expect(main!.projectPath).toBe('__machine__');
+  });
+
+  it('produces the same dedupeKey for the same from/to across sessions (硬验收)', () => {
+    const first = lessonToMemoryAdds(aliasLesson(), { ...ctx, sessionId: 'session-A' })
+      .find((a) => a.dedupeKey?.startsWith('correction:term_alias:'))!;
+    const second = lessonToMemoryAdds(aliasLesson(), { ...ctx, sessionId: 'session-B' })
+      .find((a) => a.dedupeKey?.startsWith('correction:term_alias:'))!;
+    expect(first.dedupeKey).toBe(second.dedupeKey);
+    expect(first.dedupeKey).toMatch(/^correction:term_alias:[0-9a-f]{12}$/);
   });
 });
 

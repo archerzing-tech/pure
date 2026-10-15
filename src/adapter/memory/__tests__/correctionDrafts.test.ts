@@ -44,6 +44,31 @@ describe('DRAFT_CONFIRMABLE_TYPES', () => {
   });
 });
 
+describe('term_alias drafts (阶段 11.4)', () => {
+  // term_alias 落库时映射为 project_convention + low（见 LessonReflector.
+  // lessonToMemoryAdds），所以复用同一套草稿判定/确认逻辑，不需要新类型。
+  function aliasEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
+    return entry({
+      type: 'project_convention',
+      content: '本工作区词条：用户写「oldname.ts」时指的是「newname.ts」（真实存在）。',
+      dedupeKey: 'correction:term_alias:abc123def456',
+      ...overrides,
+    });
+  }
+
+  it('treats a term_alias draft as a confirmable draft', () => {
+    expect(isDraftEntry(aliasEntry())).toBe(true);
+  });
+
+  it('confirms a term_alias draft by raising confidence and keeping the dedupeKey', () => {
+    const confirmed = confirmedDraftEntry(aliasEntry());
+    expect(confirmed.type).toBe('project_convention');
+    expect(confirmed.confidence).toBe('high');
+    expect(confirmed.dedupeKey).toBe('correction:term_alias:abc123def456');
+    expect(confirmed.content).toContain('newname.ts');
+  });
+});
+
 describe('confirmedDraftEntry', () => {
   it('raises confidence to high and drops the volatile lifecycle fields', () => {
     const confirmed = confirmedDraftEntry(entry({

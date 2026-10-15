@@ -70,11 +70,26 @@ export function buildTurnEvidence(messages: Message[]): TurnEvidence[] {
 }
 
 /** E3.1 便车：用户纠正过的规矩/偏好 —— 只做草稿，确认前没有注入资格。 */
-export interface ReflectedCorrection {
+export interface ReflectedStatementCorrection {
   kind: 'project_convention' | 'user_preference';
   /** 以用户原话概括的规矩/偏好（≤200 字符）。 */
   statement: string;
 }
+
+/** 阶段 11.4（纠错记忆闭环）：本轮真的观测到"用户写的 token 不存在 → 换用另
+ *  一个真实路径并成功"时提炼的别名。from = 用户写的不存在 token，to = 真实
+ *  路径。metadata 单独留 from/to（而不只压进 statement），落库时才能拼出可读
+ *  的"本工作区词条"。 */
+export interface ReflectedTermAliasCorrection {
+  kind: 'term_alias';
+  /** 由 from/to 规范化生成的稳定句子 —— correctionDedupeKey 的内容来源，
+   *  同一 from/to 无论模型怎么措辞都得到同一 dedupeKey（跨会话一致）。 */
+  statement: string;
+  from: string;
+  to: string;
+}
+
+export type ReflectedCorrection = ReflectedStatementCorrection | ReflectedTermAliasCorrection;
 
 export interface ReflectedLesson {
   symptom: string;
@@ -108,13 +123,14 @@ Respond with STRICT JSON only — no markdown fences, no prose outside the JSON:
   "evidence": ["id1", "id2"],
   "procedure": "optional: for a SUCCESSFUL multi-step task, a compact step skeleton (intent -> steps -> how it was verified), under 600 chars; omit for trivial or failed turns",
   "scope": "optional: 'machine' ONLY when the lesson is about this machine's environment, network, platform, or installed toolchain (it would hold in ANY project on this computer — e.g. GitHub is slow here, a tool is missing); omit for everything project-specific",
-  "correction": "optional: if the user explicitly corrected how the agent should work, {\"kind\": \"project_convention\" or \"user_preference\", \"statement\": \"the rule as the user stated it, under 200 chars\"}; omit otherwise"
+  "correction": "optional. Two forms. (a) The user explicitly corrected how the agent should work: {\"kind\": \"project_convention\" or \"user_preference\", \"statement\": \"the rule as the user stated it, under 200 chars\"}. (b) You OBSERVED in THIS turn that a name/path the user used does not exist and you then successfully used a different real one: {\"kind\": \"term_alias\", \"from\": \"the nonexistent token the user wrote\", \"to\": \"the real path you used instead\"}. Omit otherwise"
 }
 
 Hard rules:
 - "evidence" may ONLY contain ids from the provided tool-call catalog. Never invent ids.
 - If you cannot ground the root cause in catalog evidence, keep your best guess in rootCause but the system will downgrade confidence automatically.
-- Output "correction" ONLY for explicit user corrections of output style, working practice, or project rules (e.g. "no comments in this repo", "always run tests before commit"). Never infer it from tone alone.
+- Output "correction" (a) ONLY for explicit user corrections of output style, working practice, or project rules (e.g. "no comments in this repo", "always run tests before commit"). Never infer it from tone alone.
+- Output "correction" (b) term_alias ONLY when the recorded failures show a not-found for \`from\` AND a later successful call used \`to\`; BOTH \`from\` and \`to\` must appear in the tool-call catalog. Never invent an alias, and never emit one where from === to.
 - Keep every string under 300 characters. Write in English.`;
 
 export interface ReflectTurnInput {
@@ -185,23 +201,52 @@ function asString(value: unknown, max: number): string {
   return typeof value === 'string' ? value.slice(0, max) : '';
 }
 
-const CORRECTION_KINDS = new Set(['project_convention', 'user_preference']);
+const CORRECTION_KINDS = new Set(['project_convention', 'user_preference', 'term_alias']);
 
 /** 草稿条目的 dedupeKey：同一句纠正（内容哈希）跨会话、跨轮次只落一条。 */
 export function correctionDedupeKey(correction: ReflectedCorrection): string {
   return `correction:${correction.kind}:${sha256Hex(correction.statement).slice(0, EVIDENCE_ID_LENGTH)}`;
 }
 
+/** term_alias 的 statement 由 from/to 规范化生成 —— 不采信模型的措辞，同一
+ *  from/to 永远落到同一句子，从而保证 dedupeKey 跨轮次/跨会话一致（硬验收）。 */
+function termAliasStatement(from: string, to: string): string {
+  return `The user writes "${from}" to mean the real path "${to}".`.slice(0, 200);
+}
+
+/** term_alias 落库的 content：可读的「本工作区词条」（≤300）。 */
+function termAliasContent(from: string, to: string): string {
+  return `本工作区词条：用户写「${from}」时指的是「${to}」（真实存在）。`.slice(0, 300);
+}
+
 /** 纠正草稿的校验：kind 白名单之外、statement 短于 8 个有效字符的一律丢弃 ——
- *  宁可漏收，不往仪表盘塞噪音草稿。 */
+ *  宁可漏收，不往仪表盘塞噪音草稿。term_alias 额外要求 from/to 非空且不同，
+ *  statement 由二者规范化生成（模型给的 statement 一律不采信，防止措辞漂移
+ *  破坏 dedupeKey 稳定性）。 */
 function parseCorrection(value: unknown): ReflectedCorrection | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const raw = value as Record<string, unknown>;
   const kind = typeof raw.kind === 'string' ? raw.kind : '';
   if (!CORRECTION_KINDS.has(kind)) return undefined;
+  if (kind === 'term_alias') {
+    const from = asString(raw.from, 200).trim();
+    const to = asString(raw.to, 200).trim();
+    if (!from || !to || from === to) return undefined;
+    return { kind: 'term_alias', statement: termAliasStatement(from, to), from, to };
+  }
   const statement = asString(raw.statement, 240).trim().slice(0, 200);
   if (statement.length < 8) return undefined;
-  return { kind: kind as ReflectedCorrection['kind'], statement };
+  return { kind: kind as 'project_convention' | 'user_preference', statement };
+}
+
+/** term_alias 的证据纪律（复用 parseReflectedLesson 的证据目录校验）：from 与
+ *  to 都必须真的出现在本轮的调用目录里 —— from 出现在失败那次调用的参数、to
+ *  出现在随后成功的调用参数。二者对不上就丢弃别名（lessons 主体照旧保留），
+ *  呼应"绝不臆造别名"的硬规则。 */
+function isTermAliasGrounded(correction: ReflectedCorrection, turnEvidence: TurnEvidence[]): boolean {
+  if (correction.kind !== 'term_alias') return true;
+  const inCatalog = (token: string): boolean => turnEvidence.some((e) => e.argsPreview.includes(token));
+  return inCatalog(correction.from) && inCatalog(correction.to);
 }
 
 /** Validate + sanitize a model reply against THIS turn's evidence catalog.
@@ -223,7 +268,11 @@ export function parseReflectedLesson(reply: string, turnEvidence: TurnEvidence[]
   const prevention = asString(parsed.prevention, 300) || 'Keep the same inspection and verification sequence for similar tasks.';
   const recovery = asString(parsed.recovery, 300) || 'not needed';
   const procedure = asString(parsed.procedure, 600);
-  const correction = parseCorrection(parsed.correction);
+  const parsedCorrection = parseCorrection(parsed.correction);
+  // term_alias 证据纪律：from/to 都要在调用目录里对得上，否则丢弃（lesson 主体保留）。
+  const correction = parsedCorrection && isTermAliasGrounded(parsedCorrection, turnEvidence)
+    ? parsedCorrection
+    : undefined;
   // 白名单校验：缺省/拼错一律 project（见 ReflectedLesson.scope 注）。
   const scope = parsed.scope === 'machine' ? 'machine' : 'project';
 
@@ -325,14 +374,23 @@ export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistCo
   // E3.1 便车：用户明确纠正过的做法/规矩 → 低置信草稿。确认前没有注入资格
   // （confidence:'low' 在 composeMemoryPrompt 被过滤），落库只为仪表盘待确认
   // 卡片；dedupeKey 用内容哈希，同一句纠正跨会话只落一条。
+  // 阶段 11.4：term_alias（纠错别名）同样走这条草稿通道，只映射为现有
+  // project_convention 类型（不新增 MemoryType/SOT）；content 换成可读的
+  // 「本工作区词条：用户写 from 时指的是 to」。确认后只让模型"看到"该别名，
+  // 不回灌 pathIndex 做自动改写（那会新建存储，违反约束）。
   if (lesson.correction) {
+    const correction = lesson.correction;
+    const isAlias = correction.kind === 'term_alias';
     adds.push({
-      type: lesson.correction.kind,
-      content: lesson.correction.statement.slice(0, 300),
+      type: isAlias ? 'project_convention' : correction.kind,
+      content: isAlias
+        ? termAliasContent(correction.from, correction.to)
+        : correction.statement.slice(0, 300),
       timestamp: Date.now(),
       sessionId: ctx.sessionId,
+      // 项目域：即便 lesson.scope === 'machine'，别名也留项目（不随 scope 走全局）。
       projectPath: ctx.projectPath,
-      dedupeKey: correctionDedupeKey(lesson.correction),
+      dedupeKey: correctionDedupeKey(correction),
       confidence: 'low',
     });
   }

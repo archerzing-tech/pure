@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'bun:test';
 import { Harness } from '../Harness';
 import { buildTurnEvidence } from '../LessonReflector';
+import { confirmedDraftEntry } from '../../adapter/memory/correctionDrafts';
 import { PromptAssembler } from '../../shared/PromptAssembler';
 import { DefaultHookRouter } from '../../engine/HookRouter';
 import { DefaultFailurePolicy } from '../../engine/FailurePolicy';
@@ -1837,6 +1838,51 @@ describe('Harness lesson reflector (E1.1)', () => {
       expect(sys).toContain('Project conventions you corrected or confirmed');
       expect(sys).toContain(preference);
       expect(sys).toContain('User preferences:');
+    });
+
+    it('takes a term_alias draft through confirmation into the injected conventions', async () => {
+      const memStore = new FakeMemoryStore();
+      const reflect = reflectLLM(async () => ({
+        content: JSON.stringify({
+          symptom: 'user named a file that does not exist',
+          rootCause: 'guessed the path; the real one differs',
+          prevention: 'resolve the real path first',
+          recovery: 'used the real path',
+          evidence: [],
+          correction: { kind: 'term_alias', from: 'f1.ts', to: 'f3.ts' },
+        }),
+      }));
+      const harness = harnessWith({ memStore, llm: multiStepLLM(3, 'done'), reflect });
+      await collect(harness.run('SYS', 'open the f3.ts file for me'));
+      await harness.settleReflections();
+
+      // 草稿落库：映射为 project_convention + low，content 是可读词条。
+      const draft = memStore.entries.find(e => e.dedupeKey?.startsWith('correction:term_alias:'));
+      expect(draft).toBeDefined();
+      expect(draft!.type).toBe('project_convention');
+      expect(draft!.confidence).toBe('low');
+      expect(draft!.content).toContain('f3.ts');
+
+      // 未确认（low）不进 prompt。
+      const before = recordingLLM('answer');
+      await collect(new Harness({
+        sessionId: 'sess-alias-before', llm: before, toolsDefs: [], budget: STD_BUDGET,
+        memory: memStore, projectPath: '/ws',
+      }).run('SYS', 'open the f3.ts file for me'));
+      expect(before.received[0][0].content).not.toContain('f3.ts');
+
+      // 用户确认 → confidence:'high'（走既有确认机制）。
+      await memStore.removeById(draft!.id);
+      await memStore.add(confirmedDraftEntry(draft!));
+
+      const after = recordingLLM('answer');
+      await collect(new Harness({
+        sessionId: 'sess-alias-after', llm: after, toolsDefs: [], budget: STD_BUDGET,
+        memory: memStore, projectPath: '/ws',
+      }).run('SYS', 'open the f3.ts file for me'));
+      const sys = after.received[0][0].content;
+      expect(sys).toContain('f3.ts');
+      expect(sys).toContain('Project conventions you corrected or confirmed');
     });
   });
 });

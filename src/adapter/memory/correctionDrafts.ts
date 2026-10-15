@@ -3,6 +3,12 @@
 // 落库即 confidence:'low'，没有注入资格（注入端统一过滤 low）；仪表盘卡片给
 // "草稿"徽章 + 确认按钮，用户点头才转正（confidence:'high'）获得注入资格。
 //
+// 阶段 11.4 —— project_convention 草稿现在有两条产出路径：(a) 用户明确纠正
+// 的规矩（statement 即用户原话）；(b) 纠错别名 term_alias（用户写的 token 不
+// 存在 → 换用真实路径），落库类型同样映射为 project_convention，content 换
+// 成可读的「本工作区词条」。两条路径共用下面这套确认徽章/重写逻辑，无需区别
+// 对待，也不新增 MemoryType。
+//
 // IMemoryStore 没有 update：确认 = removeById + 重写一条（本模块构造重写条
 // 目）。dedupeKey 原样保留 —— 同一句纠正（内容哈希）之后无论反思器再写多少
 // 次，都会撞在已确认条目上被去重，不会回头再冒草稿卡。
