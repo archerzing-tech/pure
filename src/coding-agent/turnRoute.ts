@@ -308,6 +308,8 @@ export async function decideTurnRoute(
   // the app takes is not overridden.
   const advisoryClarify = action !== 'clarify' && confidence < INPUT_CLARIFY_CONFIDENCE;
 
+  // 保守强化：明显文件改动且有多 agent 时，向信号里加一个轻微倾向
+  const fileMutateGate = Boolean(prefetch.fileMutating && options.hasSubagents);
   const decision: TurnRouteDecision = {
     route,
     workflow,
@@ -346,6 +348,7 @@ export async function decideTurnRoute(
       ...(advisoryClarify ? { advisoryClarify: true } : {}),
       ...(prefetch.fileMutating ? { fileMutating: true } : {}),
       ...(options.hasSubagents ? { hasSubagents: true } : {}),
+      ...(fileMutateGate ? { fileMutateWithSubagents: true } : {}),
     },
     defer: prefetch.defer,
     advisoryClarify,
