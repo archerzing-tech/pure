@@ -1890,9 +1890,9 @@ export class ChatController {
     send: (text, images, displayText) => { void this.send(text, images, displayText); },
     abort: (reason) => this.abortController?.abort(reason),
     stopBranchByCallId: (callId, mode) => this.stopBranchByCallId(callId, mode),
-    steerRunningTurn: (text, images, ack, target, cancel) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel),
+    steerRunningTurn: (text, images, ack, target, cancel, receipt) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel, receipt),
     queueInterjectTask: (text, images, displayText) => this.queueInterjectTask(text, images, displayText),
-    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels, stopMissed),
+    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed, receipt) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels, stopMissed, receipt),
     answerMidrunQuestion: (text, images) => this.answerMidrunQuestion(text, images),
     askMidrunClarification: (decision, text, images, ack) => this.askMidrunClarification(decision, text, images, ack as HTMLElement | null),
     deferTimedInsert: (timing, text, images, displayText) => this.deferTimedInsert(timing, text, images, displayText),
@@ -3221,7 +3221,7 @@ export class ChatController {
    * (smallest action, state what changed/stays, never discard finished work).
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
    * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
-  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean): void {
+  private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     this.steerBus.enqueue({
       message: {
@@ -3239,8 +3239,13 @@ export class ChatController {
       displayText: text,
       images,
     });
+    // 现场收执优先（2026-10-15 用户定调「不要固定话术，要结合上下文说明会
+    // 怎么做」）：裁决器判的那一刻就在现场（看得见阶段与插话原话），它写的
+    // 那两句点名了用户插话里的实际对象；固定口径降为兜底——规则/安全网路径
+    // 没有裁决器在场，裁决器没写时照样有话说。
     this.settleAck(ack,
-      target === 'parent'
+      receipt?.trim()
+      ?? (target === 'parent'
         // 单任务场景（无委派在飞才会落到 parent）：话进的是 pure 自己下个
         // THINK 边界，没有"转给谁"——「已转达」像在转给第三人（2026-09-28
         // 用户指出）。只说事实：活不停，下个动作带上这句。
@@ -3254,7 +3259,7 @@ export class ChatController {
                 ? `在跑的 ${flying} 路都收到了——各自下个动作就带上。`
                 : '在跑的那路收到了——下个动作就带上。';
             })()
-          : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`);
+          : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`));
   }
 
   /** 计划必须是当着用户想出来的（2026-09-26 用户定调）：一次流式 LLM 调用，
@@ -3606,7 +3611,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false, receipt?: string): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     const bubble = this.addBubble('user', displayText, images);
     this.placeEchoBeforeAck(ack, bubble);
@@ -3627,7 +3632,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       ? cancelFoldUnmatchedReceipt()
       : earlyDispatched
         ? foldInEarlyReceipt()
-        : foldInReceipt(cancels, this.hasDelegationInFlight()));
+        // 现场收执优先（2026-10-15 用户定调）：裁决器结合现场写的那两句，
+        // 普通折入路线与它说的语义一致，轮得到它；上面两臂是只有宿主知道的
+        // 事实（没停成/已在跑），固定诚实口径压过现场话术（收执纪律：只说
+        // 真实发生的事）。缺席回落 foldInReceipt（固定口径降为兜底）。
+        : (receipt?.trim() || foldInReceipt(cancels, this.hasDelegationInFlight())));
   }
 
   /** 早派（刀 2.2 早派版，2026-10-10）：委派在飞时挂号进来的机械追加，宿主

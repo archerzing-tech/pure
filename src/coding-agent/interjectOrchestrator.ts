@@ -79,14 +79,17 @@ export interface InterjectOrchestratorDeps {
    * （或规则路径的单支集合事实），宿主只按这个确切 id 真停——不做任何自己
    * 的文本匹配。支不在飞/已结算返回 null，调用方退回取消折入。 */
   stopBranchByCallId(callId: string, mode: 'abort' | 'pause'): string | null;
-  /** 转向通道入队 + 收执（框架文本与收执口径留宿主）。 */
-  steerRunningTurn(text: string, images: MessageImage[], ack: InterjectAck, target: SteerTarget, cancel: boolean): void;
+  /** 转向通道入队 + 收执（框架文本与收执口径留宿主）。receipt（2026-10-15
+   *  现场收执）：裁决器结合现场写的那两句，宿主优先用它、缺席回落固定口径。 */
+  steerRunningTurn(text: string, images: MessageImage[], ack: InterjectAck, target: SteerTarget, cancel: boolean, receipt?: string): void;
   /** 排队不相关插话（roundClose.queueTask + 队列卡渲染 + 补调度）。 */
   queueInterjectTask(text: string, images: MessageImage[], displayText: string): void;
   /** 折入汇合轮的铺排（回显 + folds.add + 收执——铺排留宿主）。stopMissed
    *  （2026-10-10）：取消折入发生在「点名停支没停成」时置真——收执换诚实
-   *  口径（在跑的支没停、给出能真停的说法），不说「其余照常」了事。 */
-  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean, stopMissed?: boolean): void;
+   *  口径（在跑的支没停、给出能真停的说法），不说「其余照常」了事。
+   *  receipt（2026-10-15 现场收执）：普通折入的收执优先用裁决器写的；
+   *  stopMissed/早派这类宿主事实修正压过它（收执纪律：只说真实发生的事）。 */
+  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean, stopMissed?: boolean, receipt?: string): void;
   answerMidrunQuestion(text: string, images: MessageImage[]): Promise<void>;
   askMidrunClarification(decision: DynamicInsertionDecision, text: string, images: MessageImage[], ack: InterjectAck): Promise<void>;
   /** 输入自带执行时刻的排期 sink（false = 没接 sink 或拒收）。 */
@@ -396,7 +399,7 @@ export class InterjectOrchestrator {
           this.deps.delegation.registerCancel(text);
           if (this.deps.atAggregationWindow()) {
             this.stripSettledTarget(text);
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
             // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
             // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
@@ -411,9 +414,9 @@ export class InterjectOrchestrator {
         }
         echoUserBubble();
         if (this.deps.hasDelegationInFlight()) {
-          this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false);
+          this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
         } else {
-          this.deps.steerRunningTurn(text, images, ack, 'parent', false);
+          this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
         }
         return;
       }
@@ -461,7 +464,7 @@ export class InterjectOrchestrator {
           this.deps.delegation.registerCancel(text);
           if (this.deps.atAggregationWindow()) {
             this.stripSettledTarget(text);
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
             try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
             this.deps.steerRunningTurn(text, images, null, 'parent', true);
@@ -494,7 +497,7 @@ export class InterjectOrchestrator {
         //   两段输出被明确推翻）。收尾核验没折入就转排队兜底，机制已有。
         // ③ 单任务流（本就没派过委派）：没有汇合轮可折，照旧排队。
         if (this.deps.hasDelegationInFlight() || this.deps.atAggregationWindow()) {
-          this.deps.foldInScopeAddition(text, images, displayText, true, ack, false); // scope 追加：机械执行
+          this.deps.foldInScopeAddition(text, images, displayText, true, ack, false, false, receipt); // scope 追加：机械执行
         } else {
           // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
           this.deps.discardAckRow(ack);

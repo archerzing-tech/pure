@@ -195,6 +195,24 @@ describe('DynamicInsertionCoordinator', () => {
     expect(plain.signals.stopBranchCallId).toBeUndefined();
   });
 
+  it('threads the judge-written receipt into the decision signals (2026-10-15 现场收执)', async () => {
+    // 现场收执：裁决器结合现场写的那两句随 signals 过河，编排器送到转达型
+    // 收执点（steer/fold）；裁决器没写就没有这个字段——宿主回落固定口径，
+    // 规则与安全网路径天然没有它。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({
+        kind: 'task', reason: 'two more platforms', confidence: 0.9,
+        receipt: '收到——当前这批先跑完，结束后我会新派两路查询补上，再一起汇总。',
+      }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '再加两个平台' });
+    expect(decision.signals.receipt).toBe('收到——当前这批先跑完，结束后我会新派两路查询补上，再一起汇总。');
+    const plain = await new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'task', reason: 'queued', confidence: 0.9 }),
+    }).decide(llm(), 'current task', { text: '顺便查一下股价' });
+    expect(plain.signals.receipt).toBeUndefined();
+  });
+
   it('delegates focused stop targeting to the injected resolver with the roster (2026-10-10)', async () => {
     // 规则快路径只裁「要不要停」，「停哪支」聚焦点名归裁决器：协调器必须
     // 把花名册原样递给 resolver、并原样带回它的指认（null 也照传——调用方

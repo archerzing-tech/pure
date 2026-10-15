@@ -226,6 +226,10 @@ export class DynamicInsertionCoordinator {
         // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
         // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。
         ...(result.stopBranch ? { stopBranchCallId: result.stopBranch.callId } : {}),
+        // 现场收执（2026-10-15）：裁决器结合现场写的那两句随信号走，编排器
+        // 送到转达型收执点（steer/fold）；宿主自己的事实修正（没停成/已早派）
+        // 优先于它，规则与安全网路径没有裁决器在场、天然没有这个字段。
+        ...(typeof result.receipt === 'string' && result.receipt.trim() ? { receipt: result.receipt } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
       },

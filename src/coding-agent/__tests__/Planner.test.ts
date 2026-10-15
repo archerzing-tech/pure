@@ -827,6 +827,51 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     }
   });
 
+  it('carries the judge-written receipt through, trimmed and capped (2026-10-15 现场收执)', async () => {
+    // 现场收执：裁决器结合现场写的那两句随分类过河——非空才收、去首尾空白、
+    // 封顶 240 字（它是直接上屏给用户的，超长就不再是「一两句」了）。
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"task","reason":"two more platforms","confidence":0.9,"receipt":"  收到——当前这批先跑完，结束后我会新派两路查询补上芒果TV和爱奇艺，再一起汇总输出。  "}'),
+      'context', '你应该增加两个平台，芒果tv和爱奇艺',
+    );
+    expect(hit.receipt).toBe('收到——当前这批先跑完，结束后我会新派两路查询补上芒果TV和爱奇艺，再一起汇总输出。');
+    const long = await classifyInsertion(
+      mockLlm(`{"kind":"steer","reason":"x","confidence":0.9,"receipt":"${'长'.repeat(300)}"}`),
+      'context', '文案口语一点',
+    );
+    expect(long.receipt?.length).toBe(240);
+    // 缺席/空白不带字段——宿主回落固定口径（规则与安全网路径永远没有它）。
+    for (const junk of [
+      '{"kind":"steer","reason":"x","confidence":0.9}',
+      '{"kind":"steer","reason":"x","confidence":0.9,"receipt":"   "}',
+    ]) {
+      const miss = await classifyInsertion(mockLlm(junk), 'context', 'x');
+      expect(miss.receipt).toBeUndefined();
+    }
+  });
+
+  it('teaches the judge to write a context-aware receipt, not a canned one (2026-10-15 用户定调)', () => {
+    // 用户定调：插话收执不许是放之四海皆准的固定话术，要结合上下文说明会怎
+    // 么做（判例：多平台调研在飞，插话加两个平台 → 收执点名平台、说清手头
+    // 不停、说清接下来新派两路一起汇总）。教导锁在提示词的 receipt 段。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    expect(promptStart).toBeGreaterThan(-1);
+    const start = src.indexOf('"receipt": the one or two sentences', promptStart);
+    expect(start).toBeGreaterThan(-1);
+    const doc = src.slice(start, src.indexOf('when reality differs', start));
+    expect(doc).toContain('canned formula');
+    expect(doc).toContain('the host announces');
+    expect(doc).toContain('what you understood');
+    expect(doc).toContain('what you will do next');
+    expect(doc).toContain('芒果TV和爱奇艺');
+    expect(doc).toContain('never 支/委派/分类/排队/上下文');
+    expect(doc).toContain('what WILL happen');
+    // JSON 契约模板带 receipt 字段（裁决器一眼看得见的输出位）。
+    const template = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    expect(template).toContain('"receipt":"<what you tell the user, see below>"');
+  });
+
   it('teaches the supplements_current carve-out: refining THE ONE deliverable in flight is not a second item (2026-09-27 排队事故)', () => {
     // 真实事故：画小鸟时补一句"背景上加一些会动的云朵"，被当成第二件活
     // 排队，队列的活又丢了——图上没有云。构图补充必须吸收进正在想的那一

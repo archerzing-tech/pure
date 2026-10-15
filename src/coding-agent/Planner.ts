@@ -464,6 +464,14 @@ export interface InsertionClassification {
    * 止损在飞支并让插话重入，绝不落取消收执（「这项不做了」会把用户真正
    * 要的「换成 X」那半句扔掉）。 */
   methodSwitch?: boolean;
+  /** 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
+   * 做」）：裁决那一刻裁决器就在现场（看得见 current_task 的阶段与插话原
+   * 话），由它顺手写好给用户看的那一两句——听懂了什么（点名插话里的实际
+   * 对象）、手头的活怎么办、接下来会怎么做。宿主只在路线与收执语义一致时
+   * 采用（steer / 普通折入）；停支没停成、早派这类只有宿主知道的事实，其
+   * 诚实口径优先于它；缺席/空串回落固定话术（规则与安全网路径没有裁决器
+   * 在场，永远走固定口径）。 */
+  receipt?: string;
 }
 
 const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what to do with it the way a sharp human colleague would — NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
@@ -485,7 +493,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -553,7 +561,26 @@ invent or shorten one; name only ONE branch even when the wording is loose.
 When the roster is absent, or no live branch clearly matches what the message
 removes, OMIT the field entirely — a wrong id stops the wrong branch, an
 invented one stops nothing. Omitting it when you are genuinely unsure is the
-honest answer: the host folds the removal into the result instead of gambling.`;
+honest answer: the host folds the removal into the result instead of gambling.
+
+"receipt": the one or two sentences the user sees the moment their remark
+lands — YOU speaking to them, mid-work, the way a sharp colleague would. No
+canned formula, no template reply: a receipt that would fit any conversation
+is wrong for this one. Write it ONLY for kinds where the work KEEPS RUNNING
+and the remark changes what you will do — "steer", and "task" (including a
+"cancels_part" remark whose removal folds into the result); OMIT it for
+chatter, question, stop, premise-change and goal-change (the host announces
+those actions itself). Cover three things in your own words for THIS exact
+message: what you understood (name the actual things the user named — the
+platforms, the branch to drop, the constraint), what happens to the work
+already running (it carries on), and what you will do next (「结束后我会新
+派两路查询补上芒果TV和爱奇艺，再一起汇总输出」 / the constraint lands in
+the next step / the collection redone without that part). One or two short
+sentences, the user's language, plain prose — no markdown, no internal
+jargon (never 支/委派/分类/排队/上下文 — those are machine words). Honesty:
+describe what WILL happen; never claim something has already been dispatched
+or removed — the doing is the host's hand, and the host corrects the receipt
+when reality differs.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
@@ -621,7 +648,7 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown };
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
     // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
     // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
     const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
@@ -641,6 +668,11 @@ export async function classifyInsertion(
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
       ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
+      // 现场收执（2026-10-15）：非空字符串才收，去首尾空白、封顶 240 字——
+      // 它是直接上屏给用户的，超长就不再是「一两句」了。
+      ...(typeof parsedAny.receipt === 'string' && parsedAny.receipt.trim()
+        ? { receipt: parsedAny.receipt.trim().slice(0, 240) }
+        : {}),
       ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranch: { callId: rawStopId.trim() } } : {}),
     };
   }

@@ -1167,8 +1167,8 @@ describe('plan overview completion state', () => {
       expect(body.indexOf('this.deps.settleAck(ack') !== -1 || body.indexOf('this.deps.discardAckRow(ack)') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack。
-    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false)')).toBeGreaterThan(-1);
-    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false, receipt?: string)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string)')).toBeGreaterThan(-1);
   });
 
   it('routes the method switch through pause-and-reenter, never the cancel receipt (2026-10-13 REA case)', () => {
@@ -1511,6 +1511,38 @@ describe('plan overview completion state', () => {
     expect(taskBody.indexOf('this.stripSettledTarget(text);')).toBeGreaterThan(-1);
   });
 
+  it('uses the judge-written receipt at the transit acks with fixed fallbacks intact (2026-10-15 现场收执)', () => {
+    // 用户定调「不要固定话术，要结合上下文说明会怎么做」：转达型收执（steer/
+    // 普通折入）优先用裁决器结合现场写的那两句；固定口径降为兜底；宿主事实
+    // 修正（没停成/已早派）压过现场话术——顺序即纪律。
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
+    // steer 收执：现场优先（receipt?.trim() ?? 固定口径链）。
+    const steerFn = src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string): void {');
+    expect(steerFn).toBeGreaterThan(-1);
+    const steerBody = src.slice(steerFn, steerFn + 1800);
+    expect(steerBody.indexOf("receipt?.trim()\n      ?? (target === 'parent'")).toBeGreaterThan(-1);
+    expect(steerBody.indexOf("'收到——活不停，下个动作就带上这句。'")).toBeGreaterThan(-1);
+    // fold 收执：stopMissed → 早派 → 现场收执的顺序不可倒——前两臂是只有
+    // 宿主知道的事实（没停成/已在跑），现场话术说不了谎也补不了位。
+    const foldFn = src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false, receipt?: string): void {');
+    expect(foldFn).toBeGreaterThan(-1);
+    const foldBody = src.slice(foldFn, foldFn + 1600);
+    const missAt = foldBody.indexOf('stopMissed\n      ? cancelFoldUnmatchedReceipt()');
+    const earlyAt = foldBody.indexOf('? foldInEarlyReceipt()');
+    const receiptAt = foldBody.indexOf('receipt?.trim() || foldInReceipt(cancels, this.hasDelegationInFlight())');
+    expect(missAt).toBeGreaterThan(-1);
+    expect(earlyAt).toBeGreaterThan(missAt);
+    expect(receiptAt).toBeGreaterThan(earlyAt);
+    // 编排器取信号、只传给路线与收执语义一致的臂：普通折入 ×3 + steer ×2。
+    expect(orch.indexOf("typeof decision.signals.receipt === 'string'")).toBeGreaterThan(-1);
+    expect(orch.split(', false, receipt);').length - 1).toBe(5);
+    expect(orch.split(', false, false, receipt);').length - 1).toBe(1);
+    // stopMissed 两臂与出生前取消两臂不传 receipt——死参与失实话术都不进。
+    expect(orch.split(', ack, true, true);').length - 1).toBe(2);
+    expect(orch.split("null, 'parent', true);").length - 1).toBe(2);
+  });
+
   it('handles a cancelled branch of parallel work as a removal, never an addition (2026-09-24 取消案例)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const msg = readSource(new URL('../../shared/insertionMessaging.ts', import.meta.url));
@@ -1602,7 +1634,7 @@ describe('plan overview completion state', () => {
     // 让忘传的取消路径静默用通用框架（"计划照旧"，2026-09-26 事故）；现在
     // 忘传是编译错误，签名里绝不能再出现 `cancel = false`。
     expect(src.indexOf('cancel = false')).toBe(-1);
-    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string)')).toBeGreaterThan(-1);
     // 取消专用框架的话术归 insertionMessaging.steerFrameText（chat.ts 侧锁
     // cancel 参数流转，那边锁措辞与分流——一致性测试再锁三处同向）。
     expect(msg.indexOf('用户收掉了一个方向/话题')).toBeGreaterThan(-1);
