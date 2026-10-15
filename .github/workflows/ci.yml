@@ -32,6 +32,12 @@ jobs:
       - name: Conventions
         run: bun run lint:conventions
 
+      # GUI 生产构建闸：bun test 全在 node 侧跑，vite 浏览器图里的坑（node
+      # 内建静态导入=具名导出判死）只有真跑 vite build 才暴露——v3.3.3
+      # release 首轮三平台全红就死在这，tag 时点才发现是最贵的时点。
+      - name: GUI production build
+        run: bun run vite build
+
       - name: Run tests
         run: bun test
 
