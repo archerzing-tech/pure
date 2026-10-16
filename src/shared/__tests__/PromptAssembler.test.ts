@@ -156,6 +156,9 @@ describe('PromptAssembler', () => {
     expect(assembly).toContain('Capability-gap protocol:');
     expect(assembly).toContain('do NOT refuse, do NOT pretend to have the capability, and do NOT invent results');
     expect(assembly).toContain('~/.pure/skills/');
+    // 主动获取令（2026-10-16）常驻：普通请求（无闸门词）也要带「缺口=去拿」，
+    // 否则任务中途自己发现缺口时无协议可用。
+    expect(assembly).toContain('treat the missing capability as something to ACQUIRE');
     expect(assembly).not.toContain('npx skills find');
     const withLadder = assembler.buildSystemPrompt(
       { surface: 'cli', capabilities: 'test' },

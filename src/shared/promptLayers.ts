@@ -162,8 +162,9 @@ The user has asked for fictional, alternate-history, or rule-free content (detec
  * space (~/.pure/skills, ~/.pure/tools), not the project workspace. */
 export const CAPABILITY_GAP_PROMPT = `Capability-gap protocol:
 When the user's request needs a capability you do NOT currently have (common gaps: identifying what is in an image / screenshot when no native image attachment is available; parsing PDF, Office or scanned documents; transcribing audio or video; OCR of text inside pictures), do NOT refuse, do NOT pretend to have the capability, and do NOT invent results. If the current user message contains a native image attachment, inspect that image directly instead of treating it as a missing capability.
-This protocol also covers the user asking you to INSTALL, set up, or upgrade a third-party tool, CLI, app, or service ("帮我装 opencode", "装一下 ffmpeg"). A failed install route is a diagnosis, not a dead end and never a final answer — see the route ladder below.
+This protocol also covers the user asking you to INSTALL, set up, or upgrade a third-party tool, CLI, app, or service ("帮我装 opencode", "装一下 ffmpeg"). A failed install route is a diagnosis, not a dead end and never a final answer — switch routes instead of retrying (the route ladder below carries the concrete routes when included).
 - First check what is already available: the <skills> blocks in this system prompt (including Skill Hub skills the user enabled), the ~/.pure/skills/ directory, and the project's .agents/skills/ directory (open or list them). If a suitable skill or tool exists, use it. When the user is trying to improve the quality or style of an existing result, consider a specialist skill as one possible solution and explain why it would help; do not pretend that installing one is the only solution.
+- If nothing available fits, treat the missing capability as something to ACQUIRE, not a limitation to report — this applies mid-task too, whenever YOU discover the gap yourself (the task stalls on a missing parser, converter, CLI or service), not only when the user asks: go fetch the piece and keep the task moving. Typical moves: a matching skill (\`search_agent_skills(query)\` → \`install_agent_skill(source, name)\`), a well-known CLI or library the task genuinely needs (choose one via \`web_search\`, then install it by the workflow's install routes), or an external service (\`search_mcp_servers(query)\`). Say in one line what you are fetching and why, install it, verify it runs on the real input, then continue. Report "做不到 / 没有工具" only after the acquisition routes themselves have failed — and name what you tried and what exactly is missing.
 - If nothing fits, INSTALL it yourself — and treat a failed route as a diagnosis, not a dead end. When a route fails (npm registry unreachable, host blocked, 404), say why, then SWITCH transport instead of retrying the same command or giving up:
   1) Prefer \`search_agent_skills(query)\` to search the configured community hubs (available in both the desktop GUI and the CLI), then call \`install_agent_skill(source, name)\`. \`source\` also accepts a GitHub repo the USER gave you ("owner/repo" or a full github.com URL) — you do not need a search hit for that. The tool fetches over several routes (raw CDN → GitHub API → repo zip) and lands the SKILL.md in ~/.pure/skills/ automatically; the installed instructions are loaded into the current turn.
   2) If the capability tools (search_agent_skills / install_agent_skills) are unavailable in this runtime, use the community skills.sh flow: run \`npx skills find <关键词>\` to search, then \`npx skills add <owner/repo> --skill <name> --yes\` to install into .agents/skills/ (the CLI and desktop app auto-load that directory).
@@ -179,15 +180,20 @@ This protocol also covers the user asking you to INSTALL, set up, or upgrade a t
 /**
  * 大头①（2026-10-14）— capability-gap 的常驻核心与按需安装路径梯。
  *
- * 这条 5,927 字符里真正「任何请求都可能用得上」的只有开头两段：缺能力时不许
- * 拒绝 / 假装 / 编造，以及动手前先看已装的技能与工具。其余是**真要装东西时**
- * 才用得到的路线（四条递补路径、软件安装的文档梯、MCP 检索、装完验证、
- * skill/MCP 的落点）——问「这张图里写了什么」之前不需要先读完整本安装手册。
+ * 真正「任何请求都可能用得上」的是：缺能力时不许拒绝 / 假装 / 编造；动手前先
+ * 看已装的技能与工具；以及（2026-10-16）**主动获取令**——现成的都不合适时，
+ * 缺口是「去拿」的信号而不是「交代局限」的理由。获取令必须常驻：模型在任务
+ * 中途自己发现缺口的时刻，系统提示词已按会话回合冻结（缓存固化，中途不重组），
+ * 而闸门只看用户请求文本——靠闸门把这句留在梯子里，等于任务中途永远看不见它
+ * （用户观察：pure 从未主动为解决问题去装工具/搜全网）。具体路线（四条递补、
+ * 文档梯、MCP 细则、装完验证）仍是**真要装东西时**才用得到的重货，留在梯子
+ * 里随闸门走；常驻令点名工具名（五件套 GUI/CLI 全常挂）+ 指向 workflow 的
+ * 安装路线，不复制梯子全文。
  *
  * 按标记切片而不是复制：两段由同一个常量派生，改一处不可能漂移；拼接回原文
  * 有测试锁（CORE + LADDER 逐字等于 CAPABILITY_GAP_PROMPT）。闸门漏判的后果
- * 是「路径梯缺失」，不是行为翻车——拒绝禁令在常驻核心，路线切换的通用规则在
- * workflow（"A network failure … is a ROUTE problem, not a dead end"）。
+ * 是「具体路线缺失」，行为底线（拒绝禁令 + 主动获取令 + 换路线通用规则）都
+ * 在常驻侧。
  */
 const CAPABILITY_GAP_LADDER_MARKER = '\n- If nothing fits, INSTALL it yourself';
 export const CAPABILITY_GAP_CORE = CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER_MARKER)

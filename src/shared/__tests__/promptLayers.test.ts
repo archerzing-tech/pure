@@ -276,6 +276,15 @@ describe('L1 behavior contracts', () => {
     expect(CAPABILITY_GAP_CORE).toContain('~/.pure/skills/');
     expect(CAPABILITY_GAP_CORE).not.toContain('codeload.github.com');
     expect(CAPABILITY_GAP_LADDER).toContain('codeload.github.com');
+    // 主动获取令（2026-10-16）在常驻核心：现成的都不合适 → 缺口是「去拿」的
+    // 信号，不是交代局限的理由。中途缺口只能靠常驻令触达（回合中提示词冻结，
+    // 闸门只看用户文本），所以工具名与「穷尽后才许说做不到」都必须在这一侧。
+    expect(CAPABILITY_GAP_CORE).toContain('treat the missing capability as something to ACQUIRE');
+    expect(CAPABILITY_GAP_CORE).toContain('whenever YOU discover the gap yourself');
+    expect(CAPABILITY_GAP_CORE).toContain('install_agent_skill(source, name)');
+    expect(CAPABILITY_GAP_CORE).toContain('only after the acquisition routes themselves have failed');
+    expect(CAPABILITY_GAP_CORE).not.toContain('npx skills find');
+    expect(CAPABILITY_GAP_LADDER).toContain('If nothing fits, INSTALL it yourself');
     const mechanicsStart = MULTI_AGENT_PROTOCOL.indexOf('Artifact fit: ');
     expect(mechanicsStart).toBeGreaterThan(0);
     expect(MULTI_AGENT_CORE.slice(0, mechanicsStart) + MULTI_AGENT_MECHANICS + MULTI_AGENT_CORE.slice(mechanicsStart))
