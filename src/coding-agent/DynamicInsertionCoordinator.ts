@@ -1,5 +1,6 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { classifyInsertion, resolveStopBranchTarget, type InsertionClassification } from './Planner';
+import { levelForKind } from '../shared/scheduling';
 import {
   applyConfidenceGate,
   parseInputTiming,
@@ -124,6 +125,14 @@ export const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停�
 // 续跑（走「继续」条），绝不在这里赌。
 export const RESUME_BRANCH_RE = /(?:继续|接着|续上|接续)(?:帮?我?)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,12}?(?:接着|继续|续上|接着跑|继续跑|跑完|接着弄|继续弄|接着做|继续做|接着干|继续干)/i;
 
+// 第 5 期「这个急」提级的安全网（对称于 STOP_RE，但**只在裁决器倒下时**由
+// netVerdict 使用，绝不抢在裁决器前面抢答）：用户口头声明这件活加急/优先。
+// 窄词族——「加急/优先(办)/先办/插队/urgent/asap」与「这个(很/挺…)急」，
+// 且用否定前视挡掉「不着急/不急/别急」（把一句"不慌"读成"加急"就是反向
+// 调度）。主路径是裁决器把 urgent 判进分类（见 INSERTION_CLASSIFY_PROMPT），
+// 正则只负责裁决器不可用时不把急件默默降级成普通排队。
+export const URGENT_RE = /(?:加急|优先(?:办|做|处理|安排)?|插队|先(?:办|做|处理)|urgent|asap|high\s*priority|(?:这个|这件|这项|这句|这活|它)(?:非常|很|特别|比较|挺|有点|真)*(?<!不|别|没|莫)急)/i;
+
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
   private readonly resolveStop: NonNullable<DynamicInsertionCoordinatorOptions['resolveStopBranchTarget']>;
@@ -232,6 +241,9 @@ export class DynamicInsertionCoordinator {
         ...(typeof result.receipt === 'string' && result.receipt.trim() ? { receipt: result.receipt } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
         ...(result.when ? { when: result.when } : {}),
+        // 第 5 期「这个急」提级：裁决器判定这件活加急（只对 task/steer 有意义）
+        // ——宿主据此在队列里插队并换提级收执。缺省绝不自己补。
+        ...(result.urgent === true ? { urgent: true } : {}),
       },
     });
   }
@@ -272,7 +284,9 @@ export class DynamicInsertionCoordinator {
     return this.build('task', `${why}; queued so the words can never be lost`, {
       confidence: NO_CLASSIFIER_CONFIDENCE,
       timing: { mode: 'after-current' },
-      signals: { via: 'net', netReason, fallback: 'literal-net' },
+      // 「这个急」的字面安全网：裁决器不可用时，别把一句明确的加急请求默默
+      // 降级成普通排队（提级只改队列次序，不涉破坏性动作，网在这里用是安全的）。
+      signals: { via: 'net', netReason, fallback: 'literal-net', ...(URGENT_RE.test(text) ? { urgent: true } : {}) },
     });
   }
 
@@ -298,7 +312,10 @@ export class DynamicInsertionCoordinator {
       scope: policy.scope,
       shouldAbort: action === 'stop' || action === 'replan',
       reason,
-      signals: fields.signals,
+      // 第 5 期调度显式化：kind 一律折成处理级随信号过河（宿主/队列按它分
+      // 轻重缓急）。这是纯映射、不改任何行为，只是把原本"藏在 switch 顺序
+      // 里"的调度策略写成可读、可测、可下发的一枚事实。
+      signals: { ...fields.signals, processingLevel: levelForKind(kind) },
     };
     // The gate can downgrade the action to `clarify` and clears shouldAbort with
     // it: asking the user must never tear down the running work first.

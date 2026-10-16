@@ -464,6 +464,11 @@ export interface InsertionClassification {
    * 止损在飞支并让插话重入，绝不落取消收执（「这项不做了」会把用户真正
    * 要的「换成 X」那半句扔掉）。 */
   methodSwitch?: boolean;
+  /** 「这个急」提级（第 5 期调度）：用户明确这件新活加急/该先办（"这个急"、
+   *  "优先处理这个"、"加急"）时置真——宿主据此把队列里的这项插到队头并换
+   *  提级收执。只对 task（排队）/steer 有意义；提级只改**队列次序**，不涉
+   *  任何破坏性动作，所以缺省绝不自己补（严格 === true 才认）。 */
+  urgent?: boolean;
   /** 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
    * 做」）：裁决那一刻裁决器就在现场（看得见 current_task 的阶段与插话原
    * 话），由它顺手写好给用户看的那一两句——听懂了什么（点名插话里的实际
@@ -493,7 +498,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -551,6 +556,15 @@ into the request and redoes the thought; omit it for every other message.
 message switches HOW the work is done by pointing at a resource you already
 have ("你不是已经装了X吗", "用X来做") — the goal stands, the approach is
 replaced. For goal changes that change WHAT is being made, omit it.
+
+"urgent": include it as true ONLY when the user's own words say this new work
+should jump ahead of other waiting work — "这个急", "这件比较急", "优先处理这个",
+"加急", "先办这个". It only reorders work that is already waiting to run after
+the current task (the urgent item goes before the other queued ones), it never
+means interrupt the current task, and it is meaningless for kinds that are not
+"task" or "steer". Do NOT infer urgency from tone — a piece of work being
+important is not the user calling it urgent, and "不着急" is the opposite.
+Omit the field for every message that does not say it.
 
 "stop_branch": the context may contain a <live_branches> block — the delegated
 branches currently running, each with its id, name, role and task snippet.
@@ -628,7 +642,7 @@ export async function classifyInsertion(
     },
   ];
   const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'stop', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown; methodSwitch?: unknown; method_switch?: unknown }>(
+  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown; methodSwitch?: unknown; method_switch?: unknown; urgent?: unknown }>(
     llm,
     request,
     signal,
@@ -668,6 +682,9 @@ export async function classifyInsertion(
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
       ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
+      // 第 5 期「这个急」提级：只认严格 === true；缺省/非 true 都不带标记，
+      // 宿主只按这一个读取点插队。
+      ...(parsed.urgent === true ? { urgent: true } : {}),
       // 现场收执（2026-10-15）：非空字符串才收，去首尾空白、封顶 240 字——
       // 它是直接上屏给用户的，超长就不再是「一两句」了。
       ...(typeof parsedAny.receipt === 'string' && parsedAny.receipt.trim()

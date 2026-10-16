@@ -116,6 +116,21 @@ export function foldInFollowUpText(text: string): string {
   return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
 }
 
+/** 排期收执（第 5 期「调度」）：插话产生的 task 进待办队列时，宿主当场说
+ *  一句「排上了」——队列卡是逐条可见的账，这句话是排队这个动作的**事实陈
+ *  述**，不含机制承诺、不预告顺序之外的东西。口吻与详略归第 6 期，这里只
+ *  说事实（排上了）。用户口头说「这个急」被提级时走 queuedUrgentReceipt，
+ *  如实说「插队了」。 */
+export function queuedReceipt(): string {
+  return '这句排上了，办完手头就轮到。';
+}
+
+/** 提级排期收执（第 5 期）：用户说了「这个急」，宿主照做把它插到队头——
+ *  收执如实交代「插队了、办完手头就轮到」，与 queuedReceipt 同款只陈述事实。 */
+export function queuedUrgentReceipt(): string {
+  return '这句急，我插到队头——办完手头就轮到。';
+}
+
 /** ⑤ 分支级继续的收执（第 2 期第三刀）：排队（interjectOrchestrator）与派工
  *  （chat.ts takeSyntheticToolCalls）两处共用一个出处。二分口径（蓝图判例
  *  14「回执说清从哪轮接的」+「找不到断点不许悄悄从头跑」）：命中 checkpoint

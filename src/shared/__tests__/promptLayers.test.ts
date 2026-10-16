@@ -70,6 +70,10 @@ describe('L1 behavior contracts', () => {
     // 无关插入进待办；多句一批，不逐句抢跑。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('record it as a to-do');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('ONE batched decision');
+    // 第 5 期「调度」批/分协议：跨回合攒下的同类小活并成一批，一次跑完一次
+    // 汇报——不能一条小差事配一个小回合。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('several such unrelated pieces of the SAME kind pile up');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('one batch to run together once the turn ends');
     // 翻转只认最后明确意图，不执行中间态；不可逆旁先问，问不毁。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('LAST explicit statement');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never execute a middle state');
@@ -114,6 +118,11 @@ describe('L1 behavior contracts', () => {
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never idle waiting for answers');
     // ② 承重假设加廉价护栏：失配要被检测、给清晰提示，绝不静默失败。
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('fail loudly, never silently');
+    // ② 之后·第 5 期「调度」批/分协议：能一块干的并成一批一次汇报，强依赖的
+    //    拆 relay 链分步交接绝不硬凑；违背节奏地合/分要一句说清为什么。
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('Batch what can be batched, split what must be split');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never one announcement per little errand');
+    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('relay chain');
     // ③ 失败表达全账：什么坏/为什么/修没修好/波及没有，且教训锁定防复发。
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('whether anything else was touched');
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('lock the lesson in');

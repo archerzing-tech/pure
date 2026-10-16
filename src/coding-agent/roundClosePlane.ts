@@ -16,6 +16,7 @@
 
 import type { SteerQueueEntry } from './steerBus';
 import type { MessageImage } from '../shared/types';
+import { QUEUED_PRIORITY } from '../shared/scheduling';
 
 /** 排队/重入的一条指令（与原 chat.ts pendingTasks 元素同形）。 */
 export interface QueuedTask {
@@ -23,6 +24,14 @@ export interface QueuedTask {
   images: MessageImage[];
   displayText: string;
   ts: number;
+  /** 第 5 期调度：队列优先级，数值越大越急（见 shared/scheduling.ts）。缺省
+   *  = 队列级（QueuedTask 早于本字段诞生，旧快照与 rule/net 路径都不传它）。 */
+  priority?: number;
+}
+
+/** 一条账的优先级读数：没带 priority 的一律按队列级算（旧档兜底，唯一口径）。 */
+function priorityOf(task: QueuedTask): number {
+  return task.priority ?? QUEUED_PRIORITY;
 }
 
 export interface RoundCloseDeps {
@@ -64,9 +73,15 @@ export class RoundClosePlane {
 
   constructor(private readonly deps: RoundCloseDeps) {}
 
-  /** 排队一件不相关插话（原 queueInterjectTask 的账半边；渲染与补调度留宿主）。 */
+  /** 排队一件不相关插话（原 queueInterjectTask 的账半边；渲染与补调度留宿主）。
+   *  第 5 期调度：按优先级**稳定插入**——数值大的排前面，同级保持到达序
+   *  （后到的不越过先到的，folding/兜底残差与普通 task 同级时次序不变）。 */
   queueTask(task: QueuedTask): void {
-    this.queue.push(task);
+    const p = priorityOf(task);
+    const stamped: QueuedTask = { ...task, priority: p };
+    let i = this.queue.length;
+    while (i > 0 && priorityOf(this.queue[i - 1]) < p) i--;
+    this.queue.splice(i, 0, stamped);
   }
 
   /** 只读视图（宿主渲染队列卡用，不留双真相）。 */
@@ -137,12 +152,24 @@ export class RoundClosePlane {
       return;
     }
     if (this.queue.length > 0 && !this.deps.autoContinuePending()) {
-      const t = this.queue.shift()!;
+      const t = this.takeHighest();
       // 交接先说一声再动手（队列卡同步收掉这项/空了撤卡）——用户的下一句
       // 话凭空开始跑，没有这句衔接读起来就是无中生有。
       this.deps.narrateHandoff(this.queue.length);
       this.deps.reenter(t);
     }
+  }
+
+  /** 第 5 期调度：取**最高优先级**的一项（同级 FIFO）。队列通常已按优先级
+   *  降序排好（queueTask 稳定插入），但恢复的旧档可能乱序——这里按最大优先
+   *  级扫一遍、并列取最靠前的一项，既不依赖排序前提也不破坏稳定语义。一次
+   *  仍只取一件：dispatch 的 isStreaming 守卫保证开不出第二个并发回合。 */
+  private takeHighest(): QueuedTask {
+    let best = 0;
+    for (let i = 1; i < this.queue.length; i++) {
+      if (priorityOf(this.queue[i]) > priorityOf(this.queue[best])) best = i;
+    }
+    return this.queue.splice(best, 1)[0];
   }
 
   /** 新会话清场：待办队列与押账插话一并（clear() 用；DOM 卡的撤除留宿主）。 */
@@ -165,10 +192,12 @@ export class RoundClosePlane {
    *  reset 已清场；非空拒收——宁可丢一份旧话，不养双真相。恢复只装账不
    *  派发：重启的会话没有「回合收尾」这一刻，排队的活等下一个自然派发点
    *  （用户下一句话的收尾扫除接手）——被记得 ≠ 此刻抢跑；队列卡的 DOM
-   *  重建同样留给宿主回放后的 restoreQueueAffordance（与「继续」条同拍）。 */
+   *  重建同样留给宿主回放后的 restoreQueueAffordance（与「继续」条同拍）。
+   *  第 5 期调度：逐条经 queueTask 装回——旧档缺 priority 的兜队列级、且
+   *  恢复后的呈现顺序与实况一致（queueView 顺序即展示顺序）。 */
   restore(state: { queue: QueuedTask[]; heldInsert: QueuedTask | null }): void {
     if (this.queue.length > 0 || this.heldInsert !== null) return;
-    this.queue = state.queue.map((t) => ({ ...t }));
+    for (const task of state.queue) this.queueTask(task);
     this.heldInsert = state.heldInsert ? { ...state.heldInsert } : null;
   }
 }

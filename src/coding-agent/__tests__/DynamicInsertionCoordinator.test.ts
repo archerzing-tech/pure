@@ -96,6 +96,47 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(0);
   });
 
+  it('把 kind 折成处理级随信号过河（第 5 期调度显式化）', async () => {
+    // 纯显式化：kind 一律折成处理级随信号下发，把原本藏在 switch 顺序里的
+    // 调度策略写成可读、可测、可下发的一枚事实——不改任何分发行为。
+    const cases = [
+      ['stop', 'interrupt'],
+      ['premise-change', 'interrupt'],
+      ['goal-change', 'interrupt'],
+      ['steer', 'boundary'],
+      ['question', 'immediate-answer'],
+      ['task', 'queued'],
+      ['chatter', 'companion'],
+    ] as const;
+    for (const [kind, level] of cases) {
+      const coordinator = new DynamicInsertionCoordinator({ classify: async () => ({ kind, reason: '', confidence: 1 }) });
+      const decision = await coordinator.decide(llm(), 'current task', { text: '随便一句' });
+      expect(decision.signals.processingLevel).toBe(level);
+    }
+  });
+
+  it('裁决器的 urgent 透进信号，缺省绝不自己补（第 5 期「这个急」）', async () => {
+    const urgent = new DynamicInsertionCoordinator({ classify: async () => ({ kind: 'task', reason: '', confidence: 0.9, urgent: true }) });
+    const d = await urgent.decide(llm(), 'current task', { text: '这个急，先办' });
+    expect(d.signals.urgent).toBe(true);
+    expect(d.signals.processingLevel).toBe('queued');
+    const plain = new DynamicInsertionCoordinator({ classify: async () => ({ kind: 'task', reason: '', confidence: 0.9 }) });
+    expect((await plain.decide(llm(), 'current task', { text: '查一下天气' })).signals.urgent).toBeUndefined();
+  });
+
+  it('裁决器倒下时字面网兜住「这个急」，且否定前视不许读成加急（第 5 期）', async () => {
+    // 提级只改队列次序、不涉破坏性动作，所以字面网在这里用是安全的——它
+    // 只保证一句明确的加急不会被默默降级成普通排队。否定前视挡掉「不着急」。
+    const net = new DynamicInsertionCoordinator({ classify: async () => { throw new Error('judge must not be called'); } });
+    const urgent = await net.decide(null, '', { text: '这个活加急办一下' });
+    expect(urgent.kind).toBe('task');
+    expect(urgent.signals.fallback).toBe('literal-net');
+    expect(urgent.signals.urgent).toBe(true);
+    const notUrgent = await net.decide(null, '', { text: '这个不着急，慢慢来' });
+    expect(notUrgent.signals.fallback).toBe('literal-net');
+    expect(notUrgent.signals.urgent).toBeUndefined();
+  });
+
   it('hands partial-cancellation phrasing to the judge; cancelsPart comes from the verdict, not the regex (2026-09-24 案例 + 2026-09-28 降级)', async () => {
     // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入——取消
     // 的字面族（CANCEL_PART_RE）当年为此而生、直判 steer+cancelsPart。

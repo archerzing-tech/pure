@@ -729,6 +729,18 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(cls.kind).toBe('task');
   });
 
+  it('reads an "urgent" flag into the classification (第 5 期「这个急」提级)', async () => {
+    // 裁决器只在用户明说「这个急/加急/优先处理」时置 urgent；宿主只认严格 true。
+    const hit = await classifyInsertion(mockLlm('{"kind":"task","reason":"user called it urgent","urgent":true}'), '正在构建网页', '这个急，先办');
+    expect(hit.kind).toBe('task');
+    expect(hit.urgent).toBe(true);
+    const plain = await classifyInsertion(mockLlm('{"kind":"task","reason":"plain errand"}'), '正在构建网页', '查一下天气');
+    expect(plain.urgent).toBeUndefined();
+    // 非布尔不认——严格 === true 才带标记，缺省绝不自己补。
+    const loose = await classifyInsertion(mockLlm('{"kind":"task","reason":"x","urgent":"yes"}'), 'context', '查一下天气');
+    expect(loose.urgent).toBeUndefined();
+  });
+
   it('rejects an unknown kind and falls back to a queued task', async () => {
     // 2026-09-22 重新设计：兜底不再 steer——委派在飞时没有可兑现 steer 的
     // THINK 边界，"转达"会静默丢话；排队是确定性目的地，话绝不丢。

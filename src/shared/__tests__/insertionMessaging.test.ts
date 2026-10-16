@@ -22,6 +22,8 @@ import {
   cancelFoldInstruction,
   foldInInstruction,
   foldInFollowUpText,
+  queuedReceipt,
+  queuedUrgentReceipt,
   CANCELLATION_INVARIANTS as INV,
   branchResumeReceipt,
   treeResumeReceipt,
@@ -302,5 +304,35 @@ describe('整树续跑回执判定（第 3 期刀 3）', () => {
   it('非恢复回合：一律 null——回执只随恢复回合出，防噪音', () => {
     const notResuming = { resumingPausedTurn: false, pausedBranches: new Set(['竞品分析员']) };
     expect(treeResumeReceipt({ agentName: '竞品分析员', resumed: false }, notResuming)).toBeNull();
+  });
+});
+
+// 第 5 期「调度」排期收执：插话产生的 task 进待办队列时当场说一句「排上了」，
+// 提级的如实说「插队了」。与本文件既有的收执纪律同款——**只陈述真实发生的
+// 事实**（排上了/插队了/办完手头轮到），机制承诺（派工/合并/汇总）住协议与
+// 框架里，不进这两句；口吻与详略归第 6 期。队列卡本身是逐条可见的就地账，
+// 与这两句互补不重复。
+describe('排期收执（第 5 期「调度」）', () => {
+  it('普通排队收执只讲事实：排上了、办完手头轮到', () => {
+    const r = queuedReceipt();
+    expect(r).toContain('排上');
+    expect(r).toContain('办完手头');
+    // 无机制承诺词——承诺住协议/框架里，收执不许替它们开口。
+    expect(r).not.toContain('汇总');
+    expect(r).not.toContain('派工');
+  });
+
+  it('提级收执如实说插队，与普通收执同款只讲事实', () => {
+    const r = queuedUrgentReceipt();
+    expect(r).toContain('急');
+    expect(r).toContain('队头');
+    expect(r).not.toContain('汇总');
+  });
+
+  it('两条收执都无默认形参（场景开关默认值回归锁）', () => {
+    expectNoDefaultParams([
+      ['queuedReceipt', 0, queuedReceipt],
+      ['queuedUrgentReceipt', 0, queuedUrgentReceipt],
+    ]);
   });
 });

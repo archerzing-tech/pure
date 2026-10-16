@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'bun:test';
 import { RoundClosePlane, type QueuedTask, type RoundCloseDeps } from '../roundClosePlane';
 import type { SteerQueueEntry } from '../steerBus';
+import { QUEUED_PRIORITY } from '../../shared/scheduling';
 
 const IMG: never[] = [];
 const task = (text: string, over: Partial<QueuedTask> = {}): QueuedTask => ({ text, images: IMG, displayText: text, ts: 1, ...over });
@@ -165,6 +166,63 @@ describe('RoundClosePlane 调度与清场', () => {
     expect(r.plane.hasHeldInsert()).toBe(false);
     r.plane.dispatch();
     expect(r.reentered).toEqual([]);
+  });
+});
+
+describe('RoundClosePlane 优先级（第 5 期「调度」）', () => {
+  it('queueTask 按优先级稳定插入：高的在前，同级保持到达序', () => {
+    const r = rig();
+    r.plane.queueTask(task('普通一'));
+    r.plane.queueTask(task('急件', { priority: 15 }));
+    r.plane.queueTask(task('普通二'));
+    r.plane.queueTask(task('更急', { priority: 30 }));
+    // 30 > 15 > 10（缺省）；同级的普通一/普通二保持先到先排。
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['更急', '急件', '普通一', '普通二']);
+  });
+
+  it('缺 priority 的按队列级算，落账即盖缺省（旧档/rule 路径兜底）', () => {
+    const r = rig();
+    r.plane.queueTask(task('无级'));
+    r.plane.queueTask(task('急件', { priority: QUEUED_PRIORITY + 5 }));
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['急件', '无级']);
+    expect(r.plane.queueView()[0].priority).toBe(QUEUED_PRIORITY + 5);
+    expect(r.plane.queueView()[1].priority).toBe(QUEUED_PRIORITY);
+  });
+
+  it('dispatch 取最高优先级，同级 FIFO，仍一次只派一件', () => {
+    const r = rig();
+    r.plane.queueTask(task('先到普通'));
+    r.plane.queueTask(task('后到普通'));
+    r.plane.queueTask(task('急件', { priority: 15 }));
+    r.plane.dispatch();
+    // 急件插队先跑；一趟只交接一件（剩余计数被 narrateHandoff 带出）。
+    expect(r.reentered.map((t) => t.text)).toEqual(['急件']);
+    expect(r.calls).toContain('narrate:2');
+    r.plane.dispatch();
+    // 同级回到 FIFO：先到的普通先派。
+    expect(r.reentered.map((t) => t.text)).toEqual(['急件', '先到普通']);
+  });
+
+  it('恢复旧档：缺 priority 兜队列级，且呈现顺序与实时一致（乱序快照重排）', () => {
+    const r = rig();
+    r.plane.restore({
+      queue: [task('旧一'), task('旧二', { priority: 30 }), task('旧三')],
+      heldInsert: null,
+    });
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['旧二', '旧一', '旧三']);
+    expect(r.plane.queueView().map((t) => t.priority)).toEqual([30, QUEUED_PRIORITY, QUEUED_PRIORITY]);
+    // 恢复后的账与实况同权：dispatch 照取最高优先级。
+    r.plane.dispatch();
+    expect(r.reentered.map((t) => t.text)).toEqual(['旧二']);
+  });
+
+  it('snapshot 带 priority 出账，且是深拷贝', () => {
+    const r = rig();
+    r.plane.queueTask(task('急件', { priority: 15 }));
+    const snap = r.plane.snapshot();
+    expect(snap.queue[0].priority).toBe(15);
+    snap.queue[0].priority = 99;
+    expect(r.plane.queueView()[0].priority).toBe(15);
   });
 });
 

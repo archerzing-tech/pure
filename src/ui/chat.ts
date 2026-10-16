@@ -46,6 +46,7 @@ import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
 import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote } from '../shared/insertionMessaging';
+import { QUEUED_PRIORITY } from '../shared/scheduling';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -1892,7 +1893,7 @@ export class ChatController {
     abort: (reason) => this.abortController?.abort(reason),
     stopBranchByCallId: (callId, mode) => this.stopBranchByCallId(callId, mode),
     steerRunningTurn: (text, images, ack, target, cancel, receipt) => this.steerRunningTurn(text, images, ack as HTMLElement | null, target, cancel, receipt),
-    queueInterjectTask: (text, images, displayText) => this.queueInterjectTask(text, images, displayText),
+    queueInterjectTask: (text, images, displayText, priority) => this.queueInterjectTask(text, images, displayText, priority),
     foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed, receipt) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as HTMLElement | null, cancels, stopMissed, receipt),
     answerMidrunQuestion: (text, images) => this.answerMidrunQuestion(text, images),
     askMidrunClarification: (decision, text, images, ack) => this.askMidrunClarification(decision, text, images, ack as HTMLElement | null),
@@ -3509,9 +3510,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * AFTER this point — a classification that lands after the turn already
    * finished (LLM judges can take seconds) would otherwise leave the queued
    * task or a RELATED insert frozen until the user's NEXT turn completed. */
-  private queueInterjectTask(text: string, images: MessageImage[], displayText: string): void {
+  private queueInterjectTask(text: string, images: MessageImage[], displayText: string, priority?: number): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
-    this.roundClose.queueTask({ text, images, displayText, ts: Date.now() });
+    this.roundClose.queueTask({ text, images, displayText, ts: Date.now(), priority });
     this.renderQueueCard();
     if (!this.isStreaming()) this.roundClose.scheduleDispatch();
   }
@@ -3579,7 +3580,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     list.className = 'queue-card-items';
     for (const t of this.roundClose.queueView()) {
       const item = document.createElement('li');
-      item.textContent = t.displayText.length > 60 ? `${t.displayText.slice(0, 60)}…` : t.displayText;
+      // 第 5 期调度：提级的急件（priority 高于普通队列级）加个标记——用户
+      // 一眼看出哪件被插了队。queueView 顺序即展示顺序（急件在前）。
+      if ((t.priority ?? QUEUED_PRIORITY) > QUEUED_PRIORITY) {
+        const badge = document.createElement('span');
+        badge.className = 'queue-card-urgent';
+        badge.textContent = '急';
+        item.appendChild(badge);
+      }
+      item.appendChild(document.createTextNode(t.displayText.length > 60 ? `${t.displayText.slice(0, 60)}…` : t.displayText));
       list.appendChild(item);
     }
     bubble.appendChild(list);

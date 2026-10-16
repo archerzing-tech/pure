@@ -16,7 +16,8 @@
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
 import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
-import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt } from '../shared/insertionMessaging';
+import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
+import { priorityForKind } from '../shared/scheduling';
 import { PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import type { DelegationControlPlane } from './delegationControl';
 import type { RoundClosePlane } from './roundClosePlane';
@@ -82,8 +83,9 @@ export interface InterjectOrchestratorDeps {
   /** 转向通道入队 + 收执（框架文本与收执口径留宿主）。receipt（2026-10-15
    *  现场收执）：裁决器结合现场写的那两句，宿主优先用它、缺席回落固定口径。 */
   steerRunningTurn(text: string, images: MessageImage[], ack: InterjectAck, target: SteerTarget, cancel: boolean, receipt?: string): void;
-  /** 排队不相关插话（roundClose.queueTask + 队列卡渲染 + 补调度）。 */
-  queueInterjectTask(text: string, images: MessageImage[], displayText: string): void;
+  /** 排队不相关插话（roundClose.queueTask + 队列卡渲染 + 补调度）。第 5 期
+   *  调度：priority 由调度级折算（见 shared/scheduling.ts）；缺省 = 队列级。 */
+  queueInterjectTask(text: string, images: MessageImage[], displayText: string, priority?: number): void;
   /** 折入汇合轮的铺排（回显 + folds.add + 收执——铺排留宿主）。stopMissed
    *  （2026-10-10）：取消折入发生在「点名停支没停成」时置真——收执换诚实
    *  口径（在跑的支没停、给出能真停的说法），不说「其余照常」了事。
@@ -222,6 +224,10 @@ export class InterjectOrchestrator {
     const receipt = typeof decision.signals.receipt === 'string' && decision.signals.receipt.trim()
       ? decision.signals.receipt
       : undefined;
+    // 第 5 期调度：kind 折成处理级、裁决器的 urgent 再折成提级——两个入队点
+    // （分类期间硬停的兜底、task 臂）共用同一个优先级读数，口径不漂。
+    const urgent = decision.signals.urgent === true;
+    const queuePriority = priorityForKind(decision.kind, urgent);
     if (this.deps.isAborted()) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
@@ -229,7 +235,7 @@ export class InterjectOrchestrator {
       // only duplicate it.
       try { appendTrace({ type: 'interject_block', reason: 'aborted_during_classify', snippet: text.slice(0, 60) }); } catch {}
       this.deps.discardAckRow(ack);
-      this.deps.queueInterjectTask(text, images, displayText);
+      this.deps.queueInterjectTask(text, images, displayText, queuePriority);
       return;
     }
     // 输入级时间语义先于 kind 生效：这句话自己报了执行时刻，那它现在就不该被
@@ -508,9 +514,11 @@ export class InterjectOrchestrator {
         if (this.deps.hasDelegationInFlight() || this.deps.atAggregationWindow()) {
           this.deps.foldInScopeAddition(text, images, displayText, true, ack, false, false, receipt); // scope 追加：机械执行
         } else {
-          // 队列卡本身就是回执（逐条可见、就地更新），临时回执不再留行。
-          this.deps.discardAckRow(ack);
-          this.deps.queueInterjectTask(text, images, displayText);
+          // 第 5 期调度收执：排上了就说一声——普通活「办完手头就轮到」，
+          // 提级的「这句急，先办」。只说事实（排上了/插队了），口吻/详略归
+          // 第 6 期。队列卡本身就是逐条可见的就地回执，两者互补不重复。
+          this.deps.settleAck(ack, urgent ? queuedUrgentReceipt() : queuedReceipt());
+          this.deps.queueInterjectTask(text, images, displayText, queuePriority);
         }
         return;
       }

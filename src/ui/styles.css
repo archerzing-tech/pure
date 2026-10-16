@@ -1805,6 +1805,19 @@ body.window-maximized #boot-splash {
   color: var(--accent);
   font-weight: 600;
 }
+/* 第 5 期调度：被「这个急」提级的队项挂一枚「急」标记——队列卡顺序即优先级
+   顺序（急件在前），这枚标记让「它为什么排在最前」一眼可读。 */
+.queue-card-urgent {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
 
 @keyframes statusPulse {
   0%, 100% { opacity: 0.7; }
