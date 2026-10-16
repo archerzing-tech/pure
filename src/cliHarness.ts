@@ -575,6 +575,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 恒空 ⇒ 已结算面恒空、无产出可剔），与 atAggregationWindow 同一休眠语义。
     settledBranches: () => [],
     stripSettledBranchOutput: () => false,
+    registerStrippedBranch: () => {},
     branchLabel: (name) => name,
     // 整理窗读数（GUI 权威参照）：CLI 插话输入路休眠中（流态恒 false），
     // 恒 false 即休眠语义；输入路接通时换成通道宿主的真读数。

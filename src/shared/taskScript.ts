@@ -36,6 +36,10 @@ export interface TaskDelegation {
   outcome: BranchOutcome | null;
   /** 有界的产出摘要——账本要进快照，不能把整份支的报告存进去。 */
   summary: string;
+  /** 缺口②机械排除（第 6 期）：委派工具调用 id——已收工支被点名取消后，按
+   *  它从账上撤掉这条委派（summary 含支产出，必须随产出一起离场）。可选字段
+   *  对旧账向后兼容，不升版本号。 */
+  callId?: string;
 }
 
 /** 摘要字符上限：一句结论的长度上限，不是报告的长度上限。 */
@@ -87,7 +91,8 @@ export type TaskScriptSignal =
   | { kind: 'planReplaced'; plan: Plan }
   | { kind: 'control'; marker: 'phaseStart' | 'phaseDone' | 'phaseJump' | 'substepStart' | 'substepDone'; phase: number; substep?: number }
   | { kind: 'tool'; toolName: string; ok: boolean; command?: string; artifact?: string }
-  | { kind: 'delegation'; toolName: string; ok: boolean; outcome?: BranchOutcome; summary: string }
+  | { kind: 'delegation'; toolName: string; ok: boolean; outcome?: BranchOutcome; summary: string; callId?: string }
+  | { kind: 'delegationRetracted'; callId: string }
   | { kind: 'verification'; command: string; ok: boolean }
   | { kind: 'turnEnd' }
   | { kind: 'branch'; outcome: BranchOutcome; toolName?: string };
@@ -332,6 +337,21 @@ function rebuildFold(script: TaskScript): FoldResult {
       openSubstep = null;
       continue;
     }
+    if (signal.kind === 'delegationRetracted') {
+      // 缺口②机械排除（第 6 期）：已收工支被点名取消——按 callId 把那条委派
+      // 从账上撤掉（summary 含支产出，不能随 taskScriptFacts 进后续请求）。
+      // 只逐条目扣减（找到才减 1）；已被 MAX_DELEGATIONS_PER_STEP 挤出列表
+      // 的条目本来就没产出可泄漏，计数留着不误伤。补记追加、不改写历史。
+      for (const step of folded) {
+        const kept = step.delegations.filter((item) => item.callId !== signal.callId);
+        if (kept.length !== step.delegations.length) step.delegationCount = Math.max(0, step.delegationCount - 1);
+        step.delegations = kept;
+      }
+      const keptEarlier = earlier.delegations.filter((item) => item.callId !== signal.callId);
+      if (keptEarlier.length !== earlier.delegations.length) earlier.delegationCount = Math.max(0, earlier.delegationCount - 1);
+      earlier.delegations = keptEarlier;
+      continue;
+    }
     const step = folded[Math.min(cursor, folded.length) - 1];
     if (!step) continue;
     step.tools += 1;
@@ -345,6 +365,7 @@ function rebuildFold(script: TaskScript): FoldResult {
           ok: signal.ok,
           outcome: signal.outcome ?? step.branchOutcome ?? null,
           summary: summarizeDelegation(signal.summary),
+          ...(signal.callId ? { callId: signal.callId } : {}),
         });
       }
       if (!signal.ok) pushUnique(step.failedTools, signal.toolName);

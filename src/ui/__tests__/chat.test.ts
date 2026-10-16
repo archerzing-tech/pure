@@ -1482,33 +1482,46 @@ describe('plan overview completion state', () => {
     // content 换墓碑），转写渲染是另一条通道不受影响；找不到按没剔处理。
     const stripFn = src.indexOf('private stripSettledBranchOutput(callId: string): boolean {');
     expect(stripFn).toBeGreaterThan(-1);
-    const stripBody = src.slice(stripFn, stripFn + 800);
+    const stripBody = src.slice(stripFn, stripFn + 1400);
     expect(stripBody.indexOf("m.role === 'tool' && m.toolCallId === callId")).toBeGreaterThan(-1);
     expect(stripBody.indexOf('hit.content = settledBranchCancelNote();')).toBeGreaterThan(-1);
     expect(stripBody.indexOf('return false;')).toBeGreaterThan(-1);
+    // 第 6 期四通道：② workspace 预压实窗作废、③ 账本 done 摘账、④ 剧本委派撤账。
+    expect(stripBody.indexOf('this.preCompactedMessages = null;')).toBeGreaterThan(-1);
+    expect(stripBody.indexOf('this.dropLedgerDelegateEntry(callId);')).toBeGreaterThan(-1);
+    expect(stripBody.indexOf("this.recordTaskScript({ kind: 'delegationRetracted', callId });")).toBeGreaterThan(-1);
     // 墓碑住 insertionMessaging（协议文本单一出处）：取消语义 + 宣布职责。
     expect(msg.indexOf('export function settledBranchCancelNote(')).toBeGreaterThan(-1);
     expect(msg.indexOf('【已按用户要求取消】')).toBeGreaterThan(-1);
     // 候选面只认产出已回的支：暂停/停掉的支结算不带产出，无从剔除。
     expect(src.indexOf("settledBranches: () => this.agentActivities\n      .filter((item) => item.status === 'done')")).toBeGreaterThan(-1);
-    // 编排器判定缝：整理窗取消臂先认已结算支再折入（两臂同形）；匹配纪律
-    // 复用 1a 区分词匹配器（打平不赌=宁可漏剔不误剔），fold 不因此省。
-    const stripTarget = orch.indexOf('private stripSettledTarget(text: string): void {');
+    // 编排器判定缝：取消臂命中已收工支即登记（callId + 点名原文）+ 尝试即时
+    // 剔除；匹配纪律复用 1a 区分词匹配器（打平不赌=宁可漏剔不误剔），fold
+    // 不因此省。
+    const stripTarget = orch.indexOf('private stripSettledTarget(text: string): boolean {');
     expect(stripTarget).toBeGreaterThan(-1);
     const stripTargetBody = orch.slice(stripTarget, stripTarget + 900);
     expect(stripTargetBody.indexOf('matchInFlightBranch(text, this.deps.settledBranches())')).toBeGreaterThan(-1);
+    expect(stripTargetBody.indexOf('this.deps.registerStrippedBranch(matched.callId, text)')).toBeGreaterThan(-1);
     expect(stripTargetBody.indexOf('this.deps.stripSettledBranchOutput(matched.callId)')).toBeGreaterThan(-1);
-    // 整理窗两臂（steer 取消 + task 取消）都在折入前先剔除；strip 与 fold
-    // 同拍出现=宣布职责（「已取消」一句话）仍由框架文本承担。机械追加臂
-    // （task 的非取消路径）不带剔除——追加没有「产出不在场」的语义。
+    // 第 6 期扩窗：四条取消臂都登记/剔除（steer 没停成臂、steer 取消臂、
+    // task 没停成臂、task 取消臂）；机械追加臂（task 非取消路径）不带剔除
+    // ——追加没有「产出不在场」的语义。
     const armCount = orch.split('this.stripSettledTarget(text);').length - 1;
-    expect(armCount).toBe(2);
-    const steerCase = orch.indexOf("case 'steer': {");
-    const steerBody = orch.slice(steerCase, orch.indexOf("case 'question':", steerCase));
-    expect(steerBody.indexOf('this.stripSettledTarget(text);')).toBeGreaterThan(-1);
-    const taskCase = orch.indexOf("case 'task': {");
-    const taskBody = orch.slice(taskCase, orch.indexOf("case 'chatter':", taskCase));
-    expect(taskBody.indexOf('this.stripSettledTarget(text);')).toBeGreaterThan(-1);
+    expect(armCount).toBe(4);
+    const steerBody = orch.slice(orch.indexOf("case 'steer': {"), orch.indexOf("case 'question':", orch.indexOf("case 'steer': {")));
+    expect(steerBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
+    const taskBody = orch.slice(orch.indexOf("case 'task': {"), orch.indexOf("case 'chatter':", orch.indexOf("case 'task': {")));
+    expect(taskBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
+    // 同回合窗口兜底：回合收尾/下一轮装配按离场账补剔（applyStrippedBranches
+    // 空集短路）。
+    expect(src.indexOf('private applyStrippedBranches(messages: Message[]): void {')).toBeGreaterThan(-1);
+    expect(src.split('this.applyStrippedBranches(finalMessages);').length - 1).toBe(1);
+    expect(src.indexOf('this.applyStrippedBranches(historyMessages);')).toBeGreaterThan(-1);
+    // 渲染通道（修推断2）：剔除行的落盘 resultText 不回落墓碑。
+    expect(src.indexOf('private toolRowRenderText(callId: string | undefined, content: string)')).toBeGreaterThan(-1);
+    // 离场账随快照走：空集写 undefined。
+    expect(src.indexOf('strippedBranchIds: this.strippedBranchIds.size > 0 ? [...this.strippedBranchIds] : undefined')).toBeGreaterThan(-1);
   });
 
   it('uses the judge-written receipt at the transit acks with fixed fallbacks intact (2026-10-15 现场收执)', () => {
@@ -1663,7 +1676,7 @@ describe('plan overview completion state', () => {
     // 匹配器（matchInFlightBranch）不得回流进宿主停支半边。
     const stopFn = src.indexOf('private stopBranchByCallId(callId: string, mode:');
     expect(stopFn).toBeGreaterThan(-1);
-    const stopBody = src.slice(stopFn, src.indexOf('private branchLabel(', stopFn));
+    const stopBody = src.slice(stopFn, src.indexOf('private stripSettledBranchOutput(', stopFn));
     expect(stopBody).toContain('orchestrator.branchView()');
     expect(stopBody).toContain('orchestrator.pauseBranch(callId)');
     expect(stopBody).toContain('orchestrator.abortBranch(callId)');

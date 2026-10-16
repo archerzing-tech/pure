@@ -59,6 +59,11 @@ export interface InterjectOrchestratorDeps {
   /** 已收工支的产出剔除（宿主执行，返回 false = 上下文里没找到那路的
    *  结果——迟到/缺账，调用方按没剔处理，不预支收执）。 */
   stripSettledBranchOutput(callId: string): boolean;
+  /** 登记一路已收工支进入「离场账」（缺口②机械排除，第 6 期）：callId 为
+   *  durable key，topic 是用户点名原文（迟到/缺账时装配期二次匹配的依据）。
+   *  登记与即时剔除解耦——同回合 settle 的支此刻结果还没进宿主 this.messages
+   *  （即时剔会落空），靠回合收尾补剔与下一轮装配兜底兑现；登记不预支成功。 */
+  registerStrippedBranch(callId: string, topic: string): void;
   /** 收执里引用支名时带同任务第几号（同名多支消歧）。 */
   branchLabel(name: string, callId: string): string;
   /** 阶段 C 窗口（2026-10-15 用户定调「冲突按样本执行」并行委派都收齐、汇总
@@ -395,6 +400,9 @@ export class InterjectOrchestrator {
           // 取消案例同源）。折入只守汇报步；同回合父若再为这个话题派工，
           // 起飞闸（挂号簿）在出生点拦下。
           this.deps.delegation.registerCancel(text);
+          // 缺口②扩窗：没停成的取消臂也点名了话题——若它同时命中某支**已收
+          // 工**的支，登记进离场账（在飞支停没停成不影响已收工支的产出离场）。
+          this.stripSettledTarget(text);
           // stopMissed=true：支还在飞、但没停成（没指认/闸生效/编排器缺位）
           // ——收执必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
           this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
@@ -412,8 +420,11 @@ export class InterjectOrchestrator {
           // 若还会为这个话题再派工，出生点拦下。
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
+          // 缺口②扩窗（第 6 期）：不再只在整理窗剔——任何取消臂只要点名命中
+          // 已收工支就登记（登记保证回合收尾补剔与下一轮装配兜底）；整理窗内
+          // 即时剔中即兑现，窗口外此刻未必有候选（出生前）也不影响登记。
+          this.stripSettledTarget(text);
           if (this.deps.atAggregationWindow()) {
-            this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
             // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
@@ -469,6 +480,9 @@ export class InterjectOrchestrator {
             // 没指认出来的取消折入：折入守汇报步，挂号守同回合再出生的支。
             // stopMissed=true（同 steer 分支）：收执如实说「没停」。
             this.deps.delegation.registerCancel(text);
+            // 缺口②扩窗：同 steer 没停成臂——点名也可能命中一支已收工支，
+            // 登记进离场账（在飞支没停成不挡已收工支的产出离场）。
+            this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
             return;
           }
@@ -477,8 +491,10 @@ export class InterjectOrchestrator {
           // 起飞闸 + 转达父引擎。
           echoUserBubble();
           this.deps.delegation.registerCancel(text);
+          // 缺口②扩窗（第 6 期）：与上方 steer 取消臂同形——不再只在整理窗
+          // 剔，任何取消臂都先登记已收工支的离场。
+          this.stripSettledTarget(text);
           if (this.deps.atAggregationWindow()) {
-            this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
             try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
@@ -604,20 +620,27 @@ export class InterjectOrchestrator {
     return hit ? { name: hit.name, callId: hit.callId, status: hit.status } : null;
   }
 
-  /** 缺口②机械排除（2026-10-15）：整理窗的取消点中了某支**已收工**的支时，
-   *  宿主把那路的产出从父上下文里整体剔除（换墓碑）——「不进最终汇总」从
-   *  cancelFoldInstruction 的劝阻升格为数据不在场，与在飞停支「结算体不带
-   *  产出」的机制强制抹平不对称。匹配纪律复用点名续跑的先例（1a 区分词匹
-   *  配器：只认区分性命中，打平/认不出 = 宁可漏剔不误剔，fold 的提示词约
-   *  束照旧兜底）；候选只认产出已回的支（settledBranches——暂停/停掉的支
-   *  结算不带产出，无从剔除）。fold 不因此省：最终汇总宣布「已取消」的
-   *  职责仍在框架文本里。 */
-  private stripSettledTarget(text: string): void {
+  /** 缺口②机械排除（2026-10-15，第 6 期扩窗）：点名取消点中了某支**已收工**
+   *  的支时，把那路的产出从父上下文里整体剔除（换墓碑），并把它的 callId 登
+   *  记进宿主的离场账——「不进后续请求」从 cancelFoldInstruction 的劝阻升格
+   *  为数据不在场，与在飞停支「结算体不带产出」的机制强制抹平不对称。匹配
+   *  纪律复用点名续跑的先例（1a 区分词匹配器：只认区分性命中，打平/认不出
+   *  = 宁可漏剔不误剔，fold 的提示词约束照旧兜底）；候选只认产出已回的支
+   *  （settledBranches——暂停/停掉的支结算不带产出，无从剔除）。
+   *  登记与即时剔除解耦：同回合 settle 的支此刻结果还没进 this.messages，
+   *  即时剔除落空（返回 false），登记让回合收尾补剔与下一轮装配兜底兑现。
+   *  fold 不因此省：最终汇总宣布「已取消」的职责仍在框架文本里。返回是否即
+   *  时剔中——调用方**不得**据此预支「已剔除」收执（收执链本就不声称剔除，
+   *  扩窗后也不加）。 */
+  private stripSettledTarget(text: string): boolean {
     const matched = matchInFlightBranch(text, this.deps.settledBranches());
-    if (!matched) return;
+    if (!matched) return false;
+    this.deps.registerStrippedBranch(matched.callId, text);
     if (this.deps.stripSettledBranchOutput(matched.callId)) {
       try { appendTrace({ type: 'cancel_strip_settled', snippet: text.slice(0, 80) }); } catch {}
+      return true;
     }
+    return false;
   }
 
   // ── 思考窗寄存器的宿主面（send() 重启循环 / planByThinking / 上下文投影用）─

@@ -10,7 +10,7 @@ import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, custo
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
-import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, type SessionLedger } from '../shared/sessionLedger';
+import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { memoryStore } from './memoryStore';
@@ -35,7 +35,7 @@ import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../c
 import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
 import { InterjectOrchestrator } from '../coding-agent/interjectOrchestrator';
 import { sanitizeSkillName } from './skillHub';
-import { type SteerTarget } from '../shared/steerTargeting';
+import { type SteerTarget, matchInFlightBranch } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
 import { DelegationControlPlane } from '../coding-agent/delegationControl';
 import { FoldInLedger } from '../coding-agent/foldInLedger';
@@ -1663,6 +1663,18 @@ export class ChatController {
   private activePlanSeq = 1;
   /** Task-scoped collaboration trace shared by live execution and restore. */
   private agentActivities: SessionAgentActivity[] = [];
+  /** 缺口②机械排除（第 6 期）：被用户点名取消并已整体离场的委派支（durable
+   *  key = 委派 callId）。非空时后续每一处请求装配源（this.messages 装配、
+   *  预压实窗、会话账本 done、剧本委派摘要）都要按它过滤；空集（绝大多数回
+   *  合）全短路。随快照持久化——reload 后通道③/④的残留不复活。 */
+  private strippedBranchIds = new Set<string>();
+  /** 被剔除支的点名原文（与 ids 同序登记）：迟到/缺账时装配期二次匹配的依
+   *  据（复用 1a 区分词匹配器，只认区分性命中）。 */
+  private strippedBranchTopics: string[] = [];
+  /** 剔除时那路工具消息的原始 content（渲染通道专用留底）：this.messages 里
+   *  换成墓碑后落盘的 toolExec.resultText 不能回落到墓碑。reload 后从已持久化
+   *  的 toolExec 回灌（见 loadFromStorage）——渲染通道的唯一形态没被复制。 */
+  private strippedBranchOriginals = new Map<string, string>();
   private agentActivityPanel: AgentActivityPanelHandle | null = null;
   private agentActivityHistorical = false;
   private agentActivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1878,6 +1890,7 @@ export class ChatController {
       .filter((item) => item.status === 'done')
       .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet })),
     stripSettledBranchOutput: (callId) => this.stripSettledBranchOutput(callId),
+    registerStrippedBranch: (callId, topic) => this.registerStrippedBranch(callId, topic),
     branchLabel: (name, callId) => this.branchLabel(name, callId),
     // 阶段 C 窗读数（2026-10-15 样本口径接入）：委派已出生且一支不在飞、回合
     // 仍在流式——汇合后的整理/汇总窗。此刻追加/取消折入汇聚轮而非排队/转达。
@@ -2855,6 +2868,20 @@ export class ChatController {
     // 空账，读侧不崩）。澄清句柄不恢复：一个已死的进程收不到那个回答，句柄
     // 跟着旧进程走。
     this.sessionLedger = normalizeSessionLedger(snapshot.uiState.sessionLedger);
+    // 缺口②机械排除（第 6 期）：离场账随快照回来——reload 后装配侧据此继续
+    // 剔除（通道③/④残留不复活）。渲染通道留底从**已持久化**的 toolExec 回灌
+    // （剔除只动引擎上下文，渲染通道始终是原始输出——reload 后不能再落盘时拿
+    // 墓碑顶替原状）。
+    this.strippedBranchIds = new Set(Array.isArray(snapshot.uiState.strippedBranchIds) ? snapshot.uiState.strippedBranchIds : []);
+    this.strippedBranchTopics = Array.isArray(snapshot.uiState.strippedBranchTopics) ? [...snapshot.uiState.strippedBranchTopics] : [];
+    if (this.strippedBranchIds.size > 0) {
+      for (const entry of snapshot.transcript ?? []) {
+        if (entry.role !== 'tool' || !entry.toolCallId) continue;
+        if (!this.strippedBranchIds.has(entry.toolCallId)) continue;
+        const original = entry.toolExec?.resultText;
+        if (original && original !== settledBranchCancelNote()) this.strippedBranchOriginals.set(entry.toolCallId, original);
+      }
+    }
     // E6：账随会话走——旧会话的活账在此弃掉（切走前已随快照落盘；在飞队列
     // 账有 hasPendingCloseWork 否决冷回收兜着），再从新会话的快照收账。不弃
     // 账的后果：上一会话排队的活在本会话的收尾派发里重入，还会被本会话的下
@@ -2901,6 +2928,16 @@ export class ChatController {
     this.statusLines = (snapshot.statusLines ?? []).map(line => ({ ...line }));
     // 押账的规划叙述属于被切走的那一回合，不跟进来（插入点已随会话切换作废）。
     this.pendingPlanNarration = null;
+    // 缺口②：把离场账重放到恢复出来的三处装配源——① modelContext 里的原产出
+    // （若那次剔除没来得及落盘）换墓碑、③ 账本 done 摘账、④ 剧本委派撤账。
+    // 已在盘上剔过的条目重放幂等（② 预压实窗在恢复期尚未建，无需处理）。
+    if (this.strippedBranchIds.size > 0) {
+      for (const callId of [...this.strippedBranchIds]) {
+        this.dropLedgerDelegateEntry(callId);
+        this.recordTaskScript({ kind: 'delegationRetracted', callId });
+      }
+      this.applyStrippedBranches(this.messages);
+    }
     // ⑥ 长会话恢复后立刻把 trim/摘要挪进 idle 窗口，首次发送不再在关键路径上
     // 同步等压实（见 preCompactAfterLoad）。
     this.preCompactAfterLoad();
@@ -3190,17 +3227,96 @@ export class ChatController {
     return ok ? this.branchLabel(branch.agentName, callId) : null;
   }
 
-  /** 缺口②机械排除（2026-10-15）：把已收工委派支在父上下文里的产出整体换
-   *  成墓碑（settledBranchCancelNote）——后续请求从此看不见那路产出，与在
-   *  飞停支「结算体不带产出」同一语义。引擎上下文与转写渲染是两条通道：这
-   *  里只动 this.messages，用户界面上的委派卡与转写不受影响。返回 false =
-   *  messages 里没有那路的工具结果（迟到/缺账），调用方按没剔处理，不预支
-   *  任何「已剔除」的说法。 */
+  /** 缺口②机械排除（2026-10-15，第 6 期四通道整体离场）：把已收工委派支在
+   *  父请求的**全部装配源**里整体换掉/摘掉——① this.messages 里那路的工具
+   *  结果换墓碑（后续装配从此看不见那路产出）；② 预压实窗作废；③ 会话账本
+   *  done 里那笔「已做 delegate:<agent>」摘掉；④ 剧本里那条委派摘要撤掉。
+   *  渲染通道（toolExec.resultText / 委派卡 agentActivities.output / 事件日志）
+   *  一律不碰——剔的是引擎上下文，不是界面。返回 false = ① 里没找到那路的
+   *  结果（同回合 settle 时结果还没进 this.messages，迟到/缺账），调用方按
+   *  没剔处理，不预支任何「已剔除」的说法；②③④ 仍照剔（它们不依赖 ① 的
+   *  命中——产出已回就该随取消离场）。 */
   private stripSettledBranchOutput(callId: string): boolean {
+    // ② 预压实窗：identity+条数守卫拦不住「内容被就地改写」（数组引用与长度
+    // 都没变），作废缓存让 pickHistoryMessages 自然回落到 this.messages。
+    if (this.preCompactedMessages !== null) {
+      this.preCompactedMessages = null;
+      this.preCompactSourceMessages = null;
+    }
+    // ③ 会话账本 done：那笔委派的「已做」条目随产出离场。
+    this.dropLedgerDelegateEntry(callId);
+    // ④ 剧本委派摘要：summary 含支产出，随产出离场。
+    this.recordTaskScript({ kind: 'delegationRetracted', callId });
     const hit = this.messages.find((m) => m.role === 'tool' && m.toolCallId === callId);
     if (!hit) return false;
+    // 渲染通道留底（见 toolRowRenderText）：先记住原状再换墓碑。
+    if (hit.content !== settledBranchCancelNote()) this.strippedBranchOriginals.set(callId, hit.content);
     hit.content = settledBranchCancelNote();
     return true;
+  }
+
+  /** 登记一路已收工支进入「离场账」（缺口②机械排除，第 6 期）：callId 是
+   *  durable key，topic 是用户点名原文。登记与即时剔除解耦——同回合 settle
+   *  的支此刻工具结果还没进 this.messages（见 stripSettledBranchOutput），
+   *  登记让回合收尾（applyStrippedBranches）与下一轮装配兜底兑现。幂等：
+   *  同一支重复点名不重复登记。 */
+  private registerStrippedBranch(callId: string, topic: string): void {
+    if (this.strippedBranchIds.has(callId)) return;
+    this.strippedBranchIds.add(callId);
+    this.strippedBranchTopics.push(topic);
+  }
+
+  /** ③ 会话账本 done 摘账：委派条目的指纹 = actionFingerprint('delegate:<agent>',
+   *  inputSnippet)——与 logDelegationSettled 的记账口径同源，从 agentActivities
+   *  的支视图重建（reload 后支视图仍在，指纹可复算）。 */
+  private dropLedgerDelegateEntry(callId: string): void {
+    const activity = this.agentActivities.find((item) => item.callId === callId);
+    if (!activity) return;
+    const fingerprint = actionFingerprint(`delegate:${activity.agentName}`, activity.inputSnippet ?? '');
+    const done = this.sessionLedger.done.filter((entry) => entry.fingerprint !== fingerprint);
+    if (done.length !== this.sessionLedger.done.length) {
+      this.sessionLedger = { ...this.sessionLedger, done };
+    }
+  }
+
+  /** 渲染通道专用：委派工具行落盘用的原始输出（缺口②修推断2）。被剔除的行
+   *  content 已是墓碑——落盘时**绝不**回落墓碑（否则「剔除引擎上下文」把界面
+   *  上的委派结果也擦掉）。原状来源：本进程剔除时留底 → reload 后从已持久化
+   *  的 toolExec 回灌 → 兜底取委派卡读数 agentActivities.output（仍非墓碑）。 */
+  private toolRowRenderText(callId: string | undefined, content: string): string | undefined {
+    if (!callId || content !== settledBranchCancelNote()) return content || undefined;
+    const original = this.strippedBranchOriginals.get(callId);
+    if (original !== undefined && original !== settledBranchCancelNote()) return original;
+    const branch = this.agentActivities.find((item) => item.callId === callId);
+    return branch?.output || undefined;
+  }
+
+  /** 回合收尾/下一轮装配的补剔（缺口②）：this.messages 是**回合级**重建的
+   *  （只在 Completed/Interrupted 事件 merge），同回合 settle 的支在取消那一刻
+   *  工具结果还没进 this.messages——stripSettledBranchOutput 落空，登记照在。
+   *  merge 之后本方法按 strippedBranchIds 扫一遍，把本回合才进账的那路结果换
+   *  墓碑（幂等）。迟到/缺账时用登记的点名原文做二次匹配（复用 1a 区分词匹配
+   *  器：只认区分性命中，打平不剔）。空集短路——绝大多数回合零开销。 */
+  private applyStrippedBranches(messages: Message[]): void {
+    if (this.strippedBranchIds.size === 0) return;
+    // 装配期二次匹配：支视图里已收工、但取消当时还没上榜（迟到）的支，用点名
+    // 原文重放到当前已收工面上——同一匹配器、同一保守纪律（打平/认不出不剔）。
+    if (this.strippedBranchTopics.length > 0) {
+      const candidates = this.agentActivities
+        .filter((item) => item.status === 'done')
+        .map((item) => ({ callId: item.callId, name: item.agentName, role: item.agentRole, snippet: item.inputSnippet }));
+      for (const topic of this.strippedBranchTopics) {
+        const matched = matchInFlightBranch(topic, candidates);
+        if (matched) this.registerStrippedBranch(matched.callId, topic);
+      }
+    }
+    for (const message of messages) {
+      if (message.role !== 'tool' || !message.toolCallId) continue;
+      if (!this.strippedBranchIds.has(message.toolCallId)) continue;
+      if (message.content === settledBranchCancelNote()) continue;
+      this.strippedBranchOriginals.set(message.toolCallId, message.content);
+      message.content = settledBranchCancelNote();
+    }
   }
 
   /** 收执里引用支名时带上同任务第几号（researcher·2号）：同名多支时裸的
@@ -5985,6 +6101,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.preCompactedMessages, this.preCompactSessionId, this.preCompactMessageCount,
         sendSessionId, this.messages, this.preCompactSourceMessages,
       );
+      // 缺口②装配兜底：剔除账非空时，装配源里可能还留着要剔除的支结果（迟到
+      // /缺账）——按 callId 再扫一遍换墓碑（幂等）。空集短路在
+      // applyStrippedBranches 内，绝大多数回合零开销。
+      this.applyStrippedBranches(historyMessages);
       // Safety net: whenever a plan card exists and the engine is about to
       // run (any pre-flight path — continuation, approval, forced mode), the
       // chat plan card must be in the executing state, never stale-waiting.
@@ -6469,6 +6589,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 ok: event.payload.result.success,
                 ...(branchOutcome ? { outcome: branchOutcome } : {}),
                 summary: truncateResultLines(resultText),
+                // 缺口②机械排除：记 callId——被点名取消时按它撤掉这条委派摘要。
+                callId: event.payload.toolCallId,
               });
             }
             this.recordToolActivity(
@@ -6905,6 +7027,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (completionMessages && !interruptedMessages) {
               // 押账的规划叙述插在本回合用户消息后面（2026-09-27 时序修正）。
               finalMessages = mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration());
+              // 缺口②：同回合 settle 的支此刻才进账——收尾补剔（登记在取消那
+              // 一刻，工具结果到回合收尾才 merge 进来）。引擎自己的消息表
+              // （completionMessages）也一并剔，否则后台预压实以它作输入，会
+              // 把原产出写进第二轮的 preCompactedMessages。
+              this.applyStrippedBranches(finalMessages);
+              this.applyStrippedBranches(completionMessages);
               this.messages = limitMessageHistory(finalMessages);
               this.hasHistory = true;
               // Background pre-compaction: trim + LLM-summarize the model
@@ -7111,6 +7239,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (visiblePartial.length > 0 && !alreadyCarried) {
                 interruptedMessages.push({ role: 'assistant', content: visiblePartial });
               }
+              // 缺口②：中断回合也补剔同回合 settle 的支（登记照在）。
+              this.applyStrippedBranches(interruptedMessages);
+              this.applyStrippedBranches(event.payload.messages);
               finalMessages = interruptedMessages;
               this.messages = limitMessageHistory(interruptedMessages);
               this.hasHistory = true;
@@ -7801,7 +7932,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 ...existing,
                 toolName: existing.toolName || m.toolName || storedToolCall?.toolName || 'tool',
                 args: existing.args ?? storedToolCall?.args,
-                resultText: existing.resultText ?? (m.content || undefined),
+                resultText: existing.resultText ?? this.toolRowRenderText(m.toolCallId, m.content),
               };
             }
             return {
@@ -7809,7 +7940,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               success: !/^Error:\s/i.test(m.content),
               duration: 0,
               args: storedToolCall?.args,
-              resultText: m.content || undefined,
+              // 缺口②（修推断2）：被剔除的委派工具行 content 是墓碑——落盘绝不
+              // 回落墓碑，取专门留底（见 toolRowRenderText），渲染通道保持原样。
+              resultText: this.toolRowRenderText(m.toolCallId, m.content),
             } satisfies ToolExecMeta;
           })()
         : undefined;
@@ -7873,6 +8006,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         pendingQueue: this.roundClose.queueView().length > 0 || this.roundClose.hasHeldInsert()
           ? this.roundClose.snapshot()
           : undefined,
+        // 缺口②机械排除（第 6 期）：已离场支的 callId 随快照走——reload 后
+        // 装配侧据此继续剔除（否则通道③/④的残留复活）。空账写 undefined。
+        strippedBranchIds: this.strippedBranchIds.size > 0 ? [...this.strippedBranchIds] : undefined,
+        strippedBranchTopics: this.strippedBranchTopics.length > 0 ? [...this.strippedBranchTopics] : undefined,
       },
     };
     await saveSession(sessionId, nextSnapshot, workspace);

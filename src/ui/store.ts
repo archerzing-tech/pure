@@ -124,6 +124,12 @@ export interface SessionUiState {
    *  自然收尾点。可选字段对 v3 向后兼容（paused/sessionLedger 同款先例，
    *  不升快照版本号——normalize 只认 version===3）。 */
   pendingQueue?: { queue: QueuedTask[]; heldInsert: QueuedTask | null };
+  /** 缺口②机械排除（第 6 期，2026-10-16）：被点名取消并已整体离场的委派支
+   *  callId（durable key）+ 点名原文。随快照走——reload 后装配侧据此继续剔除
+   *  （否则通道③会话账本/通道④剧本摘要的残留复活）。可选字段对 v3 向后兼容，
+   *  不升快照版本号。 */
+  strippedBranchIds?: string[];
+  strippedBranchTopics?: string[];
 }
 
 export interface PlanState {
