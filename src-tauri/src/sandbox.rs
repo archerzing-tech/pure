@@ -90,14 +90,19 @@ pub fn seatbelt_profile(workspace: &Path) -> String {
 /// plus a flag saying whether the wrapper was applied. When Seatbelt is
 /// unavailable the original `sh -c <command>` argv is returned unchanged.
 pub fn wrap_command(workspace: &Path, command: &str) -> (Vec<String>, bool) {
+    // Unavailable path must return the platform's COMPLETE plain argv — the
+    // doc contract says "the original `sh -c <command>` argv unchanged", and
+    // the linux test locks that shape. Dropping the command here used to be
+    // masked because both callers pre-check seatbelt_available(), but the
+    // profile-write fallback below is reachable after that check passes.
     let base = || -> Vec<String> {
         #[cfg(windows)]
         {
-            vec!["powershell".into(), "-NoProfile".into(), "-NonInteractive".into(), "-EncodedCommand".into()]
+            vec!["powershell".into(), "-NoProfile".into(), "-NonInteractive".into(), "-EncodedCommand".into(), crate::powershell_encoded_command(command)]
         }
         #[cfg(not(windows))]
         {
-            vec!["sh".into(), "-c".into()]
+            vec!["sh".into(), "-c".into(), command.to_string()]
         }
     };
     if !seatbelt_available() {
