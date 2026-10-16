@@ -2517,7 +2517,14 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
     `- **总 tokens**: ${formatTokens((stats.usage?.promptTokens ?? 0) + (stats.usage?.completionTokens ?? 0))}`,
     `- **估算花费**: ${formatCostUsd(cost)}`,
     `- **首字延迟均值**: ${avgTtftMs === null ? '—' : formatLatencyMs(avgTtftMs)}`,
-    ...(last ? [`- **上轮首字延迟**: ${last.ttftMs === null ? '未出字' : formatLatencyMs(last.ttftMs)}（其中路由 ${last.routeMs === null ? '—' : formatLatencyMs(last.routeMs)}）`] : []),
+    ...(last
+      ? [
+          `- **上轮首字延迟**: ${last.ttftMs === null ? '未出字' : formatLatencyMs(last.ttftMs)}` +
+            `（其中路由 ${last.routeMs === null ? '—' : formatLatencyMs(last.routeMs)}` +
+            `、引擎装配 ${last.engineMs == null ? '—' : formatLatencyMs(last.engineMs)}` +
+            `、线上首字 ${last.engineMs != null && last.ttftMs != null ? formatLatencyMs(last.ttftMs - last.engineMs) : '—'}）`,
+        ]
+      : []),
     '',
     '## 搜索历史',
     ...(stats.searches.length

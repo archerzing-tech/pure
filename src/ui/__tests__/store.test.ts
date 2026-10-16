@@ -51,12 +51,12 @@ describe('session stats persistence', () => {
         fileWrites: [],
         fileReads: [],
         commands: [],
-        turnTimings: [{ ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, totalMs: 15_230 }],
+        turnTimings: [{ ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, engineMs: 210, totalMs: 15_230 }],
       });
       const loaded = loadSessionStats(sessionId);
       // The load-path normalizer whitelists fields — turnTimings must survive it.
       expect(loaded.turnTimings).toEqual([
-        { ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, totalMs: 15_230 },
+        { ts: 1_728_000_000_000, ttftMs: 8420, routeMs: 6100, probeMs: 12, contextMs: 340, engineMs: 210, totalMs: 15_230 },
       ]);
 
       // 第 2 期第四刀：分支账（turnTimings.branches）也要跟着往返——它记的是
@@ -73,6 +73,7 @@ describe('session stats persistence', () => {
           routeMs: null,
           probeMs: 3,
           contextMs: 40,
+          engineMs: 180,
           totalMs: 9000,
           branches: [
             { at: 1_728_000_000_002, callId: 'call_b', agentName: 'researcher', kind: 'branch_aborted', outcome: 'paused' },

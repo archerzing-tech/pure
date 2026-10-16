@@ -807,6 +807,9 @@ export interface TurnTiming {
   probeMs: number | null;
   /** Bounded MCP waits on the critical path (connect budget + resource prefetch). */
   contextMs: number | null;
+  /** Send → 引擎首个事件（GUI 前置之后的装配/引擎启动段）。ttft 减它 ≈ 线上
+   * 首字——冷连接税/provider 首字就藏在这一段，冷启动归因靠它分账。 */
+  engineMs: number | null;
   /** Send → turn end (completed, failed, or aborted). */
   totalMs: number | null;
   /** 第 2 期第四刀：本回合的分支账——一等分支事件落成的流水（叫停/续跑/

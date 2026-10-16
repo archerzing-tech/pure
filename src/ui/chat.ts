@@ -2834,6 +2834,7 @@ export class ChatController {
       payload: {
         totalMs: turnTiming.totalMs,
         ttftMs: turnTiming.ttftMs,
+        engineMs: turnTiming.engineMs,
         branchEvents: turnTiming.branches?.length ?? 0,
         branches: turnTiming.branches,
       },
@@ -3900,7 +3901,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // committed in the turn's finally (generation-guarded so a turn superseded
     // by a session switch never writes into the session the user switched TO).
     const turnStartMs = performance.now();
-    const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, totalMs: null };
+    const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, engineMs: null, totalMs: null };
     // 落定账已提交过没有：成功路径在 setStreaming(false) 之前提交（见该调用点），
     // finally 只补失败/中断路径的账，防双写。
     let turnSettledCommitted = false;
@@ -6171,6 +6172,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
       for await (const event of events) {
+        // First engine event closes the app-side assembly slice: ttft minus
+        // this ≈ wire first-token, where the cold-connection tax lives
+        // (冷启动归因：客户端装配段与线上段就此分账).
+        if (turnTiming.engineMs === null) turnTiming.engineMs = Math.round(performance.now() - turnStartMs);
         // 每个引擎事件都是流活着的证据：刷新保鲜戳，看门狗在 burst 间停顿里闭嘴。
         this.lastStreamActivityAt = Date.now();
 
