@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -458,6 +458,32 @@ describe('NodeToolAdapter find_files', () => {
     } finally {
       unlinkSync(bin);
     }
+  });
+});
+
+describe('expandTilde', () => {
+  // 纯函数注入 home，不碰进程环境——任何平台跑结果一致。
+  const home = '/Users/tester';
+  it('展开 ~、~/、$HOME、%USERPROFILE% 前缀', () => {
+    expect(expandTilde('~', home)).toBe(home);
+    expect(expandTilde('~/Downloads/a.md', home)).toBe('/Users/tester/Downloads/a.md');
+    expect(expandTilde('$HOME', home)).toBe(home);
+    expect(expandTilde('$HOME/doc.txt', home)).toBe('/Users/tester/doc.txt');
+    expect(expandTilde('~/a', '/Users/tester/')).toBe('/Users/tester/a');
+    // `~\`、`%USERPROFILE%\` 的展开产物含平台差异（非 Windows 上反斜杠是
+    // 合法文件名字符），精确串会漂移——只锁行为（落在 home 下且内容没丢）。
+    const backslashed = expandTilde('~\\Downloads\\a.md', home);
+    expect(backslashed.startsWith(home)).toBe(true);
+    expect(backslashed).toContain('Downloads');
+    const profile = expandTilde('%USERPROFILE%\\doc.txt', home);
+    expect(profile.startsWith(home)).toBe(true);
+    expect(profile).toContain('doc.txt');
+  });
+  it('非边界与未知前缀按字面不动', () => {
+    expect(expandTilde('~user/x', home)).toBe('~user/x');
+    expect(expandTilde('$HOMEWORK/x', home)).toBe('$HOMEWORK/x');
+    expect(expandTilde('relative/a.txt', home)).toBe('relative/a.txt');
+    expect(expandTilde('', home)).toBe('');
   });
 });
 

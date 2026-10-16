@@ -828,6 +828,44 @@ async fn mcp_call_inner_with_deadline(
 //  File Tools
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// `~`/`~\`/`$HOME`/`%USERPROFILE%` 前缀展开为真实主目录——模型常把 shell
+/// 习惯带进文件工具参数（真机判例 2026-10-16：read_file "~/Downloads/…" 报
+/// os error 2，只因 `~` 没人展开）。跨平台差异在这里收口：home 来源与
+/// pure_home_dir 同源（Windows 只设 USERPROFILE 不设 HOME）；`~\` 与
+/// `%USERPROFILE%\` 是 Windows 侧惯用写法，光认 `~/` 会漏。`~user`、
+/// `$HOMEWORK` 这类非边界前缀按字面不动（展开反而错）。展开产物再走常规
+/// 解析，绝对路径全盘可达的契约不变。与 resolve_document_path 的 `~/`/
+/// `$HOME` 展开同语义（那边是宽松前缀匹配，这边要求边界）；TS 侧同构函数
+/// 在 NodeToolAdapter 的 expandTilde，改必须同步。纯函数注入 home，测试
+/// 不碰进程环境，任何平台跑结果一致。
+fn expand_tilde_with(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    let joined = |rest: &str| -> String {
+        let rest = rest.trim_start_matches(['/', '\\']);
+        if rest.is_empty() {
+            home.to_string()
+        } else {
+            format!("{home}{}{rest}", std::path::MAIN_SEPARATOR)
+        }
+    };
+    let at_boundary = |rest: &str| rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\');
+    if path == "~" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        joined(rest)
+    } else if let Some(rest) = path.strip_prefix("$HOME") {
+        if at_boundary(rest) { joined(rest) } else { path.to_string() }
+    } else if let Some(rest) = path.strip_prefix("%USERPROFILE%") {
+        if at_boundary(rest) { joined(rest) } else { path.to_string() }
+    } else {
+        path.to_string()
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    PathBuf::from(expand_tilde_with(path, &pure_home_dir()))
+}
+
 /// Resolve a tool path below `workspace`.
 ///
 /// Tool schemas describe paths relative to the workspace, but models sometimes
@@ -842,7 +880,7 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
     if workspace_path.as_os_str().is_empty() {
         return Err("workspace is required".to_string());
     }
-    let requested_path = PathBuf::from(path.trim());
+    let requested_path = expand_tilde(path.trim());
     if requested_path.as_os_str().is_empty() {
         return Err("path is required".to_string());
     }
@@ -851,7 +889,9 @@ fn resolve(workspace: &str, path: &str) -> Result<PathBuf, String> {
 
 fn has_symlink_component(workspace: &str, path: &str) -> bool {
     let base = PathBuf::from(workspace.trim());
-    let requested = PathBuf::from(path.trim());
+    // 与 resolve 同吃 `~` 展开：守卫若不展开，`~/x` 会被 join 到 workspace
+    // 下检查，symlink 检查错位形同虚设。
+    let requested = expand_tilde(path.trim());
     let candidate = if requested.is_absolute() { requested } else { base.join(requested) };
     let Ok(normalized) = path_policy::normalize_lexical(&candidate) else { return false };
     // Guard against an ACTUAL symlink component in the path itself. Paths
@@ -6623,6 +6663,43 @@ mod resolve_tests {
         let ws = temp_workspace("空 格");
         let r = resolve(&ws, "src/中文 文件.ts").unwrap();
         assert_eq!(r, PathBuf::from(&ws).join("src/中文 文件.ts"));
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn expands_tilde_prefixes_with_injected_home() {
+        // 纯函数注入 home，不碰进程环境——任何平台跑结果一致。
+        let home = "/Users/tester";
+        assert_eq!(expand_tilde_with("~", home), home);
+        assert_eq!(expand_tilde_with("~/Downloads/a.md", home), "/Users/tester/Downloads/a.md");
+        assert_eq!(expand_tilde_with("$HOME", home), home);
+        assert_eq!(expand_tilde_with("$HOME/doc.txt", home), "/Users/tester/doc.txt");
+        // home 带尾分隔符时不得产生双分隔符。
+        assert_eq!(expand_tilde_with("~/a", "/Users/tester/"), "/Users/tester/a");
+        // `~\` 的展开产物含平台分隔符，非 Windows 上反斜杠是合法文件名字符，
+        // 精确串会随平台漂移——只锁行为（落在 home 下且内容没丢）。
+        let backslashed = expand_tilde_with("~\\Downloads\\a.md", home);
+        assert!(backslashed.starts_with(home), "{}", backslashed);
+        assert!(backslashed.contains("Downloads"), "{}", backslashed);
+        assert!(backslashed.contains("a.md"), "{}", backslashed);
+        let win_profile = expand_tilde_with("%USERPROFILE%\\doc.txt", home);
+        assert!(win_profile.starts_with(home), "{}", win_profile);
+        assert!(win_profile.contains("doc.txt"), "{}", win_profile);
+        // 非边界与未知形式按字面不动。
+        assert_eq!(expand_tilde_with("~user/x", home), "~user/x");
+        assert_eq!(expand_tilde_with("$HOMEWORK/x", home), "$HOMEWORK/x");
+        assert_eq!(expand_tilde_with("relative/a.txt", home), "relative/a.txt");
+    }
+
+    #[test]
+    fn resolve_sends_tilde_paths_outside_the_workspace() {
+        // `~` 必须展开成主目录而不是 workspace 下的字面 `~` 目录。
+        let ws = temp_workspace("tilde");
+        let sep = std::path::MAIN_SEPARATOR;
+        let r = resolve(&ws, &format!("~{sep}pure-tilde-probe.txt")).unwrap();
+        assert!(r.is_absolute(), "{}", r.display());
+        assert!(r.starts_with(PathBuf::from(pure_home_dir())), "{}", r.display());
+        assert!(r.ends_with("pure-tilde-probe.txt"), "{}", r.display());
         fs::remove_dir_all(&ws).unwrap();
     }
 

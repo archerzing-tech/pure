@@ -3008,7 +3008,7 @@ export class NodeToolAdapter implements ToolAdapter {
   // ── Helpers ──
 
   private resolve(filePath: string): string {
-    const resolved = pathResolve(this.workspace, filePath);
+    const resolved = pathResolve(this.workspace, expandTilde(filePath));
     // Workspace confinement is REMOVED: absolute paths anywhere on disk are
     // allowed (relative paths still resolve against the workspace root). The
     // remaining checks only guard against symlink tricks.
@@ -3039,6 +3039,28 @@ export class NodeToolAdapter implements ToolAdapter {
       duration: Date.now() - start,
     };
   }
+}
+
+/** `~`/`~\`/`$HOME`/`%USERPROFILE%` 前缀展开为真实主目录——模型常把 shell
+ * 习惯带进工具参数（真机判例 2026-10-16：read_file "~/Downloads/…" 报 os
+ * error 2，只因 `~` 没人展开）。跨平台差异在这里收口：home 用 node:os 的
+ * homedir（Windows 只设 USERPROFILE，它已处理）；`~\` 与 `%USERPROFILE%\`
+ * 是 Windows 侧惯用写法，光认 `~/` 会漏。`~user`、`$HOMEWORK` 这类非边界
+ * 前缀按字面不动（展开反而错）。展开产物再走常规解析，绝对路径全盘可达的
+ * 契约不变。与 Rust 侧 expand_tilde_with（src-tauri/src/lib.rs）同构，改
+ * 必须同步。home 可注入，测试不碰进程环境。 */
+export function expandTilde(path: string, home = homedir()): string {
+  const trimmedHome = home.replace(/[/\\]+$/, '');
+  const joined = (rest: string): string => {
+    const restClean = rest.replace(/^[/\\]+/, '');
+    return restClean ? `${trimmedHome}/${restClean}` : trimmedHome;
+  };
+  const atBoundary = (rest: string): boolean => rest === '' || rest.startsWith('/') || rest.startsWith('\\');
+  if (path === '~') return trimmedHome;
+  if (path.startsWith('~/') || path.startsWith('~\\')) return joined(path.slice(2));
+  if (path.startsWith('$HOME') && atBoundary(path.slice(5))) return joined(path.slice(5));
+  if (path.startsWith('%USERPROFILE%') && atBoundary(path.slice(13))) return joined(path.slice(13));
+  return path;
 }
 
 type EditMatch = {
