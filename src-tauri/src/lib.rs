@@ -16576,8 +16576,8 @@ fn parse_linux_icon_value(value: &str) -> Option<String> {
 fn linux_theme_icon_path(name: &str) -> Option<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(home).join(".icons"));
-        roots.push(PathBuf::from(home).join(".local/share/icons"));
+        roots.push(PathBuf::from(&home).join(".icons"));
+        roots.push(PathBuf::from(&home).join(".local/share/icons"));
     }
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
         roots.push(PathBuf::from(data_home).join("icons"));
