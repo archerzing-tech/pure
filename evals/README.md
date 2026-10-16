@@ -31,6 +31,14 @@ bun run eval:snapshot
 
 It folds every report in `evals/` into `src/shared/baselineSnapshotData.ts` — commit that file with the release. Only reports matching the current suite version are rowed; reports from older suites are listed as excluded, and the dashboard flags a snapshot whose suite no longer matches instead of presenting stale numbers as current. A unit test keeps the snapshot's suite version and `fixtureHash` in step with the live fixtures, so bumping the suite without regenerating fails `bun test`.
 
+## Compare two runs
+
+```bash
+bun run eval:compare -- --baseline evals/glm-5.3-flash.v5.json --candidate evals/model.latest.json
+```
+
+Puts two suite reports side by side: per-task pass→fail / fail→pass transitions, aggregate deltas (pass@1, mean duration, cost), and a verdict (改善 / 退步 / 有增有减 / 无变化 / 不可比). It is an **observation, not a gate** — it exits `0` even on a regression; pass `--strict` to exit `1` when a run regresses with no fixes. Reports whose suite version, fixture hash, or held-out marker differ are refused as `incomparable` (exit `2`) rather than diffed into a false conclusion, and a control run (no provider) is flagged so "control 0/N vs agent N/N" is never read as a quality improvement. `--json <path>` writes the full comparison for tooling. No provider call, no key — it reads reports already on disk.
+
 ## Release notes
 
 Every release entry in CHANGELOG.md carries an evaluation-baseline line. Run `bun run eval:notes` and paste its output under the new version heading: it re-measures the control and golden runs on the spot (so the numbers are never copied from an older release) and refuses to emit anything while the fixture sanity gate is red. The emitted `fixtureHash` ties the release to the exact suite state it was measured against. Once real-provider runs are recorded (see Baseline interpretation), add their scores to the same section.
