@@ -239,11 +239,14 @@ describe('keywordSearch helpers', () => {
   });
 
   it('searchMemories ranks multi-keyword matches above single-keyword ones', () => {
+    // 词对必须互不为子串：'npm' 是 'pnpm' 的子串，includes 匹配下单词条目
+    // 也会命中两个 token，2:2 打平后由 timestamp 决胜——而 base() 每条各自
+    // Date.now()，跨不跨毫秒随平台时钟粒度漂移（Windows 真机翻车：id 2 反超）。
     const entries: MemoryEntry[] = [
-      { ...base({ content: 'user prefers pnpm over npm' }), id: '1' },
-      { ...base({ content: 'user prefers pnpm' }), id: '2' },
+      { ...base({ content: 'user prefers bun over deno' }), id: '1' },
+      { ...base({ content: 'user prefers bun' }), id: '2' },
     ];
-    const hits = searchMemories(entries, 'pnpm npm', { projectPath: '/proj/a' });
+    const hits = searchMemories(entries, 'bun deno', { projectPath: '/proj/a' });
     expect(hits[0].id).toBe('1');
   });
 

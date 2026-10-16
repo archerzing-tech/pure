@@ -105,6 +105,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # tauri.conf.json 的 bundle.resources 声明了 ./AGENTS.md（相对
+      # src-tauri/ 解析），仓库根的单源文件不会自动出现在那里——不拷贝的话
+      # tauri-build 的 build.rs 在 cargo check 阶段直接报
+      # "resource path AGENTS.md doesn't exist"（CI 连红十轮的根因）。
+      - name: Stage AGENTS.md next to tauri.conf.json
+        run: cp AGENTS.md src-tauri/AGENTS.md
+
       # Tauri v2 Linux prerequisites: webkit2gtk for the webview and
       # ayatana-appindicator for the tray icon.
       - name: Install Linux dependencies

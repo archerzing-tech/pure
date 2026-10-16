@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # bundle.resources 的 ./AGENTS.md 相对 src-tauri/ 解析，单源在仓库根——
+      # 不拷贝 tauri-build 的 build.rs 直接报 resource path doesn't exist。
+      - name: Stage AGENTS.md next to tauri.conf.json
+        run: cp AGENTS.md src-tauri/AGENTS.md
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -115,6 +120,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+
+      # bundle.resources 的 ./AGENTS.md 相对 src-tauri/ 解析，单源在仓库根——
+      # 不拷贝 tauri-build 的 build.rs 直接报 resource path doesn't exist。
+      - name: Stage AGENTS.md next to tauri.conf.json
+        run: cp AGENTS.md src-tauri/AGENTS.md
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
