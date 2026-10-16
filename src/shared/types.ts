@@ -88,6 +88,13 @@ export type LLMChunk =
   | { type: 'reasoning'; content: string }
   | { type: 'tool_call_delta'; index: number; name?: string; arguments?: string }
   | { type: 'tool_call'; index: number; id: string; name: string; arguments: string }
+  // Transport-lifecycle signal from the wire layer (Rust backend): connection
+  // retries, backoff waits, and route failover used to be COMPLETELY silent —
+  // the engine could only see "first chunk迟迟不来" while a hung proxy burned
+  // minutes, and the UI could only guess "waiting for the model". Yielded
+  // between real chunks; streamWithDeadline deliberately does NOT count it as
+  // the first token, so the first-token deadline keeps governing.
+  | { type: 'status'; stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number }
   // Billing usage reported by the provider (OpenAI-style `usage` on the final
   // stream chunk; DeepSeek `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`).
   // Yielded once per stream so the engine can aggregate per-turn totals.
@@ -652,9 +659,15 @@ export type EngineEvent =
   | { type: 'SteerInjected'; payload: { count: number; turnNumber: number }; timestamp: number }
   // 9.1 reactive compaction: the provider rejected the request as too long
   // even though the pre-flight estimator said it fit. The engine compacted
-  // harder and is retrying the round. Observability only — the retry itself is
-  // transparent to the user.
-  | { type: 'ContextCompactRetry'; payload: { attempt: number; evictedMessages: number; reclaimedTokens: number; estimatedTokens: number }; timestamp: number }
+  // harder and is retrying the round. `stage: 'start'` is emitted BEFORE the
+  // compaction begins — the L2 summary is a full non-streaming LLM call
+  // (60s cap), and without the start signal that window reads as a stall.
+  // Observability only — the retry itself is transparent to the user.
+  | { type: 'ContextCompactRetry'; payload: { stage?: 'start' | 'done'; attempt: number; evictedMessages: number; reclaimedTokens: number; estimatedTokens: number }; timestamp: number }
+  // Wire-layer lifecycle (retries / backoff / route failover) forwarded from
+  // the transport so a long silent connect window can be labeled honestly
+  // ("连接不太顺，正在重试…") instead of reading as a frozen model.
+  | { type: 'TransportStatus'; payload: { stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number }; timestamp: number }
   // Live subagent interior activity (parallel multi-agent): forwarded from the
   // orchestrator's progress sink through ctx.subagentEvents while the engine
   // awaits the tool batch, namespaced by the delegation toolCallId. Between a

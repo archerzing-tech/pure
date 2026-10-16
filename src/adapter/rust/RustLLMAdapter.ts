@@ -238,6 +238,23 @@ export class RustLLMAdapter implements LLMAdapter {
             arguments: typeof payload.arguments === 'string' ? payload.arguments : undefined,
           };
         }
+        // Wire-lifecycle notices (connection retry / backoff / route failover)
+        // — forwarded so the engine can surface them and the GUI can label the
+        // silent connect window honestly. Best-effort by nature; unknown
+        // stages are dropped rather than guessed at.
+        if (payload?.type === 'status' && typeof payload.stage === 'string') {
+          const stages = ['retrying', 'connected', 'failover'] as const;
+          const stage = stages.find((s) => s === payload.stage);
+          if (stage) {
+            yield {
+              type: 'status',
+              stage,
+              attempt: typeof payload.attempt === 'number' ? payload.attempt : undefined,
+              maxAttempts: typeof payload.maxAttempts === 'number' ? payload.maxAttempts : undefined,
+              waitMs: typeof payload.waitMs === 'number' ? payload.waitMs : undefined,
+            };
+          }
+        }
         // Billing usage (OpenAI-style `usage`, DeepSeek cache-hit/miss) —
         // normalized and yielded once per stream for session stats.
         if (payload?.type === 'usage') {

@@ -285,6 +285,73 @@ describe('AgentLoopEngine', () => {
     expect(assistantMsg?.content).not.toContain('file layout');
   });
 
+  it('forwards transport status chunks as TransportStatus events, out of the answer', async () => {
+    // Wire-lifecycle notices from the Rust transport (retry backoff / route
+    // failover): the GUI's only honest signal during a silent connect window.
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'status', stage: 'retrying', attempt: 1, maxAttempts: 3, waitMs: 800 };
+        yield { type: 'status', stage: 'connected', attempt: 2, maxAttempts: 3 };
+        yield { type: 'content', content: 'recovered' };
+        yield { type: 'done', content: 'recovered', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'recovered', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-status', systemPrompt: 'You are helpful.', userPrompt: 'Hi', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const statuses = events.filter(e => e.type === 'TransportStatus');
+    expect(statuses).toHaveLength(2);
+    expect(statuses[0].payload).toEqual({ stage: 'retrying', attempt: 1, maxAttempts: 3, waitMs: 800 });
+    expect(statuses[1].payload).toEqual({ stage: 'connected', attempt: 2, maxAttempts: 3, waitMs: undefined });
+    // Status is a wire notice, never answer content.
+    expect(events.find(e => e.type === 'Completed')?.payload.finalOutput).toBe('recovered');
+  });
+
+  it('carries the first fragment tool name onto nameless tool_call_delta fragments', async () => {
+    // Anthropic input_json_delta fragments lack the tool name after the first
+    // one — without the carry, the GUI's live tool row staging (keyed by name)
+    // drops every fragment but the first.
+    let llmCalled = false;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        if (!llmCalled) {
+          llmCalled = true;
+          yield { type: 'tool_call_delta', index: 0, name: 'read_file', arguments: '{"path":' };
+          yield { type: 'tool_call_delta', index: 0, arguments: '"a.ts"}' };
+          yield { type: 'tool_call', index: 0, id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' };
+          yield { type: 'done', content: '', toolCalls: [{ id: 'call_1', index: 0, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] };
+        } else {
+          yield { type: 'content', content: 'ok' };
+          yield { type: 'done', content: 'ok', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, toolsDefs: [READ_FILE_TOOL], tools: echoToolAdapter([READ_FILE_TOOL]) });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-nameless', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const toolDeltas = events.filter(
+      (e): e is Extract<EngineEvent, { type: 'TokenDelta' }> => e.type === 'TokenDelta' && e.payload.isToolCall,
+    );
+    // 2 delta fragments + the id-bearing tool_call + the done echo = 4.
+    expect(toolDeltas.length).toBe(4);
+    // The second fragment had NO name on the wire — the carry is what filled it.
+    expect(toolDeltas[1].payload.toolCallName).toBe('read_file');
+    expect(toolDeltas.every(e => e.payload.toolCallName === 'read_file')).toBe(true);
+    expect(events.find(e => e.type === 'Completed')).toBeDefined();
+  });
+
   // ═══ ReAct loop: THINK → ACT → OBSERVE → THINK → VERIFY → TERMINATE ═══
 
   it('counts every tool call in the budget snapshot', async () => {
@@ -1240,12 +1307,12 @@ describe('AgentLoopEngine', () => {
 
     // The overflow was answered by compacting harder, not by stopping the turn.
     expect(compactArgs).toEqual([{ force: true, aggressive: true }]);
-    const retry = events.find(e => e.type === 'ContextCompactRetry');
-    expect(retry).toBeDefined();
-    if (retry?.type === 'ContextCompactRetry') {
-      expect(retry.payload.attempt).toBe(1);
-      expect(retry.payload.reclaimedTokens).toBe(500);
-    }
+    // The 'start' notice (before the summary call) and the 'done' notice (after
+    // it) bracket the compaction — the GUI labels the silent summary window.
+    const retries = events.filter(e => e.type === 'ContextCompactRetry');
+    expect(retries.length).toBe(2);
+    expect(retries[0].payload).toMatchObject({ stage: 'start', attempt: 1 });
+    expect(retries[1].payload).toMatchObject({ stage: 'done', attempt: 1, reclaimedTokens: 500 });
     expect(events.some(e => e.type === 'Interrupted')).toBe(false);
     expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
     // The retry ran against the COMPACTED transcript, not the rejected one.

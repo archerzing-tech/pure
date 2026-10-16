@@ -59,6 +59,10 @@ export async function runLlmTurn(options: LlmTurnRunnerOptions): Promise<LlmTurn
       case 'tool_call':
         sawToolCall = true;
         break;
+      case 'status':
+        // Wire-lifecycle notice — pass-through only (streamLlmTurn yields it
+        // to the engine); irrelevant to the aggregated turn result.
+        break;
       case 'usage':
         usage = mergeTokenUsage(usage, chunk.usage);
         break;

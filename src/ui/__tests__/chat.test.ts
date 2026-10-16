@@ -2499,3 +2499,29 @@ describe('委派结账守卫（B4）', () => {
     expect(src).toContain('this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, event.payload.usage)');
   });
 });
+
+// 长静默歼灭（2026-10-16）：传输层重试/换路/压缩摘要这些「后台其实在干活」的
+// 窗口，过去在 UI 上一律表现为思考卡原地不动——用户无从区分慢、断、死。这里
+// 钉住诚实文案与开卡守卫，删掉它们不会报错，只会退回无声窗口。
+describe('传输层状态进思考卡（长静默歼灭）', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('TransportStatus 三种 stage 各有诚实文案，重试带次数与等待', () => {
+    expect(src).toContain("case 'TransportStatus':");
+    expect(src).toContain('连接不太顺，正在重试（第');
+    expect(src).toContain('这条路不通，换条线路再试');
+    expect(src).toContain('已连上模型服务，等它开口');
+    expect(src).toContain('waitMs >= 2000');
+  });
+
+  it('状态开卡遵守与看门狗同款的静默守卫（工具行在场上时不开卡）', () => {
+    expect(src).toContain('const { stage, attempt, maxAttempts, waitMs } = event.payload;');
+    expect(src).toContain("if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {");
+  });
+
+  it('压缩摘要的起点翻牌（start 才翻，done 不需要话）', () => {
+    expect(src).toContain("case 'ContextCompactRetry':");
+    expect(src).toContain('上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）');
+    expect(src).toContain("if (event.payload.stage === 'start' && thinkingCard) {");
+  });
+});

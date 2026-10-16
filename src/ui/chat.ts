@@ -6241,6 +6241,45 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             break;
           }
 
+          case 'TransportStatus': {
+            // Wire-lifecycle notice from the Rust transport (connect retry /
+            // backoff / route failover / connected). This is the one honest
+            // signal available inside a silent connect window — without it the
+            // card keeps saying 正在思考下一步… while the request layer is
+            // actually sleeping off a backoff or dialing the fallback proxy.
+            // Retry label intentionally contains 重试: defaultHintFor /
+            // resetThinkingLabelForOutput key their copy off that keyword.
+            cancelToolGapCard();
+            if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
+              thinkingCard = openThinkingCard();
+              thinkingCard.card.classList.add('waiting');
+              this.scrollUi(chatEl);
+            }
+            const { stage, attempt, maxAttempts, waitMs } = event.payload;
+            if (thinkingCard) {
+              if (stage === 'retrying') {
+                const waitNote = waitMs && waitMs >= 2000 ? `，约 ${Math.round(waitMs / 1000)} 秒后` : '';
+                setThinkingLabel(thinkingCard, `连接不太顺，正在重试（第 ${attempt ?? 1}/${maxAttempts ?? 3} 次${waitNote}）…`);
+              } else if (stage === 'failover') {
+                setThinkingLabel(thinkingCard, '这条路不通，换条线路再试…');
+              } else {
+                setThinkingLabel(thinkingCard, '已连上模型服务，等它开口…');
+              }
+            }
+            break;
+          }
+
+          case 'ContextCompactRetry': {
+            // Reactive context compaction hides one NON-streaming summary call
+            // (up to 60s) that from the UI is indistinguishable from a hang.
+            // 'start' flips the card's label the moment compaction begins;
+            // 'done' needs no message — the next THINK round speaks for itself.
+            if (event.payload.stage === 'start' && thinkingCard) {
+              setThinkingLabel(thinkingCard, '上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）…');
+            }
+            break;
+          }
+
           case 'TokenDelta': {
             if (!event.payload.isToolCall) {
               const delta = event.payload.content;

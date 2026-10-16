@@ -366,6 +366,13 @@ export class AgentLoopEngine {
       // `done` (silent connection close), it stays false and we treat the
       // accumulated text as truncated.
       let sawDone = false;
+      // Argument fragments often arrive WITHOUT a name (Anthropic
+      // input_json_delta follows a content_block_start that named the call in
+      // a separate event). Carry the name per index so every tool-call delta
+      // the UI sees is attributable — a nameless delta used to fall through
+      // the GUI's rendering branch entirely, re-creating the very silence
+      // this wiring exists to kill.
+      const toolCallNames = new Map<number, string>();
 
       try {
         if (!syntheticRound) {
@@ -396,7 +403,14 @@ export class AgentLoopEngine {
                 break;
               case 'tool_call_delta':
                 sawToolCall = true;
-                yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name }, timestamp: Date.now() };
+                if (chunk.name) toolCallNames.set(chunk.index, chunk.name);
+                yield { type: 'TokenDelta', payload: { content: chunk.arguments ?? '', stateId: sid(), isToolCall: true, toolCallBuffer: chunk.arguments, toolCallName: chunk.name ?? toolCallNames.get(chunk.index) }, timestamp: Date.now() };
+                break;
+              case 'status':
+                // Wire-lifecycle notice (retry/backoff/failover from the Rust
+                // transport). Forward as-is so the UI can label the silent
+                // connect window honestly instead of reading it as a stall.
+                yield { type: 'TransportStatus', payload: { stage: chunk.stage, attempt: chunk.attempt, maxAttempts: chunk.maxAttempts, waitMs: chunk.waitMs }, timestamp: Date.now() };
                 break;
               case 'tool_call':
                 sawToolCall = true;
@@ -469,6 +483,13 @@ export class AgentLoopEngine {
           const errMessage = err?.message ?? String(err);
           if (classifyFailure(errMessage) === 'context') {
             reactiveCompactions++;
+            // 压缩不是一段可以无声熬过的静默：L2 摘要是一次完整的非流式 LLM
+            // 调用（60s 上限），动手前先说一声，别让「压缩中」被读成「卡死」。
+            yield {
+              type: 'ContextCompactRetry',
+              payload: { stage: 'start', attempt: reactiveCompactions, evictedMessages: 0, reclaimedTokens: 0, estimatedTokens: 0 },
+              timestamp: Date.now(),
+            };
             try {
               const compacted = await ctx.contextEngine.compact(messages, { force: true, aggressive: true });
               const shrank = compacted.messages.length !== messages.length || (compacted.reclaimedTokens ?? 0) > 0;
@@ -478,6 +499,7 @@ export class AgentLoopEngine {
                 yield {
                   type: 'ContextCompactRetry',
                   payload: {
+                    stage: 'done',
                     attempt: reactiveCompactions,
                     evictedMessages: compacted.evictedMessages ?? 0,
                     reclaimedTokens: compacted.reclaimedTokens ?? 0,

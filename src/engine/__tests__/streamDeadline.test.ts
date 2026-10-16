@@ -70,3 +70,47 @@ describe('streamWithDeadline first-token deadline', () => {
     expect(chunks[chunks.length - 1]?.type).toBe('done');
   });
 });
+
+describe('streamWithDeadline transport status chunks', () => {
+  // Wire-lifecycle notices (retry backoff / connected) arrive BEFORE any model
+  // output. They must pass through — and must NOT count as the first token, or
+  // an early "connected" would silently relax the ceiling from
+  // firstTokenTimeoutMs to the 120s per-chunk idle cap.
+  function statusFirstAdapter(mode: 'then-output' | 'then-stall'): LLMAdapter {
+    return {
+      async *stream(_messages: Message[], _tools: ToolDefinition[], signal?: AbortSignal): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'status', stage: 'connected' };
+        if (mode === 'then-stall') {
+          await new Promise((_resolve, reject) => {
+            if (signal?.aborted) {
+              reject(new Error('aborted before first content'));
+              return;
+            }
+            signal?.addEventListener('abort', () => reject(new Error('aborted before first content')), { once: true });
+          });
+        }
+        yield { type: 'content', content: 'hello' };
+        yield { type: 'done', content: 'hello', toolCalls: [] };
+      },
+    } as unknown as LLMAdapter;
+  }
+
+  it('passes status chunks through untouched', async () => {
+    const { chunks, error } = await consume(
+      streamWithDeadline(statusFirstAdapter('then-output'), NO_MESSAGES, NO_TOOLS, undefined, 60_000, 10_000),
+    );
+    expect(error).toBeUndefined();
+    expect(chunks.find((c) => c.type === 'status')).toMatchObject({ type: 'status', stage: 'connected' });
+    expect(chunks[chunks.length - 1]?.type).toBe('done');
+  });
+
+  it('does NOT flip firstChunk: a stall after "connected" still times out as first-token', async () => {
+    const started = Date.now();
+    const { error } = await consume(
+      streamWithDeadline(statusFirstAdapter('then-stall'), NO_MESSAGES, NO_TOOLS, undefined, 60_000, 50),
+    );
+    expect(error?.name).toBe('TimeoutError');
+    expect(error?.message).toMatch(/first token/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});

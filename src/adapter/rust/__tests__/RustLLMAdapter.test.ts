@@ -159,6 +159,37 @@ describe('RustLLMAdapter', () => {
     ]);
   });
 
+  it('forwards wire status payloads as status chunks (unknown stages dropped)', async () => {
+    const { deps } = makeDeps({
+      deltas: [
+        JSON.stringify({ type: 'status', stage: 'retrying', attempt: 1, maxAttempts: 3, waitMs: 800 }),
+        JSON.stringify({ type: 'status', stage: 'connected', attempt: 2, maxAttempts: 3, waitMs: 0 }),
+        // Malformed/garbage stages must be dropped, not guessed at.
+        JSON.stringify({ type: 'status', stage: 'warp-drive' }),
+        JSON.stringify({ type: 'status' }),
+        JSON.stringify({ type: 'delta', content: 'ok' }),
+      ],
+      result: { text: 'ok', toolCalls: [] },
+    });
+
+    const adapter = new RustLLMAdapter(
+      { provider: 'deepseek-openai', model: 'm' },
+      deps,
+    );
+
+    const statuses: any[] = [];
+    const contents: string[] = [];
+    for await (const chunk of adapter.stream(MSGS, [])) {
+      if (chunk.type === 'status') statuses.push(chunk);
+      if (chunk.type === 'content') contents.push(chunk.content);
+    }
+    expect(statuses).toEqual([
+      { type: 'status', stage: 'retrying', attempt: 1, maxAttempts: 3, waitMs: 800 },
+      { type: 'status', stage: 'connected', attempt: 2, maxAttempts: 3, waitMs: 0 },
+    ]);
+    expect(contents).toEqual(['ok']);
+  });
+
   it('passes provider extraBody through to the request args', async () => {
     const { deps, lastArgs } = makeDeps({ deltas: [JSON.stringify({ type: 'delta', content: 'ok' })], result: { text: 'ok', toolCalls: [] } });
     const adapter = new RustLLMAdapter(

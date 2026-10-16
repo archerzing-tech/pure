@@ -512,7 +512,7 @@ mod llm_route_switch_tests {
     async fn connection_failure_switches_route_instead_of_retrying_the_dead_route() {
         let (addr, accepted) = spawn_dropping_server();
         let url = format!("http://{}/chat/completions", addr);
-        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", false).await;
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", false, None).await;
         assert!(result.is_err(), "a dropped connection must fail");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
@@ -526,7 +526,7 @@ mod llm_route_switch_tests {
     async fn single_route_keeps_the_backoff_retry_ladder() {
         let (addr, accepted) = spawn_dropping_server();
         let url = format!("http://{}/chat/completions", addr);
-        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", true).await;
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", true, None).await;
         assert!(result.is_err());
         assert_eq!(
             accepted.load(Ordering::SeqCst),
@@ -13223,6 +13223,32 @@ fn anthropic_usage_to_openai(usage: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// Best-effort wire-lifecycle notice pushed to the WebView channel:
+/// `{"type":"status","stage":…,"attempt":…,"maxAttempts":…,"waitMs":…}`. The
+/// GUI uses it to label the silent connect window (retry backoff / failover)
+/// instead of showing an unchanged 正在思考… — the deepest long-silence source
+/// used to be invisible from the UI. Send failures are ignored: the channel
+/// is a progress hint, not a contract, and a closed WebView must never turn a
+/// transport retry into a request failure.
+fn send_status(
+    status: Option<&Channel<String>>,
+    stage: &str,
+    attempt: u32,
+    max_attempts: u32,
+    wait_ms: u64,
+) {
+    if let Some(ch) = status {
+        let payload = serde_json::json!({
+            "type": "status",
+            "stage": stage,
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "waitMs": wait_ms,
+        });
+        let _ = ch.send(payload.to_string());
+    }
+}
+
 /// `retry_connection_failures` 决定「连接层失败（连接超时 / 网络错误 / 请求
 /// 超时）要不要在**同一条出口上**退避重试」。配了反向路由时传 false：连接层
 /// 失败说明这条出口不通，在原路加退避重试只是把换路的时间烧掉——静默丢包时
@@ -13236,6 +13262,11 @@ async fn send_chat_request(
     anthropic: bool,
     api_key: &str,
     retry_connection_failures: bool,
+    // Wire-lifecycle status channel (chat_stream's on_chunk) for
+    // retrying/connected notices. None in unit tests and non-interactive
+    // callers. Named `status_channel` because the response's HTTP status
+    // shadows a plainer name inside the send loop.
+    status_channel: Option<&Channel<String>>,
 ) -> Result<reqwest::Response, String> {
     let mut attempts: u32 = 0;
     loop {
@@ -13265,7 +13296,9 @@ async fn send_chat_request(
         match send_result {
             Err(_) => {
                 if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
-                    tokio::time::sleep(sleep_backoff(attempts, None)).await;
+                    let wait = sleep_backoff(attempts, None);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
                 return Err(format!(
@@ -13276,7 +13309,9 @@ async fn send_chat_request(
             }
             Ok(Err(e)) => {
                 if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
-                    tokio::time::sleep(sleep_backoff(attempts, None)).await;
+                    let wait = sleep_backoff(attempts, None);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
                 return Err(format!("request: {} (after {} attempts)", e, attempts));
@@ -13284,12 +13319,21 @@ async fn send_chat_request(
             Ok(Ok(resp)) => {
                 let status = resp.status();
                 if status.is_success() {
+                    // Announce success ONLY after a retry: with no prior
+                    // "retrying" the UI never opened a card for this request,
+                    // and a "已连上…" flash on every healthy request would be
+                    // pure noise (tokens close the card on their own).
+                    if attempts > 1 {
+                        send_status(status_channel, "connected", attempts, LLM_RETRY_MAX_ATTEMPTS, 0);
+                    }
                     return Ok(resp);
                 }
                 let code = status.as_u16();
                 if retryable_status(code) && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     let retry_after = parse_retry_after(&resp);
-                    tokio::time::sleep(sleep_backoff(attempts, retry_after)).await;
+                    let wait = sleep_backoff(attempts, retry_after);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
                 let text = resp.text().await.unwrap_or_default();
@@ -13473,7 +13517,7 @@ async fn chat_stream(
         _ = &mut cancel_rx => return Err("cancelled".into()),
         // 打通优先：有反向路由时，首选出口的连接层失败不原路重试——立刻换路，
         // 与 netRoute.unblockAttemptPlan 的「首选 → 反向 → 首选·重试」同序。
-        r = send_chat_request(&client, &url, &body, anthropic, &api_key, fallback_spec.is_none()) => r,
+        r = send_chat_request(&client, &url, &body, anthropic, &api_key, fallback_spec.is_none(), Some(&on_chunk)) => r,
     } {
         Ok(r) => {
             resp = r;
@@ -13486,12 +13530,17 @@ async fn chat_stream(
                 .transpose();
             match fallback_client {
                 Ok(Some(fallback)) => {
+                    // The UI may be showing a retry label from the primary
+                    // route's exhausted attempts — flip it to the failover
+                    // wording BEFORE the fallback dials, so the route switch
+                    // itself is visible instead of reading as more of the same.
+                    send_status(Some(&on_chunk), "failover", 1, 1, 0);
                     resp = tokio::select! {
                         biased;
                         _ = &mut cancel_rx => return Err("cancelled".into()),
                         // 反向出口已是最后一条路：它的连接层失败没有「下一条路」
                         // 可换，退避重试是仅剩的杆杆，保留原有韧性。
-                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key, true) => r,
+                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key, true, Some(&on_chunk)) => r,
                     }
                     .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
                     served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
@@ -13773,10 +13822,12 @@ async fn chat_stream(
 
         if let Some(error) = stream_error {
             if should_retry_stream_failure(stream_emitted, stream_attempt) {
-                tokio::time::sleep(sleep_backoff(stream_attempt, None)).await;
+                let wait = sleep_backoff(stream_attempt, None);
+                send_status(Some(&on_chunk), "retrying", stream_attempt, LLM_STREAM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                tokio::time::sleep(wait).await;
                 // 流中断重试：出口本身刚才是通的（已收到响应头与部分字节），
                 // 重试的是「同一个出口上的流」，因而照旧允许原路退避重试。
-                resp = send_chat_request(&client, &url, &body, anthropic, &api_key, true).await?;
+                resp = send_chat_request(&client, &url, &body, anthropic, &api_key, true, Some(&on_chunk)).await?;
                 continue 'stream_attempts;
             }
             return Err(format!(                "{} (stream attempt {} of {}; response body failed before output: {})",

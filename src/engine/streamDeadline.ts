@@ -89,7 +89,11 @@ export async function* streamWithDeadline(
         () => linkedController.abort(),
       );
       if (next.done) return;
-      firstChunk = false;
+      // A transport status (retry/backoff/failover notice) is NOT the first
+      // token: the first-token deadline must keep governing until real model
+      // output starts, or an early "connected" status would silently relax
+      // the ceiling from firstTokenTimeoutMs to the 120s per-chunk idle cap.
+      if (next.value.type !== 'status') firstChunk = false;
       yield next.value;
     }
   } finally {
