@@ -8,7 +8,7 @@ import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
-import { mergeTokenUsage } from '../shared/usage';
+import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
@@ -6491,6 +6491,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const toolName = event.payload.toolName;
             const duration = event.payload.duration;
             const rawResult = event.payload.result.result;
+            // B4 委派结账：子代理跑的是自己的引擎，它的 usage 不会搭父引擎那次
+            // Completed 回来——只并父用量的话，会话总账对每一次扇出都少算一份，而
+            // 「能并则并」恰恰要先算得清账才敢定并发上限。这里随工具结果落地即时并
+            // 账并刷新面板（不必等回合收尾）；形状校验在 readDelegationUsage 里。
+            if (subagentNames.has(toolName)) {
+              const delegationUsage = readDelegationUsage(rawResult);
+              if (delegationUsage) {
+                this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, delegationUsage);
+                this.persistStats();
+              }
+            }
             // 分支中断结算（第 2 期）：暂停/停掉一支子 agent 是用户自己的
             // 决定，不是失败——委派卡走静音态（灰 + ⏸/⏹），计划卡读"已暂
             // 停"，不进任何红色通道。

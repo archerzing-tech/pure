@@ -94,6 +94,34 @@ export function mergeTokenUsage(a?: TokenUsage, b?: TokenUsage): TokenUsage | un
   };
 }
 
+/**
+ * 委派工具结果里的 token 用量（B4 结账）。
+ *
+ * 子代理跑的是自己的引擎，它的 usage 只搭自己的 Completed 事件，**不会**混进父
+ * 引擎那次 Completed 的 payload——所以父宿主只并 `event.payload.usage` 的话，会话
+ * 总账对每一次扇出都少算一份。用量从这个结果体里取，形状在这里校验（只认
+ * TokenUsage 的四个数值字段）；坏值当缺，宁可少算一次也不把杂物并进总账。
+ */
+export function readDelegationUsage(rawResult: unknown): TokenUsage | undefined {
+  if (!rawResult || typeof rawResult !== 'object') return undefined;
+  const usage = (rawResult as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const source = usage as Record<string, unknown>;
+  const promptTokens = num(source.promptTokens);
+  const completionTokens = num(source.completionTokens);
+  const cacheHitTokens = num(source.cacheHitTokens);
+  const cacheMissTokens = num(source.cacheMissTokens);
+  if (
+    promptTokens === undefined &&
+    completionTokens === undefined &&
+    cacheHitTokens === undefined &&
+    cacheMissTokens === undefined
+  ) {
+    return undefined;
+  }
+  return { promptTokens, completionTokens, cacheHitTokens, cacheMissTokens };
+}
+
 /** Estimated cost in USD for a usage total under a provider's rate card. */
 export function estimateCostUsd(usage: TokenUsage | undefined, provider: string): number {
   if (!usage) return 0;

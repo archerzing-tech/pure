@@ -2480,3 +2480,22 @@ describe('isLightTurn（复杂度 → 思考档）', () => {
     expect(isLightTurn(null, false, undefined)).toBe(true);
   });
 });
+
+// B4 委派结账守卫（2026-10-16 整体审计）：「子代理的 token 没进会话总账」全靠一句
+// merge 撑着，删掉它不会有任何报错——下次真机只表现为「扇出越多、总账越偏低」，
+// 极难归因。这与 verify-delegation-accounting 记的是同一个教训：丢这种约定零报错，
+// 所以用断言钉住，而不是靠代码注释。
+describe('委派结账守卫（B4）', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('chat.ts 从 usage 引入 readDelegationUsage，且只有一处取用处', () => {
+    expect(src).toContain("import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';");
+    expect(src.split('readDelegationUsage(').length - 1).toBe(1);
+  });
+
+  it('委派工具结果落地时把它的用量并进会话总账（否则每次扇出少算一份）', () => {
+    expect(src).toContain('this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, delegationUsage)');
+    // 旧口径（父引擎那次 Completed 的 payload.usage）仍在——两处都在才叫「总账」。
+    expect(src).toContain('this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, event.payload.usage)');
+  });
+});

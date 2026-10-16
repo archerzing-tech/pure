@@ -6,6 +6,7 @@ import {
   formatCostUsd,
   formatTokens,
   formatTokensCompact,
+  readDelegationUsage,
 } from '../usage';
 
 describe('normalizeTokenUsage', () => {
@@ -109,5 +110,35 @@ describe('formatting', () => {
     expect(formatTokensCompact(1_200)).toBe('1.2k');
     expect(formatTokensCompact(123_456)).toBe('123.5k');
     expect(formatTokensCompact(3_400_000)).toBe('3.4M');
+  });
+});
+
+describe('readDelegationUsage（B4 委派结账）', () => {
+  it('从子代理结果体里取出 TokenUsage 四字段', () => {
+    expect(readDelegationUsage({ agentId: 'a', output: 'ok', usage: { promptTokens: 100, completionTokens: 40, cacheHitTokens: 60, cacheMissTokens: 40 } }))
+      .toEqual({ promptTokens: 100, completionTokens: 40, cacheHitTokens: 60, cacheMissTokens: 40 });
+  });
+
+  it('缺 usage 键（旧记录 / 非委派结果）→ undefined，不编造零', () => {
+    expect(readDelegationUsage({ output: 'ok' })).toBeUndefined();
+    expect(readDelegationUsage(null)).toBeUndefined();
+    expect(readDelegationUsage('a string')).toBeUndefined();
+    expect(readDelegationUsage(undefined)).toBeUndefined();
+  });
+
+  it('usage 形状坏了（非对象 / 全非数值）→ undefined，不把杂物并进总账', () => {
+    expect(readDelegationUsage({ usage: 42 })).toBeUndefined();
+    expect(readDelegationUsage({ usage: { promptTokens: 'nope' } })).toBeUndefined();
+  });
+
+  it('部分字段缺失时保留有的、其余当缺（不把缺失当 0 写死）', () => {
+    expect(readDelegationUsage({ usage: { completionTokens: 12 } }))
+      .toEqual({ promptTokens: undefined, completionTokens: 12, cacheHitTokens: undefined, cacheMissTokens: undefined });
+  });
+
+  it('并进总账后逐项相加——这就是「扇出不再少算一份」的机制', () => {
+    const parent = { promptTokens: 1000, completionTokens: 200, cacheHitTokens: 500, cacheMissTokens: 500 };
+    const delegation = readDelegationUsage({ usage: { promptTokens: 300, completionTokens: 90, cacheHitTokens: 100, cacheMissTokens: 200 } });
+    expect(mergeTokenUsage(parent, delegation)).toEqual({ promptTokens: 1300, completionTokens: 290, cacheHitTokens: 600, cacheMissTokens: 700 });
   });
 });
