@@ -4,6 +4,7 @@
 // 与列表形态（2026-09-27 用户定调：会话就是会话，不按工作区分组）。
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { assignShortIds, SessionSidebar } from '../sessionSidebar';
 import type { SessionSidebarDeps } from '../sessionSidebar';
@@ -247,5 +248,25 @@ describe('SessionSidebar 列表不按工作区分组', () => {
     expect(container.querySelector('.sidebar-session-item-id')).toBeTruthy();
     expect(container.querySelector('.sidebar-session-delete')).toBeTruthy();
     expect(container.querySelector('.sidebar-session-item-time')).toBeTruthy();
+  });
+});
+
+// 「+」新窗口必须与主窗同皮（2026-10-16 用户反馈：点 + 新开的独立窗口还带着
+// 系统原生 header）。WebviewWindow 的创建参数只有 Tauri 运行时才生效，单测
+// 造不出真窗口，这里用源级锁：参数表必须同时含 decorations:false 与
+// transparent:true——菜单「新建窗口」（lib.rs）与 tauri.conf.json 的主窗都是
+// 这么配的，三条创建路径的窗口壳不许漂移。
+describe('openPureWindow 与主窗同皮（源级锁）', () => {
+  const src = readFileSync(new URL('../sessionSidebar.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('new WebviewWindow(');
+  const opts = src.slice(start, src.indexOf('});', start));
+
+  it('新窗关掉原生边框：decorations:false', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(opts).toContain('decorations: false');
+  });
+
+  it('新窗开透明——自绘标题栏与 macOS 圆角的前提：transparent:true', () => {
+    expect(opts).toContain('transparent: true');
   });
 });

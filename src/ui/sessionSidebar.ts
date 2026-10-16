@@ -131,6 +131,12 @@ export async function openPureWindow(sessionId?: string): Promise<void> {
       title: 'pure',
       width: 1280,
       height: 860,
+      // 与主窗同皮：关掉原生边框、开透明，新窗走 index.html 的自绘标题栏
+      // （window-titlebar）与 macOS 侧圆角。少了这两个，新窗会带着系统原生
+      // header，和主窗两副面孔——菜单「新建窗口」与 tauri.conf.json 主窗都
+      // 是这么配的，三条创建路径不许漂移。
+      decorations: false,
+      transparent: true,
     });
   } catch (err) {
     console.error('[pure] open window failed:', err);
