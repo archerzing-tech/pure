@@ -549,13 +549,20 @@ export function isReasoningModelName(model: string | undefined | null): boolean 
  * top-level body fields, and the anthropic thinking API has a different shape.
  * Accepts PureConfig structurally (providers.ts must not import ui/config.ts).
  */
-export function resolveReasoningEffort(cfg: {
-  provider?: string | null;
-  model?: string | null;
-  customProviders?: readonly CustomProvider[] | null;
-  providerOverrides?: Record<string, ProviderOverride> | null;
-  protocol?: 'openai' | 'anthropic' | string | null;
-}): { supported: boolean; effort?: ReasoningEffortLevel } {
+export function resolveReasoningEffort(
+  cfg: {
+    provider?: string | null;
+    model?: string | null;
+    customProviders?: readonly CustomProvider[] | null;
+    providerOverrides?: Record<string, ProviderOverride> | null;
+    protocol?: 'openai' | 'anthropic' | string | null;
+  },
+  /** Per-call override for a SINGLE call (判例/路由这类「判断但轻」的一次性
+   *  调用，或简单回合的降档）：只在模型本来就会收到推理参数时生效——不支持
+   *  的模型照样一个参数都不发。'off' 撤回参数；具体档位强制该档。undefined
+   *  = 完全按每模型设置/名单解析（行为与不加此参逐字节一致）。 */
+  effortOverride?: ReasoningEffortSetting,
+): { supported: boolean; effort?: ReasoningEffortLevel } {
   const model = cfg.model?.trim();
   if (!model) return { supported: false };
   const custom = customProviderFor(cfg.customProviders, cfg.provider);
@@ -565,12 +572,15 @@ export function resolveReasoningEffort(cfg: {
     = custom?.modelBudgets?.[model]?.reasoningEffort
       ?? override?.modelBudgets?.[model]?.reasoningEffort;
   if (cfg.protocol === 'anthropic') return { supported: false };
-  if (setting === 'off') return { supported: false };
-  if (setting === 'low' || setting === 'medium' || setting === 'high') {
-    return { supported: true, effort: setting };
-  }
-  // Auto: only models on the 2026+ list get the parameter (level medium).
-  return isReasoningModelName(model) ? { supported: true, effort: 'medium' } : { supported: false };
+  const base: { supported: boolean; effort?: ReasoningEffortLevel }
+    = setting === 'off' ? { supported: false }
+      : setting === 'low' || setting === 'medium' || setting === 'high' ? { supported: true, effort: setting }
+        // Auto: only models on the 2026+ list get the parameter (level medium).
+        : isReasoningModelName(model) ? { supported: true, effort: 'medium' } : { supported: false };
+  // The override only DOWNSHIFTS a call that would already carry the parameter
+  // (or withdraws it) — it never adds reasoning to a model that takes none.
+  if (effortOverride === undefined || !base.supported) return base;
+  return effortOverride === 'off' ? { supported: false } : { supported: true, effort: effortOverride };
 }
 
 /** Display label for a provider id, resolving custom providers by name. */

@@ -6,7 +6,7 @@ import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type Pure
 import { abortPaused, upgradeToHardStop } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
@@ -1147,7 +1147,7 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
 // persona overlay and runs its A/B gate on the SAME provider/adapter pipeline.
 export function createLLMAdapter(
   config: ReturnType<typeof loadConfig>,
-  opts: { disableThinking?: boolean } = {},
+  opts: { disableThinking?: boolean; reasoningEffort?: ReasoningEffortSetting } = {},
 ): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
@@ -1188,7 +1188,7 @@ export function createLLMAdapter(
   // DeepSeekAnthropicAdapter (browser-dev anthropic branch below) has no
   // extraBody plumb and anthropic endpoints reject unknown top-level fields,
   // so this stays an OpenAI-protocol-only parameter for now.
-  const reasoning = resolveReasoningEffort({ ...config, protocol });
+  const reasoning = resolveReasoningEffort({ ...config, protocol }, opts.reasoningEffort);
   // 规划思考调用（disableThinking）在支持的 provider 上显式关掉暗推理：
   // 可见叙述本身就是思考，暗推理只把第一个可见字推迟 90s+（见
   // planThinkingOffExtraBody 的实测注）。不支持的 provider 得 undefined，
@@ -4706,12 +4706,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
       // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
       // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时，这个缝整体换轻模型
-      // ——插话分类/聚焦点名（同一 decideLlm 缝）这类「判断但轻」的调用走轻
-      // 档；没配时保持关暗思考的主模型，行为与轻档引入前一致。
+      // ——插话分类/聚焦点名/语义路由（同一 decideLlm 缝）这类「判断但轻」的
+      // 调用走轻档；没配时保持主模型 + 关暗思考。
+      // 第 6 期：disableThinking 只有 GLM 端真有「关思考」开关（thinking:
+      // disabled）；别的 provider 会给 undefined，于是回落到 reasoning_effort
+      // 的每模型默认（推理模型往往就是 medium）——「关暗思考」在 DeepSeek/OpenAI
+      // 这些推理模型上名不副实，8s 路由预算照旧被推理吃掉。再显式压一档到 low：
+      // 判例只产一个小 JSON，不需要深度推理，把首字从十几秒拉回秒级。
       const judgeModel = judgeModelFor(config.phaseModels, config.model);
+      const judgeOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
       this.judgeLlm = judgeModel
-        ? createLLMAdapter({ ...config, model: judgeModel }, { disableThinking: true })
-        : createLLMAdapter(config, { disableThinking: true });
+        ? createLLMAdapter({ ...config, model: judgeModel }, judgeOpts)
+        : createLLMAdapter(config, judgeOpts);
       // 9.2 — per-phase model routing (experimental). Each phase naming a
       // different model gets its own same-provider adapter through the shared
       // factory; blank / main-model entries fall through to `llm` via the E0.3

@@ -501,4 +501,21 @@ describe('reasoning-effort capability detection', () => {
     // No model → nothing.
     expect(resolveReasoningEffort({ provider: 'openai', model: '  ' })).toEqual({ supported: false });
   });
+
+  it('resolveReasoningEffort: 每调用覆盖（判例/路由/简单回合降档）', () => {
+    // 覆盖只「降档或撤回」本来就会带参数的一次调用：gpt-5.2 自动档 medium，
+    // 判例/路由那一次压到 low。
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }, 'low'))
+      .toEqual({ supported: true, effort: 'low' });
+    // 'off' 撤回参数（模型仍可能自行推理，但对不支持「关思考」的 provider
+    // 至少不再显式加档）。
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }, 'off'))
+      .toEqual({ supported: false });
+    // 不给本就不支持推理的模型凭空加参数：覆盖是空操作。
+    expect(resolveReasoningEffort({ provider: 'qwen', model: 'qwen3-coder-next' }, 'low'))
+      .toEqual({ supported: false });
+    // undefined = 完全按现状解析（不加此参逐字节一致）。
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }, undefined))
+      .toEqual({ supported: true, effort: 'medium' });
+  });
 });

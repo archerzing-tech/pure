@@ -2304,10 +2304,13 @@ describe('plan-by-thinking flow', () => {
     // 读数缝（decideLlm）——判据锁在宿主绑定上。
     expect(src).toContain('decideLlm: () => this.judgeLlm ?? this.turnLlm ?? null');
     // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时裁决缝整体换轻模型
-    // （插话分类/聚焦点名同走 decideLlm 缝），没配保持关暗思考主模型——
-    // 未配置行为与轻档引入前一致。
+    // （插话分类/聚焦点名/语义路由同走 decideLlm 缝），没配保持主模型 + 关暗思考。
     expect(src).toMatch(/const judgeModel = judgeModelFor\(config\.phaseModels, config\.model\);/);
-    expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, \{ disableThinking: true \}\)\s*:\s*createLLMAdapter\(config, \{ disableThinking: true \}\);/);
+    // 第 6 期：disableThinking 只在 GLM 端真关思考，别的 provider 会回落
+    // reasoning_effort 的 medium——判例/路由必须再显式压一档到 low，否则这
+    // 一跳照样吃掉 8s 路由预算。两条分支共用同一 judgeOpts（单一来源）。
+    expect(src).toMatch(/const judgeOpts = \{ disableThinking: true, reasoningEffort: 'low' \} as const;/);
+    expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, judgeOpts\)\s*:\s*createLLMAdapter\(config, judgeOpts\);/);
     // 路由不走门控：路由与插话裁决同为「判断但轻」的一次性调用，一律关暗
     // 推理。旧门控（配了轻档才换 judgeLlm）默认路径下（没配轻档）把路由绑在
     // 主适配器上，2026-10-14 实测 glm-5.3-flash 同一段路由提示词：暗思考开
