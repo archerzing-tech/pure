@@ -13673,6 +13673,48 @@ button svg,
   .design-preview-confirm { transition: none; }
 }
 
+/* ── Canvas 绘画内联卡：对话内直接渲染模型交付的 canvas html ── */
+.canvas-art-row { display: flex; justify-content: flex-start; }
+.canvas-art-card {
+  width: min(560px, 100%);
+  border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface); overflow: hidden;
+}
+.canvas-art-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border-light);
+  font-size: 13px; font-weight: 600;
+}
+.canvas-art-file {
+  margin-left: auto;
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-card, var(--surface));
+  border: 1px solid var(--border-light);
+  border-radius: 999px; padding: 2px 9px;
+  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-art-frame {
+  display: block; width: calc(100% - 24px);
+  height: 380px; margin: 10px 12px 0;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: #fff;
+}
+[data-theme="dark"] .canvas-art-frame { background: #fff; }
+.canvas-art-actions { display: flex; justify-content: flex-end; padding: 10px 14px 14px; }
+.canvas-art-open {
+  cursor: pointer;
+  padding: 6px 12px; border-radius: 9px;
+  font-size: 12px; font-weight: 600;
+  background: transparent; color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: opacity var(--transition), transform var(--transition);
+}
+.canvas-art-open:hover { transform: translateY(-1px); color: var(--text-primary); border-color: var(--text-tertiary); }
+@media (prefers-reduced-motion: reduce) {
+  .canvas-art-open { transition: none; }
+}
+
 
 /* ── 计划卡头：计划序号 chip（区分同一对话里的多份计划）── */
 .plan-progress-seq {
