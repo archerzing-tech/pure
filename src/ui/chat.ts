@@ -127,7 +127,7 @@ import type {
 } from '../shared/types';
 import { EventFanout } from '../shared/asyncQueue';
 import { judgeModelFor, phaseModelOverrides } from '../shared/phaseModels';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, PlanVerificationSpec, TaskMode, IntentAssessment } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, PlanVerificationSpec, TaskMode, IntentAssessment, SemanticRouteDecision } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
@@ -1142,6 +1142,22 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
 }
 
 // ── Adapter factory ──
+
+/**
+ * 第 6 期 · 复杂度 → 思考档：这一回合要不要为深度推理付首字代价。实测
+ * （glm-5.3-flash，同一段提示词）暗思考开首字 10.9–35.1s、关 2.4–3.9s。裁决
+ * 在手时按 complex/simple 定；工作形态但路由没给出裁决（超时兜底）保守留主档；
+ * 用户明令的 plan/build（forcedMode）永远留主档；闲聊/直答（地板已复现裁决、
+ * 无路由）走轻档。纯函数，行为在 chat.test.ts 钉住。
+ */
+export function isLightTurn(
+  verdict: Pick<SemanticRouteDecision, 'complexity'> | null,
+  needsRouter: boolean,
+  forcedMode: TaskMode | undefined,
+): boolean {
+  if (forcedMode) return false;
+  return verdict ? verdict.complexity === 'simple' : !needsRouter;
+}
 
 // Exported for the Settings evolution dashboard (13.3 part 3), which drafts a
 // persona overlay and runs its A/B gate on the SAME provider/adapter pipeline.
@@ -4682,11 +4698,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 的每模型默认（推理模型往往就是 medium）——「关暗思考」在 DeepSeek/OpenAI
       // 这些推理模型上名不副实，8s 路由预算照旧被推理吃掉。再显式压一档到 low：
       // 判例只产一个小 JSON，不需要深度推理，把首字从十几秒拉回秒级。
+      // lightOpts = 「不值得为一段深度思考空等」的共用轻档：判例/路由这一缝，以及
+      // 下面按复杂度判定为 simple 的主回合共用（见复杂度 → 思考档）。
+      const lightOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
       const judgeModel = judgeModelFor(config.phaseModels, config.model);
-      const judgeOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
       this.judgeLlm = judgeModel
-        ? createLLMAdapter({ ...config, model: judgeModel }, judgeOpts)
-        : createLLMAdapter(config, judgeOpts);
+        ? createLLMAdapter({ ...config, model: judgeModel }, lightOpts)
+        : createLLMAdapter(config, lightOpts);
       // 提前开始这一跳：与下面的记忆落库、运行时探针并行。
       const routeStartMs = performance.now();
       const routeFetch = startTurnRoute(routePrefetch, this.judgeLlm, {
@@ -4746,7 +4764,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       let userPlausibilityOverride: string | undefined;
       let taskContract: TaskContract | undefined;
 
-      const llm = createLLMAdapter(config);
+      // ── 第 6 期 · 复杂度 → 思考档 ────────────────────────────────────────
+      // 路由裁决此刻已经在手（routeFetch 在回合开头就发出去了，已与记忆落库、
+      // 运行时探针并行），于是用它决定这一回合付不付深度推理的首字代价。实测
+      // （glm-5.3-flash，同一段提示词）：暗思考开首字 10.9–35.1s / 关 2.4–3.9s。
+      // 闲聊（地板已定）与路由明说 simple 的活都不值得为一段思考空等十几秒；
+      // 复杂活、以及用户明令的 plan/build（forcedMode）保持主档。工作形态但没有
+      // 裁决（路由超时兜底）也保守留主档——不确定就当复杂。
+      const routeVerdict = routeFetch ? await routeFetch : null;
+      const lightTurn = isLightTurn(routeVerdict, routePrefetch.needsRouter, forcedMode);
+      const llm = createLLMAdapter(config, lightTurn ? lightOpts : {});
       this.turnLlm = llm;
       // 规划实例：planByThinking 的流式思考轮走它。GLM 端点上关暗思考
       // （planThinkingOffExtraBody），让「当着用户想」的第一个字秒级出现——

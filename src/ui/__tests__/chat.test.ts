@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply, isLightTurn } from '../chat';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -2308,9 +2308,13 @@ describe('plan-by-thinking flow', () => {
     expect(src).toMatch(/const judgeModel = judgeModelFor\(config\.phaseModels, config\.model\);/);
     // 第 6 期：disableThinking 只在 GLM 端真关思考，别的 provider 会回落
     // reasoning_effort 的 medium——判例/路由必须再显式压一档到 low，否则这
-    // 一跳照样吃掉 8s 路由预算。两条分支共用同一 judgeOpts（单一来源）。
-    expect(src).toMatch(/const judgeOpts = \{ disableThinking: true, reasoningEffort: 'low' \} as const;/);
-    expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, judgeOpts\)\s*:\s*createLLMAdapter\(config, judgeOpts\);/);
+    // 一跳照样吃掉 8s 路由预算。两条分支共用同一 lightOpts（单一来源）。
+    expect(src).toMatch(/const lightOpts = \{ disableThinking: true, reasoningEffort: 'low' \} as const;/);
+    expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, lightOpts\)\s*:\s*createLLMAdapter\(config, lightOpts\);/);
+    // 第 6 期 · 复杂度 → 思考档：路由裁决在手时按 complex/simple 定主回合的思考
+    // 档；用户明令的 plan/build（forcedMode）与工作形态无裁决（超时兜底）都留主档。
+    expect(src).toMatch(/const lightTurn = isLightTurn\(routeVerdict, routePrefetch\.needsRouter, forcedMode\);/);
+    expect(src).toMatch(/const llm = createLLMAdapter\(config, lightTurn \? lightOpts : \{\}\);/);
     // 路由不走门控：路由与插话裁决同为「判断但轻」的一次性调用，一律关暗
     // 推理。旧门控（配了轻档才换 judgeLlm）默认路径下（没配轻档）把路由绑在
     // 主适配器上，2026-10-14 实测 glm-5.3-flash 同一段路由提示词：暗思考开
@@ -2447,5 +2451,32 @@ describe('artifact-shape register wiring (刀 9)', () => {
     // 免显块先置位再返回（不重入），契约气泡行仍在免显块之后（production 路径不残缺）。
     expect(src.slice(lightIdx, lightIdx + 200)).toContain('probeFindingsReported = true;');
     expect(src).toContain('已建立任务契约：');
+  });
+});
+
+// ── 第 6 期 · 复杂度 → 思考档 ───────────────────────────────────────────────
+// 首字慢的头号来源是主回合的暗思考（实测 glm-5.3-flash：开 10.9–35.1s、关
+// 2.4–3.9s）。路由裁决在这一版里已经在适配器构造前拿到，于是按它决定这一回合
+// 付不付深度推理。这里钉住映射本身——降多了会把复杂活做轻，降少了首字照旧慢。
+describe('isLightTurn（复杂度 → 思考档）', () => {
+  it('路由明说 simple 才降档，complex 保持主档', () => {
+    expect(isLightTurn({ complexity: 'simple' }, true, undefined)).toBe(true);
+    expect(isLightTurn({ complexity: 'complex' }, true, undefined)).toBe(false);
+  });
+
+  it('用户明令 plan/build 时永远留主档（复杂度判定不覆盖用户意图）', () => {
+    expect(isLightTurn({ complexity: 'simple' }, true, 'plan')).toBe(false);
+    expect(isLightTurn({ complexity: 'simple' }, true, 'build')).toBe(false);
+    expect(isLightTurn(null, false, 'plan')).toBe(false);
+  });
+
+  it('工作形态但路由没给裁决（超时兜底）保守留主档', () => {
+    // 地板把 debug / 加功能 / 要方案的请求全读成 question，路由输了就退回地板；
+    // 那正是不能降档的那一类——不确定就当复杂。
+    expect(isLightTurn(null, true, undefined)).toBe(false);
+  });
+
+  it('闲聊 / 直答（地板已复现裁决、无路由）走轻档', () => {
+    expect(isLightTurn(null, false, undefined)).toBe(true);
   });
 });
