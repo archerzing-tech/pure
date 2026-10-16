@@ -196,6 +196,11 @@ export interface TurnRouteOptions {
    *  rather than as a standalone sentence (see routeHistoryMessages). Absent
    *  for a first turn — there is nothing to continue. */
   history?: readonly RouteContextTurn[];
+  /** 第 6 期：宿主已用 startTurnRoute 抢先开始了这一跳（与工作区/探针并行），
+   *  把 promise 交给这里，避免再发第二次调用。undefined = 宿主没预启动，按老
+   *  路自己发；null = 宿主已认定这一跳不该跑（续计划/闲聊）。裁决仍由本函数
+   *  唯一产出——这里只搬「何时开始」，不搬「意味着什么」。 */
+  preRoute?: Promise<SemanticRouteDecision | null> | null;
 }
 
 export interface TurnRouteDecision extends InputDecision {
@@ -270,7 +275,11 @@ export async function decideTurnRoute(
   // A continuing plan keeps its already-approved route: re-routing "继续" would
   // let the router turn a mid-plan nudge into a fresh plan.
   if (!continuing && prefetch.needsRouter && llm) {
-    route = await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, options.history);
+    // The host may have already started this call (startTurnRoute) so the round
+    // trip overlapped its preflight; otherwise fire it here as before.
+    route = options.preRoute === undefined
+      ? await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, options.history)
+      : await (options.preRoute ?? null);
   }
   const deterministic = route === null;
   // The router was ASKED because the floor could not settle this turn — so if
@@ -357,6 +366,28 @@ export async function decideTurnRoute(
   try { appendTrace({ type: 'turn_route_decided', route: kind, reason: decision.reason, snippet: prefetch.text.slice(0, 80) }); } catch {}
   if (options.log !== false) recordInputDecision(decision, now);
   return decision;
+}
+
+/**
+ * Stage 1.5 — start the hidden router WITHOUT deciding anything yet. The host
+ * calls this right after the workspace is known, so the round trip overlaps the
+ * rest of its preflight (the memory harvest and the runtime probe) instead of
+ * sitting alone on the critical path immediately before the engine.
+ *
+ * It is deliberately NOT a second producer: the returned promise is handed back
+ * to decideTurnRoute (`preRoute`), which still compiles the workflow, records
+ * the decision, and owns the meaning. This only moves WHEN the model call
+ * starts. Returns null when no call is warranted — a continuation keeps its
+ * approved route, and a pleasantry/conversational turn never needed one.
+ */
+export function startTurnRoute(
+  prefetch: TurnRoutePrefetch,
+  llm: LLMAdapter | null,
+  opts: { continuing: boolean; history?: readonly RouteContextTurn[] },
+  signal?: AbortSignal,
+): Promise<SemanticRouteDecision | null> | null {
+  if (opts.continuing || !prefetch.needsRouter || !llm) return null;
+  return inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, opts.history);
 }
 
 /**

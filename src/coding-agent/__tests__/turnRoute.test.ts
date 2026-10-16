@@ -5,7 +5,7 @@
 // records can be replayed as evidence.
 
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { decideTurnRoute, prefetchTurnRoute, recordScheduledInput } from '../turnRoute';
+import { decideTurnRoute, prefetchTurnRoute, recordScheduledInput, startTurnRoute } from '../turnRoute';
 import { isPlainConversational } from '../Planner';
 import {
   INPUT_CLARIFY_CONFIDENCE,
@@ -327,5 +327,61 @@ describe('work-shaped fallback when the router answers nothing', () => {
     expect(decision.signals.workShapedFallback).toBeUndefined();
     expect(decision.action).toBe('answer');
     expect(decision.workflow.needsProbe).toBe(false);
+  });
+});
+
+// ── 第 6 期：路由提前（startTurnRoute / preRoute）──────────────────────────
+// 路由这一跳原来压在引擎装配之后的临界路径上干等；宿主改为在回合开头就把它
+// 发出去，与记忆落库、运行时探针并行。这里钉住两件事：该跑的回合确实只跑一次，
+// 不该跑的回合一次都不跑——「提前」不能变成「多发」。
+describe('startTurnRoute / preRoute（路由提前与前置并行）', () => {
+  function countingRouter(route: Partial<SemanticRouteDecision> | null): { llm: LLMAdapter; calls: () => number } {
+    let calls = 0;
+    const inner = fakeRouter(route) as unknown as { complete: unknown; stream: (...a: unknown[]) => unknown };
+    const llm = {
+      complete: inner.complete,
+      stream: (...args: unknown[]) => {
+        calls++;
+        return inner.stream(...args);
+      },
+    } as unknown as LLMAdapter;
+    return { llm, calls: () => calls };
+  }
+
+  it('不为不需要路由的回合预启动（闲聊 / 续计划 / 没有适配器）', () => {
+    const { llm } = countingRouter(WORK);
+    // 闲聊：同步地板已复现路由裁决，本来就不该有这一跳。
+    expect(startTurnRoute(prefetchTurnRoute('谢谢'), llm, { continuing: false })).toBeNull();
+    // 续计划：保留已批准的路线，重路由会把「继续」读成新计划。
+    expect(startTurnRoute(prefetchTurnRoute('继续'), llm, { continuing: true })).toBeNull();
+    // 工作形态但没有可用适配器（CLI / 探针路径）。
+    expect(startTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), null, { continuing: false })).toBeNull();
+  });
+
+  it('宿主预启动的这一次调用被唯一产出者复用，不再发第二次', async () => {
+    const { llm, calls } = countingRouter(WORK);
+    const prefetch = prefetchTurnRoute(FLOOR_BLIND_SPOT);
+    const routeFetch = startTurnRoute(prefetch, llm, { continuing: false });
+    expect(routeFetch).not.toBeNull();
+
+    const decision = await decideTurnRoute(prefetch, llm, { hasTools: true, preRoute: routeFetch });
+    // 全程只有一次路由往返：预启动的 promise 被 decideTurnRoute 直接 await，
+    // 裁决的含义仍由它唯一产出。
+    expect(calls()).toBe(1);
+    expect(decision.kind).toBe('router-decided');
+    expect(decision.route?.intent).toBe('modify');
+    expect(decision.action).toBe('proceed');
+    // 与不预启动的同一输入逐字结果一致，证明「提前」只搬了时机。
+    const baseline = await decideTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), fakeRouter(WORK), { hasTools: true });
+    expect(decision.action).toBe(baseline.action);
+    expect(decision.reason).toBe(baseline.reason);
+    expect(decision.workflow.stage).toBe(baseline.workflow.stage);
+  });
+
+  it('宿主没预启动时 decideTurnRoute 照旧自己发（CLI / 探针路径不受影响）', async () => {
+    const { llm, calls } = countingRouter(WORK);
+    const decision = await decideTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), llm, { hasTools: true });
+    expect(calls()).toBe(1);
+    expect(decision.kind).toBe('router-decided');
   });
 });

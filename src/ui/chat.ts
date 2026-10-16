@@ -29,7 +29,7 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type Dynamic
 import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, type RouteContextTurn } from '../coding-agent/Planner';
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
-import { decideTurnRoute, prefetchTurnRoute } from '../coding-agent/turnRoute';
+import { decideTurnRoute, prefetchTurnRoute, startTurnRoute } from '../coding-agent/turnRoute';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
@@ -4650,6 +4650,57 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
         return;
       }
+      // ── 第 6 期 · 路由前移 ─────────────────────────────────────────────
+      // 「计划态判定 + 判例适配器 + 隐藏语义路由」都只读回合开始时的状态（config
+      // 与上一回合留下的计划/历史），不依赖工作区、记忆或运行时探针。所以先把它
+      // 们算出来，并把路由这一跳抢在记忆落库与探针之前发出去，让它的往返与它们
+      // 并行，而不是像原来那样压在引擎装配之后的临界路径上干等。裁决仍由
+      // decideTurnRoute 唯一产出——这里只提前「开始」，不搬「意味着什么」，
+      // 语义与引入前逐字节一致。
+      const forcedMode: TaskMode | undefined =
+        config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
+      // A plan that already reached its final "## 计划 n 已完成" (or the turn-end
+      // completion dispatch) is DONE — its progress model status is 'complete'. A
+      // subsequent user message ("页面很丑，改一下" / a brand-new tweak) must NOT
+      // be treated as a continuation of that finished plan: the old plan card
+      // stays in the transcript as history, but the request is a fresh task that
+      // may or may not spawn its own new plan. Treating a finished plan as still
+      // active made the agent answer "收到，我们继续处理第 x 阶段的第 y 个 Todo"
+      // even though the project was already delivered.
+      const activePlanFinished =
+        this.activePlanProgress?.getSnapshot().status === 'complete' ||
+        this.activePlanCardSnapshot?.complete === true;
+      const continuingPlan = !activePlanFinished && this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
+      const planPauseRequested = !activePlanFinished && this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
+      // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
+      // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时，这个缝整体换轻模型
+      // ——插话分类/聚焦点名/语义路由（同一 decideLlm 缝）这类「判断但轻」的
+      // 调用走轻档；没配时保持主模型 + 关暗思考。
+      // 第 6 期：disableThinking 只有 GLM 端真有「关思考」开关（thinking:
+      // disabled）；别的 provider 会给 undefined，于是回落到 reasoning_effort
+      // 的每模型默认（推理模型往往就是 medium）——「关暗思考」在 DeepSeek/OpenAI
+      // 这些推理模型上名不副实，8s 路由预算照旧被推理吃掉。再显式压一档到 low：
+      // 判例只产一个小 JSON，不需要深度推理，把首字从十几秒拉回秒级。
+      const judgeModel = judgeModelFor(config.phaseModels, config.model);
+      const judgeOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
+      this.judgeLlm = judgeModel
+        ? createLLMAdapter({ ...config, model: judgeModel }, judgeOpts)
+        : createLLMAdapter(config, judgeOpts);
+      // 提前开始这一跳：与下面的记忆落库、运行时探针并行。
+      const routeStartMs = performance.now();
+      const routeFetch = startTurnRoute(routePrefetch, this.judgeLlm, {
+        continuing: continuingPlan || planPauseRequested,
+        history: this.routeHistory(),
+      }, this.abortController?.signal);
+      // 路由与前置并行后，routeMs 仍记这一跳自己的往返时长（不是压在临界路径上
+      // 的等待），统计口径不变。
+      if (routeFetch) {
+        void routeFetch.then(
+          () => { turnTiming.routeMs = Math.round(performance.now() - routeStartMs); },
+          () => { turnTiming.routeMs = Math.round(performance.now() - routeStartMs); },
+        );
+      }
       // All setup that could throw synchronously (adapter creation, agent construction)
       // Memory skill toggle: when disabled, skip learning + memory injection.
       const memoryEnabled = config.skills?.memory ?? true;
@@ -4703,21 +4754,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 其他 provider 不给开关（planThinkingOffExtraBody 返回 undefined），
       // 于是回落到 reasoning_effort，与主回合行为一致。
       this.planLlm = createLLMAdapter(config, { disableThinking: true });
-      // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
-      // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
-      // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时，这个缝整体换轻模型
-      // ——插话分类/聚焦点名/语义路由（同一 decideLlm 缝）这类「判断但轻」的
-      // 调用走轻档；没配时保持主模型 + 关暗思考。
-      // 第 6 期：disableThinking 只有 GLM 端真有「关思考」开关（thinking:
-      // disabled）；别的 provider 会给 undefined，于是回落到 reasoning_effort
-      // 的每模型默认（推理模型往往就是 medium）——「关暗思考」在 DeepSeek/OpenAI
-      // 这些推理模型上名不副实，8s 路由预算照旧被推理吃掉。再显式压一档到 low：
-      // 判例只产一个小 JSON，不需要深度推理，把首字从十几秒拉回秒级。
-      const judgeModel = judgeModelFor(config.phaseModels, config.model);
-      const judgeOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
-      this.judgeLlm = judgeModel
-        ? createLLMAdapter({ ...config, model: judgeModel }, judgeOpts)
-        : createLLMAdapter(config, judgeOpts);
       // 9.2 — per-phase model routing (experimental). Each phase naming a
       // different model gets its own same-provider adapter through the shared
       // factory; blank / main-model entries fall through to `llm` via the E0.3
@@ -5071,21 +5107,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 规则启发式先支撑 prompt 注入与只读探针；LLM 三段式思考完成后，用它的语义判断
       // 校准风险/意图/可逆性——规则层只会抬高安全要求，永远不会把模型判断压得更低。
       // The shared compiler keeps this preflight identical between GUI and CLI.
-      const forcedMode: TaskMode | undefined =
-        config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
-      // A plan that already reached its final "## 计划 n 已完成" (or the
-      // turn-end completion dispatch) is DONE — its progress model status is
-      // 'complete'. A subsequent user message ("页面很丑，改一下" / a brand-new
-      // tweak) must NOT be treated as a continuation of that finished plan: the
-      // old plan card stays in the transcript as history, but the request is a
-      // fresh task that may or may not spawn its own new plan. Treating a
-      // finished plan as still-active made the agent answer "收到，我们继续处理
-      // 第 x 阶段的第 y 个 Todo" even though the project was already delivered.
-      const activePlanFinished =
-        this.activePlanProgress?.getSnapshot().status === 'complete' ||
-        this.activePlanCardSnapshot?.complete === true;
-      const continuingPlan = !activePlanFinished && this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
-      const planPauseRequested = !activePlanFinished && this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
+      // （forcedMode / activePlanFinished / continuingPlan / planPauseRequested
+      //  已在回合开头提前算好——本函数 try 的第一段注释；这里直接用。）
       // 刀 6 分量判读：从用户措辞判这份活的分量（draft 决策稿 / spike 原型穿刺 /
       // production 正式）。接续回合不重判——"继续"没有分量信号，重判会把草稿
       // 任务的后续回合顶回正式档（与上面 continuingProjectBuild 同款纪律）。
@@ -5124,18 +5147,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // scope, and which layer decided — into the replayable log. The callers
       // below consume `route` / `workflow` exactly as the five separate
       // derivations used to produce them.
-      const routeStartMs = performance.now();
       // 刀 4.2：判例轻档配了轻模型时，语义路由也走轻档（路由是「判断但轻」
-      // 的一次性调用）；没配留主适配器，路由行为与引入前一致。
-      // 路由走裁决实例（暗思考关），不随「有没有配轻档」开关切换。
+      // 的一次性调用）；没配留主适配器，路由行为与引入前一致。路由走裁决实例
+      // （暗思考关 + 低推理档），不随「有没有配轻档」开关切换。
       // 2026-10-14 实测（glm-5.3-flash，同一段路由提示词，四个真实请求）：
       //   thinking 关 → 首字 2.4–3.9s、出全 3.1–6.0s
       //   thinking 开 → 首字 10.9–35.1s、出全 12.2–38.3s
-      // 而已配置的默认路径下 judgeModelFor 返回 undefined（没有轻档），于是
-      // 路由一直跑在主 adapter（暗思考开）上，10–38s 对上 12s 的超时帽——判定
-      // 结果由供应商延迟抽签：输了就静默退回关键词地板，而地板把 debug / 加功能 /
-      // 要方案的请求全读成 question。judgeLlm 本来就是主模型 + 关暗思考，
-      // 语义不变，只是让这一跳来得回来（插话裁决与聚焦点名早就无条件走它）。
+      // 第 6 期起这一跳已在回合开头提前开始（routeFetch），与记忆落库/探针并行；
+      // 这里只等它回来，由唯一产出者 decideTurnRoute 落定裁决（preRoute）。原注释
+      // 里「默认路径 judgeModelFor 返回 undefined，路由跑在暗思考主 adapter 上」
+      // 的隐患已由判例缝统一压到低推理档 + 提前并行解决。
       const turnRoute = await decideTurnRoute(routePrefetch, this.judgeLlm ?? llm, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
@@ -5147,10 +5168,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         continuingProjectBuild: this.activePlanProjectBuild,
         // 追问只有放在对话里才读得懂：「还是不行」本身什么也说明不了。
         history: this.routeHistory(),
+        // 提前开始的那一跳；undefined 时 decideTurnRoute 自行发（CLI/探针路径）。
+        preRoute: routeFetch,
       }, this.abortController?.signal);
-      // The hidden router round trip is the single largest pre-request cost
-      // (6-12s on slow providers) — timing it is what makes that visible.
-      turnTiming.routeMs = Math.round(performance.now() - routeStartMs);
       const semanticRoute = turnRoute.route;
       const workflow = turnRoute.workflow;
       const analysis = workflow.analysis;
