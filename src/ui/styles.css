@@ -6582,6 +6582,22 @@ body.window-maximized #boot-splash {
   font-size: 1.05em;
 }
 
+/* GFM task lists: the checkbox replaces the bullet, done items dim + strike. */
+.bubble li.task-item {
+  list-style: none;
+  margin-left: -1.2em;
+}
+.bubble li.task-item input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin-right: 7px;
+  cursor: pointer;
+  vertical-align: -1px;
+}
+.bubble li.task-done {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+}
+
 /* Inline code (NOT inside <pre>) */
 .bubble code:not(pre code) {
   background: var(--bg-input);

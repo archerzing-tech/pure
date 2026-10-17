@@ -419,6 +419,28 @@ function diagramRawOf(slot: HTMLElement): string {
     ?? '';
 }
 
+/**
+ * GFM task lists (`- [ ]` / `- [x]`) arrive as `<input type="checkbox"
+ * disabled>` — a dead control. Re-enable them and toggle a done style on the
+ * parent `<li>` so users can actually tick items off. State is DOM-local by
+ * design: the markdown source stays exactly what the model wrote (session
+ * transcripts must replay identically), so a re-render resets to the authored
+ * state. Clicks during streaming get rebuilt on the next render anyway.
+ */
+export function bindTaskCheckboxes(container: HTMLElement): void {
+  const boxes = container.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"]');
+  for (const box of boxes) {
+    box.removeAttribute('disabled');
+    const li = box.parentElement;
+    if (!li) continue;
+    li.classList.add('task-item');
+    if (box.hasAttribute('checked')) li.classList.add('task-done');
+    box.addEventListener('click', () => {
+      li.classList.toggle('task-done', box.checked);
+    });
+  }
+}
+
 function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
   slot.setAttribute('data-state', state);
   slot.setAttribute('aria-busy', String(state === 'loading'));
@@ -2455,6 +2477,9 @@ export async function renderMarkdown(
   // Mermaid/chart work below leaves an already-visible image with no dblclick
   // handler while another diagram is still loading.
   bindMdImagePopup(container);
+  // Task-list checkboxes: same early-binding rationale — plain DOM, no engine
+  // dependency, and the control is visible as soon as the bubble paints.
+  bindTaskCheckboxes(container);
   // Mark the bubble as fully-rendered markdown so CSS can collapse whitespace
   // (white-space:normal). marked emits newline characters BETWEEN block
   // elements (</p>\n<p>, </li>\n<li>, </pre>\n<ul>…); under the bubble's
