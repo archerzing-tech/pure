@@ -12,8 +12,57 @@ mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } 
 
 const { flushStreamingRender, renderMarkdown, scheduleStreamingRender } = await import('../markdown');
 
-beforeAll(() => GlobalRegistrator.register());
-afterAll(() => GlobalRegistrator.unregister());
+let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+
+beforeAll(() => {
+  GlobalRegistrator.register();
+  // Self-sufficient canvas stub: happy-dom ships no 2D context AND its
+  // HTMLCanvasElement.prototype is shared across register cycles, so whatever
+  // another file left on the prototype would leak in here (CI sorts files
+  // differently than local bun — this exact leak broke this file once).
+  // Mount our own full no-op 2D context so the render pipeline (claim → two
+  // rAF → parse → draw → preview) always completes, restore afterwards.
+  originalGetContext = window.HTMLCanvasElement.prototype.getContext;
+  const noopCtx = () => ({
+    fillStyle: null,
+    strokeStyle: null,
+    lineWidth: 1,
+    globalAlpha: 1,
+    font: '',
+    textAlign: 'left',
+    textBaseline: 'alphabetic',
+    save: () => {},
+    restore: () => {},
+    beginPath: () => {},
+    closePath: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
+    arc: () => {},
+    ellipse: () => {},
+    arcTo: () => {},
+    rect: () => {},
+    fill: () => {},
+    stroke: () => {},
+    fillRect: () => {},
+    fillText: () => {},
+    bezierCurveTo: () => {},
+    quadraticCurveTo: () => {},
+    setLineDash: () => {},
+    setTransform: () => {},
+    translate: () => {},
+    rotate: () => {},
+    scale: () => {},
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+    createRadialGradient: () => ({ addColorStop: () => {} }),
+    measureText: (t: string) => ({ width: t.length * 7 }),
+  });
+  window.HTMLCanvasElement.prototype.getContext =
+    noopCtx as unknown as typeof HTMLCanvasElement.prototype.getContext;
+});
+afterAll(() => {
+  window.HTMLCanvasElement.prototype.getContext = originalGetContext;
+  GlobalRegistrator.unregister();
+});
 
 const BEFORE = '看这张示意图：\n\n';
 const PAINT =

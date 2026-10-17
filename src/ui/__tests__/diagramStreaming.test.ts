@@ -28,10 +28,13 @@ mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } 
 const { flushStreamingRender, renderMarkdown, scheduleStreamingRender, normalizeViewerDiagramSize } = await import('../markdown');
 const fs = await import('node:fs');
 
+let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+
 beforeAll(() => {
   // A real page URL matters: Emscripten-based engine bundles resolve their own
   // asset paths against location.href, and "about:blank" is not a valid base.
   GlobalRegistrator.register({ url: 'http://localhost:1420/' });
+  originalGetContext = window.HTMLCanvasElement.prototype.getContext;
   // happy-dom ships no canvas 2D context, and the engine measures every label
   // with one before laying a diagram out. The stub only has to answer
   // measureText — glyph widths move pixels around, they do not decide whether
@@ -58,7 +61,16 @@ beforeAll(() => {
     new Function(source)();
   }
 });
-afterAll(() => GlobalRegistrator.unregister());
+afterAll(() => {
+  // happy-dom's HTMLCanvasElement.prototype is SHARED across
+  // register/unregister cycles (verified 2026-10-17): without this restore,
+  // the measureText-only stub leaks into every later test file that draws to
+  // a canvas — paintStreaming's renderPaintInto then throws on the missing
+  // setTransform and its slots land in the error state (CI-only, because bun
+  // sorts files differently per platform).
+  window.HTMLCanvasElement.prototype.getContext = originalGetContext;
+  GlobalRegistrator.unregister();
+});
 
 const BEFORE = '先看结构：\n\n';
 const SVG = '```svg\n<svg width="40" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="40" height="10" fill="teal"/></svg>\n```\n\n';
