@@ -14,6 +14,7 @@ import {
   CHART_DSL_PROMPT,
   COMPLEX_TASK_PROTOCOL_PROMPT,
   MAP_DSL_PROMPT,
+  PAINT_DSL_PROMPT,
   COMPLETION_PROMPT,
   DELIVERY_CONTRACT,
   FILE_TOOLS_CORE,
@@ -269,6 +270,7 @@ function buildVisualFragments(
   ];
   if (surface === 'gui') {
     parts.push(
+      ['paint_dsl', wants.paint ? PAINT_DSL_PROMPT : undefined, 63],
       ['chart_dsl', wants.chart ? CHART_DSL_PROMPT : undefined, 63],
       ['map_dsl', wants.map ? MAP_DSL_PROMPT : undefined, 62],
       ['image_gen', imageGeneration && wants.picture ? IMAGE_GEN_OUTPUT_PROMPT : undefined, 61],

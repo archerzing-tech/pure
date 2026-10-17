@@ -238,7 +238,8 @@ export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, char
 - \`\`\`mermaid or \`\`\`puml — structural diagrams (flowchart/sequence/state/ER/gantt/pie/mindmap/timeline; PlantUML for class/component/deployment/activity/use-case).
 - \`\`\`chart — data as a chart: a \`type:\` line (bar/hbar/line/pie/scatter/kline/radar/tree/treemap/sunburst, default bar), optional \`title:\` / \`unit:\`, then one \`label value\` row per line.
 - \`\`\`map — routes/places as ONE JSON object {title, center:[lat,lng], zoom, markers:[{lat,lng,title,label}], route:[[lat,lng],…]} with REAL coordinates.
-NEVER save a picture/chart/map with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable.`;
+- \`\`\`paint — a STATIC geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icons) as ONE JSON object {version, width, height, shapes:[rect/circle/line/arrow/path/polygon/text/group], defs.gradients}.
+NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable.`;
 
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
 export interface VisualRequestParts {
@@ -248,6 +249,10 @@ export interface VisualRequestParts {
   chart: boolean;
   /** 地图/路线/地点（→ ```map DSL）。 */
   map: boolean;
+  /** 几何示意/插画（架构示意图、流程示意、几何图、图标 → ```paint DSL）。
+   *  与 picture 故意重叠（召回优先）：重叠只多装配一条细则，通道争用由
+   *  PAINT_DSL_PROMPT 里的路由优先级句消解。 */
+  paint: boolean;
 }
 
 export function detectVisualRequest(prompt: string): VisualRequestParts {
@@ -255,7 +260,9 @@ export function detectVisualRequest(prompt: string): VisualRequestParts {
   const picture = /(?:画一?[张个幅副]|画个|绘制|手绘|画出来|绘图|生成一?[张个幅副](?:图|图片)|做一?[张个幅副]图|配图|插画|海报|封面|图标|logo|icon|贴纸|壁纸|svg|示意图|流程图|架构图|时序图|类图|思维导图|甘特图|uml|diagram|flow ?chart|draw|sketch|illustration|poster|thumbnail|mockup)/i.test(text);
   const chart = /(?:图表|柱状图|条形图|折线图|饼图|散点图|k线|candlestick|雷达图|树图|矩形树图|旭日图|可视化|数据图|画个图|做成图|趋势图|占比图|统计图|chart|graph|plot|visuali[sz])/i.test(text);
   const map = /(?:地图|路线|路径规划|导航|行程路线|骑行|自驾|怎么走|在哪[里儿]|坐标|经纬度|markers?|route|map\b|itinerary|directions)/i.test(text);
-  return { picture, chart, map };
+  // 几何示意/插画的召回词。不收裸「画」/「图」——那会吞掉 chart/picture 主通道。
+  const paint = /(?:架构图|架构示意|示意图|几何|插画|图标|流程示意|分层图|层级图|schematic|geometric|layered diagram|icon\b)/i.test(text);
+  return { picture, chart, map, paint };
 }
 
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
@@ -315,6 +322,34 @@ export const MAP_DSL_PROMPT = `To SHOW a route, route plan, directions, or place
 - Use REAL coordinates — for real cities look them up (web_search) when unsure; never invent them.
 - The map block IS the deliverable — never save it as a file or draw it with a script.
 - A MAP IS NEVER SVG: do NOT render a map / route / place as a \`\`\`svg block, an <svg> document, an image, or any other diagram format. The \`\`\`map JSON block is the ONLY map format — the app renders it with Leaflet, not SVG. If a map failed to render before, fix it by re-emitting a valid \`\`\`map JSON block with correct coordinates — NEVER switch to SVG.`;
+
+/** ```paint DSL contract — identical in GUI and CLI (shared, not duplicated).
+ * The GUI renders fenced ```paint blocks inline as a static canvas drawing
+ * (pure's own renderer — no scripts, no files). The CLI renders the block as
+ * plain code. Scope: STATIC geometric illustration — architecture sketches,
+ * flow schematics, layered diagrams, geometry, icons. Anything animated or
+ * programmatic belongs to a standalone .html file instead. */
+export const PAINT_DSL_PROMPT = `To DRAW a static geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icon), emit a fenced code block tagged paint containing ONE JSON object — the app renders it as a crisp inline picture. Minimal shape of the payload:
+{
+  "version": 1,
+  "width": 640,
+  "height": 360,
+  "background": "#ffffff",
+  "shapes": [
+    { "type": "rect", "x": 40, "y": 40, "w": 240, "h": 72, "r": 8, "fill": "#3b82f6" },
+    { "type": "text", "x": 70, "y": 82, "text": "前端", "size": 18, "color": "#ffffff" },
+    { "type": "arrow", "x1": 280, "y1": 76, "x2": 380, "y2": 76, "stroke": "#64748b", "strokeWidth": 2 },
+    { "type": "rect", "x": 380, "y": 40, "w": 220, "h": 72, "r": 8, "stroke": "#64748b" },
+    { "type": "group", "transform": { "translate": [0, 160] }, "children": [ { "type": "circle", "cx": 60, "cy": 0, "r": 20, "fill": "#f59e0b" } ] }
+  ],
+  "defs": { "gradients": [ { "id": "g1", "type": "linear", "from": [0, 0], "to": [640, 0], "stops": [ { "offset": 0, "color": "#93c5fd" }, { "offset": 1, "color": "#1d4ed8" } ] } ] }
+}
+- shape types: rect (r = corner radius) | circle | ellipse | line | arrow (head: "end"/"start"/"both") | path (d: SVG subset M/L/H/V/C/S/Q/T/A/Z) | polygon | polyline | text (color/size/align/bold) | group (transform: translate/rotate/scale + nested children).
+- style keys on any shape: fill / stroke / strokeWidth / dash / opacity; gradients live in defs and are referenced as "fill": {"gradient": "g1"}.
+- Give text an explicit color; coordinates are absolute pixels inside width×height. No random values — the drawing must be identical on every render.
+- Routing: a STATIC picture (diagram/schematic/geometry/icon) → the paint block. Animation, generative art, or a small game → write a complete standalone .html file that draws on <canvas> (the chat renders it as a live card). Organic artwork / photo-like images / multiple variations → \`\`\`svg blocks or generate_image, not paint.
+- The paint block IS the deliverable — never save it as a file or draw it with a script.
+- A PAINT BLOCK IS NEVER SVG: do NOT render a geometric diagram/illustration as a \`\`\`svg block when paint fits. If a paint block failed to render, fix it by re-emitting a valid \`\`\`paint JSON block — NEVER switch to SVG.`;
 
 /** 拟人化沟通基调 — identical in GUI and CLI (shared, not duplicated).
  * Persona: the senior engineer pairing with the user. Deliberately written as

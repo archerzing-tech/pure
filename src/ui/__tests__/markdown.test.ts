@@ -1037,3 +1037,58 @@ describe('mermaid slot CSS contract', () => {
     expect(css).toContain('width: auto');
   });
 });
+
+// ```paint — declarative canvas illustration channel, wired exactly like
+// ```chart (same diagramSlot state machine). These pins guard the seams that
+// historically broke the map channel when forgotten (slotFenceLang, retry
+// dispatch) plus the paint-specific export path.
+describe('paint code blocks', () => {
+  it('renders a ```paint block as a .paint-slot (no raw code block)', () => {
+    const html = renderer.code({ text: '{"width":10,"height":10,"shapes":[]}', lang: 'paint', type: 'code', raw: 'x' } as never);
+    expect(html).toContain('class="diagram-slot paint-slot"');
+    expect(html).toContain('data-diagram-kind="paint"');
+    expect(html).toContain('paint-target');
+    expect(html).toContain('diagram-download-btn');
+    expect(html).not.toContain('<pre><code');
+  });
+
+  it('an un-tagged JSON block stays a plain code block (no paint alias)', () => {
+    const html = renderer.code({ text: '{"shapes":[]}', lang: 'json', type: 'code', raw: 'x' } as never);
+    expect(html).toContain('<pre><code');
+    expect(html).not.toContain('paint-slot');
+  });
+
+  it('keeps the streaming + wiring contract intact', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    // DiagramKind union knows paint.
+    expect(src).toContain("'mermaid' | 'svg' | 'chart' | 'puml' | 'paint'");
+    // slotFenceLang — the ONE switch that keeps a growing fence's slot stable
+    // across diff ticks (missing it was the map flicker class of bug).
+    expect(src).toContain("l === 'map' || l === 'leaflet' || l === 'paint'");
+    // Closed-fence kick AND the retry button dispatch must both run the paint
+    // renderer — a missing retry arm silently reruns PlantUML instead.
+    expect(src).toContain('void renderPaintNodes(container).then(() => bindPaintPopup(container))');
+    expect(src).toContain('void renderPaintNodes(host).then(() => bindPaintPopup(host))');
+    // The completion pipeline renders + binds paint like chart.
+    expect(src).toContain('await renderPaintNodes(container)');
+    expect(src).toContain('bindPaintPopup(container);');
+    // Loading card is pre-shaped to the finished aspect ratio.
+    expect(src).toContain("'--paint-aspect'");
+    // PNG export parses the paint spec and rasterizes via renderPaintToBlob.
+    // spec.background present → undefined (drawScene draws it, gradients
+    // included); absent → the theme card color. null would mean
+    // force-transparent and would vanish dark art on the white viewer.
+    expect(src).toContain('renderPaintToBlob(spec, spec.background ? undefined : cardBg, 2)');
+    // Export filename: paint JSON must not fall into chart's title extractor
+    // (the dedicated branch is diagramSourceName's first check).
+    expect(src).toContain("if (kind === 'paint') {");
+    expect(src).toContain("return 'paint';");
+    // Layout: loading placeholder takes the final aspect ratio (not the
+    // generic 360px square), canvas scales to the card width. The paint rule
+    // MUST out-specify the generic .diagram-slot rule that appears LATER in
+    // the file — same specificity would lose the cascade.
+    expect(css).toContain('.bubble .diagram-slot.paint-slot[data-state="loading"]');
+    expect(css).toContain('.paint-target canvas');
+  });
+});

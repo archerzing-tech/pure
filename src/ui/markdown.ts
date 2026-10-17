@@ -20,6 +20,7 @@ import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../share
 import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
 import { stripToolCallXml } from './markdownCore';
+import { renderPaintInto, renderPaintToBlob, paintCanvasToDataUrl, parsePaintSource } from './paintCanvas';
 export { stripToolCallXml } from './markdownCore';
 
 // ── Languages registered for hljs (tree-shaken subset) ──
@@ -108,7 +109,7 @@ function isDark(): boolean {
 
 const DIAGRAM_RENDER_TIMEOUT_MS = 15000;
 
-export type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml';
+export type DiagramKind = 'mermaid' | 'svg' | 'chart' | 'puml' | 'paint';
 type DiagramState = 'loading' | 'preview' | 'error';
 const diagramRenderVersions = new WeakMap<HTMLElement, number>();
 
@@ -192,6 +193,12 @@ renderer.code = (token: { text: string; lang?: string }): string => {
 
   if (lang === 'map' || lang === 'leaflet') {
     return mapSlot(code);
+  }
+
+  // Static geometric illustration (architecture sketch, schematic, icon) —
+  // one JSON object rendered by pure's own canvas renderer.
+  if (lang === 'paint') {
+    return diagramSlot('paint', code, '');
   }
 
   // Other code blocks: emit <pre><code>; hljs tags inside after parse. The code
@@ -1893,6 +1900,63 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
   }
 }
 
+// ── Paint (```paint) ──
+// Static geometric illustration drawn by pure's own canvas renderer
+// (paintCanvas.ts, statically imported — no lazy chunk needed). Same skeleton
+// as renderChartNodes: claim the slot, yield two frames, parse → draw →
+// preview; a parse failure lands in the slot's error card with retry.
+
+async function renderPaintNodes(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.paint-slot:not([data-processed])'))
+    .filter((slot) => !streamFenceOpen(slot));
+  if (slots.length === 0) return;
+  const attempts = slots.map((slot) => ({ slot, version: nextDiagramRenderVersion(slot) }));
+
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+    // Pre-shape the loading card to the finished aspect ratio so the reveal
+    // doesn't jump from the generic square to a wide canvas.
+    try {
+      const { spec } = parsePaintSource(diagramRawOf(slot));
+      slot.style.setProperty('--paint-aspect', `${spec.width} / ${spec.height}`);
+    } catch {
+      /* parse fails → error card later; keep the default geometry */
+    }
+  }
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
+  for (const { slot, version } of attempts) {
+    if (!isCurrentDiagramRender(slot, version)) continue;
+    const target = slot.querySelector<HTMLElement>('.paint-target');
+    if (!target) {
+      setDiagramState(slot, 'error', t('diagram.missingTarget'));
+      continue;
+    }
+    try {
+      const { spec, repaired, repairedSource } = parsePaintSource(diagramRawOf(slot));
+      renderPaintInto(target, spec);
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+      setDiagramState(slot, 'preview');
+    } catch (err) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw.startsWith('paint 数据需要是一个 JSON 对象') ? t('paint.parseFailed')
+        : raw.startsWith('paint 绘图内容为空') ? t('paint.empty')
+        : t('diagram.renderFailed');
+      setDiagramState(slot, 'error', msg);
+    }
+  }
+}
+
 // ── Leaflet maps (```map) ──
 // A ```map fenced block carries a JSON payload (markers / route / center) and
 // renders as an interactive map. Dedicated slot (not diagram-slot) because the
@@ -2342,6 +2406,7 @@ export async function renderMarkdown(
   // their double-click handler now, not at the end of the whole pipeline.
   bindVectorPopup(container);
   await renderChartNodes(container);
+  await renderPaintNodes(container);
   await renderMapNodes(container);
 
   // 4) Async: PlantUML renders locally (its own lazy engine chunk) into
@@ -2355,6 +2420,7 @@ export async function renderMarkdown(
   bindMapControls(container);
   bindMermaidPopup(container);
   bindVectorPopup(container);
+  bindPaintPopup(container);
   bindMdImagePopup(container);
 
   // 6) Add copy + save buttons to code blocks.
@@ -2426,6 +2492,7 @@ streamRenderer.code = (token: { text: string; lang?: string }): string => {
   // slot mid-stream (not a plain code block), so the streaming gate can start
   // hydrating it and hold later blocks until the tiles have painted.
   if (lang === 'map' || lang === 'leaflet') return mapSlot(token.text);
+  if (lang === 'paint') return diagramSlot('paint', token.text, '');
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
 };
 const mdStream = new Marked({ gfm: true, breaks: true, renderer: streamRenderer });
@@ -2486,7 +2553,7 @@ function mapFenceClosed(raw: string): boolean {
 function slotFenceLang(lang: string): boolean {
   const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
   return l === 'mermaid' || l === 'puml' || l === 'plantuml' || l === 'svg'
-    || l === 'chart' || l === 'charts' || l === 'map' || l === 'leaflet';
+    || l === 'chart' || l === 'charts' || l === 'map' || l === 'leaflet' || l === 'paint';
 }
 
 /** A streaming-mounted slot carries `data-md-raw` (the whole fenced token's
@@ -2550,6 +2617,8 @@ function kickStreamingDiagram(el: HTMLElement, container: HTMLElement): void {
       void renderSvgNodes(container).then(() => bindVectorPopup(container));
     } else if (kind === 'chart') {
       void renderChartNodes(container).then(() => bindVectorPopup(container));
+    } else if (kind === 'paint') {
+      void renderPaintNodes(container).then(() => bindPaintPopup(container));
     } else if (kind === 'puml') {
       void renderPumlNodes(container).then(() => bindVectorPopup(container));
     }
@@ -2974,6 +3043,8 @@ function bindDiagramControls(container: HTMLElement): void {
         void renderSvgNodes(host).then(() => bindVectorPopup(host));
       } else if (kind === 'chart') {
         void renderChartNodes(host).then(() => bindVectorPopup(host));
+      } else if (kind === 'paint') {
+        void renderPaintNodes(host).then(() => bindPaintPopup(host));
       } else {
         void renderPumlNodes(host).then(() => bindVectorPopup(host));
       }
@@ -3026,6 +3097,27 @@ function bindMdImagePopup(container: HTMLElement): void {
     const img = wrap.querySelector<HTMLImageElement>('.md-img');
     if (!img) continue;
     bindDiagramActivation(wrap, () => img.cloneNode(true) as HTMLElement, 'dblclick');
+  }
+}
+
+// ```paint has no SVG root for bindVectorPopup to clone — the viewer gets a
+// data-URL <img> of the canvas instead (same path the md-image popup uses; the
+// viewer's SVG-only sizing pass early-returns on non-SVG content).
+function bindPaintPopup(container: HTMLElement): void {
+  const targets = container.matches('.paint-slot .paint-target')
+    ? [container]
+    : Array.from(container.querySelectorAll<HTMLElement>('.paint-slot[data-state="preview"] .paint-target'));
+  for (const target of targets) {
+    bindDiagramActivation(target, () => {
+      const canvas = target.querySelector<HTMLCanvasElement>('canvas');
+      if (!canvas) return null;
+      const url = paintCanvasToDataUrl(canvas);
+      if (!url) return null;
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = t('diagram.openViewer');
+      return img;
+    }, 'dblclick');
   }
 }
 
@@ -3274,6 +3366,17 @@ function showDiagramViewer(el: HTMLElement): void {
  */
 function diagramSourceName(slot: HTMLElement): string {
   const kind = slot.getAttribute('data-diagram-kind');
+  if (kind === 'paint') {
+    // Paint sources are JSON — chart's title extractor must not see them.
+    try {
+      const { spec } = parsePaintSource(diagramRawOf(slot));
+      const title = (spec.title ?? '').trim();
+      if (title) return title.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').slice(0, 60) || 'paint';
+    } catch {
+      /* unparseable — keep the default name */
+    }
+    return 'paint';
+  }
   const fallback = kind === 'mermaid' ? 'mermaid' : kind === 'svg' ? 'svg' : 'chart';
   let base = fallback;
   try {
@@ -3415,6 +3518,30 @@ async function saveImageFile(blob: Blob, filename: string, mime: string): Promis
  * <img> — those labels drop out of the PNG.
  */
 async function exportDiagramPng(slot: HTMLElement): Promise<void> {
+  // Paint slots have no SVG root to serialize — the live canvas rasterizes
+  // directly (2×, over the spec background or the theme card color).
+  if (slot.getAttribute('data-diagram-kind') === 'paint') {
+    try {
+      const { spec } = parsePaintSource(diagramRawOf(slot));
+      let cardBg: string | null = null;
+      if (!spec.background && typeof getComputedStyle === 'function') {
+        cardBg = getComputedStyle(slot).getPropertyValue('--bg-card').trim() || null;
+      }
+      // undefined = "draw spec.background" (drawScene's own logic, gradients
+      // included); null would mean force-transparent — exactly wrong when the
+      // spec HAS a background (dark art on a white viewer would vanish).
+      const blob = await renderPaintToBlob(spec, spec.background ? undefined : cardBg, 2);
+      if (!blob) {
+        showToast(t('diagram.downloadError'));
+        return;
+      }
+      const savedTo = await saveImageFile(blob, `${diagramSourceName(slot)}.png`, 'image/png');
+      if (savedTo) showToast(`${t('codeBlock.savedTo')} ${savedTo}`);
+    } catch {
+      showToast(t('diagram.downloadError'));
+    }
+    return;
+  }
   const out = serializeDiagramSvg(slot);
   if (!out) {
     showToast(t('diagram.downloadError'));

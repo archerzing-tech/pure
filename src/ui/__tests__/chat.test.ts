@@ -2525,3 +2525,18 @@ describe('传输层状态进思考卡（长静默歼灭）', () => {
     expect(src).toContain("if (event.payload.stage === 'start' && thinkingCard) {");
   });
 });
+
+describe('paint 双卡防御（canvas 卡让位 paint 块）', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('回复含 ```paint fence 时 canvas 挂卡条件被否决（查文本不查 DOM）', () => {
+    // renderMarkdown 的 rAF yield 使挂卡时 paint slot 未必已插入 DOM——
+    // 硬防必须查回复文本（segments + finalOutput），不能查 seg.el。
+    expect(src).toContain("assistantSegments.some((s) => /```[ \\t]*paint\\b/.test(s.text || ''))");
+    expect(src).toContain("/```[ \\t]*paint\\b/.test(event.payload.finalOutput || '')");
+    // 挂卡条件真正吃进否决项。锚点取 TEMP DIAG 插桩有无两种形态的交集
+    // （插桩被拆掉后守卫与否决项必须原样存活，否则提交树测试红）。
+    expect(src).toContain('&& !replyHasPaintFence)');
+    expect(src.split('replyHasPaintFence').length - 1).toBeGreaterThanOrEqual(2);
+  });
+});

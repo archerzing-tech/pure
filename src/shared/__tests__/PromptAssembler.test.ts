@@ -495,9 +495,13 @@ describe('PromptAssembler', () => {
     expect(chart).toContain('A JSON payload');
     const map = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '给我一条西安到上海的骑行路线');
     expect(map).toContain('A MAP IS NEVER SVG');
+    // paint 细则随几何/插画类请求到位（与 picture 故意重叠，消解靠细则优先级句）。
+    const paint = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '画一张架构示意图');
+    expect(paint).toContain('A PAINT BLOCK IS NEVER SVG');
     // 尾巴纪律：细则接在末尾，所以不带细则的提示词是带细则的前缀——
     // 前缀逐字不变，供应商的前缀缓存只重预填尾巴。
     expect(chart.startsWith(chat)).toBe(true);
+    expect(paint.startsWith(chat)).toBe(true);
   });
 
   it('swaps SVG for generate_image when the provider supports text-to-image', () => {

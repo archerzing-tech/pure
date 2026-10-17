@@ -9144,6 +9144,46 @@ button svg,
   overflow-x: auto;
 }
 
+/* ── Paint (```paint) — declarative canvas illustration ── */
+
+.bubble .paint-slot {
+  width: 100%;
+  margin: 12px 0;
+}
+
+/* The generic diagram-slot loading state is a 360px square (L10063); paint
+   replaces it with the drawing's own aspect ratio as soon as the JSON parses
+   (--paint-aspect is set by renderPaintNodes), so the reveal doesn't jump from
+   square to wide. Unparseable JSON keeps the default square until the error
+   card takes over. */
+/* Higher specificity than the generic .bubble .diagram-slot[data-state="loading"]
+   rule further down the file — same-specificity would lose to it (it comes
+   later) and the loading card would stay a 360px square until the preview
+   flipped it wide (the exact layout jump this rule exists to prevent). */
+.bubble .diagram-slot.paint-slot[data-state="loading"] {
+  width: 100%;
+  aspect-ratio: var(--paint-aspect, 8 / 5);
+  min-height: 120px;
+}
+
+.bubble .paint-target {
+  display: block;
+  width: 100%;
+  padding: 0;
+  cursor: zoom-in;
+}
+
+.bubble .paint-target canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(60vh, 560px);
+  /* object-fit keeps the drawing undistorted when max-height clamps a tall
+     canvas (canvas is a replaced element, so this works like on <img>). */
+  object-fit: contain;
+  margin: 0 auto;
+}
+
 /* ── Leaflet map tiles (```map) ── */
 .bubble .map-slot {
   position: relative;

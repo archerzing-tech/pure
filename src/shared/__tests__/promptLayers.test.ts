@@ -14,6 +14,8 @@ import {
   SVG_OUTPUT_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
+  PAINT_DSL_PROMPT,
+  detectVisualRequest,
   HUMAN_TONE_PROMPT,
   INSERTION_PROTOCOL_PROMPT,
   COMPLEX_TASK_PROTOCOL_PROMPT,
@@ -254,6 +256,31 @@ describe('L1 behavior contracts', () => {
     expect(MAP_DSL_PROMPT).toContain('renders it with Leaflet, not SVG');
     expect(MAP_DSL_PROMPT).toContain('NEVER switch to SVG');
     expect(MAP_DSL_PROMPT).toContain('re-emitting a valid');
+  });
+
+  it('keeps paint on the declarative JSON contract and never on SVG or scripts', () => {
+    // Static geometric illustration rides the same data-channel logic as
+    // chart/map: pure's own canvas renderer draws the spec. The DSL must pin
+    // the minimal JSON shape, forbid scripts/SVG (the two escape hatches the
+    // model historically took), and route animation to the .html channel.
+    expect(PAINT_DSL_PROMPT).toContain('"width"');
+    expect(PAINT_DSL_PROMPT).toContain('"height"');
+    expect(PAINT_DSL_PROMPT).toContain('"shapes"');
+    expect(PAINT_DSL_PROMPT).toContain('A PAINT BLOCK IS NEVER SVG');
+    expect(PAINT_DSL_PROMPT).toContain('IS the deliverable');
+    expect(PAINT_DSL_PROMPT).toContain('complete standalone .html file');
+  });
+
+  it('routes geometric requests to paint without grabbing bare 画/图', () => {
+    // Recall-first: these MUST arm the paint detail (and deliberately overlap
+    // the picture regex — the DSL's priority sentence resolves the overlap).
+    for (const hit of ['画一张三层架构示意图', '来个几何插画', '画个登录图标', '画一个流程示意图', 'schematic of the layers']) {
+      expect(detectVisualRequest(hit).paint).toBe(true);
+    }
+    // Bare 画/图 without a geometric keyword stays unrouted (看图/画一笔 等).
+    for (const miss of ['帮我看看这张图', '画蛇添足是什么意思', '改一下标题', '总结这段话']) {
+      expect(detectVisualRequest(miss).paint).toBe(false);
+    }
   });
 
   it('asks for a human, conversational tone without canned boilerplate', () => {

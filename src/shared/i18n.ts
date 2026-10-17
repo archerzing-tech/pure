@@ -116,6 +116,10 @@ const translations: Record<Language, Record<string, string>> = {
     'map.expand': '展开地图',
     'map.close': '关闭',
 
+    // ── Paint (```paint blocks) ──
+    'paint.parseFailed': '绘图数据格式无法识别，请检查是否符合 paint JSON 格式',
+    'paint.empty': '绘图内容为空（shapes 为空或全部无效）',
+
     // ── Thinking card ──
     'thinking.thinking': '思考',
     'thinking.done': '思考完成',
@@ -1399,6 +1403,10 @@ const translations: Record<Language, Record<string, string>> = {
     'map.sourceHide': 'Hide data',
     'map.expand': 'Expand map',
     'map.close': 'Close',
+
+    // ── Paint (```paint blocks) ──
+    'paint.parseFailed': 'Paint data is not recognized — check that it is one JSON object with a shapes array',
+    'paint.empty': 'Painting is empty (no valid shapes)',
 
     // ── Thinking card ──
     'thinking.thinking': 'Thinking',
