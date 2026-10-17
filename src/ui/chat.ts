@@ -95,7 +95,6 @@ import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
-import { createCanvasArtCard, isCanvasHtml, pickCanvasCandidates } from './canvasArtCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { formatBytes } from '../shared/format';
@@ -7185,42 +7184,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               }
             }
 
-            // Canvas-art inline cards: an .html the turn wrote that actually
-            // draws on <canvas> renders right here (sandboxed iframe, same
-            // pattern as the design preview above) so the user sees the
-            // drawing without opening the file. Best-effort like the preview:
-            // a read failure or non-canvas html silently skips.
-            // A reply that delivered a ```paint block already drew this
-            // picture inline — a canvas-art card for an .html of the same
-            // turn would show the same thing twice. Text check, not DOM:
-            // renderMarkdown yields frames before inserting the slot, so
-            // seg.el may not contain .paint-slot yet at this point.
-            const replyHasPaintFence =
-              assistantSegments.some((s) => /```[ \t]*paint\b/.test(s.text || '')) ||
-              /```[ \t]*paint\b/.test(event.payload.finalOutput || '');
-            if (effectiveWorkspace && turnArtifacts.length > 0) {
-              const canvasPaths = pickCanvasCandidates(
-                turnArtifacts.map(a => a.path),
-                { exclude: designMockupFile ?? undefined },
-              );
-              for (const canvasPath of canvasPaths) {
-                try {
-                  const artAdapter = createToolAdapter(effectiveWorkspace, config);
-                  const res = await artAdapter.execute({
-                    id: `canvas_art_${Date.now()}`,
-                    index: 0,
-                    function: { name: 'read_file', arguments: JSON.stringify({ path: canvasPath }) },
-                  }, turnSignal);
-                  const artHtml = typeof res.result === 'string' ? res.result : '';
-                  if (artHtml.trim() && isCanvasHtml(artHtml) && gen === this.generation && !replyHasPaintFence) {
-                    this.appendToTranscript(createCanvasArtCard(artHtml, canvasPath, effectiveWorkspace).el);
-                    this.scrollUi(chatEl);
-                  }
-                } catch {
-                  // Canvas preview is best-effort only.
-                }
-              }
-            }
 
             // Artifact cards follow the human rule per TURN: a colleague who
             // edited your file this turn ends with "改好了，文件是 xxx" —
