@@ -6570,6 +6570,18 @@ body.window-maximized #boot-splash {
   color: var(--text);
 }
 
+/* LaTeX math (KaTeX): katex.min.css ships the full layout — only overflow
+   needs local tuning, so long display formulas scroll instead of bursting
+   the bubble. KaTeX inherits currentColor, so dark theme needs no extra rule. */
+.bubble .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+.bubble .katex {
+  font-size: 1.05em;
+}
+
 /* Inline code (NOT inside <pre>) */
 .bubble code:not(pre code) {
   background: var(--bg-input);

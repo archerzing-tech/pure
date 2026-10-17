@@ -11,6 +11,8 @@
 
 import { Marked, Renderer } from 'marked';
 import DOMPurify from 'dompurify';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { stripAnsi } from '../shared/ansi';
 import { showToast } from '../shared/toast';
@@ -201,6 +203,12 @@ renderer.code = (token: { text: string; lang?: string }): string => {
     return diagramSlot('paint', code, '');
   }
 
+  // ```math fences: models habitually wrap multi-line formulas this way —
+  // render the whole body as one display formula instead of a code block.
+  if (lang === 'math' || lang === 'latex' || lang === 'tex') {
+    return renderKatex(code, true);
+  }
+
   // Other code blocks: emit <pre><code>; hljs tags inside after parse. The code
   // must be HTML-escaped here — marked hands us the raw source, and inserting it
   // unescaped would let `<<` sequences (generics, HTML samples, `<<img onerror>`) be
@@ -301,8 +309,76 @@ export const highlightExt = {
   renderer: (token: { text: string }): string => `<mark>${esc(token.text)}</mark>`,
 };
 
+// ── LaTeX math extension ($…$ inline, $$…$$ / \[…\] block) ──
+// Math as raw TeX source is unreadable — every mainstream chat product renders
+// it (KaTeX, local, offline). Delimiter rules deliberately mirror KaTeX's
+// auto-render conservatism so prices never turn into formulas: the char right
+// after an opening `$` must be a non-space, the char before the closing `$`
+// must be a non-space AND the closing `$` must not be followed by a digit, and
+// inline math cannot span lines. So "$100, plus tax $5" stays literal while
+// "能量 $E=mc^2$" renders. Text containing CJK is left literal too — prose
+// wrapped in $…$ is a formatting slip, not an equation. The \(…\) inline form
+// is deliberately NOT supported: marked's escape rule consumes `\(` before
+// inline extensions run (verified 2026-10-17), so half-matched pairs would
+// swallow trailing prose — literal display beats wrong rendering. Exported for
+// the headless tests (katex.renderToString needs no DOM).
+export const mathExtInline = {
+  name: 'inlineMath',
+  level: 'inline' as const,
+  start: (src: string): number => src.indexOf('$'),
+  tokenizer: (src: string) => {
+    // `\S` right after the opening fence, non-space right before the closing
+    // one, no digit right after it — the price guard in one regex.
+    const dollar = /^\$(?!\s)((?:\\.|[^$\n\\])*?\S)\$(?!\d)/.exec(src);
+    if (!dollar) return undefined;
+    return { type: 'inlineMath', raw: dollar[0], text: dollar[1], tokens: [] };
+  },
+  renderer: (token: { text: string }): string => renderKatex(token.text, false),
+};
+
+export const mathExtBlock = {
+  name: 'blockMath',
+  level: 'block' as const,
+  start: (src: string): number => {
+    const a = src.indexOf('$$');
+    const b = src.indexOf('\\[');
+    if (a < 0) return b;
+    if (b < 0) return a;
+    return Math.min(a, b);
+  },
+  tokenizer: (src: string) => {
+    const dollars = /^\$\$([\s\S]+?)\$\$/.exec(src);
+    if (dollars) return { type: 'blockMath', raw: dollars[0], text: dollars[1], tokens: [] };
+    const bracket = /^\\\[([\s\S]+?)\\\]/.exec(src);
+    if (bracket) return { type: 'blockMath', raw: bracket[0], text: bracket[1], tokens: [] };
+    return undefined;
+  },
+  renderer: (token: { text: string }): string => renderKatex(token.text, true),
+};
+
+// Render one TeX snippet with KaTeX. CJK content and unparseable input come
+// back as escaped literal text (throwOnError:false colors unknown TeX red —
+// worse than leaving prose alone). output:'html' skips the MathML tree: DOMPurify
+// keeps it, but it doubles the markup for no reader in a WebView context.
+function renderKatex(tex: string, displayMode: boolean): string {
+  const trimmed = tex.trim();
+  if (!trimmed || /[一-鿿぀-ヿ가-힯]/.test(trimmed)) {
+    return esc(tex);
+  }
+  try {
+    return katex.renderToString(trimmed, {
+      displayMode,
+      throwOnError: false,
+      strict: false,
+      output: 'html',
+    });
+  } catch {
+    return esc(tex);
+  }
+}
+
 const md = new Marked({ gfm: true, breaks: true, renderer });
-md.use({ extensions: [highlightExt] });
+md.use({ extensions: [highlightExt, mathExtInline, mathExtBlock] });
 
 // ── Mermaid (lazy import — heavy module, ~600KB) ──
 

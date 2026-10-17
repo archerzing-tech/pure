@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -129,6 +129,59 @@ describe('highlightExt (==text== → <mark>)', () => {
     const html = md.parse('==<b>x</b>==') as string;
     expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(html).not.toContain('<b>x</b>');
+  });
+});
+
+// ── LaTeX math (KaTeX): $…$ inline, $$…$$ / \[…\] block, ```math fences ──
+describe('mathExt ($…$ / $$…$$ → KaTeX)', () => {
+  const mdm = new Marked({ gfm: true, breaks: true });
+  mdm.use({ extensions: [mathExtInline, mathExtBlock] });
+
+  it('renders inline $…$ as a KaTeX span', () => {
+    const html = mdm.parse('能量 $E=mc^2$ 与动量') as string;
+    expect(html).toContain('class="katex"');
+    expect(html).toContain('与动量');
+  });
+
+  it('renders $$…$$ as a display block', () => {
+    const html = mdm.parse('$$\n\\int_0^1 x^2\\,dx = \\frac{1}{3}\n$$') as string;
+    expect(html).toContain('katex-display');
+    expect(html).toContain('class="katex"');
+  });
+
+  it('renders \\[…\\] as a display block', () => {
+    const html = mdm.parse('\\[\na^2+b^2=c^2\n\\]') as string;
+    expect(html).toContain('katex-display');
+  });
+
+  it('keeps prices literal (space/price guards)', () => {
+    expect(mdm.parse('价格 $100, plus tax $5 end') as string).not.toContain('katex');
+    expect(mdm.parse('$100和$3 什么关系') as string).not.toContain('katex');
+    // closing $ followed by a digit stays literal too
+    expect(mdm.parse('成本 $50和$30 一共') as string).not.toContain('katex');
+  });
+
+  it('leaves code spans and unfenced text untouched', () => {
+    expect(mdm.parse('code 里 `$x$` 不渲染') as string).not.toContain('katex');
+  });
+
+  it('keeps CJK-only content literal (prose, not TeX)', () => {
+    const html = mdm.parse('$这是一段中文$') as string;
+    expect(html).not.toContain('katex');
+    expect(html).toContain('这是一段中文');
+  });
+
+  it('renders ```math fences as display formulas (not code blocks)', () => {
+    const html = renderer.code({ text: 'a^2+b^2=c^2', lang: 'math', type: 'code', raw: 'a^2+b^2=c^2' } as never);
+    expect(html).toContain('katex-display');
+    expect(html).not.toContain('<pre>');
+  });
+
+  it('renders ```latex / ```tex fences the same way', () => {
+    for (const lang of ['latex', 'tex']) {
+      const html = renderer.code({ text: 'e^{i\\pi}+1=0', lang, type: 'code', raw: 'x' } as never);
+      expect(html).toContain('katex-display');
+    }
   });
 });
 
