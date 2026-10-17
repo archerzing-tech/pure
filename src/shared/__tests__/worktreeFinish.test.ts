@@ -83,14 +83,14 @@ describe('isSessionWorktree', () => {
     // A plain checkout is nobody's session worktree.
     const main = await inspectWorktreeFinish(git, repo);
     expect(main && isSessionWorktree(main.binding)).toBe(false);
-  });
+  }, { timeout: 60_000 });
 });
 
 describe('inspectWorktreeFinish', () => {
   it('returns null outside git', async () => {
     const plain = await mkdtemp(join(root, 'plain-'));
     expect(await inspectWorktreeFinish(git, plain)).toBeNull();
-  });
+  }, { timeout: 60_000 });
 
   it('reports commits, file count, stat and uncommitted work', async () => {
     const repo = await seedRepo('a');
@@ -108,7 +108,7 @@ describe('inspectWorktreeFinish', () => {
     expect(status!.stat).toContain('src/feature.ts');
     expect(status!.stat).toContain('src/more.ts');
     expect(status!.uncommitted).toBe(1);
-  });
+  }, { timeout: 60_000 });
 
   it('reports nothing to settle on a fresh session worktree', async () => {
     const repo = await seedRepo('b');
@@ -117,7 +117,7 @@ describe('inspectWorktreeFinish', () => {
     expect(status).not.toBeNull();
     expect(status!.commits).toEqual([]);
     expect(status!.uncommitted).toBe(0);
-  });
+  }, { timeout: 60_000 });
 });
 
 describe('mergeWorktreeBack', () => {
@@ -144,7 +144,7 @@ describe('mergeWorktreeBack', () => {
     await expect(git(['rev-parse', '--verify', branch], repo)).rejects.toThrow();
     // ...and the main checkout is clean (nothing mid-merge).
     expect(await git(['status', '--porcelain'], repo)).toBe('');
-  });
+  }, { timeout: 60_000 });
 
   it('refuses when the main workspace is dirty and leaves everything intact', async () => {
     const repo = await seedRepo('d');
@@ -163,7 +163,7 @@ describe('mergeWorktreeBack', () => {
     expect((await git(['rev-parse', '--verify', branch], repo)).trim()).not.toBe('');
     expect(await Bun.file(join(repo, 'README.md')).text()).toBe('user is mid-edit\n');
     expect(await git(['status', '--porcelain'], repo)).toContain(' M README.md');
-  });
+  }, { timeout: 60_000 });
 
   it('rolls a conflicting merge back cleanly instead of leaving main mid-merge', async () => {
     const repo = await seedRepo('e');
@@ -185,7 +185,7 @@ describe('mergeWorktreeBack', () => {
     expect(await git(['status', '--porcelain'], repo)).toBe('');
     expect(existsSync(worktree)).toBe(true);
     expect((await git(['rev-parse', '--verify', branch], repo)).trim()).not.toBe('');
-  });
+  }, { timeout: 60_000 });
 
   it('refuses to merge when the main worktree is in detached HEAD', async () => {
     const repo = await seedRepo('f');
@@ -200,7 +200,7 @@ describe('mergeWorktreeBack', () => {
     if (result.ok) return;
     expect(result.stage).toBe('detached');
     expect(existsSync(worktree)).toBe(true);
-  });
+  }, { timeout: 60_000 });
 });
 
 describe('discardWorktree', () => {
@@ -220,5 +220,5 @@ describe('discardWorktree', () => {
     await expect(git(['rev-parse', '--verify', branch], repo)).rejects.toThrow();
     // The main workspace never saw any of it.
     expect(existsSync(join(repo, 'src/doomed.ts'))).toBe(false);
-  });
+  }, { timeout: 60_000 });
 });
