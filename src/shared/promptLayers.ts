@@ -243,21 +243,29 @@ NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file show
 
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
 export interface VisualRequestParts {
-  /** 手绘图片/图标/插画/示意图（→ SVG 或 generate_image 契约）。 */
+  /** 手绘图片/图标/插画（→ SVG 或 generate_image 契约）。静态几何示意词
+   *  （架构示意/流程示意等）命中时本闸门让位为 false——SVG 细则不随附，
+   *  避免两条细则同装时模型偏向 SVG（真机判例 2026-10-17）。 */
   picture: boolean;
   /** 数据图表（→ ```chart DSL）。 */
   chart: boolean;
   /** 地图/路线/地点（→ ```map DSL）。 */
   map: boolean;
   /** 几何示意/插画（架构示意图、流程示意、几何图、图标 → ```paint DSL）。
-   *  与 picture 故意重叠（召回优先）：重叠只多装配一条细则，通道争用由
-   *  PAINT_DSL_PROMPT 里的路由优先级句消解。 */
+   *  「插画/图标」与 picture 重叠（有机形状手绘自由度高，SVG 合理）；
+   *  几何示意词则独占——命中时 picture 让位，模型只见 paint 细则。 */
   paint: boolean;
 }
 
 export function detectVisualRequest(prompt: string): VisualRequestParts {
   const text = prompt ?? '';
-  const picture = /(?:画一?[张个幅副]|画个|绘制|手绘|画出来|绘图|生成一?[张个幅副](?:图|图片)|做一?[张个幅副]图|配图|插画|海报|封面|图标|logo|icon|贴纸|壁纸|svg|示意图|流程图|架构图|时序图|类图|思维导图|甘特图|uml|diagram|flow ?chart|draw|sketch|illustration|poster|thumbnail|mockup)/i.test(text);
+  // 静态几何示意词是专属意图,命中时 picture(svg)让位:泛画图词(画一张/
+  // 画个)会把「画一张三层架构示意图」同时点亮两条细则,SVG 契约措辞更强,
+  // 模型实测偏向 SVG(2026-10-17 判例)。weak 词(插画/图标,有机形状)维持
+  // 重叠——那类请求 svg/生成图仍是合理主通道。
+  const geometricStrong = /(?:架构图|架构示意|示意图|流程示意|分层图|层级图|schematic|geometric|layered diagram)/i.test(text);
+  const picture = !geometricStrong &&
+    /(?:画一?[张个幅副]|画个|绘制|手绘|画出来|绘图|生成一?[张个幅副](?:图|图片)|做一?[张个幅副]图|配图|插画|海报|封面|图标|logo|icon|贴纸|壁纸|svg|流程图|时序图|类图|思维导图|甘特图|uml|flow ?chart|draw|sketch|illustration|poster|thumbnail|mockup)/i.test(text);
   const chart = /(?:图表|柱状图|条形图|折线图|饼图|散点图|k线|candlestick|雷达图|树图|矩形树图|旭日图|可视化|数据图|画个图|做成图|趋势图|占比图|统计图|chart|graph|plot|visuali[sz])/i.test(text);
   const map = /(?:地图|路线|路径规划|导航|行程路线|骑行|自驾|怎么走|在哪[里儿]|坐标|经纬度|markers?|route|map\b|itinerary|directions)/i.test(text);
   // 几何示意/插画的召回词。不收裸「画」/「图」——那会吞掉 chart/picture 主通道。

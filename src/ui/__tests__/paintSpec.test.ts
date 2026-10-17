@@ -415,4 +415,26 @@ describe('parsePathD', () => {
     expect(parsePathD('10,20 30,40')).toBeNull(); // numbers before any command
     expect(parsePathD('M0,0 X50')).toBeNull(); // unknown command
   });
+
+  test('a "canvas" wrapper object is unfolded, top-level keys win', () => {
+    // Real-machine shape: models sometimes wrap width/height/background in a
+    // "canvas" object. Without unfolding, the wrapper is silently dropped and
+    // the picture renders at default size with no background.
+    const wrapped = parsePaintSource(
+      '{"canvas":{"width":400,"height":400,"background":"#FFF8E1"},"shapes":[{"type":"circle","cx":50,"cy":50,"r":20}]}',
+    );
+    expect(wrapped.spec.width).toBe(400);
+    expect(wrapped.spec.height).toBe(400);
+    expect(wrapped.spec.background).toBe('#FFF8E1');
+    // Top-level keys beat the wrapper's.
+    const mixed = parsePaintSource(
+      '{"canvas":{"width":999,"height":999},"width":320,"height":200,"shapes":[{"type":"rect","x":0,"y":0,"w":1,"h":1}]}',
+    );
+    expect(mixed.spec.width).toBe(320);
+    expect(mixed.spec.height).toBe(200);
+    // A non-object "canvas" key is inert, and a well-formed spec without a
+    // wrapper is unaffected.
+    expect(parsePaintSource('{"canvas":"none","shapes":[{"type":"rect","x":0,"y":0,"w":1,"h":1}]}').spec.width).toBe(640);
+    expect(parsePaintSource('{"width":100,"shapes":[{"type":"rect","x":0,"y":0,"w":1,"h":1}]}').spec.width).toBe(100);
+  });
 });

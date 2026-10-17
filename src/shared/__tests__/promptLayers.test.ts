@@ -272,14 +272,31 @@ describe('L1 behavior contracts', () => {
   });
 
   it('routes geometric requests to paint without grabbing bare 画/图', () => {
-    // Recall-first: these MUST arm the paint detail (and deliberately overlap
-    // the picture regex — the DSL's priority sentence resolves the overlap).
+    // Recall-first: these MUST arm the paint detail.
     for (const hit of ['画一张三层架构示意图', '来个几何插画', '画个登录图标', '画一个流程示意图', 'schematic of the layers']) {
       expect(detectVisualRequest(hit).paint).toBe(true);
     }
     // Bare 画/图 without a geometric keyword stays unrouted (看图/画一笔 等).
     for (const miss of ['帮我看看这张图', '画蛇添足是什么意思', '改一下标题', '总结这段话']) {
       expect(detectVisualRequest(miss).paint).toBe(false);
+    }
+  });
+
+  it('does NOT arm the svg contract for static-geometry requests (2026-10-17 case)', () => {
+    // 「画一张三层架构示意图」armed both svg and paint details; the SVG
+    // contract's wording is stronger and the model went SVG (real-machine
+    // case). Geometric words are paint-exclusive now: the svg detail must
+    // stay unarmed so paint is the only inline-drawing contract in context.
+    for (const text of ['画一张三层架构示意图', '画个系统架构图，矩形加箭头', 'a schematic of the data flow', 'layered diagram of the stack']) {
+      const wants = detectVisualRequest(text);
+      expect(wants.paint, text).toBe(true);
+      expect(wants.picture, text).toBe(false);
+    }
+    // Organic image requests keep the svg contract — 插画/图标 stay overlapped
+    // on purpose (freehand shapes suit svg/generation better than paint).
+    for (const text of ['画一张鸟的图', '生成一个图标', '画个头像插画']) {
+      const wants = detectVisualRequest(text);
+      expect(wants.picture, text).toBe(true);
     }
   });
 

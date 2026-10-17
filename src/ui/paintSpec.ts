@@ -695,7 +695,16 @@ export function parsePaintSource(raw: string): {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('paint 数据需要是一个 JSON 对象');
   }
-  const obj = parsed as Record<string, unknown>;
+  let obj = parsed as Record<string, unknown>;
+  // Real-machine case: models sometimes wrap the spec in a "canvas" object —
+  // {"canvas":{width,height,background},"shapes":[…]} — reading fine either
+  // way. Unfold the wrapper instead of silently dropping its width/height/
+  // background; top-level keys always win, so a stray "canvas" key on a
+  // well-formed spec changes nothing.
+  const wrap = obj.canvas;
+  if (typeof wrap === 'object' && wrap !== null && !Array.isArray(wrap)) {
+    obj = { ...(wrap as Record<string, unknown>), ...obj };
+  }
 
   const ctx: ParseCtx = { count: 0 };
   const shapes = parseShapeList(obj.shapes, 0, ctx) ?? [];
