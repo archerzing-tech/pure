@@ -46,6 +46,7 @@ import {
   renderErrorClusters,
   renderExperienceList,
   renderObservationStats,
+  renderParallelismSection,
   renderArchivedRolesSection,
   renderQuarantineSection,
   renderRevertedOverlaysSection,
@@ -3626,6 +3627,13 @@ export class SettingsPanel {
         now, caseCounts, roles: roleSurface,
         trialBadges: buildTrialBadges(await loadGeneratedRoles(), read.records, now),
       });
+    }
+
+    // B5 并行机会：同一观测切片，把「派了几支、实际同时跑了几支」摆出来。只读，
+    // 不改判据——串行扇出/扇出超限要攒够数据才谈硬化。
+    const parallelismEl = document.getElementById('evolution-parallelism');
+    if (parallelismEl) {
+      parallelismEl.innerHTML = renderParallelismSection(read.records, { now });
     }
 
     // T4 成本视图：同一观测切片，按 角色 × provider 聚合 T1 的委派 usage。

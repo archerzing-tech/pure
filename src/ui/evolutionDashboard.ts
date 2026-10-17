@@ -24,6 +24,7 @@ import { SUBAGENT_ADVICE_WINDOW_DAYS, type SubagentAdvice } from '../shared/suba
 import { postApplyStats } from '../shared/adviceApplication';
 import type { AdviceAppliedObservation, PromptObservation } from '../shared/promptObservability';
 import type { RoleEffectSlice, RunEffectSlice, StrategyDimension, StrategyEffectSummary } from '../shared/strategyEffect';
+import { MIRRORED_READ_CONCURRENCY, summarizeParallelism } from '../shared/parallelismSummary';
 import { toolDisplayName } from './toolRow';
 import type { RevertedOverlayEntry } from './overlayRevertHost';
 import { formatCostUsd } from '../shared/usage';
@@ -368,6 +369,68 @@ export function renderStrategySection(
       : `<div class="evo-empty">${escapeHtml(t('evolution.dimension.empty', '这个维度还没有带策略标记的记录'))}</div>`;
   }
   return `<div class="evo-tables">${[table, renderRoleTable(strategy.byRole, overlays)].filter(Boolean).join('')}</div>`;
+}
+
+// ── 并行机会（B5）──
+
+/**
+ * B5 ——「派了几支、实际同时跑了几支」。
+ *
+ * 只读同一份观测切片（T1 的 delegations），不改任何行为：判据硬化与并发上限都要等
+ * 这里先出数。空态刻意分两种——「窗口内还没跑过带委派的运行」与「跑过、但每轮都只有
+ * 一支」，因为后者才是「还没出现并行机会」，前者只是没数据。
+ */
+export function renderParallelismSection(
+  records: readonly PromptObservation[],
+  options: { now: number; cap?: number },
+): string {
+  const cap = options.cap ?? MIRRORED_READ_CONCURRENCY;
+  const summary = summarizeParallelism(records, { now: options.now, cap });
+  const title = escapeHtml(t('evolution.parallelism.title', '并行机会'));
+  if (summary.runs === 0) {
+    return `<div class="evo-table-wrap"><div class="evo-table-title">${title}</div>
+      <div class="evo-stat-note">${escapeHtml(t('evolution.parallelism.empty', '窗口内还没有带委派记录的运行——跑一次会扇出的任务后，这里会显示「派了几支、实际同时跑了几支」。'))}</div></div>`;
+  }
+  if (summary.multiDelegationRuns === 0) {
+    return `<div class="evo-table-wrap"><div class="evo-table-title">${title}</div>
+      <div class="evo-stat-note">${escapeHtml(
+        t('evolution.parallelism.singleOnly', '窗口内 {n} 轮带委派，但每轮都只有一支——还没有出现并行机会。').replace('{n}', formatCount(summary.runs)),
+      )}</div></div>`;
+  }
+  const head = `<div class="evo-stat-note">${escapeHtml(
+    t('evolution.parallelism.head', '扇出 ≥2 支的运行 {multi} 轮：其中 {seq} 轮全程串行（本可并行却没并行），{ex} 轮扇出超过并发上限 {cap}（多出来的只能排队）；窗口内观察到最大同时委派 {max} 支。')
+      .replace('{multi}', formatCount(summary.multiDelegationRuns))
+      .replace('{seq}', formatCount(summary.sequentialRuns))
+      .replace('{ex}', formatCount(summary.exceedingRuns))
+      .replace('{cap}', String(cap))
+      .replace('{max}', String(summary.maxConcurrencySeen)),
+  )}</div>`;
+  const body = summary.rows.slice(0, 20).map((row) => {
+    const shape = row.sequential
+      ? t('evolution.parallelism.shape.sequential', '串行扇出')
+      : row.exceedsCap
+        ? t('evolution.parallelism.shape.exceeds', '扇出超限')
+        : t('evolution.parallelism.shape.parallel', '并行');
+    return `<tr>
+    <td class="evo-table-key">${escapeHtml(relativeTime(row.startedAt, options.now))}</td>
+    <td>${escapeHtml(formatCount(row.delegations))}</td>
+    <td>${escapeHtml(formatCount(row.maxConcurrency))}</td>
+    <td>${escapeHtml(shape)}</td>
+  </tr>`;
+  }).join('');
+  return `<div class="evo-table-wrap">
+    <div class="evo-table-title">${title}</div>
+    ${head}
+    <table class="evo-table">
+      <thead><tr>
+        <th>${escapeHtml(t('evolution.parallelism.col.time', '时间'))}</th>
+        <th>${escapeHtml(t('evolution.parallelism.col.delegations', '委派支数'))}</th>
+        <th>${escapeHtml(t('evolution.parallelism.col.concurrent', '同时最大'))}</th>
+        <th>${escapeHtml(t('evolution.parallelism.col.shape', '形状'))}</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
 }
 
 // ── 子代理角色建议（E1.4）──
