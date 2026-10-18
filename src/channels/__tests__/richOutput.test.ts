@@ -84,6 +84,9 @@ describe('renderRichOutput', () => {
 });
 
 describe('local renderer (real rasterization)', () => {
+  // Real rasterization cold-loads the whole markdown/echarts module chain —
+  // not a performance test, so the default 5s bun timeout is wrong (a loaded
+  // Windows CI runner blew past it once, 2026-10-18). 30s, same for SVG.
   it('turns a ```chart block into a real PNG', async () => {
     const renderers = createLocalRichRenderers();
     const png = await renderers.chartToPng!('title 销量\ntype bar\n苹果 10\n香蕉 20');
@@ -91,14 +94,14 @@ describe('local renderer (real rasterization)', () => {
     expect(png!.length).toBeGreaterThan(1000);
     // PNG magic bytes.
     expect([...png!.slice(0, 4)]).toEqual([137, 80, 78, 71]);
-  });
+  }, 30000);
 
   it('turns an inline SVG into a PNG', async () => {
     const renderers = createLocalRichRenderers();
     const png = await renderers.svgToPng!('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><circle cx="20" cy="20" r="18" fill="#3b82f6"/></svg>');
     expect(png).not.toBeNull();
     expect(png!.length).toBeGreaterThan(100);
-  });
+  }, 30000);
 
   it('does not claim mermaid/puml support', () => {
     const renderers = createLocalRichRenderers();

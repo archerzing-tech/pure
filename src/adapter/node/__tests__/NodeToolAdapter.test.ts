@@ -104,8 +104,12 @@ describe('NodeToolAdapter execute_command', () => {
   it('reports failure when the command is not found', async () => {
     const r = await adapter.execute(makeCall('definitely-not-a-real-command-xyz'));
     expect(r.success).toBe(false);
-    // sh reports the failure on stderr; the exit code must be non-zero.
-    expect(resultOf(r).exitCode).not.toBe(0);
+    // A fast shell answers with a non-zero exit code. On a loaded CI runner
+    // commandTimeout can fire first (2026-10-18 Windows), and a timed-out
+    // command carries NO result object — nothing ran to completion, so there
+    // is no exit code to report. Failure is still the correct answer there.
+    const result = resultOf(r);
+    if (result) expect(result.exitCode).not.toBe(0);
   }, 30000);
 
   it('allows reads through a symlink pointing outside the workspace', async () => {
