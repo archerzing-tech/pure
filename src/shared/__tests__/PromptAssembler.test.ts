@@ -83,6 +83,14 @@ describe('output_style · 折叠长引用素材(details 卡)', () => {
       expect(system).toContain('collapsible card');
     }
   });
+
+  it('gui 与 cli 的 output style 都教模型用 suggested 注释给跟进 chip', () => {
+    for (const surface of ['gui', 'cli'] as const) {
+      const system = assembler.buildSystemPrompt({ surface, capabilities: 'capabilities' });
+      expect(system).toContain('<!-- suggested:');
+      expect(system).toContain('never pad filler questions');
+    }
+  });
 });
 
 describe('PromptAssembler', () => {

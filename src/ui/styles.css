@@ -6618,6 +6618,31 @@ body.window-maximized #boot-splash {
   margin-bottom: 6px;
 }
 
+/* Suggested follow-up chips: the model's "接下来可以…" rendered as tappable
+   next questions under the reply. Quiet pills that light up on hover. */
+.followup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 2px;
+}
+.followup-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.followup-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* Inline code (NOT inside <pre>) */
 .bubble code:not(pre code) {
   background: var(--bg-input);

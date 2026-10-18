@@ -2057,6 +2057,24 @@ export class ChatController {
     this.transcriptHost = options.host ?? null;
     this.viewActive = options.viewActive ?? true;
     this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
+    this.wireFollowupChips();
+  }
+
+  /** Suggested-followup chips (rendered by markdown.ts) dispatch a bubbling
+   * 'pure-followup' event; the owning transcript answers it by sending the
+   * question as the next user turn. The target check keeps shared-host
+   * sessions (single-session mode roots everything at #chat) from answering
+   * each other's chips — only chips inside THIS transcript send through THIS
+   * controller. */
+  private wireFollowupChips(): void {
+    const host = this.transcriptHost ?? document.getElementById('chat');
+    if (!host) return;
+    host.addEventListener('pure-followup', (e) => {
+      const myRoot = this.transcriptElement();
+      if (!(e.target instanceof Element) || !myRoot.contains(e.target)) return;
+      const q = (e as CustomEvent<string>).detail;
+      if (typeof q === 'string' && q.trim()) void this.send(q.trim());
+    });
   }
 
   /** The transcript column this session streams into: its own host when in

@@ -441,6 +441,59 @@ export function bindTaskCheckboxes(container: HTMLElement): void {
   }
 }
 
+// ── Suggested follow-ups (tappable next-question chips under a reply) ──
+// The model ends a reply that opens an obvious next step with ONE HTML comment:
+// `<!-- suggested: question? ;; question? -->`. The comment never renders
+// during streaming (marked treats it as a comment; DOMPurify strips comments
+// anyway), so extraction here is the only thing that can surface it — as
+// tappable chips that send the question as the next user turn. Chat-level
+// wiring: the chips dispatch a bubbling 'pure-followup' CustomEvent, and the
+// owning ChatApp answers it on its own transcript (constructor listens on the
+// transcript host and verifies the event target lives inside it).
+const FOLLOWUP_COMMENT_RE = /<!--\s*suggested:\s*([\s\S]*?)-->/g;
+const FOLLOWUP_MAX = 4;
+
+export interface SuggestedFollowups {
+  text: string;
+  questions: string[];
+}
+
+/** Pull the suggested-followups comment out of a reply and strip it from the
+ * rendered text. List bullets the model may have wrapped questions in
+ * (`- …`, `1. …`) are cleaned off; empty pieces and anything past 4 are
+ * dropped. No comment → text unchanged, zero questions. */
+export function extractSuggestedFollowups(md: string): SuggestedFollowups {
+  const questions: string[] = [];
+  const text = md.replace(FOLLOWUP_COMMENT_RE, (_m, body: string) => {
+    for (const piece of body.split(';;')) {
+      const q = piece.trim().replace(/^[-*•\d.)\s]+/, '').trim();
+      if (q && questions.length < FOLLOWUP_MAX) questions.push(q);
+    }
+    return '';
+  });
+  return { text, questions };
+}
+
+/** Render the extracted questions as a chip row appended to the bubble.
+ * textContent (not innerHTML) keeps question text inert by construction.
+ * Exported for the DOM tests (same rationale as bindTaskCheckboxes). */
+export function appendFollowupChips(container: HTMLElement, questions: string[]): void {
+  if (questions.length === 0 || container.querySelector('.followup-chips')) return;
+  const row = document.createElement('div');
+  row.className = 'followup-chips';
+  for (const q of questions) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'followup-chip';
+    chip.textContent = q;
+    chip.addEventListener('click', () => {
+      chip.dispatchEvent(new CustomEvent('pure-followup', { detail: q, bubbles: true }));
+    });
+    row.appendChild(chip);
+  }
+  container.appendChild(row);
+}
+
 function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
   slot.setAttribute('data-state', state);
   slot.setAttribute('aria-busy', String(state === 'loading'));
@@ -2451,8 +2504,10 @@ export async function renderMarkdown(
   // marked always appends a trailing \n; trim it — with white-space:pre-wrap on
   // the bubble, that trailing newline would render as a visible blank line.
   // Strip ANSI escape codes (logs / colored command output echo) so they render
-  // as plain text rather than mojibake.
-  const html = (md.parse(normalizeMapFence(stripAnsi(text)), { async: false }) as string).replace(/\n+$/, '');
+  // as plain text rather than mojibake. Suggested-followups comments come out
+  // before parsing — they never render as prose, only as chips at the end.
+  const { text: stripped, questions: suggestedQuestions } = extractSuggestedFollowups(stripAnsi(text));
+  const html = (md.parse(normalizeMapFence(stripped), { async: false }) as string).replace(/\n+$/, '');
   // Defense-in-depth: the custom renderer already escapes raw HTML and
   // restricts link/image schemes, but sanitize the final HTML anyway so any
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
@@ -2526,6 +2581,10 @@ export async function renderMarkdown(
 
   // 6) Add copy + save buttons to code blocks.
   addCodeBlockActions(container);
+
+  // 7) Suggested follow-ups: the chips land after every rendered block so a
+  // reply always ends with them, like a colleague's "接下来可以…" aside.
+  appendFollowupChips(container, suggestedQuestions);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
