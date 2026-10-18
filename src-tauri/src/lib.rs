@@ -17241,6 +17241,30 @@ enum CloseDisposition {
     Close,
 }
 
+/// One append-only line per shutdown decision into ~/.pure/exit_audit.log
+/// (epoch-ms, same clock as the session ledger). A crash leaves an .ips; a
+/// clean exit leaves nothing — this is the nothing-catcher, so a "pure 闪退"
+/// report can be answered by reading one file instead of unified-log
+/// archaeology. Never panics, never blocks shutdown on failure.
+fn audit_exit(reason: &str) {
+    let line = format_audit_line(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        reason,
+    );
+    let path = format!("{}/.pure/exit_audit.log", pure_home_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn format_audit_line(ts_ms: u128, reason: &str) -> String {
+    format!("{ts_ms} {reason}\n")
+}
+
 fn close_disposition(running_sessions: usize, open_windows: usize) -> CloseDisposition {
     if running_sessions > 0 {
         CloseDisposition::BackgroundAndHint
@@ -17260,6 +17284,11 @@ mod close_disposition_tests {
         assert!(matches!(close_disposition(2, 1), CloseDisposition::BackgroundAndHint));
         assert!(matches!(close_disposition(0, 1), CloseDisposition::Quit));
         assert!(matches!(close_disposition(0, 2), CloseDisposition::Close));
+    }
+
+    #[test]
+    fn audit_line_is_epoch_ms_space_reason_newline() {
+        assert_eq!(format_audit_line(1792296470373, "tray-quit exit(0)"), "1792296470373 tray-quit exit(0)\n");
     }
 }
 
@@ -17484,7 +17513,10 @@ pub fn run() {
                     let id = event.id().as_ref();
                     match id {
                         "tray-show" => show_all_windows(app),
-                        "tray-quit" => app.exit(0),
+                        "tray-quit" => {
+                            audit_exit("tray-quit exit(0)");
+                            app.exit(0);
+                        }
                         // Roadmap 5.3: per-session entries pushed by the
                         // frontend — 前往 comes out of the tray AND switches
                         // (the frontend listener does the switch); 取消 stops
@@ -17538,6 +17570,7 @@ pub fn run() {
                 match close_disposition(running, app.webview_windows().len()) {
                     CloseDisposition::BackgroundAndHint => {
                         api.prevent_close();
+                        audit_exit(&format!("close-requested hide (tasks running: {running})"));
                         let _ = window.hide();
                         // Best effort — a failed hint must never block hiding.
                         let body = format!("还有 {running} 个任务在跑，窗口关了它们也继续；进度和取消都在托盘菜单里。");
@@ -17548,9 +17581,12 @@ pub fn run() {
                     }
                     CloseDisposition::Quit => {
                         api.prevent_close();
+                        audit_exit(&format!("close-requested quit (idle, windows: {})", app.webview_windows().len()));
                         app.exit(0);
                     }
-                    CloseDisposition::Close => {}
+                    CloseDisposition::Close => {
+                        audit_exit("close-requested close (multi-window, others stay)");
+                    }
                 }
             }
         })
@@ -17691,6 +17727,15 @@ pub fn run() {
                 has_visible_windows: false,
                 ..
             } => show_all_windows(_app),
+            // Exit audit: `code: Some(n)` = an explicit `app.exit(n)` somewhere
+            // (each such call site logs its own reason line right before);
+            // `code: None` = the last window closed with no explicit exit. A
+            // vanished app with no crash report is a clean exit — this turns
+            // "which clean-exit path was it" into one line in a file.
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                audit_exit(&format!("exit-requested code={code:?}"));
+            }
+            tauri::RunEvent::Exit => audit_exit("run-exit"),
             _ => {}
         });
 }
