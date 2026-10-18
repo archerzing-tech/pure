@@ -34,6 +34,7 @@ import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBud
 import { resolvePromptBudget } from '../shared/PromptAssembler';
 import type { Message } from '../shared/types';
 import { ComposerSelect } from './composerSelect';
+import { wireComposerDraft } from './composerDraft';
 import { renderMarkdown, stripToolCallXml } from './markdownLoader';
 import { createToolRow, finalizeToolRow, markToolRowStopped, appendToolStreamLine, groupToolRoundRuns, toolCardKind, toolGridClass } from './toolRow';
 import { appendStoredThinking } from './thinkingCard';
@@ -413,9 +414,21 @@ const inputHistoryStore = new SessionInputHistoryStore();
 const promptHistory = new ComposerInputHistory(promptEl, inputHistoryStore, () => chat.getSessionId());
 const landingHistory = landingPrompt ? new ComposerInputHistory(landingPrompt, inputHistoryStore, () => chat.getSessionId()) : null;
 void promptHistory.load();
+// ── Per-session composer drafts: a half-typed message survives refresh,
+// restart and session switches. Same lifecycle as the input history above —
+// the composer is ONE shared element, so without this the outgoing session's
+// text simply became the incoming session's box content.
+const composerDrafts = wireComposerDraft(promptEl, {
+  getSessionId: () => chat.getSessionId(),
+  onRestored: () => {
+    autoResizePrompt();
+    sendBtn.disabled = !promptEl.value.trim() && !pasteChips.hasAttachments();
+  },
+});
 chat.onSessionIdChanged = (sessionId) => {
   void promptHistory.onSessionChanged(sessionId);
   landingHistory?.onSessionChanged(sessionId);
+  composerDrafts.onSessionChanged(sessionId);
 };
 
 // ── Batch task queue (single-flight per worktree since 4.2: tasks in the
@@ -1602,6 +1615,7 @@ promptEl.addEventListener('keydown', (e) => {
         const held = holdIfScheduled(text, text);
         if (!held) void chat.interject(text, [], text);
         promptEl.value = '';
+        composerDrafts.onSent();
         promptEl.style.height = 'auto';
         promptEl.placeholder = t('input.queued');
       }
@@ -1778,6 +1792,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   if (slash) {
     (sourceEl === promptEl ? promptHistory : landingHistory)?.remember(sourceEl.value);
     sourceEl.value = '';
+    if (sourceEl === promptEl) composerDrafts.onSent();
     sourceEl.style.height = 'auto';
     if (sourceEl === landingPrompt) {
       landingSend.disabled = true;
@@ -1829,6 +1844,7 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   // 过了所有门，这条指令真的要发了 —— 记进输入历史（之后 ↑ 可以翻回来）。
   (sourceEl === promptEl ? promptHistory : landingHistory)?.remember(sourceEl.value);
   sourceEl.value = '';
+  if (sourceEl === promptEl) composerDrafts.onSent();
   sourceEl.style.height = 'auto';
   if (sourceEl === landingPrompt) {
     landingSend.disabled = true;
