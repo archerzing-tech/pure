@@ -21,8 +21,24 @@ jobs:
         with:
           bun-version: 1.4.3
 
+      # 2026-10-18 连续两轮 CI 死在 npm registry 掐大包 tarball(onnxruntime
+      # 系/mermaid ConnectionClosed)——缓存命中时不再走网络,重试兜住残余瞬断。
+      - name: Restore bun download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - name: Install dependencies
-        run: bun install
+        run: |
+          for i in 1 2 3; do
+            bun install && exit 0
+            echo "::warning::bun install attempt $i failed; retrying in 15s"
+            sleep 15
+          done
+          exit 1
 
       - name: Typecheck
         run: bun run typecheck
@@ -80,8 +96,23 @@ jobs:
         with:
           bun-version: 1.4.3
 
+      - name: Restore bun download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - name: Install dependencies
-        run: bun install
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            bun install && exit 0
+            echo "::warning::bun install attempt $i failed; retrying in 15s"
+            sleep 15
+          done
+          exit 1
 
       - name: Typecheck
         run: bun run typecheck
