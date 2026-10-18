@@ -314,6 +314,7 @@ chat.onStreamingStateChange((streaming) => {
     landingSend.innerHTML = stopSvg;
     landingSend.title = t('input.stop.title');
     landingSend.setAttribute('aria-label', t('input.stop.title'));
+    syncTurnVariantBar(); // 流式起：无可用变体组即隐藏（重生成中的让位）
     updateContextPanelStage(true);
   } else {
     const sendSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
@@ -330,6 +331,7 @@ chat.onStreamingStateChange((streaming) => {
     landingSend.title = t('input.send.title');
     landingSend.setAttribute('aria-label', t('input.send.title'));
     landingSend.disabled = !landingPrompt.value.trim() && !pasteChips.hasAttachments();
+    syncTurnVariantBar(); // 流式落：新回合若有变体账（重生成完成）条就回来
     updateContextPanelStage(false);
   }
 });
@@ -430,6 +432,58 @@ chat.onSessionIdChanged = (sessionId) => {
   landingHistory?.onSessionChanged(sessionId);
   composerDrafts.onSessionChanged(sessionId);
 };
+
+// ── 回复版本条（重新生成 + ‹n/m› 切换，最后一轮）────────────────────────
+// 条住 composer 上方：不挂转写流里就没有「被后续气泡/收尾卡顶位」的时序
+// 问题，live 与重放两端共用同一个显隐口径（chat.getTurnVariantInfo）。
+const turnVariantBar = document.getElementById('turn-variant-bar') as HTMLDivElement;
+const tvPrev = document.getElementById('tv-prev') as HTMLButtonElement;
+const tvPos = document.getElementById('tv-pos') as HTMLSpanElement;
+const tvNext = document.getElementById('tv-next') as HTMLButtonElement;
+const tvRegen = document.getElementById('tv-regen') as HTMLButtonElement;
+
+function syncTurnVariantBar(): void {
+  const info = chat.getTurnVariantInfo();
+  if (!info) {
+    turnVariantBar.hidden = true;
+    return;
+  }
+  turnVariantBar.hidden = false;
+  tvPos.textContent = `${info.active + 1}/${info.count}`;
+  tvPrev.disabled = info.active <= 0;
+  tvNext.disabled = info.active >= info.count - 1;
+  tvRegen.textContent = t('turnVariants.regenerate');
+}
+
+// 切换变体 = 内存链已换 + 已全量落盘，这里从盘重读当前会话整屏重放
+// （复用冷恢复的渲染链，折叠/卡片/染色全一致）。读盘前后守会话竞态：
+// 用户已切走就放弃，交给新会话自己的渲染。
+async function reloadVisibleSessionTranscript(): Promise<void> {
+  const sessionId = chat.getSessionId();
+  const loaded = await loadSession(sessionId);
+  if (!loaded || chat.getSessionId() !== sessionId) return;
+  const opened = chat.openSession(sessionId);
+  await renderSessionMessages(loaded.snapshot, opened.host);
+}
+
+tvPrev.addEventListener('click', () => {
+  const info = chat.getTurnVariantInfo();
+  if (info && info.active > 0) void chat.switchTurnVariant(info.active - 1);
+});
+tvNext.addEventListener('click', () => {
+  const info = chat.getTurnVariantInfo();
+  if (info && info.active < info.count - 1) void chat.switchTurnVariant(info.active + 1);
+});
+tvRegen.addEventListener('click', () => {
+  void chat.regenerateLastTurn();
+});
+
+chat.onTurnVariantsChanged((reason) => {
+  if (reason === 'switched') void reloadVisibleSessionTranscript();
+  // 'regenerated' 两个来源统一为刷条：重生成开始时流式已起、info 为 null
+  // 即隐藏；落盘同步追加了新变体则刷新 ‹n/m›。
+  syncTurnVariantBar();
+});
 
 // ── Batch task queue (single-flight per worktree since 4.2: tasks in the
 // visible conversation run through the facade; tasks of OTHER worktrees run
@@ -1335,6 +1389,8 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
   // E6：待办队列卡同一拍重建（快照带 pendingQueue 的会话恢复可见账）；派发
   // 不在这里抢跑——排队的活等下一个自然收尾点（loadFromStorage 只装账）。
   chat.restoreQueueAffordance();
+  // 回复版本条同一拍刷新：恢复/切换变体重放后，条按快照带回的变体账显隐。
+  syncTurnVariantBar();
   // A session restore rebuilds the transcript from scratch, so it always
   // lands at the newest content — force the pin state the same way a fresh
   // stream would, then scroll through the shared coalesced helper.

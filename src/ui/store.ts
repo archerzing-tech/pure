@@ -16,6 +16,7 @@ import type { PlanProgressSnapshot } from './planProgress';
 import type { TaskScript } from '../shared/taskScript';
 import type { SessionLedger } from '../shared/sessionLedger';
 import type { PathRepair } from './pathIndex';
+import type { TurnVariantGroup } from './turnVariants';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
 
@@ -130,6 +131,11 @@ export interface SessionUiState {
    *  不升快照版本号。 */
   strippedBranchIds?: string[];
   strippedBranchTopics?: string[];
+  /** 回复版本账（重新生成/版本切换，2026-10-18）：最后一个用户回合的变体组
+   *  （各变体 = 该回合完整消息切片）。随快照走——重启后 ‹n/m› 切换条原样
+   *  回来。恢复侧 normalizeTurnVariants 兜底，损坏档归 null 不崩；可选字段
+   *  对 v3 向后兼容（paused/sessionLedger 同款先例），不升快照版本号。 */
+  turnVariants?: TurnVariantGroup | null;
 }
 
 export interface PlanState {

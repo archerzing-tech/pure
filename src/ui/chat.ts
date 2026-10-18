@@ -20,6 +20,7 @@ import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, re
 import { promptObservability } from '../shared/promptObservability';
 import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
+import { lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
@@ -2049,6 +2050,12 @@ export class ChatController {
   private sessionEndedPaused = false;
   private liveTranscript: LiveTranscriptWindow;
   private liveTurn: LiveTurnHandle | null = null;
+  // 回复版本账（重新生成/版本切换）：挂在最后一个用户回合上的变体组。
+  // this.messages 永远只含选中链——切换 = 尾段替换，模型上下文绝不同时
+  // 带着同一问的两份答。持久化随快照 uiState.turnVariants 走。
+  private turnVariants: TurnVariantGroup | null = null;
+  /** 变体账变化（重生成入册/切换生效）后通知宿主刷新切换条与重放。 */
+  onTurnVariantsChanged: ((reason: 'regenerated' | 'switched') => void) | null = null;
 
   constructor(options: ChatControllerOptions = {}) {
     this.sessionId = `session_${Date.now()}`;
@@ -2903,6 +2910,10 @@ export class ChatController {
     // 空账，读侧不崩）。澄清句柄不恢复：一个已死的进程收不到那个回答，句柄
     // 跟着旧进程走。
     this.sessionLedger = normalizeSessionLedger(snapshot.uiState.sessionLedger);
+    // 回复版本账随快照回来（normalize 兜底——损坏档归 null，读侧不崩）。
+    // userText 是否仍对得上最后一个用户回合，留到 regenerate/switch 运行时
+    // 校验：恢复时装 messages 的时序在这里之后，就地比对不了。
+    this.turnVariants = normalizeTurnVariants(snapshot.uiState.turnVariants);
     // 缺口②机械排除（第 6 期）：离场账随快照回来——reload 后装配侧据此继续
     // 剔除（通道③/④残留不复活）。渲染通道留底从**已持久化**的 toolExec 回灌
     // （剔除只动引擎上下文，渲染通道始终是原始输出——reload 后不能再落盘时拿
@@ -3893,7 +3904,116 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.restoreDraftHandler = fn;
   }
 
-  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void, userPathRepairs: PathRepair[] = []) {
+  // ── 回复版本（重新生成 + ‹n/m› 切换）────────────────────────────────
+  // 账本只挂最后一个用户回合（变体只在「它是最后一轮」时产生）；切换 =
+  // messages 尾段替换 + 全量落盘，重放由宿主（main.ts）在
+  // onTurnVariantsChanged 里编排。
+
+  /** 切换条数据：最后回合的变体组形状；没有可用组（无历史/流式中）返回
+   *  null。userText 运行时校验在这里做——恢复时装 messages 的时序比
+   *  loadFromStorage 晚，就地比对不了。 */
+  getTurnVariantInfo(): { count: number; active: number } | null {
+    if (this.streaming) return null;
+    const group = this.turnVariants;
+    if (!group || group.variants.length < 1) return null;
+    const start = lastUserTurnStart(this.messages);
+    if (start === null || this.messages[start]?.content !== group.userText) return null;
+    return { count: group.variants.length, active: group.active };
+  }
+
+  /** 重新生成最后一个用户回合的回复：当前回复入变体账，messages 截断到
+   *  回合起点后按原输入重跑（skipUserPersist——user_input 与用户气泡都
+   *  已在账上/屏上，不重来）。新回复落定后成为最新变体。 */
+  async regenerateLastTurn(): Promise<void> {
+    if (this.streaming) return;
+    const start = lastUserTurnStart(this.messages);
+    if (start === null) return;
+    const userMessage = this.messages[start];
+    const slice = this.messages.slice(start);
+    // 账本挂靠校验：现有组不属于这个回合（换了个问题）就弃旧开新。当前
+    // 显示版先入册占位（去重：切回旧变体后再重生成，同一份内容不重复
+    // 占位）；重跑出来的「新版」槽位由落盘时的 syncTurnVariantsWithMessages
+    // 追加——不在这里预占，否则落定回写会覆盖掉刚入册的旧版。
+    if (!this.turnVariants || this.turnVariants.userText !== userMessage.content) {
+      this.turnVariants = { userText: userMessage.content, variants: [{ messages: slice, fingerprint: variantFingerprint(slice) }], active: 0 };
+    } else {
+      const fingerprint = variantFingerprint(slice);
+      let position = this.turnVariants.variants.findIndex((v) => v.fingerprint === fingerprint);
+      if (position === -1) {
+        this.turnVariants.variants.push({ messages: slice, fingerprint });
+        position = this.turnVariants.variants.length - 1;
+        while (this.turnVariants.variants.length > TURN_VARIANT_CAP) this.turnVariants.variants.shift();
+      }
+      this.turnVariants.active = position;
+    }
+    // 截断 + 清屏：最后一个用户气泡之后的 DOM（旧回复、工具卡、状态行）
+    // 全部让位，重跑的流式输出从同一位置长回来。
+    this.messages = this.messages.slice(0, start);
+    this.pruneTranscriptAfterLastUserBubble();
+    this.onTurnVariantsChanged?.('regenerated');
+    await this.send(
+      userMessage.content,
+      userMessage.images ?? [],
+      userMessage.content,
+      false,
+      userMessage.attachments ?? [],
+      undefined,
+      [],
+      { skipUserPersist: true },
+    );
+  }
+
+  /** 切到最后回合的第 index 个变体：messages 尾段换上目标变体的切片
+   *  （当前显示本就在自己的槽位里，无回写必要——尾段切片不受 limit 裁
+   *  剪影响，fingerprint 不会漂）。落盘后由宿主重放转写。 */
+  async switchTurnVariant(index: number): Promise<void> {
+    if (this.streaming) return;
+    const group = this.turnVariants;
+    if (!group || index < 0 || index >= group.variants.length) return;
+    const start = lastUserTurnStart(this.messages);
+    if (start === null || this.messages[start]?.content !== group.userText) return;
+    group.active = index;
+    this.messages = [...this.messages.slice(0, start), ...group.variants[index].messages];
+    await this.persistSession(this.messages, new Map(), []);
+    this.onTurnVariantsChanged?.('switched');
+  }
+
+  /** 落盘前的账本同步：将落盘的消息尾段若不等于 active 槽位（重生成刚
+   *  落定的新回复 / 暂停提交的中间态），作为新变体追加并指 active。返回
+   *  是否追加了新变体（宿主据此刷新切换条）。幂等，全落盘路径共用——
+   *  成功、失败、中断、暂停都经 doPersistSession；对参数消息做（暂停路
+   *  径传切片，与 this.messages 可能短暂不同）。 */
+  private syncTurnVariantsWithMessages(messages: Message[]): boolean {
+    const group = this.turnVariants;
+    if (!group) return false;
+    const start = lastUserTurnStart(messages);
+    if (start === null || messages[start]?.content !== group.userText) return false;
+    const slice = messages.slice(start);
+    const fingerprint = variantFingerprint(slice);
+    if (group.variants[group.active]?.fingerprint === fingerprint) return false;
+    group.variants.push({ messages: slice, fingerprint });
+    while (group.variants.length > TURN_VARIANT_CAP) group.variants.shift();
+    group.active = group.variants.length - 1;
+    return true;
+  }
+
+  /** 清掉最后一个用户气泡之后的全部转写节点（重新生成的让位清理）。
+   *  按文本锚定最后那个用户 row——row 上没有 id，唯一稳定锚是内容本身
+   *  （stripUserTurnContext 后的可见文本，与重放口径一致）。 */
+  private pruneTranscriptAfterLastUserBubble(): void {
+    const host = this.transcriptElement();
+    const rows = host.querySelectorAll<HTMLElement>('.bubble-row.user');
+    const lastUserRow = rows[rows.length - 1];
+    if (!lastUserRow) return;
+    let node = lastUserRow.nextElementSibling;
+    while (node) {
+      const next = node.nextElementSibling;
+      node.remove();
+      node = next;
+    }
+  }
+
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void, userPathRepairs: PathRepair[] = [], opts: { skipUserPersist?: boolean } = {}) {
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
@@ -3931,14 +4051,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const turnMessageBaseline = this.messages.length;
     // 架构评审 v2 A1（S1-1）— 用户输入进会话事件日志（带 gui 来源；通道/CLI
     // 来源的输入事件由各自宿主在 S1-2 接入）。fire-and-forget：日志失败熔断
-    // 降级，绝不挡回合。
-    void getSessionEventSink(this.sessionId).append({
-      ts: Date.now(),
-      kind: 'user_input',
-      actor: 'gui',
-      origin: { surface: 'gui' },
-      payload: { text: capEventText(displayUserText), isAuto },
-    });
+    // 降级，绝不挡回合。重新生成（skipUserPersist）不重记：这条输入的
+    // user_input 在它首轮就已入账，账本是 append-only 的审计流水，同一句
+    // 话不写两遍。
+    if (!opts.skipUserPersist) {
+      void getSessionEventSink(this.sessionId).append({
+        ts: Date.now(),
+        kind: 'user_input',
+        actor: 'gui',
+        origin: { surface: 'gui' },
+        payload: { text: capEventText(displayUserText), isAuto },
+      });
+    }
     // First STREAMED byte counts — reasoning deltas open the visible card just
     // like answer text, so both TokenDelta and ReasoningDelta mark through here.
     const markFirstToken = (): void => {
@@ -3984,27 +4108,31 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // then cancelled, the bubble is removed (see the cancel branch) so no
     // ghost message remains.
     const liveTurn = this.beginLiveTurn(displayUserText || userText);
-    const userBubble = this.addBubble('user', userText);
+    // 重新生成（skipUserPersist）不重画用户气泡：那句话还挂在原位，回合
+    // 重跑的只是回复。后续的 remove/linkify 引用全部空安全。
+    const userBubble = opts.skipUserPersist ? null : this.addBubble('user', userText);
     const userMessageAttachments = userAttachments.length > 0 ? userAttachments : undefined;
     const openUserAttachment = attachmentViewer;
 
-    if (displayUserText !== userText || userImages.length > 0) {
-      userBubble.textContent = displayUserText;
-      renderUserImageAttachments(userBubble, userImages);
-      for (const attachment of userAttachments) {
-        // Images already render as thumbnails above (renderUserImageAttachments
-        // from userImages) — don't double them as a full attachment card.
-        if (attachment.kind === 'image') continue;
-        userBubble.appendChild(renderAttachmentCard(attachment, () => openUserAttachment?.(attachment)));
+    if (userBubble) {
+      if (displayUserText !== userText || userImages.length > 0) {
+        userBubble.textContent = displayUserText;
+        renderUserImageAttachments(userBubble, userImages);
+        for (const attachment of userAttachments) {
+          // Images already render as thumbnails above (renderUserImageAttachments
+          // from userImages) — don't double them as a full attachment card.
+          if (attachment.kind === 'image') continue;
+          userBubble.appendChild(renderAttachmentCard(attachment, () => openUserAttachment?.(attachment)));
+        }
       }
-    }
 
-    // 11.2 — path slips: the bubble keeps the user's OWN words (displayUserText),
-    // the note names what pure read instead, and one click puts the original
-    // draft back in the composer. Appended AFTER the block above, which
-    // rewrites the bubble's textContent and would otherwise wipe the note.
-    const repairNote = createPathRepairNote(userPathRepairs, () => this.restoreDraftHandler?.(displayUserText));
-    if (repairNote) userBubble.appendChild(repairNote);
+      // 11.2 — path slips: the bubble keeps the user's OWN words (displayUserText),
+      // the note names what pure read instead, and one click puts the original
+      // draft back in the composer. Appended AFTER the block above, which
+      // rewrites the bubble's textContent and would otherwise wipe the note.
+      const repairNote = createPathRepairNote(userPathRepairs, () => this.restoreDraftHandler?.(displayUserText));
+      if (repairNote) userBubble.appendChild(repairNote);
+    }
 
     // Snapshot the user-selected workspace separately from the effective tool
     // workspace. An empty user workspace uses an application-owned tmp folder,
@@ -4150,7 +4278,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // guarantees the new bubble gets a browser paint first.
     await yieldToNextPaint(turnController.signal);
     if (gen !== this.generation) {
-      userBubble.remove();
+      userBubble?.remove();
       this.finishLiveTurn(liveTurn);
       releaseSupersededTurn();
       return;
@@ -4171,7 +4299,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         sendWorkspace,
       );
     }
-    linkifyPaths(userBubble);
+    if (userBubble) linkifyPaths(userBubble);
     // Background sessions run their auto-continue chains inside the same
     // shared scroll container: yanking the viewport here used to drag the
     // session the user is ACTUALLY reading every ~1.2s. Fresh-turn re-pinning
@@ -4201,7 +4329,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     if (gen !== this.generation) {
       // The immediately-rendered user bubble belongs to the superseded
       // transcript — drop it so no ghost message appears in the new session.
-      userBubble.remove();
+      userBubble?.remove();
       releaseSupersededTurn();
       return;
     }
@@ -4219,7 +4347,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // ——此时转录将由新会话重建，消息属于旧会话。
     const keepOrDropUserBubble = (pausedText: string): void => {
       if (gen !== this.generation) {
-        userBubble.remove();
+        userBubble?.remove();
         return;
       }
       this.addStatusBubble(pausedText, true, false);
@@ -7999,6 +8127,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     artifactsDelivered = false,
   ) {
     if (messages.length <= 0) return;
+    // 回复版本账随落盘同步（幂等）：重生成落定的新回复 / 暂停提交的中间态
+    // 在这里追加入册，快照带走的账永远与将要写的消息一致。追加了新变体就
+    // 喊宿主刷切换条（流式结束点 persist 还在飞，宿主不能只盯 streaming
+    // 边沿）。
+    if (this.syncTurnVariantsWithMessages(messages)) {
+      this.onTurnVariantsChanged?.('regenerated');
+    }
     await this.activePlanProgressPersistence?.flush();
     let assistantIndex = 0;
     let renderedAssistantIndex = 0;
@@ -8137,6 +8272,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 装配侧据此继续剔除（否则通道③/④的残留复活）。空账写 undefined。
         strippedBranchIds: this.strippedBranchIds.size > 0 ? [...this.strippedBranchIds] : undefined,
         strippedBranchTopics: this.strippedBranchTopics.length > 0 ? [...this.strippedBranchTopics] : undefined,
+        // 回复版本账随快照走；空组写 undefined 不留字段，快照不膨胀。
+        turnVariants: this.turnVariants ?? undefined,
       },
     };
     await saveSession(sessionId, nextSnapshot, workspace);
@@ -8575,6 +8712,7 @@ export class SessionChatManager {
   private snapshotCb?: (available: boolean) => void;
   private restoreDraftCb?: (text: string) => void;
   private activeSessionCb?: (sessionId: string) => void;
+  private turnVariantsCb?: (reason: 'regenerated' | 'switched') => void;
 
   /** Register the reap veto (taskQueue ownership check). */
   onReapGuard(fn: (sessionId: string) => boolean): void {
@@ -8628,11 +8766,34 @@ export class SessionChatManager {
     controller.onRestoreDraft((text) => {
       if (controller === this.current) this.restoreDraftCb?.(text);
     });
+    controller.onTurnVariantsChanged = (reason) => {
+      if (controller === this.current) this.turnVariantsCb?.(reason);
+    };
   }
 
   /** 11.2 — register the composer's "put the original draft back" action. */
   onRestoreDraft(fn: (text: string) => void): void {
     this.restoreDraftCb = fn;
+  }
+
+  /** Register the reply-variants bar refresh hook (regenerated / switched). */
+  onTurnVariantsChanged(fn: (reason: 'regenerated' | 'switched') => void): void {
+    this.turnVariantsCb = fn;
+  }
+
+  /** 回复版本条数据（可见会话的最后一个用户回合）。 */
+  getTurnVariantInfo(): { count: number; active: number } | null {
+    return this.current?.getTurnVariantInfo() ?? null;
+  }
+
+  /** 重新生成可见会话最后一个回合的回复。 */
+  async regenerateLastTurn(): Promise<void> {
+    await this.activeNow().regenerateLastTurn();
+  }
+
+  /** 切换可见会话最后回合的回复变体（落盘后宿主重放转写）。 */
+  async switchTurnVariant(index: number): Promise<void> {
+    await this.activeNow().switchTurnVariant(index);
   }
 
   /** Register a "the visible session changed" listener. Session switches have

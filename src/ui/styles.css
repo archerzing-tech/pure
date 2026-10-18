@@ -10678,6 +10678,48 @@ button svg,
   order: 0;
 }
 
+/* ── Row 0: reply variants (regenerate + ‹n/m›) ──
+   A slim status strip above the input, shown only while the visible
+   session's last user turn carries a variant ledger. Lives in the composer
+   (not the transcript) so follow-up bubbles and settlement cards can never
+   displace it. */
+#turn-variant-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 0;
+  order: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+#turn-variant-bar[hidden] {
+  display: none;
+}
+#turn-variant-bar button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+#turn-variant-bar button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+#turn-variant-bar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+#turn-variant-bar .tv-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border-light);
+}
+
 /* ── Row 1: text input ── */
 #composer-input-row {
   display: flex;

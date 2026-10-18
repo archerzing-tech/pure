@@ -198,6 +198,16 @@
 
           <footer id="input-bar">
             <div id="composer-box">
+              <!-- Row 0: reply variants (regenerate + ‹n/m› switching) for the
+                   last user turn. Hidden unless the visible session's last turn
+                   has a variant ledger — see main.ts syncTurnVariantBar. -->
+              <div id="turn-variant-bar" hidden>
+                <button id="tv-prev" type="button" aria-label="上一版本">‹</button>
+                <span id="tv-pos"></span>
+                <button id="tv-next" type="button" aria-label="下一版本">›</button>
+                <span class="tv-sep"></span>
+                <button id="tv-regen" type="button"></button>
+              </div>
               <!-- Row 1: the text input. One unified outer frame around BOTH
                    rows — the tool row below shares the same border, so the
                    composer reads as a single surface (see #composer-box in

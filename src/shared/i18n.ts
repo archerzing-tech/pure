@@ -158,6 +158,9 @@ const translations: Record<Language, Record<string, string>> = {
     'input.copyFailed': '复制输入内容失败',
     'assistant.copied': '已复制回复内容',
     'assistant.copyFailed': '复制回复内容失败',
+    'turnVariants.regenerate': '重新生成',
+    'turnVariants.prevTitle': '上一版本',
+    'turnVariants.nextTitle': '下一版本',
 
     // ── Context panel ──
     'context.kicker': '项目上下文',
@@ -1458,6 +1461,9 @@ const translations: Record<Language, Record<string, string>> = {
     'input.copyFailed': 'Could not copy input',
     'assistant.copied': 'Reply copied',
     'assistant.copyFailed': 'Could not copy reply',
+    'turnVariants.regenerate': 'Regenerate',
+    'turnVariants.prevTitle': 'Previous version',
+    'turnVariants.nextTitle': 'Next version',
 
     // ── Context panel ──
     'context.kicker': 'PROJECT CONTEXT',

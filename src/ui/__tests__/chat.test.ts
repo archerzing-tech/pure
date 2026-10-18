@@ -273,10 +273,12 @@ describe('rules-layer risk calibration settles the safety card', () => {
 describe('send feedback timing', () => {
   it('paints the user bubble before send-time DOM and workspace work', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const bubble = src.indexOf("const userBubble = this.addBubble('user', userText);");
+    // 重生成（skipUserPersist）不重画气泡——正常路径仍然在任何 await 之前
+    // 同步上屏，锚钉在条件创建表达式本身。
+    const bubble = src.indexOf("const userBubble = opts.skipUserPersist ? null : this.addBubble('user', userText);");
     const paint = src.indexOf('await yieldToNextPaint(turnController.signal);', bubble);
     const secondFrame = src.indexOf('requestAnimationFrame(() => requestAnimationFrame', src.indexOf('function yieldToNextPaint'));
-    const linkify = src.indexOf('linkifyPaths(userBubble);', bubble);
+    const linkify = src.indexOf('if (userBubble) linkifyPaths(userBubble);', bubble);
     const resolveWorkspace = src.indexOf('getApplicationTmpWorkspace(sendSessionId)', bubble);
     expect(bubble).toBeGreaterThan(-1);
     expect(paint).toBeGreaterThan(bubble);
@@ -556,8 +558,8 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     // 中止分支走 keepOrDropUserBubble，仅在切换到其他会话时才移除气泡。
     expect(src).toContain('const keepOrDropUserBubble = (pausedText: string): void => {');
     expect(src).toContain("keepOrDropUserBubble('已暂停：你的请求已保留在对话中。')");
-    // Every remaining userBubble.remove() is guarded by a session-switch check.
-    expect(src).toMatch(/if \(gen !== this\.generation\) \{\s*userBubble\.remove\(\);\s*return;\s*\}/);
+    // Every remaining userBubble?.remove() is guarded by a session-switch check.
+    expect(src).toMatch(/if \(gen !== this\.generation\) \{\s*userBubble\?\.remove\(\);\s*return;\s*\}/);
   });
 
   it('commits a preflight-paused request into the live history so 继续 has context', () => {
