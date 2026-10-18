@@ -1,13 +1,16 @@
 // src/ui/turnVariants.ts
-// Reply variants (regenerate + version switching), pure logic — no DOM, no
-// chat imports, directly testable under bun.
+// Reply variants (regenerate + edit-resend + version switching), pure logic —
+// no DOM, no chat imports, directly testable under bun.
 //
 // One variant group lives on the LAST user turn only: a variant is produced
-// while its turn is the last one (regenerate), and switching rewrites the tail
-// of the linear `messages` array (context stays the selected chain — the model
-// must never see two answers to the same question). The snapshot's full-rewrite
+// while its turn is the last one (regenerate, edit-resend), and switching
+// rewrites the tail of the linear `messages` array (context stays the selected
+// chain — the model must never see two answers to the same question). A
+// variant's user text IS its first message, so an edited variant switches the
+// visible question together with the reply. The snapshot's full-rewrite
 // persistence carries the ledger for free; the JSONL event log keeps every
-// variant's turn_messages as its append-only audit trail.
+// variant's turn_messages as its append-only audit trail (an edit-resend is a
+// NEW user_input — the user said something new — while a regenerate is not).
 
 import type { Message } from '../shared/types';
 
@@ -15,7 +18,8 @@ export const TURN_VARIANT_CAP = 5;
 
 export interface TurnVariant {
   /** The turn's full message slice: the user message and everything after it
-   * (assistant, tool, internal pause commits). Engine-canonical content. */
+   * (assistant, tool, internal pause commits). Engine-canonical content. The
+   * first message's content doubles as this variant's user text. */
   messages: Message[];
   /** JSON fingerprint used to dedupe a re-adoption of the currently shown
    * slice (regenerate → switch back → regenerate again). */
@@ -23,9 +27,6 @@ export interface TurnVariant {
 }
 
 export interface TurnVariantGroup {
-  /** The turn's engine-canonical user text — the restore-time identity check
-   * against the transcript's last user block. */
-  userText: string;
   variants: TurnVariant[];
   active: number;
 }
@@ -45,13 +46,23 @@ export function variantFingerprint(messages: Message[]): string {
   return JSON.stringify(messages);
 }
 
+/** Identity check: does the ledger group still belong to the turn that is now
+ * last in `messages`? Anchored on the ACTIVE variant's first message — an edit
+ * intentionally changes the turn's user text, so the group follows the active
+ * slot, not a frozen string. */
+export function groupAnchoredToTurn(group: TurnVariantGroup, messages: Message[]): boolean {
+  const start = lastUserTurnStart(messages);
+  if (start === null) return false;
+  const activeVariant = group.variants[group.active];
+  return activeVariant?.messages[0]?.role === 'user' && activeVariant.messages[0].content === messages[start].content;
+}
+
 /** Snapshot restore path: anything malformed degrades to "no variants" the
  * same way normalizeSessionLedger does — a corrupt ledger must never block a
  * session from opening. */
 export function normalizeTurnVariants(raw: unknown): TurnVariantGroup | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const candidate = raw as Partial<TurnVariantGroup>;
-  if (typeof candidate.userText !== 'string' || candidate.userText.length === 0) return null;
   if (!Array.isArray(candidate.variants)) return null;
   const variants: TurnVariant[] = [];
   for (const entry of candidate.variants) {
@@ -67,5 +78,5 @@ export function normalizeTurnVariants(raw: unknown): TurnVariantGroup | null {
   const active = typeof candidate.active === 'number' && candidate.active >= 0 && candidate.active < variants.length
     ? candidate.active
     : variants.length - 1;
-  return { userText: candidate.userText, variants, active };
+  return { variants, active };
 }

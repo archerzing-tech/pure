@@ -161,6 +161,10 @@ const translations: Record<Language, Record<string, string>> = {
     'turnVariants.regenerate': '重新生成',
     'turnVariants.prevTitle': '上一版本',
     'turnVariants.nextTitle': '下一版本',
+    'turnVariants.edit': '编辑',
+    'turnVariants.editTitle': '编辑这一问并发送——原问原答留作版本',
+    'turnVariants.editBanner': '正在编辑上一问 · 发送后将重新生成回复',
+    'turnVariants.cancel': '取消',
 
     // ── Context panel ──
     'context.kicker': '项目上下文',
@@ -1464,6 +1468,10 @@ const translations: Record<Language, Record<string, string>> = {
     'turnVariants.regenerate': 'Regenerate',
     'turnVariants.prevTitle': 'Previous version',
     'turnVariants.nextTitle': 'Next version',
+    'turnVariants.edit': 'Edit',
+    'turnVariants.editTitle': 'Edit this question and resend — the original stays as a version',
+    'turnVariants.editBanner': 'Editing the last question · sending regenerates the reply',
+    'turnVariants.cancel': 'Cancel',
 
     // ── Context panel ──
     'context.kicker': 'PROJECT CONTEXT',

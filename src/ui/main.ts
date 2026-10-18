@@ -315,6 +315,7 @@ chat.onStreamingStateChange((streaming) => {
     landingSend.title = t('input.stop.title');
     landingSend.setAttribute('aria-label', t('input.stop.title'));
     syncTurnVariantBar(); // 流式起：无可用变体组即隐藏（重生成中的让位）
+    if (editResendActive) cancelEditResend(); // 编辑入口只在空闲时存在，流式起即作废
     updateContextPanelStage(true);
   } else {
     const sendSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
@@ -446,14 +447,58 @@ function syncTurnVariantBar(): void {
   const info = chat.getTurnVariantInfo();
   if (!info) {
     turnVariantBar.hidden = true;
-    return;
+  } else {
+    turnVariantBar.hidden = false;
+    tvPos.textContent = `${info.active + 1}/${info.count}`;
+    tvPrev.disabled = info.active <= 0;
+    tvNext.disabled = info.active >= info.count - 1;
+    tvRegen.textContent = t('turnVariants.regenerate');
   }
-  turnVariantBar.hidden = false;
-  tvPos.textContent = `${info.active + 1}/${info.count}`;
-  tvPrev.disabled = info.active <= 0;
-  tvNext.disabled = info.active >= info.count - 1;
-  tvRegen.textContent = t('turnVariants.regenerate');
+  syncUserEditButton();
 }
+
+// ── 编辑重发：最后用户气泡上的「编辑」入口 ─────────────────────────────
+// 按钮由本函数统一挂/摘（先清后挂，只挂最后一个 user row）——live 流结束
+// 与重放完成都会走到 syncTurnVariantBar，两端同一口径。挂 row 内右下角，
+// hover 才显（不发认真模式的视觉噪音）。
+function syncUserEditButton(): void {
+  document.querySelectorAll('.user-edit-btn').forEach((button) => button.remove());
+  if (chat.isStreaming()) return;
+  const rows = document.getElementById('chat')?.querySelectorAll<HTMLElement>('.bubble-row.user');
+  const lastRow = rows ? rows[rows.length - 1] : null;
+  if (!lastRow) return;
+  const button = document.createElement('button');
+  button.className = 'user-edit-btn';
+  button.type = 'button';
+  button.textContent = t('turnVariants.edit');
+  button.title = t('turnVariants.editTitle');
+  button.addEventListener('click', () => {
+    const text = chat.getLastUserTurnText();
+    if (text) startEditResend(text);
+  });
+  lastRow.appendChild(button);
+}
+
+let editResendActive = false;
+const editResendBanner = document.getElementById('edit-resend-banner') as HTMLDivElement;
+const editResendLabel = document.getElementById('edit-resend-label') as HTMLElement;
+const editResendCancel = document.getElementById('edit-resend-cancel') as HTMLButtonElement;
+
+function startEditResend(text: string): void {
+  editResendActive = true;
+  restoreDraftToComposer(text);
+  editResendLabel.textContent = t('turnVariants.editBanner');
+  editResendCancel.textContent = t('turnVariants.cancel');
+  editResendBanner.hidden = false;
+}
+
+function cancelEditResend(): void {
+  editResendActive = false;
+  editResendBanner.hidden = true;
+  // 回填的文字留给用户处置（改发成新消息也行），只撤编辑态本身。
+}
+
+editResendCancel.addEventListener('click', cancelEditResend);
 
 // 切换变体 = 内存链已换 + 已全量落盘，这里从盘重读当前会话整屏重放
 // （复用冷恢复的渲染链，折叠/卡片/染色全一致）。读盘前后守会话竞态：
@@ -1683,6 +1728,9 @@ promptEl.addEventListener('keydown', (e) => {
     queuedWhileStreaming = null;
     // 阶段 12: Escape pauses too — same resumable semantics as the ⏹ button.
     chat.pause();
+  } else if (e.key === 'Escape' && editResendActive) {
+    // 编辑态的 Escape = 只撤编辑（回填文字留在框里），与取消按钮同义。
+    cancelEditResend();
   }
 });
 
@@ -1835,6 +1883,16 @@ async function sendMessage(sourceEl: HTMLTextAreaElement) {
   // 语义，所以不上屏解释、也不问用户；风险判定若因此读到更高档，由模型在
   // 回合内说清楚（评估卡）。取消发送时输入框原文原样留着。
   const normalized = normalizeDraft(sourceEl.value);
+  // 编辑重发改道：编辑态下的发送不走普通 sendMessage——旧问旧答已在
+  // editLastTurn 里入变体账，编辑后的文本作为新输入重开回合。清空发送
+  // 等于取消编辑（框已清，横幅已撤，文字不重发）。
+  if (editResendActive && sourceEl === promptEl) {
+    cancelEditResend();
+    sourceEl.value = '';
+    composerDrafts.onSent();
+    if (normalized) await chat.editLastTurn(normalized);
+    return;
+  }
   // Empty typed text is fine when pasted file chips carry the message.
   if ((!normalized && !pasteChips.hasAttachments()) || chat.isStreaming()) return;
 

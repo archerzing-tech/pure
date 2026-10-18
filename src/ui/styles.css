@@ -10720,6 +10720,63 @@ button svg,
   background: var(--border-light);
 }
 
+/* ── Edit-resend: banner + the per-bubble edit affordance ──
+   The banner shares Row 0 with the variant strip; the edit button lives on
+   the last user bubble row and only surfaces on hover. */
+#edit-resend-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 0;
+  order: 0;
+  font-size: 12px;
+  color: var(--accent);
+}
+#edit-resend-banner[hidden] {
+  display: none;
+}
+#edit-resend-banner button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+}
+#edit-resend-banner button:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+.bubble-row.user {
+  position: relative;
+}
+.user-edit-btn {
+  position: absolute;
+  right: 4px;
+  bottom: -10px;
+  z-index: 2;
+  border: 1px solid var(--border-light);
+  background: var(--bg-card, var(--bg));
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease-out), color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+}
+.bubble-row.user:hover .user-edit-btn,
+.user-edit-btn:focus-visible {
+  opacity: 1;
+}
+.user-edit-btn:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-light));
+}
+
 /* ── Row 1: text input ── */
 #composer-input-row {
   display: flex;

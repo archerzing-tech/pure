@@ -27,12 +27,42 @@ describe('turn variants · chat.ts wiring', () => {
   it('regenerateLastTurn truncates to the last user turn, prunes the DOM tail, and re-sends with skipUserPersist', () => {
     const method = src.indexOf('async regenerateLastTurn(): Promise<void> {');
     expect(method).toBeGreaterThan(-1);
-    const body = src.slice(method, src.indexOf('async switchTurnVariant', method));
+    const body = src.slice(method, src.indexOf('async editLastTurn', method));
     expect(body).toContain('if (this.streaming) return;');
     expect(body).toContain('lastUserTurnStart(this.messages)');
+    expect(body).toContain('this.adoptTurnVariantLedger(');
     expect(body).toContain('this.messages = this.messages.slice(0, start);');
     expect(body).toContain('this.pruneTranscriptAfterLastUserBubble()');
     expect(body).toContain('skipUserPersist: true');
+  });
+
+  it('editLastTurn records the edited text as a NEW user_input — an edit is a new sentence', () => {
+    const method = src.indexOf('async editLastTurn(newText: string): Promise<void> {');
+    expect(method).toBeGreaterThan(-1);
+    const body = src.slice(method, src.indexOf('async switchTurnVariant', method));
+    expect(body).toContain('if (this.streaming) return;');
+    expect(body).toContain('this.adoptTurnVariantLedger(');
+    expect(body).toContain('this.messages = this.messages.slice(0, start);');
+    expect(body).toContain('this.pruneTranscriptAfterLastUserBubble()');
+    // 不带 skipUserPersist:user_input 照记,与重新生成的本质区别。
+    expect(body).toContain('await this.send(newText, userMessage.images ?? [], newText, false, userMessage.attachments ?? []);');
+    expect(body).not.toContain('skipUserPersist');
+  });
+
+  it('the ledger identity follows the ACTIVE variant, so an edited question re-anchors the same group', () => {
+    expect(src).toContain('groupAnchoredToTurn(this.turnVariants, this.messages)');
+    const adopt = src.indexOf('private adoptTurnVariantLedger(slice: Message[]): void {');
+    expect(adopt).toBeGreaterThan(-1);
+    const adoptBody = src.slice(adopt, adopt + 700);
+    expect(adoptBody).toContain('groupAnchoredToTurn(this.turnVariants, this.messages)');
+    expect(adoptBody).toContain('variants: [{ messages: slice, fingerprint }], active: 0');
+  });
+
+  it('the composer gets the visible last-question text for the edit backfill', () => {
+    const method = src.indexOf('getLastUserTurnText(): string | null {');
+    expect(method).toBeGreaterThan(-1);
+    const body = src.slice(method, method + 260);
+    expect(body).toContain('stripUserTurnContext(this.messages[start].content)');
   });
 
   it('the ledger syncs on every persist and notifies the host when a variant is added', () => {
@@ -57,7 +87,7 @@ describe('turn variants · chat.ts wiring', () => {
     expect(method).toBeGreaterThan(-1);
     const body = src.slice(method, src.indexOf('private syncTurnVariantsWithMessages', method));
     expect(body).toContain('if (this.streaming) return;');
-    expect(body).toContain('this.messages[start]?.content !== group.userText');
+    expect(body).toContain('groupAnchoredToTurn(group, this.messages)');
     expect(body.indexOf('this.persistSession(this.messages, new Map(), [])')).toBeGreaterThan(-1);
     expect(body.indexOf("this.onTurnVariantsChanged?.('switched')")).toBeGreaterThan(body.indexOf('this.persistSession'));
   });

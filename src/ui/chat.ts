@@ -20,7 +20,7 @@ import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, re
 import { promptObservability } from '../shared/promptObservability';
 import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
-import { lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
+import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
@@ -3910,15 +3910,41 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   // onTurnVariantsChanged 里编排。
 
   /** 切换条数据：最后回合的变体组形状；没有可用组（无历史/流式中）返回
-   *  null。userText 运行时校验在这里做——恢复时装 messages 的时序比
-   *  loadFromStorage 晚，就地比对不了。 */
+   *  null。挂靠校验在这里做——恢复时装 messages 的时序比 loadFromStorage
+   *  晚，就地比对不了。 */
   getTurnVariantInfo(): { count: number; active: number } | null {
     if (this.streaming) return null;
     const group = this.turnVariants;
     if (!group || group.variants.length < 1) return null;
-    const start = lastUserTurnStart(this.messages);
-    if (start === null || this.messages[start]?.content !== group.userText) return null;
+    if (!groupAnchoredToTurn(group, this.messages)) return null;
     return { count: group.variants.length, active: group.active };
+  }
+
+  /** 最后一问的可见文本（stripUserTurnContext 后，与重放/回填口径一致）
+   *  ——编辑按钮取它回填输入框。 */
+  getLastUserTurnText(): string | null {
+    const start = lastUserTurnStart(this.messages);
+    if (start === null) return null;
+    return stripUserTurnContext(this.messages[start].content);
+  }
+
+  /** 变体账的入册/挂靠共用件：现有组不锚当前回合就弃旧开新（当前显示版
+   *  占第 0 槽）；锚着就去重入册并指 active。重跑出来的「新版」槽位由落
+   *  盘时的 syncTurnVariantsWithMessages 追加——不在这里预占，否则落定
+   *  回写会覆盖掉刚入册的旧版。 */
+  private adoptTurnVariantLedger(slice: Message[]): void {
+    const fingerprint = variantFingerprint(slice);
+    if (!this.turnVariants || !groupAnchoredToTurn(this.turnVariants, this.messages)) {
+      this.turnVariants = { variants: [{ messages: slice, fingerprint }], active: 0 };
+      return;
+    }
+    let position = this.turnVariants.variants.findIndex((v) => v.fingerprint === fingerprint);
+    if (position === -1) {
+      this.turnVariants.variants.push({ messages: slice, fingerprint });
+      position = this.turnVariants.variants.length - 1;
+      while (this.turnVariants.variants.length > TURN_VARIANT_CAP) this.turnVariants.variants.shift();
+    }
+    this.turnVariants.active = position;
   }
 
   /** 重新生成最后一个用户回合的回复：当前回复入变体账，messages 截断到
@@ -3929,23 +3955,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const start = lastUserTurnStart(this.messages);
     if (start === null) return;
     const userMessage = this.messages[start];
-    const slice = this.messages.slice(start);
-    // 账本挂靠校验：现有组不属于这个回合（换了个问题）就弃旧开新。当前
-    // 显示版先入册占位（去重：切回旧变体后再重生成，同一份内容不重复
-    // 占位）；重跑出来的「新版」槽位由落盘时的 syncTurnVariantsWithMessages
-    // 追加——不在这里预占，否则落定回写会覆盖掉刚入册的旧版。
-    if (!this.turnVariants || this.turnVariants.userText !== userMessage.content) {
-      this.turnVariants = { userText: userMessage.content, variants: [{ messages: slice, fingerprint: variantFingerprint(slice) }], active: 0 };
-    } else {
-      const fingerprint = variantFingerprint(slice);
-      let position = this.turnVariants.variants.findIndex((v) => v.fingerprint === fingerprint);
-      if (position === -1) {
-        this.turnVariants.variants.push({ messages: slice, fingerprint });
-        position = this.turnVariants.variants.length - 1;
-        while (this.turnVariants.variants.length > TURN_VARIANT_CAP) this.turnVariants.variants.shift();
-      }
-      this.turnVariants.active = position;
-    }
+    this.adoptTurnVariantLedger(this.messages.slice(start));
     // 截断 + 清屏：最后一个用户气泡之后的 DOM（旧回复、工具卡、状态行）
     // 全部让位，重跑的流式输出从同一位置长回来。
     this.messages = this.messages.slice(0, start);
@@ -3963,6 +3973,22 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     );
   }
 
+  /** 编辑最后一问并重发：旧回合（原问+原回复）入变体账，截断后把编辑后
+   *  的文本当**新输入**发出——skipUserPersist 为 false，user_input 照记
+   *  （编辑是说了一句新话，与重新生成不同）。原 images/attachments 随行；
+   *  落定后新回合成为最新变体，‹n/m› 可切回旧问旧答。 */
+  async editLastTurn(newText: string): Promise<void> {
+    if (this.streaming) return;
+    const start = lastUserTurnStart(this.messages);
+    if (start === null) return;
+    const userMessage = this.messages[start];
+    this.adoptTurnVariantLedger(this.messages.slice(start));
+    this.messages = this.messages.slice(0, start);
+    this.pruneTranscriptAfterLastUserBubble();
+    this.onTurnVariantsChanged?.('regenerated');
+    await this.send(newText, userMessage.images ?? [], newText, false, userMessage.attachments ?? []);
+  }
+
   /** 切到最后回合的第 index 个变体：messages 尾段换上目标变体的切片
    *  （当前显示本就在自己的槽位里，无回写必要——尾段切片不受 limit 裁
    *  剪影响，fingerprint 不会漂）。落盘后由宿主重放转写。 */
@@ -3971,7 +3997,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const group = this.turnVariants;
     if (!group || index < 0 || index >= group.variants.length) return;
     const start = lastUserTurnStart(this.messages);
-    if (start === null || this.messages[start]?.content !== group.userText) return;
+    if (start === null || !groupAnchoredToTurn(group, this.messages)) return;
     group.active = index;
     this.messages = [...this.messages.slice(0, start), ...group.variants[index].messages];
     await this.persistSession(this.messages, new Map(), []);
@@ -3987,7 +4013,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const group = this.turnVariants;
     if (!group) return false;
     const start = lastUserTurnStart(messages);
-    if (start === null || messages[start]?.content !== group.userText) return false;
+    if (start === null || !groupAnchoredToTurn(group, messages)) return false;
     const slice = messages.slice(start);
     const fingerprint = variantFingerprint(slice);
     if (group.variants[group.active]?.fingerprint === fingerprint) return false;
@@ -8786,9 +8812,19 @@ export class SessionChatManager {
     return this.current?.getTurnVariantInfo() ?? null;
   }
 
+  /** 最后一问的可见文本（编辑重发回填用）。 */
+  getLastUserTurnText(): string | null {
+    return this.current?.getLastUserTurnText() ?? null;
+  }
+
   /** 重新生成可见会话最后一个回合的回复。 */
   async regenerateLastTurn(): Promise<void> {
     await this.activeNow().regenerateLastTurn();
+  }
+
+  /** 编辑可见会话最后一问并重发（旧问旧答入变体账）。 */
+  async editLastTurn(newText: string): Promise<void> {
+    await this.activeNow().editLastTurn(newText);
   }
 
   /** 切换可见会话最后回合的回复变体（落盘后宿主重放转写）。 */

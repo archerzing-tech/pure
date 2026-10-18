@@ -1,11 +1,13 @@
 // src/ui/__tests__/turnVariants.test.ts
 // Reply-variant ledger, pure logic: the last-user-turn slice anchor, the
-// snapshot restore normalizer (corrupt archives degrade to "no variants",
-// never block a session), and the fingerprint that keeps a re-adoption of the
-// shown slice from occupying a second slot. Pure module — no DOM, no imports
-// of anything mockable.
+// group-to-turn identity check (anchored on the ACTIVE variant's first
+// message — an edit intentionally changes the turn's user text), the snapshot
+// restore normalizer (corrupt archives degrade to "no variants", never block
+// a session), and the fingerprint that keeps a re-adoption of the shown slice
+// from occupying a second slot. Pure module — no DOM, no imports of anything
+// mockable.
 import { describe, it, expect } from 'bun:test';
-import { lastUserTurnStart, normalizeTurnVariants, variantFingerprint, TURN_VARIANT_CAP } from '../turnVariants';
+import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, variantFingerprint, TURN_VARIANT_CAP } from '../turnVariants';
 import type { Message } from '../../shared/types';
 
 const user = (content: string, internal?: boolean): Message => ({ role: 'user', content, ...(internal ? { internal } : {}) });
@@ -28,22 +30,53 @@ describe('lastUserTurnStart', () => {
   });
 });
 
-describe('normalizeTurnVariants', () => {
-  it('round-trips a well-formed group', () => {
-    const group = {
-      userText: '画一张图',
+describe('groupAnchoredToTurn', () => {
+  const group = (activeUserText: string) => ({
+    active: 0,
+    variants: [{ messages: [user(activeUserText), assistant('答')], fingerprint: 'x' }],
+  });
+
+  it('holds while the active variant still matches the last user turn', () => {
+    const messages = [user('前文'), assistant('前答'), user('画一张图'), assistant('版本')];
+    expect(groupAnchoredToTurn(group('画一张图'), messages)).toBe(true);
+  });
+
+  it('breaks when the turn moved on (a new question came after the ledger)', () => {
+    const messages = [user('画一张图'), assistant('版本'), user('新问题'), assistant('新答')];
+    expect(groupAnchoredToTurn(group('画一张图'), messages)).toBe(false);
+  });
+
+  it('follows the ACTIVE slot — an edited question re-anchors the same group', () => {
+    // 编辑重发后 active 槽首条是编辑后的文本:组跟着 active 走,不认冻结字符串。
+    const edited = {
       active: 1,
       variants: [
-        { messages: [user('画一张图'), assistant('版本一')] },
-        { messages: [user('画一张图'), assistant('版本二')] },
+        { messages: [user('原问'), assistant('原答')], fingerprint: 'a' },
+        { messages: [user('改过的话'), assistant('新答')], fingerprint: 'b' },
+      ],
+    };
+    const messages = [user('改过的话'), assistant('新答')];
+    expect(groupAnchoredToTurn(edited, messages)).toBe(true);
+  });
+
+  it('is false without any user turn', () => {
+    expect(groupAnchoredToTurn(group('问'), [])).toBe(false);
+  });
+});
+
+describe('normalizeTurnVariants', () => {
+  it('round-trips a well-formed group and recomputes fingerprints', () => {
+    const group = {
+      active: 1,
+      variants: [
+        { messages: [user('问'), assistant('版本一')], fingerprint: 'stale' },
+        { messages: [user('问'), assistant('版本二')], fingerprint: 'stale' },
       ],
     };
     const restored = normalizeTurnVariants(structuredClone(group));
     expect(restored).not.toBeNull();
-    expect(restored?.userText).toBe('画一张图');
     expect(restored?.variants.length).toBe(2);
     expect(restored?.active).toBe(1);
-    // fingerprints get recomputed on the way in
     expect(restored?.variants[0].fingerprint).toBe(variantFingerprint(group.variants[0].messages));
   });
 
@@ -51,14 +84,12 @@ describe('normalizeTurnVariants', () => {
     expect(normalizeTurnVariants(null)).toBeNull();
     expect(normalizeTurnVariants('x')).toBeNull();
     expect(normalizeTurnVariants([])).toBeNull();
-    expect(normalizeTurnVariants({ variants: [{ messages: [user('一')] }] })).toBeNull(); // no userText
-    expect(normalizeTurnVariants({ userText: '一', variants: 'nope' })).toBeNull();
-    expect(normalizeTurnVariants({ userText: '一', variants: [] })).toBeNull();
+    expect(normalizeTurnVariants({ variants: 'nope' })).toBeNull();
+    expect(normalizeTurnVariants({ variants: [] })).toBeNull();
   });
 
   it('drops slices that do not start at their user message, and clamps a bad active', () => {
     const restored = normalizeTurnVariants({
-      userText: '问',
       active: 9,
       variants: [
         { messages: [assistant('没有 user 开头')] },
