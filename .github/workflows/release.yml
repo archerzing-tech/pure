@@ -38,7 +38,6 @@ jobs:
 
       - name: Install dependencies
         env:
-          npm_config_registry: https://registry.npmmirror.com
           NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: bun install
 
@@ -141,7 +140,6 @@ jobs:
 
       - name: Install dependencies
         env:
-          npm_config_registry: https://registry.npmmirror.com
           NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: bun install
 

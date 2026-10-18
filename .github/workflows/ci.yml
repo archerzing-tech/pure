@@ -33,7 +33,6 @@ jobs:
 
       - name: Install dependencies
         env:
-          npm_config_registry: https://registry.npmmirror.com
           NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: |
           for i in 1 2 3; do
@@ -109,7 +108,6 @@ jobs:
 
       - name: Install dependencies
         env:
-          npm_config_registry: https://registry.npmmirror.com
           NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         shell: bash
         run: |
