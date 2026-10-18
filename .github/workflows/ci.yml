@@ -31,13 +31,7 @@ jobs:
           restore-keys: |
             bun-${{ runner.os }}-
 
-      # npmmirror 只为绕病通路:registry.npmjs.org 本身没坏包,换源是绕开
-      # GitHub↔npmjs 之间掐大 tarball 的那一段。锁文件按 name@version+
-      # integrity 解析,镜像字节一致,sha512 不过会大声报错不会静默装错。
       - name: Install dependencies
-        env:
-          npm_config_registry: https://registry.npmmirror.com
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: |
           for i in 1 2 3; do
             bun install && exit 0
@@ -111,9 +105,6 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        env:
-          npm_config_registry: https://registry.npmmirror.com
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         shell: bash
         run: |
           for i in 1 2 3; do
