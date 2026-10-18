@@ -2527,3 +2527,27 @@ describe('传输层状态进思考卡（长静默歼灭）', () => {
     expect(src).toContain("if (event.payload.stage === 'start' && thinkingCard) {");
   });
 });
+
+// 流式偶发中断三修(2026-10-18):事件循环过去没有 per-event 隔离,任何一条
+// 事件的处理异常都会炸穿 for-await、把整个回合打进错误 catch——长文本渲染
+// 打个嗝,正在流的回复就断在半句。这里钉住隔离结构与「取消是控制流不是意外」
+// 的放行语义;删掉它们不会报错,只会退回一条异常杀一轮的死法。
+describe('事件循环 per-event 隔离(单事件异常不杀回合)', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('for-await 事件体包 try,异常只丢事件、回合继续', () => {
+    const loop = src.indexOf('for await (const event of events) {');
+    expect(loop).toBeGreaterThan(-1);
+    const body = src.slice(loop, loop + 1600);
+    expect(body).toContain('try {');
+    expect(body).toContain('switch (event.type) {');
+  });
+
+  it('catch 放行取消/接管(控制流),只吞意外异常并留痕', () => {
+    const handler = src.indexOf('[turn] ${event.type} handler failed');
+    expect(handler).toBeGreaterThan(-1);
+    const catchHead = src.slice(src.indexOf('} catch (err) {', handler - 2000), handler + 120);
+    expect(catchHead).toContain('if (gen !== this.generation || turnController.signal.aborted) throw err;');
+    expect(catchHead).toContain('console.error(');
+  });
+});

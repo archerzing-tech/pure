@@ -6356,6 +6356,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // cancel() (main.ts loadAndDisplaySession), so no events remain — this
         // guard also covers slow-abort cases where a straggler still yields.
         if (gen !== this.generation) break;
+        // Per-event isolation: one event handler throwing used to unwind the
+        // whole for-await and land the turn in the error catch — a rendering
+        // hiccup on one delta killed a streaming reply mid-sentence ("偶发中
+        // 断"). The stream itself is alive; only this event failed. Keep the
+        // switch at its original indent: re-indenting ~1250 lines would burn
+        // the file's blame history for a two-line wrap.
+        try {
         switch (event.type) {
           case 'YieldControl': {
             this.updateTurnCount(event.payload.turnNumber, true);
@@ -7603,6 +7610,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             this.scrollUi(chatEl);
             break;
           }
+        }
+        } catch (err) {
+          // Cancel / takeover are control flow, not accidents — hand them to
+          // the outer catch so the interrupted-turn semantics stay untouched.
+          if (gen !== this.generation || turnController.signal.aborted) throw err;
+          console.error(`[turn] ${event.type} handler failed — event dropped, turn continues:`, err);
         }
       }
 
