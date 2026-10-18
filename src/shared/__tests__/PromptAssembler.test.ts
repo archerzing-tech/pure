@@ -75,6 +75,16 @@ describe('session ledger · 协议与素材（第 4 期刀 4/5）', () => {
   });
 });
 
+describe('output_style · 折叠长引用素材(details 卡)', () => {
+  it('gui 与 cli 的 output style 都教模型用 details 折叠长素材', () => {
+    for (const surface of ['gui', 'cli'] as const) {
+      const system = assembler.buildSystemPrompt({ surface, capabilities: 'capabilities' });
+      expect(system).toContain('<details><summary>');
+      expect(system).toContain('collapsible card');
+    }
+  });
+});
+
 describe('PromptAssembler', () => {
   it('uses an injected observability sink for assembly traces', () => {
     const store = new InMemoryPromptObservationStore();

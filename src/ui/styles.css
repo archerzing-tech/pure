@@ -6598,6 +6598,26 @@ body.window-maximized #boot-splash {
   text-decoration: line-through;
 }
 
+/* Collapsible <details> blocks: model-emitted folding for long reference
+   material (full logs, long quotes, extended listings) — a quiet card with a
+   clickable summary line instead of a wall of text. */
+.bubble details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  padding: 6px 10px;
+  margin: 8px 0;
+}
+.bubble details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.bubble details[open] summary {
+  margin-bottom: 6px;
+}
+
 /* Inline code (NOT inside <pre>) */
 .bubble code:not(pre code) {
   background: var(--bg-input);
