@@ -37,6 +37,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
+        env:
+          npm_config_registry: https://registry.npmmirror.com
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: bun install
 
       - name: Typecheck
@@ -137,6 +140,9 @@ jobs:
           targets: x86_64-apple-darwin
 
       - name: Install dependencies
+        env:
+          npm_config_registry: https://registry.npmmirror.com
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: bun install
 
       # Same sidecar embed as the Windows job, for the same reason: the app
