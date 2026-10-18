@@ -30,7 +30,17 @@ import {
 } from '../netGuard';
 
 beforeAll(() => {
-  GlobalRegistrator.register();
+  // bun test is single-process and file order drifts with the file set: an
+  // earlier test file's happy-dom registration may still be up when we load
+  // (2026-10-18 full-suite case: register() throws "already registered").
+  // A leftover registration is equivalent for our purposes — its DOM is the
+  // same fresh happy-dom — so consume it instead of dying on it.
+  try {
+    GlobalRegistrator.register();
+  } catch {
+    GlobalRegistrator.unregister();
+    GlobalRegistrator.register();
+  }
   localStorage.removeItem('pure.netGuard.hosts.v1');
 });
 afterAll(() => GlobalRegistrator.unregister());

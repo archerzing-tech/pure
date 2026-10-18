@@ -1,9 +1,15 @@
 // src/ui/__tests__/taskCheckboxes.test.ts
 // GFM task-list checkbox interaction: `- [ ]` must arrive as a live checkbox,
-// not a dead disabled control. Rendering pipeline under test is
-// markdown.ts's bindTaskCheckboxes (exported for this test) + the DOMPurify
-// pass it runs behind — verified end-to-end through renderMarkdown's sanitize
-// config shape (ADD_ATTR target/loading) since that's what ships.
+// not a dead disabled control. The behavior under test is bindTaskCheckboxes
+// (exported from markdown.ts for this file): strip disabled, tag the <li>,
+// toggle a done class on click.
+//
+// Deliberately does NOT import dompurify: streaming test files
+// mock.module('dompurify') as an identity OBJECT, bun test is single-process,
+// and a later-loading file that calls createDOMPurify(window) dies on the mock
+// (2026-10-18 full-suite case). The marked output is injected as-is here; the
+// fact that DOMPurify's default allow-list keeps input[type=checkbox] (with
+// disabled/checked attrs) is library behavior, not pure's contract.
 import { describe, it, expect, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { marked } from 'marked';
@@ -14,27 +20,17 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-// Minimal re-implementation of the sanitize call in renderMarkdown — the real
-// one is exercised in chat-level tests; here we pin that nothing in the
-// checkbox markup is sanitize-hostile (no ADD_ATTR needed for task lists).
 function renderToDom(mdText: string): HTMLElement {
-  const html = marked.parse(mdText, { gfm: true, breaks: true }) as string;
   const el = document.createElement('div');
-  // DOMPurify default config, same as pure's call site plus its two attrs.
-  // Importing dompurify here keeps the test honest about what survives it.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const createDOMPurify = require('dompurify') as (w: Window) => { sanitize: (s: string, o?: object) => string };
-  const clean = createDOMPurify(window).sanitize(html, { ADD_ATTR: ['target', 'loading'] });
-  el.innerHTML = clean;
+  el.innerHTML = marked.parse(mdText, { gfm: true, breaks: true }) as string;
   return el;
 }
 
 describe('GFM task list checkboxes', () => {
-  it('marked emits disabled checkboxes that survive DOMPurify', () => {
+  it('marked emits disabled checkboxes for - [ ] / - [x]', () => {
     const el = renderToDom('- [ ] 未完成项\n- [x] 已完成项');
     const boxes = el.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"]');
     expect(boxes.length).toBe(2);
-    // Both arrive disabled (marked's output); bindTaskCheckboxes re-enables.
     expect(boxes[0].hasAttribute('disabled')).toBe(true);
     expect(boxes[1].hasAttribute('checked')).toBe(true);
   });

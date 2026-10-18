@@ -83,12 +83,25 @@ mock.module('../../shared/tauri', () => ({
 
 const NOW = 1_700_000_000_000;
 const mem: Record<string, string> = {};
-(globalThis as Record<string, unknown>).localStorage = {
-  getItem: (k: string) => mem[k] ?? null,
-  setItem: (k: string, v: string) => { mem[k] = v; },
-  removeItem: (k: string) => { delete mem[k]; },
-};
-(globalThis as Record<string, unknown>).window = { location: { search: '' } };
+// Plain assignment dies under bun's own readonly localStorage accessor (or a
+// happy-dom registration left over from an earlier file in the same process —
+// file order drifts with the file set, 2026-10-18 full-suite case). A
+// configurable own property definition works in every state and also shadows
+// anything on the prototype chain.
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  writable: true,
+  value: {
+    getItem: (k: string) => mem[k] ?? null,
+    setItem: (k: string, v: string) => { mem[k] = v; },
+    removeItem: (k: string) => { delete mem[k]; },
+  },
+});
+Object.defineProperty(globalThis, 'window', {
+  configurable: true,
+  writable: true,
+  value: { location: { search: '' } },
+});
 
 function manifest(name: string): { file: string; text: string } {
   return {
