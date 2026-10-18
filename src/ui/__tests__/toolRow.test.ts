@@ -1385,3 +1385,90 @@ describe('failureResultPreview (四问题① 子代理失败卡的部分产出�
     expect(failureResultPreview('err', { finalOutput: '   ' })).toBe('err');
   });
 });
+
+describe('tool row renders edit/write results as an inline diff card', () => {
+  const diffMeta = (rows: any[], extra: Record<string, unknown> = {}) => ({
+    success: true,
+    duration: 420,
+    resultKind: 'diff' as const,
+    resultDiff: { rows, additions: 2, removals: 1, truncated: false, overwrite: false, ...extra },
+    resultText: 'Replaced 1 occurrence(s) in src/foo.ts',
+  });
+
+  it('renders head stats, colored rows, and keeps the original note as a suffix', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('edit_file', { path: 'src/foo.ts', oldString: 'a', newString: 'b' });
+      finalizeToolRow(row, diffMeta([
+        { kind: 'same', text: 'context' },
+        { kind: 'del', text: 'old line' },
+        { kind: 'add', text: 'new line' },
+      ]));
+      expect(row.details.className).toContain('diff-result');
+      const head = row.resultEl.children[0];
+      expect(head.className).toBe('tool-diff-head');
+      expect(head.children[0].className).toBe('tool-diff-stat add');
+      expect(head.children[0].textContent).toBe('+2');
+      expect(head.children[1].className).toBe('tool-diff-stat del');
+      expect(head.children[1].textContent).toBe('−1');
+      // 新建文件(overwrite=false)无徽标。
+      expect(head.children.length).toBe(2);
+      const list = row.resultEl.children[1];
+      expect(list.className).toBe('tool-diff-rows');
+      expect(list.children[0].className).toBe('tool-diff-row same');
+      expect(list.children[0].textContent).toBe(' context');
+      expect(list.children[1].textContent).toBe('-old line');
+      expect(list.children[2].textContent).toBe('+new line');
+      // 原文案(带撤销提示)缀底,不能丢。
+      const note = row.resultEl.children[2];
+      expect(note.className).toBe('tool-diff-note');
+      expect(note.textContent).toContain('Replaced 1 occurrence(s)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('write_file overwriting an existing file shows the overwrite badge', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('write_file', { path: 'notes.md', content: 'x' });
+      finalizeToolRow(row, diffMeta([{ kind: 'gap', text: '12' }, { kind: 'add', text: 'x' }], { overwrite: true }));
+      const head = row.resultEl.children[0];
+      const badge = Array.from(head.children).find((c: any) => c.className === 'tool-diff-badge') as any;
+      expect(badge).toBeDefined();
+      expect(badge.textContent).toBe('覆盖已有文件');
+      const gap = row.resultEl.children[1].children[0];
+      expect(gap.className).toBe('tool-diff-row gap');
+      expect(gap.textContent).toContain('12 行未变');
+    } finally {
+      restore();
+    }
+  });
+
+  it('truncated diffs carry the more-hint', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('write_file', { path: 'big.md', content: 'x' });
+      finalizeToolRow(row, diffMeta([{ kind: 'add', text: 'x' }], { truncated: true }));
+      const more = row.resultEl.children[2];
+      expect(more.className).toBe('tool-diff-more');
+      expect(more.textContent).toContain('其余行未显示');
+    } finally {
+      restore();
+    }
+  });
+
+  it('empty rows fall back to the plain preview (no diff card)', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('edit_file', { path: 'src/foo.ts' });
+      finalizeToolRow(row, diffMeta([]));
+      expect(row.details.className).not.toContain('diff-result');
+      const pre = Array.from(row.resultEl.children).find((c: any) => c.className.includes('tool-result-preview')) as any;
+      expect(pre).toBeDefined();
+      expect(pre.textContent).toContain('Replaced 1 occurrence(s)');
+    } finally {
+      restore();
+    }
+  });
+});

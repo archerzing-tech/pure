@@ -74,7 +74,8 @@ import {
 import { renderAttachmentCard } from './pasteChip';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, type ImageGenContext } from './TauriToolAdapter';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, takeToolDiff, type ImageGenContext } from './TauriToolAdapter';
+import { buildDiffRows, type ToolDiffData } from './toolDiff';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
 import { attachPlanPauseActions } from './planPauseActions';
@@ -6778,9 +6779,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Special-parse web_search / web_fetch results for rich body
             // rendering; generated images render as <img> cards. Other tools
             // fall back to a raw preview in <pre>.
-            let resultKind: 'search' | 'fetch' | 'image' | undefined;
+            let resultKind: 'search' | 'fetch' | 'image' | 'diff' | undefined;
             let resultItems: Array<{ title: string; snippet: string; url: string }> | undefined;
             let resultImages: GeneratedImage[] | undefined;
+            let resultDiff: ToolDiffData | undefined;
             let resultPreview = '';
             let downloadMeta: { path: string; size: number; via?: string } | null = null;
             if (event.payload.result.success) {
@@ -6795,6 +6797,19 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 } else {
                   resultPreview = resultText || '图片已生成（数据未送达界面）。';
                 }
+              } else if (toolName === 'edit_file' || toolName === 'write_file') {
+                // diff 变更卡:old/new 走 adapter 旁路拿(见 tool-diff side
+                // channel),这里压成紧凑行随 ToolExecMeta 持久化——会话重放
+                // 免费继承同一张卡。压不动(超行数闸/无缓存)就落回普通文案。
+                const payload = takeToolDiff(event.payload.toolCallId);
+                if (payload) {
+                  const built = buildDiffRows(payload.old, payload.new);
+                  if (built) {
+                    resultKind = 'diff';
+                    resultDiff = { ...built, overwrite: payload.overwrite };
+                  }
+                }
+                resultPreview = resultText;
               } else if (toolName === 'web_search' || toolName === 'researcher_web' || toolName === 'researcher_docs') {
                 resultKind = 'search';
                 resultItems = parseResearchResult(resultText);
@@ -6847,6 +6862,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               resultKind,
               resultItems,
               resultImages,
+              resultDiff,
               resultText: resultPreview,
               subagentTrace: subagentTraceByCall.get(event.payload.toolCallId),
             });

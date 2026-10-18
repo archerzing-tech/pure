@@ -2347,6 +2347,67 @@ body.window-maximized #boot-splash {
 }
 .download-card-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ── Tool diff card (edit_file / write_file, inline in the Output panel) ── */
+.tool-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 2px 4px;
+  font: 600 11px var(--font-sans);
+}
+.tool-diff-stat.add { color: var(--success); font-family: var(--font-mono); }
+.tool-diff-stat.del { color: var(--danger); font-family: var(--font-mono); }
+.tool-diff-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+}
+.tool-diff-rows {
+  font: 12px/1.55 var(--font-mono);
+  background: var(--bg-input);
+  border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 8px;
+  padding: 6px 0;
+  max-height: 300px;
+  overflow: auto;
+}
+.tool-diff-row {
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-diff-row.add {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: color-mix(in srgb, var(--success) 75%, var(--text));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--success) 60%, transparent);
+}
+.tool-diff-row.del {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: color-mix(in srgb, var(--danger) 80%, var(--text));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--danger) 60%, transparent);
+}
+.tool-diff-row.same { color: color-mix(in srgb, var(--fg) 62%, transparent); }
+.tool-diff-row.gap {
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  text-align: center;
+  font-size: 11px;
+  padding: 1px 0;
+  user-select: none;
+}
+.tool-diff-more {
+  margin-top: 3px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+.tool-diff-note {
+  margin-top: 5px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
 /* Live output lines streamed into the Output panel while a command runs
    (execute_command_stream). Monospace console text; stderr tinted so the two
    streams stay distinguishable at a glance. */

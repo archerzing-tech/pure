@@ -309,6 +309,43 @@ function cacheGeneratedImages(toolCallId: string, images: GeneratedImage[]): voi
   }
 }
 
+// ── Tool-diff side channel ──
+// edit_file / write_file 的 old/new 全文同样绝不进 ToolResult.result(会被引擎
+// 序列化回 LLM 的 tool message)。按 toolCallId 缓存在这里,chat.ts 在
+// ToolResult 时认领(takeToolDiff)压成紧凑 diff 行渲染。撤销快照
+// (captureWriteBatch)读文件时顺手拿到了写前旧内容,这里零额外 IO 复用它。
+const MAX_TOOL_DIFF_CACHE = 50;
+const MAX_TOOL_DIFF_PAYLOAD_CHARS = 1_000_000;
+
+export interface ToolDiffPayload {
+  path: string;
+  old: string;
+  new: string;
+  /** write_file 覆盖已有文件(edit_file 恒为 true——有 old 必有被替换者)。 */
+  overwrite: boolean;
+}
+
+const toolDiffCache = new Map<string, ToolDiffPayload>();
+
+/** Claim (and remove) the old/new payload for a tool call id. Returns
+ * undefined when nothing was cached — a failed edit, an oversized payload,
+ * or a call that never went through this adapter (CLI). */
+export function takeToolDiff(toolCallId: string): ToolDiffPayload | undefined {
+  const payload = toolDiffCache.get(toolCallId);
+  toolDiffCache.delete(toolCallId);
+  return payload;
+}
+
+function cacheToolDiff(toolCallId: string, payload: ToolDiffPayload): void {
+  if (payload.new.length > MAX_TOOL_DIFF_PAYLOAD_CHARS) return;
+  toolDiffCache.set(toolCallId, payload);
+  while (toolDiffCache.size > MAX_TOOL_DIFF_CACHE) {
+    const oldest = toolDiffCache.keys().next().value;
+    if (oldest === undefined) break;
+    toolDiffCache.delete(oldest);
+  }
+}
+
 import {
   ProbeGuardError,
   checkProbeTarget,
@@ -1088,6 +1125,13 @@ export class TauriToolAdapter implements ToolAdapter {
           const path = String(args.path ?? '');
           const content = String(args.content ?? '');
           const batch = await this.captureWriteBatch('write_file', [path]);
+          // diff 旁路:旧内容取自撤销快照(新建文件时为空串→纯新增视图)。
+          cacheToolDiff(toolCall.id, {
+            path,
+            old: batch.entries[0]?.content ?? '',
+            new: content,
+            overwrite: batch.entries[0]?.existed === true,
+          });
           // Stream byte-level progress while the file is written so the tool
           // row shows "正在写入 … 45% (230/512 KB)" instead of a silent
           // "等待输出" wait for the whole (possibly large) write to finish.
@@ -1117,6 +1161,13 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'edit_file': {
           const path = String(args.path ?? '');
           const batch = await this.captureWriteBatch('edit_file', [path]);
+          // diff 旁路:old/new 就是本次替换的片段(天然局部,不持有全文)。
+          cacheToolDiff(toolCall.id, {
+            path,
+            old: String(args.oldString ?? ''),
+            new: String(args.newString ?? ''),
+            overwrite: true,
+          });
           const editMsg = await this.call('edit_file', {
             workspace: ws,
             path,

@@ -17,6 +17,7 @@ import type { TaskScript } from '../shared/taskScript';
 import type { SessionLedger } from '../shared/sessionLedger';
 import type { PathRepair } from './pathIndex';
 import type { TurnVariantGroup } from './turnVariants';
+import type { ToolDiffData } from './toolDiff';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
 
@@ -277,13 +278,18 @@ export interface ToolExecMeta {
    * renders the generated images as <img> cards; `undefined` (or anything
    * else) renders the raw `resultText` in a `<pre>` body.
    */
-  resultKind?: 'search' | 'fetch' | 'image';
+  resultKind?: 'search' | 'fetch' | 'image' | 'diff';
   /**
    * Parsed result for `resultKind: 'search'`. Each item is a search hit the
    * web_search backends returned (cn.bing / Sogou / 360 / Baidu / Brave /
    * Bing-via-Jina / SearXNG; see src-tauri/src/lib.rs web_search).
    */
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
+  /**
+   * 紧凑红绿 diff(`resultKind: 'diff'`,edit_file / write_file)。行数据已压缩
+   * (上下文折叠+渲染上限),随会话快照持久化,重放渲染同一张 diff 卡。
+   */
+  resultDiff?: ToolDiffData;
   /**
    * Verbatim result string. Used by `resultKind === 'fetch'` (truncated) and by
    * the raw fallback when `resultItems` is missing.

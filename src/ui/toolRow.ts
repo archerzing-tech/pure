@@ -13,6 +13,7 @@ import { stripAnsi } from '../shared/ansi';
 import { isTauriRuntime } from '../shared/tauri';
 import { loadConfig } from './config';
 import type { GeneratedImage, SubagentActivityEvent } from '../shared/types';
+import { renderToolDiff, type ToolDiffData } from './toolDiff';
 // Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
 // as markdown.ts — re-registering the grammars here is idempotent and keeps
 // toolRow.ts self-contained (it is imported by chat.ts, main.ts and tests).
@@ -210,10 +211,12 @@ export interface ToolRowResultMeta {
    *  'stopped' = 用户点名取消（灰卡 ⏹）。二者都不是失败——不染红、不打 ✗，
    *  也不读失败 tooltip。会话重放（ToolExecMeta）与实时结算共用本字段。 */
   outcome?: 'paused' | 'stopped';
-  resultKind?: 'search' | 'fetch' | 'image';
+  resultKind?: 'search' | 'fetch' | 'image' | 'diff';
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
   /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
   resultImages?: GeneratedImage[];
+  /** edit_file / write_file 的紧凑红绿 diff(见 toolDiff.ts),渲染于 Output 面板。 */
+  resultDiff?: ToolDiffData;
   resultText?: string;
   /** Subagent interior-activity trace (live SubagentActivity lines), rendered
    * after the result wipe so finalize never shrinks the panel, and by session
@@ -971,6 +974,17 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     // portrait image. The row-level class lifts the cap for this result.
     row.details.classList.add('image-result');
     row.resultEl.appendChild(renderImageGallery(meta.resultImages, meta.resultText));
+  } else if (meta.resultKind === 'diff' && meta.resultDiff?.rows.length) {
+    // edit/write 的红绿 diff 卡。原文案(Replaced N occurrence(s) + 撤销提示)
+    // 仍以小字缀底——撤销提示混在那句话里,不能丢。
+    row.details.classList.add('diff-result');
+    renderToolDiff(row.resultEl, meta.resultDiff);
+    if (meta.resultText) {
+      const note = document.createElement('div');
+      note.className = 'tool-diff-note';
+      note.textContent = meta.resultText;
+      row.resultEl.appendChild(note);
+    }
   } else if (meta.resultText) {
     const pre = document.createElement('pre');
     pre.className = meta.resultKind === 'fetch' ? 'fetch-preview' : 'tool-result-preview';

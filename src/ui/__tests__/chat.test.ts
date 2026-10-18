@@ -1923,6 +1923,28 @@ describe('generate_image text-to-image wiring', () => {
     expect(toolRowSrc).toContain("resultKind === 'image' && meta.resultImages?.length");
   });
 
+  it('routes edit/write diffs through the side channel, never the tool result text', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // edit_file / write_file 认领旁路 old/new 并压成紧凑 diff 行;压不动就
+    // 落回普通文案 —— 全文任何形态都不进 ToolResult.result(那会被序列化
+    // 回 LLM 的 tool message)。
+    expect(src).toContain("toolName === 'edit_file' || toolName === 'write_file'");
+    expect(src).toContain('const payload = takeToolDiff(event.payload.toolCallId);');
+    expect(src).toContain("resultKind = 'diff';");
+    expect(src).toContain('resultDiff,');
+    // Adapter side: old/new 缓存按 toolCallId,撤销快照顺手供旧内容,零额外 IO。
+    const adapterSrc = readSource(new URL('../TauriToolAdapter.ts', import.meta.url));
+    expect(adapterSrc).toContain('export function takeToolDiff');
+    expect(adapterSrc).toContain("cacheToolDiff(toolCall.id, {\n            path,\n            old: batch.entries[0]?.content ?? '',");
+    expect(adapterSrc).toContain("old: String(args.oldString ?? ''),");
+    // Replay persists the compact rows and the row finalizer renders them.
+    const storeSrc = readSource(new URL('../store.ts', import.meta.url));
+    expect(storeSrc).toContain("resultKind?: 'search' | 'fetch' | 'image' | 'diff';");
+    expect(storeSrc).toContain('resultDiff?: ToolDiffData;');
+    const toolRowSrc = readSource(new URL('../toolRow.ts', import.meta.url));
+    expect(toolRowSrc).toContain("meta.resultKind === 'diff' && meta.resultDiff?.rows.length");
+  });
+
   it('shows a waiting card during slow-model gaps between tool results and the next step', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // After a ToolResult finalizes, a debounced watchdog opens a "正在思考下一步…"
