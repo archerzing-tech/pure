@@ -668,6 +668,13 @@ export type EngineEvent =
   // the transport so a long silent connect window can be labeled honestly
   // ("连接不太顺，正在重试…") instead of reading as a frozen model.
   | { type: 'TransportStatus'; payload: { stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number }; timestamp: number }
+  // Silent auto-resume after a stalled or cut stream: the engine keeps the
+  // partial answer and asks the model to continue exactly where it stopped.
+  // The resume itself is seamless, but the gap (a full request round-trip —
+  // tens of seconds on a long context) reads as "输出停住了". Same principle
+  // as ContextCompactRetry: a silent window this long must speak for itself.
+  // Observability + UI label only; the continuation is unchanged.
+  | { type: 'StreamResuming'; payload: { attempt: number; max: number; reason: 'stall' | 'timeout' }; timestamp: number }
   // Live subagent interior activity (parallel multi-agent): forwarded from the
   // orchestrator's progress sink through ctx.subagentEvents while the engine
   // awaits the tool batch, namespaced by the delegation toolCallId. Between a

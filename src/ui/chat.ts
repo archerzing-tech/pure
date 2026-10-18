@@ -6464,6 +6464,23 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             break;
           }
 
+          case 'StreamResuming': {
+            // 断流静默续跑的缺口是一次完整请求往返（长上下文几十秒），不说
+            // 一声就被读成「输出停住了」。与压缩提示同理：这么长的静默窗口
+            // 必须自己开口。开卡守卫与 TransportStatus 同款。
+            cancelToolGapCard();
+            if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
+              thinkingCard = openThinkingCard();
+              thinkingCard.card.classList.add('waiting');
+            }
+            if (thinkingCard) {
+              setThinkingLabel(thinkingCard, `回复断了一下，正在接着生成（第 ${event.payload.attempt}/${event.payload.max} 次）…`);
+              dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
+            }
+            this.scrollUi(chatEl);
+            break;
+          }
+
           case 'TokenDelta': {
             if (!event.payload.isToolCall) {
               const delta = event.payload.content;

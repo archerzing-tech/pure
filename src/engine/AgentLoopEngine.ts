@@ -431,11 +431,21 @@ export class AgentLoopEngine {
             }
           }
 
+          // Truncation heuristic for a COMPLETED stream (done arrived): an odd
+          // count of ``` fences suggests a cut-off code block. Counting every
+          // ``` occurrence misjudged replies that merely mention ``` inline or
+          // nest fences ("用 ``` 包代码") — a finished answer then got a
+          // forced resume, re-generating duplicated/off-track content behind
+          // a stall. Fences are line-initial (CommonMark: ≤3 leading spaces);
+          // inline mentions are not.
           const silentlyTruncated =
-            (sawDone && !sawToolCall && content.length > 0 && (content.match(/```/g) ?? []).length % 2 === 1) ||
+            (sawDone && !sawToolCall && content.length > 0 && (content.match(/^[ \t]{0,3}```/gm) ?? []).length % 2 === 1) ||
             (!sawDone && !sawToolCall && content.length > 0);
           if (silentlyTruncated && streamResumes < MAX_STREAM_RESUMES) {
             streamResumes++;
+            // The resume is seamless to the transcript but its gap is a full
+            // request round-trip — label it or the UI reads a stall.
+            yield { type: 'StreamResuming', payload: { attempt: streamResumes, max: MAX_STREAM_RESUMES, reason: 'stall' }, timestamp: Date.now() };
             messages.push({ role: 'assistant' as const, content });
             messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
             turnCount++;
@@ -525,6 +535,10 @@ export class AgentLoopEngine {
         // "两次流式输出超时" the user hit on large HTML / large output).
         if (isTimeout && streamResumes < MAX_STREAM_RESUMES && content.length > 0 && !sawToolCall) {
           streamResumes++;
+          // The resume is seamless to the transcript but its gap is a full
+          // request round-trip (tens of seconds on a long context) — label it
+          // or the UI reads "输出停住了" with nothing on screen.
+          yield { type: 'StreamResuming', payload: { attempt: streamResumes, max: MAX_STREAM_RESUMES, reason: 'timeout' }, timestamp: Date.now() };
           messages.push({ role: 'assistant' as const, content });
           messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
           turnCount++; budget.incrementTurn();
