@@ -1145,3 +1145,37 @@ describe('paint code blocks', () => {
     expect(css).toContain('.paint-target canvas');
   });
 });
+
+// 流式偶发中断三修(2026-10-18):lexer 对某类半截输入持续抛错时,旧行为
+// 「保留旧帧」意味着画面永久冻结——token 还在到,气泡一动不动,用户看到的
+// 就是输出中断。钉住降级路径(raw 文本续帧)、单拍渲染失败的自愈循环,以及
+// KaTeX memo(活跃块每拍重算已闭合公式的主线程税)。
+describe('流式渲染韧性(lexer 降级 / 渲染自愈 / KaTeX memo)', () => {
+  const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+
+  it('lexer 失败降级为整帧 raw 文本,不再裸退保留旧帧', () => {
+    const catchAt = src.indexOf('degrading to raw text');
+    expect(catchAt).toBeGreaterThan(-1);
+    const body = src.slice(catchAt, catchAt + 400);
+    expect(body).toContain('container.replaceChildren()');
+    expect(body).toContain("raw.className = 'stream-raw'");
+    expect(body).toContain('raw.textContent = text');
+  });
+
+  it('单拍渲染失败保留 lastRenderedText,下一帧带新文本重试', () => {
+    const guard = src.indexOf('streaming render failed; keeping last frame');
+    expect(guard).toBeGreaterThan(-1);
+    const body = src.slice(guard, guard + 140);
+    // 失败路径不更新 lastRenderedText——更新了,失败帧就被当成已渲染。
+    expect(body).not.toContain('lastRenderedText =');
+    expect(body).toContain('return;');
+  });
+
+  it('KaTeX 结果按 (displayMode, tex) memo,有界淘汰最旧', () => {
+    expect(src).toContain('const KATEX_MEMO_CAP = 512;');
+    expect(src).toContain('const katexMemo = new Map<string, string>();');
+    expect(src).toContain("const key = `${displayMode ? 'B' : 'I'}\\u0000${trimmed}`;");
+    expect(src).toContain('if (hit !== undefined) return hit;');
+    expect(src).toContain('katexMemo.delete(katexMemo.keys().next().value as string);');
+  });
+});

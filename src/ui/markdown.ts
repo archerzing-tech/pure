@@ -360,13 +360,26 @@ export const mathExtBlock = {
 // back as escaped literal text (throwOnError:false colors unknown TeX red —
 // worse than leaving prose alone). output:'html' skips the MathML tree: DOMPurify
 // keeps it, but it doubles the markup for no reader in a WebView context.
+//
+// Results are memoized: streaming re-renders the ACTIVE top-level block every
+// throttled tick, and a formula-dense block (math answers) re-ran every already-
+// closed KaTeX conversion per tick — hundreds of ms of main-thread work that
+// grew with the block. KaTeX output is a pure function of (tex, displayMode),
+// so a bounded cache is safe. Bounded, not grow-forever: a long session of
+// math answers can churn thousands of distinct snippets.
+const KATEX_MEMO_CAP = 512;
+const katexMemo = new Map<string, string>();
 function renderKatex(tex: string, displayMode: boolean): string {
   const trimmed = tex.trim();
   if (!trimmed || /[一-鿿぀-ヿ가-힯]/.test(trimmed)) {
     return esc(tex);
   }
+  const key = `${displayMode ? 'B' : 'I'}\u0000${trimmed}`;
+  const hit = katexMemo.get(key);
+  if (hit !== undefined) return hit;
+  let out: string;
   try {
-    return katex.renderToString(trimmed, {
+    out = katex.renderToString(trimmed, {
       displayMode,
       throwOnError: false,
       strict: false,
@@ -375,6 +388,12 @@ function renderKatex(tex: string, displayMode: boolean): string {
   } catch {
     return esc(tex);
   }
+  if (katexMemo.size >= KATEX_MEMO_CAP) {
+    // Map iteration order is insertion order — drop the oldest entry.
+    katexMemo.delete(katexMemo.keys().next().value as string);
+  }
+  katexMemo.set(key, out);
+  return out;
 }
 
 const md = new Marked({ gfm: true, breaks: true, renderer });
@@ -2837,12 +2856,22 @@ function diffStreaming(container: HTMLElement, text: string): void {
     // marked 18: lexer is on the Marked instance, returns top-level block tokens.
     tokens = mdStream.lexer(normalizeMapFence(text)) as unknown as Token[];
   } catch (err) {
-    // Partial markdown can occasionally trip the lexer — keep the last-frame
-    // DOM (whose data-md-raw was already correct for the prior tick).
+    // Partial markdown can occasionally trip the lexer. The old behavior kept
+    // the last-frame DOM — but the SAME partial input trips the lexer again on
+    // every tick until the structure closes, so the bubble froze mid-stream
+    // while tokens kept arriving ("偶发中断"). Degrade instead: show the whole
+    // frame as raw text so the picture keeps moving; the next tick where the
+    // lexer recovers diffs back into rendered blocks, and Completed re-renders
+    // the final frame through the full pipeline anyway.
     if (typeof console !== 'undefined') {
       const msg = err instanceof Error ? err.message : String(err);
-      console.debug(`[markdown-ts] lexer failed len=${text.length}: ${msg}`);
+      console.debug(`[markdown-ts] lexer failed len=${text.length}: ${msg} — degrading to raw text`);
     }
+    container.replaceChildren();
+    const raw = document.createElement('p');
+    raw.className = 'stream-raw';
+    raw.textContent = text;
+    container.appendChild(raw);
     return;
   }
 
@@ -3022,7 +3051,18 @@ export function scheduleStreamingRender(
     // from when the timer was scheduled (tokens keep arriving meanwhile).
     const latest = state.latestText;
     const startedAt = Date.now();
-    diffStreaming(container, latest);
+    try {
+      diffStreaming(container, latest);
+    } catch (err) {
+      // A failed frame must not poison the schedule loop: lastRenderedText
+      // stays behind, so the next token retries this frame with newer text.
+      state.renderCostMs = Date.now() - startedAt;
+      if (typeof console !== 'undefined') {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.debug(`[markdown-ts] streaming render failed; keeping last frame: ${msg}`);
+      }
+      return;
+    }
     state.renderCostMs = Date.now() - startedAt;
     state.lastRenderedText = latest;
     state.lastRenderTime = Date.now();
