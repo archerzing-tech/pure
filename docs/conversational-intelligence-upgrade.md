@@ -115,7 +115,7 @@
 **验收**：真机判例 13–14 + 单测（定向 abort 只杀目标支、persist-先于-settle 顺序、relay 下游 fail-fast、排队支清除）；回放器加 2 条分支止损判例（✅ 2026-10-09：模型侧回放器 TC-10「停后不进汇总、不自行重派」+ TC-11「点名续跑接得上、别的支不重跑」，真 provider 手跑；宿主侧 conversationSamples 已有 8+ 条止损/续跑判例超额覆盖）。真机判例 13–14 实测仍待真机会话收官。
 **量级**：中大（本蓝图最大单体工程，但「停/续」底座全是现成的，新写的只有信号通路与语义收口）。
 
-### 第 3 期「持久性」：关机不丢，随时接着聊
+### 第 3 期「持久性」：关机不丢，随时接着聊 ✅（2026-10-09）
 
 - **子代理 checkpoint 换 FSStore**：GUI 的 stateStore 从 MemoryStateStore（chat.ts:1504，重启即丢）换成 CLI 同款 FSStore（已实现，`cliHarness.ts:352`）——稳定 sessionId 机制不动，同参重派即命中。落盘位置 `~/.pure/checkpoints/`，随会话删除清理
 - **暂停态显式持久化**：快照加 session 级 `paused: true`（store.ts V3 → V4 小升版，兼容读）；重启恢复时重建「继续」条（现在只在活的 Interrupted 分支创建，chat.ts:5987-6005），点击等价「继续」
@@ -123,6 +123,7 @@
 - 分支断点一并落盘：第 2 期的单支中止 checkpoint 同走 FSStore，重启后单支续跑不丢
 - **验收**：判例 5 的真机全流程（跑一半→暂停→退出 app→重开→继续→子代理从 checkpoint 续；含单支中止后的重启续跑）。
 **量级**：中小。
+**落地**：✅（2026-10-09）四刀全落——刀 1（c0658df）子代理断点落盘：GUI 换 `TauriCheckpointStore`（invoke Rust 三命令，落 `~/.pure/checkpoints/<支sessionId>/checkpoints/v%03d.json`，tmp+rename 原子写；openSession 预热内存镜像保同步 loadSession 契约；随会话删除 Rust 侧按本名+`sub_` 前缀扫净）；刀 2（49afa0c）暂停态落盘+重启重建「继续」条（`uiState.paused`，send 开头摘条=用户开口即处置）；刀 3（85261aa）整树续跑对话流回执，接断点还是重跑一眼可见；刀 4（3a7e4ae）血缘号 runCount 落盘，续跑第几次跨重启数得清。两处有意偏差：①介质非 CLI 同款 FSStore 直读——WebView 无 node:fs，走 Tauri invoke+镜像，目录布局/版本升序/覆写语义与 FSStore 同构；②不升 V4——照 sessionLedger 先例走 uiState 可选字段（normalize 只认 version===3，升号反而让旧 app 读新档掉兜底清空会话）。余：判例 5 真机验收。
 
 ### 第 4 期「账本」：不重复问、不重复做、不重复规划
 
