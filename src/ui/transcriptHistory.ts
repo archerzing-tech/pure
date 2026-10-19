@@ -62,17 +62,27 @@ export const FLING_SETTLE_MS = 160;
 /** After leaving the band, a group stays mounted at least this long, and only
  *  parks once the fling has ALSO been quiet this long (hysteresis). */
 export const PARK_IDLE_MS = 900;
+/** Starvation cap: a queued group mounts after waiting this long even while
+ *  the fling is still in motion. Without the cap a CONTINUOUS fling — every
+ *  scroll event a fresh ≥240px jump, never quiet for FLING_SETTLE_MS — keeps
+ *  the settle timer re-arming forever, and groups sitting in the visible
+ *  viewport stay empty (summary-only) for as long as the user keeps flinging.
+ *  That was the "甩动后历史内容一片空白" regression: the 2026-10-19 fling
+ *  gate traded correctness for smoothness with no lower bound on latency. */
+export const FLING_MAX_WAIT_MS = 300;
 
 let flingDeltaPx = FLING_DELTA_PX;
 let flingSettleMs = FLING_SETTLE_MS;
 let parkIdleMs = PARK_IDLE_MS;
+let flingMaxWaitMs = FLING_MAX_WAIT_MS;
 
 /** Test seam: tighten the timings so bun tests don't sleep for seconds.
  *  Production never calls this. */
-export function setTranscriptFlingTimings(opts: { flingDeltaPx?: number; flingSettleMs?: number; parkIdleMs?: number }): void {
+export function setTranscriptFlingTimings(opts: { flingDeltaPx?: number; flingSettleMs?: number; parkIdleMs?: number; flingMaxWaitMs?: number }): void {
   if (opts.flingDeltaPx !== undefined) flingDeltaPx = Math.max(1, opts.flingDeltaPx);
   if (opts.flingSettleMs !== undefined) flingSettleMs = Math.max(1, opts.flingSettleMs);
   if (opts.parkIdleMs !== undefined) parkIdleMs = Math.max(0, opts.parkIdleMs);
+  if (opts.flingMaxWaitMs !== undefined) flingMaxWaitMs = Math.max(1, opts.flingMaxWaitMs);
 }
 
 let lastFlingAt = 0;
@@ -105,6 +115,8 @@ const flingSettledFor = (ms: number, now = Date.now()): boolean => now - lastFli
 interface PendingGroupWork {
   /** Runs only if the group is still inside the band (and not disconnected). */
   run: () => Promise<void> | void;
+  /** When the work was queued — the starvation clock for FLING_MAX_WAIT_MS. */
+  enqueuedAt: number;
 }
 const settleQueue: PendingGroupWork[] = [];
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -118,15 +130,25 @@ function armSettleTimer(): void {
   if (settleTimer !== null) return;
   settleTimer = setTimeout(() => {
     settleTimer = null;
-    if (flingActive()) armSettleTimer();
-    else flushSettleQueue();
+    const now = Date.now();
+    if (flingActive(now)) {
+      // Still mid-fling. Deferral is bounded: work older than the starvation
+      // cap flushes anyway — one bounded batch per settle tick beats a blank
+      // viewport for as long as the user's hand keeps the fling alive.
+      const aged = settleQueue.some(work => now - work.enqueuedAt >= flingMaxWaitMs);
+      if (aged) flushSettleQueue();
+      else armSettleTimer();
+    } else {
+      flushSettleQueue();
+    }
   }, flingSettleMs);
 }
 
-/** Defer heavy group work until the fling settles; dropped silently if the
- *  group left the band before then (its observer re-fires on re-entry). */
+/** Defer heavy group work until the fling settles — or until the starvation
+ *  cap; dropped silently if the group left the band before then (its observer
+ *  re-fires on re-entry). */
 function enqueueSettleWork(run: () => Promise<void> | void): void {
-  settleQueue.push({ run });
+  settleQueue.push({ run, enqueuedAt: Date.now() });
   armSettleTimer();
 }
 

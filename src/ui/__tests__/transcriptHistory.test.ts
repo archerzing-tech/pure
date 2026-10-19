@@ -4,6 +4,7 @@ import {
   createHistoryGroup,
   setTranscriptFlingTimings,
   FLING_SETTLE_MS,
+  FLING_MAX_WAIT_MS,
   PARK_IDLE_MS,
   type HistoryGroupHandle,
 } from '../transcriptHistory';
@@ -47,8 +48,9 @@ beforeEach(() => {
   document.body.innerHTML = '<div id="chat"></div>';
   chat = document.getElementById('chat')!;
   StubIntersectionObserver.instances = [];
-  // 测试时钟收紧:生产值见 FLING_SETTLE_MS / PARK_IDLE_MS(160ms / 900ms)。
-  setTranscriptFlingTimings({ flingDeltaPx: 100, flingSettleMs: 40, parkIdleMs: 120 });
+  // 测试时钟收紧:生产值见 FLING_SETTLE_MS / FLING_MAX_WAIT_MS / PARK_IDLE_MS
+  // (160ms / 300ms / 900ms)。
+  setTranscriptFlingTimings({ flingDeltaPx: 100, flingSettleMs: 40, parkIdleMs: 120, flingMaxWaitMs: 120 });
   (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = StubIntersectionObserver;
 });
 
@@ -83,6 +85,25 @@ describe('transcript history fling policy', () => {
     expect(group.body.children.length).toBe(0); // 甩动进行中:不手术
     await sleep(FLING_SETTLE_MS + 30);
     expect(group.body.children.length).toBe(1); // 落定后补做
+  });
+
+  it('a CONTINUOUS fling mounts within the starvation cap instead of blanking forever', async () => {
+    const group = createHistoryGroup({ parkOffscreen: true });
+    chat.appendChild(group.el);
+    group.adopt([document.createElement('div')]);
+    group.park();
+    const io = StubIntersectionObserver.instances.at(-1)!;
+    fling();
+    io.emit([{ isIntersecting: true }]); // 进队,排队时钟开跑
+    // 连续快甩:每 20ms 一记大位移,fling 时钟永远热——甩不停。
+    // 2026-10-19 真机判例:这种甩法下旧实现永远不 flush,屏上分组一直空白。
+    const keepFlinging = setInterval(fling, 20);
+    try {
+      await sleep(FLING_MAX_WAIT_MS + 60); // cap=120(测试值):排队必已超龄
+      expect(group.body.children.length).toBe(1); // 超龄作业就地 mount,不再等落定
+    } finally {
+      clearInterval(keepFlinging);
+    }
   });
 
   it('parking waits out the idle window and cancels on re-entry', async () => {
