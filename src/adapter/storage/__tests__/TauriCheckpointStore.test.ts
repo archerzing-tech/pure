@@ -116,6 +116,34 @@ describe('TauriCheckpointStore', () => {
     expect(calls).toHaveLength(1); // 只有 save，没有 delete
   });
 
+  it('盘上写失败即撤镜像账：无旧档时整条移除，预检不命中不预支「从断点接」', async () => {
+    const { invoker } = makeFakeInvoker((cmd) => {
+      if (cmd === 'save_checkpoint') throw new Error('disk full');
+      return undefined;
+    });
+    const store = new TauriCheckpointStore(invoker);
+    await expect(store.saveCheckpoint('sub_p_tool_1', makeCheckpoint(1, 9))).rejects.toThrow('disk full');
+    // 镜像不留假账:本回合续跑预检(读镜像)与重启后的盘上真相同口径——都 miss。
+    expect(store.loadSession('sub_p_tool_1')).toBeNull();
+  });
+
+  it('盘上写失败还原被覆写的旧档;盘恢复后重写,新账重新生效', async () => {
+    let failNext = false;
+    const { invoker } = makeFakeInvoker((cmd) => {
+      if (cmd === 'save_checkpoint' && failNext) throw new Error('disk full');
+      return undefined;
+    });
+    const store = new TauriCheckpointStore(invoker);
+    await store.saveCheckpoint('sub_p_tool_1', makeCheckpoint(1, 4)); // 旧档真实落盘
+    failNext = true;
+    await expect(store.saveCheckpoint('sub_p_tool_1', makeCheckpoint(1, 12))).rejects.toThrow('disk full');
+    // 还原旧档而非删除:盘上 v001.json 还是第 4 轮那份,预检口径回到它。
+    expect(store.loadSession('sub_p_tool_1')!.state.turnCount).toBe(4);
+    failNext = false;
+    await store.saveCheckpoint('sub_p_tool_1', makeCheckpoint(1, 12));
+    expect(store.loadSession('sub_p_tool_1')!.state.turnCount).toBe(12);
+  });
+
   it('warm 忽略畸形回包行（坏 sessionId / 坏 checkpoint 不进镜像）', async () => {
     const { invoker } = makeFakeInvoker(() => [
       { sessionId: 'sub_p_tool_1', checkpoint: makeCheckpoint(1) },

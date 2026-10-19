@@ -61,9 +61,42 @@ export class TauriCheckpointStore implements IStateStore {
   }
 
   async saveCheckpoint(sessionId: string, checkpoint: Checkpoint): Promise<void> {
+    if (!this.invoker) {
+      // 非 Tauri 环境:镜像即全部,没有「盘上真相」可背叛。
+      this.append(sessionId, checkpoint);
+      return;
+    }
+    // 有盘介质:镜像先同步认账(本回合内续跑预检立即可见,persist-before-settle
+    // 依赖这一点),盘上写失败即撤这笔账——镜像若留着假账,本回合的续跑预检
+    // 会报「从第 N 轮接上」,重启后却是诚实 miss,回执预支了机制兑现不了的
+    // 承诺(2026-10-19 勘察缺口 a)。撤账后预检与盘上真相同口径:没存上就明
+    // 说重跑。错误照常上抛,编排器 persist 侧 best-effort 吞掉,只读仓不打断
+    // 运行。
+    const list = this.mirror.get(sessionId);
+    const at = list ? list.findIndex((c) => c.version === checkpoint.version) : -1;
+    const prev = list && at >= 0 ? list[at] : undefined;
     this.append(sessionId, checkpoint);
-    if (!this.invoker) return;
-    await this.invoker('save_checkpoint', { sessionId, checkpoint });
+    try {
+      await this.invoker('save_checkpoint', { sessionId, checkpoint });
+    } catch (error) {
+      this.revertAppend(sessionId, checkpoint.version, prev);
+      throw error;
+    }
+  }
+
+  /** 撤掉最近一次 append:同 version 覆写过的还原旧条(盘上真有的那份,
+   *  预检口径回到它),新插入的整条移除(键全撤,预检诚实 miss)。 */
+  private revertAppend(sessionId: string, version: number, prev: Checkpoint | undefined): void {
+    const list = this.mirror.get(sessionId);
+    if (!list) return;
+    const at = list.findIndex((c) => c.version === version);
+    if (at < 0) return;
+    if (prev) {
+      list[at] = prev;
+    } else {
+      list.splice(at, 1);
+      if (list.length === 0) this.mirror.delete(sessionId);
+    }
   }
 
   async deleteSession(sessionId: string): Promise<void> {
