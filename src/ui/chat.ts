@@ -8948,7 +8948,13 @@ export class SessionChatManager {
       this.hosts.set(sessionId, host);
     }
     this.makeActive(controller, host!, sessionId);
-    this.onSessionIdChanged?.(sessionId);
+    // 微任务延迟「会话已切换」广播：消费方（main.ts 的输入历史/草稿/侧栏
+    // 高亮链）注册在模块前段、却引用模块后段才声明的 UI 常量。首个会话在
+    // 模块求值期被懒创建时（TaskQueue 构造、输入历史预热等内部查询都可能
+    // 触发），同步广播会踩进那些常量的 TDZ——2026-10-19 E2E 判例：模块
+    // 求值当场中断，半数 UI 没接线。微任务在求值整体结束后才跑，同一任
+    // 务轮内消费者语义不变（桶加载/草稿恢复均幂等）。
+    queueMicrotask(() => this.onSessionIdChanged?.(sessionId));
     this.reapColdSessions();
     return { controller, host: host!, warm };
   }
