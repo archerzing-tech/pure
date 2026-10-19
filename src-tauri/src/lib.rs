@@ -17265,6 +17265,25 @@ fn format_audit_line(ts_ms: u128, reason: &str) -> String {
     format!("{ts_ms} {reason}\n")
 }
 
+/// GUI 未捕获异常台账:JS 侧 window.onerror / unhandledrejection 的第一手栈
+/// 只有页面内能接住——WebContent 进程活着时外面读不到它的 console,「快速
+/// 甩动后按钮全死、窗口空白」这类僵尸态事故就靠这份落盘对账。批量 append,
+/// 永不 panic;行内容由 TS 侧 errorLedger 序列化,Rust 不解析。
+#[tauri::command]
+fn gui_error_log(entries: Vec<String>) {
+    if entries.is_empty() {
+        return;
+    }
+    let path = format!("{}/.pure/gui_errors.log", pure_home_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        for line in entries {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+    }
+}
+
 fn close_disposition(running_sessions: usize, open_windows: usize) -> CloseDisposition {
     if running_sessions > 0 {
         CloseDisposition::BackgroundAndHint
@@ -17591,6 +17610,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            // GUI diagnostics: uncaught JS error ledger (~/.pure/gui_errors.log)
+            gui_error_log,
             // File tools
             read_file,
             path_info,

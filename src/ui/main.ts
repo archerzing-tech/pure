@@ -73,6 +73,32 @@ import { shouldYieldAfterRestoreBlock } from './sessionRestorePolicy';
 import { formatSegmentSummary, groupConversationTurns, segmentConversationTurns } from './conversationTurns';
 import { createHistoryGroup, type HistoryGroupHandle } from './transcriptHistory';
 import { loadDeferredStyles } from './deferredStyles';
+import { invoke } from '@tauri-apps/api/core';
+import { createErrorLedger } from './errorLedger';
+
+// ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
+// 僵尸态事故(按钮全死/窗口空白)唯一的页面内第一手证据,机制见 errorLedger.ts;
+// Rust 侧 gui_error_log 只管把 JSONL 行 append 进 ~/.pure/gui_errors.log。
+const guiErrorLedger = createErrorLedger({
+  sink: lines => (isTauriRuntime() ? invoke('gui_error_log', { entries: lines }) : Promise.resolve()),
+});
+window.addEventListener('error', e => {
+  guiErrorLedger.record({
+    kind: 'error',
+    message: e.message,
+    source: e.filename,
+    line: e.lineno,
+    column: e.colno,
+    stack: e.error?.stack,
+  });
+});
+window.addEventListener('unhandledrejection', e => {
+  const reason = e.reason as { stack?: string; message?: string } | undefined;
+  guiErrorLedger.record({ kind: 'unhandledrejection', message: reason?.message ?? String(reason), stack: reason?.stack });
+});
+window.addEventListener('pagehide', () => {
+  void guiErrorLedger.flush();
+});
 
 const chat = new SessionChatManager();
 
