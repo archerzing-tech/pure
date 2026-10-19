@@ -756,21 +756,33 @@ async fn mcp_call_inner_with_deadline(
     request: &str,
     deadline: std::time::Duration,
 ) -> Result<String, String> {
-    // Write request to stdin
+    // Write request to stdin. A BrokenPipe here is the server dying BEFORE it
+    // ever saw the request — the same death the stdout-EOF path reports, just
+    // noticed earlier (CI 判例 2026-10-19: `sh -c "exit 0"` 子进程在调度慢的
+    // 机器上先于写入退出,原始 EPIPE 漏给了上层)。归类口径必须一致,否则
+    // 同一种死亡因竞态时机不同报两种话。
     {
         let mut stdin = handle.stdin.lock().await;
+        const SERVER_DEAD: &str = "MCP server closed stdout (process exited)";
+        let classify = |e: std::io::Error, what: &str| -> String {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                SERVER_DEAD.to_string()
+            } else {
+                format!("{}: {}", what, e)
+            }
+        };
         stdin
             .write_all(request.as_bytes())
             .await
-            .map_err(|e| format!("write stdin: {}", e))?;
+            .map_err(|e| classify(e, "write stdin"))?;
         stdin
             .write_all(b"\n")
             .await
-            .map_err(|e| format!("write newline: {}", e))?;
+            .map_err(|e| classify(e, "write newline"))?;
         stdin
             .flush()
             .await
-            .map_err(|e| format!("flush stdin: {}", e))?;
+            .map_err(|e| classify(e, "flush stdin"))?;
     }
 
     // A server's stdout is shared traffic: progress notifications and plain
