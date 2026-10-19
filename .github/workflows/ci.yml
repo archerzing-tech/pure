@@ -31,14 +31,30 @@ jobs:
           restore-keys: |
             bun-${{ runner.os }}-
 
+      # 2026-10-19:GitHub runner 出口被 CDN 侧掐大 tarball(npmjs/npmmirror
+      # 同日同病、同位置确定性复现,本机同 bun 同包秒装)——单源重试熬不过
+      # 持续性故障,多源轮换,哪条通路活着走哪条;integrity 校验兜底,装错
+      # 大声报错。任一次成功后 actions/cache 固化,后续跑缓存命中即免网。
       - name: Install dependencies
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+        shell: bash
         run: |
-          for i in 1 2 3; do
-            bun install && exit 0
-            echo "::warning::bun install attempt $i failed; retrying in 15s"
-            sleep 15
+          registries=(
+            "https://mirrors.cloud.tencent.com/npm/"
+            "https://registry.npmmirror.com"
+            "https://repo.huaweicloud.com/repository/npm/"
+            "https://registry.npmjs.org"
+          )
+          for r in "${registries[@]}"; do
+            for i in 1 2; do
+              echo "::group::bun install via $r (attempt $i)"
+              if NPM_CONFIG_REGISTRY="$r" bun install; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::bun install via $r attempt $i failed"
+              echo "::endgroup::"
+              sleep 10
+            done
           done
           exit 1
 
@@ -107,14 +123,25 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         shell: bash
         run: |
-          for i in 1 2 3; do
-            bun install && exit 0
-            echo "::warning::bun install attempt $i failed; retrying in 15s"
-            sleep 15
+          registries=(
+            "https://mirrors.cloud.tencent.com/npm/"
+            "https://registry.npmmirror.com"
+            "https://repo.huaweicloud.com/repository/npm/"
+            "https://registry.npmjs.org"
+          )
+          for r in "${registries[@]}"; do
+            for i in 1 2; do
+              echo "::group::bun install via $r (attempt $i)"
+              if NPM_CONFIG_REGISTRY="$r" bun install; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::bun install via $r attempt $i failed"
+              echo "::endgroup::"
+              sleep 10
+            done
           done
           exit 1
 

@@ -36,10 +36,29 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # 同 ci.yml:多源轮换装依赖,CDN 掐大包时哪条通路活着走哪条。
       - name: Install dependencies
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
-        run: bun install
+        shell: bash
+        run: |
+          registries=(
+            "https://mirrors.cloud.tencent.com/npm/"
+            "https://registry.npmmirror.com"
+            "https://repo.huaweicloud.com/repository/npm/"
+            "https://registry.npmjs.org"
+          )
+          for r in "${registries[@]}"; do
+            for i in 1 2; do
+              echo "::group::bun install via $r (attempt $i)"
+              if NPM_CONFIG_REGISTRY="$r" bun install; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::bun install via $r attempt $i failed"
+              echo "::endgroup::"
+              sleep 10
+            done
+          done
+          exit 1
 
       - name: Typecheck
         run: bun run typecheck
@@ -139,9 +158,27 @@ jobs:
           targets: x86_64-apple-darwin
 
       - name: Install dependencies
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
-        run: bun install
+        shell: bash
+        run: |
+          registries=(
+            "https://mirrors.cloud.tencent.com/npm/"
+            "https://registry.npmmirror.com"
+            "https://repo.huaweicloud.com/repository/npm/"
+            "https://registry.npmjs.org"
+          )
+          for r in "${registries[@]}"; do
+            for i in 1 2; do
+              echo "::group::bun install via $r (attempt $i)"
+              if NPM_CONFIG_REGISTRY="$r" bun install; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::bun install via $r attempt $i failed"
+              echo "::endgroup::"
+              sleep 10
+            done
+          done
+          exit 1
 
       # Same sidecar embed as the Windows job, for the same reason: the app
       # bundle must ship a CLI or `gateway_start` has nothing local to run.
