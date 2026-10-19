@@ -442,7 +442,12 @@ const landingAmbiguity = landingPrompt ? new ComposerAmbiguityHint(landingPrompt
 const inputHistoryStore = new SessionInputHistoryStore();
 const promptHistory = new ComposerInputHistory(promptEl, inputHistoryStore, () => chat.getSessionId());
 const landingHistory = landingPrompt ? new ComposerInputHistory(landingPrompt, inputHistoryStore, () => chat.getSessionId()) : null;
-void promptHistory.load();
+// 模块求值陷阱：这里同步一路打到 chat.getSessionId() → activeNow() →
+// openSession → makeActive，其回调链会摸到本模块更下方才声明的 UI 常量
+// （turnVariantBar 那排）——每次启动都是一条 TDZ 未处理拒绝
+// （~/.pure/gui_errors.log 2026-10-19 判例）。微任务把首次建会话推迟到本
+// 模块求值完成之后；EOF 之前没有任何代码依赖它提前跑。
+queueMicrotask(() => void promptHistory.load());
 // ── Per-session composer drafts: a half-typed message survives refresh,
 // restart and session switches. Same lifecycle as the input history above —
 // the composer is ONE shared element, so without this the outgoing session's
