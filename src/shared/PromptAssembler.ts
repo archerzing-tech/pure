@@ -48,6 +48,15 @@ export interface PromptSkill {
   name: string;
   body: string;
   enabled?: boolean;
+  /** One-line trigger description (from SKILL.md frontmatter). Index-mode
+   *  entries (path set) show this instead of the body. */
+  description?: string;
+  /** Absolute path of the SKILL.md file. Present ⇒ progressive disclosure:
+   *  only the index line is injected and the model reads the full body via
+   *  read_file when the task calls for it. Absent ⇒ legacy inline body
+   *  (hub skills whose body lives in config.json, and workspace-less GUI
+   *  turns whose tool list has no read_file). */
+  path?: string;
 }
 
 export interface PromptAssemblyContext {
@@ -328,10 +337,50 @@ function buildMode(mode?: PromptTaskMode): string {
   return `<task_mode>\nOperating mode: ${label} — auto-detected from the user's request as a complex multi-step task. ${directive}\n</task_mode>`;
 }
 
+/** XML 属性值转义(path/name 进属性)。 */
+function escapeXmlAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+/** XML 元素文本转义(description 进元素文本)。 */
+function escapeXmlText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+}
+
+/** 索引行的描述回退:frontmatter 的 description 缺失或坏形时取 body 首个
+ *  非空段截断。坏形含空串、YAML 块标量指示符(`>` / `|`,parseSkillMarkdown
+ *  的单行正则取不到块标量——geo-3d-scene-builder 真实踩中,取到字面 ">" )
+ *  和纯引号壳。索引行至少要让模型能判断「这个技能是不是当前任务要的」。 */
+function effectiveSkillDescription(skill: PromptSkill): string {
+  const raw = (skill.description ?? '').trim();
+  if (raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw)) return raw;
+  const paragraph = skill.body
+    .split(/\n\s*\n/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .find(Boolean) ?? '';
+  return paragraph.length > 160 ? `${paragraph.slice(0, 160)}…` : paragraph;
+}
+
 function buildSkills(skills?: PromptSkill[]): string {
   const enabled = (skills ?? []).filter((skill) => skill.enabled !== false && skill.body);
   if (enabled.length === 0) return '';
-  return `Installed skills (follow these when they apply):\n${enabled.map((skill) => `\n<skill name="${sanitizeSkillName(skill.name)}">\n${skill.body}\n</skill>`).join('')}`;
+  // 渐进式披露(2026-10-20,对齐 Anthropic Agent Skills 三层模型):盘上技能
+  // (SKILL.md 在磁盘上、read_file 全盘可达)只注入索引行——name + SKILL.md
+  // 路径 + 一句触发描述,正文由模型在任务命中时按需读取。此前 6 个技能全文
+  // 常驻 ≈14k tokens/轮,一句 hello 也要先背完全部手册,还稀释注意力。
+  // 无 path 的条目保持旧的全文内联:hub 技能 body 在 config.json 里(读它要
+  // 过 apiKey,不能指给模型),无 workspace 的 GUI 回合没有 read_file 工具
+  // ——没有读的通道就不能开「去读它」的空头支票。
+  const entries = enabled
+    .map((skill) => {
+      const name = sanitizeSkillName(skill.name);
+      if (skill.path) {
+        return `\n<skill name="${escapeXmlAttr(name)}" path="${escapeXmlAttr(skill.path)}">${escapeXmlText(effectiveSkillDescription(skill))}</skill>`;
+      }
+      return `\n<skill name="${escapeXmlAttr(name)}">\n${skill.body}\n</skill>`;
+    })
+    .join('');
+  return `Installed skills (progressive disclosure): each <skill> line below is an INDEX entry. When the current task clearly calls for one of these skills, FIRST use read_file on its path to load the full SKILL.md instructions, then follow them; read ONLY the one skill that best matches — do not pre-read skills for tasks that do not call for them. If you installed a skill this very turn, its full instructions were already returned in the tool result — use them directly without re-reading. Relative paths inside a skill (e.g. <skill-root>/scripts/...) resolve from the SKILL.md's own directory, which IS the skill root.\n${entries}`;
 }
 
 function buildMcpResources(resources?: string): string {

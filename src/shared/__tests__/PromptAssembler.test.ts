@@ -153,18 +153,66 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('Do not answer only "pure"');
   });
 
-  it('injects app-skill bodies alongside hub skills', () => {
+  it('indexes on-disk skills by path while hub skills stay inline (progressive disclosure)', () => {
+    // 刀 1(2026-10-20):盘上技能(read_file 可达)只注入索引行,正文按需
+    // 读取;hub 技能 body 在 config.json 里(过 apiKey,不可指给模型)、无
+    // workspace 回合没有 read_file——两者保持全文内联,不开空头支票。
     const assembly = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: 'test',
       skills: [
         { name: 'hub-skill', body: 'hub body', enabled: true },
-        { name: 'app-ocr', body: 'use tesseract for OCR', enabled: true },
+        {
+          name: 'app-ocr',
+          body: 'use tesseract for OCR and never do anything else',
+          description: 'OCR images via tesseract',
+          path: '/home/user/.pure/skills/app-ocr/SKILL.md',
+          enabled: true,
+        },
       ],
     });
+    // hub 条目:旧形态逐字保留。
     expect(assembly).toContain('hub body');
-    expect(assembly).toContain('use tesseract for OCR');
-    expect(assembly).toContain('<skill name="app-ocr">');
+    expect(assembly).toContain('<skill name="hub-skill">');
+    // app 条目:只出索引行——路径在场,正文绝不注入。
+    expect(assembly).toContain('<skill name="app-ocr" path="/home/user/.pure/skills/app-ocr/SKILL.md">OCR images via tesseract</skill>');
+    expect(assembly).not.toContain('use tesseract for OCR');
+    // 按需读取指令随索引常驻。
+    expect(assembly).toContain('FIRST use read_file on its path');
+    expect(assembly).toContain('read ONLY the one skill that best matches');
+    expect(assembly).toContain('which IS the skill root');
+  });
+
+  it('falls back to the body opening when a skill description is missing or a YAML block scalar', () => {
+    const assembly = assembler.buildSystemPrompt({
+      surface: 'cli',
+      capabilities: 'test',
+      skills: [
+        // geo-3d-scene-builder 真实踩中:frontmatter 是 `description: >`,
+        // 单行正则取到字面 ">"——回退 body 首段。
+        { name: 'folded', body: 'Builds geo 3D scenes from one sentence.\n\nMore details here.', description: '>', path: '/skills/folded/SKILL.md', enabled: true },
+        { name: 'empty-desc', body: 'First paragraph stands in.\n\nSecond.', path: '/skills/empty-desc/SKILL.md', enabled: true },
+        { name: 'long-body', body: `${'x'.repeat(200)}\n\nrest`, path: '/skills/long-body/SKILL.md', enabled: true },
+      ],
+    });
+    expect(assembly).toContain('>Builds geo 3D scenes from one sentence.</skill>');
+    expect(assembly).toContain('>First paragraph stands in.</skill>');
+    // 超长首段截断到 160 字符。
+    expect(assembly).toMatch(/x{160}…<\/skill>/);
+    expect(assembly).not.toContain('x'.repeat(161));
+  });
+
+  it('escapes XML-significant characters in skill index attributes and descriptions', () => {
+    const assembly = assembler.buildSystemPrompt({
+      surface: 'cli',
+      capabilities: 'test',
+      skills: [
+        { name: 'quo"ted<', body: 'b', description: 'a & b < c', path: '/s/quo"ted</SKILL.md', enabled: true },
+      ],
+    });
+    expect(assembly).toContain('name="quo_ted_"');
+    expect(assembly).toContain('path="/s/quo&quot;ted&lt;/SKILL.md"');
+    expect(assembly).toContain('a &amp; b &lt; c');
   });
 
   it('keeps the capability-gap protocol when budget allows, with install details on demand', () => {
