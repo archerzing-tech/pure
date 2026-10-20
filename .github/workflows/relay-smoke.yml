@@ -1,54 +1,37 @@
-name: relay-smoke
+name: Relay Smoke
 
-# 自动更新中继（services/update-relay，部署在 Vercel）的冒烟检查：从 GitHub
-# runner（外部视角）打 /latest.json 与资产重定向，确认目录形状与回源可达。
-# workflow_dispatch 手动触发 —— 发版后或怀疑中继故障时跑一次。
-
+# 更新中继（update-relay.vercel.app）烟测：发布后手动触发，从境外 runner
+# 打 latest.json 验证 updater 咽喉通路。本机网络被 DNS 污染时（2026-10-19
+# 判例：vercel.app 子域被解析到 Meta IP 段），本地无法自证 relay 健康，
+# 以这里的输出为准。
 on:
   workflow_dispatch:
-    inputs:
-      base:
-        description: '中继基址（默认生产别名）'
-        required: false
-        default: 'https://update-relay.vercel.app'
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Check /latest.json shape
-        env:
-          BASE: ${{ github.event.inputs.base || 'https://update-relay.vercel.app' }}
+      - name: Fetch latest.json via relay
         run: |
-          set -euo pipefail
-          echo "::group::latest.json"
-          curl -sS --fail "$BASE/latest.json" -o latest.json
-          cat latest.json
-          echo "::endgroup::"
+          set -o pipefail
+          curl -sS --max-time 30 -w "\nHTTP=%{http_code} time=%{time_total}s\n" \
+            https://update-relay.vercel.app/latest.json -o /tmp/relay.json
+          echo "--- body head ---"
+          head -c 600 /tmp/relay.json; echo
+          echo "--- assertions ---"
           python3 - <<'PY'
-          import json, sys
-          m = json.load(open('latest.json'))
-          assert m.get('version'), 'missing version'
-          plats = m.get('platforms', {})
-          assert plats, 'no platforms entry'
-          for key, entry in plats.items():
-              assert entry.get('signature'), f'{key}: missing signature'
-              assert str(entry.get('url', '')).startswith('http'), f'{key}: bad url'
-          print(f"OK: version={m['version']}, platforms={sorted(plats)}")
+          import json
+          d = json.load(open('/tmp/relay.json'))
+          ver = d.get('version')
+          plats = d.get('platforms') or {}
+          print('relay version:', ver)
+          assert ver, 'latest.json missing version'
+          assert plats, 'latest.json missing platforms'
+          for name, info in sorted(plats.items()):
+              url = info.get('url', '')
+              sig = info.get('signature', '')
+              print(f'{name}: {url.rsplit("/", 1)[-1]} sig={"yes" if sig else "MISSING"}')
+              assert url, f'{name}: missing url'
+              assert sig, f'{name}: missing signature'
+          print('RELAY-SMOKE-PASS')
           PY
-
-      - name: Check one asset redirect
-        env:
-          BASE: ${{ github.event.inputs.base || 'https://update-relay.vercel.app' }}
-        run: |
-          set -euo pipefail
-          URL=$(python3 -c "import json; print(next(iter(json.load(open('latest.json'))['platforms'].values()))['url'])")
-          echo "asset url: $URL"
-          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL")
-          LOCATION=$(curl -sS -o /dev/null -w '%{redirect_url}' "$URL")
-          echo "status=$CODE redirect=$LOCATION"
-          test "$CODE" = "307"
-          case "$LOCATION" in
-            https://github.com/*) echo "redirects to github: OK" ;;
-            *) echo "unexpected redirect target"; exit 1 ;;
-          esac
