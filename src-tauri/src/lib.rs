@@ -13784,6 +13784,29 @@ async fn chat_stream(
                                 stream_emitted = true;
                                 let cur = tc_map.entry(index).or_insert_with(|| serde_json::json!({"id":"","name":"","arguments":""}));
                                 cur["arguments"] = serde_json::Value::String(format!("{}{}", cur["arguments"].as_str().unwrap_or(""), partial));
+                                // Mirror of the openai branch below: forward the
+                                // FULL accumulated arguments buffer (not just this
+                                // delta), throttled to TOOL_CALL_EMIT_MS, so the
+                                // GUI's tool row grows live while a giant argument
+                                // (write_file `content`) is generated instead of
+                                // the UI staying empty until the stream ends. The
+                                // final id + full args still arrive only via the
+                                // returned result, so nothing is duplicated.
+                                if !partial.is_empty()
+                                    && !cur["name"].as_str().map_or(true, |n| n.is_empty())
+                                    && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
+                                {
+                                    last_tool_emit = Instant::now();
+                                    let chunk = serde_json::json!({
+                                        "type": "tool_call_delta",
+                                        "index": index,
+                                        "name": cur["name"].as_str().unwrap_or(""),
+                                        "arguments": cur["arguments"].as_str().unwrap_or(""),
+                                    });
+                                    if on_chunk.send(chunk.to_string()).is_err() {
+                                        return Err("cancelled".into());
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -13794,6 +13817,27 @@ async fn chat_stream(
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                             stream_emitted = true;
                             tc_map.insert(index, serde_json::json!({"id": block["id"], "name": block["name"], "arguments":""}));
+                            // OpenAI's first tool delta carries id+name and
+                            // forwards immediately; this is the anthropic
+                            // equivalent — emit the call's birth (name known,
+                            // empty arguments) so the tool card appears the
+                            // moment the model starts the call, not when the
+                            // first partial_json lands. Same throttle, same
+                            // message shape as the input_json_delta forward.
+                            if !block["name"].as_str().map_or(true, |n| n.is_empty())
+                                && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
+                            {
+                                last_tool_emit = Instant::now();
+                                let chunk = serde_json::json!({
+                                    "type": "tool_call_delta",
+                                    "index": index,
+                                    "name": block["name"].as_str().unwrap_or(""),
+                                    "arguments": "",
+                                });
+                                if on_chunk.send(chunk.to_string()).is_err() {
+                                    return Err("cancelled".into());
+                                }
+                            }
                         }
                     }
                     _ => {}
