@@ -1291,6 +1291,10 @@ async function loadAppSkills(workspace: string): Promise<PromptSkill[]> {
       items = (entries ?? []).map((entry) => ({
         name: entry.name,
         body: entry.body,
+        description: entry.description,
+        // path = SKILL.md 文件路径(list_app_skills 返回的是技能目录)。
+        // 有它 PromptAssembler 才走索引行;无 workspace 回合由调用方剥掉。
+        path: entry.path ? `${entry.path}/SKILL.md` : undefined,
         enabled: true,
       }));
     } catch (err) {
@@ -6282,7 +6286,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         runtimes: buildRuntimesContext(),
         network: buildNetworkContext(),
         shell: buildShellContextLine(),
-        skills: [...(config.hubSkills ?? []), ...appSkills],
+        // 无 workspace 的回合工具列表里没有 read_file,盘上技能的索引路径
+        // 会开空头支票——剥掉 path 退回全文内联(与有 workspace 回合的索引
+        // 形态互斥,但内容都来自同一份 loadAppSkills 缓存)。
+        skills: [
+          ...(config.hubSkills ?? []),
+          ...(effectiveWorkspace ? appSkills : appSkills.map(({ path: _path, ...rest }) => rest)),
+        ],
         mcpResources: mcpResourceContext,
         mode: analysis.mode,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),

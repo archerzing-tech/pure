@@ -279,7 +279,9 @@ function loadAppSkills(): PromptSkill[] {
       if (!existsSync(file)) continue;
       try {
         const parsed = parseSkillMarkdown(readFileSync(file, 'utf8'));
-        if (parsed) out.push({ name: parsed.name, body: parsed.body, enabled: true });
+        // path = SKILL.md 文件路径(Progressive disclosure 索引行用);CLI 恒
+        // 有文件系统,path 恒携带。
+        if (parsed) out.push({ name: parsed.name, body: parsed.body, description: parsed.description, path: file, enabled: true });
       } catch {
         // unreadable skill — skip, never crash the CLI
       }
@@ -321,7 +323,12 @@ async function assembleCliPrompt(
     runtimes: buildRuntimesContext(),
     network: buildNetworkContext(),
     shell: buildShellContextLine(),
-    skills: [...(loadConfig()?.hubSkills ?? []), ...loadAppSkills()],
+    // hub 条目显式收窄为 PromptSkill 的字段(name/body/enabled),不把
+    // HubSkill 的 source/hash 带进装配上下文。
+    skills: [
+      ...(loadConfig()?.hubSkills ?? []).map(({ name, body, enabled }) => ({ name, body, enabled })),
+      ...loadAppSkills(),
+    ],
     // MCP resources share the optional-context tier with skills; the client
     // prefetches on connect and bounds the wait, so a slow server never
     // delays the turn indefinitely.
