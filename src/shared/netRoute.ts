@@ -310,12 +310,20 @@ export function resolveNetRoute(hostOrUrl: string, hasProxy: boolean, now = Date
  * 路」的记忆清掉，让分类重新决策。失败的路由从不被「学习」——否则重试会
  * 被自己的记忆堵死。
  */
-export function recordNetOutcome(hostOrUrl: string, route: NetRoute, ok: boolean, now = Date.now()): void {
+export function recordNetOutcome(
+  hostOrUrl: string,
+  route: NetRoute,
+  ok: boolean,
+  now = Date.now(),
+  /** 响应头耗时（TCP+TLS+代理协商，Rust 侧回传）。undefined = 旧后端/其他
+   *  调用方没量——慢直连判据跳过，行为与不加此参逐字节一致。 */
+  headersMs?: number,
+): void {
   const host = normalizeRouteHost(hostOrUrl);
   if (!host) return;
   // 本地/环回没有「代理优先」可言，记了也只会污染分类面。
   if (classifyHostName(host) === 'neutral') return;
-  recordRouteForKey(host, route, ok, now);
+  recordRouteForKey(host, route, ok, now, headersMs);
 }
 
 /** 出口面的学习入口（key 已是内部形态，不做 URL 解析）。 */
@@ -323,10 +331,28 @@ export function recordNetSurfaceOutcome(surface: NetSurface, route: NetRoute, ok
   recordRouteForKey(surfaceKey(surface), route, ok, now);
 }
 
-function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: number): void {
+/** 响应头慢判据：健康直连 ~0.1s、经本地代理 ~0.3s；超过它说明这条路的
+ *  连接层在爬（丢包/网关排队），即使请求最终成功也不算可用性证据。 */
+const SLOW_HEADERS_MS = 4000;
+
+function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: number, headersMs?: number): void {
   ensureLoaded();
   const entry = learned.get(key);
   if (ok) {
+    // 慢直连判据（2026-10-20）：proxy-first 主机经直连「连上了但响应头爬了
+    // 秒级」不是可用性证据——头时间只含连接层，不受模型 prefill/思考污染。
+    // 这种成功不钉路线；若记忆正钉在 direct 上，清掉让分类翻回代理。此前
+    // 「慢而不断」的直连每次都把 direct 钉 30 分钟，下一轮继续爬。
+    if (
+      headersMs !== undefined && headersMs > SLOW_HEADERS_MS
+      && route === 'direct' && classifyHostName(key) === 'proxy-first'
+    ) {
+      if (entry?.route === 'direct') {
+        learned.delete(key);
+        persist();
+      }
+      return;
+    }
     if (entry?.route === route) return;
     learned.set(key, { route, at: now });
     persist();

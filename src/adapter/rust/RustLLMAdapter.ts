@@ -42,8 +42,10 @@ export interface RustLLMConfig {
    *  a URL = that proxy, undefined = no fallback (netRouteProxyPair shape). */
   fallbackProxyUrl?: string;
   /** Real-outcome feedback for the netRoute learning: which route served the
-   *  turn (or which failed). Wired by chat.ts to recordNetOutcome. */
-  onNetOutcome?: (outcome: { route: 'direct' | 'proxy'; ok: boolean }) => void;
+   *  turn (or which failed). headersMs = response-header time (TCP+TLS+proxy
+   *  negotiation, clean of prefill/thinking) when ok — the slow-direct
+   *  evidence for the learner. Wired by chat.ts to recordNetOutcome. */
+  onNetOutcome?: (outcome: { route: 'direct' | 'proxy'; ok: boolean; headersMs?: number }) => void;
   proxyBypassProviders?: string[];
 }
 
@@ -159,9 +161,10 @@ export class RustLLMAdapter implements LLMAdapter {
         // Report the route that ACTUALLY served this turn (Rust echoes it in
         // the result; an older backend without the field falls back to what
         // was chosen here) so the WebView's netRoute learning pins what worked.
-        const route = (res as { netRoute?: 'direct' | 'proxy' } | null)?.netRoute
+        const resObj = res as { netRoute?: 'direct' | 'proxy'; headersMs?: number } | null;
+        const route = resObj?.netRoute
           ?? (this.config.proxyUrl ? 'proxy' : 'direct');
-        this.config.onNetOutcome?.({ route, ok: true });
+        this.config.onNetOutcome?.({ route, ok: true, headersMs: resObj?.headersMs });
       })
       .catch((err: unknown) => {
         invokeError = err instanceof Error ? err : new Error(String(err));

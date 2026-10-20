@@ -13601,6 +13601,11 @@ async fn chat_stream(
 
     let mut resp;
     let served_route: &'static str;
+    // 响应头耗时（TCP+TLS+代理协商）——路线质量的干净信号：它不含 prefill
+    // 与模型思考，健康直连 ~0.1s、经本地代理 ~0.3s，爬行链路要秒级。随结果
+    // 回传给 WebView 的 netRoute 学习面，「慢而不断」的直连不再被当成功钉住。
+    let send_started = std::time::Instant::now();
+    let headers_ms: u64;
     match tokio::select! {
         biased;
         _ = &mut cancel_rx => return Err("cancelled".into()),
@@ -13611,6 +13616,7 @@ async fn chat_stream(
         Ok(r) => {
             resp = r;
             served_route = primary_route;
+            headers_ms = send_started.elapsed().as_millis() as u64;
         }
         Err(primary_err) => {
             let fallback_client = fallback_spec
@@ -13624,6 +13630,7 @@ async fn chat_stream(
                     // wording BEFORE the fallback dials, so the route switch
                     // itself is visible instead of reading as more of the same.
                     send_status(Some(&on_chunk), "failover", 1, 1, 0);
+                    let fallback_started = std::time::Instant::now();
                     resp = tokio::select! {
                         biased;
                         _ = &mut cancel_rx => return Err("cancelled".into()),
@@ -13633,6 +13640,7 @@ async fn chat_stream(
                     }
                     .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
                     served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
+                    headers_ms = fallback_started.elapsed().as_millis() as u64;
                 }
                 _ => return Err(primary_err),
             }
@@ -13991,7 +13999,7 @@ async fn chat_stream(
         }
     }
 
-    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route }))
+    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route, "headersMs": headers_ms }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

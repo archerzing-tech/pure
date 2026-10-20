@@ -160,6 +160,46 @@ describe('resolveNetRoute', () => {
     expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 10 * netRoute.LEARNED_ROUTE_TTL_MS)).toBe('proxy');
   });
 
+  // 慢直连判据（2026-10-20）：响应头耗时只含 TCP+TLS+代理协商，不受模型
+  // prefill/思考污染。proxy-first 主机的直连「连上了但头爬了秒级」不是可用
+  // 性证据——此前它照样把 direct 钉 30 分钟，下一轮继续爬。
+  it('does not pin direct after a slow-headers success on a proxy-first host', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0, 5000);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1)).toBe('proxy');
+  });
+
+  it('unpins an existing direct memory when a slow-headers direct success arrives', () => {
+    const t0 = 1_700_000_000_000;
+    // 先有一次快速成功把 direct 钉上，随后一次慢成功把它清掉，分类翻回代理。
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0, 200);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1)).toBe('direct');
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0 + 2, 6000);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 3)).toBe('proxy');
+  });
+
+  it('leaves direct-first hosts alone: slow domestic successes are normal, not evidence', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome('api.deepseek.com', 'direct', true, t0, 6000);
+    expect(netRoute.resolveNetRoute('api.deepseek.com', true, t0 + 1)).toBe('direct');
+  });
+
+  it('still pins fast successes and proxy-route successes regardless of header timing', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0, 300);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1)).toBe('direct');
+    // 慢头时间只对 direct 路线有判据意义——代理路线慢说明代理本身排队，
+    // 但那是唯一出国通道，照旧钉住。
+    netRoute.recordNetOutcome('relay2-openai.test', 'proxy', true, t0, 9000);
+    expect(netRoute.resolveNetRoute('relay2-openai.test', true, t0 + 1)).toBe('proxy');
+  });
+
+  it('ignores the slow-direct criterion when headersMs is absent (old callers)', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1)).toBe('direct');
+  });
+
   it('persists learned routes to localStorage', () => {
     netRoute.recordNetOutcome('persist-write.test', 'proxy', true);
     const raw = localStorage.getItem('pure.netRoute.v1');

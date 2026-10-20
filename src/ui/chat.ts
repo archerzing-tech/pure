@@ -1236,7 +1236,7 @@ export function createLLMAdapter(
       // 学习表写的是死条目）。
       onNetOutcome: (outcome) => {
         if (!effectiveProxyUrl(config.proxy)) return;
-        recordNetOutcome(baseURL, outcome.route, outcome.ok);
+        recordNetOutcome(baseURL, outcome.route, outcome.ok, Date.now(), outcome.headersMs);
       },
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
