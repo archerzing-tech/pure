@@ -1143,7 +1143,10 @@ export class TauriToolAdapter implements ToolAdapter {
               let parsed: { type?: string; written?: number; total?: number } | null = null;
               try { parsed = JSON.parse(raw); } catch { parsed = null; }
               if (!parsed || parsed.type !== 'progress') return;
-              dispatchToolOutput(toolCall.id, 'stdout', formatWriteProgress(path, parsed.written ?? 0, parsed.total ?? 0));
+              // 第四参 progress=true：写入进度是同一行的原地重绘（\r 语义），
+              // 不是新增输出——不带它一次大写入会刷出几百行 FIFO，面板只剩
+              // 百分比滚屏（appendToolStreamLine 的 progress 分支负责重绘）。
+              dispatchToolOutput(toolCall.id, 'stdout', formatWriteProgress(path, parsed.written ?? 0, parsed.total ?? 0), true);
             };
             const msg = await this.call('write_file_stream', {
               workspace: ws,

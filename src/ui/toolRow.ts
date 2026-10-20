@@ -164,10 +164,20 @@ export function formatToolArgsSummary(toolName: string, args: Record<string, unk
     case 'read_file':
     case 'write_file':
     case 'edit_file':
-    case 'replace_files':
+    case 'save_file_binary':
+    case 'create_document':
     case 'list_files':
     case 'create_directory':
       return typeof v('path') === 'string' ? `path="${String(v('path'))}"` : '';
+    case 'replace_files': {
+      // 批量替换的参数是 files 数组（toolDefs.ts），读 path 永远落空——
+      // 列出目标文件（超长收一刀），用户才知道这一刀落在哪几个文件上。
+      const files = Array.isArray(v('files'))
+        ? (v('files') as unknown[]).filter((f): f is string => typeof f === 'string')
+        : [];
+      if (files.length === 0) return '';
+      return `files="${clipSummary(files.join(', '))}"`;
+    }
     case 'execute_command':
     case 'bash_executor':
       return typeof v('command') === 'string' ? `$ ${String(v('command')).slice(0, 100)}` : '';
@@ -420,10 +430,31 @@ export function pendingActionLabel(toolName: string, args: Record<string, unknow
       const content = typeof args?.content === 'string' ? args.content : '';
       return `正在写入 ${path}（${formatBytes(byteLength(content))}）`;
     }
-    case 'edit_file':
-      return '正在编辑文件…';
-    case 'replace_files':
-      return '正在替换文件内容…';
+    case 'edit_file': {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      return path ? `正在编辑 ${path}…` : '正在编辑文件…';
+    }
+    case 'replace_files': {
+      // 参数名是 files 数组（toolDefs.ts / 适配器同款）：单文件亮路径，
+      // 多文件报个数——与 read_files 的「N 个文件」同一口吻。
+      const files = Array.isArray(args?.files)
+        ? (args?.files as unknown[]).filter((f): f is string => typeof f === 'string')
+        : [];
+      if (files.length === 0) return '正在替换文件内容…';
+      return files.length === 1 ? `正在替换 ${files[0]}…` : `正在替换 ${files.length} 个文件…`;
+    }
+    case 'save_file_binary': {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      return path ? `正在保存 ${path}…` : '正在保存文件…';
+    }
+    case 'create_document': {
+      const path = typeof args?.path === 'string' ? args.path : '';
+      if (!path) return '正在生成文档…';
+      // 「做个 PPT」轮的行内实时态：亮目标文件名（含扩展名），用户能对上
+      // 「在生成哪一份」，而不是一句泛化的「正在生成文档」。
+      const name = path.replaceAll('\\', '/').split('/').pop() || path;
+      return `正在生成 ${name}…`;
+    }
     case 'read_file': {
       // 长读的行内实时态（2026-10-15）：path 在 args 里一到就亮出来——参数
       // 流式期间行头不再是空的「等待输出」，用户能对上「在读哪个文件」。
@@ -473,6 +504,104 @@ function byteLength(s: string): number {
   } catch {
     return s.length;
   }
+}
+
+// ── Mid-stream partial-args probe ──
+// 巨型字符串参数（write_file 的 content，一整个 HTML 文件）要等模型把参数
+// 整段生成完，JSON 才第一次合法——在那之前 parseToolCallBuffer 恒返回
+// {}，行头摘要与等待文案全程停在「正在写入文件…」，零字节反馈（2026-10-20
+// 用户报的长文档读写零反馈缺陷）。这个容错探针从半截 buffer 里抠出已经
+// 到达的参数：完整值照常收；仍在流式中的收尾值只对 content 这类「体量即
+// 反馈」的键放行——路径类键必须是完整值，半截路径会渲染出误导行头。
+
+/** Keys allowed to appear MID-STREAM (still open, no closing quote): the
+ *  giant body args whose growing size IS the feedback. Identity-ish keys
+ *  (path, url, command, …) only ever count when complete. */
+const PARTIAL_SAFE_ARG_KEYS: ReadonlySet<string> = new Set(['content']);
+
+/** Strict decode of one complete string body (quotes already sliced off by
+ *  the caller). A torn escape at the slice edge returns undefined. */
+function decodeJsonString(raw: string): string | undefined {
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tolerantly extract the args already visible in a PARTIAL tool-arguments
+ * JSON buffer (the OpenAI tool_call_delta accumulation). Walks the text
+ * string-aware and depth-aware, so nested keys never leak in as top level,
+ * and decodes every value with real JSON.parse (never regex-unescaping).
+ * Returns undefined when nothing displayable has arrived yet — the caller
+ * keeps its previous state instead of flashing an empty row head.
+ */
+export function extractPartialToolArgs(buf: string | undefined): Record<string, unknown> | undefined {
+  const text = (buf ?? '').trim();
+  // The streaming buffer is the raw arguments object; anything else (empty,
+  // prose, a bare string) carries no displayable args.
+  if (!text.startsWith('{')) return undefined;
+  const args: Record<string, unknown> = {};
+  let depth = 0;                 // {} / [] nesting — pairs only count at depth 1
+  let key: string | null = null; // depth-1 key awaiting its value
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') {
+      // Walk to the closing quote (escape-aware); a torn escape at the
+      // buffer tail reads as "still open".
+      let j = i + 1;
+      let closed = false;
+      while (j < text.length) {
+        const d = text[j];
+        if (d === '\\') {
+          if (j + 1 >= text.length) break;
+          j += 2;
+          continue;
+        }
+        if (d === '"') { closed = true; break; }
+        j++;
+      }
+      const body = text.slice(i + 1, closed ? j : text.length);
+      if (!closed) {
+        // Still-streaming string: only the giant body args are worth showing
+        // mid-generation, and only under a key we deliberately allow.
+        if (depth === 1 && key !== null && PARTIAL_SAFE_ARG_KEYS.has(key) && body.length > 0) {
+          const decoded = decodeJsonString(body);
+          if (decoded !== undefined) args[key] = decoded;
+        }
+        break; // nothing complete can follow an open string
+      }
+      if (depth === 1) {
+        const decoded = decodeJsonString(body);
+        if (decoded !== undefined) {
+          // Key vs value: a key is followed by `:` after optional whitespace.
+          let k = j + 1;
+          while (k < text.length && /\s/.test(text[k])) k++;
+          if (text[k] === ':') {
+            key = decoded;
+            i = k + 1;
+            continue;
+          }
+          if (key !== null) args[key] = decoded;
+        }
+        key = null;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === '{' || c === '[') {
+      if (depth === 1) key = null; // a container IS the value — pair done
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === '}' || c === ']') { depth--; i++; continue; }
+    if (c === ',' && depth === 1) { key = null; i++; continue; }
+    i++;
+  }
+  return Object.keys(args).length > 0 ? args : undefined;
 }
 
 export function formatLiveOutputStatus(toolName: string, bytes: number, latestLine = ''): string {

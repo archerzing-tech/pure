@@ -91,7 +91,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
-import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
+import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, extractPartialToolArgs, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
@@ -6441,7 +6441,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               } else if (stage === 'failover') {
                 setThinkingLabel(thinkingCard, '这条路不通，换条线路再试…');
               } else {
-                setThinkingLabel(thinkingCard, '已连上模型服务，等它开口…');
+                // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能
+                // 正点名「正在消化 Read 的结果（…）」，整句覆盖会把工具与体量
+                // 归因抹掉、读作凭空又白等一轮——组合句把两件事一次说全。
+                setThinkingLabel(thinkingCard, digestNote
+                  ? `已连上模型服务，还在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}），等它开口…`
+                  : '已连上模型服务，等它开口…');
               }
             }
             break;
@@ -6590,22 +6595,36 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   const args = due
                     ? (parseToolCallBuffer(event.payload.toolCallBuffer).args || {})
                     : undefined;
+                  // 容错兜底（2026-10-20 长文档读写零反馈缺陷）：巨型 content
+                  // 没写完时严格解析整段失败，上面恒为 {}——生成全程行头停在
+                  // 「正在写入文件…」。此时从容错探针抠出已到达的 path / 部分
+                  // content，行头摘要与等待文案（含实时字节数）就地长出来；
+                  // 严格解析成功后仍走完整 args，行为不变。
+                  const displayArgs = due && args && Object.keys(args).length === 0
+                    ? extractPartialToolArgs(event.payload.toolCallBuffer)
+                    : undefined;
                   const existing = pendingByName.get(toolName);
                   if (!existing) {
                     // Repeated identical call mid-stream: stage VIRTUALLY on
                     // the completed card instead of appending a new row.
+                    // Collapse 判定仍只用严格 args——容错 args 是半截数据，
+                    // 不拿来跟已完成卡做精确匹配。
                     const collapse = args ? tryCollapseDuplicateRow(toolName, args) : null;
                     if (collapse) {
                       pendingByName.set(toolName, { ...collapse, toolName });
                     } else {
                       endThinking();
-                      const row = appendToolRow(toolName, args ?? {}, subagentNames.has(toolName) ? 'agent' : 'tool');
+                      const rowArgs = displayArgs ?? args ?? {};
+                      const row = appendToolRow(toolName, rowArgs, subagentNames.has(toolName) ? 'agent' : 'tool');
                       toolRowSinceSegment = true;
-                      pendingByName.set(toolName, { row, toolName, args: args ?? {} });
+                      pendingByName.set(toolName, { row, toolName, args: rowArgs });
                     }
-                  } else if (args) {
-                    existing.args = args;
-                    updateToolRowArgs(existing.row, toolName, args, false);
+                  } else {
+                    const shown = displayArgs ?? args;
+                    if (shown) {
+                      existing.args = shown;
+                      updateToolRowArgs(existing.row, toolName, shown, false);
+                    }
                   }
                 }
               }
@@ -6766,6 +6785,22 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 不覆盖旧笔记（旧笔记比空笔记信息多）。
             if (resultText.length >= THINK_DIGEST_CHARS) {
               digestNote = { tool: toolDisplayName(toolName), chars: resultText.length };
+            } else {
+              // 大写入归因补全（2026-10-20）：write/edit 的“结果”只是一句
+              // Wrote N bytes，永远够不到上面的闸——但写进正文的体量落在了
+              // 本轮历史里，紧跟着的等待一样长、一样无因。按这次调用的 args
+              // 内容体量补登记，间隔卡同样点名工具与体量，不让长写入后的
+              // 静默退回泛化的「正在思考下一步…」。
+              const callArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
+              const writtenChars = toolName === 'write_file'
+                ? (typeof callArgs?.content === 'string' ? callArgs.content.length : 0)
+                : toolName === 'edit_file'
+                  ? (typeof callArgs?.oldString === 'string' ? callArgs.oldString.length : 0)
+                    + (typeof callArgs?.newString === 'string' ? callArgs.newString.length : 0)
+                  : 0;
+              if (writtenChars >= THINK_DIGEST_CHARS) {
+                digestNote = { tool: toolDisplayName(toolName), chars: writtenChars };
+              }
             }
             // 附加：最小化工具结果摘要（不改现有 UI 文案）
             try { void summarizeToolResult(toolName, resultText); } catch {}

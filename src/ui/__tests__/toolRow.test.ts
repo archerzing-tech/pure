@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine, toolCardKind, groupToolRoundRuns, toolGridClass } from '../toolRow';
+import { shouldExpandToolRowInitially, shouldUseTerminalPanel, toolDisplayName, toolIcon, formatToolArgsSummary, highlightStreamLine, isStepHeaderLine, truncateResultLines, MAX_LIVE_STREAM_LINES, pendingActionLabel, formatLiveOutputStatus, formatStructuredText, MAX_STRUCTURED_FORMAT_CHARS, imageExtension, imageDefaultName, createToolRow, finalizeToolRow, isToolRowExpanded, setToolRowExpanded, appendToolStreamLine, isSubagentTool, formatSubagentTraceLine, toolCardKind, groupToolRoundRuns, toolGridClass, extractPartialToolArgs } from '../toolRow';
 import { invalidateConfigCache, STORAGE_KEY } from '../config';
 import type { GeneratedImage } from '../../shared/types';
 
@@ -446,6 +446,69 @@ describe('live output status', () => {
   });
 });
 
+describe('extractPartialToolArgs (mid-stream tolerant probe over a half-written buffer)', () => {
+  it('returns undefined for empty, non-object, and prose buffers', () => {
+    expect(extractPartialToolArgs(undefined)).toBeUndefined();
+    expect(extractPartialToolArgs('')).toBeUndefined();
+    expect(extractPartialToolArgs('   ')).toBeUndefined();
+    expect(extractPartialToolArgs('{"path"')).toBeUndefined(); // key not closed → nothing usable yet
+    expect(extractPartialToolArgs('just prose')).toBeUndefined();
+    expect(extractPartialToolArgs('"a bare string"')).toBeUndefined();
+  });
+
+  it('reads a fully-written buffer exactly like a strict parse would', () => {
+    expect(extractPartialToolArgs('{"path": "src/foo.ts", "content": "done"}'))
+      .toEqual({ path: 'src/foo.ts', content: 'done' });
+  });
+
+  it('picks up the complete path plus the still-growing content of a giant write', () => {
+    // 2026-10-20 长文档读写零反馈缺陷的主场景：path 已完整落地、content
+    // 还在流式生成——行头要靠它长出 path 摘要与实时字节数。
+    const buf = '{"path": "dist/report.html", "content": "<html><body>hel';
+    expect(extractPartialToolArgs(buf)).toEqual({
+      path: 'dist/report.html',
+      content: '<html><body>hel',
+    });
+  });
+
+  it('never reports a half-written path — identity keys must arrive complete', () => {
+    const buf = '{"path": "src/fo';
+    expect(extractPartialToolArgs(buf)).toBeUndefined();
+    // path 完整落地后（哪怕值本身很短），后续仍开放中的 content 照常上报。
+    expect(extractPartialToolArgs('{"path": "src/fo", "content": "x'))
+      .toEqual({ path: 'src/fo', content: 'x' });
+  });
+
+  it('decodes escapes in a still-open string so the byte count matches what will be written', () => {
+    const buf = '{"content": "a\\n b\\"c';
+    expect(extractPartialToolArgs(buf)).toEqual({ content: 'a\n b"c' });
+  });
+
+  it('drops the tail value entirely when the buffer ends mid-escape', () => {
+    // 收尾反斜杠被拦腰截断：这一拍宁可不报，也不能塞进非法解码。
+    expect(extractPartialToolArgs('{"path": "a.ts", "content": "x\\'))
+      .toEqual({ path: 'a.ts' });
+  });
+
+  it('does not leak nested object keys as top-level args', () => {
+    const buf = '{"spec": {"title": "t"}, "path": "out.pptx", "format": "pptx"';
+    expect(extractPartialToolArgs(buf)).toEqual({ path: 'out.pptx', format: 'pptx' });
+  });
+
+  it('keeps number-valued args from hijacking the key slot', () => {
+    // 50 不得被当成 maxResults 的字符串值、也不能把 query 顶成它的值——
+    // 尾随 query 闭合成完整值后正确入账。
+    const buf = '{"maxResults": 50, "query": "abc", "path": "p.ts"';
+    expect(extractPartialToolArgs(buf)).toEqual({ query: 'abc', path: 'p.ts' });
+  });
+
+  it('ignores strings inside arrays (replace_files files list) until the strict parse takes over', () => {
+    // 数组里的路径字符串不得泄漏成顶层参数；闭合后的 oldString 照常入账。
+    const buf = '{"files": ["a.ts", "b.ts"], "oldString": "x"';
+    expect(extractPartialToolArgs(buf)).toEqual({ oldString: 'x' });
+  });
+});
+
 describe('structured text formatting (JSON/YAML in tool input/output)', () => {
   it('pretty-prints JSON output with 2-space indent', () => {
     const r = formatStructuredText('{"a":1,"b":[1,2],"c":"x"}');
@@ -513,6 +576,23 @@ describe('pendingActionLabel', () => {
     expect(pendingActionLabel('read_files', { paths: ['a.ts', 'b.ts', 'c.ts'] })).toBe('正在读取 3 个文件…');
   });
 
+  it('shows path attribution for the write-family tools once args arrive (2026-10-20)', () => {
+    // 长文档读写零反馈缺陷的另一半：编辑/替换/存盘/文档生成此前全是
+    // 泛化文案，行头对不上「在动哪个文件」。
+    expect(pendingActionLabel('edit_file', { path: 'src/app.ts' })).toBe('正在编辑 src/app.ts…');
+    expect(pendingActionLabel('edit_file', {})).toBe('正在编辑文件…');
+    expect(pendingActionLabel('replace_files', { files: ['src/a.ts'] })).toBe('正在替换 src/a.ts…');
+    expect(pendingActionLabel('replace_files', { files: ['src/a.ts', 'src/b.ts', 'src/c.ts'] }))
+      .toBe('正在替换 3 个文件…');
+    expect(pendingActionLabel('replace_files', {})).toBe('正在替换文件内容…');
+    expect(pendingActionLabel('replace_files', { files: ['src/a.ts', 42] })).toBe('正在替换 src/a.ts…');
+    expect(pendingActionLabel('save_file_binary', { path: 'out/report.pdf' })).toBe('正在保存 out/report.pdf…');
+    expect(pendingActionLabel('save_file_binary', {})).toBe('正在保存文件…');
+    expect(pendingActionLabel('create_document', { path: '~/Downloads/季度汇报.pptx' })).toBe('正在生成 季度汇报.pptx…');
+    expect(pendingActionLabel('create_document', { path: 'docs/deep/nested.docx' })).toBe('正在生成 nested.docx…');
+    expect(pendingActionLabel('create_document', {})).toBe('正在生成文档…');
+  });
+
   it('keeps all web tools on the pale-blue non-terminal surface', () => {
     expect(shouldUseTerminalPanel('web_search')).toBe(false);
     expect(shouldUseTerminalPanel('web_fetch')).toBe(false);
@@ -561,6 +641,27 @@ describe('pendingActionLabel', () => {
     expect(formatToolArgsSummary('researcher', { topic: 'a\n\nb   c' })).toBe('topic="a b c"');
     // No ask field → empty (not "undefined").
     expect(formatToolArgsSummary('code_reviewer', {})).toBe('');
+  });
+
+  it('summarizes path args for the write-family tools (2026-10-20)', () => {
+    expect(formatToolArgsSummary('edit_file', { path: 'src/app.ts' })).toBe('path="src/app.ts"');
+    expect(formatToolArgsSummary('save_file_binary', { path: 'out/report.pdf', dataBase64: 'x' }))
+      .toBe('path="out/report.pdf"');
+    expect(formatToolArgsSummary('create_document', { path: '~/Downloads/季度汇报.pptx', format: 'pptx' }))
+      .toBe('path="~/Downloads/季度汇报.pptx"');
+    // replace_files 的参数是 files 数组（读 path 永远落空）：单文件亮路径，
+    // 多文件列清单、超长收一刀。
+    expect(formatToolArgsSummary('replace_files', { files: ['src/a.ts'] })).toBe('files="src/a.ts"');
+    expect(formatToolArgsSummary('replace_files', { files: ['src/a.ts', 'src/b.ts'] }))
+      .toBe('files="src/a.ts, src/b.ts"');
+    const longList = ['a.ts', 'b.ts', 'dir0/file.ts', 'dir1/file.ts', 'dir2/file.ts', 'dir3/file.ts'].join(', ');
+    // 62 chars in → clipped to 60 + ellipsis (same clipSummary rule as the asks).
+    expect(formatToolArgsSummary('replace_files', { files: longList.split(', ') }))
+      .toBe('files="a.ts, b.ts, dir0/file.ts, dir1/file.ts, dir2/file.ts, dir3/f…"');
+    expect(formatToolArgsSummary('replace_files', {})).toBe('');
+    // 非 files 数组参数（如旧格式的 path）不再误报为 path 摘要——数组缺失
+    // 就回空，让 pendingActionLabel 的泛化文案兜底。
+    expect(formatToolArgsSummary('replace_files', { path: 'src/a.ts' })).toBe('');
   });
 
   it('counts CJK content as its UTF-8 bytes, not chars', () => {
