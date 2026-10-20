@@ -32,7 +32,7 @@ export interface InsertionAudit {
  * 当年它当决策用出了两次事故（同一个句子在裁决器与宿主两边被读成相反的两件
  * 事），但作为"事后挑可疑句子"的网，它的宽口径正合适。
  */
-const CANCEL_SMELL = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终止|中止|停[掉下来了]|砍掉|掐掉)/;
+const CANCEL_SMELL = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终止|中止|停[掉下来了]|暂停|去掉|剔除|砍掉|掐掉)/;
 
 /**
  * 排他性标记（2026-09-28）：「不要只查均价」说的是**不要仅限于**，均值仍被需要
@@ -52,7 +52,9 @@ const EXCLUSIVITY = /(?:不要|别|不用|无需|不是|并非)?只(?:是|要|�
  * 那句话是漏报时反向执行的真实受害者，审计必须看得见它。两族取并集：审计的
  * 假阳性由人一眼扫掉，假阴性才会让一个反向执行静默溜过。
  */
-function looksLikeRemoval(text: string): boolean {
+/** 「这句话有取消味吗」的并集网(抹排他性标记后测)。审计用它事后挑疑点;
+ *  interjectOrchestrator 的去重终稿闸也用它——同一张网,两处同源,不另造词表。 */
+export function looksLikeRemoval(text: string): boolean {
   const meaningful = text.replace(EXCLUSIVITY, '');
   return CANCEL_SMELL.test(meaningful) || CANCEL_PART_RE.test(meaningful);
 }

@@ -1510,11 +1510,12 @@ describe('plan overview completion state', () => {
     // task 没停成臂、task 取消臂）；机械追加臂（task 非取消路径）不带剔除
     // ——追加没有「产出不在场」的语义。
     const armCount = orch.split('this.stripSettledTarget(text);').length - 1;
-    expect(armCount).toBe(4);
+    expect(armCount).toBe(5);
     const steerBody = orch.slice(orch.indexOf("case 'steer': {"), orch.indexOf("case 'question':", orch.indexOf("case 'steer': {")));
     expect(steerBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
     const taskBody = orch.slice(orch.indexOf("case 'task': {"), orch.indexOf("case 'chatter':", orch.indexOf("case 'task': {")));
-    expect(taskBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
+    // 三处：cancelish 主臂、委派未出生臂、去重终稿的取消味闸臂（2026-10-20）。
+    expect(taskBody.split('this.stripSettledTarget(text);').length - 1).toBe(3);
     // 同回合窗口兜底：回合收尾/下一轮装配按离场账补剔（applyStrippedBranches
     // 空集短路）。
     expect(src.indexOf('private applyStrippedBranches(messages: Message[]): void {')).toBeGreaterThan(-1);
@@ -1553,8 +1554,9 @@ describe('plan overview completion state', () => {
     expect(orch.indexOf("typeof decision.signals.receipt === 'string'")).toBeGreaterThan(-1);
     expect(orch.split(', false, receipt);').length - 1).toBe(5);
     expect(orch.split(', false, false, receipt);').length - 1).toBe(1);
-    // stopMissed 两臂与出生前取消两臂不传 receipt——死参与失实话术都不进。
-    expect(orch.split(', ack, true, true);').length - 1).toBe(2);
+    // stopMissed 两臂、出生前取消两臂与去重终稿的取消味闸臂不传 receipt——
+    // 死参与失实话术都不进（2026-10-20 真机三连击后闸臂加入，同构不传）。
+    expect(orch.split(', ack, true, true);').length - 1).toBe(3);
     expect(orch.split("null, 'parent', true);").length - 1).toBe(2);
   });
 
@@ -1635,7 +1637,8 @@ describe('plan overview completion state', () => {
     expect(steerBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(2);
     const task = orch.indexOf("case 'task': {");
     const taskBody = orch.slice(task, orch.indexOf("case 'chatter':", task));
-    expect(taskBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(2);
+    // 三处：cancelish 主臂、委派未出生臂、去重终稿的取消味闸臂（2026-10-20）。
+    expect(taskBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(3);
     // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"；收执点名
     // 直接走 cancelBeforeDispatchReceipt（2026-09-26 用户实测反馈固定话术里
     // 「这项」是空的——能抽出话题就点名，与停支收执同一人味；S2 第六刀起

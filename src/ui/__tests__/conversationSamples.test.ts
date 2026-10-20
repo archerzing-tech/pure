@@ -1026,6 +1026,47 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('您说的这个正在「researcher·2号」那路跑着，不重复派——收齐后一并汇总给您。');
   });
 
+  it('复测三连击（2026-10-20 真机）：裁决器漏报 cancels_part 的取消话撞上去重——绝不用「不重复派」把话吞掉', async () => {
+    // 真机形态：四路平台调研在飞，用户三句取消（「去掉优酷的调研」「我说
+    // 不需要优酷的」「暂停优酷」）全被裁决器判成 task 且没报 cancels_part
+    // （「去掉/不需要/暂停」三个高频动词不在提示词样例面里）——宿主按契约
+    // 不嗅关键词，掉进去重终稿「不重复派——收齐后一并汇总」，同一句逐字顶
+    // 回三次，支烧完汇总还带着用户明确去掉的东西。
+    // 闸（同日）：去重终稿前用审计同源的取消味网测一次——有味就不吞，降级
+    // 走取消无目标臂（折入守汇报步，模型带全上下文终裁；收执如实说「没停」）。
+    // 真加活不受闸影响：「新增一个平台，爱奇艺」上一条测试照旧终稿。
+    const llm = scriptedLlm([
+      { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+      { match: '暂停', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_r1', agentName: 'researcher', instanceNo: 1, status: 'running', inputSnippet: '调研腾讯视频国漫剧集' },
+      { callId: 'call_r2', agentName: 'researcher', instanceNo: 2, status: 'running', inputSnippet: '调研优酷国漫剧集' },
+      { callId: 'call_r3', agentName: 'researcher', instanceNo: 3, status: 'running', inputSnippet: '调研B站国漫剧集' },
+      { callId: 'call_r4', agentName: 'researcher', instanceNo: 4, status: 'running', inputSnippet: '调研芒果TV国漫剧集' },
+    );
+    // 裁决器漏报时宿主绝不机械停支——闸只是不吞话，不是宿主改道停支。
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    for (const line of ['去掉 优酷的调研', '我说不需要优酷的', '暂停优酷']) {
+      await h.chat.interject(line);
+    }
+    const said = assistantJoined(h.root) + statusJoined(h.root);
+    expect(said).not.toContain('不重复派');
+    expect(paused).toEqual([]); // 漏报场景宿主不停支：话折给模型终裁
+    const folds = h.chat.folds.entries();
+    expect(folds).toHaveLength(3);
+    for (const fold of folds) expect(fold.cancels).toBe(true);
+  });
+
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
     // 案例的真实形态：LLM 把"收掉一项"判成加活。提示词已教正；这里锁宿
     // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、

@@ -517,8 +517,11 @@ one is not (the agent restarts work or loses the message).
 explicitly belongs after the current task, and null when no timing was said.
 
 "cancels_part": include it as true whenever the message REMOVES work that was
-already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了") or an
-imperative removal of one ("把 X 这个调研取消掉", "知乎那项也收掉吧"). NARROWING
+already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了", "去掉
+X 的调研", "我说不需要 X 的") or an imperative removal of one ("把 X 这个调研
+取消掉", "知乎那项也收掉吧", "暂停 X", "砍掉 X 那路"). The removal vocabulary is
+an OPEN SET, not a keyword list — 去掉/不需要/不要了/暂停/剔除/收掉/砍掉/先不查
+all remove work; read the intent, not the vocabulary. NARROWING
 counts as removal too — but ONLY when the user actually stops wanting that output
 ("均价不用查了，改查区间"): a 只 next to the negation ("不要只查均价了") narrows what is
 EXCLUSIVE, not what is required — the average is still wanted there, so nothing is

@@ -14,6 +14,7 @@
 // insertionMessaging（本模块只引用，不内联第二份）。
 
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
+import { looksLikeRemoval } from './insertionAudit';
 import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
 import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
@@ -510,6 +511,21 @@ export class InterjectOrchestrator {
         // 折入，绝不拿"可能重复"当理由吞用户的活。
         const covered = this.findCoveringBranch(text);
         if (covered) {
+          // 2026-10-20 真机三连击闸：去重终稿前先问一句"这话有没有取消味"。
+          // 裁决器漏报 cancels_part（用户连说「去掉优酷的调研」「我说不需要
+          // 优酷的」「暂停优酷」三句全被判成 task）时，这里的终稿会把话钉死
+          // 成"不重复派——收齐后一并汇总"——模型永远看不到这句取消，支烧完
+          // 汇总还带着用户明确去掉的东西，且三次确认都被同一句话顶回。
+          // 这不是 2026-09-28 撤掉的那种"宿主另立判断改道"：kind 照旧、支不
+          // 机械停——只是拒绝用一句可能与原话相反的终稿把话吞掉，降级走下方
+          // 取消无目标臂（折入守汇报步，模型带全上下文终裁，收执如实说"没停"）。
+          if (looksLikeRemoval(text)) {
+            echoUserBubble();
+            this.deps.delegation.registerCancel(text);
+            this.stripSettledTarget(text);
+            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
+            return;
+          }
           echoUserBubble();
           const coveredName = this.deps.branchLabel(covered.name, covered.callId);
           // 去重回执是终稿（没有后续在途）——转普通气泡。
