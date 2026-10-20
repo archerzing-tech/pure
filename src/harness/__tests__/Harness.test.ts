@@ -4,7 +4,7 @@
 // --resume runs restarted from a blank [system, user] context).
 
 import { describe, it, expect } from 'bun:test';
-import { Harness } from '../Harness';
+import { Harness, capMemoryChars, dedupeBySymptom } from '../Harness';
 import { buildTurnEvidence } from '../LessonReflector';
 import { confirmedDraftEntry } from '../../adapter/memory/correctionDrafts';
 import { PromptAssembler } from '../../shared/PromptAssembler';
@@ -2160,5 +2160,38 @@ describe('Harness tool-correction notes (E1.3)', () => {
     const sys = llm.received[0][0].content;
     expect(sys).toContain('Platform-verified tools');
     expect(sys).toContain(suggestion.note);
+  });
+});
+
+// ── 注入侧漏斗（刀 3）──
+
+describe('memory injection funnel', () => {
+  const entry = (content: string, timestamp: number): MemoryEntry =>
+    ({ id: `m${timestamp}`, type: 'successful_pattern', content, timestamp, sessionId: 's', projectPath: '/ws', decayScore: 1 });
+
+  it('collapses same-symptom entries to the newest, preserving relevance order', () => {
+    const out = dedupeBySymptom([
+      entry('Symptom: fix the build. Root cause: stale lock', 100),
+      entry('unrelated note without the template prefix', 50),
+      entry('Symptom: fix the build. Root cause: stale lock', 300),
+      entry('Symptom: other task. Recovery path: rerun', 200),
+    ]);
+    expect(out.map(e => e.timestamp)).toEqual([50, 300, 200]);
+  });
+
+  it('passes through entries without the Symptom prefix untouched', () => {
+    const input = [entry('Failed during execution: web_fetch', 1), entry('Effective approach: cache it', 2)];
+    expect(dedupeBySymptom(input)).toEqual(input);
+  });
+
+  it('caps long lists at the char budget keeping the head', () => {
+    const line = 'x'.repeat(900);
+    const out = capMemoryChars(Array.from({ length: 20 }, () => line));
+    expect(out).toHaveLength(8); // 8×900 = 7200 fits; 9th would reach 8100 > 8000
+  });
+
+  it('keeps the first line even past budget and passes small lists through', () => {
+    expect(capMemoryChars(['x'.repeat(9000)])).toHaveLength(1);
+    expect(capMemoryChars(['a', 'bb', 'ccc'])).toEqual(['a', 'bb', 'ccc']);
   });
 });

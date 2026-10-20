@@ -976,15 +976,17 @@ export class Harness {
     // v1.9.7 — verified successes are injected with priority (they appear
     // before error patterns in <session_memory>), so the model prefers proven
     // approaches over unproven ones and treats failures as avoid-lists.
-    const successes = memories
-      .filter(m => m.type === 'successful_pattern')
-      .map(m => m.content);
-    const errorPatterns = memories
-      .filter(m => m.type === 'error_pattern')
-      .map(m => m.content);
-    const procedures = memories
-      .filter(m => m.type === 'procedure')
-      .map(m => m.content);
+    // 刀 3 漏斗先同症状去重再过 8000 字符帽：垃圾/重复 lesson 不再挤占注入面，
+    // 相关性序保头去尾。
+    const successes = capMemoryChars(dedupeBySymptom(memories
+      .filter(m => m.type === 'successful_pattern'))
+      .map(m => m.content));
+    const errorPatterns = capMemoryChars(dedupeBySymptom(memories
+      .filter(m => m.type === 'error_pattern'))
+      .map(m => m.content));
+    const procedures = capMemoryChars(dedupeBySymptom(memories
+      .filter(m => m.type === 'procedure'))
+      .map(m => m.content));
     // E3.1 — confirmed project conventions ride the same confidence filter as
     // everything else: drafts stay out (low), user-confirmed ones inject.
     const projectConventions = memories
@@ -1530,6 +1532,38 @@ function parseRememberMarkers(text: string): string[] {
     if (value) out.push(value);
   }
   return out;
+}
+
+/** 注入侧漏斗（刀 3）——同症状去重。模板 lesson 的 content 以 `Symptom: `
+ *  开头，同一 prompt 跨回合/跨会话重复时检索会捞回多条同义条目；以症状前缀
+ *  （≤120 字符）为键，同键只留 timestamp 最新的一条。非该格式的条目原样
+ *  透传；存活者保持输入序（即检索相关性序）。 */
+export function dedupeBySymptom<T extends { content: string; timestamp: number }>(entries: T[]): T[] {
+  const PREFIX = 'Symptom: ';
+  const newestByKey = new Map<string, T>();
+  for (const e of entries) {
+    if (!e.content.startsWith(PREFIX)) continue;
+    const key = e.content.slice(PREFIX.length, PREFIX.length + 120);
+    const prev = newestByKey.get(key);
+    if (!prev || e.timestamp >= prev.timestamp) newestByKey.set(key, e);
+  }
+  if (newestByKey.size === 0) return entries;
+  const kept = new Set(newestByKey.values());
+  return entries.filter(e => !e.content.startsWith(PREFIX) || kept.has(e));
+}
+
+/** 注入侧漏斗（刀 3）——字符预算帽。successes/errorPatterns/procedures 三张
+ *  清单合计注入 <session_memory>，垃圾 lesson 堆积时曾把注入面顶到 3k tokens。
+ *  以 8000 字符封顶：检索相关性序保头去尾，第一行永远保留（防御性下限）。 */
+export function capMemoryChars(lines: string[], maxChars = 8000): string[] {
+  const kept: string[] = [];
+  let total = 0;
+  for (const line of lines) {
+    if (kept.length > 0 && total + line.length > maxChars) break;
+    kept.push(line);
+    total += line.length;
+  }
+  return kept;
 }
 
 /**
