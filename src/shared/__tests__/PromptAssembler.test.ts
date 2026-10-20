@@ -241,8 +241,29 @@ describe('PromptAssembler', () => {
       // 例外必须限定在工程语境，不推翻无路径贴代码的默认（纯代码片段仍 inline）。
       expect(prompt).toContain('when the workspace holds a project that the request builds into or fixes');
       expect(prompt).toContain('Questions and explanations about code stay inline regardless');
-      expect(prompt).toContain('the engineering exception above applies instead');
+      // 刀 2(2026-10-20):「generate X 无路径」条的第二句是 L236 工程例外的
+      // 纯复述,已删——例外只在一处陈述,行为不变。
+      expect(prompt).not.toContain('the engineering exception above applies instead');
     }
+  });
+
+  it('keeps every information/time-sensitive query predicate through the merged output-style rule', () => {
+    // 刀 2(2026-10-20)合并天气/信息查询两条前的逐字锁定:合并只压结构,
+    // 行为谓词一个不少——先搜后答、不编造未来值、缺位置先问、inline 不落盘、
+    // 不为咨询请求搭项目骨架、只有真数据才出 chart、搜不到就明说。
+    const gui = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+    });
+    expect(gui).toContain('call web_search FIRST');
+    expect(gui).toContain('never invent future weather');
+    expect(gui).toContain('location assumption clearly');
+    expect(gui).toContain('ANSWERED INLINE');
+    expect(gui).toContain('no weather.js');
+    expect(gui).toContain('never scaffold a project directory for an advice/planning request');
+    expect(gui).toContain('ONLY when you actually retrieved real data points');
+    expect(gui).toContain('NEVER emit a chart with empty, placeholder, or invented values');
+    expect(gui).toContain('summarize them in your reply instead');
   });
 
   it('offers mermaid and puml as offline GUI diagram formats', () => {
