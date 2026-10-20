@@ -13750,16 +13750,28 @@ async fn chat_stream(
                     }
                     "message_delta" => {
                         // The single emission point: message_delta arrives once
-                        // near the end carrying the final cumulative
-                        // output_tokens (message_start alone lacks it —
-                        // forwarding there would double-count the prompt).
+                        // near the end carrying the final cumulative usage.
+                        // Merge EVERY delta key over the message_start usage,
+                        // not just output_tokens: official Anthropic keeps
+                        // input_tokens in start and deltas only output_tokens,
+                        // but GLM's compat endpoint sends `{input_tokens: 0}`
+                        // in start and the real counts (input/cache_read) in
+                        // the delta — merging only output_tokens zeroed the
+                        // whole prompt side of the billing usage there, so
+                        // token totals and cost estimates silently
+                        // undercounted. Delta wins per key; unknown keys are
+                        // ignored by the mapper anyway.
                         if let (Some(start), Some(delta_u)) =
                             (anthropic_usage.as_ref(), json.get("usage"))
                         {
                             if delta_u.is_object() {
                                 let mut merged = start.clone();
-                                if let Some(o) = delta_u.get("output_tokens") {
-                                    merged["output_tokens"] = o.clone();
+                                if let (Some(start_obj), Some(delta_obj)) =
+                                    (merged.as_object_mut(), delta_u.as_object())
+                                {
+                                    for (k, v) in delta_obj {
+                                        start_obj.insert(k.clone(), v.clone());
+                                    }
                                 }
                                 let mapped = anthropic_usage_to_openai(&merged);
                                 usage = Some(mapped.clone());
