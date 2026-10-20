@@ -6449,6 +6449,57 @@ body.window-maximized #boot-splash {
   pointer-events: none;
 }
 
+/* ── Proxy onboarding card (首启代理引导，见 proxyOnboarding.ts) ──
+ * 非阻塞浮动卡：不遮 composer、不进聊天转写，右下角待用户拍板。
+ * z-index 压在 toast (300) 之下，启用成功后 toast 可覆盖其退场。 */
+#proxy-onboarding-card {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 320px;
+  max-width: calc(100vw - 48px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 14px 16px;
+  z-index: 280;
+  animation: proxy-onboard-in 0.35s var(--ease-out);
+}
+@keyframes proxy-onboard-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+.proxy-onboard-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.proxy-onboard-body {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.proxy-onboard-addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-input);
+  border-radius: var(--radius-xs);
+  padding: 4px 8px;
+  margin-bottom: 12px;
+}
+.proxy-onboard-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.proxy-onboard-actions .setting-btn {
+  padding: 5px 12px;
+  font-size: 12.5px;
+}
+
 /* ── Scrollbar (hidden; wheel / trackpad scrolling still works) ──
  * The GUI keeps its clean surfaces: no visible scrollbar chrome anywhere.
  * overflow-y: auto is left untouched so mouse-wheel and trackpad scrolling

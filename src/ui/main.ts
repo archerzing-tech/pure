@@ -51,6 +51,7 @@ import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
+import { maybeOfferProxyOnboarding } from './proxyOnboarding';
 import { memoryStore } from './memoryStore';
 import { showConfirmModal } from './modal';
 import { normalizeDraft } from './inputRepair';
@@ -1028,6 +1029,10 @@ function deferToIdle(fn: () => void): void {
       const bootSession = new URLSearchParams(location.search).get('session');
       if (bootSession) void sessionSidebar.load(bootSession);
       initPathLinks();
+      // 首启代理引导：GUI 就绪后静默探测一次系统代理，机器上有代理而应用内
+      // 代理没开时弹一次非阻塞引导卡（每次启动至多一次，详见 proxyOnboarding.ts）。
+      // 放 idle 路径不占关键启动链路，也绝不挂在聊天失败路径上。
+      void maybeOfferProxyOnboarding();
       // Background memory decay: Harness only decays at session start (1h
       // throttle), so idle apps never forget. A timer re-runs decay after the
       // throttle window elapses — see src/ui/memoryDecayTimer.ts.
