@@ -116,6 +116,7 @@ Shell & Git:
   * Single self-contained .html file (no build step, no server-only APIs) → open it directly via its file:// path — no service needed.
   * Anything with a dev-server script (package.json scripts / vite / webpack / next / flask / fastapi…) or pages using fetch(), ES modules, or CORS-sensitive assets → MUST go through http://localhost: install dependencies first (finite command), then start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows PowerShell "Start-Process <url>"), and report the URL + how to stop it (kill <pid>).
   Never leave a foreground server running, never let a server start time out, and never fake a preview by opening file:// for something that needs a server.
+- Token discipline for command output: prefer quiet/summary flags (-q, --oneline, head/tail, counters) over dumping full logs or directory listings into the conversation. When a command inevitably prints a lot, redirect it to a temporary file, grep/head the relevant part, then delete the file. After write_file/edit_file, do NOT re-read the whole file to "verify" — the tool result is authoritative; use diff_files or a ranged read_file when a targeted check is genuinely needed.
 - git_diff(staged?, path?) — show git diff
 - git_log(maxCount?, oneline?) — recent commit history
 - git_status — working tree status

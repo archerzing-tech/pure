@@ -4,7 +4,7 @@ import {
   buildCliCapabilities,
   buildGuiCapabilities,
 } from '../PromptAssembler';
-import { composeUserTurn } from '../promptLayers';
+import { composeUserTurn, FILE_TOOLS_CORE } from '../promptLayers';
 import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
 import { VETERAN_FAST_EXPRESSION_PROMPT, VETERAN_FAST_LINES } from '../../character';
 
@@ -91,7 +91,25 @@ describe('output_style · 折叠长引用素材(details 卡)', () => {
       expect(system).toContain('never pad filler questions');
     }
   });
+
+  it('output style 教模型用 path:line 精确指位（2026-10-20 对齐 Codex 规范）', () => {
+    const system = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'capabilities' });
+    expect(system).toContain('`path:line`');
+    expect(system).toContain('src/app.ts:42');
+  });
+
+  it('tool-calling 规则带进度叙事纪律（一句进展,不是逐调用播报）', () => {
+    const system = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'capabilities' });
+    expect(system).toContain('silence between tool calls reads as a hang');
+    expect(system).toContain('ONE short plain sentence');
+  });
+
+  it('shell 纪律进 FILE_TOOLS_CORE：省 token 的输出习惯 + 不整读回验', () => {
+    expect(FILE_TOOLS_CORE).toContain('Token discipline for command output');
+    expect(FILE_TOOLS_CORE).toContain('do NOT re-read the whole file to "verify"');
+  });
 });
+
 
 describe('PromptAssembler', () => {
   it('uses an injected observability sink for assembly traces', () => {
