@@ -830,6 +830,10 @@ export interface TurnTiming {
   /** 刀 6/7 诊断：本回合生效的分量档位（判定或继承所得，气泡已撤后这是
    *  档位在真机唯一可观察面——验收/排障读这里）。 */
   workOrderRegister?: 'draft' | 'spike' | 'production';
+  /** 修 5：本回合 provider 报的计费账（含缓存命中/未命中）。会话统计只有
+   *  全期累计，缓存被哪一回合打掉无从归因——逐回合账读这里；provider 没
+   *  报 usage 就不写字段（与 branches 同款：没报与零分开）。 */
+  usage?: TokenUsage;
 }
 
 /** 一条分支事件记录（第 2 期第四刀）：分支事件一等化后的落账形态。 */

@@ -2848,18 +2848,21 @@ export class ChatController {
         payload: { messages: turnDelta },
       });
     }
-    // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志。ttft/分支账给远端 digest 用。
+    // 架构评审 v2 A1（S1-1）— 回合落定进会话事件日志。ttft/分支账给远端 digest 用；
+    // 修 5 加本回合计费账（provider 报了才有——digest 侧缓存归因读它）。
+    const settledPayload: Record<string, unknown> = {
+      totalMs: turnTiming.totalMs,
+      ttftMs: turnTiming.ttftMs,
+      engineMs: turnTiming.engineMs,
+      branchEvents: turnTiming.branches?.length ?? 0,
+      branches: turnTiming.branches,
+    };
+    if (turnTiming.usage) settledPayload.usage = turnTiming.usage;
     void getSessionEventSink(this.sessionId).append({
       ts: Date.now(),
       kind: 'turn_settled',
       actor: 'gui',
-      payload: {
-        totalMs: turnTiming.totalMs,
-        ttftMs: turnTiming.ttftMs,
-        engineMs: turnTiming.engineMs,
-        branchEvents: turnTiming.branches?.length ?? 0,
-        branches: turnTiming.branches,
-      },
+      payload: settledPayload,
     });
   }
 
@@ -7402,8 +7405,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               this.preCompactInBackground(systemPrompt, completionMessages, gen, codingAgent, this.messages);
             }
             // Merge this turn's billing usage into the session totals, then
-            // persist + refresh the right-panel 统计 tab.
+            // persist + refresh the right-panel 统计 tab. 修 5：同一份 per-turn
+            // 账也钉在回合时序记录上——累计值看不出缓存是哪一回合被打掉的，
+            // 逐回合的 prompt/cacheHit/cacheMiss 才能归因。commitTurnSettled
+            // 在其后（7710/7830），引用后赋值即随落定账一起进 turn_settled。
             if (event.payload.usage) {
+              turnTiming.usage = event.payload.usage;
               this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, event.payload.usage);
             }
             this.sessionStats.provider = config.provider;
