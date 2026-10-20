@@ -1202,7 +1202,7 @@ export function createLLMAdapter(
   // 可见叙述本身就是思考，暗推理只把第一个可见字推迟 90s+（见
   // planThinkingOffExtraBody 的实测注）。不支持的 provider 得 undefined，
   // 什么 extra 都不加。
-  const extraBody = (opts.disableThinking ? planThinkingOffExtraBody(config.provider, baseURL) : undefined)
+  const extraBody = (opts.disableThinking ? planThinkingOffExtraBody(config.provider, baseURL, model) : undefined)
     ?? (reasoning.effort ? { reasoning_effort: reasoning.effort } : undefined);
   const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (protocol === 'anthropic' && !isTauriRuntime()) {

@@ -686,10 +686,14 @@ export function firstTokenHintTimeoutMs(provider: string | undefined | null, mod
 }
 
 /**
- * 规划思考调用的「关暗思考」参数（2026-09-26 实测）：GLM 5.3 对规划类长回答
- * 先暗推理才吐第一个可见字——anthropic 兼容端点实测 97.7s，而规划调用的
- * 可见叙述本身就是思考，暗推理是 90 秒的纯重复税。GLM（bigmodel）接受
- * `thinking: {"type": "disabled"}`：第一个可见字 1.4s，叙述质量不降。
+ * 规划/轻回合的「压暗思考」参数。GLM（bigmodel）两条路：
+ * - glm-5.3 系（2026-10 官方文档）：强制思考模型，thinking.type 传 disabled
+ *   已不支持——native 端点报 1210 错，anthropic 兼容端点静默忽略（实测）。
+ *   官方口径=保 thinking + `reasoning_effort` 压低；实测 compat 端点吃这个
+ *   字段，同问 total 10.6s → 5.4s。轻回合的可见叙述本身就是思考，档位固定
+ *   low——用户在模型行选的高/中档留给正回合，寒暄不值得深想。
+ * - 更老的 GLM（4.5/4.6/5.0-5.2）：`thinking: {"type": "disabled"}` 照旧
+ *   生效（2026-09-26 实测第一个可见字 97.7s → 1.4s）。
  * 其他 provider 没有验证过「开着不炸」的等价参数（DeepSeek 无开关、官方
  * Anthropic 以省略为关），返回 undefined 由调用方跳过——静默期靠思考卡
  * 的存活与慢响应提示顶着。
@@ -697,13 +701,15 @@ export function firstTokenHintTimeoutMs(provider: string | undefined | null, mod
 export function planThinkingOffExtraBody(
   provider: string | undefined | null,
   baseURL: string | undefined | null,
+  model?: string | undefined | null,
 ): Record<string, unknown> | undefined {
   const id = `${provider ?? ''}`.toLowerCase();
   const host = `${baseURL ?? ''}`.toLowerCase();
-  if (id.includes('glm') || host.includes('bigmodel')) {
-    return { thinking: { type: 'disabled' } };
+  if (!id.includes('glm') && !host.includes('bigmodel')) return undefined;
+  if (/glm-5\.3/.test(`${model ?? ''}`.toLowerCase())) {
+    return { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
   }
-  return undefined;
+  return { thinking: { type: 'disabled' } };
 }
 
 /** True for the deepseek-* providers (shared API base / budget tuning). */

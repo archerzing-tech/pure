@@ -45,12 +45,14 @@ const extraBodyOf = (adapter: LLMAdapter): unknown => (adapter as unknown as { e
 const modelOf = (adapter: LLMAdapter): string => (adapter as unknown as { model: string }).model;
 
 describe('resolveJudgeAdapter', () => {
-  test('turns hidden reasoning off for the provider that has a switch', () => {
+  test('runs the judge at the cheapest reasoning tier for the provider that has a switch', () => {
     const main = createAdapter(glmArgs()).adapter;
     const judge = resolveJudgeAdapter(glmArgs(), main);
     expect(judge).not.toBe(main);
     expect(judge).toBeInstanceOf(OpenAICompatibleAdapter);
-    expect(extraBodyOf(judge)).toEqual({ thinking: { type: 'disabled' } });
+    // glm-5.3 系是强制思考模型（disabled 已废弃）：官方口径 = 保 thinking +
+    // reasoning_effort 压到 low。老 GLM 走旧的 thinking disabled（见 providers 测试）。
+    expect(extraBodyOf(judge)).toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'low' });
     // Same provider / model / endpoint — only the reasoning switch differs.
     expect(modelOf(judge)).toBe(modelOf(main));
   });

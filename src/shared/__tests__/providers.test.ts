@@ -26,6 +26,7 @@ import {
   resolvePromptBudget,
   isReasoningModelName,
   resolveReasoningEffort,
+  planThinkingOffExtraBody,
   isCustomKeyless,
   isCustomProviderId,
   type CustomProvider,
@@ -517,5 +518,32 @@ describe('reasoning-effort capability detection', () => {
     // undefined = 完全按现状解析（不加此参逐字节一致）。
     expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }, undefined))
       .toEqual({ supported: true, effort: 'medium' });
+  });
+});
+
+describe('planThinkingOffExtraBody（压暗思考参数）', () => {
+  it('glm-5.3 系强制思考模型发 enabled+low（官方口径，disabled 已废弃）', () => {
+    expect(planThinkingOffExtraBody('glm', 'https://open.bigmodel.cn/api/anthropic', 'glm-5.3-flash'))
+      .toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'low' });
+    expect(planThinkingOffExtraBody('glm', 'https://api.z.ai/api/coding/paas/v4', 'glm-5.3'))
+      .toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'low' });
+  });
+
+  it('老 GLM 照旧发 disabled（4.5/4.6/5.0-5.2 实测生效）', () => {
+    expect(planThinkingOffExtraBody('glm', 'https://open.bigmodel.cn/api/paas/v4', 'glm-4.6'))
+      .toEqual({ thinking: { type: 'disabled' } });
+    // 未带模型时保守回退 disabled（旧调用方逐字节兼容）。
+    expect(planThinkingOffExtraBody('glm', 'https://open.bigmodel.cn/api/anthropic'))
+      .toEqual({ thinking: { type: 'disabled' } });
+  });
+
+  it('非 GLM provider / 非 bigmodel 端点不给参数', () => {
+    expect(planThinkingOffExtraBody('deepseek-openai', 'https://api.deepseek.com', 'glm-5.3-flash')).toBeUndefined();
+    expect(planThinkingOffExtraBody(undefined, undefined, undefined)).toBeUndefined();
+  });
+
+  it('custom provider 名字不带 glm 但端点是 bigmodel 也命中（host 兜底）', () => {
+    expect(planThinkingOffExtraBody('my-relay', 'https://open.bigmodel.cn/api/anthropic', 'glm-5.3-flash'))
+      .toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'low' });
   });
 });

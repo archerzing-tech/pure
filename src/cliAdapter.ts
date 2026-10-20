@@ -32,8 +32,8 @@ function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}):
   // header; keyed ones use their own key from the custom entry.
   const custom = customProviderFor(args.customProviders, args.provider);
   /** Vendor extra body for the judge flavour; undefined = provider has no switch. */
-  const judgeExtraBody = (endpoint?: string): Record<string, unknown> | undefined => (opts.disableThinking
-    ? planThinkingOffExtraBody(args.provider, endpoint ?? customBaseURL(args.customProviders, args.provider, args.providerOverrides))
+  const judgeExtraBody = (endpoint?: string, model?: string): Record<string, unknown> | undefined => (opts.disableThinking
+    ? planThinkingOffExtraBody(args.provider, endpoint ?? customBaseURL(args.customProviders, args.provider, args.providerOverrides), model)
     : undefined);
   if (custom) {
     if (!custom.baseURL) {
@@ -88,7 +88,7 @@ function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}):
       if (endpoint && protocolForURL(endpoint) === 'anthropic') {
         return { adapter: new DeepSeekAnthropicAdapter({ apiKey: args.apiKey, model: args.model, baseURL: endpoint, maxTokens }), label: `${displayName} (${args.model})` };
       }
-      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens, judgeExtraBody(endpoint)), label: `${displayName} (${args.model})` };
+      return { adapter: createGLMAdapter(args.apiKey, args.model, endpoint, maxTokens, judgeExtraBody(endpoint, args.model)), label: `${displayName} (${args.model})` };
     }
     case 'deepseek-openai':
       return { adapter: createDeepSeekAdapter(args.apiKey, args.model, endpoint, maxTokens), label: `${displayName} (${args.model})` };
@@ -99,7 +99,7 @@ function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}):
     case 'openrouter':
     case 'nvidia':
       return {
-        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model, maxTokens, extraBody: judgeExtraBody(endpoint) }),
+        adapter: new OpenAICompatibleAdapter({ baseURL: endpoint || baseURLFor(args.provider), apiKey: args.apiKey, model: args.model, maxTokens, extraBody: judgeExtraBody(endpoint, args.model) }),
         label: `${displayName} (${args.model})`,
       };
     default:
