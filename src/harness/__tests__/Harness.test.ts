@@ -4,7 +4,7 @@
 // --resume runs restarted from a blank [system, user] context).
 
 import { describe, it, expect } from 'bun:test';
-import { Harness, capMemoryChars, dedupeBySymptom } from '../Harness';
+import { Harness, capMemoryChars, capMemoryTotal, dedupeBySymptom } from '../Harness';
 import { buildTurnEvidence } from '../LessonReflector';
 import { confirmedDraftEntry } from '../../adapter/memory/correctionDrafts';
 import { PromptAssembler } from '../../shared/PromptAssembler';
@@ -2193,5 +2193,27 @@ describe('memory injection funnel', () => {
   it('keeps the first line even past budget and passes small lists through', () => {
     expect(capMemoryChars(['x'.repeat(9000)])).toHaveLength(1);
     expect(capMemoryChars(['a', 'bb', 'ccc'])).toEqual(['a', 'bb', 'ccc']);
+  });
+
+  it('caps the combined lists at a shared pool in injection order', () => {
+    // 总帽（2026-10-20 晚）：三类各自 8k 相加最坏 24k 且合计无帽——共享
+    // 池按注入序花费，前面的清单吃满预算，后面的只分到残余。
+    const line = 'x'.repeat(900);
+    const [successes, errorPatterns, procedures] = capMemoryTotal(
+      [Array.from({ length: 20 }, () => line), Array.from({ length: 20 }, () => line), Array.from({ length: 20 }, () => line)],
+      12000,
+    );
+    expect(successes).toHaveLength(13); // 11700 fits the pool
+    expect(errorPatterns).toHaveLength(1); // 残余 300 < 一行:防御性下限兜底
+    expect(procedures).toHaveLength(1); // 同上,池空也保第一行
+    const total = [...successes, ...errorPatterns, ...procedures].reduce((sum, l) => sum + l.length, 0);
+    expect(total).toBeLessThanOrEqual(12000 + 2 * 900); // 池空后每张清单仍保首行
+  });
+
+  it('passes small combined lists through the shared pool untouched', () => {
+    const [successes, errorPatterns, procedures] = capMemoryTotal([['s1'], ['e1', 'e2'], ['p1']], 12000);
+    expect(successes).toEqual(['s1']);
+    expect(errorPatterns).toEqual(['e1', 'e2']);
+    expect(procedures).toEqual(['p1']);
   });
 });

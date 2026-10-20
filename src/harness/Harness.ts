@@ -977,16 +977,17 @@ export class Harness {
     // before error patterns in <session_memory>), so the model prefers proven
     // approaches over unproven ones and treats failures as avoid-lists.
     // 刀 3 漏斗先同症状去重再过 8000 字符帽：垃圾/重复 lesson 不再挤占注入面，
-    // 相关性序保头去尾。
-    const successes = capMemoryChars(dedupeBySymptom(memories
-      .filter(m => m.type === 'successful_pattern'))
-      .map(m => m.content));
-    const errorPatterns = capMemoryChars(dedupeBySymptom(memories
-      .filter(m => m.type === 'error_pattern'))
-      .map(m => m.content));
-    const procedures = capMemoryChars(dedupeBySymptom(memories
-      .filter(m => m.type === 'procedure'))
-      .map(m => m.content));
+    // 相关性序保头去尾。总帽（2026-10-20 晚）——三类各自 8k 相加最坏 24k 且
+    // 合计无帽，hello 回合实测记忆注入 13.2k 字符/轮；三类按注入序共享
+    // 12000 字符池，已验证的成功做法优先，截断先落在失败梯与流程清单上。
+    const [successes, errorPatterns, procedures] = capMemoryTotal(
+      [
+        dedupeBySymptom(memories.filter(m => m.type === 'successful_pattern')).map(m => m.content),
+        dedupeBySymptom(memories.filter(m => m.type === 'error_pattern')).map(m => m.content),
+        dedupeBySymptom(memories.filter(m => m.type === 'procedure')).map(m => m.content),
+      ],
+      MEMORY_TOTAL_CAP_CHARS,
+    );
     // E3.1 — confirmed project conventions ride the same confidence filter as
     // everything else: drafts stay out (low), user-confirmed ones inject.
     const projectConventions = memories
@@ -1552,6 +1553,9 @@ export function dedupeBySymptom<T extends { content: string; timestamp: number }
   return entries.filter(e => !e.content.startsWith(PREFIX) || kept.has(e));
 }
 
+/** 三类 lesson 清单（successes/errorPatterns/procedures）共享的注入总帽。 */
+const MEMORY_TOTAL_CAP_CHARS = 12000;
+
 /** 注入侧漏斗（刀 3）——字符预算帽。successes/errorPatterns/procedures 三张
  *  清单合计注入 <session_memory>，垃圾 lesson 堆积时曾把注入面顶到 3k tokens。
  *  以 8000 字符封顶：检索相关性序保头去尾，第一行永远保留（防御性下限）。 */
@@ -1564,6 +1568,19 @@ export function capMemoryChars(lines: string[], maxChars = 8000): string[] {
     total += line.length;
   }
   return kept;
+}
+
+/** 注入侧漏斗（总帽，2026-10-20 晚）——多张清单按注入序共享一个字符池：
+ *  每张先按剩余预算过 capMemoryChars，花掉的从池里扣，后面的清单只分到残余。
+ *  预算耗尽后 capMemoryChars 的防御性下限仍各保第一行，不会整段消失。 */
+export function capMemoryTotal(lists: string[][], totalChars: number): string[][] {
+  let remaining = Math.max(0, totalChars);
+  return lists.map(list => {
+    const capped = capMemoryChars(list, remaining);
+    remaining -= capped.reduce((sum, line) => sum + line.length, 0);
+    if (remaining < 0) remaining = 0;
+    return capped;
+  });
 }
 
 /**
