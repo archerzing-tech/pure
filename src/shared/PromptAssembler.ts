@@ -594,19 +594,22 @@ export class PromptAssembler {
       fragment('plausibility_review', PLAUSIBILITY_REVIEW_PROMPT, 72),
       fragment('capability_gap', CAPABILITY_GAP_CORE, 75),
       fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
-      fragment('environment', context.environment ?? '', 60),
       fragment('runtimes', context.runtimes ?? '', 45),
       fragment('network', context.network ?? '', 50),
       fragment('shell', context.shell ?? '', 58),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('mcp_resources', buildMcpResources(context.mcpResources), 30),
       // ── Volatile fragments LAST ──
-      // Everything that can legitimately change mid-session (the
-      // circuit-breaker blocked-hosts list inside `capabilities`, MCP
-      // resources, the task mode) sits at the tail of the system prompt:
-      // providers' implicit context caches match the longest byte-identical
-      // prefix, so a tail change only re-prefills the tail instead of
-      // invalidating ~25KB of stable instructions behind it.
+      // Everything that can legitimately change mid-session (the time line
+      // and circuit-breaker blocked-hosts list inside `environment`, the
+      // same list inside `capabilities`, MCP resources, the task mode) sits
+      // at the tail of the system prompt: providers' implicit context caches
+      // match the longest byte-identical prefix, so a tail change only
+      // re-prefills the tail instead of invalidating ~25KB of stable
+      // instructions behind it. `environment` moved here (修 5) — its
+      // blocked-hosts line mutates at circuit-break time and used to sit in
+      // the middle, evicting skills/mcp/capabilities behind it.
+      fragment('environment', context.environment ?? '', 60),
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('task_mode', buildMode(context.mode), 85),
       // ── 按请求装配的可视化细则（尾区，随回合变化）──

@@ -428,6 +428,29 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('Operating mode: BUILD');
   });
 
+  it('sits the environment fragment at the volatile tail, after skills and before capabilities', () => {
+    // 修 5:environment 里的熔断 blocked-hosts 行会在运行中突变,时间行在天切
+    // 时变——它坐中部时一次突变就把后面的 skills/mcp/capabilities 的 provider
+    // 前缀缓存全部打掉。挪进尾区后,字节序必须是 runtimes → … → skills →
+    // environment → capabilities:突变只重填本来就每轮重填的易变尾区。
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'CAP_MARKER',
+      environment: 'ENV_MARKER',
+      runtimes: 'RT_MARKER',
+      skills: [{ name: 'tail-skills', body: 'SKILLS_MARKER', enabled: true }],
+      mode: 'build',
+    });
+    const rt = prompt.indexOf('RT_MARKER');
+    const skills = prompt.indexOf('SKILLS_MARKER');
+    const env = prompt.indexOf('ENV_MARKER');
+    const cap = prompt.indexOf('CAP_MARKER');
+    expect(rt).toBeGreaterThanOrEqual(0);
+    expect(skills).toBeGreaterThan(rt);
+    expect(env).toBeGreaterThan(skills);
+    expect(cap).toBeGreaterThan(env);
+  });
+
   it('keeps user-turn composition on the same shared compiler path', () => {
     const context = { assessment: '<intent_assessment>medium</intent_assessment>' };
     expect(assembler.buildUserPrompt('ship it', context)).toBe(composeUserTurn('ship it', context));
