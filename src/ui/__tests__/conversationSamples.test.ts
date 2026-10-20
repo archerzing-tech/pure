@@ -1026,16 +1026,17 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('您说的这个正在「researcher·2号」那路跑着，不重复派——收齐后一并汇总给您。');
   });
 
-  it('复测三连击（2026-10-20 真机）：裁决器漏报 cancels_part 的取消话撞上去重——绝不用「不重复派」把话吞掉', async () => {
+  it('复测三连击（2026-10-20 真机）：裁决器漏报 cancels_part 的取消话撞上去重——复核裁决接住，绝不回「不重复派」', async () => {
     // 真机形态：四路平台调研在飞，用户三句取消（「去掉优酷的调研」「我说
     // 不需要优酷的」「暂停优酷」）全被裁决器判成 task 且没报 cancels_part
-    // （「去掉/不需要/暂停」三个高频动词不在提示词样例面里）——宿主按契约
-    // 不嗅关键词，掉进去重终稿「不重复派——收齐后一并汇总」，同一句逐字顶
-    // 回三次，支烧完汇总还带着用户明确去掉的东西。
-    // 闸（同日）：去重终稿前用审计同源的取消味网测一次——有味就不吞，降级
-    // 走取消无目标臂（折入守汇报步，模型带全上下文终裁；收执如实说「没停」）。
-    // 真加活不受闸影响：「新增一个平台，爱奇艺」上一条测试照旧终稿。
+    // ——掉进去重终稿「不重复派——收齐后一并汇总」，同一句逐字顶回三次，
+    // 支烧完汇总还带着用户明确去掉的东西。
+    // 复核裁决（同日，替换试过的词表闸——取消措辞穷举不尽）：判成 task 却
+    // 撞上"已在跑"是矛盾信号，宿主把现场事实喂回裁决器重判一次（剧本第二
+    // 遍命中 dedupe_conflict 标记，报 cancels_part）——走取消落地臂折入守
+    // 汇报步。真加活照旧终稿：「新增一个平台，爱奇艺」上一条测试锁死。
     const llm = scriptedLlm([
+      { match: 'dedupe_conflict', cls: { kind: 'task', reason: 'recheck: the wording removes a running branch', confidence: 0.9, cancels_part: true } },
       { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
       { match: '暂停', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
@@ -1046,7 +1047,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
       { callId: 'call_r3', agentName: 'researcher', instanceNo: 3, status: 'running', inputSnippet: '调研B站国漫剧集' },
       { callId: 'call_r4', agentName: 'researcher', instanceNo: 4, status: 'running', inputSnippet: '调研芒果TV国漫剧集' },
     );
-    // 裁决器漏报时宿主绝不机械停支——闸只是不吞话，不是宿主改道停支。
+    // 复核没点名 stop_branch 时宿主不机械停支——话折给模型终裁。
     const paused: string[] = [];
     h.chat.codingAgentRef = {
       subagentOrchestrator: {
@@ -1061,13 +1062,44 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     }
     const said = assistantJoined(h.root) + statusJoined(h.root);
     expect(said).not.toContain('不重复派');
-    expect(paused).toEqual([]); // 漏报场景宿主不停支：话折给模型终裁
+    expect(paused).toEqual([]); // 无点名：折入守汇报步，不机械停
     const folds = h.chat.folds.entries();
     expect(folds).toHaveLength(3);
     for (const fold of folds) expect(fold.cancels).toBe(true);
     // 双气泡防回归（2026-10-20 真机「不要优酷了」×2）：fold 自带回显，闸臂
     // 手动 echo 会出两份用户气泡。三句输入各恰一份。
     expect(h.root.querySelectorAll('.bubble-row.user')).toHaveLength(3);
+  });
+
+  it('复核点名 stop_branch 时真停那支：带现场重判让漏报的取消精确落地', async () => {
+    // 复核的价值不止"不吞话"：带着「哪支在跑」的事实重判，裁决器能点名
+    // call_id——宿主直接暂停那一支，比无目标折入更早止损。
+    const llm = scriptedLlm([
+      { match: 'dedupe_conflict', cls: { kind: 'task', reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' } } },
+      { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+    ]);
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_r2', agentName: 'researcher', instanceNo: 2, status: 'running', inputSnippet: '调研优酷国漫剧集' },
+      { callId: 'call_r3', agentName: 'researcher', instanceNo: 3, status: 'running', inputSnippet: '调研B站国漫剧集' },
+    );
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_r2', agentName: 'researcher', state: 'running', inputSnippet: '调研优酷国漫剧集' },
+          { callId: 'call_r3', agentName: 'researcher', state: 'running', inputSnippet: '调研B站国漫剧集' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('去掉 优酷的调研');
+    expect(paused).toEqual(['call_r2']); // 复核点名→精确暂停
+    expect(assistantJoined(h.root)).toContain('明白——「researcher·2号」那路我先暂停了');
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('不重复派');
+    expect(h.chat.folds.entries()).toHaveLength(0);
   });
 
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {

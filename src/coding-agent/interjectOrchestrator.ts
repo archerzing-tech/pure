@@ -14,7 +14,6 @@
 // insertionMessaging（本模块只引用，不内联第二份）。
 
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
-import { looksLikeRemoval } from './insertionAudit';
 import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
 import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
@@ -221,7 +220,8 @@ export class InterjectOrchestrator {
     // 裁决走 judgeLlm（关暗推理）而不是 turnLlm：开着思考时 8s 预算几乎必然
     // 超时，判定会整批落到字面安全网。turnLlm 是兜底（judgeLlm 没立起来时
     // 它至少让 decide 拿到一个 llm）。档位选择留宿主（decideLlm 缝）。
-    const decision = await this.deps.decider.decide(this.deps.decideLlm(), this.deps.insertionContext(images), { text, images, displayText }, this.deps.decideSignal());
+    const insertionCtx = this.deps.insertionContext(images);
+    const decision = await this.deps.decider.decide(this.deps.decideLlm(), insertionCtx, { text, images, displayText }, this.deps.decideSignal());
     this.deps.logDecision(decision, text);
     // 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
     // 做」）：裁决器判的那一刻就在现场，由它顺手写好给用户看的那两句。只在
@@ -471,41 +471,7 @@ export class InterjectOrchestrator {
         // 自己消化。
         const cancelish = decision.signals.cancelsPart === true;
         if (cancelish) {
-          if (this.deps.hasDelegationInFlight()) {
-            const target = decision.signals.addsAlong === true ? null : await this.resolveStopTarget(text, decision);
-            const stopped = target ? this.deps.stopBranchByCallId(target, 'pause') : null;
-            if (stopped) {
-              echoUserBubble();
-              // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
-              this.deps.settleAck(ack, branchStopReceipt(stopped, 'pause'));
-              return;
-            }
-            // 没指认出来的取消折入：折入守汇报步，挂号守同回合再出生的支。
-            // stopMissed=true（同 steer 分支）：收执如实说「没停」。
-            this.deps.delegation.registerCancel(text);
-            // 缺口②扩窗：同 steer 没停成臂——点名也可能命中一支已收工支，
-            // 登记进离场账（在飞支没停成不挡已收工支的产出离场）。
-            this.stripSettledTarget(text);
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
-            return;
-          }
-          // 整理窗的取消折入汇聚轮（同上方 steer 取消口径，2026-10-15 样本
-          // 「剔除并继续」）；委派还没出生（2026-09-26 用户实测窗口）：话挂
-          // 起飞闸 + 转达父引擎。
-          // 回显挪进 else 臂（同 steer 整理窗臂）：fold 自带用户气泡，臂头
-          // 统一 echo 让整理窗分支出双气泡（2026-10-20 真机）。
-          this.deps.delegation.registerCancel(text);
-          // 缺口②扩窗（第 6 期）：与上方 steer 取消臂同形——不再只在整理窗
-          // 剔，任何取消臂都先登记已收工支的离场。
-          this.stripSettledTarget(text);
-          if (this.deps.atAggregationWindow()) {
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
-          } else {
-            echoUserBubble();
-            try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
-            this.deps.steerRunningTurn(text, images, null, 'parent', true);
-            this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
-          }
+          await this.handleCancelFold(text, images, displayText, ack, receipt, decision, echoUserBubble);
           return;
         }
         // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
@@ -515,24 +481,21 @@ export class InterjectOrchestrator {
         // 折入，绝不拿"可能重复"当理由吞用户的活。
         const covered = this.findCoveringBranch(text);
         if (covered) {
-          // 2026-10-20 真机三连击闸：去重终稿前先问一句"这话有没有取消味"。
-          // 裁决器漏报 cancels_part（用户连说「去掉优酷的调研」「我说不需要
-          // 优酷的」「暂停优酷」三句全被判成 task）时，这里的终稿会把话钉死
-          // 成"不重复派——收齐后一并汇总"——模型永远看不到这句取消，支烧完
-          // 汇总还带着用户明确去掉的东西，且三次确认都被同一句话顶回。
-          // 这不是 2026-09-28 撤掉的那种"宿主另立判断改道"：kind 照旧、支不
-          // 机械停——只是拒绝用一句可能与原话相反的终稿把话吞掉，降级走下方
-          // 取消无目标臂（折入守汇报步，模型带全上下文终裁，收执如实说"没停"）。
-          if (looksLikeRemoval(text)) {
-            // 回显不在此处手动做——foldInScopeAddition 自带（addBubble+
-            // placeEchoBeforeAck），手动 echo 会出双气泡（2026-10-20 真机）。
-            this.deps.delegation.registerCancel(text);
-            this.stripSettledTarget(text);
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
+          // 2026-10-20 真机三连击的复核裁决（替换当日试过的词表闸——用户指
+          // 得对：取消的措辞穷举不尽，词表永远追着漏网跑）。判成 task 却撞
+          // 上"已在跑"本身就是矛盾信号——谁会要求加一个正在跑的东西？最可
+          // 能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回裁决器重判
+          // 一次：报了取消走同一条取消落地臂（点名还能精确停支）；仍不报才
+          // 回终稿——真加活照旧秒回。语义判断全程归模型，宿主零词表。
+          const coveredName = this.deps.branchLabel(covered.name, covered.callId);
+          const recheckContext = `${insertionCtx}\n\n<dedupe_conflict>你刚把这句话判成 task，但它提到的活已有一支在跑：「${coveredName}」。谁会要求加一个正在跑的东西？复核：这句话是否其实在收掉/暂停已在跑的工作？措辞不限——「去掉X的调研」「我说不需要X的」「暂停X」与「X就不调研了」同义。是就报 cancels_part，不是就维持原判。</dedupe_conflict>`;
+          const recheck = await this.deps.decider.decide(this.deps.decideLlm(), recheckContext, { text, images, displayText }, this.deps.decideSignal());
+          this.deps.logDecision(recheck, `(复核)${text}`);
+          if (recheck.signals.cancelsPart === true) {
+            await this.handleCancelFold(text, images, displayText, ack, receipt, recheck, echoUserBubble);
             return;
           }
           echoUserBubble();
-          const coveredName = this.deps.branchLabel(covered.name, covered.callId);
           // 去重回执是终稿（没有后续在途）——转普通气泡。
           this.deps.settleAck(ack, covered.status === 'done'
             ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
@@ -639,6 +602,57 @@ export class InterjectOrchestrator {
     if (!matched) return null;
     const hit = candidates.find((item) => item.callId === matched.callId);
     return hit ? { name: hit.name, callId: hit.callId, status: hit.status } : null;
+  }
+
+  /** 取消话的落地臂（2026-09-24 取消案例口径，2026-10-20 抽出共用）：点名
+   *  点得中就真停（pause），停不了按取消型折入守汇报步；委派不在飞交给
+   *  在跑的回合自己消化，整理窗折入汇聚轮，出生前挂起飞闸+转达父引擎。
+   *  case 'task' 的 cancelish 主路与去重复核（2026-10-20 三连击）共用——
+   *  复核判定报了 cancels_part 就走同一条落地路，不另起分支。 */
+  private async handleCancelFold(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    if (this.deps.hasDelegationInFlight()) {
+      const target = decision.signals.addsAlong === true ? null : await this.resolveStopTarget(text, decision);
+      const stopped = target ? this.deps.stopBranchByCallId(target, 'pause') : null;
+      if (stopped) {
+        echoUserBubble();
+        // 宿主已完成暂停（sync 已落），收执是终稿——转普通气泡。
+        this.deps.settleAck(ack, branchStopReceipt(stopped, 'pause'));
+        return;
+      }
+      // 没指认出来的取消折入：折入守汇报步，挂号守同回合再出生的支。
+      // stopMissed=true（同 steer 分支）：收执如实说「没停」。
+      this.deps.delegation.registerCancel(text);
+      // 缺口②扩窗：同 steer 没停成臂——点名也可能命中一支已收工支，
+      // 登记进离场账（在飞支没停成不挡已收工支的产出离场）。
+      this.stripSettledTarget(text);
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
+      return;
+    }
+    // 整理窗的取消折入汇聚轮（同 steer 取消口径，2026-10-15 样本
+    // 「剔除并继续」）；委派还没出生（2026-09-26 用户实测窗口）：话挂
+    // 起飞闸 + 转达父引擎。
+    // 回显挪进 else 臂（同 steer 整理窗臂）：fold 自带用户气泡，臂头
+    // 统一 echo 让整理窗分支出双气泡（2026-10-20 真机）。
+    this.deps.delegation.registerCancel(text);
+    // 缺口②扩窗（第 6 期）：与上方 steer 取消臂同形——不再只在整理窗
+    // 剔，任何取消臂都先登记已收工支的离场。
+    this.stripSettledTarget(text);
+    if (this.deps.atAggregationWindow()) {
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
+    } else {
+      echoUserBubble();
+      try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
+      this.deps.steerRunningTurn(text, images, null, 'parent', true);
+      this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+    }
   }
 
   /** 缺口②机械排除（2026-10-15，第 6 期扩窗）：点名取消点中了某支**已收工**

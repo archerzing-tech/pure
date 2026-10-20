@@ -1506,16 +1506,21 @@ describe('plan overview completion state', () => {
     expect(stripTargetBody.indexOf('matchInFlightBranch(text, this.deps.settledBranches())')).toBeGreaterThan(-1);
     expect(stripTargetBody.indexOf('this.deps.registerStrippedBranch(matched.callId, text)')).toBeGreaterThan(-1);
     expect(stripTargetBody.indexOf('this.deps.stripSettledBranchOutput(matched.callId)')).toBeGreaterThan(-1);
-    // 第 6 期扩窗：四条取消臂都登记/剔除（steer 没停成臂、steer 取消臂、
-    // task 没停成臂、task 取消臂）；机械追加臂（task 非取消路径）不带剔除
-    // ——追加没有「产出不在场」的语义。
+    // 第 6 期扩窗 + 2026-10-20 抽取：四条取消臂都登记/剔除——steer 没停成臂、
+    // steer 整理窗臂、handleCancelFold 没停成臂、handleCancelFold 整理窗臂
+    // （task cancelish 主路与去重复核共用同一条落地方法）；机械追加臂（task
+    // 非取消路径）不带剔除——追加没有「产出不在场」的语义。
     const armCount = orch.split('this.stripSettledTarget(text);').length - 1;
-    expect(armCount).toBe(5);
+    expect(armCount).toBe(4);
     const steerBody = orch.slice(orch.indexOf("case 'steer': {"), orch.indexOf("case 'question':", orch.indexOf("case 'steer': {")));
     expect(steerBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
     const taskBody = orch.slice(orch.indexOf("case 'task': {"), orch.indexOf("case 'chatter':", orch.indexOf("case 'task': {")));
-    // 三处：cancelish 主臂、委派未出生臂、去重终稿的取消味闸臂（2026-10-20）。
-    expect(taskBody.split('this.stripSettledTarget(text);').length - 1).toBe(3);
+    const cancelFoldFn = orch.indexOf('private async handleCancelFold(');
+    expect(cancelFoldFn).toBeGreaterThan(-1);
+    const cancelFoldBody = orch.slice(cancelFoldFn, orch.indexOf('private stripSettledTarget(', cancelFoldFn));
+    // task case 本体不再直接登记/剔除——两条取消臂全在共享落地方法里。
+    expect(taskBody.split('this.stripSettledTarget(text);').length - 1).toBe(0);
+    expect(cancelFoldBody.split('this.stripSettledTarget(text);').length - 1).toBe(2);
     // 同回合窗口兜底：回合收尾/下一轮装配按离场账补剔（applyStrippedBranches
     // 空集短路）。
     expect(src.indexOf('private applyStrippedBranches(messages: Message[]): void {')).toBeGreaterThan(-1);
@@ -1554,9 +1559,9 @@ describe('plan overview completion state', () => {
     expect(orch.indexOf("typeof decision.signals.receipt === 'string'")).toBeGreaterThan(-1);
     expect(orch.split(', false, receipt);').length - 1).toBe(5);
     expect(orch.split(', false, false, receipt);').length - 1).toBe(1);
-    // stopMissed 两臂、出生前取消两臂与去重终稿的取消味闸臂不传 receipt——
-    // 死参与失实话术都不进（2026-10-20 真机三连击后闸臂加入，同构不传）。
-    expect(orch.split(', ack, true, true);').length - 1).toBe(3);
+    // stopMissed 两臂（steer 没停成 + handleCancelFold 没停成）与出生前取消
+    // 两臂不传 receipt——死参与失实话术都不进。
+    expect(orch.split(', ack, true, true);').length - 1).toBe(2);
     expect(orch.split("null, 'parent', true);").length - 1).toBe(2);
   });
 
@@ -1609,15 +1614,27 @@ describe('plan overview completion state', () => {
     const taskBody = orch.slice(task, orch.indexOf("case 'chatter':", task));
     expect(taskBody.indexOf('decision.signals.cancelsPart === true')).toBeGreaterThan(-1);
     const override = taskBody.indexOf('cancelsPart === true');
+    // 2026-10-20 抽取：task cancelish 主路与去重复核共用 handleCancelFold
+    // 落地方法——stopMissed 折入与出生前转达的形状锁挪进方法体。
+    const cancelFoldAt = orch.indexOf('private async handleCancelFold(');
+    const cancelFoldBody = orch.slice(cancelFoldAt, orch.indexOf('private stripSettledTarget(', cancelFoldAt));
+    expect(taskBody.indexOf('await this.handleCancelFold(', override)).toBeGreaterThan(-1);
     // 末参 stopMissed=true（2026-10-10）：点名停支没停成的折入，收执换诚实口径。
-    expect(taskBody.indexOf('this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true)', override)).toBeGreaterThan(-1);
+    expect(cancelFoldBody.indexOf('this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true)')).toBeGreaterThan(-1);
     // 委派未出生的窗口（2026-09-26）：转达引擎的调用挂 null ack——收执由
     // 挂号处点名（能抽出话题就点名），不再用泛泛的"已转达"；机制承诺（没派
     // 的不会派之类）2026-09-28 起不进收执——那个窗口可能根本没有委派可派
     // （单任务场景，说了就是编造），承诺归框架/协议。收执只说砍了什么。
     // cancel=true 走取消专用注入框架（"手头的活继续"会把取消引导成计划照旧）。
-    expect(taskBody.indexOf("this.deps.steerRunningTurn(text, images, null, 'parent', true)", override)).toBeGreaterThan(-1);
-    expect(taskBody.indexOf('this.deps.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (decision.signals.cancelsPart === true)', override));
+    expect(cancelFoldBody.indexOf("this.deps.steerRunningTurn(text, images, null, 'parent', true)")).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('this.deps.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (cancelish)', override));
+    // 去重复核裁决（2026-10-20 三连击，替换词表闸）：判成 task 却撞上"已在
+    // 跑"= 矛盾信号，宿主把现场事实（dedupe_conflict 块）喂回裁决器重判一次
+    // ——报了取消走同一条落地臂；宿主零词表，语义判断归模型。
+    expect(taskBody.indexOf('<dedupe_conflict>')).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('recheck.signals.cancelsPart === true')).toBeGreaterThan(-1);
+    const recheckAt = taskBody.indexOf('recheck.signals.cancelsPart === true');
+    expect(taskBody.indexOf('await this.handleCancelFold(', recheckAt)).toBeGreaterThan(-1);
   });
 
   it('a cancel arriving BEFORE any delegation exists gates the branch at birth (2026-09-26 插话先于委派)', () => {
@@ -1637,8 +1654,12 @@ describe('plan overview completion state', () => {
     expect(steerBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(2);
     const task = orch.indexOf("case 'task': {");
     const taskBody = orch.slice(task, orch.indexOf("case 'chatter':", task));
-    // 三处：cancelish 主臂、委派未出生臂、去重终稿的取消味闸臂（2026-10-20）。
-    expect(taskBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(3);
+    // 2026-10-20 抽取：task case 本体零登记——cancelish 主路与去重复核两条
+    // 臂都经 handleCancelFold 落地，登记在方法体里（与 steer 两处共四）。
+    expect(taskBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(0);
+    const cancelFoldAt = orch.indexOf('private async handleCancelFold(');
+    const cancelFoldBody = orch.slice(cancelFoldAt, orch.indexOf('private stripSettledTarget(', cancelFoldAt));
+    expect(cancelFoldBody.split('this.deps.delegation.registerCancel(text)').length - 1).toBe(2);
     // 无委派窗的收执说人话：没派的不会派，不是泛泛的"已转达"；收执点名
     // 直接走 cancelBeforeDispatchReceipt（2026-09-26 用户实测反馈固定话术里
     // 「这项」是空的——能抽出话题就点名，与停支收执同一人味；S2 第六刀起
