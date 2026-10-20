@@ -419,7 +419,8 @@ export class InterjectOrchestrator {
           // 「剔除并继续」口径：旧路在父已流中输出时可能收不过来）。收执只
           // 说砍了什么——foldInScopeAddition 自带收执；起飞闸照挂——同回合
           // 若还会为这个话题再派工，出生点拦下。
-          echoUserBubble();
+          // 回显挪进 else 臂：foldInScopeAddition 自带用户气泡回显，臂头统一
+          // echo 会让整理窗分支出双气泡（2026-10-20 真机「不要优酷了」×2）。
           this.deps.delegation.registerCancel(text);
           // 缺口②扩窗（第 6 期）：不再只在整理窗剔——任何取消臂只要点名命中
           // 已收工支就登记（登记保证回合收尾补剔与下一轮装配兜底）；整理窗内
@@ -428,6 +429,7 @@ export class InterjectOrchestrator {
           if (this.deps.atAggregationWindow()) {
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
+            echoUserBubble();
             // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
             // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
             // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
@@ -490,7 +492,8 @@ export class InterjectOrchestrator {
           // 整理窗的取消折入汇聚轮（同上方 steer 取消口径，2026-10-15 样本
           // 「剔除并继续」）；委派还没出生（2026-09-26 用户实测窗口）：话挂
           // 起飞闸 + 转达父引擎。
-          echoUserBubble();
+          // 回显挪进 else 臂（同 steer 整理窗臂）：fold 自带用户气泡，臂头
+          // 统一 echo 让整理窗分支出双气泡（2026-10-20 真机）。
           this.deps.delegation.registerCancel(text);
           // 缺口②扩窗（第 6 期）：与上方 steer 取消臂同形——不再只在整理窗
           // 剔，任何取消臂都先登记已收工支的离场。
@@ -498,6 +501,7 @@ export class InterjectOrchestrator {
           if (this.deps.atAggregationWindow()) {
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
           } else {
+            echoUserBubble();
             try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
             this.deps.steerRunningTurn(text, images, null, 'parent', true);
             this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
@@ -520,7 +524,8 @@ export class InterjectOrchestrator {
           // 机械停——只是拒绝用一句可能与原话相反的终稿把话吞掉，降级走下方
           // 取消无目标臂（折入守汇报步，模型带全上下文终裁，收执如实说"没停"）。
           if (looksLikeRemoval(text)) {
-            echoUserBubble();
+            // 回显不在此处手动做——foldInScopeAddition 自带（addBubble+
+            // placeEchoBeforeAck），手动 echo 会出双气泡（2026-10-20 真机）。
             this.deps.delegation.registerCancel(text);
             this.stripSettledTarget(text);
             this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);

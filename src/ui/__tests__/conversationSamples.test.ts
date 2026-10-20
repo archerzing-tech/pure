@@ -1065,6 +1065,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const folds = h.chat.folds.entries();
     expect(folds).toHaveLength(3);
     for (const fold of folds) expect(fold.cancels).toBe(true);
+    // 双气泡防回归（2026-10-20 真机「不要优酷了」×2）：fold 自带回显，闸臂
+    // 手动 echo 会出两份用户气泡。三句输入各恰一份。
+    expect(h.root.querySelectorAll('.bubble-row.user')).toHaveLength(3);
   });
 
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
