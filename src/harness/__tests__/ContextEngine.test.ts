@@ -565,4 +565,69 @@ describe('ContextEngine', () => {
     expect(result.rehydratedFiles).toBe(0);
     expect(result.restoredPlan).toBe(false);
   });
+
+  // ═══ Soft mode (idle pre-compaction): shed at the trigger line, not the wall ═══
+
+  /** A pair worth ~106 estimated tokens: 400-char tool result (≈100) plus the
+   *  wire-priced tool-call block (≈6). */
+  function softPair(id: string): Message[] {
+    return [
+      { role: 'assistant', content: '', toolCalls: [{ id, index: 0, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool', content: 'x'.repeat(400), toolCallId: id, toolName: 'read_file' },
+    ];
+  }
+
+  it('soft mode sheds below the wall: trigger fires under 100%, target bounds the kept window', async () => {
+    // 9 pairs ≈ 954 est. tokens: under the 1000 wall, above the 850 trigger.
+    // The idle pre-compaction must act HERE — before any send can overflow.
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000 });
+    const msgs = Array.from({ length: 9 }, (_, i) => softPair(`p${i}`)).flat();
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.compacted).toBe(true);
+    expect(result.evictedMessages).toBeGreaterThan(0);
+    // Shed to the 700-token target, not merely under the wall.
+    expect(result.estimatedTokens).toBeLessThanOrEqual(750);
+    expect(result.overBudget).toBe(false);
+    // Newest pair survives, oldest goes — same retention shape as ever.
+    expect(result.messages.some(m => m.role === 'tool' && m.toolCallId === 'p8')).toBe(true);
+    expect(result.messages.some(m => m.role === 'tool' && m.toolCallId === 'p0')).toBe(false);
+  });
+
+  it('soft mode no-ops under the trigger line', async () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000 });
+    const msgs = Array.from({ length: 4 }, (_, i) => softPair(`p${i}`)).flat(); // ≈424 tokens
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.compacted).toBe(false);
+    expect(result.evictedMessages).toBe(0);
+    expect(result.messages).toHaveLength(msgs.length);
+  });
+
+  it('soft mode lets L1 microcompaction satisfy the trigger before any eviction', async () => {
+    // 18 pairs of 200-char results (≈56 tokens each) ≈ 1008 tokens: over the
+    // trigger. keepRecent: 8 protects the newest 8, L1 clears the other 10 to
+    // placeholders (≈34 tokens each) → ≈788, back under 850 — L2 must NOT run.
+    const engine = new ContextEngine({
+      maxMessages: 1000,
+      maxTokens: 1000,
+      microcompaction: { minChars: 100 },
+    });
+    const msgs = Array.from({ length: 18 }, (_, i) => [
+      { role: 'assistant' as const, content: '', toolCalls: [{ id: `q${i}`, index: 0, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'tool' as const, content: 'x'.repeat(200), toolCallId: `q${i}`, toolName: 'read_file' },
+    ]).flat();
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.compacted).toBe(true);
+    expect(result.microcompactedToolResults).toBe(10);
+    expect(result.reclaimedTokens).toBeGreaterThan(0);
+    expect(result.evictedMessages).toBe(0);
+    // Newest window untouched, placeholders in place of the old results.
+    expect(result.messages).toHaveLength(msgs.length);
+    expect(result.messages.some(m => m.content?.includes('old read_file result cleared'))).toBe(true);
+  });
 });

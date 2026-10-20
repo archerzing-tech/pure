@@ -200,6 +200,7 @@ const translations: Record<Language, Record<string, string>> = {
     'context.compact.overBudget': '最新消息过大，已保持完整，当前窗口仍超过 Token 预算',
     'context.compact.contextOverBudget': '系统提示词或摘要本身已超过 Token 预算，当前窗口仍保持 provider 可接受的完整消息结构',
     'context.compact.noSummary': '未调用摘要模型，较早消息仅按窗口裁剪',
+    'context.compact.preemptive': '上下文快满了，我先把较早的对话收成了摘要腾地方——手头的活不受影响。',
 
     // ── Status footer ──
     'status.ready': '就绪',
@@ -1507,6 +1508,7 @@ const translations: Record<Language, Record<string, string>> = {
     'context.compact.overBudget': 'The newest message is too large to split; the window remains over the token budget',
     'context.compact.contextOverBudget': 'The system prompt or summary baseline already exceeds the token budget; the provider-safe message structure was preserved',
     'context.compact.noSummary': 'No summarizer was available; older messages were trimmed to the bounded window',
+    'context.compact.preemptive': 'Context was getting full, so I folded the earlier conversation into a summary to make room — the work in progress is unaffected.',
 
     // ── Status footer ──
     'status.ready': 'Ready',

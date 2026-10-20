@@ -173,6 +173,14 @@ const TOOL_CALL_REFRESH_MS = 120;
 /** 9.1 — cap on a rehydrated file read; the ContextEngine truncates what
  *  enters the prompt, this just keeps the bridge payload bounded. */
 const REHYDRATION_READ_CAP = 20_000;
+/** 主动压缩的软阈值（2026-10-20）：窗口过预算 85% 就在闲时槽 shed 到 70%，
+ *  让窗口在 70~85% 之间锯齿往返，而不是第一次撞上 100% 才在发送关键路径上
+ *  同步跑摘要（最长 60s）。与 CC 的 auto-compact-before-full 同一取舍。 */
+const IDLE_PRECOMPACT_SOFT_TRIGGER = 0.85;
+const IDLE_PRECOMPACT_SOFT_TARGET = 0.7;
+/** 主动压缩 toast 的抑制窗：会话一旦长期坐在阈值上方，每回合都会触发一次
+ *  shed——同一句话十分钟内不重复念。 */
+const PREEMPTIVE_COMPACT_TOAST_COOLDOWN_MS = 10 * 60_000;
 
 // ── Interrupt-reason sanitization ──
 // FailurePolicy.stop reasons are written as instructions FOR the model (they
@@ -1980,6 +1988,7 @@ export class ChatController {
     getLastCompactionResult?(): ContextCompactionResult | undefined;
   };
   private preCompactedMessages: Message[] | null = null;
+  private lastPreemptiveCompactToastAt = 0;
   private preCompactSourceMessages: Message[] | null = null;
   private preCompactSessionId = '';
   private preCompactMessageCount = 0;
@@ -8445,6 +8454,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       );
     }
 
+    /** 主动压缩发生过才提醒，且在冷却窗内不重复念——否则长会话坐在阈值上方
+     *  时，这句话每个回合都要念一遍。 */
+    private shouldNotifyPreemptiveCompaction(): boolean {
+      const now = Date.now();
+      if (now - this.lastPreemptiveCompactToastAt < PREEMPTIVE_COMPACT_TOAST_COOLDOWN_MS) return false;
+      this.lastPreemptiveCompactToastAt = now;
+      return true;
+    }
+
     /**
      * Shared idle-slot scheduler behind both pre-compaction entry points. The
      * engine is either the live harness one (post-turn) or lazily built for a
@@ -8480,11 +8498,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               ...priorSummaries,
               ...msgs.filter((message) => message.role !== 'system'),
             ];
-            const compaction = await ctx.compact(compactionInput);
+            // 软阈值主动压缩（2026-10-20）：闲时预压缩此前调 compact() 不带
+            // force——窗口在 50%~100% 之间时它整个是 no-op，永远等撞墙
+            // （provider 拒超长 / 发送期同步 trim）才开始压。给了 soft 档，
+            // 窗口过 85% 就在 idle 槽 shed 到 70%，撞墙这件事从关键路径上消失。
+            const compaction = await ctx.compact(compactionInput, { soft: { trigger: IDLE_PRECOMPACT_SOFT_TRIGGER, target: IDLE_PRECOMPACT_SOFT_TARGET } });
             const trimmed = compaction.messages;
             if (gen === this.generation && this.messages === transcriptMessages) {
               if (compaction.overBudget && notifyOverBudget) {
                 showToast(t(compaction.oversizedNewestGroup ? 'context.compact.overBudget' : 'context.compact.contextOverBudget'));
+              } else if (notifyOverBudget && compaction.evictedMessages > 0 && this.shouldNotifyPreemptiveCompaction()) {
+                showToast(t('context.compact.preemptive'));
               }
               this.preCompactedMessages = trimmed;
               this.preCompactSourceMessages = transcriptMessages;

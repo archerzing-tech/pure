@@ -72,6 +72,14 @@ export interface ContextCompactionOptions {
    *  budget and lets the cheap layers clear aggressively, so the retry
    *  actually converges instead of overflowing again. */
   aggressive?: boolean;
+  /** Soft mode (idle pre-compaction): shed at `trigger`×budget instead of
+   *  waiting for the wall. Above `trigger` (measured after L1) the retained
+   *  window is bounded by `target`×budget — the oldest groups leave through
+   *  the normal L2 summary, nothing drops silently, and the next send never
+   *  crosses 100% on the critical path. Without this the idle pass is a no-op
+   *  until the window is already over budget, so the FIRST over-budget send
+   *  blocks on the summarizer (up to 60s) mid-task. */
+  soft?: { trigger: number; target: number };
 }
 
 export interface ContextCompactionResult {
@@ -120,6 +128,12 @@ const AGGRESSIVE_MIN_CHARS = 200;
 /** Reactive mode targets this fraction of the configured budget: the provider
  *  ignored our estimate once, so land well under the limit rather than on it. */
 const AGGRESSIVE_BUDGET_RATIO = 0.7;
+
+/** Clamp a soft-mode fraction into [0, 1]. The caller passes constants; this
+ *  keeps a bad config from producing a nonsense retention budget. */
+function softFraction(value: number): number {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+}
 
 /** L3 defaults (files / per-file chars / total chars). */
 const REHYDRATE_MAX_FILES = 5;
@@ -340,12 +354,6 @@ export class ContextEngine {
     ];
     const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
     const configuredMax = this.config.maxTokens;
-    // Reactive mode aims BELOW the configured budget: the provider already
-    // rejected one request our estimator believed fit, so landing at exactly
-    // the limit would just overflow again.
-    const retentionBudget = options.aggressive && configuredMax !== undefined
-      ? Math.max(1, Math.floor(configuredMax * AGGRESSIVE_BUDGET_RATIO))
-      : configuredMax;
 
     // ── L1: microcompaction ──────────────────────────────────────────────
     // Runs before eviction, and only under pressure: it rewrites content in
@@ -357,9 +365,14 @@ export class ContextEngine {
     let microcompactedToolResults = 0;
     let reclaimedTokens = 0;
     const microSetting = this.config.microcompaction === false ? undefined : (this.config.microcompaction ?? {});
-    const underPressure = configuredMax !== undefined && estimateTokens(messages) + toolTokens > configuredMax;
+    const preTokens = estimateTokens(messages) + toolTokens;
+    const underPressure = configuredMax !== undefined && preTokens > configuredMax;
+    // Soft mode is pressure too: give L1 the first shot — if the cheap layer
+    // alone sheds the window back under the trigger, no message is evicted.
+    const softPressure = options.soft !== undefined && configuredMax !== undefined &&
+      preTokens > configuredMax * softFraction(options.soft.trigger);
     const overCountWindow = configuredMax === undefined && messages.filter(m => m.role !== 'system').length > this.config.maxMessages;
-    if (microSetting && (underPressure || overCountWindow || options.aggressive === true)) {
+    if (microSetting && (underPressure || overCountWindow || softPressure || options.aggressive === true)) {
       const baseKeep = microSetting.keepRecent ?? MICROCOMPACT_KEEP_RECENT;
       const baseMin = microSetting.minChars ?? MICROCOMPACT_MIN_CHARS;
       const outcome = microcompactToolResults(messages, {
@@ -378,11 +391,25 @@ export class ContextEngine {
     // budget. Without a token budget the count window is all we know.
     const overMessageBudget = configuredMax === undefined && nonSystem.length > this.config.maxMessages;
     const overTokenBudget = configuredMax !== undefined && currentTokens > configuredMax;
+    // Post-L1 soft trigger: still above the trigger line even after the cheap
+    // layer — now the eviction pass runs, bounded by the soft target.
+    const softTriggered = options.soft !== undefined && configuredMax !== undefined &&
+      currentTokens > configuredMax * softFraction(options.soft.trigger);
+    // Reactive mode aims BELOW the configured budget: the provider already
+    // rejected one request our estimator believed fit, so landing at exactly
+    // the limit would just overflow again. Soft mode targets its own lower
+    // line: shed to `target` so the window saws between target and trigger
+    // instead of ever touching the wall.
+    const retentionBudget = options.aggressive && configuredMax !== undefined
+      ? Math.max(1, Math.floor(configuredMax * AGGRESSIVE_BUDGET_RATIO))
+      : softTriggered && options.soft !== undefined
+        ? Math.max(1, Math.floor(configuredMax * softFraction(options.soft.target)))
+        : configuredMax;
 
     const groups = this.groupAtomicPairs(nonSystem);
     const hasInvalidFragments = groups.some(group => !group.retainable);
     const hasCollapsedSummaries = priorSummaries.length > 1;
-    if (!options.force && !overMessageBudget && !overTokenBudget && !hasInvalidFragments && !hasCollapsedSummaries) {
+    if (!options.force && !overMessageBudget && !overTokenBudget && !softTriggered && !hasInvalidFragments && !hasCollapsedSummaries) {
       // Microcompaction alone may have been enough. Report it honestly rather
       // than as a no-op, and keep the caller's message order (only tool-result
       // contents changed; nothing was moved or dropped).
