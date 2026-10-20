@@ -1174,8 +1174,9 @@ export class Harness {
    * turn ends while it runs and settleReflections() drains it before process
    * exit. Everything else keeps the synchronous template write, unchanged.
    * The template version is also the reflector's designed fallback: a
-   * reflection that throws, times out, hits the daily cap, or returns garbage
-   * degrades to it, so every completed turn still leaves a lesson behind.
+   * reflection that throws, times out, or returns garbage degrades to it.
+   * Turns with zero evidence (no failures, no tool activity) write nothing —
+   * their template lesson is boilerplate noise, not knowledge.
    */
   private async writeSessionLesson(
     userPrompt: string,
@@ -1309,63 +1310,13 @@ export class Harness {
     const tools = [...new Set((messages ?? [])
       .filter(m => m.role === 'tool' && m.toolName)
       .map(m => m.toolName!))];
-    const recovery = retriedFailures.length > 0
-      ? `Diagnosed and recovered from ${[...new Set(retriedFailures.map(f => f.message.substring(0, 120)))].join(' | ')}`
-      : 'No retry was required';
-    const symptom = userPrompt.substring(0, 180);
-    const lesson = {
-      symptom,
-      rootCause: retriedFailures.length > 0
-        ? [...new Set(retriedFailures.map(f => f.message.substring(0, 160)))].join(' | ')
-        : 'Not determined by the engine; no retry or failure metadata was recorded',
-      recoveryPath: recovery,
-      verification: this.verificationSummary,
-      avoidNextTime: retriedFailures.length > 0
-        ? 'Do not repeat the failed approach without new evidence; use the recorded recovery path.'
-        : 'Keep the same inspection and verification sequence for similar tasks.',
-      ...(tools.length > 0 ? { tools } : {}),
-    };
-    const dedupeKey = `${this.config.sessionId}:${userPrompt.trim().toLowerCase()}`;
-    if (this.writtenLessonKeys.has(dedupeKey)) return;
-    const parts = [
-      `Symptom: ${lesson.symptom}`,
-      `Root cause: ${lesson.rootCause}`,
-      `Recovery path: ${lesson.recoveryPath}`,
-      `Verification: ${lesson.verification}`,
-      `Avoid next time: ${lesson.avoidNextTime}`,
-      tools.length > 0 ? `Tools used: ${tools.join(', ')}` : 'Tools used: none recorded',
-    ];
-    if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
-    if (this.currentAdaptiveStrategy) {
-      parts.push(`Runtime strategy: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery`);
-    }
-    await this.config.memory.add({
-      type: 'successful_pattern',
-      content: `Reusable lesson — ${parts.join('. ')}.`.slice(0, 900),
-      timestamp: Date.now(),
-      sessionId: this.config.sessionId,
-      projectPath: this.projectPath(),
-      lesson,
-      dedupeKey,
-    });
-    // Skill/experience sink (procedure layer): a compact, actionable version of
-    // the lesson — WHAT was achieved and the verified HOW — so future sessions
-    // can apply the proven procedure instead of rediscovering it. Kept short
-    // (the full lesson lives in the successful_pattern entry above).
-    const strategyNote = this.currentAdaptiveStrategy
-      ? ` Runtime strategy selected from live signals: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery. Re-evaluate it against the next workspace evidence.`
-      : '';
-    const hasVerifiedEvidence = this.verificationPassed;
-    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${strategyNote}${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
-    if (hasVerifiedEvidence) {
-      await this.config.memory.add({
-        type: 'procedure',
-        content: procedure.slice(0, 600),
-        timestamp: Date.now(),
-        sessionId: this.config.sessionId,
-        projectPath: this.projectPath(),
-        dedupeKey: `procedure:${dedupeKey}`,
-      });
+    // 零证据闸门：无失败、无工具活动的回合（纯问候/闲聊）写出的模板 lesson
+    // 全是固定样板串，只会污染注入面（实测 hello 垃圾曾占 system prompt 9%）。
+    // 与 shouldReflect 的 evidence=0 判据天然对齐：有失败仍写（恢复路径有价值），
+    // 有工具活动仍写（工作集/过程层有价值）。[remember] 标记是显式持久化信号，
+    // 不受闸门影响，照常落盘。
+    if (retriedFailures.length > 0 || tools.length > 0) {
+      await this.writeTemplateLesson(userPrompt, finalOutput, retriedFailures, tools);
     }
     // Tool preferences: every distinct command tool this completed session ran
     // is, on balance, part of the working set on this platform. Persisted as
@@ -1422,6 +1373,83 @@ export class Harness {
           dedupeKey: `remember:${item.trim().toLowerCase().slice(0, 80)}`,
         }).catch(() => {});
       }
+    }
+  }
+
+  /**
+   * The synchronous template lesson + procedure write (the noise-prone pair the
+   * zero-evidence gate conditionalizes). dedupeKey drops the sessionId so
+   * FSMemoryStore's per-project dedupe collapses the same prompt across
+   * sessions; the reflect:/procedure: channels keep their own prefixes.
+   */
+  private async writeTemplateLesson(
+    userPrompt: string,
+    finalOutput: string | undefined,
+    retriedFailures: FailureRecord[],
+    tools: string[],
+  ): Promise<void> {
+    const memory = this.config.memory;
+    if (!memory) return;
+    const recovery = retriedFailures.length > 0
+      ? `Diagnosed and recovered from ${[...new Set(retriedFailures.map(f => f.message.substring(0, 120)))].join(' | ')}`
+      : 'No retry was required';
+    const symptom = userPrompt.substring(0, 180);
+    const lesson = {
+      symptom,
+      rootCause: retriedFailures.length > 0
+        ? [...new Set(retriedFailures.map(f => f.message.substring(0, 160)))].join(' | ')
+        : 'Not determined by the engine; no retry or failure metadata was recorded',
+      recoveryPath: recovery,
+      verification: this.verificationSummary,
+      avoidNextTime: retriedFailures.length > 0
+        ? 'Do not repeat the failed approach without new evidence; use the recorded recovery path.'
+        : 'Keep the same inspection and verification sequence for similar tasks.',
+      ...(tools.length > 0 ? { tools } : {}),
+    };
+    // 跨会话去重：FSMemoryStore.add 按同项目 dedupeKey 去重，键里去掉
+    // sessionId 后同一 prompt 全项目只留一条模板 lesson（reflect:/procedure:
+    // 前缀通道不受影响）。
+    const dedupeKey = `lesson:${userPrompt.trim().toLowerCase()}`;
+    if (this.writtenLessonKeys.has(dedupeKey)) return;
+    const parts = [
+      `Symptom: ${lesson.symptom}`,
+      `Root cause: ${lesson.rootCause}`,
+      `Recovery path: ${lesson.recoveryPath}`,
+      `Verification: ${lesson.verification}`,
+      `Avoid next time: ${lesson.avoidNextTime}`,
+      tools.length > 0 ? `Tools used: ${tools.join(', ')}` : 'Tools used: none recorded',
+    ];
+    if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
+    if (this.currentAdaptiveStrategy) {
+      parts.push(`Runtime strategy: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery`);
+    }
+    await memory.add({
+      type: 'successful_pattern',
+      content: `Reusable lesson — ${parts.join('. ')}.`.slice(0, 900),
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      projectPath: this.projectPath(),
+      lesson,
+      dedupeKey,
+    });
+    // Skill/experience sink (procedure layer): a compact, actionable version of
+    // the lesson — WHAT was achieved and the verified HOW — so future sessions
+    // can apply the proven procedure instead of rediscovering it. Kept short
+    // (the full lesson lives in the successful_pattern entry above).
+    const strategyNote = this.currentAdaptiveStrategy
+      ? ` Runtime strategy selected from live signals: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery. Re-evaluate it against the next workspace evidence.`
+      : '';
+    const hasVerifiedEvidence = this.verificationPassed;
+    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${strategyNote}${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
+    if (hasVerifiedEvidence) {
+      await memory.add({
+        type: 'procedure',
+        content: procedure.slice(0, 600),
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        projectPath: this.projectPath(),
+        dedupeKey: `procedure:${dedupeKey}`,
+      });
     }
     this.writtenLessonKeys.add(dedupeKey);
   }

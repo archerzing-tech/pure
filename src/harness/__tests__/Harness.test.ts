@@ -80,6 +80,38 @@ function recordingLLM(finalText: string): LLMAdapter & { received: Message[][] }
 const roles = (msgs: Message[]) => msgs.map(m => m.role);
 const contents = (msgs: Message[]) => msgs.map(m => m.content);
 
+// One scripted successful tool call, then the final answer. Gives a turn tool
+// evidence (a tool result message) without triggering reflection — one call
+// sits below REFLECTION_DEFAULTS.minToolCalls (3), so the turn lands in the
+// synchronous template write, which is what these tests exercise.
+function singleToolCallLLM(finalText: string, toolName = 'read_file'): LLMAdapter & { received: Message[][] } {
+  const received: Message[][] = [];
+  let calls = 0;
+  return {
+    received,
+    stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+      received.push(messages.map(m => ({ ...m })));
+      calls++;
+      if (calls === 1) {
+        const tc: ToolCall = { id: 'call_1', index: 0, function: { name: toolName, arguments: '{"path":"x"}' } };
+        yield { type: 'tool_call', index: 0, id: tc.id, name: toolName, arguments: tc.function.arguments };
+        yield { type: 'done', content: '', toolCalls: [tc] };
+      } else {
+        yield { type: 'content', content: finalText };
+        yield { type: 'done', content: finalText, toolCalls: [] };
+      }
+    },
+    complete: async () => ({ content: finalText, toolCalls: [] }),
+  };
+}
+
+const echoTool: ToolAdapter = {
+  execute: async (toolCall: ToolCall): Promise<ToolResult> =>
+    ({ id: toolCall.id, toolName: toolCall.function.name, result: 'ok', success: true, duration: 1 }),
+  getMetadata: () => ({ isWrite: false }),
+  getTools: () => [{ name: 'read_file', description: 'read', input_schema: {} }],
+};
+
 async function collect(gen: AsyncGenerator<EngineEvent, void, void>): Promise<EngineEvent[]> {
   const events: EngineEvent[] = [];
   for await (const e of gen) events.push(e);
@@ -92,8 +124,12 @@ class FakeMemoryStore implements IMemoryStore {
   entries: MemoryEntry[] = [];
   decayCalls = 0;
   searchCalls = 0;
+  // Monotonic — entries.length would hand out colliding ids once a test
+  // removes and re-adds an entry (the E3.1 confirm loop does exactly that),
+  // and a later removeById would then take out the wrong entries.
+  private nextId = 0;
   async add(entry: Omit<MemoryEntry, 'id'>): Promise<string> {
-    const id = `mem_${this.entries.length}`;
+    const id = `mem_${this.nextId++}`;
     this.entries.push({ ...entry, id, decayScore: 1 });
     return id;
   }
@@ -254,11 +290,12 @@ describe('Harness cross-session memory (v0.10)', () => {
 
   it('writes a successful_pattern when a session completes', async () => {
     const memStore = new FakeMemoryStore();
-    const llm = recordingLLM('final output here');
+    const llm = singleToolCallLLM('final output here');
     const harness = new Harness({
       sessionId: 'sess-mem2',
       llm,
-      toolsDefs: [],
+      tools: echoTool,
+      toolsDefs: [{ name: 'read_file', description: 'read', input_schema: {} }],
       budget: STD_BUDGET,
       memory: memStore,
       projectPath: '/ws',
@@ -277,13 +314,32 @@ describe('Harness cross-session memory (v0.10)', () => {
     expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(0);
   });
 
+  it('writes nothing for a zero-evidence turn (no failures, no tool activity)', async () => {
+    const memStore = new FakeMemoryStore();
+    const llm = recordingLLM('hello there');
+    const harness = new Harness({
+      sessionId: 'sess-hello',
+      llm,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+    });
+
+    await collect(harness.run('SYS', 'hello'));
+
+    expect(memStore.entries.filter(e => e.type === 'successful_pattern')).toHaveLength(0);
+    expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(0);
+  });
+
   it('promotes the adaptive strategy only when structured verification passes', async () => {
     const memStore = new FakeMemoryStore();
-    const llm = recordingLLM('verified output');
+    const llm = singleToolCallLLM('verified output');
     const harness = new Harness({
       sessionId: 'sess-verified-strategy',
       llm,
-      toolsDefs: [],
+      tools: echoTool,
+      toolsDefs: [{ name: 'read_file', description: 'read', input_schema: {} }],
       budget: STD_BUDGET,
       memory: memStore,
       projectPath: '/ws',
@@ -310,11 +366,12 @@ describe('Harness cross-session memory (v0.10)', () => {
 
   it('does not duplicate a lesson when the same prompt is completed twice in one session', async () => {
     const memStore = new FakeMemoryStore();
-    const llm = recordingLLM('same answer');
+    const llm = singleToolCallLLM('same answer');
     const harness = new Harness({
       sessionId: 'sess-dedupe',
       llm,
-      toolsDefs: [],
+      tools: echoTool,
+      toolsDefs: [{ name: 'read_file', description: 'read', input_schema: {} }],
       budget: STD_BUDGET,
       memory: memStore,
       projectPath: '/ws',
@@ -326,6 +383,11 @@ describe('Harness cross-session memory (v0.10)', () => {
     await collect(harness.continueTurn('SYS', completed!.payload.messages!, 'same task'));
 
     expect(memStore.entries.filter(e => e.type === 'successful_pattern')).toHaveLength(1);
+    // The dedupe key carries NO session component: FSMemoryStore.add scopes it
+    // per project, so the same prompt is one lesson across sessions too.
+    const key = memStore.entries.find(e => e.type === 'successful_pattern')?.dedupeKey;
+    expect(key).toBe('lesson:same task');
+    expect(key).not.toContain('sess-dedupe');
   });
 
   it('does not inject memory when no store is configured', async () => {
@@ -1448,11 +1510,14 @@ describe('Harness resume (P1-7)', () => {
   it('persists checkpoint + memory when the consumer breaks on Completed', async () => {
     const store = new MemoryStore();
     const memStore = new FakeMemoryStore();
-    const llm = recordingLLM('final answer');
+    // Tool evidence so the turn writes a lesson (zero-evidence turns are gated
+    // to silence) — the write is the proxy for "side effects land pre-yield".
+    const llm = singleToolCallLLM('final answer');
     const harness = new Harness({
       sessionId: 'sess-break',
       llm,
-      toolsDefs: [],
+      tools: echoTool,
+      toolsDefs: [{ name: 'read_file', description: 'read', input_schema: {} }],
       budget: STD_BUDGET,
       stateStore: store,
       memory: memStore,
