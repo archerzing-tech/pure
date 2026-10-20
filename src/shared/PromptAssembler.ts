@@ -347,17 +347,19 @@ function escapeXmlText(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 }
 
-/** 索引行的描述回退:frontmatter 的 description 缺失或坏形时取 body 首个
- *  非空段截断。坏形含空串、YAML 块标量指示符(`>` / `|`,parseSkillMarkdown
- *  的单行正则取不到块标量——geo-3d-scene-builder 真实踩中,取到字面 ">" )
- *  和纯引号壳。索引行至少要让模型能判断「这个技能是不是当前任务要的」。 */
+/** 索引行的描述回退:frontmatter 的 description 缺失或坏形时取 body 首段
+ *  截断。坏形含空串、YAML 块标量指示符(`>` / `|`,parseSkillMarkdown 的单行
+ *  正则取不到块标量——geo-3d-scene-builder 真实踩中,取到字面 ">")和纯引
+ *  号壳。首段若只是标题行(# 开头,索引行放个标题没有判断价值)则跳过取下
+ *  一段;全 body 只剩标题时才用标题凑数。 */
 function effectiveSkillDescription(skill: PromptSkill): string {
   const raw = (skill.description ?? '').trim();
   if (raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw)) return raw;
-  const paragraph = skill.body
+  const paragraphs = skill.body
     .split(/\n\s*\n/)
     .map((s) => s.replace(/\s+/g, ' ').trim())
-    .find(Boolean) ?? '';
+    .filter(Boolean);
+  const paragraph = paragraphs.find((s) => !s.startsWith('#')) ?? paragraphs[0] ?? '';
   return paragraph.length > 160 ? `${paragraph.slice(0, 160)}…` : paragraph;
 }
 

@@ -197,6 +197,14 @@ describe('PromptAssembler', () => {
     });
     expect(assembly).toContain('>Builds geo 3D scenes from one sentence.</skill>');
     expect(assembly).toContain('>First paragraph stands in.</skill>');
+    // 首段只是标题行(无判断价值)时跳过取正文段。
+    const titleOnly = assembler.buildSystemPrompt({
+      surface: 'cli',
+      capabilities: 'test',
+      skills: [{ name: 'titled', body: '# Just A Title\n\nReal intro paragraph here.', path: '/skills/titled/SKILL.md', enabled: true }],
+    });
+    expect(titleOnly).toContain('>Real intro paragraph here.</skill>');
+    expect(titleOnly).not.toContain('># Just A Title</skill>');
     // 超长首段截断到 160 字符。
     expect(assembly).toMatch(/x{160}…<\/skill>/);
     expect(assembly).not.toContain('x'.repeat(161));
