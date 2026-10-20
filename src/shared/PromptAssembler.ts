@@ -46,7 +46,9 @@ export type { PromptBudgetConfig, ResolvedPromptBudget } from './providers';
 
 export interface PromptSkill {
   name: string;
-  body: string;
+  /** Full skill text. Required for inline entries (hub skills); awareness
+   *  entries (workspace-free GUI turns) carry only name + description. */
+  body?: string;
   enabled?: boolean;
   /** One-line trigger description (from SKILL.md frontmatter). Index-mode
    *  entries (path set) show this instead of the body. */
@@ -355,9 +357,9 @@ function escapeXmlText(value: string): string {
  *  号壳。首段若只是标题行(# 开头,索引行放个标题没有判断价值)则跳过取下
  *  一段;全 body 只剩标题时才用标题凑数。 */
 function effectiveSkillDescription(skill: PromptSkill): string {
-  const raw = (skill.description ?? '').trim();
-  if (raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw)) return raw;
-  const paragraphs = skill.body
+  const usable = usableSkillDescription(skill);
+  if (usable) return usable;
+  const paragraphs = (skill.body ?? '')
     .split(/\n\s*\n/)
     .map((s) => s.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
@@ -365,26 +367,47 @@ function effectiveSkillDescription(skill: PromptSkill): string {
   return paragraph.length > 160 ? `${paragraph.slice(0, 160)}…` : paragraph;
 }
 
+/** 知晓行(无 body 条目)只吃「可当人话读」的 description——YAML 指示符、
+ *  引号壳、空串都不算。正文首段回退是有 body 条目专属的,无 body 条目没得
+ *  回退,buildSkills 靠它决定整条收还是丢。 */
+function usableSkillDescription(skill: PromptSkill): string {
+  const raw = (skill.description ?? '').trim();
+  return raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw) ? raw : '';
+}
+
 function buildSkills(skills?: PromptSkill[]): string {
-  const enabled = (skills ?? []).filter((skill) => skill.enabled !== false && skill.body);
+  const enabled = (skills ?? []).filter(
+    (skill) => skill.enabled !== false && (skill.body || usableSkillDescription(skill)),
+  );
   if (enabled.length === 0) return '';
   // 渐进式披露(2026-10-20,对齐 Anthropic Agent Skills 三层模型):盘上技能
   // (SKILL.md 在磁盘上、read_file 全盘可达)只注入索引行——name + SKILL.md
   // 路径 + 一句触发描述,正文由模型在任务命中时按需读取。此前 6 个技能全文
   // 常驻 ≈14k tokens/轮,一句 hello 也要先背完全部手册,还稀释注意力。
-  // 无 path 的条目保持旧的全文内联:hub 技能 body 在 config.json 里(读它要
-  // 过 apiKey,不能指给模型),无 workspace 的 GUI 回合没有 read_file 工具
-  // ——没有读的通道就不能开「去读它」的空头支票。
+  // 条目按「读的通道」分三档,头部指令据实措辞,不开空头支票:
+  // - 有 path:索引行,命中时 read_file SKILL.md;
+  // - 无 path 有 body:hub 技能,全文内联(body 在 config.json 里,读它要过
+  //   apiKey,不能指给模型);
+  // - 无 path 无 body:无 workspace 的 GUI 回合(连 read_file 工具都没有;
+  //   2026-10-20 晚改)。此前这里整退全文内联,hello 回合为技能正文多背
+  //   ≈10k tokens,现在只留知晓行。
+  const anyPath = enabled.some((skill) => skill.path);
   const entries = enabled
     .map((skill) => {
       const name = sanitizeSkillName(skill.name);
       if (skill.path) {
         return `\n<skill name="${escapeXmlAttr(name)}" path="${escapeXmlAttr(skill.path)}">${escapeXmlText(effectiveSkillDescription(skill))}</skill>`;
       }
-      return `\n<skill name="${escapeXmlAttr(name)}">\n${skill.body}\n</skill>`;
+      if (skill.body) {
+        return `\n<skill name="${escapeXmlAttr(name)}">\n${skill.body}\n</skill>`;
+      }
+      return `\n<skill name="${escapeXmlAttr(name)}">${escapeXmlText(usableSkillDescription(skill))}</skill>`;
     })
     .join('');
-  return `Installed skills (progressive disclosure): each <skill> line below is an INDEX entry. When the current task clearly calls for one of these skills, FIRST use read_file on its path to load the full SKILL.md instructions, then follow them; read ONLY the one skill that best matches — do not pre-read skills for tasks that do not call for them. If you installed a skill this very turn, its full instructions were already returned in the tool result — use them directly without re-reading. Relative paths inside a skill (e.g. <skill-root>/scripts/...) resolve from the SKILL.md's own directory, which IS the skill root.\n${entries}`;
+  if (!anyPath) {
+    return `Installed skills (awareness index): each <skill> line names one installed skill and what it is for; entries carrying inline text are complete instructions — use them directly. This turn has no file access, so indexed entries arrive without their bodies — never claim to have read a skill file. When the task clearly calls for one, apply the approach its description outlines and say you are doing so.\n${entries}`;
+  }
+  return `Installed skills (progressive disclosure): entries with a path are INDEX lines — when the current task clearly calls for one, FIRST use read_file on its path to load the full SKILL.md instructions, then follow them; read ONLY the one skill that best matches — do not pre-read skills for tasks that do not call for them. Entries with inline text are complete instructions — use them directly without any file access. If you installed a skill this very turn, its full instructions were already returned in the tool result — use them directly without re-reading. Relative paths inside a skill (e.g. <skill-root>/scripts/...) resolve from the SKILL.md's own directory, which IS the skill root.\n${entries}`;
 }
 
 function buildMcpResources(resources?: string): string {

@@ -6278,12 +6278,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         runtimes: buildRuntimesContext(),
         network: buildNetworkContext(),
         shell: buildShellContextLine(),
-        // 无 workspace 的回合工具列表里没有 read_file,盘上技能的索引路径
-        // 会开空头支票——剥掉 path 退回全文内联(与有 workspace 回合的索引
-        // 形态互斥,但内容都来自同一份 loadAppSkills 缓存)。
+        // 无 workspace 的回合工具列表里没有 read_file,索引路径会开空头支票
+        // ——剥掉 body 和 path,只留 name+description 的知晓行(2026-10-20
+        // 晚改:此前整退全文内联,hello 回合为技能正文多背 ≈10k tokens)。
+        // hub 技能照旧全文内联(config.json 混 apiKey,不能指给模型)。
         skills: [
           ...(config.hubSkills ?? []),
-          ...(effectiveWorkspace ? appSkills : appSkills.map(({ path: _path, ...rest }) => rest)),
+          ...(effectiveWorkspace
+            ? appSkills
+            : appSkills.map(({ path: _path, body: _body, ...rest }) => rest)),
         ],
         mcpResources: mcpResourceContext,
         mode: analysis.mode,

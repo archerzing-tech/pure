@@ -201,6 +201,32 @@ describe('PromptAssembler', () => {
     expect(assembly).toContain('which IS the skill root');
   });
 
+  it('reduces workspace-free skill entries to awareness-only index lines (no body, no path)', () => {
+    // 2026-10-20 晚:无 workspace 的 GUI 回合没有 read_file,盘上技能剥掉
+    // body 和 path 只留知晓行——此前整退全文内联,hello 回合为技能正文多背
+    // ≈10k tokens。头部据实措辞,不开「去读它」的空头支票。
+    const assembly = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'test',
+      skills: [
+        { name: 'dashi-ppt', description: 'Generate slide decks as HTML', enabled: true },
+        { name: 'hub-inline', body: 'hub instructions', enabled: true },
+        { name: 'no-desc', enabled: true },
+        { name: 'yaml-desc', description: '>', enabled: true },
+      ],
+    });
+    // 知晓行:name + description,无路径、无正文。
+    expect(assembly).toContain('<skill name="dashi-ppt">Generate slide decks as HTML</skill>');
+    expect(assembly).not.toContain('FIRST use read_file');
+    expect(assembly).toContain('never claim to have read a skill file');
+    // hub 条目照旧内联,头部说明内联条目即完整指令。
+    expect(assembly).toContain('hub instructions');
+    expect(assembly).toContain('entries carrying inline text are complete instructions');
+    // body 与可读 description 皆无的条目整条丢弃(YAML 指示符同罪)。
+    expect(assembly).not.toContain('no-desc');
+    expect(assembly).not.toContain('yaml-desc');
+  });
+
   it('falls back to the body opening when a skill description is missing or a YAML block scalar', () => {
     const assembly = assembler.buildSystemPrompt({
       surface: 'cli',
