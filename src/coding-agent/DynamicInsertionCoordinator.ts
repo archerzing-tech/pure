@@ -298,9 +298,15 @@ export class DynamicInsertionCoordinator {
     return this.resolveStop(llm, context, insertion.text, roster, signal);
   }
 
-  /** 安全网（2026-09-28 降级）：只裁决器倒下时用它——按字面族挑一个**不丢
-   * 话**的目的地，绝不冒充判断。推翻话重开、收活折入、其余一律排队（唯一
-   * 保证跑完的投递）。 */
+  /** 安全网（2026-09-28 降级；2026-10-21 刀 D 反转默认投递）：只裁决器倒下
+   *  时用它——按字面族挑目的地，绝不冒充判断。推翻话重开、收活折入不变；
+   *  **其余从「一律排队」反转为「能注入就注入」**：steer 通道的话落引擎
+   *  THINK 边界、进会话历史——模型带着现场自己判它是什么、怎么接（freebuff
+   *  无分类器的同款哲学：把「怎么处置」交给带现场的模型，烂天气也不该把
+   *  话冻结到回合外）；没被边界带走的残留由回合收尾 settleRound 原话重入，
+   *  话照样丢不了——「排队是唯一不丢话的投递」这个旧前提已不成立。排队
+   *  的真正代价（2026-10-21 用户报的病根）是语境断裂：重入时现场已散。
+   *  加急件例外：提级的落点只在队列（插到队头），注入反而把它不排队。 */
   private netVerdict(text: string, why: string, netReason: 'no-judge' | 'judge-down'): DynamicInsertionDecision {
     if (GOAL_CHANGE_RE.test(text)) {
       return this.build('goal-change', `${why}; overturn phrasing caught by the literal net`, {
@@ -316,12 +322,19 @@ export class DynamicInsertionCoordinator {
         signals: { via: 'net', netReason, fallback: 'literal-net', cancelsPart: true },
       });
     }
-    return this.build('task', `${why}; queued so the words can never be lost`, {
-      confidence: NO_CLASSIFIER_CONFIDENCE,
-      timing: { mode: 'after-current' },
+    if (URGENT_RE.test(text)) {
       // 「这个急」的字面安全网：裁决器不可用时，别把一句明确的加急请求默默
       // 降级成普通排队（提级只改队列次序，不涉破坏性动作，网在这里用是安全的）。
-      signals: { via: 'net', netReason, fallback: 'literal-net', ...(URGENT_RE.test(text) ? { urgent: true } : {}) },
+      return this.build('task', `${why}; queued ahead (urgent) so the words can never be lost`, {
+        confidence: NO_CLASSIFIER_CONFIDENCE,
+        timing: { mode: 'after-current' },
+        signals: { via: 'net', netReason, fallback: 'literal-net', urgent: true },
+      });
+    }
+    return this.build('steer', `${why}; handed to the running turn at its next boundary — the words land in the conversation, and close sweeps any leftovers back in`, {
+      confidence: NO_CLASSIFIER_CONFIDENCE,
+      timing: { mode: 'now' },
+      signals: { via: 'net', netReason, fallback: 'literal-net' },
     });
   }
 

@@ -94,17 +94,21 @@ describe('DynamicInsertionCoordinator', () => {
     expect(cancelish.signals.cancelsPart).toBe(true); // 收活，绝不反向执行
     expect(cancelish.signals.fallback).toBe('literal-net');
     const plain = await coordinator.decide(llm(), '', { text: '顺便问一下，跑完了吗' });
-    expect(plain.kind).toBe('task');
-    expect(plain.timing.mode).toBe('after-current');
+    // 2026-10-21 刀 D 反转：其余不再一律排队——注入引擎 THINK 边界，模型带
+    // 现场自己判它是什么；没被带走的残留由收尾 settleRound 原话重入，话照样
+    // 丢不了。排队留给了真正需要队列语义的加急件。
+    expect(plain.kind).toBe('steer');
+    expect(plain.timing.mode).toBe('now');
     expect(plain.signals.fallback).toBe('literal-net');
     // 没有 llm 同样落网，且分类调用一次都不该发生。
     let calls = 0;
     const noLlm = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { kind: 'task', reason: '', confidence: 1, fallbackUsed: true }; } });
-    const queued = await noLlm.decide(null, '', { text: '再加一个 爱奇艺平台' });
-    expect(queued.kind).toBe('task');
-    expect(queued.timing.mode).toBe('after-current');
-    expect(queued.signals.fallback).toBe('literal-net');
-    expect(queued.signals.rule).toBeUndefined();
+    const injected = await noLlm.decide(null, '', { text: '再加一个 爱奇艺平台' });
+    expect(injected.kind).toBe('steer');
+    expect(injected.timing.mode).toBe('now');
+    expect(injected.shouldAbort).toBe(false);
+    expect(injected.signals.fallback).toBe('literal-net');
+    expect(injected.signals.rule).toBeUndefined();
     expect(calls).toBe(0);
   });
 
@@ -369,13 +373,16 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.shouldAbort).toBe(false);
   });
 
-  it('queues as a task when no classifier LLM is available (never drops, never aborts)', async () => {
+  it('hands the words to the running turn when no classifier LLM is available (never drops, never aborts)', async () => {
     // 2026-09-22 重新设计：没有分类器时兜底从 steer 换成 task——委派在飞时
     // steer 的承诺不可兑现（没有可兑现的 THINK 边界），排队才保真。
     // 2026-09-28 起由 netVerdict 兑现：字面网只挑不丢话的目的地。
+    // 2026-10-21 刀 D 反转：收尾 settleRound 残留重入补上了「没被边界带走」
+    // 的缺口——注入通道加上它，话同样丢不了，且语境不断裂（排队的真正代价）。
+    // 决策权交还带现场的模型（freebuff 无分类器的同款哲学）。
     const coordinator = new DynamicInsertionCoordinator();
     const decision = await coordinator.decide(null, 'current task', { text: '顺便把标题也改了' });
-    expect(decision.kind).toBe('task');
+    expect(decision.kind).toBe('steer');
     expect(decision.shouldAbort).toBe(false);
     expect(decision.signals.fallback).toBe('literal-net');
   });
