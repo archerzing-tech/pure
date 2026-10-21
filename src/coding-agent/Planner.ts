@@ -464,6 +464,13 @@ export interface InsertionClassification {
    * 止损在飞支并让插话重入，绝不落取消收执（「这项不做了」会把用户真正
    * 要的「换成 X」那半句扔掉）。 */
   methodSwitch?: boolean;
+  /** 止损失效重想（2026-10-21 对话主导架构刀 B，用户拍板）：这句插话改变
+   * 「当前正在产出的东西」从现在起该是什么样——按旧路继续吐出来的内容
+   * 反正要被收回。宿主当场停流（委派在飞则 PAUSE 存档），押话重入：原话
+   * 开场、结合现场重新思考，已完成的不丢。是 EXECUTING 阶段
+   * supplements_current 的对应物（那个管思考窗，这个管执行流）；
+   * cancels_part/resumes_part/stop_branch 在场时不生效（专门臂优先）。 */
+  affectsCurrent?: boolean;
   /** 「这个急」提级（第 5 期调度）：用户明确这件新活加急/该先办（"这个急"、
    *  "优先处理这个"、"加急"）时置真——宿主据此把队列里的这项插到队头并换
    *  提级收执。只对 task（排队）/steer 有意义；提级只改**队列次序**，不涉
@@ -487,7 +494,7 @@ The next user message carries your live situation in two tagged sections — rea
 
 The ways to take a remark (pick exactly one kind):
 
-- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when that list lives INSIDE the one deliverable, so the remark changes what the deliverable covers and nothing else — it is NOT this when the added thing is another OBJECT of the kind already being worked on in parallel (three platforms being researched and the user names a fourth): that object is a unit of work of its own, not a detail of the current one, and it is a TASK (see below). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
+- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when that list lives INSIDE the one deliverable, so the remark changes what the deliverable covers and nothing else — it is NOT this when the added thing is another OBJECT of the kind already being worked on in parallel (three platforms being researched and the user names a fourth): that object is a unit of work of its own, not a detail of the current one, and it is a TASK (see below). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step — UNLESS the remark changes what the output must be from here on (「你理解错了」/ a new emphasis or audience): then set "affects_current": true instead, and the host stops the stream and redoes it from the remark. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
 - "premise-change" — the remark corrects a FACT the work is built on: place, dates, environment, versions, budget, who owns what, what something IS ("其实我在西安，不是广东", "预算只有三千", "你对jev的理解是错误的，jev是2026年9月新发布的模型"). The goal stands, but everything computed from the wrong fact comes out worthless — the work must be redone from the corrected fact. Judge this over steer whenever the correction would change the ANSWER, not just its wording. Especially while THINKING: if the thought-so-far (shown in the context) rests on the wrong fact, redoing the thought is the only honest move.
 - "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this. A RESOURCE REMINDER is 换方案 said sideways, and it lands HERE with "method_switch": true: the user points at something you ALREADY have — an installed tool, a skill, a server, a package ("你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的", "不是有现成的X吗，用X来做") — meaning "stop the approach it replaces and use it instead". The deliverable stands; only the way of producing it changes. This holds even when the reminder touches only one part of the work — the switch outranks the scope test above. It is NEVER a plain removal — "cancels_part" must stay OFF for it: answering a resource reminder with "这项不做了" throws away the very half the user asked for (switch to the named resource), and that reading is the single most confusing reply an insertion can produce.
 - "stop" — the running work ends and NOTHING takes its place ("先缓一缓", "这个就到这儿吧", "停掉整个任务", "不用继续了", "够了，先这样"). The whole question is what happens to the work: a stop leaves no answer to build, a goal-change replaces it with a different one, and a steer reshapes it. Phrases that look like stopping but are not: a constraint on how the work proceeds ("别停下来", "先别改这部分") is steer; asking where things stand ("跑完了吗") is question; a removal of ONE named branch or part while the rest continues is steer with "cancels_part" (the work as a whole carries on).
@@ -498,7 +505,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -554,6 +561,23 @@ it for every other message.
 remark belongs INSIDE the one thing currently being produced — an added
 element, a reshaping constraint, the growing list — so the host merges it
 into the request and redoes the thought; omit it for every other message.
+
+"affects_current": the "stop now, redo the output with this in hand" move —
+the EXECUTING-phase sibling of "supplements_current". Include it as true
+when the remark changes what the CURRENT output must be from this point on
+— its direction, emphasis, audience, format or scope — so that going on
+along the old line would produce content you would have to take back
+anyway. The one test: would the VERY NEXT thing you are about to produce
+already be wrong or stale because of this message? 「你理解错了，我说的是X」
+/「重点放到价格上，别铺那么长背景」/「这份是给老板看的，不要技术细节」 — all
+true: the host stops the stream mid-sentence, keeps everything already
+done, and restarts from the remark with you. While EXECUTING this outranks
+the default carry-at-next-step — carrying on is only right when the current
+line still stands. NOT this: a remark that only adds a parallel piece of
+work (the current line is untouched), a corrected FACT ("premise-change"
+owns that), guidance for a LATER step, or anything landing while still
+THINKING ("supplements_current" already covers that phase). Omit it when
+the current output survives the remark unchanged.
 
 "method_switch": include it as true ONLY with kind "goal-change", when the
 message switches HOW the work is done by pointing at a resource you already
@@ -670,7 +694,7 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
     // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
     // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
     const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
@@ -689,6 +713,7 @@ export async function classifyInsertion(
       ...(parsed.adds_along === true || parsed.addsAlong === true ? { addsAlong: true } : {}),
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
+      ...(parsedAny.affects_current === true || parsedAny.affectsCurrent === true ? { affectsCurrent: true } : {}),
       ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
       // 第 5 期「这个急」提级：只认严格 === true；缺省/非 true 都不带标记，
       // 宿主只按这一个读取点插队。

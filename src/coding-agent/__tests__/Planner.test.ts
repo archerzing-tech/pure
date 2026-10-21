@@ -1060,7 +1060,7 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(prompt).toContain('"cancels_part" must stay OFF for it');
     expect(prompt).toContain('answering a resource reminder with "这项不做了"');
     // JSON 样例与契约段落都在。
-    expect(prompt).toContain('"supplements_current":true,"method_switch":true');
+    expect(prompt).toContain('"supplements_current":true,"affects_current":true,"method_switch":true');
     expect(prompt).toContain('"method_switch": include it as true ONLY with kind "goal-change"');
     // 移除段的护栏：点名替换方案的句子不是移除；但顺带取消无关支的混合句
     // 照常报 cancels_part（评审 1b：绝对化会压住合法移除）。
@@ -1094,6 +1094,46 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
       'context', '同样的话',
     );
     expect(onSteer.methodSwitch).toBe(true);
+  });
+
+  it('teaches the judge the affects-current stop-and-redo move, and parses affects_current through (2026-10-21 刀 B)', () => {
+    // 对话主导架构刀 B（用户拍板）：改变「当前正在产出」的插话过去落进
+    // 「下个 THINK 边界顺路带上」（执行流没边界就一直吐旧方向）或排队
+    // （重入时语境断裂）——现在教裁决器认出它，宿主当场停流押话重入。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    // JSON 契约行与字段文档段都在。
+    expect(prompt).toContain('"supplements_current":true,"affects_current":true');
+    expect(prompt).toContain('"affects_current": the "stop now, redo the output with this in hand" move');
+    expect(prompt).toContain('the EXECUTING-phase sibling of "supplements_current"');
+    // 单题判据：接下来要产出的东西已经因这句话而过时。
+    expect(prompt).toContain('would the VERY NEXT thing you are about to produce');
+    // steer 定义段的执行期默认改成「顺路带上，除非……改报 affects_current」。
+    expect(prompt).toContain('set "affects_current": true instead');
+    // 护栏：平行加活（task）、事实纠正（premise-change）、思考窗各有其主。
+    expect(prompt).toContain('"premise-change"\nowns that');
+  });
+
+  it('parses the affects_current contract field through to the classification (2026-10-21 刀 B)', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"changes what the report must cover from here on","confidence":0.9,"affects_current":true}'),
+      'context', '你理解错了，我说的是价格不是成本',
+    );
+    expect(hit.kind).toBe('steer');
+    expect(hit.affectsCurrent).toBe(true);
+    // 驼峰兜底（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"same","confidence":0.9,"affectsCurrent":true}'),
+      'context', '同样的话',
+    );
+    expect(camel.affectsCurrent).toBe(true);
+    // 缺省/非 true 都不带标记——普通 steer 绝不触发停流。
+    const plain = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"a constraint for the next step","confidence":0.9,"affects_current":false}'),
+      'context', '记得跑测试',
+    );
+    expect(plain.affectsCurrent).toBeUndefined();
   });
 
   it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {

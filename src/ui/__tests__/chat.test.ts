@@ -1129,10 +1129,11 @@ describe('plan overview completion state', () => {
     // 结束后才突然执行。判定落定时若已不在流式中，必须补一次 scheduleDispatch；
     // dispatch 的 isStreaming 守卫保证重复调度不会开出第二个并发回合。
     expect(src.indexOf('if (!this.isStreaming()) this.roundClose.scheduleDispatch()')).toBeGreaterThan(-1);
-    // S2 第六刀：同类补派搬进了编排器——恰三处，删掉任何一处的 mutant 都要
+    // S2 第六刀：同类补派搬进了编排器——恰四处，删掉任何一处的 mutant 都要
     // 被这条计数抓住：goal-change 的方法切换支（2026-10-13 REA 判例，押账重
-    // 入同样的迟到风险）、goal-change 的推翻支、premise-change。
-    expect(orch.split('if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();').length - 1).toBe(3);
+    // 入同样的迟到风险）、goal-change 的推翻支、premise-change、止损失效
+    // 重想（2026-10-21 刀 B，押话重入同款迟到风险）。
+    expect(orch.split('if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();').length - 1).toBe(4);
     const dispatch = plane.indexOf('  dispatch(): void {');
     expect(dispatch).toBeGreaterThan(-1);
     const dispatchBody = plane.slice(dispatch, dispatch + 400);
@@ -1211,6 +1212,39 @@ describe('plan overview completion state', () => {
     expect(proto.indexOf('continues THIS conversation')).toBeGreaterThan(-1);
     expect(proto.indexOf('A reply that would fit any other conversation is wrong by construction')).toBeGreaterThan(-1);
     expect(proto.indexOf('say in one line what you switched to and why')).toBeGreaterThan(-1);
+  });
+
+  it('stops the stream and re-enters when the insertion affects the current output (2026-10-21 刀 B)', () => {
+    // 对话主导架构刀 B（用户拍板）：改变「当前正在产出」的插话过去落进
+    // 「下个边界顺路带上」（执行流没边界就一直吐旧方向）或排队（重入语境
+    // 断裂）。现在单任务流当场停流：押话重入（原话开场、现场可见），已完成
+    // 的不丢。机械与 premise-change 同源；专门臂（取消/停支/续支）与 B/C 窗
+    // 不从这里过。
+    const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
+    const absorbAt = orch.indexOf('shouldAbsorbIntoThinkingWindow(decision');
+    const routeAt = orch.indexOf('decision.signals.affectsCurrent === true');
+    const switchAt = orch.indexOf("switch (decision.kind) {");
+    // 路由臂在思考窗吸收之后、switch 各臂之前——吸收优先（窗内自有重想）。
+    expect(absorbAt).toBeGreaterThan(-1);
+    expect(routeAt).toBeGreaterThan(absorbAt);
+    expect(routeAt).toBeLessThan(switchAt);
+    // 专门臂优先：取消/停支/续支各有更精确的宿主动作，不从这条过。
+    const guardAt = orch.indexOf('hasDedicatedSignal');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(routeAt);
+    for (const dedicated of ['cancelsPart === true', 'branchStop === true', 'resumesBranch === true']) {
+      expect(orch.slice(guardAt, routeAt).indexOf(dedicated)).toBeGreaterThan(-1);
+    }
+    // B/C 窗不从这条过：折入汇合/汇聚轮本身就是「结合插话重整」。
+    const body = orch.slice(routeAt, switchAt);
+    expect(body.indexOf('!this.deps.hasDelegationInFlight()')).toBeGreaterThan(-1);
+    expect(body.indexOf('!this.deps.atAggregationWindow()')).toBeGreaterThan(-1);
+    // 机械同 premise-change：押账 + 停流 + 迟到派发兜底；收执固定口径为
+    // 机械失败兜底（receipt 优先是刀 A 的全场景约定）。
+    expect(body.indexOf('holdInsert(')).toBeGreaterThan(-1);
+    expect(body.indexOf('this.deps.abort()')).toBeGreaterThan(-1);
+    expect(body.indexOf('scheduleDispatch()')).toBeGreaterThan(-1);
+    expect(body.indexOf("receipt ?? '收到——正在做的先停在这里")).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {

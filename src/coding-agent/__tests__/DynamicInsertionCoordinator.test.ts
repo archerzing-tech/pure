@@ -65,6 +65,18 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(5); // 每句都过了裁决器
   });
 
+  it('passes the affects-current signal through from the judge (2026-10-21 刀 B 止损失效重想)', async () => {
+    // 对话主导架构刀 B：裁决器认出「改变当前正在产出」的插话后，信号随
+    // 裁决走——编排器据此当场停流押话重入，而不是等下个边界或排队。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'changes what the output must be from here on', confidence: 0.9, affectsCurrent: true }),
+    });
+    const decision = await coordinator.decide(llm(), '正在流式输出一份长报告', { text: '你理解错了，我说的是价格不是成本' });
+    expect(decision.kind).toBe('steer');
+    expect(decision.signals.affectsCurrent).toBe(true);
+    expect(decision.signals.via).toBe('judge');
+  });
+
   it('catches the words with the literal net only when the judge falls over (2026-09-28 用户定调)', async () => {
     // 裁决器倒下的两个形状：内部 fallback（超时/网络/解析失败，以
     // fallbackUsed 上报）和根本没有 llm。netVerdict 按字面族挑一个**不丢

@@ -283,6 +283,34 @@ export class InterjectOrchestrator {
         : '已并入补充，重新规划…');
       return;
     }
+    // 止损失效重想（2026-10-21 对话主导架构刀 B，用户拍板）：这句插话改变
+    // 「当前正在产出的东西」从现在起该是什么样——按旧路继续吐出来的内容
+    // 反正要被收回，白烧算力还先错为敬。过去它被判 steer 后默认「下个 THINK
+    // 边界顺路带上」或被判 task 后排队——执行流里没有近的边界时（长工具链、
+    // 长文流式），错误方向一直吐；排队则整句错过现场，重入时语境断裂。
+    // 现在当场停流：押话重入（原话开场、模型看得见现场重新组织），已完成的
+    // 不丢。机械与 premise-change 同源（真机打磨过的成熟通道），仅收执口径
+    // 不同。专门臂优先：带取消/停支/续跑信号的话各有更精确的宿主动作，不从
+    // 这里过；B/C 窗也不从这里过——折入汇合/汇聚轮本身就是「结合插话重整」，
+    // 且保留已收工支的产出，比整流重启更精细。
+    const hasDedicatedSignal = decision.signals.cancelsPart === true
+      || decision.signals.branchStop === true
+      || decision.signals.resumesBranch === true;
+    if ((decision.kind === 'steer' || decision.kind === 'task')
+      && decision.signals.affectsCurrent === true
+      && !hasDedicatedSignal
+      && !this.deps.hasDelegationInFlight()
+      && !this.deps.atAggregationWindow()) {
+      this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
+      // 无委派在飞（上方条件已排除，且到这行无 await、状态不变）：裸 abort
+      // 停当前流，无在飞支可产生假失败。委派在飞的同类止损走 premise-change
+      // 臂的 PAUSE 存档口径，不在这里。
+      this.deps.settleAck(ack, receipt ?? '收到——正在做的先停在这里，马上带着你这句话重新来；已完成的不丢。', true, 'info');
+      this.deps.abort();
+      // 同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
+      if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
+      return;
+    }
     switch (decision.kind) {
       case 'stop':
         // 这条可能来自正则快路径（"停止""停下"——字面命令）也可能来自裁决
