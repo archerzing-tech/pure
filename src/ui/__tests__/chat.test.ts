@@ -1629,12 +1629,23 @@ describe('plan overview completion state', () => {
     expect(cancelFoldBody.indexOf("this.deps.steerRunningTurn(text, images, null, 'parent', true)")).toBeGreaterThan(-1);
     expect(taskBody.indexOf('this.deps.queueInterjectTask(', override)).toBeGreaterThan(taskBody.indexOf('if (cancelish)', override));
     // 去重复核裁决（2026-10-20 三连击，替换词表闸）：判成 task 却撞上"已在
-    // 跑"= 矛盾信号，宿主把现场事实（dedupe_conflict 块）喂回裁决器重判一次
-    // ——报了取消走同一条落地臂；宿主零词表，语义判断归模型。
-    expect(taskBody.indexOf('<dedupe_conflict>')).toBeGreaterThan(-1);
-    expect(taskBody.indexOf('recheck.signals.cancelsPart === true')).toBeGreaterThan(-1);
-    const recheckAt = taskBody.indexOf('recheck.signals.cancelsPart === true');
+    // 跑"= 矛盾信号，宿主把现场事实喂给复核。2026-10-21 真机二连后复核换
+    // 独立窄问题提示词（decider.recheckCovered——同一 system 重问被锚定拉
+    // 回原判）；宿主零词表，语义判断归模型。
+    expect(taskBody.indexOf('recheckCovered(')).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('recheck?.signals.cancelsPart === true')).toBeGreaterThan(-1);
+    const recheckAt = taskBody.indexOf('recheck?.signals.cancelsPart === true');
     expect(taskBody.indexOf('await this.handleCancelFold(', recheckAt)).toBeGreaterThan(-1);
+    // 复核提示词的契约面（Planner 侧）：dedupe_conflict 是 system 点名的顶层
+    // 块、举证责任倒置写进指令、输出契约带 stop_branch 点名与现场收执。
+    const plannerSrc = readSource(new URL('../../coding-agent/Planner.ts', import.meta.url));
+    const recheckPromptAt = plannerSrc.indexOf('RECHECK_COVERED_PROMPT = `');
+    expect(recheckPromptAt).toBeGreaterThan(-1);
+    const recheckPromptBody = plannerSrc.slice(recheckPromptAt, recheckPromptAt + 2400);
+    expect(recheckPromptBody.indexOf('<dedupe_conflict>')).toBeGreaterThan(-1);
+    expect(recheckPromptBody.indexOf('WHO asks to ADD work that is ALREADY RUNNING')).toBeGreaterThan(-1);
+    expect(recheckPromptBody.indexOf('"cancels_part": true')).toBeGreaterThan(-1);
+    expect(recheckPromptBody.indexOf('"stop_branch"')).toBeGreaterThan(-1);
   });
 
   it('a cancel arriving BEFORE any delegation exists gates the branch at birth (2026-09-26 插话先于委派)', () => {

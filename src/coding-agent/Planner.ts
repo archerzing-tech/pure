@@ -754,6 +754,90 @@ export async function resolveStopBranchTarget(
   return typeof callId === 'string' && callId.trim() ? { callId: callId.trim() } : null;
 }
 
+/** 复核判定（去重撞车专用，2026-10-21 真机「停掉优酷这一调研」二次判 task
+ *  实证了锚定问题）：不用同一个 system 重问——同一个提示词框架下模型会把
+ *  原判再背一遍（<dedupe_conflict> 块在 system 里零契约，被当噪声忽略）。
+ *  换一个只装这条窄问题的独立提示词，把「它已在跑」当事实摆在面前、举证
+ *  责任倒置：谁会要求加一个正在跑的东西？ */
+export interface CoveredRecheckVerdict {
+  cancelsPart: boolean;
+  stopBranchCallId?: string;
+  receipt?: string;
+  reason: string;
+  confidence: number;
+}
+
+const RECHECK_COVERED_PROMPT = `You are the agent, mid-task, re-examining ONE user message under a fact your first read clashed with. The next user message carries your situation in three tagged sections:
+<current_task> — what you are working on, including the roster of delegated branches currently running (each with its id and task).
+<dedupe_conflict> — the fact your first read missed: the thing the user's message names is ALREADY being worked on by one of those branches.
+<new_message> — the message itself.
+
+Ask the only question that matters here: WHO asks to ADD work that is ALREADY RUNNING? Almost nobody. When a message names something already in flight, the overwhelmingly likely intent is to STOP it, PAUSE it, or say it is no longer wanted — however it is worded. 「停掉X这一调研」「去掉X的调研」「我说不需要X的」「暂停X」「X就不调研了」 are all that ONE intent. The burden of proof is INVERTED from a normal classification: treat the message as a removal or pause of the running work UNLESS it clearly asks for something NEW and DIFFERENT on top of what is running (a different platform to add, a different deliverable, an extra scope — such wording names the NEW thing, not the running one).
+
+Decide:
+- Removal or pause of the running work — or you cannot honestly read the message as new different work: set "cancels_part": true. If exactly ONE running branch clearly matches what the message removes, ALSO set "stop_branch": {"call_id": "<id copied EXACTLY from the roster>"} — the host pauses that branch the moment you name it; never invent or shorten an id; when two could match, name none and let the removal fold into the result instead of gambling.
+- Clearly a request for new, different work that merely collides with a running branch: leave "cancels_part" off — the host will tell the user that work is already running.
+
+When "cancels_part" is true, also write "receipt": one or two short sentences the user sees the moment their remark lands — you speaking mid-work, plain prose, the user's language, no internal jargon (never 支/委派/分类/排队). Say what you understood (name the actual thing) and what happens next (the named work stops leaving the result / the rest carries on). Honesty: describe what WILL happen, never claim it already has.
+
+Return ONLY one JSON object:
+{"cancels_part":true,"stop_branch":{"call_id":"<exact id from the roster, or omit>"},"receipt":"<...>","reason":"<one short line>","confidence":<0..1>}`;
+
+export async function recheckCoveredInsertion(
+  llm: LLMAdapter,
+  context: string,
+  conflictNote: string,
+  prompt: string,
+  signal?: AbortSignal,
+  images?: MessageImage[],
+  timeoutMs = 8_000,
+): Promise<CoveredRecheckVerdict | null> {
+  if (!prompt.trim() || !conflictNote.trim() || signal?.aborted) return null;
+  // 刀 4.1 缓存固化同一纪律：system 逐字稳定，现场（投影/矛盾事实/消息）进
+  // user 消息。dedupe_conflict 是顶层块——独立提示词点名词它，模型没有无视
+  // 的余地。
+  const request: Message[] = [
+    { role: 'system', content: RECHECK_COVERED_PROMPT },
+    {
+      role: 'user',
+      content: `<current_task>\n${context.slice(0, 3_200)}\n</current_task>\n\n<dedupe_conflict>\n${conflictNote.slice(0, 800)}\n</dedupe_conflict>\n\n<new_message>\n${prompt.slice(0, 2_000)}\n</new_message>`,
+      images,
+    },
+  ];
+  const parsed = await streamUntilParsed<{ cancels_part?: unknown; cancelsPart?: unknown; stop_branch?: unknown; stopBranch?: unknown; receipt?: unknown; reason?: unknown; confidence?: unknown }>(
+    llm,
+    request,
+    signal,
+    timeoutMs,
+    (raw) => {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const value = JSON.parse(match[0]);
+        return value && typeof value === 'object' ? value : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  if (!parsed) return null;
+  // 与主分类同一口径：蛇形为主、驼峰兜底，严格 === true，缺省即 false。
+  const cancels = parsed.cancels_part === true || parsed.cancelsPart === true;
+  const rawStop = parsed.stop_branch ?? parsed.stopBranch;
+  const rawStopId = rawStop && typeof rawStop === 'object'
+    ? (rawStop as { call_id?: unknown; callId?: unknown }).call_id ?? (rawStop as { callId?: unknown }).callId
+    : undefined;
+  return {
+    cancelsPart: cancels,
+    ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranchCallId: rawStopId.trim() } : {}),
+    ...(typeof parsed.receipt === 'string' && parsed.receipt.trim()
+      ? { receipt: parsed.receipt.trim().slice(0, 240) }
+      : {}),
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    confidence: clampConfidence(parsed.confidence),
+  };
+}
+
 const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;
 function applyImageReadOverride(
   decision: SemanticRouteDecision,

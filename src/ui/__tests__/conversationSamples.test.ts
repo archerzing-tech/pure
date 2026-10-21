@@ -263,7 +263,8 @@ afterEach(() => {
 // ── 假分类 LLM：按剧本对插话文本给判定；旁路问答给固定答复 ────────────────
 
 interface ScriptedClassification {
-  kind: string;
+  /** 去重复核调用（独立提示词）的输出契约没有 kind——只有主分类要求它。 */
+  kind?: string;
   reason: string;
   confidence: number;
   when?: string;
@@ -1032,11 +1033,13 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // ——掉进去重终稿「不重复派——收齐后一并汇总」，同一句逐字顶回三次，
     // 支烧完汇总还带着用户明确去掉的东西。
     // 复核裁决（同日，替换试过的词表闸——取消措辞穷举不尽）：判成 task 却
-    // 撞上"已在跑"是矛盾信号，宿主把现场事实喂回裁决器重判一次（剧本第二
-    // 遍命中 dedupe_conflict 标记，报 cancels_part）——走取消落地臂折入守
-    // 汇报步。真加活照旧终稿：「新增一个平台，爱奇艺」上一条测试锁死。
+    // 撞上"已在跑"是矛盾信号，宿主把现场事实喂给复核。2026-10-21 真机二连
+    // 后复核走独立窄问题提示词（decider.recheckCovered）——剧本第二遍命
+    // 中 user 消息里的 <dedupe_conflict> 顶层块，按复核输出契约报
+    // cancels_part——走取消落地臂折入守汇报步。真加活照旧终稿：「新增一
+    // 个平台，爱奇艺」上一条测试锁死。
     const llm = scriptedLlm([
-      { match: 'dedupe_conflict', cls: { kind: 'task', reason: 'recheck: the wording removes a running branch', confidence: 0.9, cancels_part: true } },
+      { match: 'dedupe_conflict', cls: { reason: 'recheck: the wording removes a running branch', confidence: 0.9, cancels_part: true } },
       { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
       { match: '暂停', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
@@ -1072,10 +1075,11 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('复核点名 stop_branch 时真停那支：带现场重判让漏报的取消精确落地', async () => {
-    // 复核的价值不止"不吞话"：带着「哪支在跑」的事实重判，裁决器能点名
-    // call_id——宿主直接暂停那一支，比无目标折入更早止损。
+    // 复核的价值不止"不吞话"：带着「哪支在跑」的事实单独问一遍（独立窄问
+    // 题提示词），模型能点名 call_id——宿主直接暂停那一支，比无目标折入更
+    // 早止损。
     const llm = scriptedLlm([
-      { match: 'dedupe_conflict', cls: { kind: 'task', reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' } } },
+      { match: 'dedupe_conflict', cls: { reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' } } },
       { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);

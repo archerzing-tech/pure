@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
+import { Planner, assessIntent, detectArtifactRequest, detectFictionIntent, detectProjectRequest, formatArtifactPrompt, formatIntentPrompt, formatTrapPrompt, inferSemanticRoute, isPlainConversational, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, shouldBypassSemanticRoute } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
 
@@ -1103,6 +1103,55 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
       'context', '顺便查一下汇率',
     );
     expect(judged.fallbackUsed).toBeUndefined();
+  });
+});
+
+describe('recheckCoveredInsertion — 去重撞车复核（2026-10-21 真机二连）', () => {
+  function mockLlm(content: string): LLMAdapter {
+    const stream = async function* (_messages: Message[], _tools: unknown[], _signal?: AbortSignal) {
+      const mid = Math.max(1, Math.floor(content.length / 2));
+      if (mid < content.length) yield { type: 'content', content: content.slice(0, mid) };
+      yield { type: 'content', content: content.slice(mid) };
+    };
+    return { stream } as unknown as LLMAdapter;
+  }
+
+  // 「停掉优酷这一调研」在同一个 system 下重问仍判 task——<dedupe_conflict>
+  // 块在 system 里零契约被当噪声，二次锚定原判。复核换独立窄问题提示词：
+  // 举证责任倒置（谁会要求加一个正在跑的东西），输出契约收窄为
+  // cancels_part / stop_branch / receipt。
+  it('parses the recheck contract: snake cancels_part, stop_branch id, receipt', async () => {
+    const verdict = await recheckCoveredInsertion(
+      mockLlm('{"cancels_part":true,"stop_branch":{"call_id":"call_r2"},"receipt":"好——优酷那路这就停掉。","reason":"removal of the named branch","confidence":0.9}'),
+      '并行调研四路平台', '它点到的活已有一支在跑：researcher·3号', '停掉优酷这一调研',
+    );
+    expect(verdict).not.toBeNull();
+    expect(verdict?.cancelsPart).toBe(true);
+    expect(verdict?.stopBranchCallId).toBe('call_r2');
+    expect(verdict?.receipt).toContain('优酷');
+  });
+
+  it('accepts the camelCase fallbacks and a bare no-verdict object', async () => {
+    const remove = await recheckCoveredInsertion(
+      mockLlm('{"cancelsPart":true,"reason":"no longer wanted","confidence":0.8}'),
+      'context', 'conflict', '不需要优酷的了',
+    );
+    expect(remove?.cancelsPart).toBe(true);
+    expect(remove?.stopBranchCallId).toBeUndefined();
+    const keep = await recheckCoveredInsertion(
+      mockLlm('{"cancels_part":false,"reason":"genuinely new work","confidence":0.7}'),
+      'context', 'conflict', '再加一个爱奇艺',
+    );
+    expect(keep?.cancelsPart).toBe(false);
+  });
+
+  it('returns null on parse failure, empty message, or abort — caller falls back to the canned receipt', async () => {
+    expect(await recheckCoveredInsertion(mockLlm('not json at all'), 'context', 'conflict', 'anything')).toBeNull();
+    expect(await recheckCoveredInsertion(mockLlm('{"cancels_part":true}'), 'context', 'conflict', '  ')).toBeNull();
+    expect(await recheckCoveredInsertion(mockLlm('{"cancels_part":true}'), 'context', '  ', 'anything')).toBeNull();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await recheckCoveredInsertion(mockLlm('{"cancels_part":true}'), 'context', 'conflict', 'anything', controller.signal)).toBeNull();
   });
 });
 

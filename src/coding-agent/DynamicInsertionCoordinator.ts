@@ -1,5 +1,5 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
-import { classifyInsertion, resolveStopBranchTarget, type InsertionClassification } from './Planner';
+import { classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, type InsertionClassification } from './Planner';
 import { levelForKind } from '../shared/scheduling';
 import {
   applyConfidenceGate,
@@ -82,6 +82,7 @@ export interface DynamicInsertionCoordinatorOptions {
     images?: MessageImage[],
   ) => Promise<InsertionClassification>;
   resolveStopBranchTarget?: typeof resolveStopBranchTarget;
+  recheckCoveredInsertion?: typeof recheckCoveredInsertion;
 }
 
 // 导出只为可测/可回放（见 scripts/replay-insertion-decisor.ts）：这些常量
@@ -136,10 +137,12 @@ export const URGENT_RE = /(?:加急|优先(?:办|做|处理|安排)?|插队|先(
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
   private readonly resolveStop: NonNullable<DynamicInsertionCoordinatorOptions['resolveStopBranchTarget']>;
+  private readonly recheck: NonNullable<DynamicInsertionCoordinatorOptions['recheckCoveredInsertion']>;
 
   constructor(options: DynamicInsertionCoordinatorOptions = {}) {
     this.classify = options.classify ?? classifyInsertion;
     this.resolveStop = options.resolveStopBranchTarget ?? resolveStopBranchTarget;
+    this.recheck = options.recheckCoveredInsertion ?? recheckCoveredInsertion;
   }
 
   async decide(
@@ -244,6 +247,36 @@ export class DynamicInsertionCoordinator {
         // 第 5 期「这个急」提级：裁决器判定这件活加急（只对 task/steer 有意义）
         // ——宿主据此在队列里插队并换提级收执。缺省绝不自己补。
         ...(result.urgent === true ? { urgent: true } : {}),
+      },
+    });
+  }
+
+  /** 去重撞车的复核（2026-10-21）：宿主发现「判成 task 却撞上已在跑」的矛盾
+   *  后，把事实喂回来单独问一遍——不走 decide()（同一个 system 重问会被锚定
+   *  拉回原判，真机「停掉优酷这一调研」二次判 task 实证），走
+   *  recheckCoveredInsertion 的独立窄问题提示词（举证责任倒置：谁会要求加
+   *  一个正在跑的东西）。判定仍折成 DynamicInsertionDecision（收掉=steer/
+   *  真加活=task），宿主按同一套信号消费。LLM 缺席或复核失败返回 null——
+   *  调用方回终稿，宁可照旧不可误停。 */
+  async recheckCovered(
+    llm: LLMAdapter | null,
+    context: string,
+    conflictNote: string,
+    insertion: DynamicInsertion,
+    signal?: AbortSignal,
+  ): Promise<DynamicInsertionDecision | null> {
+    if (!llm) return null;
+    const verdict = await this.recheck(llm, context, conflictNote, insertion.text, signal, insertion.images);
+    if (!verdict) return null;
+    return this.build(verdict.cancelsPart ? 'steer' : 'task', verdict.reason || 'covered recheck', {
+      confidence: verdict.confidence,
+      timing: { mode: 'now' },
+      signals: {
+        via: 'judge',
+        classifier: 'llm',
+        ...(verdict.cancelsPart ? { cancelsPart: true } : {}),
+        ...(verdict.stopBranchCallId ? { stopBranchCallId: verdict.stopBranchCallId } : {}),
+        ...(verdict.receipt ? { receipt: verdict.receipt } : {}),
       },
     });
   }

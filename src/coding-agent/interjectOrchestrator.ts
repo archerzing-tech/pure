@@ -484,15 +484,25 @@ export class InterjectOrchestrator {
           // 2026-10-20 真机三连击的复核裁决（替换当日试过的词表闸——用户指
           // 得对：取消的措辞穷举不尽，词表永远追着漏网跑）。判成 task 却撞
           // 上"已在跑"本身就是矛盾信号——谁会要求加一个正在跑的东西？最可
-          // 能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回裁决器重判
-          // 一次：报了取消走同一条取消落地臂（点名还能精确停支）；仍不报才
-          // 回终稿——真加活照旧秒回。语义判断全程归模型，宿主零词表。
+          // 能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回复核单独问
+          // 一遍。2026-10-21 真机二连：同一 system 下重问仍判 task（<dedupe_
+          // conflict> 块在 system 里零契约被当噪声，二次锚定原判）——复核改
+          // 走独立窄问题提示词（decider.recheckCovered），<dedupe_conflict>
+          // 升为顶层块进 system 契约，举证责任倒置。报了取消走同一条取消落
+          // 地臂（点名还能精确停支）；复核失败/不报才回终稿——真加活照旧秒
+          // 回。语义判断全程归模型，宿主零词表。
           const coveredName = this.deps.branchLabel(covered.name, covered.callId);
-          const recheckContext = `${insertionCtx}\n\n<dedupe_conflict>你刚把这句话判成 task，但它提到的活已有一支在跑：「${coveredName}」。谁会要求加一个正在跑的东西？复核：这句话是否其实在收掉/暂停已在跑的工作？措辞不限——「去掉X的调研」「我说不需要X的」「暂停X」与「X就不调研了」同义。是就报 cancels_part，不是就维持原判。</dedupe_conflict>`;
-          const recheck = await this.deps.decider.decide(this.deps.decideLlm(), recheckContext, { text, images, displayText }, this.deps.decideSignal());
-          this.deps.logDecision(recheck, `(复核)${text}`);
-          if (recheck.signals.cancelsPart === true) {
-            await this.handleCancelFold(text, images, displayText, ack, receipt, recheck, echoUserBubble);
+          const conflictNote = `你刚把这句话判成「新增任务」，但它点到的活已有一支在跑：「${coveredName}」（call_id=${covered.callId}）。没人会要求加一个正在跑的东西——复核这句话是不是其实在收掉/暂停这支在跑的活。`;
+          const recheck = await this.deps.decider.recheckCovered(this.deps.decideLlm(), insertionCtx, conflictNote, { text, images, displayText }, this.deps.decideSignal());
+          if (recheck) this.deps.logDecision(recheck, `(复核)${text}`);
+          if (recheck?.signals.cancelsPart === true) {
+            // 收执只取复核现场写的（它见到的是矛盾现场）；原判是「task」时
+            // 它写的收执是加活口径，用在取消臂就是说谎——宁缺，fold 臂有固
+            // 定兜底。
+            const recheckReceipt = typeof recheck.signals.receipt === 'string' && recheck.signals.receipt.trim()
+              ? recheck.signals.receipt
+              : undefined;
+            await this.handleCancelFold(text, images, displayText, ack, recheckReceipt, recheck, echoUserBubble);
             return;
           }
           echoUserBubble();
