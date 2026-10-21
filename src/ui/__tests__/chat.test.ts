@@ -1636,6 +1636,12 @@ describe('plan overview completion state', () => {
     expect(taskBody.indexOf('recheck?.signals.cancelsPart === true')).toBeGreaterThan(-1);
     const recheckAt = taskBody.indexOf('recheck?.signals.cancelsPart === true');
     expect(taskBody.indexOf('await this.handleCancelFold(', recheckAt)).toBeGreaterThan(-1);
+    // 兜底反转（2026-10-21 真机三连，用户定调「方向性问题，大 bug」）：复核
+    // 超时/失败=没结论时，暂停 covered 那支而不是任其继续——误停可逆（说
+    // 一声就续上），该停不停不可逆。拿不准选可逆的一边。
+    expect(taskBody.indexOf("recheck === null && covered.status === 'running'")).toBeGreaterThan(-1);
+    expect(taskBody.indexOf("this.deps.stopBranchByCallId(covered.callId, 'pause')")).toBeGreaterThan(-1);
+    expect(taskBody.indexOf('branchUncertainPauseReceipt(')).toBeGreaterThan(-1);
     // 复核提示词的契约面（Planner 侧）：dedupe_conflict 是 system 点名的顶层
     // 块、举证责任倒置写进指令、输出契约带 stop_branch 点名与现场收执。
     const plannerSrc = readSource(new URL('../../coding-agent/Planner.ts', import.meta.url));

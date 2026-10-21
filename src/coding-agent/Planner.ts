@@ -790,7 +790,10 @@ export async function recheckCoveredInsertion(
   prompt: string,
   signal?: AbortSignal,
   images?: MessageImage[],
-  timeoutMs = 8_000,
+  // 12s（2026-10-21 真机三连：8s 恰好掐死冷启动首调——GLM 系强制思考，
+  // 全新 system 零缓存，思考起步+provider 冷税叠加出不了 8s；账本实证
+  // 主判定→终稿间隙恰 8003ms）。没结论有兜底暂停接着，快败不是灾难。
+  timeoutMs = 12_000,
 ): Promise<CoveredRecheckVerdict | null> {
   if (!prompt.trim() || !conflictNote.trim() || signal?.aborted) return null;
   // 刀 4.1 缓存固化同一纪律：system 逐字稳定，现场（投影/矛盾事实/消息）进

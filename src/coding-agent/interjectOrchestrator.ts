@@ -16,7 +16,7 @@
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
 import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
-import { branchStopReceipt, branchResumeReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
+import { branchStopReceipt, branchResumeReceipt, branchUncertainPauseReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
 import { priorityForKind } from '../shared/scheduling';
 import { PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import type { DelegationControlPlane } from './delegationControl';
@@ -504,6 +504,23 @@ export class InterjectOrchestrator {
               : undefined;
             await this.handleCancelFold(text, images, displayText, ack, recheckReceipt, recheck, echoUserBubble);
             return;
+          }
+          if (recheck === null && covered.status === 'running') {
+            // 2026-10-21 真机三连（用户定调「方向性问题，大 bug」）：复核超
+            // 时/失败 = 没结论，旧兜底「宁可照旧」在取消场景方向反了——用户
+            // 说了「不需要」却被任其继续跑，等于当着用户的面背叛，且不可逆；
+            // 误停一支是可逆的（说一声就续上）。拿不准时选可逆的一边：直接
+            // 暂停 covered 那支（callId 是 covered 命中给的宿主事实，不需要
+            // 模型点名），收执诚实交代没拿准+给出恢复口。只有复核**明确判
+            // 加活**（recheck 非 null 且不报取消）才配「不重复派」终稿。
+            const stopped = this.deps.stopBranchByCallId(covered.callId, 'pause');
+            if (stopped) {
+              try { appendTrace({ type: 'covered_recheck_unresolved_pause', snippet: text.slice(0, 80) }); } catch {}
+              echoUserBubble();
+              this.deps.settleAck(ack, branchUncertainPauseReceipt(coveredName));
+              return;
+            }
+            // 停不成（窗口刚好收尾）→ 落到下方终稿：活已不在跑，无方向性伤害。
           }
           echoUserBubble();
           // 去重回执是终稿（没有后续在途）——转普通气泡。

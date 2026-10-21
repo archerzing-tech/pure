@@ -1015,8 +1015,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
     // 真机观感：两支同名 researcher，收执里裸的「researcher」指不清是哪支。
-    // 同名不止一支时收执引用带 instanceNo（researcher·2号）。
-    const llm = scriptedLlm([]);
+    // 同名不止一支时收执引用带 instanceNo（researcher·2号）。复核剧本给
+    // cancels_part:false——真加活（补一个新平台）由复核明确背书，配「不
+    // 重复派」终稿；复核没结论时的兜底是暂停（见下一条），不能混在这里。
+    const llm = scriptedLlm([
+      { match: 'dedupe_conflict', cls: { reason: 'genuinely adds a new platform, iqiyi', confidence: 0.9, cancels_part: false } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
       { callId: 'call_r1', agentName: 'researcher', instanceNo: 1, status: 'running', inputSnippet: '调研优酷最新国漫上新' },
@@ -1104,6 +1108,55 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(assistantJoined(h.root)).toContain('明白——「researcher·2号」那路我先暂停了');
     expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('不重复派');
     expect(h.chat.folds.entries()).toHaveLength(0);
+  });
+
+  it('复核没结论（超时/失败）时兜底反转：暂停 covered 那支，绝不任其继续（2026-10-21 真机三连，方向性）', async () => {
+    // 真机账本：主判定→终稿恰 8003ms = 复核 8s 超时 → null → 旧兜底回「不
+    // 重复派」终稿，用户说了「不需要」的活继续烧。用户定调「方向性问题，
+    // 大 bug」：拿不准要选可逆的一边——误停一支说一声就续上；该停不停是
+    // 当着用户的面背叛。复核 null + covered running → 宿主直接暂停命中那
+    // 支（callId 是 covered 命中给的宿主事实，不需要模型点名），收执诚实
+    // 交代没拿准+给出恢复口。scriptedLlm 的 fallback 会给复核喂回一个成功
+    // 的 task 判定（那走的是「明确判加活」路），所以这里用局部 llm 让复核
+    // 调用输出非 JSON——真模拟解析失败 → null。
+    const llm = {
+      classifyCalls: [] as string[],
+      async *stream(messages: Array<{ content: unknown }>) {
+        const user = String(messages[1]?.content ?? '');
+        (this.classifyCalls as string[]).push(user);
+        const payload = user.includes('dedupe_conflict')
+          ? '模型这回合没说出人话' // 复核调用：解析失败 → null
+          : JSON.stringify({ kind: 'task', reason: 'misread as addition', confidence: 0.9 });
+        yield { type: 'content', content: payload };
+        yield { type: 'done', content: payload };
+      },
+      async complete() { return { content: '' }; },
+    } as never;
+    const h = makeHarness(llm);
+    h.chat.agentActivities.push(
+      { callId: 'call_r2', agentName: 'researcher', instanceNo: 2, status: 'running', inputSnippet: '调研优酷国漫剧集' },
+      { callId: 'call_r3', agentName: 'researcher', instanceNo: 3, status: 'running', inputSnippet: '调研B站国漫剧集' },
+    );
+    const paused: string[] = [];
+    h.chat.codingAgentRef = {
+      subagentOrchestrator: {
+        branchView: () => [
+          { callId: 'call_r2', agentName: 'researcher', state: 'running', inputSnippet: '调研优酷国漫剧集' },
+          { callId: 'call_r3', agentName: 'researcher', state: 'running', inputSnippet: '调研B站国漫剧集' },
+        ],
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
+      },
+    };
+
+    await h.chat.interject('不需要优酷的调研');
+    expect(paused).toEqual(['call_r2']); // 拿不准：暂停命中的那支，可逆
+    const said = assistantJoined(h.root) + statusJoined(h.root);
+    expect(said).not.toContain('不重复派');
+    expect(said).toContain('没拿准'); // 诚实收执：不装「明白」
+    expect(said).toContain('researcher·2号');
+    expect(said).toContain('接着跑'); // 给出恢复口
+    expect(h.root.querySelectorAll('.bubble-row.user')).toHaveLength(1); // 单气泡（2026-10-20 双气泡判例）
   });
 
   it('分类器把取消误判成 task 时宿主兜底：取消永不排队，按取消型折入走', async () => {
