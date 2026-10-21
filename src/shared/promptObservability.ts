@@ -194,7 +194,21 @@ export interface AdviceAppliedObservation {
   };
 }
 
-export type PromptObservation = PromptAssemblyObservation | AgentRunObservation | AdviceAppliedObservation;
+/** 传输状态影子（2026-10-21）：TransportStatus 刻意不进会话账本（UI-only，
+ *  防上下文污染），代价是 30s 级首字无法事后取证——分不清是 provider 排队
+ *  还是重试/换路苦战（当日 31.5s 首字判例）。影子进 observations 遥测：不进
+ *  模型上下文，首字异常时读这条时间线定责。 */
+export interface TransportStatusObservation {
+  type: 'transport_status';
+  at: number;
+  stage: 'retrying' | 'connected' | 'failover';
+  attempt?: number;
+  maxAttempts?: number;
+  waitMs?: number;
+  sessionId?: string;
+}
+
+export type PromptObservation = PromptAssemblyObservation | AgentRunObservation | AdviceAppliedObservation | TransportStatusObservation;
 
 /**
  * E4.2 — parse a JSONL dump back into records. The GUI dashboard (Rust tail
@@ -209,7 +223,7 @@ export function parsePromptObservations(jsonl: string): PromptObservation[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as PromptObservation;
-      if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run' || parsed.type === 'advice_applied')) records.push(parsed);
+      if (parsed && (parsed.type === 'prompt_assembly' || parsed.type === 'agent_run' || parsed.type === 'advice_applied' || parsed.type === 'transport_status')) records.push(parsed);
     } catch {
       // Ignore the bad line, keep reading.
     }

@@ -31,6 +31,7 @@ import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, type 
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute, startTurnRoute } from '../coding-agent/turnRoute';
+import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
@@ -6449,6 +6450,20 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               this.scrollUi(chatEl);
             }
             const { stage, attempt, maxAttempts, waitMs } = event.payload;
+            // 影子记账（2026-10-21）：事件本身 UI-only 不进账本，首字异常的
+            // 事后取证断链（31.5s 判例分不清排队还是重试苦战）——同拍落一
+            // 行进 observations 遥测，写失败静默（同 sink 语义）。
+            try {
+              createTauriObservationSink()?.append({
+                type: 'transport_status',
+                at: Date.now(),
+                stage,
+                attempt,
+                maxAttempts,
+                waitMs,
+                sessionId: this.sessionId || undefined,
+              });
+            } catch { /* 遥测失败不碰主流程 */ }
             if (thinkingCard) {
               if (stage === 'retrying') {
                 const waitNote = waitMs && waitMs >= 2000 ? `，约 ${Math.round(waitMs / 1000)} 秒后` : '';

@@ -174,7 +174,7 @@ describe('PromptObservability', () => {
     });
     expect(runTrace).toBe(assemblyTrace);
     observability.finishRun(runTrace);
-    expect(observability.records().filter((record) => record.type !== 'advice_applied' && record.traceId === assemblyTrace)).toHaveLength(2);
+    expect(observability.records().filter((record) => (record.type === 'agent_run' || record.type === 'prompt_assembly') && record.traceId === assemblyTrace)).toHaveLength(2);
   });
 
   it('can be disabled without changing trace ids or retaining records', () => {
@@ -214,7 +214,7 @@ describe('PromptObservability', () => {
         store.append({ type: 'agent_run', traceId: `run-${index}`, startedAt: Date.now(), eventCounts: {}, toolCalls: [], reasoningChars: 0, outputChars: 0 });
       }
       const retained = store.list();
-      expect(retained.filter((record) => record.type !== 'advice_applied').map((record) => record.traceId)).toEqual(['run-2', 'run-3']);
+      expect(retained.filter((record) => record.type === 'agent_run').map((record) => record.traceId)).toEqual(['run-2', 'run-3']);
       expect(existsSync(`${path}.tmp-${process.pid}`)).toBe(false);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -235,7 +235,7 @@ describe('PromptObservability', () => {
 
   it('mirrors every persisted record to the sink (E0.1 durability)', () => {
     const sunk: string[] = [];
-    const observability = new PromptObservability({ sink: { append: (record) => { if (record.type !== 'advice_applied') sunk.push(record.traceId); } } });
+    const observability = new PromptObservability({ sink: { append: (record) => { if (record.type === 'agent_run' || record.type === 'prompt_assembly') sunk.push(record.traceId); } } });
     const assemblyTrace = observability.recordAssembly({
       sessionId: 's',
       systemPrompt: 'system',
@@ -262,7 +262,7 @@ describe('PromptObservability', () => {
     const observability = new PromptObservability();
     const traceId = observability.startRun({ sessionId: 's' });
     observability.finishRun(traceId);
-    observability.setSink({ append: (record) => { if (record.type !== 'advice_applied') sunk.push(record.traceId); } });
+    observability.setSink({ append: (record) => { if (record.type === 'agent_run') sunk.push(record.traceId); } });
     const second = observability.startRun({ sessionId: 's' });
     observability.finishRun(second);
     observability.setSink(undefined);
@@ -391,7 +391,7 @@ describe('parsePromptObservations (E4.2 shared reader)', () => {
       JSON.stringify({ type: 'prompt_assembly', traceId: 'b', timestamp: 2 }),
       JSON.stringify({ type: 'something_else', traceId: 'c' }),
     ].join('\n');
-    expect(parsePromptObservations(jsonl).filter((record) => record.type !== 'advice_applied').map((record) => record.traceId)).toEqual(['a', 'b']);
+    expect(parsePromptObservations(jsonl).filter((record) => record.type !== 'advice_applied' && record.type !== 'transport_status').map((record) => record.traceId)).toEqual(['a', 'b']);
   });
 
   it('reads advice_applied records through (13.1) and still skips unknown types', () => {
@@ -409,5 +409,19 @@ describe('parsePromptObservations (E4.2 shared reader)', () => {
   it('returns nothing for an empty dump', () => {
     expect(parsePromptObservations('')).toEqual([]);
     expect(parsePromptObservations('\n\n')).toEqual([]);
+  });
+
+  it('reads transport_status shadow lines through (2026-10-21 首字取证)', () => {
+    // TransportStatus 刻意不进会话账本（UI-only），影子落 observations——
+    // 31.5s 首字判例的事后定责线：retrying→failover→connected 时间线可读。
+    const jsonl = [
+      JSON.stringify({ type: 'transport_status', at: 100, stage: 'retrying', attempt: 1, maxAttempts: 3, waitMs: 2000, sessionId: 's1' }),
+      JSON.stringify({ type: 'transport_status', at: 4000, stage: 'failover' }),
+      JSON.stringify({ type: 'transport_status', at: 5200, stage: 'connected' }),
+      JSON.stringify({ type: 'transport_status_typo', at: 6000 }),
+    ].join('\n');
+    const parsed = parsePromptObservations(jsonl);
+    expect(parsed).toHaveLength(3);
+    expect(parsed.map((r) => (r as { stage?: string }).stage)).toEqual(['retrying', 'failover', 'connected']);
   });
 });
