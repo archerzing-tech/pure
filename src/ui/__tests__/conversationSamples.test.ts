@@ -1119,11 +1119,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 交代没拿准+给出恢复口。scriptedLlm 的 fallback 会给复核喂回一个成功
     // 的 task 判定（那走的是「明确判加活」路），所以这里用局部 llm 让复核
     // 调用输出非 JSON——真模拟解析失败 → null。
+    const classifyCalls: string[] = [];
     const llm = {
-      classifyCalls: [] as string[],
+      classifyCalls,
       async *stream(messages: Array<{ content: unknown }>) {
         const user = String(messages[1]?.content ?? '');
-        (this.classifyCalls as string[]).push(user);
+        classifyCalls.push(user);
         const payload = user.includes('dedupe_conflict')
           ? '模型这回合没说出人话' // 复核调用：解析失败 → null
           : JSON.stringify({ kind: 'task', reason: 'misread as addition', confidence: 0.9 });
