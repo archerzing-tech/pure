@@ -47,7 +47,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText } from '../shared/insertionMessaging';
 import { QUEUED_PRIORITY } from '../shared/scheduling';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -3675,7 +3675,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * task or a RELATED insert frozen until the user's NEXT turn completed. */
   private queueInterjectTask(text: string, images: MessageImage[], displayText: string, priority?: number): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
-    this.roundClose.queueTask({ text, images, displayText, ts: Date.now(), priority });
+    // 交接框架（2026-10-21 刀 C）：入队时就框架化引擎文本——重入时模型收到
+    // 「这是排队到的用户话+结合现场消化」的交接，屏幕（displayText）与队列卡
+    // 显示的仍是原话。快照存的是框架化文本，恢复后重入同样带语境。
+    this.roundClose.queueTask({ text: queuedHandoffText(text), images, displayText, ts: Date.now(), priority });
     this.renderQueueCard();
     if (!this.isStreaming()) this.roundClose.scheduleDispatch();
   }

@@ -12,6 +12,7 @@
 // 词汇都不带；机制承诺（不派工/不进汇总/只合并幸存者）住在协议与框架里。
 
 import { describe, it, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { INSERTION_PROTOCOL_PROMPT } from '../promptLayers';
 import {
   steerFrameText,
@@ -24,6 +25,7 @@ import {
   foldInFollowUpText,
   queuedReceipt,
   queuedUrgentReceipt,
+  queuedHandoffText,
   CANCELLATION_INVARIANTS as INV,
   branchResumeReceipt,
   treeResumeReceipt,
@@ -333,6 +335,46 @@ describe('排期收执（第 5 期「调度」）', () => {
     expectNoDefaultParams([
       ['queuedReceipt', 0, queuedReceipt],
       ['queuedUrgentReceipt', 0, queuedUrgentReceipt],
+    ]);
+  });
+});
+
+// 对话主导架构刀 C（2026-10-21，用户拍板）：排队插话重入裸发原话 = 模型把
+// 它当凭空而来的新请求——用户报的「说出来的话和语境不搭」的直接机制。交接
+// 框架交给模型三个事实（你忙时说的/排到了现在/现在接上结合现场消化），屏幕
+// 仍显示原话（displayText 与框架分离，send 的双文本缝原生支持）。
+describe('队列交接框架（2026-10-21 刀 C）', () => {
+  it('框架带原话+三个事实：忙时说的、排到了现在、结合刚做的消化', () => {
+    const framed = queuedHandoffText('再加一个爱奇艺平台');
+    expect(framed).toContain('【排队中的用户消息');
+    expect(framed).toContain('再加一个爱奇艺平台');
+    expect(framed).toContain('忙于前一件事时');
+    expect(framed).toContain('排进了队列');
+    expect(framed).toContain('结合刚做完的事');
+    // 教它别从零开始——语境断裂的解药在这半句。
+    expect(framed).toContain('不要当成凭空而来的新请求从零开始');
+  });
+
+  it('幂等：已带框架的原样返回，空话原样返回（恢复旧档不二次包装）', () => {
+    const once = queuedHandoffText('顺便查一下汇率');
+    expect(queuedHandoffText(once)).toBe(once);
+    expect(queuedHandoffText('')).toBe('');
+    expect(queuedHandoffText('  ')).toBe('  ');
+  });
+
+  it('宿主接线：queueInterjectTask 入队时框架化引擎文本，displayText 保持原话', () => {
+    const src = readFileSync(new URL('../../ui/chat.ts', import.meta.url), 'utf8');
+    const at = src.indexOf('private queueInterjectTask(');
+    expect(at).toBeGreaterThan(-1);
+    const body = src.slice(at, src.indexOf('hasPendingCloseWork(', at));
+    expect(body).toContain('queuedHandoffText(text)');
+    // displayText 原样进账——队列卡与重入上屏都是原话。
+    expect(body).toContain('displayText, ts: Date.now()');
+  });
+
+  it('无默认形参（场景开关默认值回归锁）', () => {
+    expectNoDefaultParams([
+      ['queuedHandoffText', 1, queuedHandoffText],
     ]);
   });
 });
