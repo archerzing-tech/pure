@@ -1247,34 +1247,40 @@ describe('plan overview completion state', () => {
     expect(body.indexOf("receipt ?? '收到——正在做的先停在这里")).toBeGreaterThan(-1);
   });
 
-  it('answers scope-confirmation remarks with the covered verdict instead of relaying (2026-10-21 刀 E)', () => {
-    // 真机判例：多路平台调研在飞，用户插「调研的平台必须包括腾讯」——腾讯
-    // 那路已在跑，该答「正在跑着，不重复」，实际却定向转达（收执「已直接
-    // 转给 researcher 那路」）。病根：覆盖去重只挂 task 臂，范围确认话判成
-    // steer 后没人查花名册。现在判据归裁决器（ensures_present 契约字段抄下
-    // 要求在场的对象），执行归宿主（findCoveringBranch 同款区分性匹配）。
+  it('verifies the judge-named covered branch and answers the covered verdict (2026-10-21 刀 F)', () => {
+    // 真机判例二连反转刀 E：范围确认话两次都回转达口径。刀 E 的「裁决器抄
+    // 对象名+宿主字面匹配」被否决（漏报新字段/「优酷」对不上任务书里的语义
+    // 表述）。刀 F 与 stop_branch 同构：裁决器拿花名册（含新增的
+    // <finished_branches>）点已覆盖那支的 call_id，宿主只核实 id 真实性
+    // ——机械事实零语义，模型判断宿主执行的原样复用。
     const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
     const affectsAt = orch.indexOf('decision.signals.affectsCurrent === true');
-    const ensuresAt = orch.indexOf("typeof decision.signals.ensuresPresent === 'string'");
+    const coveredAt = orch.indexOf("typeof decision.signals.coveredBranchCallId === 'string'");
     const switchAt = orch.indexOf('switch (decision.kind) {');
     // 臂在刀 B 止损臂之后、switch 各臂之前——affects 优先（重入回合自然
     // 带上要求），范围确认臂接住其余。
     expect(affectsAt).toBeGreaterThan(-1);
-    expect(ensuresAt).toBeGreaterThan(affectsAt);
-    expect(ensuresAt).toBeLessThan(switchAt);
-    const body = orch.slice(ensuresAt, switchAt);
-    // 闸面：只对 steer/task、对象名非空才查；专门臂（取消/停支/续支）优先。
+    expect(coveredAt).toBeGreaterThan(affectsAt);
+    expect(coveredAt).toBeLessThan(switchAt);
+    const body = orch.slice(coveredAt, switchAt);
+    // 闸面：只对 steer/task、点名非空才查；专门臂（取消/停支/续支）优先。
     expect(body.indexOf("(decision.kind === 'steer' || decision.kind === 'task')")).toBeGreaterThan(-1);
-    expect(body.indexOf('&& ensuredThing')).toBeGreaterThan(-1);
+    expect(body.indexOf('&& coveredCallId')).toBeGreaterThan(-1);
     expect(body.indexOf('!hasDedicatedSignal')).toBeGreaterThan(-1);
-    // 匹配面是裁决器抄的对象名，不是全句——全句里的「调研的平台」这类泛词
-    // 会把区分性匹配带偏（真机 researcher 误点名）。
-    expect(body.indexOf('this.findCoveringBranch(ensuredThing)')).toBeGreaterThan(-1);
-    // 命中即终稿：running/done 两口径与 task 臂同源；去重回执绕开裁决器的
-    // receipt（它写的是转达口径，与去重事实矛盾）。
+    // 宿主唯一动作是核实（callId 在覆盖面里才回），零文本匹配——刀 E 的
+    // findCoveringBranch(对象名) 不许出现在这条臂。
+    expect(body.indexOf('this.deps.coveringCandidates().find((item) => item.callId === coveredCallId)')).toBeGreaterThan(-1);
+    expect(body.indexOf('findCoveringBranch(coveredCallId)')).toBe(-1);
+    // 核实通过即终稿：running/done 两口径与 task 臂同源；去重回执绕开裁决
+    // 器的 receipt（它写的是转达口径，与去重事实矛盾）。
     expect(body.indexOf('「${ensuredName}」那路跑着，不重复派——收齐后一并汇总给您。')).toBeGreaterThan(-1);
     expect(body.indexOf('那路的结果就在汇总里，不重复派。')).toBeGreaterThan(-1);
     expect((body.match(/this\.deps\.settleAck\(ack/g) ?? []).length).toBe(1);
+    // 判定遥测落盘（真机取证断链修复）：kind/点名/收执进 observations。
+    expect(orch.indexOf("type: 'interject_decision'")).toBeGreaterThan(-1);
+    // 花名册喂已收工支（裁决器看得见才点得出）。
+    const chat = readSource(new URL('../chat.ts', import.meta.url));
+    expect(chat.indexOf("parts.push('<finished_branches>')")).toBeGreaterThan(-1);
   });
 
   it('honors the confidence gate in the interject path: destructive doubt asks, never aborts', () => {

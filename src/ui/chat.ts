@@ -3122,6 +3122,18 @@ export class ChatController {
         }
         parts.push('</live_branches>');
       }
+      // 已收工支进花名册（2026-10-21 刀 F 覆盖点名）：跑完的那路同样是覆盖
+      // 事实——插「必须包括X」而 X 那路已收工时，裁决器照 callId 点名、宿主
+      // 核实后回「已跑完，在汇总里」。与在飞支同格式，块名区分（stop_branch
+      // 只许点在飞块，covered_branch 两块都可点）。
+      const finished = this.agentActivities.filter((item) => item.status === 'done');
+      if (finished.length > 0) {
+        parts.push('<finished_branches>');
+        for (const item of finished) {
+          parts.push(`- id=${item.callId} name=${item.agentName}${item.agentRole ? ` role=${item.agentRole}` : ''}${item.inputSnippet ? ` task=${item.inputSnippet.slice(0, 80)}` : ''}`);
+        }
+        parts.push('</finished_branches>');
+      }
       // 分支级继续的判据输入：被暂停/被停的支是可续跑的候补，分类器只有
       // 看见它们存在，才能把「把 X 那支接着跑完」判成 resumes_part（第 2 期
       // 第三刀）。名单带任务书片段——名字是代号，用户点的是主题。

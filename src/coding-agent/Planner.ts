@@ -471,13 +471,15 @@ export interface InsertionClassification {
    * supplements_current 的对应物（那个管思考窗，这个管执行流）；
    * cancels_part/resumes_part/stop_branch 在场时不生效（专门臂优先）。 */
   affectsCurrent?: boolean;
-  /** 范围确认去重（2026-10-21 对话主导架构刀 E，真机「调研的平台必须包括
-   *  腾讯」判例）：这句插话要求某件东西**必须出现在产出范围内**——那路已
-   *  在跑时该答「正在跑着，不重复」，而不是再转达一遍。字段值=用户要求在
-   *  场的那件东西（从原话里抄，如「腾讯」），宿主拿它对花名册做区分性匹配、
-   *  回终稿；判据归模型，执行归宿主。缺省/非空串才收（模型只回 true 没给
-   *  对象时宿主没有可靠匹配面，宁可不赌去重，照旧路由转达）。 */
-  ensuresPresent?: string;
+  /** 范围确认去重（2026-10-21 对话主导架构刀 F，真机「调研必须包括优酷」
+   *  判例二连反转）：这句插话要求某件东西**必须出现在产出范围内**，而花名
+   *  册里已有一支在做/做完了它——宿主该答「那路正在跑着，不重复」而不是再
+   *  转达一遍。刀 E 试过「裁决器抄对象名+宿主字面匹配」，真机否决：裁决器
+   *  漏报新字段、字面匹配对不上语义对应（「优酷」vs 任务书里的「优酷动漫
+   *  官方消息」）。刀 F 改与 stop_branch 同构——**模型拿花名册点名已覆盖
+   *  那支的确切 callId，宿主只核实 id 真实性**（机械事实零语义）；点不出
+   *  就留空，照旧路由（缺的东西照常补上）。 */
+  coveredBranch?: { callId: string };
   /** 「这个急」提级（第 5 期调度）：用户明确这件新活加急/该先办（"这个急"、
    *  "优先处理这个"、"加急"）时置真——宿主据此把队列里的这项插到队头并换
    *  提级收执。只对 task（排队）/steer 有意义；提级只改**队列次序**，不涉
@@ -512,7 +514,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"ensures_present":"<the thing the user requires to be present>","method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","covered_branch":{"call_id":"<exact id from the roster, or omit>"},"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -586,19 +588,27 @@ owns that), guidance for a LATER step, or anything landing while still
 THINKING ("supplements_current" already covers that phase). Omit it when
 the current output survives the remark unchanged.
 
-"ensures_present": the "make sure X is covered" remark — the user confirms or
-extends the SET of things the work must include, naming the thing itself
-(「调研的平台必须包括腾讯」「别忘了知乎」「记得把芒果TV也查上」). Set it to
-that REQUIRED thing copied from their words ("腾讯", "芒果TV"): the host then
-checks the live roster, and when a branch already covers it answers
-「那路正在跑着，不重复」 instead of dispatching it twice — a sharp human
-pointing out that the thing is already being worked on, not relaying the
-order a second time. NOT this: steering an already-running branch's
-direction (「优酷那路重点查剧场版」 — the branch exists and this changes HOW
-it works, not what the set includes), removing ("cancels_part" owns that),
-or any message that does not hinge on a thing being present in the result.
-Omit it for every other message — a bare true with no thing named gives the
-host nothing to check.
+"covered_branch": the "make sure X is covered" remark — the user confirms or
+extends the SET of things the work must include (「调研的平台必须包括腾讯」
+「别忘了知乎」「记得把芒果TV也查上」). Before answering, CHECK THE ROSTER:
+the context may carry <live_branches> (branches still running) and
+<finished_branches> (branches already done, their results are in the
+汇总). When ONE branch there already covers the thing the user names — by
+its task snippet or role, including paraphrase (「优酷」 matches a branch
+researching 优酷动漫官方消息) — point at it: {"call_id": "<the id copied
+EXACTLY from the roster>"}. The host verifies the id and answers the user
+「那路正在跑着，不重复」 (or 「已跑完，在汇总里」) for you — a sharp human
+pointing out the thing is already being worked on, not relaying the order a
+second time. When NOTHING on the roster covers it, OMIT the field — the
+remark routes as usual and the missing thing gets added; say so in
+"receipt" (「目前还没在查优酷，这就补上」). Never guess or shorten an id: a
+wrong one tells the user the WRONG branch is already on it. NOT this:
+steering an already-running branch's direction (「优酷那路重点查剧场版」 —
+the branch exists and this changes HOW it works, not what the set
+includes), removing ("cancels_part" owns that), or any message that does
+not hinge on a thing being present in the result. "stop_branch" and
+"covered_branch" never fire together — one message stops a branch or
+confirms coverage, not both.
 
 "method_switch": include it as true ONLY with kind "goal-change", when the
 message switches HOW the work is done by pointing at a resource you already
@@ -620,7 +630,9 @@ When the message stops or cancels work that ONE of those branches is doing,
 set it to {"call_id": "<the id copied EXACTLY from the roster>"} — the host
 stops that branch for you the moment you name it. Copy the id verbatim, never
 invent or shorten one; name only ONE branch even when the wording is loose.
-When the roster is absent, or no live branch clearly matches what the message
+Only <live_branches> can be stopped — a branch in <finished_branches> has
+nothing left to stop (its result is already in the 汇总). When the roster is
+absent, or no live branch clearly matches what the message
 removes, OMIT the field entirely — a wrong id stops the wrong branch, an
 invented one stops nothing. Omitting it when you are genuinely unsure is the
 honest answer: the host folds the removal into the result instead of gambling.
@@ -715,19 +727,19 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; ensures_present?: unknown; ensuresPresent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
-    // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
-    // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; covered_branch?: unknown; coveredBranch?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
+    // 模型点名（stop_branch / covered_branch）：蛇形为主、驼峰兜底。id 非空
+    // 字符串才收——残缺对象宁可当没点名（宿主退回保守折入/照旧路由），绝不
+    // 拿半截 id 去停或去答「不重复」。
     const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
     const rawStopId = rawStop && typeof rawStop === 'object'
       ? (rawStop as { call_id?: unknown; callId?: unknown }).call_id ?? (rawStop as { callId?: unknown }).callId
       : undefined;
-    // 范围确认去重（刀 E）：值是要求在场的那件东西。非空字符串才收——模型
-    // 只回 true 没给对象名时宿主没有可靠匹配面，全句匹配会被「调研的平台」
-    // 这类泛词带偏（真机「researcher」误点名），宁可不赌去重、照旧转达。
-    const rawEnsures = parsedAny.ensures_present ?? parsedAny.ensuresPresent;
-    const ensuredPresent = typeof rawEnsures === 'string' && rawEnsures.trim()
-      ? rawEnsures.trim().slice(0, 80)
+    // 范围确认去重（刀 F）：裁决器点名已覆盖那支的确切 id，宿主只核实——
+    // 刀 E 的「抄对象名+宿主字面匹配」真机否决（漏报新字段/语义对应不上）。
+    const rawCovered = parsedAny.covered_branch ?? parsedAny.coveredBranch;
+    const coveredId = rawCovered && typeof rawCovered === 'object'
+      ? (rawCovered as { call_id?: unknown; callId?: unknown }).call_id ?? (rawCovered as { callId?: unknown }).callId
       : undefined;
     return {
       kind: parsed.kind as InsertionKind,
@@ -742,7 +754,7 @@ export async function classifyInsertion(
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
       ...(parsedAny.affects_current === true || parsedAny.affectsCurrent === true ? { affectsCurrent: true } : {}),
-      ...(ensuredPresent ? { ensuresPresent: ensuredPresent } : {}),
+      ...(typeof coveredId === 'string' && coveredId.trim() ? { coveredBranch: { callId: coveredId.trim() } } : {}),
       ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
       // 第 5 期「这个急」提级：只认严格 === true；缺省/非 true 都不带标记，
       // 宿主只按这一个读取点插队。

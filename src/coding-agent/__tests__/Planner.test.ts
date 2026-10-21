@@ -1059,9 +1059,9 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     // 硬要求：绝不能落 cancels_part——「这项不做了」丢掉要换的那半句。
     expect(prompt).toContain('"cancels_part" must stay OFF for it');
     expect(prompt).toContain('answering a resource reminder with "这项不做了"');
-    // JSON 样例与契约段落都在（刀 E 在 affects_current 与 method_switch 之间
-    // 插入 ensures_present，三字段连续性守卫随契约行演进）。
-    expect(prompt).toContain('"supplements_current":true,"affects_current":true,"ensures_present":"<the thing the user requires to be present>","method_switch":true');
+    // JSON 样例与契约段落都在（刀 F 契约行把 ensures_present 换成
+    // covered_branch 对象点名，affects_current 与 method_switch 恢复连续）。
+    expect(prompt).toContain('"supplements_current":true,"affects_current":true,"method_switch":true');
     expect(prompt).toContain('"method_switch": include it as true ONLY with kind "goal-change"');
     // 移除段的护栏：点名替换方案的句子不是移除；但顺带取消无关支的混合句
     // 照常报 cancels_part（评审 1b：绝对化会压住合法移除）。
@@ -1137,51 +1137,53 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(plain.affectsCurrent).toBeUndefined();
   });
 
-  it('teaches the judge the ensures-present coverage move, and parses ensures_present through (2026-10-21 刀 E)', () => {
-    // 真机判例：多路平台调研在飞，用户插「调研的平台必须包括腾讯」——腾讯
-    // 那路已在跑，该答「正在跑着，不重复」，实际却定向转达（收执「已直接转
-    // 给 researcher 那路」）。病根：覆盖去重只挂 task 臂，范围确认话判成
-    // steer 后没人查花名册。现在教裁决器认出这类话并抄下要求在场的对象，
-    // 宿主拿对象查花名册回终稿——判据归模型，执行归宿主。
+  it('teaches the judge the covered-branch roster check, and parses covered_branch through (2026-10-21 刀 F)', () => {
+    // 真机判例二连：多路平台调研在飞，插「调研的平台必须包括腾讯」（腾讯那
+    // 路在跑）/「调研必须包括优酷」——两次都回转达口径而不是 covered。刀 E
+    // 教裁决器抄对象名+宿主字面匹配被否决（漏报新字段/语义对应不上字面）；
+    // 刀 F 与 stop_branch 同构：裁决器拿花名册点已覆盖那支的 call_id，宿主
+    // 只核实。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    // 教学段与 JSON 契约行都在。
-    expect(prompt).toContain('"ensures_present": the "make sure X is covered" remark');
-    expect(prompt).toContain('copied from their words');
-    // 护栏：改在飞支的方向（steer）、移除（cancels_part）都不是范围确认；
-    // 只回 true 不给对象名=宿主没得查。
+    // 教学段：两块花名册都在点名面；id 照抄、绝不猜。
+    expect(prompt).toContain('"covered_branch": the "make sure X is covered" remark');
+    expect(prompt).toContain('<finished_branches>');
+    expect(prompt).toContain('the id copied\nEXACTLY from the roster');
+    // 护栏：改在飞支的方向（steer）、移除（cancels_part）不是范围确认；
+    // 与 stop_branch 互斥；名单没覆盖就留空并在 receipt 里说明补上。
     expect(prompt).toContain('「优酷那路重点查剧场版」');
     expect(prompt).toContain('"cancels_part" owns that');
-    expect(prompt).toContain('a bare true with no thing named');
+    expect(prompt).toContain('"stop_branch" and\n"covered_branch" never fire together');
+    expect(prompt).toContain('「目前还没在查优酷，这就补上」');
+    // stop_branch 段防混淆：已收工支无活可停。
+    expect(prompt).toContain('Only <live_branches> can be stopped');
   });
 
-  it('parses the ensures_present contract field through to the classification (2026-10-21 刀 E)', async () => {
+  it('parses the covered_branch contract field through to the classification (2026-10-21 刀 F)', async () => {
     const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"scope confirmation, the thing is already being worked on","confidence":0.9,"ensures_present":"腾讯"}'),
+      mockLlm('{"kind":"steer","reason":"scope confirmation, a branch already covers it","confidence":0.9,"covered_branch":{"call_id":"call_tencent"}}'),
       'context', '调研的平台必须包括腾讯',
     );
     expect(hit.kind).toBe('steer');
-    expect(hit.ensuresPresent).toBe('腾讯');
+    expect(hit.coveredBranch).toEqual({ callId: 'call_tencent' });
     // 驼峰兜底（模型两条路都可能回）。
     const camel = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"same","confidence":0.9,"ensuresPresent":"芒果TV"}'),
+      mockLlm('{"kind":"task","reason":"same","confidence":0.9,"coveredBranch":{"callId":"call_mgtv"}}'),
       'context', '记得把芒果TV也查上',
     );
-    expect(camel.ensuresPresent).toBe('芒果TV');
-    // 只回 true 没给对象名：宿主没有可靠匹配面（全句匹配会被泛词带偏），
-    // 宁可不赌去重照旧转达——绝不带值。
+    expect(camel.coveredBranch).toEqual({ callId: 'call_mgtv' });
+    // 名单没覆盖（裁决器留空/半截 id）：宿主没有可核实的支，照旧路由。
     const bare = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"scope confirmation","confidence":0.9,"ensures_present":true}'),
-      'context', '必须包括主流平台',
+      mockLlm('{"kind":"steer","reason":"nothing on the roster covers it yet","confidence":0.9}'),
+      'context', '调研必须包括优酷',
     );
-    expect(bare.ensuresPresent).toBeUndefined();
-    // 缺省不带——普通插话绝不触发去重臂。
-    const plain = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"a constraint for the next step","confidence":0.9}'),
-      'context', '记得跑测试',
+    expect(bare.coveredBranch).toBeUndefined();
+    const stub = await classifyInsertion(
+      mockLlm('{"kind":"steer","reason":"same","confidence":0.9,"covered_branch":{"call_id":"  "}}'),
+      'context', '同样的话',
     );
-    expect(plain.ensuresPresent).toBeUndefined();
+    expect(stub.coveredBranch).toBeUndefined();
   });
 
   it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {

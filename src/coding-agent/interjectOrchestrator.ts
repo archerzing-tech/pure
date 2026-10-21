@@ -223,6 +223,25 @@ export class InterjectOrchestrator {
     const insertionCtx = this.deps.insertionContext(images);
     const decision = await this.deps.decider.decide(this.deps.decideLlm(), insertionCtx, { text, images, displayText }, this.deps.decideSignal());
     this.deps.logDecision(decision, text);
+    // 判定遥测（2026-10-21 刀 F）：真机插话失败三连无法取证——logDecision
+    // 只进内存调试面，trace 在 WebView 里曾是静默 no-op。判定结果同拍落
+    // observations，事后可直接对质裁决器回了什么（kind/关键信号/收执）。
+    try {
+      appendTrace({
+        type: 'interject_decision',
+        snippet: text.slice(0, 80),
+        route: decision.kind,
+        reason: decision.reason,
+        kind: decision.kind,
+        via: decision.signals.via,
+        cancelsPart: decision.signals.cancelsPart,
+        affectsCurrent: decision.signals.affectsCurrent,
+        supplementsCurrent: decision.signals.supplementsCurrent,
+        coveredBranchCallId: decision.signals.coveredBranchCallId,
+        stopBranchCallId: decision.signals.stopBranchCallId,
+        receipt: typeof decision.signals.receipt === 'string' ? decision.signals.receipt.slice(0, 120) : undefined,
+      });
+    } catch { /* 遥测失败不碰主流程 */ }
     // 现场回应（2026-10-21 对话主导架构，用户拍板）：裁决器就是插话的对话
     // 枢纽——判的那一刻就在现场，回应用户与裁定路线是同一次判断的两面。除
     // chatter/question 外全 kind 必写（停/纠偏/改向也要先接住用户的话，不是
@@ -311,22 +330,24 @@ export class InterjectOrchestrator {
       if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
       return;
     }
-    // 范围确认去重（2026-10-21 对话主导架构刀 E，真机「调研的平台必须包括
-    // 腾讯」判例）：腾讯那路正在跑时，该答「正在跑着，不重复」——旧路里这
-    // 句话判成 steer 后直接定向转达（收执「已直接转给 X 那路」），没人查覆
-    // 盖花名册：去重检查过去只挂在 task 臂，范围确认话永远轮不到它。现在判
-    // 据归裁决器（契约字段 ensures_present 抄下要求在场的对象），执行归宿主
-    // （拿对象对花名册做区分性匹配、回终稿）——与 task 臂同一套纪律（只认
-    // 区分性命中，认不出=照旧路由，绝不拿"可能重复"吞用户的活；收执绕开裁
-    // 决器的 receipt——它写的是转达口径，与去重事实矛盾，task 臂同款绕开）。
+    // 范围确认去重（2026-10-21 对话主导架构刀 F，真机「调研必须包括优酷」
+    // 判例二连反转刀 E）：范围确认话（「必须包括X」）若花名册里已有一支在
+    // 做/做完了 X，该答「那路正在跑着，不重复」而不是再转达一遍。判据与点
+    // 名全归裁决器（covered_branch 契约字段——它分类时看得见 <live_branches>
+    // 与 <finished_branches>，与 stop_branch 点名同构）；宿主唯一做的是**核
+    // 实**：点名的 callId 真在覆盖面（在飞/已收工）里。刀 E 的「抄对象名+
+    // 宿主字面匹配」被真机否决（裁决器漏报新字段/字面对不上语义对应），刀
+    // F 起宿主零文本匹配——模型判断、宿主执行的原样复用。点错/已结算（race）
+    // = 核实不过，照旧路由，绝不拿错误的支回「不重复」；收执用宿主核实过的
+    // 事实终稿，绕开裁决器的 receipt（它写的是转达口径，与去重事实矛盾）。
     // 专门臂优先同刀 B：带取消/停支/续跑信号的话各有更精确的宿主动作。
-    const ensuredThing = typeof decision.signals.ensuresPresent === 'string'
-      ? decision.signals.ensuresPresent.trim()
+    const coveredCallId = typeof decision.signals.coveredBranchCallId === 'string'
+      ? decision.signals.coveredBranchCallId
       : '';
     if ((decision.kind === 'steer' || decision.kind === 'task')
-      && ensuredThing
+      && coveredCallId
       && !hasDedicatedSignal) {
-      const ensured = this.findCoveringBranch(ensuredThing);
+      const ensured = this.deps.coveringCandidates().find((item) => item.callId === coveredCallId);
       if (ensured) {
         const ensuredName = this.deps.branchLabel(ensured.name, ensured.callId);
         echoUserBubble();
@@ -336,7 +357,7 @@ export class InterjectOrchestrator {
           : `您说的这个正在「${ensuredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
         return;
       }
-      // 没命中 = 这件东西还没人在跑：要求照常兑现，落下去走正常路由。
+      // 核实不过（模型点错/那支刚结算）：要求照常兑现，落下去走正常路由。
     }
     switch (decision.kind) {
       case 'stop':

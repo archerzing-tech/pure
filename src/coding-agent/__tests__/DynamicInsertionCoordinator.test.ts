@@ -77,22 +77,22 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.via).toBe('judge');
   });
 
-  it('passes the ensures-present object through from the judge (2026-10-21 刀 E 覆盖去重)', async () => {
-    // 对话主导架构刀 E（真机「必须包括腾讯」判例）：裁决器认出范围确认话
-    // 并抄下要求在场的对象，信号随裁决走——编排器据此查覆盖花名册，已在
-    // 跑/已收工就回「那路正在跑着，不重复」，不再转达一遍。
+  it('passes the covered-branch id through from the judge (2026-10-21 刀 F 覆盖点名)', async () => {
+    // 对话主导架构刀 F（真机「必须包括优酷」判例二连反转刀 E）：裁决器拿花
+    // 名册点名已覆盖那支的确切 id，随信号走——编排器只核实 id 真实在跑/已
+    // 收工就回「那路正在跑着，不重复」，语义判断归模型、宿主零文本匹配。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ kind: 'steer', reason: 'scope confirmation, the thing is already covered', confidence: 0.9, ensuresPresent: '腾讯' }),
+      classify: async () => ({ kind: 'steer', reason: 'scope confirmation, a branch already covers it', confidence: 0.9, coveredBranch: { callId: 'call_youku' } }),
     });
-    const decision = await coordinator.decide(llm(), '正在并行调研各平台', { text: '调研的平台必须包括腾讯' });
+    const decision = await coordinator.decide(llm(), '正在并行调研各平台', { text: '调研必须包括优酷' });
     expect(decision.kind).toBe('steer');
-    expect(decision.signals.ensuresPresent).toBe('腾讯');
+    expect(decision.signals.coveredBranchCallId).toBe('call_youku');
     expect(decision.signals.via).toBe('judge');
-    // 裁决器没报 = 信号不出现，普通 steer 绝不触发去重臂。
+    // 裁决器没点名 = 信号不出现，普通 steer 绝不触发去重臂。
     const plain = await new DynamicInsertionCoordinator({
       classify: async () => ({ kind: 'steer', reason: 'a constraint for the next step', confidence: 0.9 }),
     }).decide(llm(), '正在并行调研各平台', { text: '记得跑测试' });
-    expect(plain.signals.ensuresPresent).toBeUndefined();
+    expect(plain.signals.coveredBranchCallId).toBeUndefined();
   });
 
   it('catches the words with the literal net only when the judge falls over (2026-09-28 用户定调)', async () => {

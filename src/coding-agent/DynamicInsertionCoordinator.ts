@@ -236,10 +236,10 @@ export class DynamicInsertionCoordinator {
         ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
         // 止损失效重想（2026-10-21 刀 B）：随信号走，编排器据此停流重入。
         ...(result.affectsCurrent ? { affectsCurrent: true } : {}),
-        // 范围确认去重（2026-10-21 刀 E）：裁决器认出「要求某对象必须在产出
-        // 范围内」的话并抄下对象名，随信号走——编排器据此查覆盖花名册，已在
-        // 跑/已收工就回「那路正在跑着，不重复」，不再转达一遍。
-        ...(result.ensuresPresent ? { ensuresPresent: result.ensuresPresent } : {}),
+        // 范围确认去重（2026-10-21 刀 F）：裁决器拿花名册点名已覆盖那支的
+        // 确切 id，随信号走——编排器只核实 id 真实在跑/已收工就回「那路正在
+        // 跑着，不重复」，语义判断全程归模型，宿主零文本匹配。
+        ...(result.coveredBranch ? { coveredBranchCallId: result.coveredBranch.callId } : {}),
         ...(result.methodSwitch ? { methodSwitch: true } : {}),
         // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
         // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。

@@ -9,6 +9,7 @@
 export type TraceEventType =
   | 'interject'
   | 'interject_block'
+  | 'interject_decision'
   | 'cancel_before_dispatch'
   | 'route_decided'
   | 'delegate'
@@ -32,8 +33,25 @@ function inNodeRuntime(): boolean {
 
 export function appendTrace(event: Omit<TraceEvent, 'ts'>): void {
   try {
-    if (!inNodeRuntime()) return; // 浏览器 bundle：无盘可落，静默放弃
+    if (!inNodeRuntime()) {
+      // WebView 无 node:fs：走 Tauri append_observation（opaque JSON 进
+      // ~/.pure/observations/，Rust 侧不耦合 schema）。真机插话失败三次取
+      // 证全断链的根因就是这里的静默 no-op（2026-10-21 刀 F 补通道）。
+      void writeTraceViaTauri(event);
+      return;
+    }
     void writeTrace(event);
+  } catch {
+    // 静默：不影响主流程
+  }
+}
+
+async function writeTraceViaTauri(event: Omit<TraceEvent, 'ts'>): Promise<void> {
+  try {
+    const { isTauriRuntime, tauriInvoke } = await import('../shared/tauri');
+    if (!isTauriRuntime()) return;
+    const rec: TraceEvent = { ts: Date.now(), ...event } as TraceEvent;
+    tauriInvoke('append_observation', { recordJson: JSON.stringify(rec) }).catch(() => { });
   } catch {
     // 静默：不影响主流程
   }
