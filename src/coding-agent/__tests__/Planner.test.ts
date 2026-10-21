@@ -865,7 +865,9 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
   it('teaches the judge to write a context-aware receipt, not a canned one (2026-10-15 用户定调)', () => {
     // 用户定调：插话收执不许是放之四海皆准的固定话术，要结合上下文说明会怎
     // 么做（判例：多平台调研在飞，插话加两个平台 → 收执点名平台、说清手头
-    // 不停、说清接下来新派两路一起汇总）。教导锁在提示词的 receipt 段。
+    // 不停、说清接下来新派两路一起汇总）。2026-10-21 对话主导架构：回应升格
+    // 为全 kind 必写（chatter/question 除外）——停/纠偏/改向也要先接住用户
+    // 的话，宿主机械播报降为机械失败兜底。教导锁在提示词的 receipt 段。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     expect(promptStart).toBeGreaterThan(-1);
@@ -873,7 +875,9 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(start).toBeGreaterThan(-1);
     const doc = src.slice(start, src.indexOf('when reality differs', start));
     expect(doc).toContain('canned formula');
-    expect(doc).toContain('the host announces');
+    expect(doc).toContain('EVERY kind except "chatter"');
+    expect(doc).toMatch(/must be about\s+THEIR words/);
+    expect(doc).toMatch(/Open by receiving\s+their words/);
     expect(doc).toContain('what you understood');
     expect(doc).toContain('what you will do next');
     expect(doc).toContain('芒果TV和爱奇艺');

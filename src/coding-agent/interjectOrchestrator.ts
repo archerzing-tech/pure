@@ -223,10 +223,10 @@ export class InterjectOrchestrator {
     const insertionCtx = this.deps.insertionContext(images);
     const decision = await this.deps.decider.decide(this.deps.decideLlm(), insertionCtx, { text, images, displayText }, this.deps.decideSignal());
     this.deps.logDecision(decision, text);
-    // 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
-    // 做」）：裁决器判的那一刻就在现场，由它顺手写好给用户看的那两句。只在
-    // 路线与收执语义一致的臂（steer / 折入）采用；规则与安全网路径没有裁决
-    // 器在场，天然没有它——固定口径仍是兜底，不再是无条件的唯一话术。
+    // 现场回应（2026-10-21 对话主导架构，用户拍板）：裁决器就是插话的对话
+    // 枢纽——判的那一刻就在现场，回应用户与裁定路线是同一次判断的两面。除
+    // chatter/question 外全 kind 必写（停/纠偏/改向也要先接住用户的话，不是
+    // 机械播报）；规则与安全网路径没有裁决器在场，固定口径降为机械失败兜底。
     const receipt = typeof decision.signals.receipt === 'string' && decision.signals.receipt.trim()
       ? decision.signals.receipt
       : undefined;
@@ -292,7 +292,7 @@ export class InterjectOrchestrator {
         // ——补上回显，别让转写里只剩 pure 的一句话（插话没有回执时 transcript
         // 必须仍能对上「谁说了什么」）。
         echoUserBubble();
-        this.deps.settleAck(ack, '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
+        this.deps.settleAck(ack, receipt ?? '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
         this.deps.abort();
         return;
       case 'goal-change': {
@@ -306,10 +306,10 @@ export class InterjectOrchestrator {
         if (decision.signals.methodSwitch === true) {
           this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
           if (this.deps.hasDelegationInFlight()) {
-            this.deps.settleAck(ack, '收到——手头的活先暂停存档，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
+            this.deps.settleAck(ack, receipt ?? '收到——手头的活先暂停存档，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
             this.deps.abort(PAUSE_ABORT_REASON);
           } else {
-            this.deps.settleAck(ack, '收到——正在做的先停在这里，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
+            this.deps.settleAck(ack, receipt ?? '收到——正在做的先停在这里，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
             this.deps.abort();
           }
           // 与下方同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
@@ -319,7 +319,7 @@ export class InterjectOrchestrator {
         // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
         // 先回显再重入 = 同一句话上两遍。
         this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-        this.deps.settleAck(ack, '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
+        this.deps.settleAck(ack, receipt ?? '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
         this.deps.abort();
         // Same late-classification hazard as queueInterjectTask: if the turn
         // already finished while we were judging, no finalize will dispatch
@@ -343,10 +343,10 @@ export class InterjectOrchestrator {
         //   收尾的回合是 no-op，押账插话照常派发）。
         this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
         if (this.deps.hasDelegationInFlight()) {
-          this.deps.settleAck(ack, '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
+          this.deps.settleAck(ack, receipt ?? '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
           this.deps.abort(PAUSE_ABORT_REASON);
         } else {
-          this.deps.settleAck(ack, '前提变了——按纠正后的事实重新来；已完成的不丢。', true, 'info');
+          this.deps.settleAck(ack, receipt ?? '前提变了——按纠正后的事实重新来；已完成的不丢。', true, 'info');
           this.deps.abort();
         }
         // Same late-classification hazard as queueInterjectTask: if the turn

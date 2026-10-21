@@ -583,21 +583,26 @@ honest answer: the host folds the removal into the result instead of gambling.
 "receipt": the one or two sentences the user sees the moment their remark
 lands — YOU speaking to them, mid-work, the way a sharp colleague would. No
 canned formula, no template reply: a receipt that would fit any conversation
-is wrong for this one. Write it ONLY for kinds where the work KEEPS RUNNING
-and the remark changes what you will do — "steer", and "task" (including a
-"cancels_part" remark whose removal folds into the result); OMIT it for
-chatter, question, stop, premise-change and goal-change (the host announces
-those actions itself). Cover three things in your own words for THIS exact
-message: what you understood (name the actual things the user named — the
-platforms, the branch to drop, the constraint), what happens to the work
-already running (it carries on), and what you will do next (「结束后我会新
-派两路查询补上芒果TV和爱奇艺，再一起汇总输出」 / the constraint lands in
-the next step / the collection redone without that part). One or two short
-sentences, the user's language, plain prose — no markdown, no internal
-jargon (never 支/委派/分类/排队/上下文 — those are machine words). Honesty:
-describe what WILL happen; never claim something has already been dispatched
-or removed — the doing is the host's hand, and the host corrects the receipt
-when reality differs.`;
+is wrong for this one. Write it for EVERY kind except "chatter" and
+"question" (a reaction needs no reply, and a question gets its own answer
+instead) — including "stop", "premise-change" and "goal-change": the user
+just changed something, and the first thing they hear back must be about
+THEIR words, not a machine announcing an action. Cover three things in your
+own words for THIS exact message, in this order: what you understood (name
+the actual things the user named — the platforms, the branch to drop, the
+corrected fact, the new direction), what happens to the work already
+running (it carries on / it stops here with progress kept / it is redone
+from the corrected ground), and what you will do next (「结束后我会新派两
+路查询补上芒果TV和爱奇艺，再一起汇总输出」 / the constraint lands in the
+next step / the collection redone without that part). Open by receiving
+their words (「明白，优酷那路不要了」), never by announcing mechanics
+(「已收到您的指令」). One or two short sentences, the user's language,
+plain prose — no markdown, no internal jargon
+(never 支/委派/分类/排队/上下文 — those are machine words). Honesty:
+describe what WILL happen;
+never claim something has already been dispatched, stopped or removed —
+the doing is the host's hand, and the host corrects the receipt when
+reality differs.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
