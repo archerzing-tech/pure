@@ -471,6 +471,13 @@ export interface InsertionClassification {
    * supplements_current 的对应物（那个管思考窗，这个管执行流）；
    * cancels_part/resumes_part/stop_branch 在场时不生效（专门臂优先）。 */
   affectsCurrent?: boolean;
+  /** 范围确认去重（2026-10-21 对话主导架构刀 E，真机「调研的平台必须包括
+   *  腾讯」判例）：这句插话要求某件东西**必须出现在产出范围内**——那路已
+   *  在跑时该答「正在跑着，不重复」，而不是再转达一遍。字段值=用户要求在
+   *  场的那件东西（从原话里抄，如「腾讯」），宿主拿它对花名册做区分性匹配、
+   *  回终稿；判据归模型，执行归宿主。缺省/非空串才收（模型只回 true 没给
+   *  对象时宿主没有可靠匹配面，宁可不赌去重，照旧路由转达）。 */
+  ensuresPresent?: string;
   /** 「这个急」提级（第 5 期调度）：用户明确这件新活加急/该先办（"这个急"、
    *  "优先处理这个"、"加急"）时置真——宿主据此把队列里的这项插到队头并换
    *  提级收执。只对 task（排队）/steer 有意义；提级只改**队列次序**，不涉
@@ -505,7 +512,7 @@ The ways to take a remark (pick exactly one kind):
 One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"ensures_present":"<the thing the user requires to be present>","method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
 "confidence" is how sure you are of the kind and therefore of the action that
 follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
@@ -578,6 +585,20 @@ work (the current line is untouched), a corrected FACT ("premise-change"
 owns that), guidance for a LATER step, or anything landing while still
 THINKING ("supplements_current" already covers that phase). Omit it when
 the current output survives the remark unchanged.
+
+"ensures_present": the "make sure X is covered" remark — the user confirms or
+extends the SET of things the work must include, naming the thing itself
+(「调研的平台必须包括腾讯」「别忘了知乎」「记得把芒果TV也查上」). Set it to
+that REQUIRED thing copied from their words ("腾讯", "芒果TV"): the host then
+checks the live roster, and when a branch already covers it answers
+「那路正在跑着，不重复」 instead of dispatching it twice — a sharp human
+pointing out that the thing is already being worked on, not relaying the
+order a second time. NOT this: steering an already-running branch's
+direction (「优酷那路重点查剧场版」 — the branch exists and this changes HOW
+it works, not what the set includes), removing ("cancels_part" owns that),
+or any message that does not hinge on a thing being present in the result.
+Omit it for every other message — a bare true with no thing named gives the
+host nothing to check.
 
 "method_switch": include it as true ONLY with kind "goal-change", when the
 message switches HOW the work is done by pointing at a resource you already
@@ -694,12 +715,19 @@ export async function classifyInsertion(
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
+    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; ensures_present?: unknown; ensuresPresent?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
     // 模型点名（stop_branch）：蛇形为主、驼峰兜底。id 非空字符串才收——残缺
     // 对象宁可当没点名（宿主退回保守折入），绝不拿半截 id 去停。
     const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
     const rawStopId = rawStop && typeof rawStop === 'object'
       ? (rawStop as { call_id?: unknown; callId?: unknown }).call_id ?? (rawStop as { callId?: unknown }).callId
+      : undefined;
+    // 范围确认去重（刀 E）：值是要求在场的那件东西。非空字符串才收——模型
+    // 只回 true 没给对象名时宿主没有可靠匹配面，全句匹配会被「调研的平台」
+    // 这类泛词带偏（真机「researcher」误点名），宁可不赌去重、照旧转达。
+    const rawEnsures = parsedAny.ensures_present ?? parsedAny.ensuresPresent;
+    const ensuredPresent = typeof rawEnsures === 'string' && rawEnsures.trim()
+      ? rawEnsures.trim().slice(0, 80)
       : undefined;
     return {
       kind: parsed.kind as InsertionKind,
@@ -714,6 +742,7 @@ export async function classifyInsertion(
       ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
       ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
       ...(parsedAny.affects_current === true || parsedAny.affectsCurrent === true ? { affectsCurrent: true } : {}),
+      ...(ensuredPresent ? { ensuresPresent: ensuredPresent } : {}),
       ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
       // 第 5 期「这个急」提级：只认严格 === true；缺省/非 true 都不带标记，
       // 宿主只按这一个读取点插队。

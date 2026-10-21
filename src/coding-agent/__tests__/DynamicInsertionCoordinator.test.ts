@@ -77,6 +77,24 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.via).toBe('judge');
   });
 
+  it('passes the ensures-present object through from the judge (2026-10-21 刀 E 覆盖去重)', async () => {
+    // 对话主导架构刀 E（真机「必须包括腾讯」判例）：裁决器认出范围确认话
+    // 并抄下要求在场的对象，信号随裁决走——编排器据此查覆盖花名册，已在
+    // 跑/已收工就回「那路正在跑着，不重复」，不再转达一遍。
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'scope confirmation, the thing is already covered', confidence: 0.9, ensuresPresent: '腾讯' }),
+    });
+    const decision = await coordinator.decide(llm(), '正在并行调研各平台', { text: '调研的平台必须包括腾讯' });
+    expect(decision.kind).toBe('steer');
+    expect(decision.signals.ensuresPresent).toBe('腾讯');
+    expect(decision.signals.via).toBe('judge');
+    // 裁决器没报 = 信号不出现，普通 steer 绝不触发去重臂。
+    const plain = await new DynamicInsertionCoordinator({
+      classify: async () => ({ kind: 'steer', reason: 'a constraint for the next step', confidence: 0.9 }),
+    }).decide(llm(), '正在并行调研各平台', { text: '记得跑测试' });
+    expect(plain.signals.ensuresPresent).toBeUndefined();
+  });
+
   it('catches the words with the literal net only when the judge falls over (2026-09-28 用户定调)', async () => {
     // 裁决器倒下的两个形状：内部 fallback（超时/网络/解析失败，以
     // fallbackUsed 上报）和根本没有 llm。netVerdict 按字面族挑一个**不丢

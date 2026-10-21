@@ -311,6 +311,33 @@ export class InterjectOrchestrator {
       if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
       return;
     }
+    // 范围确认去重（2026-10-21 对话主导架构刀 E，真机「调研的平台必须包括
+    // 腾讯」判例）：腾讯那路正在跑时，该答「正在跑着，不重复」——旧路里这
+    // 句话判成 steer 后直接定向转达（收执「已直接转给 X 那路」），没人查覆
+    // 盖花名册：去重检查过去只挂在 task 臂，范围确认话永远轮不到它。现在判
+    // 据归裁决器（契约字段 ensures_present 抄下要求在场的对象），执行归宿主
+    // （拿对象对花名册做区分性匹配、回终稿）——与 task 臂同一套纪律（只认
+    // 区分性命中，认不出=照旧路由，绝不拿"可能重复"吞用户的活；收执绕开裁
+    // 决器的 receipt——它写的是转达口径，与去重事实矛盾，task 臂同款绕开）。
+    // 专门臂优先同刀 B：带取消/停支/续跑信号的话各有更精确的宿主动作。
+    const ensuredThing = typeof decision.signals.ensuresPresent === 'string'
+      ? decision.signals.ensuresPresent.trim()
+      : '';
+    if ((decision.kind === 'steer' || decision.kind === 'task')
+      && ensuredThing
+      && !hasDedicatedSignal) {
+      const ensured = this.findCoveringBranch(ensuredThing);
+      if (ensured) {
+        const ensuredName = this.deps.branchLabel(ensured.name, ensured.callId);
+        echoUserBubble();
+        // 去重回执是终稿（没有后续在途）——转普通气泡，与 task 臂同一口径。
+        this.deps.settleAck(ack, ensured.status === 'done'
+          ? `这个刚才已经跑完了——「${ensuredName}」那路的结果就在汇总里，不重复派。`
+          : `您说的这个正在「${ensuredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
+        return;
+      }
+      // 没命中 = 这件东西还没人在跑：要求照常兑现，落下去走正常路由。
+    }
     switch (decision.kind) {
       case 'stop':
         // 这条可能来自正则快路径（"停止""停下"——字面命令）也可能来自裁决
