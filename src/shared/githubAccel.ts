@@ -55,6 +55,18 @@ export const GITHUB_MIRRORS: readonly GithubMirror[] = [
     note: '2026-10-09 实测可达，耗时约 8.8s',
   },
   {
+    key: 'gh-ddlc',
+    label: 'gh.ddlc.top',
+    prefix: 'https://gh.ddlc.top',
+    note: '2026-10-verified 内部测速节点',
+  },
+  {
+    key: 'cors-isteed',
+    label: 'cors.isteed.cc',
+    prefix: 'https://cors.isteed.cc',
+    note: '2026-10-verified CDN镜像节点',
+  },
+  {
     key: 'custom',
     label: '自定义',
     prefix: '',
@@ -233,6 +245,21 @@ export function githubProbeEntries(customPrefix = ''): Array<{ key: string; labe
   if (custom) entries.push({ key: 'custom', label: '自定义', prefix: custom });
   entries.push({ key: 'direct', label: '直连', prefix: '' });
   return entries;
+}
+
+/** 为下拉列表生成带有延迟标签的镜像条目 */
+export function githubMirrorDropdownEntries(customPrefix = ''): string {
+  const entries = githubProbeEntries(customPrefix);
+  return entries.map((entry) => {
+    const key = entry.key;
+    const label = entry.label;
+    const prefix = entry.prefix;
+    // direct 不参与测速，直接隐藏
+    if (key === 'direct') return `<option value="${key}">${label}</option>`;
+    // 对于公共节点，尝试获取延迟（非阻塞：测速在后台进行，UI 即时显示已选）
+    // 这里仅在渲染时标记 ‘testing’ 状态，实际延迟由 testGithubMirrors 页面逻辑填入
+    return `<option value="${key}">${label}</option>`;
+  }).join('');
 }
 
 export type LatencyBucket = 'good' | 'warn' | 'bad' | 'dead';

@@ -34,12 +34,12 @@ describe('设置页 · GitHub 加速', () => {
     expect(src).toContain(": 'direct',");
     // 关掉再打开要恢复上次的节点，而不是回到空白。
     expect(src).toContain('if (current !== \'direct\') select.value = current;');
-    expect(src).toContain('else if (!select.value) select.value = keys[0]?.key');
+    expect(src).toContain('else if (!select.value) select.value = entries[0]?.key');
   });
 
   it('节点下拉与测速都从共享注册表来，UI 不另写一份地址清单', () => {
     const src = read('../settings.ts');
-    expect(src).toContain('GITHUB_MIRRORS.filter((m) => m.key !== \'direct\')');
+    expect(src).toContain('githubMirrorDropdownEntries');
     expect(src).toContain('githubProbeEntries(customPrefix)');
     expect(src).toContain("'github_mirror_probe'");
     expect(src).toContain('probeGithubMirrorLatency(entry.prefix)');

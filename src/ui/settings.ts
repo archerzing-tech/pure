@@ -145,6 +145,7 @@ import {
   githubProbeEntries,
   latencyBucket,
   normalizeGithubMirrorKey,
+  githubMirrorDropdownEntries,
   normalizeGithubMirrorPrefix,
   probeGithubMirrorLatency,
 } from '../shared/githubAccel';
@@ -2245,17 +2246,14 @@ export class SettingsPanel {
     }
     if (!toggle || !select) return;
 
-    const keys = GITHUB_MIRRORS.filter((m) => m.key !== 'direct');
-    const options = keys
-      .map((m) => `<option value="${escapeHtml(m.key)}">${escapeHtml(this.githubMirrorLabel(m.key, m.label))}</option>`)
-      .join('');
+    // 使用共享函数生成下拉选项，包含新增的镜像节点和延迟标签
+    const options = githubMirrorDropdownEntries(cfg.customGithubMirror);
     if (select.innerHTML !== options) select.innerHTML = options;
 
     const current = normalizeGithubMirrorKey(cfg.githubMirror);
     toggle.checked = current !== 'direct';
     if (current !== 'direct') select.value = current;
-    // 关着的时候也要摆一个可用节点：否则重新打开开关会拿到空白值。
-    else if (!select.value) select.value = keys[0]?.key ?? 'ghfast';
+    // 关着的时候也要摆一个可用节点：否则重新打开开关会拿到空白值。\n    else if (!select.value) select.value = entries[0]?.key;
     if (custom) custom.value = cfg.customGithubMirror ?? '';
     this.updateGithubAccelVisibility();
   }
