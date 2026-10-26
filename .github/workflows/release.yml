@@ -257,14 +257,24 @@ jobs:
           PURE_CLI_TARGET: bun-darwin-x64
         run: bun run cli:build && mv pure pure_x86_64
 
+      - name: Stage GUI artifacts (flat, updater asset names)
+        run: |
+          # upload-artifact 会保留多个源目录的公共祖先（bundle/）为子目录结构，
+          # publish 的 files: dist/* 只匹配一层——v3.3.13 的 dmg/app.tar.gz 就
+          # 这样静默漏传了。在这里摊平到单层，并按 updater 惯例改名
+          # （latest.json 的 darwin url 指向 pure_x64.app.tar.gz）。
+          mkdir -p gui-dist
+          BUNDLE=src-tauri/target/x86_64-apple-darwin/release/bundle
+          cp "$BUNDLE"/dmg/*.dmg gui-dist/
+          cp "$BUNDLE"/macos/pure.app.tar.gz gui-dist/pure_x64.app.tar.gz
+          cp "$BUNDLE"/macos/pure.app.tar.gz.sig gui-dist/pure_x64.app.tar.gz.sig
+          ls -la gui-dist/
+
       - name: Upload GUI artifacts (dmg + app.tar.gz updater artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: gui-macos
-          path: |
-            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          path: gui-dist/*
           if-no-files-found: error
 
       - name: Upload CLI artifact (macOS x86_64)
@@ -319,6 +329,13 @@ jobs:
           WIN_SIG="${WIN_SIG%x}"
           MAC_SIG="$(cat dist/pure_x64.app.tar.gz.sig; echo x)"
           MAC_SIG="${MAC_SIG%x}"
+          # 空签名绝不能出门：cat 扑空被上面的 '; echo x' 吞成空串时，latest.json
+          # 的 darwin 条目会带着空 signature 上线，updater 直接拒绝安装——v3.3.13
+          # 就差一点这样发布。缺签名是流水线断裂，fail fast。
+          if [ -z "$WIN_SIG" ] || [ -z "$MAC_SIG" ]; then
+            echo "::error::updater signature missing (win empty=${#WIN_SIG}, mac empty=${#MAC_SIG}) — artifact staging broke"
+            exit 1
+          fi
 
           jq -n \
             --arg version "$VERSION" \
