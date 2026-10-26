@@ -438,6 +438,29 @@
                     </div>
                   </div>
                 </div>
+                <h3 class="settings-section-title" data-i18n="ghAccel.title">GitHub 加速</h3>
+                <p class="settings-page-desc" data-i18n="ghAccel.desc">GitHub 的 release 资产与原始文件经由前缀代理下载；任一节点失败会自动落到下一个节点，最后回到直连。</p>
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="ghAccel.enabled">GitHub 加速</span><span class="setting-hint" data-i18n="ghAccel.enabled.hint">把 GitHub 原始 URL 拼到镜像域名后面下载；默认关闭，公共节点无 SLA、响应体可被替换</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-github-accel" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div id="gh-accel-detail" hidden>
+                    <div class="setting-row">
+                      <div class="setting-info"><span class="setting-label" data-i18n="ghAccel.mirror">加速节点</span><span class="setting-hint" data-i18n="ghAccel.mirror.hint">选中的节点优先，失败后按「其余节点 → 直连」回退</span></div>
+                      <select id="cfg-github-mirror" class="setting-select" aria-label="GitHub mirror"></select>
+                    </div>
+                    <div id="gh-accel-custom-row" class="setting-row gh-accel-custom-row hidden">
+                      <div class="setting-info"><span class="setting-label" data-i18n="ghAccel.custom">自定义地址</span><span class="setting-hint" data-i18n="ghAccel.custom.hint">自建代理的前缀，如 https://gh.example.com；填了它就不再回退到公共节点</span></div>
+                      <input id="cfg-github-mirror-custom" class="setting-input" type="text" placeholder="https://gh.example.com" autocomplete="off" />
+                    </div>
+                    <div class="setting-row">
+                      <div class="setting-info"><span class="setting-label" data-i18n="ghAccel.test">节点测速</span><span class="setting-hint" data-i18n="ghAccel.test.hint">并发探测一个固定的 GitHub release 资产；任何 HTTP 应答都算可达，只比延迟</span></div>
+                      <button id="cfg-github-mirror-test" class="setting-btn secondary" type="button" data-i18n="ghAccel.testBtn">测速</button>
+                    </div>
+                    <div id="gh-accel-latency" class="gh-accel-latency" hidden></div>
+                  </div>
+                </div>
                 <h3 class="settings-section-title" data-i18n="general.character">Character</h3>
                 <div class="settings-section">
                   <div class="setting-row">

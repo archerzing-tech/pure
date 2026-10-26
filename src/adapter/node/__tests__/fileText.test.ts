@@ -127,10 +127,13 @@ describe('NodeToolAdapter read/search over documents', () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  it('read_file returns a directory hint instead of a bare error', async () => {
+  it('read_file on a directory returns its listing instead of failing', async () => {
+    writeFileSync(join(workspace, 'dir-visible.txt'), 'x');
     const r = await adapter.execute(toolCall('read_file', { path: '.' }));
-    expect(r.success).toBe(false);
-    expect(r.error).toContain('目录');
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('是目录');
+    expect(String(r.result)).toContain('dir-visible.txt');
+    expect(String(r.result)).toContain('补全到文件名');
   });
 
   it('read_file decodes a GBK text file', async () => {

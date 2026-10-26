@@ -138,6 +138,16 @@ import {
   splitSkillMarkdown,
   type HubSkill,
 } from './skillHub';
+import {
+  GITHUB_MIRRORS,
+  GITHUB_MIRROR_PROBE_URL,
+  githubFallbackPrefixes,
+  githubProbeEntries,
+  latencyBucket,
+  normalizeGithubMirrorKey,
+  normalizeGithubMirrorPrefix,
+  probeGithubMirrorLatency,
+} from '../shared/githubAccel';
 import { listToolInventory } from './toolInventory';
 import { probeMcpServerTools, renderMcpPoisonRow, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
 import { loginMcpServer, logoutMcpServer, mcpLoginState, type McpLoginState, type McpOAuthStage } from './mcpOAuthFlow';
@@ -539,8 +549,10 @@ export class SettingsPanel {
       hubGroupedEl!.innerHTML = '';
       setHubStatus('');
       try {
-        const index = await fetchHubIndex(repo);
-        const cfg = loadConfig() ?? defaults();
+        const mirrorCfg = loadConfig() ?? defaults();
+        const mirrorPrefixes = githubFallbackPrefixes(mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
+        const index = await fetchHubIndex(repo, '', mirrorPrefixes);
+        const cfg = mirrorCfg;
         const installed = new Set((cfg.hubSkills ?? []).map(s => s.name));
         const groups = index.groupings.length > 0 ? index.groupings : [{
           title: t('hub.allSkills'),
@@ -586,7 +598,9 @@ export class SettingsPanel {
       btn.disabled = true;
       btn.textContent = t('hub.installing');
       try {
-        const raw = await fetchSkillBody(repo, skill);
+        const mirrorCfg = loadConfig() ?? defaults();
+        const mirrorPrefixes = githubFallbackPrefixes(mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
+        const raw = await fetchSkillBody(repo, skill, '', mirrorPrefixes);
         if (raw === null) {
           setHubStatus(t('hub.bodyFailed').replace('{s}', skill), true);
           return;
@@ -951,6 +965,24 @@ export class SettingsPanel {
     // it when the toggle is checked, hide it otherwise.
     document.getElementById('cfg-auto-continue')?.addEventListener('change', () => this.updateAutoContinueVisibility());
 
+    // ── GitHub 加速（设置 → 通用）──
+    // 开关状态不另存布尔字段：githubMirror !== 'direct' 就是「开」。关掉时
+    // select 仍留着上次选中的节点，重新打开即恢复——避免「关了再开丢选择」。
+    document.getElementById('cfg-github-accel')?.addEventListener('change', () => {
+      const select = document.getElementById('cfg-github-mirror') as HTMLSelectElement | null;
+      // select 的选项里没有 direct（那就是关闭态）；空值只可能是首帧，补第一个节点。
+      if (select && !select.value) select.value = GITHUB_MIRRORS.find((m) => m.key !== 'custom' && m.key !== 'direct')?.key ?? 'ghfast';
+      this.updateGithubAccelVisibility();
+      this.autoSave();
+    });
+    document.getElementById('cfg-github-mirror')?.addEventListener('change', () => {
+      this.updateGithubAccelVisibility();
+      this.autoSave();
+    });
+    document.getElementById('cfg-github-mirror-test')?.addEventListener('click', () => {
+      void this.testGithubMirrors();
+    });
+
     // Auto-save on all input/select/checkbox changes
     const autoSaveSelectors = [
       // LLM fields (api key / name / base URL / image gen / model editor) are
@@ -969,6 +1001,8 @@ export class SettingsPanel {
       '#cfg-streaming-render',
       '#cfg-auto-continue',
       '#cfg-auto-continue-rounds',
+      // GitHub 加速的自定义前缀（节点下拉自带 change 监听，上面的开关语义要一起更新可见性）。
+      '#cfg-github-mirror-custom',
       '#cfg-permission-mode', '#cfg-perm-read', '#cfg-perm-write', '#cfg-perm-cmd', '#cfg-perm-git',
       '.cfg-skill-toggle',
       // Map-tile cache cap (number input saves on change/blur).
@@ -2194,6 +2228,106 @@ export class SettingsPanel {
     });
   }
 
+  // ── GitHub 下载加速（设置 → 通用）──
+  //
+  // 「URL 前缀代理 + 多级回退」的唯一开关。开关不另存布尔字段：
+  // githubMirror !== 'direct' 就是开——两处状态永远不会互相矛盾。
+
+  /** 节点下拉按注册表现建（加/删节点只改 shared/githubAccel.ts）。 */
+  private renderGithubAccelForm(cfg: PureConfig): void {
+    const toggle = document.getElementById('cfg-github-accel') as HTMLInputElement | null;
+    const select = document.getElementById('cfg-github-mirror') as HTMLSelectElement | null;
+    const custom = document.getElementById('cfg-github-mirror-custom') as HTMLInputElement | null;
+    const latency = document.getElementById('gh-accel-latency');
+    if (latency) {
+      latency.hidden = true;
+      latency.innerHTML = '';
+    }
+    if (!toggle || !select) return;
+
+    const keys = GITHUB_MIRRORS.filter((m) => m.key !== 'direct');
+    const options = keys
+      .map((m) => `<option value="${escapeHtml(m.key)}">${escapeHtml(this.githubMirrorLabel(m.key, m.label))}</option>`)
+      .join('');
+    if (select.innerHTML !== options) select.innerHTML = options;
+
+    const current = normalizeGithubMirrorKey(cfg.githubMirror);
+    toggle.checked = current !== 'direct';
+    if (current !== 'direct') select.value = current;
+    // 关着的时候也要摆一个可用节点：否则重新打开开关会拿到空白值。
+    else if (!select.value) select.value = keys[0]?.key ?? 'ghfast';
+    if (custom) custom.value = cfg.customGithubMirror ?? '';
+    this.updateGithubAccelVisibility();
+  }
+
+  private githubMirrorLabel(key: string, fallback: string): string {
+    if (key === 'custom') return t('ghAccel.mirror.custom');
+    if (key === 'direct') return t('ghAccel.mirror.direct');
+    return fallback;
+  }
+
+  private updateGithubAccelVisibility(): void {
+    const on = (document.getElementById('cfg-github-accel') as HTMLInputElement | null)?.checked ?? false;
+    const detail = document.getElementById('gh-accel-detail');
+    if (detail) detail.hidden = !on;
+    // 自定义地址只在选 custom 时出现——它是一个补充输入，不是常驻字段。
+    const mirror = (document.getElementById('cfg-github-mirror') as HTMLSelectElement | null)?.value ?? '';
+    document.getElementById('gh-accel-custom-row')?.classList.toggle('hidden', mirror !== 'custom');
+  }
+
+  /**
+   * 测速（参考实现的「测速」按钮）：所有节点 + 直连并发 HEAD 一个固定的
+   * release 资产。判定刻意宽松——任何 HTTP 应答都算可达，只有连不上/超时
+   * 才判死；目的只是告诉用户「此刻哪条路快」，不是鉴权验证。
+   */
+  private async testGithubMirrors(): Promise<void> {
+    const btn = document.getElementById('cfg-github-mirror-test') as HTMLButtonElement | null;
+    const box = document.getElementById('gh-accel-latency');
+    if (!btn || !box) return;
+    const selected = (document.getElementById('cfg-github-mirror') as HTMLSelectElement | null)?.value ?? '';
+    const customPrefix = (document.getElementById('cfg-github-mirror-custom') as HTMLInputElement | null)?.value ?? '';
+    if (selected === 'custom' && !normalizeGithubMirrorPrefix(customPrefix)) {
+      this.toast(t('ghAccel.customNeeded'));
+      return;
+    }
+    const entries = githubProbeEntries(customPrefix);
+    const previous = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = t('ghAccel.testing');
+    box.hidden = false;
+    box.innerHTML = '';
+    try {
+      let results: Array<{ ok: boolean; latencyMs: number; error?: string }>;
+      if (isTauriRuntime()) {
+        const core = await loadTauriCore();
+        if (!core) throw new Error('Tauri core unavailable');
+        const proxy = effectiveProxyUrl((loadConfig() ?? defaults()).proxy);
+        results = await core.invoke<Array<{ ok: boolean; latencyMs: number; error?: string }>>('github_mirror_probe', {
+          prefixes: entries.map((entry) => entry.prefix),
+          probeUrl: GITHUB_MIRROR_PROBE_URL,
+          proxyUrl: proxy || null,
+        });
+      } else {
+        results = await Promise.all(entries.map((entry) => probeGithubMirrorLatency(entry.prefix)));
+      }
+      box.innerHTML = entries.map((entry, i) => {
+        const result = results[i] ?? { ok: false, latencyMs: 0, error: 'no result' };
+        const tag = latencyBucket(result.latencyMs, result.ok);
+        const text = result.ok
+          ? t('ghAccel.ms').replace('{ms}', String(result.latencyMs))
+          : t('ghAccel.unreachable');
+        const title = result.error ? ` title="${escapeHtml(result.error)}"` : '';
+        return `<div class="gh-accel-latency-row"><span class="gh-accel-latency-name">${escapeHtml(this.githubMirrorLabel(entry.key, entry.label))}</span><span class="gh-accel-latency-tag ${tag}"${title}>${escapeHtml(text)}</span></div>`;
+      }).join('');
+    } catch (err) {
+      console.error('[pure] github mirror probe failed:', err);
+      box.innerHTML = `<div class="gh-accel-latency-row"><span class="gh-accel-latency-name">${escapeHtml(t('ghAccel.testFailed'))}</span></div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = previous || t('ghAccel.testBtn');
+    }
+  }
+
   // ── Theme ──
 
   private applyTheme(theme: string) {
@@ -2352,6 +2486,7 @@ export class SettingsPanel {
     const autoContinueRoundsEl = document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null;
     if (autoContinueRoundsEl) autoContinueRoundsEl.value = String(cfg.autoContinueMaxRounds ?? DEFAULT_AUTO_CONTINUE_MAX_ROUNDS);
     this.updateAutoContinueVisibility();
+    this.renderGithubAccelForm(cfg);
     const mapTileCacheMbEl = document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null;
     if (mapTileCacheMbEl) mapTileCacheMbEl.value = String(cfg.mapTileCacheMB ?? DEFAULT_MAP_TILE_CACHE_MB);
     const mapTianDiTuKeyEl = document.getElementById('cfg-map-tianditu-key') as HTMLInputElement | null;
@@ -4442,6 +4577,11 @@ export class SettingsPanel {
           enabled: (document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null)?.checked ?? false,
         })),
       }),
+      // GitHub 加速：开关就是「mirror !== direct」，自定义前缀只在 custom 时生效。
+      githubMirror: (document.getElementById('cfg-github-accel') as HTMLInputElement | null)?.checked
+        ? normalizeGithubMirrorKey((document.getElementById('cfg-github-mirror') as HTMLSelectElement | null)?.value)
+        : 'direct',
+      customGithubMirror: ((document.getElementById('cfg-github-mirror-custom') as HTMLInputElement | null)?.value ?? '').trim().slice(0, 300),
       skills,
       hubSkills,
       mcpServers: [...this.mcpServers],

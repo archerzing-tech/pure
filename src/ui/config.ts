@@ -12,6 +12,7 @@ import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
 import { normalizeProxyConfig } from '../shared/proxy';
+import { DEFAULT_GITHUB_MIRROR } from '../shared/githubAccel';
 import type { PhaseModelConfig } from '../shared/phaseModels';
 import { sanitizePhaseModelConfig } from '../shared/phaseModels';
 import { activeCharacterProfile } from '../character';
@@ -154,6 +155,16 @@ export interface PureConfig {
   mcpExcludedPrefixes: string[];
   /** Network proxy used by desktop LLM and agent requests. It is opt-in; an empty or invalid URL means direct connection. LLM and tool traffic have independent switches. */
   proxy: ProxyConfig;
+  /**
+   * GitHub 下载加速（Settings → General → GitHub 加速）：选中的前缀代理 key。
+   * 'direct' = 关闭；公共节点（ghfast / gh-proxy / ghproxy-net）或 'custom'。
+   * 只在 GitHub 公开下载面上生效（release 资产 / raw / codeload / objects），
+   * 一律附带「其余节点 → 直连」的回退链。默认 direct：第三方公益代理不该在
+   * 用户没显式打开时接管下载。
+   */
+  githubMirror: string;
+  /** 用户自建 / 自选的加速前缀；仅当 githubMirror === 'custom' 时使用。 */
+  customGithubMirror: string;
   /**
    * Bumped when a config migration changes field semantics. v2: toolBrowser
    * became a functional gate (was a decorative no-op defaulting to false);
@@ -338,6 +349,8 @@ export function defaults(): PureConfig {
     providerModelNames: {},
     providerOverrides: {},
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [] }),
+    githubMirror: DEFAULT_GITHUB_MIRROR,
+    customGithubMirror: '',
     streamingRender: true,
     taskMode: 'auto',
     autoContinue: true,

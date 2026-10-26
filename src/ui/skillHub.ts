@@ -20,6 +20,7 @@
 
 import { isTauriRuntime } from '../shared/tauri';
 import { sha256Hex } from '../shared/sha256';
+import { withGithubMirrorPrefix } from '../shared/githubAccel';
 
 /** AbortSignal.timeout needs Safari 16+ (macOS 13) in the WebView and is also
  *  the one suspect that explains the 2026-10-14 Windows CI failure of every
@@ -43,18 +44,32 @@ function abortSignal(ms: number): AbortSignal {
  *  `proxyUrl` comes from netRouteProxyPair at the call site when configured. */
 async function hubFetchText(url: string, timeoutMs = 10000, proxyUrl = ''): Promise<string | null> {
   if (isTauriRuntime()) {
+    // 桥接层缺失（预览环境 / 更老的后端 / 测试里的共享模块替身）时不能直接判死：
+    // 退回 WebView 的 fetch 至少还能拿到直连结果，而不是把 hub 整块判成不可达。
     try {
-      const core = await loadTauriCore();
-      if (!core) return null;
-      const text = await core.invoke<string>('fetch_url_text', {
-        url,
-        accept: null,
-        proxyUrl: proxyUrl || null,
-        timeoutSecs: Math.max(1, Math.ceil(timeoutMs / 1000)),
-      });
-      return text || null;
+      // 动态取桥接层：`loadTauriCore` 用命名 import 的话，测试里对
+      // shared/tauri 的进程级替身（只导出 isTauriRuntime / tauriInvoke）会让
+      // 整个模块在求值期 SyntaxError——本模块的所有 hub 调用都会跟着死掉。
+      const bridge = await import('../shared/tauri');
+      const loader = bridge.loadTauriCore;
+      if (typeof loader === 'function') {
+        const core = await loader();
+        if (core) {
+          const text = await core.invoke<string>('fetch_url_text', {
+            url,
+            accept: null,
+            proxyUrl: proxyUrl || null,
+            timeoutSecs: Math.max(1, Math.ceil(timeoutMs / 1000)),
+          });
+          // 非字符串 = 后端根本没处理这条命令（未知命令 / 共享模块替身）：
+          // 不能当成「站点不可达」，落到下面的 WebView fetch 再试一次。
+          if (typeof text === 'string') return text || null;
+        }
+      }
     } catch {
-      return null;
+      // Rust 通道失败（网络 / 老后端 / 测试环境里被钉死的运行时标记）：落到
+      // 下面的 WebView fetch 走反向路由再试一次。反向不认应用代理，所以它只是
+      // 「首选路挂了再换一条」的兑底，不是替代。
     }
   }
   try {
@@ -65,9 +80,6 @@ async function hubFetchText(url: string, timeoutMs = 10000, proxyUrl = ''): Prom
     return null;
   }
 }
-
-// Re-import loadTauriCore for the Tauri path above.
-import { loadTauriCore } from '../shared/tauri';
 
 export interface HubSkill {
   /** Skill id — the directory name (e.g. "web-design-guidelines"). */
@@ -125,6 +137,41 @@ export const SEARCH_HUB_REPOS = [
 
 export interface SkillSearchResult extends HubSkillSummary {
   source: string;
+}
+
+/**
+ * GitHub 加速档：镜像前缀优先，再回落到原有直连阶梯。
+ *
+ * 预算是全局的（12s），不是每个节点一份：加速只负责「更快」，不能把原本 10s
+ * 能直连成功的网络拖成 40s。预算耗尽就交给下面的原有阶梯——直连始终在链尾，
+ * 所以「所有镜像都挂了」只是退回今天的行为，不会变成失败。
+ */
+const MIRROR_LADDER_BUDGET_MS = 12_000;
+
+/** 镜像可能返回 200 + HTML 错误页：JSON 会 parse 失败自然被丢弃，技能正文必须
+ *  显式挡一下，否则一封错误页会被当成 SKILL.md 装进 ~/.pure/skills/。 */
+function looksLikeHtmlDocument(text: string): boolean {
+  const head = text.trimStart().slice(0, 200).toLowerCase();
+  return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<body');
+}
+
+async function fetchThroughMirrors(
+  urls: readonly string[],
+  mirrorPrefixes: readonly string[],
+  proxyUrl: string,
+): Promise<string | null> {
+  const prefixes = mirrorPrefixes.filter((p) => p);
+  if (prefixes.length === 0) return null;
+  const deadline = Date.now() + MIRROR_LADDER_BUDGET_MS;
+  for (const prefix of prefixes) {
+    for (const url of urls) {
+      const left = deadline - Date.now();
+      if (left <= 0) return null;
+      const text = await hubFetchText(withGithubMirrorPrefix(prefix, url), Math.min(left, 8000), proxyUrl);
+      if (text && text.trim()) return text;
+    }
+  }
+  return null;
 }
 
 /** Rewrite "owner/repo" or a bare repo name into a canonical GitHub repo
@@ -204,8 +251,22 @@ async function fetchSkillsDirListing(repo: string, proxyUrl = ''): Promise<HubSk
 /** Fetch the first reachable hub index and normalize it into HubIndex. In
  * Tauri runtime the fetch rides the proxy-aware Rust web_fetch (see
  * hubFetchText); browser/dev mode fetches directly. */
-export async function fetchHubIndex(repo: string, proxyUrl = ''): Promise<HubIndex> {
+export async function fetchHubIndex(
+  repo: string,
+  proxyUrl = '',
+  mirrorPrefixes: readonly string[] = [],
+): Promise<HubIndex> {
   const urls = hubIndexUrls(repo);
+  // 加速档最先跑（默认关闭时 mirrorPrefixes 为空，一次多余请求都不会发）。
+  const mirrored = await fetchThroughMirrors(urls, mirrorPrefixes, proxyUrl);
+  if (mirrored) {
+    try {
+      const index = normalizeIndex(JSON.parse(mirrored));
+      if (index) return index;
+    } catch {
+      // 镜像回了非 JSON（错误页/挡板页）：当作加速档没命中，继续直连阶梯。
+    }
+  }
   const errors: string[] = [];
   let anyReached = false;
   for (const url of urls) {
@@ -306,25 +367,14 @@ export function normalizeIndex(json: unknown): HubIndex | null {
  * is blocked; on any error it falls back to the direct candidates so an older
  * backend that predates the command still works. Browser/dev mode probes the
  * same candidates directly. */
-export async function fetchSkillBody(repo: string, skillName: string, proxyUrl = ''): Promise<string | null> {
+export async function fetchSkillBody(
+  repo: string,
+  skillName: string,
+  proxyUrl = '',
+  mirrorPrefixes: readonly string[] = [],
+): Promise<string | null> {
   const r = normalizeHubRepo(repo);
-  if (isTauriRuntime()) {
-    try {
-      const core = await loadTauriCore();
-      if (core) {
-        const res = await core.invoke<{ path: string; body: string; via: string }>('fetch_skill_markdown', {
-          repo: r,
-          skill: skillName,
-          proxyUrl: proxyUrl || null,
-        });
-        return res?.body || null;
-      }
-    } catch {
-      // Unknown command (old backend) or all ladder routes unreachable —
-      // retry via the direct candidates below.
-    }
-  }
-  const candidates = [
+  const rawUrls = [
     `https://raw.githubusercontent.com/${r}/HEAD/skills/${skillName}/SKILL.md`,
     `https://raw.githubusercontent.com/${r}/main/skills/${skillName}/SKILL.md`,
     `https://raw.githubusercontent.com/${r}/HEAD/${skillName}/SKILL.md`,
@@ -332,7 +382,31 @@ export async function fetchSkillBody(repo: string, skillName: string, proxyUrl =
     `https://raw.githubusercontent.com/${r}/HEAD/SKILL.md`,
     `https://raw.githubusercontent.com/${r}/main/SKILL.md`,
   ];
-  for (const url of candidates) {
+  // 加速档最先跑：同一份 raw 路径走镜像前缀（用户显式开启时才非空）。
+  const mirrored = await fetchThroughMirrors(rawUrls, mirrorPrefixes, proxyUrl);
+  if (mirrored && !looksLikeHtmlDocument(mirrored)) return mirrored;
+  if (isTauriRuntime()) {
+    try {
+      // 与 hubFetchText 同一个理由：命名 import 会在共享模块替身下炸掉整个模块。
+      const bridge = await import('../shared/tauri');
+      const loader = bridge.loadTauriCore;
+      if (typeof loader === 'function') {
+        const core = await loader();
+        if (core) {
+          const res = await core.invoke<{ path: string; body: string; via: string }>('fetch_skill_markdown', {
+            repo: r,
+            skill: skillName,
+            proxyUrl: proxyUrl || null,
+          });
+          return res?.body || null;
+        }
+      }
+    } catch {
+      // Unknown command (old backend) or all ladder routes unreachable —
+      // retry via the direct candidates below.
+    }
+  }
+  for (const url of rawUrls) {
     try {
       const resp = await fetch(url, { signal: abortSignal(10000) });
       if (resp.status === 404) continue;

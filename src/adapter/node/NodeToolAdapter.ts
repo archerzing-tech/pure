@@ -304,7 +304,10 @@ export class NodeToolAdapter implements ToolAdapter {
       return this.fail(null, start, `File not found: ${String(args.path)}`);
     }
     if (meta.isDirectory()) {
-      return this.fail(null, start, `read_file: '${String(args.path)}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。`);
+      // 目录不报错（2026-10-22）：模型经常只把 path 精确到目录层——过去
+      // 报「是目录，请用 list_files」等于整轮白跑 + 一次空转往返。这里
+      // 直接以 list_files 同款非递归格式给出目录内容，一次往返就能继续。
+      return this.readDirectoryListing(path, String(args.path), start);
     }
 
     if (meta.size > this.maxFileSize) {
@@ -359,6 +362,31 @@ export class NodeToolAdapter implements ToolAdapter {
       id: `tool_${Date.now()}`,
       toolName: 'read_file',
       result: text,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  /**
+   * read_file打到目录时的降级路径：给出目录一级内容（与 list_files 非递归
+   * 同款式：排序 + 截断上限 + 截断脚注）。返回 success=true——这不是错误，
+   * 是模型少跑一轮就能用上的信息。CLI(Node)与 GUI(Rust read_file_impl)
+   * 两侧语义必须一致，改哪边都同步另一边。
+   */
+  private readDirectoryListing(path: string, displayPath: string, start: number): ToolResult {
+    const DIR_LISTING_MAX = 2000;
+    const entries = readdirSync(path, { withFileTypes: true })
+      .map((entry) => entry.name)
+      .sort();
+    const truncated = entries.length > DIR_LISTING_MAX;
+    const items = entries.slice(0, DIR_LISTING_MAX);
+    const listing = items.length > 0 ? items.join('\n') : '(empty directory)';
+    const head = `[read_file：'${displayPath}' 是目录，以下为其内容${truncated ? `（前 ${DIR_LISTING_MAX} 项）` : ''}；读具体文件请在 path 补全到文件名。]`;
+    const footnote = truncated ? `\n\n[截断] 仅显示前 ${DIR_LISTING_MAX} 项；目录还有更多内容，请缩小 path 或使用 glob_files。` : '';
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'read_file',
+      result: `${head}\n\n${listing}${footnote}`,
       success: true,
       duration: Date.now() - start,
     };

@@ -16,6 +16,7 @@ import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
+import { githubDownloadAttempts, githubFallbackPrefixes } from '../shared/githubAccel';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
@@ -474,9 +475,12 @@ export class TauriToolAdapter implements ToolAdapter {
    * other — venv installs into the user home died with EPERM. Explicit
    * opt-in via the config flag only. */
   private readonly sandbox: boolean;
+  /** GitHub 加速（设置 → 通用）：选中节点 key + 自定义前缀；'direct' = 关闭。 */
+  private readonly githubMirror: string;
+  private readonly githubCustomMirror: string;
   private readonly mcpCandidates = new Map<string, McpCandidate>();
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false) {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false, githubMirror = '', githubCustomMirror = '') {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
@@ -488,6 +492,13 @@ export class TauriToolAdapter implements ToolAdapter {
     this.imageGen = imageGen;
     this.capabilityHooks = capabilityHooks;
     this.sandbox = sandbox;
+    this.githubMirror = githubMirror;
+    this.githubCustomMirror = githubCustomMirror;
+  }
+
+  /** GitHub 加速（设置 → 通用）的回退链；关闭 / 未配置时只有直连一级。 */
+  private githubAccelPrefixes(): string[] {
+    return githubFallbackPrefixes(this.githubMirror, this.githubCustomMirror);
   }
 
   private call(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -919,18 +930,37 @@ export class TauriToolAdapter implements ToolAdapter {
     signal: AbortSignal | undefined,
   ): Promise<ToolResult | null> {
     const originalUrl = String(args.url ?? '').trim();
-    const rw = primaryRewrite(originalUrl);
-    if (!rw || rw.url === originalUrl) return null;
-    const retried = await this.execute(
+    const retry = (url: string): Promise<ToolResult> => this.execute(
       {
         id: toolCall.id,
         index: toolCall.index,
-        function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: rw.url }) },
+        function: { name: 'download_file', arguments: JSON.stringify({ ...args, url }) },
       },
       signal,
     );
-    if (!retried.success) return null;
-    return this.withRewriteProvenance(retried, originalUrl, rw);
+
+    // ① 字节一致的官方/机构镜像（codeload / npmmirror …，sourceRewrite 的 t0/t1）。
+    const rw = primaryRewrite(originalUrl);
+    if (rw && rw.url !== originalUrl) {
+      const retried = await retry(rw.url);
+      if (retried.success) return this.withRewriteProvenance(retried, originalUrl, rw);
+    }
+
+    // ② GitHub 前缀代理（设置 → 通用 → GitHub 加速）：按「选中节点 → 其余
+    //    节点 → 直连」逐条重试。直连刚才已经失败过一次，这里跳过链尾的原
+    //    URL，避免对着同一条死路再打一遍。镜像地址的 host 不在 GitHub 名单里，
+    //    递归回去不会再次展开，所以链不会套娃。
+    for (const attempt of githubDownloadAttempts(originalUrl, this.githubMirror, this.githubCustomMirror)) {
+      if (!attempt.prefix || attempt.url === originalUrl) continue;
+      const retried = await retry(attempt.url);
+      if (retried.success) {
+        return this.withRewriteProvenance(retried, originalUrl, {
+          url: attempt.url,
+          rule: `github-mirror:${attempt.mirrorKey}`,
+        });
+      }
+    }
+    return null;
   }
 
   /** 把「实际来自镜像端点」标注进下载成功结果（结果是一段 JSON），不让一次
@@ -991,7 +1021,7 @@ export class TauriToolAdapter implements ToolAdapter {
           const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
           const raw = await this.runRouted(
             hubRoute,
-            (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl),
+            (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl, this.githubAccelPrefixes()),
             (text) => detectHijack(text, { url: 'https://raw.githubusercontent.com/', expectContent: true }).signal,
           );
           // Route learning: runRouted 已经按真实结局记过学习；这里额外把

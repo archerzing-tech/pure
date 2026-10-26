@@ -664,11 +664,14 @@ describe('Tauri egress routing', () => {
     // 只锁「代理传下去 + 反向兜底存在」这条契约；Hub 内部有 6 条候选 URL 的
     // 阶梯，不适合在这里断言调用次数。
     const src = readFileSync(new URL('../TauriToolAdapter.ts', import.meta.url), 'utf8');
-    const hubIdx = src.indexOf('fetchSkillBody(repo, nameArg, proxyUrl)');
+    const hubIdx = src.indexOf('fetchSkillBody(repo, nameArg, proxyUrl, this.githubAccelPrefixes())');
     expect(hubIdx).toBeGreaterThan(-1);
     const window = src.slice(Math.max(0, hubIdx - 400), hubIdx + 200);
     expect(window).toContain('this.runRouted(');
     expect(window).toContain("netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl)");
+    // GitHub 加速（设置 → 通用）也在这条路上：镜像回退链必须和代理路由一起
+    // 交下去，否则开了加速的安装仍然只走直连。
+    expect(src).toContain('githubFallbackPrefixes(this.githubMirror, this.githubCustomMirror)');
   });
 });
 
@@ -1139,6 +1142,47 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     expect(commands[3]).toContain('registry.npmmirror.com');
     const parsed = JSON.parse(String(result.result)) as { rewrite?: { from: string; to: string; rule: string } };
     expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
+  });
+
+  // GitHub 加速（设置 → 通用）：前缀代理链只在开关打开时生效。
+  const GH = 'https://github.com/o/r/releases/download/v1/a.zip';
+  function adapterWithGithubMirror(calls: ToolCall[], ok: (url: string) => boolean, mirror = 'ghfast', custom = ''): TauriToolAdapter {
+    const adapter = new TauriToolAdapter('/ws', '', '', '', async () => 'x', '', '', undefined, '', undefined, false, mirror, custom);
+    (adapter as unknown as Record<string, unknown>)['execute'] = async (call: ToolCall) => {
+      calls.push(call);
+      const url = JSON.parse(call.function.arguments).url as string;
+      return {
+        id: call.id,
+        toolName: 'download_file',
+        result: JSON.stringify({ kind: 'download', path: '/tmp/a.zip', size: 14, durationMs: 1, via: 'stub' }),
+        success: ok(url),
+        duration: 1,
+      };
+    };
+    return adapter;
+  }
+
+  it('开关关闭时 GitHub 地址没有任何镜像候选（不拿公共代理偷偷换路）', async () => {
+    const calls: ToolCall[] = [];
+    const adapter = adapterWithGithubMirror(calls, () => true, 'direct');
+    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: GH }, undefined);
+    expect(out).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('打开后按「选中节点 → 其余节点 → 直连」逐个重试，成功的那一跳记来源', async () => {
+    const calls: ToolCall[] = [];
+    // 前两个节点都失败，第三个（ghproxy.net）成功——回退链真的在走，而不是只试第一个。
+    const adapter = adapterWithGithubMirror(calls, (url) => url.startsWith('https://ghproxy.net/'), 'ghfast');
+    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: GH }, undefined);
+    const urls = calls.map((call) => JSON.parse(call.function.arguments).url as string);
+    expect(urls).toEqual([
+      `https://ghfast.top/${GH}`,
+      `https://gh-proxy.com/${GH}`,
+      `https://ghproxy.net/${GH}`,
+    ]);
+    const parsed = JSON.parse(String(out?.result)) as { rewrite?: { from: string; to: string; rule: string } };
+    expect(parsed.rewrite).toEqual({ from: GH, to: `https://ghproxy.net/${GH}`, rule: 'github-mirror:ghproxy-net' });
   });
 });
 

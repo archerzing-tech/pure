@@ -1380,7 +1380,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
 }
 
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = '', capabilityHooks?: DynamicCapabilityHooks): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true);
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true, config.githubMirror ?? 'direct', config.customGithubMirror ?? '');
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.

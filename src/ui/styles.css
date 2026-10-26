@@ -5865,6 +5865,60 @@ body.window-maximized #boot-splash {
   display: none;
 }
 
+/* ── GitHub 加速（设置 → 通用）──
+   详情区里的行自己带 16px 内缩，外层不能再吃一遍卡片对非行内容的 16px，
+   否则开关行与节点行会差出一截左边界。 */
+.settings-section > #gh-accel-detail {
+  padding-left: 0;
+  padding-right: 0;
+}
+/* setting-row 是 flex，原生 [hidden] 会被 display:flex 覆盖，用类收口。 */
+.setting-row.gh-accel-custom-row.hidden {
+  display: none;
+}
+.gh-accel-latency {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 16px 14px;
+}
+.gh-accel-latency[hidden] {
+  display: none;
+}
+.gh-accel-latency-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.gh-accel-latency-tag {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+}
+.gh-accel-latency-tag.good {
+  color: #2da44e;
+  background: rgba(45, 164, 78, 0.12);
+}
+.gh-accel-latency-tag.warn {
+  color: #bf8700;
+  background: rgba(191, 135, 0, 0.14);
+}
+.gh-accel-latency-tag.bad {
+  color: #cf222e;
+  background: rgba(207, 34, 46, 0.12);
+}
+.gh-accel-latency-tag.dead {
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+}
+
 /* ── Memory forgetting-speed fields（遗忘速度设置区）── */
 
 .memory-evo-input {

@@ -974,10 +974,39 @@ fn read_file_impl(
         format!("read_file: {}", e)
     })?;
     if meta.is_dir() {
-        return Err(format!(
-            "read_file: '{}' 是目录，不是文件——请用 list_files 查看目录内容，或补全到具体文件名。",
-            path
-        ));
+        // 目录不报错（2026-10-22）：模型经常只把 path 精确到目录层——过去
+        // 报「是目录，请用 list_files」等于整轮白跑 + 一次空转往返。这里
+        // 直接按 list_files_impl 非递归同款格式给出目录内容，一次往返就能
+        // 继续。与 NodeToolAdapter.readDirectoryListing 语义一致，改要同步。
+        let read_dir = fs::read_dir(&full).map_err(|e| format!("read_file: {}", e))?;
+        const DIR_LISTING_MAX: usize = 2000;
+        let mut items: Vec<String> = Vec::new();
+        let mut truncated = false;
+        for entry in read_dir {
+            if items.len() >= DIR_LISTING_MAX {
+                truncated = true;
+                break;
+            }
+            let entry = entry.map_err(|e| format!("read_file: {}", e))?;
+            items.push(entry.file_name().to_string_lossy().to_string());
+        }
+        items.sort();
+        let listing = if items.is_empty() {
+            "(empty directory)".to_string()
+        } else {
+            items.join("\n")
+        };
+        return Ok(if truncated {
+            format!(
+                "[read_file：'{}' 是目录，以下为其内容（前 {} 项）；读具体文件请在 path 补全到文件名。]\n\n{}\n\n[截断] 仅显示前 {} 项；目录还有更多内容，请缩小 path 或使用 glob_files。",
+                path, DIR_LISTING_MAX, listing, DIR_LISTING_MAX
+            )
+        } else {
+            format!(
+                "[read_file：'{}' 是目录，以下为其内容；读具体文件请在 path 补全到文件名。]\n\n{}",
+                path, listing
+            )
+        });
     }
     if meta.len() > MAX_READ_BYTES {
         return Err(format!(
@@ -1109,6 +1138,20 @@ mod read_file_slice_tests {
         assert!(out.contains("f2-aaa"));
         assert!(!out.contains("f3-aaa"));
         assert!(out.contains("以上是前 3 行，文件共 10 行。继续读用 startLine=4"));
+    }
+
+    #[test]
+    fn reading_a_directory_returns_listing_not_error() {
+        // 模型把 path 精确到目录层很常见：报错等于整轮白跑，直接抖出
+        // 目录一级内容（与 list_files_impl 非递归同款）让下一步可用。
+        let ws = write_fixture("dir", "irrelevant");
+        let subdir = std::path::Path::new(&ws).join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(subdir.join("b.txt"), "x").unwrap();
+        let out = read_file_impl(ws.clone(), "subdir".into(), None, None, None).unwrap();
+        assert!(out.contains("是目录"), "应自陈是目录：{}", out);
+        assert!(out.contains("b.txt"), "应列出文件条目：{}", out);
+        assert!(out.contains("补全到文件名"), "应给出下一步出路：{}", out);
     }
 }
 
@@ -15404,6 +15447,71 @@ async fn test_proxy(proxy_url: String, probe_urls: Vec<String>) -> Result<String
     Err(format!("all probes failed through the proxy: {}", failed.join(" | ")))
 }
 
+/// GitHub 加速节点测速（Settings → General → GitHub 加速 → 测速）。
+///
+/// 所有节点 + 直连并发 HEAD 同一个固定 release 资产。判据刻意宽松：拿到任何
+/// HTTP 应答（含 401/403/429/405）就算链路可达——测的是连通性与延迟，不是
+/// 鉴权；只有连接失败 / 超时才判不可达。本命令不下载也不校验资产字节：
+/// 「镜像活着但吐的内容不对」得由下载侧的内容校验回答，测速只回答哪条路通。
+#[derive(serde::Serialize)]
+struct GithubMirrorProbe {
+    prefix: String,
+    ok: bool,
+    status: Option<u16>,
+    latency_ms: u64,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn github_mirror_probe(
+    prefixes: Vec<String>,
+    probe_url: String,
+    proxy_url: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<GithubMirrorProbe>, String> {
+    let target = probe_url.trim().to_string();
+    if target.is_empty() {
+        return Err("github_mirror_probe: probe_url is empty".to_string());
+    }
+    let timeout =
+        std::time::Duration::from_millis(timeout_ms.unwrap_or(8000).clamp(1000, 20_000));
+    let client = build_http_client(timeout, proxy_url.as_deref())?;
+    let probes = prefixes.into_iter().map(|prefix| {
+        let client = client.clone();
+        let target = target.clone();
+        async move {
+            let url = if prefix.is_empty() {
+                target.clone()
+            } else {
+                format!("{}/{}", prefix.trim_end_matches('/'), target)
+            };
+            let started = Instant::now();
+            match client
+                .head(&url)
+                .header("User-Agent", BROWSER_UA)
+                .send()
+                .await
+            {
+                Ok(resp) => GithubMirrorProbe {
+                    prefix,
+                    ok: true,
+                    status: Some(resp.status().as_u16()),
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    error: None,
+                },
+                Err(e) => GithubMirrorProbe {
+                    prefix,
+                    ok: false,
+                    status: None,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    error: Some(reqwest_error_detail(&e)),
+                },
+            }
+        }
+    });
+    Ok(futures_util::future::join_all(probes).await)
+}
+
 // ── System proxy detection (Settings → 网络代理 → 读取系统代理) ──
 // Reads the OS-level proxy (macOS scutil / Windows reg) or the standard proxy
 // environment variables, then maps the result onto the settings form's
@@ -17724,6 +17832,7 @@ pub fn run() {
             fetch_url_text,
             test_llm_connection,
             test_proxy,
+            github_mirror_probe,
             detect_system_proxy,
             // Web tools
             web_search,
