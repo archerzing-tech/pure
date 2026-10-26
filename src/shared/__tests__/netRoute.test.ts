@@ -2,7 +2,9 @@
 // 路由契约的两层语义：分类面只回答「谁是首选」，通用契约回答「有没有兜底」——
 // 配了代理的远程主机一律有反向兜底，环回/内网一律没有。学习记忆按 host 归一
 // （调用点传 URL 还是 host 都行）且带 30 分钟 TTL，过期回落分类。
-// 每个测试用一个不重复的 host —— 学习表是模块状态，同一文件内刻意跨用例存活。
+// 每个测试用一个不重复的 host；学习表在**单个用例内**刻意存活供断言，用例间
+// 由 beforeEach 清空——跨文件的下载类测试会写入 github.com 等真实 host 的记录，
+// 不清空会把这里的分类断言翻面（见 resetLearnedRoutes）。
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -16,6 +18,11 @@ beforeAll(async () => {
 
 beforeEach(() => {
   localStorage.removeItem('pure.netRoute.v1');
+  // 学习表是模块级单例：同文件其他用例刻意让它存活，但跨文件的下载类测试
+  // 会写入 github.com 等真实 host 的记录，把这里的分类断言翻面。每个用例
+  // 前清空内存记忆（文件头「跨用例存活」的语义由各用例自行构造，不依赖
+  // 前一个用例的残留）。
+  netRoute?.resetLearnedRoutes();
 });
 
 afterAll(() => GlobalRegistrator.unregister());

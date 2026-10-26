@@ -472,6 +472,14 @@ export function hostBlocked(url: string): boolean {
   return !!state && state.blockedUntil > Date.now();
 }
 
+/** 清空熔断计数与封锁（内存部分）。仅供测试隔离使用：下载类测试会真实累积
+ *  各 host 的失败计数，模块级单例跨用例残留会让 HOST_TRIP_THRESHOLD 提前触发，
+ *  把后续用例的 hostBlocked 即时拒绝误判成链路行为（2026-10-26 镜像优先测试
+ *  踩中，与 netRoute.resetLearnedRoutes 同款问题）。 */
+export function resetNetGuardForTests(): void {
+  hosts.clear();
+}
+
 export function recordNetFailure(url: string): { tripped: boolean; host: string | null } {
   const host = hostOf(url);
   if (!host) return { tripped: false, host: null };

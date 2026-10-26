@@ -22,6 +22,19 @@
 //
 // 节点清单只收本仓库 mirrorSources.ts 里核验过的几家（2026-10-09 实测），
 // 不抄别处「9 个节点」的表——死掉一半的清单比短清单更误导人。
+//
+// ── 优先级（2026-10-26 定稿）：同一份 GitHub 下载面上可能同时存在三套路由
+// 意愿，按「显式度」排成一条链，谁显式谁先手，任何一级网络类失败都落到下一级：
+//   1. 调用点显式镜像 —— download_file 的 url 已带已知镜像前缀（skill 教的
+//      路由 / 模型自选）。赢法是「不二次包裹」；它失败时解出原 URL 重新入链
+//      （unwrapGithubMirrorUrl + TauriToolAdapter.retryDownloadViaMirror）。
+//   2. 系统设置链 —— 设置 → 通用 → GitHub 加速（用户显式开关节点）。裸
+//      GitHub URL 时先行（mirror-first），链尾直连。
+//   3. 官方等价镜像（sourceRewrite t0/t1）与直连 —— 中立兜底。
+// 熔断例外：hostBlocked 即时失败发生在整条链之前——已判死的 host 不再探路，
+// 也不落优先级链（兜底交给模型层换 URL）。
+// switch_package_source 的 github 生态不在链内：它管 git/包管理的源选择
+// （codeload / raw 官方端点），与下载面前缀代理语义不同，互不接管。
 
 export interface GithubMirror {
   /** 稳定 key，存进配置（githubMirror）。 */
@@ -200,6 +213,39 @@ export interface GithubDownloadAttempt {
   prefix: string;
   mirrorKey: string;
   label: string;
+}
+
+export interface UnwrappedGithubMirror {
+  /** 前缀后面的原始 GitHub 下载面 URL。 */
+  original: string;
+  /** 被剥掉的镜像前缀。 */
+  prefix: string;
+  /** 前缀对应的节点 key（custom 前缀即 'custom'）。 */
+  mirrorKey: string;
+}
+
+/**
+ * 已带镜像前缀的 URL → 还原出原始下载面 URL。只认 GITHUB_MIRRORS 清单内的
+ * 前缀 + 用户自定义前缀：skill/模型给的显式镜像跳网络类失败后，靠它解出原
+ * URL 落回系统链（优先级第 1 级 → 第 2/3 级）。陌生前缀一律不解——把任意
+ * host 当镜像剥壳等于给劫持页洗白；尾巴也必须是 GitHub 下载面 URL。
+ */
+export function unwrapGithubMirrorUrl(rawUrl: unknown, customPrefix = ''): UnwrappedGithubMirror | null {
+  const raw = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!raw) return null;
+  const prefixes: Array<{ prefix: string; mirrorKey: string }> = GITHUB_MIRRORS
+    .filter((m) => m.prefix)
+    .map((m) => ({ prefix: m.prefix, mirrorKey: m.key }));
+  const custom = normalizeGithubMirrorPrefix(customPrefix);
+  if (custom) prefixes.push({ prefix: custom, mirrorKey: 'custom' });
+  for (const { prefix, mirrorKey } of prefixes) {
+    const base = prefix.replace(/\/+$/, '');
+    if (!raw.toLowerCase().startsWith(`${base.toLowerCase()}/`)) continue;
+    const original = raw.slice(base.length + 1);
+    if (!isGithubDownloadUrl(original)) return null;
+    return { original, prefix: base, mirrorKey };
+  }
+  return null;
 }
 
 function mirrorKeyForPrefix(prefix: string): string {

@@ -10,6 +10,7 @@ import {
   githubMirrorPrefix,
   githubProbeEntries,
   isGithubDownloadUrl,
+  unwrapGithubMirrorUrl,
   latencyBucket,
   normalizeGithubMirrorKey,
   normalizeGithubMirrorPrefix,
@@ -68,6 +69,26 @@ describe('GitHub 加速 · 节点与前缀', () => {
     expect(withGithubMirrorPrefix('https://ghfast.top/', prefixed)).toBe(prefixed);
     // 回退链不套娃。
     expect(githubDownloadAttempts(prefixed, 'ghfast')).toEqual([]);
+  });
+
+  it('解包：已知前缀（公共 + 自定义）还原原 URL，陌生前缀与尾巴非 GitHub 面一律不解', () => {
+    const raw = 'https://github.com/o/r/releases/download/v1/a.zip';
+    expect(unwrapGithubMirrorUrl(`https://ghfast.top/${raw}`)).toEqual({
+      original: raw,
+      prefix: 'https://ghfast.top',
+      mirrorKey: 'ghfast',
+    });
+    expect(unwrapGithubMirrorUrl(`https://mirror.example.com/gh/${raw}`, 'https://mirror.example.com/gh')).toEqual({
+      original: raw,
+      prefix: 'https://mirror.example.com/gh',
+      mirrorKey: 'custom',
+    });
+    // 陌生前缀不解——把任意 host 当镜像剥壳等于给劫持页洗白。
+    expect(unwrapGithubMirrorUrl(`https://evil.example/${raw}`)).toBeNull();
+    // 尾巴不是 GitHub 下载面也不解。
+    expect(unwrapGithubMirrorUrl('https://ghfast.top/https://example.com/a.zip')).toBeNull();
+    expect(unwrapGithubMirrorUrl(raw)).toBeNull();
+    expect(unwrapGithubMirrorUrl('')).toBeNull();
   });
 });
 

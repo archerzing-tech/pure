@@ -54,13 +54,16 @@ describe('设置页 · GitHub 加速', () => {
     expect(src).toContain('fetchSkillBody(repo, skill, \'\', mirrorPrefixes)');
   });
 
-  it('download_file 在原生路径失败后按镜像链重试，并标注实际来源', () => {
+  it('download_file 开了加速就镜像先行（直连退居链尾），并标注实际来源', () => {
     const src = read('../TauriToolAdapter.ts');
-    expect(src).toContain('githubDownloadAttempts(originalUrl, this.githubMirror, this.githubCustomMirror)');
+    expect(src).toContain('githubDownloadAttempts(url, this.githubMirror, this.githubCustomMirror)');
     expect(src).toContain('github-mirror:${attempt.mirrorKey}');
-    // 直连已失败过一次，链尾原 URL 不再重复打。
-    expect(src).toContain('if (!attempt.prefix || attempt.url === originalUrl) continue;');
-    // 递归回到同一个 URL 时必须停（镜像地址不在 GitHub 名单里 → 不再展开）。
+    // 链尾直连不在这里重复打——它就是后面的常规路径本身。
+    expect(src).toContain(".filter((attempt) => attempt.prefix !== '')");
+    // 递归回到镜像 URL 时必须停（镜像地址不在 GitHub 名单里 → 不再展开）。
+    expect(src).toContain('!isAlreadyMirrored(url, this.githubAccelPrefixes())');
+    // 镜像链全灭后，直连的失败兜底不再重打整条链。
+    expect(src).toContain('mirrorChainTried ? null : await this.retryDownloadViaMirror');
   });
 
   it('默认关闭，配置字段进模型', () => {

@@ -16,6 +16,8 @@ import {
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
 import { recordNetOutcome } from '../../shared/netRoute';
+import { beforeEach } from 'bun:test';
+import { resetNetGuardForTests } from '../../shared/netGuard';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -1065,9 +1067,18 @@ describe('GUI 侧 source:auto 测速（默认档不能跳过）', () => {
 });
 
 // ── S2 单请求改写：GUI 下载网络失败时换镜像端点 ───────────────────────────
-// 直接驱动私有编排 retryDownloadViaMirror（桩替 execute），验证「有镜像才换、
-// 换到哪、成功后标注来源」。镜像 URL 不在改写表内，真跑也只递归一层。
+// 官方等价改写兜底（retryDownloadViaMirror）用桩替 execute 直接驱动，验证
+// 「有镜像才换、换到哪、成功后标注来源」；GitHub 加速的先行链（mirror-first）
+// 则驱动真实 execute 走 buffered 兜底路，断言每一跳实际下发的命令。镜像 URL
+// 不在改写表内，真跑也只递归一层。
 describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
+  // 熔断计数（netGuard.hosts）是模块级单例：本组用例会真实累积各镜像 host 的
+  // 失败，跨用例残留会让 HOST_TRIP_THRESHOLD 提前触发、hostBlocked 即时拒绝
+  // 干扰后续断言。每组用例前清零（netRoute 的 resetLearnedRoutes 同款问题）。
+  beforeEach(() => {
+    resetNetGuardForTests();
+  });
+
   const NPM = 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz';
   const MIRROR = 'https://registry.npmmirror.com/left-pad/-/left-pad-1.3.0.tgz';
   type MirrorHost = {
@@ -1144,45 +1155,162 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     expect(parsed.rewrite).toEqual({ from: NPM, to: MIRROR, rule: 'npm-tarball-to-npmmirror' });
   });
 
-  // GitHub 加速（设置 → 通用）：前缀代理链只在开关打开时生效。
+  // GitHub 加速（设置 → 通用）：download_file 开了加速就镜像先行，直连退居链尾。
+  // tauriChannel 在测试环境为 null → 走 buffered 兜底路（execute_command），用
+  // invoke stub 断言每一跳实际下发的命令里是哪个 URL。
   const GH = 'https://github.com/o/r/releases/download/v1/a.zip';
-  function adapterWithGithubMirror(calls: ToolCall[], ok: (url: string) => boolean, mirror = 'ghfast', custom = ''): TauriToolAdapter {
-    const adapter = new TauriToolAdapter('/ws', '', '', '', async () => 'x', '', '', undefined, '', undefined, false, mirror, custom);
-    (adapter as unknown as Record<string, unknown>)['execute'] = async (call: ToolCall) => {
-      calls.push(call);
-      const url = JSON.parse(call.function.arguments).url as string;
-      return {
-        id: call.id,
-        toolName: 'download_file',
-        result: JSON.stringify({ kind: 'download', path: '/tmp/a.zip', size: 14, durationMs: 1, via: 'stub' }),
-        success: ok(url),
-        duration: 1,
-      };
+  function mirrorFirstAdapter(commands: string[], mirror: string, ok: (cmd: string) => boolean, custom = ''): TauriToolAdapter {
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command !== 'execute_command') return 'x';
+      const cmd = String(args?.command ?? '');
+      commands.push(cmd);
+      if (!ok(cmd)) return { exitCode: 6, stdout: '', stderr: 'curl: (6) Could not resolve host' };
+      return { exitCode: 0, stdout: JSON.stringify({ type: 'done', code: 0, path: '/tmp/a.zip', filename: 'a.zip', size: 14, via: 'curl' }), stderr: '' };
     };
-    return adapter;
+    return new TauriToolAdapter('/ws', '', '', '', invoke, '', '', undefined, '', undefined, false, mirror, custom);
   }
 
-  it('开关关闭时 GitHub 地址没有任何镜像候选（不拿公共代理偷偷换路）', async () => {
-    const calls: ToolCall[] = [];
-    const adapter = adapterWithGithubMirror(calls, () => true, 'direct');
-    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: GH }, undefined);
-    expect(out).toBeNull();
-    expect(calls).toHaveLength(0);
+  it('开加速：第一跳就是选中节点，成功即返回并标注来源', async () => {
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='https://ghfast.top/${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: { from: string; to: string; rule: string } };
+    expect(parsed.rewrite).toEqual({ from: GH, to: `https://ghfast.top/${GH}`, rule: 'github-mirror:ghfast' });
   });
 
-  it('打开后按「选中节点 → 其余节点 → 直连」逐个重试，成功的那一跳记来源', async () => {
-    const calls: ToolCall[] = [];
-    // 前两个节点都失败，第三个（ghproxy.net）成功——回退链真的在走，而不是只试第一个。
-    const adapter = adapterWithGithubMirror(calls, (url) => url.startsWith('https://ghproxy.net/'), 'ghfast');
-    const out = await (adapter as unknown as MirrorHost).retryDownloadViaMirror({ id: 't1', index: 0 }, { url: GH }, undefined);
-    const urls = calls.map((call) => JSON.parse(call.function.arguments).url as string);
-    expect(urls).toEqual([
-      `https://ghfast.top/${GH}`,
-      `https://gh-proxy.com/${GH}`,
-      `https://ghproxy.net/${GH}`,
-    ]);
-    const parsed = JSON.parse(String(out?.result)) as { rewrite?: { from: string; to: string; rule: string } };
-    expect(parsed.rewrite).toEqual({ from: GH, to: `https://ghproxy.net/${GH}`, rule: 'github-mirror:ghproxy-net' });
+  it('开加速：镜像链全灭后落到直连，镜像不重复第二遍', async () => {
+    const commands: string[] = [];
+    // 5 个公共节点全部失败，只有直连成功——恰好 5 镜像跳 + 1 直跳。
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', (cmd) =>
+      !['ghfast.top/', 'gh-proxy.com/', 'ghproxy.net/', 'gh.ddlc.top/', 'cors.isteed.cc/'].some((h) => cmd.includes(h)));
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(6);
+    expect(commands[0]).toContain(`https://ghfast.top/${GH}`);
+    expect(commands[5]).toContain(`url='${GH}'`);
+    // ghfast 失败过一次就不再重打（旧「失败后兜底」链已并入先行链）。
+    expect(commands.filter((cmd) => cmd.includes('ghfast.top/'))).toHaveLength(1);
+  });
+
+  it('关加速（direct）：没有任何镜像跳，第一跳就是原 URL', async () => {
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'direct', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
+    expect(parsed.rewrite).toBeUndefined();
+  });
+
+  it('非 GitHub 下载面的 URL 不吃镜像链（加速只管 GitHub 名单）', async () => {
+    const commands: string[] = [];
+    const NPM = 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz';
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: NPM }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='${NPM}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
+    expect(parsed.rewrite).toBeUndefined();
+  });
+
+  // ── 优先级（shared/githubAccel.ts 头部定稿）：调用点显式镜像 > 系统设置链 >
+  //    官方等价镜像/直连。显式镜像的赢法是不二次包裹，失败后解包落回下级。 ──
+
+  it('优先级 1：skill/模型给的显式镜像 URL 原样下载，系统加速不二次包裹', async () => {
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: `https://ghproxy.net/${GH}` }));
+    expect(out.success).toBe(true);
+    // 恰好一跳，且就是显式给的那个镜像地址——ghfast 没有插队。
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='https://ghproxy.net/${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
+    expect(parsed.rewrite).toBeUndefined();
+  });
+
+  it('优先级 1→2：显式镜像失败后解包，落到系统链（选中节点 → 其余 → 直连）', async () => {
+    const commands: string[] = [];
+    // 除直连外全部失败：显式 ghproxy.net 一跳 + 内层系统链四跳（ghproxy-net 自身
+    // 被去重排除，不对刚失败的死路再打一遍），最后直连接住。
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', (cmd) =>
+      !['ghfast.top/', 'gh-proxy.com/', 'ghproxy.net/', 'gh.ddlc.top/', 'cors.isteed.cc/'].some((h) => cmd.includes(h)));
+    const out = await adapter.execute(toolCall('download_file', { url: `https://ghproxy.net/${GH}` }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(6);
+    expect(commands[0]).toContain(`https://ghproxy.net/${GH}`);
+    // 内层第一跳是系统选中的 ghfast，链尾直连。
+    expect(commands[1]).toContain(`https://ghfast.top/${GH}`);
+    expect(commands[5]).toContain(`url='${GH}'`);
+    // 显式镜像只被打一次：去重真的生效。
+    expect(commands.filter((cmd) => cmd.includes('ghproxy.net/'))).toHaveLength(1);
+  });
+
+  it('优先级 1→3：加速关闭时显式镜像（自定义前缀）失败，解包后由直连接住', async () => {
+    const commands: string[] = [];
+    // 用自定义前缀当显式镜像：公共 host 在前面的用例里已累积熔断（netGuard
+    // 模块级状态），熔断的镜像被即时拒绝正是熔断器的本分，不该靠它测解包。
+    const adapter = mirrorFirstAdapter(commands, 'direct', (cmd) => cmd.includes(`url='${GH}'`), 'https://skill-mirror.example');
+    const out = await adapter.execute(toolCall('download_file', { url: `https://skill-mirror.example/${GH}` }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain(`https://skill-mirror.example/${GH}`);
+    expect(commands[1]).toContain(`url='${GH}'`);
+  });
+
+  it('陌生前缀不是镜像：失败后不解包（防洗白），按原样报错', async () => {
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', () => false);
+    const out = await adapter.execute(toolCall('download_file', { url: `https://evil.example/${GH}` }));
+    expect(out.success).toBe(false);
+    // 没有展开任何系统链跳：evil.example 不是已知镜像，原 URL 不会被派生重跑。
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('evil.example');
+  });
+
+  it('优先级 1→2 去重：显式镜像 == 系统选中节点时，内层链不再重打它', async () => {
+    const commands: string[] = [];
+    // 显式给的 ghfast 恰好也是系统选中的节点：失败解包后内层链必须跳过 ghfast，
+    // 从 gh-proxy 起步——否则就是对刚超时死掉的同一条死路再打一遍（8s 级）。
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', (cmd) =>
+      !['ghfast.top/', 'gh-proxy.com/', 'ghproxy.net/', 'gh.ddlc.top/', 'cors.isteed.cc/'].some((h) => cmd.includes(h)));
+    const out = await adapter.execute(toolCall('download_file', { url: `https://ghfast.top/${GH}` }));
+    expect(out.success).toBe(true);
+    // 显式 1 跳 + 内层 4 跳（gh-proxy → ghproxy-net → gh-ddlc → cors.isteed）+ 直连。
+    expect(commands).toHaveLength(6);
+    expect(commands[0]).toContain(`https://ghfast.top/${GH}`);
+    expect(commands[1]).toContain('gh-proxy.com/');
+    expect(commands.filter((cmd) => cmd.includes('ghfast.top/'))).toHaveLength(1);
+  });
+
+  it('加速关闭时官方等价改写不先行：raw URL 只打直连一跳', async () => {
+    const commands: string[] = [];
+    const RAW = 'https://raw.githubusercontent.com/o/r/main/data.bin';
+    const adapter = mirrorFirstAdapter(commands, 'direct', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: RAW }));
+    expect(out.success).toBe(true);
+    // 只有一跳且就是原 URL：jsDelivr（20MB 上限的第三方 CDN）不上移为第一跳。
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='${RAW}'`);
+    expect(commands[0]).not.toContain('jsdelivr');
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
+    expect(parsed.rewrite).toBeUndefined();
+  });
+
+  it('加速开启时官方等价改写升为链首：raw URL 第一跳就是 jsDelivr', async () => {
+    const commands: string[] = [];
+    const RAW = 'https://raw.githubusercontent.com/o/r/main/data.bin';
+    const adapter = mirrorFirstAdapter(commands, 'ghfast', (cmd) => cmd.includes('cdn.jsdelivr.net/'));
+    const out = await adapter.execute(toolCall('download_file', { url: RAW }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('cdn.jsdelivr.net/gh/o/r@main/data.bin');
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: { from: string; to: string; rule: string } };
+    expect(parsed.rewrite?.rule).toBe('github-mirror:raw-github-to-jsdelivr');
   });
 });
 

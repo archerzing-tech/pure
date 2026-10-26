@@ -248,6 +248,14 @@ interface RouteEntry {
 const learned = new Map<string, RouteEntry>();
 let loaded = false;
 
+/** 清空学习记忆（含未落盘部分）。仅供测试隔离使用：路由学习是模块级单例，
+ *  任何真实下载路径都会写入记录，跨文件跑测试时会把 resolveNetRoute 的
+ *  断言翻面（2026-10-26 download_file 镜像测试踩中）。 */
+export function resetLearnedRoutes(): void {
+  learned.clear();
+  loaded = false;
+}
+
 function ensureLoaded(): void {
   if (loaded) return;
   loaded = true;
