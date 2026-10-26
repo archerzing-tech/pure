@@ -202,3 +202,63 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --locked
+
+  # Rust release-cache warmer（windows + macos）。release.yml 的 tag run 对
+  # GitHub 缓存只能「读 main 作用域、写 tag 作用域」——写进去的缓存随 tag
+  # 作用域搁浅，永远读不到（本仓库缓存列表里 v3.3.8/v3.3.10 release run 存
+  # 的 bun-* 缓存正是这样搁浅的）。所以 release 侧只读不写，main 侧必须有人
+  # 把 --release 依赖图编译出来：本 job 与 release 构建同工具链、同
+  # shared-key、同 target 组合，每次 push main 把缓存焐热在 main 作用域，
+  # release 的 tauri 构建从 ~10min 冷编译降到几分钟。
+  #
+  # 代价：每次 main push 多两个平台的 cargo build（缓存命中后各几分钟）。
+  # 附带收益：windows/macos 的 Rust 编译破绽在 main 就暴露，不再拖到 tag 时。
+  # 上面的 rust job（ubuntu）仍是编译 + 测试门，不受影响。
+  #
+  # 只在 push 跑：PR 无缓存写权（只读 main 作用域），跑它纯属烧机器。
+  rust-warm:
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            targets: ''
+          - os: macos-latest
+            targets: 'x86_64-apple-darwin'
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # 同 release.yml：bundle.resources 的 ./AGENTS.md 相对 src-tauri/ 解析，
+      # 不拷贝则 tauri-build 的 build.rs 在编译阶段直接报 resource path。
+      - name: Stage AGENTS.md next to tauri.conf.json
+        run: cp AGENTS.md src-tauri/AGENTS.md
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      # shared-key + add-job-id-key 与 release.yml 两个 build job 严格一致：
+      # rust-cache 的键 = shared-key + rustc + Cargo.lock 哈希（去掉 job id），
+      # 两边才能算出同一个键。push 到 main，写进的就是 main 作用域。
+      - name: Cache Rust build (release graph)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: release-gui
+          add-job-id-key: 'false'
+
+      # 编译而不是 check：release 构建吃的是 codegen 产物（.rlib），check 只
+      # 产出元数据，暖不了 tag 时的 cargo build。与 release 相同的 target 组合。
+      - name: cargo build --release (release-graph warm-up)
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.targets }}" ]; then
+            cargo build --release --locked --target "${{ matrix.targets }}"
+          else
+            cargo build --release --locked
+          fi

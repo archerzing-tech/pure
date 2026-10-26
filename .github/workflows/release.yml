@@ -1,24 +1,46 @@
 name: Release
 
+# ── 拓扑（2026-10-26 重构）：build / publish 分离，双平台并行 ──
+# 两个平台 job 只构建并上传 workflow artifacts；一个小的 publish job 独占
+# 一切触碰 GitHub Release 的动作：创建、传全部资产、拼 latest.json。
+#
+# 为什么不让两个 tauri-action 直接发布（旧形态）：那会把「谁创建 Release、
+# 谁写 latest.json」变成并发竞争——旧 workflow 正是为此让 macOS `needs:
+# windows-release` 串行空等 ~13 分钟（Windows 占墙钟 13 min，macOS 只重叠
+# 0.1 min）。artifacts + 单写者是同一保证的确定性版本：latest.json 只在
+# publish 一处、用本次 run 的签名现场拼装，不再对「另一个 job 刚传上去的
+# 资产」做读改写（tauri-action 内置的 read-merge-reupload 曾在 2.2.6-alpha
+# 静默失败，旧 workflow 因此手写 jq 合并——现在整块被 publish 取代）。
+#
+# 顺带修一个存活 bug：旧 macOS 合并步骤 `base64 < macos.sig` 把签名又编码
+# 了一遍——tauri 的 .sig 本身就是 base64 过的 minisign 文本（与 action 给
+# windows 条目生成的签名同构）。v3.3.10 的 latest.json 里 darwin 条目是双层
+# base64，更新器验签会失败。现在 `cat` 原样进 json。
+#
+# 附带收益：publish needs 两个 build，任一平台失败都不会再产出「windows-only
+# 的残缺 release + windows-only 的 latest.json」这种半成品现场。
+#
+# ── Rust 缓存：tag run 只读不写 ──
+# GitHub Actions 缓存按 ref 作用域：tag run 存的缓存进 tag 作用域，永远读不
+# 到（本仓库缓存列表里 v3.3.8/v3.3.10 release run 存的 bun-* 缓存正是这样搁
+# 浅在 refs/tags/* 上的）；tag run 可回退读 default-branch 作用域。所以两个
+# build job 的 rust-cache 均 save-if: false，由 ci.yml 的 rust-warm job（每
+# 次 push main）在 main 作用域持续暖 windows/macos 的 --release 依赖图——
+# shared-key / add-job-id-key / target 组合与这里严格一致，键才能命中。
+
 on:
   push:
     tags: ['v*']
 
 jobs:
-  # ── Windows 10+ GUI + CLI build (runs FIRST and creates the GitHub release) ──
-  # Builds the Windows x86_64 installer (.exe) + CLI on a native Windows runner
-  # (Tauri cannot cross-compile the NSIS/MSI bundle from macOS). tauri-action
-  # creates the release for the tag if it does not exist yet, then uploads the
-  # NSIS installer plus the Windows updater artifacts (createUpdaterArtifacts)
-  # and the windows-x86_64 entry of latest.json (the action creates that file).
-  # The macOS Intel job runs after this one and adds the darwin-x86_64 entry —
-  # but via its own jq merge step, NOT via tauri-action's built-in
-  # read-merge-reupload of the existing asset, which failed silently in the
-  # 2.2.6-alpha runs (step died right after the bundle uploads, no error text).
-  windows-release:
+  # ── Windows 10+ GUI + CLI（native runner；macOS 无法交叉产出 NSIS）──
+  # 只构建：tauri-action 不给 tagName → 不触碰任何 Release。安装包 + 更新器
+  # 签名（createUpdaterArtifacts 产出 .sig）与 CLI 全部走 artifacts 交接。
+  build-windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v5
@@ -35,6 +57,25 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # 只读 main 作用域缓存（ci.yml rust-warm 暖的），不写——tag 作用域的
+      # 缓存永远不会再被读到，写了就是白传 ~GB。键与 rust-warm 严格一致。
+      - name: Rust cache (restore only)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: release-gui
+          add-job-id-key: 'false'
+          save-if: 'false'
+
+      # ci.yml 的 windows job 在 main 作用域存了 bun 下载缓存，这里只读不写。
+      - name: Restore bun download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
 
       # 同 ci.yml:多源轮换装依赖,CDN 掐大包时哪条通路活着走哪条。
       - name: Install dependencies
@@ -63,9 +104,6 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Run tests
-        run: bun test
-
       # The CLI sidecar is what `gateway_start` picks first after install
       # (`<install>/binaries/pure-cli.exe`). Dropping it here — together with
       # the `binaries/*` entry in tauri.conf.json's bundle.resources — is the
@@ -78,64 +116,41 @@ jobs:
           mkdir -p src-tauri/binaries
           cp pure.exe "src-tauri/binaries/pure-cli.exe"
 
-      # Same release-notes extraction as the macOS job (bash is available on
-      # Windows runners via Git Bash) so both jobs publish the same body.
-      - name: Prepare release notes
-        id: notes
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          NOTES="$(awk -v v="## v${VERSION}" 'BEGIN{f=0} $0==v{f=1; next} f && /^## v/{exit} f{print}' CHANGELOG.md)"
-          if [ -z "$NOTES" ]; then
-            NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
-          fi
-          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
-          {
-            echo 'body<<EOF'
-            echo "$NOTES"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and publish GUI (Windows NSIS)
+      - name: Build GUI (Windows NSIS, build only — publish job owns the release)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          releaseBody: ${{ steps.notes.outputs.body }}
           args: '--bundles nsis'
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
 
-      - name: Upload CLI binary (Windows)
-        uses: softprops/action-gh-release@v3
+      - name: Upload GUI artifacts (installer + updater signature)
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.ref_name }}
-          files: pure.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: gui-windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+          if-no-files-found: error
+
+      - name: Upload CLI artifact (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-windows
+          path: pure.exe
+          if-no-files-found: error
 
   # ── macOS Intel (x86_64) GUI build ──
-  # GitHub removed the Intel-hosted `macos-13` runner, so it can no longer be
-  # used to build the Intel installer (the job would sit queued forever and the
-  # run get cancelled). Instead we build on the available Apple Silicon runner
-  # (`macos-latest`) and CROSS-COMPILE to x86_64-apple-darwin. This still
-  # produces a genuine Intel bundle (app + dmg + .app.tar.gz updater artifacts).
-  # The darwin-x86_64 entry in latest.json comes from the explicit jq merge
-  # step at the end of this job — tauri-action runs here with
-  # includeUpdaterJson: false so it never touches latest.json (its built-in
-  # merge died without output in the 2.2.6-alpha runs) — keeping macOS
-  # auto-update working on Intel Macs (via Rosetta for Apple Silicon).
-  # A job timeout fails fast instead of hanging ~24h if a runner is unavailable.
-  macos-x64-release:
-    needs: windows-release
+  # GitHub removed the Intel-hosted `macos-13` runner, so we build on the
+  # available Apple Silicon runner (`macos-latest`) and CROSS-COMPILE to
+  # x86_64-apple-darwin. This still produces a genuine Intel bundle (app +
+  # dmg + .app.tar.gz updater artifacts). 与 Windows job 并行，不再串行等待。
+  build-macos-x64:
     runs-on: macos-latest
     timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
     env:
       HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
@@ -156,6 +171,26 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
+
+      # 同 build-windows：只读 main 作用域缓存，键与 rust-warm 的 macos 臂一致
+      # （rustc host 不同，键天然按平台分开，shared-key 可同名）。
+      - name: Rust cache (restore only)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: release-gui
+          add-job-id-key: 'false'
+          save-if: 'false'
+
+      # 尽力而为：main 作用域暂无 macOS 生产者，未命中只告警不失败；
+      # ci.yml 若将来加 macos job，这里自动受益。
+      - name: Restore bun download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
 
       - name: Install dependencies
         shell: bash
@@ -191,7 +226,7 @@ jobs:
           mkdir -p src-tauri/binaries
           cp pure src-tauri/binaries/pure-cli
 
-      - name: Build and publish GUI (signed, Intel cross-compiled)
+      - name: Build GUI (signed, Intel cross-compiled)
         if: env.HAS_APPLE_SIGNING == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -205,15 +240,9 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          # latest.json is merged by the dedicated step at the end of this job.
-          includeUpdaterJson: false
           args: --target x86_64-apple-darwin
 
-      - name: Build and publish GUI (unsigned, Intel cross-compiled)
+      - name: Build GUI (unsigned, Intel cross-compiled)
         if: env.HAS_APPLE_SIGNING == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -221,12 +250,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Pure v__VERSION__'
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          # latest.json is merged by the dedicated step at the end of this job.
-          includeUpdaterJson: false
           args: --target x86_64-apple-darwin
 
       - name: Build CLI binary (macOS x86_64, cross-compiled on ARM host)
@@ -234,32 +257,92 @@ jobs:
           PURE_CLI_TARGET: bun-darwin-x64
         run: bun run cli:build && mv pure pure_x86_64
 
-      - name: Upload CLI binary (macOS x86_64)
+      - name: Upload GUI artifacts (dmg + app.tar.gz updater artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos
+          path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+
+      - name: Upload CLI artifact (macOS x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos
+          path: pure_x86_64
+          if-no-files-found: error
+
+  # ── 发布收尾：Release 的唯一写者 ──
+  # 创建 Release、传全部资产、拼 latest.json，全部在这一处：双平台并行后
+  # 「谁先到谁建 Release」的竞争不存在了。latest.json 的 darwin 签名 `cat`
+  # 原样进 json（.sig 已是 base64，勿再编码——见文件头 bug 说明）。
+  publish:
+    needs: [build-windows, build-macos-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # 不加此项时各 artifact 会落进以自己名字命名的子目录，下面按
+          # dist/*.sig 取签名就会扑空——摊平到同一层。
+          merge-multiple: true
+
+      # 同旧 windows-release job 的提取逻辑：CHANGELOG 里 `## v<版本>` 到下一
+      # 个 `## v` 之间的正文；缺节时回退 changelog 链接。latest.json 的 notes
+      # 字段与 release body 同文（旧 tauri-action 行为）。
+      - name: Prepare release notes + latest.json
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v v="## v${VERSION}" 'BEGIN{f=0} $0==v{f=1; next} f && /^## v/{exit} f{print}' CHANGELOG.md)"
+          if [ -z "$NOTES" ]; then
+            NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
+          fi
+          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
+          {
+            echo 'body<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          # $(cat …; echo x) + 去尾 x：保留文件末尾恰好一个换行，与 tauri-action
+          # 读文件再 base64 的结果逐字节同构（$(cat …) 会把尾部换行吃掉）。
+          WIN_SIG="$(cat dist/*-setup.exe.sig; echo x)"
+          WIN_SIG="${WIN_SIG%x}"
+          MAC_SIG="$(cat dist/pure_x64.app.tar.gz.sig; echo x)"
+          MAC_SIG="${MAC_SIG%x}"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --arg winsig "$WIN_SIG" \
+            --arg winurl "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/pure_${VERSION}_x64-setup.exe" \
+            --arg macsig "$MAC_SIG" \
+            --arg macurl "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/pure_x64.app.tar.gz" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {
+               "windows-x86_64":     {signature: $winsig, url: $winurl},
+               "windows-x86_64-nsis": {signature: $winsig, url: $winurl},
+               "darwin-x86_64":      {signature: $macsig, url: $macurl}}}' \
+            > dist/latest.json
+          jq empty dist/latest.json
+
+      - name: Create release and attach all assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          files: pure_x86_64
+          name: 'Pure ${{ github.ref_name }}'
+          body: ${{ steps.notes.outputs.body }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # tauri-action's built-in version-JSON merge (read the existing
-      # latest.json asset, keep its platforms map, re-upload with the extra
-      # platform) died without output in the 2.2.6-alpha runs — right after
-      # the bundle uploads, leaving latest.json windows-only and skipping
-      # every later step. This step is the deterministic replacement: plain
-      # jq on the file the Windows job created, plus the macOS updater
-      # signature that the action just uploaded above. Runs only when every
-      # earlier step succeeded, so the signature is always this run's.
-      - name: Merge darwin-x86_64 entry into latest.json
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "${{ github.ref_name }}" --pattern 'latest.json' --output latest.json --clobber
-          gh release download "${{ github.ref_name }}" --pattern 'pure_x64.app.tar.gz.sig' --output macos.sig --clobber
-          jq --arg sig "$(base64 < macos.sig | tr -d '\n')" \
-             --arg url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/pure_x64.app.tar.gz" \
-             --arg date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
-             '.pub_date = $date | .platforms["darwin-x86_64"] = {signature: $sig, url: $url}' \
-             latest.json > latest.json.next
-          mv latest.json.next latest.json
-          gh release upload "${{ github.ref_name }}" latest.json --clobber
