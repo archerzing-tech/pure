@@ -539,7 +539,7 @@ export class PromptAssembler {
         ? [fragment('project_conventions', `<project_conventions>\n${context.conventions}\n</project_conventions>`, 250, true)]
         : []),
       fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
-      fragment('work_invariant', 'Work step by step. Read before you write: any implement / fix / extend request starts with list_files on the workspace — when it holds a project (stubs, README, tests/), the deliverable is the change written into those files plus their tests passing, never a code block in the reply; existing file names, signatures, and test layout are the contract, not suggestions. Verify after you change. Be concise.', 110, true),
+      fragment('work_invariant', 'Work step by step. Read before you write — when a request means changing code IN this workspace (implement / fix / extend), start with list_files to learn the layout: existing file names, signatures, and test structure are the contract, not suggestions, and the deliverable is the change written into those files plus their tests passing, never a code block in the reply. Analysis / review / explanation / summary requests are the opposite — do NOT scout the workspace with list_files first; go straight to the target the user named (file, path, app, or topic) and read only what answers the question. Verify after you change. Be concise.', 110, true),
       // Tone is REQUIRED: it is the persona of the product, not decoration —
       // it used to be priority 35, optional, and was silently dropped first
       // under budget pressure on small-context models. Priority 108 sits

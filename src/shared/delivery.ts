@@ -398,7 +398,7 @@ export function buildTaskContract(request: string, profile: WorkspaceProfile): T
   if (profile.explorationComplete === false) {
     acceptanceCriteria.unshift({
       id: 'explore',
-      description: '项目探索必须完成；当前目录结构或清单不完整时禁止宣称交付。',
+      description: '写码/改文件的交付必须先完成项目探索；当前目录结构或清单不完整时禁止宣称交付。分析/审阅/答疑类请求不适用此条——直接读用户点名的目标，不必先探查工作区。',
       required: true,
     });
   }

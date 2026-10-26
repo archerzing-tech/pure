@@ -317,14 +317,18 @@ describe('PromptAssembler', () => {
     expect(cli).toContain('never an implement/fix request answered with inline code alone');
   });
 
-  it('tells the model to inspect an existing project before writing (work invariant)', () => {
+  it('tells the model to inspect an existing project before writing — and NOT before analysis (work invariant)', () => {
     // S02 残留：写了自创文件名 fizzbuzzjazz.py 而不是补全种子的 fizzbuzz.py stub；
     // S01 残留：全程没看工作区，用 execute_command 硬跑。work_invariant 必须
-    // 把「先看项目、按既有契约动手」立成不变量。
+    // 把「先看项目、按既有契约动手」立成不变量——但只对写码场景：分析/汇总类
+    // 任务被这条不变量带得先跑 list_files 探路径（2026-10-26 用户实测），
+    // 纯属浪费一轮工具调用，必须显式豁免。
     const cli = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() });
-    expect(cli).toContain('starts with list_files on the workspace');
+    expect(cli).toContain('when a request means changing code IN this workspace (implement / fix / extend), start with list_files');
     expect(cli).toContain('the deliverable is the change written into those files plus their tests passing, never a code block in the reply');
-    expect(cli).toContain('existing file names, signatures, and test layout are the contract, not suggestions');
+    expect(cli).toContain('existing file names, signatures, and test structure are the contract, not suggestions');
+    expect(cli).toContain('Analysis / review / explanation / summary requests are the opposite');
+    expect(cli).toContain('do NOT scout the workspace with list_files first');
   });
 
   it('carries the engineering exception so project work lands in files, not inline code blocks', () => {
