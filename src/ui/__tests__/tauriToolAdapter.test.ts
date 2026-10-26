@@ -18,6 +18,7 @@ import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } fro
 import { recordNetOutcome } from '../../shared/netRoute';
 import { beforeEach } from 'bun:test';
 import { resetNetGuardForTests } from '../../shared/netGuard';
+import { resetMirrorHealth } from '../../shared/githubAccel';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -1075,8 +1076,11 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
   // 熔断计数（netGuard.hosts）是模块级单例：本组用例会真实累积各镜像 host 的
   // 失败，跨用例残留会让 HOST_TRIP_THRESHOLD 提前触发、hostBlocked 即时拒绝
   // 干扰后续断言。每组用例前清零（netRoute 的 resetLearnedRoutes 同款问题）。
+  // mirrorHealth 同理：下载链现在会给加速节点记健康账，前一用例的失败记录
+  // 会让后一用例的先行链把节点过滤光（链条缩短，跳数断言全崩）。
   beforeEach(() => {
     resetNetGuardForTests();
+    resetMirrorHealth();
   });
 
   const NPM = 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz';

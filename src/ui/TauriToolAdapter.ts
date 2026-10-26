@@ -16,7 +16,7 @@ import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
-import { githubDownloadAttempts, githubFallbackPrefixes, isAlreadyMirrored, isGithubDownloadUrl, unwrapGithubMirrorUrl } from '../shared/githubAccel';
+import { githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
@@ -1363,17 +1363,27 @@ export class TauriToolAdapter implements ToolAdapter {
           // （rw 受开关约束）：jsDelivr 有 20MB 上限、「关闭加速 = 回到 GitHub 官
           // 方地址」的开关承诺不许被第三方 CDN 稀释，它们留在失败兜底位。
           // __ghAccelExclude 供 unwrap 下落排除刚失败的显式镜像（防同 URL 重打）。
-          // 链全灭置 mirrorChainTried：直连再失败时不重打整条链。
+          // 链全灭置 mirrorChainTried：直连再失败时不重打整条链。加速节点
+          // 每一跳都向 mirrorHealth 记账（与设置页测速共用），TTL 内已知
+          // 死亡的节点直接跳过——全灭场景下挨个白打是分钟级浪费。
           let mirrorChainTried = false;
+          const mirrorTried: Array<{ label: string; error?: string }> = [];
+          const mirrorSkipped: string[] = [];
           if (isGithubDownloadUrl(url) && !isAlreadyMirrored(url, this.githubAccelPrefixes())) {
             const accelOn = this.githubMirror !== 'direct';
             const rw = accelOn ? primaryRewrite(url) : null;
             const excludeKey = typeof args.__ghAccelExclude === 'string' ? args.__ghAccelExclude : '';
+            const allAttempts = githubDownloadAttempts(url, this.githubMirror, this.githubCustomMirror)
+              .filter((attempt) => attempt.prefix !== '')
+              .filter((attempt) => !excludeKey || attempt.mirrorKey !== excludeKey);
+            const aliveAttempts = allAttempts.filter((attempt) => !mirrorIsDead(attempt.mirrorKey));
+            for (const dead of allAttempts) {
+              if (!aliveAttempts.some((a) => a.mirrorKey === dead.mirrorKey)) mirrorSkipped.push(dead.label);
+            }
             const mirrorAttempts = [
-              ...(rw && rw.url !== url ? [{ url: rw.url, mirrorKey: rw.rule }] : []),
-              ...githubDownloadAttempts(url, this.githubMirror, this.githubCustomMirror)
-                .filter((attempt) => attempt.prefix !== '')
-                .filter((attempt) => !excludeKey || attempt.mirrorKey !== excludeKey),
+              // rw 跳（官方等价改写）不是加速节点，label 留空即不参与健康记账。
+              ...(rw && rw.url !== url ? [{ url: rw.url, prefix: '', mirrorKey: rw.rule, label: '' }] : []),
+              ...aliveAttempts,
             ];
             for (const attempt of mirrorAttempts) {
               const viaMirror = await this.execute(
@@ -1390,10 +1400,16 @@ export class TauriToolAdapter implements ToolAdapter {
               // 取消高于链序：用户叫停就原样交回，不悄悄换主机接着下。
               if (signal?.aborted) return viaMirror;
               if (viaMirror.success) {
+                if (attempt.label) recordMirrorOutcome(attempt.mirrorKey, true);
                 return this.withRewriteProvenance(viaMirror, url, {
                   url: attempt.url,
                   rule: `github-mirror:${attempt.mirrorKey}`,
                 });
+              }
+              if (attempt.label) {
+                const hopError = String(viaMirror.error ?? viaMirror.result ?? '').slice(0, 200);
+                recordMirrorOutcome(attempt.mirrorKey, false, hopError);
+                mirrorTried.push({ label: attempt.label, error: hopError });
               }
             }
             mirrorChainTried = mirrorAttempts.length > 0;
@@ -1528,10 +1544,16 @@ export class TauriToolAdapter implements ToolAdapter {
                 const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
                 if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
+                // 全灭聚合：镜像链参与过（打过失败或被健康缓存跳过）且直连也
+                // 失败 → 列出每条路 + 出口建议，模型不再重试同一条死路。熔断
+                // 消息优先——会话级拦截比单次解释更急。
+                const allDead = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
+                  ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, detail)
+                  : null;
                 return {
                   id: toolCall.id,
                   toolName: 'download_file',
-                  result: tripped ? blockedHostMessage(url, detail) : netFailureHint(url, detail),
+                  result: tripped ? blockedHostMessage(url, detail) : allDead ?? netFailureHint(url, detail),
                   success: false,
                   duration: Date.now() - start,
                 };
@@ -1627,10 +1649,15 @@ export class TauriToolAdapter implements ToolAdapter {
                 const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
                 if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
+                const deadNotice = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
+                  ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, `下载失败（退出码 ${code}）`)
+                  : null;
                 return {
                   id: toolCall.id,
                   toolName: 'download_file',
-                  result: tripped ? blockedHostMessage(url, `下载失败（退出码 ${code}）`) : netFailureHint(url, `下载失败（退出码 ${code}）`),
+                  result: tripped
+                    ? blockedHostMessage(url, `下载失败（退出码 ${code}）`)
+                    : deadNotice ?? netFailureHint(url, `下载失败（退出码 ${code}）`),
                   success: false,
                   duration: Date.now() - start,
                 };
@@ -1673,10 +1700,14 @@ export class TauriToolAdapter implements ToolAdapter {
             const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
             if (mirrored) return mirrored;
             const { tripped } = recordNetFailure(url);
+            const fbDetail = `下载失败（退出码 ${exec.exitCode}）`;
+            const deadNotice = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
+              ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, fbDetail)
+              : null;
             return {
               id: toolCall.id,
               toolName: 'download_file',
-              result: tripped ? blockedHostMessage(url, `下载失败（退出码 ${exec.exitCode}）`) : netFailureHint(url, `下载失败（退出码 ${exec.exitCode}）`),
+              result: tripped ? blockedHostMessage(url, fbDetail) : deadNotice ?? netFailureHint(url, fbDetail),
               success: false,
               duration: Date.now() - start,
             };

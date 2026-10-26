@@ -329,6 +329,73 @@ export interface MirrorProbeResult {
   error?: string;
 }
 
+// ── 节点健康缓存（会话级，测速面板与下载链共用的唯一数据源）────────────
+//
+// 「全部节点都不可用」要快、说清、记住：下载链挨个白打已知死节点（每跳一
+// 个完整连接超时）是全灭场景最痛的开销；而设置页测速学到的 dead 与下载链
+// 学到的失败此前各记各的，两处都在重复交学费。这里统一记账：成功标活、
+// 失败标死，TTL 与 netGuard 的 host 熔断同数量级（5 分钟）——节点恢复后
+// 自然重新入选，不需要用户手动刷新。
+
+const MIRROR_HEALTH_TTL_MS = 5 * 60_000;
+
+export { MIRROR_HEALTH_TTL_MS };
+
+interface MirrorHealthEntry {
+  ok: boolean;
+  at: number;
+  error?: string;
+}
+
+const mirrorHealth = new Map<string, MirrorHealthEntry>();
+
+function mirrorHealthFresh(key: string, now: number): MirrorHealthEntry | null {
+  const entry = mirrorHealth.get(key);
+  if (!entry) return null;
+  if (now - entry.at > MIRROR_HEALTH_TTL_MS) {
+    mirrorHealth.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+/** 下载链每一跳、设置页每次测速都从这里记账。 */
+export function recordMirrorOutcome(key: string, ok: boolean, error?: string): void {
+  if (!key || key === 'direct') return;
+  mirrorHealth.set(key, { ok, at: Date.now(), error: ok ? undefined : (error ?? '').slice(0, 200) || undefined });
+}
+
+/** 清空健康记忆。测试隔离用；运行时节点状态本就随 TTL 自然过期。 */
+export function resetMirrorHealth(): void {
+  mirrorHealth.clear();
+}
+
+/** TTL 内已知死亡（下载链据此跳过该节点）。 */
+export function mirrorIsDead(key: string, now = Date.now()): boolean {
+  const entry = mirrorHealthFresh(key, now);
+  return entry?.ok === false;
+}
+
+/** 全灭聚合消息：列出试过/跳过的每条路 + 直连的最后错误 + 出口建议。
+ *  模型读到就不会再重试同一路径，用户知道下一步（等恢复 / 配代理 / 手动
+ *  下载）。tried = 本次真打过且失败的节点；skipped = 因健康缓存跳过的。 */
+export function githubAllPathsDeadNotice(
+  tried: Array<{ label: string; error?: string }>,
+  skipped: string[],
+  directError: string,
+): string {
+  const lines: string[] = ['下载失败：所有路径均不可用。'];
+  for (const t of tried) {
+    lines.push(`- 加速节点 ${t.label}：${t.error?.trim() || '失败'}`);
+  }
+  for (const label of skipped) {
+    lines.push(`- 加速节点 ${label}：近期已失败，本次跳过`);
+  }
+  lines.push(`- 直连：${directError.trim() || '失败'}`);
+  lines.push('建议：稍后重试（节点恢复后自动重新启用）、在 设置 → 网络代理 配置代理，或从可直连的网络环境手动下载该文件后放入目标目录。');
+  return lines.join('\n');
+}
+
 /**
  * 单节点测速（浏览器 / 非 Tauri 路径）。判据刻意宽松：**任何 HTTP 应答**
  * （含 401/403/429）都算链路可达——测的是连通性与延迟，不是鉴权；只有连接

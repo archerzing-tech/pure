@@ -148,6 +148,7 @@ import {
   githubMirrorDropdownEntries,
   normalizeGithubMirrorPrefix,
   probeGithubMirrorLatency,
+  recordMirrorOutcome,
 } from '../shared/githubAccel';
 import { listToolInventory } from './toolInventory';
 import { probeMcpServerTools, renderMcpPoisonRow, renderMcpResourcesRow, type McpProbeResult, type McpProbeResource } from './mcpProbe';
@@ -2309,6 +2310,13 @@ export class SettingsPanel {
       } else {
         results = await Promise.all(entries.map((entry) => probeGithubMirrorLatency(entry.prefix)));
       }
+      // 测速结果写入节点健康缓存（与下载链共用，见 githubAccel.mirrorHealth）：
+      // 刚测出 dead 的节点在接下来 5 分钟内不再被下载链白打；反之下载链学到的
+      // 失败也会让这里的刷新显示红色。双向一致，不再两处各记各的。
+      entries.forEach((entry, i) => {
+        const result = results[i];
+        if (result) recordMirrorOutcome(entry.key, result.ok, result.error);
+      });
       box.innerHTML = entries.map((entry, i) => {
         const result = results[i] ?? { ok: false, latencyMs: 0, error: 'no result' };
         const tag = latencyBucket(result.latencyMs, result.ok);

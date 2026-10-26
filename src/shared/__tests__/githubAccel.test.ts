@@ -1,15 +1,20 @@
 // GitHub 下载加速的共享层：回退链是「下载不死」的唯一保证，所以这里锁的是
 // 顺序与边界，而不是某个镜像当前能不能通（网络事实由设置页测速回答）。
 
-import { describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   DEFAULT_GITHUB_MIRROR,
   GITHUB_MIRRORS,
+  MIRROR_HEALTH_TTL_MS,
+  githubAllPathsDeadNotice,
   githubDownloadAttempts,
   githubFallbackPrefixes,
   githubMirrorPrefix,
   githubProbeEntries,
   isGithubDownloadUrl,
+  mirrorIsDead,
+  recordMirrorOutcome,
+  resetMirrorHealth,
   unwrapGithubMirrorUrl,
   latencyBucket,
   normalizeGithubMirrorKey,
@@ -159,5 +164,49 @@ describe('GitHub 加速 · 测速判定', () => {
     });
     expect(dead.ok).toBe(false);
     expect(dead.error).toContain('connect timeout');
+  });
+});
+
+describe('GitHub 加速 · 节点健康缓存（全灭处理）', () => {
+  beforeEach(() => {
+    // 用例间互不污染（同文件其他组也会驱动真实记账路径）。
+    resetMirrorHealth();
+  });
+
+  it('记账后 TTL 内判死，过期后自动复活', () => {
+    recordMirrorOutcome('ghfast', false, 'connect timeout');
+    expect(mirrorIsDead('ghfast')).toBe(true);
+    // TTL 边界内仍判死。
+    expect(mirrorIsDead('ghfast', Date.now() + 4 * 60_000)).toBe(true);
+    // 过 TTL 复活：节点恢复后自然重新入选，不需要手动刷新。
+    expect(mirrorIsDead('ghfast', Date.now() + MIRROR_HEALTH_TTL_MS + 1_000)).toBe(false);
+  });
+
+  it('成功记账清除死亡标记，direct 与空 key 不参与记账', () => {
+    recordMirrorOutcome('gh-proxy', false);
+    expect(mirrorIsDead('gh-proxy')).toBe(true);
+    recordMirrorOutcome('gh-proxy', true);
+    expect(mirrorIsDead('gh-proxy')).toBe(false);
+    // direct 不是加速节点：记录无操作，读出来永远不是「已知死亡」。
+    recordMirrorOutcome('direct', false);
+    expect(mirrorIsDead('direct')).toBe(false);
+    recordMirrorOutcome('', false);
+    expect(mirrorIsDead('')).toBe(false);
+  });
+
+  it('全灭聚合消息列出打过的、跳过的、直连错误和出口建议', () => {
+    const notice = githubAllPathsDeadNotice(
+      [{ label: 'ghfast.top', error: 'connection timeout' }, { label: 'gh-proxy.com' }],
+      ['ghproxy.net'],
+      'connection reset by peer',
+    );
+    expect(notice).toContain('所有路径均不可用');
+    expect(notice).toContain('- 加速节点 ghfast.top：connection timeout');
+    // 缺错误文本时落到「失败」占位，不出 undefined。
+    expect(notice).toContain('- 加速节点 gh-proxy.com：失败');
+    expect(notice).toContain('- 加速节点 ghproxy.net：近期已失败，本次跳过');
+    expect(notice).toContain('- 直连：connection reset by peer');
+    expect(notice).toContain('设置 → 网络代理');
+    expect(notice).toContain('手动下载');
   });
 });
