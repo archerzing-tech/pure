@@ -727,26 +727,27 @@ body.window-maximized #boot-splash {
   top: 44px;
   left: 4px;
   z-index: 10;
-  /* Solid chip, no backdrop-filter: blur() makes WKWebView re-blur the layers
-     beneath on every repaint (streaming scroll, theme flip) — a constant
-     compositor cost even when the button is idle. A crisp opaque surface
-     reads the same at 34px and costs nothing. */
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  /* Ghost chrome (2026-10-26): no card, no border, no shadow — a quiet icon
+     in idle state, the hover highlight is the only affordance. Transparent
+     border (not `border: 0`) keeps the box geometry identical to the old
+     bordered chip so the transition never shifts layout. No backdrop-filter
+     anywhere here either (idle paints nothing; hover paints opaque
+     --bg-hover): blur() makes WKWebView re-blur the layers beneath on every
+     repaint — the rationale other floating surfaces cite (#composer-box). */
+  background: transparent;
+  border: 1px solid transparent;
   cursor: pointer;
   color: var(--text-tertiary);
   padding: 6px 7px;
   border-radius: var(--radius-sm);
   display: flex;
   opacity: 1;
-  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out);
 }
 
 #sidebar-toggle:hover {
   color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-  box-shadow: var(--shadow-sm);
+  background: var(--bg-hover);
 }
 
 /* ── In-sidebar collapse handle ──
@@ -765,14 +766,14 @@ body.window-maximized #boot-splash {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--bg-card);
+  background: transparent;
   color: var(--text-tertiary);
   cursor: pointer;
   /* The sidebar is -webkit-app-region: drag; clicks must reach the button. */
   -webkit-app-region: no-drag;
-  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out);
 }
 
 #sidebar:not(.collapsed) #sidebar-close {
@@ -781,9 +782,7 @@ body.window-maximized #boot-splash {
 
 #sidebar-close:hover {
   color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-  box-shadow: var(--shadow-sm);
+  background: var(--bg-hover);
 }
 
 /* Sidebar open → the floating top-left hamburger would float over the chat
@@ -801,24 +800,21 @@ body.window-maximized #boot-splash {
   top: 44px;
   right: 4px;
   z-index: 20;
-  /* Same no-backdrop-filter treatment as #sidebar-toggle — see there for the
-     WKWebView compositing rationale. */
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  /* Ghost chrome — same rationale as #sidebar-toggle above. */
+  background: transparent;
+  border: 1px solid transparent;
   cursor: pointer;
   color: var(--text-tertiary);
   padding: 7px 8px;
   border-radius: var(--radius-sm);
   display: flex;
   opacity: 1;
-  transition: opacity 0.4s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+  transition: opacity 0.4s var(--ease-out), right 0.35s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out);
 }
 
 #right-settings-btn:hover {
   color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-  box-shadow: var(--shadow-md);
+  background: var(--bg-hover);
 }
 
 /* ── View container: horizontal layout for chat + settings side-by-side ── */
@@ -7407,9 +7403,6 @@ select:focus-visible,
 #sidebar-toggle,
 #right-settings-btn {
   top: 52px;
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-  border-color: var(--border-light);
-  box-shadow: var(--shadow-sm);
 }
 
 #sidebar-toggle {
@@ -7419,17 +7412,10 @@ select:focus-visible,
 #right-settings-btn {
   top: 52px;
   right: 12px;
-  transition: right 0.35s var(--ease-out), opacity 0.2s var(--ease-out), color 0.2s var(--ease-out), background 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
 }
 
 #main.context-collapsed #right-settings-btn {
   right: 12px;
-}
-
-#sidebar-toggle:hover,
-#right-settings-btn:hover {
-  border-color: var(--border);
-  box-shadow: var(--shadow-md);
 }
 
 /* ── Corner chrome reveal: the top-left sidebar toggle and top-right settings
@@ -7443,17 +7429,16 @@ select:focus-visible,
 #main:not(.window-hover) #right-settings-btn {
   opacity: 0;
   pointer-events: none;
-  border-color: transparent;
-  box-shadow: none;
 }
 
 /* Keyboard users: focus must still be visible even while the pointer is
-   outside the window — otherwise Tab reaches an invisible, unseeable button. */
+   outside the window — otherwise Tab reaches an invisible, unseeable button.
+   Same highlight language as hover (ghost chrome has no border to restore). */
 #main:not(.window-hover) #sidebar-toggle:focus-visible,
 #main:not(.window-hover) #right-settings-btn:focus-visible {
   opacity: 1;
   pointer-events: auto;
-  border-color: var(--border);
+  background: var(--bg-hover);
 }
 
 #main.window-hover #sidebar-toggle,
