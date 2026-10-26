@@ -998,6 +998,7 @@ export class SettingsPanel {
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
       '#cfg-proxy-enabled', '#cfg-proxy-mode', '#cfg-proxy-llm', '#cfg-proxy-tools', '#cfg-proxy-scheme', '#cfg-proxy-host', '#cfg-proxy-port', '#cfg-proxy-username', '#cfg-proxy-password', '#cfg-proxy-bypass-providers',
+      '#cfg-tls-verify',
       '#cfg-proxy-probe-0-enabled', '#cfg-proxy-probe-0-url', '#cfg-proxy-probe-1-enabled', '#cfg-proxy-probe-1-url', '#cfg-proxy-probe-2-enabled', '#cfg-proxy-probe-2-url',
       '#cfg-streaming-render',
       '#cfg-auto-continue',
@@ -2519,6 +2520,9 @@ export class SettingsPanel {
     const proxy = normalizeProxyConfig(cfg.proxy);
     const proxyEnabledEl = document.getElementById('cfg-proxy-enabled') as HTMLInputElement | null;
     if (proxyEnabledEl) proxyEnabledEl.checked = proxy.enabled;
+    // TLS 证书校验开关（undefined = 默认不校验 → 不勾选）。
+    const tlsVerifyEl = document.getElementById('cfg-tls-verify') as HTMLInputElement | null;
+    if (tlsVerifyEl) tlsVerifyEl.checked = cfg.tlsVerify === true;
     const proxyModeEl = document.getElementById('cfg-proxy-mode') as HTMLSelectElement | null;
     if (proxyModeEl) proxyModeEl.value = proxy.mode;
     this.updateProxyModeVisibility();
@@ -4575,6 +4579,9 @@ export class SettingsPanel {
           enabled: (document.getElementById(`cfg-proxy-probe-${i}-enabled`) as HTMLInputElement | null)?.checked ?? false,
         })),
       }),
+      // TLS 证书校验开关（默认不校验，见 PureConfig.tlsVerify 注）。persistConfig
+      // 会把值同步给 Rust（set_tls_verify），Rust 侧换策略时清 LLM 连接池。
+      tlsVerify: (document.getElementById('cfg-tls-verify') as HTMLInputElement | null)?.checked ?? false,
       // GitHub 加速：开关就是「mirror !== direct」，自定义前缀只在 custom 时生效。
       githubMirror: (document.getElementById('cfg-github-accel') as HTMLInputElement | null)?.checked
         ? normalizeGithubMirrorKey((document.getElementById('cfg-github-mirror') as HTMLSelectElement | null)?.value)

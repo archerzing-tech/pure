@@ -246,6 +246,54 @@ describe('RustLLMAdapter', () => {
     expect(caught!.message).toContain('401 Unauthorized');
   });
 
+  // ── Connection-pool self-heal: network-class failures drop the cached pool ──
+
+  /** Mock that records EVERY invoked command (the default above asserts
+   *  chat_stream only, which would reject the fire-and-forget reset call). */
+  function makeRecordingDeps(error: string): { deps: RustLLMDeps; commands: () => string[] } {
+    const invoked: string[] = [];
+    const invoke = async (cmd: string, args: any) => {
+      invoked.push(cmd);
+      if (cmd === 'chat_stream') {
+        const channel = args.onChunk as MockChannel<string>;
+        channel.send(JSON.stringify({ type: 'delta', content: 'x' }));
+        throw new Error(error);
+      }
+      return null;
+    };
+    return {
+      deps: { invoke, Channel: MockChannel as unknown as RustLLMDeps['Channel'] },
+      commands: () => invoked,
+    };
+  }
+
+  it('network-class stream failure asks Rust to reset the LLM client pool', async () => {
+    const { deps, commands } = makeRecordingDeps('error sending request: connection reset by peer');
+    const adapter = new RustLLMAdapter({ provider: 'deepseek-openai', model: 'm' }, deps);
+    await expect(async () => {
+      for await (const _ of adapter.stream(MSGS, [])) { /* drain */ }
+    }).toThrow(/connection reset/);
+    expect(commands()).toContain('reset_llm_stream_clients');
+  });
+
+  it('provider rejections (401) do NOT touch the client pool', async () => {
+    const { deps, commands } = makeRecordingDeps('401 Unauthorized: invalid key');
+    const adapter = new RustLLMAdapter({ provider: 'deepseek-openai', model: 'm' }, deps);
+    await expect(async () => {
+      for await (const _ of adapter.stream(MSGS, [])) { /* drain */ }
+    }).toThrow(/401/);
+    expect(commands()).not.toContain('reset_llm_stream_clients');
+  });
+
+  it('cancelled streams neither reset the pool nor report net outcome', async () => {
+    const { deps, commands } = makeRecordingDeps('cancelled');
+    const adapter = new RustLLMAdapter({ provider: 'deepseek-openai', model: 'm' }, deps);
+    await expect(async () => {
+      for await (const _ of adapter.stream(MSGS, [])) { /* drain */ }
+    }).toThrow(/cancelled/);
+    expect(commands()).not.toContain('reset_llm_stream_clients');
+  });
+
   it('complete() accumulates the final response', async () => {
     const { deps } = makeDeps({
       deltas: [JSON.stringify({ type: 'delta', content: 'answer' })],

@@ -156,6 +156,14 @@ export interface PureConfig {
   /** Network proxy used by desktop LLM and agent requests. It is opt-in; an empty or invalid URL means direct connection. LLM and tool traffic have independent switches. */
   proxy: ProxyConfig;
   /**
+   * TLS 证书校验开关（Settings → 网络代理）。语义与直觉相反，按用户口径：
+   * undefined / false = 默认不校验（内网 TLS 拦截网关的自签根证书不在系统
+   * 信任库，严格校验会让每个外部请求直接 "certificate verify failed"）；
+   * true = 校验（直连公网用户防中间人）。只影响桌面 Rust 侧的全部 reqwest
+   * 出口（LLM / 搜索 / 工具），CLI（Node）不经过这里。
+   */
+  tlsVerify?: boolean;
+  /**
    * GitHub 下载加速（Settings → General → GitHub 加速）：选中的前缀代理 key。
    * 'direct' = 关闭；公共节点（ghfast / gh-proxy / ghproxy-net）或 'custom'。
    * 只在 GitHub 公开下载面上生效（release 资产 / raw / codeload / objects），
@@ -524,6 +532,17 @@ async function saveConfigToRust(cfg: PureConfig): Promise<void> {
   }
 }
 
+/** Push the TLS-verify toggle into Rust. The config lives in the WebView
+ * (localStorage / config.json) where Rust can't read it, so the flag is
+ * synced at startup and on every persist; Rust drops its cached LLM stream
+ * clients on change so no client keeps the old certificate policy. */
+export function syncTlsVerifyToRust(cfg: PureConfig): void {
+  if (!isTauriRuntime()) return;
+  void loadTauriCore()
+    .then((core) => core?.invoke('set_tls_verify', { enabled: cfg.tlsVerify === true }))
+    .catch((e) => console.warn('[pure] failed to sync tlsVerify:', e));
+}
+
 /**
  * Single choke point for persisting a changed config: writes localStorage
  * (runtime + browser mirror), drops the cache, and mirrors to the desktop
@@ -539,6 +558,7 @@ export function persistConfig(cfg: PureConfig): void {
     console.warn('[pure] failed to persist config to localStorage:', err);
   }
   invalidateConfigCache();
+  syncTlsVerifyToRust(cfg);
   if (isTauriRuntime()) void saveConfigToRust(cfg);
 }
 
@@ -571,6 +591,9 @@ export async function initConfigFile(): Promise<void> {
   } catch (err) {
     console.warn('[pure] config file init failed:', err);
   }
+  // The file/localStorage mirror above decided this launch's config — push
+  // the TLS flag it carries into Rust (default off = don't verify).
+  syncTlsVerifyToRust(loadConfig() ?? defaults());
 }
 
 export function loadConfig(): PureConfig | null {

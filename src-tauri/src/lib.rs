@@ -70,7 +70,14 @@ fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> R
 fn build_llm_stream_client_resolved(resolved_proxy: Option<&str>) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .http1_only();
+        .http1_only()
+        // Keep pool connections visibly alive: intranet NAT/firewalls silently
+        // reclaim idle TCP sessions (often well under a minute), and the next
+        // THINK round then writes onto a half-open connection and stalls —
+        // the "first reply fine, second reply dead" intranet report. A 15s
+        // keepalive probe keeps the path warm through the idle gap.
+        .tcp_keepalive(std::time::Duration::from_secs(15))
+        .danger_accept_invalid_certs(!tls_verify_enabled());
     let builder = if let Some(url) = resolved_proxy {
         if !valid_proxy_url(url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -97,6 +104,48 @@ fn llm_stream_clients(
     CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// TLS certificate verification toggle (Settings → 网络代理).
+/// Default OFF = certificates are NOT verified: corporate intranets routinely
+/// TLS-intercept outbound traffic with a self-signed root that never made it
+/// into the OS trust store, and a strict default turns every external LLM call
+/// into "certificate verify failed". Switching it ON restores MITM protection
+/// for users on a direct public-internet link. Applies to every reqwest
+/// client (finalize_http_client + the stream builder); `set_tls_verify`
+/// drops the cached stream clients so no client keeps the previous policy.
+static TLS_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn tls_verify_enabled() -> bool {
+    TLS_VERIFY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn clear_llm_stream_client_cache() {
+    if let Ok(mut map) = llm_stream_clients().lock() {
+        map.clear();
+    }
+}
+
+/// Settings → 网络代理: the WebView owns the persisted config (localStorage /
+/// config.json), so it pushes the flag at startup and on every save.
+#[tauri::command]
+fn set_tls_verify(enabled: bool) -> Result<(), String> {
+    TLS_VERIFY.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    // The client cache key doesn't include the TLS flag — drop the pool so
+    // the next chat_stream builds clients under the new policy.
+    clear_llm_stream_client_cache();
+    Ok(())
+}
+
+/// Drop every cached LLM stream client. Called by the TS adapter after a
+/// network-class stream error: the pooled connections are likely half-open
+/// (NAT/firewall silently reclaimed them during the idle gap between turns),
+/// and reqwest would otherwise hand the SAME dead pool to every THINK-round
+/// retry — 5 identical failures ⇒ "已中断：连续多次尝试失败".
+#[tauri::command]
+fn reset_llm_stream_clients() -> Result<(), String> {
+    clear_llm_stream_client_cache();
+    Ok(())
+}
+
 fn cached_llm_stream_client(proxy_spec: Option<&str>) -> Result<reqwest::Client, String> {
     let resolved = effective_proxy_url(proxy_spec.unwrap_or(""));
     let key = resolved.clone().unwrap_or_else(|| "direct".to_string());
@@ -113,6 +162,11 @@ fn cached_llm_stream_client(proxy_spec: Option<&str>) -> Result<reqwest::Client,
 
 /// Shared tail of every client builder: apply the optional proxy, then build.
 fn finalize_http_client(mut builder: reqwest::ClientBuilder, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    // One place so LLM / search / tool traffic all honor the same toggle and
+    // the same keepalive policy (see build_llm_stream_client_resolved).
+    builder = builder
+        .tcp_keepalive(std::time::Duration::from_secs(15))
+        .danger_accept_invalid_certs(!tls_verify_enabled());
     if let Some(url) = effective_proxy_url(proxy_url.unwrap_or("")) {
         if !valid_proxy_url(&url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -266,7 +320,8 @@ fn build_search_client(timeout: std::time::Duration, proxy_url: Option<&str>) ->
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .http1_only()
-        .cookie_provider(search_cookie_jar().clone());
+        .cookie_provider(search_cookie_jar().clone())
+        .danger_accept_invalid_certs(!tls_verify_enabled());
     if let Some(url) = effective_proxy_url(proxy_url.unwrap_or("")) {
         if !valid_proxy_url(&url) {
             return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -533,6 +588,55 @@ mod llm_route_switch_tests {
             LLM_RETRY_MAX_ATTEMPTS as usize,
             "只有一条出口时保留退避重试"
         );
+    }
+}
+
+#[cfg(test)]
+mod tls_verify_tests {
+    use super::*;
+
+    /// 开关默认关闭（不校验证书）：内网 TLS 拦截网关的自签根证书不在系统
+    /// 信任库里，严格校验会让每个外部 LLM 调用直接 "certificate verify
+    /// failed"——这是设置项选默认不校验的动机（用户口径：默认打开=不校验）。
+    #[test]
+    fn tls_verification_is_off_by_default() {
+        // 先显式归位，避免与其他测试的写入顺序耦合。
+        TLS_VERIFY.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!tls_verify_enabled());
+        // builder 在默认策略下必须能构建出客户端（danger_accept_invalid_certs(true)）。
+        let client = build_llm_stream_client_resolved(None).expect("client builds under default (no-verify)");
+        let _ = client;
+        let client2 = finalize_http_client(reqwest::Client::builder(), None).expect("finalize builds under default");
+        let _ = client2;
+    }
+
+    /// 切到「校验」后客户端仍可构建，且 set_tls_verify 必须清空流客户端缓存
+    /// ——缓存 key 不含 TLS 标志，不清池的话旧 client 会继续带着旧策略。
+    #[test]
+    fn set_tls_verify_clears_the_stream_client_cache() {
+        TLS_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(tls_verify_enabled());
+        let _ = finalize_http_client(reqwest::Client::builder(), None).expect("verify mode builds too");
+
+        // 填充缓存（direct 项），开关一翻必须被清掉。
+        let _ = cached_llm_stream_client(None).expect("populate cache");
+        assert!(!llm_stream_clients().lock().unwrap().is_empty(), "cache holds the client before the toggle");
+
+        set_tls_verify(false).expect("set_tls_verify");
+        assert!(llm_stream_clients().lock().unwrap().is_empty(), "cache must be cleared so new clients pick up the new policy");
+        assert!(!tls_verify_enabled());
+
+        // 复位为默认，不污染后续测试。
+        TLS_VERIFY.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// reset_llm_stream_clients 单独可用（adapter 网络错误后的自救路径）。
+    #[test]
+    fn reset_llm_stream_clients_clears_the_cache() {
+        let _ = cached_llm_stream_client(None).expect("populate cache");
+        assert!(!llm_stream_clients().lock().unwrap().is_empty());
+        reset_llm_stream_clients().expect("reset");
+        assert!(llm_stream_clients().lock().unwrap().is_empty());
     }
 }
 
@@ -12466,6 +12570,8 @@ async fn gateway_download_cli() -> Result<String, String> {
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        // 公网出网统一受 TLS 开关管（内网拦截网关下 GitHub 直连也要能下载）。
+        .danger_accept_invalid_certs(!tls_verify_enabled())
         .build()
         .map_err(|e| format!("HTTP client: {}", e))?;
     let resp = client.get(url).send().await.map_err(|e| format!("下载失败：{}", e))?;
@@ -16237,6 +16343,7 @@ async fn probe_reachability() -> String {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .no_proxy()
+        .danger_accept_invalid_certs(!tls_verify_enabled())
         .build()
     {
         Ok(c) => c,
@@ -17897,6 +18004,9 @@ pub fn run() {
             // LLM transport
             chat_stream,
             cancel_chat_stream,
+            reset_llm_stream_clients,
+            // TLS verify toggle (Settings → 网络代理)
+            set_tls_verify,
             // Text-to-image (OpenAI-compatible /images/generations)
             generate_image,
             // Session persistence

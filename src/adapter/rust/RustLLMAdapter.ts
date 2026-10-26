@@ -65,6 +65,20 @@ interface QueueItem {
 
 const SECRET_KEY = 'llm.apiKey';
 
+/**
+ * Network-class transport errors: connection refused/reset, timeouts, TLS
+ * handshake failures, dead proxies. These mean the pooled TCP connections
+ * (or the path to them) died — NOT that the provider rejected the request —
+ * so the backend's cached LLM stream client must be dropped before the next
+ * retry. Cancellation never reaches this matcher, and provider-side
+ * rejections (400/401/429 bodies, context-length overflow) don't match.
+ */
+const NETWORK_ERROR_RE = /connect|timed?\s?out|timeout|reset|broken pipe|connection|tls|ssl|certificate|ECONN|ETIMEDOUT|ECONNRESET|EPIPE|unreachable|network|proxy/i;
+
+function isNetworkClassError(err: Error): boolean {
+  return NETWORK_ERROR_RE.test(err.message);
+}
+
 export class RustLLMAdapter implements LLMAdapter {
   private config: RustLLMConfig;
   private deps?: RustLLMDeps;
@@ -175,6 +189,16 @@ export class RustLLMAdapter implements LLMAdapter {
           route: this.config.proxyUrl ? 'proxy' : 'direct',
           ok: false,
         });
+        // Intranet kill switch for the half-open-connection bug: NAT/firewalls
+        // silently reclaim idle TCP sessions between turns, the next turn
+        // writes onto a dead pooled connection, and the engine's THINK-round
+        // retries would reuse the SAME cached client (same dead pool) until
+        // the failure policy stops the session ("已中断：连续多次尝试失败").
+        // Ask Rust to drop the pool so the next attempt builds fresh
+        // connections. Fire-and-forget — the original error still propagates.
+        if (isNetworkClassError(invokeError)) {
+          deps.invoke('reset_llm_stream_clients', {}).catch(() => {});
+        }
       })
       .finally(() => {
         invokeDone = true;

@@ -682,6 +682,10 @@
                     <label class="toggle"><input type="checkbox" id="cfg-proxy-enabled" /><span class="toggle-slider"></span></label>
                   </div>
                   <div class="setting-row">
+                    <div class="setting-info"><span class="setting-label" data-i18n="proxy.tlsVerify">校验 TLS 证书</span><span class="setting-hint" data-i18n="proxy.tlsVerify.hint">默认关闭：不校验证书，企业内网拦截网关/自签证书环境保持关闭即可连通；直连公网建议开启以防中间人</span></div>
+                    <label class="toggle"><input type="checkbox" id="cfg-tls-verify" /><span class="toggle-slider"></span></label>
+                  </div>
+                  <div class="setting-row">
                     <div class="setting-info"><span class="setting-label" data-i18n="proxy.mode">代理方式</span><span class="setting-hint" data-i18n="proxy.mode.hint">手动填写地址，或直接使用系统代理（透明转发）</span></div>
                     <select id="cfg-proxy-mode" class="setting-select" data-i18n-options="manual:proxy.mode.manual,system:proxy.mode.system"><option value="manual" selected>手动地址</option><option value="system">系统代理</option></select>
                   </div>
