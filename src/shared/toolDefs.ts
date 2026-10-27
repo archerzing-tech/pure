@@ -103,7 +103,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit.',
+    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit. Serving & previewing a project — pick the vehicle FIRST: a single self-contained .html (no build step, no server-only APIs) opens directly via its file:// path; anything with a dev-server script (vite/webpack/next/flask/fastapi…), fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost — install dependencies (finite command), start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, then open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows "Start-Process <url>") and report the URL + how to stop it (kill <pid>). Never leave a foreground server running and never fake a preview with file:// for something that needs a server.',
     input_schema: {
       type: 'object',
       properties: {
@@ -187,7 +187,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_search',
-    description: 'Legacy compatibility alias for researcher_web. Hidden from new model tool lists.',
+    description: 'Web search. With a Serper or Tavily API key it uses those API backends first; otherwise free backends are tried in order (DuckDuckGo / Wikipedia / Bing / Sogou / Baidu / Brave, plus a Jina-proxy last resort); an intranet SearXNG instance is tried first when configured. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.',
     input_schema: {
       type: 'object',
       properties: {
@@ -199,7 +199,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_fetch',
-    description: 'Legacy compatibility tool for fetching readable page text — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. Hidden from new model tool lists.',
+    description: 'Fetch and extract readable text from a text/HTML/JSON/PDF page — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. If it still returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page.',
     input_schema: {
       type: 'object',
       properties: {
@@ -308,7 +308,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'git_commit',
-    description: 'Stage changes and create a git commit in the workspace repository (must already be a git repo). Pass paths to stage specific files, or omit paths to stage every change. Write the message as a concise summary line of WHY the change matters. Never force-push or amend published history.',
+    description: 'Stage changes and create a git commit in the workspace repository (must already be a git repo). Pass paths to stage specific files, or omit paths to stage every change. Write the message as a concise summary line of WHY the change matters. On your first commit of a non-trivial change, follow the pre-commit review contract in the system prompt. Never force-push or amend published history.',
     input_schema: {
       type: 'object',
       properties: {

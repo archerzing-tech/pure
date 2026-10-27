@@ -320,9 +320,6 @@ async function assembleCliPrompt(
     toolDefinitions: toolsDefs,
     modelIdentity: args.model ? { provider: args.provider, model: args.model } : undefined,
     environment: buildEnvironmentContext(),
-    runtimes: buildRuntimesContext(),
-    network: buildNetworkContext(),
-    shell: buildShellContextLine(),
     // hub 条目显式收窄为 PromptSkill 的字段(name/body/enabled),不把
     // HubSkill 的 source/hash 带进装配上下文。
     skills: [
@@ -335,12 +332,24 @@ async function assembleCliPrompt(
     mcpResources: mcpClient ? await mcpClient.collectResourceContext() : undefined,
     mode,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
-    conventions,
     // The CLI merges subagent tools into toolsDefs when it has a workspace, so
     // delegation is possible — enable the multi_agent protocol fragment. Gated
     // on actual subagent tool presence (see hasSubagents above).
     hasSubagents,
-  }, userText, context);
+  }, userText, { ...context, envFacts: buildCliEnvFacts(conventions) });
+}
+
+/** P2 下沉（2026-10-27）：CLI 侧环境事实拼装，与 GUI 的 buildEnvFacts 同构。 */
+function buildCliEnvFacts(conventions?: string): string {
+  const parts: string[] = [];
+  if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
+  const runtimes = buildRuntimesContext().trim();
+  const network = buildNetworkContext().trim();
+  const shell = buildShellContextLine().trim();
+  if (runtimes) parts.push(runtimes);
+  if (network) parts.push(network);
+  if (shell) parts.push(shell);
+  return parts.join('\n\n');
 }
 
 /** `/prompts` — list the prompt templates the connected MCP servers publish. */

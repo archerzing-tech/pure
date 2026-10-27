@@ -45,17 +45,21 @@ export interface ChannelPromptInput {
 }
 
 export function assembleChannelPrompt(input: ChannelPromptInput): PromptAssembly {
+  // P2 下沉：conventions 住 user turn（envFacts），不再进 system 前缀。
+  // 通道面没有本机 runtimes/network/shell 探针，envFacts 只拼惯例。
+  const envFacts = input.conventions?.trim()
+    ? `<project_conventions>\n${input.conventions.trim()}\n</project_conventions>`
+    : undefined;
   return promptAssembler.assemble({
     surface: 'channel',
     capabilities: buildChannelCapabilities(input.capabilities),
     toolDefinitions: input.toolDefinitions,
     budget: input.budget,
     modelIdentity: input.modelIdentity,
-    conventions: input.conventions,
     hasSubagents: input.hasSubagents,
     mode: input.mode,
     sessionId: input.sessionId,
-  }, input.userText);
+  }, input.userText, { envFacts });
 }
 
 export function channelOutputReserve(budget: PromptBudgetConfig): number {

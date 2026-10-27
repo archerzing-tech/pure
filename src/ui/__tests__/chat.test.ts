@@ -2009,9 +2009,10 @@ describe('generate_image text-to-image wiring', () => {
     expect(src).toContain("codingAgent.toolRegistry.register({ ...IMAGE_GEN_TOOL_DEF, tags: [Tags.READ], riskLevel: 'low' });");
     // …and the plain toolsDef list otherwise.
     expect(src).toContain('...(imageGen ? [IMAGE_GEN_TOOL_DEF] : [])');
-    // Both prompt surfaces (early base + final assembly) get the flag.
-    expect(src).toContain('buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions)');
-    expect(src).toContain('capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen })');
+    // Both prompt surfaces (early base + final assembly) get the flag, plus
+    // the attachment gate (image input contract rides only with attachments).
+    expect(src).toContain('buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions, (userMessageAttachments?.length ?? 0) > 0)');
+    expect(src).toContain('capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen, hasImageAttachment: (userMessageAttachments?.length ?? 0) > 0 })');
     expect(src).toContain('imageGeneration: imageGen,');
     // generate_image is workspace-independent (available in plain-chat mode).
     expect(src).toContain("|| name === 'generate_image'");

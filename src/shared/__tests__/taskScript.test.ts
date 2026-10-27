@@ -513,8 +513,9 @@ describe('taskScript · fold 记忆化（审计批 4⑤）', () => {
     const steps = deriveTaskScript(script).steps;
     const elapsed = performance.now() - started;
     expect(steps[0]?.evidence.tools).toBe(total);
-    // 有 memo：32 次 derive 里 31 次命中，只剩随追加的重放 ≈ 0.4s。
-    // 无 memo：每次 derive 全账重放，≈ 32 倍 ≈ 10s+。
-    expect(elapsed).toBeLessThan(1_200);
+    // 有 memo：32 次 derive 里 31 次命中，只剩随追加的重放。阈值给足余量：
+    // 全量测试并发跑时机器负载会把绝对耗时抬高 2-3 倍（2026-10-27 判例），
+    // 与无 memo 的 ≈10s+ 之间留一个数量级——这条锚是摊平复杂度，不是压秒表。
+    expect(elapsed).toBeLessThan(4_000);
   });
 });

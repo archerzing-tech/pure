@@ -896,21 +896,31 @@ async function applyOverlayGuardToSources(sources: Array<{ file: string; text: s
   return out;
 }
 
-function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string): string {
+function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, config: PureConfig | null = null, toolDefinitions: ToolDefinition[] = [], imageGeneration = false, conventions?: string, hasImageAttachment = false): string {
   return promptAssembler.buildSystemPrompt({
     surface: 'gui',
-    capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace, { imageGeneration }),
+    capabilities: buildGuiCapabilities(hasWorkspace, temporaryWorkspace, { imageGeneration, hasImageAttachment }),
     imageGeneration,
     toolDefinitions,
     modelIdentity: buildModelIdentity(config),
     environment: buildEnvironmentContext(config),
-    runtimes: buildRuntimesContext(),
-    network: buildNetworkContext(),
-    shell: buildShellContextLine(),
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides),
-    conventions,
   });
+}
+
+/** P2 下沉（2026-10-27）：惯例 + 运行时 + 网络 + shell 拼成 user-turn 环境事实。
+ * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。 */
+function buildEnvFacts(conventions?: string): string {
+  const parts: string[] = [];
+  if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
+  const runtimes = buildRuntimesContext().trim();
+  const network = buildNetworkContext().trim();
+  const shell = buildShellContextLine().trim();
+  if (runtimes) parts.push(runtimes);
+  if (network) parts.push(network);
+  if (shell) parts.push(shell);
+  return parts.join('\n\n');
 }
 
 function formatDigestSize(chars: number): string {
@@ -5309,7 +5319,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
           ];
       const conventions = await loadGuiConventions(effectiveWorkspace || undefined);
-      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions);
+      systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions, (userMessageAttachments?.length ?? 0) > 0);
       // 缓存本次真实装配的固定开销，供底部上下文窗口进度条读取（与引擎估算同口径）。
       this.contextOverhead = {
         system: estimatePromptTokens(systemPrompt),
@@ -6292,14 +6302,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       turnTiming.contextMs = (turnTiming.contextMs ?? 0) + Math.round(performance.now() - mcpResourceStartMs);
       const assembly = promptAssembler.assemble({
         surface: 'gui',
-        capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen }),
+        capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen, hasImageAttachment: (userMessageAttachments?.length ?? 0) > 0 }),
         imageGeneration: imageGen,
         toolDefinitions: finalPromptTools,
         modelIdentity: buildModelIdentity(config),
         environment: buildEnvironmentContext(config),
-        runtimes: buildRuntimesContext(),
-        network: buildNetworkContext(),
-        shell: buildShellContextLine(),
         // 无 workspace 的回合工具列表里没有 read_file,索引路径会开空头支票
         // ——剥掉 body 和 path,只留 name+description 的知晓行(2026-10-20
         // 晚改:此前整退全文内联,hello 回合为技能正文多背 ≈10k tokens)。
@@ -6318,14 +6325,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // fire when delegation is actually possible. Without a workspace there
         // are no subagent tools — don't tell the model to delegate.
         hasSubagents: !!effectiveWorkspace,
-        // Thread the merged AGENTS.md conventions into the EXECUTION prompt too
-        // (not just the pre-analysis buildSystemPrompt). Without this the GUI
-        // runs with no project_conventions — the model never sees the
-        // multi-agent delegation + display-discipline rules it needs to
-        // actually delegate and to keep output concise. `conventions` is in
-        // scope from line 2467.
-        conventions,
       }, userText, {
+        // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
+        // `conventions` is in scope from the pre-analysis build above.
+        envFacts: buildEnvFacts(conventions),
         traps: userTraps,
         buildProtocol: userBuildProtocol,
         plan: userPlan,

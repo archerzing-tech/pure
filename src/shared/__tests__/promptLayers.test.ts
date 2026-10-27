@@ -32,6 +32,7 @@ import {
   wantsCapabilityLadder,
   wantsDelegationMechanics,
 } from '../promptLayers';
+import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { INCREMENTAL_BUILD_PROMPT } from '../agentBehavior';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
@@ -282,6 +283,18 @@ describe('L1 behavior contracts', () => {
     }
   });
 
+  it('arms the svg contract for picture requests with the 只 measure word (2026-10-27 判例)', () => {
+    // 「画一只鸟」自 2026-10-14 起就 picture:false——量词表只有[张个幅副]，
+    // 「只」缺位导致细则从未随请求装配（常驻指针兜底让测试伪绿）。量词表
+    // 补「只」后锁死：动物量词是真实用户输入，漏了细则就缺席。
+    for (const hit of ['画一只鸟', '画只小狗', '生成一张猫的图片', '生成一只卡通熊的图片']) {
+      expect(detectVisualRequest(hit).picture).toBe(true);
+    }
+    // 「只」不吞几何让位词：示意图类仍由 paint 独占。
+    expect(detectVisualRequest('画一只三层架构示意图').picture).toBe(false);
+    expect(detectVisualRequest('画一只三层架构示意图').paint).toBe(true);
+  });
+
   it('does NOT arm the svg contract for static-geometry requests (2026-10-17 case)', () => {
     // 「画一张三层架构示意图」armed both svg and paint details; the SVG
     // contract's wording is stronger and the model went SVG (real-machine
@@ -316,7 +329,7 @@ describe('L1 behavior contracts', () => {
     // 大头①②（2026-10-14）：常驻核心与按需细则由同一个常量切片而来——改一处
     // 不可能只改半边，拼接回原文逐字相等就是这条不变式的锚。
     expect(CAPABILITY_GAP_CORE + CAPABILITY_GAP_LADDER).toBe(CAPABILITY_GAP_PROMPT);
-    expect(CAPABILITY_GAP_CORE).toContain('do NOT refuse, do NOT pretend to have the capability, and do NOT invent results');
+    expect(CAPABILITY_GAP_CORE).toContain('never refuse, pretend to have it, or invent results');
     expect(CAPABILITY_GAP_CORE).toContain('~/.pure/skills/');
     expect(CAPABILITY_GAP_CORE).not.toContain('codeload.github.com');
     expect(CAPABILITY_GAP_LADDER).toContain('codeload.github.com');
@@ -349,7 +362,7 @@ describe('L1 behavior contracts', () => {
     expect(CAPABILITY_GAP_PROMPT).toContain('install_agent_skill(source, name)');
     expect(CAPABILITY_GAP_PROMPT).toContain('search_mcp_servers(query)');
     expect(CAPABILITY_GAP_PROMPT).toContain('connect_mcp_server(candidateId)');
-    expect(CAPABILITY_GAP_PROMPT).toContain('consider a specialist skill as one possible solution');
+    expect(CAPABILITY_GAP_PROMPT).toContain('a specialist skill is one option');
     expect(CAPABILITY_GAP_PROMPT).toContain('official Registry recipe');
     // The transport-escalation ladder: a failed route is a diagnosis, and the
     // archive route must name the concrete codeload URL + placement target.
@@ -385,10 +398,11 @@ describe('L1 behavior contracts', () => {
     expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('once per task');
   });
 
-  it('documents the git write tools in the Shell & Git tool core', () => {
-    expect(FILE_TOOLS_CORE).toContain('git_commit(message, paths?)');
-    expect(FILE_TOOLS_CORE).toContain("git_branch(action, name?)");
-    expect(FILE_TOOLS_CORE).toContain('<pre_commit_review>');
+  it('documents the git write tools via their schema descriptions (2026-10-27 下沉)', () => {
+    // git 工具的散文清单已从 FILE_TOOLS_CORE 下沉到 schema description——
+    // pre_commit_review 的跨引用锚现在住在 git_commit 的 description 里。
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_commit')?.description).toContain('pre-commit review contract');
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_branch')?.description).toBeTruthy();
   });
 });
 
@@ -477,19 +491,22 @@ describe('stripUserTurnContext (replay round-trip)', () => {
 
 describe('FILE_TOOLS_CORE (L1 shared tool list)', () => {
   it('lists the full file + shell/git tool set', () => {
-    expect(FILE_TOOLS_CORE).toContain('read_file(path, startLine?, endLine?)');
-    expect(FILE_TOOLS_CORE).toContain('replace_files(files[], oldString, newString, allowMultiple?)');
-    expect(FILE_TOOLS_CORE).toContain('execute_command(command, background?) — run a shell command');
-    expect(FILE_TOOLS_CORE).toContain('git_status — working tree status');
+    // 2026-10-27 瘦身：逐工具散文下沉 schema，FILE_TOOLS_CORE 只留跨工具策略。
+    expect(FILE_TOOLS_CORE).toContain('File tool strategy');
+    expect(FILE_TOOLS_CORE).toContain('find_files FIRST');
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'read_file')?.description).toContain('startLine');
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'replace_files')).toBeTruthy();
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_status')).toBeTruthy();
   });
 
   it('teaches the serve-and-preview decision: static file vs web server', () => {
     // The "启动服务打开页面" protocol: the model must pick the right vehicle
-    // instead of faking a preview or letting a server time out.
-    expect(FILE_TOOLS_CORE).toContain('Single self-contained .html file');
+    // instead of faking a preview or letting a server time out. 现同时钉在
+    // FILE_TOOLS_CORE（策略段）与 execute_command schema（下沉承接）两处。
+    expect(FILE_TOOLS_CORE).toContain('a single self-contained .html');
     expect(FILE_TOOLS_CORE).toContain('MUST go through http://localhost');
-    expect(FILE_TOOLS_CORE).toContain('background:true');
-    expect(FILE_TOOLS_CORE).toContain('never fake a preview by opening file:// for something that needs a server');
+    expect(FILE_TOOLS_CORE).toContain('never fake a preview with file://');
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'execute_command')?.description).toContain('background:true');
   });
 });
 
