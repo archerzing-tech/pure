@@ -372,14 +372,15 @@ describe('PromptAssembler', () => {
 
   it('offers mermaid and puml as offline GUI diagram formats', () => {
     // GUI 的图全部本地渲染：mermaid 与 PlantUML 引擎都随应用打包，断网也能画，
-    // 所以 puml 不再被禁止，只声明各自擅长的图型（mermaid 默认，PlantUML 负责
-    // class / component / deployment / activity / use-case）。
+    // 所以 puml 不再被禁止，只声明各自擅长的图型（mermaid 默认、含 v12 起原生的
+    // usecase-beta 等；PlantUML 只负责 component / deployment / activity）。
     const gui = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: buildGuiCapabilities(true),
     });
     expect(gui).toContain('puml/plantuml blocks render locally too');
-    expect(gui).toContain('class / component / deployment / activity / use-case UML');
+    expect(gui).toContain('component / deployment / activity UML');
+    expect(gui).toContain('usecase-beta (UML use case; ASCII node ids)');
     expect(gui).not.toContain('NEVER emit puml/plantuml');
     expect(gui).not.toContain('fail without network');
 
@@ -390,7 +391,7 @@ describe('PromptAssembler', () => {
       imageGeneration: true,
     });
     expect(withImageGen).toContain('ALL of them render locally in the app with no network');
-    expect(withImageGen).toContain('puml/plantuml when PlantUML\'s layout is better');
+    expect(withImageGen).toContain('puml/plantuml only for component / deployment / activity, where PlantUML\'s layout is better');
     expect(withImageGen).not.toContain('plantuml.com');
   });
 

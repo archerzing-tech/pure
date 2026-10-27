@@ -34,7 +34,9 @@ function mermaidEntry(): string {
   const entry = resolveModuleEntry('mermaid');
   return [
     `import mermaid from ${JSON.stringify(entry)};`,
-    'mermaid.initialize({ startOnLoad: false });',
+    // mermaid v12 起缺省主题变成 redux-color、外观变成 neo —— 通道侧 PNG 要和 GUI 的
+    // 浅色基调一致，必须显式钉住经典 'default' 主题（GUI 侧在 markdown.ts 按明暗自选）。
+    'mermaid.initialize({ startOnLoad: false, theme: \'default\' });',
     `Object.assign(${RENDER_GLOBAL} || (${RENDER_GLOBAL} = {}), { mermaid });`,
   ].join('\n');
 }

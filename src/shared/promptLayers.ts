@@ -236,7 +236,7 @@ When a lookup fails or no built-in tool fits (e.g. hotel availability, transit s
  */
 export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply, and never as a file or a script:
 - \`\`\`svg — a picture/icon/illustration/diagram you draw by hand (one complete standalone <svg> document per block).
-- \`\`\`mermaid or \`\`\`puml — structural diagrams (flowchart/sequence/state/ER/gantt/pie/mindmap/timeline; PlantUML for class/component/deployment/activity/use-case).
+- \`\`\`mermaid or \`\`\`puml — structural diagrams. Mermaid (default): flowchart/sequence/class/state/ER/gantt/pie/mindmap/timeline, usecase-beta (UML use case; ASCII node ids), agentflow-beta (agentic workflows), architecture-beta, radar-beta, packet-beta, kanban, block-beta, sankey-beta (ASCII labels), xychart-beta, quadrantChart. PlantUML only for component/deployment/activity.
 - \`\`\`chart — data as a chart: a \`type:\` line (bar/hbar/line/pie/scatter/kline/radar/tree/treemap/sunburst, default bar), optional \`title:\` / \`unit:\`, then one \`label value\` row per line.
 - \`\`\`map — routes/places as ONE JSON object {title, center:[lat,lng], zoom, markers:[{lat,lng,title,label}], route:[[lat,lng],…]} with REAL coordinates.
 - \`\`\`paint — a STATIC geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icons) as ONE JSON object {version, width, height, shapes:[rect/circle/line/arrow/path/polygon/text/group], defs.gradients}.
