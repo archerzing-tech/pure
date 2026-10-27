@@ -26,14 +26,17 @@ import {
   SCOPE_ADD_RE,
   STOP_RE,
 } from './DynamicInsertionCoordinator';
-import type { InsertionKind } from './Planner';
 import { HARVESTED_CASES } from './insertionCorpusHarvested';
 
 /** 机械路径会给出的处置（与裁决器应判的 kind 是两套词，分开标注，离线对照
  *  才不会把「停一支」和「整树停」混成一件事）。 */
 export type Handled = 'stop' | 'branch-stop' | 'branch-resume' | 'goal-change' | 'steer-cancel' | 'task';
 
-export type ExpectKind = InsertionKind | 'scheduled';
+/** 语料期望词表（v1 判定词，离线对照存档用）。生产判定面已切九类 relation
+ *  （v2，2026-10-27），Planner 的 @deprecated InsertionKind 别名随之删除；
+ *  语料里人工核对过的期望句**按原样留档**——它们记录的是当时裁决器的判词，
+ *  换成 relation 词表就是篡改历史数据。新语料入库时按 relation 词表标注。 */
+export type ExpectKind = 'stop' | 'premise-change' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter' | 'scheduled';
 
 export interface Case {
   text: string;

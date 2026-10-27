@@ -263,20 +263,31 @@ afterEach(() => {
 // ── 假分类 LLM：按剧本对插话文本给判定；旁路问答给固定答复 ────────────────
 
 interface ScriptedClassification {
-  /** 去重复核调用（独立提示词）的输出契约没有 kind——只有主分类要求它。 */
-  kind?: string;
+  /** 九类 relation（v2 权威分类面——classifyInsertion 真解析只认它）。 */
+  relation: 'supplement' | 'change' | 'emphasize' | 'unrelated' | 'correction' | 'question' | 'mixed' | 'meta' | 'misunderstanding';
+  /** relation=unrelated 的细分（new_task=排队跑，chatter=收下）。 */
+  unrelated_kind?: 'new_task' | 'chatter';
   reason: string;
   confidence: number;
-  when?: string;
   /** 与真模型按提示词契约回的字段同名（蛇形）——剧本原样 JSON.stringify，
    *  走 classifyInsertion 的真解析，回放保真。 */
   cancels_part?: boolean;
   adds_along?: boolean;
-  supplements_current?: boolean;
   /** 模型点名（2026-10-10 模型判断、宿主执行）：完整分类回包里的
    *  stop_branch（分类调用读）；聚焦点名调用读顶层的 call_id。 */
   stop_branch?: { call_id: string };
   call_id?: string;
+}
+
+/** 复核窄问题（<dedupe_conflict> 顶层块）的输出契约——蛇形原样走
+ *  recheckCoveredInsertion 真解析（Planner 同名结构）。复核不分类：没有
+ *  relation 字段，只裁「收掉在跑的」还是「真加活」。 */
+interface RecheckScriptVerdict {
+  reason: string;
+  confidence: number;
+  cancels_part?: boolean;
+  stop_branch?: { call_id: string };
+  receipt?: string;
 }
 
 interface ScriptedLlm {
@@ -286,7 +297,7 @@ interface ScriptedLlm {
 }
 
 function scriptedLlm(
-  classifications: Array<{ match: string; cls: ScriptedClassification; during?: () => void }>,
+  classifications: Array<{ match: string; cls: ScriptedClassification | RecheckScriptVerdict; during?: () => void }>,
   answers: { clarify?: string; question?: string } = {},
 ): ScriptedLlm {
   const classifyCalls: string[] = [];
@@ -297,8 +308,8 @@ function scriptedLlm(
       classifyCalls.push(user);
       const hit = classifications.find((c) => user.includes(c.match));
       hit?.during?.(); // 判定途中的副作用（模拟在飞回合往转写里流行内容）
-      const payload: ScriptedClassification = hit?.cls
-        ?? { kind: 'task', reason: 'unmatched script line', confidence: 0.9 };
+      const payload: ScriptedClassification | RecheckScriptVerdict = hit?.cls
+        ?? { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'unmatched script line', confidence: 0.9 };
       const json = JSON.stringify(payload);
       yield { type: 'content', content: json };
       yield { type: 'done', content: json };
@@ -389,10 +400,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
       return true;
     });
     const llm = scriptedLlm([
-      { match: '北京天气', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
-      { match: '东京的机票', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
-      // 样本插话 4 是"提醒我今晚买牛奶"——带时刻的诉求不进队列，进排期。
-      { match: '买牛奶', cls: { kind: 'task', reason: 'life reminder with a time', confidence: 0.9, when: '今晚 19:30' } },
+      { match: '北京天气', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'unrelated errand', confidence: 0.9 } },
+      { match: '东京的机票', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'unrelated errand', confidence: 0.9 } },
+      // 样本插话 4 是"今晚 19:30 提醒买牛奶"——带时刻的诉求不进队列，进排
+      // 期。v2 契约没有 when 字段：时刻从用户自己的话里推导（parseInputTiming
+      // 的 TIMING_CUE + 时钟解析），裁决器只管关系。
+      { match: '买牛奶', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'life reminder with a time', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -413,10 +426,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(text.indexOf('北京天气')).toBeGreaterThan(-1);
     expect(text.indexOf('东京的机票')).toBeGreaterThan(text.indexOf('北京天气'));
 
-    await h.chat.interject('提醒我今晚买牛奶。');
+    await h.chat.interject('提醒我今晚 19:30 买牛奶。');
     // 定时的走了宿主排期：用户的话上屏 + 已排期回执；不占待办队列。
     expect(sinkCalls).toHaveLength(1);
-    expect(sinkCalls[0].text).toBe('提醒我今晚买牛奶。');
+    expect(sinkCalls[0].text).toBe('提醒我今晚 19:30 买牛奶。');
     expect(sinkCalls[0].at).toBeGreaterThan(Date.now());
     expect(statusJoined(h.root)).toContain('已排期');
     expect(userJoined(h.root)).toContain('买牛奶');
@@ -437,7 +450,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('打断修正型（打断案例1 插话1）：方向掀掉 → 认下+止损回执，收尾后插话作为新回合开场重入', async () => {
     const llm = scriptedLlm([
-      { match: '读书会', cls: { kind: 'goal-change', reason: 'the event itself was replaced', confidence: 0.9 } },
+      { match: '读书会', cls: { relation: 'change', reason: 'the event itself was replaced', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     const insert = '等等，不是读书会了，改成 AI 工具实操工作坊，面向职场人，周日，30 人。';
@@ -458,7 +471,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('打断修正型（打断案例1 插话3）：前提修正走同一条止损链', async () => {
     const llm = scriptedLlm([
-      { match: '预算砍半', cls: { kind: 'premise-change', reason: 'budget premise overturned', confidence: 0.85 } },
+      { match: '预算砍半', cls: { relation: 'change', reason: 'budget premise overturned', confidence: 0.85 } },
     ]);
     const h = makeHarness(llm);
     const insert = '预算砍半，不能请外部讲师，你自己出内容。';
@@ -466,12 +479,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject(insert);
     // 2026-09-29 前提修正分两路：有在飞委派走暂停止损（「暂停存档」），无在飞
     // 委派走直路重入——本用例无委派，落的是直路回执。
-    expect(statusJoined(h.root)).toContain('前提变了——按纠正后的事实重新来；已完成的不丢。');
+    expect(statusJoined(h.root)).toContain('方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。');
     expect(h.chat.abortController.signal.aborted).toBe(true);
 
     h.endTurn();
     expect(h.sends).toEqual([insert]);
-    expect(rowPending(h.root, '前提变了')).toBe(false);
+    expect(rowPending(h.root, '方向变了')).toBe(false);
   });
 
   it('开局插话的收执行不落会话最顶上：首回合消息未入账时锚在下一条消息之后', async () => {
@@ -481,20 +494,20 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 事件流第 0 条。本 harness 就是这个窗口——全新控制器、零入账消息、
     // 回合在飞——修复后收执行锚 0（本回合用户消息将占的下标）。
     const llm = scriptedLlm([
-      { match: '预算砍半', cls: { kind: 'premise-change', reason: 'budget premise overturned', confidence: 0.85 } },
+      { match: '预算砍半', cls: { relation: 'change', reason: 'budget premise overturned', confidence: 0.85 } },
     ]);
     const h = makeHarness(llm);
     expect(h.chat.messages).toHaveLength(0);
     await h.chat.interject('预算砍半，不能请外部讲师，你自己出内容。');
     const ledger = h.chat.statusLines as Array<{ afterIndex: number; text: string }>;
-    const ack = ledger.find((l) => l.text.includes('前提变了'));
+    const ack = ledger.find((l) => l.text.includes('方向变了'));
     expect(ack).toBeDefined();
     expect(ack!.afterIndex).toBe(0);
   });
 
   it('模糊澄清型（澄清案例姿态 + 置信门）：破坏性判定没把握时先问一句，手头的活照跑', async () => {
     const llm = scriptedLlm(
-      [{ match: '换个搞法', cls: { kind: 'goal-change', reason: 'an overturn, but could also be a tweak', confidence: 0.35 } }],
+      [{ match: '换个搞法', cls: { relation: 'change', reason: 'an overturn, but could also be a tweak', confidence: 0.35 } }],
       { clarify: '你是想推倒当前方向重来吗？还是只是小调整？' },
     );
     const h = makeHarness(llm);
@@ -513,7 +526,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('主线相关追问（排队案例2 插话3）：老板问进度 → 边干边答，主线不动', async () => {
     const llm = scriptedLlm([
-      { match: '老板', cls: { kind: 'question', reason: 'status question, answer out-of-band', confidence: 0.9 } },
+      { match: '老板', cls: { relation: 'question', reason: 'status question, answer out-of-band', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -527,7 +540,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('1b question 入账：旁答后问答对折进运行回合（internal，重放不冒充用户）', async () => {
     const llm = scriptedLlm([
-      { match: '老板', cls: { kind: 'question', reason: 'status question, answer out-of-band', confidence: 0.9 } },
+      { match: '老板', cls: { relation: 'question', reason: 'status question, answer out-of-band', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -547,7 +560,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('1b 旁答失败不静默：明说没答上，问题原话收尾重入（承诺兑现）', async () => {
     const llm = scriptedLlm([
-      { match: '老板', cls: { kind: 'question', reason: 'status question', confidence: 0.9 } },
+      { match: '老板', cls: { relation: 'question', reason: 'status question', confidence: 0.9 } },
     ], { question: '' });
     const h = makeHarness(llm);
 
@@ -580,8 +593,8 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('1a 定向投递（判例1）：在飞时点名某支 → 直达那支（区分词点名），没点名才广播', async () => {
     const llm = scriptedLlm([
-      { match: '竞品', cls: { kind: 'steer', reason: 'redirect the competitor branch', confidence: 0.9 } },
-      { match: '方向', cls: { kind: 'steer', reason: 'general tightening', confidence: 0.9 } },
+      { match: '竞品', cls: { relation: 'supplement', reason: 'redirect the competitor branch', confidence: 0.9 } },
+      { match: '方向', cls: { relation: 'supplement', reason: 'general tightening', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     // 两支在飞（蓝本判例1 场景缩影），宿主唯一账本 agentActivities 供寻址。
@@ -607,7 +620,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
   it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {
     const llm = scriptedLlm([
-      { match: '口语', cls: { kind: 'steer', reason: 'style tweak', confidence: 0.9 } },
+      { match: '口语', cls: { relation: 'supplement', reason: 'style tweak', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -742,7 +755,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 裁决器判 steer + cancels_part（新提示词教的收活裁决），宿主点名停不
     // 中（'jev' 对不上「调研 Agent」）→ 退回取消折入——宁可折叠不误杀。
     const llm = scriptedLlm([
-      { match: '就不调研', cls: { kind: 'steer', reason: 'removes the named part from the join', confidence: 0.95, cancels_part: true } },
+      { match: '就不调研', cls: { relation: 'supplement', reason: 'removes the named part from the join', confidence: 0.95, cancels_part: true } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '调研 Agent', status: 'running' });
@@ -827,7 +840,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 全程不停。新链路：分类上下文带 <live_branches> 花名册，裁决器指认
     // 确切 callId，宿主只执行——判断在模型，动作在宿主。
     const llm = scriptedLlm([
-      { match: '评审', cls: { kind: 'steer', reason: 'removes the review part from the plan', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_review' } } },
+      { match: '评审', cls: { relation: 'supplement', reason: 'removes the review part from the plan', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_review' } } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_review', agentName: '审查员', agentRole: '代码评审', status: 'running', inputSnippet: '对照规范逐条审查代码' });
@@ -854,7 +867,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // branchView 里已不在飞时，宿主拒绝执行——宁可折入如实说，绝不拿错
     // id 停错支。
     const llm = scriptedLlm([
-      { match: '评审', cls: { kind: 'steer', reason: 'removes the review part', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_gone' } } },
+      { match: '评审', cls: { relation: 'supplement', reason: 'removes the review part', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_gone' } } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_gone', agentName: '审查员', status: 'running' });
@@ -900,7 +913,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 宿主执行）：分类上下文带着 <live_branches> 花名册，裁决器指认确切
     // call_id，宿主按 id 真停（不落中止），其余照跑——宿主不再做任何文本匹配。
     const llm = scriptedLlm([
-      { match: '爆发点', cls: { kind: 'steer', reason: 'removes the named research item', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
+      { match: '爆发点', cls: { relation: 'supplement', reason: 'removes the named research item', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -936,7 +949,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 契约驱动：kind 错了不要紧，cancels_part + stop_branch 在就不会反向执行
     // ——2026-10-10 起连「停哪支」也在契约里（裁决器指认 call_id）。
     const llm = scriptedLlm([
-      { match: '取消', cls: { kind: 'task', reason: 'misjudged as an addition, flag still set', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
+      { match: '取消', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'misjudged as an addition, flag still set', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -973,7 +986,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 契约的代价在这里如实地钉住：分类器漏报 cancels_part 时，这句会按普通
     // task 处理（排队），提示词里那句「即使判成 task 也必须报」是唯一防线。
     const llm = scriptedLlm([
-      { match: '取消', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+      { match: '取消', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     // 委派不在飞：判定落在队列路径，才好断言“没被改道成取消”。
@@ -991,7 +1004,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 两个标记同时在，宿主就只取消折入、绝不停支——停掉那支会把刚要求加进来
     // 的活一并杀掉。
     const llm = scriptedLlm([
-      { match: 'B站', cls: { kind: 'task', reason: 'removes one part while adding another', confidence: 0.9, cancels_part: true, adds_along: true } },
+      { match: 'B站', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'removes one part while adding another', confidence: 0.9, cancels_part: true, adds_along: true } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_price', agentName: '价格调研员', status: 'running', inputSnippet: '调研各平台均价' });
@@ -1044,8 +1057,8 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 个平台，爱奇艺」上一条测试锁死。
     const llm = scriptedLlm([
       { match: 'dedupe_conflict', cls: { reason: 'recheck: the wording removes a running branch', confidence: 0.9, cancels_part: true } },
-      { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
-      { match: '暂停', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+      { match: '优酷', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+      { match: '暂停', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -1084,7 +1097,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 早止损。
     const llm = scriptedLlm([
       { match: 'dedupe_conflict', cls: { reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' } } },
-      { match: '优酷', cls: { kind: 'task', reason: 'read as an addition, no flag', confidence: 0.9 } },
+      { match: '优酷', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -1127,7 +1140,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
         classifyCalls.push(user);
         const payload = user.includes('dedupe_conflict')
           ? '模型这回合没说出人话' // 复核调用：解析失败 → null
-          : JSON.stringify({ kind: 'task', reason: 'misread as addition', confidence: 0.9 });
+          : JSON.stringify({ relation: 'unrelated', unrelated_kind: 'new_task', reason: 'misread as addition', confidence: 0.9 });
         yield { type: 'content', content: payload };
         yield { type: 'done', content: payload };
       },
@@ -1165,7 +1178,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 主兜底——signals.cancelsPart 为真时 task 判定被改道，绝不进队列、
     // 绝不机械折入。剧本用蛇形 cancels_part，走真解析。
     const llm = scriptedLlm([
-      { match: '收掉', cls: { kind: 'task', reason: 'misjudge', confidence: 0.9, cancels_part: true } },
+      { match: '收掉', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'misjudge', confidence: 0.9, cancels_part: true } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '调研 Agent', status: 'running' });
@@ -1280,7 +1293,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
   it('画鸟时补云（steer+supplements_current）：不排队、不折入——并进请求一起想', async () => {
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'steer', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9, supplements_current: true } },
+      { match: '云朵', cls: { relation: 'supplement', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow(); // 预检思考（planByThinking）还在流式进行
@@ -1309,21 +1322,25 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     expect(h.chat.applyPreflightSupplements('再来一句', [])).toBe('再来一句');
   });
 
-  it('分类器判成 task 但给了 supplements_current：同样吸收，绝不排队', async () => {
-    // 真实事故的精确形态：老提示词把一切加内容都路由成 task。分类器给了
-    // supplements_current 就该被吸收——kind 不是豁免凭据。
+  it('分类器把构图内补充误判成新活：吸收集合是封闭的——不吸收，照排队回告', async () => {
+    // 画鸟事故的 v2 防线换了位置：裁决器提示词按九类重写后，构图内加内容
+    // 该判 supplement（上一条锁死吸收路）。v1 的 supplements_current 营救
+    // 条款随 kind 一起退役——编排层的吸收面保持封闭（七类关系，unrelated
+    // 不在内，蓝图 §二）：误路由成新活就照排队并回告，绝不静默吞进思考窗。
+    // 吸收越权吞新活与排队拆构图是同一枚硬币的两面，这条锁住反面。
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'task', reason: 'scope addition, but INSIDE the current deliverable', confidence: 0.9, supplements_current: true } },
+      { match: '云朵', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'scope addition, but INSIDE the current deliverable', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
 
     await h.chat.interject('背景上加一些会动的云朵');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(queueCard(h.root)).toBeUndefined();
-    expect(h.chat.roundClose.queueView()).toHaveLength(0);
-    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(1);
-    expect(assistantJoined(h.root)).toContain('已并入补充，重新规划');
+    // 没被吸收：暂存空，队列卡上屏，收执交代「排上了」——绝不静默。
+    expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
+    expect(queueCard(h.root)).toBeDefined();
+    expect(h.chat.roundClose.queueView()).toHaveLength(1);
+    expect(assistantJoined(h.root) + statusJoined(h.root)).toContain('这句排上了，办完手头就轮到。');
   });
 
   it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {
@@ -1331,7 +1348,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 若被吸收，图上该消失的云就留下了——与意图相反。cancels_part 在场
     // 一律不吸收。
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'steer', reason: 'removes one element', confidence: 0.9, cancels_part: true } },
+      { match: '云朵', cls: { relation: 'supplement', reason: 'removes one element', confidence: 0.9, cancels_part: true } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1350,7 +1367,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 还没落账，新回合只剩纠错这一句，要重做的事反而丢了。窗内纠错的正确
     // 动作只有一种：并进请求、推倒重想。
     const llm = scriptedLlm([
-      { match: 'jev', cls: { kind: 'premise-change', reason: 'corrects a fact the plan is built on', confidence: 0.9 } },
+      { match: 'jev', cls: { relation: 'correction', reason: 'corrects a fact the plan is built on', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1373,7 +1390,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 的承诺在思考期没有别的兑现点，等计划定型后才被看见就晚了。窗内
     // steer 一律吸收，不再赌分类器记得打标记。
     const llm = scriptedLlm([
-      { match: 'jev', cls: { kind: 'steer', reason: 'a correction to carry forward', confidence: 0.9 } },
+      { match: 'jev', cls: { relation: 'supplement', reason: 'a correction to carry forward', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1388,7 +1405,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 思考期"推翻重来" = 带着新方向重新想。原路拆回合会把原请求丢在
     // 落账前（首回合 canonical 是空的）——吸收重想一样兑现，还更省。
     const llm = scriptedLlm([
-      { match: '换个思路', cls: { kind: 'goal-change', reason: 'overturns the approach', confidence: 0.9 } },
+      { match: '换个思路', cls: { relation: 'change', reason: 'overturns the approach', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1404,7 +1421,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 挂号）后，重想流在飞期间再到的补充只入暂存——在飞的重想流完，宿主一次
     // 带上全部。N 句补充不再 N 次废生成 N 次重启。
     const llm = scriptedLlm([
-      { match: '晚霞', cls: { kind: 'steer', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9, supplements_current: true } },
+      { match: '晚霞', cls: { relation: 'supplement', reason: 'adds elements INSIDE the one picture being produced', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1432,7 +1449,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // planByThinking 已经返回，请求正文并不进去了——此刻的补充只能转达给
     // 在跑的回合（下个 THINK 边界带上），收尾没被带走的按用户原话重入。
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'steer', reason: 'supplement, but the window is closed', confidence: 0.9, supplements_current: true } },
+      { match: '云朵', cls: { relation: 'supplement', reason: 'supplement, but the window is closed', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     // planPreflightActive 默认 false：真实链路里 applyPreflightSupplements
@@ -1448,7 +1465,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 吸收只管"正在产出的那一件东西"；第二件活（画完图后要一份年报）还是
     // 走队列——这是一条路上的两件事，不是一件东西的构图变了。
     const llm = scriptedLlm([
-      { match: '年报', cls: { kind: 'task', reason: 'a second, unrelated deliverable', confidence: 0.9 } },
+      { match: '年报', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'a second, unrelated deliverable', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     h.chat.interjectOrchestrator.openPreflightWindow();
@@ -1480,7 +1497,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // 事故根因之三：派发定时器只在 send() finally 末尾一处装上，前面任何
     // 一步抛出就永远不装了。修后"落到空闲"这个事实本身就是扫除信号。
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
+      { match: '云朵', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'unrelated errand', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -1498,7 +1515,7 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
     // "收到——看一下这句话怎么安排…"）——ack 行被直接 remove() 后账本里的
     // 记录还在，快照把它拼回去。
     const llm = scriptedLlm([
-      { match: '云朵', cls: { kind: 'task', reason: 'unrelated errand', confidence: 0.9 } },
+      { match: '云朵', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'unrelated errand', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
@@ -1519,7 +1536,7 @@ describe('插话回执次序与形态', () => {
     // 插队到 ack 行正前，不管中间落了多少行，顺序永远是【原话 → 回话】。
     let chat: Record<string, any> | null = null;
     const llm = scriptedLlm([
-      { match: '爱奇艺', during: () => chat?.addStatusBubble('（在飞回合插进来的流式行）正在整理B站数据…', false), cls: { kind: 'task', reason: 'r', confidence: 0.9 } },
+      { match: '爱奇艺', during: () => chat?.addStatusBubble('（在飞回合插进来的流式行）正在整理B站数据…', false), cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'r', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
     chat = h.chat;

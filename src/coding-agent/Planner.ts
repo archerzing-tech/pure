@@ -388,24 +388,93 @@ export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
   };
 }
 
-/** Result of judging a mid-run insert against the current task.
+/** 九类承接关系（插话架构 v2 权威分类面，蓝图 §五 /《设想》§三）。判定不再
+ *  问"人看到这句话会怎么处理"（处置是宿主的事），只问"这句话与「用户上一句
+ *  + 当前正在输出的内容」构成的脉络是什么关系"：
+ *  supplement 承接加新 / change 承接改撤 / emphasize 承接调权重 / unrelated
+ *  无承接（细分 new_task|chatter）/ correction 指认用户自己表述有歧义 /
+ *  question 问进度 / mixed 一句多关系 / meta 改方式不改内容 / misunderstanding
+ *  理解纠偏（判断对象是「当前输出 vs 用户上一句」，自查确认才真暂停）。
  *
- * 插话重构：判定不再问"相关与否"，而是直接问"人看到这句话会怎么处理"——
- * question 侧路回答、steer 顺路带上、premise-change 前提被推翻止损重来、
- * goal-change 方向推翻重来、stop 停手不重排、task 排队、chatter 会心一笑。
- *
- * stop 分两层（2026-09-28 补）：**字面命令**（"停止""停下""取消"…）仍走
- * STOP_RE 快路径——停是不可逆动作，等一次分类往返是抗命，且限流/超时期间
- * 机械路径是唯一可靠的处置通道；**非字面的停**（"先缓一缓""这个就到这儿"
- * "停掉整个任务""不用继续了"）正则覆盖不到，以前会被判成 steer（带上）或
- * task（排队），现在由裁决器判 stop。判据是「没有东西补上来」：goal-change
- * 是换一个方向继续，stop 是不需要这个结果了。 */
-export type InsertionKind = 'question' | 'steer' | 'premise-change' | 'goal-change' | 'stop' | 'task' | 'chatter';
+ *  旧七类 kind（stop/premise-change/goal-change/steer/question/task/chatter）
+ *  就此退役。两条边界保持不变：字面停（"停止""停下""取消"…）仍走 STOP_RE
+ *  快路径——停是不可逆动作，等一次分类往返是抗命（2026-09-28 判例）；分类
+ *  失败仍按「要回来的新活」兜底——排队是唯一不丢话的投递（2026-09-22）。 */
+export type InsertionRelation =
+  | 'supplement'
+  | 'change'
+  | 'emphasize'
+  | 'unrelated'
+  | 'correction'
+  | 'question'
+  | 'mixed'
+  | 'meta'
+  | 'misunderstanding';
+
+export const INSERTION_RELATIONS: readonly InsertionRelation[] = [
+  'supplement',
+  'change',
+  'emphasize',
+  'unrelated',
+  'correction',
+  'question',
+  'mixed',
+  'meta',
+  'misunderstanding',
+];
+
+/** relation=unrelated 的细分（§5.1 必填）：new_task=要回来一件自己的活（排队
+ *  跑，绝不丢），chatter=寒暄反应（收下，不动手）。 */
+export type UnrelatedKind = 'new_task' | 'chatter';
+
+/** relation=mixed 的原子拆分（§5.1 必填）：每个原子自带关系与原话片段，
+ *  处置层按原子分流。 */
+export interface InsertionAtom {
+  relation: InsertionRelation;
+  text: string;
+}
+
+
+/** 判定上下文三要素（蓝图 §5.0，2026-10-27 用户强调「软暂停后开始思考关系」）：
+ *  同一句「预算改成 50 万」在「还没用到预算」和「已基于旧预算产出」两种情况
+ *  下无法区分——判定输入必须三要素齐备。宿主（chat.ts buildInsertionContext）
+ *  产出本 payload；本侧只定义接口与渲染，judge 提示词按三要素消费。rule/net
+ *  通道不依赖此 payload。 */
+export interface LiveContextPayload {
+  /** ① 用户上一句原话：当前任务的目标原点。原样保留，不得摘要掉关键条件。 */
+  lastUserMessage: string;
+  /** ② 当前输出脉络：正在生成/执行的内容到哪了——最近几个 THINK 段的实质
+   *  进展 + 当前批次在做什么。忠实脉络，不是 token 级全文。 */
+  outputGist: string;
+  /** ③ 任务状态投影：taskState snapshot 的轻量投影（running/pending 节点、
+   *  依附约束、最近副作用）——「依据什么条件在做」。 */
+  taskStateProjection: string;
+}
+
+/** 三要素渲染成 judge user 消息里 <current_task> 块的内层小节。宿主也可以
+ *  自行拼装等价文本；这个渲染器只是把三要素的呈现形状固定下来，让提示词里
+ *  的小节名（<last_user_message>/<output_gist>/<task_state>）有唯一出处。 */
+export function renderLiveContext(payload: LiveContextPayload): string {
+  return [
+    '<last_user_message>',
+    payload.lastUserMessage.trim(),
+    '</last_user_message>',
+    '',
+    '<output_gist>',
+    payload.outputGist.trim(),
+    '</output_gist>',
+    '',
+    '<task_state>',
+    payload.taskStateProjection.trim(),
+    '</task_state>',
+  ].join('\n');
+}
 
 export interface InsertionClassification {
-  kind: InsertionKind;
+  /** 九类关系——权威分类面（见 InsertionRelation）。 */
+  relation: InsertionRelation;
   reason: string;
-  /** The model's OWN confidence in `kind` (0..1). It is what lets the caller
+  /** The model's OWN confidence in `relation` (0..1). It is what lets the caller
    *  ask instead of gambling — see applyConfidenceGate in inputDecision.ts.
    *  Absent/ignored by a provider → inputDefaultConfidence() (see there for why
    *  the default sits ABOVE the gate). */
@@ -417,17 +486,18 @@ export interface InsertionClassification {
   confidenceDefaulted?: boolean;
   /** True when this verdict is not a judgment at all but the internal fallback
    *  (timeout / network / unparseable / empty input): the coordinator answers
-   *  it with the literal safety nets instead of trusting "task" as a reading.
-   *  2026-09-28 用户定调：正则不配做决策，只配做裁决器倒下时的安全网。 */
+   *  it with the literal safety nets instead of trusting the verdict as a
+   *  reading. 2026-09-28 用户定调：正则不配做决策，只配做裁决器倒下时的安全网。 */
   fallbackUsed?: boolean;
-  /** The model's reading of WHEN this input wants to run, verbatim ("now",
-   *  "after", "10 分钟后", "下午三点"). Parsing happens in inputDecision.ts so
-   *  the clock arithmetic stays testable and provider-independent. */
-  when?: string;
+  /** relation=unrelated 时的细分（§5.1 必填）：new_task 排队跑，chatter 收下。 */
+  unrelatedKind?: UnrelatedKind;
+  /** relation=mixed 时的原子拆分（§5.1 必填），处置按原子分流。 */
+  atoms?: InsertionAtom[];
   /** True when the message CANCELS or removes a named part of the running
    *  work rather than adding or adjusting one (2026-09-24 取消案例). The host
-   *  routes the removal away from the task queue on this flag — queuing a
-   *  removal would run the opposite of what was asked. */
+   *  routes the removal away from the queue and away from whole-run replans on
+   *  this flag — queuing a removal (or redoing every surviving branch with it)
+   *  would run the opposite of what was asked. */
   cancelsPart?: boolean;
   /** True when ONE message does both jobs: removes a named part AND asks for new
    *  work ("B站那支别查了，再加一个爱奇艺"——砍掉那一支，同时把这一支加进来).
@@ -435,8 +505,7 @@ export interface InsertionClassification {
    *  那既不是移除也没有 adds_along（2026-09-28 复核）。
    *  Only meaningful alongside `cancelsPart`, and the host reads it as the gate
    *  on stopping a branch: pausing that branch would kill the work the message
-   *  just asked for, so the removal is folded into the join instead. Replaces
-   *  the host's old SCOPE_ADD_RE keyword sniff (2026-09-28). */
+   *  just asked for, so the removal is folded into the join instead. */
   addsAlong?: boolean;
   /** 祈使式「停掉 X 那支」（第 2 期分支中断快路径）：真停一支在飞委派，
    * 不等汇合轮。宿主先点名寻址（matchSteerRecipient），点到了就
@@ -448,227 +517,80 @@ export interface InsertionClassification {
    * 指认不出（模糊/无所指/花名册缺席）留空，宿主退回保守折入。mode 不进
    * 契约：祈使停=abort、收掉一项=pause 由宿主按判例口径从信号推导。 */
   stopBranch?: { callId: string };
-  /** 分支级继续（第 2 期第三刀）：「把 X 那支接着跑完」——宿主点名找到那支
-   * 已暂停/已停的档案，用**原始参数**同参重派（稳定 sessionId 命中断点 →
-   * 引擎 continue）；点不到具体支或拿不到原参退回让父模型重派。
-   * 命名与 cancelsPart 同风格（分类器 JSON 字段 resumes_part → 这里），
-   * coordinator 再转成信号 resumesBranch。 */
-  resumesPart?: boolean;
-  /** 思考窗吸收（2026-09-27 用户定调）：这句话往**当前正在产出的那一件东西
-   * 里**加内容（画小鸟时“背景加几朵会动的云”、做页面时“标题再大一点”），
-   * 不是第二件活。宿主在预检思考还活着时据此把它并进请求一起想，第一版
-   * 产出就带上；不排队（排队=拆成两件事，构图就断了）。 */
-  supplementsCurrent?: boolean;
-  /** 方法切换（2026-10-13 REA 判例）：「你刚才不是已经装了 X 吗」这类资源
-   * 提醒 = 换做法，不是纯取消——交付物不变，换的是路。宿主照 pause 口径
-   * 止损在飞支并让插话重入，绝不落取消收执（「这项不做了」会把用户真正
-   * 要的「换成 X」那半句扔掉）。 */
-  methodSwitch?: boolean;
-  /** 止损失效重想（2026-10-21 对话主导架构刀 B，用户拍板）：这句插话改变
-   * 「当前正在产出的东西」从现在起该是什么样——按旧路继续吐出来的内容
-   * 反正要被收回。宿主当场停流（委派在飞则 PAUSE 存档），押话重入：原话
-   * 开场、结合现场重新思考，已完成的不丢。是 EXECUTING 阶段
-   * supplements_current 的对应物（那个管思考窗，这个管执行流）；
-   * cancels_part/resumes_part/stop_branch 在场时不生效（专门臂优先）。 */
-  affectsCurrent?: boolean;
   /** 范围确认去重（2026-10-21 对话主导架构刀 F，真机「调研必须包括优酷」
    *  判例二连反转）：这句插话要求某件东西**必须出现在产出范围内**，而花名
    *  册里已有一支在做/做完了它——宿主该答「那路正在跑着，不重复」而不是再
-   *  转达一遍。刀 E 试过「裁决器抄对象名+宿主字面匹配」，真机否决：裁决器
-   *  漏报新字段、字面匹配对不上语义对应（「优酷」vs 任务书里的「优酷动漫
-   *  官方消息」）。刀 F 改与 stop_branch 同构——**模型拿花名册点名已覆盖
-   *  那支的确切 callId，宿主只核实 id 真实性**（机械事实零语义）；点不出
-   *  就留空，照旧路由（缺的东西照常补上）。 */
+   *  转达一遍。模型拿花名册点名已覆盖那支的确切 callId，宿主只核实 id 真实
+   *  性（机械事实零语义）；点不出就留空，照旧路由（缺的东西照常补上）。 */
   coveredBranch?: { callId: string };
   /** 「这个急」提级（第 5 期调度）：用户明确这件新活加急/该先办（"这个急"、
    *  "优先处理这个"、"加急"）时置真——宿主据此把队列里的这项插到队头并换
-   *  提级收执。只对 task（排队）/steer 有意义；提级只改**队列次序**，不涉
-   *  任何破坏性动作，所以缺省绝不自己补（严格 === true 才认）。 */
+   *  提级收执。只对排队的新活（unrelated/new_task）有意义；提级只改**队列
+   *  次序**，不涉任何破坏性动作，所以缺省绝不自己补（严格 === true 才认）。 */
   urgent?: boolean;
-  /** 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎么
-   * 做」）：裁决那一刻裁决器就在现场（看得见 current_task 的阶段与插话原
-   * 话），由它顺手写好给用户看的那一两句——听懂了什么（点名插话里的实际
-   * 对象）、手头的活怎么办、接下来会怎么做。宿主只在路线与收执语义一致时
-   * 采用（steer / 普通折入）；停支没停成、早派这类只有宿主知道的事实，其
-   * 诚实口径优先于它；缺席/空串回落固定话术（规则与安全网路径没有裁决器
-   * 在场，永远走固定口径）。 */
-  receipt?: string;
+  /** 被替换的条件/前提原文片段（§5.1 targets_constraint）：change/correction
+   *  换掉的不是活、而是活所依据的条件时（"其实我在西安，不是广东"→"从广东
+   *  出发"），裁决器把用户原话里那个条件抄回来——处置层据此定位哪些在跑的
+   *  活挂在死条件上。只摘片段、不转述；没有具体条件可指认时缺席。 */
+  targetsConstraint?: string;
+  /** 疑似 misunderstanding 时请求自查（§5.1 /《设想》§五.2 双重触发）：插话
+   *  意图指向纠偏 **且** 自查确认「当前输出不忠实于用户上一句」→ 才真暂停；
+   *  自查通过 → 降级 correction/supplement 处置。自查由宿主执行，本字段只是
+   *  请求。严格 === true 才认。 */
+  selfCheckNeeded?: boolean;
 }
 
-const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what to do with it the way a sharp human colleague would — NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
+const INSERTION_CLASSIFY_PROMPT = `You are the agent, mid-task. The user just said something while you were working. Decide what that remark IS — its relation to the thread you and the user are already weaving — the way a sharp human colleague would: NOT by matching keywords, but by weighing two things together: WHEN it arrived (which phase you are in, from the context) and WHAT it changes about the result you still owe them. One question decides everything: which handling leaves the final result best off — 统筹兼顾顺势而为 (take it in stride, fold it into what you are already doing) or 及时停下改方向 (stop, and redo from the new ground truth)? A sharp human never drops the remark, and never throws work away without a reason. Neither may you.
 
-The next user message carries your live situation in two tagged sections — read both before judging:
-<current_task> — what you are working on right now; read the phase carefully, it decides what "taking it in stride" even means.
+The next user message carries your live situation — read all of it before judging:
+<current_task> — your situation woven from three threads. 用户上一句原话: the user's LAST message, the origin the whole task answers to — its exact conditions (place, budget, scope, wording) are the ground truth. 当前输出脉络: where the work-in-progress stands and what the current batch is producing. 任务状态投影: what the work rests on — steps running or pending, the constraints they answer to, recent side effects. The host may render the three threads as separate tagged sections (<last_user_message> / <output_gist> / <task_state>) inside the block; whatever the layout, all three are there. Which relation a remark has DEPENDS on these: the same words land differently before vs after the work has already used them.
+<live_branches> / <finished_branches> — when present, the delegated branches (running / finished) with id, name, role and task snippet.
 <new_message> — what the user just said.
 
-The ways to take a remark (pick exactly one kind):
+The nine relations a remark can have to that thread (pick exactly one):
 
-- "steer" — the remark belongs to the thing you are ALREADY making: a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), an element or detail added inside the same deliverable ("背景上加几朵会动的云", "标题再大一点"), the one list/answer growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when that list lives INSIDE the one deliverable, so the remark changes what the deliverable covers and nothing else — it is NOT this when the added thing is another OBJECT of the kind already being worked on in parallel (three platforms being researched and the user names a fourth): that object is a unit of work of its own, not a detail of the current one, and it is a TASK (see below). Which "taking it in stride" means is decided by the PHASE in the context: while you are still THINKING (the context says the plan is being thought out), it means the thought must be redone with the remark INSIDE it — the host merges it into the request and rethinks from scratch; if the remark belongs to the thing being thought, set "supplements_current": true and trust the host to do that. While EXECUTING, it means the running work carries it at the next step — UNLESS the remark changes what the output must be from here on (「你理解错了」/ a new emphasis or audience): then set "affects_current": true instead, and the host stops the stream and redoes it from the remark. While COLLECTING parallel results, an addition merges into the汇总, and a named removal ("X 就不调研了", "Y 那个别查了" — set "cancels_part": true) simply leaves the result: NEVER queue a removal — queuing would run the exact opposite of what was asked — and never treat one branch changing as the whole direction overturning. A named paused/stopped branch being carried on ("把竞品那支接着跑完", "让报价那路继续") is also steer with "resumes_part": true — the branch has its own checkpoint to continue from; queuing it would start it from scratch.
-- "premise-change" — the remark corrects a FACT the work is built on: place, dates, environment, versions, budget, who owns what, what something IS ("其实我在西安，不是广东", "预算只有三千", "你对jev的理解是错误的，jev是2026年9月新发布的模型"). The goal stands, but everything computed from the wrong fact comes out worthless — the work must be redone from the corrected fact. Judge this over steer whenever the correction would change the ANSWER, not just its wording. Especially while THINKING: if the thought-so-far (shown in the context) rests on the wrong fact, redoing the thought is the only honest move.
-- "goal-change" — the user overturns the direction itself: replace the goal/approach/output, start the task over differently ("推翻重来", "换方案", "别做这个了，改成…"). The dividing line with steer is scope: one part or one aspect changing is steer; the whole thing heading somewhere else is this. A RESOURCE REMINDER is 换方案 said sideways, and it lands HERE with "method_switch": true: the user points at something you ALREADY have — an installed tool, a skill, a server, a package ("你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的", "不是有现成的X吗，用X来做") — meaning "stop the approach it replaces and use it instead". The deliverable stands; only the way of producing it changes. This holds even when the reminder touches only one part of the work — the switch outranks the scope test above. It is NEVER a plain removal — "cancels_part" must stay OFF for it: answering a resource reminder with "这项不做了" throws away the very half the user asked for (switch to the named resource), and that reading is the single most confusing reply an insertion can produce.
-- "stop" — the running work ends and NOTHING takes its place ("先缓一缓", "这个就到这儿吧", "停掉整个任务", "不用继续了", "够了，先这样"). The whole question is what happens to the work: a stop leaves no answer to build, a goal-change replaces it with a different one, and a steer reshapes it. Phrases that look like stopping but are not: a constraint on how the work proceeds ("别停下来", "先别改这部分") is steer; asking where things stand ("跑完了吗") is question; a removal of ONE named branch or part while the rest continues is steer with "cancels_part" (the work as a whole carries on).
-- "task" — a NEW, completable piece of work, even one that extends the current job ("再加一个 X 平台", "顺便也查一下 Y", "把 Z 也照样处理", "再写一首五言绝句" alongside an essay). Queuing runs it right after the current task so it can never be lost; when torn between steer and task over ADDED work, pick task. The test needs NO deliberation — ask what has to come BACK: something that must be fetched, looked up, researched or produced on its own is a task however small, even when it is worded as an addition ("再加一个爱奇艺平台" while three platforms are being researched = one more unit of work of that kind, not a detail of the 对比汇总; "把爱奇艺也查一下", "芒果TV也来一份", "also check Douban" all ask for something brought back). But what has to come back must ALSO be outside the current job: a step the current work itself has to take anyway — verifying it, running its tests, checking the result, keeping a style — adds no scope and is guidance, i.e. steer ("记得跑测试", "文案再口语一点"); it is not a second piece of work just because it names an action. Only a remark that changes the ONE thing you are already producing — its shape, its content, a constraint on it — is steer. ONE exception outranks this test: when the SAME message also REMOVES work that was already asked for (see "cancels_part"), the removal decides the kind — that message is steer, its addition is folded into the join, and nothing is queued ("B站那支别查了，再加一个爱奇艺" drops one branch and grows another in the same breath — the insert is reshaped, not deferred). A removal sent to the queue runs the exact opposite of what was asked. The user's expectation draws the same line otherwise: ONE deliverable that now carries the remark (steer), or a SECOND deliverable after this one (task).
+- "supplement" — the remark JOINS the thing you are already making without disturbing it: an element or detail added inside the one deliverable ("背景上加几朵会动的云", "标题再大一点"), a constraint that reshapes it ("诗句里一定要出现'明月'", "这首必须是五言的"), the one list growing ("新增加两位" while five are being worked out — the same answer now covers seven), or guidance on how it proceeds ("记得跑测试", "文案再口语一点"). The growing-list case counts ONLY when the list lives INSIDE the one deliverable; a remark adding another OBJECT of the kind already being worked on (three platforms being researched and the user names a fourth) is a unit of work of its own — that is "unrelated" with "unrelated_kind":"new_task", not this. Nothing is interrupted, nothing produced is thrown away.
+- "change" — the remark REMOVES or REPLACES part of what was asked, or overturns the direction: a named part leaves the result ("X 就不调研了", "Y 那个别查了" — set "cancels_part"), the direction or the deliverable itself is replaced ("推翻重来", "换个方案", "别做这个了，改成…"), or a FACT/condition the work is built on turns out different ("其实我在西安，不是广东", "预算只有三千" — name the replaced condition in "targets_constraint"). What was computed from the replaced part comes out worthless, so the affected work is redone from the new ground. Judge this over "supplement" whenever the remark would change the ANSWER, not just add to it. One special case sits here: the whole-run STOP ("先缓一缓", "这个就到这儿吧", "不用继续了", "够了，先这样") — the result is no longer wanted and NOTHING takes its place; that is "change" at full scope with "cancels_part" OFF (that flag is for a named PART leaving while the rest carries on). A stop that must not wait never reaches you — the host's literal-stop fast path answers it; what reaches you is the non-literal stop. Phrases that look like stopping but are not: a constraint on how the work proceeds ("别停下来", "先别改这部分") is "supplement"; asking where things stand ("跑完了吗") is "question"; a removal of ONE named branch while the rest continues is "change" with "cancels_part".
+- "emphasize" — the deliverable stays exactly as asked, but its weights move: "重点研究X", "X 部分要重点讲", "一定要突出性价比". Nothing is added or removed; depth and priority shift.
+- "unrelated" — no connection to the user's last message or to the current output. You MUST say which kind: "unrelated_kind":"new_task" when it asks for work that must come BACK as its own unit ("再加一个爱奇艺平台", "顺便也查一下芒果TV", "查一下北京的天气", "再写一首五言绝句" alongside an essay), or "unrelated_kind":"chatter" for small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). The new_task test needs NO deliberation — ask what has to come BACK: something fetched, looked up, researched or produced on its own is a new task however small, even when worded as an addition. But a step the current work itself has to take anyway (verifying it, running its tests, keeping a style) adds no scope — that guidance is "supplement", not a second piece of work. Also "new_task": the "make sure X is covered" remark when NOTHING already covers X and it must join the set of things the work includes (see "covered_branch").
+- "correction" — the remark corrects the USER'S OWN earlier wording: they said it ambiguously or wrong and are fixing it ("哦我前面说错了，不是周三是周四", "我说的'那个'指的是X文件，不是Y", "预算那句有歧义——我是说总共三千，不是每天三千"). The understanding rewinds — the host implements that itself; your whole job is to name the relation, not to make it sound more drastic than it is. NOT this: a fact of the world that changed ("change"), or your reading of the user's (correct) words having drifted ("misunderstanding") — there the user is fixing their OWN words, nobody else's.
 - "question" — the user asks something and expects an answer NOW ("跑完了吗", "现在到哪了"), or asks for a decision only they can make. Answering must not disturb the running work.
-- "chatter" — small talk, thanks, reactions, filler ("哈哈", "好的", "辛苦了", "+1"). Nothing to act on.
+- "mixed" — ONE message carrying relations from DIFFERENT families ("顺便查下股价，另外预算改成两万" — question + change; "换成X来做，另外先看看计划再动" — meta + meta is NOT mixed). You MUST fill "atoms": one entry per part, each with its own relation and the verbatim fragment of the user's words. One dominance rule: when one part REMOVES named work that was already asked for, do NOT use "mixed" — that message is "change" (with "cancels_part", plus "adds_along" when another part asks for new work): the removal decides, and the host folds the removal out while everything else keeps running ("加 D，B 不用做了" and "B站那支别查了，再加一个爱奇艺" are "change" + "cancels_part", not mixed). Reserve "mixed" for combinations with no removal in them. When the parts all share one relation, do NOT use "mixed" — pick that relation and name the parts in "reason".
+- "meta" — the remark changes HOW you work, not WHAT the result is: process/interaction directives ("先给我看计划再执行", "输出别用表格", "分步来，每步先问我"), and RESOURCE REMINDERS — the user points at something you ALREADY have, an installed tool, a skill, a server ("你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的", "不是有现成的X吗，用X来做") — meaning "stop the approach it replaces and use it instead". The deliverable stands; only the road changes. NEVER let a resource reminder read as a removal or as a direction overturn — answering "你刚才不是已经装了X吗" with "这项不做了" throws away the very half the user asked for (switch to the named resource). The line against "change": the DELIVERABLE replaced is "change", only the WAY replaced is "meta".
+- "misunderstanding" — the user said A all along, but the current output shows you understood B: the remark reads like the user RE-STATING their actual ask because what you are producing does not match it ("不是这个意思——我让你查的是价格，你怎么对比起画质了", "我说的是给个人用，不是企业方案——重看一遍我的原话"). The object of judgment here is NOT "remark vs the user's last message" — the remark AGREES with the last message, and the OUTPUT is what drifted from both. That is why this is the one relation that may pause the stream and redo from the user's own words: everything produced under the wrong understanding would have to be taken back anyway. If the message reads this way, set "self_check_needed": true and let the host verify before any drastic move (see below). NOT this: a fact that changed ("change"), the user fixing their own earlier wording ("correction").
 
-One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the kind of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped. When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
+One message may carry SEVERAL instructions ("预算改两万；人群换成企业决策者；顺便查下股价"). Judge it as ONE whole: pick the relation of whichever part changes the running work the MOST, and name the remaining parts in "reason" so nothing is dropped (use "mixed" with "atoms" only when the parts belong to DIFFERENT relation families). When a message contradicts itself or flips back and forth ("用X。算了还是Y。不，别管刚才那句"), do NOT classify a middle state — the user's LAST explicit statement is the message; say in "reason" that the earlier ones were overridden.
 
 Return ONLY one JSON object:
-{"kind":"steer|premise-change|goal-change|stop|task|question|chatter","reason":"<one short line>","confidence":<0..1>,"when":"<timing words or null>","cancels_part":true,"adds_along":true,"resumes_part":true,"supplements_current":true,"affects_current":true,"method_switch":true,"urgent":true,"receipt":"<what you tell the user, see below>","covered_branch":{"call_id":"<exact id from the roster, or omit>"},"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
+{"relation":"supplement|change|emphasize|unrelated|correction|question|mixed|meta|misunderstanding","unrelated_kind":"new_task|chatter","reason":"<one short line>","confidence":<0..1>,"atoms":[{"relation":"supplement","text":"加 D"}],"cancels_part":true,"adds_along":true,"urgent":true,"targets_constraint":"<the user's own words for the condition being replaced>","self_check_needed":true,"covered_branch":{"call_id":"<exact id from the roster, or omit>"},"stop_branch":{"call_id":"<exact id from the live_branches roster, or omit>"}}
 
-"confidence" is how sure you are of the kind and therefore of the action that
-follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely
-reads two ways (a correction of facts that could also be a small tweak, an
-overturn that could also be a scope addition). Report genuine doubt (~0.5 or
-lower) also when the message is self-contradictory, or when it touches
-something irreversible (sending, publishing, deleting, paying, deploying)
-while staying unclear — the host will ask the user one short question instead
-of gambling with an action that cannot be undone. Never inflate the number: a
-low one is cheap (the agent asks the user one short question), a wrong high
-one is not (the agent restarts work or loses the message).
+Include a field only when it applies; omit everything else. "unrelated_kind" is REQUIRED when relation is "unrelated"; "atoms" is REQUIRED when relation is "mixed".
 
-"when" is the user's own words for WHEN this should run if they named a time
-("10 分钟后", "下午三点", "明天早上") — copy them, do not compute a time. Use
-"now" when the message implies it must be handled immediately, "after" when it
-explicitly belongs after the current task, and null when no timing was said.
+"confidence" is how sure you are of the relation and therefore of the action that follows it — 0.9+ for an unambiguous message, ~0.5 when the message genuinely reads two ways (a removed part that could also be a narrowing, an overturn that could also be an addition). Report genuine doubt (~0.5 or lower) also when the message is self-contradictory, or when it touches something irreversible (sending, publishing, deleting, paying, deploying) while staying unclear — the host will ask the user one short question instead of gambling with an action that cannot be undone. Never inflate the number: a low one is cheap (the agent asks the user one short question), a wrong high one is not (the agent restarts work or loses the message).
 
-"cancels_part": include it as true whenever the message REMOVES work that was
-already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了", "去掉
-X 的调研", "我说不需要 X 的") or an imperative removal of one ("把 X 这个调研
-取消掉", "知乎那项也收掉吧", "暂停 X", "砍掉 X 那路"). The removal vocabulary is
-an OPEN SET, not a keyword list — 去掉/不需要/不要了/暂停/剔除/收掉/砍掉/先不查
-all remove work; read the intent, not the vocabulary. NARROWING
-counts as removal too — but ONLY when the user actually stops wanting that output
-("均价不用查了，改查区间"): a 只 next to the negation ("不要只查均价了") narrows what is
-EXCLUSIVE, not what is required — the average is still wanted there, so nothing is
-removed and cancels_part stays off. Report it
-EVEN WHEN you pick "task" for the same message: the host routes removals away
-from the queue on this flag alone, and a removal that reaches the queue runs the
-exact opposite of what was asked — a misjudged kind is survivable, a missing
-flag is not. And a message that names a REPLACEMENT for the work it stops
-(stop this way, use X instead of it) removes nothing from the result — the
-result now comes from X — so it is goal-change with "method_switch": true,
-never cancels_part. This covers only a replacement that takes the removed
-work's place; a message that ALSO cancels some unrelated part is different:
-the unrelated removal still reports "cancels_part" as usual ("换成X来做，
-另外知乎那支别查了"). Omit it for messages that only add or adjust work.
+"cancels_part": include it as true whenever the message REMOVES work that was already asked for — a named branch or part ("X 就不调研了", "Y 那个别查了", "去掉X 的调研", "我说不需要X 的") or an imperative removal of one ("把X 这个调研取消掉", "知乎那项也收掉吧", "暂停X", "砍掉X 那路"). The removal vocabulary is an OPEN SET, not a keyword list — 去掉/不需要/不要了/暂停/剔除/收掉/砍掉/先不查 all remove work; read the intent, not the vocabulary. NARROWING counts as removal too — but ONLY when the user actually stops wanting that output ("均价不用查了，改查区间"): a 只 next to the negation ("不要只查均价了") narrows what is EXCLUSIVE, not what is required — the average is still wanted there, so nothing is removed and cancels_part stays off. Report it EVEN WHEN you pick another relation for the same message: the host routes removals away from the queue and away from whole-run redos on this flag alone — a removal that reaches the queue runs the exact opposite of what was asked, and a removal folded into a full redo wastes every branch that survives. And a message that names a REPLACEMENT for the work it stops (stop this way, use X instead of it) removes nothing from the result — the result now comes from X — so it is "meta", never cancels_part. This covers only a replacement that takes the removed work's place; a message that ALSO cancels some unrelated part is different: the unrelated removal still reports "cancels_part" as usual ("换成X来做，另外知乎那支别查了"). Omit it for messages that only add or adjust work, and for the whole-run stop (nothing partial remains to carry on).
 
-"adds_along": include it as true ONLY together with "cancels_part" — when the
-same message does BOTH jobs: it removes one named part AND asks for new work
-("B站那支别查了，再加一个爱奇艺" — that branch leaves, this one joins; "均价不用查了，
-把区间加上"). NOT "不要只查均价了，把区间也查一下": 只 narrows the exclusivity only,
-the average is still wanted, so nothing is removed and there is no adds_along. The host reads it as a gate on stopping a branch: pausing the
-named branch would kill the work this very message asked for, so the removal is
-folded into the join and nothing is stopped. Omit it for messages that only
-remove, or only add.
+"adds_along": include it as true ONLY together with "cancels_part" — when the same message does BOTH jobs: it removes one named part AND asks for new work ("B站那支别查了，再加一个爱奇艺" — that branch leaves, this one joins; "均价不用查了，把区间加上"). NOT "不要只查均价了，把区间也查一下": 只 narrows the exclusivity only, the average is still wanted, so nothing is removed and there is no adds_along. The host reads it as a gate on stopping a branch: pausing the named branch would kill the work this very message asked for, so the removal is folded into the join and nothing is stopped. Omit it for messages that only remove, or only add.
 
-"resumes_part": include it as true ONLY when kind is "steer" AND the message
-asks to carry on ONE named branch that was previously stopped or paused; omit
-it for every other message.
+"targets_constraint": when a "change" replaces a CONDITION the work was built on, copy the user's own fragment of that condition from the context — the ground truth being replaced ("从广东出发" behind "其实我在西安", the old budget behind "预算只有三千", "周三" behind "不是周三是周四"). One short verbatim fragment, no paraphrase: the host uses it to find exactly which running work depends on the dead condition. Omit it when the remark removes or adds work without naming a condition.
 
-"supplements_current": include it as true ONLY when kind is "steer" AND the
-remark belongs INSIDE the one thing currently being produced — an added
-element, a reshaping constraint, the growing list — so the host merges it
-into the request and redoes the thought; omit it for every other message.
+"covered_branch": the "make sure X is covered" remark — the user confirms or extends the SET of things the work must include (「调研的平台必须包括腾讯」「别忘了知乎」「记得把芒果TV也查上」). Before answering, CHECK THE ROSTER: the context may carry <live_branches> (branches still running) and <finished_branches> (branches already done, their results are in the 汇总). When ONE branch there already covers the thing the user names — by its task snippet or role, including paraphrase (「优酷」 matches a branch researching 优酷动漫官方消息) — point at it: {"call_id": "<the id copied EXACTLY from the roster>"}. The host verifies the id and answers the user 「那路正在跑着，不重复」 (or 「已跑完，在汇总里」) for you — a sharp human pointing out the thing is already being worked on, not relaying the order a second time. When NOTHING on the roster covers it, OMIT the field — the remark routes as usual and the missing thing gets added; say so in "reason" (「目前还没在查优酷，这就补上」). Never guess or shorten an id: a wrong one tells the user the WRONG branch is already on it. NOT this: steering an already-running branch's direction (「优酷那路重点查剧场版」 — the branch exists and this changes HOW it works, not what the set includes), removing ("cancels_part" owns that), or any message that does not hinge on a thing being present in the result. "stop_branch" and "covered_branch" never fire together — one message stops a branch or confirms coverage, not both.
 
-"affects_current": the "stop now, redo the output with this in hand" move —
-the EXECUTING-phase sibling of "supplements_current". Include it as true
-when the remark changes what the CURRENT output must be from this point on
-— its direction, emphasis, audience, format or scope — so that going on
-along the old line would produce content you would have to take back
-anyway. The one test: would the VERY NEXT thing you are about to produce
-already be wrong or stale because of this message? 「你理解错了，我说的是X」
-/「重点放到价格上，别铺那么长背景」/「这份是给老板看的，不要技术细节」 — all
-true: the host stops the stream mid-sentence, keeps everything already
-done, and restarts from the remark with you. While EXECUTING this outranks
-the default carry-at-next-step — carrying on is only right when the current
-line still stands. NOT this: a remark that only adds a parallel piece of
-work (the current line is untouched), a corrected FACT ("premise-change"
-owns that), guidance for a LATER step, or anything landing while still
-THINKING ("supplements_current" already covers that phase). Omit it when
-the current output survives the remark unchanged.
+"urgent": include it as true ONLY when the user's own words say this new work should jump ahead of other waiting work — "这个急", "这件比较急", "优先处理这个", "加急", "先办这个". It only reorders work that is already waiting to run after the current task (the urgent item goes before the other queued ones), it never means interrupt the current task, and it is meaningless unless the remark lands as queued new work ("unrelated" with "unrelated_kind":"new_task"). Do NOT infer urgency from tone — a piece of work being important is not the user calling it urgent, and "不着急" is the opposite. Omit the field for every message that does not say it.
 
-"covered_branch": the "make sure X is covered" remark — the user confirms or
-extends the SET of things the work must include (「调研的平台必须包括腾讯」
-「别忘了知乎」「记得把芒果TV也查上」). Before answering, CHECK THE ROSTER:
-the context may carry <live_branches> (branches still running) and
-<finished_branches> (branches already done, their results are in the
-汇总). When ONE branch there already covers the thing the user names — by
-its task snippet or role, including paraphrase (「优酷」 matches a branch
-researching 优酷动漫官方消息) — point at it: {"call_id": "<the id copied
-EXACTLY from the roster>"}. The host verifies the id and answers the user
-「那路正在跑着，不重复」 (or 「已跑完，在汇总里」) for you — a sharp human
-pointing out the thing is already being worked on, not relaying the order a
-second time. When NOTHING on the roster covers it, OMIT the field — the
-remark routes as usual and the missing thing gets added; say so in
-"receipt" (「目前还没在查优酷，这就补上」). Never guess or shorten an id: a
-wrong one tells the user the WRONG branch is already on it. NOT this:
-steering an already-running branch's direction (「优酷那路重点查剧场版」 —
-the branch exists and this changes HOW it works, not what the set
-includes), removing ("cancels_part" owns that), or any message that does
-not hinge on a thing being present in the result. "stop_branch" and
-"covered_branch" never fire together — one message stops a branch or
-confirms coverage, not both.
+"stop_branch": the context may contain a <live_branches> block — the delegated branches currently running, each with its id, name, role and task snippet. When the message stops or cancels work that ONE of those branches is doing, set it to {"call_id": "<the id copied EXACTLY from the roster>"} — the host stops that branch for you the moment you name it. Copy the id verbatim, never invent or shorten one; name only ONE branch even when the wording is loose. Only <live_branches> can be stopped — a branch in <finished_branches> has nothing left to stop (its result is already in the 汇总). When the roster is absent, or no live branch clearly matches what the message removes, OMIT the field entirely — a wrong id stops the wrong branch, an invented one stops nothing. Omitting it when you are genuinely unsure is the honest answer: the host folds the removal into the result instead of gambling.
 
-"method_switch": include it as true ONLY with kind "goal-change", when the
-message switches HOW the work is done by pointing at a resource you already
-have ("你不是已经装了X吗", "用X来做") — the goal stands, the approach is
-replaced. For goal changes that change WHAT is being made, omit it.
+"self_check_needed": include it as true ONLY when the message reads like "misunderstanding" — the user re-asserting what they actually asked for because the current output contradicts it. The host will then run one check — is the current output faithful to the user's last message? — and only a CONFIRMED drift triggers the full pause-and-redo; if the check passes, the remark is handled as the lighter correction or supplement it really was. Do not set it for plain corrections of the user's own wording, changed facts, emphasis, or meta directives — none of those pauses the stream on its own. When torn between "misunderstanding" and something lighter, prefer the lighter one and say why in "reason" — the drastic path is the one that must justify itself.`;
 
-"urgent": include it as true ONLY when the user's own words say this new work
-should jump ahead of other waiting work — "这个急", "这件比较急", "优先处理这个",
-"加急", "先办这个". It only reorders work that is already waiting to run after
-the current task (the urgent item goes before the other queued ones), it never
-means interrupt the current task, and it is meaningless for kinds that are not
-"task" or "steer". Do NOT infer urgency from tone — a piece of work being
-important is not the user calling it urgent, and "不着急" is the opposite.
-Omit the field for every message that does not say it.
-
-"stop_branch": the context may contain a <live_branches> block — the delegated
-branches currently running, each with its id, name, role and task snippet.
-When the message stops or cancels work that ONE of those branches is doing,
-set it to {"call_id": "<the id copied EXACTLY from the roster>"} — the host
-stops that branch for you the moment you name it. Copy the id verbatim, never
-invent or shorten one; name only ONE branch even when the wording is loose.
-Only <live_branches> can be stopped — a branch in <finished_branches> has
-nothing left to stop (its result is already in the 汇总). When the roster is
-absent, or no live branch clearly matches what the message
-removes, OMIT the field entirely — a wrong id stops the wrong branch, an
-invented one stops nothing. Omitting it when you are genuinely unsure is the
-honest answer: the host folds the removal into the result instead of gambling.
-
-"receipt": the one or two sentences the user sees the moment their remark
-lands — YOU speaking to them, mid-work, the way a sharp colleague would. No
-canned formula, no template reply: a receipt that would fit any conversation
-is wrong for this one. Write it for EVERY kind except "chatter" and
-"question" (a reaction needs no reply, and a question gets its own answer
-instead) — including "stop", "premise-change" and "goal-change": the user
-just changed something, and the first thing they hear back must be about
-THEIR words, not a machine announcing an action. Cover three things in your
-own words for THIS exact message, in this order: what you understood (name
-the actual things the user named — the platforms, the branch to drop, the
-corrected fact, the new direction), what happens to the work already
-running (it carries on / it stops here with progress kept / it is redone
-from the corrected ground), and what you will do next (「结束后我会新派两
-路查询补上芒果TV和爱奇艺，再一起汇总输出」 / the constraint lands in the
-next step / the collection redone without that part). Open by receiving
-their words (「明白，优酷那路不要了」), never by announcing mechanics
-(「已收到您的指令」). One or two short sentences, the user's language,
-plain prose — no markdown, no internal jargon
-(never 支/委派/分类/排队/上下文 — those are machine words). Honesty:
-describe what WILL happen;
-never claim something has already been dispatched, stopped or removed —
-the doing is the host's hand, and the host corrects the receipt when
-reality differs.`;
 
 /**
  * Lightweight single-call routing of a message the user inserts while the
- * agent is mid-run. Mirrors inferSemanticRoute's (signal + timeout + JSON-
- * parse) shape. On any failure, timeout, or parse miss it falls back to
- * "task": the message queues and runs deterministically after the current
- * task. The old steer fallback predates a proven hole — a parent blocked on
- * parallel delegations has no THINK boundary to cash a steer at, so
- * "delivered as a remark" could silently drop. Queueing never drops.
+ * agent is mid-run (v2 九类 relation 契约，§5.1). Mirrors inferSemanticRoute's
+ * (signal + timeout + JSON-parse) shape. On any failure, timeout, or parse
+ * miss it falls back to unrelated/new_task: the message queues and runs
+ * deterministically after the current task — the one destination that can
+ * never lose the words (2026-09-22 判例：父任务阻塞收委派时没有"下个动作"
+ * 可兑现，"顺路带上"是空头承诺；排队从不丢话).
  */
 export async function classifyInsertion(
   llm: LLMAdapter,
@@ -678,12 +600,14 @@ export async function classifyInsertion(
   images?: MessageImage[],
   timeoutMs = 8_000,
 ): Promise<InsertionClassification> {
-  // Fallback is a QUEUED task, not a steer (2026-09-22 redesign): a parent
-  // blocked on parallel delegations has no THINK boundary to cash a steer at,
-  // so "delivered as a remark" could silently drop. Queueing waits its turn
-  // and runs deterministically — the words can never be lost.
+  // Fallback is a QUEUED new task (unrelated/new_task), not a supplement: a
+  // parent blocked on parallel delegations has no THINK boundary to cash a
+  // remark at, so "delivered as a remark" could silently drop. Queueing waits
+  // its turn and runs deterministically. 保守面：判不出来时永远按「要回来的
+  // 新活」处理，绝不按「顺路带上」处理。
   const fallback: InsertionClassification = {
-    kind: 'task',
+    relation: 'unrelated',
+    unrelatedKind: 'new_task',
     reason: 'classification unavailable; queued so the words can never be lost',
     // Queueing IS the confident action when no label could be produced — see
     // inputDefaultConfidence() (inputDecision.ts). This is the parse/timeout
@@ -706,8 +630,7 @@ export async function classifyInsertion(
       images,
     },
   ];
-  const KINDS: readonly string[] = ['question', 'steer', 'premise-change', 'goal-change', 'stop', 'task', 'chatter'];
-  const parsed = await streamUntilParsed<{ kind?: unknown; reason?: unknown; confidence?: unknown; when?: unknown; cancelsPart?: unknown; cancels_part?: unknown; addsAlong?: unknown; adds_along?: unknown; resumesPart?: unknown; resumes_part?: unknown; methodSwitch?: unknown; method_switch?: unknown; urgent?: unknown }>(
+  const parsed = await streamUntilParsed<Record<string, unknown>>(
     llm,
     request,
     signal,
@@ -716,54 +639,71 @@ export async function classifyInsertion(
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) return null;
       try {
-        const value = JSON.parse(match[0]) as { kind?: unknown };
-        return value && typeof value.kind === 'string' && KINDS.includes(value.kind) ? value : null;
+        const value = JSON.parse(match[0]) as { relation?: unknown };
+        // 只有 relation 合法落在九类名录里才算解析成功——旧 seven-kind JSON
+        // （"kind":"…"）一律当没解析出来，走 fallback 排队，绝不拿旧词表
+        // 冒充九类判定。
+        return value && typeof value.relation === 'string' && INSERTION_RELATIONS.includes(value.relation as InsertionRelation)
+          ? value
+          : null;
       } catch {
         return null;
       }
     },
   );
-  if (parsed && typeof parsed.kind === 'string' && KINDS.includes(parsed.kind)) {
+  if (parsed && typeof parsed.relation === 'string' && INSERTION_RELATIONS.includes(parsed.relation as InsertionRelation)) {
     const rawConfidence = typeof parsed.confidence === 'number' || typeof parsed.confidence === 'string'
       ? Number(parsed.confidence)
       : NaN;
-    const parsedAny = parsed as { supplements_current?: unknown; supplementsCurrent?: unknown; affects_current?: unknown; affectsCurrent?: unknown; covered_branch?: unknown; coveredBranch?: unknown; stop_branch?: unknown; stopBranch?: unknown; method_switch?: unknown; methodSwitch?: unknown; receipt?: unknown };
+    // atoms（relation=mixed 必填）：逐个校验 relation 合法 + text 非空才收，
+    // 残缺原子宁可丢弃——处置层按原子分流，半截原子会分错流。
+    const rawAtoms = Array.isArray(parsed.atoms) ? (parsed.atoms as unknown[]) : [];
+    const atoms = rawAtoms
+      .map((a) => a as { relation?: unknown; text?: unknown })
+      .filter((a) => typeof a.relation === 'string'
+        && INSERTION_RELATIONS.includes(a.relation as InsertionRelation)
+        && typeof a.text === 'string' && a.text.trim().length > 0)
+      .map((a) => ({ relation: a.relation as InsertionRelation, text: String(a.text).trim().slice(0, 160) }));
     // 模型点名（stop_branch / covered_branch）：蛇形为主、驼峰兜底。id 非空
     // 字符串才收——残缺对象宁可当没点名（宿主退回保守折入/照旧路由），绝不
     // 拿半截 id 去停或去答「不重复」。
-    const rawStop = parsedAny.stop_branch ?? parsedAny.stopBranch;
+    const rawStop = parsed.stop_branch ?? parsed.stopBranch;
     const rawStopId = rawStop && typeof rawStop === 'object'
       ? (rawStop as { call_id?: unknown; callId?: unknown }).call_id ?? (rawStop as { callId?: unknown }).callId
       : undefined;
     // 范围确认去重（刀 F）：裁决器点名已覆盖那支的确切 id，宿主只核实——
     // 刀 E 的「抄对象名+宿主字面匹配」真机否决（漏报新字段/语义对应不上）。
-    const rawCovered = parsedAny.covered_branch ?? parsedAny.coveredBranch;
+    const rawCovered = parsed.covered_branch ?? parsed.coveredBranch;
     const coveredId = rawCovered && typeof rawCovered === 'object'
       ? (rawCovered as { call_id?: unknown; callId?: unknown }).call_id ?? (rawCovered as { callId?: unknown }).callId
       : undefined;
+    // unrelated 细分：两值之外一律当缺席（宿主按 new_task 保守处理）。
+    const rawUnrelated = parsed.unrelated_kind ?? parsed.unrelatedKind;
+    const unrelatedKind = rawUnrelated === 'new_task' || rawUnrelated === 'chatter' ? rawUnrelated : undefined;
+    // 被替换条件的原文片段：蛇形为主、驼峰兜底，非空才收、封顶 120 字——
+    // 它是给处置层对着任务状态定位用的，不是给用户看的。
+    const rawTargets = typeof parsed.targets_constraint === 'string'
+      ? parsed.targets_constraint
+      : typeof parsed.targetsConstraint === 'string'
+        ? parsed.targetsConstraint
+        : '';
     return {
-      kind: parsed.kind as InsertionKind,
+      relation: parsed.relation as InsertionRelation,
       reason: typeof parsed.reason === 'string' ? parsed.reason : '',
       confidence: clampConfidence(parsed.confidence),
       confidenceDefaulted: !Number.isFinite(rawConfidence),
-      when: typeof parsed.when === 'string' ? parsed.when : undefined,
+      ...(unrelatedKind ? { unrelatedKind } : {}),
+      ...(atoms.length ? { atoms } : {}),
       // 契约字段是蛇形 cancels_part（见提示词 JSON 样例）；驼峰兜底防模型
       // 自行改写。两处都严格 === true，缺省即 false。
       ...(parsed.cancels_part === true || parsed.cancelsPart === true ? { cancelsPart: true } : {}),
       ...(parsed.adds_along === true || parsed.addsAlong === true ? { addsAlong: true } : {}),
-      ...(parsed.resumes_part === true || parsed.resumesPart === true ? { resumesPart: true } : {}),
-      ...(parsedAny.supplements_current === true || parsedAny.supplementsCurrent === true ? { supplementsCurrent: true } : {}),
-      ...(parsedAny.affects_current === true || parsedAny.affectsCurrent === true ? { affectsCurrent: true } : {}),
       ...(typeof coveredId === 'string' && coveredId.trim() ? { coveredBranch: { callId: coveredId.trim() } } : {}),
-      ...(parsedAny.method_switch === true || parsedAny.methodSwitch === true ? { methodSwitch: true } : {}),
-      // 第 5 期「这个急」提级：只认严格 === true；缺省/非 true 都不带标记，
-      // 宿主只按这一个读取点插队。
       ...(parsed.urgent === true ? { urgent: true } : {}),
-      // 现场收执（2026-10-15）：非空字符串才收，去首尾空白、封顶 240 字——
-      // 它是直接上屏给用户的，超长就不再是「一两句」了。
-      ...(typeof parsedAny.receipt === 'string' && parsedAny.receipt.trim()
-        ? { receipt: parsedAny.receipt.trim().slice(0, 240) }
-        : {}),
+      ...(rawTargets.trim() ? { targetsConstraint: rawTargets.trim().slice(0, 120) } : {}),
+      // 疑似 misunderstanding 的自查请求：只认严格 === true；缺省/非 true 都
+      // 不带标记，宿主只按这一个读取点决定要不要跑自查。
+      ...(parsed.self_check_needed === true || parsed.selfCheckNeeded === true ? { selfCheckNeeded: true } : {}),
       ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranch: { callId: rawStopId.trim() } } : {}),
     };
   }
@@ -907,6 +847,83 @@ export async function recheckCoveredInsertion(
     ...(typeof parsed.receipt === 'string' && parsed.receipt.trim()
       ? { receipt: parsed.receipt.trim().slice(0, 240) }
       : {}),
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    confidence: clampConfidence(parsed.confidence),
+  };
+}
+
+/** 输出忠实性自查的裁定（v2 §5.1 /《设想》§五.2 双重触发的第二trigger）：
+ *  drifting=当前输出确已偏离用户原话。null=自查没跑成（LLM 缺席/超时/
+ *  解析失败）——没结论按「未确认」处理，真暂停不许在没证据时出手。 */
+export interface FaithfulnessVerdict {
+  drifting: boolean;
+  reason: string;
+  confidence: number;
+}
+
+const SELF_CHECK_FAITHFULNESS_PROMPT = `You are the agent, mid-task, re-reading your own output against the user's actual request. The host paused the stream because a remark from the user suggests what you are producing may have drifted from what they asked for. Your ONLY job here is one narrow verdict: is the current output faithful to the user's last message?
+
+The next user message carries your situation in two tagged sections:
+<live_context> — your live situation. Inside it, <last_user_message> is the user's own request — the ground truth (its exact conditions: object, scope, constraints, wording); <output_gist> is where your output has actually taken direction; <task_state> is what the work rests on.
+<new_message> — the remark that triggered this check (a signal, not the standard — the standard is the user's last message).
+
+Compare them and decide:
+- "drifting": true when the output's direction contradicts or substitutes what the last message actually asks for (different object than requested, a scope the user did not give, a constraint quietly dropped). Generic opening铺垫 (greetings, restating the task, initial research that fits any reading) is NOT drift — only a substantive commitment to the WRONG reading counts.
+- "drifting": false when the output still serves the request as asked, or what looks like drift is a reading the user's words themselves support.
+
+Do NOT reclassify the remark, do not propose actions, do not hedge both ways: one boolean and one line of evidence.
+
+Return ONLY one JSON object:
+{"drifting":true,"reason":"<one short line citing the exact mismatch>","confidence":<0..1>}`;
+
+/**
+ * misunderstanding 的自查子调用（v2 §六处置表第 9 行；仿 recheckCoveredInsertion
+ * 的独立窄问题提示词模式——同一个 system 重问会被原判锚定，换只装这一条窄问题
+ * 的独立提示词，判定对象直接钉死在「当前输出 vs 用户上一句」上）。context 是宿主
+ * 渲染的三要素现场（renderLiveContext 同款形状）。任何失败返回 null，调用方按
+ * 「未确认偏离」降级轻处置——真暂停是双重的，缺一半就不许停。
+ */
+export async function checkOutputFaithfulness(
+  llm: LLMAdapter | null,
+  context: string,
+  prompt: string,
+  signal?: AbortSignal,
+  images?: MessageImage[],
+  // 与 recheckCoveredInsertion 同档：GLM 系强制思考 + 冷 system，8s 掐死冷启动
+  // 首调；没结论有降级路接着，快败不是灾难。
+  timeoutMs = 12_000,
+): Promise<FaithfulnessVerdict | null> {
+  // LLM 缺席 = 自查链路没立起来 → 返回 null（调用方降级为普通转达，绝不
+  // 拿坏链路当暂停依据）。
+  if (!llm || !prompt.trim() || signal?.aborted) return null;
+  // 刀 4.1 缓存固化同纪律：system 逐字稳定，现场（三要素）进 user 消息。
+  const request: Message[] = [
+    { role: 'system', content: SELF_CHECK_FAITHFULNESS_PROMPT },
+    {
+      role: 'user',
+      content: `<live_context>\n${context.slice(0, 3_200)}\n</live_context>\n\n<new_message>\n${prompt.slice(0, 2_000)}\n</new_message>`,
+      images,
+    },
+  ];
+  const parsed = await streamUntilParsed<{ drifting?: unknown; reason?: unknown; confidence?: unknown }>(
+    llm,
+    request,
+    signal,
+    timeoutMs,
+    (raw) => {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const value = JSON.parse(match[0]) as Record<string, unknown>;
+        return value && typeof value === 'object' ? value : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  if (!parsed || typeof parsed.drifting !== 'boolean') return null;
+  return {
+    drifting: parsed.drifting,
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
     confidence: clampConfidence(parsed.confidence),
   };

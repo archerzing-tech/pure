@@ -1,24 +1,27 @@
 // src/coding-agent/interjectOrchestrator.ts
-// S2 第六刀（P3-2 控制面抽出）— 插话分类编排主刀：interject() 入口与序列化
-// 链、classifyAndApply 的裁决序（时机语义 → 置信门 → 思考窗吸收 → 五类分
-// 发）、1a 定向投递匹配 / 覆盖去重 / 点名续跑的编排、思考窗寄存器。
+// 插话架构 v2（2026-10-27）— 九类分发臂主刀：interject() 入口（到达即软暂停
+// 闸 hold）与序列化链、classifyAndApply 的裁决序（软暂停 → 裁决 → 时机语义 →
+// 置信门 → 思考窗吸收 → 九类处置表分发）、真暂停链（押账 + 掐流 + 产出清理 +
+// 原话重入）、1a 定向投递匹配 / 覆盖去重 / 点名续跑的编排、思考窗寄存器。
 //
-// 此前这一整套焊死在 chat.ts（GUI 控制器）。S3 的前置硬约束：五分类只有一
+// 此前这一整套焊死在 chat.ts（GUI 控制器）。S3 的前置硬约束：九类判定只有一
 // 份、控制面是无宿主状态依赖的决策核——本模块把决策核搬出来，DOM（ack 行/
 // 回显/收执/事件日志/控制台诊断）、LLM 产出（旁答/追问）、铺排（折入框架/
 // 转向框架/队列卡）与引擎把手（abort/真停支）经依赖缝留给宿主。宿主读数
-// （流态/在飞/分支视图）全部注入，决策核不猜宿主状态。
+// （流态/在飞/分支视图/任务状态投影）全部注入，决策核不猜宿主状态。
 //
 // ack 句柄不透明（InterjectAck = unknown）：宿主给什么还什么——GUI 是
 // HTMLElement，通道宿主可以是任何东西。收执话术的单一事实来源仍在
 // insertionMessaging（本模块只引用，不内联第二份）。
 
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
-import { needsClarification, isDestructiveAction, shouldAbsorbIntoThinkingWindow, type InputAction, type InputTiming } from './inputDecision';
+import { needsClarification, isDestructiveAction, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, cancelReceiptTopic, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
 import { branchStopReceipt, branchResumeReceipt, branchUncertainPauseReceipt, cancelBeforeDispatchReceipt, queuedReceipt, queuedUrgentReceipt } from '../shared/insertionMessaging';
-import { priorityForKind } from '../shared/scheduling';
+import { priorityForLevel, type ProcessingLevel } from '../shared/scheduling';
 import { PAUSE_ABORT_REASON } from '../shared/pauseSignal';
+import type { HoldGate } from './holdGate';
+import { affectedByChange, type SideEffectEntry, type TaskStateSnapshot } from './taskState';
 import type { DelegationControlPlane } from './delegationControl';
 import type { RoundClosePlane } from './roundClosePlane';
 import type { MessageImage, LLMAdapter } from '../shared/types';
@@ -78,6 +81,23 @@ export interface InterjectOrchestratorDeps {
    *  退回「无脑许愿从断点续」，正是本刀要收掉的谎。 */
   probeResume(toolName: string, rawArgs: string): { hit: boolean; turns: number };
 
+  // ── 软暂停 / 真暂停 / 任务状态（v2 §四 §七）──────────────────────
+  /** 软暂停闸（holdGate）：interject() 到达即 close、处置完 open；宿主把
+   *  引擎停顿点与写派发扣在这个闸后面。缺席 = 宿主没接闸（判定照走，只是
+   *  不扣推进——单测/通道宿主的合法形态）。 */
+  hold?: HoldGate;
+  /** 任务状态投影（foldTaskState 的宿主快照，change 臂「先确定影响再行动」
+   *  的读数）。null = 当前没有可折算的任务账（未挂任务脚本/单测），change
+   *  臂退回真暂停链。 */
+  taskStateSnapshot?(): TaskStateSnapshot | null;
+  /** 已完成工作的副作用冻结（写操作标记 frozen，防后续补偿/引用踩到已被
+   *  推翻前提的产出）。返回冻结到的条目（收执如实点名）。 */
+  freezeSideEffects?(): SideEffectEntry[];
+  /** 真暂停的中断产物清理（宿主执行）：把被掐流的半截 assistant 输出从
+   *  上下文剔除、渲染留底（stripSettledBranchOutput 同范式推广）。缺席 =
+   *  宿主没实现清理，押账重入照走（上下文里留半截话，不阻塞主链）。 */
+  stripAbortedTurnPartial?(): void;
+
   // ── 引擎动作缝（宿主生命周期）─────────────────────────────────────
   send(text: string, images: MessageImage[], displayText: string): void;
   abort(reason?: string): void;
@@ -121,6 +141,12 @@ export class InterjectOrchestrator {
    * user's words for good. */
   private chain: Promise<void> = Promise.resolve();
 
+  // ── 软暂停闸生命周期（v2 §四：到达即扣，处置完解除）────────────────
+  /** 当前在裁的插话数（序列化链保证实际 ≤1，计数器防嵌套泄漏）。 */
+  private holdDepth = 0;
+  /** 本轮处置是否走了真暂停链（hold 解除结论 paused 的依据）。 */
+  private pauseRequested = false;
+
   // ── 思考窗寄存器（原 chat.ts 五件，S2 第六刀迁入）───────────────────
   /** 阶段感知的 scope 追加（2026-09-22 用户定稿）：并行委派还没收齐时插进
    * 来的追加活不走"收尾后排队"——那会先输出一份没有它的汇总。折入汇合轮：
@@ -148,19 +174,22 @@ export class InterjectOrchestrator {
 
   /**
    * Handle a message the user typed while a turn is running (interrupt-and-
-   * insert). 插话重构 — 判定的依据从"相不相关"换成了"一个埋头干活的人听到
-   * 这句话会怎么处理"，只有两种情况值得停下手里的活：
-   *   - stop        → 用户叫停，结束当前任务（正则直判，不占分类往返）。
-   *   - goal-change → 方向被掀掉，停下并把这句话作为新指令重新出发。
-   * 其余全部不打断：
-   *   - steer   → 进引擎转向通道（takeSteerMessages），下一个 THINK 轮顺路
-   *               带上，手头的活继续干。
+   * insert). 插话 v2（2026-10-27，《设想》§一）：时序倒转——**到达即软暂停，
+   * 先判断关系，再决定怎么做**。入口第一步关上软暂停闸（holdGate：扣输出
+   * 推进与写派发，只读放行，死线兜底绝不锁死），九类关系判完、处置做完，
+   * finally 里按结论开闸。九类处置面（蓝图 §六）：
+   *   - supplement / emphasize / meta → 不打断：转向通道顺路带上，活照干。
    *   - question → 侧路回答一句，主循环毫无感知。
-   *   - task    → 阶段感知：委派还在飞 → 折入汇合轮（foldInScopeAddition，
-   *               先补这项再合并汇总，收尾核验没折入就转排队兜底）；
-   *               委派收齐 → 排队（RoundClosePlane 待办账），收尾后作为新任务启动。
-   *   - chatter → 收下即可，用户的话以自己的气泡上屏，不打扰干活的人。
-   * 分类不可用时保守按 steer 处理：话一定送到，活绝不推倒重来。
+   *   - unrelated → new_task 按阶段折入/排队；chatter 收下即可。
+   *   - correction → 押账重入但不掐流：转向通道转达，模型在下一个边界自己
+   *     回退理解；残留由收尾原话重入兜底。
+   *   - misunderstanding → 先自查（当前输出忠实吗）：确认跑偏 → 真暂停链；
+   *     自查坏了/没确证 → 降级为转达，绝不拿坏链路当暂停依据。
+   *   - change → 先确定影响再行动：带专门信号（点名撤支）折入/停支；带
+   *     targets_constraint 查任务状态（未开始拦截/进行中暂停/已完成冻结+
+   *     询问）；推翻/改向/整停 → 真暂停链。
+   *   - mixed → 原子分流：破坏性原子主导整消息，否则逐原子各归各臂。
+   * 判定不可用时保守按 supplement 转达处理：话一定送到，活绝不推倒重来。
    */
   async interject(text: string, images: MessageImage[] = [], displayText = text): Promise<void> {
     if (!text.trim()) return;
@@ -181,12 +210,23 @@ export class InterjectOrchestrator {
     // place, so the transcript never shows two lines for one insert.
     const ack = this.deps.createAck();
     try { appendTrace({ type: 'interject', snippet: text.slice(0, 80) }); } catch {}
-    const run = this.chain.then(() => this.classifyAndApply(text, images, displayText, ack));
-    // A rejected link must never poison the chain for later inserts.
-    this.chain = run.catch(() => {
-      this.deps.settleAck(ack, '未能处理这句插话；请重新发送。');
-    });
-    await run;
+    // 到达即软暂停（v2 §四）：闸在裁决期间扣住输出推进与写派发。死线在
+    // holdGate 内兜底（超时强制解除 + 宿主收执），这里绝不吞异常——闸的
+    // open 在 finally，判定链炸了也要放行主回合。
+    this.pauseRequested = false;
+    this.holdDepth += 1;
+    this.deps.hold?.close(text.slice(0, 120));
+    try {
+      const run = this.chain.then(() => this.classifyAndApply(text, images, displayText, ack));
+      // A rejected link must never poison the chain for later inserts.
+      this.chain = run.catch(() => {
+        this.deps.settleAck(ack, '未能处理这句插话；请重新发送。');
+      });
+      await run;
+    } finally {
+      this.holdDepth = Math.max(0, this.holdDepth - 1);
+      if (this.holdDepth === 0) this.deps.hold?.open(this.pauseRequested ? 'paused' : 'released');
+    }
   }
 
   /** One link of the interject chain: runs only after every earlier insert has
@@ -225,18 +265,19 @@ export class InterjectOrchestrator {
     this.deps.logDecision(decision, text);
     // 判定遥测（2026-10-21 刀 F）：真机插话失败三连无法取证——logDecision
     // 只进内存调试面，trace 在 WebView 里曾是静默 no-op。判定结果同拍落
-    // observations，事后可直接对质裁决器回了什么（kind/关键信号/收执）。
+    // observations，事后可直接对质裁决器回了什么（relation/关键信号/收执）。
     try {
       appendTrace({
         type: 'interject_decision',
         snippet: text.slice(0, 80),
-        route: decision.kind,
+        route: decision.relation,
         reason: decision.reason,
-        kind: decision.kind,
+        // v2 判定面（2026-10-27）：九类 relation 是权威分类（kind 槽承载
+        // 同值仅供旧日志对读），trace 直落 relation，不再经过折算层。
+        kind: decision.relation,
+        relation: decision.relation,
         via: decision.signals.via,
         cancelsPart: decision.signals.cancelsPart,
-        affectsCurrent: decision.signals.affectsCurrent,
-        supplementsCurrent: decision.signals.supplementsCurrent,
         coveredBranchCallId: decision.signals.coveredBranchCallId,
         stopBranchCallId: decision.signals.stopBranchCallId,
         receipt: typeof decision.signals.receipt === 'string' ? decision.signals.receipt.slice(0, 120) : undefined,
@@ -249,10 +290,14 @@ export class InterjectOrchestrator {
     const receipt = typeof decision.signals.receipt === 'string' && decision.signals.receipt.trim()
       ? decision.signals.receipt
       : undefined;
-    // 第 5 期调度：kind 折成处理级、裁决器的 urgent 再折成提级——两个入队点
-    // （分类期间硬停的兜底、task 臂）共用同一个优先级读数，口径不漂。
+    // 第 5 期调度：处理级随裁决信号过河（九类处置表折出），裁决器的 urgent
+    // 再折成提级——两个入队点（分类期间硬停的兜底、unrelated 排队臂）共用
+    // 同一个优先级读数，口径不漂。
     const urgent = decision.signals.urgent === true;
-    const queuePriority = priorityForKind(decision.kind, urgent);
+    const queuePriority = priorityForLevel(
+      (decision.signals.processingLevel as ProcessingLevel | undefined) ?? 'queued',
+      urgent,
+    );
     if (this.deps.isAborted()) {
       // The turn was hard-stopped while we were classifying — don't drop the
       // insert; queue it so it still runs as a task. The queue card that
@@ -281,8 +326,22 @@ export class InterjectOrchestrator {
       void this.deps.askMidrunClarification(decision, text, images, ack);
       return;
     }
-    // 思考窗吸收（判据在 shouldAbsorbIntoThinkingWindow，纯函数）。
-    if (shouldAbsorbIntoThinkingWindow(decision, this.planPreflightActive)) {
+    // 思考窗吸收（v2 判据内联）：预检窗开着、插话是「改/补当前构图」类关系
+    // （supplement/emphasize/meta/correction/change/mixed/misunderstanding），
+    // 且不带专门宿主信号（点名撤支/停支/续支各有更精确的机械动作，不从这
+    // 里过）——吸收进思考重开，不占独立处置。蓝图 §二「不再独立判定吸收」
+    // 指旧独立吸收判定器退役，机制本身保留（成熟管道），判据从 kind 换
+    // relation（supplementsCurrent 契约字段已退役，task 吸收条款随之撤销）。
+    const hasDedicatedSignal = decision.signals.cancelsPart === true
+      || decision.signals.branchStop === true
+      || decision.signals.resumesBranch === true
+      || typeof decision.signals.stopBranchCallId === 'string';
+    const ABSORBABLE_RELATIONS: ReadonlySet<string> = new Set([
+      'supplement', 'emphasize', 'meta', 'correction', 'change', 'mixed', 'misunderstanding',
+    ]);
+    if (this.planPreflightActive
+      && ABSORBABLE_RELATIONS.has(decision.relation)
+      && !hasDedicatedSignal) {
       echoUserBubble();
       this.pendingPreflightSupplements.push({ text, images });
       if (this.preflightRethinkInFlight) {
@@ -296,38 +355,9 @@ export class InterjectOrchestrator {
         this.preflightRestartRequested = true;
         this.preflightAbort?.abort();
       }
-      const isCorrection = decision.kind === 'premise-change' || decision.kind === 'goal-change';
-      this.deps.settleAck(ack, isCorrection
+      this.deps.settleAck(ack, isDestructiveAction(decision.action)
         ? '已按纠正重构思路，重新规划…'
         : '已并入补充，重新规划…');
-      return;
-    }
-    // 止损失效重想（2026-10-21 对话主导架构刀 B，用户拍板）：这句插话改变
-    // 「当前正在产出的东西」从现在起该是什么样——按旧路继续吐出来的内容
-    // 反正要被收回，白烧算力还先错为敬。过去它被判 steer 后默认「下个 THINK
-    // 边界顺路带上」或被判 task 后排队——执行流里没有近的边界时（长工具链、
-    // 长文流式），错误方向一直吐；排队则整句错过现场，重入时语境断裂。
-    // 现在当场停流：押话重入（原话开场、模型看得见现场重新组织），已完成的
-    // 不丢。机械与 premise-change 同源（真机打磨过的成熟通道），仅收执口径
-    // 不同。专门臂优先：带取消/停支/续跑信号的话各有更精确的宿主动作，不从
-    // 这里过；B/C 窗也不从这里过——折入汇合/汇聚轮本身就是「结合插话重整」，
-    // 且保留已收工支的产出，比整流重启更精细。
-    const hasDedicatedSignal = decision.signals.cancelsPart === true
-      || decision.signals.branchStop === true
-      || decision.signals.resumesBranch === true;
-    if ((decision.kind === 'steer' || decision.kind === 'task')
-      && decision.signals.affectsCurrent === true
-      && !hasDedicatedSignal
-      && !this.deps.hasDelegationInFlight()
-      && !this.deps.atAggregationWindow()) {
-      this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-      // 无委派在飞（上方条件已排除，且到这行无 await、状态不变）：裸 abort
-      // 停当前流，无在飞支可产生假失败。委派在飞的同类止损走 premise-change
-      // 臂的 PAUSE 存档口径，不在这里。
-      this.deps.settleAck(ack, receipt ?? '收到——正在做的先停在这里，马上带着你这句话重新来；已完成的不丢。', true, 'info');
-      this.deps.abort();
-      // 同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
-      if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
       return;
     }
     // 范围确认去重（2026-10-21 对话主导架构刀 F，真机「调研必须包括优酷」
@@ -340,11 +370,11 @@ export class InterjectOrchestrator {
     // F 起宿主零文本匹配——模型判断、宿主执行的原样复用。点错/已结算（race）
     // = 核实不过，照旧路由，绝不拿错误的支回「不重复」；收执用宿主核实过的
     // 事实终稿，绕开裁决器的 receipt（它写的是转达口径，与去重事实矛盾）。
-    // 专门臂优先同刀 B：带取消/停支/续跑信号的话各有更精确的宿主动作。
+    // 专门臂优先同前：带取消/停支/续跑信号的话各有更精确的宿主动作。
     const coveredCallId = typeof decision.signals.coveredBranchCallId === 'string'
       ? decision.signals.coveredBranchCallId
       : '';
-    if ((decision.kind === 'steer' || decision.kind === 'task')
+    if ((decision.relation === 'supplement' || decision.relation === 'unrelated')
       && coveredCallId
       && !hasDedicatedSignal) {
       const ensured = this.deps.coveringCandidates().find((item) => item.callId === coveredCallId);
@@ -359,278 +389,532 @@ export class InterjectOrchestrator {
       }
       // 核实不过（模型点错/那支刚结算）：要求照常兑现，落下去走正常路由。
     }
-    switch (decision.kind) {
-      case 'stop':
-        // 这条可能来自正则快路径（"停止""停下"——字面命令）也可能来自裁决
-        // 器的 stop 档（"先缓一缓""这个就到这儿"——正则覆盖不到的软停）。
-        // 两条路落到同一个分支，因为要做的事一样：停手，不重排。
-        // 整树停不重入 send()（没有 held insert），用户的原话不会在别处上屏
-        // ——补上回显，别让转写里只剩 pure 的一句话（插话没有回执时 transcript
-        // 必须仍能对上「谁说了什么」）。
-        echoUserBubble();
-        this.deps.settleAck(ack, receipt ?? '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
-        this.deps.abort();
+    // ── 九类处置表分发（蓝图 §六）──────────────────────────────────────
+    switch (decision.relation) {
+      case 'supplement':
+      case 'emphasize':
+      case 'meta':
+        // 不打断：转向通道顺路带上，活照干。三类共用同一落地形态——差别只在
+        // 语义标注（约束补充/强调/过程说明），机械动作没有分别。
+        await this.steerArm(text, images, displayText, ack, receipt, decision, echoUserBubble);
         return;
-      case 'goal-change': {
-        // 方法切换（2026-10-13 REA 判例）先走：目标没变、换的是路——在飞支
-        // 照 premise-change 的口径 PAUSE 存档而非硬 abort，旧做法的活结算成
-        // 「已暂停·进度已存档」而不是失败证据，重入回合自己决定弃用还是续
-        // 跑。收执只说宿主真实做的机械动作（暂停+押话重排），绝不替现场下
-        // 结论——插的是什么事、该怎么接，由重入回合看得见现场的模型说
-        // （2026-10-13 用户纠偏：不是所有回答都要说「换方法」，模板话贴进
-        // 任何对话都成立就是错的）。
-        if (decision.signals.methodSwitch === true) {
-          this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-          if (this.deps.hasDelegationInFlight()) {
-            this.deps.settleAck(ack, receipt ?? '收到——手头的活先暂停存档，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
-            this.deps.abort(PAUSE_ABORT_REASON);
-          } else {
-            this.deps.settleAck(ack, receipt ?? '收到——正在做的先停在这里，马上带着你这句话重新安排；已完成的不丢。', true, 'info');
-            this.deps.abort();
-          }
-          // 与下方同款迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话。
-          if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
-          return;
-        }
-        // 不在这里回显——held insert 从 send() 重入时会作为新回合开场气泡上屏，
-        // 先回显再重入 = 同一句话上两遍。
-        this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-        this.deps.settleAck(ack, receipt ?? '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。', true, 'info');
-        this.deps.abort();
-        // Same late-classification hazard as queueInterjectTask: if the turn
-        // already finished while we were judging, no finalize will dispatch
-        // the held insert — re-arm the deferred dispatch here.
-        if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
-        return;
-      }
-      case 'premise-change': {
-        // 前提被推翻（"其实我在西安"）：目标没变，但在飞的委派按错误前提算
-        // 下去全是白跑——先止损。
-        // 2026-09-29 用户反馈重构（三路调研 + "现在的年份是2026年9月"案例）：
-        // 旧实现裸 abort 整树，在飞支被结算成 success:false 的假失败——重入
-        // 回合的模型看见三个失败，不敢再派 agent，降级成自己派工具。现在：
-        // ① 活动期整树走 PAUSE 原因 → 在飞支结算成「已暂停·进度已存档」
-        //   （灰 ⏸、success:true，checkpoint 照存），父模型看到的是可续跑
-        //   的事实，不是失败证据；
-        // ② held insert 在收尾派发点重入 → 新回合自主决策：从断点重派原
-        //   支（同参重派命中 checkpoint）、改派、换方案都由它按纠正后的
-        //   前提权衡——用户的插话被接纳后重决策，而不是整树报废。
-        // ③ 已收齐委派、无在飞可暂停时，维持旧路：直接重入（abort 对已
-        //   收尾的回合是 no-op，押账插话照常派发）。
-        this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
-        if (this.deps.hasDelegationInFlight()) {
-          this.deps.settleAck(ack, receipt ?? '收到——先把手头的活暂停存档，带着这个纠正重新安排；已完成的不丢。', true, 'info');
-          this.deps.abort(PAUSE_ABORT_REASON);
-        } else {
-          this.deps.settleAck(ack, receipt ?? '前提变了——按纠正后的事实重新来；已完成的不丢。', true, 'info');
-          this.deps.abort();
-        }
-        // Same late-classification hazard as queueInterjectTask: if the turn
-        // already finished while we were judging, no finalize will dispatch
-        // the held insert — re-arm the deferred dispatch here.
-        if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
-        return;
-      }
-      case 'steer': {
-        // 分支级继续（第 2 期第三刀）：点名把一支**已暂停/已停**的委派接着
-        // 跑完——用原始参数同参重派（稳定 sessionId 命中 checkpoint → 子引
-        // 擎 continue），排在停支/取消/普通 steer 之前（带点名锚的「接着跑」
-        // 比整树续跑、加活都具体）。点不出具体支或拿不到原参，落下去走普通
-        // steer——让父模型从上下文重派（旧会话的兜底，可能从头跑）。
-        if (decision.signals.resumesBranch === true) {
-          const resumed = this.resumeNamedBranch(text);
-          if (resumed) {
-            echoUserBubble();
-            // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
-            // 是终稿——转普通气泡（与停支/暂停收执同一形态）。命中说从第 N
-            // 轮接 / 没命中明说从头跑，口径单一出处（branchResumeReceipt），
-            // 与派工收执、兜底指令三处同源。
-            this.deps.settleAck(ack, branchResumeReceipt(resumed.label, resumed.checkpoint, this.deps.hasDelegationInFlight()));
-            return;
-          }
-        }
-        // 第 2 期分支中断：祈使式「停掉 X 那支」或取消型话里点得出具体支的
-        // ——真停那一支（abortBranch，产出不入账、断点照存），其余照跑。
-        // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
-        const stopish = decision.signals.branchStop === true || decision.signals.cancelsPart === true;
-        if (stopish && this.deps.hasDelegationInFlight()) {
-          // 祈使「停掉那支」= 中止（判例 13 口径）；收掉一项「先停下」= 暂停
-          // （复测案例二口径：立即止损不烧完，活口比中止更大）。
-          const pause = decision.signals.branchStop !== true;
-          // addsAlong 闸对两 kind 一套口径：同一句里还要求加活的话，停掉那支
-          // 会把刚要求加进来的活一并杀掉——立即停会让加活失去汇合轮，只取消
-          // 折入（砍与加都在汇合轮兑清）。
-          const target = decision.signals.addsAlong === true
-            ? null
-            : await this.resolveStopTarget(text, decision);
-          const stopped = target ? this.deps.stopBranchByCallId(target, pause ? 'pause' : 'abort') : null;
-          if (stopped) {
-            echoUserBubble();
-            // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
-            // 气泡（settleAck 终稿语义），不必等收尾扫除摘微光。
-            this.deps.settleAck(ack, branchStopReceipt(stopped, pause ? 'pause' : 'abort'));
-            return;
-          }
-          // 没停成（裁决器没指认/指认已结算/执行缝缺席）：退回取消折入——
-          // 宁可折叠不误杀。绝不能往下走 1a 广播：「停掉那支」广播给所有在飞
-          // 支，每支都可能把自己当成"那支"自己停（反向执行最伤，2026-09-24
-          // 取消案例同源）。折入只守汇报步；同回合父若再为这个话题派工，
-          // 起飞闸（挂号簿）在出生点拦下。
-          this.deps.delegation.registerCancel(text);
-          // 缺口②扩窗：没停成的取消臂也点名了话题——若它同时命中某支**已收
-          // 工**的支，登记进离场账（在飞支停没停成不影响已收工支的产出离场）。
-          this.stripSettledTarget(text);
-          // stopMissed=true：支还在飞、但没停成（没指认/闸生效/编排器缺位）
-          // ——收执必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
-          this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
-          return;
-        }
-        // 非取消、非停支的 steer 走 1a 定向投递：委派在飞时按点名找收件人
-        // ——点到某一支就直达那一支（其余照跑），没点名就广播给所有在飞的
-        // 活。委派不在飞时照旧：父引擎下个 THINK 边界顺路带上。
-        if (stopish && !this.deps.hasDelegationInFlight()) {
-          // 整理窗（委派收齐、汇总未完）的取消：无支可停，但「不进最终汇总」
-          // 这个承诺此刻真实在场——折 cancelFoldInstruction 进汇聚轮（剔除后
-          // 重整），不再依赖父引擎下个 THINK 边界转达（2026-10-15 样本
-          // 「剔除并继续」口径：旧路在父已流中输出时可能收不过来）。收执只
-          // 说砍了什么——foldInScopeAddition 自带收执；起飞闸照挂——同回合
-          // 若还会为这个话题再派工，出生点拦下。
-          // 回显挪进 else 臂：foldInScopeAddition 自带用户气泡回显，臂头统一
-          // echo 会让整理窗分支出双气泡（2026-10-20 真机「不要优酷了」×2）。
-          this.deps.delegation.registerCancel(text);
-          // 缺口②扩窗（第 6 期）：不再只在整理窗剔——任何取消臂只要点名命中
-          // 已收工支就登记（登记保证回合收尾补剔与下一轮装配兜底）；整理窗内
-          // 即时剔中即兑现，窗口外此刻未必有候选（出生前）也不影响登记。
-          this.stripSettledTarget(text);
-          if (this.deps.atAggregationWindow()) {
-            this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
-          } else {
-            echoUserBubble();
-            // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
-            // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
-            // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
-            // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
-            // （2026-09-28：这个窗口可能压根没有委派可派）。
-            try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
-            this.deps.steerRunningTurn(text, images, null, 'parent', true);
-            this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
-          }
-          return;
-        }
-        echoUserBubble();
-        if (this.deps.hasDelegationInFlight()) {
-          this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
-        } else {
-          this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
-        }
-        return;
-      }
       case 'question':
         // 回答气泡马上就来（旁路一次 LLM 调用），临时回执不再留行。
         this.deps.discardAckRow(ack);
         echoUserBubble();
         void this.deps.answerMidrunQuestion(text, images);
         return;
-      case 'task': {
-        // 取消不是活（2026-09-24 取消案例）：分类器把收掉一项判成 task 时，
-        // 只要它带上了 cancels_part，就绝不能走去重、排队或机械折入——排队
-        // 一个"取消"等于把它当活跑（反向执行），送去重会回出"已经在调研着
-        // 了"这种答非所问。
-        // 2026-09-28：宿主不再自己嗅关键词（CANCELISH_RE 已删），只看这个
-        // 契约字段。可靠性靠提示词的硬要求兑现——「即使判成 task 也必须报」
-        // ——而不是靠宿主当场猜措辞：一个句子在裁决器与宿主两边被读成相反的
-        // 两件事，就是两条反向执行的来路。
-        // 停支的闸 2026-09-28 起由契约字段驱动（adds_along），不再嗅关键词：
-        // 同一句里还要求加活的话——「B站那支别查了，再加一个爱奇艺」——永不
-        // 停支，因为停掉那支会把刚要求加进来的活一并杀掉，只取消折入。
-        // 停不了/点不到具体支按取消型 steer 折入；委派不在飞交给在跑的回合
-        // 自己消化。
-        const cancelish = decision.signals.cancelsPart === true;
-        if (cancelish) {
+      case 'unrelated': {
+        // 收活先于排队：判成不相关却带着取消信号的，绝不能当新活跑（反向执行
+        // ——排队一个"取消"等于把它当活跑）。
+        if (decision.signals.cancelsPart === true) {
           await this.handleCancelFold(text, images, displayText, ack, receipt, decision, echoUserBubble);
           return;
         }
-        // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
-        // 经覆盖（「新增一个平台，爱奇艺」而爱奇艺那路正在跑），如实回「已
-        // 经在跑/已在汇总里」，不重复派也不折入——重复派一支是白烧算力还
-        // 污染汇总。只认区分性命中（1a 同款纪律）：打平认不出 = 宁可照旧
-        // 折入，绝不拿"可能重复"当理由吞用户的活。
-        const covered = this.findCoveringBranch(text);
-        if (covered) {
-          // 2026-10-20 真机三连击的复核裁决（替换当日试过的词表闸——用户指
-          // 得对：取消的措辞穷举不尽，词表永远追着漏网跑）。判成 task 却撞
-          // 上"已在跑"本身就是矛盾信号——谁会要求加一个正在跑的东西？最可
-          // 能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回复核单独问
-          // 一遍。2026-10-21 真机二连：同一 system 下重问仍判 task（<dedupe_
-          // conflict> 块在 system 里零契约被当噪声，二次锚定原判）——复核改
-          // 走独立窄问题提示词（decider.recheckCovered），<dedupe_conflict>
-          // 升为顶层块进 system 契约，举证责任倒置。报了取消走同一条取消落
-          // 地臂（点名还能精确停支）；复核失败/不报才回终稿——真加活照旧秒
-          // 回。语义判断全程归模型，宿主零词表。
-          const coveredName = this.deps.branchLabel(covered.name, covered.callId);
-          const conflictNote = `你刚把这句话判成「新增任务」，但它点到的活已有一支在跑：「${coveredName}」（call_id=${covered.callId}）。没人会要求加一个正在跑的东西——复核这句话是不是其实在收掉/暂停这支在跑的活。`;
-          const recheck = await this.deps.decider.recheckCovered(this.deps.decideLlm(), insertionCtx, conflictNote, { text, images, displayText }, this.deps.decideSignal());
-          if (recheck) this.deps.logDecision(recheck, `(复核)${text}`);
-          if (recheck?.signals.cancelsPart === true) {
-            // 收执只取复核现场写的（它见到的是矛盾现场）；原判是「task」时
-            // 它写的收执是加活口径，用在取消臂就是说谎——宁缺，fold 臂有固
-            // 定兜底。
-            const recheckReceipt = typeof recheck.signals.receipt === 'string' && recheck.signals.receipt.trim()
-              ? recheck.signals.receipt
-              : undefined;
-            await this.handleCancelFold(text, images, displayText, ack, recheckReceipt, recheck, echoUserBubble);
-            return;
-          }
-          if (recheck === null && covered.status === 'running') {
-            // 2026-10-21 真机三连（用户定调「方向性问题，大 bug」）：复核超
-            // 时/失败 = 没结论，旧兜底「宁可照旧」在取消场景方向反了——用户
-            // 说了「不需要」却被任其继续跑，等于当着用户的面背叛，且不可逆；
-            // 误停一支是可逆的（说一声就续上）。拿不准时选可逆的一边：直接
-            // 暂停 covered 那支（callId 是 covered 命中给的宿主事实，不需要
-            // 模型点名），收执诚实交代没拿准+给出恢复口。只有复核**明确判
-            // 加活**（recheck 非 null 且不报取消）才配「不重复派」终稿。
-            const stopped = this.deps.stopBranchByCallId(covered.callId, 'pause');
-            if (stopped) {
-              try { appendTrace({ type: 'covered_recheck_unresolved_pause', snippet: text.slice(0, 80) }); } catch {}
-              echoUserBubble();
-              this.deps.settleAck(ack, branchUncertainPauseReceipt(coveredName));
-              return;
-            }
-            // 停不成（窗口刚好收尾）→ 落到下方终稿：活已不在跑，无方向性伤害。
-          }
+        if (decision.unrelatedKind === 'chatter') {
+          // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
+          // 气泡已上屏，这就够了，别再打扰干活的人。临时回执也一并收走。
+          this.deps.discardAckRow(ack);
           echoUserBubble();
-          // 去重回执是终稿（没有后续在途）——转普通气泡。
-          this.deps.settleAck(ack, covered.status === 'done'
-            ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
-            : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
           return;
         }
-        // 阶段感知（2026-09-22 用户定稿；整理窗口 2026-10-15 用户定调改派）：
-        // ① B 窗（并行委派在飞）：插进来的追加活不进"当前任务完成后处理"的
-        //   队列——那会先输出一份没有它的汇总。折入汇合轮：收齐后先补这项，
-        //   再合并输出一份覆盖全部的汇总。
-        // ② C 窗（委派收齐、汇总还在整理）：追加折入汇聚轮——暂停汇总、保留
-        //   中间结果，把这项像其他委派一样补跑，返回后重整一份覆盖全部的
-        //   输出（样本「新增平台」C 档口径；旧定稿「先出已有汇总再补跑」的
-        //   两段输出被明确推翻）。收尾核验没折入就转排队兜底，机制已有。
-        // ③ 单任务流（本就没派过委派）：没有汇合轮可折，照旧排队。
-        if (this.deps.hasDelegationInFlight() || this.deps.atAggregationWindow()) {
-          this.deps.foldInScopeAddition(text, images, displayText, true, ack, false, false, receipt); // scope 追加：机械执行
-        } else {
-          // 第 5 期调度收执：排上了就说一声——普通活「办完手头就轮到」，
-          // 提级的「这句急，先办」。只说事实（排上了/插队了），口吻/详略归
-          // 第 6 期。队列卡本身就是逐条可见的就地回执，两者互补不重复。
-          this.deps.settleAck(ack, urgent ? queuedUrgentReceipt() : queuedReceipt());
-          this.deps.queueInterjectTask(text, images, displayText, queuePriority);
-        }
+        await this.newTaskArm(text, images, displayText, ack, receipt, decision, urgent, queuePriority, insertionCtx, echoUserBubble);
         return;
       }
-      case 'chatter':
-        // 收下了。同事埋头干活时说了句"哈哈"，你不会停下来回一句"收到"——
-        // 气泡已上屏，这就够了，别再打扰干活的人。临时回执也一并收走。
-        this.deps.discardAckRow(ack);
-        echoUserBubble();
+      case 'change':
+        await this.changeArm(text, images, displayText, ack, receipt, decision, echoUserBubble);
         return;
+      case 'correction':
+        this.correctionArm(text, images, ack, receipt, echoUserBubble);
+        return;
+      case 'misunderstanding':
+        await this.misunderstandingArm(text, images, displayText, ack, receipt, decision, insertionCtx, echoUserBubble);
+        return;
+      case 'mixed':
+        await this.mixedArm(text, images, displayText, ack, receipt, decision, queuePriority, insertionCtx, echoUserBubble);
+        return;
+    }
+  }
+
+  /**
+   * 真暂停链（v2 §七）：中断输出（abort，委派在飞走 PAUSE 存档口径）→
+   * 产出清理（宿主把被掐流的半截输出剔出上下文、渲染留底）→ 押账重入
+   * （roundClose.holdInsert，新回合开场 = 用户上一句原话 + 纠偏插话，
+   * RoundClosePlane 派发序保证押账优先）。只由双重触发确认的臂进入：
+   * change 的推翻/改向判词、misunderstanding 的自查确认。
+   */
+  private truePause(text: string, images: MessageImage[], displayText: string, ack: InterjectAck, receipt?: string): void {
+    this.pauseRequested = true;
+    this.deps.roundClose.holdInsert({ text, images, displayText, ts: Date.now() });
+    // 先落押账再 abort：abort 是异步排空，押账先入账保证收尾派发点有话可派。
+    // 收执兜底按宿主真实做的机械动作二分（2026-09-29 判例口径）：在飞走
+    // PAUSE → 「暂停存档」（在飞支会结算成已暂停·进度已存档，说「止损」会
+    // 让人以为产出报废）；无在飞 → 直路止损。receipt 在场 = 裁决器结合现场
+    // 写的，压过兜底（刀 A 全场景约定）。
+    const fallback = this.deps.hasDelegationInFlight()
+      ? '收到——手头的活先暂停存档，马上带着你这句话重新安排；已完成的不丢。'
+      : '方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。';
+    this.deps.settleAck(ack, receipt ?? fallback, true, 'info');
+    this.deps.stripAbortedTurnPartial?.();
+    if (this.deps.hasDelegationInFlight()) {
+      // 活动期整树走 PAUSE 原因 → 在飞支结算成「已暂停·进度已存档」（灰 ⏸、
+      // success:true，checkpoint 照存）——重入回合看到的是可续跑的事实，
+      // 不是失败证据（2026-09-29 三路调研判例）。
+      this.deps.abort(PAUSE_ABORT_REASON);
+    } else {
+      // 无在飞可暂停：裸 abort（对已收尾的回合是 no-op），押账插话照常派发。
+      this.deps.abort();
+    }
+    // 迟到判定风险：裁决期间回合已收尾的话，没人派发押账插话——重 arm 派发点。
+    if (!this.deps.isStreaming()) this.deps.roundClose.scheduleDispatch();
+  }
+
+  /**
+   * supplement / emphasize / meta 臂：不打断的转达。分支级续跑/点名停支/
+   * 取消折入等专门信号优先（各有更精确的机械动作），普通话走 1a 定向投递
+   * （委派在飞按点名直达某支，没点名广播），委派不在飞转达父引擎。
+   */
+  private async steerArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    // 分支级继续（第 2 期第三刀）：点名把一支**已暂停/已停**的委派接着
+    // 跑完——用原始参数同参重派（稳定 sessionId 命中 checkpoint → 子引
+    // 擎 continue），排在停支/取消/普通 steer 之前（带点名锚的「接着跑」
+    // 比整树续跑、加活都具体）。点不出具体支或拿不到原参，落下去走普通
+    // steer——让父模型从上下文重派（旧会话的兜底，可能从头跑）。
+    if (decision.signals.resumesBranch === true) {
+      const resumed = this.resumeNamedBranch(text);
+      if (resumed) {
+        echoUserBubble();
+        // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
+        // 是终稿——转普通气泡（与停支/暂停收执同一形态）。命中说从第 N
+        // 轮接 / 没命中明说从头跑，口径单一出处（branchResumeReceipt），
+        // 与派工收执、兜底指令三处同源。
+        this.deps.settleAck(ack, branchResumeReceipt(resumed.label, resumed.checkpoint, this.deps.hasDelegationInFlight()));
+        return;
+      }
+    }
+    // 第 2 期分支中断：祈使式「停掉 X 那支」或取消型话里点得出具体支的
+    // ——真停那一支（abortBranch，产出不入账、断点照存），其余照跑。
+    // 点不出具体支时退回原路：取消口径折入 / 普通 steer。
+    const stopish = decision.signals.branchStop === true || decision.signals.cancelsPart === true;
+    if (stopish) {
+      await this.stopishArm(text, images, displayText, ack, receipt, decision, echoUserBubble);
+      return;
+    }
+    echoUserBubble();
+    // 非取消、非停支的转达走 1a 定向投递：委派在飞时按点名找收件人
+    // ——点到某一支就直达那一支（其余照跑），没点名就广播给所有在飞的
+    // 活。委派不在飞时照旧：父引擎下个 THINK 边界顺路带上。
+    if (this.deps.hasDelegationInFlight()) {
+      this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
+    } else {
+      this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
+    }
+  }
+
+  /**
+   * 点名停支/取消的落地（委派在飞与否两窗口）。祈使「停掉那支」= 中止
+   * （判例 13 口径）；收掉一项「先停下」= 暂停（复测案例二口径：立即止损
+   * 不烧完，活口比中止更大）。addsAlong 闸：同一句里还要求加活的话永不
+   * 停支——停掉那支会把刚要求加进来的活一并杀掉，只取消折入（砍与加都在
+   * 汇合轮兑清）。没停成退回取消折入——绝不 1a 广播（「停掉那支」广播给
+   * 所有在飞支，每支都可能把自己当成"那支"自己停，反向执行最伤）。
+   */
+  private async stopishArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    if (this.deps.hasDelegationInFlight()) {
+      const pause = decision.signals.branchStop !== true;
+      const target = decision.signals.addsAlong === true
+        ? null
+        : await this.resolveStopTarget(text, decision);
+      const stopped = target ? this.deps.stopBranchByCallId(target, pause ? 'pause' : 'abort') : null;
+      if (stopped) {
+        echoUserBubble();
+        // 停/暂停是宿主已完成的动作（sync 已落），收执是终稿——转普通
+        // 气泡（settleAck 终稿语义），不必等收尾扫除摘微光。
+        this.deps.settleAck(ack, branchStopReceipt(stopped, pause ? 'pause' : 'abort'));
+        return;
+      }
+      // 没停成（裁决器没指认/指认已结算/执行缝缺席）：退回取消折入——
+      // 宁可折叠不误杀。折入只守汇报步；同回合父若再为这个话题派工，
+      // 起飞闸（挂号簿）在出生点拦下。
+      this.deps.delegation.registerCancel(text);
+      // 缺口②扩窗：没停成的取消臂也点名了话题——若它同时命中某支**已收
+      // 工**的支，登记进离场账（在飞支停没停成不影响已收工支的产出离场）。
+      this.stripSettledTarget(text);
+      // stopMissed=true：支还在飞、但没停成（没指认/闸生效/编排器缺位）
+      // ——收执必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
+      return;
+    }
+    // 整理窗（委派收齐、汇总未完）的取消：无支可停，但「不进最终汇总」
+    // 这个承诺此刻真实在场——折 cancelFoldInstruction 进汇聚轮（剔除后
+    // 重整）。收执只说砍了什么——foldInScopeAddition 自带收执；起飞闸照挂。
+    // 回显挪进 else 臂：foldInScopeAddition 自带用户气泡回显，臂头统一
+    // echo 会让整理窗分支出双气泡（2026-10-20 真机「不要优酷了」×2）。
+    this.deps.delegation.registerCancel(text);
+    // 缺口②扩窗（第 6 期）：不再只在整理窗剔——任何取消臂只要点名命中
+    // 已收工支就登记（登记保证回合收尾补剔与下一轮装配兜底）。
+    this.stripSettledTarget(text);
+    if (this.deps.atAggregationWindow()) {
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
+    } else {
+      echoUserBubble();
+      // 插话落在委派出生之前（2026-09-26 用户实测）：此刻无支可停，话
+      // 挂上起飞闸——委派批次出生时按区分词拦下被取消的那支；同时照旧
+      // 转达父引擎，父在派工前读到的话计划本身就会少这一路（闸是保底，
+      // 不是唯一手段）。收执点名说砍了什么——机制承诺不进收执
+      // （2026-09-28：这个窗口可能压根没有委派可派）。
+      try { appendTrace({ type: 'cancel_before_dispatch', snippet: text.slice(0, 80) }); } catch {}
+      this.deps.steerRunningTurn(text, images, null, 'parent', true);
+      this.deps.settleAck(ack, cancelBeforeDispatchReceipt(cancelReceiptTopic(text)));
+    }
+  }
+
+  /**
+   * change 臂（推翻/改向/整停，蓝图 §六）：先确定影响再行动（《设想》§一）。
+   * ① 字面整停（rule 通道，action=stop）：停手不重排，不押账（用户说的是
+   *    「停」，不是「重来」）。
+   * ② 专门信号（点名撤支/停支）：机械动作比整树重排精细，走 stopish 落地。
+   * ③ targets_constraint 在场且任务状态可折：对着状态投影定位被替换条件
+   *    挂着的节点，按节点态拆——进行中暂停、已完成冻结、未开始不再启动；
+   *    机械处置不了的（定位不到/投影缺席）宁停不猜。
+   * ④ 其余（推翻/改向判词）：真暂停链——押账重入，新回合开场 = 用户原话。
+   */
+  private async changeArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    // ① 字面整停：正则快路径（"停止""停下"——字面命令）与裁决器软停
+    // （"先缓一缓"）都落 action=stop——停手，不重排。整树停不重入 send()
+    // （没有 held insert），原话回显补在这里，别让转写对不上谁说了什么。
+    if (decision.action === 'stop') {
+      echoUserBubble();
+      this.deps.settleAck(ack, receipt ?? '收到，停——正在收尾当前任务，已经跑完的部分都留着。', true, 'info');
+      this.deps.abort();
+      return;
+    }
+    // ② 专门信号：点名撤一支/停一支——宿主执行比整树暂停精确。
+    const dedicated = decision.signals.cancelsPart === true
+      || decision.signals.branchStop === true
+      || typeof decision.signals.stopBranchCallId === 'string';
+    if (dedicated) {
+      await this.stopishArm(text, images, displayText, ack, receipt, decision, echoUserBubble);
+      return;
+    }
+    // ③ targets_constraint：对着任务状态投影定位影响面。
+    const targets = typeof decision.signals.targetsConstraint === 'string'
+      ? decision.signals.targetsConstraint.trim()
+      : '';
+    const snapshot = targets ? this.deps.taskStateSnapshot?.() ?? null : null;
+    if (targets && snapshot) {
+      const affected = this.locateAffected(snapshot, targets);
+      if (affected.length > 0 && await this.disposeAffected(affected, text, images, ack, receipt, echoUserBubble)) {
+        return;
+      }
+      // 定位不到（约束对不上账/节点无支可停可冻）：落到真暂停，宁停不猜。
+    }
+    // ④ 推翻/改向判词：真暂停链。不在这里回显——held insert 从 send() 重入
+    // 时会作为新回合开场气泡上屏，先回显再重入 = 同一句话上两遍。收执交给
+    // truePause 按在飞事实二分（PAUSE 说「暂停存档」，直路说止损）。
+    this.truePause(text, images, displayText, ack, receipt);
+  }
+
+  /**
+   * 约束定位（change 臂 ③ 的第一步）：targets_constraint 是被替换条件的
+   * 原文片段，任务状态账里的约束条目也记着原文——按文本包含关系对上号
+   * （约束记账本来就摘自用户/计划原话，此处是账本对账，不是语义判断）。
+   * 对不上号返回空集，调用方宁停不猜。
+   */
+  private locateAffected(snapshot: TaskStateSnapshot, targets: string): ReturnType<typeof affectedByChange> {
+    const ids = snapshot.constraints
+      .filter((c) => {
+        const ct = c.text.trim();
+        return ct.length > 0 && (targets.includes(ct) || ct.includes(targets));
+      })
+      .map((c) => c.id);
+    return affectedByChange(snapshot, { constraintIds: ids });
+  }
+
+  /**
+   * 影响面机械处置（change 臂 ③ 的第二步）：按节点态拆——进行中的支暂停
+   * （checkpoint 照存）、已完成的产出冻结（不进后续请求）、未开始的拦截
+   * （起飞闸 + 转达父引擎）。返回 false = 没有任何机械动作可做（定位到的
+   * 节点都无支可停/无账可冻），调用方落到真暂停。收执逐项如实点名。
+   */
+  private async disposeAffected(
+    affected: ReturnType<typeof affectedByChange>,
+    text: string,
+    images: MessageImage[],
+    ack: InterjectAck,
+    receipt: string | undefined,
+    echoUserBubble: () => void,
+  ): Promise<boolean> {
+    const running = affected.filter((n) => n.state === 'running' && typeof n.branchCallId === 'string' && n.branchCallId.length > 0);
+    const done = affected.filter((n) => n.state === 'done');
+    const pending = affected.filter((n) => n.state === 'pending');
+    if (running.length === 0 && done.length === 0 && pending.length === 0) return false;
+    echoUserBubble();
+    // 进行中：逐支暂停（活口比中止大——说一声就能续）。
+    const stoppedLabels: string[] = [];
+    for (const node of running) {
+      const stopped = this.deps.stopBranchByCallId(node.branchCallId as string, 'pause');
+      if (stopped) stoppedLabels.push(stopped);
+    }
+    // 已完成：副作用冻结（写操作标记 frozen，产出不再被后续引用/补偿踩到）。
+    const frozen = done.length > 0 ? this.deps.freezeSideEffects?.() ?? [] : [];
+    // 未开始：挂起飞闸（同回合再为这个话题派工时出生点拦下）+ 转达父引擎。
+    if (pending.length > 0) this.deps.delegation.registerCancel(text);
+    this.deps.steerRunningTurn(text, images, null, 'parent', pending.length > 0,
+      typeof receipt === 'string' ? receipt : undefined);
+    const parts: string[] = [];
+    if (stoppedLabels.length > 0) parts.push(`「${stoppedLabels.join('」「')}」先暂停了，断点都存着`);
+    if (frozen.length > 0) parts.push(`已完成的 ${frozen.length} 项产出先冻结，不进后续`);
+    if (pending.length > 0) parts.push('还没开工的部分不再启动');
+    this.deps.settleAck(ack, receipt ?? (parts.length > 0
+      ? `收到——${parts.join('；')}，都按你说的这份调整来。`
+      : '收到，按调整后的来。'), true, 'info');
+    return true;
+  }
+
+  /**
+   * correction 臂（理解纠偏）：押账重入但**不掐流**——纠偏经转向通道转达，
+   * 模型在下一个 THINK 边界自己回退理解，手头的活不停（纠偏错一层就该在
+   * 执行里修，不值得整树暂停）；整段重入的兜底由回合收尾 settleRound 的
+   * 残留原话重入承担，回合已收尾则它自然成为重入开场。
+   */
+  private correctionArm(
+    text: string,
+    images: MessageImage[],
+    ack: InterjectAck,
+    receipt: string | undefined,
+    echoUserBubble: () => void,
+  ): void {
+    echoUserBubble();
+    if (this.deps.hasDelegationInFlight()) {
+      this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
+    } else {
+      this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
+    }
+    this.deps.settleAck(ack, receipt ?? '收到——这里理解偏了，接下来按纠正后的来；已完成的会对照这条重新核对。', true, 'info');
+  }
+
+  /**
+   * misunderstanding 臂（方向理解错了）：真暂停的双重触发之二——先自查
+   * （当前输出忠实于用户上一句吗），**确认跑偏才真暂停**；自查链路坏了或
+   * 没确证 → 降级为转达，绝不拿坏链路当暂停依据（错杀整树比错跑一段代价
+   * 大）。自查判词来自 checkOutputFaithfulness（三要素现场 + 窄问题）。
+   */
+  private async misunderstandingArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    insertionCtx: string,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    const verdict = await this.deps.decider.selfCheckDrift(
+      this.deps.decideLlm(), insertionCtx, text, this.deps.decideSignal(),
+    );
+    if (verdict?.drifting === true) {
+      const drift = typeof verdict.reason === 'string' ? verdict.reason.trim() : '';
+      this.truePause(
+        text, images, displayText, ack,
+        receipt ?? (drift
+          ? `对了一遍，你说得对——${drift}。先停在这里，带着你这句话重新对齐；已完成的不丢。`
+          : '对了一遍，当前产出确实没接住你的意思——先停下重新对齐；已完成的不丢。'),
+      );
+      return;
+    }
+    // 降级：按普通转达走（自查没确证 = 不配整树暂停）。
+    try {
+      appendTrace({
+        type: 'self_check_unconfirmed',
+        snippet: text.slice(0, 80),
+        verdict: verdict ? (verdict.drifting ? 'drift' : 'faithful') : 'unavailable',
+      });
+    } catch { /* 遥测失败不碰主流程 */ }
+    echoUserBubble();
+    if (this.deps.hasDelegationInFlight()) {
+      this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
+    } else {
+      this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
+    }
+    this.deps.settleAck(ack, receipt ?? '这句我记下了——先按你说的方向接着走；有出入随时再纠正我。', true, 'info');
+  }
+
+  /**
+   * mixed 臂（一句话多个关系）：原子分流。破坏性原子主导（change/
+   * misunderstanding/correction 任一在场）→ 整条消息按该关系的处置臂走
+   * （原子文本是片段，拆开执行会丢上下文；破坏优先保命）；无破坏性 →
+   * 转达类合并为一次转达（整句原文带现场），排队类逐条入队，提问逐条旁答。
+   * 全都认不出 → 按普通转达兜底，话不丢。
+   */
+  private async mixedArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    queuePriority: number,
+    insertionCtx: string,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    const atoms = decision.atoms ?? [];
+    const dominant = (['change', 'misunderstanding', 'correction'] as const)
+      .find((r) => atoms.some((a) => a.relation === r));
+    if (dominant) {
+      const dominantDecision: DynamicInsertionDecision = { ...decision, relation: dominant };
+      if (dominant === 'change') {
+        await this.changeArm(text, images, displayText, ack, receipt, dominantDecision, echoUserBubble);
+      } else if (dominant === 'misunderstanding') {
+        await this.misunderstandingArm(text, images, displayText, ack, receipt, dominantDecision, insertionCtx, echoUserBubble);
+      } else {
+        this.correctionArm(text, images, ack, receipt, echoUserBubble);
+      }
+      return;
+    }
+    // 无破坏性：逐原子各归各臂。转达类有 → 整句转达（带着全话转，模型自己
+    // 对应到各原子）；排队类逐条入队；提问逐条旁答。
+    const steerish = atoms.some((a) => a.relation === 'supplement' || a.relation === 'emphasize' || a.relation === 'meta');
+    const newTasks = atoms.filter((a) => a.relation === 'unrelated');
+    const questions = atoms.filter((a) => a.relation === 'question');
+    if (!steerish && newTasks.length === 0 && questions.length === 0) {
+      // 原子缺席/全认不出：按普通转达兜底。
+      await this.steerArm(text, images, displayText, ack, receipt, decision, echoUserBubble);
+      return;
+    }
+    echoUserBubble();
+    if (steerish) {
+      if (this.deps.hasDelegationInFlight()) {
+        this.deps.steerRunningTurn(text, images, ack, this.matchSteerRecipient(text), false, receipt);
+      } else {
+        this.deps.steerRunningTurn(text, images, ack, 'parent', false, receipt);
+      }
+    }
+    for (const q of questions) {
+      void this.deps.answerMidrunQuestion(q.text, images);
+    }
+    for (const t of newTasks) {
+      this.deps.queueInterjectTask(t.text, images, t.text, queuePriority);
+    }
+    const parts: string[] = [];
+    if (steerish) parts.push('要调整的已带上');
+    if (newTasks.length > 0) parts.push(`新派的 ${newTasks.length} 件排上队了`);
+    if (questions.length > 0) parts.push('问题这就答');
+    this.deps.settleAck(ack, receipt ?? `都收到了——${parts.join('，')}。`, true, 'info');
+  }
+
+  /**
+   * unrelated/new_task 臂（要回来的新活）：取消复核撞车 → 阶段感知折入/
+   * 排队。整段自旧 task 臂原样迁移，判定面换成 relation（kind 不再参与）。
+   */
+  private async newTaskArm(
+    text: string,
+    images: MessageImage[],
+    displayText: string,
+    ack: InterjectAck,
+    receipt: string | undefined,
+    decision: DynamicInsertionDecision,
+    urgent: boolean,
+    queuePriority: number,
+    insertionCtx: string,
+    echoUserBubble: () => void,
+  ): Promise<void> {
+    // 不重复做（2026-09-25 复测案例一）：加的活若某支在飞/已收工的支已
+    // 经覆盖（「新增一个平台，爱奇艺」而爱奇艺那路正在跑），如实回「已
+    // 经在跑/已在汇总里」，不重复派也不折入——重复派一支是白烧算力还
+    // 污染汇总。只认区分性命中（1a 同款纪律）：打平认不出 = 宁可照旧
+    // 折入，绝不拿"可能重复"当理由吞用户的活。
+    const covered = this.findCoveringBranch(text);
+    if (covered) {
+      // 2026-10-20 真机三连击的复核裁决（替换当日试过的词表闸——用户指
+      // 得对：取消的措辞穷举不尽，词表永远追着漏网跑）。判成新活却撞
+      // 上"已在跑"本身就是矛盾信号——谁会要求加一个正在跑的东西？最可
+      // 能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回复核单独问
+      // 一遍。2026-10-21 真机二连：同一 system 下重问仍判新活（<dedupe_
+      // conflict> 块在 system 里零契约被当噪声，二次锚定原判）——复核改
+      // 走独立窄问题提示词（decider.recheckCovered），<dedupe_conflict>
+      // 升为顶层块进 system 契约，举证责任倒置。报了取消走同一条取消落
+      // 地臂（点名还能精确停支）；复核失败/不报才回终稿——真加活照旧秒
+      // 回。语义判断全程归模型，宿主零词表。
+      const coveredName = this.deps.branchLabel(covered.name, covered.callId);
+      const conflictNote = `你刚把这句话判成「新增任务」，但它点到的活已有一支在跑：「${coveredName}」（call_id=${covered.callId}）。没人会要求加一个正在跑的东西——复核这句话是不是其实在收掉/暂停这支在跑的活。`;
+      const recheck = await this.deps.decider.recheckCovered(this.deps.decideLlm(), insertionCtx, conflictNote, { text, images, displayText }, this.deps.decideSignal());
+      if (recheck) this.deps.logDecision(recheck, `(复核)${text}`);
+      if (recheck?.signals.cancelsPart === true) {
+        // 收执只取复核现场写的（它见到的是矛盾现场）；原判是「新活」时
+        // 它写的收执是加活口径，用在取消臂就是说谎——宁缺，fold 臂有固
+        // 定兜底。
+        const recheckReceipt = typeof recheck.signals.receipt === 'string' && recheck.signals.receipt.trim()
+          ? recheck.signals.receipt
+          : undefined;
+        await this.handleCancelFold(text, images, displayText, ack, recheckReceipt, recheck, echoUserBubble);
+        return;
+      }
+      if (recheck === null && covered.status === 'running') {
+        // 2026-10-21 真机三连（用户定调「方向性问题，大 bug」）：复核超
+        // 时/失败 = 没结论，旧兜底「宁可照旧」在取消场景方向反了——用户
+        // 说了「不需要」却被任其继续跑，等于当着用户的面背叛，且不可逆；
+        // 误停一支是可逆的（说一声就续上）。拿不准时选可逆的一边：直接
+        // 暂停 covered 那支（callId 是 covered 命中给的宿主事实，不需要
+        // 模型点名），收执诚实交代没拿准+给出恢复口。只有复核**明确判
+        // 加活**（recheck 非 null 且不报取消）才配「不重复派」终稿。
+        const stopped = this.deps.stopBranchByCallId(covered.callId, 'pause');
+        if (stopped) {
+          try { appendTrace({ type: 'covered_recheck_unresolved_pause', snippet: text.slice(0, 80) }); } catch {}
+          echoUserBubble();
+          this.deps.settleAck(ack, branchUncertainPauseReceipt(coveredName));
+          return;
+        }
+        // 停不成（窗口刚好收尾）→ 落到下方终稿：活已不在跑，无方向性伤害。
+      }
+      echoUserBubble();
+      // 去重回执是终稿（没有后续在途）——转普通气泡。
+      this.deps.settleAck(ack, covered.status === 'done'
+        ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
+        : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
+      return;
+    }
+    // 阶段感知（2026-09-22 用户定稿；整理窗口 2026-10-15 用户定调改派）：
+    // ① B 窗（并行委派在飞）：插进来的追加活不进"当前任务完成后处理"的
+    //   队列——那会先输出一份没有它的汇总。折入汇合轮：收齐后先补这项，
+    //   再合并输出一份覆盖全部的汇总。
+    // ② C 窗（委派收齐、汇总还在整理）：追加折入汇聚轮——暂停汇总、保留
+    //   中间结果，把这项像其他委派一样补跑，返回后重整一份覆盖全部的
+    //   输出（样本「新增平台」C 档口径；旧定稿「先出已有汇总再补跑」的
+    //   两段输出被明确推翻）。收尾核验没折入就转排队兜底，机制已有。
+    // ③ 单任务流（本就没派过委派）：没有汇合轮可折，照旧排队。
+    if (this.deps.hasDelegationInFlight() || this.deps.atAggregationWindow()) {
+      this.deps.foldInScopeAddition(text, images, displayText, true, ack, false, false, receipt); // scope 追加：机械执行
+    } else {
+      // 第 5 期调度收执：排上了就说一声——普通活「办完手头就轮到」，
+      // 提级的「这句急，先办」。只说事实（排上了/插队了），口吻/详略归
+      // 第 6 期。队列卡本身就是逐条可见的就地回执，两者互补不重复。
+      this.deps.settleAck(ack, urgent ? queuedUrgentReceipt() : queuedReceipt());
+      this.deps.queueInterjectTask(text, images, displayText, queuePriority);
     }
   }
 

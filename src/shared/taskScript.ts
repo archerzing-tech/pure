@@ -72,6 +72,8 @@ export interface TaskSubstepRecord {
 }
 
 export interface TaskStepRecord {
+  /** 对应 PlanStep.id——下游（taskState 折算器）按 id 对节点，不靠下标对齐。 */
+  stepId: string;
   index: number;
   action: string;
   description: string;
@@ -118,6 +120,7 @@ export function applyTaskScriptSignals(script: TaskScript, signals: readonly Tas
 }
 
 interface FoldedStep {
+  stepId: string;
   index: number;
   action: string;
   description: string;
@@ -179,6 +182,7 @@ function inferClosures(folded: FoldedStep[]): void {
 
 function blankSteps(plan: Plan): FoldedStep[] {
   return plan.steps.map((step, i) => ({
+    stepId: step.id,
     index: i + 1,
     action: step.action ?? '',
     description: step.description ?? '',
@@ -399,6 +403,7 @@ function deriveStatus(step: FoldedStep): TaskStepStatus {
 export function deriveTaskScript(script: TaskScript): { steps: TaskStepRecord[]; cursor: number; earlierEvidence: TaskStepEvidence } {
   const { folded, cursor, earlier } = fold(script);
   const steps = folded.map((step) => ({
+    stepId: step.stepId,
     index: step.index,
     action: step.action,
     description: step.description,

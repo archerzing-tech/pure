@@ -27,7 +27,7 @@ import { ContextEngine, estimateTokens, type ContextCompactionResult, type Conte
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, type RouteContextTurn } from '../coding-agent/Planner';
+import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, renderLiveContext, type RouteContextTurn } from '../coding-agent/Planner';
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
 import { decideTurnRoute, prefetchTurnRoute, startTurnRoute } from '../coding-agent/turnRoute';
@@ -36,6 +36,9 @@ import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
 import { InterjectOrchestrator } from '../coding-agent/interjectOrchestrator';
+import { foldTaskState, type SideEffectEntry, type TaskStateSnapshot } from '../coding-agent/taskState';
+import { HoldGate } from '../coding-agent/holdGate';
+import { appendTrace } from '../evolution/trace';
 import { sanitizeSkillName } from './skillHub';
 import { type SteerTarget, matchInFlightBranch } from '../shared/steerTargeting';
 import { SteerBus } from '../coding-agent/steerBus';
@@ -1884,14 +1887,26 @@ export class ChatController {
     // 靠这一拍感知「真收尾」，否则静默排空的会话永远挂在在跑集合里。
     onDispatchIdle: () => notifyRunningSessionsChanged(),
   });
+  /** 软暂停闸（v2 §四）：插话到达即扣——输出推进扣在引擎停顿点（THINK
+   *  边界的 takeSteerMessages / 合成工具派发的 takeSyntheticToolCalls），
+   *  写操作扣在会话工具适配器的 execute 前（只读放行，isWrite 元数据判定）。
+   *  死线 30s（judge 8s + 自查 12s + 处置余量）到点强制解除，闸回调这里
+   *  只做诊断落账——真正的收执由判定链自己的回执承担，这里不额外上屏
+   *  （判定链的 ack 行还在，多插一行就是两份口径）。 */
+  private holdGate = new HoldGate({
+    onDeadline: (reason) => {
+      try { appendTrace({ type: 'hold_deadline', snippet: reason.slice(0, 80) }); } catch {}
+      console.info(`[pure] 插话软暂停到死线，已强制放行（插话原文：${reason.slice(0, 60)}）`);
+    },
+  });
   /** S2 第六刀（P3-2）— 插话分类编排住 InterjectOrchestrator（宿主无关，
    * CLI/通道同接）：interject() 入口与序列化链、classifyAndApply 的裁决序
-   * （时机语义 → 置信门 → 思考窗吸收 → 五类分发）、1a 定向投递匹配 / 覆盖
-   * 去重 / 点名续跑的编排、思考窗寄存器五件。决策核不猜宿主状态——流态/
-   * 在飞/分支视图全部经读数缝注入；DOM（ack 行/回显/收执/队列卡）、LLM
-   * 产出（旁答/追问/计划思考）、铺排（折入框架/转向框架）与引擎把手
-   * （abort/真停支）经动作与投影缝留给宿主。ack 句柄不透明：这里给
-   * HTMLElement，通道宿主给什么都行。 */
+   * （软暂停 → 裁决 → 时机语义 → 置信门 → 思考窗吸收 → 九类分发）、真暂
+   * 停链、1a 定向投递匹配 / 覆盖去重 / 点名续跑的编排、思考窗寄存器五件。
+   * 决策核不猜宿主状态——流态/在飞/分支视图/任务状态全部经读数缝注入；
+   * DOM（ack 行/回显/收执/队列卡）、LLM 产出（旁答/追问/计划思考）、铺排
+   * （折入框架/转向框架）与引擎把手（abort/真停支）经动作与投影缝留给宿
+   * 主。ack 句柄不透明：这里给 HTMLElement，通道宿主给什么都行。 */
   private interjectOrchestrator = new InterjectOrchestrator({
     decider: new DynamicInsertionCoordinator(),
     delegation: this.delegationControl,
@@ -1929,6 +1944,26 @@ export class ChatController {
     // 编排器实例（续跑常发生在会话恢复后，那时没有实例）；口径与 execute
     // 的 sessionId 生成同源（stableSessionId）。
     probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(this.subagentStore, this.sessionId, name, args),
+    // ── v2 §四 §七：软暂停 / 任务状态 / 真暂停清理 ─────────────────────
+    hold: this.holdGate,
+    taskStateSnapshot: () => {
+      const script = this.activeTaskScript;
+      if (!script) return null;
+      const branches = new Map(this.agentActivities.map((item) => [
+        item.callId,
+        (item.status === 'running' ? 'running'
+          : item.status === 'paused' ? 'paused'
+          : item.status === 'cancelled' ? 'aborted'
+          : 'completed') as 'running' | 'paused' | 'aborted' | 'completed',
+      ] as const));
+      try {
+        return foldTaskState({ signals: script.signals, plan: script.plan, branches });
+      } catch {
+        return null; // 账本坏了退回真暂停，宁停不猜
+      }
+    },
+    freezeSideEffects: () => this.freezeSideEffects(),
+    stripAbortedTurnPartial: () => { this.stripAbortedTurnPartial(); },
     send: (text, images, displayText) => { void this.send(text, images, displayText); },
     abort: (reason) => this.abortController?.abort(reason),
     stopBranchByCallId: (callId, mode) => this.stopBranchByCallId(callId, mode),
@@ -1954,12 +1989,13 @@ export class ChatController {
     },
     logDecision: (decision, text) => {
       // 架构评审 v2 A1（S1-2）— 插话裁决进会话事件日志（远端 digest 的「这句
-      // 被怎么处理了」一行）。
+      // 被怎么处理了」一行）。v2：relation 是权威分类面，payload 直落。
       void getSessionEventSink(this.sessionId).append({
         ts: Date.now(),
         kind: 'insertion_classified',
         actor: 'gui',
         payload: {
+          relation: decision.relation,
           kind: decision.kind,
           action: decision.action,
           via: decision.signals.via ?? null,
@@ -1972,15 +2008,18 @@ export class ChatController {
       //（字面安全网）。
       console.info(`[pure] 插话决策 ${formatInputDecision(decision)} via=${String(decision.signals.via ?? 'judge')}`);
       // 澄清回答回收（窄启发式）：刚问过澄清且这句插话的分类方向与 gatedFrom
-      // 同族（stop→stop；replan→goal-change/premise-change），大概率就是回应。
-      // 旁答问答对确定直接回填；澄清这里是猜方向——误回收比不回收更糟，
-      // 所以窗口（10 分钟）与同族判定都收紧。句柄存在即消费（用完即弃）：
-      // 超窗只是不回填，不悬挂到下次覆盖。
+      // 同族（stop→整停；replan→撤改类关系），大概率就是回应。旁答问答对确定
+      // 直接回填；澄清这里是猜方向——误回收比不回收更糟，所以窗口（10 分钟）
+      // 与同族判定都收紧。句柄存在即消费（用完即弃）：超窗只是不回填，不悬
+      // 挂到下次覆盖。v2：同族判定按 relation（kind 槽承载同值，但语义以
+      // relation 为准——折算层已删）。
       const pending = this.pendingClarification;
       if (pending) {
+        const relation = decision.relation;
         const sameDirection =
-          (pending.gatedFrom === 'stop' && decision.kind === 'stop') ||
-          (pending.gatedFrom === 'replan' && (decision.kind === 'goal-change' || decision.kind === 'premise-change'));
+          (pending.gatedFrom === 'stop' && decision.action === 'stop') ||
+          (pending.gatedFrom === 'replan'
+            && (relation === 'change' || relation === 'correction' || relation === 'misunderstanding' || relation === 'mixed'));
         if (sameDirection && Date.now() - pending.ts < 10 * 60_000) {
           this.sessionLedger = recordAnswer(this.sessionLedger, pending.fingerprint, text, Date.now());
         }
@@ -2288,6 +2327,9 @@ export class ChatController {
     this.cancelBackgroundPreCompaction();
     this.liveTranscript.reset();
     this.liveTurn = null;
+    // 会话切走：旧回合的软暂停闸没有存在意义（裁决的宿主上下文没了），
+    // 强制开闸放掉等待中的派发点，别把闸带进新会话。
+    this.holdGate.reset();
     setInlineCardHost(null);
     // Session switch = human takeover: stop any pending auto-continue chain.
     this.autoContinue.cancel();
@@ -3086,30 +3128,47 @@ export class ChatController {
   }
 
   /** Compact snapshot of the current task, fed to classifyInsertion so it can
-   * judge whether a mid-run insert is related. */
+   *  judge whether a mid-run insert is related. v2 三要素（蓝图 §5.0）：同一句
+   *  「预算改成 50 万」在「还没用到预算」和「已基于旧预算产出」两种情况下
+   *  无法区分——判定输入必须三要素齐备：
+   *  ① lastUserMessage（目标原点）② outputGist（输出到哪了）③ taskState
+   *  （依据什么条件在做）。花名册节（live_branches/finished_branches）保留在
+   *  三要素之外——stop_branch/covered_branch 点名靠它们，刀 F 以来从未变过。 */
   private buildInsertionContext(images?: MessageImage[]): string {
     const parts: string[] = [];
-    // 正在跑的请求优先于 canonical：用户消息要等回合结束才落账（2026-09-27
-    // 排队事故的根因之一），第一回合插话时 canonical 是空的——分类器当时看
-    // 到的"当前任务"是一句"（当前任务）"，自然把"加几朵云"判成新任务。
+    // ① 用户上一句原话：正在跑的请求优先于 canonical（用户消息要等回合结束
+    // 才落账，第一回合插话时 canonical 是空的——2026-09-27 排队事故根因）。
     // 活回合手里就有用户的原话（beginLiveTurn 存的）。
     const runningRequest = this.liveTurn?.userText?.trim();
     const lastUser = runningRequest ? null : [...this.messages].reverse().find((m) => m.role === 'user');
-    const currentAsk = runningRequest ?? lastUser?.content ?? '';
-    if (currentAsk) parts.push(`用户当前诉求：${currentAsk.slice(0, 400)}`);
-    // 思考窗状态喂给裁决器（2026-09-28 用户定调：判断=时机×内容×结果收益，
-    // 裁决器得看到全景才能综合权衡）：手头的活是"正在想"而不是"正在跑"；
-    // 思考最新说到哪了（叙述尾——裁决器能自己看见叙述里的错误前提，比如
-    // 把 jev 当成 JEPA，用户不纠正它也该看见）；思考期间已经并进来的补充
-    // （连续插话不丢账）。
+    const lastUserMessage = runningRequest ?? lastUser?.content ?? '';
+    // ② 当前输出脉络：正在生成/执行的内容到哪了。思考窗开着 → 思考叙述尾
+    // （裁决器能自己看见叙述里的错误前提，比如把 jev 当成 JEPA）；否则取最近
+    // 的 assistant 输出尾（忠实脉络，不是 token 级全文）+ 在飞批次概览。
+    const gistParts: string[] = [];
     if (this.interjectOrchestrator.preflightWindowActive()) {
-      parts.push('（当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考）');
+      gistParts.push('当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考');
       const narrationTail = this.interjectOrchestrator.preflightNarrationTailView();
-      if (narrationTail) parts.push(`思考最新说到：……${narrationTail}`);
+      if (narrationTail) gistParts.push(`思考最新说到：……${narrationTail}`);
       if (this.interjectOrchestrator.pendingPreflightCount() > 0) {
-        parts.push(`思考期间已并进来的补充：${this.interjectOrchestrator.pendingPreflightView().map((s) => s.text).join('；')}`);
+        gistParts.push(`思考期间已并进来的补充：${this.interjectOrchestrator.pendingPreflightView().map((s) => s.text).join('；')}`);
       }
+    } else {
+      const lastAssistant = [...this.messages].reverse().find((m) => m.role === 'assistant' && m.content.trim());
+      if (lastAssistant) gistParts.push(`输出最新说到：……${lastAssistant.content.trim().slice(-500)}`);
     }
+    const inFlight = this.agentActivities.filter((item) => item.status === 'running');
+    if (inFlight.length > 0) {
+      gistParts.push(`当前批次：${inFlight.length} 路委派在飞（${inFlight.map((b) => b.agentName).join('、')}）`);
+    }
+    const outputGist = gistParts.join('\n');
+    // ③ 任务状态投影：taskState 快照的轻量投影——在跑什么、依据什么条件、
+    // 最近动了什么。没有任务账（未挂任务脚本）就给分支事实的兜底投影。
+    parts.push(renderLiveContext({
+      lastUserMessage: lastUserMessage.slice(0, 800) || '（无——回合由排程任务发起）',
+      outputGist: outputGist.slice(0, 900) || '（刚起步，还没有实质产出）',
+      taskStateProjection: this.projectTaskState().slice(0, 1_200),
+    }));
     if (images?.length) parts.push(`（本回合含 ${images.length} 张图片）`);
     const plan = this.activeComplexPlan;
     if (plan && plan.steps.length > 0) {
@@ -3119,7 +3178,7 @@ export class ChatController {
       }
     }
     // 委派在飞状态喂给分类器：steer 的承诺（"下个动作带上"）只有在真有
-    // 下个动作时才可兑现——在飞/收尾的事实是 steer vs task 判定的关键输入。
+    // 下个动作时才可兑现——在飞/收尾的事实是转达 vs 排队判定的关键输入。
     if (this.agentActivities.length > 0) {
       const running = this.agentActivities.filter((item) => item.status === 'running');
       const standby = this.agentActivities.filter((item) => item.status === 'paused' || item.status === 'cancelled');
@@ -3148,8 +3207,8 @@ export class ChatController {
         parts.push('</finished_branches>');
       }
       // 分支级继续的判据输入：被暂停/被停的支是可续跑的候补，分类器只有
-      // 看见它们存在，才能把「把 X 那支接着跑完」判成 resumes_part（第 2 期
-      // 第三刀）。名单带任务书片段——名字是代号，用户点的是主题。
+      // 看见它们存在，才能把「把 X 那支接着跑完」判成续跑（第 2 期第三刀）。
+      // 名单带任务书片段——名字是代号，用户点的是主题。
       if (standby.length > 0) {
         const names = standby.map((item) => `${item.agentName}${item.inputSnippet ? `（${item.inputSnippet}）` : ''}`);
         parts.push(`已暂停/已停的支（用户点名可让它们接着跑）: ${names.join('、')}`);
@@ -3159,6 +3218,81 @@ export class ChatController {
       parts.push(`本会话已写入文件：${this.sessionArtifacts.slice(0, 12).map((a) => a.path).join(', ')}`);
     }
     return parts.join('\n') || '（当前任务）';
+  }
+
+  /**
+   * 任务状态投影（三要素之 ③ 的数据源）：有任务账（activeTaskScript）就折
+   * 全量快照，投影出在跑节点 + 依附约束 + 最近副作用；没有就退化成分支事实
+   * 的直读投影——投影函数永远有话可说，判定不该因账本缺席而失明。
+   */
+  private projectTaskState(): string {
+    const lines: string[] = [];
+    const script = this.activeTaskScript;
+    if (script) {
+      const branches = new Map(this.agentActivities.map((item) => [
+        item.callId,
+        (item.status === 'running' ? 'running'
+          : item.status === 'paused' ? 'paused'
+          : item.status === 'cancelled' ? 'aborted'
+          : 'completed') as 'running' | 'paused' | 'aborted' | 'completed',
+      ] as const));
+      let snapshot: TaskStateSnapshot | null = null;
+      try {
+        snapshot = foldTaskState({ signals: script.signals, plan: script.plan, branches });
+      } catch { /* 账本坏了不阻塞判定——落到下方分支直读投影 */ }
+      if (snapshot) {
+        const active = snapshot.nodes.filter((n) => n.state === 'running' || n.state === 'pending');
+        if (active.length > 0) {
+          lines.push(`在跑/待做：${active.slice(0, 6).map((n) => `${n.title}${n.state === 'running' ? '（进行中）' : ''}`).join('、')}`);
+        }
+        const liveConstraints = snapshot.constraints.filter((c) => c.status === 'active').slice(0, 6);
+        if (liveConstraints.length > 0) {
+          lines.push(`正在依据的条件：${liveConstraints.map((c) => c.text.slice(0, 60)).join('；')}`);
+        }
+        const recentEffects = snapshot.sideEffects.filter((e) => e.status !== 'compensated').slice(-4);
+        if (recentEffects.length > 0) {
+          lines.push(`最近动过的写操作：${recentEffects.map((e) => `${e.tool}${e.target ? `(${e.target.slice(0, 40)})` : ''}`).join('、')}`);
+        }
+        if (lines.length === 0) lines.push('任务账在册，暂无在跑节点');
+        return lines.join('\n');
+      }
+    }
+    // 兜底：分支直读（无任务脚本的会话——委派事实仍是对/改/停判定的关键输入）。
+    if (this.agentActivities.length > 0) {
+      lines.push(`委派：${this.agentActivities.slice(0, 6).map((item) => `${item.agentName}(${item.status === 'running' ? '在飞' : item.status === 'done' ? '已完成' : '已停'})`).join('、')}`);
+    }
+    return lines.join('\n') || '暂无结构化任务账';
+  }
+
+  /**
+   * 副作用冻结（change 臂「已完成→冻结」）：真冻结账（TaskStateStore 的
+   * sideEffects 台账挂进宿主）是后续一刀——当前宿主没有独立副作用台账，
+   * 冻结语义以「中止后的重入回合不再引用旧产出」由上下文清理+重入承担。
+   * 返回空数组=没有可机械冻结的条目，处置臂的收执就不会谎称冻结了几项。
+   */
+  private freezeSideEffects(): SideEffectEntry[] {
+    return [];
+  }
+
+  /**
+   * 真暂停的中断产物清理（v2 §七）：被掐流的半截 assistant 输出从上下文里
+   * 换成墓碑（数据不在场，模型重入时看不见旧方向的半截话），原文留底
+   * （strippedBranchOriginals 同范式）。找不到半截输出（abort 前已收尾/
+   * 没有可见文本）返回 false，调用方不预支清理。
+   */
+  private stripAbortedTurnPartial(): boolean {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.role === 'user') break;
+      if (m.role === 'assistant' && m.content.trim()) {
+        const key = `partial-turn-${Date.now()}`;
+        this.strippedBranchOriginals.set(key, m.content);
+        m.content = '（这一段输出在方向调整时被打断，已不再作数——按你上一句原话重新来。）';
+        try { appendTrace({ type: 'aborted_turn_partial_stripped', snippet: key }); } catch {}
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -5000,7 +5134,22 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // (cheap) adapter when routing is on, else the main model.
       this.turnPhaseLlm = phaseAdapters.get('REFLECT');
       const toolAdapter = this.getOrCreateSessionToolAdapter(effectiveWorkspace, config, sendSessionId);
-      this.snapshotPort = toolAdapter.getSnapshotPort?.();
+      // 软暂停闸的写派发扣压（v2 §四）：hold 期间写操作在 execute 前等闸开
+      // （judge 判关系 + 处置落定的窗口），只读调用照常放行——「软暂停不卡
+      // 死」的边界就在工具元数据的 isWrite 上。signal abort 同样放行（abort
+      // 管道接管后执行层自会掐调用）。闸缺席或关着时零开销直通。
+      const gatedToolAdapter: ToolAdapter = {
+        execute: async (toolCall, signal) => {
+          if (this.holdGate.isOpen() && toolAdapter.getMetadata(toolCall.function.name)?.isWrite === true) {
+            await this.holdGate.waitUntilOpen(signal);
+          }
+          return toolAdapter.execute(toolCall, signal);
+        },
+        getMetadata: (name) => toolAdapter.getMetadata(name),
+        getTools: () => toolAdapter.getTools(),
+        getSnapshotPort: () => toolAdapter.getSnapshotPort?.(),
+      };
+      this.snapshotPort = gatedToolAdapter.getSnapshotPort?.();
       this.onSnapshotChanged?.(!!this.snapshotPort?.getLatestWriteBatch());
 
       // Skill toggles: when a skill is disabled, drop its matching subagent so
@@ -5101,6 +5250,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 分支拉取不铺排折入（bus 的身份检查本来会跳过回调）；早派 hold
           // 也只该等在父边界——分支的 THINK 不为别人的追加买单（刀 2.2）。
           if (recipient?.branchCallId) return this.steerBus.drain(recipient);
+          // 软暂停闸（v2 §四）：插话裁决/处置期间，父引擎的 THINK 边界在此
+          // 挂起——这就是「扣输出推进」的落点。输出推进不是掐流式中断：
+          // 闸开（或 abort）后照常取走 steer 继续，模型对闸零感知。signal
+          // abort 同样放行——等待面不比 abort 管道固执。
+          await this.holdGate.waitUntilOpen(this.abortController?.signal);
           const folded = await this.prepareFoldDelivery();
           return this.steerBus.drain(recipient, () => folded);
         },
@@ -5111,6 +5265,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 落地前模型不会被咨询，"先汇总再补跑"没有发生的材料；卡片和正常委派
         // 完全同源，不再手搓任何 UI（此前的合成卡片/事件泵/思考卡接管全删）。
         takeSyntheticToolCalls: async () => {
+          // 软暂停闸（v2 §四）：合成派发=写操作的出生点，闸开着就等处置完
+          // 再发车——折入/续跑的委派不该在方向未定时起飞。abort 同样放行。
+          await this.holdGate.waitUntilOpen(this.abortController?.signal);
           // 早派 hold（刀 2.2 早派版）：同一边界先等在途早派支落地——早派
           // 账已被 claimImmediate 领走（claimForSynthetic 的 delivered 跳过
           // 不会二次派发），这里等是为了其余代执行与追加产出的注入同轮发生。
@@ -5149,7 +5306,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 都住在 plane 里（语义与原闭包逐条一致，见 delegationControl.ts
         // 的方法级注释与测试）。
         gateDelegations: async (calls) => this.delegationControl.gate(calls, subagentNames),
-        toolAdapter,
+        toolAdapter: gatedToolAdapter,
         subagents,
         personaOverlays,
         // 13.4 — external script tools join the registry (MCP-same pathway);
@@ -8004,6 +8161,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 思考窗吸收的暂存一并清场：新对话不带上一段的补充，重启请求、在飞
     // 思考流的句柄与叙述尾同样作废。
     this.interjectOrchestrator.resetPreflight();
+    // 软暂停闸随会话清场（v2 §四）：新对话没有「正在裁的插话」，闸必须
+    // 开着——reset 顺带放掉所有等待中的派发点（它们等的回合已经没了，
+    // 挂着只会把新会话的第一批写操作无辜扣住）。
+    this.holdGate.reset();
     this.interjectReceiptRows.clear();
     // 插话重构 — new chat discards steers aimed at the old conversation.
     this.steerBus.settleRound(); // 取空即弃（残留不重入：那是旧会话的话）

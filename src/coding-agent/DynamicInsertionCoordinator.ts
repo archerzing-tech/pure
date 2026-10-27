@@ -1,6 +1,16 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
-import { classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, type InsertionClassification } from './Planner';
-import { levelForKind } from '../shared/scheduling';
+import {
+  checkOutputFaithfulness,
+  classifyInsertion,
+  resolveStopBranchTarget,
+  recheckCoveredInsertion,
+  type FaithfulnessVerdict,
+  type InsertionAtom,
+  type InsertionClassification,
+  type InsertionRelation,
+  type UnrelatedKind,
+} from './Planner';
+import { type ProcessingLevel } from '../shared/scheduling';
 import {
   applyConfidenceGate,
   parseInputTiming,
@@ -18,54 +28,89 @@ import {
  *  三者互斥且必填，决策日志（inputDecision.ts）据此对账。 */
 
 /**
- * 插话重构（2026-09-19）：一个人在埋头干活时听到同事插话，只有三种情况
- * 值得停下手里的活——对方说"别干了"（stop），对方把方向掀了
- * （goal-change），或者对方纠正了手里这活所依据的事实（premise-change：
- * "其实我在西安"——目标没变，但按错误前提算出来的东西全都不值钱了，接着
- * 跑就是白烧）。其余一切都不值得推倒重来：提醒、约束、补充顺着下个动作
- * 带上就好（steer）；提问先答一句（question）；新活儿排到手里这单后面
- * （task）；寒暄点头收下（chatter）。
+ * 插话架构 v2（2026-10-27）：判定面是九类 relation（Planner 的
+ * InsertionRelation——supplement/change/emphasize/unrelated/correction/
+ * question/mixed/meta/misunderstanding，蓝图 §五），处置臂按 relation 分发
+ * （interjectOrchestrator §六处置表）。v1 的七类 kind 与它的折算层
+ * （dispatchKindOf）随九类分发臂落地一并删除：decision.kind 现在直接承载
+ * relation 值——它只是 InputDecision 的「producer 专属标签」槽（日志可读、
+ * 旧消费者仍能 switch），权威语义在 relation。
  *
- * stop 有两条来路（2026-09-28）：字面命令走 STOP_RE 快路径，非字面的停
- * （"先缓一缓""这个就到这儿"）由裁决器判（Planner 的 stop 档）——两条都落
- * 成同一个 kind 与同一个 action，下游不需要知道是哪个来的。
+ * 三通道结构不变（2026-09-28 定调）：字面命令（整停/点名停支/点名续支）走
+ * rule 快路径零往返；其余全走 judge 裁决器（时机×内容×结果收益的综合判断）；
+ * judge 倒下时 net 字面网兜底，话绝不丢。
  */
-export type DynamicInsertionKind = 'stop' | 'premise-change' | 'goal-change' | 'steer' | 'question' | 'task' | 'chatter';
-
 export interface DynamicInsertion {
   text: string;
   images?: MessageImage[];
   displayText?: string;
 }
 
-/** The insert decision in the SHARED shape (inputDecision.ts): the kind is kept
- *  verbatim for the UI's switch, while action/confidence/timing/scope are what
- *  the rest of the app can reason about without knowing insertion vocabulary. */
+/** The insert decision in the SHARED shape (inputDecision.ts): action/
+ *  confidence/timing/scope are what the rest of the app can reason about
+ *  without knowing insertion vocabulary. */
 export interface DynamicInsertionDecision extends InputDecision {
   source: 'mid-run-insert';
-  kind: DynamicInsertionKind;
+  /** 九类关系——权威分类面（蓝图 §5.1），处置与置信门的真正依据。 */
+  relation: InsertionRelation;
+  /** relation=unrelated 时的细分（new_task=排队跑，chatter=收下）。 */
+  unrelatedKind?: UnrelatedKind;
+  /** relation=mixed 时的原子拆分（§5.1）：处置臂按原子分流。 */
+  atoms?: InsertionAtom[];
+  /** InputDecision 的 producer 专属标签槽：承载 relation 值（日志可读性，
+   *  见模块头注）。别在它身上写新逻辑——语义以 relation 为准。 */
+  kind: string;
   /** True → the running turn must end so the insert can re-enter as a fresh
-   *  send (stop / goal-change / premise-change only, and never while a
-   *  low-confidence decision is waiting for the user's answer). False → the
-   *  turn keeps running and the insert is handled out-of-band
-   *  (steer / question / task / chatter). */
+   *  send (replan/stop actions only, and never while a low-confidence decision
+   *  is waiting for the user's answer). False → the turn keeps running and the
+   *  insert is handled out-of-band (apply / answer / queue / ignore). */
   shouldAbort: boolean;
 }
 
-/** What each kind does to the running work, and what it touches — the join
- *  between insertion vocabulary and the shared action/scope words. */
-const KIND_POLICY: Record<DynamicInsertionKind, { action: InputAction; scope: InputScope[] }> = {
-  // 正则快路径（"停止""停下"）与裁决器的 stop 档（"先缓一缓"）共用这一行。
-  stop:            { action: 'stop',   scope: ['plan', 'completed-steps'] },
-  'goal-change':   { action: 'replan', scope: ['goal', 'plan', 'completed-steps'] },
-  // The goal stands but the fact it is computed from is wrong: everything
-  // derived from it is worthless, so the plan and the done steps are in scope.
-  'premise-change': { action: 'replan', scope: ['plan', 'completed-steps'] },
-  steer:           { action: 'apply',  scope: ['constraints'] },
-  question:        { action: 'answer', scope: ['none'] },
-  task:            { action: 'queue',  scope: ['plan'] },
-  chatter:         { action: 'ignore', scope: ['none'] },
+/** 九类 → 处置动作与影响范围（蓝图 §六处置表的粗投影）。这张表喂的是置信门
+ *  （低置信且破坏性 → 先问）与 shouldAbort/日志，不是分发本身——分发臂按
+ *  relation + 专门信号（cancels_part/stop_branch/…）+ 任务状态细分。
+ *  - supplement/emphasize/meta → apply：不中断不清理，纳入执行。
+ *  - change/correction/misunderstanding/mixed → replan：撤改类先止损的保守
+ *    底线；「未开始→拦截 / 进行中→中断 / 已完成→冻结+询问 / 真暂停」由处置
+ *    臂按任务状态拆开。
+ *  - question → answer（旁答）；unrelated → queue（chatter 特例 ignore，
+ *    见 dispositionOf）——要回来的活排队跑，绝不丢。 */
+const RELATION_DISPOSITION: Record<InsertionRelation, { action: InputAction; scope: InputScope[] }> = {
+  supplement:        { action: 'apply',  scope: ['constraints'] },
+  emphasize:         { action: 'apply',  scope: ['constraints'] },
+  meta:              { action: 'apply',  scope: ['constraints'] },
+  change:            { action: 'replan', scope: ['goal', 'plan', 'completed-steps'] },
+  correction:        { action: 'replan', scope: ['plan', 'completed-steps'] },
+  misunderstanding:  { action: 'replan', scope: ['plan', 'completed-steps'] },
+  mixed:             { action: 'replan', scope: ['goal', 'plan', 'completed-steps'] },
+  question:          { action: 'answer', scope: ['none'] },
+  unrelated:         { action: 'queue',  scope: ['plan'] },
 };
+
+function dispositionOf(relation: InsertionRelation, unrelatedKind: UnrelatedKind | undefined): { action: InputAction; scope: InputScope[] } {
+  if (relation === 'unrelated' && unrelatedKind === 'chatter') return { action: 'ignore', scope: ['none'] };
+  return RELATION_DISPOSITION[relation];
+}
+
+/** 九类 → 处理级（第 5 期调度投影，随处置表同源定案；unrelated 的 chatter
+ *  细分降陪伴级）。队列优先级从它折，不再经过 v1 kind 词表。 */
+const LEVEL_BY_RELATION: Record<InsertionRelation, ProcessingLevel> = {
+  supplement: 'boundary',
+  emphasize: 'boundary',
+  meta: 'boundary',
+  question: 'immediate-answer',
+  unrelated: 'queued',
+  change: 'interrupt',
+  correction: 'interrupt',
+  misunderstanding: 'interrupt',
+  mixed: 'interrupt',
+};
+
+function levelOf(relation: InsertionRelation, unrelatedKind: UnrelatedKind | undefined): ProcessingLevel {
+  if (relation === 'unrelated' && unrelatedKind === 'chatter') return 'companion';
+  return LEVEL_BY_RELATION[relation];
+}
 
 /** Confident by construction: a mechanical rule matched. */
 const RULE_CONFIDENCE = 1;
@@ -180,39 +225,42 @@ export class DynamicInsertionCoordinator {
       // 祈使式停一支（第 2 期）：宿主点名寻址后直接 abortBranch 真停。排在
       // 一切整树/收活规则之前（理由见 BRANCH_STOP_RE 注）。点不到具体支时
       // 宿主退回取消折入——宁可折叠不误杀（快路径只负责快，不负责赌）。
-      return this.build('steer', 'imperative branch-stop matched the fast path; the named branch is aborted now', {
+      // relation 面：点名停支=change 的一个特写（撤掉正在跑的一部分），但
+      // 带分支锚的命令由专门臂接走，不落整树 replan。
+      return this.build('change', 'imperative branch-stop matched the fast path; the named branch is aborted now', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { via: 'rule', rule: 'BRANCH_STOP_RE', branchStop: true },
-      });
+      }, { action: 'apply', scope: ['constraints'] });
     }
     if (RESUME_BRANCH_RE.test(text)) {
       // 分支级继续（第 2 期第三刀）：点名把某一支接着跑完。宿主按区分词找到
       // 那支已暂停/已停的档案，用原始参数同参重派——稳定 sessionId 命中
       // checkpoint 续跑，不从头做。排在 STOP/收活/加活之前：带点名锚的
-      // 「接着跑」比整树续跑、加活都具体。
-      return this.build('steer', 'named-branch resume matched the fast path; the branch is re-delegated from its checkpoint', {
+      // 「接着跑」比整树续跑、加活都具体。relation=supplement（让既有工作
+      // 继续产出，无撤无改）。
+      return this.build('supplement', 'named-branch resume matched the fast path; the branch is re-delegated from its checkpoint', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { via: 'rule', rule: 'RESUME_BRANCH_RE', resumesBranch: true },
-      });
+      }, { action: 'apply', scope: ['constraints'] });
     }
     if (STOP_RE.test(text)) {
       // Mechanical, high-precision, and latency-free: a stop must not wait on
-      // (or be misread by) a classification round-trip.
-      return this.build('stop', 'user requested the current run to stop', {
+      // (or be misread by) a classification round-trip. relation=change（整停
+      // 特例，蓝图 §十.5），action 压在 stop——字面停不重排不重想。
+      return this.build('change', 'user requested the current run to stop', {
         confidence: RULE_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { via: 'rule', rule: 'STOP_RE' },
-      });
+      }, { action: 'stop', scope: ['plan', 'completed-steps'] });
     }
     // 2026-09-28 用户定调：决策不看关键词——正则只配做裁决器倒下时的安全网。
     // 上面的三类（整停/点名停支/点名续支）是**命令**不是判断：人对"停"字
     // 不需要 deliberation，等一次裁决往返反而是抗命。其余一切（加活/收活/
     // 推翻/约束/纠错/提问/寒暄/**非字面的停**）全走裁决器——时机×内容×
     // 结果收益的综合判断；字面族（SCOPE_ADD/CANCEL_PART/GOAL_CHANGE）只在
-    // 裁决不可用时兜底（netVerdict），绝不再抢在判断前面。stop 那个档
-    // （Planner）补的正是 STOP_RE 词汇表覆盖不到的软停。
+    // 裁决不可用时兜底（netVerdict），绝不再抢在判断前面。
     if (!llm) {
       return this.netVerdict(text, 'classification unavailable', 'no-judge');
     }
@@ -221,40 +269,37 @@ export class DynamicInsertionCoordinator {
       // 裁决器倒下（超时/网络/解析失败）：字面网兜底，话绝不丢。
       return this.netVerdict(text, 'judge unreachable', 'judge-down');
     }
-    // premise-change 与 goal-change 同判：前提错了的在飞委派不会因为"下个
-    // 动作带上"就变对——止损要趁早，停掉重排比跑完再改便宜（KIND_POLICY）。
-    const timing = parseInputTiming(result.when, text, Date.now());
-    return this.build(result.kind, result.reason, {
+    // 契约里不再有 when 字段（v2 §5.1）：时机意图从用户原话文本推导
+    // （parseInputTiming 的 TIMING_CUE 兜底），裁决器只管关系。
+    const timing = parseInputTiming(undefined, text, Date.now());
+    return this.build(result.relation, result.reason, {
       confidence: result.confidence,
       timing,
       signals: {
         via: 'judge',
         classifier: 'llm',
+        ...(result.unrelatedKind ? { unrelatedKind: result.unrelatedKind } : {}),
         ...(result.cancelsPart ? { cancelsPart: true } : {}),
         ...(result.addsAlong ? { addsAlong: true } : {}),
-        ...(result.resumesPart ? { resumesBranch: true } : {}),
-        ...(result.supplementsCurrent ? { supplementsCurrent: true } : {}),
-        // 止损失效重想（2026-10-21 刀 B）：随信号走，编排器据此停流重入。
-        ...(result.affectsCurrent ? { affectsCurrent: true } : {}),
         // 范围确认去重（2026-10-21 刀 F）：裁决器拿花名册点名已覆盖那支的
         // 确切 id，随信号走——编排器只核实 id 真实在跑/已收工就回「那路正在
         // 跑着，不重复」，语义判断全程归模型，宿主零文本匹配。
         ...(result.coveredBranch ? { coveredBranchCallId: result.coveredBranch.callId } : {}),
-        ...(result.methodSwitch ? { methodSwitch: true } : {}),
         // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
         // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。
         ...(result.stopBranch ? { stopBranchCallId: result.stopBranch.callId } : {}),
-        // 现场收执（2026-10-15）：裁决器结合现场写的那两句随信号走，编排器
-        // 送到转达型收执点（steer/fold）；宿主自己的事实修正（没停成/已早派）
-        // 优先于它，规则与安全网路径没有裁决器在场、天然没有这个字段。
-        ...(typeof result.receipt === 'string' && result.receipt.trim() ? { receipt: result.receipt } : {}),
+        // 被替换条件的原文片段（v2 §5.1 targets_constraint）：处置管线据此
+        // 对着任务状态定位挂在死条件上的节点。过渡期随信号透传。
+        ...(result.targetsConstraint ? { targetsConstraint: result.targetsConstraint } : {}),
+        // 疑似 misunderstanding 的自查请求（《设想》§五.2 双重触发）：宿主
+        // 据此跑「当前输出是否忠实于用户上一句」的自查，确认才真暂停。
+        ...(result.selfCheckNeeded ? { selfCheckNeeded: true } : {}),
         ...(result.confidenceDefaulted ? { confidenceDefaulted: true } : {}),
-        ...(result.when ? { when: result.when } : {}),
-        // 第 5 期「这个急」提级：裁决器判定这件活加急（只对 task/steer 有意义）
+        // 第 5 期「这个急」提级：裁决器判定这件活加急（只对排队新活有意义）
         // ——宿主据此在队列里插队并换提级收执。缺省绝不自己补。
         ...(result.urgent === true ? { urgent: true } : {}),
       },
-    });
+    }, { unrelatedKind: result.unrelatedKind, ...(result.atoms?.length ? { atoms: result.atoms } : {}) });
   }
 
   /** 去重撞车的复核（2026-10-21）：宿主发现「判成 task 却撞上已在跑」的矛盾
@@ -274,17 +319,29 @@ export class DynamicInsertionCoordinator {
     if (!llm) return null;
     const verdict = await this.recheck(llm, context, conflictNote, insertion.text, signal, insertion.images);
     if (!verdict) return null;
-    return this.build(verdict.cancelsPart ? 'steer' : 'task', verdict.reason || 'covered recheck', {
-      confidence: verdict.confidence,
-      timing: { mode: 'now' },
-      signals: {
-        via: 'judge',
-        classifier: 'llm',
-        ...(verdict.cancelsPart ? { cancelsPart: true } : {}),
-        ...(verdict.stopBranchCallId ? { stopBranchCallId: verdict.stopBranchCallId } : {}),
-        ...(verdict.receipt ? { receipt: verdict.receipt } : {}),
-      },
-    });
+    // 复核判定折回 relation 面：cancelsPart=收掉一支（change + 专门信号 →
+    // 折入而非整树重排）；否则按「要回来的新活」排队（unrelated/new_task）。
+    return verdict.cancelsPart
+      ? this.build('change', verdict.reason || 'covered recheck', {
+        confidence: verdict.confidence,
+        timing: { mode: 'now' },
+        signals: {
+          via: 'judge',
+          classifier: 'llm',
+          cancelsPart: true,
+          ...(verdict.stopBranchCallId ? { stopBranchCallId: verdict.stopBranchCallId } : {}),
+          ...(verdict.receipt ? { receipt: verdict.receipt } : {}),
+        },
+      })
+      : this.build('unrelated', verdict.reason || 'covered recheck', {
+        confidence: verdict.confidence,
+        timing: { mode: 'now' },
+        signals: {
+          via: 'judge',
+          classifier: 'llm',
+          ...(verdict.receipt ? { receipt: verdict.receipt } : {}),
+        },
+      }, { unrelatedKind: 'new_task' });
   }
 
   /**
@@ -313,14 +370,17 @@ export class DynamicInsertionCoordinator {
    *  加急件例外：提级的落点只在队列（插到队头），注入反而把它不排队。 */
   private netVerdict(text: string, why: string, netReason: 'no-judge' | 'judge-down'): DynamicInsertionDecision {
     if (GOAL_CHANGE_RE.test(text)) {
-      return this.build('goal-change', `${why}; overturn phrasing caught by the literal net`, {
+      // 推翻话重开：relation=change → replan。
+      return this.build('change', `${why}; overturn phrasing caught by the literal net`, {
         confidence: NO_CLASSIFIER_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { via: 'net', netReason, fallback: 'literal-net' },
       });
     }
     if (CANCEL_PART_RE.test(text)) {
-      return this.build('steer', `${why}; partial-cancellation caught by the literal net — the named part leaves the result`, {
+      // 收活折入：relation=change + cancels_part 专门信号 → 折入而非整树重排
+      // （点名撤一支，其余照跑——2026-09-24 口径）。
+      return this.build('change', `${why}; partial-cancellation caught by the literal net — the named part leaves the result`, {
         confidence: NO_CLASSIFIER_CONFIDENCE,
         timing: { mode: 'now' },
         signals: { via: 'net', netReason, fallback: 'literal-net', cancelsPart: true },
@@ -329,13 +389,16 @@ export class DynamicInsertionCoordinator {
     if (URGENT_RE.test(text)) {
       // 「这个急」的字面安全网：裁决器不可用时，别把一句明确的加急请求默默
       // 降级成普通排队（提级只改队列次序，不涉破坏性动作，网在这里用是安全的）。
-      return this.build('task', `${why}; queued ahead (urgent) so the words can never be lost`, {
+      return this.build('unrelated', `${why}; queued ahead (urgent) so the words can never be lost`, {
         confidence: NO_CLASSIFIER_CONFIDENCE,
         timing: { mode: 'after-current' },
         signals: { via: 'net', netReason, fallback: 'literal-net', urgent: true },
-      });
+      }, { unrelatedKind: 'new_task' });
     }
-    return this.build('steer', `${why}; handed to the running turn at its next boundary — the words land in the conversation, and close sweeps any leftovers back in`, {
+    // 默认投递：能注入就注入（relation=supplement → apply）。steer 通道的话
+    // 落引擎 THINK 边界、进会话历史——模型带着现场自己判它是什么、怎么接；
+    // 残留由回合收尾 settleRound 原话重入，话照样丢不了。
+    return this.build('supplement', `${why}; handed to the running turn at its next boundary — the words land in the conversation, and close sweeps any leftovers back in`, {
       confidence: NO_CLASSIFIER_CONFIDENCE,
       timing: { mode: 'now' },
       signals: { via: 'net', netReason, fallback: 'literal-net' },
@@ -345,32 +408,67 @@ export class DynamicInsertionCoordinator {
   /**
    * Assemble the shared decision shape and run the confidence gate as the LAST
    * step, so no producer path can bypass it.
+   *
+   * v2：action/scope 以九类处置表（RELATION_DISPOSITION）为底；专门信号
+   * （cancels_part/branch_stop/stop_branch）在场时改写——点名撤一支既不排队
+   * 也不整树重排，折入汇合（编排器按专门信号细分）。opts 供 rule 通道显式压
+   * action/scope（命令不是判断，不该被处置表覆盖），judge 通道透传 mixed 的
+   * atoms。
    */
   private build(
-    kind: DynamicInsertionKind,
+    relation: InsertionRelation,
     reason: string,
     fields: Pick<DynamicInsertionDecision, 'confidence' | 'timing' | 'signals'>,
+    opts: { unrelatedKind?: UnrelatedKind; action?: InputAction; scope?: InputScope[]; atoms?: InsertionAtom[] } = {},
   ): DynamicInsertionDecision {
-    const policy = KIND_POLICY[kind];
+    const disposition = dispositionOf(relation, opts.unrelatedKind);
+    // 专门信号三形：cancels_part（点名撤一部分）、branch_stop（规则通道的
+    // 停支闸）、stop_branch.call_id（裁决器指认的被停支 id，judge 通道把它
+    // 从 signals.stopBranchCallId 过河）。任一在场=点名撤一支：折入汇合，
+    // 绝不整树重排。
+    const dedicated =
+      relation === 'change' &&
+      (fields.signals.cancelsPart === true ||
+        fields.signals.branchStop === true ||
+        typeof fields.signals.stopBranchCallId === 'string' && fields.signals.stopBranchCallId.length > 0);
+    const baseAction: InputAction = dedicated ? 'apply' : disposition.action;
+    const baseScope: InputScope[] = dedicated ? ['constraints'] : disposition.scope;
     // A timed input cannot be applied to the running turn — it has to be HELD
     // until its moment arrives, whatever the classifier thought of its content.
-    const action: InputAction = fields.timing.mode === 'at' && policy.action !== 'stop' ? 'queue' : policy.action;
+    const action: InputAction = fields.timing.mode === 'at' && baseAction !== 'stop' ? 'queue' : opts.action ?? baseAction;
     const decision: DynamicInsertionDecision = {
       source: 'mid-run-insert',
-      kind,
+      relation,
+      ...(opts.unrelatedKind ? { unrelatedKind: opts.unrelatedKind } : {}),
+      ...(opts.atoms?.length ? { atoms: opts.atoms } : {}),
+      kind: relation,
       action,
       confidence: fields.confidence,
       timing: fields.timing,
-      scope: policy.scope,
+      scope: opts.scope ?? baseScope,
       shouldAbort: action === 'stop' || action === 'replan',
       reason,
-      // 第 5 期调度显式化：kind 一律折成处理级随信号过河（宿主/队列按它分
-      // 轻重缓急）。这是纯映射、不改任何行为，只是把原本"藏在 switch 顺序
-      // 里"的调度策略写成可读、可测、可下发的一枚事实。
-      signals: { ...fields.signals, processingLevel: levelForKind(kind) },
+      // 第 5 期调度显式化：处理级从九类处置表折（与 action 同源），随信号
+      // 过河——宿主/队列按它分轻重缓急，不再经过 v1 kind 词表。
+      signals: { ...fields.signals, processingLevel: levelOf(relation, opts.unrelatedKind) },
     };
     // The gate can downgrade the action to `clarify` and clears shouldAbort with
     // it: asking the user must never tear down the running work first.
     return applyConfidenceGate(decision) as DynamicInsertionDecision;
+  }
+
+  /**
+   * 自查降级（v2 §七 真暂停的双重触发之二）：疑似 misunderstanding 时宿主
+   * 拿三要素现场问一遍「当前输出是否忠实于用户上一句」——判词是模型的，宿主
+   * 只执行（verdict.drifting=true 才走真暂停链；null=自查链路坏了，降级为
+   * 普通 steer 转达，绝不拿坏链路当暂停依据）。
+   */
+  selfCheckDrift(
+    llm: LLMAdapter | null,
+    context: string,
+    insertText: string,
+    signal?: AbortSignal,
+  ): Promise<FaithfulnessVerdict | null> {
+    return checkOutputFaithfulness(llm, context, insertText, signal);
   }
 }

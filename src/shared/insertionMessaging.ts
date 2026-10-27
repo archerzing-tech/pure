@@ -213,3 +213,85 @@ export const RESUME_INVARIANTS = {
   hitSaysFromCheckpoint: /从存档断点（第 \d+ 轮）/,
   missAdmitsNoArchive: /没找到存档/,
 } as const;
+
+// ── 插话架构 v2 收执（2026-10-27 软暂停/九类/真暂停链）─────────────────────
+// v2 里插话到达即被宿主软暂停押着（hold on），判定放行才到模型；这里新增的
+// 收执是放行/转向/真暂停/冻结几个宿主动作的当场口径。收执纪律不变（§十.6
+// 保留）：只说这个场景里真实发生/真实在场的事——放行/转向/真暂停都可能发生
+// 在单任务（无委派无汇总）场景，机制词汇照旧一个不带；机制语义（九类处置、
+// 清理链、幸存者合并）住在协议与框架文本里，那里才面向模型。
+
+/** 软暂停一致性锚（与 CANCELLATION_INVARIANTS 同型的契约锚）：放行必须传
+ *  达「手头照跑」；转向必须同时说「受影响的停/清」与「其余照常」；真暂停
+ *  必须「推倒」与「重新想」同句在场（只清不重想是把用户晾着，只重想不清
+ *  是把错误当底）；冻结必须带「冻」并开口问用户；自查交代必须明说「没跑
+ *  偏」的结论——不许装改正（没有错可改），也不许闷头当没听见。 */
+export const HOLD_INVARIANTS = {
+  releaseKeepsRunning: /接着跑/,
+  turnNamesAffected: /受影响/,
+  turnSparesRest: /照常/,
+  truePauseTearsDown: /推倒/,
+  truePauseRethinks: /重新想/,
+  frozenNamesFreeze: /冻/,
+  frozenAsksUser: /你说一声|要不要|还是/,
+  selfCheckStatesVerdict: /没跑偏/,
+} as const;
+
+/** v2 软暂停解除——放行收执：hold 判完打开、主线方向不动（supplement/
+ *  emphasize 纳入、question 旁答、unrelated 回告、meta 应用后继续）。
+ *  folded=true = 这句会并进手头的活（纳入执行的真实承诺）；false = 不触碰
+ *  主线，只说记下了——对旁答/无关的话说「并进」就是编造。topic 传插话原话
+ *  或其要点，没有可引的就显式传 null。 */
+export function holdReleaseReceipt(topic: string | null, folded: boolean): string {
+  const said = topic ? `“${topic}”` : '这句';
+  return folded
+    ? `收到——${said}并进手头的活里，接着跑。`
+    : `收到——${said}记下了，手头的活不受它影响，接着跑。`;
+}
+
+/** v2 软暂停解除——转向收执：hold 判完打开、主线按插话改道（change/
+ *  correction 的进行中处置）。只能在受影响的在飞活确实已被宿主停掉/清出的
+ *  路径上用——「停下来清出去了」是已完成动作的汇报，没停成还说它就是失实
+ *  收执（cancelFoldUnmatchedReceipt 的教训：没停要明说没停）。 */
+export function holdReleaseTurnReceipt(topic: string): string {
+  return `明白——照这句改：受影响的活我停下来清出去了，按「${topic}」接着干，没受影响的照常。`;
+}
+
+/** v2 真暂停收执：理解纠偏坐实（自查确认当前输出不忠实于用户上一句，或改
+ *  变的目标已被旧方向实质产出）——宿主掐流、把基于错误理解的产出清出上下
+ *  文，新回合带着用户上一句原话 + 纠偏输入重新开始。「推倒」与「重新想」
+ *  必须同时在场（HOLD_INVARIANTS 锁）。屏幕上那段留底是给用户看的记录，
+ *  不是新推理的地基——这句负责把两件事说开（蓝图 §七.3：现场清、UI 留底、
+ *  账本作废）。 */
+export function truePauseReceipt(): string {
+  return '这里我之前理解偏了——基于这个理解跑出来的部分我推倒了，带着你上一句话和这句纠偏重新想。屏幕上先前的记录还在，是给你留的底，我不会在它上面接着盖。';
+}
+
+/** v2 真暂停重入框架（引擎侧，新回合开场投递用）：旧方向产出已清出上下文，
+ *  新回合第一眼 = 用户上一句原话 + 纠偏插话。原话裸发的风险同队列重入
+ *  （queuedHandoffText 的教训）：模型把纠偏当凭空而来的新请求，或把已清掉
+ *  的旧产出当既成事实接着推。框架交给模型三件事：这是推倒重来；旧产出不在
+ *  上下文、不许当底；从原话 + 纠偏重新理解。屏幕显示仍归 displayText，框架
+ *  只走引擎。 */
+export function truePauseReentryText(originalAsk: string, correction: string): string {
+  if (originalAsk.startsWith('【推倒重来')) return originalAsk;
+  if (!correction.trim()) return originalAsk;
+  return `【推倒重来·回到你的原话】你的上一句话是：「${originalAsk}」；刚发的这句纠偏是：「${correction}」。\n（之前基于错误理解的产出已从上下文清出，不要当既成事实，也不要试图接回它；从这两句重新理解任务，重新开始。）`;
+}
+
+/** v2 已完成副作用的收执（(2)/(5)/(7) 的已完成节点，一期一律冻结+询问，
+ *  蓝图 §六）：如实说三件事——那步已经做完、先冻住（下游不再依赖它）、
+ *  补偿与否交用户发话。「已经做完」不许说成「还没做」，「冻住」不许说成
+ *  「已经撤销」——一期没有自动补偿，收执替机制许愿就是说谎。 */
+export function frozenSideEffectReceipt(done: string): string {
+  return `「${done}」这步已经做完了——我先把它冻住，后面的活不再依赖它；这笔要撤还是就留着，你说一声。`;
+}
+
+/** v2 misunderstanding 自查**通过**后的如实交代：查了、没发现输出偏离用户
+ *  上一句——降级轻处置（按补充收进来）继续。绝不装「已改正」（自查没坐实
+ *  偏离，没有错可改），也不闷头当没听见；「没跑偏」的结论必须明说
+ *  （HOLD_INVARIANTS.selfCheckStatesVerdict）。只用于降级为补充形态的放行；
+ *  自查坐实偏离走 truePauseReceipt，纠正表述歧义的转向走 holdReleaseTurnReceipt。 */
+export function selfCheckClearReceipt(topic: string): string {
+  return `你这句我认真对了一遍——手头的活没跑偏，没有哪段要清掉；「${topic}」我按补充收进来，继续。`;
+}

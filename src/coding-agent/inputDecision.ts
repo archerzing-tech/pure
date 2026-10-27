@@ -43,6 +43,23 @@ export function isDestructiveAction(action: InputAction): boolean {
   return action === 'replan' || action === 'stop';
 }
 
+/** 破坏性 relation 集合（蓝图 §二，置信门扩类）：这三类的处置都含「回退/重做
+ *  已产出内容」——低置信时必须先问用户，绝不赌。change=改/撤（含整停特例）、
+ *  misunderstanding=真暂停重做、correction=回退理解节点。supplement/emphasize/
+ *  meta/unrelated/question/mixed→replan 的混合类不在此列（混合按其主原子
+ *  定破坏性，一期保守取 change 同级——即 mixed 在 coordinator 折算里落
+ *  replan，受同一个置信门管）。 */
+export const DESTRUCTIVE_RELATIONS: readonly string[] = ['change', 'misunderstanding', 'correction'];
+
+/** True when this nine-relation verdict would tear down (or rewind) work
+ *  already in flight — the relation-level sibling of isDestructiveAction.
+ *  过渡期两者并存：coordinator 把 relation 折成 v1 分发词后 action/replan
+ *  语义等价（change/misunderstanding/correction → replan），编排器现存的
+ *  isDestructiveAction 判据不用动；新代码按 relation 问这一侧。 */
+export function isDestructiveRelation(relation: string): boolean {
+  return DESTRUCTIVE_RELATIONS.includes(relation);
+}
+
 /**
  * What the input touches. Cheap for the producers to fill in, and the only
  * thing an impact assessment can be built on later (a `replan` that names
@@ -183,40 +200,6 @@ export function needsClarification(decision: InputDecision): boolean {
   return decision.action === 'clarify';
 }
 
-/**
- * 思考窗吸收判据（S2 第六刀从 chat.ts classifyAndApplyInterject 的内联条件
- * 下沉为纯函数；2026-09-27 定调、2026-09-28 jev 纠错案例扩容）：预检思考
- * 还活着时，四类话都是"正在想的这件东西本身要变"——不排队、不广播、
- * 也不许拆回合，全部并进请求推倒重想：
- * ① 加内容/约束（task + supplements_current，"背景加云""诗句要有明月"）；
- * ② 事实纠错（premise-change，"你对 jev 的理解是错的"——旧思考建立在错事
- *    实上，继续想全白费；而 premise-change 原路是拆回合重入，思考期原请求
- *    还没落账，新回合只剩纠错这一句，要重做的事反而丢了）；
- * ③ 方向推翻（goal-change，思考期"推翻重来" = 带着新方向重想，同一理由
- *    不拆回合）；
- * ④ 窗内普通 steer 一律吸收：窗内没有别的活在跑，steer 的"下个动作带上"
- *    唯一兑现点就是在飞的思考本身——落转向队只会等到思考完、计划定型后才
- *    被看见（jev 案例的直因）。
- * 取消/停支/续支不是加内容，不吸收照走各自的路；不带 supplements 的 task
- * （第二件活）照旧排队；停/问/寒暄照旧。
- */
-export function shouldAbsorbIntoThinkingWindow(
-  decision: {
-    kind: string;
-    signals: { supplementsCurrent?: boolean; cancelsPart?: boolean; branchStop?: boolean; resumesBranch?: boolean };
-  },
-  windowActive: boolean,
-): boolean {
-  return windowActive
-    && (decision.kind === 'steer'
-      || decision.kind === 'premise-change'
-      || decision.kind === 'goal-change'
-      || (decision.kind === 'task' && decision.signals.supplementsCurrent === true))
-    && decision.signals.cancelsPart !== true
-    && decision.signals.branchStop !== true
-    && decision.signals.resumesBranch !== true;
-}
-
 // ── Timing ────────────────────────────────────────────────────────────────
 // The classifier answers `when` with a loose string; the user's own text is the
 // fallback source. Parsing here (not in the prompt) keeps the clock arithmetic
@@ -226,7 +209,7 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 /** A cue that the message is naming a MOMENT, not carrying a time as content. */
-const TIMING_CUE = /(?:之后|之後|以前|之前|等到|再过|再等|然后|随后|时候|待会|稍后|晚点|明天|明日|后天|上午|中午|下午|傍晚|晚上|凌晨|早上|分钟|小时|点(?:\s*[0-9一两二三]|半)|later|after|tomorrow|in \d+\s*(?:min|hour))/i;
+const TIMING_CUE = /(?:之后|之後|以前|之前|等到|再过|再等|然后|随后|时候|待会|稍后|晚点|今晚|明晚|明天|明日|后天|上午|中午|下午|傍晚|晚上|凌晨|早上|分钟|小时|点(?:\s*[0-9一两二三]|半)|later|after|tomorrow|in \d+\s*(?:min|hour))/i;
 
 /** "15:30" / "15：30" (24h) → {h, m}; null when malformed or out of range. */
 export function parseClock(text: string): { h: number; m: number } | null {
@@ -461,6 +444,9 @@ const decisionLog: InputDecision[] = [];
 
 export interface LoggedInputDecision extends InputDecision {
   ts: number;
+  /** 插话架构 v2：权威判定面（九类 relation）。过渡期 decision.kind 仍是
+   *  旧分发词，日志两版都记，诊断区才能对上编排器的分发臂。 */
+  relation?: string;
 }
 
 const stampedLog: LoggedInputDecision[] = [];

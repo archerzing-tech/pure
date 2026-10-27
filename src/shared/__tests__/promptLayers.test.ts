@@ -35,6 +35,8 @@ import {
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { INCREMENTAL_BUILD_PROMPT, INFORMATION_VALUE_PRINCIPLE } from '../agentBehavior';
+import { PromptAssembler, buildGuiCapabilities } from '../PromptAssembler';
+import { estimatePromptTokens } from '../providers';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
   it('carries the immutable identity + operating contract', () => {
@@ -58,20 +60,40 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
 });
 
 describe('L1 behavior contracts', () => {
-  it('carries the mid-run insertion protocol (2026-09-24 案例集泛化)', () => {
-    // 学习案例集（11 例：补充/转向/取消/无关/多句/翻转/恢复/前提/不可逆）
-    // 的泛化表固化为行为协议——领域无关，九种插入各有一条最小动作。
+  it('carries the mid-run insertion protocol (v2 软暂停+九类消化，2026-10-27)', () => {
+    // v2（docs/insertion-redesign-v2.md §八）：插话到达即被宿主软暂停押着
+    // （hold on），宿主判完九类 relation 才放行——运行中的模型看到的是已判
+    // 定、已放行的插话，按 relation 语义消化；旧版「自己先判影响面再选最小
+    // 动作」的旁观框架随判定窗口一起作废。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('<insertion_protocol>');
-    // 核心规则：先判断影响面（需求/在跑步骤/已完成产物/下游依赖），再选最小动作。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('which stated requirement it changes');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('SMALLEST action');
-    // 补充不打断；取消约束只停受影响的活，产物标记不用而非删除。
+    // 软暂停处境：押着时不许抢跑/预判，解除后按结论继续或转向。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('soft-pauses the run the moment one lands');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('already released and labeled by its relation');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('do not rush ahead or pre-empt the verdict');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('standing work keeps moving, the affected part turns or restarts');
+    // 九类 relation 全部点名（对齐 inputDecision 九类契约），各带消化要点。
+    for (const relation of ['supplement', 'emphasize', 'unrelated', 'question', 'meta', 'change', 'correction', 'mixed', 'misunderstanding']) {
+      expect(INSERTION_PROTOCOL_PROMPT).toContain(`- ${relation} — `);
+    }
+    // 补充纳入不打断；无关绝不触碰主线且回告。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('Never restart anything for it');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('must not leak into the running work');
+    // 改变：宿主已查状态定位影响（未开始拦截/进行中停清/已完成冻结+询问），
+    // 模型只做最小重算；已取外部数据标记不用而非删除（§十.2 降级保留）。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('not-yet-started pieces are intercepted');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('frozen and the user asked');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('smallest rework');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('marked not-used-for-decisions');
-    // 方向变更保留未冲突条件；前提变更立即止损回滚，不等跑完再补。
+    // 真暂停重入：带着用户上一句原话+纠偏输入重新开始，清掉的产出不是既成
+    // 事实；旧方向实质产出同样触发（§七.1 双重触发）。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('TRUE pause');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain("restart from the user's original last message plus the corrective line");
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('not a fact you may build on');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('already substantively built the old way');
+    // 方向变更保留未冲突条件；前提变更立即止损，不等跑完再补。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('does not contradict');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('instead of letting them finish and patching afterwards');
-    // 无关插入进待办；多句一批，不逐句抢跑。
+    // 无关插入进待办；多句/mixed 一批，不逐句抢跑。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('record it as a to-do');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('ONE batched decision');
     // 第 5 期「调度」批/分协议：跨回合攒下的同类小活并成一批，一次跑完一次
@@ -97,8 +119,9 @@ describe('L1 behavior contracts', () => {
     // 部分产出不进合并，一句话交代取消与出结果的部分。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('named branch of parallel or delegated work cancelled mid-run');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('surviving branches keep running untouched');
-    // 派出前取消（2026-09-26 用户反馈）：计划当场缩，叙述只数会派的支并
-    // 同一口气点名弃掉的方向——收执说"不派了"、计划书却照数三支是自相矛盾。
+    // 派出前取消（2026-09-26 用户反馈；§十.3 起飞闸判例保留）：计划当场缩，
+    // 叙述只数会派的支并同一口气点名弃掉的方向——收执说"不派了"、计划书却
+    // 照数三支是自相矛盾。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('cancelled before its delegation even exists');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('count what you will actually dispatch');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never announce the dropped one as still on the list');
@@ -109,6 +132,21 @@ describe('L1 behavior contracts', () => {
     // 并入最终汇总」这类调度腔复读成回复原文。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('orders to execute, not phrasing to reuse');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('never a sentence in your reply');
+  });
+
+  it('keeps the resident prompt within the slimming red line (2026-10-27: 9,978 × 105%)', () => {
+    // 量入量出红线（v2 蓝图 §八）：协议改写不许让常驻段回涨。基线 = 纯常驻
+    // （GUI 有工作区）9,978 tokens（cd26110 拍板值），本测试用与拍板时同款
+    // 量法复现基线，锁住「改写后 ≤ 105%」。
+    const assembler = new PromptAssembler();
+    const prompt = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+      hasSubagents: false,
+    });
+    expect(estimatePromptTokens(prompt)).toBeLessThanOrEqual(Math.ceil(9_978 * 1.05));
+    // 协议在装配里恰好出现一次（防双份装配推高常驻量）。
+    expect(prompt.split('<insertion_protocol>').length - 1).toBe(1);
   });
 
   it('carries the complex-task conduct protocol (2026-09-24 复杂任务案例集)', () => {

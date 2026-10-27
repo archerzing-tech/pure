@@ -91,6 +91,7 @@ interface OrchestratorSpies {
 function steerCancelDecision(extra: Record<string, unknown> = {}): DynamicInsertionDecision {
   return {
     source: 'mid-run-insert',
+    relation: 'change',
     kind: 'steer',
     action: 'apply',
     confidence: 1,

@@ -30,6 +30,13 @@ import {
   branchResumeReceipt,
   treeResumeReceipt,
   RESUME_INVARIANTS as RESUME_INV,
+  holdReleaseReceipt,
+  holdReleaseTurnReceipt,
+  truePauseReceipt,
+  truePauseReentryText,
+  frozenSideEffectReceipt,
+  selfCheckClearReceipt,
+  HOLD_INVARIANTS as HOLD_INV,
 } from '../insertionMessaging';
 import { expectNoDefaultParams } from './arityLock';
 
@@ -273,6 +280,93 @@ describe('续跑收执诚实二分（第 2 期第三刀，判例 14）', () => {
     expect(t).toContain('会重新跑一遍');
     expect(t).not.toContain('断点');
     expect(t).not.toContain('等手头这批收齐接上'); // pending=false 无尾巴
+  });
+});
+
+// ── 插话架构 v2 收执（2026-10-27 软暂停/九类/真暂停链）─────────────────────
+// v2 里插话被宿主软暂停押着，判定放行才到模型；放行/转向/真暂停/冻结几个
+// 宿主动作各有当场口径。收执纪律同上：放行/转向/真暂停都可能发生在单任务
+// （无委派无汇总）场景，机制词汇照旧一个不带；机制语义住协议与框架文本。
+describe('插话 v2 收执（软暂停/真暂停/冻结/自查）', () => {
+  it('放行收执：folded 承诺并进接着跑，unfolded 只说记下——不触碰主线就不许说纳入', () => {
+    const folded = holdReleaseReceipt('顺手加个导出', true);
+    expect(folded).toContain('顺手加个导出');
+    expect(folded).toContain('并进');
+    expect(folded).toMatch(HOLD_INV.releaseKeepsRunning);
+    // 不触碰主线的插话（question/unrelated）不承诺纳入——说了就是编造。
+    const plain = holdReleaseReceipt('顺便问下天气', false);
+    expect(plain).toMatch(HOLD_INV.releaseKeepsRunning);
+    expect(plain).toContain('记下了');
+    expect(plain).not.toContain('并进');
+    // 无可引原话（显式 null）也成立；单任务场景一个机制词都不带。
+    expect(holdReleaseReceipt(null, true)).toMatch(HOLD_INV.releaseKeepsRunning);
+    expect(holdReleaseReceipt(null, false)).not.toMatch(MECHANISM_WORDS);
+    expect(folded).not.toMatch(MECHANISM_WORDS);
+    expect(plain).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('转向收执：说清受影响的停/清与其余照常——已完成动作的口径', () => {
+    const t = holdReleaseTurnReceipt('预算改成 50 万');
+    expect(t).toContain('预算改成 50 万');
+    expect(t).toMatch(HOLD_INV.turnNamesAffected);
+    expect(t).toMatch(HOLD_INV.turnSparesRest);
+    expect(t).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('真暂停收执：推倒与重新想同句在场，屏幕留底不是新推理的地基', () => {
+    const t = truePauseReceipt();
+    expect(t).toMatch(HOLD_INV.truePauseTearsDown);
+    expect(t).toMatch(HOLD_INV.truePauseRethinks);
+    // 重入起点=用户上一句原话+纠偏（蓝图 §七.4）。
+    expect(t).toContain('你上一句话');
+    expect(t).toContain('纠偏');
+    // UI 留底（§十.2：现场清、UI 历史不删）要说开：留的是给用户的底。
+    expect(t).toContain('屏幕');
+    expect(t).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('真暂停重入框架：带原话+纠偏+不当既成事实三件事；幂等且无纠偏时裸发', () => {
+    const framed = truePauseReentryText('做一个记账 App', '不用登录，单机就行');
+    expect(framed).toContain('做一个记账 App');
+    expect(framed).toContain('不用登录，单机就行');
+    expect(framed).toContain('已从上下文清出');
+    expect(framed).toContain('不要当既成事实');
+    // 幂等：已带框架的原话不再二次包装；纠偏为空退回裸原话。
+    expect(truePauseReentryText(framed, '再改一句')).toBe(framed);
+    expect(truePauseReentryText('原话', '')).toBe('原话');
+    expect(truePauseReentryText('原话', '   ')).toBe('原话');
+  });
+
+  it('冻结收执：说已完成+冻住+问用户发话，绝不预支「已撤销」', () => {
+    const t = frozenSideEffectReceipt('生成报表');
+    expect(t).toContain('生成报表');
+    expect(t).toContain('已经做完');
+    expect(t).toMatch(HOLD_INV.frozenNamesFreeze);
+    expect(t).toMatch(HOLD_INV.frozenAsksUser);
+    // 一期没有自动补偿：收执不许说补偿已发生。
+    expect(t).not.toContain('已撤销');
+    expect(t).not.toContain('补偿');
+    expect(t).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('自查交代：明说没跑偏的结论、按轻的收进来——不装改正也不推倒', () => {
+    const t = selfCheckClearReceipt('预算改成 50 万');
+    expect(t).toContain('预算改成 50 万');
+    expect(t).toMatch(HOLD_INV.selfCheckStatesVerdict);
+    // 自查没坐实偏离：不许借用真暂停词汇（没有错可改，也没有东西可清）。
+    expect(t).not.toMatch(HOLD_INV.truePauseTearsDown);
+    expect(t).not.toMatch(MECHANISM_WORDS);
+  });
+
+  it('footgun 回归：v2 收执全族无默认形参（场景开关默认值回归锁）', () => {
+    expectNoDefaultParams([
+      ['holdReleaseReceipt（folded 场景开关必填）', 2, holdReleaseReceipt],
+      ['holdReleaseTurnReceipt', 1, holdReleaseTurnReceipt],
+      ['truePauseReceipt', 0, truePauseReceipt],
+      ['truePauseReentryText', 2, truePauseReentryText],
+      ['frozenSideEffectReceipt', 1, frozenSideEffectReceipt],
+      ['selfCheckClearReceipt', 1, selfCheckClearReceipt],
+    ]);
   });
 });
 

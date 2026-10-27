@@ -676,7 +676,7 @@ describe('detectFictionIntent', () => {
   });
 });
 
-describe('classifyInsertion — 插话重构：五分类路由', () => {
+describe('classifyInsertion — 插话架构 v2：九类 relation 路由', () => {
   /** Build an LLMAdapter whose stream() delivers the given content (the
    * classification consumes the stream incrementally). */
   function mockLlm(content: string): LLMAdapter {
@@ -689,79 +689,190 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
   }
 
   it('routes a status question to question', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"question","reason":"status check"}'), '正在构建一个网页', '现在跑到哪了？');
-    expect(cls.kind).toBe('question');
+    const cls = await classifyInsertion(mockLlm('{"relation":"question","reason":"status check"}'), '正在构建一个网页', '现在跑到哪了？');
+    expect(cls.relation).toBe('question');
     expect(cls.reason).toContain('status');
   });
 
-  it('routes a small tweak to steer', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"steer","reason":"constraint on current task"}'), '正在构建一个网页', '记得跑测试');
-    expect(cls.kind).toBe('steer');
+  it('routes a small tweak to supplement', async () => {
+    const cls = await classifyInsertion(mockLlm('{"relation":"supplement","reason":"constraint on current task"}'), '正在构建一个网页', '记得跑测试');
+    expect(cls.relation).toBe('supplement');
   });
 
-  it('routes an independent request to task', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"task","reason":"separate lookup"}'), '正在构建一个网页', '查一下北京的天气');
-    expect(cls.kind).toBe('task');
+  it('routes an independent request to unrelated/new_task', async () => {
+    const cls = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"separate lookup"}'), '正在构建一个网页', '查一下北京的天气');
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.unrelatedKind).toBe('new_task');
   });
 
-  it('routes small talk to chatter', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"chatter","reason":"filler"}'), 'context', '哈哈 辛苦了');
-    expect(cls.kind).toBe('chatter');
+  it('routes small talk to unrelated/chatter', async () => {
+    const cls = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"chatter","reason":"filler"}'), 'context', '哈哈 辛苦了');
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.unrelatedKind).toBe('chatter');
   });
 
-  it('routes an overturn to goal-change', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"goal-change","reason":"user replaced the approach"}'), 'context', '别用方案A了，换一个思路');
-    expect(cls.kind).toBe('goal-change');
+  it('routes an overturn to change', async () => {
+    const cls = await classifyInsertion(mockLlm('{"relation":"change","reason":"user replaced the approach"}'), 'context', '别用方案A了，换一个思路');
+    expect(cls.relation).toBe('change');
   });
 
-  it('routes a corrected fact to premise-change (2026-09-22 止损缺口)', async () => {
+  it('routes a corrected fact to change and carries the replaced-condition fragment (2026-09-22 止损缺口)', async () => {
     // 用户实测暴露的缺口：规划按广东出发跑到一半，用户说"我在西安"——
-    // premise-change 必须是合法判定，收下后协调器会沿 abort 链止损重排。
-    const cls = await classifyInsertion(mockLlm('{"kind":"premise-change","reason":"origin city is wrong"}'), '正在规划从广东到广西的旅游', '我现在在西安');
-    expect(cls.kind).toBe('premise-change');
+    // v2 里这是 change + targets_constraint：条件原文片段随分类过河，
+    // 处置管线据此定位挂在死条件上的节点。
+    const cls = await classifyInsertion(
+      mockLlm('{"relation":"change","reason":"origin city is wrong","confidence":0.9,"targets_constraint":"从广东出发"}'),
+      '正在规划从广东到广西的旅游', '我现在在西安',
+    );
+    expect(cls.relation).toBe('change');
+    expect(cls.targetsConstraint).toBe('从广东出发');
+    // 驼峰兜底。
+    const camel = await classifyInsertion(
+      mockLlm('{"relation":"change","reason":"same","confidence":0.9,"targetsConstraint":"周三"}'),
+      'context', '不是周三是周四',
+    );
+    expect(camel.targetsConstraint).toBe('周三');
+    // 缺席/空白/非字符串不带字段。
+    for (const junk of ['{"relation":"change","reason":"x"}', '{"relation":"change","reason":"x","targets_constraint":"   "}']) {
+      const miss = await classifyInsertion(mockLlm(junk), 'context', 'x');
+      expect(miss.targetsConstraint).toBeUndefined();
+    }
   });
 
-  it('routes a scope addition to task, not steer (2026-09-22 加平台被遗忘缺口)', async () => {
-    // 用户实测暴露：委派在飞时"再加一个 X"被判 steer，而 steer 只剩空头
-    // 承诺（父任务阻塞等子 agent 返回，没有"下个动作"）——提示词现在明确
-    // scope 追加一律 task：排队保底，当前活收尾后必跑，话不会被忘掉。
-    const cls = await classifyInsertion(mockLlm('{"kind":"task","reason":"new work item: research one more platform"}'), '正在并行调研 B站/腾讯/优酷 三个平台的国漫剧集', '再加一个 爱奇艺平台');
-    expect(cls.kind).toBe('task');
+  it('routes a scope addition to unrelated/new_task, not supplement (2026-09-22 加平台被遗忘缺口)', async () => {
+    // 用户实测暴露：委派在飞时"再加一个 X"被判顺路带上而丢话——v2 里并列
+    // 对象是 unrelated/new_task：排队保底，当前活收尾后必跑，话不会被忘掉。
+    const cls = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"research one more platform"}'),
+      '正在并行调研 B站/腾讯/优酷 三个平台的国漫剧集', '再加一个 爱奇艺平台',
+    );
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.unrelatedKind).toBe('new_task');
+  });
+
+  it('routes the user fixing their OWN wording to correction, and output drift to misunderstanding (v2 §三 5/9 分界)', async () => {
+    // (5) correction：用户自己前面表述有歧义，自己修——理解回退但宿主押账
+    // 重入，不掐流。(9) misunderstanding：用户说的还是 A，是当前输出理解错
+    // 了——判断对象是「当前输出 vs 用户上一句」，才可能真暂停。
+    const fix = await classifyInsertion(
+      mockLlm('{"relation":"correction","reason":"the user fixed their own wording"}'),
+      'context', '哦我前面说错了，不是周三是周四',
+    );
+    expect(fix.relation).toBe('correction');
+    const drift = await classifyInsertion(
+      mockLlm('{"relation":"misunderstanding","reason":"output drifted from the last message","self_check_needed":true}'),
+      'context', '不是这个意思——我让你查的是价格，不是成本',
+    );
+    expect(drift.relation).toBe('misunderstanding');
+    expect(drift.selfCheckNeeded).toBe(true);
+  });
+
+  it('routes a resource reminder to meta (2026-10-13 REA case, v2 (8))', async () => {
+    // 资源提醒=改方式不改内容：交付物不变，换的是路。v2 里落 meta，
+    // 绝不落 cancels_part（「这项不做了」丢掉要换的那半句）。
+    const cls = await classifyInsertion(
+      mockLlm('{"relation":"meta","reason":"use the installed REA tool instead","confidence":0.9}'),
+      'context', '你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的',
+    );
+    expect(cls.relation).toBe('meta');
   });
 
   it('reads an "urgent" flag into the classification (第 5 期「这个急」提级)', async () => {
     // 裁决器只在用户明说「这个急/加急/优先处理」时置 urgent；宿主只认严格 true。
-    const hit = await classifyInsertion(mockLlm('{"kind":"task","reason":"user called it urgent","urgent":true}'), '正在构建网页', '这个急，先办');
-    expect(hit.kind).toBe('task');
+    const hit = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"user called it urgent","urgent":true}'), '正在构建网页', '这个急，先办');
+    expect(hit.relation).toBe('unrelated');
     expect(hit.urgent).toBe(true);
-    const plain = await classifyInsertion(mockLlm('{"kind":"task","reason":"plain errand"}'), '正在构建网页', '查一下天气');
+    const plain = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"plain errand"}'), '正在构建网页', '查一下天气');
     expect(plain.urgent).toBeUndefined();
     // 非布尔不认——严格 === true 才带标记，缺省绝不自己补。
-    const loose = await classifyInsertion(mockLlm('{"kind":"task","reason":"x","urgent":"yes"}'), 'context', '查一下天气');
+    const loose = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"x","urgent":"yes"}'), 'context', '查一下天气');
     expect(loose.urgent).toBeUndefined();
   });
 
-  it('rejects an unknown kind and falls back to a queued task', async () => {
-    // 2026-09-22 重新设计：兜底不再 steer——委派在飞时没有可兑现 steer 的
+  it('parses the atoms contract field for a mixed message (v2 §5.1)', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"relation":"mixed","reason":"adds D while dropping B","confidence":0.9,"atoms":[{"relation":"supplement","text":"加 D"},{"relation":"change","text":"B 不用做了"}]}'),
+      'context', '加 D，B 不用做了',
+    );
+    expect(hit.relation).toBe('mixed');
+    expect(hit.atoms).toEqual([
+      { relation: 'supplement', text: '加 D' },
+      { relation: 'change', text: 'B 不用做了' },
+    ]);
+    // 残缺原子（relation 非法 / text 缺失或空白）逐个丢弃，半截原子不分流。
+    const partial = await classifyInsertion(
+      mockLlm('{"relation":"mixed","reason":"x","confidence":0.9,"atoms":[{"relation":"banana","text":"x"},{"relation":"change"},{"relation":"change","text":"   "},{"relation":"question","text":"跑完了吗"}]}'),
+      'context', 'x',
+    );
+    expect(partial.atoms).toEqual([{ relation: 'question', text: '跑完了吗' }]);
+    const plain = await classifyInsertion(
+      mockLlm('{"relation":"supplement","reason":"single relation","confidence":0.9,"atoms":[]}'),
+      'context', '记得跑测试',
+    );
+    expect(plain.atoms).toBeUndefined();
+  });
+
+  it('parses unrelated_kind strictly: only new_task|chatter count', async () => {
+    const miss = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelated_kind":"banana","reason":"x"}'),
+      'context', 'x',
+    );
+    expect(miss.relation).toBe('unrelated');
+    expect(miss.unrelatedKind).toBeUndefined(); // 宿主按 new_task 保守处理
+    const camel = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelatedKind":"new_task","reason":"x"}'),
+      'context', 'x',
+    );
+    expect(camel.unrelatedKind).toBe('new_task'); // 驼峰兜底
+  });
+
+  it('parses self_check_needed strictly — only === true requests the self-check', async () => {
+    const hit = await classifyInsertion(
+      mockLlm('{"relation":"misunderstanding","reason":"x","confidence":0.9,"self_check_needed":true}'),
+      'context', 'x',
+    );
+    expect(hit.selfCheckNeeded).toBe(true);
+    const loose = await classifyInsertion(
+      mockLlm('{"relation":"misunderstanding","reason":"x","confidence":0.9,"self_check_needed":"yes"}'),
+      'context', 'x',
+    );
+    expect(loose.selfCheckNeeded).toBeUndefined();
+  });
+
+  it('rejects an unknown relation and falls back to a queued new task', async () => {
+    // 2026-09-22 重新设计：兜底不再顺路带上——委派在飞时没有可兑现的
     // THINK 边界，"转达"会静默丢话；排队是确定性目的地，话绝不丢。
-    const cls = await classifyInsertion(mockLlm('{"kind":"banana","reason":"junk"}'), 'context', 'anything');
-    expect(cls.kind).toBe('task');
+    // v2 里兜底形态=unrelated/new_task。
+    const cls = await classifyInsertion(mockLlm('{"relation":"banana","reason":"junk"}'), 'context', 'anything');
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.unrelatedKind).toBe('new_task');
+    expect(cls.fallbackUsed).toBe(true);
   });
 
-  it('falls back to a queued task when the model output cannot be parsed', async () => {
+  it('rejects legacy seven-kind JSON — the old contract is not silently accepted', async () => {
+    // 不做兼容妥协：旧词表的 {"kind":...} 回复不再是合法判定，走 fallback
+    // 排队——绝不拿旧词表冒充九类判定。
+    const cls = await classifyInsertion(mockLlm('{"kind":"task","reason":"old contract"}'), 'context', 'anything');
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.fallbackUsed).toBe(true);
+  });
+
+  it('falls back to a queued new task when the model output cannot be parsed', async () => {
     const cls = await classifyInsertion(mockLlm('not json at all'), 'context', 'anything');
-    expect(cls.kind).toBe('task'); // waits its turn, runs deterministically
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.fallbackUsed).toBe(true); // waits its turn, runs deterministically
   });
 
-  it('falls back to a queued task when the LLM throws', async () => {
+  it('falls back to a queued new task when the LLM throws', async () => {
     const bad = { stream: async function* () { throw new Error('boom'); } } as unknown as LLMAdapter;
     const cls = await classifyInsertion(bad, 'context', 'anything');
-    expect(cls.kind).toBe('task');
+    expect(cls.relation).toBe('unrelated');
+    expect(cls.fallbackUsed).toBe(true);
   });
 
-  it('falls back to a queued task for an empty prompt (no-op fallback)', async () => {
-    const cls = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
-    expect(cls.kind).toBe('task');
+  it('falls back to a queued new task for an empty prompt (no-op fallback)', async () => {
+    const cls = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"chatter"}'), 'context', '');
+    expect(cls.relation).toBe('unrelated');
   });
 
   it('classifies a multi-part message as ONE whole and flips by final intent (2026-09-24 案例集)', () => {
@@ -771,46 +882,81 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     expect(promptStart).toBeGreaterThan(-1);
-    const prompt = src.slice(promptStart, src.indexOf(';', src.indexOf('null when no timing was said', promptStart)));
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion', promptStart));
     expect(prompt).toContain('Judge it as ONE whole');
     expect(prompt).toContain('LAST explicit statement');
     expect(prompt).toContain('do NOT classify a middle state');
     expect(prompt).toContain('irreversible');
   });
 
-  it('teaches that cancelling a named part is steer, never task (2026-09-24 取消案例)', () => {
+  it('teaches that cancelling a named part rides change with cancels_part, folded — never queued, never whole-tree (2026-09-24 取消案例)', () => {
     // 真实事故：并行调研中"X 就不调研了"被判成加活。提示词必须把裁决
-    // 说死：取消一部分=steer（cancels_part），绝不排队（排队=反向执行），
-    // 收一支也不等于整树翻向。2026-09-28 重构后这段住在 steer 的分期语义
-    // 里（COLLECTING 阶段），字段契约不变。
+    // 说死：点名撤一支（cancels_part）既不排队（排队=反向执行）也不整树
+    // 重排（折入汇合，其余照跑）。v2 里这段住在 change 的定义与
+    // cancels_part 字段文档里。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     expect(promptStart).toBeGreaterThan(-1);
-    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
-    expect(steerBody).toContain('a named removal');
-    expect(steerBody).toContain('NEVER queue a removal');
-    expect(steerBody).toContain('the exact opposite of what was asked');
-    expect(steerBody).toContain('"cancels_part": true');
-    // 收一支 ≠ 翻向：分界线写在 goal-change 的定义里。
-    const goalBody = src.slice(src.indexOf('- "goal-change"', promptStart), src.indexOf('- "task"', promptStart));
-    expect(goalBody).toContain('the whole thing heading somewhere else');
-    // 结构化字段：契约输出蛇形 cancels_part，仅 steer+取消一部分时为真。
-    const fieldDoc = src.indexOf('include it as true ONLY when kind is "steer"', promptStart);
+    const changeBody = src.slice(src.indexOf('- "change"', promptStart), src.indexOf('- "emphasize"', promptStart));
+    expect(changeBody).toContain('a named part leaves the result');
+    expect(changeBody).toContain('"cancels_part"');
+    // 字段契约：蛇形 cancels_part，收活时必报（漏报 = 反向执行），且不因
+    // 换了 relation 而丢。
+    const fieldDoc = src.indexOf('"cancels_part": include it as true whenever the message REMOVES', promptStart);
     expect(fieldDoc).toBeGreaterThan(-1);
+    const cancelsDoc = src.slice(fieldDoc, src.indexOf('"targets_constraint"', fieldDoc));
+    expect(cancelsDoc).toContain('the exact opposite of what was asked');
+    expect(cancelsDoc).toContain('EVEN WHEN you pick another relation');
+    // 收窄也是移除（不说"取消"的取消）："均价不用查了"就是不再要那个数。
+    expect(cancelsDoc).toContain('NARROWING counts as removal too');
+    // 但"只"限定的是排他性，不是"还要不要"——「不要只查均价」均值仍被需要，
+    // 不该报 cancels_part。2026-09-28 复核认定这是双读句，提示词两侧都把
+    // 这个陷阱写死（否则模型只会在同一个词上来回飘）。
+    expect(cancelsDoc).toContain('narrows what is EXCLUSIVE, not what is required');
+    expect(cancelsDoc).toContain('NOT "不要只查均价了，把区间也查一下"');
+    // 混着加活的取消：停支的闸从宿主关键词改成了 adds_along 契约。
+    const addsDoc = src.indexOf('"adds_along": include it as true ONLY together with "cancels_part"', promptStart);
+    expect(addsDoc).toBeGreaterThan(-1);
+    expect(src.slice(addsDoc, addsDoc + 600)).toContain('B站那支别查了，再加一个爱奇艺');
   });
 
   it('parses the cancels_part contract field through to the classification', async () => {
     const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"drops one branch","confidence":0.9,"cancels_part":true}'),
+      mockLlm('{"relation":"change","reason":"drops one branch","confidence":0.9,"cancels_part":true}'),
       'context', 'X 就不调研了',
     );
-    expect(hit.kind).toBe('steer');
+    expect(hit.relation).toBe('change');
     expect(hit.cancelsPart).toBe(true);
     // 缺省/非 true 都不带标记——宿主只认严格 === true。
     const plain = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"style tweak","confidence":0.9,"cancels_part":false}'),
+      mockLlm('{"relation":"supplement","reason":"style tweak","confidence":0.9,"cancels_part":false}'),
       'context', '文案口语一点',
     );
+    expect(plain.cancelsPart).toBeUndefined();
+  });
+
+  it('parses the adds_along contract field — the gate on stopping a branch (2026-09-28)', async () => {
+    // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——取消那半由
+    // cancels_part 报，加活那半由 adds_along 报。宿主靠它拒绝停支：停掉那支
+    // 会把刚要求加进来的活一并杀掉。这是宿主侧最后一条关键词闸的接力棒。
+    const hit = await classifyInsertion(
+      mockLlm('{"relation":"change","reason":"removes one part while adding another","confidence":0.9,"cancels_part":true,"adds_along":true}'),
+      'context', 'B站那支别查了，再加一个爱奇艺',
+    );
+    expect(hit.cancelsPart).toBe(true);
+    expect(hit.addsAlong).toBe(true);
+    // 驼峰写法也认（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"relation":"change","reason":"same","confidence":0.9,"addsAlong":true}'),
+      'context', '同样的话',
+    );
+    expect(camel.addsAlong).toBe(true);
+    // 缺省/非 true 都不带标记——宿主只认严格 === true。
+    const plain = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"a plain addition","confidence":0.9}'),
+      'context', '顺便查一下汇率',
+    );
+    expect(plain.addsAlong).toBeUndefined();
     expect(plain.cancelsPart).toBeUndefined();
   });
 
@@ -818,126 +964,87 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     // 模型判断、宿主执行：裁决器从 <live_branches> 花名册指认被停支的确切
     // id，宿主只按这个 id 执行——id 解析必须一字不差过河。
     const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"stop the review branch","confidence":0.95,"cancels_part":true,"stop_branch":{"call_id":"call_review"}}'),
+      mockLlm('{"relation":"change","reason":"stop the review branch","confidence":0.95,"cancels_part":true,"stop_branch":{"call_id":"call_review"}}'),
       'context', '不要评审了',
     );
     expect(hit.stopBranch).toEqual({ callId: 'call_review' });
     // 驼峰兜底：模型自行改写键名时照样收。
     const camel = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"stop it","confidence":0.9,"stopBranch":{"callId":"call_a"}}'),
+      mockLlm('{"relation":"change","reason":"stop it","confidence":0.9,"stopBranch":{"callId":"call_a"}}'),
       'context', '停掉那一支',
     );
     expect(camel.stopBranch).toEqual({ callId: 'call_a' });
     // 残缺对象/空串/缺字段宁可当没点名——绝不拿半截 id 去停。
     for (const junk of [
-      '{"kind":"steer","reason":"x","confidence":0.9,"stop_branch":{}}',
-      '{"kind":"steer","reason":"x","confidence":0.9,"stop_branch":{"call_id":"  "}}',
-      '{"kind":"steer","reason":"x","confidence":0.9}',
+      '{"relation":"change","reason":"x","confidence":0.9,"stop_branch":{}}',
+      '{"relation":"change","reason":"x","confidence":0.9,"stop_branch":{"call_id":"  "}}',
+      '{"relation":"change","reason":"x","confidence":0.9}',
     ]) {
       const miss = await classifyInsertion(mockLlm(junk), 'context', 'x');
       expect(miss.stopBranch).toBeUndefined();
     }
   });
 
-  it('carries the judge-written receipt through, trimmed and capped (2026-10-15 现场收执)', async () => {
-    // 现场收执：裁决器结合现场写的那两句随分类过河——非空才收、去首尾空白、
-    // 封顶 240 字（它是直接上屏给用户的，超长就不再是「一两句」了）。
+  it('teaches the covered-branch roster check, and parses covered_branch through (2026-10-21 刀 F)', () => {
+    // 真机判例二连：多路平台调研在飞，插「调研的平台必须包括腾讯」（腾讯那
+    // 路在跑）/「调研必须包括优酷」——两次都回转达口径而不是 covered。刀 E
+    // 教裁决器抄对象名+宿主字面匹配被否决（漏报新字段/语义对应不上字面）；
+    // 刀 F 与 stop_branch 同构：裁决器拿花名册点已覆盖那支的 call_id，宿主
+    // 只核实。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    // 教学段：两块花名册都在点名面；id 照抄、绝不猜。
+    expect(prompt).toContain('"covered_branch": the "make sure X is covered" remark');
+    expect(prompt).toContain('<finished_branches>');
+    expect(prompt).toContain('the id copied EXACTLY from the roster');
+    // 护栏：改在飞支的方向（steer）、移除（cancels_part）不是范围确认；
+    // 与 stop_branch 互斥；名单没覆盖就留空并在 reason 里说明补上。
+    expect(prompt).toContain('「优酷那路重点查剧场版」');
+    expect(prompt).toContain('"cancels_part" owns that');
+    expect(prompt).toContain('"stop_branch" and "covered_branch" never fire together');
+    expect(prompt).toContain('「目前还没在查优酷，这就补上」');
+    // stop_branch 段防混淆：已收工支无活可停。
+    expect(prompt).toContain('Only <live_branches> can be stopped');
+  });
+
+  it('parses the covered_branch contract field through to the classification (2026-10-21 刀 F)', async () => {
     const hit = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"two more platforms","confidence":0.9,"receipt":"  收到——当前这批先跑完，结束后我会新派两路查询补上芒果TV和爱奇艺，再一起汇总输出。  "}'),
-      'context', '你应该增加两个平台，芒果tv和爱奇艺',
+      mockLlm('{"relation":"supplement","reason":"scope confirmation, a branch already covers it","confidence":0.9,"covered_branch":{"call_id":"call_tencent"}}'),
+      'context', '调研的平台必须包括腾讯',
     );
-    expect(hit.receipt).toBe('收到——当前这批先跑完，结束后我会新派两路查询补上芒果TV和爱奇艺，再一起汇总输出。');
-    const long = await classifyInsertion(
-      mockLlm(`{"kind":"steer","reason":"x","confidence":0.9,"receipt":"${'长'.repeat(300)}"}`),
-      'context', '文案口语一点',
+    expect(hit.relation).toBe('supplement');
+    expect(hit.coveredBranch).toEqual({ callId: 'call_tencent' });
+    // 驼峰兜底（模型两条路都可能回）。
+    const camel = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"same","confidence":0.9,"coveredBranch":{"callId":"call_mgtv"}}'),
+      'context', '记得把芒果TV也查上',
     );
-    expect(long.receipt?.length).toBe(240);
-    // 缺席/空白不带字段——宿主回落固定口径（规则与安全网路径永远没有它）。
-    for (const junk of [
-      '{"kind":"steer","reason":"x","confidence":0.9}',
-      '{"kind":"steer","reason":"x","confidence":0.9,"receipt":"   "}',
-    ]) {
-      const miss = await classifyInsertion(mockLlm(junk), 'context', 'x');
-      expect(miss.receipt).toBeUndefined();
-    }
+    expect(camel.coveredBranch).toEqual({ callId: 'call_mgtv' });
+    // 名单没覆盖（裁决器留空/半截 id）：宿主没有可核实的支，照旧路由。
+    const bare = await classifyInsertion(
+      mockLlm('{"relation":"supplement","reason":"nothing on the roster covers it yet","confidence":0.9}'),
+      'context', '调研必须包括优酷',
+    );
+    expect(bare.coveredBranch).toBeUndefined();
+    const stub = await classifyInsertion(
+      mockLlm('{"relation":"supplement","reason":"same","confidence":0.9,"covered_branch":{"call_id":"  "}}'),
+      'context', '同样的话',
+    );
+    expect(stub.coveredBranch).toBeUndefined();
   });
 
-  it('teaches the judge to write a context-aware receipt, not a canned one (2026-10-15 用户定调)', () => {
-    // 用户定调：插话收执不许是放之四海皆准的固定话术，要结合上下文说明会怎
-    // 么做（判例：多平台调研在飞，插话加两个平台 → 收执点名平台、说清手头
-    // 不停、说清接下来新派两路一起汇总）。2026-10-21 对话主导架构：回应升格
-    // 为全 kind 必写（chatter/question 除外）——停/纠偏/改向也要先接住用户
-    // 的话，宿主机械播报降为机械失败兜底。教导锁在提示词的 receipt 段。
-    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
-    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
-    expect(promptStart).toBeGreaterThan(-1);
-    const start = src.indexOf('"receipt": the one or two sentences', promptStart);
-    expect(start).toBeGreaterThan(-1);
-    const doc = src.slice(start, src.indexOf('when reality differs', start));
-    expect(doc).toContain('canned formula');
-    expect(doc).toContain('EVERY kind except "chatter"');
-    expect(doc).toMatch(/must be about\s+THEIR words/);
-    expect(doc).toMatch(/Open by receiving\s+their words/);
-    expect(doc).toContain('what you understood');
-    expect(doc).toContain('what you will do next');
-    expect(doc).toContain('芒果TV和爱奇艺');
-    expect(doc).toContain('never 支/委派/分类/排队/上下文');
-    expect(doc).toContain('what WILL happen');
-    // JSON 契约模板带 receipt 字段（裁决器一眼看得见的输出位）。
-    const template = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    expect(template).toContain('"receipt":"<what you tell the user, see below>"');
-  });
-
-  it('teaches the supplements_current carve-out: refining THE ONE deliverable in flight is not a second item (2026-09-27 排队事故)', () => {
-    // 真实事故：画小鸟时补一句"背景上加一些会动的云朵"，被当成第二件活
-    // 排队，队列的活又丢了——图上没有云。构图补充必须吸收进正在想的那一
-    // 件：提示词把"往当前产出的那一件东西里加内容"说死，并按阶段讲清
-    // "顺势而为"在思考中意味着推倒重想（2026-09-28 时机感知重写）。
-    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
-    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
-    expect(promptStart).toBeGreaterThan(-1);
-    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
-    expect(steerBody).toContain('"supplements_current": true');
-    expect(steerBody).toContain('the thought must be redone with the remark INSIDE it');
-    // 2026-09-27 用户定调的第二批形状：约束改构图（明月/五言）、清单长大
-    // （调研五位加两位 = 同一份答案 5→7）——都不是第二件活。
-    expect(steerBody).toContain('明月');
-    expect(steerBody).toContain('五言');
-    expect(steerBody).toContain('新增加两位');
-    // task 的判据写在用户期待上：一份交付物带上它 vs 这一单之后再来一份。
-    const taskBody = src.slice(src.indexOf('- "task"', promptStart), src.indexOf('- "question"', promptStart));
-    expect(taskBody).toContain('a SECOND deliverable after this one');
-    // JSON 契约字段：仅 steer + 加进当前产出物时为真。
-    const fieldDoc = src.indexOf('"supplements_current": include it as true ONLY when kind is "steer"', promptStart);
-    expect(fieldDoc).toBeGreaterThan(-1);
-  });
-
-  it('separates 「往当前产出物里加」 from 「单独取回来的一件」 without deliberation (2026-09-28 实测)', () => {
-    // 回放实测：关掉暗推理后加活族 5 句从 task 掉到 steer。不是模型变笨，是原
-    // 判据（"清单变长"）与「往当前产出物里加」共用一句话，没有深思就分不开——
-    // 而 2026-09-22 的丢话事故正是 steer 落空造成的。所以判据换成不需要深思
-    // 的那一问：这件东西要不要**单独取回来**。
-    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
-    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
-    const taskBody = src.slice(src.indexOf('- "task"', promptStart), src.indexOf('- "question"', promptStart));
-    expect(taskBody).toContain('The test needs NO deliberation');
-    expect(taskBody).toContain('what has to come BACK');
-    expect(taskBody).toContain('再加一个爱奇艺平台');
-    expect(taskBody).toContain('把爱奇艺也查一下');
-    // 两个守卫都是从实测里掤出来的："当前工作自己就要走的一步"（跑测试/核对/
-    // 文风）不加范围，仍归 steer——第一版没写这句，"记得跑测试"当场被拉到 task。
-    expect(taskBody).toContain('must ALSO be outside the current job');
-    expect(taskBody).toContain('记得跑测试');
-    // 但「同一句既收又加」时收压倒加：否则「B站那支别查了，再加一个爱奇艺」
-    // 会被 task 那条例子拽走（实测真被拽走过），而把删除送进队列是反向执行。
-    expect(taskBody).toContain('ONE exception outranks this test');
-    expect(taskBody).toContain('the removal decides the kind');
-    expect(taskBody).toContain('B站那支别查了，再加一个爱奇艺');
-    // steer 侧的守卫："清单长大"只在**那份清单住在唯一产出物里面**时才算数，
-    // 否则并列对象就是一条新支（task）。
-    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
-    expect(steerBody).toContain('lives INSIDE the one deliverable');
-    expect(steerBody).toContain('a unit of work of its own');
+  it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {
+    // 内部兜底（空话/中止/超时/解析失败）必须自我表白：协调器据此改用
+    // 字面安全网，而不是把兜底当成一份裁决来信。真裁决绝不带这个标记。
+    const fell = await classifyInsertion(mockLlm('{"relation":"unrelated","unrelated_kind":"chatter"}'), 'context', '');
+    expect(fell.relation).toBe('unrelated');
+    expect(fell.fallbackUsed).toBe(true);
+    const judged = await classifyInsertion(
+      mockLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"a second lookup","confidence":0.9}'),
+      'context', '顺便查一下汇率',
+    );
+    expect(judged.fallbackUsed).toBeUndefined();
   });
 
   it('opens with the judge-first frame: timing × content-impact, never keywords (2026-09-28 用户定调)', () => {
@@ -953,250 +1060,138 @@ describe('classifyInsertion — 插话重构：五分类路由', () => {
     expect(opening).toContain('the result you still owe them');
     expect(opening).toContain('统筹兼顾顺势而为');
     expect(opening).toContain('及时停下改方向');
-    // 时机决定"顺势"的含义：思考中=并进请求推倒重想。
-    const steerBody = src.slice(promptStart, src.indexOf('- "premise-change"', promptStart));
-    expect(steerBody).toContain('the PHASE in the context');
     // 纠错优先于微调：改正的是答案而不只是说法。
-    const premiseBody = src.slice(src.indexOf('- "premise-change"', promptStart), src.indexOf('- "goal-change"', promptStart));
-    expect(premiseBody).toContain('would change the ANSWER');
-    expect(premiseBody).toContain('jev');
+    const changeBody = src.slice(src.indexOf('- "change"', promptStart), src.indexOf('- "emphasize"', promptStart));
+    expect(changeBody).toContain('would change the ANSWER');
   });
 
-  it('gives the judge a stop kind — literal stops stay on STOP_RE, non-literal ones need judgement (2026-09-28)', () => {
-    // 正则只认字面命令（停止/停下/取消…）；"先缓一缓""这个就到这儿""停掉整个
-    // 任务"这类软停它盖不到，以前会被判 steer（带上）或 task（排队）。回放实测
-    // 又证明：字面命令交给裁决器时它只能判 goal-change（kind 表里没有 stop），
-    // 等于把单纯止损升级成推翻重排。所以补这一档，并守住分界表述。
+  it('grounds the judgment in the three-element live context (蓝图 §5.0, 2026-10-27 用户强调)', () => {
+    // 软暂停后开始思考关系：判定输入必须三要素齐备——用户上一句原话（目标
+    // 原点）、当前输出脉络（做到哪）、任务状态投影（依据什么条件在做）。
+    // 同一句"预算改成 50 万"在用到前后着陆不同，提示词必须把三要素讲清。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const contextDoc = src.slice(src.indexOf('<current_task>', promptStart), src.indexOf('<live_branches>', promptStart));
+    expect(contextDoc).toContain('用户上一句原话');
+    expect(contextDoc).toContain('当前输出脉络');
+    expect(contextDoc).toContain('任务状态投影');
+    expect(contextDoc).toContain('<last_user_message>');
+    expect(contextDoc).toContain('<output_gist>');
+    expect(contextDoc).toContain('<task_state>');
+    expect(contextDoc).toContain('the same words land differently before vs after the work has already used them');
+  });
+
+  it('teaches the nine-relation contract with required fields in the JSON template (v2 §5.1)', () => {
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    expect(prompt).toContain('- "stop" —');
-    // 契约三件套：JSON 样例、KINDS 白名单、与 goal-change / steer 的分界。
-    expect(prompt).toContain('"kind":"steer|premise-change|goal-change|stop|task|question|chatter"');
-    expect(src.slice(src.indexOf('const KINDS: readonly string[]'), src.indexOf('const KINDS: readonly string[]') + 160)).toContain("'stop'");
-    expect(prompt).toContain('a stop leaves no answer to build');
-    expect(prompt).toContain('is steer with "cancels_part"');
-    // cancels_part 的硬要求：即使判成 task 也必须报（漏报 = 反向执行）。
-    expect(prompt).toContain('EVEN WHEN you pick "task"');
-    expect(prompt).toContain('a missing\nflag is not');
-    // 混着加活的取消：停支的闸从宿主关键词改成了 adds_along 契约。
-    expect(prompt).toContain('"adds_along": include it as true ONLY together with "cancels_part"');
-    // 收窄也是移除（不说"取消"的取消）："均价不用查了"就是不再要那个数。
-    expect(prompt).toContain('NARROWING\ncounts as removal too');
-    // 但"只"限定的是排他性，不是"还要不要"——「不要只查均价」均值仍被需要，
-    // 不该报 cancels_part。2026-09-28 复核认定这是双读句，已从断言语料降级，
-    // 提示词两侧都把这个陷阱写死（否则模型只会在同一个词上来回飘）。
-    expect(prompt).toContain('narrows what is\nEXCLUSIVE, not what is required');
-    expect(prompt).toContain('NOT "不要只查均价了，把区间也查一下"');
+    // 九类模板与细分。
+    expect(prompt).toContain('"relation":"supplement|change|emphasize|unrelated|correction|question|mixed|meta|misunderstanding"');
+    expect(prompt).toContain('"unrelated_kind":"new_task|chatter"');
+    expect(prompt).toContain('"atoms":[{"relation":"supplement","text":"加 D"}]');
+    expect(prompt).toContain('"targets_constraint"');
+    expect(prompt).toContain('"self_check_needed":true');
+    // 必填纪律。
+    expect(prompt).toContain('"unrelated_kind" is REQUIRED when relation is "unrelated"');
+    expect(prompt).toContain('"atoms" is REQUIRED when relation is "mixed"');
+    // 九类各占一个定义条目。
+    for (const rel of ['supplement', 'change', 'emphasize', 'unrelated', 'correction', 'question', 'mixed', 'meta', 'misunderstanding']) {
+      expect(prompt).toContain(`- "${rel}" —`);
+    }
   });
 
-  it('parses the stop kind through the real pipeline', async () => {
-    const hit = await classifyInsertion(
-      mockLlm('{"kind":"stop","reason":"the user is done with this run","confidence":0.9}'),
-      'context', '先缓一缓，这个就到这儿吧',
-    );
-    expect(hit.kind).toBe('stop');
-    expect(hit.fallbackUsed).toBeUndefined();
-  });
-
-  it('parses the adds_along contract field — the gate on stopping a branch (2026-09-28)', async () => {
-    // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——取消那半由
-    // cancels_part 报，加活那半由 adds_along 报。宿主靠它拒绝停支：停掉那支
-    // 会把刚要求加进来的活一并杀掉。这是宿主侧最后一条关键词闸的接力棒。
-    const hit = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"removes one part while adding another","confidence":0.9,"cancels_part":true,"adds_along":true}'),
-      'context', 'B站那支别查了，再加一个爱奇艺',
-    );
-    expect(hit.cancelsPart).toBe(true);
-    expect(hit.addsAlong).toBe(true);
-    // 驼峰写法也认（模型两条路都可能回）。
-    const camel = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"same","confidence":0.9,"addsAlong":true}'),
-      'context', '同样的话',
-    );
-    expect(camel.addsAlong).toBe(true);
-    // 缺省/非 true 都不带标记——宿主只认严格 === true。
-    const plain = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"a plain addition","confidence":0.9}'),
-      'context', '顺便查一下汇率',
-    );
-    expect(plain.addsAlong).toBeUndefined();
-    expect(plain.cancelsPart).toBeUndefined();
-  });
-
-  it('parses the supplements_current contract field through to the classification', async () => {
-    const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"adds clouds INSIDE the picture being drawn","confidence":0.9,"supplements_current":true}'),
-      'context', '背景上加一些会动的云朵',
-    );
-    expect(hit.kind).toBe('steer');
-    expect(hit.supplementsCurrent).toBe(true);
-    // 蛇形/驼峰双写法都认（模型两条路都可能回）。
-    const camel = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"misrouted","confidence":0.9,"supplementsCurrent":true}'),
-      'context', '背景上加一些会动的云朵',
-    );
-    expect(camel.supplementsCurrent).toBe(true);
-    // 缺省/非 true 都不带标记——宿主只认严格 === true。
-    const plain = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"unrelated errand","confidence":0.9,"supplements_current":false}'),
-      'context', '明天北京天气怎么样',
-    );
-    expect(plain.supplementsCurrent).toBeUndefined();
-  });
-
-  it('teaches the judge the resource-reminder method switch, and parses method_switch through (2026-10-13 REA case)', () => {
-    // 真机判例：pure 正用传统办法反编译，用户插「你刚才不是已经安装了REA
-    // 这个工具了吗」。旧词表里没有「资源提醒=换做法」这一档，裁决器把它读
-    // 成砍掉"传统办法"这一项（steer/task + cancels_part），宿主回了
-    // 「好——这项不做了」——只接住停的那半，扔掉用户真正要的「换成REA」。
+  it('teaches the misunderstanding double trigger and its boundary with correction/change (v2 §5.1,《设想》§五.2)', () => {
+    // (9) 的判断对象是「当前输出 vs 用户上一句」，插话只是触发自查的信号；
+    // 自查确认偏离才真暂停，通过则降级轻量处置。(5) 是用户修自己的表述，
+    // (2) 是事实变了——三者分界必须写死。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    // goal-change 收这类话，且带 method_switch 契约字段。
-    expect(prompt).toContain('A RESOURCE REMINDER is 换方案 said sideways');
-    expect(prompt).toContain('"method_switch": true');
-    // 硬要求：绝不能落 cancels_part——「这项不做了」丢掉要换的那半句。
-    expect(prompt).toContain('"cancels_part" must stay OFF for it');
-    expect(prompt).toContain('answering a resource reminder with "这项不做了"');
-    // JSON 样例与契约段落都在（刀 F 契约行把 ensures_present 换成
-    // covered_branch 对象点名，affects_current 与 method_switch 恢复连续）。
-    expect(prompt).toContain('"supplements_current":true,"affects_current":true,"method_switch":true');
-    expect(prompt).toContain('"method_switch": include it as true ONLY with kind "goal-change"');
-    // 移除段的护栏：点名替换方案的句子不是移除；但顺带取消无关支的混合句
-    // 照常报 cancels_part（评审 1b：绝对化会压住合法移除）。
-    expect(prompt).toContain('never cancels_part. This covers only a replacement');
+    const misBody = src.slice(src.indexOf('- "misunderstanding"', promptStart), src.indexOf('One message may carry SEVERAL', promptStart));
+    expect(misBody).toContain('the OUTPUT is what drifted');
+    expect(misBody).toContain('RE-STATING their actual ask');
+    expect(misBody).toContain('"self_check_needed": true');
+    const selfDoc = src.indexOf('"self_check_needed": include it as true', promptStart);
+    const selfBody = src.slice(selfDoc, src.length);
+    expect(selfBody).toContain('only a CONFIRMED drift triggers the full pause-and-redo');
+    expect(selfBody).toContain('prefer the lighter one');
+    const corrBody = src.slice(src.indexOf('- "correction"', promptStart), src.indexOf('- "question"', promptStart));
+    expect(corrBody).toContain("the USER'S OWN earlier wording");
+  });
+
+  it('teaches the whole-run stop as change at full scope with cancels_part OFF (蓝图 §十.5)', () => {
+    // 非字面的停（"先缓一缓""这个就到这儿"）落在 relation=change 全停特例：
+    // 没有东西补上来、不设 cancels_part（那是点名撤一部分、其余照跑的字段）；
+    // 字面命令归宿主快路径，到不了裁决器。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const changeBody = src.slice(src.indexOf('- "change"', promptStart), src.indexOf('- "emphasize"', promptStart));
+    expect(changeBody).toContain('the whole-run STOP');
+    expect(changeBody).toContain('NOTHING takes its place');
+    expect(changeBody).toContain('"cancels_part" OFF');
+    expect(changeBody).toContain("the host's literal-stop fast path");
+  });
+
+  it('teaches the resource-reminder meta relation, never removal (2026-10-13 REA case)', () => {
+    // 真机判例：资源提醒被读成砍掉"传统办法"这一项，宿主回了「好——这项
+    // 不做了」——只接住停的那半，扔掉用户真正要的「换成REA」。v2 里这类话
+    // 是 meta（改方式不改内容）。
+    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
+    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
+    const metaBody = src.slice(src.indexOf('- "meta"', promptStart), src.indexOf('- "misunderstanding"', promptStart));
+    expect(metaBody).toContain('RESOURCE REMINDERS');
+    expect(metaBody).toContain('REA');
+    expect(metaBody).toContain('answering "你刚才不是已经装了X吗" with "这项不做了"');
+    expect(metaBody).toContain('the DELIVERABLE replaced is "change", only the WAY replaced is "meta"');
+    // 移除段的护栏：点名替换方案的句子不是移除（meta owns it）。
+    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
+    expect(prompt).toContain('so it is "meta", never cancels_part');
     expect(prompt).toContain('the unrelated removal still reports "cancels_part" as usual');
   });
 
-  it('parses the method_switch contract field through to the classification (2026-10-13 REA case)', async () => {
-    const hit = await classifyInsertion(
-      mockLlm('{"kind":"goal-change","reason":"method switch: use the installed REA tool instead","confidence":0.9,"method_switch":true}'),
-      'context', '你刚才不是已经安装了REA这个工具了吗，专门用来反编译分析的',
-    );
-    expect(hit.kind).toBe('goal-change');
-    expect(hit.methodSwitch).toBe(true);
-    // 驼峰兜底（模型两条路都可能回）。
-    const camel = await classifyInsertion(
-      mockLlm('{"kind":"goal-change","reason":"same","confidence":0.9,"methodSwitch":true}'),
-      'context', '同样的话',
-    );
-    expect(camel.methodSwitch).toBe(true);
-    // 缺省/非 true 都不带标记——推翻方向的 goal-change 不该被当成换做法。
-    const plain = await classifyInsertion(
-      mockLlm('{"kind":"goal-change","reason":"overturn: make a poster instead","confidence":0.9}'),
-      'context', '别做这个了，改成做海报',
-    );
-    expect(plain.methodSwitch).toBeUndefined();
-    // 蛇形字段只在 goal-change 上有意义，但解析层不拦——契约语义由提示词
-    // 兜住（与 supplements_current 同款分层）。
-    const onSteer = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"misrouted","confidence":0.9,"method_switch":true}'),
-      'context', '同样的话',
-    );
-    expect(onSteer.methodSwitch).toBe(true);
-  });
-
-  it('teaches the judge the affects-current stop-and-redo move, and parses affects_current through (2026-10-21 刀 B)', () => {
-    // 对话主导架构刀 B（用户拍板）：改变「当前正在产出」的插话过去落进
-    // 「下个 THINK 边界顺路带上」（执行流没边界就一直吐旧方向）或排队
-    // （重入时语境断裂）——现在教裁决器认出它，宿主当场停流押话重入。
+  it('teaches the growing-list guard and the separate take-back unit (2026-09-28 实测)', () => {
+    // 回放实测：加活族 5 句曾在 steer/task 之间摇摆。判据不需要深思：
+    // 这件东西要不要**单独取回来**；"清单长大"只在清单住在唯一产出物里面
+    // 时才算 supplement，否则并列对象就是一条新活（unrelated/new_task）。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
-    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    // JSON 契约行与字段文档段都在。
-    expect(prompt).toContain('"supplements_current":true,"affects_current":true');
-    expect(prompt).toContain('"affects_current": the "stop now, redo the output with this in hand" move');
-    expect(prompt).toContain('the EXECUTING-phase sibling of "supplements_current"');
-    // 单题判据：接下来要产出的东西已经因这句话而过时。
-    expect(prompt).toContain('would the VERY NEXT thing you are about to produce');
-    // steer 定义段的执行期默认改成「顺路带上，除非……改报 affects_current」。
-    expect(prompt).toContain('set "affects_current": true instead');
-    // 护栏：平行加活（task）、事实纠正（premise-change）、思考窗各有其主。
-    expect(prompt).toContain('"premise-change"\nowns that');
+    const supBody = src.slice(src.indexOf('- "supplement"', promptStart), src.indexOf('- "change"', promptStart));
+    expect(supBody).toContain('lives INSIDE the one deliverable');
+    expect(supBody).toContain('a unit of work of its own');
+    expect(supBody).toContain('明月');
+    expect(supBody).toContain('五言');
+    expect(supBody).toContain('新增加两位');
+    const unrelBody = src.slice(src.indexOf('- "unrelated"', promptStart), src.indexOf('- "correction"', promptStart));
+    expect(unrelBody).toContain('The new_task test needs NO deliberation');
+    expect(unrelBody).toContain('what has to come BACK');
+    expect(unrelBody).toContain('再加一个爱奇艺平台');
+    // 但「同一句既收又加」时收压倒加：撤改决定 relation，加的一半走
+    // adds_along 折入，否则删除会被送进队列（反向执行）。
+    const mixedBody = src.slice(src.indexOf('- "mixed"', promptStart), src.indexOf('- "meta"', promptStart));
+    expect(mixedBody).toContain('when one part REMOVES named work that was already asked for');
+    expect(mixedBody).toContain('"B站那支别查了，再加一个爱奇艺" are "change" + "cancels_part", not mixed');
   });
 
-  it('parses the affects_current contract field through to the classification (2026-10-21 刀 B)', async () => {
+  it('parses the soft-stop verdict as change through the real pipeline (v2 整停特例)', async () => {
     const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"changes what the report must cover from here on","confidence":0.9,"affects_current":true}'),
-      'context', '你理解错了，我说的是价格不是成本',
+      mockLlm('{"relation":"change","reason":"the user is done with this run","confidence":0.9}'),
+      'context', '先缓一缓，这个就到这儿吧',
     );
-    expect(hit.kind).toBe('steer');
-    expect(hit.affectsCurrent).toBe(true);
-    // 驼峰兜底（模型两条路都可能回）。
-    const camel = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"same","confidence":0.9,"affectsCurrent":true}'),
-      'context', '同样的话',
-    );
-    expect(camel.affectsCurrent).toBe(true);
-    // 缺省/非 true 都不带标记——普通 steer 绝不触发停流。
-    const plain = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"a constraint for the next step","confidence":0.9,"affects_current":false}'),
-      'context', '记得跑测试',
-    );
-    expect(plain.affectsCurrent).toBeUndefined();
+    expect(hit.relation).toBe('change');
+    expect(hit.fallbackUsed).toBeUndefined();
   });
 
-  it('teaches the judge the covered-branch roster check, and parses covered_branch through (2026-10-21 刀 F)', () => {
-    // 真机判例二连：多路平台调研在飞，插「调研的平台必须包括腾讯」（腾讯那
-    // 路在跑）/「调研必须包括优酷」——两次都回转达口径而不是 covered。刀 E
-    // 教裁决器抄对象名+宿主字面匹配被否决（漏报新字段/语义对应不上字面）；
-    // 刀 F 与 stop_branch 同构：裁决器拿花名册点已覆盖那支的 call_id，宿主
-    // 只核实。
-    const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
-    const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
-    const prompt = src.slice(promptStart, src.indexOf('export async function classifyInsertion'));
-    // 教学段：两块花名册都在点名面；id 照抄、绝不猜。
-    expect(prompt).toContain('"covered_branch": the "make sure X is covered" remark');
-    expect(prompt).toContain('<finished_branches>');
-    expect(prompt).toContain('the id copied\nEXACTLY from the roster');
-    // 护栏：改在飞支的方向（steer）、移除（cancels_part）不是范围确认；
-    // 与 stop_branch 互斥；名单没覆盖就留空并在 receipt 里说明补上。
-    expect(prompt).toContain('「优酷那路重点查剧场版」');
-    expect(prompt).toContain('"cancels_part" owns that');
-    expect(prompt).toContain('"stop_branch" and\n"covered_branch" never fire together');
-    expect(prompt).toContain('「目前还没在查优酷，这就补上」');
-    // stop_branch 段防混淆：已收工支无活可停。
-    expect(prompt).toContain('Only <live_branches> can be stopped');
-  });
-
-  it('parses the covered_branch contract field through to the classification (2026-10-21 刀 F)', async () => {
-    const hit = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"scope confirmation, a branch already covers it","confidence":0.9,"covered_branch":{"call_id":"call_tencent"}}'),
-      'context', '调研的平台必须包括腾讯',
+  it('parses the question and emphasize relations through the real pipeline', async () => {
+    const q = await classifyInsertion(
+      mockLlm('{"relation":"question","reason":"status check","confidence":0.9}'),
+      'context', '跑完了吗',
     );
-    expect(hit.kind).toBe('steer');
-    expect(hit.coveredBranch).toEqual({ callId: 'call_tencent' });
-    // 驼峰兜底（模型两条路都可能回）。
-    const camel = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"same","confidence":0.9,"coveredBranch":{"callId":"call_mgtv"}}'),
-      'context', '记得把芒果TV也查上',
+    expect(q.relation).toBe('question');
+    const em = await classifyInsertion(
+      mockLlm('{"relation":"emphasize","reason":"reweight the deliverable","confidence":0.9}'),
+      'context', '重点研究X',
     );
-    expect(camel.coveredBranch).toEqual({ callId: 'call_mgtv' });
-    // 名单没覆盖（裁决器留空/半截 id）：宿主没有可核实的支，照旧路由。
-    const bare = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"nothing on the roster covers it yet","confidence":0.9}'),
-      'context', '调研必须包括优酷',
-    );
-    expect(bare.coveredBranch).toBeUndefined();
-    const stub = await classifyInsertion(
-      mockLlm('{"kind":"steer","reason":"same","confidence":0.9,"covered_branch":{"call_id":"  "}}'),
-      'context', '同样的话',
-    );
-    expect(stub.coveredBranch).toBeUndefined();
-  });
-
-  it('raises fallbackUsed when the judge falls over, and never on a real verdict (2026-09-28)', async () => {
-    // 内部兜底（空话/中止/超时/解析失败）必须自我表白：协调器据此改用
-    // 字面安全网，而不是把"task"当成一份裁决来信。真裁决绝不带这个标记。
-    const fell = await classifyInsertion(mockLlm('{"kind":"chatter"}'), 'context', '');
-    expect(fell.kind).toBe('task');
-    expect(fell.fallbackUsed).toBe(true);
-    const judged = await classifyInsertion(
-      mockLlm('{"kind":"task","reason":"a second lookup","confidence":0.9}'),
-      'context', '顺便查一下汇率',
-    );
-    expect(judged.fallbackUsed).toBeUndefined();
+    expect(em.relation).toBe('emphasize');
   });
 });
 
@@ -1267,7 +1262,7 @@ describe('刀 4.1 缓存固化 — 判例调用 system 逐字稳定，现场全�
     // （投影/消息），每次判例都是一次缓存写（1.25×）且永不命中。所以指令
     // 头与 JSON 契约尾必须同住一个逐字稳定的 system，投影/消息只许出现在
     // user 消息里。
-    const { llm, calls } = captureLlm('{"kind":"task","reason":"x","confidence":0.9}');
+    const { llm, calls } = captureLlm('{"relation":"unrelated","unrelated_kind":"new_task","reason":"x","confidence":0.9}');
     await classifyInsertion(llm, '现场投影<LIVE-STATE>独一份', '用户插话<MSG-MARKER>独一份');
     expect(calls).toHaveLength(1);
     const [system, user] = calls[0];
