@@ -20,7 +20,7 @@
 //   - depends on app state, not request → L1 (tools, env, skills, mode)
 //   - depends on THIS request           → L2 (composeUserTurn)
 
-import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT } from './agentBehavior';
+import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT, INFORMATION_VALUE_PRINCIPLE } from './agentBehavior';
 
 // ── L0 · SYSTEM (immutable core) ─────────────────────────────────────────
 // The agent's stable identity + global operating contract. Kept deliberately
@@ -84,9 +84,29 @@ next step. Never emit tool calls when the task is complete.
 // ── L1 · APPLICATION (shared behavior contracts) ─────────────────────────
 // These two are the always-on workflow + completion-report contracts, kept in
 // agentBehavior.ts (single source) and re-exported here so layer-1 assembly
-// reads from one place.
+// reads from one place. workflow 自 2026-10-27 起按「动手类请求」闸门装配
+// （wantsHandsOnWorkflow）；信息价值原则是表达纪律，问答回合同样适用，保持常驻。
 export const WORKFLOW_PROMPT = PROACTIVE_WORKFLOW_PROMPT;
 export const COMPLETION_PROMPT = COMPLETION_LESSON_PROMPT;
+export { INFORMATION_VALUE_PRINCIPLE };
+
+/**
+ * workflow 闸门（2026-10-27）：7 条操作流程（先读后改/失败诊断/换路线/安装/
+ * 验证/教训）只对「会动手」的请求有意义，纯问答轮是纯开销。召回优先：
+ * 动作词命中即带；纯问答特征且无动作词才免带；其余默认带（漏判的后果是
+ * 纪律缺失——work_invariant 与 capability_gap CORE 兜底，可接受；误判只是
+ * 多 ≈830 tokens，无害）。
+ */
+export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'build'): boolean {
+  if (mode === 'build' || mode === 'plan') return true;
+  const text = prompt ?? '';
+  const actionWord = /(?:修改|改动|修复|修理|fix(?:ed|ing)?|实现|编写|写一?[个点条个]|新增|添加|加一?[个点功能条]|删除|去掉|重构|搭建?|建一?[个]|创建|生成|安装|装一?下|部署|跑起来|运行|启动|测试|调试|debug|扩展|升级|迁移|接入|集成|优化|refactor|implement|build|create|deploy|run\b|test|add\b|remove|migrate|整理|清洗|爬取|脚本|自动化|接入|把关|审完|提交|merge|合并|rebase)/i
+    .test(text);
+  if (actionWord) return true;
+  const questionOnly = /(?:是干什么的|是什么|什么意思|为什么|解释(?:一下)?|介绍(?:一下)?|讲讲|说说|有什么区别|有什么不同|哪个好|怎么看|如何理解|翻译|总结一下|概括|有多大|有多少|靠不靠谱)/i
+    .test(text);
+  return !questionOnly;
+}
 
 /**
  * Byte-identical file-tool block shared by GUI and CLI (single source of truth

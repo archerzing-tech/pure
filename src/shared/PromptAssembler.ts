@@ -20,6 +20,7 @@ import {
   FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
+  INFORMATION_VALUE_PRINCIPLE,
   INSERTION_PROTOCOL_PROMPT,
   LEDGER_PROTOCOL_PROMPT,
   LOGICAL_TRAPS_PROMPT,
@@ -37,6 +38,7 @@ import {
   detectVisualRequest,
   wantsCapabilityLadder,
   wantsDelegationMechanics,
+  wantsHandsOnWorkflow,
   type UserTurnContext,
 } from './promptLayers';
 
@@ -558,7 +560,6 @@ export class PromptAssembler {
       // printer; dropping it under budget pressure is exactly the failure
       // mode required-ness exists for.
       fragment('complex_task', COMPLEX_TASK_PROTOCOL_PROMPT, 111, true),
-      fragment('workflow', WORKFLOW_PROMPT, 90),
       fragment('completion', COMPLETION_PROMPT, 80),
       // Multi-agent delegation + delivery discipline are REQUIRED so they are
       // never dropped under budget pressure (selectFragments always keeps
@@ -600,10 +601,21 @@ export class PromptAssembler {
       fragment('environment', context.environment ?? '', 60),
       fragment('capabilities', `<capabilities>${capabilities ? `\n${capabilities}` : ''}\n</capabilities>`, 75),
       fragment('task_mode', buildMode(context.mode), 85),
+      // information_value（表达纪律，常驻）必须排在所有按请求闸门的尾块
+      // （visualization/ladder/mechanics/workflow）之前：问答回合止于它，
+      // 动手/可视回合 = 问答序列 + 尾块，公共前缀才不被打破（2026-10-27）。
+      fragment('information_value', INFORMATION_VALUE_PRINCIPLE, 57),
       // ── 按请求装配的可视化细则（尾区，随回合变化）──
       ...buildVisualFragments(context.surface, context.imageGeneration === true, userText),
       // ── 按请求装配的「大头」细则（尾区）：安装路径梯 + 委派机制段 ──
       ...buildRequestDetailFragments(context, userText),
+      // ── workflow 闸门块（2026-10-27）住在数组绝对尾部──
+      // 渲染序 = 数组序（priority 只管预算裁剪序）：闸门随请求出现/消失，
+      // 坐数组中部就会插进共享块中间、打破前缀缓存纪律。7 条操作流程只对
+      // 「会动手」的请求装配（wantsHandsOnWorkflow），纯问答轮省 ≈830 tokens；
+      // work_invariant（required）与 capability_gap CORE 兜底先读后改与换路线。
+      // p25 = 预算紧张时它先被裁（priority 只影响裁剪序）。
+      fragment('workflow', wantsHandsOnWorkflow(userText ?? '', context.mode) ? WORKFLOW_PROMPT : '', 25),
     ].filter((item): item is PromptFragment => item !== null);
   }
 

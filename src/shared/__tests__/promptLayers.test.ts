@@ -31,9 +31,10 @@ import {
   stripUserTurnContext,
   wantsCapabilityLadder,
   wantsDelegationMechanics,
+  wantsHandsOnWorkflow,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
-import { INCREMENTAL_BUILD_PROMPT } from '../agentBehavior';
+import { INCREMENTAL_BUILD_PROMPT, INFORMATION_VALUE_PRINCIPLE } from '../agentBehavior';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
   it('carries the immutable identity + operating contract', () => {
@@ -149,6 +150,23 @@ describe('L1 behavior contracts', () => {
     // 定死即八股，机器侧轨迹由运行时（活动卡/可重放日志）原生承担。
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('assumptions.md');
     expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('UPGRADE.md');
+  });
+
+  it('gates the 7-step workflow behind hands-on requests (2026-10-27 闸门化)', () => {
+    // 召回优先：动作词命中即带；纯问答特征且无动作词才免带；其余默认带。
+    for (const hit of ['修一下这个 bug', '帮我实现一个导出功能', '装一下 ffmpeg', '把这个接口迁移到 v2', 'fix the failing test']) {
+      expect(wantsHandsOnWorkflow(hit)).toBe(true);
+    }
+    for (const miss of ['这个函数是干什么的？', 'Promise 和 async/await 有什么区别？', '解释一下事件循环', '翻译这段报错']) {
+      expect(wantsHandsOnWorkflow(miss)).toBe(false);
+    }
+    // build/plan 模式无条件带（复杂任务纪律不赌闸门）；未知措辞默认带。
+    expect(wantsHandsOnWorkflow('随便聊聊', 'build')).toBe(true);
+    expect(wantsHandsOnWorkflow('随便聊聊', 'plan')).toBe(true);
+    expect(wantsHandsOnWorkflow('帮我看看这段代码有什么问题')).toBe(true);
+    // 信息价值原则不随 workflow 闸门走：表达纪律在问答轮同样适用。
+    expect(INFORMATION_VALUE_PRINCIPLE).toContain('信息价值优先原则');
+    expect(WORKFLOW_PROMPT).not.toContain('信息价值优先原则');
   });
 
   it('re-exports the always-on workflow + completion contracts', () => {
