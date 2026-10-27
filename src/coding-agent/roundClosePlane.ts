@@ -27,6 +27,10 @@ export interface QueuedTask {
   /** 第 5 期调度：队列优先级，数值越大越急（见 shared/scheduling.ts）。缺省
    *  = 队列级（QueuedTask 早于本字段诞生，旧快照与 rule/net 路径都不传它）。 */
   priority?: number;
+  /** 重入时宿主要不要回显用户气泡（缺省要）。回合残留的 steer 与押账重入
+   *  置假——插话时 echoUser 已显示过原话，重入只补历史账（2026-10-27 真
+   *  机复验：再画一遍就是用户报的「重复显示两遍」）。队列任务照常显。 */
+  echoUser?: boolean;
 }
 
 /** 一条账的优先级读数：没带 priority 的一律按队列级算（旧档兜底，唯一口径）。 */
@@ -139,7 +143,7 @@ export class RoundClosePlane {
       const ri = this.heldInsert;
       this.heldInsert = null;
       this.deps.supersedeAutoContinue(); // folding in supersedes the '继续' chain
-      this.deps.reenter(ri);
+      this.deps.reenter({ ...ri, echoUser: false });
       return;
     }
     // 插话重构 — steers left over when the turn already ended never reached a
@@ -157,7 +161,7 @@ export class RoundClosePlane {
     if (leftoverSteers.length > 0) {
       this.deps.supersedeAutoContinue(); // the user's own words supersede '继续'
       const text = leftoverSteers.map((entry) => entry.displayText || entry.message.content).join('\n');
-      this.deps.reenter({ text, images: leftoverSteers.flatMap((entry) => entry.images ?? []), displayText: text, ts: Date.now() });
+      this.deps.reenter({ text, images: leftoverSteers.flatMap((entry) => entry.images ?? []), displayText: text, ts: Date.now(), echoUser: false });
       return;
     }
     if (this.queue.length > 0 && !this.deps.autoContinuePending()) {

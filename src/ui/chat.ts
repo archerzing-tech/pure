@@ -50,7 +50,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText } from '../shared/insertionMessaging';
+import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText, steerFallbackReceipt } from '../shared/insertionMessaging';
 import { QUEUED_PRIORITY } from '../shared/scheduling';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -1875,7 +1875,7 @@ export class ChatController {
     resumeFallback: () => this.delegationControl.settleResumesFallback(),
     settleReceipts: () => this.settleInterjectReceipts(),
     supersedeAutoContinue: () => this.autoContinue.cancel(),
-    reenter: (t) => void this.send(t.text, t.images, t.displayText),
+    reenter: (t) => void this.send(t.text, t.images, t.displayText, false, [], undefined, [], { skipUserBubble: t.echoUser === false }),
     narrateHandoff: (remaining) => {
       this.renderQueueCard();
       this.addStatusBubble(remaining > 0
@@ -3563,27 +3563,13 @@ export class ChatController {
       displayText: text,
       images,
     });
-    // 现场收执优先（2026-10-15 用户定调「不要固定话术，要结合上下文说明会
-    // 怎么做」）：裁决器判的那一刻就在现场（看得见阶段与插话原话），它写的
-    // 那两句点名了用户插话里的实际对象；固定口径降为兜底——规则/安全网路径
-    // 没有裁决器在场，裁决器没写时照样有话说。
+    // 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎
+    // 么做」）：裁决器判的那一刻就在现场，它写的两句点名插话里的实际对象。
+    // 2026-10-27 真机复验：固定口径三族（parent/广播/点名）全废——独立于
+    // 语境的模板句按构照就是错的。兜底也必须带着用户原话（steerFallbackReceipt）。
     this.settleAck(ack,
       receipt?.trim()
-      ?? (target === 'parent'
-        // 单任务场景（无委派在飞才会落到 parent）：话进的是 pure 自己下个
-        // THINK 边界，没有"转给谁"——「已转达」像在转给第三人（2026-09-28
-        // 用户指出）。只说事实：活不停，下个动作带上这句。
-        ? '收到——活不停，下个动作就带上这句。'
-        : typeof target === 'string'
-          ? // 广播到全部在飞委派：几路就说几路，一路就别装多路（2026-09-28
-            // 收执纪律：收执里的「几路」必须等于真实的在飞数）。
-            (() => {
-              const flying = this.agentActivities.filter((item) => item.status === 'running').length;
-              return flying > 1
-                ? `在跑的 ${flying} 路都收到了——各自下个动作就带上。`
-                : '在跑的那路收到了——下个动作就带上。';
-            })()
-          : `已直接转给「${target.branchName}」那一路——它下个动作就带上，其余照跑。`));
+      ?? steerFallbackReceipt(text));
   }
 
   /** 计划必须是当着用户想出来的（2026-09-26 用户定调）：一次流式 LLM 调用，
@@ -4202,7 +4188,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     }
   }
 
-  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void, userPathRepairs: PathRepair[] = [], opts: { skipUserPersist?: boolean } = {}) {
+  async send(userText: string, userImages: MessageImage[] = [], displayUserText = userText, isAuto = false, userAttachments: import('../shared/types').MessageAttachment[] = [], attachmentViewer?: (attachment: import('../shared/types').MessageAttachment) => void, userPathRepairs: PathRepair[] = [], opts: { skipUserPersist?: boolean; skipUserBubble?: boolean } = {}) {
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
@@ -4298,8 +4284,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // ghost message remains.
     const liveTurn = this.beginLiveTurn(displayUserText || userText);
     // 重新生成（skipUserPersist）不重画用户气泡：那句话还挂在原位，回合
-    // 重跑的只是回复。后续的 remove/linkify 引用全部空安全。
-    const userBubble = opts.skipUserPersist ? null : this.addBubble('user', userText);
+    // 重跑的只是回复；残留重入（skipUserBubble）同理——插话时 echoUser 已
+    // 显示过，重入只补历史账，屏幕再来一遍就是用户报的「重复显示两遍」
+    // （2026-10-27）。后续的 remove/linkify 引用全部空安全。
+    const userBubble = opts.skipUserPersist || opts.skipUserBubble ? null : this.addBubble('user', userText);
     const userMessageAttachments = userAttachments.length > 0 ? userAttachments : undefined;
     const openUserAttachment = attachmentViewer;
 

@@ -275,7 +275,7 @@ describe('send feedback timing', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 重生成（skipUserPersist）不重画气泡——正常路径仍然在任何 await 之前
     // 同步上屏，锚钉在条件创建表达式本身。
-    const bubble = src.indexOf("const userBubble = opts.skipUserPersist ? null : this.addBubble('user', userText);");
+    const bubble = src.indexOf("const userBubble = opts.skipUserPersist || opts.skipUserBubble ? null : this.addBubble('user', userText);");
     const paint = src.indexOf('await yieldToNextPaint(turnController.signal);', bubble);
     const secondFrame = src.indexOf('requestAnimationFrame(() => requestAnimationFrame', src.indexOf('function yieldToNextPaint'));
     const linkify = src.indexOf('if (userBubble) linkifyPaths(userBubble);', bubble);
@@ -1145,7 +1145,7 @@ describe('plan overview completion state', () => {
     expect(depsBody.indexOf('isStreaming: () => this.isStreaming()')).toBeGreaterThan(-1);
     expect(depsBody.indexOf('activityCount: () => this.agentActivities.length')).toBeGreaterThan(-1);
     expect(depsBody.indexOf('autoContinuePending: () => this.autoContinue.pending')).toBeGreaterThan(-1);
-    expect(depsBody.indexOf('reenter: (t) => void this.send(t.text, t.images, t.displayText)')).toBeGreaterThan(-1);
+    expect(depsBody.indexOf('reenter: (t) => void this.send(t.text, t.images, t.displayText, false, [], undefined, [], { skipUserBubble: t.echoUser === false })')).toBeGreaterThan(-1);
     expect(depsBody.indexOf('timer: (fn, ms) => window.setTimeout(fn, ms)')).toBeGreaterThan(-1);
   });
 
@@ -1599,18 +1599,21 @@ describe('plan overview completion state', () => {
     expect(src.indexOf('strippedBranchIds: this.strippedBranchIds.size > 0 ? [...this.strippedBranchIds] : undefined')).toBeGreaterThan(-1);
   });
 
-  it('uses the judge-written receipt at the transit acks with fixed fallbacks intact (2026-10-15 现场收执)', () => {
-    // 用户定调「不要固定话术，要结合上下文说明会怎么做」：转达型收执（steer/
-    // 普通折入）优先用裁决器结合现场写的那两句；固定口径降为兜底；宿主事实
-    // 修正（没停成/已早派）压过现场话术——顺序即纪律。
+  it('uses the judge-written receipt at the transit acks; fixed fallbacks are gone (2026-10-27 固定话术全废)', () => {
+    // 用户定调「不要固定话术，要结合上下文说明会怎么做」（2026-10-15），
+    // 2026-10-27 真机复验再加码：固定口径三族（parent/广播/点名）整体删除
+    // ——现场收执缺席时兜底也必须带着用户原话（steerFallbackReceipt），
+    // 宿主事实修正（没停成/已早派）压过现场话术——顺序即纪律。
     const src = readSource(new URL('../chat.ts', import.meta.url));
     const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
-    // steer 收执：现场优先（receipt?.trim() ?? 固定口径链）。
+    // steer 收执：现场优先，兜底引用原话，固定句零存活。
     const steerFn = src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string): void {');
     expect(steerFn).toBeGreaterThan(-1);
     const steerBody = src.slice(steerFn, steerFn + 1800);
-    expect(steerBody.indexOf("receipt?.trim()\n      ?? (target === 'parent'")).toBeGreaterThan(-1);
-    expect(steerBody.indexOf("'收到——活不停，下个动作就带上这句。'")).toBeGreaterThan(-1);
+    expect(steerBody.indexOf('receipt?.trim()\n      ?? steerFallbackReceipt(text)')).toBeGreaterThan(-1);
+    expect(steerBody).not.toContain('活不停，下个动作就带上这句');
+    expect(steerBody).not.toContain('已直接转给');
+    expect(src).not.toContain('在跑的 ${flying} 路都收到了');
     // fold 收执：stopMissed → 早派 → 现场收执的顺序不可倒——前两臂是只有
     // 宿主知道的事实（没停成/已在跑），现场话术说不了谎也补不了位。
     const foldFn = src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: HTMLElement | null, cancels: boolean, stopMissed = false, receipt?: string): void {');

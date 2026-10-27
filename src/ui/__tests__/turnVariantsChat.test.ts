@@ -20,7 +20,9 @@ describe('turn variants · chat.ts wiring', () => {
     expect(gate).toBeGreaterThan(-1);
     const gateBody = src.slice(gate, gate + 400);
     expect(gateBody).toContain("kind: 'user_input'");
-    const bubble = src.indexOf('const userBubble = opts.skipUserPersist ? null : this.addBubble(\'user\', userText);');
+    // 渲染行三元的 skipUserBubble 分支是插话重入静默化（2026-10-27）：
+    // 残留 steer 重入只补历史账不重画气泡——同一条纪律，两处闸门。
+    const bubble = src.indexOf("const userBubble = opts.skipUserPersist || opts.skipUserBubble ? null : this.addBubble('user', userText);");
     expect(bubble).toBeGreaterThan(-1);
   });
 

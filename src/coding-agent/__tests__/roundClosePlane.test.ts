@@ -61,7 +61,9 @@ describe('RoundClosePlane dispatch 裁决序', () => {
     r.plane.holdInsert(task('换个方向', { displayText: '换个方向（原话）' }));
     r.plane.dispatch();
     expect(r.calls).toEqual(['settleReceipts', 'foldSettle', 'resumeFallback', 'supersede', 'reenter']);
-    expect(r.reentered).toEqual([task('换个方向', { displayText: '换个方向（原话）' })]);
+    // echoUser:false=重入静默化（2026-10-27）：插话时原话已显示过，重入
+    // 只补历史账不重画气泡。
+    expect(r.reentered).toEqual([task('换个方向', { displayText: '换个方向（原话）', echoUser: false })]);
     // 押账即消费：第二趟不再重入（旧插话不重放）。
     r.calls.length = 0;
     r.reentered.length = 0;

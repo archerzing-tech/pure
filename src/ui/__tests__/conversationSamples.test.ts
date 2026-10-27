@@ -273,6 +273,9 @@ interface ScriptedClassification {
    *  走 classifyInsertion 的真解析，回放保真。 */
   cancels_part?: boolean;
   adds_along?: boolean;
+  /** 现场收执（2026-10-15 定调，2026-10-27 扩为凡处置必写）：剧本原样过
+   *  解析面，宿主 settleAck 优先用它——固定口径三族已废。 */
+  receipt?: string;
   /** 模型点名（2026-10-10 模型判断、宿主执行）：完整分类回包里的
    *  stop_branch（分类调用读）；聚焦点名调用读顶层的 call_id。 */
   stop_branch?: { call_id: string };
@@ -592,9 +595,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('1a 定向投递（判例1）：在飞时点名某支 → 直达那支（区分词点名），没点名才广播', async () => {
+    // 剧本顺序=匹配语义：scriptedLlm 按数组序 find，而第二次 classify 的
+    // 上下文里已带着第一次插话的历史（含「竞品」二字）——「方向」必须排在
+    // 「竞品」前面，否则第二次判定会被历史命中拉回第一个剧本。
     const llm = scriptedLlm([
-      { match: '竞品', cls: { relation: 'supplement', reason: 'redirect the competitor branch', confidence: 0.9 } },
-      { match: '方向', cls: { relation: 'supplement', reason: 'general tightening', confidence: 0.9 } },
+      { match: '方向', cls: { relation: 'supplement', reason: 'general tightening', confidence: 0.9, receipt: '两路在跑的调研都收到了——方向收紧这点，各自动作里带上。' } },
+      { match: '竞品', cls: { relation: 'supplement', reason: 'redirect the competitor branch', confidence: 0.9, receipt: '竞品那路记下了，重点改看下沉市场的定价，其余的照跑。' } },
     ]);
     const h = makeHarness(llm);
     // 两支在飞（蓝本判例1 场景缩影），宿主唯一账本 agentActivities 供寻址。
@@ -604,16 +610,17 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     ];
 
     // 点名：「竞品」「定价」只在竞品分析员的匹配面里 → 直达那支，其余照跑。
+    // 收执=裁决器现场写的两句（2026-10-27 固定口径三族全废）。
     await h.chat.interject('竞品那支重点看下沉市场的定价。');
-    expect(assistantJoined(h.root)).toContain('已直接转给「竞品分析员」那一路——它下个动作就带上，其余照跑。');
+    expect(assistantJoined(h.root)).toContain('竞品那路记下了，重点改看下沉市场的定价，其余的照跑。');
     expect(h.chat.steerBus.entries()).toHaveLength(1);
     expect(h.chat.steerBus.entries()[0].target).toEqual({ branchCallId: 'call_b', branchName: '竞品分析员' });
     expect(h.chat.steerBus.entries()[0].displayText).toBe('竞品那支重点看下沉市场的定价。');
 
-    // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。收执里的
-    // 「几路」等于真实在飞数（2026-09-28 收执纪律：两支就说两路，不空说）。
+    // 没点名：候选词两边都不沾 → 分不清宁可广播，给在飞的全体。现场收执
+    // 里的「两路」等于真实在飞数（2026-09-28 收执纪律：两支就说两路，不空说）。
     await h.chat.interject('方向都再收紧一点。');
-    expect(assistantJoined(h.root)).toContain('在跑的 2 路都收到了——各自下个动作就带上。');
+    expect(assistantJoined(h.root)).toContain('两路在跑的调研都收到了——方向收紧这点，各自动作里带上。');
     expect(h.chat.steerBus.entries()).toHaveLength(2);
     expect(h.chat.steerBus.entries()[1].target).toBe('all');
   });
@@ -625,9 +632,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
 
     await h.chat.interject('报告文案再口语一点。');
-    // 单任务场景（无委派在飞）：话进 pure 自己下个 THINK 边界，收执不说
-    // 「已转达」（没有收件人，2026-09-28 用户指出），只说活不停、带上这句。
-    expect(assistantJoined(h.root)).toContain('收到——活不停，下个动作就带上这句。');
+    // 单任务场景（无委派在飞）：话进 pure 自己下个 THINK 边界。裁决器这个
+    // 剧本没写 receipt → 兜底也必须带着用户原话（2026-10-27 固定话术全废：
+    // 「活不停带上这句」那族按构照就是错的）。
+    expect(assistantJoined(h.root)).toContain('收到，「报告文案再口语一点。」——手头的活不停，下个动作就带上它。');
     expect(h.chat.abortController.signal.aborted).toBe(false);
     // 回合收尾时没被 THINK 边界带走的 steer，作为下一回合开场——不丢。
     // 1a + 渲染一致性（2026-09-25）：重入是用户原话，不是引擎框架文——
@@ -636,6 +644,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.sends).toHaveLength(1);
     expect(h.sends[0]).toContain('报告文案再口语一点。');
     expect(h.sends[0]).not.toContain('【用户插话·顺路带上】');
+    // 渲染一致性（2026-10-27 重入静默化）：残留重入只补历史账不再画气泡
+    // ——插话时 echoUser 已显示过，屏幕上用户原话始终只有一遍。
+    expect(userJoined(h.root).split('报告文案再口语一点。').length - 1).toBe(1);
 
     // 停是快路径：正则直判，一次 LLM 都不花。（steer 的回合已收尾，
     // 现在是下一个正在跑的回合里叫停。）

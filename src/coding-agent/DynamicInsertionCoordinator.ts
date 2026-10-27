@@ -298,6 +298,9 @@ export class DynamicInsertionCoordinator {
         // 第 5 期「这个急」提级：裁决器判定这件活加急（只对排队新活有意义）
         // ——宿主据此在队列里插队并换提级收执。缺省绝不自己补。
         ...(result.urgent === true ? { urgent: true } : {}),
+        // 现场收执（2026-10-15 定调，2026-10-27 扩为凡处置必写）：裁决器
+        // 结合现场写的那两句随信号走——编排器优先转达给宿主，缺席才兜底。
+        ...(result.receipt ? { receipt: result.receipt } : {}),
       },
     }, { unrelatedKind: result.unrelatedKind, ...(result.atoms?.length ? { atoms: result.atoms } : {}) });
   }

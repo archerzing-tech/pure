@@ -242,6 +242,15 @@ export const HOLD_INVARIANTS = {
  *  folded=true = 这句会并进手头的活（纳入执行的真实承诺）；false = 不触碰
  *  主线，只说记下了——对旁答/无关的话说「并进」就是编造。topic 传插话原话
  *  或其要点，没有可引的就显式传 null。 */
+/** steer 收执兜底（2026-10-27 真机复验：固定话术全废）。裁决器 receipt 是
+ *  唯一现场来源；规则/安全网路径没有裁决器在场，兜底也必须带着用户的原话
+ *  ——独立于语境的固定句（「活不停带上这句」那族）按构照就是错的。 */
+export function steerFallbackReceipt(text: string): string {
+  const gist = text.trim().replace(/\s+/g, ' ');
+  const shown = gist.length > 42 ? `${gist.slice(0, 42)}…` : gist;
+  return `收到，「${shown}」——手头的活不停，下个动作就带上它。`;
+}
+
 export function holdReleaseReceipt(topic: string | null, folded: boolean): string {
   const said = topic ? `“${topic}”` : '这句';
   return folded

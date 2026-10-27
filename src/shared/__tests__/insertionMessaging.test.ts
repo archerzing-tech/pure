@@ -36,6 +36,7 @@ import {
   truePauseReentryText,
   frozenSideEffectReceipt,
   selfCheckClearReceipt,
+  steerFallbackReceipt,
   HOLD_INVARIANTS as HOLD_INV,
 } from '../insertionMessaging';
 import { expectNoDefaultParams } from './arityLock';
@@ -470,5 +471,25 @@ describe('队列交接框架（2026-10-21 刀 C）', () => {
     expectNoDefaultParams([
       ['queuedHandoffText', 1, queuedHandoffText],
     ]);
+  });
+});
+
+describe('steer 收执兜底（2026-10-27 固定话术全废）', () => {
+  it('兜底必须带着用户原话——独立于语境的固定句按构照就是错的', () => {
+    const out = steerFallbackReceipt('你就帮我做一个实施方案即可');
+    expect(out).toContain('你就帮我做一个实施方案即可');
+    expect(out).toContain('手头的活不停');
+    // 长原话截断但保留开头（gist 在前）。
+    const long = steerFallbackReceipt('帮我把这个方案里面的市场分析部分再扩充一下，然后顺便把竞品定价策略也纳入进来对比着看，最后把结论整理成一页纸的备忘录');
+    expect(long).toContain('…');
+    expect(long.indexOf('帮我把这个方案')).toBeGreaterThan(-1);
+  });
+
+  it('宿主接线：steerRunningTurn 的兜底位换成 steerFallbackReceipt，固定句零存活', () => {
+    const src = readFileSync(new URL('../../ui/chat.ts', import.meta.url), 'utf8');
+    expect(src).toContain('?? steerFallbackReceipt(text)');
+    expect(src).not.toContain('收到——活不停，下个动作就带上这句');
+    expect(src).not.toContain('已直接转给「${target.branchName}」那一路');
+    expect(src).not.toContain('路都收到了——各自下个动作就带上');
   });
 });

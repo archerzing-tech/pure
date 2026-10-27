@@ -479,6 +479,9 @@ export interface InsertionClassification {
    *  Absent/ignored by a provider → inputDefaultConfidence() (see there for why
    *  the default sits ABOVE the gate). */
   confidence: number;
+  /** 现场收执（2026-10-15 定调，2026-10-27 凡处置必写）：裁决器结合现场写
+   *  的一两句，编排器转达宿主 settleAck 优先用它——独立于语境的固定句已废。 */
+  receipt?: string;
   /** True when the model answered WITHOUT a confidence number, so the value
    *  above is inputDefaultConfidence() rather than its own judgement. Without
    *  this flag a default that keeps the app quiet would be indistinguishable
@@ -705,6 +708,9 @@ export async function classifyInsertion(
       // 不带标记，宿主只按这一个读取点决定要不要跑自查。
       ...(parsed.self_check_needed === true || parsed.selfCheckNeeded === true ? { selfCheckNeeded: true } : {}),
       ...(typeof rawStopId === 'string' && rawStopId.trim() ? { stopBranch: { callId: rawStopId.trim() } } : {}),
+      // 现场收执（2026-10-15 定调，2026-10-27 扩为凡处置必写）：随判定一起
+      // 回来，编排器转达宿主优先用它；缺席由宿主兜底（steerFallbackReceipt）。
+      ...(typeof parsed.receipt === 'string' && parsed.receipt.trim() ? { receipt: parsed.receipt.trim().slice(0, 240) } : {}),
     };
   }
   return fallback;
@@ -789,7 +795,7 @@ Decide:
 - Removal or pause of the running work — or you cannot honestly read the message as new different work: set "cancels_part": true. If exactly ONE running branch clearly matches what the message removes, ALSO set "stop_branch": {"call_id": "<id copied EXACTLY from the roster>"} — the host pauses that branch the moment you name it; never invent or shorten an id; when two could match, name none and let the removal fold into the result instead of gambling.
 - Clearly a request for new, different work that merely collides with a running branch: leave "cancels_part" off — the host will tell the user that work is already running.
 
-When "cancels_part" is true, also write "receipt": one or two short sentences the user sees the moment their remark lands — you speaking mid-work, plain prose, the user's language, no internal jargon (never 支/委派/分类/排队). Say what you understood (name the actual thing) and what happens next (the named work stops leaving the result / the rest carries on). Honesty: describe what WILL happen, never claim it already has.
+ALSO write "receipt" for EVERY verdict that does something to the running work (supplement, emphasize, meta, change, correction, misunderstanding, cancels_part): one or two short sentences the user sees the moment their remark lands — you speaking mid-work, plain prose, the user's language, no internal jargon (never 支/委派/分类/排队/转向). Generic filler like 「收到——活不停，下个动作就带上这句」 is wrong by construction (2026-10-27 用户真机复验): name the actual thing from the user's words and say what happens next (the named work stops leaving the result / the addition rides along with the next step / the rest carries on). Honesty: describe what WILL happen, never claim it already has.
 
 Return ONLY one JSON object:
 {"cancels_part":true,"stop_branch":{"call_id":"<exact id from the roster, or omit>"},"receipt":"<...>","reason":"<one short line>","confidence":<0..1>}`;
