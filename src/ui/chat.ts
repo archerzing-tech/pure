@@ -1870,6 +1870,9 @@ export class ChatController {
         : '队列：现在处理排下的那件。', false, false, 'info');
     },
     timer: (fn, ms) => window.setTimeout(fn, ms),
+    // 空手而归广播成集合变更：通知器/托盘的合并口径（streaming ∪ pending 活）
+    // 靠这一拍感知「真收尾」，否则静默排空的会话永远挂在在跑集合里。
+    onDispatchIdle: () => notifyRunningSessionsChanged(),
   });
   /** S2 第六刀（P3-2）— 插话分类编排住 InterjectOrchestrator（宿主无关，
    * CLI/通道同接）：interject() 入口与序列化链、classifyAndApply 的裁决序
@@ -8785,6 +8788,13 @@ export interface OpenSessionResult {
 const runningSessionIds = new Set<string>();
 const runningSessionsListeners = new Set<() => void>();
 
+/** 广播 running 集合可能变了：流态起落之外，收尾派发空手而归（RoundClosePlane
+ *  onDispatchIdle）也是一次集合变更——pending 活的静默排空（如已照办的折入
+ *  账清账）没有流态事件，不补这一拍，合并口径的订阅者就永远等不到收尾边界。 */
+function notifyRunningSessionsChanged(): void {
+  runningSessionsListeners.forEach((cb) => cb());
+}
+
 /** An input the user asked to run at a named moment. */
 export interface TimedInputRequest {
   text: string;
@@ -8903,7 +8913,7 @@ export class SessionChatManager {
       const changed = streaming ? !runningSessionIds.has(sessionId) : runningSessionIds.has(sessionId);
       if (streaming) runningSessionIds.add(sessionId);
       else runningSessionIds.delete(sessionId);
-      if (changed) runningSessionsListeners.forEach((cb) => cb());
+      if (changed) notifyRunningSessionsChanged();
       // 开跑即点亮（2026-09-26 用户反馈）：从 landing/新对话发出的第一回合
       // 不经过任何 makeActive——侧栏的选中态还停在 null，任务卡片冒进列表
       // 却没有选中态。可见会话一开跑就把高亮钉到它身上；后台会话开跑不抢
@@ -9087,6 +9097,19 @@ export class SessionChatManager {
     return this.controllers.get(sessionId) ?? null;
   }
 
+  /** Snapshot of sessions whose controller holds unfinished round-close work
+   *  (queued tasks / held inserts / a pending 继续 chain / …). Notification,
+   *  tray and worktree surfaces union this with the streaming set: a chain's
+   *  inter-round gap (streaming=false for ~1.2s) must not read as "settled" —
+   *  the true settle edge is dispatch going idle (onDispatchIdle → set-change). */
+  pendingWorkSessionIds(): string[] {
+    const ids: string[] = [];
+    for (const [sessionId, controller] of this.controllers) {
+      if (controller.hasPendingCloseWork()) ids.push(sessionId);
+    }
+    return ids;
+  }
+
   /** The transcript host of a live session (roadmap 5.2: settle-notification
    * classification probes the settled transcript's tail). Null when the
    * controller is not live. */
@@ -9155,7 +9178,7 @@ export class SessionChatManager {
     }
     this.hosts.delete(sessionId);
     this.controllers.delete(sessionId);
-    if (runningSessionIds.delete(sessionId)) runningSessionsListeners.forEach((cb) => cb());
+    if (runningSessionIds.delete(sessionId)) notifyRunningSessionsChanged();
     if (this.current === controller) {
       this.current = null;
       this.currentHost = null;

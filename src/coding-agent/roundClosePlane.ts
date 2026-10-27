@@ -65,6 +65,12 @@ export interface RoundCloseDeps {
   narrateHandoff: (remaining: number) => void;
   /** 收尾派发的延时器（GUI 注入 window.setTimeout 包装；ui 层依赖不内传）。 */
   timer: (fn: () => void, ms: number) => unknown;
+  /** dispatch 空手而归（本趟没有任何重入）后的宿主钩子：这就是「真收尾」
+   *  时刻——通知/托盘/侧栏把 streaming ∪ pending 活当「在跑」口径后，链轮
+   *  间间隙（streaming=false）与队列交接都不是收尾边界，静默排空（如已照办
+   *  的折入账清账）更没有流态事件，这一拍补上边界（2026-10-27 SettleNotifier
+   *  判例）。可选缝：CLI 中性构造不接。 */
+  onDispatchIdle?: () => void;
 }
 
 export class RoundClosePlane {
@@ -117,6 +123,9 @@ export class RoundClosePlane {
    * of starting a second concurrent turn. */
   dispatch(): void {
     if (this.deps.isStreaming()) return;
+    // 本趟是否重入了新回合：重入的 dispatch 不是收尾边界（streaming 马上会
+    // 亮起来），只有空手而归才轮到 onDispatchIdle 说话。
+    let reentered = false;
     // 回执的账在这里结：收尾派发点就是"承诺的动作已兑现"的时刻——停的收尾
     // 落定、被留下的插话正要重入、排队的活开始交接，微光都该停了。
     this.deps.settleReceipts();
@@ -157,7 +166,11 @@ export class RoundClosePlane {
       // 话凭空开始跑，没有这句衔接读起来就是无中生有。
       this.deps.narrateHandoff(this.queue.length);
       this.deps.reenter(t);
+      reentered = true;
     }
+    // 空手而归 = 「真收尾」时刻：宿主据此广播 running 集合变更，通知器在
+    // 这一拍才把会话记成收尾（重入路径提前 return，不会走到这里）。
+    if (!reentered) this.deps.onDispatchIdle?.();
   }
 
   /** 第 5 期调度：取**最高优先级**的一项（同级 FIFO）。队列通常已按优先级

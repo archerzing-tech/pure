@@ -18,6 +18,9 @@ tauri-plugin-shell = { version = "2" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
+# 单实例锁（2026-10-27 后台异步三小片）：双开 = 两个 webview 引擎写同一份
+# 会话账本。第二次启动把已有实例带回前台后自己退出。
+tauri-plugin-single-instance = "2"
 notify-rust = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,8 +39,8 @@ quick-xml = "0.41"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSImage", "NSBitmapImageRep"] }
-objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSImage", "NSBitmapImageRep", "NSApplication", "NSDockTile"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSDictionary", "NSString", "NSProcessInfo"] }
 objc2-core-location = { version = "0.3.2", features = ["CLLocationManager"] }
 objc2-av-foundation = { version = "0.3.2", features = ["AVCaptureDevice", "AVFCapture", "AVMediaFormat", "block2"] }
 block2 = "0.6.2"

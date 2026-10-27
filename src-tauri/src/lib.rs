@@ -17500,6 +17500,33 @@ fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification)
     Ok(())
 }
 
+// ═══ Dock badge (2026-10-27 后台异步三小片) ═══
+// 未读的后台结果数打到 macOS Dock 图标上——「派活走人」回来时有一眼可见的
+// 回看抓手。徽标只是呈现，账在前端（localStorage 的 pure_unread_settles）。
+// 非 macOS 没有对等语义（任务栏不挂数字），空操作。
+#[tauri::command]
+fn set_dock_badge(app: tauri::AppHandle, count: u32) {
+    #[cfg(target_os = "macos")]
+    {
+        // NSApp/dockTile 只许在主线程上摸：命令线程不定，甩过去。
+        let _ = app.run_on_main_thread(move || {
+            use objc2_app_kit::NSApplication;
+            use objc2_foundation::NSString;
+            let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+            let dock = NSApplication::sharedApplication(mtm).dockTile();
+            if count > 0 {
+                dock.setBadgeLabel(Some(&NSString::from_str(&count.to_string())));
+            } else {
+                dock.setBadgeLabel(None);
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, count);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Tray session list (roadmap 5.3)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -17521,6 +17548,57 @@ struct TrayHandle(StdMutex<Option<tauri::tray::TrayIcon>>);
 // decide hide-vs-quit without owning session state itself.
 #[derive(Default)]
 struct TraySessions(StdMutex<Vec<TraySessionItem>>);
+
+// ═══ App Nap guard (2026-10-27 后台异步三小片) ═══
+// 窗口藏进托盘后，macOS 的 App Nap 会压低 WKWebView 的定时器节流上限
+// （auto-continue 的 1.2s 排程、收尾派发的 40ms 拍、流式渲染都住在 webview
+// JS 里）——「后台继续跑」就成了碰运气。藏窗且还有会话在跑时持一份
+// user-initiated activity 断言（UserInitiatedAllowingIdleSystemSleep：只免
+// App Nap，不拦系统息屏），窗口回前台或任务清空即释放。非 macOS 没有
+// App Nap，全是空操作。
+#[cfg(target_os = "macos")]
+struct NapToken(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+// SAFETY：activity token 是 NSProcessInfo 颁发的透明句柄，beginActivity/
+// endActivity 本身线程安全；跨线程持有只为配对释放，不借它碰任何 UI 对象。
+// （tauri 的 manage 要求 Send+Sync，而 Retained<ProtocolObject> 默认两者皆无。）
+#[cfg(target_os = "macos")]
+unsafe impl Send for NapToken {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for NapToken {}
+#[cfg(not(target_os = "macos"))]
+type NapToken = ();
+
+#[derive(Default)]
+struct NapGuard(StdMutex<Option<NapToken>>);
+
+fn update_nap_guard(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let running = app.state::<TraySessions>().0.lock().map(|s| s.len()).unwrap_or(0);
+        let hidden = app
+            .get_webview_window("main")
+            .map(|w| !w.is_visible().unwrap_or(true))
+            .unwrap_or(true);
+        let guard = app.state::<NapGuard>();
+        let Ok(mut slot) = guard.inner().0.lock() else { return };
+        if hidden && running > 0 {
+            if slot.is_none() {
+                let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+                    NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+                    &NSString::from_str("pure background turn"),
+                );
+                *slot = Some(NapToken(token));
+            }
+        } else if let Some(token) = slot.take() {
+            unsafe { NSProcessInfo::processInfo().endActivity(&token.0) };
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+}
 
 /// What a window-close press means (2026-09-17 close policy, user option A):
 /// tasks running → hide to tray with a one-shot hint (5.1's async core
@@ -17614,6 +17692,9 @@ fn update_tray_sessions(
     if let Ok(mut slot) = mirror.0.lock() {
         *slot = sessions.clone();
     }
+    // 在跑任务集合变了就重算 Nap 断言：任务清空（藏窗时）要立刻放回去，
+    // 不能一直占着 user-initiated 名额。
+    update_nap_guard(&app);
     // The menu is rebuilt WHOLESALE on every push — menu items belong to
     // their menu, so the static entries (显示 / 退出) are recreated here too
     // rather than threaded through as partial state.
@@ -17671,10 +17752,17 @@ fn show_all_windows(app: &tauri::AppHandle) {
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.set_focus();
     }
+    // 回到前台，App Nap 断言不再需要。
+    update_nap_guard(app);
 }
 
 pub fn run() {
     tauri::Builder::default()
+        // 单实例锁：官方文档要求它必须是第一个注册的插件。回调把已有实例
+        // 带回前台（自己那次启动随即退出）。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_all_windows(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -17686,6 +17774,7 @@ pub fn run() {
         .manage(DownloadCancelRegistry::default())
         .manage(TrayHandle::default())
         .manage(TraySessions::default())
+        .manage(NapGuard::default())
         .setup(|_app| {
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full
@@ -17888,6 +17977,8 @@ pub fn run() {
                             .summary("pure")
                             .body(&body)
                             .show();
+                        // 藏窗且有任务在跑：持 App Nap 断言，别让节流掐死 webview。
+                        update_nap_guard(app);
                     }
                     CloseDisposition::Quit => {
                         api.prevent_close();
@@ -18031,6 +18122,8 @@ pub fn run() {
             load_session_stats,
             load_all_session_stats,
             send_turn_notification,
+            // Dock badge for unread background results (2026-10-27 后台异步三小片)
+            set_dock_badge,
             update_tray_sessions,
         ])
         .build(tauri::generate_context!())

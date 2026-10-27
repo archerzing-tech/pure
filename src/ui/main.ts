@@ -626,7 +626,7 @@ if (worktreeFinishHost) {
     host: worktreeFinishHost,
     chat: {
       currentId: () => chat.getSessionId(),
-      isRunning: (sessionId) => runningSessionIdList().includes(sessionId),
+      isRunning: (sessionId) => busySessionIdList().includes(sessionId),
       workspaceOf: (sessionId) => chat.controllerFor(sessionId)?.getWorkspace() ?? '',
     },
     // Plain-web dev mode has no execute_command bridge — no card, no noise.
@@ -659,6 +659,18 @@ async function resolveSessionTitle(sessionId: string): Promise<string> {
   return row?.title || workspaceBase(live) || `…${sessionId.slice(-4)}`;
 }
 
+// Sessions that are streaming OR hold unfinished round-close work (a pending
+// 继续 chain, queued tasks, held inserts, …). A chain's ~1.2s inter-round gap
+// (streaming=false) and a queue handoff must not read as "settled" — so the
+// notification / tray / worktree surfaces all key off this merged set, and the
+// true settle edge arrives when round-close dispatch goes idle (the set-change
+// event it fires). See hasPendingCloseWork for the exact pending inventory.
+function busySessionIdList(): string[] {
+  const ids = new Set(runningSessionIdList());
+  for (const id of chat.pendingWorkSessionIds()) ids.add(id);
+  return [...ids];
+}
+
 // ── System notifications (5.2) ──
 // A settled background session (done / waiting for your confirmation /
 // failed — classified from the transcript tail) raises a native notification;
@@ -666,7 +678,7 @@ async function resolveSessionTitle(sessionId: string): Promise<string> {
 // plain-web dev runtime there is no bridge — the notifier wires anyway and
 // the notify step stays a silent no-op.
 const settleNotifier = new SettleNotifier({
-  runningIds: () => runningSessionIdList(),
+  runningIds: () => busySessionIdList(),
   currentId: () => chat.getSessionId(),
   windowVisible: async () => {
     try {
@@ -683,9 +695,41 @@ const settleNotifier = new SettleNotifier({
   notify: async (payload) => {
     if (!isTauriRuntime()) return;
     await tauriInvoke('send_turn_notification', { notification: payload });
+    // 通知发出去 = 用户当时没在看：进未读账，钉在 Dock 上等回看。
+    const ledger = loadUnreadSettles();
+    ledger[payload.sessionId] = (ledger[payload.sessionId] ?? 0) + 1;
+    localStorage.setItem(UNREAD_SETTLES_KEY, JSON.stringify(ledger));
+    pushDockBadge();
   },
 });
 onRunningSessionsChanged(() => settleNotifier.refresh());
+
+// ── Dock badge for unread background results (2026-10-27 后台异步三小片) ──
+// The unread ledger rides localStorage (survives restarts — an unseen result
+// stays visible until seen); revealSession (notification click / tray 前往)
+// is the single "user is now looking" entry and clears the session's count.
+// Rust's set_dock_badge is a no-op off macOS.
+const UNREAD_SETTLES_KEY = 'pure_unread_settles';
+function loadUnreadSettles(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(UNREAD_SETTLES_KEY) ?? '{}') as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+function pushDockBadge(): void {
+  if (!isTauriRuntime()) return;
+  const total = Object.values(loadUnreadSettles()).reduce((sum, n) => sum + n, 0);
+  void tauriInvoke('set_dock_badge', { count: total }).catch(() => undefined);
+}
+function clearUnreadSettles(sessionId: string): void {
+  const ledger = loadUnreadSettles();
+  if (!ledger[sessionId]) return;
+  delete ledger[sessionId];
+  localStorage.setItem(UNREAD_SETTLES_KEY, JSON.stringify(ledger));
+  pushDockBadge();
+}
+void pushDockBadge();
 
 // ── Tray running-session list (5.3) ──
 // The frontend owns session state; every running-set change re-resolves the
@@ -694,7 +738,7 @@ onRunningSessionsChanged(() => settleNotifier.refresh());
 // (listeners bound below). Plain-web runtime has no tray — skip the push.
 async function pushTraySessions(): Promise<void> {
   if (!isTauriRuntime()) return;
-  const ids = runningSessionIdList();
+  const ids = busySessionIdList();
   const titles = await Promise.all(ids.map((id) => resolveSessionTitle(id)));
   const items = buildTraySessionItems(ids, (id) => titles[ids.indexOf(id)]);
   await tauriInvoke('update_tray_sessions', { sessions: items });
@@ -2201,6 +2245,7 @@ function revealSession(sessionId: string): void {
       // Window API unavailable — the session switch below still happens.
     }
   })();
+  clearUnreadSettles(sessionId);
   chat.setSessionId(sessionId);
 }
 

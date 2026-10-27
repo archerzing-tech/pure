@@ -182,4 +182,21 @@ describe('SettleNotifier', () => {
     await Promise.resolve();
     expect(calls).toEqual([]);
   });
+
+  it('the host unions pending round-close work into the set: a chain gap is not a settle', async () => {
+    // main.ts 的 busySessionIdList 把 pending 活并进 runningIds——auto-continue
+    // 链轮间 1.2s 间隙（streaming=false）里集合不缩，也就不误响「已完成」；
+    // 真正掉出集合只发生在 dispatch 空手而归（onDispatchIdle 补发的集合变更）。
+    const { deps, calls, setRunning } = makeDeps({ running: ['a'] });
+    const notifier = new SettleNotifier(deps);
+    notifier.refresh();
+    setRunning(['a']); // 链间隙：pending 活撑住集合，'a' 没掉出去
+    notifier.refresh();
+    expect(calls).toEqual([]);
+    setRunning([]); // 链终了（无排程无队列）：真收尾
+    notifier.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls.map((c) => c.sessionId)).toEqual(['a']);
+  });
 });

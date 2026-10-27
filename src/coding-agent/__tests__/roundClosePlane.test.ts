@@ -169,6 +169,39 @@ describe('RoundClosePlane 调度与清场', () => {
   });
 });
 
+describe('RoundClosePlane 真收尾边界（onDispatchIdle）', () => {
+  it('空手而归触发 onDispatchIdle；重入的 dispatch 不是收尾', () => {
+    const idles: number[] = [];
+    const r = rig({ onDispatchIdle: () => idles.push(1) });
+    r.plane.dispatch(); // 无账空手而归 → 空闲拍
+    expect(idles).toHaveLength(1);
+    r.plane.queueTask(task('排队的活'));
+    r.plane.dispatch(); // 重入 → streaming 马上会亮，不是收尾边界
+    expect(idles).toHaveLength(1);
+    r.plane.dispatch(); // 派完了再空手 → 又一拍空闲
+    expect(idles).toHaveLength(2);
+  });
+
+  it('streaming 让位的 early-return 不触发（回合还在跑）', () => {
+    const idles: number[] = [];
+    const r = rig({ onDispatchIdle: () => idles.push(1) });
+    r.setStreaming(true);
+    r.plane.dispatch();
+    expect(idles).toHaveLength(0);
+  });
+
+  it('队列让位续跑链（没派也没重入）仍是空闲拍——宿主靠 pending 探针自行分辨', () => {
+    const idles: number[] = [];
+    const r = rig({ onDispatchIdle: () => idles.push(1) });
+    r.plane.queueTask(task('排队的活'));
+    r.setPending(true);
+    r.plane.dispatch();
+    // 这一拍触发空闲，但 hasPendingCloseWork 的合并口径仍把会话算在跑
+    // （链排程中），通知器不会拿它当收尾——边界与口径各管各的。
+    expect(idles).toHaveLength(1);
+  });
+});
+
 describe('RoundClosePlane 优先级（第 5 期「调度」）', () => {
   it('queueTask 按优先级稳定插入：高的在前，同级保持到达序', () => {
     const r = rig();
