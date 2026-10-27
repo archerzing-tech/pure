@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "3.3.14",
+  "version": "3.3.15",
   "private": true,
   "type": "module",
   "scripts": {
@@ -75,7 +75,7 @@
     "katex": "^0.19.0",
     "leaflet": "^1.9.4",
     "marked": "^18.0.7",
-    "mermaid": "^11.16.0",
+    "mermaid": "^12.2.0",
     "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
     "openai": "^7.1.0",
     "pptxgenjs": "^4.0.1",
