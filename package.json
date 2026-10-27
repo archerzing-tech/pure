@@ -43,6 +43,7 @@
     "scan:defaults": "bun run scripts/scan-default-scenario-switches.ts",
     "agents:sync": "bun run scripts/sync-default-agents-md.ts",
     "build": "bun run typecheck && npx vite build && bun run cli:build",
+    "build:vite": "node node_modules/vite/bin/vite.js build",
     "build:cli": "bun run cli:build",
     "sign:mac": "bash scripts/sign-app.sh",
     "build:gui:mac": "bash scripts/build-gui-mac.sh",

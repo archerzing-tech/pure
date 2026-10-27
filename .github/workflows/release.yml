@@ -230,6 +230,11 @@ jobs:
         if: env.HAS_APPLE_SIGNING == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
+          # mermaid 12 让 vite 打包的内存峰值顶爆了 runner 上的 bun 堆（v3.3.15
+          # 首发 OOM exit 134）。vite build 切到 node 跑（build:vite script，认
+          # NODE_OPTIONS），forceRAMSize 兜底仍由 bun 拉起的进程。
+          NODE_OPTIONS: --max-old-space-size=5120
+          BUN_JSC_forceRAMSize: "5368709120"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -246,6 +251,9 @@ jobs:
         if: env.HAS_APPLE_SIGNING == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
+          # 同上：mermaid 12 的 vite 堆峰值，node 跑 vite + 显式堆上限
+          NODE_OPTIONS: --max-old-space-size=5120
+          BUN_JSC_forceRAMSize: "5368709120"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

@@ -5,7 +5,7 @@
   "identifier": "com.pure.agent",
   "build": {
     "beforeDevCommand": "bun run vite",
-    "beforeBuildCommand": "cp AGENTS.md src-tauri/AGENTS.md && bun run vite build",
+    "beforeBuildCommand": "cp AGENTS.md src-tauri/AGENTS.md && bun run build:vite",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
