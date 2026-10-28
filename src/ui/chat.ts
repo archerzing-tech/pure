@@ -1985,6 +1985,10 @@ export class ChatController {
         anchorRow.parentElement.insertBefore(row, anchorRow);
       }
       if (ref) ref.echo = bubble;
+      // U3 微点：插话回显自带「已收到」呼吸点，主线可见进展即摘（账在上面）。
+      bubble.classList.add('interject-pending');
+      bubble.title = t('interject.pendingHint');
+      this.interjectPendingEchoes.push(bubble);
     },
     logDecision: (decision, text) => {
       // 架构评审 v2 A1（S1-2）— 插话裁决进会话事件日志（远端 digest 的「这句
@@ -3278,6 +3282,20 @@ export class ChatController {
   /** 插话占位气泡的直接退场：收执占位（clarify 路径先 settle 后回显留下的
    *  那行）随引用匣摘除。ack 行机制退役后，各臂的 discard 不再有状态行可
    *  摘——只剩这个占位；引用清空，引用匣变回空匣。 */
+  /** 插话待消化的回显气泡（体验刀 U3，2026-10-28）：微点挂在回显上——
+   *  「已收到，等下一轮消化」的非文字信号（三声约束内：点不说话）。主线
+   *  任一可见进展即摘点：THINK 边界（inline 消化点）、收执落定（stop/
+   *  new_task/clarify）、旁答回注、回合终态兜底防悬挂。分支在飞的支内活动
+   *  不算主线进展，不许摘——那正是微点要覆盖的等待窗口。 */
+  private interjectPendingEchoes: HTMLDivElement[] = [];
+
+  /** 摘掉全部待消化微点。幂等，空账直接返回。 */
+  private settleInterjectEchoPending(): void {
+    if (this.interjectPendingEchoes.length === 0) return;
+    for (const el of this.interjectPendingEchoes) el.classList.remove('interject-pending');
+    this.interjectPendingEchoes = [];
+  }
+
   private discardAckRow(ack: InterjectEchoRef | null): void {
     const placeholder = ack?.receiptBubble ?? null;
     placeholder?.parentElement?.remove();
@@ -3294,6 +3312,8 @@ export class ChatController {
    *  无话、不上屏，引用匣清空即可——固定话术已全废。keepPending/kind 已随
    *  状态行+微光的过渡稿机制退役（刀 B 签名收缩）。 */
   private settleAck(ref: InterjectEchoRef | null, text: string | null): void {
+    // 收执或沉默落定即摘微点（U3）：宿主对插话有了可见动作。
+    this.settleInterjectEchoPending();
     if (!ref) return;
     const existing = ref.receiptBubble;
     if (text === null) {
@@ -3697,6 +3717,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       // 普通助手气泡：旁答的回答就是回答本身，不带任何机制标记。
       const bubble = this.addBubble('assistant', '');
       bubble.textContent = answer;
+      this.settleInterjectEchoPending(); // 旁答回注 = 已答（U3 摘点）
       this.recordSideAnswer(text, answer);
       // 账本 asked 账：旁答的问答对确定无疑，入账即回填。steerBus 的 internal
       // 消息只在当前回合存活，账本才跨回合跨重启——用户再问同一件事，翻账即答。
@@ -3706,6 +3727,7 @@ ${this.buildInsertionContext(images).slice(0, 3_200)}
       // 旁答失败 = 沉默：对话流里不出「没答上」的机制气泡，原话与空答案走
       // 账本回注，收尾模型统一作答（插话不丢由回注机制兜底）。
       this.recordSideAnswer(text, '');
+      this.settleInterjectEchoPending(); // 兜底回注已接手（U3 摘点）
       // 没答上：只记问题（settled=false）——没有答案的条目不进素材，零误导。
       this.sessionLedger = recordAsked(this.sessionLedger, { ts: Date.now(), question: text, source: 'sideAnswer' });
     }
@@ -6464,6 +6486,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             if (event.payload.to === 'THINK') {
               assistantIteration++;
+              this.settleInterjectEchoPending(); // U3：主线边界到达，插话进入消化
               // A new LLM iteration = a new tool round: close the previous
               // round's parallel grid so the next batch of tool rows starts
               // its own horizontal group.
@@ -7125,6 +7148,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
 
           case 'Error':
+            this.settleInterjectEchoPending(); // U3：错误终态兜底摘点
             if (event.payload.recoverable) {
               assessmentFlow?.setPhase('verify', '正在调整输出…');
             } else {
@@ -7146,6 +7170,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 
           case 'Completed': {
             this.updateTurnCount(event.payload.turnCount);
+            this.settleInterjectEchoPending(); // U3：回合终态兜底摘点
             // 本轮是否真的执行过工具（写文件/跑命令）：模型提问/确认轮没有 tool 消息，
             // 那不是交付完成而是“等待用户回答”——不触发交付验证卡，评估卡保持执行等待。
             const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');
@@ -7675,6 +7700,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             interjectReenter = event.payload.reason === 'reenter';
             if (!interjectReenter) assessmentFlow?.cancel(`运行已中断：${event.payload.reason}`);
             endThinking();
+            this.settleInterjectEchoPending(); // U3：中断终态兜底摘点（reenter 重开后由 THINK 边界再结算）
             if (event.payload.messages) {
               // 押账的规划叙述插在本回合用户消息后面（2026-09-27 时序修正）：
               // 中断回合同样先请求后思考，别让思考在回放里跑到提问前面。

@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "3.4.1-beta",
+  "version": "3.4.1-rc",
   "private": true,
   "type": "module",
   "scripts": {

@@ -540,7 +540,11 @@ export async function classifyInsertion(
   prompt: string,
   signal?: AbortSignal,
   images?: MessageImage[],
-  timeoutMs = 8_000,
+  // 插话首响的延迟上界（2026-10-28 体验刀 U1）：掐流重入期间用户盯着字停
+  // 半空，判定拖 8s 是死机感，2.5s ≈ 人被打断后的自然停顿上界。插话场景
+  // 延迟比判定精度贵——超时跌落 passthrough 原话直投，损失≈0（话本来就
+  // 该到主线模型面前）。其余判定调用（覆盖复核/点名停支）不在此路径，超时另议。
+  timeoutMs = 2_500,
 ): Promise<InsertionClassification> {
   // Fallback 是原话直投（inline），不是排队：低置信一律 inline（§一 细化 5）
   // ——宁可打扰不丢话。协调器对 fallbackUsed 的判定不信不猜，统一改走

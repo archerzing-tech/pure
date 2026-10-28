@@ -1632,6 +1632,28 @@ body.window-maximized #boot-splash {
   background: var(--bg-user);
   color: var(--text);
 }
+/* 插话待消化微点（2026-10-28 体验刀 U3）：插话回显气泡上的呼吸点——
+   「已收到，等下一轮消化」的非文字信号。摘点在主线可见进展（THINK 边界/
+   收执/旁答/回合终态）；分支在飞的支内活动不算主线进展，不许摘——那正是
+   微点要覆盖的等待窗口。点不说话，三声约束内。 */
+.bubble.interject-pending::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+  animation: interject-pending-pulse 1.3s ease-in-out infinite;
+}
+@keyframes interject-pending-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 0.85; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble.interject-pending::after { animation: none; opacity: 0.5; }
+}
 /* 11.2 — path-repair note inside a user bubble. Quiet by design: it reports what
    pure read the draft as (the bubble above keeps the user's own words), so it
    reads as a footnote, not as a warning, with the one action that matters —
