@@ -9,27 +9,24 @@
 // `cancels` / `addsAlong` 是契约字段期望：该报没报 = 漏报，不该报报了 = 误报，
 // 两者代价不对称，所以分开计数。
 //
-// 机械路径的事实来源是协调器导出的那些正则常量——这里绝不复制一份，否则
-// "哪些话会被机械路径抢答"这个报告就只是在描述这份语料自己。
-//
 // 语料有两段来源（2026-09-28）：上面 `CASES` 是人工核对过的（每句的 kind 与
 // 契约期望都可断言）；`HARVESTED_CASES` 是**诊断区审计自动收割**的疑点句——
 // 那句期望只由「它当初为什么被标疑点」推出来（取消味没报 cancels_part ⇒
 // 该报 cancels_part），未经人工复核，所以标 `expectation: 'suspected'`，
 // 统计时与断言段分开计。收割脚本：`scripts/harvest-insertion-corpus.ts`。
+//
+// 2026-10-28 框架改革刀 1：机械快路径正则族（STOP_RE/BRANCH_STOP_RE/
+// RESUME_BRANCH_RE/GOAL_CHANGE_RE/CANCEL_PART_RE/SCOPE_ADD_RE）已从协调器
+// 整体删除——判定全归裁决器，原话直投是唯一兜底。本模块随之撤掉机械命中的
+// 回放机器（mechanicalHits/mainHit，「哪句会被正则抢答」的对象已不存在）；
+// 语料数据本身（CASES 原句、kind/detail 期望、source 出处）按原样留档——
+// 它们记录的是当时裁决器的判词与出处，不是可再生的机械事实。
 
-import {
-  BRANCH_STOP_RE,
-  CANCEL_PART_RE,
-  GOAL_CHANGE_RE,
-  RESUME_BRANCH_RE,
-  SCOPE_ADD_RE,
-  STOP_RE,
-} from './DynamicInsertionCoordinator';
 import { HARVESTED_CASES } from './insertionCorpusHarvested';
 
 /** 机械路径会给出的处置（与裁决器应判的 kind 是两套词，分开标注，离线对照
- *  才不会把「停一支」和「整树停」混成一件事）。 */
+ *  才不会把「停一支」和「整树停」混成一件事）。2026-10-28 刀 1 后机械路径
+ *  已不存在，此词表只作语料 `detail` 期望的存档词汇（出处判例的处置档案）。 */
 export type Handled = 'stop' | 'branch-stop' | 'branch-resume' | 'goal-change' | 'steer-cancel' | 'task';
 
 /** 语料期望词表（v1 判定词，离线对照存档用）。生产判定面已切九类 relation
@@ -227,34 +224,12 @@ export const ASSERTED_CASES: Case[] = CASES;
 /** 全量语料 = 人工核对 + 诊断区审计收割。回归与回放都读这一份。 */
 export const ALL_CASES: Case[] = [...CASES, ...HARVESTED_CASES];
 
-export interface MechanicalHit {
-  name: string;
-  lane: 'main' | 'net';
-  gives: Handled;
-}
-
-/** 按协调器 decide() 的真实次序判定命中；"命中即返回"的语义在这里体现为
- *  「第一个 main 命中才作数」。 */
-export function mechanicalHits(text: string): MechanicalHit[] {
-  const hits: MechanicalHit[] = [];
-  if (BRANCH_STOP_RE.test(text)) hits.push({ name: 'BRANCH_STOP_RE', lane: 'main', gives: 'branch-stop' });
-  if (RESUME_BRANCH_RE.test(text)) hits.push({ name: 'RESUME_BRANCH_RE', lane: 'main', gives: 'branch-resume' });
-  if (STOP_RE.test(text)) hits.push({ name: 'STOP_RE', lane: 'main', gives: 'stop' });
-  if (GOAL_CHANGE_RE.test(text)) hits.push({ name: 'GOAL_CHANGE_RE', lane: 'net', gives: 'goal-change' });
-  if (CANCEL_PART_RE.test(text)) hits.push({ name: 'CANCEL_PART_RE', lane: 'net', gives: 'steer-cancel' });
-  if (SCOPE_ADD_RE.test(text)) hits.push({ name: 'SCOPE_ADD_RE', lane: 'net', gives: 'task' });
-  return hits;
-}
-
 /** 机械路径给的处置跟期望是否同一个方向。期望里写了 detail 就严格比；只写了
- *  kind 时，steer 家族的收活（steer-cancel）也算一致——那正是 steer 的一种。 */
+ *  kind 时，steer 家族的收活（steer-cancel）也算一致——那正是 steer 的一种。
+ *  （机械命中回放机器随刀 1 撤除；此比较器留给回放脚本对裁决器判词做同构
+ *  比对。） */
 export function aligns(c: Case, gives: Handled): boolean {
   if (c.detail) return c.detail === gives;
   if (c.kind === 'steer') return gives === 'steer-cancel';
   return gives === c.kind;
-}
-
-/** 第一个主路命中（这才是真正会抢在裁决器前面的那一条）。 */
-export function mainHit(c: Case): MechanicalHit | undefined {
-  return mechanicalHits(c.text).find((h) => h.lane === 'main');
 }

@@ -12,13 +12,24 @@
 //
 // 两条疑点对应两种不对称的代价：
 //   - cancels-missed   ：话里有取消味，裁决器却没报 cancels_part——这句到了
-//                        宿主手里会按 kind 走（多半是排队），把一个"取消"跑成
-//                        一件新活（反向执行）。
-//   - adds-along-missed：报了取消，但同一句还在加活（SCOPE_ADD_RE 命中），却
-//                        没报 adds_along——宿主会真去停那支，把刚要求加进来的
-//                        活一并停掉。
+//                        宿主手里会按 relation 走（多半是排队），把一个"取消"
+//                        跑成一件新活（反向执行）。
+//   - adds-along-missed：报了取消，但同一句还在加活，却没报 adds_along——宿
+//                        主会真去停那支，把刚要求加进来的活一并停掉。
+//                        （2026-10-28 刀 1 后不再产生，见下——类型值保留供
+//                        诊断面板全键 Record 兼容。）
+//
+// 2026-10-28 框架改革刀 1/2：裁决器契约已含整树停（action=stop）与点名停支
+// （stop_branch.call_id），七条字面快路径正则整族删除。本审计的两处字面比对
+// 随之收缩：
+//   - SCOPE_ADD_RE 已删（它在决策路径本就是死代码）：adds-along-missed 不再
+//     可检。类型值保留——settings 诊断面板的 INSERTION_ANOMALY_KEYS 按全键
+//     Record 消费本类型，删值会烧到边界外文件；该疑点只是从此不再产生。
+//   - CANCEL_PART_RE 的并集引用撤除：那张决策路径的字面安全网已死，事后审
+//     计不再蹭它。漏报筛查只靠本模块自有的 CANCEL_SMELL 词族（仍只标疑点，
+//     绝不参与决策）。
+// 运行时语义判断归裁决器；宿主侧字面匹配只剩「事后挑疑点给人看」这一层。
 
-import { CANCEL_PART_RE, SCOPE_ADD_RE } from './DynamicInsertionCoordinator';
 import type { InputDecision } from './inputDecision';
 
 export type InsertionAnomaly = 'cancels-missed' | 'adds-along-missed';
@@ -45,31 +56,36 @@ const CANCEL_SMELL = /(?:不需|不用|不要|先不|别(?!的)|莫|取消|终�
 const EXCLUSIVITY = /(?:不要|别|不用|无需|不是|并非)?只(?:是|要|会|能|需|想|看|查|算|做|管)?/g;
 
 /**
- * 只留 CANCEL_SMELL 会漏掉本项目**最经典**的取消形状（"X 就不调研了"——裸
- * 否定标记 + 动词，正是 2026-09-24 那场事故的原句）：CANCELISH_RE 的标记表里
- * 没有裸"不"，所以它不命中。而"取消"与"普通事"之间的灰度已经被 LATTER 的
- * 近邻样本撑起来了：裁决器告急时接住收活的就是 CANCEL_PART_RE（字面安全网），
- * 那句话是漏报时反向执行的真实受害者，审计必须看得见它。两族取并集：审计的
- * 假阳性由人一眼扫掉，假阴性才会让一个反向执行静默溜过。
+ * 只靠 CANCEL_SMELL 会漏掉本项目**最经典**的取消形状（"X 就不调研了"——裸
+ * 否定标记 + 动词，正是 2026-09-24 那场事故的原句）：CANCEL_SMELL 的标记表
+ * 里没有裸"不"，所以它不命中。旧版在这里并上 CANCEL_PART_RE（决策路径的字
+ * 面安全网）补这个形状——2026-10-28 刀 1 那张网已整体删除，宿主不再做任何
+ * 取消意图的决策级字面匹配；裸"不"形状的疑点改由真机判例与回放覆盖（审计
+ * 的假阴性由裁决器回放对照兜住，不再由字面网兜）。审计只回答「裁决器该报
+ * 的报了吗」，语义判断始终归裁决器。
  */
-/** 「这句话有取消味吗」的并集网(抹排他性标记后测)。审计用它事后挑疑点;
- *  interjectOrchestrator 的去重终稿闸也用它——同一张网,两处同源,不另造词表。 */
+/** 「这句话有取消味吗」(抹排他性标记后测)。纯事后审计用——只产出给人看的
+ *  疑点标签（诊断区高亮 + 回放语料收割），绝不参与决策。（旧注里「interjectOrchestrator
+ *  的去重终稿闸也用它」已过时：那道闸 2026-10-21 刀 F 起消费裁决器的
+ *  covered_branch 点名 + 宿主核实，与字面网无关。） */
 export function looksLikeRemoval(text: string): boolean {
   const meaningful = text.replace(EXCLUSIVITY, '');
-  return CANCEL_SMELL.test(meaningful) || CANCEL_PART_RE.test(meaningful);
+  return CANCEL_SMELL.test(meaningful);
 }
 
 export function auditInsertionDecision(decision: InputDecision): InsertionAudit {
   const anomalies: InsertionAnomaly[] = [];
   const text = (decision.inputText ?? '').trim();
   if (!text) return { anomalies };
-  // 机械命令快路径不经过裁决器，契约字段本来就不适用（"停掉那支"是整树/分支
-  // 动作，不是收活）——审计它只会制造噪音。
-  if (decision.signals.via === 'rule') return { anomalies };
+  // 没经过裁决器判词的决策（旧规则快路径的 rule、刀 1 后的原话直投
+  // passthrough），契约字段本来就不适用——"该报没报"无从谈起，审计它只会
+  // 制造噪音（passthrough 尤其：裁决器缺席时整批插话都会被误标漏报）。
+  if (decision.signals.via === 'rule' || decision.signals.via === 'passthrough') return { anomalies };
 
   const cancels = decision.signals.cancelsPart === true;
   if (!cancels && looksLikeRemoval(text)) anomalies.push('cancels-missed');
-  if (cancels && decision.signals.addsAlong !== true && SCOPE_ADD_RE.test(text)) anomalies.push('adds-along-missed');
+  // adds-along-missed 的判据 SCOPE_ADD_RE 随刀 1 删除（决策路径死代码），
+  // 该疑点不再产生——类型值保留供诊断面板全键 Record 兼容（见头注）。
   return { anomalies };
 }
 
@@ -78,12 +94,14 @@ export function hasInsertionAnomaly(decision: InputDecision): boolean {
 }
 
 /**
- * 契约字段的"遵守率"口径（2026-09-28）：只看**可审计**的决策——命令快路径不
- * 算（契约字段对它本来就不适用），没有原话的也不算（无从比对）。把这些决策
- * 当作分母，疑点当作分子：这才是"裁决器该报的报了吗"的遵守率。
+ * 契约字段的"遵守率"口径（2026-09-28）：只看**可审计**的决策——没经过裁决
+ * 器判词的（rule/passthrough）不算（契约字段对它们本来就不适用），没有原话
+ * 的也不算（无从比对）。把这些决策当作分母，疑点当作分子：这才是"裁决器该
+ * 报的报了吗"的遵守率。
  */
 function isAuditable(decision: InputDecision): boolean {
-  return (decision.inputText ?? '').trim().length > 0 && decision.signals.via !== 'rule';
+  const via = decision.signals.via;
+  return (decision.inputText ?? '').trim().length > 0 && via !== 'rule' && via !== 'passthrough';
 }
 
 export interface AuditSummary {

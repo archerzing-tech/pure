@@ -82,7 +82,7 @@ function withFourChannelsPresent(chat: Record<string, any>): void {
 interface OrchestratorSpies {
   registered: Array<{ callId: string; topic: string }>;
   stripped: string[];
-  settleAcks: string[];
+  settleAcks: Array<string | null>;
   folds: Array<{ cancels: boolean; stopMissed?: boolean }>;
   steers: Array<{ target: SteerTarget; cancel: boolean }>;
   cancels: string[];
@@ -144,7 +144,7 @@ function makeOrchestratorFace(opts: {
     askMidrunClarification: async () => {},
     deferTimedInsert: () => false,
     createAck: () => ({}),
-    settleAck: (_ack: InterjectAck, text: string) => { spies.settleAcks.push(text); },
+    settleAck: (_ack: InterjectAck, text: string | null) => { spies.settleAcks.push(text); },
     discardAckRow: () => {},
     echoUser: () => {},
     logDecision: () => {},
@@ -209,7 +209,7 @@ describe('缺口②机械排除 · 第 0 步推断判例', () => {
 });
 
 describe('A · 编排器判定：收工支被点名取消才登记/剔除', () => {
-  it('非整理窗（委派不在飞）：命中已收工支即登记 + 即时剔除；收执只说砍了什么', async () => {
+  it('非整理窗（委派不在飞）：命中已收工支即登记 + 即时剔除；收执沉默（刀 2）', async () => {
     const { orchestrator, spies } = makeOrchestratorFace({
       decision: steerCancelDecision(),
       settled: [DONE_BRANCH],
@@ -222,7 +222,9 @@ describe('A · 编排器判定：收工支被点名取消才登记/剔除', () =
     // 非整理窗的取消臂：转达父引擎（parent, cancel=true），不折入。
     expect(spies.steers).toEqual([{ target: 'parent', cancel: true }]);
     expect(spies.folds).toHaveLength(0);
-    expect(spies.settleAcks[0]).toBe('好——“A平台定价”这项不做了。');
+    // 2026-10-28 刀 2：收执 = 裁决器现场 receipt 唯一来源——decision 无
+    // receipt 时引擎沉默（settleAck null 退场），固定句「这项不做了」已废。
+    expect(spies.settleAcks[0]).toBeNull();
   });
 
   it('整理窗（委派已收齐、汇总未完）：同样登记 + 即时剔除，且折入汇聚轮（cancels=true）', async () => {
@@ -266,7 +268,7 @@ describe('A · 编排器判定：收工支被点名取消才登记/剔除', () =
     expect(spies.stripped).toHaveLength(0);
   });
 
-  it('剔除落空（返回 false）不预支「已剔除」：收执与成功剔除时逐字一致，且不含机制词', async () => {
+  it('剔除落空（返回 false）不预支「已剔除」：收执同样沉默，且不含机制词', async () => {
     const base = {
       decision: steerCancelDecision(),
       settled: [DONE_BRANCH],
@@ -277,9 +279,10 @@ describe('A · 编排器判定：收工支被点名取消才登记/剔除', () =
     const miss = makeOrchestratorFace({ ...base, stripResult: false });
     await hit.orchestrator.interject(TOPIC);
     await miss.orchestrator.interject(TOPIC);
-    // 收执不随剔除成败改变——它本就不声称「已剔除」。
-    expect(miss.spies.settleAcks[0]).toBe(hit.spies.settleAcks[0]);
-    expect(miss.spies.settleAcks[0]).not.toMatch(/剔除|离场|汇总/);
+    // 收执不随剔除成败改变——裁决器无 receipt 时两头都沉默（刀 2：宁可无话
+    // 不出机械腔，机制状态由登记/剔除的账呈现）。
+    expect(hit.spies.settleAcks[0]).toBeNull();
+    expect(miss.spies.settleAcks[0]).toBeNull();
     // 登记照在（登记与即时剔除解耦，回合收尾/下一轮装配兜底兑现）。
     expect(miss.spies.registered).toEqual([{ callId: CALL, topic: TOPIC }]);
     expect(miss.spies.stripped).toEqual([CALL]);

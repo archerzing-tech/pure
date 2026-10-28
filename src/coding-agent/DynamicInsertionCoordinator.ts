@@ -22,10 +22,11 @@ import {
 
 /** 这条决策是谁定的——用户要看的就是这一个字段（读法见 inputDecision.ts
  *  的 decisorOf）：
- *  - judge：裁决器（LLM）按「时机 × 内容对结果的影响」综合判的，正常路径
- *  - rule ：机械正则快路径（整停 / 点名停支 / 点名续支——命令不是判断）
- *  - net  ：字面安全网（裁决器不可用时的兜底，signals.netReason 说明原因）
- *  三者互斥且必填，决策日志（inputDecision.ts）据此对账。 */
+ *  - judge      ：裁决器（LLM）按「时机 × 内容对结果的影响」综合判的——唯一
+ *                 判定路径，停/停支/续支的语义也归它，宿主只核实执行
+ *  - passthrough：裁决器缺席/倒下时的原话直投（不猜 relation，signals.netReason
+ *                 说明原因；inputDecision.decisorOf 暂把它读作 judge）
+ *  决策日志（inputDecision.ts）据此对账。 */
 
 /**
  * 插话架构 v2（2026-10-27）：判定面是九类 relation（Planner 的
@@ -36,9 +37,12 @@ import {
  * relation 值——它只是 InputDecision 的「producer 专属标签」槽（日志可读、
  * 旧消费者仍能 switch），权威语义在 relation。
  *
- * 三通道结构不变（2026-09-28 定调）：字面命令（整停/点名停支/点名续支）走
- * rule 快路径零往返；其余全走 judge 裁决器（时机×内容×结果收益的综合判断）；
- * judge 倒下时 net 字面网兜底，话绝不丢。
+ * 通路唯一形态（2026-10-28 框架改革刀 1）：判定归裁决器（LLM），宿主只核实
+ * 执行——整树停（action=stop）、点名停支（stop_branch.call_id）、点名续支
+ * （resumes_branch.call_id）都是裁决器的输出。七条字面快路径正则与 net 字面
+ * 族已删：语义判断还给人肉正则是替模型做决策，而 1–2s 裁决往返可接受，误停
+ * /误判的代价远大于延迟。裁决器缺席/倒下时不再猜 relation，原话直投队列
+ * （passthroughVerdict），让在跑的模型带着现场自己消化。
  */
 export interface DynamicInsertion {
   text: string;
@@ -112,12 +116,6 @@ function levelOf(relation: InsertionRelation, unrelatedKind: UnrelatedKind | und
   return LEVEL_BY_RELATION[relation];
 }
 
-/** Confident by construction: a mechanical rule matched. */
-const RULE_CONFIDENCE = 1;
-/** Confident by policy: with no classifier, queueing is the chosen answer —
- *  it is the one destination that cannot lose the words (see decide()). */
-const NO_CLASSIFIER_CONFIDENCE = 1;
-
 export interface DynamicInsertionCoordinatorOptions {
   classify?: (
     llm: LLMAdapter,
@@ -130,54 +128,14 @@ export interface DynamicInsertionCoordinatorOptions {
   recheckCoveredInsertion?: typeof recheckCoveredInsertion;
 }
 
-// 导出只为可测/可回放（见 scripts/replay-insertion-decisor.ts）：这些常量
-// 是「哪些话会被机械路径抢答」的唯一事实来源，回放脚本不能复制一份。
-export const STOP_RE = /^(?:停止|停下|取消|中止|别做了|先别做|abort|stop|cancel|halt|nevermind)(?:\b|$|[一-鿿])/i;
-// 2026-09-28 降级为安全网（见 decide() 注）：推翻话不再由正则直判——
-// "改成X"和"推翻重来"的分寸只有结合时机和内容才判得准，正则只在裁决器
-// 倒下时兜底（netVerdict）。
-export const GOAL_CHANGE_RE = /(?:推翻|重新来|重做|从头来|换个方案|换一种思路|换个思路|start over|redo it|rethink|different approach|scrap (?:that|this|it))/i;
-// 加活字面族，同样降级为安全网。2026-09-22 的两次丢失（"再加一个 爱奇艺
-// 平台"）是 steer 的空头承诺（父任务阻塞收委派时没有"下个动作"可兑现），
-// 排队是唯一保证跑完的投递。2026-09-28 重构把这个保证留在网里（裁决器
-// 不可用 → 排队），主路让给裁决器：加的东西可能是往在飞的那一件产出物里
-// 加（画鸟补云/五位加两位），只有看得到时机的裁决器分得清——正则分不清。
-// 2026-09-28 二段：连"安全网里的一个分支"也算不上了——netVerdict 的默认
-// 目的地本来就是排队 task，"加活"与"其余"合并成同一条，所以这个字面族
-// 不再参与任何生产判定（留着只作两用：给回放脚本标注"加活族"，以及记着
-// 当年丢话事故的原句形状）。
-export const SCOPE_ADD_RE = /(?<!别)(?<!不)(?<!不用)(?<!不要)(?<!无需)(?<!先不)(?<!莫)(?:再加(?!一?句)|增加|增添|再添|再补(?!一?句)|再算上|再算一个|顺便(?!问|说|提|聊)(?:也)?(?:查|调研|研究|搜|分析|做|跑|处理|加)|也帮?我?(?:查|调研|研究|搜|分析|处理|跑)(?:一?下|一遍)?|把.{1,16}也(?:查|调研|研究|搜|分析|处理|跑|做|算)(?:一?下|一遍)?|同样(?:处理|调研|分析|跑|做)|也来一?份|add (?:one more|another)|also (?:add|check|research|look into|run|include))/i;
-// 收掉一部分（"X 就不调研了"，"Y 那个不用查了"）：steer 的删除语义，
-// 2026-09-24 真实事故的字面形状——并行调研中砍一支被判成加活折入（"先补
-// 这项"），与意图正好相反。同样降级为安全网：主路由裁决器判 cancels_part，
-// 网只在裁决器倒下时接手。词族刻意窄：动词族不含裸做（"别做了"是整树停
-// 还收一支只有看得到上下文才分得清）、否定标记必须、了/吧 尾巴挡住纯保留
-// 约束（"不用改"）——更软的话全归裁决器，含否定式加活（"不用再加知乎了"）。
-export const CANCEL_PART_RE = /[^\n。！!？?]{0,24}(?:(?:不需|不用|不)要?再?|先不|别|莫)(?:帮?我?)?(?:查|调研|研究|分析|搜|跑|处理|翻译|改|写|画|生成)[^。，,；\n]{0,12}?(?:了|吧)(?![一-鿿A-Za-z])/i;
-// 祈使式「停掉某一支」（第 2 期分支中断快路径）：「停掉竞品那支」「把调研
-// 那路掐掉」「分析那条路停下来」。与 CANCEL_PART_RE（"X 就不调研了"——收
-// 掉一项出结果）的差别在时态：这是**现在就叫它停**，宿主点名寻址后直接
-// abortBranch，不等汇合轮。锚定词必须是 那支/那路/那一路/那条/分支——没有
-// 点名锚的「停掉」是整树 stop（STOP_RE 管）或该归分类器的话，宁可慢不可错。
-// 动词前置（停掉X那支，含「停下」）、把字句（把X那路掐掉）、锚后追停
-// （X那支别跑了/那个分支停下来）三种语序都收。判定次序上它排在 STOP_RE
-// 和 CANCEL_PART_RE 之前：带点名锚的停比整树停、收活都具体——「停下竞品
-// 那支」不能被整树 abort，「那路别跑了」不能被折进汇合轮。
-export const BRANCH_STOP_RE = /(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:帮?我?)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:停掉|停了|掐掉|砍掉|终止|取消|停下)(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,10}(?:停下来|别跑|停了|不用跑|停掉|掐掉|砍掉|终止|取消)/i;
-// 分支级继续（第 2 期第三刀）：「把竞品那支接着跑完」「让报价那路继续」。
-// 与 BRANCH_STOP_RE 同款：必须有分支锚（那支/那路/…），续跑动词前后皆可——
-// 命中即由宿主按 callId 找到那支已暂停/已停的档案，用**原始参数**同参重派
-// （稳定 sessionId 命中断点 → 引擎 continue）。没有点名锚的「继续」是整树
-// 续跑（走「继续」条），绝不在这里赌。
-export const RESUME_BRANCH_RE = /(?:继续|接着|续上|接续)(?:帮?我?)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)|(?:把)?[^。\n！!？?]{0,16}?(?:那支|那路|那一路|那条|那个分支)[^。\n！!？?]{0,12}?(?:接着|继续|续上|接着跑|继续跑|跑完|接着弄|继续弄|接着做|继续做|接着干|继续干)/i;
-
-// 第 5 期「这个急」提级的安全网（对称于 STOP_RE，但**只在裁决器倒下时**由
-// netVerdict 使用，绝不抢在裁决器前面抢答）：用户口头声明这件活加急/优先。
-// 窄词族——「加急/优先(办)/先办/插队/urgent/asap」与「这个(很/挺…)急」，
-// 且用否定前视挡掉「不着急/不急/别急」（把一句"不慌"读成"加急"就是反向
-// 调度）。主路径是裁决器把 urgent 判进分类（见 INSERTION_CLASSIFY_PROMPT），
-// 正则只负责裁决器不可用时不把急件默默降级成普通排队。
-export const URGENT_RE = /(?:加急|优先(?:办|做|处理|安排)?|插队|先(?:办|做|处理)|urgent|asap|high\s*priority|(?:这个|这件|这项|这句|这活|它)(?:非常|很|特别|比较|挺|有点|真)*(?<!不|别|没|莫)急)/i;
+// 七条字面快路径正则已随框架改革删除（2026-10-28 蓝图刀 1）：STOP_RE（整停
+// 快路径，已裁定：停的语义判断归还模型，引擎只留 abortController 掐流的机械
+// 动作）、BRANCH_STOP_RE / RESUME_BRANCH_RE（点名停支/续支——点名寻址归裁决
+// 器，covered_branch 同款：模型拿花名册点 id，宿主只核实执行，零字面匹配）、
+// GOAL_CHANGE_RE / CANCEL_PART_RE / URGENT_RE（netVerdict 字面族兜底——裁决
+// 器缺席/倒下时不再猜 relation，原话直投队列）、SCOPE_ADD_RE（死代码）。
+// 停/停支/续支由裁决器判定（INSERTION_CLASSIFY_PROMPT 的 action/stop_branch/
+// resumes_branch 契约），宿主只核实执行。
 
 export class DynamicInsertionCoordinator {
   private readonly classify: NonNullable<DynamicInsertionCoordinatorOptions['classify']>;
@@ -196,14 +154,13 @@ export class DynamicInsertionCoordinator {
     insertion: DynamicInsertion,
     signal?: AbortSignal,
   ): Promise<DynamicInsertionDecision> {
-    // 先后：命令（字面停/点名停支/点名续支）由 decideInner 最先的几条正则
-    // 接走，不进裁决器；其余（含裁决器的 stop 档）走判断。
+    // 唯一通路（刀 1）：判定全归裁决器；passthrough 只是裁决器缺席/倒下时
+    // 的原话直投兜底，不参与判定。
     const decision = await this.decideInner(llm, context, insertion, signal);
     // 每条插话决策都进共享日志（inputDecision.ts 的 recordInputDecision）：
     // 「这次是裁决器判的，还是正则/安全网接的」变成可查的数据（signals.via），
     // 设置页诊断区读它，formatInputDecisionLog() 还能整段导出回放。记录点在
-    // 唯一出口，所以四条生产路径（rule / judge / net-no-judge / net-down）
-    // 都不可能绕过。
+    // 唯一出口，所以两条生产路径（judge / passthrough）都不可能绕过。
     // 连同**判它时的场景**一起入账（2026-09-28）："判错了"只有配上"在什么场景
     // 下判的"才可行动——同一句换场景能从错到对，看不到场景就只能归咎于模型。
     recordInputDecision({
@@ -221,53 +178,16 @@ export class DynamicInsertionCoordinator {
     signal?: AbortSignal,
   ): Promise<DynamicInsertionDecision> {
     const text = insertion.text.trim();
-    if (BRANCH_STOP_RE.test(text)) {
-      // 祈使式停一支（第 2 期）：宿主点名寻址后直接 abortBranch 真停。排在
-      // 一切整树/收活规则之前（理由见 BRANCH_STOP_RE 注）。点不到具体支时
-      // 宿主退回取消折入——宁可折叠不误杀（快路径只负责快，不负责赌）。
-      // relation 面：点名停支=change 的一个特写（撤掉正在跑的一部分），但
-      // 带分支锚的命令由专门臂接走，不落整树 replan。
-      return this.build('change', 'imperative branch-stop matched the fast path; the named branch is aborted now', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { via: 'rule', rule: 'BRANCH_STOP_RE', branchStop: true },
-      }, { action: 'apply', scope: ['constraints'] });
-    }
-    if (RESUME_BRANCH_RE.test(text)) {
-      // 分支级继续（第 2 期第三刀）：点名把某一支接着跑完。宿主按区分词找到
-      // 那支已暂停/已停的档案，用原始参数同参重派——稳定 sessionId 命中
-      // checkpoint 续跑，不从头做。排在 STOP/收活/加活之前：带点名锚的
-      // 「接着跑」比整树续跑、加活都具体。relation=supplement（让既有工作
-      // 继续产出，无撤无改）。
-      return this.build('supplement', 'named-branch resume matched the fast path; the branch is re-delegated from its checkpoint', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { via: 'rule', rule: 'RESUME_BRANCH_RE', resumesBranch: true },
-      }, { action: 'apply', scope: ['constraints'] });
-    }
-    if (STOP_RE.test(text)) {
-      // Mechanical, high-precision, and latency-free: a stop must not wait on
-      // (or be misread by) a classification round-trip. relation=change（整停
-      // 特例，蓝图 §十.5），action 压在 stop——字面停不重排不重想。
-      return this.build('change', 'user requested the current run to stop', {
-        confidence: RULE_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { via: 'rule', rule: 'STOP_RE' },
-      }, { action: 'stop', scope: ['plan', 'completed-steps'] });
-    }
-    // 2026-09-28 用户定调：决策不看关键词——正则只配做裁决器倒下时的安全网。
-    // 上面的三类（整停/点名停支/点名续支）是**命令**不是判断：人对"停"字
-    // 不需要 deliberation，等一次裁决往返反而是抗命。其余一切（加活/收活/
-    // 推翻/约束/纠错/提问/寒暄/**非字面的停**）全走裁决器——时机×内容×
-    // 结果收益的综合判断；字面族（SCOPE_ADD/CANCEL_PART/GOAL_CHANGE）只在
-    // 裁决不可用时兜底（netVerdict），绝不再抢在判断前面。
+    // 快路径正则已随框架改革删除（2026-10-28 蓝图刀 1）：停/停支/续支由裁
+    // 决器判定（INSERTION_CLASSIFY_PROMPT 的 action/stop_branch/resumes_branch
+    // 契约），宿主只核实执行。裁决器缺席/倒下时不再猜 relation，原话直投。
     if (!llm) {
-      return this.netVerdict(text, 'classification unavailable', 'no-judge');
+      return this.passthroughVerdict('no-judge');
     }
     const result = await this.classify(llm, context, text, signal, insertion.images);
     if (result.fallbackUsed) {
-      // 裁决器倒下（超时/网络/解析失败）：字面网兜底，话绝不丢。
-      return this.netVerdict(text, 'judge unreachable', 'judge-down');
+      // 裁决器倒下（超时/网络/解析失败）：同样原话直投，不猜。
+      return this.passthroughVerdict('judge-down');
     }
     // 契约里不再有 when 字段（v2 §5.1）：时机意图从用户原话文本推导
     // （parseInputTiming 的 TIMING_CUE 兜底），裁决器只管关系。
@@ -288,6 +208,10 @@ export class DynamicInsertionCoordinator {
         // 模型点名（2026-10-10 模型判断、宿主执行）：裁决器指认的被停支 id
         // 随信号走，编排器只按它执行真停——宿主自己不再做任何文本匹配。
         ...(result.stopBranch ? { stopBranchCallId: result.stopBranch.callId } : {}),
+        // 点名续支（2026-10-28 刀 1，RESUME_BRANCH_RE 快路径的接棒者）：裁决
+        // 器从花名册指认该接着跑完的那支 id，宿主只核实执行（covered_branch
+        // 同款，零字面匹配）。
+        ...(result.resumesBranch ? { resumesBranchCallId: result.resumesBranch.callId } : {}),
         // 被替换条件的原文片段（v2 §5.1 targets_constraint）：处置管线据此
         // 对着任务状态定位挂在死条件上的节点。过渡期随信号透传。
         ...(result.targetsConstraint ? { targetsConstraint: result.targetsConstraint } : {}),
@@ -302,7 +226,15 @@ export class DynamicInsertionCoordinator {
         // 结合现场写的那两句随信号走——编排器优先转达给宿主，缺席才兜底。
         ...(result.receipt ? { receipt: result.receipt } : {}),
       },
-    }, { unrelatedKind: result.unrelatedKind, ...(result.atoms?.length ? { atoms: result.atoms } : {}) });
+    }, {
+      unrelatedKind: result.unrelatedKind,
+      ...(result.atoms?.length ? { atoms: result.atoms } : {}),
+      // 整树停（刀 1）：裁决器判 action=stop 时压过处置表——落点与被删的
+      // STOP_RE 快路径一致（整停不重排不重想），signals.via 据实仍是 judge。
+      ...(result.action === 'stop'
+        ? { action: 'stop' as InputAction, scope: ['plan', 'completed-steps'] as InputScope[] }
+        : {}),
+    });
   }
 
   /** 去重撞车的复核（2026-10-21）：宿主发现「判成 task 却撞上已在跑」的矛盾
@@ -348,9 +280,9 @@ export class DynamicInsertionCoordinator {
   }
 
   /**
-   * 规则快路径的聚焦点名：BRANCH_STOP_RE 只裁「要不要停」（命令零延迟），
-   * 不裁「停哪支」——指认是理解，归裁决器。裁决器不可用或指认不出返回
-   * null，调用方退回取消折入（宁可折叠不误杀）。
+   * 聚焦点名（模型判断、宿主执行）：要不要停由裁决器判，这里的窄问题只裁
+   * 「停哪支」——只要一个确切 id。裁决器不可用或指认不出返回 null，调用方
+   * 退回取消折入（宁可折叠不误杀）。
    */
   resolveStopBranchTarget(
     llm: LLMAdapter | null,
@@ -362,50 +294,21 @@ export class DynamicInsertionCoordinator {
     return this.resolveStop(llm, context, insertion.text, roster, signal);
   }
 
-  /** 安全网（2026-09-28 降级；2026-10-21 刀 D 反转默认投递）：只裁决器倒下
-   *  时用它——按字面族挑目的地，绝不冒充判断。推翻话重开、收活折入不变；
-   *  **其余从「一律排队」反转为「能注入就注入」**：steer 通道的话落引擎
-   *  THINK 边界、进会话历史——模型带着现场自己判它是什么、怎么接（freebuff
-   *  无分类器的同款哲学：把「怎么处置」交给带现场的模型，烂天气也不该把
-   *  话冻结到回合外）；没被边界带走的残留由回合收尾 settleRound 原话重入，
-   *  话照样丢不了——「排队是唯一不丢话的投递」这个旧前提已不成立。排队
-   *  的真正代价（2026-10-21 用户报的病根）是语境断裂：重入时现场已散。
-   *  加急件例外：提级的落点只在队列（插到队头），注入反而把它不排队。 */
-  private netVerdict(text: string, why: string, netReason: 'no-judge' | 'judge-down'): DynamicInsertionDecision {
-    if (GOAL_CHANGE_RE.test(text)) {
-      // 推翻话重开：relation=change → replan。
-      return this.build('change', `${why}; overturn phrasing caught by the literal net`, {
-        confidence: NO_CLASSIFIER_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { via: 'net', netReason, fallback: 'literal-net' },
-      });
-    }
-    if (CANCEL_PART_RE.test(text)) {
-      // 收活折入：relation=change + cancels_part 专门信号 → 折入而非整树重排
-      // （点名撤一支，其余照跑——2026-09-24 口径）。
-      return this.build('change', `${why}; partial-cancellation caught by the literal net — the named part leaves the result`, {
-        confidence: NO_CLASSIFIER_CONFIDENCE,
-        timing: { mode: 'now' },
-        signals: { via: 'net', netReason, fallback: 'literal-net', cancelsPart: true },
-      });
-    }
-    if (URGENT_RE.test(text)) {
-      // 「这个急」的字面安全网：裁决器不可用时，别把一句明确的加急请求默默
-      // 降级成普通排队（提级只改队列次序，不涉破坏性动作，网在这里用是安全的）。
-      return this.build('unrelated', `${why}; queued ahead (urgent) so the words can never be lost`, {
-        confidence: NO_CLASSIFIER_CONFIDENCE,
-        timing: { mode: 'after-current' },
-        signals: { via: 'net', netReason, fallback: 'literal-net', urgent: true },
-      }, { unrelatedKind: 'new_task' });
-    }
-    // 默认投递：能注入就注入（relation=supplement → apply）。steer 通道的话
-    // 落引擎 THINK 边界、进会话历史——模型带着现场自己判它是什么、怎么接；
-    // 残留由回合收尾 settleRound 原话重入，话照样丢不了。
-    return this.build('supplement', `${why}; handed to the running turn at its next boundary — the words land in the conversation, and close sweeps any leftovers back in`, {
-      confidence: NO_CLASSIFIER_CONFIDENCE,
+  /** 原话直投（2026-10-28 框架改革刀 1）：裁决器缺席或倒下时的唯一兜底——
+   *  不再按字面族猜 relation（旧 GOAL_CHANGE/CANCEL_PART/URGENT 网已删），
+   *  统一按「用户原话进队列」投递：relation=unrelated → 编排器走 queue 处置
+   *  =原话入队、回合收尾重入，让在跑的模型带着现场自己消化，话绝不丢
+   *  （不变量 §六.1）。confidence=0.3：这不是判断，是投递策略——刻意标明
+   *  「这里没有任何语义判定发生」；置信门会把它降级为 clarify（gatedFrom
+   *  记得原始动作），宿主读 signals.via=passthrough 自行择路。netReason 只
+   *  进日志（no-judge=没有裁决器；judge-down=超时/网络/解析失败），不参与
+   *  处置。 */
+  private passthroughVerdict(netReason: 'no-judge' | 'judge-down'): DynamicInsertionDecision {
+    return this.build('unrelated', 'judge unavailable; inserting the user\'s words verbatim into the queue', {
+      confidence: 0.3,
       timing: { mode: 'now' },
-      signals: { via: 'net', netReason, fallback: 'literal-net' },
-    });
+      signals: { via: 'passthrough', netReason },
+    }, { action: 'apply', scope: [] });
   }
 
   /**
@@ -414,9 +317,9 @@ export class DynamicInsertionCoordinator {
    *
    * v2：action/scope 以九类处置表（RELATION_DISPOSITION）为底；专门信号
    * （cancels_part/branch_stop/stop_branch）在场时改写——点名撤一支既不排队
-   * 也不整树重排，折入汇合（编排器按专门信号细分）。opts 供 rule 通道显式压
-   * action/scope（命令不是判断，不该被处置表覆盖），judge 通道透传 mixed 的
-   * atoms。
+   * 也不整树重排，折入汇合（编排器按专门信号细分）。opts 供裁决器的整树停
+   * （action=stop）与 passthrough 显式压 action/scope（命令与投递策略都不是
+   * 判断，不该被处置表覆盖），judge 通道透传 mixed 的 atoms。
    */
   private build(
     relation: InsertionRelation,

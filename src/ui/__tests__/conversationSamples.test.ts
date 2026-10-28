@@ -279,6 +279,12 @@ interface ScriptedClassification {
   /** 模型点名（2026-10-10 模型判断、宿主执行）：完整分类回包里的
    *  stop_branch（分类调用读）；聚焦点名调用读顶层的 call_id。 */
   stop_branch?: { call_id: string };
+  /** 分支级继续（2026-10-28 刀 1 后点名归裁决器）：判词点名一支已暂停的
+   *  委派接着跑完，宿主只核实执行。 */
+  resumes_branch?: { call_id: string };
+  /** 整树停契约（刀 1：字面停快路径已删，停的语义判断归裁决器）——
+   *  action:"stop" 随判词来，宿主只留 abort 掐流的机械动作。 */
+  action?: 'stop' | 'apply';
   call_id?: string;
 }
 
@@ -459,16 +465,17 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const insert = '等等，不是读书会了，改成 AI 工具实操工作坊，面向职场人，周日，30 人。';
 
     await h.chat.interject(insert);
-    // 认下 + 定性 + 影响面 + 下一步，一行回执原行定格；abort 还在收尾，微光撑着。
-    expect(statusJoined(h.root)).toContain('方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。');
+    // 沉默化（2026-10-28 刀 2）：剧本没写 receipt→引擎沉默退场（ack 行摘掉），
+    // abort 掐流由状态呈现，宿主不出固定止损腔。原话经真暂停链重入。
+    expect(statusJoined(h.root)).not.toContain('方向变了');
     expect(h.chat.abortController.signal.aborted).toBe(true);
-    expect(rowPending(h.root, '方向变了')).toBe(true);
+    expect(rowPending(h.root, '方向变了')).toBe(false);
     // 不预回显：重入 send() 时作为新回合开场气泡上屏，先回显 = 同句话两遍。
     expect(userJoined(h.root)).not.toContain('实操工作坊');
 
     h.endTurn();
     expect(h.sends).toEqual([insert]);
-    // 承诺兑现（新方向已开跑），微光停。
+    // 承诺兑现（新方向已开跑）：沉默退场后行不存在，账自始平。
     expect(rowPending(h.root, '方向变了')).toBe(false);
   });
 
@@ -480,9 +487,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const insert = '预算砍半，不能请外部讲师，你自己出内容。';
 
     await h.chat.interject(insert);
-    // 2026-09-29 前提修正分两路：有在飞委派走暂停止损（「暂停存档」），无在飞
-    // 委派走直路重入——本用例无委派，落的是直路回执。
-    expect(statusJoined(h.root)).toContain('方向变了——在跑的先停下止损，已完成的不丢，马上按新的方向来。');
+    // 2026-09-29 前提修正分两路：有在飞委派走暂停止损，无在飞走直路重入——
+    // 本用例无委派。刀 2 沉默化：剧本无 receipt→不出固定止损腔。
+    expect(statusJoined(h.root)).not.toContain('方向变了');
     expect(h.chat.abortController.signal.aborted).toBe(true);
 
     h.endTurn();
@@ -491,19 +498,20 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('开局插话的收执行不落会话最顶上：首回合消息未入账时锚在下一条消息之后', async () => {
-    // 2026-09-29 用户报：开局插话改前提，翻历史会话第一行是「前提变了……」
-    // 收执标签，不是用户的输入。病根：首回合在飞时 this.messages 还是空的
-    // （用户消息收尾才入账），旧锚算法给 -1，flushStatuses(-1) 把行拼成
-    // 事件流第 0 条。本 harness 就是这个窗口——全新控制器、零入账消息、
-    // 回合在飞——修复后收执行锚 0（本回合用户消息将占的下标）。
+    // 2026-09-29 用户报：开局插话改前提，翻历史会话第一行是收执标签，不是
+    // 用户的输入。病根：首回合在飞时 this.messages 还是空的（用户消息收尾
+    // 才入账），旧锚算法给 -1，flushStatuses(-1) 把行拼成事件流第 0 条。本
+    // harness 就是这个窗口——全新控制器、零入账消息、回合在飞——修复后收
+    // 执行锚 0（本回合用户消息将占的下标）。刀 2 后收执=receipt（裁决器现
+    // 场写），剧本带上 receipt 作锚定对象。
     const llm = scriptedLlm([
-      { match: '预算砍半', cls: { relation: 'change', reason: 'budget premise overturned', confidence: 0.85 } },
+      { match: '预算砍半', cls: { relation: 'change', reason: 'budget premise overturned', confidence: 0.85, receipt: '对——讲师这条路不走了，我按你自己出内容重新安排。' } },
     ]);
     const h = makeHarness(llm);
     expect(h.chat.messages).toHaveLength(0);
     await h.chat.interject('预算砍半，不能请外部讲师，你自己出内容。');
     const ledger = h.chat.statusLines as Array<{ afterIndex: number; text: string }>;
-    const ack = ledger.find((l) => l.text.includes('方向变了'));
+    const ack = ledger.find((l) => l.text.includes('讲师这条路不走了'));
     expect(ack).toBeDefined();
     expect(ack!.afterIndex).toBe(0);
   });
@@ -625,17 +633,20 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.steerBus.entries()[1].target).toBe('all');
   });
 
-  it('约束转达与叫停：steer 承诺一句话；停走正则直判不占分类往返', async () => {
+  it('约束转达与叫停：steer 沉默转达；停也是裁决器的判定', async () => {
+    // 剧本顺序=匹配语义：scriptedLlm 按数组序 find，第二次分类的上下文里
+    // 已带着第一次插话的历史（含「口语」二字）——「停下」必须排在前面。
     const llm = scriptedLlm([
+      { match: '停下', cls: { relation: 'change', reason: 'user halts everything', confidence: 0.95, action: 'stop' } },
       { match: '口语', cls: { relation: 'supplement', reason: 'style tweak', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
 
     await h.chat.interject('报告文案再口语一点。');
-    // 单任务场景（无委派在飞）：话进 pure 自己下个 THINK 边界。裁决器这个
-    // 剧本没写 receipt → 兜底也必须带着用户原话（2026-10-27 固定话术全废：
-    // 「活不停带上这句」那族按构照就是错的）。
-    expect(assistantJoined(h.root)).toContain('收到，「报告文案再口语一点。」——手头的活不停，下个动作就带上它。');
+    // 单任务场景（无委派在飞）：话进 pure 自己下个 THINK 边界。沉默化
+    // （2026-10-28 刀 2）：steerFallbackReceipt 固定句族已删——剧本没写
+    // receipt 就沉默退场，原话进引擎上下文本身就是兑现，绝不出机械腔。
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('手头的活不停');
     expect(h.chat.abortController.signal.aborted).toBe(false);
     // 回合收尾时没被 THINK 边界带走的 steer，作为下一回合开场——不丢。
     // 1a + 渲染一致性（2026-09-25）：重入是用户原话，不是引擎框架文——
@@ -648,17 +659,19 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // ——插话时 echoUser 已显示过，屏幕上用户原话始终只有一遍。
     expect(userJoined(h.root).split('报告文案再口语一点。').length - 1).toBe(1);
 
-    // 停是快路径：正则直判，一次 LLM 都不花。（steer 的回合已收尾，
-    // 现在是下一个正在跑的回合里叫停。）
+    // 停也是裁决器的判定（2026-10-28 刀 1：STOP_RE 字面快路径已删）——
+    // 剧本判 action:"stop"，宿主只留 abort 掐流的机械动作。
     const classifyCount = llm.classifyCalls.length;
     h.chat.streaming = true;
     h.chat.abortController = new AbortController();
     await h.chat.interject('停下');
-    expect(llm.classifyCalls.length).toBe(classifyCount);
-    expect(statusJoined(h.root)).toContain('收到，停——正在收尾当前任务，已经跑完的部分都留着。');
+    expect(llm.classifyCalls.length).toBe(classifyCount + 1);
+    // 停的收执随裁决走（刀 2 沉默化）：剧本没写 receipt→引擎沉默退场，
+    // abort 掐流本身由状态呈现，宿主不出固定停腔。
+    expect(statusJoined(h.root)).not.toContain('收到，停');
     expect(h.chat.abortController.signal.aborted).toBe(true);
-    // 收尾派发点把回执的账结掉：微光不再宣称活还在收。
-    expect(rowPending(h.root, '收到，停')).toBe(true);
+    // 沉默退场：ack 行摘掉，账自始平。
+    expect(rowPending(h.root, '收到，停')).toBe(false);
     h.endTurn();
     expect(rowPending(h.root, '收到，停')).toBe(false);
   });
@@ -668,11 +681,13 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ role: '市场 Agent', status: 'running' });
 
-    // 裁决器判 task（加活=收齐后补的第二项），宿主按阶段折入汇合轮——
-    // 2026-09-28 起加活不再走正则快路径，判断全在裁决器。
+    // 裁决器判新活（unrelated/new_task=收齐后补的第二项），宿主按阶段折入
+    // 汇合轮——2026-09-28 起加活不走正则快路径，判断全在裁决器。
     await h.chat.interject('再加一个爱奇艺平台');
     expect(llm.classifyCalls.length).toBe(1);
-    expect(assistantJoined(h.root)).toContain('已收到——收齐后先补这项。');
+    // 沉默化（2026-10-28 刀 2）：foldInReceipt 固定句族已删——折入账与
+    // 队列卡本身就是回执，裁决器没写 receipt 就不出机械腔。
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('收齐后先补这项');
     expect(userJoined(h.root)).toContain('爱奇艺平台');
     // 折入进 FoldInLedger 等收尾核验，不占待办队列。
     expect(h.chat.folds.entries()).toHaveLength(1);
@@ -700,8 +715,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.activeTurnUserText = '调研三大视频平台的技术栈';
 
     await h.chat.interject('再加一个小红书');
-    // 收执说真话：已在跑，绝不再说「收齐后先补这项」。
-    expect(assistantJoined(h.root)).toContain('已经直接派出去补跑了');
+    // 沉默化（2026-10-28 刀 2）：早派收执已删——派没派出去看执行账
+    // （executed），裁决器没写 receipt 就不出机械腔。
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('已经直接派出去补跑了');
     expect(assistantJoined(h.root)).not.toContain('收齐后先补这项');
     // 宿主当场派出：foldin_ id、末位角色、带主任务原文的任务书；因果叙述
     // 气泡与汇合路由同族，但说的是「立即」。
@@ -745,7 +761,8 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.activeTurnUserText = '调研三大视频平台的技术栈';
 
     await h.chat.interject('再加一个小红书');
-    expect(assistantJoined(h.root)).toContain('已经直接派出去补跑了');
+    // 沉默化（2026-10-28 刀 2）：早派收执已删——沉默与派出照旧两不误。
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('已经直接派出去补跑了');
     const delivery = (h.chat as Record<string, any>).prepareFoldDelivery() as Promise<Array<{ role: string; content: string }>>;
     let delivered: Array<{ role: string; content: string }> | undefined;
     void delivery.then((m) => { delivered = m; });
@@ -786,38 +803,44 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.sends).toHaveLength(0);
   });
 
-  it('委派在飞时点名停一支（第 2 期分支中断）：单支在飞是集合事实，零 LLM 真停', async () => {
-    // 2026-10-10 模型判断、宿主执行：规则快路径只裁「要不要停」，单支在飞
-    // 时「停哪支」是集合事实（所指必然是它）——机械直停，不花裁决往返。
-    // 编排器是分支生死的权威账：宿主经 branchView() 校验在飞、按确切 id
-    // 停那一支。
-    const llm = scriptedLlm([]);
+  it('委派在飞时点名停一支（第 2 期分支中断）：点名归裁决器，宿主按确切 id 暂停', async () => {
+    // 2026-10-28 刀 1 后「停哪支」的判断全在裁决器：分类上下文带
+    // <live_branches> 花名册，判词点名确切 call_id，宿主只核实执行——
+    // 单支集合兜底与聚焦窄问是字面快路径的宿主侧残留，随刀 1 一并清。
+    const llm = scriptedLlm([
+      { match: '竞品', cls: { relation: 'change', reason: 'user names the branch to stop', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_a' }, receipt: '明白——「竞品分析员」那支先停了，断点留着，随时说一声就续上。' } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_a', agentName: '竞品分析员', status: 'running', inputSnippet: '调研竞品定价策略' });
-    const aborted: string[] = [];
+    const paused: string[] = [];
     h.chat.codingAgentRef = {
       subagentOrchestrator: {
         branchView: () => [{ callId: 'call_a', agentName: '竞品分析员', state: 'running' }],
-        abortBranch: (callId: string) => { aborted.push(callId); return true; },
+        pauseBranch: (callId: string) => { paused.push(callId); return true; },
+        abortBranch: () => false,
       },
     };
 
     await h.chat.interject('停掉竞品那支。');
-    expect(llm.classifyCalls.length).toBe(0); // 命令零延迟 + 单支零指认成本
-    expect(aborted).toEqual(['call_a']); // 确切 id 直达
-    expect(assistantJoined(h.root)).toContain('已停掉「竞品分析员」那支——进度留了断点，随时可以让它接着跑，其余照常。');
+    expect(llm.classifyCalls.length).toBe(1); // 停哪支是理解，判定一次完成
+    expect(paused).toEqual(['call_a']); // 宿主照裁决器指认的 id 暂停（收掉一项=暂停口径）
+    // 收执随裁决走（2026-10-28 刀 2：branchStopReceipt 固定话术已删——
+    // 剧本写了就转达，缺席沉默）。
+    expect(assistantJoined(h.root)).toContain('明白——「竞品分析员」那支先停了');
     expect(userJoined(h.root)).toContain('停掉竞品那支');
     // 真停不走折入/投递账：汇合轮没有这笔，steer 池也是空的。
     expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
-  it('多支在飞规则快路径：聚焦点名归裁决器，指认不出退回取消折入', async () => {
+  it('多支在飞：停哪支归裁决器，指认不出退回取消折入', async () => {
     // 「停掉那支」有锚无名——两支都可能是"那支"。指认是理解，宿主不做
-    // （2026-10-10 重构）：聚焦点名调用裁决器；剧本回包没有 call_id = 裁决
-    // 器也指认不出 → 退回取消折入。绝不能按普通 steer 广播：每支都可能把
-    // 自己当成"那支"自己停（反向执行最伤）。
-    const llm = scriptedLlm([]);
+    // （2026-10-10 重构，2026-10-28 刀 1 后连「要不要停」也归裁决器）：
+    // 剧本回包没有 call_id = 裁决器也指认不出 → 退回取消折入。绝不能按
+    // 普通 steer 广播：每支都可能把自己当成"那支"自己停（反向执行最伤）。
+    const llm = scriptedLlm([
+      { match: '停掉', cls: { relation: 'supplement', reason: 'wants one specific branch gone but cannot name it', confidence: 0.95, cancels_part: true } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
       { callId: 'call_a', agentName: '竞品分析员', status: 'running', inputSnippet: '调研竞品定价策略' },
@@ -835,7 +858,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     };
 
     await h.chat.interject('停掉那支。');
-    // 分类快路径没走（0 次），聚焦点名走了 1 次——回包无 call_id，宿主退回折入。
+    // 判定与指认同一次往返完成——回包无 call_id，宿主退回折入。
     expect(llm.classifyCalls.length).toBe(1);
     expect(aborted).toHaveLength(0); // 指认不出宁可不停，绝不误杀
     expect(h.chat.folds.entries()).toHaveLength(1);
@@ -851,7 +874,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 全程不停。新链路：分类上下文带 <live_branches> 花名册，裁决器指认
     // 确切 callId，宿主只执行——判断在模型，动作在宿主。
     const llm = scriptedLlm([
-      { match: '评审', cls: { relation: 'supplement', reason: 'removes the review part from the plan', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_review' } } },
+      { match: '评审', cls: { relation: 'supplement', reason: 'removes the review part from the plan', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_review' }, receipt: '明白——「审查员」那路我先暂停了，其余照常。' } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_review', agentName: '审查员', agentRole: '代码评审', status: 'running', inputSnippet: '对照规范逐条审查代码' });
@@ -869,6 +892,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('不要评审了，直接给我看接轨');
     expect(llm.classifyCalls.length).toBe(1); // 判定一次完成，点名随判定带回
     expect(paused).toEqual(['call_review']); // 宿主照 id 执行
+    // 收执随裁决走（2026-10-28 刀 2：branchStopReceipt 固定话术已删）。
     expect(assistantJoined(h.root)).toContain('明白——「审查员」那路我先暂停了');
     expect(h.chat.folds.entries()).toHaveLength(0);
   });
@@ -924,7 +948,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 宿主执行）：分类上下文带着 <live_branches> 花名册，裁决器指认确切
     // call_id，宿主按 id 真停（不落中止），其余照跑——宿主不再做任何文本匹配。
     const llm = scriptedLlm([
-      { match: '爆发点', cls: { relation: 'supplement', reason: 'removes the named research item', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
+      { match: '爆发点', cls: { relation: 'supplement', reason: 'removes the named research item', confidence: 0.95, cancels_part: true, stop_branch: { call_id: 'call_burst' }, receipt: '明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总；其余照常跑，想续上随时说。' } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -948,7 +972,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     await h.chat.interject('不要调研"未来三年的爆发点"这个了');
     expect(llm.classifyCalls.length).toBe(1); // 取消裁决来自裁决器，不再走正则
     expect(paused).toEqual(['call_burst']);   // 按裁决器指认的 id 暂停那一支
-    expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总；其余照常跑，想续上随时说。');
+    // 收执随裁决走（2026-10-28 刀 2：branchStopReceipt 固定话术已删——
+    // 剧本写了就转达，缺席沉默）。
+    expect(assistantJoined(h.root)).toContain('明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总');
     // 真停了就不再折入：汇合轮没有这笔账。
     expect(h.chat.folds.entries()).toHaveLength(0);
     expect(h.chat.steerBus.entries()).toHaveLength(0);
@@ -960,7 +986,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 契约驱动：kind 错了不要紧，cancels_part + stop_branch 在就不会反向执行
     // ——2026-10-10 起连「停哪支」也在契约里（裁决器指认 call_id）。
     const llm = scriptedLlm([
-      { match: '取消', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'misjudged as an addition, flag still set', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_burst' } } },
+      { match: '取消', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'misjudged as an addition, flag still set', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_burst' }, receipt: '明白——「爆发点分析员」那路我先暂停了，它的产出不进最终汇总。' } },
     ]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push(
@@ -984,6 +1010,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(llm.classifyCalls.length).toBe(1); // 不走快路径——正是分类器判 task 的串台形态
     expect(paused).toEqual(['call_burst']);   // 仍按裁决器指认的 id 真停
     const status = statusJoined(h.root) + assistantJoined(h.root);
+    // 收执随裁决走：复核/主判的现场 receipt 是停支收执唯一来源。
     expect(status).toContain('明白——「爆发点分析员」那路我先暂停了');
     expect(status).not.toContain('不重复派'); // 去重回执绝不准碰取消话
     expect(h.chat.folds.entries()).toHaveLength(0);
@@ -1107,7 +1134,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 题提示词），模型能点名 call_id——宿主直接暂停那一支，比无目标折入更
     // 早止损。
     const llm = scriptedLlm([
-      { match: 'dedupe_conflict', cls: { reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' } } },
+      { match: 'dedupe_conflict', cls: { reason: 'recheck: removal of the named branch', confidence: 0.9, cancels_part: true, stop_branch: { call_id: 'call_r2' }, receipt: '明白——「researcher·2号」那路我先暂停了，其余照常。' } },
       { match: '优酷', cls: { relation: 'unrelated', unrelated_kind: 'new_task', reason: 'read as an addition, no flag', confidence: 0.9 } },
     ]);
     const h = makeHarness(llm);
@@ -1129,6 +1156,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
 
     await h.chat.interject('去掉 优酷的调研');
     expect(paused).toEqual(['call_r2']); // 复核点名→精确暂停
+    // 收执随裁决走：复核现场写的 receipt 是这条停支收执的唯一来源。
     expect(assistantJoined(h.root)).toContain('明白——「researcher·2号」那路我先暂停了');
     expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('不重复派');
     expect(h.chat.folds.entries()).toHaveLength(0);
@@ -1208,7 +1236,11 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   it('第 2 期第三刀：点名把一支已暂停的委派接着跑完——同参重派命中存档，回执说清从哪轮接', async () => {
     // 用户真机诉求：「把 jev 那支接着跑完」。名字是代号，点名靠区分词；
     // 关键在"用原始参数"——稳定 sessionId 命中 checkpoint，子引擎 continue。
-    const llm = scriptedLlm([]);
+    // 点名归裁决器（2026-10-28 刀 1：RESUME_BRANCH_RE 快路径已删）——判词
+    // 点 resumes_branch 的 call_id，宿主只核实执行。
+    const llm = scriptedLlm([
+      { match: '竞品那支', cls: { relation: 'supplement', reason: 'resume the named paused branch', confidence: 0.95, resumes_branch: { call_id: 'call_b' } } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities = [
       { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'paused' },
@@ -1227,9 +1259,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
       state: { messages: [{ role: 'user', content: '分析主要竞品的定价策略' }], turnCount: 12 },
     });
 
-    // RESUME_BRANCH_RE 快路径：不经 LLM 直判「把那一支接着跑完」。
+    // 裁决器点名 resumes_branch：判定一次往返，宿主核实后同参重派。
     await h.chat.interject('把竞品那支接着跑完。');
-    expect(llm.classifyCalls.length).toBe(0);
+    expect(llm.classifyCalls.length).toBe(1);
     // 回执诚实二分（判例 14 验收语）：命中存档必须说清从哪轮接的。
     expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点（第 12 轮）接上。等手头这批收齐接上。');
     expect(assistantJoined(h.root)).not.toContain('没找到存档');
@@ -1248,7 +1280,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   it('第 2 期第三刀：续跑点名但存档不在（store 空）——回执明说没存档会重跑，不许预支断点承诺', async () => {
     // 反面对照（判例 14 下半句）：「resume 找不到断点不许悄悄从头跑——
     // 明说『没找到存档，重新跑了』」。收执不能比机制许的愿更多。
-    const llm = scriptedLlm([]);
+    // 点名归裁决器（刀 1 后 resumes_branch 随判词来）：store 空，probe 必 miss。
+    const llm = scriptedLlm([
+      { match: '竞品那支', cls: { relation: 'supplement', reason: 'resume the named paused branch', confidence: 0.95, resumes_branch: { call_id: 'call_b' } } },
+    ]);
     const h = makeHarness(llm); // subagentStore 是空镜像（测试无 Tauri invoker）：probe 必 miss
     h.chat.agentActivities = [
       { callId: 'call_b', agentName: '竞品分析员', agentRole: 'analyst', inputSnippet: '分析主要竞品的定价策略', status: 'paused' },
@@ -1265,7 +1300,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('第 2 期第三刀：同参重派没赶上 THINK 边界——收尾转成排队的新指令，话绝不丢', async () => {
-    const llm = scriptedLlm([]);
+    // 点名归裁决器（刀 1 后 resumes_branch 随判词来），宿主核实排队。
+    const llm = scriptedLlm([
+      { match: '竞品那支', cls: { relation: 'supplement', reason: 'resume the named paused branch', confidence: 0.95, resumes_branch: { call_id: 'call_b' } } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities = [
       { callId: 'call_b', agentName: '竞品分析员', status: 'paused', inputSnippet: '分析主要竞品的定价策略' },
@@ -1282,7 +1320,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
   });
 
   it('第 2 期第三刀：点不出具体支（无暂停支/打平）——退回普通 steer，让父模型重派', async () => {
-    const llm = scriptedLlm([]);
+    // 裁决器照样点名（resumes_branch 随判词来），但宿主核实不过——
+    // stoppedBranches 投影是空的，callId 点不到停止面花名册 = 按普通插话
+    // 落回 steer，宿主不猜、不越权改判。
+    const llm = scriptedLlm([
+      { match: '竞品那支', cls: { relation: 'supplement', reason: 'resume the named paused branch', confidence: 0.95, resumes_branch: { call_id: 'call_b' } } },
+    ]);
     const h = makeHarness(llm);
     h.chat.agentActivities = []; // 没有可续跑的候补
 
@@ -1347,11 +1390,13 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
 
     await h.chat.interject('背景上加一些会动的云朵');
     expect(llm.classifyCalls.length).toBe(1);
-    // 没被吸收：暂存空，队列卡上屏，收执交代「排上了」——绝不静默。
+    // 没被吸收：暂存空，队列卡上屏——绝不静默吞进思考窗。沉默化（刀 2）：
+    // 「这句排上了」固定话术已删，队列卡逐条可见（原话在卡上），不预支
+    // 排期承诺。
     expect(h.chat.interjectOrchestrator.pendingPreflightCount()).toBe(0);
     expect(queueCard(h.root)).toBeDefined();
     expect(h.chat.roundClose.queueView()).toHaveLength(1);
-    expect(assistantJoined(h.root) + statusJoined(h.root)).toContain('这句排上了，办完手头就轮到。');
+    expect(assistantJoined(h.root) + statusJoined(h.root)).not.toContain('排上了');
   });
 
   it('取消话不是加内容：思考窗开着也不吸收，照走取消路', async () => {

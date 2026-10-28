@@ -1,22 +1,29 @@
 // 插话语料回归（2026-09-28）：把回放脚本用的那批真实插话原文接进常规回归。
 //
-// 这里锁的是**机械路径的行为边界**，不是模型判定质量——所以不需要 API key，
-// 每次 `bun test` 都能跑。三件事必须一直成立：
-//   1. 主路的机械快路径一句都不许判错（这是它继续抢在裁决器前面的唯一理由）
-//   2. 软停语料一句都不许被机械路径命中（否则裁决器新补的 stop 档永远到不了）
-//   3. 降级路径的方向偏差就是已知那两句（改契约前必须重新评估，不能悄悄变多）
+// 这里锁的是**语料本身的行为边界**，不是模型判定质量——所以不需要 API key，
+// 每次 `bun test` 都能跑。
+//
+// 2026-10-28 框架改革刀 1：七条机械快路径正则整族删除（STOP_RE/
+// BRANCH_STOP_RE/RESUME_BRANCH_RE/GOAL_CHANGE_RE/CANCEL_PART_RE/URGENT_RE/
+// SCOPE_ADD_RE 及 netVerdict 字面网），主路只剩裁决器 judge 与原话直投
+// passthrough 两条。语料的旧职能「锁机械路径判错面」随之消失——停/续/改的
+// 判定全归裁决器（真机判例与回放对照兜），语料继续锁的：
+//   1. 语料自洽（出处、去重、契约期望成对）
+//   2. 收割段与人工段的边界（suspected 不冒充断言）
+//   3. 场景跟句走（回放按句取场景，不回到全场一个上下文）
+//   4. 机械路径不回潮（导出面锁死）
 //
 // 语料本体在 ../insertionCorpus.ts，与 scripts/replay-insertion-decisor.ts 共用。
 //
 // 语料分两段（2026-09-28）：人工核对的 CASES（可断言 kind），与诊断区审计自动
-// 收割的 HARVESTED_CASES（期望由疑点原因反推，标 suspected）。机械路径的断言
-// 跑全量——那些正则与模型无关；快照只锁人工段，免得自动收割把快照刷花。
+// 收割的 HARVESTED_CASES（期望由疑点原因反推，标 suspected）。
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { ALL_CASES, CASES, DEFAULT_SCENARIO, HARVESTED_SCENARIO_ID, SCENARIOS, aligns, mainHit, mechanicalHits, scenarioFor } from '../insertionCorpus';
+import * as corpus from '../insertionCorpus';
+import { ALL_CASES, CASES, DEFAULT_SCENARIO, HARVESTED_SCENARIO_ID, SCENARIOS, scenarioFor } from '../insertionCorpus';
 
-describe('插话语料：机械路径的行为边界', () => {
+describe('插话语料：行为边界', () => {
   it('语料自洽：每句都有出处、不重复、契约期望成对', () => {
     const seen = new Set<string>();
     for (const c of ALL_CASES) {
@@ -65,8 +72,10 @@ describe('插话语料：机械路径的行为边界', () => {
     // 场景只描述当前任务与阶段，不含任何 kind 词——否则语料变成"把答案抄进
     // 上下文"，断言就不再是断言。
     for (const text of Object.values(SCENARIOS)) {
-      expect(text.length).toBeGreaterThan(40);
-      for (const leaked of ['steer', 'premise-change', 'goal-change', 'chatter', '排队']) {
+      expect(text).not.toContain('排队');
+    }
+    for (const leaked of ['steer', 'premise-change', 'goal-change', 'chatter']) {
+      for (const text of Object.values(SCENARIOS)) {
         expect(text).not.toContain(leaked);
       }
     }
@@ -78,53 +87,18 @@ describe('插话语料：机械路径的行为边界', () => {
     expect(script).toContain('scenarioFor(c)');
   });
 
-  it('主路的机械快路径一句都不许判错', () => {
-    // 判错 = 反向执行（该停的继续跑、该收的当成加活）。只要这里出现一条，
-    // 那条话就必须从快路径拿走交给裁决器。跑全量：审计收割来的句子同样会
-    // 落到宿主手里，正则变宽把它截错也是一样的事故。
-    const wrong = ALL_CASES
-      .map((c) => ({ c, hit: mainHit(c) }))
-      .filter(({ c, hit }) => hit !== undefined && !aligns(c, hit.gives));
-    expect(wrong.map((w) => w.c.text)).toEqual([]);
-  });
-
-  it('主路命中集合就是那 10 句命令——增删都要有人重新审视', () => {
-    // 快照式断言：语料变了、或某个正则变宽/变窄，都必须在这里显式改一次，
-    // 而不是让"截胡面"悄悄漂移。
-    const main = CASES
-      .filter((c) => mainHit(c) !== undefined)
-      .map((c) => `${c.text} [${mainHit(c)!.name}]`);
-    expect(main).toEqual([
-      '停止当前任务 [STOP_RE]',
-      '停下 [STOP_RE]',
-      '别做了 [STOP_RE]',
-      '取消 [STOP_RE]',
-      '先别做这个了 [STOP_RE]',
-      '停掉竞品那支 [BRANCH_STOP_RE]',
-      '把调研那路掐掉 [BRANCH_STOP_RE]',
-      '那路别跑了 [BRANCH_STOP_RE]',
-      '把竞品那支接着跑完 [RESUME_BRANCH_RE]',
-      '让报价那路继续 [RESUME_BRANCH_RE]',
-    ]);
-  });
-
-  it('软停语料不被任何机械路径命中——否则裁决器的 stop 档永远到不了', () => {
-    // detail 为空表示它不是命令（命令走快路径，本来就轮不到裁决器）。
-    const soft = ALL_CASES.filter((c) => c.kind === 'stop' && c.detail === undefined);
-    expect(soft.length).toBeGreaterThanOrEqual(4);
-    for (const c of soft) {
-      expect(mechanicalHits(c.text)).toEqual([]);
-    }
-  });
-
-  it('降级路径的方向偏差就是已知那两句', () => {
-    // 这两句在裁决器倒下时会被推去排队（期望是 steer）：SCOPE_ADD_RE 认不出
-    // "往当前结果里加"与"第二件活"的区别。数字变多说明加活族的边界松了。
-    const drifted = CASES
-      .filter((c) => mainHit(c) === undefined)
-      .map((c) => ({ c, hit: mechanicalHits(c.text).find((h) => h.lane === 'net') }))
-      .filter(({ c, hit }) => hit !== undefined && !aligns(c, hit.gives))
-      .map(({ c }) => c.text);
-    expect(drifted).toEqual(['不要只查均价，把区间也查了', '新增加两位']);
+  it('机械快路径不回潮：mainHit/mechanicalHits 已随刀 1 整族删除', () => {
+    // 快路径删除是刀 1 的核心动作：判定全归裁决器，宿主零字面匹配。函数名
+    // 一旦重新出现（哪怕只是换壳的正则网），裁决器就会被重新截胡——导出面
+    // 锁死，回潮即红。
+    const names = Object.keys(corpus);
+    expect(names).not.toContain('mainHit');
+    expect(names).not.toContain('mechanicalHits');
+    // CASES 数据全保留（回放对照的 baseline 不许丢）：命令句仍在语料里，
+    // 只是它们的判定改由裁决器做。
+    const texts = CASES.map((c) => c.text);
+    expect(texts).toContain('停止当前任务');
+    expect(texts).toContain('停掉竞品那支');
+    expect(texts).toContain('把竞品那支接着跑完');
   });
 });

@@ -62,15 +62,17 @@ describe('疑点句收割', () => {
     expect(added[0].source).toContain('cancels-missed');
   });
 
-  it('报了取消又在加活的句子收成 cancels + adds_along 期望', () => {
-    const { added } = harvestCasesFromLog(
+  it('报了取消又加活的句子不再产生 adds-along 疑点（2026-10-28 刀 1）', () => {
+    // adds-along-missed 的判据 SCOPE_ADD_RE 已随刀 1 删除（决策路径死代码），
+    // 该疑点不再产生：报了取消的句子即便同句加活，审计也不再标（加活面归
+    // 裁决器的 adds_along 契约字段与回放对照兜）。
+    const { added, skipped } = harvestCasesFromLog(
       [decision({ inputText: 'B站那支别查了，再加一个爱奇艺', signals: { via: 'judge', cancelsPart: true } })],
       NO_EXISTING,
       '2026-09-28',
     );
-    expect(added).toHaveLength(1);
-    expect(added[0]).toMatchObject({ cancels: true, addsAlong: true, expectation: 'suspected' });
-    expect(added[0].source).toContain('adds-along-missed');
+    expect(added).toEqual([]);
+    expect(skipped).toEqual([{ text: 'B站那支别查了，再加一个爱奇艺', why: 'clean' }]);
   });
 
   it('收割带着当初判它的场景一起进语料——否则疑点可能根本复现不出', () => {
@@ -127,11 +129,13 @@ describe('疑点句收割', () => {
   });
 
   it('已经在语料里的句子只收一次，同一批里的重复也只收一次', () => {
-    const entry = decision({ inputText: 'X 就不调研了' });
-    const existing: Case[] = [{ text: 'X 就不调研了', kind: 'steer', cancels: true, source: '人工' }];
+    // 2026-10-28 刀 1 后审计收缩：裸"不"句（「X 就不调研了」）不再命中
+    // CANCEL_SMELL，会被当 clean 跳过——duplicate 语义改用取消味命中的句子锁。
+    const entry = decision({ inputText: '把知乎那项也取消掉' });
+    const existing: Case[] = [{ text: '把知乎那项也取消掉', kind: 'steer', cancels: true, source: '人工' }];
     const againstExisting = harvestCasesFromLog([entry], existing, '2026-09-28');
     expect(againstExisting.added).toEqual([]);
-    expect(againstExisting.skipped).toEqual([{ text: 'X 就不调研了', why: 'duplicate' }]);
+    expect(againstExisting.skipped).toEqual([{ text: '把知乎那项也取消掉', why: 'duplicate' }]);
 
     const withinBatch = harvestCasesFromLog([entry, entry], NO_EXISTING, '2026-09-28');
     expect(withinBatch.added).toHaveLength(1);

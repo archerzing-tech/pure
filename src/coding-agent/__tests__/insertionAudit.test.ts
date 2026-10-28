@@ -38,14 +38,16 @@ describe('insertionAudit — 契约字段漏报的事后标记', () => {
     expect(auditInsertionDecision(d).anomalies).toEqual([]);
   });
 
-  it('flags a cancelling message that also adds work but lacks adds_along', () => {
-    // 漏报 adds_along 的代价是反向的：宿主会真去停那支，把刚要求加的活停掉。
+  it('adds-along-missed 不再产生（2026-10-28 刀 1）', () => {
+    // 判据 SCOPE_ADD_RE 已随刀 1 删除（决策路径死代码）：报了取消又加活的
+    // 句子不再标这个疑点——类型值保留供诊断面板全键 Record 兼容，加活面的
+    // 漏报改由裁决器回放对照兜。
     const d = decision({
       inputText: 'B站那支别查了，再加一个爱奇艺',
       kind: 'steer',
       signals: { via: 'judge', cancelsPart: true },
     });
-    expect(auditInsertionDecision(d).anomalies).toEqual(['adds-along-missed']);
+    expect(auditInsertionDecision(d).anomalies).toEqual([]);
   });
 
   it('stays quiet when adds_along is present', () => {
@@ -68,14 +70,14 @@ describe('insertionAudit — 契约字段漏报的事后标记', () => {
     expect(auditInsertionDecision(d).anomalies).toEqual([]);
   });
 
-  it('看得见本项目最经典的取消形状（裸否定 + 动词）', () => {
-    // 2026-09-24 事故的原句。CANCELISH_RE 的标记表里没有裸"不"，只搬它的话
-    // 这一句漏报也不会被标——而它恰是漏报后反向执行的真实受害者。审计的
-    // 假阴性不可接受（见 insertionAudit 头注），所以词族与字面安全网取并集。
-    for (const text of ['X 就不调研了', 'Y 那个不用查了', '把 X 这个调研取消掉']) {
-      const d = decision({ inputText: text, kind: 'task' });
-      expect(auditInsertionDecision(d).anomalies).toEqual(['cancels-missed']);
-    }
+  it('CANCEL_SMELL 标记表内的形状照旧标；裸「不」不再由审计兜（2026-10-28 刀 1）', () => {
+    // 2026-09-24 事故的原句「X 就不调研了」当年靠 CANCEL_PART_RE 并集兜住
+    // ——那张决策路径的字面安全网已随刀 1 整删，审计不再蹭它：裸"不"形状
+    // 的疑点改由真机判例与回放对照兜（审计只回答「该报的报了吗」，语义判断
+    // 归裁决器）。标记表内的形状照旧标。
+    expect(auditInsertionDecision(decision({ inputText: 'X 就不调研了', kind: 'task' })).anomalies).toEqual([]);
+    expect(auditInsertionDecision(decision({ inputText: 'Y 那个不用查了', kind: 'task' })).anomalies).toEqual(['cancels-missed']);
+    expect(auditInsertionDecision(decision({ inputText: '把 X 这个调研取消掉', kind: 'task' })).anomalies).toEqual(['cancels-missed']);
   });
 
   it('排他句不报漏报——「不要只 X」没有移除任何东西', () => {
@@ -98,13 +100,15 @@ describe('insertionAudit — 契约字段漏报的事后标记', () => {
     expect(auditInsertionDecision(decision({ inputText: '   ' })).anomalies).toEqual([]);
   });
 
-  it('遵守率逐批算：命令快路径与没有原话的不进分母', () => {
-    // 分母只收"契约字段本来适用"的决策：命令走 rule（字段对停一支本来就不适用），
-    // 没有原话则无从比对。把它们算进去，遵守率就变成"插话里有多少是命令"。
+  it('遵守率逐批算：rule/passthrough 与没有原话的不进分母', () => {
+    // 分母只收"契约字段本来适用"的决策：没经过裁决器判词的（rule 旧命令、
+    // 刀 1 后的原话直投 passthrough）契约字段对它们本来就不适用，没有原话
+    // 则无从比对。把它们算进去，遵守率就变成"插话里有多少不是裁决器判的"。
     const entries = [
-      decision({ inputText: 'X 就不调研了', kind: 'task' }),
+      decision({ inputText: '把知乎那项也取消掉', kind: 'task' }),
       decision({ inputText: '记得跑测试' }),
       decision({ inputText: '停掉竞品那支', signals: { via: 'rule', rule: 'BRANCH_STOP_RE' } }),
+      decision({ inputText: '推翻重来', signals: { via: 'passthrough', netReason: 'no-judge' } }),
       decision({ inputText: '' }),
     ];
     expect(auditTrend(entries, 2)).toEqual([{ index: 1, total: 2, anomalies: 1, rate: 0.5 }]);
@@ -113,9 +117,9 @@ describe('insertionAudit — 契约字段漏报的事后标记', () => {
 
   it('按时间顺序分批，批次序号从 1 起', () => {
     const entries = [
-      decision({ inputText: 'X 就不调研了', kind: 'task' }),
-      decision({ inputText: '记得跑测试' }),
       decision({ inputText: '把知乎那项也取消掉', kind: 'task' }),
+      decision({ inputText: '记得跑测试' }),
+      decision({ inputText: '把「市场格局」这份调研取消掉', kind: 'task' }),
     ];
     const trend = auditTrend(entries, 2);
     expect(trend.map((b) => [b.index, b.total, b.anomalies])).toEqual([[1, 2, 1], [2, 1, 1]]);

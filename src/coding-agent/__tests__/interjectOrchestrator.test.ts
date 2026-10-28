@@ -166,9 +166,11 @@ describe('InterjectOrchestrator — nine-relation arms (v2)', () => {
     expect(h.holds.holdInsert).toBe(0);
   });
 
-  it('literal stop (rule path) ends the turn without a held re-entry', async () => {
-    const realDecider = new DynamicInsertionCoordinator();
-    h.deps.decider = realDecider;
+  it('judged whole-run stop (action:"stop") ends the turn without a held re-entry (刀 1)', async () => {
+    // 字面停快路径已删（2026-10-28 刀 1）：整树停也是裁决器的判定——契约
+    // action:"stop" 随判词来，协调器压成整停落点，编排器走 changeArm 的
+    // stop 臂收尾。
+    h.classifyWith({ relation: 'change', reason: 'overturned', confidence: 1, action: 'stop' });
     await new InterjectOrchestrator(h.deps).interject('停止');
     expect(h.holds.abortReasons).toHaveLength(1);
     expect(h.holds.holdInsert).toBe(0); // 停是终局，不押账重入

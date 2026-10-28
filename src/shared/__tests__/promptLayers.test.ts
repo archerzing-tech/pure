@@ -60,78 +60,36 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
 });
 
 describe('L1 behavior contracts', () => {
-  it('carries the mid-run insertion protocol (v2 软暂停+九类消化，2026-10-27)', () => {
-    // v2（docs/insertion-redesign-v2.md §八）：插话到达即被宿主软暂停押着
-    // （hold on），宿主判完九类 relation 才放行——运行中的模型看到的是已判
-    // 定、已放行的插话，按 relation 语义消化；旧版「自己先判影响面再选最小
-    // 动作」的旁观框架随判定窗口一起作废。
+  it('carries the mid-run insertion protocol as a thin pointer (2026-10-28 刀 3)', () => {
+    // 框架改革刀 3（docs/framework-reform-2026-10.md）：6.5k 的逐场景长协议
+    // 瘦成 632 字符薄指针——逐场景教导下放进五个标注块（随插话现场到达），
+    // 常驻层只留四条纪律内核：认块按块内指令配合、点名具体的事禁模板句、
+    // 停支归宿主、幸存者合并照常。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('<insertion_protocol>');
-    // 软暂停处境：押着时不许抢跑/预判，解除后按结论继续或转向。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('soft-pauses the run the moment one lands');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('already released and labeled by its relation');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('do not rush ahead or pre-empt the verdict');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('standing work keeps moving, the affected part turns or restarts');
-    // 九类 relation 全部点名（对齐 inputDecision 九类契约），各带消化要点。
-    for (const relation of ['supplement', 'emphasize', 'unrelated', 'question', 'meta', 'change', 'correction', 'mixed', 'misunderstanding']) {
-      expect(INSERTION_PROTOCOL_PROMPT).toContain(`- ${relation} — `);
-    }
-    // 补充纳入不打断；无关绝不触碰主线且回告。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('Never restart anything for it');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('must not leak into the running work');
-    // 改变：宿主已查状态定位影响（未开始拦截/进行中停清/已完成冻结+询问），
-    // 模型只做最小重算；已取外部数据标记不用而非删除（§十.2 降级保留）。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('not-yet-started pieces are intercepted');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('frozen and the user asked');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('smallest rework');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('marked not-used-for-decisions');
-    // 真暂停重入：带着用户上一句原话+纠偏输入重新开始，清掉的产出不是既成
-    // 事实；旧方向实质产出同样触发（§七.1 双重触发）。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('TRUE pause');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain("restart from the user's original last message plus the corrective line");
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('not a fact you may build on');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('already substantively built the old way');
-    // 方向变更保留未冲突条件；前提变更立即止损，不等跑完再补。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('does not contradict');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('instead of letting them finish and patching afterwards');
-    // 无关插入进待办；多句/mixed 一批，不逐句抢跑。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('record it as a to-do');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('ONE batched decision');
-    // 第 5 期「调度」批/分协议：跨回合攒下的同类小活并成一批，一次跑完一次
-    // 汇报——不能一条小差事配一个小回合。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('several such unrelated pieces of the SAME kind pile up');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('one batch to run together once the turn ends');
-    // 翻转只认最后明确意图，不执行中间态；不可逆旁先问，问不毁。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('LAST explicit statement');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('never execute a middle state');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('irreversible action');
-    // 增强测试集（2026-09-24）补的两条：转向必须停掉在跑的执行资源并点名交代；
-    // 两条互斥需求不得自行二选一——挂起等用户裁决，其余照常。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('stopping anything still running for it');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('cannot both hold');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('stopped, kept, or re-dispatched');
-    // T22（2026-09-24）补的：用户说“错了算我的”也不能跳过不可逆确认——风险与被跳过的安全步骤（备份/演练）同行点名。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('takes the blame');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('safety step being skipped');
-    // 回复样式：一句说清 变更项/保留项/影响面；无关的已完成工作绝不丢弃。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('what changed, what stays, what it affects');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('never thrown away');
-    // 并行分支取消（2026-09-24 取消案例）：幸存分支照跑不中止，取消分支的
-    // 部分产出不进合并，一句话交代取消与出结果的部分。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('named branch of parallel or delegated work cancelled mid-run');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('surviving branches keep running untouched');
-    // 派出前取消（2026-09-26 用户反馈；§十.3 起飞闸判例保留）：计划当场缩，
-    // 叙述只数会派的支并同一口气点名弃掉的方向——收执说"不派了"、计划书却
-    // 照数三支是自相矛盾。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('cancelled before its delegation even exists');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('count what you will actually dispatch');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('never announce the dropped one as still on the list');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('stays out of the final merge');
+    // 五类标注块名一一在场（模型靠它们认块，标注块文本在 insertionMessaging
+    // 与宿主投递侧，一致性测试各锁各的）。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('【用户插话·顺路带上】');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('【排队中的用户消息·现在轮到它】');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('【推倒重来·回到你的原话】');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途取消，不是追加】');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途追加的任务】');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('follow the instructions inside each block');
+    // 点名具体的事禁模板句：能在任何会话里成立的回复按构就是错的。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('name the concrete thing it touches in THIS conversation');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('wrong by construction');
+    // 停支归宿主：宿主停或暂停，模型永不动手停。
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('the host stops or pauses that branch');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('stopping it is never your move');
+    // 幸存者合并：幸存照常，被收方向不进结果。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('the merge covers the survivors only');
-    // 指令词泄漏（2026-10-12 四问题③）：宿主注记（【】框架文/注入文）是执行
-    // 指令不是措辞素材——模型照做，但面向用户的话用自己的话说，别把「产出
-    // 并入最终汇总」这类调度腔复读成回复原文。
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('orders to execute, not phrasing to reuse');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('never a sentence in your reply');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('The cancelled direction stays out of the final result');
+    expect(INSERTION_PROTOCOL_PROMPT).toContain('surviving work carries on');
+    // 薄指针不再背逐场景长文：旧的九类清单、调度批/分、收尾样式等教导已
+    // 下放（现仍在的移去了复杂任务协议/标注块/裁决器提示词），不得回流——
+    // 回流即常驻段回涨，违背瘦身红线。
+    expect(INSERTION_PROTOCOL_PROMPT).not.toContain('supplement —');
+    expect(INSERTION_PROTOCOL_PROMPT).not.toContain('one batch to run together');
+    expect(INSERTION_PROTOCOL_PROMPT).not.toContain('what changed, what stays, what it affects');
   });
 
   it('keeps the resident prompt within the slimming red line (2026-10-27: 9,978 × 105%)', () => {

@@ -131,12 +131,12 @@ export interface InputDecision {
  * WHO decided it — the one field that answers "did the judge rule, or did a
  * regex/literal net step in?" for a decision read back out of the log.
  *  - judge: the LLM weighed timing × content impact (the normal path)
- *  - rule:  a mechanical fast path matched — imperative stop / named-branch
- *           stop / named-branch resume, where the words ARE the command and a
- *           round-trip would be disobedience, not deliberation
- *  - net:   the literal safety net answered because no verdict was available;
- *           `signals.netReason` says which ('no-judge' → no LLM at all,
- *           'judge-down' → the judge timed out / failed / returned garbage)
+ *  - rule:  a mechanical fast path matched — retired 2026-10-28 (framework
+ *           reform, knife 1 deleted the whole literal fast-path family); kept
+ *           only so old exported logs still read back correctly
+ *  - net:   the literal safety net answered because no verdict was available —
+ *           also retired by knife 1 (no relation is ever guessed now; the
+ *           judge-less fallback is a verbatim passthrough to the queue)
  * Producers that do not set `signals.via` are judged by their main path, so
  * this reads 'judge' for them rather than inventing a fourth bucket.
  */

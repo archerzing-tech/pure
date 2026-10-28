@@ -1121,15 +1121,18 @@ describe('classifyInsertion — 插话架构 v2：九类 relation 路由', () =>
 
   it('teaches the whole-run stop as change at full scope with cancels_part OFF (蓝图 §十.5)', () => {
     // 非字面的停（"先缓一缓""这个就到这儿"）落在 relation=change 全停特例：
-    // 没有东西补上来、不设 cancels_part（那是点名撤一部分、其余照跑的字段）；
-    // 字面命令归宿主快路径，到不了裁决器。
+    // 没有东西补上来、不设 cancels_part（那是点名撤一部分、其余照跑的字段）。
+    // 2026-10-28 刀 1：字面命令归宿主快路径的旧说法已废——整树停也是裁决器
+    // 的判定（action:"stop"），宿主只核实执行。
     const src = readFileSync(new URL('../Planner.ts', import.meta.url), 'utf8');
     const promptStart = src.indexOf('const INSERTION_CLASSIFY_PROMPT');
     const changeBody = src.slice(src.indexOf('- "change"', promptStart), src.indexOf('- "emphasize"', promptStart));
     expect(changeBody).toContain('the whole-run STOP');
     expect(changeBody).toContain('NOTHING takes its place');
     expect(changeBody).toContain('"cancels_part" OFF');
-    expect(changeBody).toContain("the host's literal-stop fast path");
+    expect(changeBody).toContain('"action":"stop"');
+    // 旧口径不得回流：宿主不再有任何字面停快路径。
+    expect(src.slice(promptStart)).not.toContain("the host's literal-stop fast path");
   });
 
   it('teaches the resource-reminder meta relation, never removal (2026-10-13 REA case)', () => {

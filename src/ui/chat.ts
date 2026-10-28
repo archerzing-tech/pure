@@ -50,7 +50,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, foldInReceipt, foldInEarlyReceipt, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText, steerFallbackReceipt } from '../shared/insertionMessaging';
+import { steerFrameText, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText } from '../shared/insertionMessaging';
 import { QUEUED_PRIORITY } from '../shared/scheduling';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
@@ -3319,7 +3319,11 @@ export class ChatController {
    * 用户实测），气泡顶替 ack 行的原位：位置正对着回显气泡的后面（次序由
    * placeEchoBeforeAck 保证：用户原话在前，宿主回话在后）。
    * keepPending=true 是「话还没说完」的占位——停/改向/追问的后续还在途，
-   * 保留状态行 + 微光，等追问气泡或收尾扫除接管；只有终稿回执才转气泡。 */
+   * 保留状态行 + 微光，等追问气泡或收尾扫除接管；只有终稿回执才转气泡。
+   * text=null = 引擎沉默（2026-10-28 框架改革刀 2）：收执 = 裁决器现场写的
+   * receipt 唯一来源，缺席时宁可无话、绝不出固定话术——临时行退场（行摘
+   * 掉 + 账上销账，不进收执事件日志），机制状态由 UI（支状态卡/队列卡/状
+   * 态气泡）呈现。 */
   /** A1（S1-4）fold 水位：最近一次已落日志（且已进 this.messages）的
    *  turn_messages 事件 ts。快照保存时写进 foldedThrough；会话恢复时从快照
    *  读回，清空归 undefined（旧会话：保守忽略日志尾增量）。 */
@@ -3354,8 +3358,14 @@ export class ChatController {
     });
   }
 
-  private settleAck(ack: HTMLElement | null, text: string, keepPending = false, kind?: 'success' | 'warn' | 'info'): void {
+  private settleAck(ack: HTMLElement | null, text: string | null, keepPending = false, kind?: 'success' | 'warn' | 'info'): void {
     if (!ack) return;
+    // 沉默退场（2026-10-28 刀 2）：不留行、不记收执账——回放里看到的沉默
+    // 与实况一致；机制状态由对应的 UI 呈现（支状态卡/队列卡/状态气泡）。
+    if (text === null) {
+      this.discardAckRow(ack);
+      return;
+    }
     // 架构评审 v2 A1（S1-2）— 收执终稿进会话事件日志（settleAck 是全部收执的
     // 单点；keepPending 的过渡稿不记，账本只要终稿）。
     if (!keepPending) {
@@ -3544,7 +3554,8 @@ export class ChatController {
    * <insertion_protocol> rules so the reconciliation follows the protocol
    * (smallest action, state what changed/stays, never discard finished work).
    * 1a 定向投递：target='parent' 走父引擎；委派在飞时是 'all'（广播）或点名
-   * 某一支（直达，其余照跑）。收执按目的地说清楚话去了哪，别让用户猜。 */
+   * 某一支（直达，其余照跑）。收执（2026-10-28 刀 2）：只转达裁决器现场写
+   * 的 receipt，缺席沉默——话去了哪由转向通道的框架文本对模型交代。 */
   private steerRunningTurn(text: string, images: MessageImage[], ack: HTMLElement | null, target: SteerTarget, cancel: boolean, receipt?: string): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     this.steerBus.enqueue({
@@ -3563,13 +3574,12 @@ export class ChatController {
       displayText: text,
       images,
     });
-    // 现场收执（2026-10-15 用户定调「不要固定话术，要结合上下文说明会怎
-    // 么做」）：裁决器判的那一刻就在现场，它写的两句点名插话里的实际对象。
-    // 2026-10-27 真机复验：固定口径三族（parent/广播/点名）全废——独立于
-    // 语境的模板句按构照就是错的。兜底也必须带着用户原话（steerFallbackReceipt）。
-    this.settleAck(ack,
-      receipt?.trim()
-      ?? steerFallbackReceipt(text));
+    // 现场收执（2026-10-28 框架改革刀 2）：裁决器判的那一刻就在现场，它写
+    // 的收执点名插话里的实际对象——唯一来源。2026-10-27 真机复验已废固定口
+    // 径三族（独立于语境的模板句按构照就是错的）；steerFallbackReceipt 兜底
+    // 随刀 2 整摘：receipt 缺席 = 沉默（settleAck 退场临时行），插话已作为
+    // 框架文本投进转向通道，机制状态不缺呈现。
+    this.settleAck(ack, receipt?.trim() || null);
   }
 
   /** 计划必须是当着用户想出来的（2026-09-26 用户定调）：一次流式 LLM 调用，
@@ -3946,18 +3956,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
     // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
     // stopMissed（2026-10-10）：点名停支没停成的取消折入，收执换诚实口径
-    // ——支还在跑，说「其余照常」是失实收执。
-    // 早派成功：收执换 foldInEarlyReceipt——「收齐后先补这项」在它已经在
-    // 跑的时候就是失实收执（收执纪律：只说真实发生的事）。
+    // ——支还在跑，说「其余照常」是失实收执（cancelFoldUnmatchedReceipt
+    // 是判例保留的事实播报：只有宿主知道「没停成」，裁决器的 receipt 写的
+    // 是转达口径，压不过宿主事实——收执纪律：只说真实发生的事）。
+    // 早派成功：foldInEarlyReceipt 已随刀 2 删除——「追加委派立即补跑」的
+    // 机制事实由 dispatchFoldImmediately 的状态气泡呈现，引擎沉默。
+    // 普通折入：裁决器现场写的 receipt 是唯一来源，缺席沉默（settleAck null
+    // 退场），绝不出固定话术（foldInReceipt 已随刀 2 删除）。
     this.settleAck(ack, stopMissed
       ? cancelFoldUnmatchedReceipt()
       : earlyDispatched
-        ? foldInEarlyReceipt()
-        // 现场收执优先（2026-10-15 用户定调）：裁决器结合现场写的那两句，
-        // 普通折入路线与它说的语义一致，轮得到它；上面两臂是只有宿主知道的
-        // 事实（没停成/已在跑），固定诚实口径压过现场话术（收执纪律：只说
-        // 真实发生的事）。缺席回落 foldInReceipt（固定口径降为兜底）。
-        : (receipt?.trim() || foldInReceipt(cancels, this.hasDelegationInFlight())));
+        ? null
+        : (receipt?.trim() || null));
   }
 
   /** 早派（刀 2.2 早派版，2026-10-10）：委派在飞时挂号进来的机械追加，宿主
