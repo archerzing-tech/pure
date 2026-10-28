@@ -2,77 +2,72 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { DynamicInsertionCoordinator } from '../DynamicInsertionCoordinator';
 import { clearInputDecisionLog, decisorOf, getInputDecisionLog } from '../inputDecision';
 import type { InputAction } from '../inputDecision';
-import type { InsertionClassification, InsertionRelation } from '../Planner';
+import type { InsertionClassification, InsertionVerdict } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 
 function llm(): LLMAdapter {
   return { complete: async (_messages: Message[]) => ({ content: '' } as never) } as unknown as LLMAdapter;
 }
 
-/** 插话架构 v2 的决策矩阵（九类 relation → action 的处置矩阵（v2））：撤改类
- * （change/correction/misunderstanding/mixed）止损重排；承接类
- * （supplement/emphasize/meta）顺路带上；question 侧路回答；unrelated/new_task
- * 排队、chatter 收下。专门信号（cancels_part/branch_stop）优先——点名撤一支
- * 折入汇合，绝不整树重排（2026-09-24 口径）。 */
+/** 三值判定契约（2026-10-28 并线/另线改版）：inline 并线原话直投（apply，
+ *  模型自消化）；sideline 旁答（apply，判定落定即放闸，寒暄也回注一句——
+ *  ignore 退役，插话不丢）；new_task 排队新轮。宿主唯一保留的机械动作是
+ *  整树停（action:"stop"）；停支/续支由裁决器点名 call_id、宿主只核实执行。 */
 describe('DynamicInsertionCoordinator', () => {
-  it('aborts on a judged whole-run stop — action:"stop" rides the decider contract (刀 1)', async () => {
-    // 字面停快路径已删（2026-10-28 刀 1）：「停止等不等得起一次分类往返」不再
-    // 是宿主的判断——判定全归裁决器，宿主只核实执行。整停落点不变：不重排
-    // 不重想，已跑完的部分都留着。
+  it('aborts on a judged whole-run stop — action:"stop" is the one mechanical action left to the host', async () => {
+    // 整树停是用户的明确命令：裁决器判 action:stop，宿主掐流（abortController），
+    // 不重排不重想，已跑完的部分都留着。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'the user is done; nothing replaces it', confidence: 0.95, action: 'stop' }),
+      classify: async () => ({ verdict: 'inline', reason: 'the user is done; nothing replaces it', confidence: 0.95, action: 'stop' }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '停止当前任务' });
     expect(decision.action).toBe('stop');
-    expect(decision.relation).toBe('change'); // 整停特例：relation 面归 change（蓝图 §十.5）
+    expect(decision.verdict).toBe('inline');
+    expect(decision.kind).toBe('inline');
     expect(decision.shouldAbort).toBe(true);
     expect(decision.signals.via).toBe('judge');
     expect(decision.scope).toEqual(['plan', 'completed-steps']);
+    expect(decision.signals.processingLevel).toBe('interrupt');
   });
 
-  it('folds a judged soft stop into change — the whole-run stop rides the relation face (v2)', async () => {
-    // v2 契约里 stop 档退役：非字面的停（"先缓一缓""这个就到这儿"）由裁决器
-    // 判 relation=change（全停特例，蓝图 §十.5），宿主按 replan 止损重排。
-    // 过渡语义：abort + 从用户原话重推——字面停（STOP_RE）仍直落 stop 不重排。
+  it('keeps a soft stop riding inline when the judge did not call action:stop — the main line digests it', async () => {
+    // 非字面的软停（"先缓一缓"）若裁决器没判 action:stop，就是并线一句话：
+    // 原话直投，模型下一轮自己决定怎么收——宿主不再有 replan 臂。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'the user is done with this run', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'inline', reason: 'the user is done with this run', confidence: 0.9 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '先缓一缓，这个就到这儿吧' });
-    expect(decision.relation).toBe('change');
-    expect(decision.kind).toBe('change'); // kind 槽承载 relation 值（v2：折算层已删）
-    expect(decision.action).toBe('replan');
-    expect(decision.shouldAbort).toBe(true);
-    expect(decision.signals.via).toBe('judge'); // 来自裁决，不是正则快路径
+    expect(decision.verdict).toBe('inline');
+    expect(decision.kind).toBe('inline');
+    expect(decision.action).toBe('apply');
+    expect(decision.shouldAbort).toBe(false);
+    expect(decision.signals.via).toBe('judge');
     expect(decision.signals.rule).toBeUndefined();
   });
 
-  it('hands overturn phrasing to the judge — the literal net only answers when the judge falls over (2026-09-28 用户定调)', async () => {
-    // 推翻话不再由正则直判（GOAL_CHANGE_RE 降级为安全网）：是推倒重想还是
-    // 整树重开、推的是哪一层，只有看得到时机（思考中？执行中？）和上下文
-    // 的裁决器分得清。裁决器倒下时 netVerdict 按字面族重开——绝不丢话。
+  it('sends overturn phrasing to the judge and lands it inline — no replan arm exists anymore', async () => {
+    // 推翻话归裁决器：并线直投后模型自己决定推倒重来还是顺势折——转向/
+    // 追加/纠正的消化全在下一轮思考，宿主只管把原话送到模型面前。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { relation: 'change', reason: 'the whole approach is overturned', confidence: 1 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { verdict: 'inline', reason: 'the whole approach is overturned', confidence: 1 }; } });
     const decision = await coordinator.decide(llm(), 'current task', { text: '推翻当前方案，从头重新来' });
-    expect(decision.relation).toBe('change');
-    expect(decision.kind).toBe('change');
-    expect(decision.shouldAbort).toBe(true);
-    expect(decision.signals.rule).toBeUndefined(); // 不是命令快路径接的
+    expect(decision.verdict).toBe('inline');
+    expect(decision.kind).toBe('inline');
+    expect(decision.shouldAbort).toBe(false);
+    expect(decision.signals.rule).toBeUndefined();
     expect(calls).toBe(1);
   });
 
-  it('hands scope-add phrasing to the judge; queues new_task when the judge says unrelated', async () => {
-    // 加活的字面族（SCOPE_ADD_RE）降级为安全网：加的东西可能是往在飞的那
-    // 件产出物里加（画鸟补云/五位加两位），只有看得到时机的裁决器分得清
-    // ——正则分不清。裁决器判 unrelated/new_task → 排队跑，绝不丢。
+  it('hands scope-add phrasing to the judge; queues new_task for a unit of work that must come back', async () => {
+    // 与任务无关但要回来一件自己的活：排队跑，当前回合收尾后开新轮，绝不丢。
     let calls = 0;
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => { calls++; return { relation: 'unrelated', unrelatedKind: 'new_task', reason: 'one more unit of work of its own', confidence: 0.9 }; },
+      classify: async () => { calls++; return { verdict: 'new_task', reason: 'one more unit of work of its own', confidence: 0.9 }; },
     });
     for (const text of ['再加一个 爱奇艺平台', '顺便也查一下 芒果TV', '把爱奇艺也查一下', '芒果TV也来一份', 'also check Douban']) {
       const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷 三个平台', { text });
-      expect(decision.relation).toBe('unrelated');
-      expect(decision.unrelatedKind).toBe('new_task');
-      expect(decision.kind).toBe('unrelated');
+      expect(decision.verdict).toBe('new_task');
+      expect(decision.kind).toBe('new_task');
       expect(decision.action).toBe('queue');
       expect(decision.shouldAbort).toBe(false);
       expect(decision.signals.rule).toBeUndefined();
@@ -80,94 +75,75 @@ describe('DynamicInsertionCoordinator', () => {
     expect(calls).toBe(5); // 每句都过了裁决器
   });
 
-  it('passes the self-check request through from the judge (v2 §5.1 misunderstanding 双重触发)', async () => {
-    // 疑似理解纠偏：裁决器只发请求（self_check_needed），宿主跑「当前输出
-    // 是否忠实于用户上一句」的自查，确认才真暂停。过渡映射：
-    // misunderstanding → premise-change 臂（押账重入的旧机制接住）。
+  it('answers small talk on the sideline without dropping it — ignore is retired (插话不丢)', async () => {
+    // 寒暄/反应话不再 ignore：旁答管线即时答、答案回注主流——插话不丢是
+    // 最高不变量，最轻的处置也是「回一句」，不是沉默。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'misunderstanding', reason: 'output drifted from the last message', confidence: 0.9, selfCheckNeeded: true }),
+      classify: async () => ({ verdict: 'sideline', reason: 'filler', confidence: 1 }),
     });
-    const decision = await coordinator.decide(llm(), '正在流式输出一份长报告', { text: '不是这个意思——我让你查的是价格，不是成本' });
-    expect(decision.relation).toBe('misunderstanding');
-    expect(decision.kind).toBe('misunderstanding');
-    expect(decision.signals.selfCheckNeeded).toBe(true);
-    expect(decision.signals.via).toBe('judge');
-    // 没请求就没有这个字段——宿主只认严格存在性。
-    const plain = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'correction', reason: 'the user fixed their own wording', confidence: 0.9 }),
-    }).decide(llm(), 'current task', { text: '我前面说错了，不是周三是周四' });
-    expect(plain.signals.selfCheckNeeded).toBeUndefined();
-    expect(plain.kind).toBe('correction'); // kind 槽 = relation
+    const decision = await coordinator.decide(llm(), 'current task', { text: '哈哈 辛苦了' });
+    expect(decision.verdict).toBe('sideline');
+    expect(decision.kind).toBe('sideline');
+    expect(decision.action).toBe('apply');
+    expect(decision.shouldAbort).toBe(false);
+    expect(decision.scope).toEqual(['none']);
+    expect(decision.signals.processingLevel).toBe('immediate-answer');
   });
 
-  it('passes the covered-branch id through from the judge (2026-10-21 刀 F 覆盖点名)', async () => {
-    // 对话主导架构刀 F（真机「必须包括优酷」判例二连反转刀 E）：裁决器拿花
-    // 名册点名已覆盖那支的确切 id，随信号走——编排器只核实 id 真实在跑/已
-    // 收工就回「那路正在跑着，不重复」，语义判断归模型、宿主零文本匹配。
+  it('passes the named-branch call_id through from the judge (§一 细化 2 插话点名某支)', async () => {
+    // 插话点名某支（范围确认/转向/问及）：裁决器拿花名册抄回确切 id，宿主
+    // 只核实 id 真实在册——零文本匹配。没点名 = 信号不出现。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'scope confirmation, a branch already covers it', confidence: 0.9, coveredBranch: { callId: 'call_youku' } }),
+      classify: async () => ({ verdict: 'inline', reason: 'scope confirmation, a branch already covers it', confidence: 0.9, branchCallId: 'call_youku' }),
     });
     const decision = await coordinator.decide(llm(), '正在并行调研各平台', { text: '调研必须包括优酷' });
-    expect(decision.kind).toBe('supplement');
-    expect(decision.signals.coveredBranchCallId).toBe('call_youku');
+    expect(decision.kind).toBe('inline');
+    expect(decision.signals.branchCallId).toBe('call_youku');
     expect(decision.signals.via).toBe('judge');
-    // 裁决器没点名 = 信号不出现，普通 steer 绝不触发去重臂。
     const plain = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'a constraint for the next step', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'inline', reason: 'a constraint for the next step', confidence: 0.9 }),
     }).decide(llm(), '正在并行调研各平台', { text: '记得跑测试' });
-    expect(plain.signals.coveredBranchCallId).toBeUndefined();
+    expect(plain.signals.branchCallId).toBeUndefined();
   });
 
-  it('passes the words through verbatim when the judge falls over — no literal guessing (刀 1)', async () => {
-    // 字面安全网已删（2026-10-28 刀 1）：裁决器倒下的两个形状（内部 fallback
-    // 上报 fallbackUsed / 根本没有 llm）都不再猜 relation——统一原话直投
-    // （unrelated→queue 处置、回合收尾重入），让在跑的模型带着现场自己消化；
-    // netReason 只进日志。话绝不丢（不变量 §六.1），且绝无「猜错方向反向
-    // 执行」的敞口。
+  it('passes the words through verbatim when the judge falls over — no guessing (刀 1)', async () => {
+    // 裁决器倒下的两个形状（内部 fallback 上报 fallbackUsed / 根本没有 llm）
+    // 都不猜：统一原话直投（inline 投递），让在跑的模型带着现场自己消化；
+    // netReason 只进日志。话绝不丢（不变量 §六.1）。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
+      classify: async () => ({ verdict: 'inline', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
     });
     const overturn = await coordinator.decide(llm(), '', { text: '推翻重来' });
-    expect(overturn.relation).toBe('unrelated');
-    expect(overturn.kind).toBe('unrelated');
+    expect(overturn.verdict).toBe('inline');
+    expect(overturn.kind).toBe('inline');
     expect(overturn.signals.via).toBe('passthrough');
     expect(overturn.signals.netReason).toBe('judge-down');
     expect(overturn.confidence).toBe(0.3); // 0.3 = 投递策略，不是判断
     expect(overturn.signals.gatedFrom).toBe('apply'); // 置信门记得直投的落点
     expect(overturn.shouldAbort).toBe(false);
-    const cancelish = await coordinator.decide(llm(), '', { text: 'jev 这个就不调研了' });
-    expect(cancelish.relation).toBe('unrelated'); // 不再猜收活
-    expect(cancelish.signals.cancelsPart).toBeUndefined(); // 判定缺席就没有信号
-    expect(cancelish.signals.via).toBe('passthrough');
     const plain = await coordinator.decide(llm(), '', { text: '顺便问一下，跑完了吗' });
-    expect(plain.relation).toBe('unrelated');
+    expect(plain.verdict).toBe('inline');
     expect(plain.timing.mode).toBe('now');
     expect(plain.signals.via).toBe('passthrough');
     // 没有 llm 同样直投，且分类调用一次都不该发生。
     let calls = 0;
-    const noLlm = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { relation: 'unrelated', reason: '', confidence: 1, fallbackUsed: true }; } });
+    const noLlm = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { verdict: 'inline', reason: '', confidence: 1, fallbackUsed: true }; } });
     const injected = await noLlm.decide(null, '', { text: '再加一个 爱奇艺平台' });
-    expect(injected.relation).toBe('unrelated');
+    expect(injected.verdict).toBe('inline');
     expect(injected.signals.via).toBe('passthrough');
     expect(injected.signals.netReason).toBe('no-judge');
     expect(injected.signals.rule).toBeUndefined();
     expect(calls).toBe(0);
   });
 
-  it('folds every relation into its processing level (第 5 期调度显式化，v2 面)', async () => {
-    // 纯显式化：最终 action 一律折成处理级随信号下发，把原本藏在 switch 顺序
-    // 里的调度策略写成可读、可测、可下发的一枚事实——不改任何分发行为。
+  it('folds every verdict into its processing level (第 5 期调度显式化)', async () => {
+    // 纯显式化：最终 action 一律折成处理级随信号下发——inline 边界消化、
+    // sideline 即时旁答、new_task 排队、整停 interrupt。
     const cases: Array<[InsertionClassification, string]> = [
-      [{ relation: 'change', reason: '', confidence: 1 }, 'interrupt'],
-      [{ relation: 'correction', reason: '', confidence: 1 }, 'interrupt'],
-      [{ relation: 'misunderstanding', reason: '', confidence: 1 }, 'interrupt'],
-      [{ relation: 'mixed', reason: '', confidence: 1 }, 'interrupt'],
-      [{ relation: 'supplement', reason: '', confidence: 1 }, 'boundary'],
-      [{ relation: 'emphasize', reason: '', confidence: 1 }, 'boundary'],
-      [{ relation: 'meta', reason: '', confidence: 1 }, 'boundary'],
-      [{ relation: 'question', reason: '', confidence: 1 }, 'immediate-answer'],
-      [{ relation: 'unrelated', unrelatedKind: 'new_task', reason: '', confidence: 1 }, 'queued'],
-      [{ relation: 'unrelated', unrelatedKind: 'chatter', reason: '', confidence: 1 }, 'companion'],
+      [{ verdict: 'inline', reason: '', confidence: 1 }, 'boundary'],
+      [{ verdict: 'sideline', reason: '', confidence: 1 }, 'immediate-answer'],
+      [{ verdict: 'new_task', reason: '', confidence: 1 }, 'queued'],
+      [{ verdict: 'inline', reason: '', confidence: 1, action: 'stop' }, 'interrupt'],
     ];
     for (const [verdict, level] of cases) {
       const coordinator = new DynamicInsertionCoordinator({ classify: async () => verdict });
@@ -176,138 +152,40 @@ describe('DynamicInsertionCoordinator', () => {
     }
   });
 
-  it('裁决器的 urgent 透进信号，缺省绝不自己补（第 5 期「这个急」）', async () => {
-    const urgent = new DynamicInsertionCoordinator({ classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: '', confidence: 0.9, urgent: true }) });
-    const d = await urgent.decide(llm(), 'current task', { text: '这个急，先办' });
-    expect(d.signals.urgent).toBe(true);
-    expect(d.signals.processingLevel).toBe('queued');
-    const plain = new DynamicInsertionCoordinator({ classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: '', confidence: 0.9 }) });
-    expect((await plain.decide(llm(), 'current task', { text: '查一下天气' })).signals.urgent).toBeUndefined();
-  });
-
-  it('passthrough 不再兜「这个急」——提级也只能由裁决器判（刀 1）', async () => {
-    // URGENT_RE 快路径已删：加急是判断（语境里这句是不是真的急），宿主不再
-    // 从措辞猜。裁决器倒下时原话直投，signals.urgent 缺省——宁可失去一次
-    // 提级，不冒充判断。
-    const net = new DynamicInsertionCoordinator({ classify: async () => { throw new Error('judge must not be called'); } });
-    const urgent = await net.decide(null, '', { text: '这个活加急办一下' });
-    expect(urgent.signals.urgent).toBeUndefined();
-    expect(urgent.signals.via).toBe('passthrough');
-    const notUrgent = await net.decide(null, '', { text: '这个不着急，慢慢来' });
-    expect(notUrgent.signals.urgent).toBeUndefined();
-    expect(notUrgent.signals.via).toBe('passthrough');
-  });
-
-  it('hands partial-cancellation phrasing to the judge; cancelsPart comes from the verdict, not the regex (2026-09-24 案例 + 2026-09-28 降级)', async () => {
-    // 真实事故：三方并行调研中"jev 这个就不调研了"被判成加活折入——取消
-    // 的字面族（CANCEL_PART_RE）当年为此而生、直判折入。2026-09-28 起降级
-    // 为安全网：收一支还是整树停、收掉的进不进结果，只有看得到时机和上下文
-    // 的裁决器分得清。v2 面：收活=change+cancels_part → 专门信号把它折成
-    // steer/apply——既不排队也不整树重排（2026-09-24 口径原样保留）。
-    let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { relation: 'change', reason: 'removes one named part from the join', confidence: 0.95, cancelsPart: true }; } });
-    for (const text of ['jev 这个就不调研了', '知乎那个不用查了', '先别查了', 'RSIAgent 那部分别调研了吧', '芒果TV 就不用翻译了']) {
-      const decision = await coordinator.decide(llm(), '正在并行调研 RSIAgent、jev 不聊天的模型、LLM 未来趋势', { text });
-      expect(decision.kind).toBe('change');
-      expect(decision.relation).toBe('change');
-      expect(decision.shouldAbort).toBe(false);
-      // 裁决没说时刻 → parseInputTiming 的默认（折入由 cancelsPart 驱动，
-      // 不靠 timing）。
-      expect(decision.timing.mode).toBe('after-current');
-      expect(decision.signals.cancelsPart).toBe(true); // 来自裁决，不是正则
-      expect(decision.signals.rule).toBeUndefined();
-    }
-    expect(calls).toBe(5);
-    // 裁决器倒下：原话直投（刀 1）——不再猜收活，话不丢、绝不反向执行。
-    const net = await new DynamicInsertionCoordinator({ classify: async () => { throw new Error('judge must not be called'); } }).decide(null, '', { text: 'jev 这个就不调研了' });
-    expect(net.relation).toBe('unrelated');
-    expect(net.signals.cancelsPart).toBeUndefined();
-    expect(net.signals.via).toBe('passthrough');
-  });
-
-  it('threads judged stop_branch / resumes_branch targets into the signals (刀 1 接棒快路径)', async () => {
-    // BRANCH_STOP_RE/RESUME_BRANCH_RE 快路径已删（2026-10-28 刀 1）：停哪支/
-    // 续哪支由裁决器对着花名册点名（确切 call_id），宿主只核实执行——零文本
-    // 匹配。缺省绝不自己造 id。
+  it('threads judged stop_branch / resumes_branch targets into the signals (点名停支/续支保留成果)', async () => {
+    // 停哪支/续哪支由裁决器对着花名册点名（确切 call_id），宿主只核实执行
+    // ——零文本匹配。停支不是整停：turn 继续跑，其余支无感。
     let calls = 0;
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => { calls++; return { relation: 'change', reason: 'stop the competitor branch', confidence: 0.95, cancelsPart: true, stopBranch: { callId: 'call_competitor' } }; },
+      classify: async () => { calls++; return { verdict: 'inline', reason: 'stop the competitor branch', confidence: 0.95, stopBranch: { callId: 'call_competitor' } }; },
     });
     const decision = await coordinator.decide(llm(), '正在并行调研竞品与各平台', { text: '停掉竞品那支' });
-    expect(decision.relation).toBe('change');
-    expect(decision.kind).toBe('change');
+    expect(decision.verdict).toBe('inline');
+    expect(decision.kind).toBe('inline');
     expect(decision.shouldAbort).toBe(false);
+    expect(decision.action).toBe('apply');
     expect(decision.signals.stopBranchCallId).toBe('call_competitor');
-    expect(decision.signals.cancelsPart).toBe(true);
     expect(decision.signals.rule).toBeUndefined();
     expect(calls).toBe(1); // 每句都过裁决器——宿主零字面匹配
-    // 点名续支（RESUME_BRANCH_RE 的接棒者）：裁决器指认该接着跑完的那支 id，
-    // covered_branch 同款契约。
+    // 点名续支：裁决器指认该接着跑完的那支 id，宿主核实后同参重派。
     const resume = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'the user wants this branch to finish', confidence: 0.95, resumesBranch: { callId: 'call_quote' } }),
+      classify: async () => ({ verdict: 'inline', reason: 'the user wants this branch to finish', confidence: 0.95, resumesBranch: { callId: 'call_quote' } }),
     }).decide(llm(), '竞品已停，报价那路还停着', { text: '把竞品那支接着跑完' });
-    expect(resume.kind).toBe('supplement');
+    expect(resume.kind).toBe('inline');
     expect(resume.signals.resumesBranchCallId).toBe('call_quote');
     expect(resume.signals.via).toBe('judge');
     // 没点名就没有字段——下游靠严格存在性判断，不容忍空串。
     const plain = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'plain encouragement', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'inline', reason: 'plain encouragement', confidence: 0.9 }),
     }).decide(llm(), 'current task', { text: '继续加油' });
     expect(plain.signals.resumesBranchCallId).toBeUndefined();
     expect(plain.signals.stopBranchCallId).toBeUndefined();
   });
 
-  it('still sends non-cancellation shapes to the classifier, unqueued', async () => {
-    // 否定式加活（不用再加）、"取消"动词但无否定标记（把X取消掉）、无动
-    // 词的"X 就先不用了"都不在快路径字面族里——交给 LLM 结合上下文裁决。
-    let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { relation: 'supplement', reason: '', confidence: 1 }; } });
-    for (const text of ['不用再加知乎了', '把jev那个取消掉', '搜索就先不用了']) {
-      const decision = await coordinator.decide(llm(), '正在并行调研三个平台', { text });
-      expect(decision.kind).toBe('supplement');
-      expect(decision.shouldAbort).toBe(false);
-      expect(decision.signals.cancelsPart).toBeUndefined(); // 只有 LLM 明说才带
-    }
-    expect(calls).toBe(3);
-  });
-
-  it('threads a classifier cancelsPart verdict into the decision signals and folds instead of replanning', async () => {
-    // 字面族之外的取消改写（"第二个不要了"）靠分类器明说 cancels_part；
-    // 宿主只认 signals.cancelsPart 这一个读取点，且专门信号优先于 change
-    // 的 replan 本义——点名撤一支，其余照跑。
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'removes one branch', confidence: 0.9, cancelsPart: true }),
-    });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '第二个不要了' });
-    expect(decision.kind).toBe('change');
-    expect(decision.action).toBe('apply');
-    expect(decision.signals.cancelsPart).toBe(true);
-  });
-
-  it('threads the judge stop_branch target into the decision signals (2026-10-10 模型点名)', async () => {
-    // 模型判断、宿主执行：裁决器指认的被停支 id 随 signals 过河，编排器只
-    // 按它执行真停——宿主不再做任何文本匹配。缺省绝不自己造 id。
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({
-        relation: 'change', reason: 'stop the review branch', confidence: 0.95,
-        cancelsPart: true, stopBranch: { callId: 'call_review' },
-      }),
-    });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '不要评审了' });
-    expect(decision.signals.stopBranchCallId).toBe('call_review');
-    expect(decision.signals.cancelsPart).toBe(true);
-    expect(decision.kind).toBe('change'); // kind 槽 = relation；停支按 stopBranchCallId 执行
-    // 没点名就没有这个字段——下游靠严格存在性判断，不容忍空串。
-    const plain = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'generic removal', confidence: 0.9, cancelsPart: true }),
-    }).decide(llm(), 'current task', { text: 'X 那支先放放' });
-    expect(plain.signals.stopBranchCallId).toBeUndefined();
-  });
-
   it('delegates focused stop targeting to the injected resolver with the roster (2026-10-10)', async () => {
-    // 规则快路径只裁「要不要停」，「停哪支」聚焦点名归裁决器：协调器必须
-    // 把花名册原样递给 resolver、并原样带回它的指认（null 也照传——调用方
-    // 退回取消折入，宁可折叠不误杀）。
+    // 要不要停由裁决器判，「停哪支」聚焦点名归窄问题：协调器必须把花名册
+    // 原样递给 resolver、并原样带回它的指认（null 也照传——调用方退回保守
+    // 消化，绝不误停）。
     const roster = [{ callId: 'call_a', name: '调研员', snippet: '调研竞品' }];
     let seen: unknown;
     const coordinator = new DynamicInsertionCoordinator({
@@ -322,167 +200,112 @@ describe('DynamicInsertionCoordinator', () => {
     expect(await decline.resolveStopBranchTarget(null, 'ctx', { text: '停掉那支' }, roster)).toBeNull();
   });
 
-  it('threads a classifier addsAlong verdict — the gate that refuses a branch stop (2026-09-28)', async () => {
-    // 混着加活的取消：「B站那支别查了，再加一个爱奇艺」——撤改占主导
-    // （relation=change），两个标记都得到宿主，少一个就会把要加的活一并停掉
-    // （停支闸已从宿主关键词改成这个）。不用「不要只查均价了」："只"限定的
-    // 是排他性，那句根本不是收活（2026-09-28）。
-    const mixed = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'removes one part while adding another', confidence: 0.9, cancelsPart: true, addsAlong: true }),
+  it('carries the judge receipt through when the moment needs a confirmation', async () => {
+    // 收执只在必须即时确认处出现（整停/停支/排队新任务）：现场措辞随信号
+    // 过河，缺席 = 引擎沉默（§〇 呈现层契约：并线默认不出 receipt）。
+    const withReceipt = new DynamicInsertionCoordinator({
+      classify: async () => ({ verdict: 'new_task', reason: 'queued errand', confidence: 0.9, receipt: '这个跑完就弄。' }),
     });
-    const decision = await mixed.decide(llm(), 'current task', { text: 'B站那支别查了，再加一个爱奇艺' });
-    expect(decision.signals.cancelsPart).toBe(true);
-    expect(decision.signals.addsAlong).toBe(true);
-    expect(decision.kind).toBe('change'); // kind 槽 = relation；折入汇合，不排队（排队=反向执行删除）
-    // 纯取消不带它——缺省绝不自己补。
-    const pure = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'removes one branch', confidence: 0.9, cancelsPart: true }),
+    const d = await withReceipt.decide(llm(), 'current task', { text: '顺便查一下天气' });
+    expect(d.signals.receipt).toBe('这个跑完就弄。');
+    const silent = new DynamicInsertionCoordinator({
+      classify: async () => ({ verdict: 'inline', reason: 'a constraint', confidence: 0.9 }),
     });
-    const plain = await pure.decide(llm(), 'current task', { text: 'X 就不调研了' });
-    expect(plain.signals.cancelsPart).toBe(true);
-    expect(plain.signals.addsAlong).toBeUndefined();
+    expect((await silent.decide(llm(), 'current task', { text: '记得跑测试' })).signals.receipt).toBeUndefined();
   });
 
-  it('threads the replaced-condition fragment through (v2 §5.1 targets_constraint)', async () => {
-    // change 换掉的不是活、而是活所依据的条件（"其实我在西安"→"从广东
-    // 出发"）：裁决器把条件原文抄回来随信号过河——处置管线据此定位挂在
-    // 死条件上的节点；缺省绝不自己造。
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'origin city is wrong', confidence: 0.9, targetsConstraint: '从广东出发' }),
-    });
-    const decision = await coordinator.decide(llm(), '正在规划从广东到广西的旅游', { text: '其实我在西安，不是广东' });
-    expect(decision.relation).toBe('change');
-    expect(decision.signals.targetsConstraint).toBe('从广东出发');
-    const plain = await new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'plain removal', confidence: 0.9 }),
-    }).decide(llm(), 'current task', { text: 'X 就不调研了' });
-    expect(plain.signals.targetsConstraint).toBeUndefined();
-  });
-
-  it('lets negated additions fall through to the classifier', async () => {
-    // 否定前置（不用加/别再加/不要再加）不是加活——绝不能误送排队。
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'not actually adding work', confidence: 1 }),
-    });
-    for (const text of ['不用再加了，就这样', '别再加新平台了', '不要再加注释了', '顺便问一下，跑完了吗']) {
-      const decision = await coordinator.decide(llm(), 'current task', { text });
-      expect(decision.kind).toBe('supplement');
+  it('still sends ordinary phrasings to the classifier, unqueued', async () => {
+    // 常规并线话全走裁决器（唯一通路），宿主零字面匹配。
+    let calls = 0;
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { verdict: 'inline', reason: '', confidence: 1 }; } });
+    for (const text of ['不用再加知乎了', '把jev那个取消掉', '记得跑测试']) {
+      const decision = await coordinator.decide(llm(), '正在并行调研三个平台', { text });
+      expect(decision.kind).toBe('inline');
       expect(decision.shouldAbort).toBe(false);
     }
+    expect(calls).toBe(3);
   });
 
-  it('does NOT abort on a constraint phrased with 不要 — the LLM judges it a supplement', async () => {
-    // 老世界里 CONSTRAINT_CHANGE_RE 会把"不要再加注释"判成 abort + 重规划；
-    // 现在约束只是顺路带上的话。
+  it('keeps the turn running for a sideline status question', async () => {
+    // 进度问句归 sideline 旁答：判定落定即放闸，主线不停。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'constraint on current task', confidence: 1 }),
-    });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '不要再加注释' });
-    expect(decision.kind).toBe('supplement');
-    expect(decision.shouldAbort).toBe(false);
-  });
-
-  it('keeps the turn running for a question', async () => {
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'question', reason: 'status check', confidence: 1 }),
+      classify: async () => ({ verdict: 'sideline', reason: 'status check', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '现在跑到哪了？' });
-    expect(decision.relation).toBe('question');
-    expect(decision.kind).toBe('question');
+    expect(decision.verdict).toBe('sideline');
+    expect(decision.kind).toBe('sideline');
     expect(decision.shouldAbort).toBe(false);
+    expect(decision.action).toBe('apply');
   });
 
   it('queues an independent task without aborting', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: 'separate lookup', confidence: 1 }),
+      classify: async () => ({ verdict: 'new_task', reason: 'separate lookup', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '查一下北京的天气' });
-    expect(decision.relation).toBe('unrelated');
-    expect(decision.kind).toBe('unrelated');
-    expect(decision.shouldAbort).toBe(false);
-  });
-
-  it('acknowledges chatter without aborting', async () => {
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'chatter', reason: 'filler', confidence: 1 }),
-    });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '哈哈 辛苦了' });
-    expect(decision.kind).toBe('unrelated'); // chatter 是 unrelatedKind 细分
-    expect(decision.action).toBe('ignore');
+    expect(decision.verdict).toBe('new_task');
+    expect(decision.kind).toBe('new_task');
     expect(decision.shouldAbort).toBe(false);
   });
 
   it('passes the words through when no classifier LLM is available (never drops, never aborts)', async () => {
-    // 2026-09-22 重新设计：没有分类器时兜底从 steer 换成 task——委派在飞时
-    // steer 的承诺不可兑现（没有可兑现的 THINK 边界）。
     // 2026-10-28 刀 1：字面网删了，兜底统一为原话直投（passthrough）——原话
-    // 进队列、回合收尾重入，让在跑的模型带着现场自己消化，话绝不丢。
+    // 进下一轮思考输入，让在跑的模型带着现场自己消化，话绝不丢。
     const coordinator = new DynamicInsertionCoordinator();
     const decision = await coordinator.decide(null, 'current task', { text: '顺便把标题也改了' });
-    expect(decision.relation).toBe('unrelated');
+    expect(decision.verdict).toBe('inline');
     expect(decision.signals.via).toBe('passthrough');
     expect(decision.signals.netReason).toBe('no-judge');
     expect(decision.shouldAbort).toBe(false);
   });
 
   it('sends the exact phrasing that was lost in the field ("增加一个平台") through the judge', async () => {
-    // 用户实测第三例："增加一个平台 爱奇艺"——字面族当年为此补上"增加"，
-    // 2026-09-28 起它的角色只剩安全网：裁决器在场就走裁决（往在飞的产出物
-    // 里加还是第二件活，由裁决定）；裁决器倒下才由网接住。
+    // 用户实测第三例："增加一个平台 爱奇艺"——往在飞的产出物里加还是第二件
+    // 活，由裁决器判；判 new_task 就排队，收尾后必跑。
     let calls = 0;
-    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { relation: 'unrelated', unrelatedKind: 'new_task', reason: 'a second platform to research', confidence: 0.9 }; } });
+    const coordinator = new DynamicInsertionCoordinator({ classify: async () => { calls++; return { verdict: 'new_task', reason: 'a second platform to research', confidence: 0.9 }; } });
     const decision = await coordinator.decide(llm(), '正在并行调研 B站/腾讯/优酷', { text: '增加一个平台  爱奇艺' });
-    expect(decision.kind).toBe('unrelated');
+    expect(decision.kind).toBe('new_task');
     expect(decision.shouldAbort).toBe(false);
     expect(calls).toBe(1);
   });
 
-  it('aborts only on a judged change', async () => {
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'user replaced the approach', confidence: 1 }),
-    });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '这个方向走不通，换个做法吧' });
-    expect(decision.relation).toBe('change');
-    expect(decision.kind).toBe('change');
-    expect(decision.shouldAbort).toBe(true);
-  });
-
-  it('aborts on a judged correction — work under an ambiguous premise is a loss to cut (v2 §5.1)', async () => {
-    const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'correction', reason: 'the user fixed their own wording', confidence: 1 }),
-    });
-    const decision = await coordinator.decide(llm(), '正在整理周三的日程', { text: '哦我前面说错了，不是周三是周四' });
-    expect(decision.relation).toBe('correction');
-    expect(decision.kind).toBe('correction');
-    expect(decision.shouldAbort).toBe(true);
-  });
-
   // ── The shared decision shape (inputDecision.ts) ──
-  // The relation is the classifier's own word; the ACTION follows the shared
+  // The verdict is the judge's own word; the ACTION follows the shared
   // vocabulary, and the confidence gate runs last so no path can bypass it.
 
-  it('asks instead of aborting when the classifier reports low confidence on a destructive relation', async () => {
-    // Phrasing that no command fast path would claim — the gate is being
-    // tested, and the literal nets only answer when the judge is unreachable.
+  it('asks instead of aborting when the judge reports low confidence on a whole-run stop', async () => {
+    // 低置信 + 破坏性动作（整停）：先问一句，绝不赌——问的成本低于误拆在跑
+    // 的活。gatedFrom 记得原始动作，回收窗口按同族判定。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'reads two ways', confidence: 0.4 }),
+      classify: async () => ({ verdict: 'inline', reason: 'reads like a stop but could be a nudge', confidence: 0.4, action: 'stop' }),
     });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '这节内容好像都不对了，要不要重新整理一下这一部分' });
-    // A doubtful destructive verdict must not tear down the running work —
-    // asking the user one short question is cheaper than a wrong restart.
-    expect(decision.relation).toBe('change');
+    const decision = await coordinator.decide(llm(), 'current task', { text: '先这样吧……还是算了，你定' });
+    expect(decision.verdict).toBe('inline');
     expect(decision.action).toBe('clarify');
     expect(decision.shouldAbort).toBe(false);
-    expect(decision.signals.gatedFrom).toBe('replan');
+    expect(decision.signals.gatedFrom).toBe('stop');
   });
 
-  it('keeps a confident destructive verdict — the gate is for doubt, not for caution', async () => {
+  it('downgrades a doubtful sideline to clarify — sideline must be a high-confidence call (置信偏置)', async () => {
+    // 低置信一律 inline 是裁决器的职责（提示词约束）；置信门是最后一道闸：
+    // 拿不准的旁答先问，绝不把可能相关的话引去旁线。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'change', reason: 'clear overturn', confidence: 0.95 }),
+      classify: async () => ({ verdict: 'sideline', reason: 'maybe unrelated', confidence: 0.4 }),
+    });
+    const decision = await coordinator.decide(llm(), 'current task', { text: '这个先放放' });
+    expect(decision.action).toBe('clarify');
+    expect(decision.signals.gatedFrom).toBe('apply');
+    expect(decision.shouldAbort).toBe(false);
+  });
+
+  it('keeps a confident verdict — the gate is for doubt, not for caution', async () => {
+    const coordinator = new DynamicInsertionCoordinator({
+      classify: async () => ({ verdict: 'inline', reason: 'clear overturn', confidence: 0.95 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '不要了，全部重来' });
-    expect(decision.action).toBe('replan');
-    expect(decision.shouldAbort).toBe(true);
+    expect(decision.action).toBe('apply');
+    expect(decision.shouldAbort).toBe(false);
   });
 
   it('defaults a provider that dropped the confidence field — upstream, not by the gate', async () => {
@@ -494,28 +317,28 @@ describe('DynamicInsertionCoordinator', () => {
     // mock without the number would (correctly) be gated to clarify.
     const realPipeline = new DynamicInsertionCoordinator();
     const noConfidence = {
-      stream: async function* () { yield { type: 'content', content: '{"relation":"unrelated","unrelated_kind":"new_task","reason":"independent lookup"}' }; },
+      stream: async function* () { yield { type: 'content', content: '{"verdict":"new_task","reason":"independent lookup"}' }; },
     } as unknown as LLMAdapter;
     const decision = await realPipeline.decide(noConfidence, 'current task', { text: '顺便查一下汇率' });
-    expect(decision.relation).toBe('unrelated');
+    expect(decision.verdict).toBe('new_task');
     expect(decision.action).toBe('queue');
     expect(decision.confidence).toBeGreaterThan(0.6);
     expect(decision.signals.confidenceDefaulted).toBe(true);
     expect(decision.shouldAbort).toBe(false);
   });
 
-  it('holds a timed insert until its moment regardless of the judged relation', async () => {
-    // v2 契约没有 when 字段：时机意图从用户原话推导（TIMING_CUE 兜底）——
+  it('holds a timed insert until its moment regardless of the verdict', async () => {
+    // 契约没有 when 字段：时机意图从用户原话推导（TIMING_CUE 兜底）——
     // "10 分钟后"落在文本里，parseInputTiming 照样算出 at。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'a constraint', confidence: 1 }),
+      classify: async () => ({ verdict: 'inline', reason: 'a constraint', confidence: 1 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '10 分钟后把标题改成 X' });
-    // A supplement the user scheduled is not applied NOW — it is a queued turn
-    // that starts at its moment. Applying it to the running turn would run the
-    // work ten minutes early.
-    expect(decision.relation).toBe('supplement');
-    expect(decision.kind).toBe('supplement');
+    // A timed insert is not applied NOW — it is a queued turn that starts at
+    // its moment. Applying it to the running turn would run the work ten
+    // minutes early.
+    expect(decision.verdict).toBe('inline');
+    expect(decision.kind).toBe('inline');
     expect(decision.timing.mode).toBe('at');
     expect(decision.action).toBe('queue');
     expect(decision.shouldAbort).toBe(false);
@@ -523,10 +346,10 @@ describe('DynamicInsertionCoordinator', () => {
 
   it('carries the confidence the model reported', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'question', reason: 'status check', confidence: 0.85 }),
+      classify: async () => ({ verdict: 'sideline', reason: 'status check', confidence: 0.85 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '现在跑哪一步了' });
-    expect(decision.action).toBe('answer');
+    expect(decision.action).toBe('apply');
     expect(decision.confidence).toBe(0.85);
   });
 
@@ -536,18 +359,18 @@ describe('DynamicInsertionCoordinator', () => {
     // that contract is asserted in Planner's tests). The gate reads "no number"
     // as "no confidence" and asks instead of acting.
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'chatter', reason: 'filler' }),
+      classify: async () => ({ verdict: 'sideline', reason: 'filler' }),
     } as never);
     const decision = await coordinator.decide(llm(), 'current task', { text: '哈哈' });
-    expect(decision.kind).toBe('unrelated'); // chatter 是 unrelatedKind 细分
+    expect(decision.kind).toBe('sideline');
     expect(decision.action).toBe('clarify');
     expect(decision.shouldAbort).toBe(false);
-    expect(decision.signals.gatedFrom).toBe('ignore');
+    expect(decision.signals.gatedFrom).toBe('apply');
   });
 
   it('derives the timing from the user text when the contract has no when field', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: 'follow-up work', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'new_task', reason: 'follow-up work', confidence: 0.9 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '下午三点再跑一遍完整测试' });
     expect(decision.timing.mode).toBe('at');
@@ -555,83 +378,58 @@ describe('DynamicInsertionCoordinator', () => {
     expect(decision.signals.when).toBeUndefined(); // when 字段已从契约移除
   });
 });
-/** 九类 relation → 处置表投影契约（v2，蓝图 §六）：kind 槽承载 relation 值
- *  （日志可读），权威语义在 relation；action/scope 走 RELATION_DISPOSITION，
- *  processingLevel 走 LEVEL_BY_RELATION。专门信号（cancels_part/branch_stop/
- *  stop_branch）优先——点名撤一支折入汇合（action=apply），绝不整树重排
- *  （2026-09-24 口径）；unrelated+cancels_part 保持排队投影（编排器
- *  unrelated 臂的 cancelish 检查先于排队接手，删除语义受保护）。 */
-describe('DynamicInsertionCoordinator — relation disposition table (v2)', () => {
+
+/** 三值 verdict → 处置表投影契约：kind 槽承载 verdict 值（日志可读），权威
+ *  语义在 verdict；action/scope 走 VERDICT_DISPOSITION，processingLevel 走
+ *  LEVEL_BY_VERDICT。三值都没有拆树动作——shouldAbort 只在整树停
+ *  （action:stop 压表）为真。 */
+describe('DynamicInsertionCoordinator — verdict disposition table', () => {
   const table: Array<{ verdict: InsertionClassification; action: InputAction; abort: boolean }> = [
-    { verdict: { relation: 'supplement', reason: '', confidence: 1 }, action: 'apply', abort: false },
-    { verdict: { relation: 'emphasize', reason: '', confidence: 1 }, action: 'apply', abort: false },
-    { verdict: { relation: 'meta', reason: '', confidence: 1 }, action: 'apply', abort: false },
-    { verdict: { relation: 'change', reason: '', confidence: 1 }, action: 'replan', abort: true },
-    { verdict: { relation: 'correction', reason: '', confidence: 1 }, action: 'replan', abort: true },
-    { verdict: { relation: 'misunderstanding', reason: '', confidence: 1 }, action: 'replan', abort: true },
-    { verdict: { relation: 'mixed', reason: '', confidence: 1 }, action: 'replan', abort: true },
-    { verdict: { relation: 'question', reason: '', confidence: 1 }, action: 'answer', abort: false },
-    { verdict: { relation: 'unrelated', unrelatedKind: 'new_task', reason: '', confidence: 1 }, action: 'queue', abort: false },
-    { verdict: { relation: 'unrelated', unrelatedKind: 'chatter', reason: '', confidence: 1 }, action: 'ignore', abort: false },
+    { verdict: { verdict: 'inline', reason: '', confidence: 1 }, action: 'apply', abort: false },
+    { verdict: { verdict: 'sideline', reason: '', confidence: 1 }, action: 'apply', abort: false },
+    { verdict: { verdict: 'new_task', reason: '', confidence: 1 }, action: 'queue', abort: false },
   ];
   for (const { verdict, action, abort } of table) {
-    it(`maps ${verdict.relation}${verdict.unrelatedKind ? `(${verdict.unrelatedKind})` : ''} → ${action}`, async () => {
+    it(`maps ${verdict.verdict} → ${action}`, async () => {
       const coordinator = new DynamicInsertionCoordinator({ classify: async () => verdict });
       const decision = await coordinator.decide(llm(), 'current task', { text: '随便一句' });
-      expect(decision.relation).toBe(verdict.relation);
-      expect(decision.kind).toBe(verdict.relation); // kind 槽承载 relation 值
+      expect(decision.verdict).toBe(verdict.verdict);
+      expect(decision.kind).toBe(verdict.verdict); // kind 槽承载 verdict 值
       expect(decision.action).toBe(action);
       expect(decision.shouldAbort).toBe(abort);
     });
   }
 
-  it('dedicated signals outrank the change policy: a named removal folds, it never replans', async () => {
-    // 点名撤一支/停一支（cancels_part / stop_branch.call_id）既不排队也不整
-    // 树重排（2026-09-24 取消案例口径）。branch_stop 作为信号面只由规则通道
-    // 产生（BRANCH_STOP_RE 快路径另有专测）；judge 通道的点名形态是 stop_branch。
-    for (const verdict of [
-      { relation: 'change', reason: '', confidence: 1, cancelsPart: true } as InsertionClassification,
-      { relation: 'change', reason: '', confidence: 1, stopBranch: { callId: 'call_x' } } as InsertionClassification,
-    ]) {
-      const coordinator = new DynamicInsertionCoordinator({ classify: async () => verdict });
-      const decision = await coordinator.decide(llm(), 'current task', { text: 'X 那支不要了' });
-      expect(decision.relation).toBe('change');
-      expect(decision.action).toBe('apply');
-      expect(decision.shouldAbort).toBe(false);
-    }
-  });
-
-  it('unrelated + cancels_part keeps the queue projection — the unrelated arm owns the cancelish check', async () => {
-    // 裁决器可以一面判 new_task 一面报 cancels_part（契约透传纪律）；
-    // 处置表不因信号改写 unrelated 的投影——编排器 unrelated 臂的 cancelish
-    // 先序接手，删除语义永远到不了队列。
+  it('a named-branch stop never tears down the turn — only the whole-run stop aborts', async () => {
+    // 停支是支级粒度：点名支消化，其余无感（细化 1「手」不打断）。verdict
+    // 面没有 replan——不存在「因撤一支而整树重排」的臂。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: '', confidence: 1, cancelsPart: true }),
+      classify: async () => ({ verdict: 'inline', reason: '', confidence: 1, stopBranch: { callId: 'call_x' } }),
     });
-    const decision = await coordinator.decide(llm(), 'current task', { text: '再加一个爱奇艺平台' });
-    expect(decision.kind).toBe('unrelated');
-    expect(decision.signals.cancelsPart).toBe(true);
-    expect(decision.action).toBe('queue');
+    const decision = await coordinator.decide(llm(), 'current task', { text: 'X 那支不要了' });
+    expect(decision.verdict).toBe('inline');
+    expect(decision.action).toBe('apply');
+    expect(decision.shouldAbort).toBe(false);
   });
 
-  it('every judge verdict lands in the nine-relation face, no legacy kind leaks', async () => {
-    // 九类名录之外的判定词（旧七类 kind）进不了决策——classifyInsertion 在
-    // 解析层已拒，这里锁协调器面：decision.relation 只能是九类之一，kind 槽
-    // 承载同值。
-    const RELATIONS: readonly InsertionRelation[] = ['supplement', 'change', 'emphasize', 'unrelated', 'correction', 'question', 'mixed', 'meta', 'misunderstanding'];
-    for (const relation of RELATIONS) {
-      const coordinator = new DynamicInsertionCoordinator({ classify: async () => ({ relation, reason: '', confidence: 1 }) });
+  it('every judge verdict lands in the three-value face, no legacy word leaks', async () => {
+    // 三值名录之外的判定词（旧九类 relation、更旧的七类 kind）进不了决策——
+    // classifyInsertion 在解析层已拒，这里锁协调器面：decision.verdict 只能
+    // 是三值之一，kind 槽与兼容槽 relation 承载同值。
+    const VERDICTS: readonly InsertionVerdict[] = ['inline', 'sideline', 'new_task'];
+    for (const verdict of VERDICTS) {
+      const coordinator = new DynamicInsertionCoordinator({ classify: async () => ({ verdict, reason: '', confidence: 1 }) });
       const decision = await coordinator.decide(llm(), 'current task', { text: '随便一句' });
-      expect(RELATIONS).toContain(decision.relation);
+      expect(VERDICTS).toContain(decision.verdict);
+      expect(decision.kind).toBe(decision.verdict); // kind 槽镜像 verdict
     }
   });
 });
 
 /** 决策通道 + 决策日志（2026-09-28 定调的可见性半边）：每条插话决策都要
  *  标明「谁定的」，并进共享日志——用户要在设置页看到这次是裁决器按时机×
- *  内容判的，还是机械正则/字面安全网接的。三个值互斥：rule（命令快路径）、
- *  judge（裁决器）、net（裁决器不可用时的安全网，netReason 说明原因）。
- *  正则接管的次数一眼可见，就是「决策不看关键词」这条定调的验收窗口。 */
+ *  内容判的，还是兜底直投接的。两个生产值：judge（裁决器）、passthrough
+ *  （缺席/倒下的原话直投）；rule/net 只留在类型里供旧日志回放。 */
 describe('DynamicInsertionCoordinator — decisor channel + decision log', () => {
   beforeEach(() => clearInputDecisionLog());
 
@@ -642,7 +440,7 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
     // 快路径正则族已删：生产通路只剩 judge（裁决器判词）与 passthrough（缺席/
     // 倒下的原话直投）。rule 值留在类型里只供旧日志回放，新账不再产生——
     // 「决策不看关键词」由「根本没有 rule 通道」兑现。
-    const judge = new DynamicInsertionCoordinator({ classify: async () => ({ relation: 'supplement', reason: '', confidence: 0.9 }) });
+    const judge = new DynamicInsertionCoordinator({ classify: async () => ({ verdict: 'inline', reason: '', confidence: 0.9 }) });
     const steered = await judge.decide(llm(), '', { text: '记得跑测试' });
     expect(steered.signals.via).toBe('judge');
     const noJudge = new DynamicInsertionCoordinator();
@@ -655,7 +453,7 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
     // 场景就是喂给裁决器的那段上下文（时机×内容里的"时机"）。它是事后诊断唯一
     // 能把"判错了"与"在错场景里判的"分开的东西——同一句换场景能从错到对。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'a constraint', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'inline', reason: 'a constraint', confidence: 0.9 }),
     });
     const context = '用户当前诉求：帮我调研三个平台的会员价格\n并行委派：共 3 个，在飞 3 个';
     await coordinator.decide(llm(), context, { text: '记得跑测试' });
@@ -667,7 +465,7 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
 
   it('marks a verdict from the judge as judge', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'supplement', reason: 'a constraint', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'inline', reason: 'a constraint', confidence: 0.9 }),
     });
     const decision = await coordinator.decide(llm(), 'current task', { text: '记得跑测试' });
     expect(decision.signals.via).toBe('judge');
@@ -685,7 +483,7 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
     expect(queued.signals.netReason).toBe('no-judge');
 
     const judgeDown = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
+      classify: async () => ({ verdict: 'inline', reason: 'internal fallback', confidence: 0.3, fallbackUsed: true }),
     });
     const netted = await judgeDown.decide(llm(), '', { text: '推翻重来' });
     expect(netted.signals.via).toBe('passthrough');
@@ -695,20 +493,19 @@ describe('DynamicInsertionCoordinator — decisor channel + decision log', () =>
   it('writes every decision to the shared log together with the user\'s own words', async () => {
     // 日志是设置页诊断区的数据源；没记上原话，用户就没法把它跟对话对上。
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'question', reason: 'status check', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'sideline', reason: 'status check', confidence: 0.9 }),
     });
     await coordinator.decide(llm(), 'current task', { text: '  现在跑到哪一步了  ' });
     const entries = inserts();
     expect(entries).toHaveLength(1);
-    expect(entries[0].kind).toBe('question');
-    expect(entries[0].relation).toBe('question');
+    expect(entries[0].kind).toBe('sideline'); // kind 槽承载 verdict 值
     expect(entries[0].inputText).toBe('现在跑到哪一步了');
     expect(decisorOf(entries[0])).toBe('judge');
   });
 
   it('caps the logged input so one pasted essay cannot bloat the diagnostics pane', async () => {
     const coordinator = new DynamicInsertionCoordinator({
-      classify: async () => ({ relation: 'unrelated', unrelatedKind: 'new_task', reason: 'a second errand', confidence: 0.9 }),
+      classify: async () => ({ verdict: 'new_task', reason: 'a second errand', confidence: 0.9 }),
     });
     await coordinator.decide(llm(), '', { text: 'x'.repeat(400) });
     expect(inserts()[0].inputText).toHaveLength(160);

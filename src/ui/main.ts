@@ -1511,9 +1511,8 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
   // 刀 2（第 3 期持久性）：回放铺完才重建「继续」条——快照带暂停标记的会话，
   // 重启后恢复原样：半截转写 + 一条继续按钮，与实况暂停时的形态一致。
   chat.restorePausedAffordance();
-  // E6：待办队列卡同一拍重建（快照带 pendingQueue 的会话恢复可见账）；派发
-  // 不在这里抢跑——排队的活等下一个自然收尾点（loadFromStorage 只装账）。
-  chat.restoreQueueAffordance();
+  // 队列卡已随呈现层契约退役（2026-10-28）：快照的 pendingQueue 账在
+  // loadFromStorage 装回，派发等下一个自然收尾点，不再有卡可重建。
   // 回复版本条同一拍刷新：恢复/切换变体重放后，条按快照带回的变体账显隐。
   syncTurnVariantBar();
   // A session restore rebuilds the transcript from scratch, so it always

@@ -43,6 +43,24 @@ export function isPauseAbort(signal: AbortSignal | null | undefined): boolean {
   return (signal as { reason?: unknown }).reason === PAUSE_ABORT_REASON;
 }
 
+/** 插话重入（2026-10-28 并线/另线改版，docs/interjection-inline-sideline.md
+ *  细化 1「嘴/手分开」）：思考流在吐字时来了并线插话——立即掐流，判定完带
+ *  原话重新开口。与 PAUSE_ABORT_REASON 的语义差：pause 是「存档等续跑」（落
+ *  暂停账、在飞支结算成已暂停、渲染停止态、等用户放行）；reenter 是「立即
+ *  带原话重开思考」（不落暂停账、不渲染停止态、宿主收到 Interrupted 后马上
+ *  重开 THINK，插话原话经 steerBus 在新轮边界注入）。半截思考丢弃是刻意的：
+ *  前缀缓存使重想便宜，而「被打断后接着说」本来就是重说。 */
+export const INTERJECT_REENTER_REASON = 'pure:interject-reenter';
+
+export function abortReenter(controller: AbortController | null | undefined): void {
+  controller?.abort(INTERJECT_REENTER_REASON);
+}
+
+export function isInterjectReenter(signal: AbortSignal | null | undefined): boolean {
+  if (!signal?.aborted) return false;
+  return (signal as { reason?: unknown }).reason === INTERJECT_REENTER_REASON;
+}
+
 /** 1c 升级硬停（S2 第四刀收口）：暂停的宽限窗里再叫停，不等宽限——立即打断
  * 硬停第二通道（工具协调器的宽限定时器当场作废；在飞工具按暂停记账掐断，
  * 断点照存、卡片如实标 ⏸）。判定必须先于主信号的 abort——abort 会把暂停
@@ -57,7 +75,12 @@ export function upgradeToHardStop(mainSignal: AbortSignal | null | undefined, ha
 }
 
 /** The Interrupted event reason an engine should yield for the current signal
- * state — 'paused' for a drain-style pause, 'aborted' for a hard stop. */
+ * state — 'paused' for a drain-style pause, 'reenter' for an interjection
+ * restarting the THINK stream, 'aborted' for a hard stop. 优先级 pause >
+ * reenter > aborted：升级路径（reenter 追在 pause 后）不能把「存档等续跑」
+ * 降格成重开，也不能反过来把暂停读成硬停。 */
 export function interruptedReasonFor(signal: AbortSignal | null | undefined): string {
-  return isPauseAbort(signal) ? 'paused' : 'aborted';
+  if (isPauseAbort(signal)) return 'paused';
+  if (isInterjectReenter(signal)) return 'reenter';
+  return 'aborted';
 }

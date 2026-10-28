@@ -91,7 +91,7 @@ interface OrchestratorSpies {
 function steerCancelDecision(extra: Record<string, unknown> = {}): DynamicInsertionDecision {
   return {
     source: 'mid-run-insert',
-    relation: 'change',
+    verdict: 'inline',
     kind: 'steer',
     action: 'apply',
     confidence: 1,
@@ -99,7 +99,9 @@ function steerCancelDecision(extra: Record<string, unknown> = {}): DynamicInsert
     scope: ['constraints'],
     shouldAbort: false,
     reason: 'test',
-    signals: { cancelsPart: true, ...extra },
+    // 三值契约（A 刀）：取消话的宿主信号 = verdict inline + 裁决器点名的
+    // stopBranchCallId——宿主只核实执行，cancelsPart 不再过河。
+    signals: { stopBranchCallId: CALL, ...extra },
   };
 }
 

@@ -1,4 +1,6 @@
-// 疑点句收割：诊断区审计标出的句子要能变成语料，且期望只从「为何被标疑点」反推。
+// 疑点句收割（2026-09-28 建立）。2026-10-28 二分改版后疑点全退（审计恒空），
+// 收割恒收零：管线形状与轮次落盘照常工作，这里锁退役语义（恒 clean）、
+// 去重优先序与落盘骨架。
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -43,23 +45,16 @@ function fakeStore(seed: Record<string, string> = {}): HarvestRoundStore {
 }
 
 describe('疑点句收割', () => {
-  it('取消味但没报 cancels_part 的句子被收成 steer + cancels_part 期望', () => {
-    // 这正是审计的两条疑点之一：宿主已经不嗅措辞了，漏报只有审计看得见；
-    // 收割把它变成「下次回放还得再判一遍」的语料。
-    const { added } = harvestCasesFromLog(
+  it('疑点退役后收割恒零：取消味的句子也不再进语料（2026-10-28 二分改版）', () => {
+    // cancels-missed 随二分契约退役（取消话 inline 直投主线消化），宿主侧零
+    // 字面匹配——审计恒空，收割再也没有可收的句子。
+    const { added, skipped } = harvestCasesFromLog(
       [decision({ inputText: '把知乎那项也取消掉', kind: 'task', signals: { via: 'judge' } })],
       NO_EXISTING,
       '2026-09-28',
     );
-    expect(added).toHaveLength(1);
-    expect(added[0]).toMatchObject({
-      text: '把知乎那项也取消掉',
-      kind: 'steer',
-      cancels: true,
-      expectation: 'suspected',
-    });
-    expect(added[0].addsAlong).toBeUndefined();
-    expect(added[0].source).toContain('cancels-missed');
+    expect(added).toEqual([]);
+    expect(skipped).toEqual([{ text: '把知乎那项也取消掉', why: 'clean' }]);
   });
 
   it('报了取消又加活的句子不再产生 adds-along 疑点（2026-10-28 刀 1）', () => {
@@ -75,23 +70,18 @@ describe('疑点句收割', () => {
     expect(skipped).toEqual([{ text: 'B站那支别查了，再加一个爱奇艺', why: 'clean' }]);
   });
 
-  it('收割带着当初判它的场景一起进语料——否则疑点可能根本复现不出', () => {
-    // 疑点只在那个具体局面下成立。不收场景，回放会拿默认场景重判，"判错了能看
-    // 到在什么场景下判的"就只停在看得见，接不上"下一次跑得到"。
+  it('疑点退役后场景原文不再随收割进语料——渲染器的场景支持保留', () => {
+    // 旧语义：疑点只在当初那个局面下成立，收割要带着场景。疑点恒空后没有
+    // 任何用例被收割，场景自然无处附着；renderHarvestedModule 的 scenarioText
+    // 支持保留（历史语料与渲染格式不动，见「渲染出的生成文件里场景原文」）。
     const scene = '用户当前诉求：帮我调研三个平台\n并行委派：共 3 个，在飞 2 个';
-    const { added } = harvestCasesFromLog(
+    const { added, skipped } = harvestCasesFromLog(
       [decision({ inputText: '把知乎那项也取消掉', inputContext: scene, kind: 'task' })],
       NO_EXISTING,
       '2026-09-28',
     );
-    expect(added[0].scenarioText).toBe(scene);
-    // 没有记下场景的记录不编一个（排期插话没经过裁决器）。
-    const blank = harvestCasesFromLog(
-      [decision({ inputText: 'Y 那个不用查了', inputContext: undefined })],
-      NO_EXISTING,
-      '2026-09-28',
-    );
-    expect(blank.added[0].scenarioText).toBeUndefined();
+    expect(added).toEqual([]);
+    expect(skipped).toEqual([{ text: '把知乎那项也取消掉', why: 'clean' }]);
   });
 
   it('渲染出的生成文件里场景原文原样保留', () => {
@@ -128,9 +118,9 @@ describe('疑点句收割', () => {
     expect(added).toEqual([]);
   });
 
-  it('已经在语料里的句子只收一次，同一批里的重复也只收一次', () => {
-    // 2026-10-28 刀 1 后审计收缩：裸"不"句（「X 就不调研了」）不再命中
-    // CANCEL_SMELL，会被当 clean 跳过——duplicate 语义改用取消味命中的句子锁。
+  it('duplicate 优先于 clean：在册句子先撞去重再谈疑点（去重先于审计）', () => {
+    // 疑点恒零后没有任何句子会被收进 seen（只有 added 才记 seen），批内重复
+    // 双双按 clean 跳过；但「在册即 duplicate」的优先序还活着，先于审计短路。
     const entry = decision({ inputText: '把知乎那项也取消掉' });
     const existing: Case[] = [{ text: '把知乎那项也取消掉', kind: 'steer', cancels: true, source: '人工' }];
     const againstExisting = harvestCasesFromLog([entry], existing, '2026-09-28');
@@ -138,7 +128,11 @@ describe('疑点句收割', () => {
     expect(againstExisting.skipped).toEqual([{ text: '把知乎那项也取消掉', why: 'duplicate' }]);
 
     const withinBatch = harvestCasesFromLog([entry, entry], NO_EXISTING, '2026-09-28');
-    expect(withinBatch.added).toHaveLength(1);
+    expect(withinBatch.added).toEqual([]);
+    expect(withinBatch.skipped).toEqual([
+      { text: '把知乎那项也取消掉', why: 'clean' },
+      { text: '把知乎那项也取消掉', why: 'clean' },
+    ]);
   });
 
   it('没有原话的记录不进语料', () => {

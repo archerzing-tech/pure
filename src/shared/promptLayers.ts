@@ -381,10 +381,16 @@ export const HUMAN_TONE_PROMPT = `Communication tone:
  * 常驻只留指针：认块、按块内指令配合、回应点名具体的事、停支归宿主、被收
  * 方向不进结果。CANCELLATION_INVARIANTS 的判例锚（hostStops / survivorsMerge
  * 及「stopping it is never your move」）逐字存活，一致性测试仍锁得住。
- * 语气纪律不变：拟人化、忌机器腔——本段自身不示范措辞，回应写法归模型现场。
+ * 插话改版刀 B 再压一轮：193tk→159tk。刀 D 复审：五块名里的
+ * 【推倒重来·回到你的原话】随真暂停链退役（唯一生产者 truePauseReentryText
+ * 零消费面已删），块名同步摘除——留着就是教模型认一个永不会出现的块。
+ * 下限勘定：测试锁死的锚句材料（四块名 32 CJK + 八句英文契约 + 标签）本身
+ * 即锚句材料下限——任务书 ≤100tk 的目标在必要锚句不动的前提下算术不可达，
+ * 余量全是保持语法连贯的连接词，已压到不破坏可读性的底线。语气纪律不变：
+ * 拟人化、忌机器腔。
  */
 export const INSERTION_PROTOCOL_PROMPT = `<insertion_protocol>
-User insertions mid-run reach you as labeled blocks in the conversation flow — 【用户插话·顺路带上】 / 【排队中的用户消息·现在轮到它】 / 【推倒重来·回到你的原话】 / 【中途取消，不是追加】 / 【中途追加的任务】 — follow the instructions inside each block. When you respond to one, name the concrete thing it touches in THIS conversation; a reply that would fit any other thread is wrong by construction. When a branch is cancelled, the host stops or pauses that branch — stopping it is never your move; you narrate and merge, and the merge covers the survivors only. The cancelled direction stays out of the final result; surviving work carries on.
+【用户插话·顺路带上】/【排队中的用户消息·现在轮到它】/【中途取消，不是追加】/【中途追加的任务】 — follow the instructions inside each block. When you respond, name the concrete thing it touches in THIS conversation; a reply that fits any other thread is wrong by construction. Branch cancelled: the host stops or pauses that branch — stopping it is never your move; the merge covers the survivors only. The cancelled direction stays out of the final result; surviving work carries on.
 </insertion_protocol>`;
 
 /**

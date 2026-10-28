@@ -32,22 +32,18 @@ import {
   branchResumeReceipt,
   treeResumeReceipt,
   RESUME_INVARIANTS as RESUME_INV,
-  truePauseReentryText,
-  frozenSideEffectReceipt,
-  FROZEN_INVARIANTS as FROZEN_INV,
 } from '../insertionMessaging';
 import { expectNoDefaultParams } from './arityLock';
 
 describe('插话取消话术三处一致性', () => {
-  it('① L1 协议（刀 2 薄指针）：五类标注块+点名具体的事+停支归宿主+幸存者合并', () => {
+  it('① L1 协议（刀 2 薄指针）：四类标注块+点名具体的事+停支归宿主+幸存者合并', () => {
     // 协议已从逐场景长文瘦成薄指针（6.5k→632 字符）：只教模型认块、按块内
     // 指令配合、点名具体的事、停支归宿主、合并只覆盖幸存者。逐场景教导下放
-    // 到五个标注块，协议层不再重复。
+    // 到标注块，协议层不再重复。推倒重来块随真暂停链退役（D 刀），块名摘除。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('<insertion_protocol>');
-    // 五类标注块名一一在场（模型靠它们认块）。
+    // 四类标注块名一一在场（模型靠它们认块）。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【用户插话·顺路带上】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【排队中的用户消息·现在轮到它】');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('【推倒重来·回到你的原话】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途取消，不是追加】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途追加的任务】');
     // 点名具体的事禁模板句：能在任何会话里成立的回复按构就是错的。
@@ -110,7 +106,9 @@ describe('插话取消话术三处一致性', () => {
     ]) {
       expect(names).not.toContain(dead);
     }
-    // 存留名：框架文本（不示范措辞）+ 判例/事实播报收执。
+    // 存留名：框架文本（不示范措辞）+ 判例/事实播报收执。真暂停重入/冻结
+    // 一族（truePauseReentryText / frozenSideEffectReceipt / FROZEN_INVARIANTS）
+    // 已随 2026-10-28 插话改版 D 刀退役，一并锁入已删名单——名不得重现。
     for (const live of [
       'steerFrameText',
       'branchUncertainPauseReceipt',
@@ -122,13 +120,13 @@ describe('插话取消话术三处一致性', () => {
       'queuedHandoffText',
       'branchResumeReceipt',
       'treeResumeReceipt',
-      'truePauseReentryText',
-      'frozenSideEffectReceipt',
       'CANCELLATION_INVARIANTS',
       'RESUME_INVARIANTS',
-      'FROZEN_INVARIANTS',
     ]) {
       expect(names).toContain(live);
+    }
+    for (const dead of ['truePauseReentryText', 'frozenSideEffectReceipt', 'FROZEN_INVARIANTS']) {
+      expect(names).not.toContain(dead);
     }
   });
 
@@ -245,8 +243,6 @@ describe('判例收执（存留）', () => {
       ['foldInFollowUpText', 1, foldInFollowUpText],
       ['queuedHandoffText', 1, queuedHandoffText],
       ['branchResumeReceipt（pending 时序开关必填）', 3, branchResumeReceipt],
-      ['truePauseReentryText（纠偏可空但必填）', 2, truePauseReentryText],
-      ['frozenSideEffectReceipt', 1, frozenSideEffectReceipt],
     ]);
   });
 });
@@ -277,42 +273,10 @@ describe('续跑收执诚实二分（第 2 期第三刀，判例 14）', () => {
   });
 });
 
-// ── 插话架构 v2 存留文本（2026-10-27 软暂停/真暂停链）─────────────────────
-// v2 的放行/转向/真暂停/自查收执已随框架改革刀 2 删除（模型现场 receipt
-// 唯一来源，引擎沉默兜底）；留下的是真暂停的引擎侧重入框架与已完成副作用的
-// 冻结收执。收执纪律不变：只说这个场景里真实发生/真实在场的事。
-describe('插话 v2 存留文本（真暂停重入/冻结）', () => {
-  it('真暂停重入框架：带原话+纠偏+不当既成事实三件事；幂等且无纠偏时裸发', () => {
-    const framed = truePauseReentryText('做一个记账 App', '不用登录，单机就行');
-    expect(framed).toContain('做一个记账 App');
-    expect(framed).toContain('不用登录，单机就行');
-    expect(framed).toContain('已从上下文清出');
-    expect(framed).toContain('不要当既成事实');
-    // 幂等：已带框架的原话不再二次包装；纠偏为空退回裸原话。
-    expect(truePauseReentryText(framed, '再改一句')).toBe(framed);
-    expect(truePauseReentryText('原话', '')).toBe('原话');
-    expect(truePauseReentryText('原话', '   ')).toBe('原话');
-  });
-
-  it('冻结收执：说已完成+冻住+问用户发话，绝不预支「已撤销」', () => {
-    const t = frozenSideEffectReceipt('生成报表');
-    expect(t).toContain('生成报表');
-    expect(t).toContain('已经做完');
-    expect(t).toMatch(FROZEN_INV.frozenNamesFreeze);
-    expect(t).toMatch(FROZEN_INV.frozenAsksUser);
-    // 一期没有自动补偿：收执不许说补偿已发生。
-    expect(t).not.toContain('已撤销');
-    expect(t).not.toContain('补偿');
-  });
-
-  it('冻结锚同步：冻字必在场、必须开口问用户（锚漂移即失败）', () => {
-    expect(FROZEN_INV.frozenNamesFreeze.test('我先把它冻住')).toBe(true);
-    expect(FROZEN_INV.frozenAsksUser.test('你说一声')).toBe(true);
-    expect(FROZEN_INV.frozenAsksUser.test('要不要撤掉')).toBe(true);
-    // 不开口问的冻结收执漂了锚。
-    expect(FROZEN_INV.frozenAsksUser.test('已经冻住了。')).toBe(false);
-  });
-});
+// ── 真暂停/冻结族已退役（2026-10-28 插话改版 D 刀）────────────────────────
+// 真暂停的引擎侧重入框架（truePauseReentryText）与冻结收执
+// （frozenSideEffectReceipt + FROZEN_INVARIANTS）零生产消费面，grep 判死随
+// 本刀删除——导出面锁（见上）已把三个名字收进「不得回潮」名单。
 
 describe('整树续跑回执判定（第 3 期刀 3）', () => {
   // send('继续') 引导的恢复回合里，每个重派支起飞时宿主问一次判定：命中

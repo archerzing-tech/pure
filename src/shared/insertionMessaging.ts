@@ -12,12 +12,12 @@
 //   本模块只存两类文本：
 //   ① 框架文本：面向模型的机制指令（steerFrameText / cancelFoldInstruction /
 //      foldInInstruction / foldInFollowUpText / queuedHandoffText /
-//      truePauseReentryText / settledBranchCancelNote）——只描述机制事实，
-//      不示范措辞；
+//      settledBranchCancelNote）——只描述机制事实，不示范措辞；
 //   ② 判例/事实播报：有真机判例背书的收执（branchUncertainPauseReceipt
 //      2026-10-21 真机三连；cancelFoldUnmatchedReceipt 2026-10-10 判例
 //      「没停要明说没停」；branchResumeReceipt/treeResumeReceipt 续跑诚实
-//      二分；frozenSideEffectReceipt v2 §六冻结+询问，带用户决策点）。
+//      二分；frozenSideEffectReceipt v2 §六冻结+询问带用户决策点——已于
+//      2026-10-28 插话改版 D 刀随真暂停链退役）。
 //
 // 纪律：这里只放文本，不放判定逻辑。判定（谁停、停哪支、何时停）归
 // DynamicInsertionCoordinator / chat.ts / steerTargeting.ts。
@@ -73,12 +73,15 @@ export function cancelFoldUnmatchedReceipt(): string {
 }
 
 /** 追加型折入的引擎侧框架（chat.ts foldInInstruction）。与取消框架互补：
- *  把「别光汇总」说死——追加项像其他委派一样派出去做完，再合并输出。 */
+ *  把「别光汇总」说死——追加项像其他委派一样派出去做完，再合并输出。
+ *  【下一刀标注】P2 fold 退役（设计 docs/interjection-inline-sideline.md §四
+ *  删除清单 3/4）随折入链整体退役；本刀只标注，chat.ts/收尾派发仍在消费。 */
 export function foldInInstruction(text: string): string {
   return `【中途追加的任务，不是闲聊】用户要求在本次任务里追加：${text}\n执行要求：把这项追加的工作像其他委派一样派出去做完；拿到结果后，把它与本次任务已产出的全部内容合并，输出一份覆盖所有对象的最终汇总。在此之前不要输出最终汇总。`;
 }
 
-/** 折入没被照办时转排队的兜底口径（chat.ts foldInFollowUpText）。 */
+/** 折入没被照办时转排队的兜底口径（chat.ts foldInFollowUpText）。
+ *  【下一刀标注】随 P2 fold 退役，本刀只标注（roundClose 收尾核验在消费）。 */
 export function foldInFollowUpText(text: string): string {
   return `（中途追加）${text}\n把这项追加的工作做完，然后把结果与此前任务的产出合并，输出一份覆盖全部对象的完整汇总（此前的产出在会话历史里）。`;
 }
@@ -156,43 +159,4 @@ export const RESUME_INVARIANTS = {
   // 全角括号是字面量不是分组：锚必须真咬住轮数（\d+ 缺席即锚失效）。
   hitSaysFromCheckpoint: /从存档断点（第 \d+ 轮）/,
   missAdmitsNoArchive: /没找到存档/,
-} as const;
-
-// ── 插话架构 v2 存留文本（2026-10-27 软暂停/真暂停链）─────────────────────
-// v2 的放行/转向/真暂停/自查收执已随框架改革刀 2 删除（模型现场 receipt
-// 唯一来源，引擎沉默兜底）；这里留下的是真暂停的引擎侧重入框架与已完成
-// 副作用的冻结收执（事实播报，带用户决策点，v2 §六）。收执纪律不变：只说
-// 这个场景里真实发生/真实在场的事——「已经撤销/补偿已发生」按构就是失实
-// （一期没有自动补偿）。
-
-/** v2 真暂停重入框架（引擎侧，新回合开场投递用）：旧方向产出已清出上下文，
- *  新回合第一眼 = 用户上一句原话 + 纠偏插话。原话裸发的风险同队列重入
- *  （queuedHandoffText 的教训）：模型把纠偏当凭空而来的新请求，或把已清掉
- *  的旧产出当既成事实接着推。框架交给模型三件事：这是推倒重来；旧产出不在
- *  上下文、不许当底；从原话 + 纠偏重新理解。屏幕显示仍归 displayText，框架
- *  只走引擎。 */
-export function truePauseReentryText(originalAsk: string, correction: string): string {
-  if (originalAsk.startsWith('【推倒重来')) return originalAsk;
-  if (!correction.trim()) return originalAsk;
-  return `【推倒重来·回到你的原话】你的上一句话是：「${originalAsk}」；刚发的这句纠偏是：「${correction}」。\n（之前基于错误理解的产出已从上下文清出，不要当既成事实，也不要试图接回它；从这两句重新理解任务，重新开始。）`;
-}
-
-/** v2 已完成副作用的收执（(2)/(5)/(7) 的已完成节点，一期一律冻结+询问，
- *  蓝图 §六）：如实说三件事——那步已经做完、先冻住（下游不再依赖它）、
- *  补偿与否交用户发话。「已经做完」不许说成「还没做」，「冻住」不许说成
- *  「已经撤销」——一期没有自动补偿，收执替机制许愿就是说谎。 */
-export function frozenSideEffectReceipt(done: string): string {
-  return `「${done}」这步已经做完了——我先把它冻住，后面的活不再依赖它；这笔要撤还是就留着，你说一声。`;
-}
-
-/** 冻结收执的一致性锚（原 HOLD_INVARIANTS.frozen* 两锚；2026-10-28 框架改革
- *  刀 2 随 HOLD_INVARIANTS 拆出独立成组——HOLD 其余锚的断言对象全部随回应性
- *  收执删除，这两个锚的断言对象 frozenSideEffectReceipt 仍在。未并入
- *  CANCELLATION_INVARIANTS：冻结是 change/correction 对已完成工作的处置，
- *  不是「取消」的三面之一，并进去会模糊那个锚组的章程）。 */
-export const FROZEN_INVARIANTS = {
-  /** 必须带「冻」——说「已撤销」就是失实（一期没有自动补偿）。 */
-  frozenNamesFreeze: /冻/,
-  /** 必须开口问用户：你说一声 / 要不要 / 还是。补偿与否交用户发话。 */
-  frozenAsksUser: /你说一声|要不要|还是/,
 } as const;

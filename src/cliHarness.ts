@@ -561,7 +561,6 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   const interjectOrchestrator = new InterjectOrchestrator({
     decider: new DynamicInsertionCoordinator(),
     delegation: delegationControl,
-    roundClose,
     isStreaming: () => false,
     isAborted: () => false,
     decideSignal: () => undefined,
@@ -583,6 +582,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 续跑预检同接（第 2 期第三刀）：store 在下方才建（const store），缝延
     // 迟求值没问题；CLI 的 checkpoint 走 FSStore 落盘，重启后 probe 仍命中。
     probeResume: (name, args) => SubagentOrchestrator.probeResumeCheckpoint(store, sessionId, name, args),
+    // 嘴/手分开（2026-10-28 并线/另线改版）：CLI 插话输入路休眠（流态恒
+    // false），THINK 流读数恒 false、重入把手 no-op 即休眠语义；输入路接通
+    // 时换成通道宿主的真读数（GUI 的 chat.ts 装配是权威参照）。
+    isThinkingStreamActive: () => false,
+    abortReenter: () => {},
     // send 缝休眠：cliRepl 没有单条消息入口（引擎整回合跑），插话输入路接通
     // 时把这里换成通道宿主的真发送缝；空函数保证休眠期零副作用。
     send: () => {},

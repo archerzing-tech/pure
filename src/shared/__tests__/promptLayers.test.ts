@@ -62,15 +62,15 @@ describe('SYSTEM_CORE_PROMPT (L0)', () => {
 describe('L1 behavior contracts', () => {
   it('carries the mid-run insertion protocol as a thin pointer (2026-10-28 刀 3)', () => {
     // 框架改革刀 3（docs/framework-reform-2026-10.md）：6.5k 的逐场景长协议
-    // 瘦成 632 字符薄指针——逐场景教导下放进五个标注块（随插话现场到达），
+    // 瘦成 632 字符薄指针——逐场景教导下放进四个标注块（随插话现场到达），
     // 常驻层只留四条纪律内核：认块按块内指令配合、点名具体的事禁模板句、
-    // 停支归宿主、幸存者合并照常。
+    // 停支归宿主、幸存者合并照常。推倒重来块随真暂停链退役（D 刀），块名
+    // 同步摘除。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('<insertion_protocol>');
-    // 五类标注块名一一在场（模型靠它们认块，标注块文本在 insertionMessaging
+    // 四类标注块名一一在场（模型靠它们认块，标注块文本在 insertionMessaging
     // 与宿主投递侧，一致性测试各锁各的）。
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【用户插话·顺路带上】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【排队中的用户消息·现在轮到它】');
-    expect(INSERTION_PROTOCOL_PROMPT).toContain('【推倒重来·回到你的原话】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途取消，不是追加】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('【中途追加的任务】');
     expect(INSERTION_PROTOCOL_PROMPT).toContain('follow the instructions inside each block');
