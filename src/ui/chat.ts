@@ -3299,6 +3299,8 @@ export class ChatController {
    * Handle a message the user typed while a turn is running (interrupt-and-
    * insert). S2 第六刀：入口、序列化链与裁决序住 InterjectOrchestrator——
    * 宿主只剩转发与 DOM 投影缝。语义注解（五类分发矩阵）见编排器模块头。
+   * 对接点（插话唯一入口，契约见 interjectionPort.ts）：GUI 主输入、
+   * 多会话面板（activeNow().interject）都汇到这；CLI/新通道接入只写转发。
    */
   async interject(text: string, images: MessageImage[] = [], displayText = text): Promise<void> {
     await this.interjectOrchestrator.interject(text, images, displayText);
@@ -5241,6 +5243,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // a mid-run remark lands in the very next reasoning round instead of
         // killing the turn. 1a 定向投递：拉取者自带身份（分支由编排器包上
         // branchCallId/branchName，不带参 = 父引擎），按身份过滤投递与消费。
+        // 插入点 P1（轮中消息边界，契约见 interjectionPort.ts）。
         // S2 第一刀 — 队列本体已抽住宿主无关的 SteerBus（语义真相一份）；
         // 这里只剩 GUI 特有的折入铺排，经父边界回调缝交给 bus（bus 不猜
         // 在飞状态，回调里自己判）。
@@ -5259,7 +5262,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 代执行回合（2026-09-22 插话重设计）：委派收齐后的第一个 THINK 边界，
         // 宿主把 scope 追加包成普通委派调用交还引擎——引擎跳过本轮模型调用，
         // 让这些调用走原生 ACT 管线（ToolStarted 出卡片、SubagentActivity 流
-        // 明细、ToolResult 收尾入档、会话回放恢复）。顺序由结构保证：追加结果
+        // 明细、ToolResult 收尾入档、会话回放恢复）。插入点 P2（委派收齐派发，
+        // 契约见 interjectionPort.ts）。顺序由结构保证：追加结果
         // 落地前模型不会被咨询，"先汇总再补跑"没有发生的材料；卡片和正常委派
         // 完全同源，不再手搓任何 UI（此前的合成卡片/事件泵/思考卡接管全删）。
         takeSyntheticToolCalls: async () => {
@@ -8812,7 +8816,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
   /** 思考窗吸收的寄存器（窗开关、暂存、在飞把手、重启请求、叙述尾、攒批
    * 寄存器）已迁 InterjectOrchestrator（S2 第六刀）：吸收分支的置位面与
    * send() 的重启循环经窄 API（openPreflightWindow/beginPreflightThought/
-   * take… 等）对接。并账消费（splice 语义）在这里：取走的补充并进请求正文。 */
+   * take… 等）对接。并账消费（splice 语义）在这里：取走的补充并进请求正文。
+   * 插入点 P3（思考窗补充，契约见 interjectionPort.ts）。 */
   private applyPreflightSupplements(userText: string, userImages: MessageImage[]): string {
     const taken = this.interjectOrchestrator.takePreflightSupplements();
     if (taken.length === 0) return userText;

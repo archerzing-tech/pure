@@ -32,6 +32,7 @@ import type { RoundClosePlane } from './roundClosePlane';
 import type { MessageImage, LLMAdapter } from '../shared/types';
 import { detectTaskKind, isFileMutating } from '../shared/taskKind';
 import { appendTrace } from '../evolution/trace';
+import type { InterjectionIngress } from './interjectionPort';
 
 /** 插话临时回执句柄：不透明（宿主投影）。 */
 export type InterjectAck = unknown;
@@ -145,7 +146,10 @@ export interface InterjectOrchestratorDeps {
   logDecision(decision: DynamicInsertionDecision, text: string): void;
 }
 
-export class InterjectOrchestrator {
+// 插话端口契约见 interjectionPort.ts：本类是对接点（interject）与 P3 插入点
+// （takePreflightSupplements）的持有者；类内裁决序/九类分发/收执纪律全部属于
+// 契约标注的「边界内可替换」面——后续换队列+注入式实现时端口签名不动。
+export class InterjectOrchestrator implements InterjectionIngress {
   /** Serializes mid-run insert classifications. A second insert typed while
    * the first is still being judged must WAIT its turn — the caller has
    * already cleared the input box, so dropping the call would lose the
