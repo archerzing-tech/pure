@@ -27,3 +27,6 @@ tmp/
 # `binaries/*` 匹配不到任何文件时整个构建失败，当初就是这么丢掉侧车递送的。
 src-tauri/binaries/*
 !src-tauri/binaries/README.md
+
+# bun build temp artifacts (random-hash executables at repo root)
+.*.bun-build
