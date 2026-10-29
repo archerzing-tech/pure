@@ -184,6 +184,10 @@ const IDLE_PRECOMPACT_SOFT_TARGET = 0.7;
  *  shed——同一句话十分钟内不重复念。 */
 const PREEMPTIVE_COMPACT_TOAST_COOLDOWN_MS = 10 * 60_000;
 
+/** failover 文案的显形门槛：本地死端口拒连几毫秒就完成换路，没有值得解释
+ *  的等待窗——文案只在换路真的慢（挂死的代理、断网）时才出现。 */
+const FAILOVER_NOTICE_MIN_MS = 300;
+
 // ── Interrupt-reason sanitization ──
 // FailurePolicy.stop reasons are written as instructions FOR the model (they
 // contain raw HTTP error text, tool names, and directives like "stop making it").
@@ -1255,6 +1259,14 @@ export function createLLMAdapter(
       onNetOutcome: (outcome) => {
         if (!effectiveProxyUrl(config.proxy)) return;
         recordNetOutcome(baseURL, outcome.route, outcome.ok, Date.now(), outcome.headersMs);
+      },
+      // Rust 内部换路救场时请求最终成功，adapter 的 catch 路径永远不触发——
+      // 「首选路失败」只能从 failover 状态事件落学习表。2026-10-29 判例：
+      // 学习表永远空着，每个会话第一个请求都重新首选死掉的代理端口，文案
+      // 反复闪「这条路不通」。deadUntil 信号从这里才能活起来。
+      onPrimaryFailure: () => {
+        if (!effectiveProxyUrl(config.proxy)) return;
+        recordNetOutcome(baseURL, llmProxy.proxyUrl ? 'proxy' : 'direct', false, Date.now());
       },
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
@@ -4749,6 +4761,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // repeat in the same turn downgrades to a counted short form — reading
     // 「这条路不通」 five turns in a row reads as a struggle, not as routing.
     let transportFailovers = 0;
+    // Turn clock for failover-notice gating: a failover that lands almost
+    // instantly (dead local proxy port = connect refused in <10ms) completes
+    // before a human could notice — the label exists to explain a WAITING
+    // window, and a sub-300ms rescue has none. Slow rescues (hung proxy,
+    // dead network) still announce.
+    const transportTurnStartedAt = Date.now();
     // Reasoning deltas are batched into 50ms flushes before touching the DOM:
     // reasoning streams (DeepSeek/Qwen/GLM) can deliver hundreds of deltas per
     // second, and a per-delta append + scroll forces a layout read every time
@@ -6570,9 +6588,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 setThinkingLabel(thinkingCard, `连接不太顺，正在重试（第 ${attempt ?? 1}/${maxAttempts ?? 3} 次${waitNote}）…`);
               } else if (stage === 'failover') {
                 transportFailovers++;
-                setThinkingLabel(thinkingCard, transportFailovers === 1
-                  ? '这条路不通，换条线路再试…'
-                  : `线路还是不稳，又换了一条（本回合第 ${transportFailovers} 次）…`);
+                // Instant rescues stay silent (dead local proxy port refuses
+                // in milliseconds); the label is for wait-time explanation.
+                if (Date.now() - transportTurnStartedAt > FAILOVER_NOTICE_MIN_MS) {
+                  setThinkingLabel(thinkingCard, transportFailovers === 1
+                    ? '这条路不通，换条线路再试…'
+                    : `线路还是不稳，又换了一条（本回合第 ${transportFailovers} 次）…`);
+                }
               } else {
                 transportFailovers = 0;
                 // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能

@@ -190,6 +190,31 @@ describe('RustLLMAdapter', () => {
     expect(contents).toEqual(['ok']);
   });
 
+  it('fires onPrimaryFailure on failover (and only there) even though the rescued request resolves ok', async () => {
+    // 2026-10-29 判例：Rust 内部换路救场时 invoke 正常 resolve，catch 不触发
+    // ——「首选路失败」只能从 failover 状态事件落学习表，否则表永远空，
+    // 每个会话第一个请求重新首选死掉的代理端口。
+    const { deps } = makeDeps({
+      deltas: [
+        JSON.stringify({ type: 'status', stage: 'retrying', attempt: 1 }),
+        JSON.stringify({ type: 'status', stage: 'failover' }),
+        JSON.stringify({ type: 'delta', content: 'ok' }),
+      ],
+      result: { text: 'ok', toolCalls: [], netRoute: 'direct', headersMs: 800 },
+    });
+
+    const failures: number[] = [];
+    const outcomes: any[] = [];
+    const adapter = new RustLLMAdapter(
+      { provider: 'glm', model: 'glm-5.3-flash', proxyUrl: 'http://127.0.0.1:7897', onPrimaryFailure: () => failures.push(1), onNetOutcome: (o) => outcomes.push(o) },
+      deps,
+    );
+    for await (const _ of adapter.stream(MSGS, [])) { /* drain */ }
+    expect(failures).toHaveLength(1);
+    // Rescued turn still reports the route that SERVED it (fallback direct).
+    expect(outcomes).toEqual([{ route: 'direct', ok: true, headersMs: 800 }]);
+  });
+
   it('passes provider extraBody through to the request args', async () => {
     const { deps, lastArgs } = makeDeps({ deltas: [JSON.stringify({ type: 'delta', content: 'ok' })], result: { text: 'ok', toolCalls: [] } });
     const adapter = new RustLLMAdapter(

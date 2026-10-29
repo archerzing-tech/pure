@@ -2672,6 +2672,15 @@ describe('传输层状态进思考卡（长静默歼灭）', () => {
     expect(src).toContain('线路还是不稳，又换了一条');
     expect(src).toContain('已连上模型服务，等它开口');
     expect(src).toContain('waitMs >= 2000');
+    // 快速救场静默（2026-10-29 判例：本地死端口拒连毫秒级完成换路，没有
+    // 值得解释的等待窗）——文案只在换路真的慢时显形。
+    expect(src).toContain('const FAILOVER_NOTICE_MIN_MS = 300;');
+    expect(src).toContain('Date.now() - transportTurnStartedAt > FAILOVER_NOTICE_MIN_MS');
+  });
+
+  it('failover 事件落学习表：首选路失败只有这里能记到（救场成功不走 catch）', () => {
+    expect(src).toContain('onPrimaryFailure: () => {');
+    expect(src).toContain("recordNetOutcome(baseURL, llmProxy.proxyUrl ? 'proxy' : 'direct', false, Date.now());");
   });
 
   it('状态开卡遵守与看门狗同款的静默守卫（工具行在场上时不开卡）', () => {

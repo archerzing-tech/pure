@@ -46,6 +46,13 @@ export interface RustLLMConfig {
    *  negotiation, clean of prefill/thinking) when ok — the slow-direct
    *  evidence for the learner. Wired by chat.ts to recordNetOutcome. */
   onNetOutcome?: (outcome: { route: 'direct' | 'proxy'; ok: boolean; headersMs?: number }) => void;
+  /** Fired when the Rust transport fails over — i.e. the PRIMARY route just
+   *  failed a connect attempt even though the request as a whole will likely
+   *  succeed on the fallback. The catch-path never runs in that case, so
+   *  without this the learner never hears about primary failures and keeps
+   *  re-picking them (2026-10-29: empty table → every session's first turn
+   *  re-dials a dead proxy port and flashes the failover label). */
+  onPrimaryFailure?: () => void;
   proxyBypassProviders?: string[];
 }
 
@@ -272,6 +279,7 @@ export class RustLLMAdapter implements LLMAdapter {
         if (payload?.type === 'status' && typeof payload.stage === 'string') {
           const stages = ['retrying', 'connected', 'failover'] as const;
           const stage = stages.find((s) => s === payload.stage);
+          if (stage === 'failover') this.config.onPrimaryFailure?.();
           if (stage) {
             yield {
               type: 'status',
