@@ -502,7 +502,13 @@ export function providerHasKey(cfg: PureConfig, id: string): boolean {
   // Built-ins always carry a default endpoint; an override may blank it.
   const baseURL = override?.baseURL ?? providerDef(id)?.baseURL ?? '';
   if (!baseURL) return false;
-  return !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
+  // The legacy global key (cfg.apiKey / cfg.hasApiKey) belongs to the ACTIVE
+  // provider alone — sharing it with every built-in lit up「已配置」cards and
+  // dropdown models for providers the user never configured a key for.
+  if (id === cfg.provider) {
+    return !!cfg.apiKey || cfg.hasApiKey === true || !!override?.apiKey || override?.hasApiKey === true;
+  }
+  return !!override?.apiKey || override?.hasApiKey === true;
 }
 
 // Cached parse of the config: loadConfig() JSON.parses localStorage and is

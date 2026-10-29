@@ -132,9 +132,16 @@ describe('providerHasKey', () => {
     apiKey: '', hasApiKey: false, ...over,
   });
 
-  it('accepts a built-in with the legacy global key', () => {
+  it('accepts the active built-in via the legacy global key, and only it', () => {
     expect(providerHasKey({ ...defaults(), apiKey: 'sk-x' }, 'deepseek-openai')).toBe(true);
-    expect(providerHasKey({ ...defaults(), hasApiKey: true }, 'qwen')).toBe(true);
+    // The legacy global key belongs to the ACTIVE provider (deepseek-openai by
+    // default) — sharing it with every built-in lit up「已配置」cards and put
+    // every provider's models into the composer dropdown for providers the
+    // user never configured (真机判例 2026-10-29).
+    expect(providerHasKey({ ...defaults(), hasApiKey: true }, 'qwen')).toBe(false);
+    expect(providerHasKey({ ...defaults(), hasApiKey: true }, 'glm')).toBe(false);
+    // A per-provider override key makes a non-active provider selectable.
+    expect(providerHasKey({ ...defaults(), providerOverrides: { glm: { hasApiKey: true } } }, 'glm')).toBe(true);
   });
 
   it('accepts a built-in with a per-provider override key', () => {
