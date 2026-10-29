@@ -243,7 +243,14 @@ export function netRouteSurfacePair(
 interface RouteEntry {
   route: NetRoute;
   at: number;
+  /** 死路半边：这条路由最近一次失败后，在此之前选路直接翻反向。
+   *  缺省 = 没有死路信号（正常记忆）。 */
+  deadUntil?: number;
 }
+
+/** 死路半边的保质期：代理故障恢复常在分钟级，5 分钟内跳过刚失败的路，
+ *  过期后照常重探，复活即恢复首选。 */
+export const DEAD_ROUTE_TTL_MS = 5 * 60_000;
 
 const learned = new Map<string, RouteEntry>();
 let loaded = false;
@@ -271,7 +278,11 @@ function ensureLoaded(): void {
       if ((entry.route === 'direct' || entry.route === 'proxy')
         && typeof entry.at === 'number'
         && now - entry.at <= LEARNED_ROUTE_TTL_MS) {
-        learned.set(host, { route: entry.route, at: entry.at });
+        learned.set(host, {
+          route: entry.route,
+          at: entry.at,
+          ...(typeof entry.deadUntil === 'number' ? { deadUntil: entry.deadUntil } : {}),
+        });
       }
     }
   } catch {
@@ -286,7 +297,11 @@ function persist(): void {
     const now = Date.now();
     for (const [host, entry] of learned) {
       if (now - entry.at > LEARNED_ROUTE_TTL_MS) continue;
-      obj[host] = { route: entry.route, at: entry.at };
+      obj[host] = {
+        route: entry.route,
+        at: entry.at,
+        ...(entry.deadUntil !== undefined ? { deadUntil: entry.deadUntil } : {}),
+      };
     }
     localStorage.setItem(STORE_KEY, JSON.stringify(obj));
   } catch {
@@ -299,7 +314,15 @@ function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetR
   ensureLoaded();
   const entry = learned.get(key);
   if (entry) {
-    if (now - entry.at <= LEARNED_ROUTE_TTL_MS) return entry.route;
+    if (now - entry.at <= LEARNED_ROUTE_TTL_MS) {
+      // 死路半边：刚失败的路在死期内直接翻反向。只删记忆不够——删掉后
+      // 分类面下一轮照样把 proxy-first 主机判给代理，每个请求重演一次
+      // 「失败→换路」，UI 就是反复闪「这条路不通」。
+      if (entry.deadUntil !== undefined && now < entry.deadUntil) {
+        return entry.route === 'proxy' ? 'direct' : 'proxy';
+      }
+      return entry.route;
+    }
     learned.delete(key);
     persist();
   }
@@ -364,10 +387,16 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
     if (entry?.route === route) return;
     learned.set(key, { route, at: now });
     persist();
-  } else if (entry?.route === route) {
-    learned.delete(key);
+  } else if (entry === undefined || entry.route === route) {
+    // 失败记死路半边，覆盖两种情形：表里根本没有记忆（这次是分类面选的
+    // 路，比如 proxy-first 主机首选代理首连失败——只删记忆的话表还是空
+    // 的，下一轮分类面原地再选它，永远学不会），以及记忆钉的正是这条
+    // 失败路（旧记忆失效）。死期内选路翻反向，过期后照常重探。
+    learned.set(key, { route, at: now, deadUntil: now + DEAD_ROUTE_TTL_MS });
     persist();
   }
+  // else：钉着的是反向记忆（活路证据），死路信号不覆盖它——选路本来就
+  // 先走钉着的路，无需再改。
 }
 
 // ── 出口契约 ───────────────────────────────────────────────────────────────

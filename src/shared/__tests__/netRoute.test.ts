@@ -119,6 +119,31 @@ describe('resolveNetRoute', () => {
     expect(netRoute.resolveNetRoute('keep-entry.test', true)).toBe('direct');
   });
 
+  it('a failure leaves a dead-route signal that flips the next picks, not just an erased memory', () => {
+    // 2026-10-29 真机判例：z.ai（proxy-first）首选代理首连失败、直连兜底
+    // 慢通（>4s 不钉），只删记忆让分类面下一轮照样选代理——每个请求重演
+    // 一次「这条路不通，换条线路再试」。死路半边补上「别再选它」的信号。
+    const t0 = 1_700_000_000_000;
+    // 无记忆 + 首选失败：死路信号是这次失败能学到的全部。
+    netRoute.recordNetOutcome('dead-flip.openai.com', 'proxy', false, t0);
+    expect(netRoute.resolveNetRoute('dead-flip.openai.com', true, t0 + 1)).toBe('direct');
+    expect(netRoute.resolveNetRoute('dead-flip.openai.com', true, t0 + netRoute.DEAD_ROUTE_TTL_MS - 1)).toBe('direct');
+    // 死期过后照常重探：回落分类首选（proxy-first → proxy）。
+    expect(netRoute.resolveNetRoute('dead-flip.openai.com', true, t0 + netRoute.DEAD_ROUTE_TTL_MS + 1)).toBe('proxy');
+  });
+
+  it('anchors DEAD_ROUTE_TTL_MS to a literal 5-minute window', () => {
+    expect(netRoute.DEAD_ROUTE_TTL_MS).toBe(5 * 60_000);
+  });
+
+  it('a pinned opposite memory survives a failure of the other route', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome('pin-guard.test', 'direct', true, t0);
+    netRoute.recordNetOutcome('pin-guard.test', 'proxy', false, t0 + 1);
+    // 钉着的 direct 是活路证据，不被 proxy 的死路信号覆盖。
+    expect(netRoute.resolveNetRoute('pin-guard.test', true, t0 + 2)).toBe('direct');
+  });
+
   it('normalizes the key so a full URL and a bare host hit the SAME entry', () => {
     // 修 3：写入侧历史上传完整 URL、读取侧用 hostOf(url)，两边永不相等，
     // 学习表写的是死条目。用一次性 host：学习表是进程级模块状态（CI 上跨
