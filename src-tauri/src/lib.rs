@@ -160,6 +160,22 @@ fn cached_llm_stream_client(proxy_spec: Option<&str>) -> Result<reqwest::Client,
     Ok(client)
 }
 
+/// Drop ONE cached LLM stream client by its proxy-spec key — the failover
+/// path's hygiene. When the primary route dies at the connect layer, its
+/// pooled connections are dead (NAT/firewalls reclaim idle TCP), and every
+/// later request that picks that route first slams the same dead pool before
+/// failing over again — the flapping loop where each turn pays one failed
+/// dial plus a full re-dial before the first token. The adapter's kill switch
+/// (`reset_llm_stream_clients`) only fires when the WHOLE request errors; a
+/// request rescued by failover never cleaned its primary's pool.
+fn evict_llm_stream_client(proxy_spec: Option<&str>) {
+    let resolved = effective_proxy_url(proxy_spec.unwrap_or(""));
+    let key = resolved.unwrap_or_else(|| "direct".to_string());
+    if let Ok(mut map) = llm_stream_clients().lock() {
+        map.remove(&key);
+    }
+}
+
 /// Shared tail of every client builder: apply the optional proxy, then build.
 fn finalize_http_client(mut builder: reqwest::ClientBuilder, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     // One place so LLM / search / tool traffic all honor the same toggle and
@@ -637,6 +653,24 @@ mod tls_verify_tests {
         assert!(!llm_stream_clients().lock().unwrap().is_empty());
         reset_llm_stream_clients().expect("reset");
         assert!(llm_stream_clients().lock().unwrap().is_empty());
+    }
+
+    /// failover 卫生（2026-10-29）：evict 只按 key 精确清 primary 的池，
+    /// 另一条路（刚被 clone 出来正要拨号的 fallback）不受牵连。
+    #[test]
+    fn evict_llm_stream_client_drops_only_the_targeted_route() {
+        let _ = cached_llm_stream_client(None).expect("populate direct");
+        let _ = cached_llm_stream_client(Some("http://127.0.0.1:9")).expect("populate proxy");
+        assert_eq!(llm_stream_clients().lock().unwrap().len(), 2, "both routes cached");
+
+        evict_llm_stream_client(None);
+        let map = llm_stream_clients().lock().unwrap();
+        assert!(!map.contains_key("direct"), "primary's dead pool is gone");
+        assert!(map.contains_key("http://127.0.0.1:9"), "fallback's entry survives");
+        drop(map);
+
+        // 复位，不污染后续测试。
+        reset_llm_stream_clients().expect("cleanup");
     }
 }
 
@@ -13620,6 +13654,10 @@ async fn chat_stream(
     // — the idle timeout in the read loop below is the only connection guard.
     // Cached per resolved route so connection pools survive across calls.
     let client = cached_llm_stream_client(llm_proxy_url(&args))?;
+    // Freeze the primary route's spec BEFORE `args` is partially moved into the
+    // request body (`args.tools`) — the failover branch needs it later to evict
+    // the primary's poisoned connection pool.
+    let primary_proxy_spec: Option<String> = llm_proxy_url(&args).map(str::to_string);
     // Capture the route information BEFORE body construction moves pieces of
     // `args` (tools) — the borrow checker forbids reading it afterwards.
     let fallback_spec = llm_fallback_proxy_url(&args);
@@ -13779,6 +13817,11 @@ async fn chat_stream(
                     // wording BEFORE the fallback dials, so the route switch
                     // itself is visible instead of reading as more of the same.
                     send_status(Some(&on_chunk), "failover", 1, 1, 0);
+                    // The primary just died at the connect layer — evict its
+                    // poisoned pool so the NEXT request that picks this route
+                    // dials fresh instead of slamming the same dead
+                    // connections and failing over again.
+                    evict_llm_stream_client(primary_proxy_spec.as_deref());
                     let fallback_started = std::time::Instant::now();
                     resp = tokio::select! {
                         biased;

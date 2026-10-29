@@ -2667,6 +2667,9 @@ describe('传输层状态进思考卡（长静默歼灭）', () => {
     expect(src).toContain("case 'TransportStatus':");
     expect(src).toContain('连接不太顺，正在重试（第');
     expect(src).toContain('这条路不通，换条线路再试');
+    // 连续 failover 不重复同一句（真机判例 2026-10-29：插话小请求每个都
+    // failover，同一句翻五遍读作挣扎）——后续降级为计数短句，connected 清零。
+    expect(src).toContain('线路还是不稳，又换了一条');
     expect(src).toContain('已连上模型服务，等它开口');
     expect(src).toContain('waitMs >= 2000');
   });

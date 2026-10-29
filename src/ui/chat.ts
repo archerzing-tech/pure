@@ -4745,6 +4745,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // decisions) — shown on the live thinking card so silent retries become
     // visible feedback.
     let llmRetryNotices = 0;
+    // Route failovers this turn: the first one earns the full sentence, any
+    // repeat in the same turn downgrades to a counted short form — reading
+    // 「这条路不通」 five turns in a row reads as a struggle, not as routing.
+    let transportFailovers = 0;
     // Reasoning deltas are batched into 50ms flushes before touching the DOM:
     // reasoning streams (DeepSeek/Qwen/GLM) can deliver hundreds of deltas per
     // second, and a per-delta append + scroll forces a layout read every time
@@ -6565,8 +6569,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 const waitNote = waitMs && waitMs >= 2000 ? `，约 ${Math.round(waitMs / 1000)} 秒后` : '';
                 setThinkingLabel(thinkingCard, `连接不太顺，正在重试（第 ${attempt ?? 1}/${maxAttempts ?? 3} 次${waitNote}）…`);
               } else if (stage === 'failover') {
-                setThinkingLabel(thinkingCard, '这条路不通，换条线路再试…');
+                transportFailovers++;
+                setThinkingLabel(thinkingCard, transportFailovers === 1
+                  ? '这条路不通，换条线路再试…'
+                  : `线路还是不稳，又换了一条（本回合第 ${transportFailovers} 次）…`);
               } else {
+                transportFailovers = 0;
                 // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能
                 // 正点名「正在消化 Read 的结果（…）」，整句覆盖会把工具与体量
                 // 归因抹掉、读作凭空又白等一轮——组合句把两件事一次说全。
