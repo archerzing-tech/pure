@@ -46,6 +46,9 @@ const PROMPT_BUDGET_FALLBACK = {
   safetyMarginTokens: 1_024,
 };
 
+/** Output reserve may claim at most this share of the window; the rest stays input. */
+const OUTPUT_RESERVE_MAX_SHARE = 0.75;
+
 /**
  * Per-family budget defaults = each model generation's published maximums
  * (blank settings input inherits these). Verified against 2026-08 vendor docs
@@ -126,9 +129,15 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
     || config.outputReserveTokens !== undefined
     || config.safetyMarginTokens !== undefined;
   const contextWindowTokens = Math.max(1, config.contextWindowTokens ?? defaults?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens);
+  // At least a quarter of the window must stay available for input. An
+  // output reserve equal to the whole window — a mis-paired combination,
+  // e.g. a 128_000 provider-level window override meeting glm's 128_000
+  // default reserve — resolves to availableInputTokens = 1 and strips every
+  // assembled fragment. No shipped default exceeds this share (the highest
+  // is minimax at 64%), so the cap only fires on mis-paired overrides.
   const outputReserveTokens = Math.max(0, Math.min(
     config.outputReserveTokens ?? defaults?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
-    contextWindowTokens,
+    Math.max(1, Math.floor(contextWindowTokens * OUTPUT_RESERVE_MAX_SHARE)),
   ));
   const safetyMarginTokens = Math.max(0, Math.min(
     config.safetyMarginTokens ?? PROMPT_BUDGET_FALLBACK.safetyMarginTokens,

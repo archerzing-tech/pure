@@ -24,6 +24,7 @@ import {
   resolveProviderProtocol,
   providerOverrideFor,
   resolvePromptBudget,
+  PROVIDERS,
   isReasoningModelName,
   resolveReasoningEffort,
   planThinkingOffExtraBody,
@@ -77,6 +78,51 @@ describe('resolvePromptBudget', () => {
     const gpt5 = resolvePromptBudget({ provider: 'openai', model: 'gpt-5.2' });
     expect(gpt5.contextWindowTokens).toBe(400_000);
     expect(gpt5.outputReserveTokens).toBe(128_000);
+  });
+
+  it('caps an output reserve that would eat the whole window (mis-paired override)', () => {
+    // Real-world regression: glm kept its 128_000 default reserve while a
+    // provider-level override shrank the window to 128_000 —
+    // availableInputTokens resolved to 1 and the assembler stripped every
+    // fragment, so chart-style deliveries degraded to plain text. The real
+    // GUI path carries safetyMarginTokens: 0.
+    const wedged = resolvePromptBudget({ provider: 'glm', contextWindowTokens: 128_000, safetyMarginTokens: 0 });
+    expect(wedged.outputReserveTokens).toBe(96_000);
+    expect(wedged.availableInputTokens).toBe(32_000);
+    // Explicit reserves are capped by the same share.
+    const explicit = resolvePromptBudget({ contextWindowTokens: 10_000, outputReserveTokens: 9_500, safetyMarginTokens: 0 });
+    expect(explicit.outputReserveTokens).toBe(7_500);
+    expect(explicit.availableInputTokens).toBe(2_500);
+    // No shipped default trips the cap: glm's real pairing keeps 87% input,
+    // o1's 50% reserve (the highest default share) stays untouched.
+    const glm = resolvePromptBudget({ provider: 'glm', model: 'glm-5.3-flash', safetyMarginTokens: 0 });
+    expect(glm.outputReserveTokens).toBe(128_000);
+    expect(glm.availableInputTokens).toBe(872_000);
+    const o1 = resolvePromptBudget({ provider: 'openai', model: 'o1' });
+    expect(o1.outputReserveTokens).toBe(100_000);
+  });
+
+  it('keeps at least a quarter of the window for input across every shipped default pairing', () => {
+    // Guards the whole fleet, not just glm: any future default (or new
+    // provider) whose reserve outgrows its window fails here, not in
+    // production as a silently stripped prompt.
+    const combos: Array<{ id: string; model: string }> = [];
+    for (const provider of PROVIDERS) {
+      for (const model of new Set([...provider.models, provider.defaultModel])) {
+        combos.push({ id: provider.id, model });
+      }
+    }
+    // anthropic ships budget defaults but sits outside PROVIDERS.
+    combos.push({ id: 'anthropic', model: 'claude-sonnet-5' });
+    combos.push({ id: 'anthropic', model: 'claude-sonnet-4-5' });
+    expect(combos.length).toBeGreaterThanOrEqual(20);
+    for (const { id, model } of combos) {
+      const budget = resolvePromptBudget({ provider: id, model });
+      const floor = Math.floor(budget.contextWindowTokens * 0.25);
+      if (budget.availableInputTokens < floor) {
+        throw new Error(`${id}/${model}: availableInput ${budget.availableInputTokens} below 25% of window (${floor})`);
+      }
+    }
   });
 
   it('uses explicit limits for unknown/custom models and accounts for consumed input', () => {
