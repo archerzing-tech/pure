@@ -1320,12 +1320,12 @@ describe('AgentLoopEngine', () => {
     expect(sentLengths[1]).toBe(1);
   });
 
-  it('caps reactive recompaction and hands a persistent overflow back to the failure ladder', async () => {
+  it('caps reactive recompaction and stops cleanly when the overflow persists', async () => {
     const llm = errorLLM(OVER_LONG_400);
-    let compactCalls = 0;
+    const compactCalls: Array<{ force?: boolean; aggressive?: boolean; skipSummary?: boolean }> = [];
     const contextEngine = {
-      compact: async (messages: Message[]) => {
-        compactCalls++;
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean }) => {
+        compactCalls.push(options ?? {});
         return { messages: messages.slice(0, 1), evictedMessages: 1, reclaimedTokens: 1, estimatedTokens: 1 };
       },
     };
@@ -1337,11 +1337,18 @@ describe('AgentLoopEngine', () => {
       ctx,
     ));
 
-    expect(compactCalls).toBe(2);
-    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+    // Two reactive passes are spent on the persistently overflowing request;
+    // the third compact call is the stop-time salvage (skipSummary).
+    const reactive = compactCalls.filter(o => !o.skipSummary);
+    expect(reactive).toHaveLength(2);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('Context window exhausted');
+    // 刀3 salvage still ran for the stop itself.
+    expect(compactCalls.some(o => o.skipSummary)).toBe(true);
   });
 
-  it('leaves a context-length rejection to the failure policy when no compactor is wired', async () => {
+  it('stops cleanly on a context-length rejection when no compactor is wired (engine-side, no ladder grind)', async () => {
     const engine = new AgentLoopEngine();
     const ctx = baseCtx({ llm: errorLLM(OVER_LONG_400), failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
 
@@ -1354,6 +1361,295 @@ describe('AgentLoopEngine', () => {
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('Context window exhausted');
+    // 楔死修复后引擎在 policy 之前直停：decision 由引擎伪造下发（不再走
+    // policy 的 context 分支——那条对 llm_error 已不可达）。
+    expect(events.some(e => e.type === 'FailurePolicyDecision')).toBe(true);
+  });
+
+  // ═══ 2026-10-29 会话楔死修复：结构性发送失败压小重试，不再阶梯空转 ═══
+
+  // 套餐端点的 400 报文不带英文 context 措辞（1214 参数非法形态）——旧判定
+  // 落 generic 走 5-8 轮全量重发阶梯，这里必须被 4xx 判别接住。
+  const PLAN_400 = '400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}';
+
+  it('answers a non-context 400 with reactive compaction instead of the failure ladder', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls === 1) throw new Error(PLAN_400);
+        yield { type: 'content', content: 'recovered' };
+        yield { type: 'done', content: 'recovered', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactArgs: Array<{ force?: boolean; aggressive?: boolean; skipSummary?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean }) => {
+        compactArgs.push(options);
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 300, estimatedTokens: 5 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy() });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-plan-400', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(compactArgs).toEqual([{ force: true, aggressive: true }]);
+    // The ladder never got a turn: no policy decision, no injected hint, no stop.
+    expect(events.some(e => e.type === 'FailurePolicyDecision')).toBe(false);
+    expect(events.some(e => e.type === 'Interrupted')).toBe(false);
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('learns the real window when the provider names one in the rejection body', async () => {
+    const learned: number[] = [];
+    const llm = errorLLM(OVER_LONG_400);
+    const contextEngine = {
+      compact: async (messages: Message[]) => ({ messages: messages.slice(-1), evictedMessages: 1, reclaimedTokens: 10, estimatedTokens: 1 }),
+      configureBudget: (maxTokens: number) => { learned.push(maxTokens); },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy() });
+
+    await collect(engine.run(
+      { sessionId: 's-learn', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // 65536 × 0.85 — the provider's own number, with headroom. Re-learned on
+    // every structural rejection (idempotent: the same truth every time).
+    expect(learned.length).toBeGreaterThan(0);
+    expect(new Set(learned)).toEqual(new Set([Math.floor(65536 * 0.85)]));
+  });
+
+  it('answers a repeated identical send failure with the compaction the ladder never had', async () => {
+    // 'stream stalled' 分 network 类：第一败走阶梯 retry；第二败同因 → 借道
+    // 压缩——大转录被 Shed 后重试收敛，而不是烧满整个阶梯。
+    const STALL = 'stream stalled: no data from the LLM API for 180s — the connection likely died. Try the turn again.';
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls <= 2) throw new Error(STALL);
+        yield { type: 'content', content: 'recovered' };
+        yield { type: 'done', content: 'recovered', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactArgs: Array<{ force?: boolean; aggressive?: boolean; skipSummary?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean }) => {
+        compactArgs.push(options);
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 800, estimatedTokens: 5 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy() });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-stall', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // call1 fails → ladder retry; call2 fails identically → reactive compact
+    // sheds the bloat → call3 converges on the smaller transcript.
+    expect(calls).toBe(3);
+    expect(compactArgs).toEqual([{ force: true, aggressive: true }]);
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+  });
+
+  it('stops cleanly on a deterministic 400 when no compactor is wired', async () => {
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error(PLAN_400);
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-400-no-compactor', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    // One doomed THINK round, not the 5-8-round grind: the provider read and
+    // rejected the request, so the ladder's verbatim retries are dead weight.
+    // (The second call is the handover wrap-up reusing the same dead adapter —
+    // it fails, is caught, and the plain stop reason lands.)
+    expect(calls).toBe(2);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('consecutive failure');
+    expect(interrupted!.payload.reason).toContain(PLAN_400);
+    const decision = events.find(e => e.type === 'FailurePolicyDecision');
+    expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
+  });
+
+  it('salvages the transcript before a policy stop so the next turn inherits a lean payload', async () => {
+    const llm = errorLLM('fatal boom');
+    const compactCalls: Array<{ options?: { skipSummary?: boolean } }> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean }) => {
+        compactCalls.push({ options });
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 5, estimatedTokens: 1 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      contextEngine,
+      failurePolicy: { decide: () => ({ kind: 'stop' as const, reason: 'too many failures, giving up' }) },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-salvage-stop', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(compactCalls[0]?.options?.skipSummary).toBe(true);
+    expect((interrupted?.payload.messages ?? []).some(m => m.role === 'user' && m.internal === true)).toBe(false);
+  });
+
+  it('never teaches the budget from a rate-limit body — the compaction borrow still runs', async () => {
+    // 429 报文里的 "30000 per minute" 是速率上限不是窗口；configureBudget
+    // 无回退路径，错学一次全会话楔死在错误小窗。teaching 只认 context 类。
+    const RATE_429 = '429 Too Many Requests: your token rate limit is 30000 per minute. (已自动重试 2)';
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        if (calls <= 2) throw new Error(RATE_429);
+        yield { type: 'content', content: 'recovered' };
+        yield { type: 'done', content: 'recovered', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const learned: number[] = [];
+    const compactArgs: Array<{ force?: boolean; aggressive?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean }) => {
+        compactArgs.push(options);
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 800, estimatedTokens: 5 };
+      },
+      configureBudget: (maxTokens: number) => { learned.push(maxTokens); },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy() });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-rate-429', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // The second identical 429 borrows the compaction attempt (a smaller
+    // payload is a legitimate rate remedy too), but the budget stays untouched.
+    expect(learned).toEqual([]);
+    expect(compactArgs).toEqual([{ force: true, aggressive: true }]);
+    expect(calls).toBe(3);
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+  });
+
+  it('falls back to the ladder (final policy stop) when the borrowed compaction cannot shed anything', async () => {
+    // 借道不是无限通行证：压不动的同因重复要还回阶梯——policy 的
+    // identical-repeat 上限仍然兜底，最终以 stop 收束，绝不无限借。
+    const STALL = 'stream stalled: no data from the LLM API for 180s — the connection likely died. Try the turn again.';
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error(STALL);
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactCalls: Array<{ skipSummary?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { skipSummary?: boolean }) => {
+        compactCalls.push(options);
+        // Nothing sheds: same length, nothing reclaimed → shrank=false.
+        return { messages: [...messages], evictedMessages: 0, reclaimedTokens: 0, estimatedTokens: 0 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-borrow-futile', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    const reactive = compactCalls.filter(o => !o?.skipSummary);
+    expect(reactive).toHaveLength(2); // 借道恰两次（上限），随后回落阶梯
+    expect(events.some(e => e.type === 'FailurePolicyDecision' && e.payload.action.kind === 'stop')).toBe(true);
+    expect(events.find(e => e.type === 'Interrupted')).toBeDefined();
+    expect(calls).toBeLessThan(15); // 有界收束，绝不无限借
+  });
+
+  it('stops on a payload-independent 4xx without spending a compaction attempt', async () => {
+    // 404 model-not-found 与载荷大小无关：压缩救不了，也不该烧一次摘要
+    // （L2 最多 60s）再停。首败即干净直停。
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error('404 Not Found: model gpt-99 does not exist');
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactCalls: Array<{ skipSummary?: boolean } | undefined> = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { skipSummary?: boolean }) => {
+        compactCalls.push(options);
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 5, estimatedTokens: 1 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-404-direct', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    expect(calls).toBe(2); // 一次 THINK + 一次 handover，无阶梯空转
+    expect(compactCalls.some(o => !o?.skipSummary)).toBe(false);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('consecutive failure');
+  });
+
+  it('keeps the bare transcript when stop-time salvage itself fails', async () => {
+    // 刀3 的兜底不该有二级事故：压缩器在止损时抛错，停机路径必须原样
+    // 保留（剥 internal 后的）转录，而不是把会话内容丢给异常。
+    const llm = errorLLM(PLAN_400);
+    const contextEngine = {
+      compact: async (): Promise<never> => { throw new Error('compactor exploded'); },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy(), budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 } });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-salvage-boom', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    // bare 转录原样保留：system 与用户原话都在，internal 注入件全部不在。
+    const bare = interrupted?.payload.messages ?? [];
+    expect(bare.some(m => m.role === 'user' && m.internal === true)).toBe(false);
+    expect(bare.some(m => m.role === 'system')).toBe(true);
+    expect(bare.some(m => m.role === 'user' && m.content === 'Y')).toBe(true);
+    expect(interrupted!.payload.reason).toContain('consecutive failure');
   });
 
   it('emits FailurePolicyDecision with stop action when policy stops', async () => {

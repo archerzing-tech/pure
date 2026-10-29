@@ -7,7 +7,7 @@ import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, Run
 import { mergeTokenUsage } from '../shared/usage';
 import { applyLanguageDirective, detectReplyLanguage, lastHumanUserText, replyLanguageDirective } from '../shared/langDetect';
 import { interruptedReasonFor } from '../shared/pauseSignal';
-import { classifyFailure } from '../shared/netGuard';
+import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -43,12 +43,18 @@ const VERIFIER_TIMEOUT_MS = 60_000;
 // think-text → nudge → think-text loop; three chances is enough to recover a
 // premature stop, after which the turn genuinely ends.
 const MAX_GUARD_CONTINUES = 3;
-// 9.1 — how many times a provider context-length rejection may be answered by
-// an aggressive recompaction + retry before the failure ladder stops the turn.
-// Two attempts: the aggressive pass clears old tool results and targets a
-// safety margin below the budget, so the first retry almost always converges;
-// the second covers a host whose estimator is systematically off.
+// 9.1 — how many times a failing send-phase request may be answered by an
+// aggressive recompaction + retry before the turn stops cleanly. Two attempts:
+// the aggressive pass clears old tool results and targets a safety margin
+// below the budget, so the first retry almost always converges; the second
+// covers a host whose estimator is systematically off.
 const MAX_REACTIVE_COMPACTIONS = 2;
+// Provider-taught budget correction: when a rejection body names the real
+// input limit, the compactor re-budgets to this fraction of it (headroom for
+// the estimator's residue and the output reserve the number may not include).
+// Floor keeps an absurd or misparsed figure from zeroing the window.
+const LEARNED_BUDGET_RATIO = 0.85;
+const LEARNED_BUDGET_FLOOR = 4_096;
 // Stable key for a tool call (name + arguments with sorted object keys), used
 // by the consecutive-identical-call dedupe below.
 function stableStringify(value: unknown): string {
@@ -358,6 +364,25 @@ export class AgentLoopEngine {
           // LLM unavailable — fall through to the plain stop reason.
         }
       };
+      // Stop-time salvage (2026-10-29 会话楔死修复, 刀3): a stop that leaves the
+      // ladder's injected hints in the transcript and the overweight payload
+      // intact makes the user's next "继续" re-run the exact doomed round that
+      // just stopped — the session wedged (the 2026-10-09 判例). Salvage before
+      // the stop lands: strip engine scaffolding (internal user hints are ours,
+      // never the user's words) and shrink the transcript once, summary-less —
+      // the handover round right after provides the narrative an L2 summary
+      // would have, and blocking the stop on a 60s summarizer call is the
+      // wrong moment to be patient. Best-effort: any failure keeps `msgs`.
+      const salvageStopMessages = async (msgs: Message[]): Promise<Message[]> => {
+        const bare = msgs.filter(m => !(m.role === 'user' && m.internal === true));
+        if (!ctx.contextEngine) return bare;
+        try {
+          const compacted = await ctx.contextEngine.compact(bare, { force: true, aggressive: true, skipSummary: true });
+          return compacted.messages.length > 0 ? compacted.messages : bare;
+        } catch {
+          return bare;
+        }
+      };
       // Set as soon as the stream starts emitting a tool call. A timeout mid
       // tool-call-argument can't be safely resumed (the partial call would be
       // corrupt), so the auto-resume branch below only fires for plain text.
@@ -477,21 +502,51 @@ export class AgentLoopEngine {
           interrupted = true;
           break;
         }
-        // 9.1 reactive compaction — the provider rejected THIS request as over
-        // its context window, which means the pre-flight trim's estimate was
-        // optimistic (dense tool-call JSON, a provider-specific tokenizer, tool
-        // schemas). Re-sending the identical request only 400s again, and the
-        // failure ladder's answer to the class is a stop.
+        const errMessage = err?.message ?? String(err);
+        // ── Structural send-phase failures: shrink the payload, don't grind ──
+        // The provider read THIS request and refused it — re-sending the same
+        // payload cannot succeed, and the ladder's hint injection (an internal
+        // user message that goes ON the wire) makes every retry strictly
+        // heavier. That is how a long session wedged (2026-10-29 判例): a
+        // coding-plan endpoint rejects transcripts past its real per-request
+        // limit long before the advertised window, the 400 body matched no
+        // context phrase, and the ladder ground 5-8 full-size retries before
+        // stopping — every later turn re-ran the same doom.
         //
-        // Recover instead: recompact HARDER than the configured budget
-        // (aggressive mode clears old tool results and targets a safety
-        // margin) and re-enter THINK with the smaller transcript. Bounded —
-        // once the attempts are spent the policy's context branch stops the
-        // turn with its existing wording, so a genuinely unfixable overflow
-        // (one newest message larger than the whole window) still terminates.
-        if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS) {
-          const errMessage = err?.message ?? String(err);
-          if (classifyFailure(errMessage) === 'context') {
+        // Recover instead: learn the real window from the body when the
+        // provider names one, recompact HARDER than the budget (aggressive
+        // mode clears old tool results and targets a safety margin) and
+        // re-enter THINK with the smaller transcript. Deterministic rejections
+        // (context class, HTTP 4xx) that compaction cannot answer stop CLEANLY
+        // with a salvaged transcript. A repeated transient-looking failure
+        // borrows the same compaction attempt — a shrinking payload is the one
+        // remedy the ladder never had — but when nothing sheds, the ladder
+        // keeps the stop cadence: on a small transcript two identical timeouts
+        // may still be an honest third-retry transient, and the policy's
+        // identical-repeat ceiling already bounds that grind.
+        const errClass = classifyFailure(errMessage);
+        const identicalRepeats = failures.filter(f => f.type === 'llm_error' && f.message === errMessage).length;
+        const deterministicRejection = errClass === 'context' || isProviderHttp4xx(errMessage);
+        const structuralSendFailure = deterministicRejection || identicalRepeats >= 1;
+        if (structuralSendFailure) {
+          // Provider-taught budget: the body's own limit beats the advertised
+          // window every later trim works from (preflight and reactive).
+          // Gated on the context class on purpose: numbers in other rejections
+          // mean different things — a 429's "30000 per minute" is a rate cap, a
+          // "maximum length: 8192 tokens including output" is the max_tokens
+          // cap — and configureBudget has no undo, so a mis-read would wedge
+          // the whole session into a too-small window. Under-teaching (e.g. a
+          // bare Chinese「上限为 N」that classifies as generic) only costs one
+          // self-heal; mis-teaching costs the session.
+          const realLimit = errClass === 'context' ? parseProviderContextLimit(errMessage) : undefined;
+          if (realLimit !== undefined) {
+            ctx.contextEngine?.configureBudget?.(Math.max(LEARNED_BUDGET_FLOOR, Math.floor(realLimit * LEARNED_BUDGET_RATIO)));
+          }
+          // Model-not-found / bad-method / schema rejections cannot be fixed
+          // by shrinking the payload — don't spend a summarizer round (up to
+          // 60s) or a reactive attempt on them.
+          const compactionCanHelp = !isPayloadIndependentHttp4xx(errMessage);
+          if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS && compactionCanHelp) {
             reactiveCompactions++;
             // 压缩不是一段可以无声熬过的静默：L2 摘要是一次完整的非流式 LLM
             // 调用（60s 上限），动手前先说一声，别让「压缩中」被读成「卡死」。
@@ -521,8 +576,35 @@ export class AgentLoopEngine {
                 continue;
               }
             } catch {
-              // Compaction failed — fall through to the failure ladder.
+              // Compaction failed — fall through to the stop-or-ladder split.
             }
+          }
+          // Compaction cannot answer (no compactor, attempts spent, or nothing
+          // left to shed). A deterministic rejection stops cleanly; a repeat of
+          // a transient-looking error goes back to the ladder, whose
+          // identical-repeat ceiling still bounds the grind.
+          if (deterministicRejection) {
+            // Wording rides sanitizeInterruptedReason's branches: the context
+            // class keeps its dedicated 上下文超窗 branch, everything else
+            // carries "consecutive failures" so the provider's own error text
+            // surfaces as the 失败原因.
+            flushPartialAssistant();
+            const stopReason = errClass === 'context'
+              ? `Context window exhausted: the conversation no longer fits the model's input window even after aggressive compaction (${reactiveCompactions} attempt(s)). Last: "${errMessage}". Retrying cannot shrink it — the user should start a fresh session or reduce the input; compaction must shed tool-call payloads too.`
+              // "consecutive failures" is the literal anchor
+              // sanitizeInterruptedReason matches to surface the 失败原因 —
+              // keep the plural even when the count is 1.
+              : `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "${errMessage}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
+            yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: errMessage, turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
+            const salvaged = await salvageStopMessages(messages);
+            messages.length = 0;
+            messages.push(...salvaged);
+            // Handover runs on the salvaged transcript: a compact payload gives
+            // the wrap-up round a chance to actually complete on the very
+            // failure that just killed the THINK round.
+            yield* emitHandover(stopReason);
+            yield { type: 'Interrupted', payload: { reason: stopReason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            interrupted = true; break;
           }
         }
         const isTimeout = err?.name === 'TimeoutError';
@@ -553,6 +635,12 @@ export class AgentLoopEngine {
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
             flushPartialAssistant();
+            // 刀3 — salvage before the stop lands, so the transcript the next
+            // turn inherits is hint-free and compact instead of the exact
+            // payload that just burned the ladder (the wedge).
+            const salvaged = await salvageStopMessages(messages);
+            messages.length = 0;
+            messages.push(...salvaged);
             yield* emitHandover(action.reason);
             yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;

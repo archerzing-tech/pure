@@ -80,6 +80,11 @@ export interface ContextCompactionOptions {
    *  until the window is already over budget, so the FIRST over-budget send
    *  blocks on the summarizer (up to 60s) mid-task. */
   soft?: { trigger: number; target: number };
+  /** Skip the L2 summarizer call even when messages were evicted. Stop-time
+   *  salvage uses this: the turn is already ending, evicted content is covered
+   *  by L3 rehydration + the handover summary, and blocking the stop on a
+   *  60s summarizer call is exactly the wrong moment to be patient. */
+  skipSummary?: boolean;
 }
 
 export interface ContextCompactionResult {
@@ -517,7 +522,7 @@ export class ContextEngine {
     // not worth a call.
     let summaryMessage: Message | undefined;
     let summarized = false;
-    if (this.config.llm && evictedRetainableMessages > 0) {
+    if (!options.skipSummary && this.config.llm && evictedRetainableMessages > 0) {
       try {
         const summaryInput = priorSummary ? [priorSummary, ...evicted] : evicted;
         const summaryPrompt = `Summarize the key information from this conversation. Include decisions made, code patterns discussed, file paths mentioned, user preferences, and unresolved work. Do not invent facts. Quote exact file paths and identifiers verbatim.\\n\\n${summaryInput.map(message => `${message.role}: ${summarizeExcerpt(message)}`).join('\\n')}`;
@@ -569,7 +574,8 @@ export class ContextEngine {
     else if (priorRehydration) ordered.push(priorRehydration);
     ordered.push(...retained);
 
-    const summaryUnavailable = evictedRetainableMessages > 0 && !summarized;
+    // skipSummary is a deliberate skip, not an outage — report it honestly.
+    const summaryUnavailable = evictedRetainableMessages > 0 && !summarized && !options.skipSummary;
     const estimatedTokens = estimateTokens(ordered) + toolTokens;
 
     return this.remember({

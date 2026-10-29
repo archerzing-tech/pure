@@ -209,6 +209,12 @@ function extractFailureCause(raw: string): string {
   // Generic ceiling stop: `6 consecutive failures. Last: msg. Salvage mode could not complete…`
   const ceiling = raw.match(/^\s*(\d+\s+consecutive failures\. Last: .*)\. Salvage mode could not complete/);
   if (ceiling) return ceiling[1];
+  // Deterministic provider rejection stop: `Repeated request failures (2
+  // consecutive failures): the provider rejected this request … Last: "msg".
+  // The transcript may exceed…` — same greedy-to-fixed-tail shape as above,
+  // since the embedded provider body may itself contain quotes and periods.
+  const rejected = raw.match(/^\s*Repeated request failures \(\d+ consecutive failures\): .*Last: (".*)\. The transcript may exceed/);
+  if (rejected) return rejected[1];
   return '';
 }
 

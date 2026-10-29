@@ -21,7 +21,10 @@ import {
   hostOf,
   isHtmlContentType,
   isNetworkError,
+  isPayloadIndependentHttp4xx,
+  isProviderHttp4xx,
   netFailureHint,
+  parseProviderContextLimit,
   recordNetFailure,
   recordNetSuccess,
   registrableDomain,
@@ -142,6 +145,59 @@ describe('classifyFailure', () => {
     expect(classifyFailure('HTTP 429 too many requests')).toBe('rate-limit');
     expect(classifyFailure('Unsupported content type: application/json')).toBe('content');
     expect(classifyFailure('something inexplicable happened')).toBe('generic');
+  });
+});
+
+// ── 2026-10-29 会话楔死修复（刀1/刀2 的判别与学习原料）──
+
+describe('isProviderHttp4xx', () => {
+  it('recognizes the transport heads the Rust layer emits, minus retryable/auth codes', () => {
+    expect(isProviderHttp4xx('400 Bad Request: {"error":{"code":"1214"}}')).toBe(true);
+    expect(isProviderHttp4xx('HTTP 404 Not Found')).toBe(true);
+    expect(isProviderHttp4xx('422 Unprocessable Entity: bad schema')).toBe(true);
+    // Rate limit / auth are the ladder's business, not payload surgery.
+    expect(isProviderHttp4xx('429 Too Many Requests')).toBe(false);
+    expect(isProviderHttp4xx('401 Unauthorized')).toBe(false);
+    expect(isProviderHttp4xx('403 Forbidden')).toBe(false);
+    // Connection-class errors and bodies that merely CONTAIN "400" never match.
+    expect(isProviderHttp4xx('request: error sending request for url (https://x)')).toBe(false);
+    expect(isProviderHttp4xx('stream stalled: no data for 180s; got HTTP 400 earlier')).toBe(false);
+  });
+});
+
+describe('isPayloadIndependentHttp4xx', () => {
+  it('picks the codes no amount of shrinking can fix', () => {
+    expect(isPayloadIndependentHttp4xx('404 Not Found: model gpt-99 does not exist')).toBe(true);
+    expect(isPayloadIndependentHttp4xx('HTTP 405 Method Not Allowed')).toBe(true);
+    expect(isPayloadIndependentHttp4xx('410 Gone')).toBe(true);
+    expect(isPayloadIndependentHttp4xx('422 Unprocessable Entity: bad schema')).toBe(true);
+    // Payload-size suspects stay eligible for the compaction attempt.
+    expect(isPayloadIndependentHttp4xx('400 Bad Request: {"error":{"code":"1214"}}')).toBe(false);
+    expect(isPayloadIndependentHttp4xx('413 Payload Too Large')).toBe(false);
+    expect(isPayloadIndependentHttp4xx('connection reset')).toBe(false);
+  });
+});
+
+describe('parseProviderContextLimit', () => {
+  it('reads the real limit from the canonical provider body shapes', () => {
+    expect(parseProviderContextLimit('400 bad request {"error":{"message":"This model\'s maximum context length is 65536 tokens. However, your messages resulted in 81234 tokens."}}')).toBe(65536);
+    // Anthropic names the cap after the '>' — the leading number is the offender.
+    expect(parseProviderContextLimit('prompt is too long: 208045 tokens > 200000 maximum')).toBe(200000);
+    expect(parseProviderContextLimit('400 Bad Request: maximum context length is 131,072 tokens')).toBe(131072);
+  });
+  it('reads Chinese-language bodies by anchoring the cap word, not the requested size', () => {
+    expect(parseProviderContextLimit('输入的token数量为200000，超过模型上限131072')).toBe(131072);
+    expect(parseProviderContextLimit('{"error":{"message":"上下文最大长度 65536 tokens","code":"1113"}}')).toBe(65536);
+    expect(parseProviderContextLimit('长度不能超过 32768')).toBe(32768);
+    expect(parseProviderContextLimit('Input is too long: limit is 98304 tokens')).toBe(98304);
+  });
+  it('returns undefined when no credible number is stated', () => {
+    expect(parseProviderContextLimit('400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}')).toBeUndefined();
+    // "limit is 60 seconds" — noise below the credibility floor.
+    expect(parseProviderContextLimit('rate limit is 60 seconds')).toBeUndefined();
+    expect(parseProviderContextLimit('stream stalled: no data from the LLM API for 180s')).toBeUndefined();
+    // Upper bound: a 100M+ "limit" is a parse artifact, not a real window.
+    expect(parseProviderContextLimit('400 Bad Request: context length is 200000000 tokens')).toBeUndefined();
   });
 });
 

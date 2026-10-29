@@ -536,6 +536,56 @@ export function netFailureHint(url: string, message: string): string {
   return `${message} — 若为网络不可达，请勿原样重试：换镜像/来源、内联替代或跳过此资源继续任务。${rewrite}`;
 }
 
+/** True when a transport error is the provider REJECTING the request itself
+ *  (HTTP 4xx): the server read the payload and refused it, so retrying the
+ *  byte-identical request cannot succeed — shrink it or surface it. Anchored
+ *  to the heads the Rust transport emits ("400 Bad Request: …", "HTTP 400 …")
+ *  so digits inside a response body never misfire. 429 (rate limit — backoff
+ *  and retry), 401/403 (auth — the ladder's ask-the-user path) are excluded:
+ *  they are rejections OF THE SENDER, not of the payload size. */
+export function isProviderHttp4xx(message: string): boolean {
+  const m = message.slice(0, 24).match(/^(?:HTTP\s+)?(4\d{2})\b/);
+  if (!m) return false;
+  const code = Number(m[1]);
+  return code !== 429 && code !== 401 && code !== 403;
+}
+
+// Status codes whose meaning cannot depend on payload size: model-not-found /
+// bad method / gone / schema validation. Compacting the transcript cannot fix
+// these, so the caller skips the reactive-compaction attempt and stops cleanly
+// instead of burning a summarizer round on an unfixable request.
+const PAYLOAD_INDEPENDENT_4XX = new Set([404, 405, 410, 422]);
+export function isPayloadIndependentHttp4xx(message: string): boolean {
+  const m = message.slice(0, 24).match(/^(?:HTTP\s+)?(4\d{2})\b/);
+  return !!m && PAYLOAD_INDEPENDENT_4XX.has(Number(m[1]));
+}
+
+function credibleContextLimit(n: number): number | undefined {
+  // Below 512 there is no usable agentic window (and the match is noise, e.g.
+  // "limit is 60 seconds"); above 100M it is a parse hallucination.
+  return Number.isFinite(n) && n >= 512 && n <= 100_000_000 ? n : undefined;
+}
+
+/** Parse the REAL context limit a provider names in a rejection body — the
+ *  truth that beats every advertised window ("maximum context length is X" /
+ *  Anthropic's "prompt is too long: N tokens > X maximum" / 中文「上限/最大」
+ *  措辞). Undefined when no credible number is stated: the caller then keeps
+ *  its configured budget instead of learning from noise. */
+export function parseProviderContextLimit(message: string): number | undefined {
+  // Anthropic names the cap AFTER the '>' — the leading number is the offender.
+  let m = message.match(/prompt is too long:\s*\d+\s*tokens?\s*>\s*([\d,]+)/i);
+  if (m) return credibleContextLimit(Number(m[1].replace(/,/g, '')));
+  // OpenAI-style / relay-wrapped: "This model's maximum context length is 131072 tokens".
+  m = message.match(/maximum(?:\s+context)?\s+length(?:\s+is|\s*:)?\s*([\d,]{3,})/i);
+  if (m) return credibleContextLimit(Number(m[1].replace(/,/g, '')));
+  // 中文报文把上限词和数字连着写：「上下文…上限131072」「最大长度 65536 tokens」
+  // 「限制为 32768」。锚定上限词本身，跳过「输入了 N tokens，超过上限 M」里
+  // 排在前面的请求数。
+  m = message.match(/(?:上限|上限为|最大长度|最大 token|最大token|最长|不能超过|不得超过|限制为|limit[\s:is]{0,4})[^\d%]{0,10}([\d,]{3,})/i);
+  if (m) return credibleContextLimit(Number(m[1].replace(/,/g, '')));
+  return undefined;
+}
+
 /** Failure classes for the failure policy's class-level loop detection. */
 export type FailureClass =
   | 'network'

@@ -247,8 +247,14 @@ export interface ReactiveCompactionOutcome {
 export interface ReactiveContextCompactor {
   compact(
     messages: Message[],
-    options?: { force?: boolean; aggressive?: boolean },
+    options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean },
   ): Promise<ReactiveCompactionOutcome>;
+  /** Provider-taught budget correction (2026-10-29 会话楔死修复): when a
+   *  rejection body names the REAL input limit ("maximum context length is X"),
+   *  the engine pushes it into the compactor so every later trim — preflight
+   *  and reactive — works against the provider's truth instead of the
+   *  advertised window. Optional: stubs in tests omit it. */
+  configureBudget?(maxTokens: number): void;
 }
 
 export interface EngineContext {

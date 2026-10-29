@@ -101,6 +101,15 @@ describe('interruption reason classification', () => {
     expect(message).toContain('失败原因');
     expect(message).toContain('tools.0 is missing');
   });
+
+  it('surfaces the provider body from the deterministic-rejection stop cause', () => {
+    // 2026-10-29 楔死修复的引擎直停形态：extractFailureCause 曾只认旧阶梯
+    // 两种形态，这张卡片会退化成通用文案、provider 原文不可见。
+    const raw = `Repeated request failures (1 consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
+    const message = sanitizeInterruptedReason(raw);
+    expect(message).toContain('失败原因');
+    expect(message).toContain('messages 参数非法');
+  });
 });
 
 describe('parseToolCallBuffer', () => {

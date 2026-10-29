@@ -254,6 +254,28 @@ describe('ContextEngine', () => {
     expect(result.summarized).toBe(false);
   });
 
+  // 刀3（2026-10-29 会话楔死修复）— stop-time salvage sheds without blocking
+  // the stop on the summarizer: eviction still happens, the LLM is never
+  // called, and the skip is a deliberate choice, not an outage.
+  it('skipSummary sheds messages without calling the summarizer and reports no outage', async () => {
+    let calls = 0;
+    const llm = {
+      stream: async function* () {
+        yield { type: 'done' as const, content: '', toolCalls: [] };
+      },
+      complete: async () => { calls++; return { content: 'should not be called' }; },
+    };
+    const engine = new ContextEngine({ maxMessages: 8, llm });
+    const msgs: Message[] = [...pair('p1'), ...pair('p2'), ...pair('p3'), ...pair('p4'), ...pair('p5')];
+    const result = await engine.compact(msgs, { force: true, aggressive: true, skipSummary: true });
+
+    expect(calls).toBe(0);
+    expect(result.evictedMessages).toBe(2);
+    expect(result.summarized).toBe(false);
+    expect(result.summaryUnavailable).toBe(false);
+    expect(result.messages.some(m => m.content.startsWith('Earlier conversation summary:'))).toBe(false);
+  });
+
   it('does not retain an orphan tool result or an incomplete tool pair', async () => {
     const engine = new ContextEngine({ maxMessages: 10 });
     const msgs: Message[] = [
