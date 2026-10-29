@@ -162,6 +162,10 @@ describe('L1 behavior contracts', () => {
     expect(wantsHandsOnWorkflow('帮我看看这段代码有什么问题')).toBe(true);
     // 信息价值原则不随 workflow 闸门走：表达纪律在问答轮同样适用。
     expect(INFORMATION_VALUE_PRINCIPLE).toContain('信息价值优先原则');
+    // 直观目标（2026-10-29 用户定调）：能图形化的一定优先图形化，不铺文字。
+    expect(INFORMATION_VALUE_PRINCIPLE).toContain('一定优先用图形');
+    expect(INFORMATION_VALUE_PRINCIPLE).toContain('```chart');
+    expect(INFORMATION_VALUE_PRINCIPLE).toContain('mermaid');
     expect(WORKFLOW_PROMPT).not.toContain('信息价值优先原则');
   });
 
