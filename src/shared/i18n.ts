@@ -1115,6 +1115,8 @@ const translations: Record<Language, Record<string, string>> = {
     'appearance.density.spacious': '宽松',
     'appearance.toolCards': '工具卡片',
     'appearance.toolCards.hint': '对话里的工具卡片随执行自动展开，方便盯过程；关掉后只留一行摘要，点一下仍能展开看详情',
+    'appearance.showThinking': '显示思考过程',
+    'appearance.showThinking.hint': '在对话里实时展示模型的推理内容；关掉后思考只留状态提示，重试与线路通知不受影响',
 
     // ── Updates Page ──
     'updates.title': '更新',
@@ -2452,6 +2454,8 @@ const translations: Record<Language, Record<string, string>> = {
     'appearance.density.spacious': 'Spacious',
     'appearance.toolCards': 'Tool Cards',
     'appearance.toolCards.hint': 'Keep tool cards open while they run so you can follow along; off shows just the one-line summary — click a row anytime to open it',
+    'appearance.showThinking': 'Show thinking process',
+    'appearance.showThinking.hint': 'Stream the model\'s reasoning live in the chat; off keeps only the status card — retry and route notices are unaffected',
 
     // ── Updates Page ──
     'updates.title': 'Updates',

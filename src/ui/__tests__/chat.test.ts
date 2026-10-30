@@ -2567,6 +2567,9 @@ describe('light-turn thinking ghost suppression wiring (刀 8)', () => {
     // 护栏四件套：阈值 + 无工具活动 + 无计划卡 + 无评估流。
     expect(src).toContain('const LIGHT_TURN_THINKING_CHARS = 600;');
     expect(src).toContain('mode === \'answer\'');
+    // 展示开关联动（2026-10-30 用户指令）：「显示思考过程」开着时护栏停用
+    // ——思考已流式展示，答案一到整卡蒸发读作内容丢失。
+    expect(src).toContain('&& !showThinkingEnabled');
     expect(src).toContain('!turnToolActivity');
     expect(src).toContain('!planCard');
     expect(src).toContain('!assessmentFlow');
@@ -2580,6 +2583,28 @@ describe('light-turn thinking ghost suppression wiring (刀 8)', () => {
     expect(declIdx).toBeGreaterThan(-1);
     expect(tryIdx).toBeGreaterThan(declIdx);
     expect(src.indexOf('let planProgress', tryIdx)).toBeGreaterThan(-1);
+  });
+});
+
+// 思考过程展示开关（2026-10-30 用户指令）：默认开（始终显示）；关=只藏推理
+// 文本，持久化与状态通知保留。守接线形状：DOM 缓冲拦截、持久化不拦、
+// textEl 恒空形态下的 phase-push 防爆、零内容撤卡天然生效。
+describe('showThinking toggle wiring (2026-10-30)', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('default on, buffered DOM write gated, persistence untouched', () => {
+    expect(src).toContain('const showThinkingEnabled = (loadConfig()?.showThinking ?? true) !== false;');
+    // ReasoningDelta 里持久化在拦截点之前完成（关闭时 session.json/重放仍可见）。
+    const persist = src.indexOf('thinkingPhases[thinkingPhases.length - 1].text += content;');
+    const gate = src.indexOf('if (showThinkingEnabled) {\n              thinkingPending += content;');
+    expect(persist).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(persist);
+  });
+
+  it('phase-push guard excludes the always-empty textEl form when hidden', () => {
+    // 展示关闭时 textEl/thinkingPending 恒空，旧判据恒真 = 每个 delta push
+    // 一个新 phase（持久化爆炸）。
+    expect(src).toContain('(showThinkingEnabled && thinkingCard.textEl.textContent === \'\' && !thinkingPending)');
   });
 });
 

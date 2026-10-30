@@ -4499,6 +4499,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // on every TokenDelta would parse JSON hundreds of times per turn,
     // undermining the perf benefit the toggle is supposed to provide.
     const streamingRenderEnabled = (loadConfig()?.streamingRender ?? true);
+    // 思考过程展示开关（2026-10-30 用户指令，默认开）：开着时 reasoning 流式
+    // 展示且输出开始后不撤卡（看见的内容蒸发读作丢失）；关着时只隐藏推理
+    // 文本——thinkingPhases 持久化照跑（session.json/重放仍可见），状态卡
+    // 与重试/线路通知保留，textEl 恒空会走零内容撤卡，不留 ghost。
+    const showThinkingEnabled = (loadConfig()?.showThinking ?? true) !== false;
 
     let finalMessages: Message[] = [];
     let interruptedMessages: Message[] | undefined;
@@ -4890,9 +4895,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // thinkingPhases（session.json / 重放）里，丢的只是屏上展位；与撤回执
       // 气泡同一哲学（内部认定不外显）。'handoff'（工具行/计划卡接管的时刻）
       // 一律照常 finalize：工作轮的思考是可回看的决策叙述。
+      // 但展示开关开着时此护栏停用（2026-10-30 用户真机指认：思考已流式
+      // 展示出来、用户看着它长大，答案一到整卡蒸发读作内容丢失）——设置
+      // 「显示思考过程」的语义就是始终显示，包括轻轮次的折叠保留。
       const thinkingTextLength = (thinkingCard.textEl.textContent ?? '').length;
       if (
         mode === 'answer'
+        && !showThinkingEnabled
         && thinkingTextLength <= LIGHT_TURN_THINKING_CHARS
         && !turnToolActivity
         && !planCard
@@ -6879,13 +6888,20 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Phase tracking runs per-delta (persistence); the DOM append is
             // throttled, so "card empty" must also consider the pending buffer
             // to avoid opening a duplicate phase while text is only buffered.
-            if (thinkingPhases.length === 0 || (thinkingCard.textEl.textContent === '' && !thinkingPending)) {
+            // 展示关闭时 textEl/thinkingPending 恒空，第二支会恒真导致每个
+            // delta push 一个新 phase——textEl 判据只在展示开启时成立。
+            if (thinkingPhases.length === 0 || (showThinkingEnabled && thinkingCard.textEl.textContent === '' && !thinkingPending)) {
               thinkingPhases.push({ text: '', assistantIndex: thinkingAssistantOffset + Math.max(assistantIteration, 0) });
             }
             thinkingPhases[thinkingPhases.length - 1].text += content;
-            thinkingPending += content;
-            if (thinkingFlushTimer === undefined) {
-              thinkingFlushTimer = window.setTimeout(flushThinking, THINKING_FLUSH_MS);
+            // 展示关闭时 reasoning 不进 DOM 缓冲（textEl 恒空 → 结束时零内容
+            // 撤卡），持久化已在上行完成。防一个连带 bug：textEl 空判据在此
+            // 形态下恒真，不挡住的话每个 delta 都会 push 一个新 phase。
+            if (showThinkingEnabled) {
+              thinkingPending += content;
+              if (thinkingFlushTimer === undefined) {
+                thinkingFlushTimer = window.setTimeout(flushThinking, THINKING_FLUSH_MS);
+              }
             }
             break;
           }

@@ -192,6 +192,13 @@ export interface PureConfig {
    */
   streamingRender: boolean;
   /**
+   * Show the model's live reasoning in the chat. Default ON (2026-10-30 用户
+   * 指令): reasoning already streams into the card, and removing it when the
+   * answer starts reads as content vanishing. OFF hides the reasoning text
+   * but keeps the status card (retry/failover notices live there).
+   */
+  showThinking: boolean;
+  /**
    * Manual task-mode override from the composer's mode selector (Settings-adjacent,
    * persisted with the rest of the config). 'auto' keeps the Planner's per-task
    * auto-detection (simple → yolo, complex → plan/build); a forced value wins
@@ -360,6 +367,7 @@ export function defaults(): PureConfig {
     githubMirror: DEFAULT_GITHUB_MIRROR,
     customGithubMirror: '',
     streamingRender: true,
+    showThinking: true,
     taskMode: 'auto',
     autoContinue: true,
     autoContinueMaxRounds: DEFAULT_AUTO_CONTINUE_MAX_ROUNDS,

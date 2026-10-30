@@ -994,7 +994,7 @@ export class SettingsPanel {
       // '#cfg-character' 不在这里：它的 change 除了存盘还要**立刻注入运行时**
       // （见 renderCharacterOptions），自己接管监听。
       '#cfg-city',
-      '#cfg-fontsize', '#cfg-density', '#cfg-tool-cards-expanded',
+      '#cfg-fontsize', '#cfg-density', '#cfg-tool-cards-expanded', '#cfg-show-thinking',
       '#cfg-tool-fs', '#cfg-tool-cmd', '#cfg-tool-git', '#cfg-tool-browser',
       '#cfg-tavily-key', '#cfg-serper-key',
       '#cfg-mcp-exclude-prefixes',
@@ -2503,6 +2503,9 @@ export class SettingsPanel {
     (document.getElementById('cfg-density') as HTMLSelectElement).value = cfg.density;
     const toolCardsEl = document.getElementById('cfg-tool-cards-expanded') as HTMLInputElement | null;
     if (toolCardsEl) toolCardsEl.checked = cfg.toolCardsExpanded ?? true;
+    // 旧配置无此字段时默认开（2026-10-30 用户指令：默认始终显示思考过程）。
+    const showThinkingEl = document.getElementById('cfg-show-thinking') as HTMLInputElement | null;
+    if (showThinkingEl) showThinkingEl.checked = cfg.showThinking !== false;
 
     const permMode = document.getElementById('cfg-permission-mode') as HTMLSelectElement | null;
     if (permMode) permMode.value = cfg.permissionMode;
@@ -4557,6 +4560,7 @@ export class SettingsPanel {
       fontSize: (document.getElementById('cfg-fontsize') as HTMLSelectElement).value as PureConfig['fontSize'],
       density: (document.getElementById('cfg-density') as HTMLSelectElement).value as PureConfig['density'],
       toolCardsExpanded: (document.getElementById('cfg-tool-cards-expanded') as HTMLInputElement | null)?.checked ?? true,
+      showThinking: (document.getElementById('cfg-show-thinking') as HTMLInputElement | null)?.checked ?? true,
       hasApiKey: (loadConfig() ?? defaults()).hasApiKey,
       permissionMode: (document.getElementById('cfg-permission-mode') as HTMLSelectElement | null)?.value as PureConfig['permissionMode'] || 'auto',
       autoPermRead: (document.getElementById('cfg-perm-read') as HTMLInputElement | null)?.checked ?? true,
