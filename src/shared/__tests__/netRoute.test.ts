@@ -479,22 +479,22 @@ describe('proxyHealth（代理健康行）', () => {
   });
 });
 
-// ── 期2 路由脑：时延 EMA（期3 双路对比的数据底座） ─────────────────────────
-describe('latencyEma（响应头时延学习）', () => {
+// ── 期2 路由脑：时延 EMA（期3「谁快用谁」的数据底座，归槽形态） ─────────────
+describe('latencyEma（响应头时延学习，双路归槽）', () => {
   // persist 用真实 Date.now() 做 30 分钟过期过滤，时间基准必须挂真实时钟，
   // 否则带过去时间戳的行根本落不了盘。
-  it('first sample seeds the EMA, later samples blend at α=0.3', () => {
+  it('first sample seeds the slot, later samples blend at α=0.3', () => {
     const t0 = Date.now() - 1_000;
     netRoute.recordNetOutcome('ema.test', 'direct', true, t0, 100);
     netRoute.recordNetOutcome('ema.test', 'direct', true, t0 + 1, 200);
     const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
-    // 100×0.7 + 200×0.3 = 130
-    expect(raw['ema.test'].latencyEma).toBe(130);
+    // 100×0.7 + 200×0.3 = 130 —— 进直连槽
+    expect(raw['ema.test'].latencyEmaDirect).toBe(130);
     expect(raw['ema.test'].lastOkAt).toBe(t0 + 1);
     expect(raw['ema.test'].at).toBe(t0 + 1);
   });
 
-  it('persists latencyEma/lastOkAt through a reload', () => {
+  it('persists slot EMA through a reload', () => {
     const t0 = Date.now() - 1_000;
     netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0, 320);
     netRoute.resetLearnedRoutes();
@@ -502,16 +502,104 @@ describe('latencyEma（响应头时延学习）', () => {
     // 320×0.7 + 80×0.3 = 248
     netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0 + 1, 80);
     const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
-    expect(raw['ema-persist.test'].latencyEma).toBe(248);
+    expect(raw['ema-persist.test'].latencyEmaProxy).toBe(248);
   });
 
-  it('absent headersMs keeps refreshing lastOkAt without touching the EMA', () => {
+  it('absent headersMs keeps refreshing lastOkAt without touching the slot', () => {
     const t0 = Date.now() - 1_000;
     netRoute.recordNetOutcome('ema-absent.test', 'direct', true, t0, 100);
     netRoute.recordNetOutcome('ema-absent.test', 'direct', true, t0 + 5);
     const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
-    expect(raw['ema-absent.test'].latencyEma).toBe(100);
+    expect(raw['ema-absent.test'].latencyEmaDirect).toBe(100);
     expect(raw['ema-absent.test'].lastOkAt).toBe(t0 + 5);
+  });
+
+  it('legacy single-slot latencyEma migrates into the route-matched slot on load', () => {
+    const t0 = Date.now() - 1_000;
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify({
+      'legacy-direct.test': { route: 'direct', at: t0, latencyEma: 120 },
+      'legacy-proxy.test': { route: 'proxy', at: t0, latencyEma: 900 },
+    }));
+    netRoute.resetLearnedRoutes();
+    // 迁移落槽后，一次同路成功就在双槽上混合，而不是重置：
+    // direct 120×0.7+300×0.3=174；proxy 900×0.7+100×0.3=660
+    netRoute.recordNetOutcome('legacy-direct.test', 'direct', true, t0 + 1, 300);
+    netRoute.recordNetOutcome('legacy-proxy.test', 'proxy', true, t0 + 1, 100);
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(raw['legacy-direct.test'].latencyEmaDirect).toBe(174);
+    expect(raw['legacy-proxy.test'].latencyEmaProxy).toBe(660);
+    expect(raw['legacy-direct.test'].latencyEma).toBeUndefined();
+  });
+});
+
+// ── 期3 路由脑：谁快用谁（双路 EMA 对比选路） ───────────────────────────────
+describe('谁快用谁（双路时延裁定）', () => {
+  // race.openai.com 命中 openai.com 后缀规则 = proxy-first：分类面首选代理，
+  // 快路裁定要证的是「真实时延压过分类与钉路」。
+  const P = 'http://race-proxy.test:7890';
+  const T = 'race.openai.com';
+  // 时间基准挂真实时钟（persist 30 分钟过滤 + 记忆 30 分钟 TTL 的判例）。
+  const t0 = () => Date.now() - 1_000;
+
+  it('decisively faster direct wins over both the classification and the pinned route', () => {
+    // 代理先 serving（proxy-first 分类首选）且慢（爬行链路），直连快一倍以上
+    // 且绝对省 ≥500ms：钉着的 proxy 记忆与 proxy-first 分类被真实时延压过。
+    netRoute.recordNetOutcome(T, 'proxy', true, t0(), 1500);
+    netRoute.recordNetOutcome(T, 'direct', true, t0() + 1, 200); // 换路，proxy 槽保留
+    expect(netRoute.resolveNetRoute(T, true, t0() + 2, P)).toBe('direct');
+  });
+
+  it('decisively faster proxy wins back a slow direct', () => {
+    // 直连爬行、代理快的反相：快路裁定同样向 proxy 翻（对称规则）。
+    netRoute.recordNetOutcome('slowdirect.openai.com', 'direct', true, t0(), 1500);
+    netRoute.recordNetOutcome('slowdirect.openai.com', 'proxy', true, t0() + 1, 200);
+    expect(netRoute.resolveNetRoute('slowdirect.openai.com', true, t0() + 2, P)).toBe('proxy');
+  });
+
+  it('modest gaps do NOT flip the route (no flip-flopping over 200-300ms)', () => {
+    // 直连 200 / 代理 300 的本地代理典型开销：300×0.5=150 ≤ 200 不满足比例
+    // 判据，钉什么走什么——不值得为两三百毫秒翻路。
+    netRoute.recordNetOutcome('modest.openai.com', 'proxy', true, t0(), 300);
+    netRoute.recordNetOutcome('modest.openai.com', 'direct', true, t0() + 1, 200);
+    expect(netRoute.resolveNetRoute('modest.openai.com', true, t0() + 2, P)).toBe('direct');
+  });
+
+  it('a single sample on the opposite route flips via the race rule, not the dead path', () => {
+    // 直连 2s 爬行（未到 4s 慢直连判据）：换路钉 direct 后，双槽对比
+    // 200×0.5 ≤ 300 不成立 → 300 < 1000 且差 1700ms ≥ 500 → 快路翻回 proxy。
+    netRoute.recordNetOutcome('single.openai.com', 'proxy', true, t0(), 300);
+    netRoute.recordNetOutcome('single.openai.com', 'direct', true, t0() + 1, 2000);
+    expect(netRoute.resolveNetRoute('single.openai.com', true, t0() + 2, P)).toBe('proxy');
+  });
+
+  it('dead-route takes precedence over any latency evidence', () => {
+    // 直连刚失败进死期：无论它时延槽里多快，死期内绝不选——死期优先于快路。
+    netRoute.recordNetOutcome('deadrace.openai.com', 'proxy', true, t0(), 1500);
+    netRoute.recordNetOutcome('deadrace.openai.com', 'direct', true, t0() + 1, 200);
+    netRoute.recordNetOutcome('deadrace.openai.com', 'direct', false, t0() + 2); // direct 死路半边
+    expect(netRoute.resolveNetRoute('deadrace.openai.com', true, t0() + 3, P)).toBe('proxy');
+  });
+
+  it('memory expired mid-session rescues both latency slots for one final race call', () => {
+    // 运行期过期（会话开着超 30 分钟）：钉哪条路的结论作废，双路时延事实
+    // 仍新鲜——抢救出来做最后一次快路裁定，不让 proxy-first 分类把主机
+    // 判回 1.5s 的爬行代理。跨启动场景过期行在读档时即丢，样本不参与
+    // （读档过滤走 at，本用例钉的是运行期路径）。
+    const t = Date.now();
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify({
+      'expire.openai.com': {
+        route: 'proxy',
+        at: t - 29 * 60_000, // 未过 TTL：能被 loadOrInit 导入
+        latencyEmaProxy: 1500,
+        latencyEmaDirect: 200,
+      },
+    }));
+    netRoute.resetLearnedRoutes();
+    // now 拨到 +2min：行在选路面变为 31min 前 = 过期，走抢救分支。
+    expect(netRoute.resolveNetRoute('expire.openai.com', true, t + 2 * 60_000, P)).toBe('direct');
+    // 行已过期删除，双槽证据随之退役——下一次是干净的分类面。
+    const after = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(after['expire.openai.com']).toBeUndefined();
   });
 });
 

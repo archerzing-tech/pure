@@ -247,9 +247,14 @@ interface RouteEntry {
   /** 死路半边：这条路由最近一次失败后，在此之前选路直接翻反向。
    *  缺省 = 没有死路信号（正常记忆）。 */
   deadUntil?: number;
-  /** 响应头时延的指数滑动平均（EMA α=0.3）。成功学习时带上，给「两条路
-   *  谁快用谁」的决策留数据底座（期3 双路对比直接消费）。 */
+  /** 旧版单槽时延（EMA α=0.3）：读档时按行的 route 迁进对应双路槽，
+   *  之后不再写。保留字段仅为兼容旧存档。 */
   latencyEma?: number;
+  /** 直连路的响应头时延 EMA（α=0.3，headers_ms 归槽）。「谁快用谁」
+   *  的数据底座：换路不覆盖对立路的样本，两路各自积累。 */
+  latencyEmaDirect?: number;
+  /** 代理路的响应头时延 EMA。同上。 */
+  latencyEmaProxy?: number;
   /** 最近一次成功时刻。 */
   lastOkAt?: number;
 }
@@ -381,11 +386,18 @@ function ensureLoaded(): void {
         && (entry.route === 'direct' || entry.route === 'proxy')
         && typeof entry.at === 'number'
         && now - entry.at <= LEARNED_ROUTE_TTL_MS) {
+        // 旧版单槽时延迁移：按该行钉着的路归进对应双路槽（期3「谁快用谁」
+        // 的读档兼容），之后写档只写双槽。
+        const legacy = typeof entry.latencyEma === 'number'
+          ? (entry.route === 'direct' ? { latencyEmaDirect: entry.latencyEma } : { latencyEmaProxy: entry.latencyEma })
+          : {};
         learned.set(host, {
           route: entry.route,
           at: entry.at,
           ...(typeof entry.deadUntil === 'number' ? { deadUntil: entry.deadUntil } : {}),
-          ...(typeof entry.latencyEma === 'number' ? { latencyEma: entry.latencyEma } : {}),
+          ...legacy,
+          ...(typeof entry.latencyEmaDirect === 'number' ? { latencyEmaDirect: entry.latencyEmaDirect } : {}),
+          ...(typeof entry.latencyEmaProxy === 'number' ? { latencyEmaProxy: entry.latencyEmaProxy } : {}),
           ...(typeof entry.lastOkAt === 'number' ? { lastOkAt: entry.lastOkAt } : {}),
         });
       }
@@ -410,7 +422,8 @@ function persist(): void {
         route: entry.route,
         at: entry.at,
         ...(entry.deadUntil !== undefined ? { deadUntil: entry.deadUntil } : {}),
-        ...(entry.latencyEma !== undefined ? { latencyEma: entry.latencyEma } : {}),
+        ...(entry.latencyEmaDirect !== undefined ? { latencyEmaDirect: entry.latencyEmaDirect } : {}),
+        ...(entry.latencyEmaProxy !== undefined ? { latencyEmaProxy: entry.latencyEmaProxy } : {}),
         ...(entry.lastOkAt !== undefined ? { lastOkAt: entry.lastOkAt } : {}),
       };
     }
@@ -418,6 +431,22 @@ function persist(): void {
   } catch {
     // 存储不可用 —— 内存中的路由照常工作
   }
+}
+
+// ── 谁快用谁（期3） ────────────────────────────────────────────────────────
+// 双路都有真实请求的 headers_ms EMA 样本时，显著快的一路优先。阈值刻意
+// 保守（快一倍以上且绝对省 ≥500ms）——本地代理典型开销 0.2-0.4s，为两三
+// 百毫秒翻路不值当；真正该翻的是「直连 0.2s / 代理 1.5s 爬行」这类量级差。
+// 数据不足或差距不大时返回 undefined，维持分类面/既有记忆，不折腾。
+/** 显著快判据：快路 < 慢路 × 比例 且 绝对差 ≥ 门槛。 */
+export const FASTER_ROUTE_RATIO = 0.5;
+export const FASTER_ROUTE_MIN_GAP_MS = 500;
+
+function fasterRouteOf(directMs: number | undefined, proxyMs: number | undefined): NetRoute | undefined {
+  if (directMs === undefined || proxyMs === undefined) return undefined;
+  if (directMs < proxyMs * FASTER_ROUTE_RATIO && proxyMs - directMs >= FASTER_ROUTE_MIN_GAP_MS) return 'direct';
+  if (proxyMs < directMs * FASTER_ROUTE_RATIO && directMs - proxyMs >= FASTER_ROUTE_MIN_GAP_MS) return 'proxy';
+  return undefined;
 }
 
 function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetRoute): NetRoute {
@@ -428,14 +457,20 @@ function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetR
     if (now - entry.at <= LEARNED_ROUTE_TTL_MS) {
       // 死路半边：刚失败的路在死期内直接翻反向。只删记忆不够——删掉后
       // 分类面下一轮照样把 proxy-first 主机判给代理，每个请求重演一次
-      // 「失败→换路」，UI 就是反复闪「这条路不通」。
+      // 「失败→换路」，UI 就是反复闪「这条路不通」。死期优先于快路裁定：
+      // 死路绝不因「曾几何时更快」被选回。
       if (entry.deadUntil !== undefined && now < entry.deadUntil) {
         return entry.route === 'proxy' ? 'direct' : 'proxy';
       }
-      return entry.route;
+      // 谁快用谁：双路样本都在时，显著快的一路压过钉着的记忆与分类面。
+      return fasterRouteOf(entry.latencyEmaDirect, entry.latencyEmaProxy) ?? entry.route;
     }
+    // 记忆过期：行删掉，但双路样本跟着陪葬太可惜——抢救出来喂一次
+    // 快路裁定，过期的只是「钉哪条路」的结论，不是两条路的时延事实。
+    const samples = { direct: entry.latencyEmaDirect, proxy: entry.latencyEmaProxy };
     learned.delete(key);
     persist();
+    return fasterRouteOf(samples.direct, samples.proxy) ?? fallback;
   }
   return fallback;
 }
@@ -480,6 +515,11 @@ export function recordNetSurfaceOutcome(surface: NetSurface, route: NetRoute, ok
  *  连接层在爬（丢包/网关排队），即使请求最终成功也不算可用性证据。 */
 const SLOW_HEADERS_MS = 4000;
 
+/** 响应头时延 EMA 的归槽键：样本按路进自己的槽，两路互不覆盖。 */
+function emaSlotOf(route: NetRoute): 'latencyEmaDirect' | 'latencyEmaProxy' {
+  return route === 'direct' ? 'latencyEmaDirect' : 'latencyEmaProxy';
+}
+
 function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: number, headersMs?: number): void {
   ensureLoaded();
   const existing = learned.get(key);
@@ -488,23 +528,30 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
   if (ok) {
     // 慢直连判据（2026-10-20）：proxy-first 主机经直连「连上了但响应头爬了
     // 秒级」不是可用性证据——头时间只含连接层，不受模型 prefill/思考污染。
-    // 这种成功不钉路线；若记忆正钉在 direct 上，清掉让分类翻回代理。此前
-    // 「慢而不断」的直连每次都把 direct 钉 30 分钟，下一轮继续爬。
+    // 这种成功不钉路线；若记忆正钉在 direct 上，翻回代理（保留代理路样本，
+    // 「谁快用谁」的对比数据不因一次慢直连陪葬）。此前「慢而不断」的直连
+    // 每次都把 direct 钉 30 分钟，下一轮继续爬。
     if (
       headersMs !== undefined && headersMs > SLOW_HEADERS_MS
       && route === 'direct' && classifyHostName(key) === 'proxy-first'
     ) {
       if (entry?.route === 'direct') {
-        learned.delete(key);
+        learned.set(key, {
+          route: 'proxy',
+          at: now,
+          ...(entry.latencyEmaProxy !== undefined ? { latencyEmaProxy: entry.latencyEmaProxy } : {}),
+        });
         persist();
       }
       return;
     }
     if (entry?.route === route) {
-      // 同路成功：EMA 更新时延（α=0.3，新样本权重适中），刷新活路时间戳。
+      // 同路成功：该路槽 EMA 更新（α=0.3，新样本权重适中），刷新活路时间戳。
       if (headersMs !== undefined && headersMs > 0) {
-        const ema = entry.latencyEma ?? headersMs;
-        learned.set(key, { ...entry, at: now, latencyEma: Math.round(ema * 0.7 + headersMs * 0.3), lastOkAt: now });
+        const slot = emaSlotOf(route);
+        const prev = entry[slot];
+        const ema = prev === undefined ? headersMs : Math.round(prev * 0.7 + headersMs * 0.3);
+        learned.set(key, { ...entry, at: now, [slot]: ema, lastOkAt: now });
         persist();
       } else if (entry.at !== now) {
         learned.set(key, { ...entry, at: now, lastOkAt: now });
@@ -512,11 +559,16 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
       }
       return;
     }
+    // 换路成功（或首钉）：钉新路、新路槽吃首样本；对立路的样本原样保留——
+    // 那是它上次真实 serving 的时延，正是「谁快用谁」要的对比数据。
+    const opposite = route === 'direct' ? 'proxy' : 'direct';
+    const oppositeSlot = emaSlotOf(opposite);
     learned.set(key, {
       route,
       at: now,
       lastOkAt: now,
-      ...(headersMs !== undefined && headersMs > 0 ? { latencyEma: headersMs } : {}),
+      ...(entry && entry[oppositeSlot] !== undefined ? { [oppositeSlot]: entry[oppositeSlot] } : {}),
+      ...(headersMs !== undefined && headersMs > 0 ? { [emaSlotOf(route)]: headersMs } : {}),
     });
     persist();
   } else if (entry === undefined || entry.route === route) {
