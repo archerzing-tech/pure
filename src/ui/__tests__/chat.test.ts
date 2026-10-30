@@ -2678,6 +2678,18 @@ describe('传输层状态进思考卡（长静默歼灭）', () => {
     expect(src).toContain('Date.now() - transportTurnStartedAt > FAILOVER_NOTICE_MIN_MS');
   });
 
+  it('首字静默时主动探测网络，探测失败才改写等待卡（服务可达不滋扰）', () => {
+    // 2026-10-30 判例：真断网时「暂未发现请求失败」是误导——用与真实请求
+    // 同构的 test_llm_connection 在 hint 时刻探测，失败把诊断写上等待卡。
+    expect(src).toContain('scheduleNetDiagnosis(card, hintAfterMs);');
+    expect(src).toContain("core.invoke('test_llm_connection'");
+    expect(src).toContain('这不是模型在思考——检查网络或代理后重试');
+    // 探测通过 = 服务可达，「模型在思考」仍是诚实文案，不改写。
+    expect(src).toContain('if (probe.ok) return;');
+    // 每轮至多一次；诊断晚到原地改写由 thinkingCard 侧负责。
+    expect(src).toContain('let netDiagnosisDone = false;');
+  });
+
   it('failover 事件落学习表：首选路失败只有这里能记到（救场成功不走 catch）', () => {
     expect(src).toContain('onPrimaryFailure: () => {');
     expect(src).toContain("recordNetOutcome(baseURL, llmProxy.proxyUrl ? 'proxy' : 'direct', false, Date.now());");

@@ -96,7 +96,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScro
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, extractPartialToolArgs, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -4929,15 +4929,57 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // append to the transcript here, right below whatever was last added.
     // Every live card gets an elapsed-time chip: a long "正在思考下一步…" with
     // only dots reads as a hung session, ticking seconds prove it is alive.
+    // 「仍在等待模型返回首个内容」的兜底文案说「暂未发现请求失败」，但真断网
+    // 时这句是误导。hint 时刻用与真实请求完全同构的 test_llm_connection 主动
+    // 探测一次（同路由决策 + 一次性反向兜底），探测**失败**时把诊断结论写到
+    // 等待卡上——两条线路都连不上是网络的事，不是模型在深度思考。探测通过
+    // 则保持泛化文案；每轮至多探测一次。
+    let netDiagnosisDone = false;
+    const scheduleNetDiagnosis = (card: ThinkingCardHandle, hintAfterMs: number): void => {
+      if (netDiagnosisDone) return;
+      netDiagnosisDone = true;
+      window.setTimeout(async () => {
+        if (!card.card.isConnected) return;
+        try {
+          const core = await loadTauriCore();
+          if (!core) return;
+          const probeBaseURL = customBaseURL(config.customProviders ?? [], config.provider, config.providerOverrides);
+          const bypassed = config.proxy?.bypassProviders?.includes(config.provider);
+          const rawProxy = bypassed ? '' : (effectiveProxyUrl(config.proxy) ?? '');
+          const pair = rawProxy
+            ? netRouteProxyPair(probeBaseURL, rawProxy)
+            : { proxyUrl: '', fallbackProxyUrl: null as string | null };
+          const custom = customProviderFor(config.customProviders ?? [], config.provider);
+          const override = providerOverrideFor(config.providerOverrides, config.provider);
+          const probe = await core.invoke('test_llm_connection', {
+            baseUrl: probeBaseURL,
+            secretKey: custom ? customSecretKey(custom.id)
+              : override?.hasApiKey ? customSecretKey(config.provider)
+              : undefined,
+            proxyUrl: pair.proxyUrl,
+            ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),
+            proxyBypassProviders: config.proxy?.bypassProviders ?? [],
+            provider: config.provider,
+          }) as { ok: boolean; status?: number; latencyMs?: number; error?: string };
+          if (probe.ok) return;
+          const reason = probe.error || `HTTP ${probe.status ?? '?'}`;
+          const detail = /refused|proxy/i.test(reason) ? '连接被拒绝（配置的代理端口可能没有程序在监听）'
+            : /timeout|timed out/i.test(reason) ? '连接超时'
+            : '失败';
+          const tried = pair.fallbackProxyUrl !== null ? '（直连与代理两条线路都已试过）' : '';
+          setThinkingNetDiagnosis(card, `到模型服务的连接探测${detail}${tried}：${reason}。这不是模型在思考——检查网络或代理后重试，也可停止本轮。`);
+        } catch { /* 探测失败不碰主流程：泛化文案兜底 */ }
+      }, hintAfterMs + 500);
+    };
     const openThinkingCard = (): ThinkingCardHandle => {
       const card = createThinkingCard();
       this.appendToTranscript(card.el);
       // Slow-reasoning / local models have a longer time-to-first-token: the
       // slow-response hint must wait for THIS provider's typical latency
       // instead of a fixed 15s that would cry wolf on deepseek-reasoner.
-      startThinkingTimer(card, {
-        hintAfterMs: firstTokenHintTimeoutMs(config.provider, config.model || customDefaultModel(config.customProviders ?? [], config.provider)),
-      });
+      const hintAfterMs = firstTokenHintTimeoutMs(config.provider, config.model || customDefaultModel(config.customProviders ?? [], config.provider));
+      startThinkingTimer(card, { hintAfterMs });
+      scheduleNetDiagnosis(card, hintAfterMs);
       return card;
     };
     // `null as … | null`: TS control-flow can't see the assignment inside

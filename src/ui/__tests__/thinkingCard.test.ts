@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, setThinkingPendingIntent, resetThinkingLabelForOutput } from '../thinkingCard';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput } from '../thinkingCard';
 
 beforeAll(() => {
   if (typeof document === 'undefined') GlobalRegistrator.register();
@@ -216,6 +216,33 @@ describe('live thinking card timer (long-silence feedback)', () => {
     startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
     handle.textEl.textContent = '真实推理内容';
     await sleep(150);
+    expect(handle.card.querySelector('.thinking-hint')).toBeNull();
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('network diagnosis overrides the generic hint in place, at hint time and at escalation', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    // 诊断晚到（探测 8s 超时内才返回）：已显示的 hint 被原地说真话覆盖。
+    await sleep(90);
+    const hint = handle.card.querySelector<HTMLElement>('.thinking-hint');
+    expect(hint).not.toBeNull();
+    setThinkingNetDiagnosis(handle, '到模型服务的连接超时：这不是模型在思考');
+    expect(hint!.textContent).toBe('到模型服务的连接超时：这不是模型在思考');
+    // 升级线（45s）不盖掉诊断——网络故障面前「模型思考常要一两分钟」是误导。
+    await sleep(60);
+    expect(handle.card.querySelector<HTMLElement>('.thinking-hint')!.textContent).toBe('到模型服务的连接超时：这不是模型在思考');
+    stopThinkingTimer(handle);
+    handle.el.remove();
+  });
+
+  it('a diagnosis arriving after real output started does not touch the card', async () => {
+    const handle = attachedCard();
+    startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
+    handle.textEl.textContent = '真实推理内容';
+    await sleep(90);
+    setThinkingNetDiagnosis(handle, '到模型服务的连接超时');
     expect(handle.card.querySelector('.thinking-hint')).toBeNull();
     stopThinkingTimer(handle);
     handle.el.remove();

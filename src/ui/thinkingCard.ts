@@ -83,6 +83,9 @@ const THINKING_TIMER_DEFAULTS = { intervalMs: 1000, hintAfterMs: 15000 };
 // tool failure, or verification failure; the precise failure remains in the
 // event stream, while this UI copy stays honest and cause-neutral.
 function defaultHintFor(handle: ThinkingCardHandle): string {
+  // 探测结论优先：具体真相 > cause-neutral 安抚。诊断只在探测失败时存在。
+  const diagnosis = netDiagnosisFor(handle);
+  if (diagnosis) return diagnosis;
   const label = handle.card.querySelector<HTMLElement>('.thinking-label')?.textContent ?? '';
   if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) {
     return '上一阶段未成功，正在自动调整处理方式；这不表示你的网络已断开。若持续失败，请查看具体错误信息或停止本轮。';
@@ -104,6 +107,10 @@ function defaultHintFor(handle: ThinkingCardHandle): string {
 const ESCALATE_DEFAULT_MS = 45_000;
 
 function escalateHintFor(handle: ThinkingCardHandle, elapsedSec: number): string | null {
+  // 有诊断结论时不升级时间预期——「已经等了 N 秒：模型思考常要一两分钟」
+  // 在网络故障面前是误导，保持诊断文案直到轮次结束。
+  const diagnosis = netDiagnosisFor(handle);
+  if (diagnosis) return diagnosis;
   const label = handle.card.querySelector<HTMLElement>('.thinking-label')?.textContent ?? '';
   if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) return null;
   // 否定性弱断言（与两条旧 hint 同纪律）：UI 验证不了「请求仍然活跃」，
@@ -138,6 +145,29 @@ export function setThinkingPendingIntent(handle: ThinkingCardHandle, text: strin
 
 function pendingIntentFor(handle: ThinkingCardHandle): string {
   return pendingIntents.get(handle) ?? '';
+}
+
+// ── Network diagnosis injection (2026-10-30) ──
+// 「暂未发现请求失败」是 cause-neutral 的纪律，但真断网时这句是误导——
+// 用户盯着「模型可能在深度思考」等一个永远不会来的首字。chat.ts 在 hint
+// 时刻用与真实请求同构的 test_llm_connection 主动探测一次（同路由决策 +
+// 一次性反向兜底），探测**失败**时把结论写到这里原地改写等待卡；探测通过
+// 则保持泛化文案——服务可达时「模型在思考」仍是诚实的。
+const netDiagnoses = new WeakMap<ThinkingCardHandle, string>();
+
+export function setThinkingNetDiagnosis(handle: ThinkingCardHandle, text: string): void {
+  if (!text) return;
+  netDiagnoses.set(handle, text);
+  // 诊断晚到（探测在 hint 之后才返回）时原地改写已显示的 hint；正在淡出
+  // 或真实输出已开始的场合不动。
+  const hint = handle.card.querySelector<HTMLElement>('.thinking-hint');
+  if (hint && hint.dataset.dismissing !== '1' && !handle.textEl.textContent) {
+    hint.textContent = text;
+  }
+}
+
+function netDiagnosisFor(handle: ThinkingCardHandle): string {
+  return netDiagnoses.get(handle) ?? '';
 }
 
 const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
