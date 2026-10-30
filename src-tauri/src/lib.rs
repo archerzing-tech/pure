@@ -611,11 +611,21 @@ mod llm_route_switch_tests {
 mod tls_verify_tests {
     use super::*;
 
+    /// 四例共享全局流客户端池与 TLS 开关，并行时互相清池打爆断言
+    /// （CI 上 evict 断言 len==2 与 set_tls_verify 的清池并发赛跑），
+    /// 串行锁强制同一时刻只有一例在动共享状态。
+    static SERIAL: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
+    fn serial() -> &'static StdMutex<()> {
+        SERIAL.get_or_init(|| StdMutex::new(()))
+    }
+
+
     /// 开关默认关闭（不校验证书）：内网 TLS 拦截网关的自签根证书不在系统
     /// 信任库里，严格校验会让每个外部 LLM 调用直接 "certificate verify
     /// failed"——这是设置项选默认不校验的动机（用户口径：默认打开=不校验）。
     #[test]
     fn tls_verification_is_off_by_default() {
+        let _serial = serial().lock().unwrap();
         // 先显式归位，避免与其他测试的写入顺序耦合。
         TLS_VERIFY.store(false, std::sync::atomic::Ordering::Relaxed);
         assert!(!tls_verify_enabled());
@@ -630,6 +640,7 @@ mod tls_verify_tests {
     /// ——缓存 key 不含 TLS 标志，不清池的话旧 client 会继续带着旧策略。
     #[test]
     fn set_tls_verify_clears_the_stream_client_cache() {
+        let _serial = serial().lock().unwrap();
         TLS_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(tls_verify_enabled());
         let _ = finalize_http_client(reqwest::Client::builder(), None).expect("verify mode builds too");
@@ -649,6 +660,7 @@ mod tls_verify_tests {
     /// reset_llm_stream_clients 单独可用（adapter 网络错误后的自救路径）。
     #[test]
     fn reset_llm_stream_clients_clears_the_cache() {
+        let _serial = serial().lock().unwrap();
         let _ = cached_llm_stream_client(None).expect("populate cache");
         assert!(!llm_stream_clients().lock().unwrap().is_empty());
         reset_llm_stream_clients().expect("reset");
@@ -659,6 +671,7 @@ mod tls_verify_tests {
     /// 另一条路（刚被 clone 出来正要拨号的 fallback）不受牵连。
     #[test]
     fn evict_llm_stream_client_drops_only_the_targeted_route() {
+        let _serial = serial().lock().unwrap();
         let _ = cached_llm_stream_client(None).expect("populate direct");
         let _ = cached_llm_stream_client(Some("http://127.0.0.1:9")).expect("populate proxy");
         assert_eq!(llm_stream_clients().lock().unwrap().len(), 2, "both routes cached");
