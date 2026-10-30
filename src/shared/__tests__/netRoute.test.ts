@@ -514,3 +514,147 @@ describe('latencyEma（响应头时延学习）', () => {
     expect(raw['ema-absent.test'].lastOkAt).toBe(t0 + 5);
   });
 });
+
+// ── 网络状态矩阵（2026-10-30 用户点名场景） ────────────────────────────────
+// 应用第一次打开与第二次打开遇到的网络状况可能不同；用户机子上的代理服务
+// 一会开一会关。每个用例对应一张场景卡：A=代理健康维度的四种相，B=跨启动
+// 的学习记忆，C=两层（代理健康 × 主机学习）独立时的组合行为。
+// 时间基准一律挂真实时钟（Date.now()-1s）：netRouteProxyPair/persist 内部
+// 硬用 Date.now()，过去时间戳会让死期判定与落盘过滤双双失真。
+describe('网络状态矩阵（用户点名场景）', () => {
+  const P = 'http://matrix-proxy.test:7890';
+
+  it('A1 代理开着：探测活，proxy-first 主机走代理', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordProxyProbe(P, true, t0, 180);
+    expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('alive');
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1, P)).toBe('proxy');
+    expect(netRoute.netRouteProxyPair('https://api.openai.com/v1', P).proxyUrl).toBe(P);
+  });
+
+  it('A2+A3 代理没开、或开了但配错：两种死法同判，死期内全线翻直连', () => {
+    // 「没开」= 端口无监听连接被拒；「开了但配错」= 端口活着但上游转发
+    // 断/认证错——两种死法在探测侧都表现为拿不到响应头，同一个 dead 判。
+    // 这里对两个不同的代理地址各记一次失败，验证判定不区分死法。
+    const t0 = Date.now() - 1_000;
+    const P2 = 'http://matrix-broken.test:7891';
+    netRoute.recordProxyProbe(P, false, t0);
+    netRoute.recordProxyProbe(P2, false, t0);
+    expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(P2, t0 + 1).state).toBe('dead');
+    // 三个消费口同一翻向：选路、成对契约、打通枚举。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1, P)).toBe('direct');
+    expect(netRoute.netRouteProxyPair('https://api.openai.com/v1', P).proxyUrl).toBe('');
+    const plan = netRoute.unblockAttemptsBeforeMirror('https://api.openai.com/v1', P);
+    expect(plan.map((a) => a.route)).toEqual(['direct', 'proxy', 'direct']);
+  });
+
+  it('A4 代理一会开一会关：关→直连，重开重探→切回，往返可逆', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordProxyProbe(P, true, t0, 200); // 开着
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1, P)).toBe('proxy');
+    netRoute.recordProxyProbe(P, false, t0 + 2); // 关了（探测失败）
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 3, P)).toBe('direct');
+    netRoute.recordProxyProbe(P, true, t0 + 4, 210); // 又开了
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 5, P)).toBe('proxy');
+    // 死期结论被新活证覆盖：健康行只剩最后一次探测的相。
+    expect(netRoute.proxyHealthInfo(P, t0 + 5)).toEqual({ state: 'alive', latencyMs: 210 });
+  });
+
+  it('A5 第一次用（从没探过）：unknown 按可用处理，不把新配置打成直连', () => {
+    const t0 = Date.now() - 1_000;
+    expect(netRoute.proxyHealthInfo(P, t0).state).toBe('unknown');
+    expect(netRoute.proxyHealthy(P, t0)).toBe(true);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0, P)).toBe('proxy');
+  });
+
+  it('A6 隔天打开：昨天的活证过期，不能拿它当今天活着', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordProxyProbe(P, true, t0, 100);
+    expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('alive');
+    // 30 分钟后（比如隔天重启）：健康数据整体过期回 unknown，让启动探测
+    // 重新落行——alive 的语义是「刚探过是活的」，不是「曾经活着」。
+    expect(netRoute.proxyHealthInfo(P, t0 + netRoute.LEARNED_ROUTE_TTL_MS + 1).state).toBe('unknown');
+    // unknown 按可用处理：分类照常走代理（下一轮探测马上会给真结论）。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + netRoute.LEARNED_ROUTE_TTL_MS + 1, P)).toBe('proxy');
+  });
+
+  it('C1 上次直连通、这次重启直连断了：旧记忆先生效，首连撞墙后本会话直跳代理零重演', () => {
+    // 重启语义 = 内存清空、localStorage 存档重读。上次会话把 direct 钉上。
+    const now = Date.now();
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify({
+      'matrix-c1.test': { route: 'direct', at: now - 10 * 60_000, lastOkAt: now - 10 * 60_000 },
+    }));
+    netRoute.resetLearnedRoutes();
+    // 刚打开：学习记忆 30min 内仍生效（不能一上来就推翻它），继续直连。
+    expect(netRoute.resolveNetRoute('matrix-c1.test', true, now, P)).toBe('direct');
+    // 首连撞墙（直连环境变了）：死路半边落信号——这就是「快速处理」，
+    // 学费只交这一次。
+    netRoute.recordNetOutcome('matrix-c1.test', 'direct', false, now + 1);
+    expect(netRoute.resolveNetRoute('matrix-c1.test', true, now + 2, P)).toBe('proxy');
+    // 本会话后续：代理成功钉上，每个请求不再重演「失败→换路」。
+    netRoute.recordNetOutcome('matrix-c1.test', 'proxy', true, now + 3, 300);
+    expect(netRoute.resolveNetRoute('matrix-c1.test', true, now + 4, P)).toBe('proxy');
+  });
+
+  it('C2 上次走代理、这次打开直连也通了：30 分钟内学习赢不折腾，隔天回落分类；谁快用谁归期3', () => {
+    // 场景：上次代理 ok（学习钉 proxy）。两次打开间隔不同，处理不同——
+    const now = Date.now();
+    const writeArchive = (ageMs: number) => {
+      localStorage.setItem('pure.netRoute.v1', JSON.stringify({
+        'api.openai.com': { route: 'proxy', at: now - ageMs, lastOkAt: now - ageMs, latencyEma: 400 },
+      }));
+      netRoute.resetLearnedRoutes();
+    };
+    // a) 快速重启（<30min）：学习记忆仍有效。代理活着（A5 未知=按可用），
+    //    就不折腾——直连虽然也通，但换路没有收益证据（EMA 对比是期3 的活）。
+    writeArchive(5 * 60_000);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now, P)).toBe('proxy');
+    // b) 隔天打开（>30min）：学习过期。分类面（proxy-first 先验=出国路走
+    //    代理）接手——直连「也通」不构成弃代理的证据，除非代理探测判死
+    //    （那是 A2 的翻向）。这是期2 的有意裁定，不是疏漏。
+    writeArchive(31 * 60_000);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now, P)).toBe('proxy');
+    // 同一根学习行在 direct-first 主机上过期后回落直连（对照：TTL 行为
+    // 与主机分类无关，变的只是回落目标）。
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify({
+      'api.deepseek.com': { route: 'proxy', at: now - 31 * 60_000 },
+    }));
+    netRoute.resetLearnedRoutes();
+    expect(netRoute.resolveNetRoute('api.deepseek.com', true, now, P)).toBe('direct');
+  });
+
+  it('D2 代理死期中直连成功、之后代理复活：直连学习是活路证据，不被拽回代理', () => {
+    const now = Date.now();
+    netRoute.recordProxyProbe(P, false, now); // 代理关着
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now + 1, P)).toBe('direct');
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, now + 2, 250); // 直连真通了
+    netRoute.recordProxyProbe(P, true, now + 3, 220); // 用户又把代理点开了
+    // 代理复活不立刻改道：直连刚被证明是活路（学习），流量不折腾。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now + 4, P)).toBe('direct');
+    // 学习 30min 过期后：分类+健康两个维度都指向代理，流量回归代理。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now + netRoute.LEARNED_ROUTE_TTL_MS + 5, P)).toBe('proxy');
+  });
+
+  it('E1 探测活但主机走代理失败：两层独立，代理活着不拦主机层的死路信号', () => {
+    // 代理全链路活着 ≠ 经它能到目标站（目标端屏蔽/风控/地域墙）。真实
+    // 请求的结论永远比探测更接近真相：host 层死路半边照常落，下一请求
+    // 直跳直连——探测的 alive 不豁免它。
+    const now = Date.now();
+    netRoute.recordProxyProbe(P, true, now, 150);
+    netRoute.recordNetOutcome('api.openai.com', 'proxy', false, now + 1);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now + 2, P)).toBe('direct');
+    expect(netRoute.netRouteProxyPair('https://api.openai.com/v1', P).proxyUrl).toBe('');
+  });
+
+  it('E2 探测死且直连成功：两层同向翻直连，直连学习钉上（死代理期间零代理流量）', () => {
+    const now = Date.now();
+    netRoute.recordProxyProbe(P, false, now);
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, now + 1, 280);
+    // 健康层 dead + 学习层 direct 活证：两层给出同一个答案。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, now + 2, P)).toBe('direct');
+    // 打通枚举也不给代理步（学习把首选翻 direct，代理只剩反向兜底步）。
+    expect(netRoute.unblockAttemptsBeforeMirror('https://api.openai.com/v1', P).map((a) => a.route))
+      .toEqual(['direct', 'proxy', 'direct']);
+  });
+});
