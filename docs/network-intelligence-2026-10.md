@@ -85,10 +85,16 @@ LLM 与 web 两条消费者各用各的决策路径。学习信号只有 LLM 在
   运行期过期抢救双槽做最后一次裁定)。附带:空正文流超时改专属短阶梯
   (2 次即停,不再走 identical-call 5 级阶梯白等 10 分钟,c828c17)
 - **期4 web 工具接入**:runRouted/镜像链/兜底链顺序改由路由脑出,错误文案
-  统一真话模板。**新增第一刀:web_fetch/web_scrape 抓取后提炼层**(2026-10-30
-  用户报「汇总任务全量大返回,处理耗时」——20k 字符原文直灌主上下文,每轮
-  THINK 重复 prefill 是耗时真身;超阈值全文先经 flash 档提炼成 2-4k 要点,
-  提炼结果按 URL 缓存,短页面放行)
+  统一真话模板。**第一刀:web_fetch/web_scrape 抓取后提炼层** —— ✅ 落地
+  (2026-10-30 用户报「汇总任务全量大返回,处理耗时」——20k 字符原文直灌
+  主上下文,每轮 THINK 重复 prefill 是耗时真身)。实施注:>8k 字符全文先经
+  宿主一次 LLM 调用(disableThinking)压成 ≤2.5k 要点,原文不再进主上下文;
+  要点按 URL+入参形态缓存 30min(cap 50,LRU),raw: true 旁路给精确原文,
+  提炼失败/回调缺席回退原文(提炼是增强,不许弄丢抓取结果)。模型可见面
+  只有 web_scrape(web_fetch 是隐藏兼容别名),raw 参数两个 schema 都带上。
+  CLI 侧(NodeToolAdapter)无 LLM 通道,暂不接。同笔附带:聊天 markdown
+  本机绝对路径图片经 asset protocol 渲染(assetProtocol 全盘 scope + CSP
+  img-src 补 https:),修掉技能配图/本地截图不显示。
 
 ## 四、验收口径
 - 正常网络:从「hello」到首字,全程零过程文案
