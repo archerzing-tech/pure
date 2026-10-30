@@ -1179,3 +1179,41 @@ describe('流式渲染韧性(lexer 降级 / 渲染自愈 / KaTeX memo)', () => {
     expect(src).toContain('katexMemo.delete(katexMemo.keys().next().value as string);');
   });
 });
+
+// 本机绝对路径图片的 asset protocol 转换(2026-10-30「主题风格一览」判例):
+// 技能生成的 `![图](/Users/…/theme-style-grid.png)` 曾因 src 按同源相对 URL
+// 解析而全死。真机转换行为读不到 __TAURI_INTERNALS__,这里钉:无 Tauri 时
+// 原样直出(不破坏浏览器 dev)、接线点全在(渲染器/流式/清洗/配置)。
+describe('markdown 图片的本机绝对路径(asset protocol)', () => {
+  it('scheme-less 绝对路径保留为图片;无 Tauri 运行时时 src 原样', () => {
+    const html = renderer.image({ href: '/Users/me/.pure/skills/x/a.png', title: null, text: '图' } as never);
+    expect(html).toContain('<img');
+    expect(html).toContain('/Users/me/.pure/skills/x/a.png');
+  });
+
+  it('https 与协议相对路径不经转换,原样输出', () => {
+    const https = renderer.image({ href: 'https://img.shields.io/badge/x.svg', title: null, text: '' } as never);
+    expect(https).toContain('src="https://img.shields.io/badge/x.svg"');
+    const proto = renderer.image({ href: '//host/p.png', title: null, text: '' } as never);
+    expect(proto).toContain('src="//host/p.png"');
+  });
+
+  it('非图片形态的 scheme 拒绝依旧(file:/javascript: → 只剩 alt)', () => {
+    const file = renderer.image({ href: 'file:///etc/passwd', title: null, text: 'bad' } as never);
+    expect(file).not.toContain('<img');
+    expect(file).toBe('bad');
+  });
+
+  it('接线点全在:转换调用/流式渲染器/DOMPurify 放行/assetProtocol 开启', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    expect(src).toContain('attr(assetUrlFor(src))');
+    expect(src).toContain('streamRenderer.image = ');
+    expect(src).toContain('convertFileSrc');
+    expect(src).toContain('ADD_URI_SAFE_ATTR');
+    // 真正的加载闸门:asset protocol 必须开着,否则转换出的 asset:// URL
+    // 被 Rust 侧拒绝(webview 拿到 403),图还是死的。
+    const conf = readFileSync('src-tauri/tauri.conf.json', 'utf8');
+    expect(conf).toContain('"assetProtocol"');
+    expect(conf).toContain('"enable": true');
+  });
+});

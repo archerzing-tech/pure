@@ -246,6 +246,27 @@ renderer.html = (token: { text: string; block?: boolean }): string => {
   return token.block ? `<p class="md-raw-html">${text}</p>` : text;
 };
 
+// scheme-less 本机绝对路径(/Users/… 或 C:\…)在 WebView 里按同源相对 URL
+// 解析(tauri://localhost/Users/…)必然 404——「主题风格一览」会话里技能
+// 生成的配图全死在这。转 asset protocol 后经 asset://localhost(macOS/Linux)
+// 或 http://asset.localhost(Windows)加载,CSP img-src 两形态都已放行。
+// 只转「像本机绝对路径」的形状(POSIX / 开头但排除 //host、Windows 盘符开头);
+// 浏览器 dev / 转换不可用时原样返回。直读 __TAURI_INTERNALS__ 是同步唯一路
+// (renderer 是同步钩子,dynamic import 给不了),与 store.ts 的运行时探测同源。
+function assetUrlFor(src: string): string {
+  if (!/^\/(?!\/)/.test(src) && !/^[a-z]:[\\/]/i.test(src)) return src;
+  const internals = typeof window !== 'undefined'
+    ? (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol?: string) => string } }).__TAURI_INTERNALS__
+    : undefined;
+  const convert = internals?.convertFileSrc;
+  if (!convert) return src;
+  try {
+    return convert(src);
+  } catch {
+    return src;
+  }
+}
+
 // Images (```![alt](src)```) are allowed through with a strict scheme allowlist
 // (http/https/data/blob — never javascript: or file:), then WRAPPED so the
 // rendered picture becomes double-click-to-enlarge like every other diagram
@@ -267,7 +288,7 @@ renderer.image = (token: { href: string; title?: string | null; text: string }):
     return alt;
   }
   const title = token.title ? ` title="${attr(token.title)}"` : '';
-  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(src)}" alt="${alt}"${title} loading="lazy" /></span>`;
+  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" /></span>`;
 };
 
 // Links are allowed through but restricted to http(s)/mailto/# and forced to
@@ -2544,6 +2565,10 @@ export async function renderMarkdown(
     // ADD_ATTR: target is ours on links, loading is ours on inline images —
     // neither is in DOMPurify's default allowed set.
     ADD_ATTR: ['target', 'loading'],
+    // asset://localhost 的本地图 src(renderer.image 经 convertFileSrc 转出)
+    // 不在 DOMPurify 默认 URI 白名单里,不加这个会被整条剥掉、图又死回去。
+    // 真正的闸门是 CSP img-src(asset: / asset.localhost / https: 都已放行)。
+    ADD_URI_SAFE_ATTR: ['src'],
   });
   adoptPreservedMapSlots(container, preservedMaps);
   adoptPreservedDiagramSlots(container, preservedDiagrams);
@@ -2673,6 +2698,16 @@ streamRenderer.code = (token: { text: string; lang?: string }): string => {
   if (lang === 'map' || lang === 'leaflet') return mapSlot(token.text);
   if (lang === 'paint') return diagramSlot('paint', token.text, '');
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
+};
+// 流式期间与完成渲染同一套 image 处理(含本机绝对路径 → asset protocol):
+// 没有它 marked 默认 renderer 直出 <img src="/Users/…">,流式破图、完成后
+// 才跳成真图,同一条消息闪一次。
+streamRenderer.image = (token: { href: string; title?: string | null; text: string }): string => {
+  const src = (token.href ?? '').trim();
+  const alt = esc(token.text ?? '');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !/^(https?:|data:|blob:)/i.test(src)) return alt;
+  const title = token.title ? ` title="${attr(token.title)}"` : '';
+  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" /></span>`;
 };
 const mdStream = new Marked({ gfm: true, breaks: true, renderer: streamRenderer });
 mdStream.use({ extensions: [highlightExt] });
