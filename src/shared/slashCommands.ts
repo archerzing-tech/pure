@@ -1,16 +1,17 @@
 // src/shared/slashCommands.ts
-// Built-in composer slash commands (/model /compact /help): parsing and
+// Built-in composer slash commands (/model /compact /clear /help): parsing and
 // model-name matching. Kept pure and surface-free (same discipline as
 // mcpPrompt.ts) so the GUI composer — and any future CLI port — share one
 // syntax. A parsed command NEVER reaches the engine: the host executes it and
 // clears the draft.
 //
-// Deliberately NO /clear: in the GUI a context reset is a session switch, and
-// the sidebar's 新对话 already owns that (user decision, 2026-09-24).
+// /clear 历史注:2026-09-24 曾裁定「不加 /clear,侧栏新对话已拥有会话切换」;
+// 2026-10-30 用户改裁定——输入栏直接敲 /clear 要能用,侧栏按钮与命令并存,
+// 同一套清场行为。
 
 /** Command words, written as a tuple so the composer autocomplete, the send
  *  gate, and docs can't drift apart on the spelling. */
-export const SLASH_COMMANDS = ['/model', '/compact', '/help'] as const;
+export const SLASH_COMMANDS = ['/model', '/compact', '/clear', '/help'] as const;
 
 export type SlashCommand = (typeof SLASH_COMMANDS)[number];
 
@@ -18,6 +19,7 @@ export type SlashCommand = (typeof SLASH_COMMANDS)[number];
 export const SLASH_COMMAND_I18N: Record<SlashCommand, { desc: string }> = {
   '/model': { desc: 'slash.model.desc' },
   '/compact': { desc: 'slash.compact.desc' },
+  '/clear': { desc: 'slash.clear.desc' },
   '/help': { desc: 'slash.help.desc' },
 };
 

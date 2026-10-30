@@ -1224,11 +1224,12 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': '模型',
     'composer.modelSaved': '模型已切换',
 
-    // ── Composer slash commands (/model /compact /help) ──
+    // ── Composer slash commands (/model /compact /clear /help) ──
     'slash.model.desc': '切换模型，如 /model glm-4.6',
     'slash.compact.desc': '压缩当前会话上下文',
+    'slash.clear.desc': '清空当前对话并开始新会话',
     'slash.help.desc': '显示内置命令',
-    'slash.help.text': '内置命令 — /model <名称> 切换模型 · /compact 压缩上下文 · /help 本帮助',
+    'slash.help.text': '内置命令 — /model <名称> 切换模型 · /compact 压缩上下文 · /clear 清空开新会话 · /help 本帮助',
     'slash.model.usage': '用法：/model <模型名>（当前 {current}）',
     'slash.model.ambiguous': '匹配到多个模型，再打具体一点：{matches}',
     'slash.model.notFound': '没有找到「{query}」。已配置的模型：{list}',
@@ -2568,11 +2569,12 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': 'Model',
     'composer.modelSaved': 'Model switched',
 
-    // ── Composer slash commands (/model /compact /help) ──
+    // ── Composer slash commands (/model /compact /clear /help) ──
     'slash.model.desc': 'Switch model, e.g. /model glm-4.6',
     'slash.compact.desc': 'Compact the current session context',
+    'slash.clear.desc': 'Clear this chat and start a new session',
     'slash.help.desc': 'Show built-in commands',
-    'slash.help.text': 'Built-in commands — /model <name> switch model · /compact compact context · /help this help',
+    'slash.help.text': 'Built-in commands — /model <name> switch model · /compact compact context · /clear clear and start new · /help this help',
     'slash.model.usage': 'Usage: /model <name> (current {current})',
     'slash.model.ambiguous': 'Multiple models match — be more specific: {matches}',
     'slash.model.notFound': 'No model matches "{query}". Configured models: {list}',

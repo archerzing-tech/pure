@@ -1929,6 +1929,7 @@ function runHelpCommand(): void {
 async function runSlashCommand(command: SlashCommand, arg: string): Promise<void> {
   if (command === '/model') runModelCommand(arg);
   else if (command === '/compact') await compactContextWithToast();
+  else if (command === '/clear') newChatSession();
   else runHelpCommand();
 }
 
@@ -2280,6 +2281,12 @@ if (isTauriRuntime()) {
 }
 
 sidebarNewChat.addEventListener('click', () => {
+  newChatSession();
+});
+
+// /clear 与侧栏「新对话」同一套清场(2026-10-30 用户定调:两个入口并存,
+// 行为不各说各话):在跑的会话转入后台继续,当前视图切到落地页开新会话。
+function newChatSession(): void {
   // A still-running conversation keeps working in the background — new chat
   // only switches away, it never interrupts (same as a sidebar switch).
   chat.clear({ keepRunningSession: true });
@@ -2289,7 +2296,7 @@ sidebarNewChat.addEventListener('click', () => {
   // A fresh session is independent: it starts with no workspace.
   chat.setWorkspace('');
   workspace.refresh();
-});
+}
 
 // ── Sidebar: settings ──
 
@@ -3136,12 +3143,7 @@ document.addEventListener('keydown', (e) => {
     void (async () => {
       if (!(await settingsVisible())) {
         workspace.closePopover();
-        chat.clear({ keepRunningSession: true });
-        goToLanding();
-        landingPrompt.focus();
-        chat.setWorkspace('');
-        workspace.refresh();
-        sessionSidebar.setActive(null);
+        newChatSession();
       }
     })();
   }

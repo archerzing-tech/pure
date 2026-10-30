@@ -2,8 +2,10 @@
 // Pure parsing + model matching for the built-in composer slash commands.
 
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import {
   SLASH_COMMANDS,
+  SLASH_COMMAND_I18N,
   parseSlashCommand,
   pickModelEntry,
   type ModelEntry,
@@ -35,15 +37,36 @@ describe('parseSlashCommand', () => {
   });
 
   it('rejects unknown and non-command text', () => {
-    expect(parseSlashCommand('/clear')).toBeNull();
     expect(parseSlashCommand('/exit')).toBeNull();
+    expect(parseSlashCommand('/reset')).toBeNull();
     expect(parseSlashCommand('帮我 /model 一下')).toBeNull();
     expect(parseSlashCommand('')).toBeNull();
     expect(parseSlashCommand('/')).toBeNull();
   });
 
-  it('never offers /clear (GUI session switch belongs to the sidebar)', () => {
-    expect(SLASH_COMMANDS).not.toContain('/clear');
+  it('parses /clear with an optional argument slot (2026-10-30 用户定调:与侧栏新对话并存)', () => {
+    expect(parseSlashCommand('/clear')).toEqual({ command: '/clear', arg: '' });
+    expect(parseSlashCommand('/clear ')).toEqual({ command: '/clear', arg: '' });
+  });
+
+  it('offers /clear with a description key (autocomplete popup reads it)', () => {
+    expect(SLASH_COMMANDS).toContain('/clear');
+    expect(SLASH_COMMAND_I18N['/clear'].desc).toBe('slash.clear.desc');
+  });
+});
+
+describe('GUI 分发(main.ts 源码锚)', () => {
+  const main = readFileSync(new URL('../ui/main.ts', import.meta.url), 'utf8');
+
+  it('/clear 分发到与侧栏新对话共享的清场函数', () => {
+    expect(main).toContain("else if (command === '/clear') newChatSession();");
+    // 行为单源:clear({ keepRunningSession: true }) 只许出现在共享函数里,
+    // 两个入口各写一份必然漂移。
+    expect(main.match(/chat\.clear\(\{ keepRunningSession: true \}\)/g) ?? []).toHaveLength(1);
+  });
+
+  it('/compact 分发到压缩 + toast', () => {
+    expect(main).toContain("else if (command === '/compact') await compactContextWithToast();");
   });
 });
 
