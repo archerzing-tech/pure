@@ -94,7 +94,9 @@ function defaultHintFor(handle: ThinkingCardHandle): string {
   if (intent) {
     return `还在等模型这轮返回——它刚说的「${intent}」要等这轮开口才真正动手。暂未发现请求失败，可随时停止本轮。`;
   }
-  return '仍在等待模型返回首个内容：通常是模型深度思考或服务端排队，暂未发现请求失败。可随时停止本轮。';
+  // 呈现纪律(2026-10-30):用户点名删除「正在等待模型返回首个内容」这类
+  // 传输过程话术——等待是常态而非故障,一句轻话术说清状态与停止权即可。
+  return '还在等模型开口——通常是深度思考或服务排队，暂未发现连接问题；可随时停止。';
 }
 
 // ── Escalated wait expectation ──
@@ -115,7 +117,7 @@ function escalateHintFor(handle: ThinkingCardHandle, elapsedSec: number): string
   if (label.includes('重试') || label.includes('未成功') || label.includes('失败') || label.includes('未通过')) return null;
   // 否定性弱断言（与两条旧 hint 同纪律）：UI 验证不了「请求仍然活跃」，
   // 只能如实说「暂未发现失败」——传输层静默挂死时卡片不能替请求撒谎。
-  return `已经等了 ${elapsedSec} 秒：写代码、长文档这类产出，模型动笔前的思考常要一两分钟。暂未发现请求失败，不是无响应的卡死；等不及可以停止本轮。`;
+  return `已经等了 ${elapsedSec} 秒：写代码、长文档这类产出，模型动笔前的思考常要一两分钟，暂未发现连接问题，不是无响应的卡死；等不及可以停止。`;
 }
 
 export function resetThinkingLabelForOutput(handle: ThinkingCardHandle): void {

@@ -110,9 +110,10 @@ describe('live thinking card timer (long-silence feedback)', () => {
     startThinkingTimer(handle, { intervalMs: 25, hintAfterMs: 60 });
     await sleep(150);
     const hint = handle.card.querySelector('.thinking-hint')?.textContent ?? '';
-    expect(hint).toContain('仍在等待模型返回首个内容');
-    expect(hint).toContain('深度思考或服务端排队');
-    expect(hint).toContain('暂未发现请求失败');
+    // 呈现纪律(2026-10-30):「正在等待模型返回首个内容」退役,轻话术上场。
+    expect(hint).toContain('还在等模型开口');
+    expect(hint).toContain('深度思考或服务排队');
+    expect(hint).toContain('暂未发现连接问题');
     expect(hint).not.toContain('重试');
     stopThinkingTimer(handle);
     handle.el.remove();
@@ -142,13 +143,13 @@ describe('live thinking card timer (long-silence feedback)', () => {
     const hintEl = () => handle.card.querySelector<HTMLElement>('.thinking-hint')!;
     expect(hintEl()).not.toBeNull();
     const firstCopy = hintEl().textContent ?? '';
-    expect(firstCopy).toContain('仍在等待模型返回首个内容');
+    expect(firstCopy).toContain('还在等模型开口');
     await sleep(150);
     const escalated = hintEl()?.textContent ?? '';
     // 同一元素原地替换（不是新 hint），带实时秒数与弱断言。
     expect(escalated).toContain('已经等了');
     expect(escalated).toMatch(/已经等了 \d+ 秒/);
-    expect(escalated).toContain('暂未发现请求失败');
+    expect(escalated).toContain('暂未发现连接问题');
     expect(hintEl().classList.contains('fading')).toBe(false);
     // 秒数不是一次性快照：继续等，hint 里的秒数跟着 chip 一起涨（评审 P1：
     // 冻结在升级时刻的秒数与持续走秒的 chip 自相矛盾）。秒粒度是 1s，两次

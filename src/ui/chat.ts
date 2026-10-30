@@ -184,9 +184,9 @@ const IDLE_PRECOMPACT_SOFT_TARGET = 0.7;
  *  shed——同一句话十分钟内不重复念。 */
 const PREEMPTIVE_COMPACT_TOAST_COOLDOWN_MS = 10 * 60_000;
 
-/** failover 文案的显形门槛：本地死端口拒连几毫秒就完成换路，没有值得解释
- *  的等待窗——文案只在换路真的慢（挂死的代理、断网）时才出现。 */
-const FAILOVER_NOTICE_MIN_MS = 300;
+/** 呈现纪律（2026-10-30）：传输层换路静默自愈，failover 文案与其 300ms
+ *  显形门槛一并退役——过程取证走 transport_status 遥测，真话只在所有路
+ *  试尽后的最终呈现里说。 */
 
 // ── Interrupt-reason sanitization ──
 // FailurePolicy.stop reasons are written as instructions FOR the model (they
@@ -4762,16 +4762,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // decisions) — shown on the live thinking card so silent retries become
     // visible feedback.
     let llmRetryNotices = 0;
-    // Route failovers this turn: the first one earns the full sentence, any
-    // repeat in the same turn downgrades to a counted short form — reading
-    // 「这条路不通」 five turns in a row reads as a struggle, not as routing.
-    let transportFailovers = 0;
-    // Turn clock for failover-notice gating: a failover that lands almost
-    // instantly (dead local proxy port = connect refused in <10ms) completes
-    // before a human could notice — the label exists to explain a WAITING
-    // window, and a sub-300ms rescue has none. Slow rescues (hung proxy,
-    // dead network) still announce.
-    const transportTurnStartedAt = Date.now();
+    // 呈现纪律(2026-10-30):传输层 failover 不再上屏(pure 静默换路),原
+    // 300ms 显形门槛与换路计数族随文案一起退役;过程取证走 transport_status
+    // 遥测,真话只在所有路试尽后的最终呈现。
     // Reasoning deltas are batched into 50ms flushes before touching the DOM:
     // reasoning streams (DeepSeek/Qwen/GLM) can deliver hundreds of deltas per
     // second, and a per-delta append + scroll forces a layout read every time
@@ -4971,12 +4964,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             provider: config.provider,
           }) as { ok: boolean; status?: number; latencyMs?: number; error?: string };
           if (probe.ok) return;
+          // 真话纪律(2026-10-30):说已试的路与真因,pure 继续换路自救;
+          // 不再把「检查网络或代理」的皮球踢回用户。
           const reason = probe.error || `HTTP ${probe.status ?? '?'}`;
-          const detail = /refused|proxy/i.test(reason) ? '连接被拒绝（配置的代理端口可能没有程序在监听）'
+          const detail = /refused|proxy/i.test(reason) ? '连接被拒（代理端口没有程序在监听）'
             : /timeout|timed out/i.test(reason) ? '连接超时'
             : '失败';
-          const tried = pair.fallbackProxyUrl !== null ? '（直连与代理两条线路都已试过）' : '';
-          setThinkingNetDiagnosis(card, `到模型服务的连接探测${detail}${tried}：${reason}。这不是模型在思考——检查网络或代理后重试，也可停止本轮。`);
+          const tried = pair.fallbackProxyUrl !== null ? '直连与代理两条线路' : '直连';
+          setThinkingNetDiagnosis(card, `连接有困难——${tried}${detail}（${reason}）。pure 会继续尝试换路；若一直失败，可停止本轮。`);
         } catch { /* 探测失败不碰主流程：泛化文案兜底 */ }
       }, hintAfterMs + 500);
     };
@@ -6606,12 +6601,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 
           case 'TransportStatus': {
             // Wire-lifecycle notice from the Rust transport (connect retry /
-            // backoff / route failover / connected). This is the one honest
-            // signal available inside a silent connect window — without it the
-            // card keeps saying 正在思考下一步… while the request layer is
-            // actually sleeping off a backoff or dialing the fallback proxy.
-            // Retry label intentionally contains 重试: defaultHintFor /
-            // resetThinkingLabelForOutput key their copy off that keyword.
+            // backoff / route failover / connected). 呈现纪律(2026-10-30):
+            // retrying/failover 是传输层内部动作,pure 静默自愈,不上屏——
+            // 用户只看结果;connected 是正向信号保留。同拍遥测照记(事后
+            // 取证断链判例 31.5s),真话留给真失败时的最终呈现。
             cancelToolGapCard();
             if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
               thinkingCard = openThinkingCard();
@@ -6633,28 +6626,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 sessionId: this.sessionId || undefined,
               });
             } catch { /* 遥测失败不碰主流程 */ }
-            if (thinkingCard) {
-              if (stage === 'retrying') {
-                const waitNote = waitMs && waitMs >= 2000 ? `，约 ${Math.round(waitMs / 1000)} 秒后` : '';
-                setThinkingLabel(thinkingCard, `连接不太顺，正在重试（第 ${attempt ?? 1}/${maxAttempts ?? 3} 次${waitNote}）…`);
-              } else if (stage === 'failover') {
-                transportFailovers++;
-                // Instant rescues stay silent (dead local proxy port refuses
-                // in milliseconds); the label is for wait-time explanation.
-                if (Date.now() - transportTurnStartedAt > FAILOVER_NOTICE_MIN_MS) {
-                  setThinkingLabel(thinkingCard, transportFailovers === 1
-                    ? '这条路不通，换条线路再试…'
-                    : `线路还是不稳，又换了一条（本回合第 ${transportFailovers} 次）…`);
-                }
-              } else {
-                transportFailovers = 0;
-                // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能
-                // 正点名「正在消化 Read 的结果（…）」，整句覆盖会把工具与体量
-                // 归因抹掉、读作凭空又白等一轮——组合句把两件事一次说全。
-                setThinkingLabel(thinkingCard, digestNote
-                  ? `已连上模型服务，还在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}），等它开口…`
-                  : '已连上模型服务，等它开口…');
-              }
+            if (thinkingCard && stage === 'connected') {
+              // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能
+              // 正点名「正在消化 Read 的结果（…）」，整句覆盖会把工具与体量
+              // 归因抹掉、读作凭空又白等一轮——组合句把两件事一次说全。
+              setThinkingLabel(thinkingCard, digestNote
+                ? `已连上模型服务，还在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}），等它开口…`
+                : '已连上模型服务，等它开口…');
             }
             break;
           }

@@ -2682,33 +2682,35 @@ describe('委派结账守卫（B4）', () => {
   });
 });
 
-// 长静默歼灭（2026-10-16）：传输层重试/换路/压缩摘要这些「后台其实在干活」的
-// 窗口，过去在 UI 上一律表现为思考卡原地不动——用户无从区分慢、断、死。这里
-// 钉住诚实文案与开卡守卫，删掉它们不会报错，只会退回无声窗口。
-describe('传输层状态进思考卡（长静默歼灭）', () => {
+// 呈现纪律（2026-10-30 用户定调）：传输过程不上屏——retrying/failover 是
+// pure 内部动作，静默自愈，用户只看结果；connected 是正向信号保留。旧
+// 「长静默歼灭」文案族退役；真话只在所有路试尽后的最终呈现（诊断/Interrupted）
+// 里说，遥测（transport_status 影子记账）保留供事后取证。
+describe('传输层静默自愈（呈现纪律）', () => {
   const src = readSource(new URL('../chat.ts', import.meta.url));
 
-  it('TransportStatus 三种 stage 各有诚实文案，重试带次数与等待', () => {
+  it('过程文案退役：retrying/failover 不再上屏，connected 保留', () => {
     expect(src).toContain("case 'TransportStatus':");
-    expect(src).toContain('连接不太顺，正在重试（第');
-    expect(src).toContain('这条路不通，换条线路再试');
-    // 连续 failover 不重复同一句（真机判例 2026-10-29：插话小请求每个都
-    // failover，同一句翻五遍读作挣扎）——后续降级为计数短句，connected 清零。
-    expect(src).toContain('线路还是不稳，又换了一条');
+    // 负向锚：旧过程文案族不许回归。
+    expect(src).not.toContain('连接不太顺，正在重试');
+    expect(src).not.toContain('这条路不通，换条线路再试');
+    expect(src).not.toContain('线路还是不稳，又换了一条');
+    expect(src).not.toContain('FAILOVER_NOTICE_MIN_MS');
+    // 正向锚：connected 正向信号与遥测影子记账都在。
     expect(src).toContain('已连上模型服务，等它开口');
-    expect(src).toContain('waitMs >= 2000');
-    // 快速救场静默（2026-10-29 判例：本地死端口拒连毫秒级完成换路，没有
-    // 值得解释的等待窗）——文案只在换路真的慢时显形。
-    expect(src).toContain('const FAILOVER_NOTICE_MIN_MS = 300;');
-    expect(src).toContain('Date.now() - transportTurnStartedAt > FAILOVER_NOTICE_MIN_MS');
+    expect(src).toContain("type: 'transport_status'");
+    expect(src).toContain("stage === 'connected'");
   });
 
-  it('首字静默时主动探测网络，探测失败才改写等待卡（服务可达不滋扰）', () => {
+  it('首字静默时主动探测网络，探测失败才改写等待卡（真话+继续换路，不踢皮球）', () => {
     // 2026-10-30 判例：真断网时「暂未发现请求失败」是误导——用与真实请求
     // 同构的 test_llm_connection 在 hint 时刻探测，失败把诊断写上等待卡。
     expect(src).toContain('scheduleNetDiagnosis(card, hintAfterMs);');
     expect(src).toContain("core.invoke('test_llm_connection'");
-    expect(src).toContain('这不是模型在思考——检查网络或代理后重试');
+    // 真话纪律：说已试的路与真因，说 pure 会继续尝试；不说「检查网络或代理」。
+    expect(src).toContain('连接有困难——');
+    expect(src).toContain('pure 会继续尝试换路');
+    expect(src).not.toContain('检查网络或代理后重试');
     // 探测通过 = 服务可达，「模型在思考」仍是诚实文案，不改写。
     expect(src).toContain('if (probe.ok) return;');
     // 每轮至多一次；诊断晚到原地改写由 thinkingCard 侧负责。
