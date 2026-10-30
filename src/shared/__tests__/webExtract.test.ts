@@ -64,7 +64,15 @@ describe('extractCacheKey', () => {
 
 describe('extract cache', () => {
   beforeEach(() => resetExtractCache());
-  afterEach(() => resetExtractCache());
+  afterEach(() => {
+    resetExtractCache();
+    // setSystemTime 是进程全局 mock(bun test 单进程、跨文件泄漏):TTL 用例
+    // 拨快 31min 后必须拨回真实时钟,否则排在后面的文件里所有 timer/Date.now
+    // 间隔型用例全被带崩——2026-10-30 CI(windows 66+linux 6)与本地全量
+    // 4 连红真凶。「隔离单跑全绿」恰是泄漏型污染的特征:单跑时污染源不在场,
+    // 不能当抖动放行,要看全量。
+    setSystemTime();
+  });
 
   it('round-trips a summary and misses unknown keys', () => {
     cacheExtract(extractCacheKey('https://a'), '要点');
