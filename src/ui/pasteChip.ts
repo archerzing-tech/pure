@@ -117,7 +117,9 @@ export function pureStamp(): string {
  * on disk (the second write would otherwise overwrite the first).
  */
 export function purePasteName(): string {
-  const rand = Math.random().toString(36).slice(2, 6);
+  // 8 base36 chars: a 4-char suffix has only ~1.7M combinations, and 50
+  // same-second saves collide ~0.07% of the time (observed in full-suite runs).
+  const rand = Math.random().toString(36).slice(2, 10);
   return `pure-${pureStamp()}-${rand}.txt`;
 }
 

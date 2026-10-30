@@ -68,7 +68,9 @@ describe('purePasteName', () => {
   });
 
   it('produces the pure-<timestamp>.txt naming scheme', () => {
-    expect(purePasteName()).toMatch(/^pure-\d{8}-\d{6}-[a-z0-9]{4}\.txt$/);
+    // Suffix runs 4–10 chars: toString(36) occasionally yields a shorter
+    // shortest-roundtrip mantissa, so the ceiling is bounded but the floor is not 8.
+    expect(purePasteName()).toMatch(/^pure-\d{8}-\d{6}-[a-z0-9]{4,10}\.txt$/);
   });
 
   it('stamps names with the local time and avoids same-second collisions', () => {

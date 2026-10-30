@@ -53,7 +53,7 @@ describe('PasteChipManager.addLongText (no-Tauri env)', () => {
     const long = 'x'.repeat(PASTE_FILE_THRESHOLD + 1);
     const att = mgr.addLongText(long);
     expect(att).not.toBeNull();
-    expect(att?.name).toMatch(/^pure-\d{8}-\d{6}-[a-z0-9]{4}\.txt$/);
+    expect(att?.name).toMatch(/^pure-\d{8}-\d{6}-[a-z0-9]{4,10}\.txt$/);
     expect(att?.content).toBe(long);
     expect(att?.kind).toBe('text');
     // Browser/dev mode: nothing persisted yet, memory fallback carries content.
