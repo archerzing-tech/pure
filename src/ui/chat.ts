@@ -14,6 +14,7 @@ import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normal
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { notifyProxyFailure, startProxyProbeLoop } from './proxyProbe';
+import { startLlmWarmLoop } from './llmWarm';
 import { memoryStore } from './memoryStore';
 import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
 import { harvestUserPreferences } from '../shared/memory';
@@ -2141,6 +2142,9 @@ export class ChatController {
     this.wireFollowupChips();
     // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
     startProxyProbeLoop();
+    // LLM 预热循环（期3）：启动 + 每 30s 暖直连/代理两条路的 TCP+TLS，
+    // 回合首字不再付握手钱。幂等，多会话共享。
+    startLlmWarmLoop();
   }
 
   /** Suggested-followup chips (rendered by markdown.ts) dispatch a bubbling

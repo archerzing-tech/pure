@@ -526,6 +526,74 @@ async fn probe_proxy(proxy_url: String) -> Result<ProxyProbe, String> {
     }
 }
 
+/// 预热一条 LLM 物理路（direct 或 proxy）的 TCP+TLS 会话：对端点 base 发一个
+/// 5s 封顶的 GET。拿到任何响应（200/401/404 皆可）= 握手完成、连接已归还
+/// client 的池——下一个真实请求复用同 origin 的热连接，省掉整段
+/// DNS+TCP+TLS 握手。零 token 零计费，只有传输层被暖到。尽力而为：失败只
+/// 返回 false，不进学习表（GET / 的失败不证路由死，判定权留给真实请求）。
+async fn warm_llm_route(proxy_spec: Option<&str>, base_url: &str) -> bool {
+    let client = match cached_llm_stream_client(proxy_spec) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let url = base_url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return false;
+    }
+    matches!(
+        client.get(url).timeout(std::time::Duration::from_secs(5)).send().await,
+        Ok(_)
+    )
+}
+
+/// 在飞的 LLM 流式请求计数：预热循环跳过在飞 tick——真实请求本来就在锻炼
+/// 同一个连接池，预热 GET 只会跟它抢连接。
+static LLM_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn llm_inflight() -> usize {
+    LLM_INFLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// RAII 计数守卫：chat_stream 的每一条退出路径（正常完成/错误/取消）都经
+/// Drop 归还计数，与 ChatCancelGuard 同纪律。
+struct LlmInflightGuard;
+
+impl Drop for LlmInflightGuard {
+    fn drop(&mut self) {
+        LLM_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 预热 tick 的跳过判定（纯函数，可单测）：在飞流式请求存在时让路；没配
+/// 端点（初始化早期）无事可做。
+fn warm_skip_reason(inflight: usize, base_url: &str) -> Option<&'static str> {
+    if inflight > 0 {
+        return Some("inflight");
+    }
+    if base_url.trim().is_empty() {
+        return Some("no-endpoint");
+    }
+    None
+}
+
+/// 后台预热两条物理路（直连 + 当前配置的代理）：TS 侧预热循环每 30s 调一次。
+/// 池 idle 90s > 周期，热连接永不过期。流式中跳过（busy guard）。
+#[tauri::command]
+async fn warm_llm_routes(
+    base_url: String,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if let Some(reason) = warm_skip_reason(llm_inflight(), &base_url) {
+        return Ok(serde_json::json!({ "skipped": reason }));
+    }
+    let direct_ok = warm_llm_route(None, &base_url).await;
+    let proxy_ok = match proxy_url.as_deref().map(str::trim) {
+        Some(spec) if !spec.is_empty() => Some(warm_llm_route(Some(spec), &base_url).await),
+        _ => None,
+    };
+    Ok(serde_json::json!({ "direct": direct_ok, "proxy": proxy_ok }))
+}
+
 #[cfg(test)]
 mod llm_retry_tests {
     use super::*;
@@ -534,6 +602,23 @@ mod llm_retry_tests {
     async fn probe_proxy_rejects_empty_url_without_touching_the_network() {
         // 空地址是前端漏配的直接信号：显式 Err 而不是一次注定失败的网络探测。
         assert!(probe_proxy("   ".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn warm_llm_routes_reports_unreachable_routes_as_false() {
+        // 不可达端点：预热是尽力而为，false 而不是 Err——循环不该被单次失败打断。
+        let r = warm_llm_routes("http://127.0.0.1:1".into(), None).await.unwrap();
+        assert_eq!(r["direct"], false);
+        assert!(r["proxy"].is_null());
+    }
+
+    #[test]
+    fn warm_skip_reason_covers_busy_and_missing_endpoint() {
+        // 并行测试共享全局计数器，busy 分支在纯函数上钉，不碰 LLM_INFLIGHT。
+        assert_eq!(warm_skip_reason(1, "https://api.deepseek.com"), Some("inflight"));
+        assert_eq!(warm_skip_reason(0, "   "), Some("no-endpoint"));
+        assert_eq!(warm_skip_reason(0, "  https://api.z.ai  "), None);
+        assert_eq!(warm_skip_reason(3, ""), Some("inflight"));
     }
 
     #[test]
@@ -13691,6 +13776,9 @@ async fn chat_stream(
     // allowed for keyless local providers (Ollama / LM Studio) — the
     // Authorization header is simply omitted below.
     let secrets = load_secrets()?;
+    // 预热循环的 busy 信号：请求在飞时 warm tick 直接跳过。RAII 归还。
+    LLM_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _inflight = LlmInflightGuard;
     let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key);
 
     let base_url = if args.base_url.trim().is_empty() {
@@ -18128,6 +18216,7 @@ pub fn run() {
             test_llm_connection,
             // Proxy endpoint health probe (netRoute brain, Settings → 网络代理)
             probe_proxy,
+            warm_llm_routes,
             test_proxy,
             github_mirror_probe,
             detect_system_proxy,
