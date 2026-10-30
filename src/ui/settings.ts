@@ -12,6 +12,7 @@ import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } f
 import { approveToolCorrection, buildToolNoteAppliedRecord, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { probeProxyNow, proxyHealthSnapshot, reprobeProxyAfterConfigChange, isProbeInFlight } from './proxyProbe';
 import { join, homeDir } from '@tauri-apps/api/path';
 import { formatBytes, relativeTime } from '../shared/format';
 import { memoryStore } from './memoryStore';
@@ -277,6 +278,8 @@ export class SettingsPanel {
     if (this.currentCategory === 'evolution') void this.renderEvolutionDashboard();
     // 插话决策日志同理：面板开在通用页时要重读，否则看到的是上次关面板时的快照。
     if (this.currentCategory === 'general') this.renderInsertionDecisionLog();
+    // 代理健康徽标：开面板就按路由脑已有结论重绘（正在探测则显示探测中）。
+    this.renderProxyHealthBadge();
     this.onOpen?.();
     // Move keyboard focus into the settings view so opening it never leaves
     // the user tabbing through controls behind the squeezed chat view.
@@ -357,7 +360,13 @@ export class SettingsPanel {
     if (category === 'tools') this.renderToolInventory();
     if (category === 'skills') void this.renderAppSkills();
     // 打开网络代理页：自动探测一次系统代理（静默，≥5s 节流）。
-    if (category === 'proxy') void this.autoDetectProxyForPage();
+    if (category === 'proxy') {
+      void this.autoDetectProxyForPage();
+      // 代理健康徽标：先按已有结论重绘，再立即补一次探测（完成后重绘）——
+      // 打开这页时用户想看的就是"现在到底通不通"。
+      this.renderProxyHealthBadge();
+      void probeProxyNow('manual').then(() => this.renderProxyHealthBadge());
+    }
   }
 
   // ── Config queries ──
@@ -2083,6 +2092,35 @@ export class SettingsPanel {
    * with the actual error — instead of the user discovering later that every
    * LLM call fails through a broken address.
    */
+  /** 代理状态徽标：按路由脑的健康结论三态重绘（可达绿/不可达红/未探测灰）。
+   *  未配置代理时整行隐藏——没有可探的东西就不占版面。结论来自后台探测
+   *  （proxyProbe 调度），这里只读不探。 */
+  private renderProxyHealthBadge(): void {
+    const row = document.getElementById('proxy-health-row');
+    const badge = document.getElementById('proxy-health-badge');
+    if (!row || !badge) return;
+    const snap = proxyHealthSnapshot();
+    if (!snap.configured) {
+      row.hidden = true;
+      return;
+    }
+    row.hidden = false;
+    const state = snap.state === 'unknown' && isProbeInFlight() ? 'checking' : snap.state;
+    badge.className = `proxy-health-badge ${state}`;
+    if (state === 'alive') {
+      badge.textContent = t('proxy.health.alive').replace('{ms}', String(snap.latencyMs ?? 0));
+    } else if (state === 'dead') {
+      const since = snap.deadSince
+        ? new Date(snap.deadSince).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : '';
+      badge.textContent = t('proxy.health.dead').replace('{time}', since);
+    } else if (state === 'checking') {
+      badge.textContent = t('proxy.health.checking');
+    } else {
+      badge.textContent = t('proxy.health.unknown');
+    }
+  }
+
   private async testProxyConnection(): Promise<void> {
     const btn = document.getElementById('cfg-proxy-test-btn') as HTMLButtonElement | null;
     const url = composeProxyUrl(
@@ -4738,6 +4776,10 @@ export class SettingsPanel {
     persistConfig(cfg);
     // Drop the cached config so the next loadConfig() re-reads the saved state.
     invalidateConfigCache();
+
+    // 代理配置变了：旧的健康结论作废，立即按新地址重探（不受节流约束），
+    // 完成后重绘徽标——用户保存完代理就该看到新地址的真实状态。
+    void reprobeProxyAfterConfigChange().then(() => this.renderProxyHealthBadge());
 
     updateLanguage(cfg.language as I18nLanguage);
     this.applyTheme(cfg.theme);

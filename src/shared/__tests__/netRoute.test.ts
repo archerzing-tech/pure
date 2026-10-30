@@ -369,3 +369,148 @@ describe('unblockAttemptsBeforeMirror（打通路径的 75% 预算）', () => {
     expect(plan.map((a) => a.proxyUrl)).toEqual([PROXY, '', PROXY]);
   });
 });
+
+// ── 期2 路由脑：代理健康行 ────────────────────────────────────────────────
+// 配置里有代理 ≠ 代理可用（FlClash 停止态真机判例）。代理 endpoint 是路径
+// 健康表的一等行：一次探测覆盖所有 proxy-first 主机，死期内整体翻直连，
+// 不必每个主机各自撞一次墙。
+describe('proxyHealth（代理健康行）', () => {
+  const P = 'http://proxy-health.test:7890';
+
+  it('unknown → alive → dead 三态按探测结论翻面', () => {
+    const t0 = 1_700_000_000_000;
+    // 没探过：unknown，按可用处理（新配置一上来不能全打成直连）。
+    expect(netRoute.proxyHealthInfo(P, t0).state).toBe('unknown');
+    expect(netRoute.proxyHealthy(P, t0)).toBe(true);
+    netRoute.recordProxyProbe(P, true, t0, 240);
+    expect(netRoute.proxyHealthInfo(P, t0)).toEqual({ state: 'alive', latencyMs: 240 });
+    netRoute.recordProxyProbe(P, false, t0 + 1);
+    expect(netRoute.proxyHealthInfo(P, t0 + 2).state).toBe('dead');
+    expect(netRoute.proxyHealthy(P, t0 + 2)).toBe(false);
+  });
+
+  it('失败探测的死期结束回 unknown（重探），不谎报 alive', () => {
+    // ok=false 的行只有死期内的价值：死期一过既不是 dead 也不是 alive——
+    // 该重探了。旧行为会让它落进 alive 分支，把一次失败报成「可达」。
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(P, false, t0);
+    expect(netRoute.proxyHealthInfo(P, t0 + netRoute.PROXY_DEAD_TTL_MS - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(P, t0 + netRoute.PROXY_DEAD_TTL_MS + 1).state).toBe('unknown');
+    expect(netRoute.proxyHealthInfo(P, t0 + 10 * 60_000).state).toBe('unknown');
+  });
+
+  it('存活数据的保鲜期与学习记忆同窗（30 分钟），过期回 unknown', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(P, true, t0, 100);
+    expect(netRoute.proxyHealthInfo(P, t0 + netRoute.LEARNED_ROUTE_TTL_MS - 1).state).toBe('alive');
+    expect(netRoute.proxyHealthInfo(P, t0 + netRoute.LEARNED_ROUTE_TTL_MS + 1).state).toBe('unknown');
+  });
+
+  it('anchors PROXY_DEAD_TTL_MS to a literal 5-minute window', () => {
+    expect(netRoute.PROXY_DEAD_TTL_MS).toBe(5 * 60_000);
+  });
+
+  it('代理 key 规范化：大小写与首尾空白共用一行', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(' HTTP://Proxy-Health.Test:7890 ', true, t0, 55);
+    expect(netRoute.proxyHealthInfo(P, t0)).toEqual({ state: 'alive', latencyMs: 55 });
+  });
+
+  it('代理死期内 proxy-first 主机的选路整体翻直连，死期后恢复代理', () => {
+    // 一次探测覆盖所有 proxy-first 主机：api.openai.com 不必亲自撞墙。
+    // 时间基准挂真实时钟（Date.now()-1s）：netRouteProxyPair/persist 内部
+    // 用 Date.now()，过去时间戳会让死期判定与落盘过滤双双失真。
+    const t0 = Date.now() - 1_000;
+    netRoute.recordProxyProbe(P, false, t0);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1, P)).toBe('direct');
+    const pair = netRoute.netRouteProxyPair('https://api.openai.com/v1', P);
+    expect(pair.proxyUrl).toBe('');
+    expect(pair.fallbackProxyUrl).toBe(P);
+    // 死期过后（按调用方时钟）照常重探：分类首选（proxy）回归。pair 恢复
+    // 形态由下一条「代理活着」用例覆盖——pair 读真实时钟，这里操纵不了。
+    const t1 = t0 + netRoute.PROXY_DEAD_TTL_MS + 1;
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t1, P)).toBe('proxy');
+  });
+
+  it('代理活着或未探测时不改变任何选路', () => {
+    const t0 = 1_700_000_000_000;
+    // unknown：没探过不判死。
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0, P)).toBe('proxy');
+    // alive：代理优先照旧。
+    netRoute.recordProxyProbe(P, true, t0, 100);
+    expect(netRoute.resolveNetRoute('api.openai.com', true, t0 + 1, P)).toBe('proxy');
+    expect(netRoute.netRouteProxyPair('https://api.openai.com/v1', P).proxyUrl).toBe(P);
+  });
+
+  it('代理健康行与 host 路由行同 map 隔离，互不覆盖', () => {
+    // route key 空间由 proxy: 前缀隔离；学过的 host 路由不受代理探测影响。
+    const t0 = Date.now() - 1_000;
+    netRoute.recordNetOutcome('api.openai.com', 'direct', true, t0);
+    netRoute.recordProxyProbe(P, false, t0 + 1);
+    // host 学习（direct 活路证据）仍在：resolve 走学习而非死期翻面。
+    // （proxy-first 主机 + 代理死期时兜底翻 direct 与 host 学习语义一致，
+    // 这里验证的是 learned 行本身没被 proxy 行顶掉。）
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(raw['api.openai.com']?.route).toBe('direct');
+    expect(raw[`proxy:${P}`]?.ok).toBe(false);
+  });
+
+  it('persists proxy health rows and reloads them across a fresh load', () => {
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(P, false, t0);
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(raw[`proxy:${P}`]).toEqual({ proxy: true, at: t0, ok: false, deadUntil: t0 + netRoute.PROXY_DEAD_TTL_MS });
+    // 模拟重启：内存表清空、从存档重读，死期结论仍然成立。
+    netRoute.resetLearnedRoutes();
+    expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('dead');
+  });
+
+  it('imports legacy route-only rows and drops malformed proxy rows', () => {
+    const t0 = Date.now();
+    const legacy = {
+      'legacy-host.test': { route: 'proxy', at: t0 },
+      [`proxy:${P}`]: { proxy: true }, // 缺 at/ok —— 结构不完整，丢弃
+      'bad-row.test': { proxy: 'yes' }, // 既非 proxy 行也非 route 行
+    };
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify(legacy));
+    netRoute.resetLearnedRoutes();
+    expect(netRoute.resolveNetRoute('legacy-host.test', true, t0 + 1)).toBe('proxy');
+    expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('unknown');
+  });
+});
+
+// ── 期2 路由脑：时延 EMA（期3 双路对比的数据底座） ─────────────────────────
+describe('latencyEma（响应头时延学习）', () => {
+  // persist 用真实 Date.now() 做 30 分钟过期过滤，时间基准必须挂真实时钟，
+  // 否则带过去时间戳的行根本落不了盘。
+  it('first sample seeds the EMA, later samples blend at α=0.3', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordNetOutcome('ema.test', 'direct', true, t0, 100);
+    netRoute.recordNetOutcome('ema.test', 'direct', true, t0 + 1, 200);
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    // 100×0.7 + 200×0.3 = 130
+    expect(raw['ema.test'].latencyEma).toBe(130);
+    expect(raw['ema.test'].lastOkAt).toBe(t0 + 1);
+    expect(raw['ema.test'].at).toBe(t0 + 1);
+  });
+
+  it('persists latencyEma/lastOkAt through a reload', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0, 320);
+    netRoute.resetLearnedRoutes();
+    // 重载后再来一次同路成功，EMA 应从存档里的 320 起步而非重置：
+    // 320×0.7 + 80×0.3 = 248
+    netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0 + 1, 80);
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(raw['ema-persist.test'].latencyEma).toBe(248);
+  });
+
+  it('absent headersMs keeps refreshing lastOkAt without touching the EMA', () => {
+    const t0 = Date.now() - 1_000;
+    netRoute.recordNetOutcome('ema-absent.test', 'direct', true, t0, 100);
+    netRoute.recordNetOutcome('ema-absent.test', 'direct', true, t0 + 5);
+    const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
+    expect(raw['ema-absent.test'].latencyEma).toBe(100);
+    expect(raw['ema-absent.test'].lastOkAt).toBe(t0 + 5);
+  });
+});

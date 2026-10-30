@@ -13,6 +13,7 @@ import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScr
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
+import { notifyProxyFailure, startProxyProbeLoop } from './proxyProbe';
 import { memoryStore } from './memoryStore';
 import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
 import { harvestUserPreferences } from '../shared/memory';
@@ -1259,6 +1260,9 @@ export function createLLMAdapter(
       onNetOutcome: (outcome) => {
         if (!effectiveProxyUrl(config.proxy)) return;
         recordNetOutcome(baseURL, outcome.route, outcome.ok, Date.now(), outcome.headersMs);
+        // 代理路撞墙：及时重探代理健康行（节流内跳过），让所有 proxy-first
+        // 主机共享一个结论，而不是每个主机各自撞墙学一遍。
+        if (!outcome.ok && outcome.route === 'proxy') notifyProxyFailure();
       },
       // Rust 内部换路救场时请求最终成功，adapter 的 catch 路径永远不触发——
       // 「首选路失败」只能从 failover 状态事件落学习表。2026-10-29 判例：
@@ -1267,6 +1271,7 @@ export function createLLMAdapter(
       onPrimaryFailure: () => {
         if (!effectiveProxyUrl(config.proxy)) return;
         recordNetOutcome(baseURL, llmProxy.proxyUrl ? 'proxy' : 'direct', false, Date.now());
+        if (llmProxy.proxyUrl) notifyProxyFailure();
       },
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
@@ -2134,6 +2139,8 @@ export class ChatController {
     this.viewActive = options.viewActive ?? true;
     this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
     this.wireFollowupChips();
+    // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
+    startProxyProbeLoop();
   }
 
   /** Suggested-followup chips (rendered by markdown.ts) dispatch a bubbling

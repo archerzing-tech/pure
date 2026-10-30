@@ -11847,6 +11847,29 @@ button svg,
   cursor: not-allowed;
 }
 
+/* 代理健康徽标（期2 路由脑）：pure 定期探测代理可达性,结论如实标注。
+ * alive=绿点 / dead=红点 / unknown=灰点,文案跟随状态变化。 */
+.proxy-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-secondary, #6b7280);
+}
+.proxy-health-badge::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.proxy-health-badge.alive { color: #178a50; }
+.proxy-health-badge.dead { color: #c23934; }
+.proxy-health-badge.unknown { color: var(--text-secondary, #6b7280); opacity: 0.75; }
+
 /* Manual-address-only proxy fields hide in "system proxy" mode (the app
    resolves the OS proxy transparently). .setting-row is display:flex, so the
    native [hidden] attribute would be overridden — toggle the class instead. */

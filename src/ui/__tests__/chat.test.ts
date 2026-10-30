@@ -2722,6 +2722,16 @@ describe('传输层静默自愈（呈现纪律）', () => {
     expect(src).toContain("recordNetOutcome(baseURL, llmProxy.proxyUrl ? 'proxy' : 'direct', false, Date.now());");
   });
 
+  it('代理健康探测调度：启动循环 + 真实撞墙及时重探（期2 路由脑）', () => {
+    // 启动即开常态探测循环（幂等，多会话共享一份）。
+    expect(src).toContain('startProxyProbeLoop();');
+    // 真实请求撞 proxy 路 → 及时重探（30s 节流在 proxyProbe 侧），别等 5 分钟。
+    expect(src).toContain("if (!outcome.ok && outcome.route === 'proxy') notifyProxyFailure();");
+    expect(src).toContain('if (llmProxy.proxyUrl) notifyProxyFailure();');
+    // 对话内零打扰：探测模块的结论只进设置页，chat 不消费快照。
+    expect(src).not.toContain('proxyHealthSnapshot');
+  });
+
   it('状态开卡遵守与看门狗同款的静默守卫（工具行在场上时不开卡）', () => {
     expect(src).toContain('const { stage, attempt, maxAttempts, waitMs } = event.payload;');
     expect(src).toContain("if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {");

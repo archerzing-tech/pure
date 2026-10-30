@@ -491,9 +491,50 @@ async fn test_llm_connection(
     Ok(probe_llm_endpoint(fallback_client, &url, &resolved_key).await)
 }
 
+/// 代理 endpoint 健康探测（期2 路由脑，2026-10-30）：经代理请求一个轻量
+/// 稳定端点，拿到任何 HTTP 响应头 = 代理全链路活着（TCP+代理协议+外联）；
+/// 连接层失败 = 死。用户口径：代理是可选工具，配置挂了要及时识别，但不该
+/// 让真实对话流量去交学费——3s 总超时，由 UI 在启动/定期/失败后触发。
+#[derive(serde::Serialize)]
+struct ProxyProbe {
+    ok: bool,
+    latency_ms: u64,
+    error: String,
+}
+
+#[tauri::command]
+async fn probe_proxy(proxy_url: String) -> Result<ProxyProbe, String> {
+    let url = proxy_url.trim().to_string();
+    if url.is_empty() {
+        return Err("proxy url is empty".into());
+    }
+    let client = build_http_client(std::time::Duration::from_secs(3), Some(url.as_str()))?;
+    let started = std::time::Instant::now();
+    // generate_204：轻、稳、无副作用。「拿到响应」就证明代理在工作，状态码
+    // 不参与判定——就算目标端点被目标网络屏蔽，经代理拿到响应仍证代理活着。
+    match client.get("https://www.gstatic.com/generate_204").send().await {
+        Ok(resp) => Ok(ProxyProbe {
+            ok: true,
+            latency_ms: started.elapsed().as_millis() as u64,
+            error: format!("HTTP {}", resp.status().as_u16()),
+        }),
+        Err(e) => Ok(ProxyProbe {
+            ok: false,
+            latency_ms: started.elapsed().as_millis() as u64,
+            error: e.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod llm_retry_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn probe_proxy_rejects_empty_url_without_touching_the_network() {
+        // 空地址是前端漏配的直接信号：显式 Err 而不是一次注定失败的网络探测。
+        assert!(probe_proxy("   ".into()).await.is_err());
+    }
 
     #[test]
     fn retryable_status_classifies_transient_codes() {
@@ -18085,6 +18126,8 @@ pub fn run() {
             fetch_skill_markdown,
             fetch_url_text,
             test_llm_connection,
+            // Proxy endpoint health probe (netRoute brain, Settings → 网络代理)
+            probe_proxy,
             test_proxy,
             github_mirror_probe,
             detect_system_proxy,

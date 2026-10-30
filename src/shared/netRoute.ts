@@ -228,11 +228,12 @@ export function netRouteSurfacePair(
 ): { proxyUrl: string; fallbackProxyUrl: string | null } {
   if (!proxyUrl) return { proxyUrl: '', fallbackProxyUrl: null };
   const retryable = !NO_RETRY_SURFACES.has(surface);
+  const fallback = SURFACE_CLASS[surface] === 'proxy-first' ? 'proxy' : 'direct';
   const route = routeForKey(
     surfaceKey(surface),
     true,
     Date.now(),
-    SURFACE_CLASS[surface] === 'proxy-first' ? 'proxy' : 'direct',
+    proxyFallbackFor(proxyUrl, Date.now(), fallback),
   );
   if (route === 'proxy') return { proxyUrl, fallbackProxyUrl: retryable ? '' : null };
   return { proxyUrl: '', fallbackProxyUrl: retryable ? proxyUrl : null };
@@ -246,13 +247,107 @@ interface RouteEntry {
   /** 死路半边：这条路由最近一次失败后，在此之前选路直接翻反向。
    *  缺省 = 没有死路信号（正常记忆）。 */
   deadUntil?: number;
+  /** 响应头时延的指数滑动平均（EMA α=0.3）。成功学习时带上，给「两条路
+   *  谁快用谁」的决策留数据底座（期3 双路对比直接消费）。 */
+  latencyEma?: number;
+  /** 最近一次成功时刻。 */
+  lastOkAt?: number;
+}
+
+// ── 代理健康行（期2 路由脑） ────────────────────────────────────────────────
+// 代理 endpoint 本身是路径健康表里的一等行：一个探测覆盖所有 proxy-first
+// 主机——否则每个 proxy-first 主机都要各自撞一次死代理的墙才学会翻面
+// （FlClash 停止态、127.0.0.1:7897 无监听的真机判例：配置里挂着代理不等于
+// 代理可用）。语义反转（用户定调 2026-10-30）：配置里有代理 ≠ 优先走代理。
+
+/** 代理健康条目：与 learned 同 map 存储，key = `proxy:<规范化代理地址>`。
+ *  旧版读取端按 route 字段校验自然丢弃这类条目，v1 存档零迁移。 */
+interface ProxyHealthEntry {
+  proxy: true;
+  at: number;
+  /** 最近一次探测结论。 */
+  ok: boolean;
+  latencyMs?: number;
+  /** 探测失败时刻起的死期；死期内所有 proxy-first 决策翻直连。 */
+  deadUntil?: number;
+}
+
+type HealthEntry = RouteEntry | ProxyHealthEntry;
+
+const isProxyEntry = (e: HealthEntry): e is ProxyHealthEntry => 'proxy' in e && (e as ProxyHealthEntry).proxy === true;
+const isRouteEntry = (e: HealthEntry): e is RouteEntry => 'route' in e;
+
+export type ProxyHealthState = 'unknown' | 'alive' | 'dead';
+
+const PROXY_KEY_PREFIX = 'proxy:';
+/** 代理死期的保质期：与死路半边同量级——代理恢复（用户点开 FlClash）
+ *  常在分钟级，5 分钟后自动重探，复活即恢复代理优先。 */
+export const PROXY_DEAD_TTL_MS = 5 * 60_000;
+
+function proxyKey(proxyUrl: string): string {
+  return `${PROXY_KEY_PREFIX}${proxyUrl.trim().toLowerCase()}`;
+}
+
+/** 从成功/失败结果里学习代理 endpoint 健康（探测或真实请求撞墙均可喂）。 */
+export function recordProxyProbe(proxyUrl: string, ok: boolean, now = Date.now(), latencyMs?: number): void {
+  const url = String(proxyUrl ?? '').trim();
+  if (!url) return;
+  ensureLoaded();
+  learned.set(proxyKey(url), {
+    proxy: true,
+    at: now,
+    ok,
+    ...(latencyMs !== undefined ? { latencyMs } : {}),
+    ...(ok ? {} : { deadUntil: now + PROXY_DEAD_TTL_MS }),
+  });
+  persist();
+}
+
+/** 代理当前是否可用作首选路（unknown = 尚无探测数据，按可用处理——
+ *  没探过就判死会把新配置一上来全打成直连）。 */
+export function proxyHealthy(proxyUrl: string, now = Date.now()): boolean {
+  const info = proxyHealthInfo(proxyUrl, now);
+  return info.state !== 'dead';
+}
+
+/** 设置页/诊断用：代理健康三态与数据。 */
+export function proxyHealthInfo(proxyUrl: string, now = Date.now()): {
+  state: ProxyHealthState; latencyMs?: number; deadSince?: number;
+} {
+  const url = String(proxyUrl ?? '').trim();
+  if (!url) return { state: 'unknown' };
+  ensureLoaded();
+  const entry = learned.get(proxyKey(url));
+  if (!entry || !('proxy' in entry) || !(entry as ProxyHealthEntry).proxy) return { state: 'unknown' };
+  const e = entry as ProxyHealthEntry;
+  if (!e.ok) {
+    // 失败的探测只有死期内的价值：死期中如实报「不可达」，死期一过回
+    // unknown（该重探了）——绝不能落进下面的 alive 分支，把一次失败谎报
+    // 成「可达 · N ms」。
+    if (e.deadUntil !== undefined && now < e.deadUntil) {
+      return { state: 'dead', deadSince: e.at, ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}) };
+    }
+    return { state: 'unknown' };
+  }
+  if (now - e.at > LEARNED_ROUTE_TTL_MS) {
+    // 健康数据本身过期（30 分钟前的「活着」不保证现在活着）：回 unknown，
+    // 让下一次探测/真实请求重新落行。
+    return { state: 'unknown' };
+  }
+  return { state: 'alive', ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}) };
+}
+
+/** proxy-first 主机的分类兜底要不要因代理死期翻成直连。 */
+function proxyFallbackFor(proxyUrl: string, now: number, fallback: NetRoute): NetRoute {
+  if (fallback === 'proxy' && proxyUrl && !proxyHealthy(proxyUrl, now)) return 'direct';
+  return fallback;
 }
 
 /** 死路半边的保质期：代理故障恢复常在分钟级，5 分钟内跳过刚失败的路，
  *  过期后照常重探，复活即恢复首选。 */
 export const DEAD_ROUTE_TTL_MS = 5 * 60_000;
 
-const learned = new Map<string, RouteEntry>();
+const learned = new Map<string, HealthEntry>();
 let loaded = false;
 
 /** 清空学习记忆（含未落盘部分）。仅供测试隔离使用：路由学习是模块级单例，
@@ -270,18 +365,28 @@ function ensureLoaded(): void {
     if (typeof localStorage === 'undefined') return;
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return;
-    const parsed = JSON.parse(raw) as Record<string, RouteEntry>;
+    const parsed = JSON.parse(raw) as Record<string, HealthEntry>;
     const now = Date.now();
     for (const [host, entry] of Object.entries(parsed)) {
+      if (isProxyEntry(entry)) {
+        // 代理健康行：结构完整即导入（自身带 at，过期由 proxyHealthInfo 判）。
+        if (typeof entry.at === 'number' && (entry.ok === true || entry.ok === false)) {
+          learned.set(host, entry);
+        }
+        continue;
+      }
       // 读取时顺手丢弃过期条目：跨天启动时不必先做一次网络请求才知道记忆
       // 已经作废。
-      if ((entry.route === 'direct' || entry.route === 'proxy')
+      if (isRouteEntry(entry)
+        && (entry.route === 'direct' || entry.route === 'proxy')
         && typeof entry.at === 'number'
         && now - entry.at <= LEARNED_ROUTE_TTL_MS) {
         learned.set(host, {
           route: entry.route,
           at: entry.at,
           ...(typeof entry.deadUntil === 'number' ? { deadUntil: entry.deadUntil } : {}),
+          ...(typeof entry.latencyEma === 'number' ? { latencyEma: entry.latencyEma } : {}),
+          ...(typeof entry.lastOkAt === 'number' ? { lastOkAt: entry.lastOkAt } : {}),
         });
       }
     }
@@ -293,14 +398,20 @@ function ensureLoaded(): void {
 function persist(): void {
   try {
     if (typeof localStorage === 'undefined') return;
-    const obj: Record<string, RouteEntry> = {};
+    const obj: Record<string, HealthEntry> = {};
     const now = Date.now();
     for (const [host, entry] of learned) {
+      if (isProxyEntry(entry)) {
+        obj[host] = entry;
+        continue;
+      }
       if (now - entry.at > LEARNED_ROUTE_TTL_MS) continue;
       obj[host] = {
         route: entry.route,
         at: entry.at,
         ...(entry.deadUntil !== undefined ? { deadUntil: entry.deadUntil } : {}),
+        ...(entry.latencyEma !== undefined ? { latencyEma: entry.latencyEma } : {}),
+        ...(entry.lastOkAt !== undefined ? { lastOkAt: entry.lastOkAt } : {}),
       };
     }
     localStorage.setItem(STORE_KEY, JSON.stringify(obj));
@@ -313,7 +424,7 @@ function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetR
   if (!hasProxy) return 'direct';
   ensureLoaded();
   const entry = learned.get(key);
-  if (entry) {
+  if (entry && isRouteEntry(entry)) {
     if (now - entry.at <= LEARNED_ROUTE_TTL_MS) {
       // 死路半边：刚失败的路在死期内直接翻反向。只删记忆不够——删掉后
       // 分类面下一轮照样把 proxy-first 主机判给代理，每个请求重演一次
@@ -329,11 +440,14 @@ function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetR
   return fallback;
 }
 
-/** Route decision for a host (accepts a bare host or a full URL). */
-export function resolveNetRoute(hostOrUrl: string, hasProxy: boolean, now = Date.now()): NetRoute {
+/** Route decision for a host (accepts a bare host or a full URL). proxyUrl
+ *  提供时，代理健康行参与决策：代理死期内 proxy-first 主机直接判直连，
+ *  不必每个主机各自撞一次墙。 */
+export function resolveNetRoute(hostOrUrl: string, hasProxy: boolean, now = Date.now(), proxyUrl?: string): NetRoute {
   const host = normalizeRouteHost(hostOrUrl);
   if (!host) return 'direct';
-  return routeForKey(host, hasProxy, now, classifyHostName(host) === 'proxy-first' ? 'proxy' : 'direct');
+  const fallback = classifyHostName(host) === 'proxy-first' ? 'proxy' : 'direct';
+  return routeForKey(host, hasProxy, now, proxyFallbackFor(proxyUrl ?? '', now, fallback));
 }
 
 /**
@@ -368,7 +482,9 @@ const SLOW_HEADERS_MS = 4000;
 
 function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: number, headersMs?: number): void {
   ensureLoaded();
-  const entry = learned.get(key);
+  const existing = learned.get(key);
+  // route key 空间（host/surface）与 proxy: 前缀天然隔离，但类型上仍收窄。
+  const entry = existing && isRouteEntry(existing) ? existing : undefined;
   if (ok) {
     // 慢直连判据（2026-10-20）：proxy-first 主机经直连「连上了但响应头爬了
     // 秒级」不是可用性证据——头时间只含连接层，不受模型 prefill/思考污染。
@@ -384,8 +500,24 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
       }
       return;
     }
-    if (entry?.route === route) return;
-    learned.set(key, { route, at: now });
+    if (entry?.route === route) {
+      // 同路成功：EMA 更新时延（α=0.3，新样本权重适中），刷新活路时间戳。
+      if (headersMs !== undefined && headersMs > 0) {
+        const ema = entry.latencyEma ?? headersMs;
+        learned.set(key, { ...entry, at: now, latencyEma: Math.round(ema * 0.7 + headersMs * 0.3), lastOkAt: now });
+        persist();
+      } else if (entry.at !== now) {
+        learned.set(key, { ...entry, at: now, lastOkAt: now });
+        persist();
+      }
+      return;
+    }
+    learned.set(key, {
+      route,
+      at: now,
+      lastOkAt: now,
+      ...(headersMs !== undefined && headersMs > 0 ? { latencyEma: headersMs } : {}),
+    });
     persist();
   } else if (entry === undefined || entry.route === route) {
     // 失败记死路半边，覆盖两种情形：表里根本没有记忆（这次是分类面选的
@@ -422,7 +554,8 @@ export function netRouteProxyPair(url: string, proxyUrl: string): NetRoutePair {
   const host = normalizeRouteHost(url);
   if (!proxyUrl || !host) return { proxyUrl: '', fallbackProxyUrl: null, host: null };
   if (classifyHostName(host) === 'neutral') return { proxyUrl: '', fallbackProxyUrl: null, host };
-  return routeForKey(host, true, Date.now(), classifyHostName(host) === 'proxy-first' ? 'proxy' : 'direct') === 'proxy'
+  const fallback = classifyHostName(host) === 'proxy-first' ? 'proxy' : 'direct';
+  return routeForKey(host, true, Date.now(), proxyFallbackFor(proxyUrl, Date.now(), fallback)) === 'proxy'
     ? { proxyUrl, fallbackProxyUrl: '', host }
     : { proxyUrl: '', fallbackProxyUrl: proxyUrl, host };
 }
@@ -456,7 +589,7 @@ export function unblockAttemptPlan(hostOrUrl: string, proxyUrl: string): Unblock
   if (!host || !proxyUrl || classifyHostName(host) === 'neutral') {
     return [{ route: 'direct', proxyUrl: '', retry: false }];
   }
-  const primary: NetRoute = resolveNetRoute(host, true);
+  const primary: NetRoute = resolveNetRoute(host, true, Date.now(), proxyUrl);
   const opposite: NetRoute = primary === 'proxy' ? 'direct' : 'proxy';
   const toUrl = (r: NetRoute): string => (r === 'proxy' ? proxyUrl : '');
   return [
