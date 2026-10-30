@@ -3,7 +3,10 @@
        背景改白；2026-10-11 去紫定稿的钻石色系不变）。白底适配：原为深底
        设计的亮元素（白星光/亮描边/白闪光线）全部换墨蓝冷色系，切面描边
        从亮线改墨蓝半透明，否则白底上主体隐形。改色后跑 gui:build 会经
-       build-gui-mac.sh 自动重出全套平台图标（tauri icon）。 -->
+       build-gui-mac.sh 自动重出全套平台图标（tauri icon）。
+       2026-10-30 满幅改 824/1024 规范边距：此前圆角方块铺满画布，Dock 里
+       比标准 macOS 图标线性大 ~24%（其他 app 按 Apple 模板留 100 边距），
+       用户反馈「图标大了」；缩放 0.805 居中后与系统图标视觉等大。 -->
   <defs>
     <linearGradient id="icn-bg" x1="0" y1="0" x2="0.9" y2="1">
       <stop offset="0%" stop-color="#FFFFFF"/>
@@ -38,6 +41,7 @@
       <stop offset="100%" stop-color="#2C6B99"/>
     </linearGradient>
     <g id="icon-gem">
+      <g transform="translate(100 100) scale(0.805)">
       <rect width="1024" height="1024" rx="224" fill="url(#icn-bg)"/>
       <rect width="1024" height="1024" rx="224" fill="url(#icn-halo)"/>
       <rect x="14" y="14" width="996" height="996" rx="210" fill="none" stroke="#14273A" stroke-opacity="0.16" stroke-width="5"/>
@@ -65,6 +69,7 @@
         <path d="M742 714 L750 740 L776 748 L750 756 L742 782 L734 756 L708 748 L734 740 Z" opacity="0.74"/>
       </g>
       <path d="M286 320 L360 220" stroke="#2C6B99" stroke-opacity="0.6" stroke-width="10" stroke-linecap="round"/>
+      </g>
       </g>
     </g>
   </defs>
