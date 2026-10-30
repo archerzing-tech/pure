@@ -381,6 +381,19 @@ const GUI_BENCH_TIMEOUT_MS = 8_000;
 
 /** 测速路径与拼接规则在 shared/mirrorSources（纯函数，CLI 同一份）。 */
 import { benchmarkUrlFor } from '../shared/mirrorSources';
+import {
+  buildExtractPrompt,
+  cacheExtract,
+  EXTRACT_TIMEOUT_MS,
+  extractCacheKey,
+  getCachedExtract,
+  shouldExtractText,
+  wrapSummary,
+} from '../shared/webExtract';
+
+/** 提炼回调:宿主用当前配置的模型把超长网页正文压成要点。抛错=提炼失败
+ *  (调用方回退原文截断,提炼是增强,不允许它把抓取结果弄丢)。 */
+export type SummarizeForExtract = (url: string, text: string, signal?: AbortSignal) => Promise<string>;
 export { benchmarkUrlFor };
 
 /** DoH 端点：WebView 里少了裸 IP 那家（1.12.12.12 的证书在浏览器侧校验不
@@ -478,9 +491,12 @@ export class TauriToolAdapter implements ToolAdapter {
   /** GitHub 加速（设置 → 通用）：选中节点 key + 自定义前缀；'direct' = 关闭。 */
   private readonly githubMirror: string;
   private readonly githubCustomMirror: string;
+  /** web 抓取后提炼层(期4)的宿主回调:超阈值全文经一次 LLM 调用压成要点。
+   *  宿主注入(chat.ts 工厂用当前配置的模型);缺席时抓取行为与旧版一致。 */
+  private readonly summarizeForExtract?: SummarizeForExtract;
   private readonly mcpCandidates = new Map<string, McpCandidate>();
 
-  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false, githubMirror = '', githubCustomMirror = '') {
+  constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false, githubMirror = '', githubCustomMirror = '', summarizeForExtract?: SummarizeForExtract) {
     this.workspace = workspace;
     this.tavilyApiKey = tavilyApiKey;
     this.serperApiKey = serperApiKey;
@@ -494,6 +510,7 @@ export class TauriToolAdapter implements ToolAdapter {
     this.sandbox = sandbox;
     this.githubMirror = githubMirror;
     this.githubCustomMirror = githubCustomMirror;
+    this.summarizeForExtract = summarizeForExtract;
   }
 
   /** GitHub 加速（设置 → 通用）的回退链；关闭 / 未配置时只有直连一级。 */
@@ -895,6 +912,44 @@ export class TauriToolAdapter implements ToolAdapter {
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  /** 抓取后提炼层(期4 第一刀):超阈值全文先经宿主 LLM 压成要点再进主
+   *  上下文——20k 原文直灌后每一轮 THINK 都重复 prefill,是汇总任务
+   *  「处理大数据耗时」的真身。raw: true 旁路(模型要精确原文);提炼
+   *  失败/回调缺席回退原文——提炼是增强,不允许它把抓取结果弄丢。要点
+   *  按 URL+入参形态缓存 30min,同页二次调用零成本命中。 */
+  private async maybeExtract(url: string, args: Record<string, unknown>, text: string): Promise<string> {
+    if (args.raw === true || !shouldExtractText(text) || !this.summarizeForExtract) return text;
+    const key = extractCacheKey(
+      url,
+      typeof args.selector === 'string' ? args.selector : undefined,
+      typeof args.maxChars === 'number' ? args.maxChars : undefined,
+    );
+    const cached = getCachedExtract(key);
+    if (cached) return wrapSummary(cached, url, text.length);
+    try {
+      // 双保险:signal 交给守约的 LLM 通道,Promise.race 兜底硬上限——
+      // 通道若无视 signal 也不许提炼把工具调用拖死。
+      const ac = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { ac.abort(); reject(new Error(`提炼超时(${Math.round(EXTRACT_TIMEOUT_MS / 1000)}s)`)); }, EXTRACT_TIMEOUT_MS);
+      });
+      let summary: string;
+      try {
+        summary = await Promise.race([this.summarizeForExtract(url, text, ac.signal), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+      const trimmed = summary.trim();
+      // 空要点或越提越长=没提炼出东西,回退原文,不拿空壳冒充。
+      if (!trimmed || trimmed.length >= text.length) return text;
+      cacheExtract(key, trimmed);
+      return wrapSummary(trimmed, url, text.length);
+    } catch {
+      return text;
+    }
   }
 
   getTools(): ToolDefinition[] {
@@ -1914,7 +1969,8 @@ export class TauriToolAdapter implements ToolAdapter {
               }) as Promise<string>,
               (text) => detectHijack(text, { url: fetchUrl, expectContent: true }).signal,
             );
-            return { id: toolCall.id, toolName: name, result: pageText, success: true, duration: Date.now() - start };
+            const served = await this.maybeExtract(fetchUrl, args, pageText);
+            return { id: toolCall.id, toolName: name, result: served, success: true, duration: Date.now() - start };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             // Non-network failure — not the proxy's fault; surface as-is.
@@ -1952,7 +2008,8 @@ export class TauriToolAdapter implements ToolAdapter {
             }) as Promise<string>,
             (text) => detectHijack(text, { url: scrapeUrl, expectContent: true }).signal,
           );
-          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+          const served = await this.maybeExtract(scrapeUrl, args, data);
+          return { id: toolCall.id, toolName: name, result: served, success: true, duration: Date.now() - start };
         }
         case 'glob_files': {
           const globResult = await this.call('glob_files', {

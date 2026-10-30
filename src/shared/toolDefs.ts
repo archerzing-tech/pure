@@ -199,12 +199,13 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_fetch',
-    description: 'Fetch and extract readable text from a text/HTML/JSON/PDF page — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. If it still returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page.',
+    description: 'Fetch and extract readable text from a text/HTML/JSON/PDF page — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. Pages longer than ~8k characters are auto-condensed to key points before entering your context (the reply notes this and the original size); pass raw:true to bypass condensation when you need exact verbatim text (pair with maxChars to bound length). If it still returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page.',
     input_schema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'Full URL to fetch (https://...)' },
         maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
+        raw: { type: 'boolean', description: 'Return raw page text instead of the auto-extracted summary; use when you need exact verbatim quotes (pair with maxChars)' },
       },
       required: ['url'],
     },
@@ -225,13 +226,14 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_scrape',
-    description: 'Fetch a KNOWN URL and extract readable text: strips navigation/boilerplate, supports an optional #id/.class/tag selector, auto-formats RSS/Atom feeds and JSON, follows meta-refresh redirects, extracts text-based PDFs directly, and falls back across Jina Reader (free) → Wayback Machine → Firecrawl (optional key) for blocked, removed, JS-heavy, or binary pages. Use when you already have the URL; use researcher_web when you need to find one.',
+    description: 'Fetch a KNOWN URL and extract readable text: strips navigation/boilerplate, supports an optional #id/.class/tag selector, auto-formats RSS/Atom feeds and JSON, follows meta-refresh redirects, extracts text-based PDFs directly, and falls back across Jina Reader (free) → Wayback Machine → Firecrawl (optional key) for blocked, removed, JS-heavy, or binary pages. Pages longer than ~8k characters are auto-condensed to key points (the reply notes this); pass raw:true for exact verbatim text. Use when you already have the URL; use researcher_web when you need to find one.',
     input_schema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'Full URL to fetch (https://...)' },
         selector: { type: 'string', description: 'Optional scope: #id, .class, or a tag name (article, main)' },
         maxChars: { type: 'number', description: 'Max characters to return (default 20000, max 50000)' },
+        raw: { type: 'boolean', description: 'Return raw page text instead of the auto-extracted summary; use when you need exact verbatim quotes (pair with maxChars)' },
       },
       required: ['url'],
     },

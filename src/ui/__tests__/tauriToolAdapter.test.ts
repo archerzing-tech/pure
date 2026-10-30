@@ -3,7 +3,8 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk, resolveDownloadOutSpec, buildDownloadCommand } from '../TauriToolAdapter';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk, resolveDownloadOutSpec, buildDownloadCommand, type SummarizeForExtract } from '../TauriToolAdapter';
+import { resetExtractCache } from '../../shared/webExtract';
 import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
 import {
@@ -675,6 +676,81 @@ describe('Tauri egress routing', () => {
     // GitHub 加速（设置 → 通用）也在这条路上：镜像回退链必须和代理路由一起
     // 交下去，否则开了加速的安装仍然只走直连。
     expect(src).toContain('githubFallbackPrefixes(this.githubMirror, this.githubCustomMirror)');
+  });
+});
+
+// ── 期4 抓取后提炼层（maybeExtract）─────────────────────────────────────
+// 超阈值全文经宿主回调压成要点再进主上下文；raw 旁路、失败回退原文、
+// 缓存命中。行为级：fake invoke 供 web_fetch，stub 回调记调用次数。
+
+describe('web 抓取后提炼层', () => {
+  const LONG = '长'.repeat(9000);
+  let calls = 0;
+  const adapterWith = (summarize?: SummarizeForExtract, page = LONG) =>
+    new TauriToolAdapter('/ws', '', '', '', async (command) => {
+      if (command === 'web_fetch') return page;
+      throw new Error(`unexpected command: ${command}`);
+    }, '', '', undefined, '', undefined, false, '', '', summarize);
+
+  beforeEach(() => {
+    resetExtractCache();
+    calls = 0;
+  });
+  const counting = async (summary = '要点一二三'): Promise<string> => {
+    calls++;
+    return summary;
+  };
+
+  it('超阈值页面经回调提炼并以包裹头返回', async () => {
+    const summarize: SummarizeForExtract = async (url, text) => {
+      expect(url).toBe('https://example.com/long');
+      expect(text).toBe(LONG);
+      return counting();
+    };
+    const r = await adapterWith(summarize).execute(toolCall('web_fetch', { url: 'https://example.com/long' }));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('[已提炼');
+    expect(String(r.result)).toContain('约 9k 字符');
+    expect(String(r.result)).toContain('raw: true');
+    expect(String(r.result)).toContain('要点一二三');
+    expect(calls).toBe(1);
+  });
+
+  it('短页面不提炼，回调一次都不调', async () => {
+    const summarize: SummarizeForExtract = async () => counting();
+    const r = await adapterWith(summarize, '短页面').execute(toolCall('web_fetch', { url: 'https://example.com/short' }));
+    expect(String(r.result)).toBe('短页面');
+    expect(calls).toBe(0);
+  });
+
+  it('raw:true 旁路提炼直返原文', async () => {
+    const summarize: SummarizeForExtract = async () => counting();
+    const r = await adapterWith(summarize).execute(toolCall('web_fetch', { url: 'https://example.com/long', raw: true }));
+    expect(String(r.result)).toBe(LONG);
+    expect(calls).toBe(0);
+  });
+
+  it('回调抛错回退原文——提炼是增强，不许弄丢抓取结果', async () => {
+    const summarize: SummarizeForExtract = async () => { throw new Error('llm down'); };
+    const r = await adapterWith(summarize).execute(toolCall('web_fetch', { url: 'https://example.com/long' }));
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toBe(LONG);
+  });
+
+  it('空要点或越提越长都回退原文，不拿空壳冒充', async () => {
+    const blank: SummarizeForExtract = async () => '   ';
+    expect(String((await adapterWith(blank).execute(toolCall('web_fetch', { url: 'https://example.com/long' }))).result)).toBe(LONG);
+    const bloated: SummarizeForExtract = async () => `${LONG}更多`;
+    expect(String((await adapterWith(bloated).execute(toolCall('web_fetch', { url: 'https://example.com/long' }))).result)).toBe(LONG);
+  });
+
+  it('同页二次调用命中缓存，回调只调一次', async () => {
+    const summarize: SummarizeForExtract = async () => counting();
+    const adapter = adapterWith(summarize);
+    const first = await adapter.execute(toolCall('web_fetch', { url: 'https://example.com/long' }));
+    const second = await adapter.execute(toolCall('web_fetch', { url: 'https://example.com/long' }));
+    expect(String(second.result)).toBe(String(first.result));
+    expect(calls).toBe(1);
   });
 });
 

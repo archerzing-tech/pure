@@ -78,7 +78,8 @@ import {
 import { renderAttachmentCard } from './pasteChip';
 import { PlanProgressModel, shouldAdvancePlanAtTurnEnd, type PlanProgressSnapshot } from './planProgress';
 import { AutoContinueScheduler, AUTO_CONTINUE_DELAY_MS, DEFAULT_AUTO_CONTINUE_MAX_ROUNDS, type AutoContinueSignals } from './autoContinue';
-import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, takeToolDiff, type ImageGenContext } from './TauriToolAdapter';
+import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutputListener, registerDownloadProgressListener, cancelDownload, takeGeneratedImages, takeToolDiff, type ImageGenContext, type SummarizeForExtract } from './TauriToolAdapter';
+import { buildExtractPrompt } from '../shared/webExtract';
 import { buildDiffRows, type ToolDiffData } from './toolDiff';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
@@ -1414,8 +1415,26 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
   };
 }
 
+/**
+ * 期4 抓取后提炼层的宿主回调:超长网页正文用当前配置的模型压成要点(一次
+ * 非流式 complete,暗思考关——提炼是机械活,不值得付 10-35s 的首字代价,
+ * 见 isLightTurn 的实测注)。构造失败(无 key/无配置)返回 undefined,
+ * adapter 侧抓取行为与旧版完全一致。
+ */
+function extractSummarizerFor(config: PureConfig): SummarizeForExtract | undefined {
+  let adapter: import('../shared/types').LLMAdapter;
+  try {
+    adapter = createLLMAdapter(config, { disableThinking: true });
+  } catch {
+    return undefined;
+  }
+  return (url, text, signal) =>
+    adapter.complete([{ role: 'user', content: buildExtractPrompt(url, text) }], [], signal)
+      .then((res) => res.content);
+}
+
 function createToolAdapter(workspace: string, config: PureConfig, sessionId = '', capabilityHooks?: DynamicCapabilityHooks): ToolAdapter {
-  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true, config.githubMirror ?? 'direct', config.customGithubMirror ?? '');
+  const inner = new TauriToolAdapter(workspace, config.tavilyApiKey, config.serperApiKey, config.city, undefined, sessionId, effectiveProxyUrl(config.proxy), imageGenContextFor(config), config.searxngUrl, capabilityHooks, config.sandboxCommands === true, config.githubMirror ?? 'direct', config.customGithubMirror ?? '', extractSummarizerFor(config));
   // A tool is available only when the settings toggle allows it. The caller
   // supplies either the selected user workspace or the session's application
   // temporary workspace, so filesystem tools have a valid root in both modes.

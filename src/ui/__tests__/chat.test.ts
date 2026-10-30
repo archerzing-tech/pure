@@ -2249,6 +2249,24 @@ describe('first-token preflight budgets', () => {
   });
 });
 
+// 期4 抓取后提炼层:宿主回调经 createToolAdapter 尾参注入 adapter。锚住三
+// 个接线点——工厂构造(disableThinking,提炼是机械活不付暗思考首字代价)、
+// prompt 同源(shared/webExtract)、注入位(构造尾参)。提炼调用链的行为
+// (阈值/raw 旁路/失败回退/缓存)在 tauriToolAdapter.test.ts 钉。
+describe('web 抓取后提炼层的宿主接线', () => {
+  const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+
+  it('extractSummarizerFor 用当前配置的模型且关暗思考', () => {
+    expect(src).toContain('createLLMAdapter(config, { disableThinking: true })');
+    expect(src).toContain('adapter.complete([{ role: \'user\', content: buildExtractPrompt(url, text) }], [], signal)');
+  });
+
+  it('回调经构造尾参注入 TauriToolAdapter', () => {
+    expect(src).toContain("config.customGithubMirror ?? '', extractSummarizerFor(config));");
+    expect(src).toContain("import { buildExtractPrompt } from '../shared/webExtract';");
+  });
+});
+
 // 「计划必须是当着用户想出来的」（2026-09-26 用户定调）：规则出卡退出主路径，
 // 思考流式可见且不套提纲，失败必须安静（上一代 LLM 预分析就死在噪音上）。
 describe('plan-by-thinking flow', () => {

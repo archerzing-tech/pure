@@ -78,3 +78,26 @@ describe('tool table consistency', () => {
     expect(tagged?.tags).not.toContain('write');
   });
 });
+
+// 期4 抓取后提炼层:模型可见的抓取面(web_scrape;web_fetch 是隐藏兼容别名)
+// 必须声明 raw 旁路,描述写明提炼行为——模型不知道 raw 存在,「需要精确原文」
+// 就成了死胡同。注意 web_fetch 在 DELIBERATELY_HIDDEN 里,模型看不见它,
+// 这里只锁 schema 契约本身。
+describe('web 抓取后提炼层契约', () => {
+  const schemaProps = (name: string): Record<string, unknown> => {
+    const def = BUILT_IN_TOOL_DEFS.find((d) => d.name === name);
+    expect(def).toBeDefined();
+    return (def!.input_schema as { properties: Record<string, unknown> }).properties;
+  };
+
+  it('web_scrape 声明 raw 旁路且描述写明提炼行为', () => {
+    expect(schemaProps('web_scrape').raw).toBeDefined();
+    const def = BUILT_IN_TOOL_DEFS.find((d) => d.name === 'web_scrape')!;
+    expect(def.description).toContain('raw:true');
+    expect(def.description).toContain('auto-condensed');
+  });
+
+  it('web_fetch(隐藏兼容别名)schema 同步带 raw', () => {
+    expect(schemaProps('web_fetch').raw).toBeDefined();
+  });
+});
