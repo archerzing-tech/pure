@@ -235,6 +235,14 @@ export class AgentLoopEngine {
     // idle-timeout may be auto-resumed (see the THINK catch) so a pathological
     // stall can't loop forever.
     let streamResumes = 0;
+    // 空正文流超时的专属短阶梯（2026-10-30 判例）：「5 consecutive failures
+    // … timed out after 2m」——流读超时曾被塞进为工具死循环设计的 5 级
+    // identical-call 阶梯，重发同 payload 白等 5×2m=10 分钟才停。LLM 调用
+    // 没有模型可「跳过/换法」的自由度，基础设施抖动的重试上限必须短：第 1
+    // 次静默重试渡过瞬时抖动（池已由 adapter 清过），第 2 次仍超时说明是
+    // 持续性故障，直接停，真话交还。
+    let streamTimeoutRepeats = 0;
+    const MAX_STREAM_TIMEOUT_RETRIES = 2;
     // continueGuard re-entries this run (plan-incomplete nudges), and
     // disconnected-tool-call recoveries (stream cut off mid tool call).
     let guardContinues = 0;
@@ -625,6 +633,26 @@ export class AgentLoopEngine {
           messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
+        // 空正文（或半截工具调用）的流超时：走上面的专属短阶梯，不进通用
+        // identical-call 阶梯（那是给模型有「跳过/换法」自由度的工具死循环
+        // 设计的——LLM 调用的 payload 由引擎拼装，注入换法指令改变不了
+        // 什么，只会把白等拖满 5×2m）。第 1 次静默重试渡过瞬时抖动；第 2
+        // 次仍超时 = 持续性故障，立即停。停时不做收尾轮——服务端刚连卡
+        // 两次，handover 大概率再卡满 2 分钟。
+        if (isTimeout) {
+          streamTimeoutRepeats++;
+          if (streamTimeoutRepeats >= MAX_STREAM_TIMEOUT_RETRIES) {
+            const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次在传输中无响应（每次等待 2 分钟后放弃）——服务端或中转链路在流中卡住了，不是你的网络问题（每次重试都是新建的连接）。本回合已停止；可直接重新发送，或稍后再试。`;
+            yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
+            const salvaged = await salvageStopMessages(messages);
+            messages.length = 0;
+            messages.push(...salvaged);
+            yield { type: 'Interrupted', payload: { reason: stopReason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            interrupted = true; break;
+          }
+          yield { type: 'StreamResuming', payload: { attempt: streamTimeoutRepeats, max: MAX_STREAM_TIMEOUT_RETRIES, reason: 'timeout' }, timestamp: Date.now() };
           continue;
         }
         failures.push({ type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount });

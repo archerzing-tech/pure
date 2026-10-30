@@ -61,3 +61,33 @@ describe('StreamResuming:静默续跑必须自己开口', () => {
     expect(body).toContain('pendingRows.size === 0 && pendingByName.size === 0');
   });
 });
+
+describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
+  const engine = readSource(new URL('../AgentLoopEngine.ts', import.meta.url));
+
+  it('上限 2 次而不是 5 级 identical-call 阶梯(白等 10 分钟判例)', () => {
+    expect(engine).toContain('let streamTimeoutRepeats = 0;');
+    expect(engine).toContain('const MAX_STREAM_TIMEOUT_RETRIES = 2;');
+    // 空正文超时不 push 进通用 failures 阶梯:短阶梯分支先于 failures.push 生效。
+    const ladderAt = engine.indexOf('        if (isTimeout) {');
+    expect(ladderAt).toBeGreaterThan(-1);
+    expect(engine.slice(ladderAt, ladderAt + 1400)).toContain('streamTimeoutRepeats++');
+  });
+
+  it('第 2 次停时说真话:链路卡住不是用户网络问题,可直接重发', () => {
+    expect(engine).toContain('服务端或中转链路在流中卡住了，不是你的网络问题');
+    expect(engine).toContain('本回合已停止；可直接重新发送，或稍后再试。');
+  });
+
+  it('停时不做收尾轮:刚连卡两次,handover 大概率再卡满 2 分钟', () => {
+    const stopAt = engine.indexOf('const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次');
+    const tail = engine.slice(stopAt, engine.indexOf('interrupted = true; break;', stopAt));
+    expect(tail).not.toContain('emitHandover');
+    expect(tail).toContain('salvageStopMessages');
+    expect(tail).toContain("type: 'Interrupted'");
+  });
+
+  it('第 1 次重试也开口(StreamResuming,attempt 计短阶梯自己的数)', () => {
+    expect(engine).toContain("yield { type: 'StreamResuming', payload: { attempt: streamTimeoutRepeats, max: MAX_STREAM_TIMEOUT_RETRIES, reason: 'timeout' }, timestamp: Date.now() };");
+  });
+});
