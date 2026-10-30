@@ -456,17 +456,17 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(oldReplace).toBe(-1);
   });
 
-  it('opens the thinking card before any preflight await (runtime probe, workspace probing)', () => {
+  it('schedules the thinking card before any preflight await (runtime probe, workspace probing)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // The eager trace opens right before the runtime probe — before the
-    // workspace scan — so the user never stares at a frozen transcript between
-    // the user bubble and the first token. The plan gate reuses that same card.
-    const eager = src.indexOf("thinkingCard = openThinkingCard();\n      setThinkingLabel(thinkingCard, '正在准备…');");
-    const reuse = src.indexOf('const earlyAnalysisCard = shouldRunTaskAnalysis ? thinkingCard : null;');
+    // 2026-10-30 反转：pre 秒开改为 1.2s 延迟排程（快回合不闪卡），但排程
+    // 仍必须发生在任何 preflight await 之前——卡的出现时机可以延迟，反馈
+    // 的挂账不能晚于探针/工作区扫描。任务分析回合拿到早卡时立即开。
+    const scheduled = src.indexOf('schedulePreflightCard();');
+    const reuse = src.indexOf('earlyAnalysisCard = thinkingCard ?? (thinkingCard = openThinkingCard());');
     const firstProbe = src.indexOf('await discoverWorkspace(');
-    expect(eager).toBeGreaterThan(-1);
+    expect(scheduled).toBeGreaterThan(-1);
     expect(reuse).toBeGreaterThan(-1);
-    expect(firstProbe).toBeGreaterThan(eager);
+    expect(firstProbe).toBeGreaterThan(scheduled);
   });
 
   it('streams a visible planning round between the probe and the plan card (2026-09-26 反转)', () => {
@@ -712,10 +712,24 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     expect(cardSrc).not.toContain('startThinkingHints');
     expect(cardSrc).not.toContain('正在理解你的需求');
     expect(cardSrc).not.toContain('正在准备好执行计划');
-    // 改为在真实阶段边界设置诚实标签：预检探查期与引擎循环等待首 token 时。
+    // 改为在真实阶段边界设置诚实标签：任务分析期的读取工作区标签保留。
     expect(src).toContain("setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…')");
-    expect(src).toContain("setThinkingLabel(thinkingCard, '等待模型首字返回…')");
     expect(src.indexOf('正在分析你的请求…')).toBe(-1);
+  });
+
+  it('首字前的等待卡延迟出卡：快回合（deepseek hello 1-2s）不再闪卡', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 2026-10-30 真机判例：回合开局立刻开等待卡，快回合就是一闪而过的杂讯。
+    // 延迟闸 + 三个首字事件的 cancel + 收尾清 timer，缺一不可。
+    expect(src).toContain('const PREFLIGHT_CARD_DELAY_MS = 1_200;');
+    expect(src).toContain('const cancelPreflightCard = (): void => {');
+    expect(src).toContain('const schedulePreflightCard = (): void => {');
+    // 两个排程点（preflight 与引擎请求发出后）都走同一闸门，幂等。
+    expect(src.match(/schedulePreflightCard\(\)/g)?.length).toBeGreaterThanOrEqual(2);
+    // 三个真实内容事件都取消排程：正文/工具行/思考流。
+    expect(src).toContain('cancelPreflightCard();\n            cancelToolGapCard();'); // ReasoningDelta
+    // 「等待模型首字返回…」期1 漏网标签退役：等待是常态，常态不念叨。
+    expect(src).not.toContain('等待模型首字返回');
   });
 
   it('passes explicit approval into the plan prompt so execution starts immediately', () => {

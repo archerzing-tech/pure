@@ -4827,10 +4827,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       }
     };
     // Drop the live trace on aborted turns (pre-flight cancel / plan gate
-    // rejection / fatal error) — a "正在准备…" card must not linger as a
+    // rejection / fatal error) — a preflight waiting card must not linger as a
     // ghost when the turn never produced output.
     const removeThinkingCard = (): void => {
       cancelToolGapCard();
+      cancelPreflightCard();
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
         thinkingFlushTimer = undefined;
@@ -4868,6 +4869,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const LIGHT_TURN_THINKING_CHARS = 600;
     const endThinking = (mode: 'answer' | 'handoff' = 'handoff') => {
       cancelToolGapCard();
+      cancelPreflightCard();
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
         thinkingFlushTimer = undefined;
@@ -4993,6 +4995,32 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       scheduleNetDiagnosis(card, hintAfterMs);
       return card;
     };
+    // ── 首字前的等待卡：延迟出卡（2026-10-30 真机判例） ────────────────────
+    // deepseek hello 首字 1-2s、glm-5.3-flash reasoning 首字 1-4s（z.ai 端点
+    // 当日实测，思考参数各形态不敏感）——回合开局立刻开等待卡，快回合就是
+    // 一闪而过的杂讯卡（用户点名「这个等是怎么发生的」）。卡是给「安静」用
+    // 的：延迟窗内正文/思考/工具行先上屏，就当没这回事；慢回合到期出卡，
+    // 默认「思考」标签+点画动画即心跳。标签不再点名「等首字」——等待是
+    // 常态不是异常，常态不念叨（期1 呈现纪律的漏网收口）。
+    const PREFLIGHT_CARD_DELAY_MS = 1_200;
+    let preflightCardTimer: number | undefined;
+    const cancelPreflightCard = (): void => {
+      if (preflightCardTimer !== undefined) {
+        clearTimeout(preflightCardTimer);
+        preflightCardTimer = undefined;
+      }
+    };
+    const schedulePreflightCard = (): void => {
+      if (thinkingCard || preflightCardTimer !== undefined) return;
+      preflightCardTimer = window.setTimeout(() => {
+        preflightCardTimer = undefined;
+        if (gen !== this.generation || this.abortController?.signal.aborted) return;
+        if (thinkingCard) return;
+        thinkingCard = openThinkingCard();
+        thinkingCard.card.classList.add('waiting');
+        this.scrollUi(chatEl);
+      }, PREFLIGHT_CARD_DELAY_MS);
+    };
     // `null as … | null`: TS control-flow can't see the assignment inside
     // maybeShowAssessment() (a closure), so without the widening cast it keeps
     // narrowing assessmentFlow to null and the later `if (assessmentFlow)`
@@ -5073,15 +5101,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // application temporary workspace is a real filesystem root for this
       // session, while web tools remain available independently.
       const usingTemporaryWorkspace = !sendWorkspace && !!effectiveWorkspace;
-      // Eager feedback: open the live trace BEFORE the remaining preflight
-      // (runtime probe, request assessment) so the user never stares at a
-      // frozen transcript between the user bubble and the first token. The
-      // label tracks the real phase; the first streamed reasoning delta
-      // replaces the waiting text with live content. The same card is reused
-      // as the task-analysis trace and (for plain turns) the engine's
-      // thinking card, so exactly one card exists per turn.
-      thinkingCard = openThinkingCard();
-      setThinkingLabel(thinkingCard, '正在准备…');
+      // Eager feedback 的延迟版（2026-10-30）：preflight 立即开卡在快回合
+      // （deepseek hello 首字 1-2s、glm reasoning 首字 1-4s）读作一闪而过
+      // 的杂讯卡（用户点名）。改为 1.2s 延迟排程——排程窗内首字/工具行先
+      // 上屏就当没这回事，慢回合到期照常出卡。任务分析回合在下方拿到早卡
+      // 时立即开（有真实 trace 要写），不受此闸。
+      schedulePreflightCard();
       // One-shot runtime probe (node/bun/python3/rustc/git versions) — the cached
       // promise resolves in ms after the first send; awaiting here guarantees
       // the first turn already carries the runtimes line in its prompt.
@@ -5108,6 +5133,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 路由裁决此刻已经在手（routeFetch 在回合开头就发出去了，已与记忆落库、
       // 运行时探针并行），于是用它决定这一回合付不付深度推理的首字代价。实测
       // （glm-5.3-flash，同一段提示词）：暗思考开首字 10.9–35.1s / 关 2.4–3.9s。
+      // 2026-10-30 z.ai 端点四参数形态复测（hello，各 2-3 轮）：thinking 各
+      // 形态（enabled+low / disabled / enabled / 不带）首字无显著差异
+      // （reason 1-4s、content 6-9s）——「关 2.4-3.9s」是历史服务端状态，
+      // 参数层已无杠杆，快回合的观感由呈现层延迟闸承担（见 preflight 卡）。
       // 闲聊（地板已定）与路由明说 simple 的活都不值得为一段思考空等十几秒；
       // 复杂活、以及用户明令的 plan/build（forcedMode）保持主档。工作形态但没有
       // 裁决（路由超时兜底）也保守留主档——不确定就当复杂。
@@ -5643,8 +5672,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       );
       // The live trace opened before the preflight doubles as the analysis
       // card — one continuous feedback row instead of two stacked cards.
-      const earlyAnalysisCard = shouldRunTaskAnalysis ? thinkingCard : null;
-      if (earlyAnalysisCard) setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…');
+      // 早卡在此刻才真正需要：立即开（分析 trace 有真实内容要写），取消
+      // 尚未到期的延迟排程；延迟窗已出卡则直接复用。
+      let earlyAnalysisCard: ThinkingCardHandle | null = null;
+      if (shouldRunTaskAnalysis) {
+        cancelPreflightCard();
+        earlyAnalysisCard = thinkingCard ?? (thinkingCard = openThinkingCard());
+        setThinkingLabel(earlyAnalysisCard, '正在读取工作区，并结合你的目标判断…');
+      }
       let workspaceProfile: WorkspaceProfile | undefined;
       // 探针本身只读、快速，照常先行（结果用于给 LLM 分析做 grounding）；但它的
       // 结论气泡不再此刻弹出——等 LLM 分析完成后由 reportProbeFindings() 统一呈现。
@@ -6315,20 +6350,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // for the first token; reasoning deltas upgrade it with live text. A
       // plain turn (no task analysis) reuses the card opened before the
       // preflight; analysis turns get a fresh card below the plan card.
-      if (!thinkingCard) thinkingCard = openThinkingCard();
-      // Waiting for the engine's first token: a stable honest label keeps the
-      // card alive (dots animate) without pretending to do specific work; the
-      // first streamed reasoning delta replaces it with real content. The
-      // label names the real state (request sent, no token yet) instead of
-      // the generic "思考", so a retry notice later reads as a DIFFERENT
-      // cause (network) rather than more of the same wait.
-      setThinkingLabel(thinkingCard, '等待模型首字返回…');
-      // Mark this card as a silence-waiter (same as the tool-gap card below):
-      // 'waiting' is what lets resetThinkingLabelForOutput flip the label to
-      // "思考" on the first ReasoningDelta. Without it the first-token label
-      // matched neither reset path and stayed stuck over visibly streaming
-      // reasoning text — reading as "still waiting" while tokens arrive.
-      thinkingCard.card.classList.add('waiting');
+      // 引擎请求已发出：等待卡同样走 1.2s 延迟闸（幂等，preflight 已排程
+      // 则不重复）——快回合首字/工具行先到，卡永远不出现；慢回合到期出
+      // 卡，默认「思考」标签+点画动画即心跳。期1 漏网的「等首字」标签随
+      // 本次退役（呈现纪律收口）：等待是常态不是异常，常态不念叨；首个
+      // reasoning delta 经 waiting 类把标签翻回「思考」的链路不变。
+      schedulePreflightCard();
+      if (thinkingCard) thinkingCard.card.classList.add('waiting');
       // A new user turn is explicit intent to continue at the bottom: re-pin
       // even if the user had scrolled up to re-read history (the pin normally
       // survives until a manual scroll-away, but a fresh send must resume
@@ -6677,6 +6705,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               const delta = event.payload.content;
               if (delta) {
                 markFirstToken();
+                cancelPreflightCard();
                 // Answer text is now visibly streaming: schedule the hint's
                 // 1s linger BEFORE endThinking finalizes the card, so a showing
                 // hint survives finalize and completes its own fade.
@@ -6825,6 +6854,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
 
           case 'ToolStarted': {
+            cancelPreflightCard();
             // 代执行回合（fold-in 补跑）的委派卡在这里落地：合成回合完全跳过
             // 模型流式调用，TokenDelta 里永远等不到它的 id 分块——没有这条
             // 兜底，追加的委派在后台跑得欢，对话流里却一张卡都不出（用户实测
@@ -6857,6 +6887,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const content = event.payload.content;
             if (!content) break;
             markFirstToken();
+            cancelPreflightCard();
             cancelToolGapCard();
             // Reasoning can resume after tool rows (each LLM iteration), so a
             // fresh card opens below whatever was appended since the last one.
