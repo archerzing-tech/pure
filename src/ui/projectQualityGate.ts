@@ -1,5 +1,5 @@
 import type { ToolAdapter, ToolCall, ToolResult } from '../shared/types';
-import { buildVerificationPlan, classifyDeliveryFailure, type DeliveryEvidence, type DeliveryFailureKind, type WorkspaceProfile } from '../shared/delivery';
+import { buildVerificationPlan, classifyDeliveryFailure, isVerificationCommand, type DeliveryEvidence, type DeliveryFailureKind, type WorkspaceProfile } from '../shared/delivery';
 import { detectShellPlatform } from '../shared/shellEnv';
 
 export type QualityGatePhase = 'review' | 'audit' | 'verify';
@@ -406,12 +406,9 @@ function buildPowerShellVerifyCommand(profile?: WorkspaceProfile): string {
   return `$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Continue'; if (Test-Path -LiteralPath 'package.json') { $runner = if ((Test-Path -LiteralPath 'bun.lock') -or (Test-Path -LiteralPath 'bun.lockb')) { 'bun' } else { 'npm' }; $package = Get-Content -Raw -LiteralPath 'package.json' | ConvertFrom-Json; if ($package.scripts.typecheck) { & $runner run typecheck; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; if ($package.scripts.lint) { & $runner run lint; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; $testFiles = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '(?:^|[\\/])(?:node_modules|dist|build|target|\.git)(?:[\\/]|$)' -and $_.Name -match '(?:\.test|\.spec)\.[cm]?[jt]sx?$|(?:^|test_).+\.py$' }; if (-not $package.scripts.test -or -not $testFiles) { Write-Output '[verify-missing-tests] package.json must contain a test script and a discoverable test file/directory'; exit 1 }; if ($runner -eq 'bun') { & bun test } else { & npm test }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; if ($package.scripts.build) { & $runner run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } } elseif (Test-Path -LiteralPath 'Cargo.toml') { & cargo check; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & cargo test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & cargo build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } elseif (Test-Path -LiteralPath 'go.mod') { & go test ./...; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } elseif ((Test-Path -LiteralPath 'pyproject.toml') -or (Test-Path -LiteralPath 'pytest.ini')) { if (-not (Get-Command pytest -ErrorAction SilentlyContinue)) { Write-Output '[verify-unavailable] pytest is not installed'; exit 127 }; & pytest; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } else { Write-Output '[verify-not-applicable] no standard test manifest' }; Write-Output '[verify-complete]'; exit 0`;
 }
 
-/** True when a shell command is a verification/check invocation (typecheck,
- * tests, build, lint, audit…). Used to credit a build phase with the model's
- * own verification evidence before the automatic backstop kicks in. */
-export function isVerificationCommand(command: string): boolean {
-  return /(?:npm run (?:typecheck|test|build|lint|check|verify)|npm test|bun (?:test|run (?:typecheck|test|build|lint|check))|pnpm (?:test|run (?:typecheck|test|build|lint|check))|tsc(?: --noEmit)?|cargo (?:test|build|check|clippy)|pytest|python -m pytest|vitest|jest|go test|make (?:test|check)|flutter test|flutter analyze)/i.test(command);
-}
+// 2026-10-31 审计 P2-6：判定逻辑单源在 shared/delivery.ts（两份正则此前逐字
+// 相同，纯重复），这里 re-export 保住既有导入面（含本目录测试）。
+export { isVerificationCommand };
 
 async function runVerification(
   tools: ToolAdapter,

@@ -1,8 +1,14 @@
 import { describe, it, expect } from 'bun:test';
 import { createDefaultRichRenderers, normalizePlantumlSource } from '../headlessRenderer';
 import { readDevToolsPort } from '../headlessChrome';
+import * as sharedPlantumlSource from '../../../shared/plantumlSource';
 
 describe('normalizePlantumlSource', () => {
+  // 2026-10-31 审计 P2-5：单源在 shared/plantumlSource.ts，本模块只是 re-export。
+  it('导出的就是 shared 单源函数本体', () => {
+    expect(normalizePlantumlSource).toBe(sharedPlantumlSource.normalizePlantumlSource);
+  });
+
   it('wraps a bare body in @startuml/@enduml', () => {
     expect(normalizePlantumlSource('A -> B')).toEqual(['@startuml', 'A -> B', '@enduml']);
   });

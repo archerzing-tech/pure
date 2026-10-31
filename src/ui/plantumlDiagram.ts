@@ -23,6 +23,11 @@
 //     every call goes through one promise queue.
 
 import { t } from '../shared/i18n';
+import { normalizePlantumlSource } from '../shared/plantumlSource';
+
+// 归一化单源在 shared/plantumlSource.ts（2026-10-31 审计 P2-5）；这里再导出，
+// 图内聊天的既有导入方不受影响。
+export { normalizePlantumlSource };
 
 /** Where viz-global.js is served from (see the plantumlAssets plugin). */
 const VIZ_SCRIPT_URL = '/plantuml/viz-global.js';
@@ -139,61 +144,6 @@ function serialize<T>(job: () => Promise<T>): Promise<T> {
   const run = renderQueue.then(job, job);
   renderQueue = run.then(() => undefined, () => undefined);
   return run;
-}
-
-const START_LINE = /^\s*@start([a-z0-9_]+)\b/i;
-const END_LINE = /^\s*@end([a-z0-9_]+)\b/i;
-// Models sometimes nest a fenced block inside the fenced block they are
-// answering with; a fence-only line is never part of a diagram.
-const FENCE_LINE = /^\s*```[a-z]*\s*$/i;
-
-function endTagFor(startLine: string): string {
-  const tag = START_LINE.exec(startLine)?.[1];
-  return tag ? `@end${tag}` : '@enduml';
-}
-
-/**
- * Turn a model-authored ```puml block into engine input.
- *
- * The engine renders exactly what it is handed, so the raw block is normalized
- * first: BOM/CRLF stripped, nested fence lines dropped, prose before `@startuml`
- * and anything after `@enduml` discarded, and a MISSING wrapper added — models
- * routinely answer with a bare body (`Alice -> Bob: hi`) or forget `@enduml`,
- * and both used to end in a blank card. Returns [] when nothing is left.
- */
-export function normalizePlantumlSource(source: string): string[] {
-  const lines = source
-    .replace(/\uFEFF/g, '')
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .filter((line) => !FENCE_LINE.test(line));
-
-  const startIndex = lines.findIndex((line) => START_LINE.test(line));
-  if (startIndex === -1) {
-    // No wrapper: keep the body, drop any stray closing tag, then wrap it.
-    const body = lines.filter((line) => !END_LINE.test(line));
-    const trimmed = trimBlankLines(body);
-    return trimmed.length === 0 ? [] : ['@startuml', ...trimmed, '@enduml'];
-  }
-
-  const body = trimBlankLines(lines.slice(startIndex));
-  if (body.length === 0) return [];
-  let endIndex = -1;
-  for (let i = body.length - 1; i >= 0; i--) {
-    if (END_LINE.test(body[i])) {
-      endIndex = i;
-      break;
-    }
-  }
-  return endIndex === -1 ? [...body, endTagFor(body[0])] : body.slice(0, endIndex + 1);
-}
-
-function trimBlankLines(lines: string[]): string[] {
-  let start = 0;
-  let end = lines.length;
-  while (start < end && lines[start].trim() === '') start++;
-  while (end > start && lines[end - 1].trim() === '') end--;
-  return lines.slice(start, end);
 }
 
 /**

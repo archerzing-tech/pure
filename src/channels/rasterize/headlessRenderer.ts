@@ -10,6 +10,7 @@
 // richOutput 走「没有可用的 headless 渲染器」的降级分支。渲染中途失败则返回
 // null，走「渲染失败」分支。两条路都不让附件生成拖垮回复本身。
 import type { RichRenderers } from '../richOutput';
+import { normalizePlantumlSource } from '../../shared/plantumlSource';
 import { buildBrowserBundle, resolveModuleEntry } from './browserBundle';
 import { HeadlessChrome, findChromePath } from './headlessChrome';
 import { createLocalRichRenderers, rasterizeSvg } from './localRenderer';
@@ -51,22 +52,13 @@ function pumlEntry(): string {
 }
 
 /**
- * 归一化 PlantUML 源码成引擎要的行数组：补上模型常忘的 @startuml/@enduml。
- * 与 `src/ui/plantumlDiagram.ts` 的 normalizePlantumlSource 同一目标，但这里保持
- * 纯字符串处理 —— gateway 侧不该为几张图把 UI 模块（及其 i18n/DOM 依赖）拖进来。
+ * 归一化 PlantUML 源码（2026-10-31 审计 P2-5 起为 re-export）：单源实现在
+ * `src/shared/plantumlSource.ts`，相比本文件旧有的宽松变体补齐了 BOM 清理、
+ * 嵌套 fence 过滤、@start 前散文丢弃与按图类型补 @end —— 此前两侧分叉，
+ * 同一段 puml 图内能成图、通道投影渲染失败。shared/ 侧是纯字符串处理，
+ * 不会为几张图把 UI 模块（及其 i18n/DOM 依赖）拖进 gateway。
  */
-export function normalizePlantumlSource(source: string): string[] {
-  const lines = source.replace(/\r\n?/g, '\n').split('\n').map((line) => line.replace(/\s+$/, ''));
-  while (lines.length > 0 && lines[0].trim() === '') lines.shift();
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-  if (lines.length === 0) return [];
-  const hasStart = lines.some((line) => line.trim().startsWith('@start'));
-  const hasEnd = lines.some((line) => line.trim().startsWith('@end'));
-  if (!hasStart && !hasEnd) return ['@startuml', ...lines, '@enduml'];
-  if (!hasStart) return ['@startuml', ...lines];
-  if (!hasEnd) return [...lines, '@enduml'];
-  return lines;
-}
+export { normalizePlantumlSource };
 
 /**
  * 建一个 headless 渲染器。没有 Chrome 就返回空对象 —— 调用方据此知道

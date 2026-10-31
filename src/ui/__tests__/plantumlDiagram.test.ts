@@ -12,6 +12,15 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { normalizePlantumlSource, renderPlantumlToSvg } from '../plantumlDiagram';
+import * as sharedPlantumlSource from '../../shared/plantumlSource';
+
+// 2026-10-31 审计 P2-5：UI 与 gateway 必须共用同一份归一化实现（单源在
+// shared/plantumlSource.ts）。若有人在这里重新养出一份本地副本，此断言立即红。
+describe('normalizePlantumlSource 单源', () => {
+  it('plantumlDiagram 导出的就是 shared 单源函数本体', () => {
+    expect(normalizePlantumlSource).toBe(sharedPlantumlSource.normalizePlantumlSource);
+  });
+});
 
 const RENDER_TIMEOUT_MS = 60_000;
 
