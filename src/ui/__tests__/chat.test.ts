@@ -822,40 +822,6 @@ describe('user bubble double-click select-all', () => {
   });
 });
 
-describe('footer context-window estimate', () => {
-  it('caches the real system+tool overhead measured at prompt assembly', () => {
-    const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 底部进度条必须复用 send() 里真实装配的系统提示词 + 工具定义开销，而不是
-    // 拿一个静态近似值当真理——否则启动/恢复时的占用百分比会和真实上下文脱节。
-    const cache = src.indexOf('this.contextOverhead = {');
-    expect(cache).toBeGreaterThan(-1);
-    expect(src.slice(cache, cache + 220)).toContain('estimatePromptTokens(systemPrompt)');
-    expect(src.slice(cache, cache + 220)).toContain('estimateToolDefinitionTokens(promptTools)');
-    expect(src).toContain('getContextOverheadTokens(): { system: number; tools: number }');
-  });
-
-  it('denominates the bar against the full context window using the POST-compaction load', () => {
-    const src = readSource(new URL('../main.ts', import.meta.url));
-    const render = src.indexOf('function renderContextWindowBar(): void {');
-    expect(render).toBeGreaterThan(-1);
-    const seg = src.slice(render, render + 1900);
-    expect(seg).toContain('const windowTokens = budget.contextWindowTokens ?? 0;');
-    // The bar shows what the next request will actually carry (the engine's
-    // post-compaction estimate), NOT the raw transcript — raw history is
-    // never sent as-is once it overflows, which is exactly why a "100%"
-    // raw reading kept working.
-    expect(seg).toContain('const rawMessageTokens = estimateMessageTokens(chat.getMessages());');
-    expect(seg).toContain('const last = chat.getLastCompaction();');
-    expect(seg).toContain('const used = last ? last.estimatedTokens : rawUsed;');
-    // 空会话（还没对话）不显示占用，避免“一句话都没说就用了 X%”的错觉。
-    expect(seg).toContain('rawMessageTokens <= 0');
-    expect(seg).toContain('value > 90');
-    // Compaction is visible: suffix + tooltip say when trimming is active.
-    expect(seg).toContain('compacted');
-    expect(src).toContain('function contextOverheadTokens(): { system: number; tools: number } {');
-  });
-});
-
 describe('plan overview completion state', () => {
   it('finalizes the chat plan card on completion without depending on phase markers', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));

@@ -4336,54 +4336,6 @@ body.window-maximized #boot-splash {
   color: var(--text-tertiary);
 }
 
-/* Footer context-window budget: slim progress bar + % chip, measuring the
-   live transcript against the provider's available input budget. On narrow
-   windows the text label drops first (same policy as #status-model). */
-.status-window {
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.status-window-label {
-  font-size: 10.5px;
-  color: var(--text-tertiary);
-}
-
-.status-window-track {
-  width: 68px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--border-light);
-  overflow: hidden;
-}
-
-.status-window-track i {
-  display: block;
-  height: 100%;
-  width: 0%;
-  border-radius: inherit;
-  background: var(--accent);
-  transition: width 0.3s var(--ease-out), background 0.3s var(--ease-out);
-}
-
-.status-window.over .status-window-track i {
-  background: var(--danger);
-}
-/* Compaction active: raw history overflows the input budget and the engine
-   trims a copy per request — the pct suffix (·压) and accent color tell the
-   user this is being managed, not broken. */
-.status-window.compacted .status-window-pct {
-  color: var(--accent);
-}
-
-.status-window-pct {
-  min-width: 2.6em;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-secondary);
-  text-align: right;
-}
-
 /* ── Settings Header ── */
 #settings-header {
   position: relative;
@@ -7835,13 +7787,8 @@ select:focus-visible,
   }
 
   /* Narrow windows: the model badge is the least critical piece of the
-     footer — drop it before the workspace path or the live state. The
-     context-window label goes next, keeping bar + % chip visible. */
+     footer — drop it before the workspace path or the live state. */
   #status-model {
-    display: none;
-  }
-
-  .status-window-label {
     display: none;
   }
 

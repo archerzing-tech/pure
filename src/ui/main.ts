@@ -6,7 +6,7 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, BASE_SYSTEM_PROMPT, buildStatusRow, type TimedInputRequest } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, buildStatusRow, type TimedInputRequest } from './chat';
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
@@ -30,8 +30,7 @@ import { loadSession, loadSessionList, loadSessionStatsForList, flushSessionSave
 import type { Language as I18nLanguage } from '../shared/i18n';
 import { showToast, showToastHtml } from '../shared/toast';
 import { copyTextToClipboard } from '../shared/clipboard';
-import { providerDef, PROVIDERS, defaultModelFor, customProviderLabel, promptBudgetForProvider, estimatePromptTokens, estimateToolDefinitionTokens, imageGenEnabled, type ProviderId } from '../shared/providers';
-import { resolvePromptBudget } from '../shared/PromptAssembler';
+import { PROVIDERS, defaultModelFor, customProviderLabel, type ProviderId } from '../shared/providers';
 import type { Message } from '../shared/types';
 import { ComposerSelect } from './composerSelect';
 import { wireComposerDraft } from './composerDraft';
@@ -45,9 +44,6 @@ import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { setupWindowChrome } from './windowChrome';
-import { getWebToolDefs, getSysInfoToolDefs } from './TauriToolAdapter';
-import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../shared/dynamicCapabilityTools';
-import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
@@ -929,10 +925,6 @@ function updateStatusBar() {
 
 function updateContextPanelStage(streaming = chat.isStreaming()) {
   updateStatusBar();
-  // The footer progress bar tracks the live transcript; refresh it on every
-  // streaming state change so it reflects the newest estimate at turn start
-  // and end (cheap: one pass over the messages per transition).
-  renderContextWindowBar();
 }
 
 // ── Boot splash ──
@@ -2441,103 +2433,6 @@ function renderSessionStats() {
   // Command rows are copyable: a hover-revealed copy button copies the raw
   // command (without the ✗ failure prefix shown in the label).
   renderStatsList('stat-cmd-list', stats.commands, (c) => (c.success ? '' : '✗ ') + c.command, undefined, (c) => c.command);
-
-  // Footer context-window progress bar refreshes alongside the numbers.
-  renderContextWindowBar();
-}
-
-// ── 上下文窗口估算 ──
-// The footer gauge estimates the CURRENT context occupancy (fixed system +
-// tool-schema overhead plus the live transcript), not the cumulative usage
-// counter (sessionStats.usage.promptTokens is summed across turns). Message
-// estimation uses shared/tokenEstimate so the bar reads in the same units
-// the engine budgets in.
-import { estimateTextTokens } from '../shared/tokenEstimate';
-
-function estimateMessageTokens(messages: Message[]): number {
-  let total = 0;
-  for (const m of messages) {
-    total += estimateTextTokens(m.content ?? '');
-    for (const tc of m.toolCalls ?? []) total += estimateTextTokens(tc.function?.arguments ?? '');
-  }
-  return total;
-}
-
-// ── Footer context-window progress bar ──
-// The persistent status footer shows the estimated context occupancy as a slim
-// progress bar (the old ring chart lived in the right panel): the fixed
-// system + tool-schema overhead plus the live transcript, against the model's
-// FULL context window — not the input-only budget (availableInputTokens
-// subtracts the output reservation and safety margin, which inflated the
-// percentage and made a fresh sentence look nearly full). Refreshed on turn
-// end, restore, and streaming changes.
-
-/** Fixed system + tool-schema overhead. Prefers the exact numbers chat.ts
- * measured when it last assembled a real prompt; before the first send
- * (fresh session / restore) a static approximation covers the same pieces. */
-function contextOverheadTokens(): { system: number; tools: number } {
-  const measured = chat.getContextOverheadTokens();
-  if (measured.system > 0 || measured.tools > 0) return measured;
-  const cfg = loadConfig();
-  const hasWorkspace = !!chat.getWorkspace();
-  const tools = [
-    ...(cfg?.toolBrowser ? getWebToolDefs() : []),
-    ...getSysInfoToolDefs(),
-    ...DYNAMIC_CAPABILITY_TOOL_DEFS,
-    ...(imageGenEnabled(cfg?.customProviders, cfg?.provider, cfg?.model) ? [IMAGE_GEN_TOOL_DEF] : []),
-  ];
-  return {
-    system: estimatePromptTokens(BASE_SYSTEM_PROMPT(hasWorkspace, false)),
-    tools: estimateToolDefinitionTokens(tools),
-  };
-}
-
-function renderContextWindowBar(): void {
-  const wrap = document.getElementById('status-window');
-  const bar = document.getElementById('status-window-bar');
-  const pct = document.getElementById('status-window-pct');
-  if (!wrap || !bar || !pct) return;
-  const config = loadConfig();
-  const budget = resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides));
-  const windowTokens = budget.contextWindowTokens ?? 0;
-  const inputBudget = budget.availableInputTokens ?? 0;
-  const overhead = contextOverheadTokens();
-  const rawMessageTokens = estimateMessageTokens(chat.getMessages());
-  const rawUsed = rawMessageTokens + overhead.system + overhead.tools;
-  // 还没有任何对话（空会话/刚启动）时不显示占用——单显示系统+工具的固定开销会
-  // 让用户以为“还没说话就用了 X%”。有了消息后固定开销才与对话一起计入。
-  if (windowTokens <= 0 || rawMessageTokens <= 0) {
-    bar.style.width = '0%';
-    pct.textContent = '—';
-    wrap.classList.remove('over');
-    wrap.classList.remove('compacted');
-    wrap.title = t('stats.contextWindow');
-    return;
-  }
-  // 口径修正：显示的不是原始历史（它一旦超窗就会被裁剪，从不原样发送），
-  // 而是引擎最近一次压缩后的真实装载量——下一次请求实际会携带的 token 数，
-  // 与请求同口径。这就是“显示 100% 却还能正常对话”的原因：100% 量的是
-  // 原始历史，实际发送的是裁剪后的副本。
-  const last = chat.getLastCompaction();
-  const used = last ? last.estimatedTokens : rawUsed;
-  // 压缩生效中：引擎丢弃/总结了较早消息（或原始历史已超出输入预算）。
-  const compacted = !!last && (last.compacted || last.evictedMessages > 0 || rawUsed > used + 64);
-  const value = Math.min(100, (used / windowTokens) * 100);
-  bar.style.width = `${Math.max(1, value)}%`;
-  pct.textContent = trimmedLabel(Math.round(value), compacted);
-  // 警示线：压缩后的真实装载超过 90%，或引擎报告压缩后仍超输入预算（此时
-  // 请求才会真的逼近模型上限）。
-  const over = value > 90 || (last?.overBudget === true) || (inputBudget > 0 && used > inputBudget);
-  wrap.classList.toggle('over', over);
-  wrap.classList.toggle('compacted', compacted);
-  const compactNote = compacted
-    ? `（已自动压缩：原始约 ${formatTokens(rawUsed)}，裁剪 ${last?.evictedMessages ?? 0} 条较早消息；旧内容不影响继续对话）`
-    : '';
-  wrap.title = `${t('stats.contextWindow')}：${t('stats.windowUsed')} ${formatTokens(used)} / ${formatTokens(windowTokens)}${compactNote}`;
-}
-
-function trimmedLabel(value: number, compacted: boolean): string {
-  return compacted ? `${value}%·压` : `${value}%`;
 }
 
 function renderFileWriteGroups(

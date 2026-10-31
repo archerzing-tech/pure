@@ -1769,10 +1769,6 @@ export class ChatController {
   private sessionArtifacts: ArtifactItem[] = [];
   private sessionArtifactSeen = new Set<string>();
   private projectDirectoryShown = false;
-  /** 最近一次上下文装配（send 构建 systemPrompt + promptTools）的真实固定开销
-   * （系统提示词 + 工具定义 token 估算），与底部上下文窗口进度条共用口径；
-   * 尚未发过消息时为 0，由 main.ts 的静态近似兜底（启动/恢复场景）。 */
-  private contextOverhead = { system: 0, tools: 0 };
   // 待办队列卡与插话收执微光账已随呈现层契约退役（2026-10-28）：
   // 对话流里引擎不发声，排队由回显气泡 + 收尾模型自然话表达，账本仍在
   // RoundClosePlane。
@@ -2847,9 +2843,9 @@ export class ChatController {
     return this.sessionStats;
   }
 
-  /** Live transcript messages (current context). Used by the context-panel
-   * charts to estimate the context window actually consumed right now —
-   * sessionStats.usage.promptTokens is cumulative across turns, not current. */
+  /** Live transcript messages (current context). Consumers: session title
+   * extraction and main.ts message helpers — sessionStats.usage.promptTokens
+   * is cumulative across turns, not current. */
   getMessages(): Message[] {
     return this.messages;
   }
@@ -2863,20 +2859,6 @@ export class ChatController {
     return this.messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' }));
-  }
-
-  /** 最近一次 send 装配的上下文固定开销（系统提示词 + 工具定义 token 估算），
-   * 与底部上下文窗口进度条共用口径。 */
-  getContextOverheadTokens(): { system: number; tools: number } {
-    return this.contextOverhead;
-  }
-
-  /** The engine's latest POST-compaction estimate — the exact token load the
-   *  next request would carry (system + tools + trimmed transcript). Null
-   *  before the first send. The raw transcript is never sent as-is once it
-   *  overflows; this is the number that actually matters. */
-  getLastCompaction(): ContextCompactionResult | null {
-    return this.contextEngine?.getLastCompactionResult?.() ?? null;
   }
 
   private updateTurnCount(turnCount: number, persist = false): void {
@@ -5527,11 +5509,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           ];
       const conventions = await loadGuiConventions(effectiveWorkspace || undefined);
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions, (userMessageAttachments?.length ?? 0) > 0);
-      // 缓存本次真实装配的固定开销，供底部上下文窗口进度条读取（与引擎估算同口径）。
-      this.contextOverhead = {
-        system: estimatePromptTokens(systemPrompt),
-        tools: estimateToolDefinitionTokens(promptTools),
-      };
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):
@@ -9557,14 +9534,6 @@ export class SessionChatManager {
 
   getMessages(): Message[] {
     return this.activeNow().getMessages();
-  }
-
-  getContextOverheadTokens(): { system: number; tools: number } {
-    return this.activeNow().getContextOverheadTokens();
-  }
-
-  getLastCompaction(): ContextCompactionResult | null {
-    return this.activeNow().getLastCompaction();
   }
 
   async undoLastWriteBatch(): Promise<WorkspaceRestoreResult> {

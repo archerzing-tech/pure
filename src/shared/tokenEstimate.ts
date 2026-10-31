@@ -1,7 +1,7 @@
 // src/shared/tokenEstimate.ts
 // Canonical CJK-aware token estimation shared by every token-accounting site:
 // engine/BudgetManager, harness/ContextEngine, PromptAssembler (via
-// providers.estimatePromptTokens), and the GUI footer gauge. One formula so
+// providers.estimatePromptTokens). One formula so
 // every surface reads and budgets in the same units.
 //
 // CJK characters are dense: most tokenizers spend ~1 token per CJK char while
