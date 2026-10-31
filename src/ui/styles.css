@@ -9578,6 +9578,13 @@ button svg,
 .map-slot[data-map-state="error"] .map-error {
   display: flex;
 }
+/* 错误态只留「查看数据」：刷新/展开对一段注定 parse 失败的 raw 都没有
+   成效（点了原地复发），藏掉而不是挂着误导。 */
+.map-slot[data-map-state="error"] .map-refresh,
+.map-slot[data-map-state="error"] .map-expand,
+.map-slot[data-map-state="error"] .map-expand-hint {
+  display: none;
+}
 .map-slot .map-error strong {
   font-weight: 600;
 }

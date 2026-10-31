@@ -113,6 +113,7 @@ const translations: Record<Language, Record<string, string>> = {
     'map.refresh': '刷新地图',
     'map.sourceToggle': '查看数据',
     'map.sourceHide': '收起数据',
+    'map.truncatedInterrupted': '生成在数据块中途被打断，这段数据不完整，已略去。',
     'map.expand': '展开地图',
     'map.close': '关闭',
 
@@ -1458,6 +1459,7 @@ const translations: Record<Language, Record<string, string>> = {
     'map.refresh': 'Refresh map',
     'map.sourceToggle': 'View data',
     'map.sourceHide': 'Hide data',
+    'map.truncatedInterrupted': 'Generation was interrupted mid-block — this data was incomplete and has been dropped.',
     'map.expand': 'Expand map',
     'map.close': 'Close',
 

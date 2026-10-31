@@ -234,6 +234,52 @@ export function normalizeMapFence(src: string): string {
   );
 }
 
+/**
+ * Settled-render tail hygiene. An interrupted turn can stop mid-fence: the
+ * model was streaming a ```map payload when an interjection settled the turn,
+ * and the persisted text ends INSIDE the fence. Parsing that half payload
+ * through the map slot is a guaranteed parse failure — a visible error card
+ * whose retry can never succeed (it re-parses the same broken raw; seen live
+ * in the 骑行郑州 session, transcript entry with a lone opening fence).
+ * Truncate the unterminated slot fence from its opening line: the data was
+ * never complete, so there is nothing honest to render; the prose above it
+ * survives, and replay/reopen get the same treatment because every settled
+ * render funnels through renderMarkdown. Plain code fences stay untouched —
+ * a half code block still renders fine as code.
+ */
+function stripUnterminatedSlotFences(text: string): string {
+  const lines = text.split('\n');
+  let open = -1;
+  let marker = '';
+  let info = '';
+  for (let i = 0; i < lines.length; i++) {
+    if (open === -1) {
+      const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+      if (!m) continue;
+      // marked semantics: a ``` opening line whose info string contains a
+      // backtick is a paragraph, not a fence.
+      if (m[1][0] === '`' && (m[2] ?? '').includes('`')) continue;
+      open = i;
+      marker = m[1];
+      info = m[2] ?? '';
+    } else {
+      // Closing line: same character, at least as long, no info string.
+      const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(lines[i]);
+      if (m && m[1][0] === marker[0] && m[1].length >= marker.length) {
+        open = -1;
+        marker = '';
+        info = '';
+      }
+    }
+  }
+  // 口径与 slot 挂载同源：langOf(小写化首词) + slotFenceLang(九类 slot 栏)。
+  if (open === -1 || !slotFenceLang(langOf(info))) return text;
+  const kept = lines.slice(0, open).join('\n');
+  // 整条消息只剩半截围栏时留一行真话，避免渲染出一只无声的空气泡。
+  if (kept.trim() === '') return `*${t('map.truncatedInterrupted')}*`;
+  return kept;
+}
+
 // Raw HTML in assistant output: render it as escaped text instead of live
 // markup. Models sometimes emit stray <div>/<br>/<b> tags in prose or in
 // "show me how this looks" examples; letting marked inject them unescaped would
@@ -2416,9 +2462,11 @@ function setMapState(slot: HTMLElement, state: 'loading' | 'preview' | 'error', 
   slot.setAttribute('aria-busy', String(state === 'loading'));
   const error = slot.querySelector<HTMLElement>('.map-error');
   if (error) {
+    // 地图的错误态只有两个来源——payload parse 失败与结构缺 canvas——都是
+    // 确定性失败：重试重 parse 的永远是同一段坏 raw。错误卡只留「查看数据」，
+    // 不给一个点了必然原地复发的重试按钮（真机判例：重试被连环点击无成效）。
     error.innerHTML = state === 'error'
-      ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>` +
-        `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>`
+      ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>`
       : '';
   }
   if (state !== 'preview') {
@@ -2491,8 +2539,9 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
       parsed = mod.parseMapSource(mapRawOf(slot));
     } catch (err) {
       // A malformed map payload is deterministic — retrying never fixes it —
-      // so this is the ONE map failure that stays visible (with the retry
-      // button and the raw source view). Everything transient is silent.
+      // so this is the ONE map failure that stays visible (with the raw
+      // source view). No retry button: it would re-parse the same broken
+      // raw and land here again. Everything transient is silent.
       if (!isCurrentDiagramRender(slot, version)) continue;
       const raw = err instanceof Error ? err.message : String(err);
       setMapState(slot, 'error', raw.includes('map 数据') ? raw : t('diagram.renderFailed'));
@@ -2633,10 +2682,6 @@ function bindMapControls(container: HTMLElement): void {
     for (const btn of slot.querySelectorAll<HTMLButtonElement>('.map-expand, .map-expand-hint')) {
       btn.addEventListener('click', openLightbox);
     }
-    slot.addEventListener('click', (event) => {
-      if (!(event.target as Element | null)?.closest('.diagram-retry')) return;
-      retryMapSlot(slot);
-    });
   }
 }
 
@@ -2687,7 +2732,9 @@ export async function renderMarkdown(
   // as plain text rather than mojibake. Suggested-followups comments come out
   // before parsing — they never render as prose, only as chips at the end.
   const { text: stripped, questions: suggestedQuestions } = extractSuggestedFollowups(stripAnsi(text));
-  const html = (md.parse(normalizeMapFence(stripped), { async: false }) as string).replace(/\n+$/, '');
+  // 中断回合可能停在 slot 围栏中途——半截数据不进渲染管线(见函数注释)。
+  const settled = stripUnterminatedSlotFences(stripped);
+  const html = (md.parse(normalizeMapFence(settled), { async: false }) as string).replace(/\n+$/, '');
   // Defense-in-depth: the custom renderer already escapes raw HTML and
   // restricts link/image schemes, but sanitize the final HTML anyway so any
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
