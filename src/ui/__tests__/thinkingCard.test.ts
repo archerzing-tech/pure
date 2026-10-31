@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, dismissThinkingHint, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput } from '../thinkingCard';
+import { collapseRepeatedReasoning, createThinkingCard, startThinkingTimer, stopThinkingTimer, finalizeThinkingCard, reopenThinkingCard, dismissThinkingHint, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput } from '../thinkingCard';
 
 beforeAll(() => {
   if (typeof document === 'undefined') GlobalRegistrator.register();
@@ -338,6 +338,29 @@ describe('live thinking card timer (long-silence feedback)', () => {
     expect(handle.card.querySelector('.thinking-timer')).toBeNull();
     expect(handle.card.classList.contains('complete')).toBe(true);
     expect(handle.card.querySelector<HTMLElement>('.thinking-label')!.textContent).toMatch(/· \d+s$/);
+    handle.el.remove();
+  });
+
+  it('reopen revives a finalized card: live state back, frozen label and dots restored, content kept', () => {
+    const handle = attachedCard();
+    handle.textEl.textContent = '思考前半。';
+    finalizeThinkingCard(handle);
+    expect(handle.card.classList.contains('complete')).toBe(true);
+    expect(handle.card.querySelector('.thinking-dots')).toBeNull();
+
+    reopenThinkingCard(handle);
+    // live 态还原:thinking 类回位、dots 重建、label 回「思考中」(不带冻结时长)。
+    expect(handle.card.classList.contains('thinking')).toBe(true);
+    expect(handle.card.classList.contains('complete')).toBe(false);
+    expect(handle.card.querySelector('.thinking-dots')).not.toBeNull();
+    const label = handle.card.querySelector<HTMLElement>('.thinking-label')!.textContent ?? '';
+    expect(label).not.toMatch(/· \d+s$/);
+    // 内容是 reopen 的全部意义:前半原文一字不动。
+    expect(handle.textEl.textContent).toContain('思考前半。');
+    // 往返稳定:finalize → reopen → finalize 不炸、不重复 dots。
+    finalizeThinkingCard(handle);
+    reopenThinkingCard(handle);
+    expect(handle.card.querySelectorAll('.thinking-dots').length).toBe(1);
     handle.el.remove();
   });
 

@@ -387,3 +387,26 @@ export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
   }
   handle.card.querySelector('.thinking-dots')?.remove();
 }
+
+/** Revive a finalized card: the model went back to reasoning after answer
+ *  text — the SAME reasoning stream, not a new phase. Reopening the existing
+ *  card (instead of opening a second one) keeps one continuous thinking card
+ *  the user can read top to bottom; the caller moves `handle.el` to the
+ *  transcript tail and restarts the timer chip. The frozen "思考完成 · Ns"
+ *  label is restored to the live thinking state, dots included. */
+export function reopenThinkingCard(handle: ThinkingCardHandle): void {
+  handle.card.classList.remove('complete');
+  handle.card.classList.add('thinking');
+  const label = handle.card.querySelector<HTMLElement>('.thinking-label');
+  if (label) label.textContent = t('thinking.thinking');
+  if (!handle.card.querySelector('.thinking-dots')) {
+    const dots = document.createElement('span');
+    dots.className = 'thinking-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('i'));
+    // 原始顺序是 icon → dots → label；icon 在则插回它后面，不在则挂最前。
+    const icon = handle.card.querySelector<HTMLElement>('.thinking-icon');
+    if (icon) icon.insertAdjacentElement('afterend', dots);
+    else handle.card.querySelector('.thinking-toggle')?.prepend(dots);
+  }
+}

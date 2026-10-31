@@ -100,7 +100,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScro
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, extractPartialToolArgs, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
-import { createThinkingCard, appendThinkingText, finalizeThinkingCard, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
+import { createThinkingCard, appendThinkingText, finalizeThinkingCard, reopenThinkingCard, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
 import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
@@ -4824,6 +4824,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // first content/tool delta, and nulled so a later reasoning phase (after
     // tool results) opens a fresh card below whatever it followed.
     let thinkingCard: ThinkingCardHandle | null = null;
+    // 刚 finalize 的卡(2026-10-31 真机判例:思考与正文交错/正文极短时,一段
+    // 思考被拆成前后两张卡)。reasoning 恢复若紧跟同一思考流, reopen 这张卡
+    // 续写而不是开新卡——一张卡从头读到尾,落盘也合回一段。
+    // `null as … | null`: 赋值发生在 endThinking 闭包里,不加宽 TS 会把
+    // 声明的 null 当终态、把恢复分支的读取推成 never(同 assessmentFlow)。
+    let lastThinkingCard: ThinkingCardHandle | null = null as ThinkingCardHandle | null;
     // 长结果的消化笔记（2026-10-15 用户实测：读很长文件/写很大文件后下一问
     // 的首字等待拉得很长，屏幕上却只剩「等待模型…」，读作卡死）。每个
     // ToolResult 落定时记下「最近一次大结果的工具公体量」，工具间隔卡与
@@ -4981,6 +4987,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       }
       resetThinkingLabelForOutput(thinkingCard);
       finalizeThinkingCard(thinkingCard);
+      // 记下刚折叠的卡(仅 answer 模式):正文打断思考后 reasoning 若恢复,
+      // 是同一思考流的续写,ReasoningDelta 会 reopen 这张卡而不是开第二张。
+      // 工具行隔开的是新思考段(新 LLM 迭代),保持各自一张卡的设计不记。
+      if (mode === 'answer') lastThinkingCard = thinkingCard;
       thinkingCard = null;
     };
     // Stop the streaming caret on every text bubble the moment a tool row is
@@ -5060,6 +5070,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       startThinkingTimer(card, { hintAfterMs });
       scheduleNetDiagnosis(card, hintAfterMs);
       return card;
+    };
+    // reopen 恢复卡时计时线用同一参数(openThinkingCard 同款),不复制表达式。
+    const reviveThinkingTimer = (card: ThinkingCardHandle): void => {
+      const hintAfterMs = firstTokenHintTimeoutMs(config.provider, config.model || customDefaultModel(config.customProviders ?? [], config.provider));
+      startThinkingTimer(card, { hintAfterMs });
+      scheduleNetDiagnosis(card, hintAfterMs);
     };
     // ── 首字前的等待卡：延迟出卡（2026-10-30 真机判例） ────────────────────
     // deepseek hello 首字 1-2s、glm-5.3-flash reasoning 首字 1-4s（z.ai 端点
@@ -6963,8 +6979,36 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             cancelPreflightCard();
             cancelToolGapCard();
             // Reasoning can resume after tool rows (each LLM iteration), so a
-            // fresh card opens below whatever was appended since the last one.
-            if (!thinkingCard) thinkingCard = openThinkingCard();
+            // fresh card opens below whatever was appended since the last one —
+            // EXCEPT when the SAME reasoning stream resumes right after answer
+            // text finalized its card (interleaved thinking, or a sliver of
+            // prose splitting one thought in half — 真机两形态判例). Reopen
+            // that card and move it to the transcript tail: one continuous
+            // card readable top to bottom, and the persisted phase stays ONE
+            // segment (the push guard below sees a non-empty textEl).
+            // 正文后的静默可能已开出空 waiting 壳(「正在思考下一步…」)——壳
+            // 没收到过内容就让位给续写卡,否则壳长出后半、与前卡构成两张。
+            const waitingShell = !!thinkingCard
+              && thinkingCard !== lastThinkingCard
+              && thinkingCard.card.classList.contains('waiting')
+              && !thinkingCard.textEl.textContent;
+            const resumingSameStream = !!lastThinkingCard && (!thinkingCard || waitingShell);
+            if (resumingSameStream) {
+              // 判据已保证 lastThinkingCard 非空;别名让 TS 的 narrowing 通过
+              // (赋值链里 thinkingCard 经历 null 中转,控制流推不出非空)。
+              const resumed = lastThinkingCard as ThinkingCardHandle;
+              lastThinkingCard = null;
+              if (thinkingCard) thinkingCard.el.remove();
+              thinkingCard = resumed;
+              reopenThinkingCard(resumed);
+              // appendChild on an attached node MOVES it: the card jumps below
+              // the answer prose that finalized it, so the resumed reasoning
+              // reads in order instead of growing inside a card sitting above.
+              this.appendToTranscript(resumed.el);
+              reviveThinkingTimer(resumed);
+            } else if (!thinkingCard) {
+              thinkingCard = openThinkingCard();
+            }
             // First real reasoning after a silence-waiter or recovery label
             // resets the card back to its default thinking state.
             resetThinkingLabelForOutput(thinkingCard);
