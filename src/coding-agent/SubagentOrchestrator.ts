@@ -733,8 +733,10 @@ export class SubagentOrchestrator implements ToolAdapter {
         } else if (event.type === 'FailurePolicyDecision') {
           // 第 2 期第四刀：failurePolicy 的 retry/reflect 是子代理自己的自愈
           // 线（不清状态、不动状态机）——发 branch_retrying 让卡片亮灯，父与
-          // 兄弟支零感知。degrade/stop 是往失败走的路，不在此列（重试耗尽
-          // 落已失败是另一条结算路）。
+          // 兄弟支零感知。degrade/stop 是往失败走的路，不算自愈重试（重试耗
+          // 尽落已失败是另一条结算路），但 degrade 注入指令后引擎还要继续跑
+          // 下一轮 THINK（首字要再等满首字上限）——活性必须 kick，否则这段
+          // 静默叠进 watchdog 的账；stop 就近结算，无需。
           const action = event.payload.action;
           if (action.kind === 'retry' || action.kind === 'reflect') {
             retryAttempt++;
@@ -745,6 +747,8 @@ export class SubagentOrchestrator implements ToolAdapter {
               attempt: retryAttempt,
               retryCause: event.payload.failure?.message,
             });
+          } else if (action.kind === 'degrade') {
+            kickWatchdog();
           }
         } else if (event.type === 'SteerInjected') {
           // 插话已并入子代理的下一轮 THINK —— 给活动卡一条可见回执（lifecycle
@@ -766,6 +770,31 @@ export class SubagentOrchestrator implements ToolAdapter {
           const entry = toolTrace.get(event.payload.toolCallId);
           if (entry) entry.status = event.payload.result?.success ? 'completed' : 'failed';
           emit(progress?.onTool, { toolName: event.payload.toolName, toolState: 'completed', lifecycle: 'observing', toolTrace: [...toolTrace.values()] });
+        } else if (event.type === 'StreamResuming') {
+          // 自愈重试链的活性凭证（2026-10-31「概率性子代理中断」根因刀）：
+          // StreamResuming 之后是退避 sleep + 一整轮等满流超时上限的静默，
+          // 期间没有 TokenDelta 可 kick。连续两三个静默恢复循环累计超过
+          // noProgressMs，watchdog 把「正在自愈」误判成 wedged 杀掉——红卡
+          // "no progress for N minutes" + 部分产出抢救，即真机看到的「中断前
+          // 已产出的部分内容」。重试链有自身上限（MAX_STREAM_RESUMES /
+          // MAX_STREAM_TIMEOUT_RETRIES），不需要 watchdog 兜底；kick 重排后
+          // 真死（连自愈事件都没有）仍会被抓。播 retrying 让卡片亮灯，与
+          // branch_retrying 同视觉语言——重试中不是无声灰卡。
+          kickWatchdog();
+          emit(progress?.onState, {
+            state: 'RETRY',
+            lifecycle: 'retrying',
+            attempt: event.payload.attempt,
+            retryCause: `stream ${event.payload.reason}`,
+          });
+        } else if (event.type === 'ContextCompactRetry') {
+          // 压缩借道 = 一次完整的非流式摘要 LLM 调用（60s 上限）+ 之后的重发，
+          // 压缩中不是卡死（引擎侧 yield 注释同一理由）。start 播报亮灯即可，
+          // done 不重复；两个 stage 都 kick——压缩往返整体都是活性。
+          kickWatchdog();
+          if (event.payload.stage === 'start') {
+            emit(progress?.onState, { state: 'RETRY', lifecycle: 'retrying', attempt: event.payload.attempt, retryCause: 'compacting context' });
+          }
         } else if (event.type === 'Completed') {
           // T1 — copy the delegation's own token split for per-role cost
           // accounting. `tokensUsed` (the TokenDelta count) stays as-is: both

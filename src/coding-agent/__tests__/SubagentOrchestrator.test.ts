@@ -8,6 +8,7 @@
 // clean Completed event — no network, no real provider.
 
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { SubagentOrchestrator, deriveSubagentBudget, makeAgentId, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
@@ -1420,5 +1421,43 @@ describe('SubagentOrchestrator probeResumeCheckpoint (第 2 期第三刀)', () =
     // 参数变了 = 另一支：稳定 sessionId 分叉，不误报命中。
     expect(SubagentOrchestrator.probeResumeCheckpoint(store, 'parentX', 'test_researcher', '{"prompt":"different task"}'))
       .toEqual({ hit: false, turns: 0 });
+  });
+});
+
+// ── 自愈静默的活性凭证(2026-10-31「概率性子代理中断」根因刀)──
+// 引擎自愈链(StreamResuming 重试 / ContextCompactRetry 压缩借道 / degrade
+// 注入后续跑)的静默窗口没有 TokenDelta 可 kick watchdog——连续两三个静默
+// 恢复循环累计超过 noProgressMs,watchdog 把「正在自愈」误判成 wedged 杀掉
+// (红卡 "no progress for 5 minutes" + 部分产出抢救,即真机看到的「中断前
+// 已产出的部分内容」)。行为窗口(首 token 90s 硬编码 + 退避真实 sleep)无法
+// 在单测里快速构造,按契约测试风格锁事件循环的三处 kick 与播报。
+describe('SubagentOrchestrator self-heal silence keeps the watchdog fed (source contracts)', () => {
+  const src = readFileSync(new URL('../SubagentOrchestrator.ts', import.meta.url), 'utf8');
+
+  it('StreamResuming kicks the watchdog and lights the card as retrying', () => {
+    const branch = src.indexOf("event.type === 'StreamResuming'");
+    expect(branch).toBeGreaterThan(-1);
+    const body = src.slice(branch, branch + 900);
+    expect(body).toContain('kickWatchdog()');
+    expect(body).toContain("lifecycle: 'retrying'");
+    expect(body).toContain('event.payload.attempt');
+  });
+
+  it('ContextCompactRetry kicks the watchdog (compaction round-trip is liveness)', () => {
+    const branch = src.indexOf("event.type === 'ContextCompactRetry'");
+    expect(branch).toBeGreaterThan(-1);
+    const body = src.slice(branch, branch + 500);
+    expect(body).toContain('kickWatchdog()');
+    // 只在 start 播报亮灯;done 只 kick 不重复。
+    expect(body).toContain("event.payload.stage === 'start'");
+  });
+
+  it('a degrade directive keeps the watchdog fed (the next THINK wait rides on it)', () => {
+    const decision = src.indexOf("event.type === 'FailurePolicyDecision'");
+    expect(decision).toBeGreaterThan(-1);
+    const body = src.slice(decision, src.indexOf("event.type === 'SteerInjected'", decision));
+    expect(body).toContain("action.kind === 'degrade'");
+    const degrade = body.indexOf("action.kind === 'degrade'");
+    expect(body.slice(degrade, degrade + 120)).toContain('kickWatchdog()');
   });
 });
