@@ -1320,9 +1320,10 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     const adapter = mirrorFirstAdapter(commands, 'auto', (cmd) => !cmd.includes(`url='${GH}'`) || cmd.includes('ghfast.top/'));
     const out = await adapter.execute(toolCall('download_file', { url: GH }));
     expect(out.success).toBe(true);
-    expect(commands).toHaveLength(2);
+    // 先断言每一跳的身份再断言跳数：跳数挂时能直接看到第一跳到底是什么。
     expect(commands[0]).toContain(`url='${GH}'`);
     expect(commands[1]).toContain(`url='https://ghfast.top/${GH}'`);
+    expect(commands).toHaveLength(2);
     const parsed = JSON.parse(String(out.result)) as { rewrite?: { rule?: string } };
     expect(parsed.rewrite?.rule).toBe('github-mirror:ghfast');
   });

@@ -355,11 +355,27 @@ export const DEAD_ROUTE_TTL_MS = 5 * 60_000;
 const learned = new Map<string, HealthEntry>();
 let loaded = false;
 
-/** 清空学习记忆（含未落盘部分）。仅供测试隔离使用：路由学习是模块级单例，
- *  任何真实下载路径都会写入记录，跨文件跑测试时会把 resolveNetRoute 的
- *  断言翻面（2026-10-26 download_file 镜像测试踩中）。 */
+/** 清空学习记忆（含已落盘部分——只清内存的话，loaded 拨回 false 后下一次
+ *  ensureLoaded 会把 localStorage 里的旧账原样灌回来，隔离形同虚设）。
+ *  仅供测试隔离使用：路由学习是模块级单例，任何真实下载路径都会写入记录，
+ *  跨文件跑测试时会把 resolveNetRoute 的断言翻面（2026-10-26 download_file
+ *  镜像测试踩中；2026-10-31 Windows CI 补刀——同进程内前一组用例 persist 的
+ *  github.com 死亡记录会在下一组用例的读侧复活，把「无证据直连先行」翻成
+ *  镜像先行）。要模拟「重启后从存档重读」，先 reset 再播种 localStorage，
+ *  然后走 reloadLearnedRoutesForTests。 */
 export function resetLearnedRoutes(): void {
   learned.clear();
+  loaded = false;
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(STORE_KEY);
+  } catch {
+    // 无 localStorage 或被禁用时内存清空即已足够。
+  }
+}
+
+/** 只丢弃内存表、保留存档，下一次读取时从 localStorage 重灌。与 reset
+ *  配对构成「重启模拟」：reset（全清）→ 播种存档 → reload → 断言。 */
+export function reloadLearnedRoutesForTests(): void {
   loaded = false;
 }
 

@@ -460,8 +460,10 @@ describe('proxyHealth（代理健康行）', () => {
     netRoute.recordProxyProbe(P, false, t0);
     const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
     expect(raw[`proxy:${P}`]).toEqual({ proxy: true, at: t0, ok: false, deadUntil: t0 + netRoute.PROXY_DEAD_TTL_MS });
-    // 模拟重启：内存表清空、从存档重读，死期结论仍然成立。
+    // 模拟重启：全清后原样回放存档、重读，死期结论仍然成立。
     netRoute.resetLearnedRoutes();
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify(raw));
+    netRoute.reloadLearnedRoutesForTests();
     expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('dead');
   });
 
@@ -472,8 +474,9 @@ describe('proxyHealth（代理健康行）', () => {
       [`proxy:${P}`]: { proxy: true }, // 缺 at/ok —— 结构不完整，丢弃
       'bad-row.test': { proxy: 'yes' }, // 既非 proxy 行也非 route 行
     };
-    localStorage.setItem('pure.netRoute.v1', JSON.stringify(legacy));
     netRoute.resetLearnedRoutes();
+    localStorage.setItem('pure.netRoute.v1', JSON.stringify(legacy));
+    netRoute.reloadLearnedRoutesForTests();
     expect(netRoute.resolveNetRoute('legacy-host.test', true, t0 + 1)).toBe('proxy');
     expect(netRoute.proxyHealthInfo(P, t0 + 1).state).toBe('unknown');
   });
@@ -497,7 +500,10 @@ describe('latencyEma（响应头时延学习，双路归槽）', () => {
   it('persists slot EMA through a reload', () => {
     const t0 = Date.now() - 1_000;
     netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0, 320);
+    const archived = localStorage.getItem('pure.netRoute.v1');
     netRoute.resetLearnedRoutes();
+    localStorage.setItem('pure.netRoute.v1', archived!);
+    netRoute.reloadLearnedRoutesForTests();
     // 重载后再来一次同路成功，EMA 应从存档里的 320 起步而非重置：
     // 320×0.7 + 80×0.3 = 248
     netRoute.recordNetOutcome('ema-persist.test', 'proxy', true, t0 + 1, 80);
@@ -516,11 +522,12 @@ describe('latencyEma（响应头时延学习，双路归槽）', () => {
 
   it('legacy single-slot latencyEma migrates into the route-matched slot on load', () => {
     const t0 = Date.now() - 1_000;
+    netRoute.resetLearnedRoutes();
     localStorage.setItem('pure.netRoute.v1', JSON.stringify({
       'legacy-direct.test': { route: 'direct', at: t0, latencyEma: 120 },
       'legacy-proxy.test': { route: 'proxy', at: t0, latencyEma: 900 },
     }));
-    netRoute.resetLearnedRoutes();
+    netRoute.reloadLearnedRoutesForTests();
     // 迁移落槽后，一次同路成功就在双槽上混合，而不是重置：
     // direct 120×0.7+300×0.3=174；proxy 900×0.7+100×0.3=660
     netRoute.recordNetOutcome('legacy-direct.test', 'direct', true, t0 + 1, 300);
@@ -586,6 +593,7 @@ describe('谁快用谁（双路时延裁定）', () => {
     // 判回 1.5s 的爬行代理。跨启动场景过期行在读档时即丢，样本不参与
     // （读档过滤走 at，本用例钉的是运行期路径）。
     const t = Date.now();
+    netRoute.resetLearnedRoutes();
     localStorage.setItem('pure.netRoute.v1', JSON.stringify({
       'expire.openai.com': {
         route: 'proxy',
@@ -594,7 +602,7 @@ describe('谁快用谁（双路时延裁定）', () => {
         latencyEmaDirect: 200,
       },
     }));
-    netRoute.resetLearnedRoutes();
+    netRoute.reloadLearnedRoutesForTests();
     // now 拨到 +2min：行在选路面变为 31min 前 = 过期，走抢救分支。
     expect(netRoute.resolveNetRoute('expire.openai.com', true, t + 2 * 60_000, P)).toBe('direct');
     // 行已过期删除，双槽证据随之退役——下一次是干净的分类面。
@@ -670,10 +678,11 @@ describe('网络状态矩阵（用户点名场景）', () => {
   it('C1 上次直连通、这次重启直连断了：旧记忆先生效，首连撞墙后本会话直跳代理零重演', () => {
     // 重启语义 = 内存清空、localStorage 存档重读。上次会话把 direct 钉上。
     const now = Date.now();
+    netRoute.resetLearnedRoutes();
     localStorage.setItem('pure.netRoute.v1', JSON.stringify({
       'matrix-c1.test': { route: 'direct', at: now - 10 * 60_000, lastOkAt: now - 10 * 60_000 },
     }));
-    netRoute.resetLearnedRoutes();
+    netRoute.reloadLearnedRoutesForTests();
     // 刚打开：学习记忆 30min 内仍生效（不能一上来就推翻它），继续直连。
     expect(netRoute.resolveNetRoute('matrix-c1.test', true, now, P)).toBe('direct');
     // 首连撞墙（直连环境变了）：死路半边落信号——这就是「快速处理」，
@@ -689,10 +698,11 @@ describe('网络状态矩阵（用户点名场景）', () => {
     // 场景：上次代理 ok（学习钉 proxy）。两次打开间隔不同，处理不同——
     const now = Date.now();
     const writeArchive = (ageMs: number) => {
+      netRoute.resetLearnedRoutes();
       localStorage.setItem('pure.netRoute.v1', JSON.stringify({
         'api.openai.com': { route: 'proxy', at: now - ageMs, lastOkAt: now - ageMs, latencyEma: 400 },
       }));
-      netRoute.resetLearnedRoutes();
+      netRoute.reloadLearnedRoutesForTests();
     };
     // a) 快速重启（<30min）：学习记忆仍有效。代理活着（A5 未知=按可用），
     //    就不折腾——直连虽然也通，但换路没有收益证据（EMA 对比是期3 的活）。
@@ -705,10 +715,11 @@ describe('网络状态矩阵（用户点名场景）', () => {
     expect(netRoute.resolveNetRoute('api.openai.com', true, now, P)).toBe('proxy');
     // 同一根学习行在 direct-first 主机上过期后回落直连（对照：TTL 行为
     // 与主机分类无关，变的只是回落目标）。
+    netRoute.resetLearnedRoutes();
     localStorage.setItem('pure.netRoute.v1', JSON.stringify({
       'api.deepseek.com': { route: 'proxy', at: now - 31 * 60_000 },
     }));
-    netRoute.resetLearnedRoutes();
+    netRoute.reloadLearnedRoutesForTests();
     expect(netRoute.resolveNetRoute('api.deepseek.com', true, now, P)).toBe('direct');
   });
 

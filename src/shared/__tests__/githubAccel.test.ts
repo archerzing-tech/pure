@@ -219,14 +219,11 @@ describe('GitHub 加速 · 节点健康缓存（全灭处理）', () => {
 
 describe('GitHub 加速 · auto 模式（证据先行，不读静态分类）', () => {
   const scrub = (): void => {
+    // resetLearnedRoutes 全清（内存+持久档，2026-10-31 起）：只清内存的话，
+    // loaded 拨回 false 后下一次 ensureLoaded 会把前序用例 persist 的
+    // github.com 记录原样灌回来，翻面「无证据直连先行」断言。
     resetLearnedRoutes();
     resetMirrorHealth();
-    // resetLearnedRoutes 只清内存并置 loaded=false：若前序测试文件留下了
-    // 全局 localStorage（GlobalRegistrator 未注销），下一次 ensureLoaded 会
-    // 把档里陈旧的 github.com 记录拉回来翻面断言——持久档一并清掉。
-    try {
-      if (typeof localStorage !== 'undefined') localStorage.removeItem('pure.netRoute.v1');
-    } catch { /* 无存储环境照常 */ }
   };
   beforeEach(scrub);
   // 路由学习是模块级单例：本组写入的结局不清掉，会翻面后续文件里的
