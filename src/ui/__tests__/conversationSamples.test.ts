@@ -235,8 +235,16 @@ function installDom(): FakeElement {
     },
   };
   (globalThis as { document?: unknown }).document = fakeDocument;
+  // location + 定时器桩：ChatController 构造器会启动代理探测/LLM 预热循环，
+  // 两者都读 loadConfig（window.location）并装 window.setInterval。以前这两
+  // 条链靠「同进程前面别的测试文件恰好置过 configCache/loopStarted」的顺序
+  // 污染才没炸（CI 文件序一变就红）——桩补齐后用例自给自足，不再依赖顺序。
   (globalThis as { window?: unknown }).window = {
     setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
+    // 假 id、不真装计时器：测试进程不留 30s/5min 的活循环。
+    setInterval: (() => 0) as unknown as typeof window.setInterval,
+    clearInterval: (() => {}) as unknown as typeof window.clearInterval,
+    location: { search: '' },
     getSelection: () => null,
   };
   (globalThis as { NodeFilter?: unknown }).NodeFilter = { SHOW_TEXT: 4 };
