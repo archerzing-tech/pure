@@ -4136,7 +4136,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const userMessage = this.messages[start];
     this.adoptTurnVariantLedger(this.messages.slice(start));
     this.messages = this.messages.slice(0, start);
-    this.pruneTranscriptAfterLastUserBubble();
+    // 截断即刻落盘：磁盘立刻与新链一致（旧实现等新回合落定才写，中途崩
+    // 溃会把已被上下文淘汰的旧回合恢复回来）。变体账此时锚着被删回合，
+    // sync 在落盘路径里锚不上、不会误追加。
+    await this.persistSession(this.messages, new Map(), []);
+    // 原句气泡连同自身一起让位：屏上只留编辑后的新句，不再出现旧句+
+    // 新句连续两句。
+    this.pruneThroughLastUserBubble();
     this.onTurnVariantsChanged?.('regenerated');
     await this.send(newText, userMessage.images ?? [], newText, false, userMessage.attachments ?? []);
   }
@@ -4186,6 +4192,23 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     let node = lastUserRow.nextElementSibling;
     while (node) {
       const next = node.nextElementSibling;
+      node.remove();
+      node = next;
+    }
+  }
+
+  /** 编辑重发的让位清理：最后一个用户气泡**连同它自己**一起移除——上下
+   *  文侧 editLastTurn 已截断原句，DOM 侧不同步让位的话屏上会连续两句
+   *  （旧句+编辑句）。重新生成不走这条：原输入气泡留着当旧回复的对账
+   *  锚，只清它之后的兄弟（pruneTranscriptAfterLastUserBubble）。 */
+  private pruneThroughLastUserBubble(): void {
+    const host = this.transcriptElement();
+    const rows = host.querySelectorAll<HTMLElement>('.bubble-row.user');
+    const lastUserRow = rows[rows.length - 1];
+    if (!lastUserRow) return;
+    let node: Element | null = lastUserRow;
+    while (node) {
+      const next: Element | null = node.nextElementSibling;
       node.remove();
       node = next;
     }

@@ -45,10 +45,26 @@ describe('turn variants · chat.ts wiring', () => {
     expect(body).toContain('if (this.streaming) return;');
     expect(body).toContain('this.adoptTurnVariantLedger(');
     expect(body).toContain('this.messages = this.messages.slice(0, start);');
-    expect(body).toContain('this.pruneTranscriptAfterLastUserBubble()');
+    // 截断即刻落盘：崩溃恢复不再出现已被上下文淘汰的旧回合。
+    expect(body).toContain('await this.persistSession(this.messages, new Map(), []);');
+    // 原句气泡连同自身一起让位：屏上只留编辑后的新句，不再连续两句。
+    expect(body).toContain('this.pruneThroughLastUserBubble()');
+    expect(body).not.toContain('this.pruneTranscriptAfterLastUserBubble()');
     // 不带 skipUserPersist:user_input 照记,与重新生成的本质区别。
     expect(body).toContain('await this.send(newText, userMessage.images ?? [], newText, false, userMessage.attachments ?? []);');
     expect(body).not.toContain('skipUserPersist');
+  });
+
+  it('pruneThroughLastUserBubble removes the original question row itself — the edited sentence replaces it on screen', () => {
+    const method = src.indexOf('private pruneThroughLastUserBubble(): void {');
+    expect(method).toBeGreaterThan(-1);
+    const body = src.slice(method, src.indexOf('async send(', method));
+    expect(body).toContain("querySelectorAll<HTMLElement>('.bubble-row.user')");
+    expect(body).toContain('node.remove()');
+    // 与重新生成的清理区分开：那条保留原气泡，从它之后的兄弟开始删。
+    const keep = src.indexOf('private pruneTranscriptAfterLastUserBubble(): void {');
+    expect(keep).toBeGreaterThan(-1);
+    expect(src.slice(keep, keep + 700)).toContain('lastUserRow.nextElementSibling');
   });
 
   it('the ledger identity follows the ACTIVE variant, so an edited question re-anchors the same group', () => {
