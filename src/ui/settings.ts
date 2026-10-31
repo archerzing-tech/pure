@@ -4647,7 +4647,7 @@ export class SettingsPanel {
       streamingRender: (document.getElementById('cfg-streaming-render') as HTMLInputElement | null)?.checked ?? true,
       autoContinue: (document.getElementById('cfg-auto-continue') as HTMLInputElement | null)?.checked ?? false,
       // Max auto rounds per user message (Settings → General, next to the
-      // auto-continue toggle). Clamp to 1..20 so a typed value can't zero out
+      // auto-continue toggle). Clamp to 1..50 so a typed value can't zero out
       // the chain or spin it forever.
       autoContinueMaxRounds: Math.min(50, Math.max(1, parseInt((document.getElementById('cfg-auto-continue-rounds') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_AUTO_CONTINUE_MAX_ROUNDS)),
       mapTileCacheMB: Math.min(2000, Math.max(10, parseInt((document.getElementById('cfg-map-tile-cache-mb') as HTMLInputElement | null)?.value ?? '', 10) || DEFAULT_MAP_TILE_CACHE_MB)),

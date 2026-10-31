@@ -2249,6 +2249,23 @@ describe('first-token preflight budgets', () => {
   });
 });
 
+// 2026-10-31 审计 P1-4:「关闭自动续跑」必须没有任何自动续——回合内引擎
+// 守卫(planContinueGuard)与轮次链(autoContinue)同闸。此前只看 guard 一个
+// 条件,用户关掉设置开关后引擎仍在回合内续着走,观感就是开关撒谎。锚住
+// 接线形状:两个条件任一命中都不注入 continueGuard。
+describe('自动续跑开关同闸（审计 P1-4）', () => {
+  const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+
+  it('continueGuard 注入同时看 planContinueGuard 与 autoContinue', () => {
+    expect(src).toContain('continueGuard: (config.planContinueGuard === false || config.autoContinue !== true)');
+    expect(src).toContain(': (args) => this.planContinueGuard(args),');
+  });
+
+  it('旧的只看 guard 的单条件接线已消失', () => {
+    expect(src).not.toContain('config.planContinueGuard === false ? undefined');
+  });
+});
+
 // 期4 抓取后提炼层:宿主回调经 createToolAdapter 尾参注入 adapter。锚住三
 // 个接线点——工厂构造(disableThinking,提炼是机械活不付暗思考首字代价)、
 // prompt 同源(shared/webExtract)、注入位(构造尾参)。提炼调用链的行为

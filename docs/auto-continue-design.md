@@ -1,6 +1,10 @@
 # 长任务自动续跑（Auto-Continue）设计文档
 
-> 状态：已定稿并实现（v1.9.14+）。设计决策：默认关闭；所有权限模式生效（confirm 模式下权限确认点即中止点）。
+> 状态：已定稿并实现（v1.9.14+）。所有权限模式生效（confirm 模式下权限确认点即中止点）。
+> **2026-10-31 更正**（逻辑一致性审计 P1-3/P1-4）：本文初稿写「默认关闭、默认 8 轮、范围
+> 1–20」，与现行代码不符——v14 迁移起 autoContinue **默认开启**（存量一并翻 true，见
+> §2），轮数默认 **20**（8 会在构建中途耗尽，见 `autoContinue.ts` 注释）、范围 **1–50**；
+> 且「关闭自动续跑」现在**连回合内的引擎续跑守卫一起关**（此前只关轮次链，开关只生效一半）。
 
 ## 1. 背景与目标
 
@@ -8,16 +12,16 @@
 
 **目标**：在用户首条指令后，复杂计划任务可以自主跑完多个阶段，消除"每阶段边界必须人工回复"的结构性断点。
 
-**边界**：只作用于复杂计划任务（`activeComplexPlan` + 聊天计划卡）；不改变普通对话；默认关闭，关闭时行为与现状完全一致。
+**边界**：只作用于复杂计划任务（`activeComplexPlan` + 聊天计划卡）；不改变普通对话。
 
 ## 2. 配置开关
 
-- `PureConfig.autoContinue: boolean`（默认 **false**）
-- `PureConfig.autoContinueMaxRounds: number`（默认 **8**）
+- `PureConfig.autoContinue: boolean`（默认 **true**；v14 迁移把存量配置一次性翻 true——复杂计划在每个阶段边界干等人工"继续"是结构性断点，用户显式关闭后该选择持久、不再被翻回）
+- `PureConfig.autoContinueMaxRounds: number`（默认 **20**，范围 1–50）
 - `configVersion` 12 → 13
 - Settings → General 新增「长任务自动续跑」开关（`#cfg-auto-continue`），复用 `#cfg-streaming-render` 的 apply/collect 模式。
-- 开关下方暴露「单条消息最大续跑轮数」（`#cfg-auto-continue-rounds`，1–20，默认 8，仅开关开启时显示）——`autoContinueMaxRounds` 不再是隐藏字段。
-- 关闭时：与现状完全一致（每阶段边界照旧"回复继续"），零回归。
+- 开关下方暴露「单条消息最大续跑轮数」（`#cfg-auto-continue-rounds`，1–50，默认 20，仅开关开启时显示）——`autoContinueMaxRounds` 不再是隐藏字段。
+- 关闭时（2026-10-31 P1-4 起）：**没有任何自动续**——轮次链不排程，引擎回合内的续跑守卫（`planContinueGuard`）也不注入，每阶段边界照旧"回复继续"。`planContinueGuard` 无独立设置项，跟随本开关。
 
 ## 3. 触发条件（每轮结束后同时满足才排程下一轮）
 
@@ -47,7 +51,7 @@
 
 ## 5. 循环保护
 
-- **轮数上限**：`autoContinueMaxRounds`（默认 8），触顶即停。
+- **轮数上限**：`autoContinueMaxRounds`（默认 20，范围 1–50），触顶即停。
 - **停滞检测**：无成功工具且计划位置未前移的回合不排程——模型原地打转时链自然终止。
 - **终态不续**：计划完成 / 交付门禁失败 / 等待态（pause）均不排程。
 - **权限确认点即中止点**：confirm 模式下权限提示挂起时 `streaming` 保持 true，链不会在提示期间触发；用户批准后回合继续，回合正常结束后再评估是否续跑。用户拒绝 → 工具失败 → `hasToolSuccess` 为 false → 链停止。

@@ -5437,7 +5437,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // round-based auto-continue chain: the guard keeps the CURRENT turn
         // alive (bounded, 3 chances); the chain decides whether ANOTHER user
         // turn starts at all.
-        continueGuard: config.planContinueGuard === false ? undefined : (args) => this.planContinueGuard(args),
+        // 2026-10-31 审计 P1-4：开关语义收拢——「关闭自动续跑」必须没有任何
+        // 自动续。回合内 guard 与轮次链此前各自为政，用户关掉设置里的开关后
+        // 引擎仍会续着走，观感就是开关撒谎；现在二者同闸（字段保留，将来要
+        // 「关链留 guard」的细分随时可拆）。
+        continueGuard: (config.planContinueGuard === false || config.autoContinue !== true)
+          ? undefined
+          : (args) => this.planContinueGuard(args),
         // Surface each spawned subagent as a live "which agent is working" card.
         subagentProgress,
         // And feed the same activity into the engine's event stream so the
