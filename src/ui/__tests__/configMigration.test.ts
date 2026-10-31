@@ -344,8 +344,9 @@ describe('config v15 migration — authorization prompts off by default', () => 
 
 describe('config v17 migration — GitHub 加速默认智能 auto', () => {
   it('翻一次旧默认 direct → auto；迁移后再显式关掉不被二次翻转', () => {
-    // 旧版下拉里根本没有 direct 选项，存出来的 'direct' 几乎必然是「从没
-    // 动过设置」的旧默认副作用（同 v15 的判断依据），不是显式选择。
+    // 旧下拉/设置开关本就能显式选 direct；这次一次性翻转依据的是产品定调
+    // （2026-10-31：加速交给智能体自动决策，不靠人工开关）。auto 证据先行，
+    // 直连健康时绝不碰镜像；翻转后显式关闭不被二次翻转。
     seedConfig({ provider: 'glm', githubMirror: 'direct' });
     const cfg = loadConfig()!;
     expect(cfg.githubMirror).toBe('auto');

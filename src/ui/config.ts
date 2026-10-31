@@ -849,10 +849,11 @@ export function loadConfig(): PureConfig | null {
       }
       // Config v17: GitHub 加速默认「智能 auto」（2026-10-31 product decision —
       // 加速的使用不该靠人工开关：直连快就走直连，直连被实测打死才自动换镜像，
-      // 恢复后自动回到直连）。存量 'direct' 迁移一次：旧版下拉里根本没有
-      // direct 选项，存出来的 'direct' 几乎必然是「从没动过设置」或旧默认的
-      // 副作用，不是显式选择（同 v15 的判断依据）。迁移后用户仍可在设置里
-      // 显式关掉（存 'direct'，configVersion 不动，不会再次被翻转）。
+      // 恢复后自动回到直连）。存量 'direct' 翻一次 auto：旧下拉/设置开关本就
+      // 能显式选 direct，这次翻转依据的是产品定调（2026-10-31 加速交给智能体
+      // 自动决策，不靠人工开关），不是「没人选过 direct」；auto 证据先行，
+      // 直连健康时绝不碰镜像。翻转后显式关掉仍被尊重（存 'direct'，
+      // configVersion 不动，不会再次被翻转）。
       if ((parsed.configVersion ?? 1) < 17) {
         if (cfg.githubMirror === 'direct') cfg.githubMirror = 'auto';
         cfg.configVersion = 17;

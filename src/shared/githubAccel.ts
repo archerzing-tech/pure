@@ -138,7 +138,7 @@ export function isGithubMirrorKey(value: unknown): boolean {
   return GITHUB_MIRRORS.some((m) => m.key === value);
 }
 
-/** 未知 / 空值回退到默认（direct），不抛——手改配置或版本回退留下的陈旧 key
+/** 未知 / 空值回退到默认（auto），不抛——手改配置或版本回退留下的陈旧 key
  *  不该让设置页和下载链炸掉。 */
 export function normalizeGithubMirrorKey(value: unknown): string {
   const key = typeof value === 'string' ? value.trim().toLowerCase() : '';

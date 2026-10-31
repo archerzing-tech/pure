@@ -776,4 +776,16 @@ describe('directRouteDead 与尸检覆盖', () => {
     expect(netRoute.directRouteDead('pin-live.test', T0 + 2)).toBe(false);
     expect(netRoute.resolveNetRoute('pin-live.test', true, T0 + 2)).toBe('proxy');
   });
+
+  it('同路成功剥掉死期：直连复活即自动回直连', () => {
+    // bcd900b 修的两个学习缺口之一：同路成功曾把 deadUntil 陪葬
+    // （spread ...entry 原样带死标），直连恢复了镜像先行还不撤。
+    netRoute.recordNetOutcome('revive-gh.test', 'direct', false, T0);
+    expect(netRoute.directRouteDead('revive-gh.test', T0 + 1)).toBe(true);
+    netRoute.recordNetOutcome('revive-gh.test', 'direct', true, T0 + 2, 120);
+    expect(netRoute.directRouteDead('revive-gh.test', T0 + 3)).toBe(false);
+    // 复活后再次失败仍能重新记死：剥死期没有破坏失败记账。
+    netRoute.recordNetOutcome('revive-gh.test', 'direct', false, T0 + 4);
+    expect(netRoute.directRouteDead('revive-gh.test', T0 + 5)).toBe(true);
+  });
 });
