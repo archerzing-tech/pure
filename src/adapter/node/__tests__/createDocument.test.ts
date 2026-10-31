@@ -123,7 +123,9 @@ describe('resolveDocumentPath（纯函数，逐条对齐 Rust 单测口径）', 
   });
 
   it('没工作区：落 ~/Downloads（保结构），绝不落进程 cwd', () => {
-    expect(resolveDocumentPath('docs/deck.pptx', '', home)).toBe('/Users/tester/Downloads/docs/deck.pptx');
+    // 期望值用 join 构建：实现的无工作区分支走 node join（Windows 产 `\`），
+    // 权威口径是 Rust 侧语义而非分隔符字面量——钉语义，分隔符随平台。
+    expect(resolveDocumentPath('docs/deck.pptx', '', home)).toBe(join(home, 'Downloads', 'docs/deck.pptx'));
   });
 
   it('`~/` 与 `$HOME` 前缀展开到真实主目录，不许落字面量 ~ 目录', () => {
