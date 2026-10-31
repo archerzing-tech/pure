@@ -61,14 +61,6 @@ export function startProxyProbeLoop(): void {
   loopTimer = window.setInterval(() => void probeProxyNow('periodic'), PROXY_PROBE_INTERVAL_MS);
 }
 
-export function stopProxyProbeLoop(): void {
-  if (loopTimer !== null) {
-    window.clearInterval(loopTimer);
-    loopTimer = null;
-  }
-  loopStarted = false;
-}
-
 /** 真实请求撞墙后的及时重探（节流内跳过）。 */
 export function notifyProxyFailure(): void {
   void probeProxyNow('failure');

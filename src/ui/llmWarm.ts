@@ -67,11 +67,3 @@ export function startLlmWarmLoop(): void {
   void warmLlmRoutesNow();
   loopTimer = window.setInterval(() => void warmLlmRoutesNow(), WARM_INTERVAL_MS);
 }
-
-export function stopLlmWarmLoop(): void {
-  if (loopTimer !== null) {
-    window.clearInterval(loopTimer);
-    loopTimer = null;
-  }
-  loopStarted = false;
-}
