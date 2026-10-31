@@ -129,9 +129,12 @@ fn clear_llm_stream_client_cache() {
 #[tauri::command]
 fn set_tls_verify(enabled: bool) -> Result<(), String> {
     TLS_VERIFY.store(enabled, std::sync::atomic::Ordering::Relaxed);
-    // The client cache key doesn't include the TLS flag — drop the pool so
-    // the next chat_stream builds clients under the new policy.
+    // The client cache key doesn't include the TLS flag — drop the pools so
+    // the next chat_stream / tile fetch builds clients under the new policy.
     clear_llm_stream_client_cache();
+    if let Ok(mut map) = map_tile_clients().lock() {
+        map.clear();
+    }
     Ok(())
 }
 
@@ -7710,6 +7713,28 @@ fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
     }
 }
 
+/// Reused map-tile clients, keyed by the RESOLVED proxy URL ("direct" when
+/// none). One map generation fires 30+ concurrent tile fetches; building a
+/// fresh client per call threw away every pooled connection and paid a full
+/// DNS+TCP+TLS handshake per tile (worst case behind a proxy/gateway). Same
+/// precedent as llm_stream_clients. Cleared together with it on TLS-verify
+/// changes so no client keeps the previous policy.
+fn map_tile_clients(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>> {
+    static CLIENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>> =
+        std::sync::OnceLock::new();
+    CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Throttle for the O(n) directory eviction scan: one full read_dir+metadata
+/// pass per written tile stalls the async runtime on caches with tens of
+/// thousands of files (200MB budget). Every 64th miss runs the scan instead —
+/// worst-case overshoot is 64 tiles ≈ a few MB against a 200MB budget.
+fn map_tile_evict_tick() -> bool {
+    static WRITES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0
+}
+
 /// Fetch one map tile, serving it from the local disk cache when available and
 /// otherwise fetching + caching it. Only real image bytes are cached, so an HTML
 /// block page or JSON error can never poison the offline tile cache.
@@ -7728,7 +7753,17 @@ async fn fetch_map_tile(
             let _ = std::fs::remove_file(&path);
         }
     }
-    let client = build_http_client(std::time::Duration::from_secs(8), proxy_url.as_deref())?;
+    let key = proxy_url.clone().unwrap_or_else(|| "direct".to_string());
+    let client = {
+        let mut map = map_tile_clients().lock().map_err(|_| "tile client lock")?;
+        if let Some(cached) = map.get(&key) {
+            cached.clone()
+        } else {
+            let built = build_http_client(std::time::Duration::from_secs(8), proxy_url.as_deref())?;
+            map.insert(key, built.clone());
+            built
+        }
+    };
     let resp = client
         .get(&url)
         .header("User-Agent", BROWSER_UA)
@@ -7749,7 +7784,9 @@ async fn fetch_map_tile(
     let payload = map_tile_payload(&bytes)?;
     let dir = map_tile_cache_dir();
     if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
-        evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
+        if map_tile_evict_tick() {
+            evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
+        }
     }
     Ok(payload)
 }
@@ -14411,10 +14448,41 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// Generated-image disk cache (~/.pure/cache/generated-images). Content-
+/// addressed (sha256 prefix): the same bytes never write twice, and the file
+/// outlives the session so replay renders from disk. MB-scale base64 used to
+/// ride IPC → snapshot → replay three times per image.
+fn generated_image_cache_dir() -> PathBuf {
+    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
+    PathBuf::from(base).join("cache").join("generated-images")
+}
+
+fn store_generated_image(bytes: &[u8], mime: &str) -> Option<PathBuf> {
+    let dir = generated_image_cache_dir();
+    let path = dir.join(format!("{}.{}", &sha256_hex(bytes)[..16], generated_image_ext(mime)));
+    if path.exists() {
+        return Some(path);
+    }
+    fs::create_dir_all(&dir).ok()?;
+    fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+fn generated_image_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    }
+}
+
 /// Generate images via the provider's OpenAI-compatible `/images/generations`
-/// endpoint and return base64 data URLs for the UI. Mirror of chat_stream's
-/// key resolution + proxy handling; the raw payload never enters the LLM
-/// context (the frontend keeps it out of ToolResult.result).
+/// endpoint. Successful b64 payloads are stored to the disk cache and returned
+/// as an absolute `path` (the UI renders via asset://); only when the disk
+/// write fails does the response degrade to the legacy inline `dataUrl`.
+/// Mirror of chat_stream's key resolution + proxy handling; the raw payload
+/// never enters the LLM context (the frontend keeps it out of ToolResult.result).
 #[tauri::command]
 async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, String> {
     let prompt = args.prompt.trim();
@@ -14502,11 +14570,22 @@ async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, St
                 Err(_) => continue,
             };
             let mime = mime_hint.unwrap_or_else(|| sniff_image_mime(&bytes).to_string());
-            images.push(serde_json::json!({
-                "dataUrl": format!("data:{};base64,{}", mime, b64),
-                "mimeType": mime,
-                "sizeBytes": bytes.len(),
-            }));
+            // 落盘 + 回绝对路径:MB 级 base64 不再走 IPC、会话快照、重放三条
+            // 链(前端经 asset:// 渲染磁盘文件)。写盘失败才降级回内联 dataUrl,
+            // 工具不因 cache 目录不可写而废。
+            let image = match store_generated_image(&bytes, &mime) {
+                Some(path) => serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "mimeType": mime,
+                    "sizeBytes": bytes.len(),
+                }),
+                None => serde_json::json!({
+                    "dataUrl": format!("data:{};base64,{}", mime, b64),
+                    "mimeType": mime,
+                    "sizeBytes": bytes.len(),
+                }),
+            };
+            images.push(image);
         } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
             let mime = mime_hint.unwrap_or_else(|| "image/png".to_string());
             images.push(serde_json::json!({ "dataUrl": url, "mimeType": mime, "sizeBytes": 0 }));
@@ -14521,6 +14600,15 @@ async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, St
 #[cfg(test)]
 mod generate_image_tests {
     use super::*;
+
+    #[test]
+    fn generated_image_ext_matches_mime() {
+        assert_eq!(generated_image_ext("image/jpeg"), "jpg");
+        assert_eq!(generated_image_ext("image/webp"), "webp");
+        assert_eq!(generated_image_ext("image/gif"), "gif");
+        assert_eq!(generated_image_ext("image/png"), "png");
+        assert_eq!(generated_image_ext(""), "png");
+    }
 
     #[test]
     fn session_ids_are_path_safe() {

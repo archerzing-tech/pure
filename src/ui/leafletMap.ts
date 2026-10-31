@@ -200,36 +200,67 @@ async function loadTile(url: string): Promise<string> {
   return blobToDataUrl(await resp.blob());
 }
 
+/** Remember which chain index last served tiles so the NEXT map's first
+ * generation starts there instead of re-walking dead sources (each dead hop
+ * costs a full 8s backend timeout). Failures still fall through naturally —
+ * the memory only picks the starting point, never a lock-in. */
+const SOURCE_MEMORY_KEY = 'pure_map_tile_source';
+
+function rememberTileSource(index: number): void {
+  try { localStorage.setItem(SOURCE_MEMORY_KEY, String(index)); } catch { /* private mode */ }
+}
+
+function recalledTileSource(count: number): number {
+  try {
+    const saved = Number(localStorage.getItem(SOURCE_MEMORY_KEY));
+    return Number.isInteger(saved) && saved >= 0 && saved < count ? saved : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** A tile layer that walks TILE_SOURCES in order until a tile loads, then
  * sticks with that source. Each fetch is bounded by the backend's 8s timeout
- * so a hung/geo-blocked source can't stall the fallback chain. */
+ * so a hung/geo-blocked source can't stall the fallback chain.
+ *
+ * Generation-scoped circuit breaker: within one generation, a source that
+ * failed twice is skipped outright — concurrent first-generation tiles each
+ * re-walking a dead source used to multiply the 8s timeout across the whole
+ * grid (first paint = dead-source count × 8s behind a firewall). */
 class ChainedTileLayer extends L.TileLayer {
   private sources: TileSource[];
   private active = 0;
   /** Current tile generation counters, reset by newGeneration() and read by
-   *  renderMapInto when the grid's 'load' event reports every visible tile
-   *  settled. The reveal criterion is a generation with EVERY tile served —
-   *  first-tile-ready used to reveal a half-gray map that read as broken. */
+   *  renderMapInto when the grid's 'load' event reports the grid settled.
+   *  The reveal criterion tolerates a small failure fraction — one dead tile
+   *  used to keep the whole card on its spinner even with 29/30 drawn; gray
+   *  gaps get patched by the existing silent retry. */
   genSuccess = 0;
   genFail = 0;
+  /** Per-generation failure tallies + tripped breakers, reset by newGeneration(). */
+  private sourceFails = new Map<number, number>();
+  private deadSources = new Set<number>();
   private onChange: ((source: TileSource) => void) | null = null;
 
   constructor(sources: TileSource[], options: L.TileLayerOptions) {
     super(sources[0].template, options);
     this.sources = sources;
+    this.active = recalledTileSource(sources.length);
   }
 
   setSourceChangeHandler(fn: (source: TileSource) => void): void {
     this.onChange = fn;
   }
 
-  /** Start a fresh evaluation generation AND restart the source walk from
-   *  the first source — a source that was reachable when the map rendered
+  /** Start a fresh evaluation generation AND restart the source walk from the
+   *  remembered source — a source that was reachable when the map rendered
    *  may be dead by the time tiles are re-requested, and vice versa. */
   newGeneration(): void {
     this.genSuccess = 0;
     this.genFail = 0;
-    this.active = 0;
+    this.sourceFails.clear();
+    this.deadSources.clear();
+    this.active = recalledTileSource(this.sources.length);
   }
 
   protected createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
@@ -237,6 +268,9 @@ class ChainedTileLayer extends L.TileLayer {
     img.alt = '';
     img.draggable = false;
     const attempt = (index: number): void => {
+      // Skip sources already tripped in this generation; the breaker resets
+      // with the generation, so a flaky source gets a fresh try next round.
+      while (this.deadSources.has(index)) index++;
       if (index >= this.sources.length) {
         this.genFail++;
         done(new Error('all tile sources unavailable'), img);
@@ -247,6 +281,9 @@ class ChainedTileLayer extends L.TileLayer {
         const url = resolveTileUrl(source, coords, key);
         const settle = (err?: Error): void => {
         if (err) {
+          const fails = (this.sourceFails.get(index) ?? 0) + 1;
+          this.sourceFails.set(index, fails);
+          if (fails >= 2) this.deadSources.add(index);
           attempt(index + 1);
           return;
         }
@@ -254,6 +291,7 @@ class ChainedTileLayer extends L.TileLayer {
           this.active = index;
           this.onChange?.(source);
           }
+          rememberTileSource(index);
           this.genSuccess++;
           done(undefined, img);
         };
@@ -395,12 +433,14 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
 
   // maxNativeZoom caps real tile requests at 18 so zooming in past a China
   // basemap's native ceiling over-zooms its last zoom level instead of blanking.
-  // REVEAL CRITERION — the strict half of the map presentation contract: the
-  // map becomes visible only when a tile generation completes with EVERY
-  // visible tile served and at least one drawn. A generation containing a
-  // failure (all six sources dead for that tile) reports 'error' instead —
-  // the slot stays a spinner and the silent retry re-requests the grid. The
-  // 12s timer covers a grid that never settles at all.
+  // REVEAL CRITERION — the map becomes visible when a tile generation settles
+  // with the grid essentially complete: every tile served, OR a small failure
+  // fraction (≤25%, i.e. scattered gray gaps) among a healthy majority. One
+  // dead tile used to hold the whole card on its spinner even with 29/30
+  // drawn — the felt "slow map" bottleneck. Gray gaps are patched afterward by
+  // the silent retry (which re-requests the grid); a map that is MOSTLY gray
+  // still counts as failed and keeps retrying. The 12s timer covers a grid
+  // that never settles at all.
   let readyReported = false;
   let tileTimer: ReturnType<typeof setTimeout> | null = null;
   const finishReady = (): void => {
@@ -419,7 +459,9 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
   });
   tiles.on('load', () => {
     if (readyReported) return;
-    if (tiles.genSuccess > 0 && tiles.genFail === 0) {
+    const healthy = tiles.genSuccess > 0
+      && (tiles.genFail === 0 || tiles.genFail <= Math.ceil(tiles.genSuccess / 4));
+    if (healthy) {
       finishReady();
     } else {
       options.onTileStatus?.('error');

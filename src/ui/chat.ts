@@ -92,6 +92,7 @@ import { capEventText, createSerializingSink, type SessionEventSink } from '../s
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
+import { rehydrateThemeStaleDiagrams } from './markdown';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
@@ -534,6 +535,7 @@ export function openUserImageViewer(image: MessageImage, alt = image.name || '�
   img.src = image.dataUrl;
   img.alt = alt;
   img.className = 'user-image-viewer-img';
+  img.decoding = 'async';
   const onKeydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape') close();
   };
@@ -561,6 +563,7 @@ export function renderUserImageAttachments(bubble: HTMLElement, images: MessageI
     img.className = 'user-image-thumb';
     img.src = image.dataUrl;
     img.alt = image.name || '上传图片';
+    img.decoding = 'async';
     img.title = '双击放大';
     img.addEventListener('dblclick', (event) => {
       event.stopPropagation();
@@ -9265,6 +9268,9 @@ export class SessionChatManager {
       this.activeSessionCb?.(sessionId);
       const scroll = document.getElementById('chat');
       if (scroll && typeof requestAnimationFrame === 'function') forceScrollToBottom(scroll);
+      // 主题切换时本会话若在隐藏暖 host 里只被标脏(data-theme-stale)——
+      // 激活此刻补渲,否则切回来的是旧主题的图(甚至空白 loading 卡)。
+      void rehydrateThemeStaleDiagrams(host);
     }
   }
 

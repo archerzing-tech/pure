@@ -297,9 +297,10 @@ export interface ToolExecMeta {
   resultText?: string;
   /**
    * Generated images for `resultKind: 'image'` (the generate_image tool).
-   * Data URLs are persisted with the session so session replay renders the
-   * same <img> cards; desktop sessions are file-backed (~/.pure/sessions/),
-   * so the payload size is a non-issue there.
+   * Desktop generations persist only the content-addressed disk `path` — the
+   * MB-scale base64 never enters the snapshot; replay renders from disk via
+   * asset://. `dataUrl` persists only for legacy snapshots and the rare
+   * disk-write fallback, so old sessions keep rendering unchanged.
    */
   resultImages?: GeneratedImage[];
   /**

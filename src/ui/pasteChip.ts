@@ -608,6 +608,7 @@ export class PasteChipManager {
           thumb.className = 'paste-chip-thumb';
           thumb.alt = '';
           thumb.src = a.dataUrl;
+          thumb.decoding = 'async';
           chip.appendChild(thumb);
         } else {
           if (a.openOnClick) {

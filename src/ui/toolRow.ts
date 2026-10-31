@@ -7,6 +7,7 @@
 // render identically.
 
 import { linkifyPaths } from './pathLink';
+import { assetUrlFor } from './markdown';
 import { wireInnerFollowTail, followInnerTail } from './scrollPin';
 import { formatBytes } from '../shared/format';
 import { stripAnsi } from '../shared/ansi';
@@ -1479,10 +1480,25 @@ async function downloadImage(image: GeneratedImage, index: number, prompt?: stri
         filters: [{ name: 'Image', extensions: [imageExtension(image.mimeType)] }],
       });
       if (!path) return;
-      const comma = image.dataUrl.indexOf(',');
-      if (comma > 0 && image.dataUrl.startsWith('data:')) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('save_file_binary', { path, dataBase64: image.dataUrl.slice(comma + 1) });
+      const { invoke } = await import('@tauri-apps/api/core');
+      if (image.path) {
+        // Disk-backed generation: fetch the bytes back over asset:// (same
+        // origin the <img> uses) instead of keeping a base64 copy in memory.
+        const res = await fetch(assetUrlFor(image.path));
+        if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
+        const blob = await res.blob();
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('read failed'));
+          reader.readAsDataURL(blob);
+        });
+        await invoke('save_file_binary', { path, dataBase64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+        return;
+      }
+      const comma = (image.dataUrl ?? '').indexOf(',');
+      if (comma > 0 && (image.dataUrl ?? '').startsWith('data:')) {
+        await invoke('save_file_binary', { path, dataBase64: (image.dataUrl ?? '').slice(comma + 1) });
         return;
       }
       // https URL payload — let the WebView download it directly.
@@ -1491,7 +1507,7 @@ async function downloadImage(image: GeneratedImage, index: number, prompt?: stri
     }
   }
   const a = document.createElement('a');
-  a.href = image.dataUrl;
+  a.href = generatedImageSrc(image);
   a.download = name;
   a.rel = 'noopener';
   document.body.appendChild(a);
@@ -1538,18 +1554,29 @@ function openImageLightbox(dataUrl: string, alt: string): void {
   activeImageLightboxCleanup = cleanup;
 }
 
+// Generated images arrive as either a legacy inline dataUrl (old snapshots,
+// disk-write fallback) or a content-addressed disk path (new generations) —
+// the path renders through asset:// so the MB-scale base64 never re-enters
+// the DOM or a replay.
+function generatedImageSrc(image: GeneratedImage): string {
+  if (image.path) return assetUrlFor(image.path);
+  return image.dataUrl ?? '';
+}
+
 function renderImageGallery(images: GeneratedImage[], prompt?: string): HTMLElement {
   const gallery = document.createElement('div');
   gallery.className = images.length > 1 ? 'image-gallery' : 'image-gallery single';
   images.forEach((image, index) => {
     const card = document.createElement('figure');
     card.className = 'image-card';
+    const src = generatedImageSrc(image);
     const img = document.createElement('img');
     img.className = 'generated-image';
-    img.src = image.dataUrl;
+    img.src = src;
     img.alt = prompt ? `${prompt}（图 ${index + 1}）` : `生成图片 ${index + 1}`;
     img.loading = 'lazy';
-    img.addEventListener('click', () => openImageLightbox(image.dataUrl, img.alt));
+    img.decoding = 'async';
+    img.addEventListener('click', () => openImageLightbox(src, img.alt));
     const download = document.createElement('button');
     download.type = 'button';
     download.className = 'image-download-btn';

@@ -226,6 +226,27 @@ describe('renderer.image (inline markdown images → double-clickable wrapper)',
   });
 });
 
+// 重渲染提速两件套:异步解码(async 解码不再卡主线程合成帧)+ 重渲染采纳
+// (innerHTML 换血时已解码的图原节点搬回,不再重请求重解码闪一次)。
+describe('inline image fast-path (async decode + repaint-free adoption)', () => {
+  it('emits decoding="async" alongside lazy loading on the wrapped image', () => {
+    const html = renderer.image({ href: 'https://example.com/pic.svg', text: 'alt' } as never);
+    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('decoding="async"');
+  });
+
+  it('sanitizes decoding through the allowlist and wires wrap adoption (source anchor)', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    // decoding 不在 DOMPurify 默认白名单,漏加会被剥掉、异步解码静默失效。
+    expect(src).toContain("ADD_ATTR: ['target', 'loading', 'decoding']");
+    // 采纳机制成对出现:preserve 在 sanitize 前收割、adopt 在 sanitize 后搬回。
+    expect(src).toContain('function preserveLiveImageWraps');
+    expect(src).toContain('function adoptPreservedImageWraps');
+    expect(src).toContain('const preservedImages = preserveLiveImageWraps(container);');
+    expect(src).toContain('adoptPreservedImageWraps(container, preservedImages);');
+  });
+});
+
 describe('suggestFilename', () => {
   it('prefers an explicit file/filename comment hint', () => {
     expect(suggestFilename('// file: main.ts\nconst x = 1;', 'ts')).toBe('main.ts');

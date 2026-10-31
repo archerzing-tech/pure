@@ -110,6 +110,20 @@ function image(dataUrl: string, mimeType = 'image/png', sizeBytes = 1024): Gener
   return { dataUrl, mimeType, sizeBytes };
 }
 
+// 生成图落盘快路径:桌面新生成只回磁盘 path(asset:// 渲染),MB 级 base64
+// 不再进 DOM/快照/重放;dataUrl 只剩旧快照与写盘失败降级两条来路。
+describe('generated image path fast-path', () => {
+  it('renders disk-backed generations via assetUrlFor and keeps the dataUrl fallback (source anchor)', () => {
+    const src = readFileSync(new URL('../toolRow.ts', import.meta.url), 'utf8');
+    expect(src).toContain('function generatedImageSrc');
+    expect(src).toContain('if (image.path) return assetUrlFor(image.path);');
+    // 下载分支:disk 图经 asset:// 拉回字节再落用户的另存路径。
+    expect(src).toContain('reader.readAsDataURL(blob)');
+    // 画廊 img 异步解码,解码不卡合成帧。
+    expect(src).toContain("img.decoding = 'async'");
+  });
+});
+
 describe('tool row expansion policy', () => {
   it('expands every execution row by default', () => {
     expect(shouldExpandToolRowInitially('execute_command')).toBe(true);

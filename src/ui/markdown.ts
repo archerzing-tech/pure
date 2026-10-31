@@ -253,7 +253,7 @@ renderer.html = (token: { text: string; block?: boolean }): string => {
 // 只转「像本机绝对路径」的形状(POSIX / 开头但排除 //host、Windows 盘符开头);
 // 浏览器 dev / 转换不可用时原样返回。直读 __TAURI_INTERNALS__ 是同步唯一路
 // (renderer 是同步钩子,dynamic import 给不了),与 store.ts 的运行时探测同源。
-function assetUrlFor(src: string): string {
+export function assetUrlFor(src: string): string {
   if (!/^\/(?!\/)/.test(src) && !/^[a-z]:[\\/]/i.test(src)) return src;
   const internals = typeof window !== 'undefined'
     ? (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol?: string) => string } }).__TAURI_INTERNALS__
@@ -288,7 +288,7 @@ renderer.image = (token: { href: string; title?: string | null; text: string }):
     return alt;
   }
   const title = token.title ? ` title="${attr(token.title)}"` : '';
-  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" /></span>`;
+  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" decoding="async" /></span>`;
 };
 
 // Links are allowed through but restricted to http(s)/mailto/# and forced to
@@ -421,6 +421,66 @@ const md = new Marked({ gfm: true, breaks: true, renderer });
 md.use({ extensions: [highlightExt, mathExtInline, mathExtBlock] });
 
 // ── Mermaid (lazy import — heavy module, ~600KB) ──
+
+// ── Diagram render cache (mermaid / puml) ──
+// Cold-session replay used to re-run the engines for the SAME source from
+// scratch (mermaid parse+layout on the main thread, PlantUML TeaVM at Java
+// speed) — a long session with a handful of diagrams took seconds to over ten
+// seconds to reopen. Keyed by kind + theme + source; the cached value is the
+// FINAL html (post-sanitize) so a hit skips the engine AND the sanitize pass.
+// Bounded LRU: 40 entries is comfortably a session's worth of diagrams.
+const diagramSvgCache = new Map<string, string>();
+const DIAGRAM_SVG_CACHE_MAX = 40;
+
+function diagramCacheKey(kind: 'mermaid' | 'puml' | 'chart', source: string): string {
+  return `${kind}:${isDark() ? 'd' : 'l'}:${source}`;
+}
+
+function cacheDiagramSvg(key: string, html: string): void {
+  diagramSvgCache.delete(key);
+  diagramSvgCache.set(key, html);
+  while (diagramSvgCache.size > DIAGRAM_SVG_CACHE_MAX) {
+    const oldest = diagramSvgCache.keys().next().value as string;
+    diagramSvgCache.delete(oldest);
+  }
+}
+
+function lookupDiagramSvg(key: string): string | undefined {
+  const hit = diagramSvgCache.get(key);
+  if (hit === undefined) return undefined;
+  diagramSvgCache.delete(key);
+  diagramSvgCache.set(key, hit); // LRU touch
+  return hit;
+}
+
+/** Cached SVGs embed engine-generated ids (mermaid-xxxx) plus their internal
+ *  url(#id) / href="#id" references. A second copy of the same diagram on the
+ *  page would collide those ids (markers/clipPaths would reach across). Every
+ *  cache hit gets a unique id-prefix rewrite before insertion. */
+let diagramCloneSeq = 0;
+function dedupeSvgIds(svg: string): string {
+  const prefix = `d${diagramCloneSeq++}_`;
+  return svg
+    .replace(/\bid="([^"]+)"/g, (_m, id: string) => `id="${prefix}${id}"`)
+    .replace(/url\(#([^)]+)\)/g, (_m, id: string) => `url(#${prefix}${id})`)
+    .replace(/href="#([^"]+)"/g, (_m, id: string) => `href="#${prefix}${id}"`);
+}
+
+/** Snapshot an echarts render for the cache: rewrite the fixed-size root
+ *  `<svg width="W" height="H">` into a viewBox form so the CSS-forced
+ *  100%×100% sizing scales the content instead of clipping it, then store. */
+function cacheChartSvg(target: HTMLElement, key: string): void {
+  const svg = target.querySelector('svg');
+  if (!svg) return;
+  const width = svg.getAttribute('width') ?? '';
+  const height = svg.getAttribute('height') ?? '';
+  if (width && height && !svg.getAttribute('viewBox')) {
+    svg.setAttribute('viewBox', `0 0 ${parseFloat(width)} ${parseFloat(height)}`);
+  }
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  const html = target.innerHTML;
+  if (html) cacheDiagramSvg(key, html);
+}
 
 type MermaidAPI = typeof import('mermaid').default;
 let mermaidMod: MermaidAPI | null = null;
@@ -829,6 +889,7 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
   }
 
   for (const { slot, version } of attempts) {
+    await yieldFrame(); // 多图分帧:每张之间让 UI 呼吸一格,不再整批冻结
     const target = slot.querySelector<HTMLElement>('.mermaid-target');
     if (!target) {
       if (isCurrentDiagramRender(slot, version)) {
@@ -841,11 +902,21 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
     if (!isCurrentDiagramRender(slot, version)) continue;
     slot.setAttribute('data-processed', 'true');
     setDiagramState(slot, 'loading');
+    // 渲染缓存命中:同源码同主题直接复用上次渲染结果(冷会话恢复/回放零重渲)。
+    const cacheKey = diagramCacheKey('mermaid', raw);
+    const cachedSvg = lookupDiagramSvg(cacheKey);
+    if (cachedSvg !== undefined) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      target.innerHTML = dedupeSvgIds(cachedSvg);
+      setDiagramState(slot, 'preview');
+      continue;
+    }
     try {
       const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
       const { svg } = await withTimeout(mermaid.render(id, raw));
       if (!isCurrentDiagramRender(slot, version)) continue;
       target.innerHTML = svg;
+      cacheDiagramSvg(cacheKey, svg);
       setDiagramState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
@@ -856,11 +927,21 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
       // user always sees the real reason and can retry by hand.
       const repaired = repairMermaidSource(raw);
       if (repaired.repaired) {
+        const repairedKey = diagramCacheKey('mermaid', repaired.source);
+        const repairedCached = lookupDiagramSvg(repairedKey);
+        if (repairedCached !== undefined) {
+          if (!isCurrentDiagramRender(slot, version)) continue;
+          target.innerHTML = dedupeSvgIds(repairedCached);
+          markDiagramRepaired(slot, repaired.source);
+          setDiagramState(slot, 'preview');
+          continue;
+        }
         try {
           const retryId = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
           const { svg } = await withTimeout(mermaid.render(retryId, repaired.source));
           if (!isCurrentDiagramRender(slot, version)) continue;
           target.innerHTML = svg;
+          cacheDiagramSvg(repairedKey, svg);
           markDiagramRepaired(slot, repaired.source);
           setDiagramState(slot, 'preview');
           continue;
@@ -926,16 +1007,27 @@ async function renderPumlNodes(container: HTMLElement): Promise<void> {
 
   const dark = isDark();
   for (const { slot, version } of attempts) {
+    await yieldFrame(); // 多图分帧:TeaVM 渲染是秒级同步开销,图间让帧
     if (!isCurrentDiagramRender(slot, version)) continue;
     const target = slot.querySelector<HTMLElement>('.puml-target');
     if (!target) {
       setDiagramState(slot, 'error', t('diagram.missingTarget'));
       continue;
     }
+    const source = diagramRawOf(slot);
+    // 渲染缓存命中(同 mermaid):省掉 TeaVM 引擎秒级渲染 + sanitize 整趟。
+    const cacheKey = diagramCacheKey('puml', source);
+    const cachedHtml = lookupDiagramSvg(cacheKey);
+    if (cachedHtml !== undefined) {
+      if (!isCurrentDiagramRender(slot, version)) continue;
+      target.innerHTML = cachedHtml;
+      setDiagramState(slot, 'preview');
+      continue;
+    }
     try {
       // The engine renders ARBITRARY source into a picture — including its own
       // syntax-error picture — so a bad diagram still shows what is wrong.
-      const svg = await withTimeout(mod.renderPlantumlToSvg(diagramRawOf(slot), { dark }), PUML_RENDER_TIMEOUT_MS);
+      const svg = await withTimeout(mod.renderPlantumlToSvg(source, { dark }), PUML_RENDER_TIMEOUT_MS);
       if (!isCurrentDiagramRender(slot, version)) continue;
       const clean = sanitizeSvgSource(svg);
       if (!clean) {
@@ -943,6 +1035,7 @@ async function renderPumlNodes(container: HTMLElement): Promise<void> {
         continue;
       }
       target.innerHTML = clean;
+      cacheDiagramSvg(cacheKey, clean);
       setDiagramState(slot, 'preview');
     } catch (err) {
       if (!isCurrentDiagramRender(slot, version)) continue;
@@ -2070,6 +2163,7 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
   }
 
     for (const { slot, version } of attempts) {
+      await yieldFrame(); // 多图分帧:echarts init+setOption 同步阻塞,图间让帧
       if (!isCurrentDiagramRender(slot, version)) continue;
       const target = slot.querySelector<HTMLElement>('.chart-target');
     if (!target) {
@@ -2078,8 +2172,21 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
     }
     try {
       const { spec, repaired, repairedSource } = parseChartSourceWithMeta(diagramRawOf(slot));
+      // 渲染缓存命中(同 mermaid/puml):echarts init+setOption 是主线程同步
+      // 开销,冷会话恢复逐图重跑;命中直接复用上次渲染的 SVG(存入时已
+      // viewBox 化,CSS 的 100% 强制尺寸下不变形;id 已去重防 defs 引用串图)。
+      const cacheKey = diagramCacheKey('chart', diagramRawOf(slot));
+      const cachedChart = lookupDiagramSvg(cacheKey);
+      if (cachedChart !== undefined) {
+        if (!isCurrentDiagramRender(slot, version)) continue;
+        target.innerHTML = dedupeSvgIds(cachedChart);
+        if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+        setDiagramState(slot, 'preview');
+        continue;
+      }
       mod.renderEchartInto(target, spec);
       if (!isCurrentDiagramRender(slot, version)) continue;
+      cacheChartSvg(target, cacheKey);
       if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
       setDiagramState(slot, 'preview');
     } catch (err) {
@@ -2268,6 +2375,39 @@ function adoptPreservedDiagramSlots(container: HTMLElement, preserved: Preserved
     const candidate = queue.get(diagramRawOf(slot))?.shift();
     if (!candidate) continue;
     slot.replaceWith(candidate);
+  }
+}
+
+/** Same adoption contract for plain markdown images (`md-img-wrap`): the
+ *  completion render re-parses the same text the user watched stream, and a
+ *  plain innerHTML swap forced every already-painted picture to re-request and
+ *  re-decode — data: URLs (paste thumbs, small inline images) have no HTTP
+ *  cache, so the flash was a full repaint. Wrappers with a non-empty img src
+ *  are matched by src and moved back wholesale, keeping the decoded bitmap and
+ *  the double-click viewer binding; unmatched ones render fresh as usual. */
+function preserveLiveImageWraps(container: HTMLElement): PreservedSlot[] {
+  const preserved: PreservedSlot[] = [];
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.md-img-wrap'))) {
+    const src = el.querySelector('img')?.getAttribute('src') ?? '';
+    if (!src) continue;
+    preserved.push({ raw: src, el });
+  }
+  return preserved;
+}
+
+function adoptPreservedImageWraps(container: HTMLElement, preserved: PreservedSlot[]): void {
+  if (preserved.length === 0) return;
+  const queue = new Map<string, HTMLElement[]>();
+  for (const p of preserved) {
+    const list = queue.get(p.raw);
+    if (list) list.push(p.el);
+    else queue.set(p.raw, [p.el]);
+  }
+  for (const wrap of Array.from(container.querySelectorAll<HTMLElement>('.md-img-wrap'))) {
+    const src = wrap.querySelector('img')?.getAttribute('src') ?? '';
+    const candidate = queue.get(src)?.shift();
+    if (!candidate) continue;
+    wrap.replaceWith(candidate);
   }
 }
 
@@ -2561,10 +2701,11 @@ export async function renderMarkdown(
   // untouched; still-loading ones re-render through the normal hydration.
   const preservedMaps = preserveLiveMapSlots(container);
   const preservedDiagrams = preserveLiveDiagramSlots(container);
+  const preservedImages = preserveLiveImageWraps(container);
   container.innerHTML = DOMPurify.sanitize(html, {
     // ADD_ATTR: target is ours on links, loading is ours on inline images —
     // neither is in DOMPurify's default allowed set.
-    ADD_ATTR: ['target', 'loading'],
+    ADD_ATTR: ['target', 'loading', 'decoding'],
     // asset://localhost 的本地图 src(renderer.image 经 convertFileSrc 转出)
     // 不在 DOMPurify 默认 URI 白名单里,不加这个会被整条剥掉、图又死回去。
     // 真正的闸门是 CSP img-src(asset: / asset.localhost / https: 都已放行)。
@@ -2572,6 +2713,7 @@ export async function renderMarkdown(
   });
   adoptPreservedMapSlots(container, preservedMaps);
   adoptPreservedDiagramSlots(container, preservedDiagrams);
+  adoptPreservedImageWraps(container, preservedImages);
   // Bind image viewers immediately after DOM replacement. Waiting until after
   // Mermaid/chart work below leaves an already-visible image with no dblclick
   // handler while another diagram is still loading.
@@ -2656,6 +2798,21 @@ const STREAM_VERY_LONG_TEXT_MS = 220;
 // renderMarkdown pass highlights the completed block exactly once.
 const STREAM_HLJS_SKIP_ABOVE = 30_000;
 
+/** Diagram hold-gate budget: after this long a still-rendering slot stops
+ *  holding up the text below it (the render itself continues in place). */
+const DIAGRAM_HOLD_BUDGET_MS = 2500;
+
+/** Let one frame paint between sequential diagram renders: echarts
+ *  init+setOption and mermaid layout are synchronous main-thread work, and
+ *  back-to-back slots in one message used to freeze the UI for the whole sum
+ *  instead of one frame per picture. */
+function yieldFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
 export function streamRenderThrottleMs(textLength: number, renderCostMs = 0): number {
   const sizeDelay = textLength >= 80_000
     ? STREAM_VERY_LONG_TEXT_MS
@@ -2707,7 +2864,7 @@ streamRenderer.image = (token: { href: string; title?: string | null; text: stri
   const alt = esc(token.text ?? '');
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !/^(https?:|data:|blob:)/i.test(src)) return alt;
   const title = token.title ? ` title="${attr(token.title)}"` : '';
-  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" /></span>`;
+  return `<span class="md-img-wrap" data-viewer="img"><img class="md-img" src="${attr(assetUrlFor(src))}" alt="${alt}"${title} loading="lazy" decoding="async" /></span>`;
 };
 const mdStream = new Marked({ gfm: true, breaks: true, renderer: streamRenderer });
 mdStream.use({ extensions: [highlightExt] });
@@ -2859,7 +3016,20 @@ function streamingDiagramGate(el: HTMLElement, container: HTMLElement): boolean 
   if (slots.length === 0) return false;
   const settled = (slot: HTMLElement): boolean => {
     const state = slot.getAttribute('data-state');
-    return state === 'preview' || state === 'error' || streamFenceOpen(slot);
+    if (state === 'preview' || state === 'error' || streamFenceOpen(slot)) return true;
+    // 兜底超时:「图先于文」不能变成「图卡住文」。PlantUML 引擎启动、被墙
+    // 的地图瓦片这类慢渲染曾把后续段落无限期扣住——hold 满 2.5s 就放行后文,
+    // 图在原地继续渲染,画好后仍亮在原位(占位卡已被换掉,布局不跳)。
+    if (slot.getAttribute('data-hold-released') === '1') return true;
+    if (slot.hasAttribute('data-hold-since')) {
+      if (Date.now() - Number(slot.getAttribute('data-hold-since')) >= DIAGRAM_HOLD_BUDGET_MS) {
+        slot.setAttribute('data-hold-released', '1');
+        return true;
+      }
+    } else {
+      slot.setAttribute('data-hold-since', String(Date.now()));
+    }
+    return false;
   };
   if (slots.every(settled)) return false;
   kickStreamingDiagram(el, container);
@@ -3167,49 +3337,91 @@ export function cancelStreamingRender(container: HTMLElement): void {
 if (typeof document !== 'undefined') {
   document.addEventListener('pure:theme-changed', async () => {
     mermaidInitTheme = null; // force re-init on next mermaid call
+    // 主题切换的 SVG 全部作废(颜色烘焙在渲染结果里);缓存 key 虽含主题,
+    // 旧主题条目留着只是占内存。
+    diagramSvgCache.clear();
+    // 只立即重渲当前可见的 slots(活跃会话);隐藏的暖会话 host 只标脏
+    // (data-theme-stale),等它被激活时由 rehydrateThemeStaleDiagrams 补渲。
+    // 此前全 document 重渲:多个暖会话的图全量重跑引擎,主题切换肉眼卡顿。
+    const isHidden = (slot: HTMLElement): boolean => slot.offsetParent === null;
+    const prepare = (slot: HTMLElement, selector: string, staleTarget: string): void => {
+      nextDiagramRenderVersion(slot);
+      slot.removeAttribute('data-processed');
+      const target = slot.querySelector<HTMLElement>(staleTarget);
+      if (target) target.innerHTML = '';
+      if (isHidden(slot)) {
+        slot.setAttribute('data-theme-stale', selector);
+      } else {
+        slot.setAttribute('data-state', 'loading');
+      }
+    };
+    const visibleOf = (selector: string): HTMLElement[] =>
+      Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((slot) => !isHidden(slot));
+
     // echarts charts also bake colors at render time — re-render every chart
     // slot so they follow the theme (the old instance is disposed inside
     // renderEchartInto before the new one renders).
     const chartSlots = Array.from(document.querySelectorAll<HTMLElement>('.chart-slot[data-state="preview"]'));
-    if (chartSlots.length > 0) {
-      for (const slot of chartSlots) {
-        nextDiagramRenderVersion(slot);
-        slot.removeAttribute('data-processed');
-        const target = slot.querySelector<HTMLElement>('.chart-target');
-        if (target) target.innerHTML = '';
-      }
+    for (const slot of chartSlots) prepare(slot, '.chart-slot', '.chart-target');
+    if (visibleOf('.chart-slot').length > 0) {
       await renderChartNodes(document.body);
       bindVectorPopup(document.body);
     }
     // PlantUML SVGs bake their palette at render time too (the engine has its
     // own dark mode), so every puml preview is re-rendered from source.
     const pumlSlots = Array.from(document.querySelectorAll<HTMLElement>('.puml-slot'));
-    for (const slot of pumlSlots) {
-      nextDiagramRenderVersion(slot);
-      slot.removeAttribute('data-processed');
-      const target = slot.querySelector<HTMLElement>('.puml-target');
-      if (target) target.innerHTML = '';
-      slot.setAttribute('data-state', 'loading');
-    }
-    if (pumlSlots.length > 0) {
+    for (const slot of pumlSlots) prepare(slot, '.puml-slot', '.puml-target');
+    if (visibleOf('.puml-slot').length > 0) {
       await renderPumlNodes(document.body);
       bindVectorPopup(document.body);
     }
 
     const all = Array.from(document.querySelectorAll<HTMLElement>('.mermaid-slot'));
-    if (all.length === 0) return;
     for (const slot of all) {
       const target = slot.querySelector<HTMLElement>('.mermaid-target');
       nextDiagramRenderVersion(slot);
       slot.removeAttribute('data-processed');
       if (target) target.innerHTML = '';
-      slot.setAttribute('data-state', 'loading');
+      if (isHidden(slot)) {
+        slot.setAttribute('data-theme-stale', '.mermaid-slot');
+      } else {
+        slot.setAttribute('data-state', 'loading');
+      }
     }
-    await renderMermaidNodes(document.body);
+    if (visibleOf('.mermaid-slot').length > 0) {
+      await renderMermaidNodes(document.body);
+    }
     bindDiagramControls(document.body);
     bindMermaidPopup(document.body);
     bindVectorPopup(document.body);
   });
+}
+
+/** 补渲主题切换时被标脏(data-theme-stale)的 diagram slots。会话从隐藏
+ *  暖 host 激活(或 park 节点重挂)时由宿主调用——那时它们才第一次以新
+ *  主题上屏。幂等:无脏标记时是空操作。 */
+export async function rehydrateThemeStaleDiagrams(container: HTMLElement): Promise<void> {
+  const stale = Array.from(container.querySelectorAll<HTMLElement>('[data-theme-stale]'));
+  if (stale.length === 0) return;
+  const kinds = new Set<string>();
+  for (const slot of stale) {
+    const selector = slot.getAttribute('data-theme-stale') ?? '';
+    slot.removeAttribute('data-theme-stale');
+    slot.setAttribute('data-state', 'loading');
+    if (selector) kinds.add(selector);
+  }
+  for (const selector of kinds) {
+    if (selector === '.puml-slot') {
+      await renderPumlNodes(container);
+    } else if (selector === '.chart-slot') {
+      await renderChartNodes(container);
+    } else if (selector === '.mermaid-slot') {
+      await renderMermaidNodes(container);
+    }
+  }
+  bindDiagramControls(container);
+  bindMermaidPopup(container);
+  bindVectorPopup(container);
 }
 
 // ── Click-to-expand diagram viewer ──

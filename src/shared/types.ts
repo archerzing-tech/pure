@@ -69,13 +69,18 @@ export interface ToolDefinition {
 }
 
 /**
- * A generated image delivered to the UI by the generate_image tool. `dataUrl`
- * is either a base64 `data:image/...;base64,...` payload or an https URL the
- * provider returned; it renders in the tool row as an <img> card. The LLM
- * never sees these — only the compact metadata summary in ToolResult.result.
+ * A generated image delivered to the UI by the generate_image tool. Desktop
+ * generations carry `path` (content-addressed file under
+ * ~/.pure/cache/generated-images) and render via asset:// — the MB-scale
+ * base64 payload never rides IPC, the session snapshot, or replay. `dataUrl`
+ * is the legacy inline payload (base64 `data:image/...` or a provider https
+ * URL): old session snapshots still hold it, and it remains the fallback when
+ * the disk write fails. The LLM never sees either — only the compact metadata
+ * summary in ToolResult.result.
  */
 export interface GeneratedImage {
-  dataUrl: string;
+  dataUrl?: string;
+  path?: string;
   mimeType: string;
   sizeBytes: number;
 }
