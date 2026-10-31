@@ -25,7 +25,7 @@ mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } 
 // on the Windows release run (export-not-found at link time). The DOM setup
 // mirrors that file's contract for the engine instead.
 
-const { flushStreamingRender, renderMarkdown, scheduleStreamingRender, normalizeViewerDiagramSize } = await import('../markdown');
+const { flushStreamingRender, renderMarkdown, scheduleStreamingRender, normalizeViewerDiagramSize, cachedChartFits } = await import('../markdown');
 const fs = await import('node:fs');
 
 let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
@@ -298,5 +298,55 @@ describe('enlarge viewer normalization (放大视图白色方块回归)', () => 
     const img = document.createElement('img');
     normalizeViewerDiagramSize(img);
     expect(img.style.cssText).toBe('');
+  });
+});
+
+// ── 回放适配契约(2026-10-31「历史会话图表变形/被遮住」)──
+// 图表 SVG LRU 的缓存条目烙着「上次渲染时容器」的几何:0 尺寸容器
+// (content-visibility 跳过的 bubble)出的 fallback 坏图入缓存=毒化,之后
+// 每次回放稳定复现;跨宽度回放(会话恢复/侧栏开合/窗口尺寸)直接插
+// 比例不符的 viewBox,CSS 100%×100% + meet 下挤压变形、溢出被槽位
+// overflow:hidden 裁掉。守卫+命中前验适配两刀的行为与接线。
+describe('chart svg cache replay fit (回放变形/遮挡回归)', () => {
+  it('rejects a hit when the slot is not measurable yet (miss path re-fits via its ResizeObserver)', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const svgHtml = '<svg width="900" height="340" viewBox="0 0 900 340"></svg>';
+    // happy-dom 无布局:clientWidth/clientHeight 是 0——正是 content-visibility
+    // 跳过区的测量形态,此时必须拒绝命中走真渲染。
+    expect(cachedChartFits(svgHtml, target)).toBe(false);
+    target.remove();
+  });
+
+  it('accepts a hit only within the aspect-ratio tolerance', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    Object.defineProperty(target, 'clientWidth', { configurable: true, get: () => 900 });
+    Object.defineProperty(target, 'clientHeight', { configurable: true, get: () => 340 });
+    // 同比例(2.65):缓存几何与槽位一致。
+    expect(cachedChartFits('<svg viewBox="0 0 900 340"></svg>', target)).toBe(true);
+    // 窄容器烙下的比例(≈1.0)撞宽槽位(2.65):偏差 162%,必须拒。
+    expect(cachedChartFits('<svg viewBox="0 0 343 340"></svg>', target)).toBe(false);
+    // 容差边缘:比例偏差 ~20% 内放行。
+    expect(cachedChartFits('<svg viewBox="0 0 800 340"></svg>', target)).toBe(true);
+    target.remove();
+  });
+
+  it('rejects cache HTML without a usable viewBox (poison-shaped entry)', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    Object.defineProperty(target, 'clientWidth', { configurable: true, get: () => 900 });
+    Object.defineProperty(target, 'clientHeight', { configurable: true, get: () => 340 });
+    expect(cachedChartFits('<svg width="900" height="340"></svg>', target)).toBe(false);
+    expect(cachedChartFits('<svg viewBox="0 0 0 340"></svg>', target)).toBe(false);
+    target.remove();
+  });
+
+  it('the cache guard and the fit check are wired into the chart render path (source contract)', () => {
+    const src = fs.readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    // 毒化守卫:小/异常尺寸的渲染绝不入缓存(echarts fallback 宽恰为 100)。
+    expect(src).toContain('width <= 100 || height < 60) return;');
+    // 命中前验适配:命中条件不再只看缓存有没有。
+    expect(src).toContain('cachedChartFits(cachedChart, target)');
   });
 });

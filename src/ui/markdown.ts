@@ -518,14 +518,42 @@ function dedupeSvgIds(svg: string): string {
 function cacheChartSvg(target: HTMLElement, key: string): void {
   const svg = target.querySelector('svg');
   if (!svg) return;
-  const width = svg.getAttribute('width') ?? '';
-  const height = svg.getAttribute('height') ?? '';
-  if (width && height && !svg.getAttribute('viewBox')) {
-    svg.setAttribute('viewBox', `0 0 ${parseFloat(width)} ${parseFloat(height)}`);
+  const width = parseFloat(svg.getAttribute('width') ?? '');
+  const height = parseFloat(svg.getAttribute('height') ?? '');
+  // 尺寸守卫：echarts 对 0/极小容器（content-visibility 跳过的 bubble、
+  // 布局未落地的会话恢复）吐的是坏图——grid/标签按 fallback 尺寸（100×100）
+  // 挤压。这种渲染绝不入缓存：毒化一次，之后每次回放都命中同一张坏图，
+  // 变形/遮挡稳定复现（2026-10-31「历史会话图表变形」主诉的毒化源）。
+  // 阈值收在 fallback 之上（<=100 拦掉,合法窄容器误拦的代价只是多渲染一次,
+  // 且 ResizeObserver 会重适配;毒化的代价是稳定复现的坏图）。
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 100 || height < 60) return;
+  if (!svg.getAttribute('viewBox')) {
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   }
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   const html = target.innerHTML;
   if (html) cacheDiagramSvg(key, html);
+}
+
+/** Whether a cached chart SVG still fits the slot it is about to fill. The
+ *  cached viewBox bakes in the container geometry of whenever the chart was
+ *  last rendered; replaying in a different-width container (session restore,
+ *  sidebar state, window size) stretches that geometry into a meet-mode
+ *  squeeze or clips it under the slot's overflow:hidden — the「历史会话图表
+ *  变形/被遮住」replay. A hit is rejected when the slot is not measurable yet
+ *  (content-visibility-skipped bubble: the miss path renders for real and its
+ *  ResizeObserver re-fits once layout lands) or when the aspect ratio has
+ *  drifted past tolerance. Exported for the replay-fit contract tests. */
+export function cachedChartFits(svgHtml: string, target: HTMLElement): boolean {
+  if (target.clientWidth < 100 || target.clientHeight < 60) return false;
+  const vb = svgHtml.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+  if (!vb) return false;
+  const vbW = parseFloat(vb[1]);
+  const vbH = parseFloat(vb[2]);
+  const svgRatio = vbW / vbH;
+  if (!Number.isFinite(svgRatio) || svgRatio <= 0) return false;
+  const slotRatio = target.clientWidth / target.clientHeight;
+  return Math.abs(slotRatio - svgRatio) / svgRatio <= 0.25;
 }
 
 type MermaidAPI = typeof import('mermaid').default;
@@ -2221,9 +2249,13 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
       // 渲染缓存命中(同 mermaid/puml):echarts init+setOption 是主线程同步
       // 开销,冷会话恢复逐图重跑;命中直接复用上次渲染的 SVG(存入时已
       // viewBox 化,CSS 的 100% 强制尺寸下不变形;id 已去重防 defs 引用串图)。
+      // 命中前先验适配:缓存的 viewBox 烙着「上次渲染时容器」的宽高比,回放
+      // 容器宽度不同(会话恢复/侧栏开合/窗口尺寸)时直接插会挤压变形或在
+      // overflow:hidden 下裁掉——比例不符或槽位还测不出尺寸就当 miss 走真
+      // 渲染(mountEchart 的 ResizeObserver 会在布局落地后重适配)。
       const cacheKey = diagramCacheKey('chart', diagramRawOf(slot));
       const cachedChart = lookupDiagramSvg(cacheKey);
-      if (cachedChart !== undefined) {
+      if (cachedChart !== undefined && cachedChartFits(cachedChart, target)) {
         if (!isCurrentDiagramRender(slot, version)) continue;
         target.innerHTML = dedupeSvgIds(cachedChart);
         if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
