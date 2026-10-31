@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   PromptAssembler,
+  activePermissionLine,
   buildCliCapabilities,
   buildGuiCapabilities,
 } from '../PromptAssembler';
@@ -795,5 +796,29 @@ describe('表达投影注入（人格轨道 刀 3）', () => {
     expect(off).toContain('<character_core>');
     const blank = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'capabilities', characterExpression: '   ' });
     expect(blank).toContain('<character_expression>');
+  });
+});
+
+// 权限模式 active 行（2026-10-31 判例）：模型不知道当前真实放行口径，就会
+// 自行编造「命令需要审批/被禁用」的话术。三种模式各一行、未接线零注入
+// （装配结果与旧版逐字节一致，CLI/测试零变化）。
+describe('activePermissionLine · 当前权限模式注入', () => {
+  it('auto/confirm/restricted 各给一行真口径', () => {
+    expect(activePermissionLine('auto')).toContain('YOLO');
+    expect(activePermissionLine('auto')).toContain('Never ask for permission');
+    expect(activePermissionLine('confirm')).toContain('NORMAL');
+    expect(activePermissionLine('restricted')).toContain('DONT_ASK');
+  });
+
+  it('未接线返回空串，system prompt 不含 Active mode 行', () => {
+    expect(activePermissionLine(undefined)).toBe('');
+    const built = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'caps' });
+    expect(built).not.toContain('Active mode right now');
+  });
+
+  it('接线后 system_core fragment 携带 active 行', () => {
+    const built = assembler.buildSystemPrompt({ surface: 'gui', capabilities: 'caps', permissionMode: 'auto' });
+    expect(built).toContain('Active mode right now: YOLO');
+    expect(built).toContain('<permission_modes>');
   });
 });

@@ -931,6 +931,8 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     toolDefinitions,
     modelIdentity: buildModelIdentity(config),
     environment: buildEnvironmentContext(config),
+    // 模型看得见当前真实放行口径：不再自行编造「命令需要审批/被禁用」。
+    permissionMode: config?.permissionMode,
     skills: config?.hubSkills,
     budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides),
   });
@@ -1159,15 +1161,22 @@ function toolCategory(tool: string): 'read' | 'write' | 'cmd' | 'git' | 'other' 
   return 'other';
 }
 
+/** 设置页逐类「自动放行」开关的纯判定：只回答「设置是否放行」，不弹卡。
+ *  同一口径喂给两处——NORMAL 的对话确认 handler，和 DONT_ASK（只读模式）
+ *  的 autoJudge（2026-10-31 用户铁律：设置写了就要被遵守，只读模式下开关
+ *  不再是死字段）。 */
+function settingsAutoApproves(config: PureConfig, tool: string): boolean {
+  const cat = toolCategory(tool);
+  return cat === 'read' ? config.autoPermRead
+    : cat === 'git' ? config.autoPermGit
+    : cat === 'write' ? config.autoPermWrite
+    : cat === 'cmd' ? config.autoPermCmd
+    : false;
+}
+
 function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement, scope = 'default'): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
-    const cat = toolCategory(info.tool);
-    const auto = cat === 'read' ? config.autoPermRead
-      : cat === 'git' ? config.autoPermGit
-      : cat === 'write' ? config.autoPermWrite
-      : cat === 'cmd' ? config.autoPermCmd
-      : false;
-    if (auto) return { allowed: true, autoApproved: true };
+    if (settingsAutoApproves(config, info.tool)) return { allowed: true, autoApproved: true };
     return requestPermission(info, { host: hostFor?.(), scope });
   };
 }
@@ -1453,17 +1462,30 @@ function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''
   // temporary workspace, so filesystem tools have a valid root in both modes.
   // generate_image is workspace-independent (it calls the provider's image
   // API), so it stays available in plain-chat mode like the web tools.
-  const available = (name: string): boolean =>
-    isToolEnabled(name, config) && (!!workspace || isWebSearchLike(name) || name === 'sys_info' || name === 'generate_image' || DYNAMIC_CAPABILITY_TOOL_DEFS.some((tool) => tool.name === name));
+  const enabled = (name: string): boolean => isToolEnabled(name, config);
+  const hasRoot = (name: string): boolean =>
+    !!workspace || isWebSearchLike(name) || name === 'sys_info' || name === 'generate_image' || DYNAMIC_CAPABILITY_TOOL_DEFS.some((tool) => tool.name === name);
+  const available = (name: string): boolean => enabled(name) && hasRoot(name);
   return {
     getTools: () => inner.getTools().filter((t) => available(t.name)),
     getMetadata: (name) => (available(name) ? inner.getMetadata(name) : undefined),
     getSnapshotPort: () => inner.getSnapshotPort(),
     execute: async (toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> => {
       const name = toolCall.function.name;
-      if (!available(name)) {
-        const why = `'${name}' is disabled in Settings → Tools.`;
-        return { id: toolCall.id, toolName: name, error: why, success: false, duration: 0 };
+      // 禁用原因分流，错误文案必须说真话（2026-10-31 用户铁律：设置放行了
+      // 却报「Settings 已停用」= 文案撒谎）。没有工作区根的是「纯对话轮」
+      // （寒暄路由不建临时工作区）——与设置开关无关，指引模型走对的路。
+      if (!enabled(name)) {
+        return { id: toolCall.id, toolName: name, error: `'${name}' is disabled by its Settings → Tools toggle.`, success: false, duration: 0 };
+      }
+      if (!hasRoot(name)) {
+        return {
+          id: toolCall.id,
+          toolName: name,
+          error: `This is a plain conversational turn: no workspace root, so '${name}' has nowhere to run. Web search, sys_info and image generation still work. If the user's request actually needs to run a command or touch files, tell the user to pick a workspace (Settings → Tools) or restate the task.`,
+          success: false,
+          duration: 0,
+        };
       }
       return inner.execute(toolCall, signal);
     },
@@ -5251,6 +5273,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // toggling "自动放行命令") takes effect immediately on the next send
       // while keeping the session's approval cache alive.
       this.permissionManager.setMode(mapPermissionMode(config.permissionMode));
+      // 只读模式（DONT_ASK）也要吃到设置页的逐类放行开关：纯判定面接线。
+      this.permissionManager.setAutoJudge((ctx) => settingsAutoApproves(config, ctx.tool));
       this.permissionManager.setRequestHandler(createPermissionHandler(
         config,
         () => this.transcriptTarget(),
@@ -5477,6 +5501,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (imageGen) {
         codingAgent.toolRegistry.register({ ...IMAGE_GEN_TOOL_DEF, tags: [Tags.READ], riskLevel: 'low' });
       }
+      // 模型可见清单吃设置页工具开关（isToolEnabled 未知名默认放行，
+      // MCP/子代理/动态工具不受影响）——「关掉=从清单消失」对模型清单
+      // 同样成立，不再「看得见调不动」。
+      codingAgent.toolRegistry.setVisibilityGate((name) => isToolEnabled(name, config));
       for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
         codingAgent.toolRegistry.register({
           ...tool,

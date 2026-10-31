@@ -106,8 +106,18 @@ export class ToolRegistry implements ToolAdapter {
   private externalToolsExecutor?: ToolAdapter;
   private permissionManager?: PermissionManager;
   private commandGuard?: (command: string) => string | null;
+  // 模型可见清单的设置闸（宿主接线 isToolEnabled）：注册表种子是全量
+  // BUILT_IN_TOOLS，不经过 delegate 的过滤面——此前「关掉开关工具立刻从
+  // 清单消失」的承诺只对设置页 inventory 成立，模型清单里 execute_command
+  // 等仍看得见、调用时才被 wrapper 拦（2026-10-31 判例）。谓词对未知名
+  // （MCP/子代理/动态/外部）默认放行，连接层排除面不受影响。
+  private visibilityGate?: (name: string) => boolean;
 
   constructor(private delegate: ToolAdapter) {}
+
+  setVisibilityGate(gate: ((name: string) => boolean) | undefined): void {
+    this.visibilityGate = gate;
+  }
 
   /** The underlying adapter (NodeToolAdapter / TauriToolAdapter) — used by
    * the external-tools executor to route through execute_command. */
@@ -161,10 +171,11 @@ export class ToolRegistry implements ToolAdapter {
     // （mcpExcludedPrefixes），这里不再滤第二次。
     return this.tools
       .filter(({ name, tags }) =>
-        isPublicToolName(name)
-        || isDynamicCapabilityTool(name)
-        || tags.includes(Tags.MCP)
-        || tags.includes(Tags.EXTERNAL))
+        (isPublicToolName(name)
+          || isDynamicCapabilityTool(name)
+          || tags.includes(Tags.MCP)
+          || tags.includes(Tags.EXTERNAL))
+        && (!this.visibilityGate || this.visibilityGate(name)))
       .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
 

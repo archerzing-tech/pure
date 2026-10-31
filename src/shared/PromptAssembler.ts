@@ -63,6 +63,22 @@ export interface PromptSkill {
   path?: string;
 }
 
+/** 当前权限模式的 active 行：接在常驻四模式表后，让模型知道此刻的真实
+ *  放行口径（四模式表只讲「有哪些模式」，不讲「现在是哪个」——模型曾据此
+ *  自行宣称「命令需要审批」）。未接线返回空串，装配结果与旧版逐字节一致。 */
+export function activePermissionLine(mode?: 'auto' | 'confirm' | 'restricted'): string {
+  switch (mode) {
+    case 'auto':
+      return '\nActive mode right now: YOLO — every tool call is auto-approved. Never ask for permission, never say a command needs approval, and never claim a tool is disabled.';
+    case 'confirm':
+      return '\nActive mode right now: NORMAL — reads run free; writes/commands prompt the user unless the settings\' fine-grained auto-approve toggle covers them.';
+    case 'restricted':
+      return '\nActive mode right now: DONT_ASK — reads run free; writes/commands are blocked unless a fine-grained auto-approve toggle in Settings covers them. If blocked, say exactly that and stop.';
+    default:
+      return '';
+  }
+}
+
 export interface PromptAssemblyContext {
   surface: PromptSurface;
   capabilities: string;
@@ -98,6 +114,10 @@ export interface PromptAssemblyContext {
    */
   mcpResources?: string;
   mode?: PromptTaskMode;
+  /** 设置页权限模式原值（GUI 接线；缺省不注入 active 行，CLI/测试零变化）。
+   *  注入是为了让模型知道当前真实放行口径——不知道就会自行编造「需要审批/
+   *  命令被禁用」的话术（2026-10-31 判例）。 */
+  permissionMode?: 'auto' | 'confirm' | 'restricted';
   budget?: PromptBudgetConfig;
   traceId?: string;
   sessionId?: string;
@@ -522,7 +542,7 @@ export class PromptAssembler {
     return [
       // conventions 已随 P2 下沉 user turn（envFacts），system 段不再有
       // project_conventions pinned fragment——项目切换/reflector 更新不再毁缓存。
-      fragment('system_core', SYSTEM_CORE_PROMPT, 120, true),
+      fragment('system_core', SYSTEM_CORE_PROMPT + activePermissionLine(context.permissionMode), 120, true),
       // ── 性格内核（人格轨道刀 2）───────────────────────────────────────
       // "pure 是谁"的统一出典：决策面与表达面都从它派生，子代理分支也继承它
       // （docs/persona-core-upgrade.md 铁律 4）。priority 119 卡在 system_core

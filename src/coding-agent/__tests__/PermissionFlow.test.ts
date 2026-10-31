@@ -408,3 +408,57 @@ describe('unknown-side-effect families never count as reads (审计批 5①)', (
     expect(asked).toBe(1);
   });
 });
+
+// 只读模式（DONT_ASK）× 设置逐类「自动放行」开关（2026-10-31 用户铁律：
+// 设置写了就要被遵守）。autoJudge 是纯判定面——能放行、绝不弹卡；未接线
+// （CLI）维持原判。三用例锁住：开关放行则写工具真跑、开关不放行维持静默
+// 拒绝、缺 autoJudge 行为与旧版逐字节一致。
+describe('DONT_ASK honors the fine-grained auto-approve toggles (autoJudge)', () => {
+  const writeCtx = (tool: string): PermissionContext => ({
+    tool,
+    isRead: false,
+    riskLevel: 'high',
+    command: tool === 'execute_command' ? 'ls -la' : undefined,
+  });
+
+  it('an auto-approve toggle covers writes in DONT_ASK (allowed, no card)', async () => {
+    const pm = new PermissionManager('DONT_ASK');
+    pm.setAutoJudge((ctx) => ctx.tool === 'execute_command');
+    const decision = await pm.askUser(writeCtx('execute_command'));
+    expect(decision.allowed).toBe(true);
+    expect(decision.autoApproved).toBe(true);
+  });
+
+  it('without a covering toggle DONT_ASK still blocks writes silently', async () => {
+    const pm = new PermissionManager('DONT_ASK');
+    pm.setAutoJudge((ctx) => ctx.tool === 'write_file');
+    const decision = await pm.askUser(writeCtx('execute_command'));
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain('DONT_ASK');
+  });
+
+  it('no autoJudge wired (CLI): unchanged legacy verdict', async () => {
+    const pm = new PermissionManager('DONT_ASK');
+    const decision = await pm.askUser(writeCtx('execute_command'));
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain('DONT_ASK');
+  });
+});
+
+// 模型可见清单吃设置页工具开关（2026-10-31 刀⑤）：注册表种子是全量
+// BUILT_IN_TOOLS，不经 delegate 过滤面——gate 关掉的工具从 getTools 消失
+// （「关掉=从清单消失」对模型清单成立）；未知名（MCP/外部/子代理）不受
+// 影响（isToolEnabled 对未知名默认放行）。
+describe('ToolRegistry visibility gate aligns the model list with the settings toggles', () => {
+  it('a gated-off built-in disappears from getTools; unknown tools stay', () => {
+    const executor: ToolAdapter = { getTools: () => [], getMetadata: () => ({}), execute: async (): Promise<ToolResult> => ({ id: 'x', toolName: 'x', success: true, duration: 0 }) };
+    const registry = new ToolRegistry(executor);
+    registry.register({ name: 'srv__search', description: 'mcp found', input_schema: { type: 'object' }, tags: [Tags.MCP] });
+    expect(registry.getTools().some((t) => t.name === 'execute_command')).toBe(true);
+    registry.setVisibilityGate((name) => name !== 'execute_command');
+    const names = registry.getTools().map((t) => t.name);
+    expect(names).not.toContain('execute_command');
+    expect(names).toContain('srv__search'); // MCP 工具不吃 GUI 开关
+    expect(names).toContain('read_file'); // 其余内建照常可见
+  });
+});

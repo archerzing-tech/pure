@@ -17,6 +17,11 @@ export class PermissionManager {
   // the old epoch and drops its approval instead of seeding the new session.
   private pendingEpoch = 0;
   private requestHandler?: PermissionRequestHandler;
+  // 只读模式（DONT_ASK）下的设置放行判定面：纯函数、绝不弹卡。设置页的
+  // 逐类「自动放行」开关经它生效——用户铁律（2026-10-31）：设置写了就要被
+  // 遵守，不能出现「开关是开的、判定链却读不到」的死字段。未接线（CLI）
+  // 维持原判，行为不变。
+  private autoJudge?: (ctx: PermissionContext) => boolean;
 
   constructor(mode: PermissionMode = 'NORMAL', handler?: PermissionRequestHandler) {
     this.mode = mode;
@@ -25,6 +30,10 @@ export class PermissionManager {
 
   setMode(mode: PermissionMode): void {
     this.mode = mode;
+  }
+
+  setAutoJudge(judge: ((ctx: PermissionContext) => boolean) | undefined): void {
+    this.autoJudge = judge;
   }
 
   getMode(): PermissionMode {
@@ -46,8 +55,13 @@ export class PermissionManager {
       return { allowed: false, reason: 'PLAN mode: read-only operations only' };
     }
 
-    // DONT_ASK: allow reads, block writes silently
+    // DONT_ASK: allow reads, block writes silently — unless the settings'
+    // fine-grained auto-approve toggle explicitly covers this category
+    // (autoJudge is a pure predicate: it can grant, never prompt).
     if (this.mode === 'DONT_ASK') {
+      if (this.autoJudge?.(ctx)) {
+        return { allowed: true, autoApproved: true, reason: 'auto-approve toggle (settings)' };
+      }
       return { allowed: ctx.isRead, reason: ctx.isRead ? undefined : 'DONT_ASK mode: write blocked' };
     }
 
