@@ -397,7 +397,11 @@ fn inject_proxy_password(proxy_url: &str, password: Option<&str>) -> String {
 // failure of the exact path the app will use. The WebView-fetch fallback stays
 // for browser dev mode, where CORS is not an issue for the user.
 
+// 跨 IPC 字段名与 TS 消费面对齐（camelCase）：此前三个探测结构体都按
+// Rust 默认 snake_case 序列化，TS 侧读 latencyMs 恒为 undefined——测速
+// 面板显示「undefined ms」、代理时延 EMA 学不到数（2026-10-31 判例）。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LlmConnectionProbe {
     ok: bool,
     status: Option<u16>,
@@ -496,6 +500,7 @@ async fn test_llm_connection(
 /// 连接层失败 = 死。用户口径：代理是可选工具，配置挂了要及时识别，但不该
 /// 让真实对话流量去交学费——3s 总超时，由 UI 在启动/定期/失败后触发。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProxyProbe {
     ok: bool,
     latency_ms: u64,
@@ -15745,6 +15750,7 @@ async fn test_proxy(proxy_url: String, probe_urls: Vec<String>) -> Result<String
 /// 鉴权；只有连接失败 / 超时才判不可达。本命令不下载也不校验资产字节：
 /// 「镜像活着但吐的内容不对」得由下载侧的内容校验回答，测速只回答哪条路通。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GithubMirrorProbe {
     prefix: String,
     ok: bool,
@@ -15766,9 +15772,12 @@ async fn github_mirror_probe(
     }
     let timeout =
         std::time::Duration::from_millis(timeout_ms.unwrap_or(8000).clamp(1000, 20_000));
-    let client = build_http_client(timeout, proxy_url.as_deref())?;
+    let proxied_client = build_http_client(timeout, proxy_url.as_deref())?;
+    // 「直连」行必须真直连：配了应用代理时，若直连行也走代理 client，
+    // 代理到镜像域不通会整版「不可达」，直连的真实可达性被掩盖。
+    let direct_client = build_http_client(timeout, None)?;
     let probes = prefixes.into_iter().map(|prefix| {
-        let client = client.clone();
+        let client = if prefix.is_empty() { direct_client.clone() } else { proxied_client.clone() };
         let target = target.clone();
         async move {
             let url = if prefix.is_empty() {

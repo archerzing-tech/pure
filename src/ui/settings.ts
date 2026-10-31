@@ -2296,7 +2296,8 @@ export class SettingsPanel {
     const current = normalizeGithubMirrorKey(cfg.githubMirror);
     toggle.checked = current !== 'direct';
     if (current !== 'direct') select.value = current;
-    // 关着的时候也要摆一个可用节点：否则重新打开开关会拿到空白值。\n    else if (!select.value) select.value = entries[0]?.key;
+    // direct 时 select 不强行复位：下拉首项天然默认选中（HTML 行为），
+    // 重新打开开关拿到的就是可用节点，无需额外摆值。
     if (custom) custom.value = cfg.customGithubMirror ?? '';
     this.updateGithubAccelVisibility();
   }
@@ -2348,6 +2349,9 @@ export class SettingsPanel {
           prefixes: entries.map((entry) => entry.prefix),
           probeUrl: GITHUB_MIRROR_PROBE_URL,
           proxyUrl: proxy || null,
+          // 节点清单自注有 8s 上下的慢镜像，Rust 默认 8s 恰好把可用的慢节点
+          // 判死（「探测死、实际活」）；显式放宽到 15s（Rust 侧仍钳 20s 上限）。
+          timeoutMs: 15000,
         });
       } else {
         results = await Promise.all(entries.map((entry) => probeGithubMirrorLatency(entry.prefix)));
@@ -2361,10 +2365,15 @@ export class SettingsPanel {
       });
       box.innerHTML = entries.map((entry, i) => {
         const result = results[i] ?? { ok: false, latencyMs: 0, error: 'no result' };
-        const tag = latencyBucket(result.latencyMs, result.ok);
-        const text = result.ok
-          ? t('ghAccel.ms').replace('{ms}', String(result.latencyMs))
-          : t('ghAccel.unreachable');
+        // 渲染护栏：时延不是有限数值就绝不插值进 UI（宁可显示「—」，不让
+        // 任何跨端字段错位再演出「undefined ms」）。
+        const finite = Number.isFinite(result.latencyMs);
+        const tag = latencyBucket(finite ? result.latencyMs : Infinity, result.ok);
+        const text = !result.ok
+          ? t('ghAccel.unreachable')
+          : finite
+            ? t('ghAccel.ms').replace('{ms}', String(result.latencyMs))
+            : '—';
         const title = result.error ? ` title="${escapeHtml(result.error)}"` : '';
         return `<div class="gh-accel-latency-row"><span class="gh-accel-latency-name">${escapeHtml(this.githubMirrorLabel(entry.key, entry.label))}</span><span class="gh-accel-latency-tag ${tag}"${title}>${escapeHtml(text)}</span></div>`;
       }).join('');

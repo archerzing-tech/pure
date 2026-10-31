@@ -34,7 +34,9 @@ describe('设置页 · GitHub 加速', () => {
     expect(src).toContain(": 'direct',");
     // 关掉再打开要恢复上次的节点，而不是回到空白。
     expect(src).toContain('if (current !== \'direct\') select.value = current;');
-    expect(src).toContain('else if (!select.value) select.value = entries[0]?.key');
+    // 曾有一行注释内嵌死代码（else if (!select.value) select.value =
+    // entries[0]?.key，entries 在该作用域根本不存在）伪装成逻辑——锁死它不再回来。
+    expect(src).not.toContain('entries[0]?.key');
   });
 
   it('节点下拉与测速都从共享注册表来，UI 不另写一份地址清单', () => {
@@ -43,8 +45,21 @@ describe('设置页 · GitHub 加速', () => {
     expect(src).toContain('githubProbeEntries(customPrefix)');
     expect(src).toContain("'github_mirror_probe'");
     expect(src).toContain('probeGithubMirrorLatency(entry.prefix)');
-    expect(src).toContain('latencyBucket(result.latencyMs, result.ok)');
+    expect(src).toContain('latencyBucket(finite ? result.latencyMs : Infinity, result.ok)');
+    expect(src).toContain('Number.isFinite(result.latencyMs)');
     expect(src).toContain('GITHUB_MIRROR_PROBE_URL');
+  });
+
+  it('Rust 探测结构体跨 IPC 用 camelCase（2026-10-31 判例：snake_case 曾让测速显示 undefined ms）', () => {
+    const rust = read('../../../src-tauri/src/lib.rs');
+    for (const structName of ['LlmConnectionProbe', 'ProxyProbe', 'GithubMirrorProbe']) {
+      const at = rust.indexOf(`struct ${structName}`);
+      expect(at).toBeGreaterThan(-1);
+      const head = rust.slice(Math.max(0, at - 200), at);
+      expect(head).toContain('rename_all = "camelCase"');
+    }
+    // 测速超时显式放宽：慢镜像（自注 8s 上下）不再被默认 8s 误判死。
+    expect(read('../settings.ts')).toContain('timeoutMs: 15000');
   });
 
   it('Skill Hub 浏览 / 安装把回退链传下去（否则开关只改了设置页的外观）', () => {
