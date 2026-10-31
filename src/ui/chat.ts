@@ -2031,7 +2031,15 @@ export class ChatController {
     // 「嘴」读数：主流 THINK 流式请求在飞计数（wrapThinkStream 包住
     // llmForPhase('THINK') 会拿到的两个适配器——turnLlm 与 THINK 相位路由）。
     // 真 = 模型正在吐字，并线插话掐流重入；假 = 工具/支在飞，不打断。
-    isThinkingStreamActive: () => this.thinkStreamDepth > 0,
+    // 2026-10-31 判例补丁：wrapThinkStream 包出的实例整条传给 CodingAgent →
+    // SubagentOrchestrator，子 agent 的 THINK 流也进同一个计数——3 支在飞时
+    // depth 恒 >0，光看计数会把「手在跑」读成「嘴在说」，inline 直投的
+    // abortReenter 会把主 controller 掐断，在飞支的 parentSignal 全体 abort
+    // 走 tree-cancel 结算（真机「子agent路线被宿主中断了」）。委派在飞时
+    // 「嘴」读数失真，一律不打断——插话已入 steerBus，下一 THINK 边界消化，
+    // 与 inlineArm 的设计语义一致（主 THINK 吐字与委派在飞天然互斥，互斥的
+    // 另一侧不受伤）。
+    isThinkingStreamActive: () => this.thinkStreamDepth > 0 && !this.hasDelegationInFlight(),
     // 掐流重入把手：abort 带 INTERJECT_REENTER_REASON——引擎在 THINK 边界
     // yield Interrupted(reason='reenter')，收尾点据此立即带 steer 队列重开
     // 思考（不落暂停账、不渲染停止态）。

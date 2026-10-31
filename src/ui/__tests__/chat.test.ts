@@ -2503,6 +2503,12 @@ describe('plan-by-thinking flow', () => {
     // （进流 +1 / finally -1）——isThinkingStreamActive 读这个计数，插话直投
     // 后要不要掐流重入就靠它。裸 createLLMAdapter 会让重入判据永远读到假。
     expect(src).toMatch(/const llm = this\.wrapThinkStream\(createLLMAdapter\(config, lightTurn \? lightOpts : \{\}\)\);/);
+    // 2026-10-31「子agent路线被宿主中断」判例：wrapThinkStream 的实例整条
+    // 传给 CodingAgent → SubagentOrchestrator，子 agent 的 THINK 流也进同一
+    // 计数——3 支在飞时 depth 恒 >0,inline 直投的 abortReenter 会把在飞支
+    // 的 parentSignal 全体 abort 成 tree-cancel。委派在飞时「嘴」读数失真，
+    // 必须一律不打断（话已入 steerBus，下一 THINK 边界消化）。
+    expect(src).toMatch(/isThinkingStreamActive: \(\) => this\.thinkStreamDepth > 0 && !this\.hasDelegationInFlight\(\),/);
     // 路由不走门控：路由与插话裁决同为「判断但轻」的一次性调用，一律关暗
     // 推理。旧门控（配了轻档才换 judgeLlm）默认路径下（没配轻档）把路由绑在
     // 主适配器上，2026-10-14 实测 glm-5.3-flash 同一段路由提示词：暗思考开
