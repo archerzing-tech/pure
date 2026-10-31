@@ -16,7 +16,7 @@ import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
-import { githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
+import { githubAutoMirrorFirst, githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, githubMirrorLadderPrefixes, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, normalizeGithubMirrorKey, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
@@ -986,10 +986,81 @@ export class TauriToolAdapter implements ToolAdapter {
    * 复用 execute 重进同一条下载链，避免把整段 GUI 下载逻辑再抄一遍。
    *
    * GitHub 系统设置的前缀链（设置 → 通用 → GitHub 加速）不在这里循环：加速
-   * 开启时它已上移为 download_file 入口处的先行链（mirror-first，直连是链尾），
-   * 链全灭后调用方以 mirrorChainTried 跳过本方法；加速关闭时
-   * githubDownloadAttempts 为空，前缀链本就无事可做。
+   * 开启时它已上移为 download_file 入口处的先行链（mirror-first，直连是链尾，
+   * 走 runGithubAccelChain），链全灭后调用方以 mirrorChainTried 跳过本方法；
+   * 加速关闭（显式 direct）时 githubDownloadAttempts 为空，前缀链本就无事可做。
+   * auto（默认）模式直连先行：链不在入口先跑，而在网络类失败分支入场
+   * （见下载 case 内的 mirrorFallback）。
    */
+  /**
+   * GitHub 加速节点链实跑器：官方等价改写（rw）→ 存活加速节点，逐跳借道
+   * execute 递归走完整下载路径（代理路由预算、断点续传、取消接线全部继承）。
+   *
+   * 两个入场位：① mirror-first 时在 download_file 入口先跑（显式节点 / custom，
+   * 或 auto 模式下直连路刚被实测打死）；② auto 模式直连先行的下载，在网络类
+   * 失败分支入场（此时链是失败兜底，不是主路）。
+   *
+   * 每一跳向 mirrorHealth 记账（与设置页测速共用），TTL 内已知死亡的节点直接
+   * 跳过——全灭场景下挨个白打是分钟级浪费；跳过名单进 ledger.mirrorSkipped，
+   * 实打失败进 ledger.mirrorTried，全灭聚合消息（githubAllPathsDeadNotice）
+   * 靠这两份台账如实列账。chainTried 在进入即置位：链的命运（成/败/全跳过）
+   * 一次问清，调用方不得再重打。
+   *
+   * 返回非 null = 该跳成功（自带 provenance）或用户取消（原样交回），调用方
+   * 直接 return；null = 链走完无果，调用方落到自己的直连/报错路径。
+   */
+  private async runGithubAccelChain(
+    toolCall: { id: string; index: number },
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    ledger: { mirrorTried: Array<{ label: string; error?: string }>; mirrorSkipped: string[]; chainTried: boolean },
+  ): Promise<ToolResult | null> {
+    ledger.chainTried = true;
+    const url = String(args.url ?? '').trim();
+    const excludeKey = typeof args.__ghAccelExclude === 'string' ? args.__ghAccelExclude : '';
+    const rw = primaryRewrite(url);
+    const allAttempts = githubDownloadAttempts(url, this.githubMirror, this.githubCustomMirror)
+      .filter((attempt) => attempt.prefix !== '')
+      .filter((attempt) => !excludeKey || attempt.mirrorKey !== excludeKey);
+    const aliveAttempts = allAttempts.filter((attempt) => !mirrorIsDead(attempt.mirrorKey));
+    for (const dead of allAttempts) {
+      if (!aliveAttempts.some((a) => a.mirrorKey === dead.mirrorKey)) ledger.mirrorSkipped.push(dead.label);
+    }
+    const mirrorAttempts = [
+      // rw 跳（官方等价改写）不是加速节点，label 留空即不参与健康记账。
+      ...(rw && rw.url !== url ? [{ url: rw.url, prefix: '', mirrorKey: rw.rule, label: '' }] : []),
+      ...aliveAttempts,
+    ];
+    for (const attempt of mirrorAttempts) {
+      const viaMirror = await this.execute(
+        {
+          id: toolCall.id,
+          index: toolCall.index,
+          // __ghAccelHop 标记这跳由先行链生成：它失败时失败分支不得再解包
+          // 回原 URL（外层链自己会落到下一跳/直连），否则与 unwrap 分支
+          // 乒乓成无限递归。只有顶层显式 URL（无标记）才允许解包一次。
+          function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: attempt.url, __ghAccelHop: attempt.mirrorKey }) },
+        },
+        signal,
+      );
+      // 取消高于链序：用户叫停就原样交回，不悄悄换主机接着下。
+      if (signal?.aborted) return viaMirror;
+      if (viaMirror.success) {
+        if (attempt.label) recordMirrorOutcome(attempt.mirrorKey, true);
+        return this.withRewriteProvenance(viaMirror, url, {
+          url: attempt.url,
+          rule: `github-mirror:${attempt.mirrorKey}`,
+        });
+      }
+      if (attempt.label) {
+        const hopError = String(viaMirror.error ?? viaMirror.result ?? '').slice(0, 200);
+        recordMirrorOutcome(attempt.mirrorKey, false, hopError);
+        ledger.mirrorTried.push({ label: attempt.label, error: hopError });
+      }
+    }
+    return null;
+  }
+
   private async retryDownloadViaMirror(
     toolCall: { id: string; index: number },
     args: Record<string, unknown>,
@@ -1094,7 +1165,7 @@ export class TauriToolAdapter implements ToolAdapter {
           const hubRoute = netRouteProxyPair('https://raw.githubusercontent.com/', this.proxyUrl);
           const raw = await this.runRouted(
             hubRoute,
-            (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl, this.githubAccelPrefixes()),
+            (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl, githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', this.githubMirror, this.githubCustomMirror)),
             (text) => detectHijack(text, { url: 'https://raw.githubusercontent.com/', expectContent: true }).signal,
           );
           // Route learning: runRouted 已经按真实结局记过学习；这里额外把
@@ -1407,68 +1478,48 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!/^https?:\/\//i.test(url)) {
             return { id: toolCall.id, toolName: 'download_file', result: '请提供以 http(s):// 开头的下载链接', success: false, duration: Date.now() - start };
           }
-          // ── GitHub 加速（设置 → 通用）：开启时镜像优先 ──
+          // ── GitHub 加速（设置 → 通用）：显式节点先行；auto 证据先行 ──
           // 链序：官方等价镜像（primaryRewrite，t0/t1）→ 选中加速节点 → 其余公共
-          // 节点 → 直连（下面的常规路径就是链尾，不在这里重复）。用户显式开了加
-          // 速，说明直连 GitHub 大概率不通——直连不再是第一顺位，别拿分钟级超时
-          // 替直连探路。每一级借道 execute 递归跑完整下载路径（代理路由预算、断
-          // 点续传、取消接线全部继承）；镜像 host 不在 GitHub 名单里，递归回去被
-          // isAlreadyMirrored 门拦下，链不会套娃。加速关闭 / 非 GitHub 下载面 URL
-          // 时链为空，行为与从前完全一致——加速关闭时官方等价改写也**不**先行
-          // （rw 受开关约束）：jsDelivr 有 20MB 上限、「关闭加速 = 回到 GitHub 官
-          // 方地址」的开关承诺不许被第三方 CDN 稀释，它们留在失败兜底位。
-          // __ghAccelExclude 供 unwrap 下落排除刚失败的显式镜像（防同 URL 重打）。
-          // 链全灭置 mirrorChainTried：直连再失败时不重打整条链。加速节点
-          // 每一跳都向 mirrorHealth 记账（与设置页测速共用），TTL 内已知
-          // 死亡的节点直接跳过——全灭场景下挨个白打是分钟级浪费。
-          let mirrorChainTried = false;
-          const mirrorTried: Array<{ label: string; error?: string }> = [];
-          const mirrorSkipped: string[] = [];
-          if (isGithubDownloadUrl(url) && !isAlreadyMirrored(url, this.githubAccelPrefixes())) {
-            const accelOn = this.githubMirror !== 'direct';
-            const rw = accelOn ? primaryRewrite(url) : null;
-            const excludeKey = typeof args.__ghAccelExclude === 'string' ? args.__ghAccelExclude : '';
-            const allAttempts = githubDownloadAttempts(url, this.githubMirror, this.githubCustomMirror)
-              .filter((attempt) => attempt.prefix !== '')
-              .filter((attempt) => !excludeKey || attempt.mirrorKey !== excludeKey);
-            const aliveAttempts = allAttempts.filter((attempt) => !mirrorIsDead(attempt.mirrorKey));
-            for (const dead of allAttempts) {
-              if (!aliveAttempts.some((a) => a.mirrorKey === dead.mirrorKey)) mirrorSkipped.push(dead.label);
-            }
-            const mirrorAttempts = [
-              // rw 跳（官方等价改写）不是加速节点，label 留空即不参与健康记账。
-              ...(rw && rw.url !== url ? [{ url: rw.url, prefix: '', mirrorKey: rw.rule, label: '' }] : []),
-              ...aliveAttempts,
-            ];
-            for (const attempt of mirrorAttempts) {
-              const viaMirror = await this.execute(
-                {
-                  id: toolCall.id,
-                  index: toolCall.index,
-                  // __ghAccelHop 标记这跳由先行链生成：它失败时失败分支不得再解包
-                  // 回原 URL（外层链自己会落到下一跳/直连），否则与 unwrap 分支
-                  // 乒乓成无限递归。只有顶层显式 URL（无标记）才允许解包一次。
-                  function: { name: 'download_file', arguments: JSON.stringify({ ...args, url: attempt.url, __ghAccelHop: attempt.mirrorKey }) },
-                },
-                signal,
-              );
-              // 取消高于链序：用户叫停就原样交回，不悄悄换主机接着下。
-              if (signal?.aborted) return viaMirror;
-              if (viaMirror.success) {
-                if (attempt.label) recordMirrorOutcome(attempt.mirrorKey, true);
-                return this.withRewriteProvenance(viaMirror, url, {
-                  url: attempt.url,
-                  rule: `github-mirror:${attempt.mirrorKey}`,
-                });
-              }
-              if (attempt.label) {
-                const hopError = String(viaMirror.error ?? viaMirror.result ?? '').slice(0, 200);
-                recordMirrorOutcome(attempt.mirrorKey, false, hopError);
-                mirrorTried.push({ label: attempt.label, error: hopError });
-              }
-            }
-            mirrorChainTried = mirrorAttempts.length > 0;
+          // 节点 → 直连（下面的常规路径就是链尾，不在这里重复）。三种模式：
+          //   · 显式节点 / custom：mirror-first——用户表过态，直连不再是第一顺位，
+          //     别拿分钟级超时替直连探路。
+          //   · auto（默认）：直连先行；只有 netRoute 学习表里该 host 的直连路
+          //     5 分钟内刚被实测打死（githubAutoMirrorFirst）才镜像先行。判定
+          //     完全证据驱动，静态 proxy-first 分类不参与；直连恢复后自动回到
+          //     直连（死期一过重探一次，成本有界）。
+          //   · 显式 direct（关闭）：链为空，行为与从前完全一致——官方等价改写
+          //     也不先行（rw 受开关约束）：jsDelivr 有 20MB 上限、「关闭加速 =
+          //     回到 GitHub 官方地址」的承诺不许被第三方 CDN 稀释，它们留在
+          //     失败兜底位（mirrorFallback 的显式 direct 分支）。
+          // 每一级借道 execute 递归跑完整下载路径（代理路由预算、断点续传、取
+          // 消接线全部继承）；镜像 host 不在 GitHub 名单里，递归回去被
+          // isAlreadyMirrored 门拦下，链不会套娃。__ghAccelExclude 供 unwrap
+          // 下落排除刚失败的显式镜像（防同 URL 重打）。
+          // auto 直连先行时镜像链不在这里跑，等网络类失败分支再入场（三个失败
+          // 分支共用的 mirrorFallback）；chainTried 在链进入即置位，直连再失败
+          // 时不会重打整条链。
+          const accelMode = normalizeGithubMirrorKey(this.githubMirror);
+          const accelOn = accelMode !== 'direct';
+          const mirrorLedger = { mirrorTried: [] as Array<{ label: string; error?: string }>, mirrorSkipped: [] as string[], chainTried: false };
+          if (isGithubDownloadUrl(url) && !isAlreadyMirrored(url, this.githubAccelPrefixes())
+            && (accelMode === 'auto' ? githubAutoMirrorFirst(url) : accelOn)) {
+            const chainResult = await this.runGithubAccelChain(toolCall, args, signal, mirrorLedger);
+            if (chainResult) return chainResult;
           }
+          const mirrorChainTried = (): boolean => mirrorLedger.chainTried;
+          // 三个失败分支（native / shell 流式 / shell 缓冲）共用的镜像兜底：
+          // 链没跑过（auto 直连先行或显式 direct）时，网络类失败后链在此入场。
+          // 只有**裸 GitHub 下载面 URL**走加速节点链；显式镜像 URL（优先级 1）
+          // 的解包下落与非 GitHub URL 的官方等价改写仍归 retryDownloadViaMirror
+          // ——加速节点链不认显式镜像前缀（返回空链），且它给改写标注套
+          // github-mirror: 前缀，会污染 npm 改写的原始 rule。
+          const mirrorFallback = async (): Promise<ToolResult | null> => {
+            if (mirrorChainTried()) return null;
+            if (accelOn && isGithubDownloadUrl(url) && !unwrapGithubMirrorUrl(url, this.githubCustomMirror)) {
+              return this.runGithubAccelChain(toolCall, args, signal, mirrorLedger);
+            }
+            return this.retryDownloadViaMirror(toolCall, args, signal);
+          };
           // Host circuit breaker: a known-dead download source fails instantly.
           if (hostBlocked(url)) {
             return { id: toolCall.id, toolName: name, result: blockedHostMessage(url), success: false, duration: Date.now() - start };
@@ -1595,15 +1646,16 @@ export class TauriToolAdapter implements ToolAdapter {
               const detail = done?.error ?? `退出码 ${code}`;
               if (isNetworkError(detail)) {
                 recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-                // 镜像链已在直连前试完（mirror-first），失败兜底只剩官方等价改写。
-                const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
+                // 链问过即 null（chainTried）；auto 直连先行的失败 → 链此刻入场；
+                // 显式 direct → 只剩官方等价改写 + unwrap 下落。
+                const mirrored = await mirrorFallback();
                 if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
                 // 全灭聚合：镜像链参与过（打过失败或被健康缓存跳过）且直连也
                 // 失败 → 列出每条路 + 出口建议，模型不再重试同一条死路。熔断
                 // 消息优先——会话级拦截比单次解释更急。
-                const allDead = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
-                  ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, detail)
+                const allDead = !tripped && (mirrorLedger.mirrorTried.length > 0 || mirrorLedger.mirrorSkipped.length > 0)
+                  ? githubAllPathsDeadNotice(mirrorLedger.mirrorTried, mirrorLedger.mirrorSkipped, detail)
                   : null;
                 return {
                   id: toolCall.id,
@@ -1700,12 +1752,13 @@ export class TauriToolAdapter implements ToolAdapter {
               // curl/wget network-class exit codes trip the host breaker.
               if (NET_DOWNLOAD_EXIT_CODES.has(code)) {
                 recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-                // 镜像链已在直连前试完（mirror-first），失败兜底只剩官方等价改写。
-                const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
+                // 链问过即 null（chainTried）；auto 直连先行的失败 → 链此刻入场；
+                // 显式 direct → 只剩官方等价改写 + unwrap 下落。
+                const mirrored = await mirrorFallback();
                 if (mirrored) return mirrored;
                 const { tripped } = recordNetFailure(url);
-                const deadNotice = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
-                  ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, `下载失败（退出码 ${code}）`)
+                const deadNotice = !tripped && (mirrorLedger.mirrorTried.length > 0 || mirrorLedger.mirrorSkipped.length > 0)
+                  ? githubAllPathsDeadNotice(mirrorLedger.mirrorTried, mirrorLedger.mirrorSkipped, `下载失败（退出码 ${code}）`)
                   : null;
                 return {
                   id: toolCall.id,
@@ -1751,13 +1804,14 @@ export class TauriToolAdapter implements ToolAdapter {
           dispatchDownloadProgress(toolCall.id, { downloaded: 0, total: -1, percent: -1, speed: 0, state: 'hidden', filename: doneFb?.filename });
           if (NET_DOWNLOAD_EXIT_CODES.has(exec.exitCode) || isNetworkError(exec.stderr ?? '')) {
             recordNetOutcome(url, usedProxy ? 'proxy' : 'direct', false);
-            // 镜像链已在直连前试完（mirror-first），失败兜底只剩官方等价改写。
-            const mirrored = mirrorChainTried ? null : await this.retryDownloadViaMirror(toolCall, args, signal);
+            // 链问过即 null（chainTried）；auto 直连先行的失败 → 链此刻入场；
+            // 显式 direct → 只剩官方等价改写 + unwrap 下落。
+            const mirrored = await mirrorFallback();
             if (mirrored) return mirrored;
             const { tripped } = recordNetFailure(url);
             const fbDetail = `下载失败（退出码 ${exec.exitCode}）`;
-            const deadNotice = !tripped && (mirrorTried.length > 0 || mirrorSkipped.length > 0)
-              ? githubAllPathsDeadNotice(mirrorTried, mirrorSkipped, fbDetail)
+            const deadNotice = !tripped && (mirrorLedger.mirrorTried.length > 0 || mirrorLedger.mirrorSkipped.length > 0)
+              ? githubAllPathsDeadNotice(mirrorLedger.mirrorTried, mirrorLedger.mirrorSkipped, fbDetail)
               : null;
             return {
               id: toolCall.id,

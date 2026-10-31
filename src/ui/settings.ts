@@ -143,6 +143,7 @@ import {
   GITHUB_MIRRORS,
   GITHUB_MIRROR_PROBE_URL,
   githubFallbackPrefixes,
+  githubMirrorLadderPrefixes,
   githubProbeEntries,
   latencyBucket,
   normalizeGithubMirrorKey,
@@ -561,7 +562,8 @@ export class SettingsPanel {
       setHubStatus('');
       try {
         const mirrorCfg = loadConfig() ?? defaults();
-        const mirrorPrefixes = githubFallbackPrefixes(mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
+        // auto（默认）证据先行：raw host 直连被实测打死才给镜像档，健康直连不绕镜像。
+        const mirrorPrefixes = githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
         const index = await fetchHubIndex(repo, '', mirrorPrefixes);
         const cfg = mirrorCfg;
         const installed = new Set((cfg.hubSkills ?? []).map(s => s.name));
@@ -610,7 +612,8 @@ export class SettingsPanel {
       btn.textContent = t('hub.installing');
       try {
         const mirrorCfg = loadConfig() ?? defaults();
-        const mirrorPrefixes = githubFallbackPrefixes(mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
+        // auto（默认）证据先行：raw host 直连被实测打死才给镜像档，健康直连不绕镜像。
+        const mirrorPrefixes = githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', mirrorCfg.githubMirror, mirrorCfg.customGithubMirror);
         const raw = await fetchSkillBody(repo, skill, '', mirrorPrefixes);
         if (raw === null) {
           setHubStatus(t('hub.bodyFailed').replace('{s}', skill), true);
@@ -2299,6 +2302,7 @@ export class SettingsPanel {
   }
 
   private githubMirrorLabel(key: string, fallback: string): string {
+    if (key === 'auto') return t('ghAccel.mirror.auto');
     if (key === 'custom') return t('ghAccel.mirror.custom');
     if (key === 'direct') return t('ghAccel.mirror.direct');
     return fallback;

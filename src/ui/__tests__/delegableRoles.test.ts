@@ -165,7 +165,7 @@ describe('只扫一次', () => {
 describe('总开关是硬门（不是可选项）', () => {
   it('关掉时一个生成角色都不加载，可委派面只剩内建', async () => {
     sources = [manifest('researcher_focused')];
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: false } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution: false } });
     invalidateConfigCache();
     await withFreshModule(async (mod) => {
       expect(await mod.loadExternalSubagents()).toEqual([]);
@@ -178,7 +178,7 @@ describe('总开关是硬门（不是可选项）', () => {
   it('开着时正常加载（否则上一条恒真，红线测试就白写了）', async () => {
     sources = [manifest('researcher_focused')];
     evolution = true;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
     invalidateConfigCache();
     await withFreshModule(async (mod) => {
       expect((await mod.loadDelegableRoleNames())).toContain('researcher_focused');
@@ -190,7 +190,7 @@ describe('生成角色不许占用内建工具名', () => {
   it('叫 execute_command 的 manifest 被编译期拒绝（reserved 含工具名）', async () => {
     sources = [manifest('execute_command')];
     evolution = true;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
     invalidateConfigCache();
     await withFreshModule(async (mod) => {
       const names = await mod.loadDelegableRoleNames();
@@ -202,7 +202,7 @@ describe('生成角色不许占用内建工具名', () => {
   it('叫 researcher_focused 的正常通过（对照：上一条不是因为全都拒绝）', async () => {
     sources = [manifest('researcher_focused'), manifest('execute_command')];
     evolution = true;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
     invalidateConfigCache();
     await withFreshModule(async (mod) => {
       const names = await mod.loadDelegableRoleNames();
@@ -214,7 +214,7 @@ describe('生成角色不许占用内建工具名', () => {
   it('生成角色撞名内建角色同样被拒（内建不可被覆盖）', async () => {
     sources = [manifest('researcher')];
     evolution = true;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
     invalidateConfigCache();
     await withFreshModule(async (mod) => {
       const names = await mod.loadDelegableRoleNames();
@@ -311,7 +311,7 @@ describe('转正后屏上状态必须立刻变（回归锚点）', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       files['subagents/researcher_focused.json'] = '{"version":1}';
       files['subagents/researcher_focused.trial.json'] =
@@ -334,12 +334,12 @@ describe('转正后屏上状态必须立刻变（回归锚点）', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       expect(await mod.loadDelegableRoleNames()).toContain('researcher_focused');
 
       evolution = false;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       expect(await mod.loadDelegableRoleNames()).not.toContain('researcher_focused');
       expect(await mod.loadGeneratedRoles()).toEqual([]);
@@ -359,7 +359,7 @@ describe('血缘：模型自取的名字不许被硬绑成父子', () => {
   it('模型给了一个无关名字 → 不写试用期，角色永远停在「未记父角色」', async () => {
     await withFreshModule(async (mod) => {
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       expect(await mod.startRoleTrial('code_reviewer_v2', 'researcher')).toBe(false);
       expect(writes).toEqual([]);
@@ -383,7 +383,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       seedManifest();
       const manifestPath = 'subagents/researcher_focused.json';
@@ -400,7 +400,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = false;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       seedManifest();
       expect(await mod.promoteGeneratedRole('researcher_focused')).toBe(false);
@@ -412,7 +412,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       seedManifest();
       expect(await mod.promoteGeneratedRole('researcher_focused')).toBe(true);
@@ -424,7 +424,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       // no seedManifest(): read_file throws → nothing to promote
       expect(await mod.promoteGeneratedRole('researcher_focused')).toBe(false);
@@ -446,7 +446,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       seedManifest();
       // 已有旁挂账：转正必须只改状态，不能把父角色与注册时间抹掉。
@@ -466,7 +466,7 @@ describe('转正写入：红线、路径与内容', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
 
       expect(await mod.startRoleTrial('researcher_focused', 'researcher')).toBe(true);
@@ -483,12 +483,12 @@ describe('转正写入：红线、路径与内容', () => {
   it('开试用期也守总开关与名字校验', async () => {
     await withFreshModule(async (mod) => {
       evolution = false;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       expect(await mod.startRoleTrial('researcher_focused', 'researcher')).toBe(false);
       expect(writes).toEqual([]);
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       expect(await mod.startRoleTrial('../escape', 'researcher')).toBe(false);
     });
@@ -502,7 +502,7 @@ describe('转正落盘要留下「凭什么」', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       files['subagents/researcher_focused.json'] = '{"version":1}';
       files['subagents/researcher_focused.trial.json'] =
@@ -520,7 +520,7 @@ describe('转正落盘要留下「凭什么」', () => {
     await withFreshModule(async (mod) => {
       sources = [manifest('researcher_focused')];
       evolution = true;
-      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution } });
+      mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution } });
       invalidateConfigCache();
       files['subagents/researcher_focused.json'] = '{"version":1}';
       expect(await mod.promoteGeneratedRole('researcher_focused')).toBe(true);
@@ -532,7 +532,7 @@ describe('转正落盘要留下「凭什么」', () => {
 describe('13.2 归档：隔离不删，且可重新启用', () => {
   function setEvolution(on: boolean): void {
     evolution = on;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: on } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution: on } });
     invalidateConfigCache();
   }
   function seedRole(role = 'researcher_focused', marker?: Record<string, unknown>): void {
@@ -686,7 +686,7 @@ describe('13.2 归档：隔离不删，且可重新启用', () => {
 describe('13.2 归档：彻底删除是一颗按钮，不是一句文案', () => {
   function setEvolution(on: boolean): void {
     evolution = on;
-    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: on } });
+    mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution: on } });
     invalidateConfigCache();
   }
 

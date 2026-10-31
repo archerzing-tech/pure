@@ -379,7 +379,7 @@ export function defaults(): PureConfig {
     mapTileCacheMB: DEFAULT_MAP_TILE_CACHE_MB,
     mapTileKey: '',
     schedules: [],
-    configVersion: 16,
+    configVersion: 17,
   };
 }
 
@@ -845,6 +845,17 @@ export function loadConfig(): PureConfig | null {
       if ((parsed.configVersion ?? 1) < 16) {
         cfg.sandboxCommands = false;
         cfg.configVersion = 16;
+        needsPersist = true;
+      }
+      // Config v17: GitHub 加速默认「智能 auto」（2026-10-31 product decision —
+      // 加速的使用不该靠人工开关：直连快就走直连，直连被实测打死才自动换镜像，
+      // 恢复后自动回到直连）。存量 'direct' 迁移一次：旧版下拉里根本没有
+      // direct 选项，存出来的 'direct' 几乎必然是「从没动过设置」或旧默认的
+      // 副作用，不是显式选择（同 v15 的判断依据）。迁移后用户仍可在设置里
+      // 显式关掉（存 'direct'，configVersion 不动，不会再次被翻转）。
+      if ((parsed.configVersion ?? 1) < 17) {
+        if (cfg.githubMirror === 'direct') cfg.githubMirror = 'auto';
+        cfg.configVersion = 17;
         needsPersist = true;
       }
       if (isTauriRuntime() && cfg.apiKey) {

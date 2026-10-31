@@ -1,14 +1,16 @@
 // GitHub 下载加速的共享层：回退链是「下载不死」的唯一保证，所以这里锁的是
 // 顺序与边界，而不是某个镜像当前能不能通（网络事实由设置页测速回答）。
 
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
   DEFAULT_GITHUB_MIRROR,
   GITHUB_MIRRORS,
   MIRROR_HEALTH_TTL_MS,
   githubAllPathsDeadNotice,
+  githubAutoMirrorFirst,
   githubDownloadAttempts,
   githubFallbackPrefixes,
+  githubMirrorLadderPrefixes,
   githubMirrorPrefix,
   githubProbeEntries,
   isGithubDownloadUrl,
@@ -22,17 +24,19 @@ import {
   probeGithubMirrorLatency,
   withGithubMirrorPrefix,
 } from '../githubAccel';
+import { recordNetOutcome, resetLearnedRoutes } from '../netRoute';
 
 const PUBLIC_PREFIXES = GITHUB_MIRRORS
-  .filter((m) => m.key !== 'custom' && m.key !== 'direct')
+  .filter((m) => m.key !== 'custom' && m.key !== 'direct' && m.key !== 'auto')
   .map((m) => m.prefix);
 
 describe('GitHub 加速 · 节点与前缀', () => {
-  it('默认关闭：direct 是默认值，未知 key 也回落到它', () => {
-    expect(DEFAULT_GITHUB_MIRROR).toBe('direct');
-    expect(normalizeGithubMirrorKey('')).toBe('direct');
-    expect(normalizeGithubMirrorKey('nope')).toBe('direct');
+  it('默认智能：auto 是默认值，未知 key 也回落到它', () => {
+    expect(DEFAULT_GITHUB_MIRROR).toBe('auto');
+    expect(normalizeGithubMirrorKey('')).toBe('auto');
+    expect(normalizeGithubMirrorKey('nope')).toBe('auto');
     expect(normalizeGithubMirrorKey(' GHFAST ')).toBe('ghfast');
+    expect(normalizeGithubMirrorKey('direct')).toBe('direct');
   });
 
   it('自定义前缀补 scheme、去尾斜杠，非 http(s) 判无效', () => {
@@ -111,6 +115,8 @@ describe('GitHub 加速 · 可加速面与候选链', () => {
     const raw = 'https://github.com/o/r/releases/download/v1/a.zip';
     expect(githubDownloadAttempts(raw, 'direct')).toEqual([]);
     expect(githubDownloadAttempts('https://example.com/a.zip', 'ghfast')).toEqual([]);
+    // auto 的候选链与显式节点同形：镜像档 + 直连尾（顺序由调用方的先行判定决定）。
+    expect(githubDownloadAttempts(raw, 'auto').length).toBe(PUBLIC_PREFIXES.length + 1);
 
     const attempts = githubDownloadAttempts(raw, 'ghfast');
     expect(attempts.length).toBe(PUBLIC_PREFIXES.length + 1);
@@ -130,9 +136,9 @@ describe('GitHub 加速 · 可加速面与候选链', () => {
     expect(attempts[0]?.mirrorKey).toBe('custom');
   });
 
-  it('测速候选包含公共节点 + 自定义（有效时）+ 直连', () => {
+  it('测速候选包含公共节点 + 自定义（有效时）+ 直连，auto 不在列（它是决策不是链路）', () => {
     const base = githubProbeEntries('');
-    expect(base.map((e) => e.key)).toEqual([...GITHUB_MIRRORS.filter((m) => m.key !== 'custom' && m.key !== 'direct').map((m) => m.key), 'direct']);
+    expect(base.map((e) => e.key)).toEqual([...GITHUB_MIRRORS.filter((m) => m.key !== 'custom' && m.key !== 'direct' && m.key !== 'auto').map((m) => m.key), 'direct']);
     const withCustom = githubProbeEntries('mirror.example.com');
     expect(withCustom.some((e) => e.key === 'custom' && e.prefix === 'https://mirror.example.com')).toBe(true);
   });
@@ -208,5 +214,57 @@ describe('GitHub 加速 · 节点健康缓存（全灭处理）', () => {
     expect(notice).toContain('- 直连：connection reset by peer');
     expect(notice).toContain('设置 → 网络代理');
     expect(notice).toContain('手动下载');
+  });
+});
+
+describe('GitHub 加速 · auto 模式（证据先行，不读静态分类）', () => {
+  const scrub = (): void => {
+    resetLearnedRoutes();
+    resetMirrorHealth();
+    // resetLearnedRoutes 只清内存并置 loaded=false：若前序测试文件留下了
+    // 全局 localStorage（GlobalRegistrator 未注销），下一次 ensureLoaded 会
+    // 把档里陈旧的 github.com 记录拉回来翻面断言——持久档一并清掉。
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.removeItem('pure.netRoute.v1');
+    } catch { /* 无存储环境照常 */ }
+  };
+  beforeEach(scrub);
+  // 路由学习是模块级单例：本组写入的结局不清掉，会翻面后续文件里的
+  // resolveNetRoute / 下载链断言（2026-10-26 download_file 镜像测试踩中过）。
+  afterEach(scrub);
+
+  it('无证据直连先行；直连实测失败后镜像先行；死期过期自动回到直连重探', () => {
+    const url = 'https://github.com/o/r/releases/download/v1/a.zip';
+    expect(githubAutoMirrorFirst(url)).toBe(false);
+    recordNetOutcome(url, 'direct', false);
+    expect(githubAutoMirrorFirst(url)).toBe(true);
+    // 5 分钟死期内镜像先行，死期一过重探直连（恢复即走直连，成本一次探路）。
+    expect(githubAutoMirrorFirst(url, Date.now() + 4 * 60_000)).toBe(true);
+    expect(githubAutoMirrorFirst(url, Date.now() + 6 * 60_000)).toBe(false);
+  });
+
+  it('直连成功与代理路失败都不是镜像先行的证据', () => {
+    const url = 'https://github.com/o/r/releases/download/v1/a.zip';
+    recordNetOutcome(url, 'direct', true);
+    expect(githubAutoMirrorFirst(url)).toBe(false);
+    // 代理路死不是直连死的证据：下一轮打通预算会自己落到直连。
+    recordNetOutcome(url, 'proxy', false);
+    expect(githubAutoMirrorFirst(url)).toBe(false);
+  });
+
+  it('两条路先后死光：尸检报告允许被最新死因覆盖，direct 的死能被读到', () => {
+    const url = 'https://github.com/o/r/releases/download/v1/a.zip';
+    recordNetOutcome(url, 'proxy', false);
+    recordNetOutcome(url, 'direct', false);
+    expect(githubAutoMirrorFirst(url)).toBe(true);
+  });
+
+  it('hub 镜像档：auto 只在直连死时给链；显式节点恒给；显式 direct 恒空', () => {
+    const raw = 'https://raw.githubusercontent.com/o/r/main/SKILL.md';
+    expect(githubMirrorLadderPrefixes(raw, 'direct')).toEqual([]);
+    expect(githubMirrorLadderPrefixes(raw, 'ghfast')).toEqual(githubFallbackPrefixes('ghfast'));
+    expect(githubMirrorLadderPrefixes(raw, 'auto')).toEqual([]);
+    recordNetOutcome(raw, 'direct', false);
+    expect(githubMirrorLadderPrefixes(raw, 'auto')).toEqual(githubFallbackPrefixes('auto'));
   });
 });

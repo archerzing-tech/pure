@@ -1,5 +1,5 @@
 // src/shared/githubAccel.ts
-// GitHub 下载加速：URL 前缀代理 + 多级回退。
+// GitHub 下载加速：URL 前缀代理 + 多级回退 + 证据驱动的 auto 模式。
 //
 // 手法只有一个：把 GitHub 原始 URL 整体拼到镜像域名后面——
 //   https://ghfast.top/https://github.com/owner/repo/releases/download/x.zip
@@ -11,25 +11,35 @@
 // 让下载死掉。注意链的每一级都是完整前缀，而不是 host 替换——镜像地址可能带
 // 路径（https://example.com/gh），拼法必须按「前缀 + 原 URL」处理。
 //
-// 信任边界（与 shared/mirrorSources.ts 同一套政策）：公共前缀代理是第三方公益
-// 服务，无 SLA、响应体可被任意替换，所以：
-//   - 默认关闭（githubMirror 默认 'direct'），必须由用户在 设置 → 通用 显式打开；
+// 信任边界（2026-10-31 用户定调修订）：公共前缀代理是第三方公益服务，无 SLA、
+// 响应体可被任意替换，所以：
+//   - 默认**智能**（githubMirror 默认 'auto'）：直连快就走直连（不经第三方）；
+//     直连失败（含代理路由耗尽）被记住后自动改走加速节点，恢复后自动回到
+//     直连——不再要求用户手动开关节点。愿意放弃智能路由的人仍可显式选固定
+//     节点或 explicit direct（永不加速）；
 //   - 只改写 GitHub 的**公开下载面**（release 资产 / raw / codeload / objects），
 //     不改 api.github.com（那里带 Authorization，第三方代理解析不到凭证也拿不到
 //     准确语义）；
-//   - 不碰用户自定义前缀之外的地址：选 custom 但地址非法时退化为直连，而不是
-//     悄悄替用户选一个他没同意过的公共代理。
+//   - 改写必标注来源（download 结果的 rewrite 字段），全灭时如实列账，不做
+//     静默替换。
 //
 // 节点清单只收本仓库 mirrorSources.ts 里核验过的几家（2026-10-09 实测），
 // 不抄别处「9 个节点」的表——死掉一半的清单比短清单更误导人。
+
+import { directRouteDead } from './netRoute';
 //
-// ── 优先级（2026-10-26 定稿）：同一份 GitHub 下载面上可能同时存在三套路由
-// 意愿，按「显式度」排成一条链，谁显式谁先手，任何一级网络类失败都落到下一级：
+// ── 优先级（2026-10-26 定稿；2026-10-31 auto 模式并入）：同一份 GitHub 下载
+// 面上可能同时存在三套路由意愿，按「显式度」排成一条链，谁显式谁先手，任何
+// 一级网络类失败都落到下一级：
 //   1. 调用点显式镜像 —— download_file 的 url 已带已知镜像前缀（skill 教的
 //      路由 / 模型自选）。赢法是「不二次包裹」；它失败时解出原 URL 重新入链
 //      （unwrapGithubMirrorUrl + TauriToolAdapter.retryDownloadViaMirror）。
-//   2. 系统设置链 —— 设置 → 通用 → GitHub 加速（用户显式开关节点）。裸
-//      GitHub URL 时先行（mirror-first），链尾直连。
+//   2. 系统设置链 —— 设置 → 通用 → GitHub 加速：
+//      · 显式节点 / custom：mirror-first，链尾直连（用户表过态，照办）；
+//      · auto（默认）：**证据先行**——netRoute 学习表里该 host 的直连路
+//        5 分钟内刚被实测打死（directRouteDead）→ 镜像先行，省一次必死
+//        超时；否则直连先行，镜像链留给网络类失败兜底。静态 proxy-first
+//        分类**不参与**这个判定——「直连行不行」只有实测能回答。
 //   3. 官方等价镜像（sourceRewrite t0/t1）与直连 —— 中立兜底。
 // 熔断例外：hostBlocked 即时失败发生在整条链之前——已判死的 host 不再探路，
 // 也不落优先级链（兜底交给模型层换 URL）。
@@ -47,8 +57,15 @@ export interface GithubMirror {
   note: string;
 }
 
-/** 公共节点 + 两个特殊项（custom / direct）。顺序就是回退链里“其余镜像”的顺序。 */
+/** 特殊项 auto + 公共节点 + custom / direct。公共节点的声明顺序就是回退链里
+ *  “其余镜像”的顺序；auto / custom / direct 无前缀，不进回退链。 */
 export const GITHUB_MIRRORS: readonly GithubMirror[] = [
+  {
+    key: 'auto',
+    label: '智能',
+    prefix: '',
+    note: '直连快就走直连；直连失败被记住后自动改走加速节点，恢复后自动回到直连',
+  },
   {
     key: 'ghfast',
     label: 'GHFast',
@@ -93,8 +110,11 @@ export const GITHUB_MIRRORS: readonly GithubMirror[] = [
   },
 ];
 
-/** 默认关闭。第三方公益代理不该在用户没点过开关时接管下载。 */
-export const DEFAULT_GITHUB_MIRROR = 'direct';
+/** 默认智能：直连快就走直连（不经第三方），直连被实测打死才自动换镜像。
+ *  显式选固定节点 / custom / direct 仍然有效——auto 只是「没人表过态」时的
+ *  默认态，不是「替用户选公共代理」的强制态（2026-10-31 用户定调：智能使用，
+ *  不要人工开关）。 */
+export const DEFAULT_GITHUB_MIRROR = 'auto';
 
 /** 测速用的固定资源：一个长期存在的 jq release 资产。
  *  刻意选 release 而不是仓库首页——前缀代理的价值就在 release 资产，仓库首页
@@ -282,10 +302,12 @@ export function githubDownloadAttempts(
   }));
 }
 
-/** 设置页测速的候选：公共节点 → 自定义（地址有效时）→ 直连。 */
+/** 设置页测速的候选：公共节点 → 自定义（地址有效时）→ 直连。
+ *  auto 不在列：它是一条决策而不是一条链路，没有可测的前缀——auto 的
+ *  「实测结果」就是面板上各节点与直连自身的延迟行。 */
 export function githubProbeEntries(customPrefix = ''): Array<{ key: string; label: string; prefix: string }> {
   const entries = GITHUB_MIRRORS
-    .filter((m) => m.key !== 'custom' && m.key !== 'direct')
+    .filter((m) => m.key !== 'custom' && m.key !== 'direct' && m.key !== 'auto')
     .map((m) => ({ key: m.key, label: m.label, prefix: m.prefix }));
   const custom = normalizeGithubMirrorPrefix(customPrefix);
   if (custom) entries.push({ key: 'custom', label: '自定义', prefix: custom });
@@ -293,19 +315,40 @@ export function githubProbeEntries(customPrefix = ''): Array<{ key: string; labe
   return entries;
 }
 
-/** 为下拉列表生成带有延迟标签的镜像条目 */
+/** 下拉列表：auto（默认态）在最前，其后公共节点 → 自定义 → 直连。 */
 export function githubMirrorDropdownEntries(customPrefix = ''): string {
+  const auto = GITHUB_MIRRORS.find((m) => m.key === 'auto');
   const entries = githubProbeEntries(customPrefix);
-  return entries.map((entry) => {
-    const key = entry.key;
-    const label = entry.label;
-    const prefix = entry.prefix;
-    // direct 不参与测速，直接隐藏
-    if (key === 'direct') return `<option value="${key}">${label}</option>`;
-    // 对于公共节点，尝试获取延迟（非阻塞：测速在后台进行，UI 即时显示已选）
-    // 这里仅在渲染时标记 ‘testing’ 状态，实际延迟由 testGithubMirrors 页面逻辑填入
-    return `<option value="${key}">${label}</option>`;
-  }).join('');
+  return [
+    ...(auto ? [`<option value="auto">${auto.label}</option>`] : []),
+    ...entries.map((entry) => `<option value="${entry.key}">${entry.label}</option>`),
+  ].join('');
+}
+
+/**
+ * auto 模式的唯一判定：这个 GitHub host 的直连路是否刚被实测打死（netRoute
+ * 学习表的死期半边，5 分钟 TTL）。判定完全证据驱动：
+ *   · 直连活着 / 没有证据 → false，直连先行（探一次的成本换「直连好就别绕路」）；
+ *   · 直连死期内 → true，镜像先行，不为直连烧第二次必死超时；
+ *   · 死期一过 → false，自动重探，直连恢复即回到直连。
+ * 静态分类面（github 的 proxy-first）只影响**配了代理时**哪条出口先手，
+ * 与「要不要镜像先行」无关——后者只认实测证据。
+ */
+export function githubAutoMirrorFirst(url: string, now = Date.now()): boolean {
+  return directRouteDead(url, now);
+}
+
+/**
+ * hub 类小文件抓取（SKILL.md / hub index）的镜像档前缀：与下载面同一套
+ * 显式度语义——显式节点 / custom 恒给链（用户表过态）；auto 只在目标 host
+ * 的直连被实测打死时才给（证据先行，健康直连绝不绕镜像）；显式 direct
+ * 永不给。抓取方拿到 [] 时按自己的无镜像路径走（Rust 阶梯 / 直连候选）。
+ */
+export function githubMirrorLadderPrefixes(url: string, key: unknown, customPrefix = '', now = Date.now()): string[] {
+  const normalized = normalizeGithubMirrorKey(key);
+  if (normalized === 'direct') return [];
+  if (normalized === 'auto') return githubAutoMirrorFirst(url, now) ? githubFallbackPrefixes(key, customPrefix) : [];
+  return githubFallbackPrefixes(key, customPrefix);
 }
 
 export type LatencyBucket = 'good' | 'warn' | 'bad' | 'dead';

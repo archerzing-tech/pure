@@ -485,6 +485,27 @@ export function resolveNetRoute(hostOrUrl: string, hasProxy: boolean, now = Date
   return routeForKey(host, hasProxy, now, proxyFallbackFor(proxyUrl ?? '', now, fallback));
 }
 
+// ── 证据读侧 ────────────────────────────────────────────────────────────────
+// 「直连这会儿到底行不行」只有学习表里的真实结局能回答，任何静态名单都回答
+// 不了（同一个域名在家被墙、在公司能连）。GitHub 加速的 auto 模式在这里读
+// 直连面的死活证据，决定要不要镜像先行；静态分类面**不参与**这个判定——
+// 分类只回答冷启动「第一条路猜谁」，猜完之后一切以实测为准。
+
+/**
+ * 只读：该 host 的直连路是否刚被实测打死（死期内）。
+ * 与选路用的死路半边同源（recordNetOutcome 落的 deadUntil），5 分钟 TTL，
+ * 过期即 false——自动回到直连探路，直连恢复则自然走直连。
+ */
+export function directRouteDead(hostOrUrl: string, now = Date.now()): boolean {
+  const host = normalizeRouteHost(hostOrUrl);
+  if (!host) return false;
+  ensureLoaded();
+  const entry = learned.get(host);
+  if (!entry || !isRouteEntry(entry)) return false;
+  if (now - entry.at > LEARNED_ROUTE_TTL_MS) return false;
+  return entry.deadUntil !== undefined && now < entry.deadUntil && entry.route === 'direct';
+}
+
 /**
  * 从真实结果里学习：成功的那条路被记住（带时间戳），失败把「正在用的那条
  * 路」的记忆清掉，让分类重新决策。失败的路由从不被「学习」——否则重试会
@@ -547,14 +568,19 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
     }
     if (entry?.route === route) {
       // 同路成功：该路槽 EMA 更新（α=0.3，新样本权重适中），刷新活路时间戳。
+      // 实测成功高于死路推断：成功一刻必须清掉本路的死期——否则「直连刚
+      // 跑通」却仍被上一次失败的死期翻面，学习表自相矛盾（证据读侧
+      // directRouteDead 也会把刚成功的路读成死）。成功样本靠 EMA 槽位区分，
+      // 死期只属于失败。
+      const { deadUntil: _clearedDeath, ...alive } = entry;
       if (headersMs !== undefined && headersMs > 0) {
         const slot = emaSlotOf(route);
         const prev = entry[slot];
         const ema = prev === undefined ? headersMs : Math.round(prev * 0.7 + headersMs * 0.3);
-        learned.set(key, { ...entry, at: now, [slot]: ema, lastOkAt: now });
+        learned.set(key, { ...alive, at: now, [slot]: ema, lastOkAt: now });
         persist();
       } else if (entry.at !== now) {
-        learned.set(key, { ...entry, at: now, lastOkAt: now });
+        learned.set(key, { ...alive, at: now, lastOkAt: now });
         persist();
       }
       return;
@@ -571,7 +597,14 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
       ...(headersMs !== undefined && headersMs > 0 ? { [emaSlotOf(route)]: headersMs } : {}),
     });
     persist();
-  } else if (entry === undefined || entry.route === route) {
+  } else if (
+    entry === undefined || entry.route === route
+    // 钉着的反向路自身带着未过期死期时，它不是活路证据而是尸检报告：
+    // 两条路先后死光（代理死→直连也死）时若不放行，direct 的死因永远进不了
+    // 表，直连面的证据读侧（directRouteDead）就永远读不到死——「代理死、
+    // 直连也死」的机器上，镜像自动先行就永远不会触发。放行 = 保留最新死因。
+    || (entry.deadUntil !== undefined && now < entry.deadUntil)
+  ) {
     // 失败记死路半边，覆盖两种情形：表里根本没有记忆（这次是分类面选的
     // 路，比如 proxy-first 主机首选代理首连失败——只删记忆的话表还是空
     // 的，下一轮分类面原地再选它，永远学不会），以及记忆钉的正是这条

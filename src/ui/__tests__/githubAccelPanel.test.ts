@@ -49,7 +49,8 @@ describe('设置页 · GitHub 加速', () => {
 
   it('Skill Hub 浏览 / 安装把回退链传下去（否则开关只改了设置页的外观）', () => {
     const src = read('../settings.ts');
-    expect(src).toContain('githubFallbackPrefixes(mirrorCfg.githubMirror, mirrorCfg.customGithubMirror)');
+    // auto（默认）证据先行：raw host 直连死才给镜像档；显式节点恒给链。
+    expect(src).toContain("githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', mirrorCfg.githubMirror, mirrorCfg.customGithubMirror)");
     expect(src).toContain('fetchHubIndex(repo, \'\', mirrorPrefixes)');
     expect(src).toContain('fetchSkillBody(repo, skill, \'\', mirrorPrefixes)');
   });
@@ -62,8 +63,10 @@ describe('设置页 · GitHub 加速', () => {
     expect(src).toContain(".filter((attempt) => attempt.prefix !== '')");
     // 递归回到镜像 URL 时必须停（镜像地址不在 GitHub 名单里 → 不再展开）。
     expect(src).toContain('!isAlreadyMirrored(url, this.githubAccelPrefixes())');
-    // 镜像链全灭后，直连的失败兜底不再重打整条链。
-    expect(src).toContain('mirrorChainTried ? null : await this.retryDownloadViaMirror');
+    // 链问过即跳过；auto 直连先行的失败 → 链在失败分支入场；显式 direct →
+    // 只剩官方等价改写 + unwrap 下落。
+    expect(src).toContain('const mirrorFallback = async');
+    expect(src).toContain('return this.retryDownloadViaMirror(toolCall, args, signal);');
   });
 
   it('默认关闭，配置字段进模型', () => {

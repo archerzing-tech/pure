@@ -746,3 +746,34 @@ describe('网络状态矩阵（用户点名场景）', () => {
       .toEqual(['direct', 'proxy', 'direct']);
   });
 });
+// ── 证据读侧（GitHub 加速 auto 模式的数据源）─────────────────────────────
+// 「直连这会儿行不行」只有学习表能回答；镜像决策读这里，静态分类不参与。
+describe('directRouteDead 与尸检覆盖', () => {
+  const T0 = 1_700_000_000_000;
+
+  it('只认 direct 路的死；代理路失败与死期过期都不算', () => {
+    netRoute.recordNetOutcome('readside-gh.test', 'direct', false, T0);
+    expect(netRoute.directRouteDead('readside-gh.test', T0 + 1)).toBe(true);
+    // 传 URL 与传裸 host 同一 entry（归一化收口）。
+    expect(netRoute.directRouteDead('https://readside-gh.test/x.zip', T0 + 1)).toBe(true);
+    expect(netRoute.directRouteDead('readside-gh.test', T0 + netRoute.DEAD_ROUTE_TTL_MS + 1)).toBe(false);
+    // 代理路的死不是直连的死（下一轮打通预算会自己落到直连）。
+    netRoute.resetLearnedRoutes();
+    netRoute.recordNetOutcome('readside-gh.test', 'proxy', false, T0);
+    expect(netRoute.directRouteDead('readside-gh.test', T0 + 1)).toBe(false);
+  });
+
+  it('两条路先后死光：带死期的反向记忆被最新死因覆盖；活的反向记忆仍然不动', () => {
+    // 尸检报告（proxy 已带死期）不是活路证据 → direct 的死允许落表：
+    // 否则「代理死、直连也死」的机器上镜像自动先行永远不会触发。
+    netRoute.recordNetOutcome('autopsy-gh.test', 'proxy', false, T0);
+    netRoute.recordNetOutcome('autopsy-gh.test', 'direct', false, T0 + 1);
+    expect(netRoute.directRouteDead('autopsy-gh.test', T0 + 2)).toBe(true);
+    // 对照（既有判例不动）：钉着的**活**记忆不被另一条路的死路信号覆盖。
+    netRoute.resetLearnedRoutes();
+    netRoute.recordNetOutcome('pin-live.test', 'proxy', true, T0);
+    netRoute.recordNetOutcome('pin-live.test', 'direct', false, T0 + 1);
+    expect(netRoute.directRouteDead('pin-live.test', T0 + 2)).toBe(false);
+    expect(netRoute.resolveNetRoute('pin-live.test', true, T0 + 2)).toBe('proxy');
+  });
+});

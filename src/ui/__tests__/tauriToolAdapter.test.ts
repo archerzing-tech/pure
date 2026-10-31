@@ -16,7 +16,7 @@ import {
 // GUI 侧的护栏/归因/渲染现在与 CLI 同源（shared/netProbeCore）：GUI 不再自带
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
-import { recordNetOutcome } from '../../shared/netRoute';
+import { recordNetOutcome, resetLearnedRoutes } from '../../shared/netRoute';
 import { beforeEach } from 'bun:test';
 import { resetNetGuardForTests } from '../../shared/netGuard';
 import { resetMirrorHealth } from '../../shared/githubAccel';
@@ -668,7 +668,7 @@ describe('Tauri egress routing', () => {
     // 只锁「代理传下去 + 反向兜底存在」这条契约；Hub 内部有 6 条候选 URL 的
     // 阶梯，不适合在这里断言调用次数。
     const src = readFileSync(new URL('../TauriToolAdapter.ts', import.meta.url), 'utf8');
-    const hubIdx = src.indexOf('fetchSkillBody(repo, nameArg, proxyUrl, this.githubAccelPrefixes())');
+    const hubIdx = src.indexOf("githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', this.githubMirror, this.githubCustomMirror)");
     expect(hubIdx).toBeGreaterThan(-1);
     const window = src.slice(Math.max(0, hubIdx - 400), hubIdx + 200);
     expect(window).toContain('this.runRouted(');
@@ -1157,6 +1157,9 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
   beforeEach(() => {
     resetNetGuardForTests();
     resetMirrorHealth();
+    // auto 模式读 netRoute 学习表直连死活（模块级单例），前组用例记下的
+    // github 失败会让本组的「无证据直连先行」翻成镜像先行。
+    resetLearnedRoutes();
   });
 
   const NPM = 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz';
@@ -1284,6 +1287,67 @@ describe('download_file · S2 单请求改写（GUI 侧镜像重试）', () => {
     expect(commands[0]).toContain(`url='${GH}'`);
     const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
     expect(parsed.rewrite).toBeUndefined();
+  });
+
+  // ── auto（默认）：判定只认 netRoute 学习表的直连死活证据，不认静态分类。──
+
+  it('auto 无证据：直连先行，一次直跳成功、不碰镜像', async () => {
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'auto', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: unknown };
+    expect(parsed.rewrite).toBeUndefined();
+  });
+
+  it('auto 直连刚被实测打死：镜像先行，第一跳就是链首节点', async () => {
+    recordNetOutcome(GH, 'direct', false);
+    const commands: string[] = [];
+    const adapter = mirrorFirstAdapter(commands, 'auto', () => true);
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`url='https://ghfast.top/${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: { rule?: string } };
+    expect(parsed.rewrite?.rule).toBe('github-mirror:ghfast');
+  });
+
+  it('auto 直连先行但直连失败：镜像链在失败分支入场接住', async () => {
+    const commands: string[] = [];
+    // 原站失败、镜像活：直跳 1 次 + 链首 ghfast 接住。
+    const adapter = mirrorFirstAdapter(commands, 'auto', (cmd) => !cmd.includes(`url='${GH}'`) || cmd.includes('ghfast.top/'));
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(true);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain(`url='${GH}'`);
+    expect(commands[1]).toContain(`url='https://ghfast.top/${GH}'`);
+    const parsed = JSON.parse(String(out.result)) as { rewrite?: { rule?: string } };
+    expect(parsed.rewrite?.rule).toBe('github-mirror:ghfast');
+  });
+
+  it('auto 全灭：聚合列账；第二发不再白打已知死节点（健康缓存跳过）', async () => {
+    const commands: string[] = [];
+    // 直连与 5 个公共节点全部失败（与「镜像链全灭后落到直连」用例不同：这里
+    // 直连也不通，才构成全灭）。
+    const adapter = mirrorFirstAdapter(commands, 'auto', (cmd) =>
+      !(['ghfast.top/', 'gh-proxy.com/', 'ghproxy.net/', 'gh.ddlc.top/', 'cors.isteed.cc/'].some((h) => cmd.includes(h))
+        || cmd.includes(`url='${GH}'`)));
+    const out = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out.success).toBe(false);
+    // 直连先行 1 跳 + 链 5 跳，全部失败 → 全灭列账。
+    expect(commands).toHaveLength(6);
+    expect(String(out.result)).toContain('所有路径均不可用');
+    expect(String(out.result)).toContain('GHFast');
+    // 第二发：直连死期内镜像先行，5 个节点都在健康缓存里 → 链空转（零跳），
+    // 只直跳 1 次。挨个白打已知死节点是分钟级浪费。此时 github.com 已连续两轮
+    // 网络失败，netGuard 宿主熔断触发——熔断消息按设计优先于全灭列账。
+    const before = commands.length;
+    const out2 = await adapter.execute(toolCall('download_file', { url: GH }));
+    expect(out2.success).toBe(false);
+    expect(commands.length - before).toBe(1);
+    expect(String(out2.result)).toContain('已熔断');
   });
 
   it('非 GitHub 下载面的 URL 不吃镜像链（加速只管 GitHub 名单）', async () => {

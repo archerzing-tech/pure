@@ -89,7 +89,7 @@ function reset(scanSources: unknown[], switchOn: boolean): void {
   calls.length = 0;
   disk.clear();
   sources = scanSources;
-  mem[STORAGE_KEY] = JSON.stringify({ configVersion: 16, skills: { evolution: switchOn } });
+  mem[STORAGE_KEY] = JSON.stringify({ configVersion: 17, skills: { evolution: switchOn } });
   invalidateConfigCache();
 }
 

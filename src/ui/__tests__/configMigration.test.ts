@@ -48,7 +48,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('moves a non-default global Base URL to the active built-in override', () => {
@@ -61,7 +61,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://my-gateway.example.com/v1');
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('never overwrites an existing override during migration', () => {
@@ -85,7 +85,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     const cfg = loadConfig()!;
     expect(cfg.baseURL).toBe('');
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('persists the migrated config back to storage (idempotent re-read)', () => {
@@ -95,13 +95,13 @@ describe('config v10 migration — legacy global Base URL', () => {
     });
     loadConfig();
     const persisted = JSON.parse(mem[STORAGE_KEY]!) as PureConfig;
-    expect(persisted.configVersion).toBe(16);
+    expect(persisted.configVersion).toBe(17);
     expect(persisted.baseURL).toBe('');
     expect(persisted.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
     // A second read must not re-migrate or change anything.
     invalidateConfigCache();
     const again = loadConfig()!;
-    expect(again.configVersion).toBe(16);
+    expect(again.configVersion).toBe(17);
     expect(again.baseURL).toBe('');
     expect(again.providerOverrides.qwen?.baseURL).toBe('https://gateway.example.com/v1');
   });
@@ -117,7 +117,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     mem[STORAGE_KEY] = JSON.stringify(v13);
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides.qwen?.baseURL).toBe('https://mirror.example.com/v1');
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
     // v14: long-task auto-continue becomes default-on for existing configs.
     expect(cfg.autoContinue).toBe(true);
     // Migrated → persisted; a re-read is stable and does NOT re-flip an
@@ -129,7 +129,7 @@ describe('config v10 migration — legacy global Base URL', () => {
     invalidateConfigCache();
     const explicitOff = loadConfig()!;
     expect(explicitOff.autoContinue).toBe(false);
-    expect(explicitOff.configVersion).toBe(16);
+    expect(explicitOff.configVersion).toBe(17);
   });
 
   it('chains older migrations (v1 → v11) without breaking the final state', () => {
@@ -141,7 +141,7 @@ describe('config v10 migration — legacy global Base URL', () => {
       toolBrowser: false, // pre-v2 decorative false must be restored
     });
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
     expect(cfg.toolBrowser).toBe(true); // v2 restored the real gate
     expect(cfg.baseURL).toBe(''); // v10 scrubbed the global field
     expect(cfg.providerOverrides.glm?.baseURL).toBe('https://gateway.example.com/v1');
@@ -164,7 +164,7 @@ describe('config v11 migration — scrub registry-default override leftovers', (
     });
     const cfg = loadConfig()!;
     expect(cfg.providerOverrides).toEqual({});
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('removes a cross-provider default (DashScope URL sitting on DeepSeek)', () => {
@@ -258,7 +258,7 @@ describe('config v12 migration — DeepSeek is ONE provider', () => {
     // v16 (2026-09-21) turns the command sandbox off ONCE — the flag never
     // had a Settings toggle, so the persisted `true` was gatherForm
     // backfill, not a deliberate choice.
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
     expect(cfg.sandboxCommands).toBe(false);
     // Deliberate opt-outs for the OTHER flipped defaults stay byte-identical
     // (v14 flipped auto-continue once, v15 flipped auto-allow once) — v16
@@ -269,16 +269,30 @@ describe('config v12 migration — DeepSeek is ONE provider', () => {
     expect(cfg.autoPermCmd).toBe(false);
   });
 
-  it('stays put when the config is already at v16', () => {
+  it('at v16, only the v17 githubMirror flip applies; explicit opt-outs survive', () => {
     const raw = JSON.stringify({ configVersion: 16, provider: 'glm', model: 'glm-5.2', autoContinue: false, permissionMode: 'confirm', autoPermWrite: false, autoPermCmd: false, sandboxCommands: true });
     mem[STORAGE_KEY] = raw;
     const cfg = loadConfig()!;
-    expect(cfg.configVersion).toBe(16);
-    // Already at the newest schema → no rewrite, and even a hand-edited
-    // sandbox opt-in (the flag's only entry point) is preserved as-is.
+    // v17（2026-10-31）只翻旧默认 githubMirror 'direct' → 'auto'；fixture 里
+    // 没有 githubMirror（并入默认即 'auto'），所以其余一字不动。
+    expect(cfg.configVersion).toBe(17);
+    expect(cfg.githubMirror).toBe('auto');
+    // Even a hand-edited sandbox opt-in (the flag's only entry point) is
+    // preserved as-is.
     expect(cfg.sandboxCommands).toBe(true);
     expect(cfg.autoContinue).toBe(false);
     expect(cfg.permissionMode).toBe('confirm');
+  });
+
+  it('stays put when the config is already at v17', () => {
+    const raw = JSON.stringify({ configVersion: 17, provider: 'glm', model: 'glm-5.2', autoContinue: false, permissionMode: 'confirm', autoPermWrite: false, autoPermCmd: false, sandboxCommands: true, githubMirror: 'direct' });
+    mem[STORAGE_KEY] = raw;
+    const cfg = loadConfig()!;
+    expect(cfg.configVersion).toBe(17);
+    // Already at the newest schema → no rewrite; even the explicit accel-off
+    // choice saved after the migration is preserved.
+    expect(cfg.githubMirror).toBe('direct');
+    expect(cfg.sandboxCommands).toBe(true);
     expect(mem[STORAGE_KEY]).toBe(raw);
   });
 });
@@ -298,7 +312,7 @@ describe('config v15 migration — authorization prompts off by default', () => 
     expect(cfg.permissionMode).toBe('auto');
     expect(cfg.autoPermWrite).toBe(true);
     expect(cfg.autoPermCmd).toBe(true);
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('never downgrades an explicit stronger choice (restricted stays)', () => {
@@ -307,7 +321,7 @@ describe('config v15 migration — authorization prompts off by default', () => 
     seedConfig({ provider: 'deepseek-openai', permissionMode: 'restricted' });
     const cfg = loadConfig()!;
     expect(cfg.permissionMode).toBe('restricted');
-    expect(cfg.configVersion).toBe(16);
+    expect(cfg.configVersion).toBe(17);
   });
 
   it('does not re-flip a deliberate opt-out saved after the migration', () => {
@@ -324,7 +338,32 @@ describe('config v15 migration — authorization prompts off by default', () => 
     expect(optOut.permissionMode).toBe('confirm');
     expect(optOut.autoPermWrite).toBe(false);
     expect(optOut.autoPermCmd).toBe(false);
-    expect(optOut.configVersion).toBe(16);
+    expect(optOut.configVersion).toBe(17);
+  });
+});
+
+describe('config v17 migration — GitHub 加速默认智能 auto', () => {
+  it('翻一次旧默认 direct → auto；迁移后再显式关掉不被二次翻转', () => {
+    // 旧版下拉里根本没有 direct 选项，存出来的 'direct' 几乎必然是「从没
+    // 动过设置」的旧默认副作用（同 v15 的判断依据），不是显式选择。
+    seedConfig({ provider: 'glm', githubMirror: 'direct' });
+    const cfg = loadConfig()!;
+    expect(cfg.githubMirror).toBe('auto');
+    expect(cfg.configVersion).toBe(17);
+    // 迁移落盘后用户显式关（direct）→ configVersion 已 17 → 不再翻。
+    mem[STORAGE_KEY] = JSON.stringify({ ...JSON.parse(mem[STORAGE_KEY]!), githubMirror: 'direct' });
+    invalidateConfigCache();
+    expect(loadConfig()!.githubMirror).toBe('direct');
+  });
+
+  it('显式选过的节点与陈旧 key 各归其位', () => {
+    seedConfig({ provider: 'glm', githubMirror: 'ghfast' });
+    expect(loadConfig()!.githubMirror).toBe('ghfast');
+    seedConfig({ provider: 'glm', githubMirror: 'nope' });
+    invalidateConfigCache();
+    // load 不做归一化：陈旧 key 原样保留，由使用点（normalizeGithubMirrorKey）
+    // 回落到默认 auto——迁移不特殊化、不替用户改手改值。
+    expect(loadConfig()!.githubMirror).toBe('nope');
   });
 });
 

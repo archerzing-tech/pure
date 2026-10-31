@@ -382,7 +382,9 @@ export async function fetchSkillBody(
     `https://raw.githubusercontent.com/${r}/HEAD/SKILL.md`,
     `https://raw.githubusercontent.com/${r}/main/SKILL.md`,
   ];
-  // 加速档最先跑：同一份 raw 路径走镜像前缀（用户显式开启时才非空）。
+  // 加速档最先跑：同一份 raw 路径走镜像前缀。显式节点/custom 时非空；
+  // auto（默认）证据先行——raw host 直连被实测打死才非空（健康直连不绕镜像，
+  // 见 githubAccel.githubMirrorLadderPrefixes）；显式 direct 恒空。
   const mirrored = await fetchThroughMirrors(rawUrls, mirrorPrefixes, proxyUrl);
   if (mirrored && !looksLikeHtmlDocument(mirrored)) return mirrored;
   if (isTauriRuntime()) {
