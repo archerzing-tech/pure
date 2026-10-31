@@ -89,8 +89,10 @@ describe('CLI Tier-2/3 web tool wiring', () => {
     const names = adapter.getTools().map((tool) => tool.name);
     expect(names).toContain('web_public_api');
     expect(names).toContain('web_scrape');
-    expect(names).not.toContain('web_search');
-    expect(names).not.toContain('web_fetch');
+    // web_search/web_fetch 自 2026-10-31 P0-1 起公开可见。
+    expect(names).toContain('web_search');
+    expect(names).toContain('web_fetch');
+    expect(names).not.toContain('search_files');
   });
 
   it('web_public_api answers an FX lookup from the direct API tier', async () => {

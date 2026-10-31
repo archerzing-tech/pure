@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
+import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
@@ -147,6 +148,23 @@ export function resolveDownloadOutDir(destination: string, home: string, cwd: st
   return join(home, 'Downloads', expanded.replace(/[^A-Za-z0-9_.\-\/]/g, '_'));
 }
 
+/** create_document 的落点解析（Node/CLI 链）。语义逐条对齐 Rust 侧
+ * resolve_document_path（src-tauri/src/lib.rs，其单测
+ * resolve_document_path_matches_the_delivery_semantics 是权威口径）：
+ * `~`/`$HOME` 前缀展开（Node 侧统一走 expandTilde，另认 `~\` 与
+ * `%USERPROFILE%`）；绝对路径原样（全盘可达契约）；相对路径有工作区锚
+ * 工作区、没工作区落 ~/Downloads，子目录结构保留——绝不落进程 cwd
+ * （2026-10-12 刀 9 判例：交付卡报「已生成」而文件在没人找得到的地方）。
+ * 与 Rust 同款「三不」：不安全化文件名、重名不加序号（直接覆盖）、不补
+ * 扩展名——落点即报告路径。改必须与 Rust 侧同步。home 可注入，测试不碰
+ * 进程环境。 */
+export function resolveDocumentPath(spec: string, workspace: string, home = homedir()): string {
+  const expanded = expandTilde(spec, home);
+  if (isAbsolute(expanded)) return expanded;
+  const ws = workspace.replace(/[/\\]+$/, '');
+  return ws ? `${ws}/${expanded}` : join(home, 'Downloads', expanded);
+}
+
 /** Size of a file for ordering find_files scans, or Number.MAX_SAFE_INTEGER
  * if the stat fails (unreadable files sort last and get skipped). */
 function statSafeSize(p: string): number {
@@ -170,6 +188,9 @@ export interface NodeToolConfig {
    * on where the user is (trip planning, weather, local services).
    */
   location?: string;
+  /** 主目录替身（测试注入）。create_document 无工作区时的 ~/Downloads 锚、
+   * 路径参数里的 `~`/`$HOME` 展开都用它；缺省 = 真实 homedir()。 */
+  homeDir?: string;
 }
 
 // ── 代理 / 内网识别 ──
@@ -188,6 +209,13 @@ export {
 
 export class NodeToolAdapter implements ToolAdapter {
   private workspace: string;
+  /** 原始 config.workspace 是否非空（CLI 裸会话没带工作区）。pathResolve 会
+   * 把空串吞成进程 cwd，而 create_document 的相对路径在无工作区时必须落
+   * ~/Downloads 而不是 cwd（刀 9 判例），所以这个布尔要在解析前记下。 */
+  private workspaceGiven: boolean;
+  /** create_document 的 ~/Downloads 锚与 `~` 展开所用的主目录；可注入让测试
+   * 不碰真实 Downloads（与 expandTilde 的注入式 home 同一约定）。 */
+  private homeDir: string;
   private commandTimeout: number;
   private maxFileSize: number;
   private maxSnapshotBytes: number;
@@ -199,7 +227,9 @@ export class NodeToolAdapter implements ToolAdapter {
   private tools: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS];
 
   constructor(config: NodeToolConfig) {
+    this.workspaceGiven = config.workspace.trim().length > 0;
     this.workspace = pathResolve(config.workspace);
+    this.homeDir = config.homeDir || homedir();
     this.sessionId = config.sessionId ?? '';
     this.commandTimeout = config.commandTimeout ?? 30000;
     this.maxFileSize = config.maxFileSize ?? 64 * 1024 * 1024; // 64MB — matches the Rust read_file cap
@@ -236,6 +266,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'list_files': return await this.handleListFiles(args, start);
         case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
         case 'create_directory': return await this.handleCreateDirectory(args, start);
+        case 'create_document': return await this.handleCreateDocument(args, start);
         case 'diff_files': return await this.handleDiffFiles(args, signal, start);
         case 'researcher_web': return await this.handleResearcherWeb(args, signal, start);
         case 'researcher_docs': return await this.handleResearcherDocs(args, signal, start);
@@ -919,6 +950,40 @@ export class NodeToolAdapter implements ToolAdapter {
       id: `tool_${Date.now()}`,
       toolName: 'create_directory',
       result: `Created directory: ${String(args.path)}`,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  // create_document 的 Node 侧执行路径（此前只下发不执行，调用必得
+  // "Unknown tool"）。GUI 侧经 save_file_binary（IPC + base64 + Rust 落盘），
+  // Node 在本进程内直接生成并写盘，参数形状与结果报告文案与 GUI 保持同构
+  // ——模型在两端看到同一工具契约。
+  private async handleCreateDocument(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const format = typeof args.format === 'string' ? args.format.trim() : '';
+    const pathArg = typeof args.path === 'string' ? args.path.trim() : '';
+    if (!format || !pathArg) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'create_document',
+        error: 'create_document: format 与 path 为必填字段',
+        success: false,
+        duration: Date.now() - start,
+      };
+    }
+
+    const bytes = await generateDocument(format, args.spec);
+    // 相对路径锚定语义与 Rust resolve_document_path 一致（见该函数注释）；
+    // 落点再过 this.resolve 拿 symlink 之后的真实路径。报告必须用落盘实路径
+    // ——用模型输入报就是「卡片在、文件不在」的 2026-10-11 bug 类。
+    const target = this.resolve(resolveDocumentPath(pathArg, this.workspaceGiven ? this.workspace : '', this.homeDir));
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, bytes);
+
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'create_document',
+      result: `文档已生成：${target}（${format.toUpperCase()}，${(bytes.length / 1024).toFixed(1)} KB）`,
       success: true,
       duration: Date.now() - start,
     };

@@ -114,8 +114,8 @@ export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'b
  * surface's own assembly.
  */
 export const FILE_TOOLS_CORE = `File tool strategy (per-tool parameters live in each tool's schema):
-- Locating content across many files: find_files FIRST — it ranks candidates by filename + content hits and returns snippets; read_file only the top 1-2 (startLine/endLine for the relevant range). If it finds nothing, follow its fallback suggestions instead of guessing or reading files one by one.
-- search_files finds a PHRASE inside documents (PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text); glob_files finds a file by NAME pattern; code_searcher is regex repository search. When a read/search fails, read the error — it says what the path problem is and what to do.
+- Locating content across many files: find_files FIRST — it ranks candidates by filename + content hits and returns snippets (works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text); read_file only the top 1-2 (startLine/endLine for the relevant range). If it finds nothing, follow its fallback suggestions instead of guessing or reading files one by one.
+- glob_files finds a file by NAME pattern; code_searcher is regex repository search. When a read/search fails, read the error — it says what the path problem is and what to do.
 - Large OUTPUT: never emit a big artifact as one giant code block — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works. Large INPUT: never paste a whole file into the conversation — read the relevant range and reference the path.
 
 Shell:

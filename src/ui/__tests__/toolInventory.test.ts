@@ -25,11 +25,11 @@ describe('completeness', () => {
     const names = entries().map((e) => e.name).sort();
     const expected = [...BUILT_IN_TOOL_DEFS, IMAGE_GEN_TOOL_DEF, ...DYNAMIC_CAPABILITY_TOOL_DEFS]
       .map((d) => d.name)
-      // Legacy-hidden aliases (web_search / web_fetch / search_files — the
-      // research tool migration folded them into their successors) execute
-      // but never show up in model tool lists — the inventory must not
-      // advertise them either.
-      .filter((n) => n !== 'web_search' && n !== 'web_fetch' && n !== 'search_files')
+      // Legacy-hidden (search_files — the research tool migration folded it
+      // into code_searcher + find_files) executes but never shows up in model
+      // tool lists — the inventory must not advertise it either.
+      // （web_search/web_fetch 自 2026-10-31 P0-1 起公开可见，不再过滤。）
+      .filter((n) => n !== 'search_files')
       .sort();
     expect(names).toEqual(expected);
     expect(new Set(names).size).toBe(names.length);

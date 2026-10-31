@@ -11,12 +11,12 @@ import { BUILT_IN_TOOL_DEFS, PUBLIC_TOOL_NAMES, TOOL_METADATA } from '../toolDef
 import { BUILT_IN_TOOLS } from '../../coding-agent/ToolRegistry';
 
 describe('tool table consistency', () => {
-  // Deliberately hidden legacy tools, curated when PUBLIC_TOOL_NAMES was
-  // introduced (v1.9.2-beta7): web_search/web_fetch are compatibility aliases
-  // kept for old transcripts, and search_files was superseded by
+  // Deliberately hidden legacy tools: search_files was superseded by
   // code_searcher + find_files. Anything else missing from the Set is a bug —
   // the model would see the schema nowhere and calls would die as unknown.
-  const DELIBERATELY_HIDDEN = new Set(['web_search', 'web_fetch', 'search_files']);
+  // （web_search/web_fetch 曾被当「旧别名」藏在这里，2026-10-31 审计证伪：
+  // 两者是一直按一线工具维护的独立实现，公开集漏收已纠正——见 P0-1。）
+  const DELIBERATELY_HIDDEN = new Set(['search_files']);
 
   it('every built-in def is public — otherwise the model never sees it', () => {
     for (const def of BUILT_IN_TOOL_DEFS) {
@@ -79,10 +79,9 @@ describe('tool table consistency', () => {
   });
 });
 
-// 期4 抓取后提炼层:模型可见的抓取面(web_scrape;web_fetch 是隐藏兼容别名)
-// 必须声明 raw 旁路,描述写明提炼行为——模型不知道 raw 存在,「需要精确原文」
-// 就成了死胡同。注意 web_fetch 在 DELIBERATELY_HIDDEN 里,模型看不见它,
-// 这里只锁 schema 契约本身。
+// 期4 抓取后提炼层:可见抓取面(web_scrape/web_fetch)必须声明 raw 旁路,
+// 描述写明提炼行为——模型不知道 raw 存在,「需要精确原文」就成了死胡同。
+// (web_fetch 曾被误当隐藏别名,2026-10-31 起公开——见 P0-1。)
 describe('web 抓取后提炼层契约', () => {
   const schemaProps = (name: string): Record<string, unknown> => {
     const def = BUILT_IN_TOOL_DEFS.find((d) => d.name === name);
@@ -97,7 +96,7 @@ describe('web 抓取后提炼层契约', () => {
     expect(def.description).toContain('auto-condensed');
   });
 
-  it('web_fetch(隐藏兼容别名)schema 同步带 raw', () => {
+  it('web_fetch schema 同步带 raw', () => {
     expect(schemaProps('web_fetch').raw).toBeDefined();
   });
 });

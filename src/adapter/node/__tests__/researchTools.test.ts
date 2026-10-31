@@ -32,8 +32,10 @@ describe('research tool migration', () => {
     expect(names).toContain('researcher_web');
     expect(names).toContain('researcher_docs');
     expect(names).toContain('code_searcher');
-    expect(names).not.toContain('web_search');
-    expect(names).not.toContain('web_fetch');
+    // web_search/web_fetch 自 2026-10-31 P0-1 起公开可见（此前被误当旧别名
+    // 藏掉——它们是一直按一线工具维护的独立实现）。
+    expect(names).toContain('web_search');
+    expect(names).toContain('web_fetch');
     expect(names).not.toContain('search_files');
   });
 

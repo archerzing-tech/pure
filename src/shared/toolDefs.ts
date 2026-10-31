@@ -394,6 +394,10 @@ export const PUBLIC_TOOL_NAMES = new Set([
   'code_searcher', 'glob_files', 'replace_files', 'git_diff', 'git_log',
   'git_status', 'git_commit', 'git_branch', 'sys_info', 'generate_image', 'web_public_api', 'web_scrape', 'download_file', 'create_document',
   'diagnose_network', 'switch_package_source',
+  // 2026-10-31 审计（批次1 P0-1）：web_search/web_fetch 一直是按一线工具
+  // 维护的（独立实现、TOOL_TAGS/元数据齐全、提示词多处指引、设置页 web 组
+  // 早就列名），此前漏在公开集外——提示词教模型调用模型看不见的工具。
+  'web_search', 'web_fetch',
 ]);
 
 /**
