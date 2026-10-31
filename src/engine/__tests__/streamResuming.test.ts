@@ -77,6 +77,8 @@ describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
   it('第 2 次停时说真话:链路卡住不是用户网络问题,可直接重发', () => {
     expect(engine).toContain('服务端或中转链路在流中卡住了，不是你的网络问题');
     expect(engine).toContain('本回合已停止；可直接重新发送，或稍后再试。');
+    // 散文不再写死分钟数——首块超时上限(300s)与流中 idle(120s)不同,写死「2 分钟」曾是错的。
+    expect(engine).toContain('每次等满超时上限后放弃');
   });
 
   it('停时不做收尾轮:刚连卡两次,handover 大概率再卡满 2 分钟', () => {
@@ -89,5 +91,33 @@ describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
 
   it('第 1 次重试也开口(StreamResuming,attempt 计短阶梯自己的数)', () => {
     expect(engine).toContain("yield { type: 'StreamResuming', payload: { attempt: streamTimeoutRepeats, max: MAX_STREAM_TIMEOUT_RETRIES, reason: 'timeout' }, timestamp: Date.now() };");
+  });
+
+  it('打击预算随干净工具轮清零(长任务放大器修正,2026-10-31)', () => {
+    // 原缺陷:streamTimeoutRepeats/streamResumes 跨整回合累计、成功不清零,
+    // 几十个 THINK 轮的长回合先后撞上互不相干的瞬时流超时就在无关位置被杀。
+    const resetAt = engine.indexOf('toolErrors.length === 0) {');
+    expect(resetAt).toBeGreaterThan(-1);
+    const block = engine.slice(resetAt, resetAt + 500);
+    expect(block).toContain('streamResumes = 0;');
+    expect(block).toContain('streamTimeoutRepeats = 0;');
+    expect(block).toContain('toolCallResumes = 0;');
+  });
+
+  it('流超时重试带退避(t=0 立即重发对拥塞服务端是确定性重败)', () => {
+    expect(engine).toContain('streamRetryBackoffMs');
+    // 两处重发点(有正文续跑 + 空正文短阶梯)都先退避再 continue。
+    expect((engine.match(/setTimeout\(resolve, streamRetryBackoffMs\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('半截工具调用的流超时借 TOOL_CALL_RESUME_HINT 重发而非 2 次即停', () => {
+    // 中转对大块 JSON 参数的缓冲攒批足以制造超 idle 上限的静默;此刻无工具
+    // 执行过,从头重发幂等安全——与 done 未至的同类场景同通道。
+    expect(engine).toContain('if (isTimeout && sawToolCall && !sawDone && toolCallResumes < MAX_TOOL_CALL_RESUMES)');
+  });
+
+  it('停时 Interrupted 带结构化 reasonCode(UI 分类第一依据,prose 只是回退)', () => {
+    expect(engine).toContain("reasonCode: 'stream_timeout'");
+    expect(engine).toContain("reasonCode: 'failure_policy_stop'");
   });
 });

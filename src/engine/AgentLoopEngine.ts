@@ -243,6 +243,11 @@ export class AgentLoopEngine {
     // 持续性故障，直接停，真话交还。
     let streamTimeoutRepeats = 0;
     const MAX_STREAM_TIMEOUT_RETRIES = 2;
+    // 流超时重试退避（2026-10-31）：1s 起步指数增长、8s 封顶、±20% 抖动。
+    // 业界 SDK 同款（Rust 传输层已按此实现）；引擎层此前 t=0 立即重发，对
+    // 仍在拥塞的服务端是确定性重败——大输入慢首块场景两次全烧满超时上限。
+    const streamRetryBackoffMs = (attempt: number): number =>
+      Math.round(Math.min(8000, 1000 * 2 ** (attempt - 1)) * (0.8 + Math.random() * 0.4));
     // continueGuard re-entries this run (plan-incomplete nudges), and
     // disconnected-tool-call recoveries (stream cut off mid tool call).
     let guardContinues = 0;
@@ -611,7 +616,7 @@ export class AgentLoopEngine {
             // the wrap-up round a chance to actually complete on the very
             // failure that just killed the THINK round.
             yield* emitHandover(stopReason);
-            yield { type: 'Interrupted', payload: { reason: stopReason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: stopReason, reasonCode: 'failure_policy_stop', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
         }
@@ -629,6 +634,8 @@ export class AgentLoopEngine {
           // request round-trip (tens of seconds on a long context) — label it
           // or the UI reads "输出停住了" with nothing on screen.
           yield { type: 'StreamResuming', payload: { attempt: streamResumes, max: MAX_STREAM_RESUMES, reason: 'timeout' }, timestamp: Date.now() };
+          // 退避再重发（同短阶梯）：拥塞中的服务端不吃 t=0 的补枪。
+          await new Promise((resolve) => setTimeout(resolve, streamRetryBackoffMs(streamResumes)));
           messages.push({ role: 'assistant' as const, content });
           messages.push({ role: 'user' as const, content: STREAM_RESUME_HINT, internal: true });
           turnCount++; budget.incrementTurn();
@@ -641,18 +648,39 @@ export class AgentLoopEngine {
         // 什么，只会把白等拖满 5×2m）。第 1 次静默重试渡过瞬时抖动；第 2
         // 次仍超时 = 持续性故障，立即停。停时不做收尾轮——服务端刚连卡
         // 两次，handover 大概率再卡满 2 分钟。
+        // 半截工具调用的流超时（2026-10-31）：非超时的同类场景（下方 done 未至
+        // 分支）已用 TOOL_CALL_RESUME_HINT 让模型重发完整调用；超时版走同一
+        // 通道而不是掉进空正文短阶梯 2 次即停。此刻没有任何工具执行过，从头
+        // 重发幂等安全——中转对大块 JSON 参数的缓冲攒批足以制造超过 idle
+        // 上限的传输静默，直接停会把大文件写入误判成持续性故障。
+        if (isTimeout && sawToolCall && !sawDone && toolCallResumes < MAX_TOOL_CALL_RESUMES) {
+          toolCallResumes++;
+          yield { type: 'StreamResuming', payload: { attempt: toolCallResumes, max: MAX_TOOL_CALL_RESUMES, reason: 'timeout' }, timestamp: Date.now() };
+          await new Promise((resolve) => setTimeout(resolve, streamRetryBackoffMs(toolCallResumes)));
+          if (content.length > 0) messages.push({ role: 'assistant' as const, content });
+          messages.push({ role: 'user' as const, content: TOOL_CALL_RESUME_HINT, internal: true });
+          budget.addTokens(TOOL_CALL_RESUME_HINT);
+          turnCount++; budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
         if (isTimeout) {
           streamTimeoutRepeats++;
           if (streamTimeoutRepeats >= MAX_STREAM_TIMEOUT_RETRIES) {
-            const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次在传输中无响应（每次等待 2 分钟后放弃）——服务端或中转链路在流中卡住了，不是你的网络问题（每次重试都是新建的连接）。本回合已停止；可直接重新发送，或稍后再试。`;
+            const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次在传输中无响应（每次等满超时上限后放弃）——服务端或中转链路在流中卡住了，不是你的网络问题（每次重试都是新建的连接）。本回合已停止；可直接重新发送，或稍后再试。`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
             const salvaged = await salvageStopMessages(messages);
             messages.length = 0;
             messages.push(...salvaged);
-            yield { type: 'Interrupted', payload: { reason: stopReason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            // reasonCode 是 UI 分类的第一依据（prose 正则只是遗留回退）——
+            // 引擎散文改写曾让纯文本锚分类失联、全部掉进 generic（2026-10-31）。
+            yield { type: 'Interrupted', payload: { reason: stopReason, reasonCode: 'stream_timeout', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           yield { type: 'StreamResuming', payload: { attempt: streamTimeoutRepeats, max: MAX_STREAM_TIMEOUT_RETRIES, reason: 'timeout' }, timestamp: Date.now() };
+          // 退避再重发：第 1 次重试渡过的应是「瞬时抖动」，t=0 补枪只会把
+          // 还在拥塞的链路再打满一整个超时上限。
+          await new Promise((resolve) => setTimeout(resolve, streamRetryBackoffMs(streamTimeoutRepeats)));
           continue;
         }
         failures.push({ type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount });
@@ -927,7 +955,17 @@ export class AgentLoopEngine {
 
         // A clean tool round resets the failure streak so the recovery policy
         // only escalates on genuinely consecutive failures.
-        if (toolErrors.length === 0) failures.length = 0;
+        if (toolErrors.length === 0) {
+          failures.length = 0;
+          // 长任务放大器修正（2026-10-31）：流超时的打击预算原本跨整回合累计、
+          // 成功不清零——几十个 THINK 轮的长回合先后撞上互不相干的瞬时流
+          // 超时，就会在与当轮质量无关的位置被杀。对齐 failures 的清零语义：
+          // 干净工具轮证明基础设施已恢复，上一轮的打击账随轮作废。持续卡死
+          // 的链路轮轮超时，账在轮内照累计照停，不会被这条放水。
+          streamResumes = 0;
+          streamTimeoutRepeats = 0;
+          toolCallResumes = 0;
+        }
 
         yield { type: 'StateChange', payload: { from: 'ACT', to: 'OBSERVE', stateId: sid() }, timestamp: Date.now() };
         completedSteps.push('OBSERVE');

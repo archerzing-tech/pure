@@ -110,6 +110,23 @@ describe('interruption reason classification', () => {
     expect(message).toContain('失败原因');
     expect(message).toContain('messages 参数非法');
   });
+
+  it('reasonCode 结构化直达：引擎中文散文不再掉进 generic（2026-10-31 主诉）', () => {
+    // c828c17 把引擎停时文案写成中文散文后，纯英文锚分类全部失联——用户
+    // 看到的是「操作被中断，请重试或切换任务」。code 是契约第一依据，
+    // prose 无论写成什么语言都不再影响分类。
+    const message = sanitizeInterruptedReason('模型的流式连接连续 2 次在传输中无响应（每次等满超时上限后放弃）——服务端或中转链路在流中卡住了', 'stream_timeout');
+    expect(message).toContain('生成超时');
+    expect(message).not.toContain('操作被中断');
+  });
+
+  it('reasonCode=failure_policy_stop 透出失败原因，与 prose 锚同款文案', () => {
+    const raw = `Repeated request failures (1 consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
+    const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');
+    expect(message).toContain('连续多次尝试均失败');
+    expect(message).toContain('失败原因');
+    expect(message).toContain('messages 参数非法');
+  });
 });
 
 describe('parseToolCallBuffer', () => {

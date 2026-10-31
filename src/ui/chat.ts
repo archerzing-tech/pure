@@ -240,7 +240,20 @@ function extractProviderErrorDetail(raw: string): string {
   return '';
 }
 
-export function sanitizeInterruptedReason(raw: string): string {
+export function sanitizeInterruptedReason(raw: string, reasonCode?: string): string {
+  // 结构化 code 是分类第一依据（2026-10-31 判例：层间契约曾靠 prose 正则，
+  // 引擎侧改写文案（c828c17 中文散文）即让分类失联、全部掉进 generic——
+  // code 上锁后 prose 只是遗留回退，宿主事件不带 code 才走下方分支）。
+  if (reasonCode === 'stream_timeout') {
+    return t('chat.interrupted.streamTimeout', 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.');
+  }
+  if (reasonCode === 'failure_policy_stop') {
+    const cause = extractFailureCause(raw);
+    const base = t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
+    return cause
+      ? `${base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
+      : base;
+  }
   const lower = raw.toLowerCase();
   // ── User stop / frontend-or-network disconnect (signal aborted) ──
   if (raw === 'aborted') {
@@ -7895,7 +7908,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // separate status row instead of flattening a bubble to text.
               // Runtime interrupt notices follow the UI language (were hard-
               // coded English) — see chat.* keys in i18n.ts.
-              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason));
+              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason, event.payload.reasonCode));
               if (hasContent) {
                 this.addStatusBubble(interrupted);
               } else if (lastSeg) {

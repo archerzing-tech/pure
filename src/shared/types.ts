@@ -689,4 +689,4 @@ export type EngineEvent =
   | { type: 'SubagentActivity'; payload: SubagentActivityEvent; timestamp: number }
   | { type: 'Error'; payload: { code: string; message: string; stateType: AgentStateType; recoverable: boolean; recoveryAction?: 'retry' | 'reflect' | 'skip' | 'terminate' }; timestamp: number }
   | { type: 'Completed'; payload: { finalOutput?: string; isComplete: boolean; interrupted: boolean; turnCount: number; messages?: Message[]; usage?: TokenUsage; verification?: VerificationSummary }; timestamp: number }
-  | { type: 'Interrupted'; payload: { reason: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };
+  | { type: 'Interrupted'; payload: { reason: string; /** 结构化中断码（'stream_timeout' / 'failure_policy_stop'…）：UI 分类的第一依据，prose 正则仅遗留回退 */ reasonCode?: string; lastState?: AgentStateType; completedSteps: string[]; messages?: Message[]; turnCount?: number }; timestamp: number };
