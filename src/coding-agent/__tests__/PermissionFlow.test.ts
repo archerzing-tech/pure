@@ -458,7 +458,11 @@ describe('ToolRegistry visibility gate aligns the model list with the settings t
     registry.setVisibilityGate((name) => name !== 'execute_command');
     const names = registry.getTools().map((t) => t.name);
     expect(names).not.toContain('execute_command');
-    expect(names).toContain('srv__search'); // MCP 工具不吃 GUI 开关
+    // 三期 deferred 化：MCP 工具默认不进清单（强制走 discover_tools），但
+    // 设置闸依旧不吃它（对未知名放行）——经搜索激活后照常可见。
+    expect(names).not.toContain('srv__search');
+    expect(registry.searchDeferredTools('mcp search').map((t) => t.name)).toContain('srv__search');
+    expect(registry.getTools().map((t) => t.name)).toContain('srv__search');
     expect(names).toContain('read_file'); // 其余内建照常可见
   });
 });

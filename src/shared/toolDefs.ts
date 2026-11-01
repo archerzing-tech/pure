@@ -21,7 +21,7 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine to read a range. Very large files: without a range only the head is returned, with a footer stating the total line count — continue from the suggested startLine or use code_searcher to pinpoint, instead of loading the whole file. Pointing path at a directory is not an error: the first-level contents of that directory are returned with the exact path echoed back, so you can immediately re-read a specific file.',
+    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file.',
     input_schema: {
       type: 'object',
       properties: {
@@ -75,7 +75,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'find_files',
-    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches — follow those suggestions instead of guessing or reading files one by one. Dependency directories (node_modules, venv, target, vendor, …) are skipped unless path/filePattern names one explicitly.',
+    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "发票") without reading every file. Filename matches rank first (cheap, no content reads), then content hits are counted across files and the TOP candidates come back with a few snippet lines each (never full content); works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches — follow those suggestions instead of guessing or reading files one by one. Dependency directories (node_modules, venv, target, …) are skipped unless path/filePattern names one explicitly.',
     input_schema: {
       type: 'object',
       properties: {
@@ -103,7 +103,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit. Serving & previewing a project — pick the vehicle FIRST: a single self-contained .html (no build step, no server-only APIs) opens directly via its file:// path; anything with a dev-server script (vite/webpack/next/flask/fastapi…), fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost — install dependencies (finite command), start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, then open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows "Start-Process <url>") and report the URL + how to stop it (kill <pid>). Never leave a foreground server running and never fake a preview with file:// for something that needs a server. Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to verify — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.',
+    description: 'Execute a shell command in the workspace. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite; background:true starts a long-lived process (dev/static server, watcher) detached and returns {pid, logFile} immediately. Serving & previewing — pick the vehicle FIRST: a single self-contained .html opens directly via its file:// path; anything with a dev-server script (vite/next/flask…), fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost — install deps, start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, then open the page and report the URL + how to stop it (kill <pid>). Never leave a foreground server running and never fake a preview with file:// for something that needs a server. Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to verify — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -211,6 +211,18 @@ export const BUILT_IN_TOOL_DEFS = [
     },
   },
   {
+    name: 'discover_tools',
+    description: 'Search the deferred tool catalog and ACTIVATE the matches for this session. The resident table only carries the everyday loop (file read/write/edit, find_files/code_searcher, execute_command, web_search/web_fetch, download_file); the long tail — git family, deep-research variants (researcher_web/researcher_docs/web_scrape/web_public_api), document writers, network diagnostics, package-source switching — and EVERY connected MCP server\'s tools live behind this index. Search it when the job at hand sounds like one of those (e.g. "git commit", "docx", "diagnose network", an MCP tool name) or before reporting that a capability is missing. Returns each match\'s full schema; matches are immediately callable and stay available for the rest of the session.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Space-separated keywords matched against tool names and descriptions, e.g. "git commit", "docx write", "network diagnose", "browser navigate"' },
+        limit: { type: 'integer', description: 'Maximum matches to activate (default 8, max 20)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'web_public_api',
     description: 'Structured-data lookup through curated no-key public APIs: weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators (GDP / population / unemployment / inflation). Use for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
     input_schema: {
@@ -240,7 +252,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'download_file',
-    description: '下载网络资源（文件 / 压缩包 / 模型权重 / 数据集 / 安装包 / 图片 / 视频等）到本机。支持大文件、多线程加速、断点续传、暂停/继续；自动携带同源 Referer 与浏览器 UA 以绕过防盗链；优先采用服务器 Content-Disposition 文件名；失败依次换用 原生多线程 → curl → aria2c → wget → fetch 多种方式重试。当用户说"下载 xxx"或给出 http(s) 链接（如 http://example.com/a.zip）时使用。url 必填；destination 可为绝对路径，或 "downloads"（默认用户下载目录）/ "workspace"（当前项目目录）；filename 可指定文件名；connections 并行线程数（默认 4，服务器支持 Range 时启用分块加速）；resume 是否断点续传（默认 true）。完成后返回本机完整文件路径。',
+    description: '下载网络资源（文件/压缩包/模型权重/数据集/安装包/图片/视频）到本机：支持大文件、断点续传、多线程加速；自动携带同源 Referer 与浏览器 UA 过防盗链。用户说「下载 xxx」或给出 http(s) 链接时使用。url 必填；destination 可为绝对路径或 "downloads"（默认用户下载目录）/"workspace"（当前项目目录）；filename 可指定；connections 并行线程数（默认 4）；resume 断点续传（默认 true）。失败依次换用 原生多线程 → curl → aria2c → wget 重试；完成后返回本机完整文件路径。',
     input_schema: {
       type: 'object',
       properties: {
@@ -398,6 +410,25 @@ export const PUBLIC_TOOL_NAMES = new Set([
   // 维护的（独立实现、TOOL_TAGS/元数据齐全、提示词多处指引、设置页 web 组
   // 早就列名），此前漏在公开集外——提示词教模型调用模型看不见的工具。
   'web_search', 'web_fetch',
+  // 工具 deferred 化（框架改革三期）：discover_tools 是常驻的目录索引工具，
+  // 长尾内置工具与 MCP 工具经它搜索并激活后才进模型可见清单。
+  'discover_tools',
+]);
+
+/**
+ * 工具 deferred 化（框架改革三期 docs/framework-reform-2026-11.md）：常驻
+ * 工具表只带日常回路的工具（文件读写改/定位/搜索、shell、网页搜索/抓取、
+ * 下载、目录索引 discover_tools、条件注册的 generate_image）；长尾内置工具
+ * 与所有 MCP 工具留在注册表里但**不进模型可见清单**，经 discover_tools
+ * 搜索并激活后才出现在后续请求的 tools 数组里。动态能力工具（skill/MCP
+ * 获取回路）整体常驻——二期刚把获取令教学放进去，闸门另有人管。
+ * ToolRegistry.getTools() 按这套集合裁剪；执行面（execute 按注册表名查）
+ * 不受影响——激活只改可见性，不改能力。
+ */
+export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'read_file', 'write_file', 'edit_file', 'execute_command', 'find_files',
+  'code_searcher', 'web_search', 'web_fetch', 'download_file',
+  'discover_tools', 'generate_image',
 ]);
 
 /**
@@ -461,6 +492,9 @@ const TOOL_METADATA_TABLE = {
   code_searcher: { sideEffects: false, isWrite: false },
   web_search: { sideEffects: false, isWrite: false },
   web_fetch: { sideEffects: false, isWrite: false },
+  // discover_tools is the registry-owned catalog index: pure read, executed
+  // inside ToolRegistry itself (never reaches the delegate adapters).
+  discover_tools: { sideEffects: false, isWrite: false },
   web_public_api: { sideEffects: false, isWrite: false },
   web_scrape: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },

@@ -25,7 +25,7 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'install_agent_skill',
-    description: 'Download and install an Agent Skill into the application skill directory (~/.pure/skills/). The skill becomes available to the current turn after installation. `source` accepts either a repo returned by search_agent_skills OR a GitHub repo the user provided ("owner/repo" or a full github.com URL) — a search hit is NOT required when the user names the repo. The fetch tries several routes automatically (raw CDN → GitHub API → repo zip), so one blocked host usually does not fail the install; if it still fails, switch transport (download the repo zip via download_file and extract to ~/.pure/skills/) instead of retrying.',
+    description: 'Download and install an Agent Skill into the application skill directory (~/.pure/skills/); it becomes available to the current turn right after installation. `source` accepts a repo returned by search_agent_skills OR a GitHub repo the user provided ("owner/repo" or a github.com URL) — a search hit is NOT required when the user names the repo. The fetch tries several routes automatically (raw CDN → GitHub API → repo zip); if all fail, switch transport: download the repo zip via download_file and extract the <skill>/SKILL.md directory into ~/.pure/skills/ instead of retrying.',
     input_schema: {
       type: 'object',
       properties: {
@@ -60,7 +60,7 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'register_mcp_server',
-    description: 'Register a custom MCP server by name and connection details (a user-named repo, a command, or a URL), persist it to configuration, and connect it in the same step — its tools become available immediately. Use this when the user names a specific MCP project that search_mcp_servers does not return (new or niche projects are often absent from the directories); a search hit is NOT required. Before registering, determine the exact launch command from that project\'s README or docs (web_fetch the repo page) instead of guessing one. This launches a third-party process or opens a remote service; the user must approve before it runs.',
+    description: 'Register a custom MCP server by name and connection details (a user-named repo, a command, or a URL), persist it to configuration, and connect it in the same step — its tools become available immediately. Use this when the user names a specific MCP project that search_mcp_servers does not return (new or niche projects are often absent from the directories; a search hit is NOT required): web_fetch that project\'s docs for its documented launch command instead of guessing one. This launches a third-party process or opens a remote service; the user must approve before it runs.',
     input_schema: {
       type: 'object',
       properties: {

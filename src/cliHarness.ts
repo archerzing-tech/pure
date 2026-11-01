@@ -730,6 +730,12 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     llmFor,
     tools,
     toolsDefs,
+    // 工具 deferred 化（框架改革三期）：discover_tools 激活的长尾/MCP 工具要
+    // 在同一 run 的下一个请求就可见——清单逐请求重算（与 GUI 的 CodingAgent
+    // 同款），启动时钉死的 toolsDefs 只作无注册表路径的兜底。
+    toolsDefsProvider: tools instanceof ToolRegistry
+      ? () => [...tools.getTools(), ...tools.getSubagentTools()]
+      : undefined,
     budget: DEFAULT_BUDGET,
     stateStore: store,
     memory: memoryStore,

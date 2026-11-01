@@ -10,7 +10,7 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../share
 import type { TaggedTool, PermissionContext } from './types';
 import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
-import { BUILT_IN_TOOL_DEFS, isPublicToolName } from '../shared/toolDefs';
+import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared/toolDefs';
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { withRelaySchema } from '../engine/relayPipeline';
@@ -86,6 +86,9 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   // low 以免把 session 档那类零落盘调用也堵在确认卡后面。
   diagnose_network: { tags: [Tags.READ], riskLevel: 'low' },
   switch_package_source: { tags: [Tags.WRITE], riskLevel: 'low' },
+  // discover_tools 由注册表自持（索引+激活都在这里完成），永不下沉执行器；
+  // 纯只读，无副作用。
+  discover_tools: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
 };
 
 export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(
@@ -101,6 +104,10 @@ export function isGitMutationCommand(command: string): boolean {
 
 export class ToolRegistry implements ToolAdapter {
   private tools: TaggedTool[] = [...BUILT_IN_TOOLS];
+  // 工具 deferred 化（框架改革三期）：discover_tools 激活过的长尾/MCP 工具
+  // 名单。激活是会话级决定——一旦搜出过，后续请求的 tools 数组持续携带，
+  // 模型不必每次用前重搜。
+  private activatedDeferred = new Set<string>();
   private subagentExecutor?: ToolAdapter;
   private mcpExecutor?: ToolAdapter;
   private externalToolsExecutor?: ToolAdapter;
@@ -161,20 +168,22 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   getTools(): ToolDefinition[] {
-    // 动态能力工具（pure-capabilities）、MCP 发现工具与外部脚本工具（13.4）
-    // 「注册即可见」——2026-10-13 真机判例：workspace 模式的模型清单走本方
-    // 法，旧的纯 isPublicToolName 过滤把注册过的动态/MCP 工具全滤掉，执行
-    // 路是通的、模型却看不见，只能答「pure 没有暴露 MCP 注册工具」。与
-    // toolInventory 的既有开口（isPublicToolName || isDynamicCapabilityTool）
-    // 同款；EXTERNAL 同刀治本：两端宿主装载进 registry 的外部工具若在此被
-    // 滤，就是「注册了却看不见」的同款缺陷。MCP 工具的排除面在连接层
+    // 工具 deferred 化（框架改革三期）：模型可见清单 = 常驻核心（CORE_TOOL_NAMES）
+    // + 动态能力工具（skill/MCP 获取回路，二期教学的载体，整体常驻）+ 用户自装
+    // 的外部脚本工具（少数派、用户明确装过，藏起来是敌意）+ **已激活**的长尾
+    // 内置工具与 MCP 工具。长尾与 MCP 留在注册表里但不再自动可见——rea 一类
+    // 两百工具的 MCP server 全量随表是几千 token 的刚需浪费；经 discover_tools
+    // 搜索并激活后才进清单。与 2026-10-13「注册即可见」判例不冲突：那次修的
+    // 是「执行路通、模型看不见且无发现路径」；现在发现路径（discover_tools）
+    // 本身常驻，藏起来的工具都有路可寻。MCP 工具的排除面仍在连接层
     // （mcpExcludedPrefixes），这里不再滤第二次。
     return this.tools
       .filter(({ name, tags }) =>
         (isPublicToolName(name)
-          || isDynamicCapabilityTool(name)
-          || tags.includes(Tags.MCP)
-          || tags.includes(Tags.EXTERNAL))
+          ? name === 'discover_tools' || CORE_TOOL_NAMES.has(name) || this.activatedDeferred.has(name)
+          : isDynamicCapabilityTool(name)
+            || tags.includes(Tags.EXTERNAL)
+            || (tags.includes(Tags.MCP) && this.activatedDeferred.has(name)))
         && (!this.visibilityGate || this.visibilityGate(name)))
       .map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
@@ -190,6 +199,81 @@ export class ToolRegistry implements ToolAdapter {
     return this.tools
       .filter(({ tags }) => tags.includes(Tags.AGENT))
       .map(({ name, description, input_schema }) => ({ name, description, input_schema: withRelaySchema(input_schema) }));
+  }
+
+  /**
+   * discover_tools 的搜索半边：在长尾内置工具与 MCP 工具（未激活、非子代理、
+   * 过设置闸）里按关键词打分（名字命中 3 分 / 描述命中 1 分），取前 N 名并
+   * **当场激活**。返回的是完整 schema——激活的目的就是让模型下一请求就能照
+   * 着调用，省一轮再要详情的往返。
+   */
+  searchDeferredTools(query: string, limit = 8): ToolDefinition[] {
+    const tokens = (query ?? '').toLowerCase().split(/[\s,]+/).filter(Boolean);
+    const scored: { tool: TaggedTool; score: number }[] = [];
+    for (const tool of this.tools) {
+      if (tool.tags.includes(Tags.AGENT)) continue;
+      if (isPublicToolName(tool.name) && (tool.name === 'discover_tools' || CORE_TOOL_NAMES.has(tool.name))) continue;
+      if (this.activatedDeferred.has(tool.name)) continue;
+      if (isDynamicCapabilityTool(tool.name)) continue;
+      if (this.visibilityGate && !this.visibilityGate(tool.name)) continue;
+      const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+      let score = 0;
+      for (const token of tokens) {
+        if (tool.name.toLowerCase().includes(token)) score += 3;
+        else if (haystack.includes(token)) score += 1;
+      }
+      if (score > 0) scored.push({ tool, score });
+    }
+    scored.sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
+    const picked = scored.slice(0, Math.max(1, Math.min(Math.floor(limit) || 8, 20)));
+    for (const { tool } of picked) this.activatedDeferred.add(tool.name);
+    return picked.map(({ tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
+  }
+
+  /** discover_tools 的执行半边：搜索 → 激活 → 把完整 schema 交到对话里。 */
+  private executeDiscoverTools(toolCall: ToolCall): ToolResult {
+    const started = Date.now();
+    const args = safeParseArgs(toolCall.function.arguments);
+    const query = typeof args.query === 'string' ? args.query.trim() : '';
+    if (!query) {
+      return {
+        id: toolCall.id,
+        toolName: toolCall.function.name,
+        error: 'query is required — space-separated keywords matched against tool names and descriptions',
+        success: false,
+        duration: Date.now() - started,
+      };
+    }
+    const limit = typeof args.limit === 'number' ? args.limit : 8;
+    const activated = this.searchDeferredTools(query, limit);
+    if (activated.length === 0) {
+      // 零命中时把目录亮出来：模型此时最需要的是「还有什么可找」，而不是
+      // 一句干巴巴的 no results。目录只在被搜索时进对话，不占常驻预算。
+      const catalog = this.tools
+        .filter((tool) => !tool.tags.includes(Tags.AGENT)
+          && !(isPublicToolName(tool.name) && (tool.name === 'discover_tools' || CORE_TOOL_NAMES.has(tool.name)))
+          && !this.activatedDeferred.has(tool.name)
+          && !isDynamicCapabilityTool(tool.name)
+          && (!this.visibilityGate || this.visibilityGate(tool.name)))
+        .map((tool) => tool.name);
+      return {
+        id: toolCall.id,
+        toolName: toolCall.function.name,
+        success: true,
+        duration: Date.now() - started,
+        result: `No deferred tool matches "${query}". The resident tools already cover the everyday loop (file read/write/edit, find_files/code_searcher, execute_command, web_search/web_fetch, download_file). The deferred catalog currently holds: ${catalog.join(', ') || '(empty — everything matching is already activated)'}. Try different or broader keywords.`,
+      };
+    }
+    const rendered = activated
+      .map((def) => [`── ${def.name} ──`, def.description, `Arguments: ${JSON.stringify(def.input_schema)}`].join('\n'))
+      .join('\n\n');
+    return {
+      id: toolCall.id,
+      toolName: toolCall.function.name,
+      success: true,
+      duration: Date.now() - started,
+      result: `Activated ${activated.length} tool(s) for "${query}" — callable now with the full schemas below, and they stay available for the rest of this session:\n\n${rendered}`,
+    };
   }
 
   getSnapshotPort(): WorkspaceSnapshotPort | undefined {
@@ -283,6 +367,13 @@ export class ToolRegistry implements ToolAdapter {
           duration: 0,
         };
       }
+    }
+
+    // discover_tools 是注册表自持的索引工具：搜索与激活都发生在注册表里，
+    // 不下沉任何执行器（delegate 适配器的清单里没有它的实现）。放在权限闸
+    // 之后——它带 READ/low，所有模式静默放行，不影响写闸语义。
+    if (toolCall.function.name === 'discover_tools') {
+      return this.executeDiscoverTools(toolCall);
     }
 
     // Route subagent tools to the orchestrator
