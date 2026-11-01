@@ -477,7 +477,6 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     // 环境事实（P2 下沉）走预算制但非 required：预算极限下先丢背景事实
     // （模型退化为按常识猜版本/路线），行为协议与用户指令优先保。
     ['env_facts', context.envFacts, 88],
-    ['traps', context.traps, 70],
     ['build_protocol', context.buildProtocol, 60],
     ['plan', context.plan, 85],
     ['clarifications', context.clarifications, 100, true],
@@ -493,9 +492,6 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     // （sessionLedger 的 ASKED/DONE/PLANS_MAX + excerpt 截断），不会裸灌。
     ['ledger_facts', context.ledgerFacts, 94, true],
     ['assessment', context.assessment, 90],
-    // Fiction override is required: a detected fiction request must always
-    // carry the skip directive, even when the budget is tight.
-    ['plausibility_override', context.plausibilityOverride, 100, true],
   ];
   return parts
     .map(([id, content, priority, required]) => fragment(id, content ?? '', priority, required))

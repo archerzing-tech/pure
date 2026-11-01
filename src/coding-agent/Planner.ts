@@ -1,11 +1,12 @@
 // src/coding-agent/Planner.ts
-// v0.1 — Analyzes tasks: determines complexity, optionally generates a plan.
-// v0.2 — Logical-trap detection: scans the prompt for self-contradictory /
-//        impossible / mutually-exclusive / trick-framed premises so the agent
-//        can verify them before execution and escape the trap by switching
-//        approach after a failed round instead of repeating the same one.
+// 框架改革一期（docs/framework-reform-2026-11.md）：形态判定归还语义路由。
+// 这个文件现在只做三件事——语义路由的 prompt/解析（inferSemanticRoute /
+// parseSemanticRoute）、路由不可用时的两级破坏词安全网（assessIntent）、
+// 计划卡的占位骨架与计划 JSON 解析（generatePlan / parsePlanJson）。
+// 曾经住在这里的 keyword floor（复杂度/陷阱/虚构/项目形态/寒暄直通判定）
+// 已全部删除：理解用户是模型的事，宿主不再用词表猜。
 
-import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, PlanVerificationSpec, TrapWarning } from './types';
+import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, PlanVerificationSpec } from './types';
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
 import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
@@ -14,14 +15,6 @@ import { activeCharacterProfile, registerScaledDecision, type RegisterScaledCaps
 // nothing about Planner) so the router and the insertion classifier can be
 // judged by the same threshold without a cycle.
 import { clampConfidence, inputDefaultConfidence } from './inputDecision';
-
-/**
- * 性格内核（刀 1 收拢，刀 5 改懒读）：步子大小 / 验证密度 / mode 阈值都从
- * 当前活跃内核的决策面读。**每次真读，不在模块加载时取一次**——宿主是在启动、
- * 读完配置之后才注入活跃内核（见 src/character/active.ts），模块加载早于那一刻，
- * 早读会把「切内核」变成静默失效。默认内核的值 = 现行为原样。
- */
-const characterDecision = () => activeCharacterProfile().decision;
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -55,11 +48,6 @@ export function markParallelPlanSteps(plan: Plan, parallelRoles: readonly string
   };
 }
 
-export interface PlannerConfig {
-  /** Threshold for explicit, concrete file-operation evidence. */
-  complexFileThreshold?: number;
-}
-
 const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. When earlier turns are included they are CONTEXT, not requests: what you classify is always the LAST user message, read as the continuation of that conversation. A short follow-up ("还是不行", "再加一个导出按钮", "用它做", "就先这样") takes its meaning from the preceding turn — judge what it asks for IN that conversation (a repeat of a failed fix, another change to the same deliverable, a switch to a resource the assistant already has), never as a standalone sentence with no subject. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
 
 Return ONLY one JSON object with this shape:
@@ -79,128 +67,6 @@ Return ONLY one JSON object with this shape:
 A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
 
 Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation ONLY for system-scale destruction (rm -rf, drop table/database, force push, reset --hard, wiping a whole database/system) or a concrete safety boundary — ordinary delete/clean/reset tasks on named targets do NOT need confirmation: probe read-only, list what will be touched, then proceed with a recoverable approach without pausing. Asking HOW is not asking you to DO it: "如何重置 X" / "怎么删掉 Y" / "how do I rotate the key" asks for a procedure, so classify it intent "question" with low risk and requiresConfirmation false even though the sentence names a destructive operation; reserve intent "delete" and requiresConfirmation for a request to perform that action now on a named target. Write "impact" as the concrete reasoning behind the safety decision rather than a category label — what this request would touch and why it cannot be undone (or why a probe comes first). The GUI shows impact verbatim as your assessment, so a label like "this is a delete request" tells the user nothing about why you stopped. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
-
-/** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
- * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
- * 表”去猜用户想做什么。这样“项目跑不起来”这类没有动作词的短消息也会走语义理解，
- * 不再被关键词启发式误判。 */
-const PLEASANTRY_BYPASS = /^(?:好的|好|谢谢|感谢|多谢|谢谢您|感谢您|ok|okay|yes|yeah|对的|对|对呀|继续|接着|收到|明白|明白了|嗯|棒|赞|辛苦了|thanks|thank you|sure|continue|got it|noted|righteous|hello|hi|hey|hiya|yo|你好|您好|嗨|哈喽|哈啰|哈罗|早上好|上午好|中午好|下午好|晚上好|晚安|在吗|在么|在不在|好的[。.，,！!?？]?|谢谢[。.，,！!?？]?)$/i;
-
-export function shouldBypassSemanticRoute(prompt: string, images?: MessageImage[] | null): boolean {
-  if (images?.length) return false;
-  const text = prompt.trim();
-  if (text.length > 16) return false;
-  return PLEASANTRY_BYPASS.test(text);
-}
-
-// ── Deterministic conversational-route skip ───────────────────────────────
-// The GUI/CLI call the LLM once to route a request BEFORE the real turn
-// starts. On providers that trickle tokens slowly that hidden call alone
-// costs 6-12s (measured on GLM) even though the model's first byte arrives
-// in ~1s — the whole call is dead latency in front of the first visible
-// answer. Most such calls only confirm the obvious (this is a plain
-// question), so the synchronous fallback below reproduces the router's
-// verdict for exactly that case and the hidden round trip is skipped
-// entirely. It fires ONLY when the deterministic fallback already concludes
-// "low-stakes conversational question" — every flag that could route to a
-// plan / delivery gate / probe / confirmation must already be off, otherwise
-// the LLM router still runs.
-
-/** Question markers (CN + EN): the prompt must read as a request for an
- * answer, not an instruction to act. */
-const QUESTION_SHAPED = /[?？]|几号|几月|几点|星期|周几|多久|多(?:大|少|远|久|高|长)|为什么|怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|可不可以|会不会|要不要|吗|呢|什么|哪个|哪些|谁|哪里|哪儿|什么时候|what|when|where|which|who|why|how|can|could|should|would/i;
-
-/** Peel a leading question frame (能不能帮我… / how do i …) so the artifact
- * guard below can still see an embedded build request. */
-function stripQuestionPrefix(text: string): string {
-  return text.replace(/^(?:请问|能不能|可不可以|可以|能否|是否|我想问|想问|麻烦问|帮我看看|how(?:(?:\s+can|\s+could|\s+do|\s+should|\s+would)?\s+i)?|can\s+you|could\s+you|please)\s*/i, '');
-}
-
-// ── Work-frame veto (2026-10-14) ──────────────────────────────────────────
-// `isPlainConversational` below asks the KEYWORD FLOOR whether it already
-// reproduced the router's verdict. The floor cannot answer that: `assessIntent`
-// defaults every request it does not recognise as destructive/migrate/refactor
-// to `intent: 'question'`, risk low — a DEFAULT, not a verdict. Measured on the
-// product's own request set (scripts/tmp-route-census.ts, 15 real phrasings),
-// the floor read 14 of them as question/simple/yolo, including:
-//
-//   登录页在我点登录后没有反应，帮我查一下为什么，然后修掉   → chat
-//   给这个登录页加上「记住我」和退出登录，并且补上测试         → chat
-//   我想给这个项目加一个离线缓存层，先给我一个方案            → chat
-//   这个页面不太行，你看看                                    → chat
-//   还是不行                                                  → chat
-//
-// so the hidden router was never called and the turn was carried as chit-chat:
-// no assessment, no read-only probe, no plan review, no delivery gate — the
-// harness abstaining exactly where the request asks for work. The two vetoes
-// below are the corrective: `namesAnEdit` (verb × target) catches the explicit
-// edit, and `namesWorkFrame` catches the rest of the work shapes. Both are
-// NEGATIVE signals on a floor that can only say "question" — they never claim
-// what the turn is, only that the fast path may not settle it.
-//
-// Bias: recall over precision, deliberately. A false veto costs one router
-// round trip (a few seconds, and only on that turn); a false skip costs the
-// whole turn's structure (probe / plan / delivery gate / assessment), which is
-// the failure this exists to prevent. The line is drawn so that genuine
-// conversational turns — questions, small talk, creative asks, design-direction
-// questions — carry none of these signals and keep the fast path.
-
-/** Change-shaped verbs: naming one is naming work to do, not a question. */
-const WORK_VERB_RE = /(?:改(?:成|为|一下|一改|掉|好|得|动|起来)|修改|修正|改动|修复|修好|修掉|修了|修一下|修下|调试|排查|定位|复现|加上|加一个|加个|新增|添加|插入|补上|补齐|补充|删掉|删了|删除|移除|去掉|替换|换成|重构|重写|重命名|拆分|抽出|抽取|迁移|升级|降级|实现|接入|接上|接进去|部署|打包|优化一下|简化|整理|清理|调整|装上|安装|用它做)/;
-
-/** Functional-failure words: the user is reporting something that does not
- *  work — that is a diagnosis request even when phrased as an observation.
- *  Deliberately excludes aesthetic opinions (难看 / 不好看): those are design
- *  feedback, and the product routes design direction as a question on purpose. */
-const WORK_SYMPTOM_RE = /(?:没反应|不响应|点不了|点不动|点了没|没效果|没生效|不生效|不起作用|不工作|跑不起来|起不来|打不开|加载不出来|报错|出错|报异常|崩溃|卡住|卡死|失效|失灵|坏了|挂了|不太行|不对劲|不好用|不行了|还是不行|又不行|不通过|没过|构建失败|测试失败|偶发)/;
-
-/** Requests for a plan / an assessment of a concrete target — asking for the
- *  shape of the work is not chit-chat. */
-const WORK_PLAN_RE = /(?:给我(?:一个|个|一份)?\s*(?:方案|计划|思路|建议)|先给(?:我)?(?:一个|个)?\s*(?:方案|计划)|规划一下|设计一下|评估一下|分析一下|排查一下|找找原因|定位一下|看看问题|你看看|你看一下|帮我看)/;
-
-/** Does this turn name work (a change, a malfunction, or a plan request)?
- *
- *  Exported so `prefetchTurnRoute` can veto the chit-chat fast path with it.
- *  It answers ONE question — "may the floor's `question` default be trusted?" —
- *  and deliberately does not attempt to classify the turn: the LLM router is
- *  the only layer allowed to say what the request IS. */
-export function namesWorkFrame(prompt: string): boolean {
-  const text = prompt.trim();
-  if (!text) return false;
-  return WORK_VERB_RE.test(text) || WORK_SYMPTOM_RE.test(text) || WORK_PLAN_RE.test(text);
-}
-
-/** True when a request is SO plainly a low-stakes conversational turn — a
- * question OR a short creative/answer imperative (做一首诗 / 写个故事 / 讲讲
- * X) — that the LLM router could not change the outcome. Conservative by
- * construction: no images, short, no project/artifact build framing (even
- * hidden behind a question prefix), and the synchronous fallback verdict
- * must already be question / simple / yolo / low-risk with no traps.
- * Anything else keeps the full semantic-route call. The interrogative-shape
- * check was dropped: creative imperatives classify identically under the
- * remaining guards, and requiring ？」/吗 made every 生成类 request pay the
- * hidden router round trip (6-12s dead latency) for a verdict the fallback
- * had already reproduced. */
-export function isPlainConversational(prompt: string, images?: MessageImage[] | null): boolean {
-  if (images?.length) return false;
-  const text = prompt.trim();
-  if (!text || text.length > 200) return false;
-  // An imperative build request hiding inside a question frame (e.g.
-  // "能不能帮我设计一个自行车网站？") must still reach the LLM router — the
-  // artifact/delivery pipeline depends on it. detectArtifactRequest already
-  // rejects question-leading forms, so re-test with the frame peeled.
-  if (detectProjectRequest(text) || detectArtifactRequest(text)) return false;
-  const peeled = stripQuestionPrefix(text);
-  if (detectProjectRequest(peeled) || detectArtifactRequest(peeled)) return false;
-  const analysis = new Planner().analyzeTask(text);
-  return analysis.intent.intent === 'question'
-    && analysis.intent.riskLevel === 'low'
-    && !analysis.intent.requiresProbe
-    && !analysis.intent.requiresConfirmation
-    && analysis.complexity === 'simple'
-    && analysis.mode === 'yolo'
-    && analysis.traps.length === 0;
-}
 
 /**
  * Stream a classification prompt while accumulating text and stop the moment
@@ -779,411 +645,77 @@ function applyImageReadOverride(
 }
 
 export class Planner {
-  private config: Required<PlannerConfig>;
-
-  constructor(config?: PlannerConfig) {
-    this.config = {
-      complexFileThreshold: config?.complexFileThreshold ?? characterDecision().modeThreshold.complexFileThreshold,
-    };
-  }
-
-  /** Analyze a task prompt to determine complexity and optionally generate a plan. */
+  /** 语义路由不可用时的最后兜底（requestWorkflow.compileRequestWorkflow 的
+   *  else 分支）。不再做任何复杂度 / 形态 / 陷阱判定——理解用户是模型的语义
+   *  判断，宿主只保留两级破坏词安全网（assessIntent：操作级毁灭→确认卡；
+   *  任务级动词→探查推进）。普通任务一律直推；「先读再动」的探查纪律由
+   *  workShapedFallback 的 probeRequired 承载，不在这里造计划。 */
   analyzeTask(prompt: string): AnalysisResult {
-    const heuristicComplexity = this.detectComplexity(prompt);
-    const traps = this.detectTraps(prompt);
-    const intent = assessIntent(prompt);
-    const needsSafetyPlan = intent.requiresConfirmation;
-    // medium→complex 只服务 refactor/migration（波及面真的广）；删除类任务
-    // 保持启发式复杂度（删几个文件不是复杂任务），但保留 plan mode——先出
-    // 计划就是先探查列对象（2026-11-01 分级：删除不再暂停等确认，探针纪律
-    // 由计划承载）。
-    const complexity: TaskComplexity = intent.riskLevel === 'medium' && intent.intent !== 'delete' ? 'complex' : heuristicComplexity;
-    const needsPlan = needsSafetyPlan || intent.intent === 'delete';
-
-    if (complexity === 'complex' || needsPlan) {
-      const mode: TaskMode = needsPlan || intent.riskLevel === 'medium' ? 'plan' : this.detectMode(prompt, complexity);
-      return {
-        complexity,
-        // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
-        // build mode; a destructive request always uses plan mode so it cannot
-        // inherit the direct-build path by accident.
-        mode,
-        plan: this.generatePlan(prompt, mode),
-        reasoning: needsSafetyPlan ? intent.recommendation : this.getComplexReasoning(prompt),
-        traps,
-        intent,
-      };
-    }
-
     return {
       complexity: 'simple',
       mode: 'yolo',
-      reasoning: 'Task appears straightforward — direct execution is appropriate.',
-      traps,
-      intent,
+      reasoning: '语义路由不可用：按普通任务直接推进，两级破坏词安全网已过。',
+      intent: assessIntent(prompt),
     };
   }
 
-  /** The model chooses build vs plan. The synchronous fallback never infers a
-   * user's desired outcome from artifact nouns or isolated verbs. */
-  private detectMode(prompt: string, complexity: TaskComplexity): TaskMode {
-    return detectProjectRequest(prompt) ? 'build' : complexity === characterDecision().modeThreshold.planAtComplexity ? 'plan' : 'yolo';
-  }
-
   /**
-   * Scan the prompt for potential logical traps: self-contradictory negation
-   * ("不要X但又要X"), contradictory extremes ("越快越好但越慢越好"), mutually
-   * exclusive simultaneity, impossible absolute obligations, and explicit
-   * paradox/trick framing. Heuristic — a hit means "verify the premise", not
-   * "the request is definitely impossible"; the description is injected into
-   * the system prompt so the LLM checks it rather than blindly following a
-   * contradictory instruction into a failure loop.
+   * 计划卡占位骨架：真实拆解是主模型的事（计划 JSON / work order），
+   * 宿主不再教它「先理解→搭骨架→逐模块→测试→收尾」的固定模板（框架改革
+   * 一期：方法论归还模型）。这里只保证计划卡有可渲染的步骤结构。
    */
-  detectTraps(prompt: string): TrapWarning[] {
-    const traps: TrapWarning[] = [];
-    const add = (type: TrapWarning['type'], description: string) => traps.push({ type, description });
-
-    // Explicit paradox / trick framing — the user themselves signals a trap.
-    if (/悖论|逻辑陷阱|陷阱题|脑筋急转弯|自相矛盾|trick question|paradox|self-contradict/i.test(prompt)) {
-      add('trap-keyword', 'The request is explicitly framed as a paradox/trick question — verify the premise before answering.');
-    }
-
-    // 不要X但又要X — the same object is both prohibited and demanded.
-    // The comma before 但 is allowed because the clause may be comma-separated
-    // ("不要X，但又要X") — but only ONE separator may appear, so a longer
-    // unrelated phrase can't slip through the back-reference.
-    const sameNeg = prompt.match(/(?:不要|不能|禁止|不允许)([^。；;]{2,20}?)(?:，|,)?(?:又要|还要|却要|但又要|同时要|仍要)\1/);
-    if (sameNeg) {
-      add('self-contradiction', `The request both prohibits and demands "${sameNeg[1].trim()}" — a direct self-contradiction.`);
-    }
-
-    // 既要X又不要X — simultaneously wants and forbids the same thing.
-    // The leading 要 is optional so the back-reference aligns with the
-    // second occurrence ("既要修改文件又不要修改文件").
-    const jiTrap = prompt.match(/既(?:要|必须)?([^。；,]{2,16}?)(?:又|还)(?:要|必须)不\1/);
-    if (jiTrap) {
-      add('self-contradiction', `The request simultaneously wants and forbids "${jiTrap[1].trim()}".`);
-    }
-
-    // 越快越好但越慢越好 — contradictory directional extremes on one quantity.
-    // The pair must be a TRUE opposite (快↔慢, 多↔少, …) — "越快越好，但占用越少越好"
-    // (fast AND low-resource) is coherent and must NOT be flagged, so the match
-    // is verified against the opposite map instead of cross-matching.
-    const CMP_PAIRS: Record<string, string> = { 快: '慢', 早: '晚', 多: '少', 大: '小', 高: '低', 长: '短', 强: '弱' };
-    const cmpTrap = prompt.match(/越(快|早|多|大|高|长|强)[^。；，,]{0,20}(?:，|,)?(?:又|但|却|同时|还要)[^。；，,]{0,14}越(慢|晚|少|小|低|短|弱)/);
-    if (cmpTrap && CMP_PAIRS[cmpTrap[1]] === cmpTrap[2]) {
-      add('self-contradiction', `The request imposes contradictory extremes: "the ${cmpTrap[1]}er the better" and "the ${cmpTrap[2]}er the better" at once.`);
-    }
-
-    // 同时...又不能... — two mutually exclusive things demanded together.
-    if (/(?:同时|既要)[^。；，,]{1,20}(?:，|,)?(?:又不能|还要不|却要|又不要)/.test(prompt)) {
-      add('mutually-exclusive', 'The request demands two mutually exclusive things at the same time.');
-    }
-
-    // 从不X，但必须X — an absolute obligation paired with its own negation on
-    // the SAME object (back-reference), e.g. "从不失败，但必须失败". Requires the
-    // object to repeat so benign "永远不要提交敏感信息，但要提交代码" (two different
-    // objects) is NOT flagged.
-    const absTrap = prompt.match(/(?:永远|从不|绝不|任何情况下都)(?:不要|不能|禁止|不允许|必须|要)?([^。；,]{2,20}?)(?:，|,)?(?:但|却|同时)(?:又要|还要|仍然要|必须|要)\1/);
-    if (absTrap) {
-      add('impossible-constraint', `The request makes an absolute statement about "${absTrap[1].trim()}" and simultaneously demands its opposite — impossible as stated.`);
-    }
-
-    // 任务级矛盾（2026-10-14）：「不要改任何文件，但把这个函数里的 bug 修掉」。
-    // 这不是名词回指（上面几条要求同一个名词出现两次），而是任务级：两句话各自
-    // 都清楚，放一起才不可能——只有读懂「修掉 bug 必然要改文件」才看得出来。
-    // 判据刻意收窄在前半句是整类封禁（任何/所有/整个 + 文件/代码/项目），否则
-    // 「不要改配置，但把 README 补上」这类正常分工会被误报；命中只代表「先验证
-    // 前提」，不代表请求一定不可能。
-    const forbidWholeClass = /(?:不要|不能|别|禁止|不允许|不许)\s*(?:改|修改|动|碰|编辑|变更|写)\s*(?:任何|所有|全部|一切|整[个套])?\s*(?:的)?\s*(?:文件|代码|源码|代码库|项目|仓库|工程)/.test(prompt);
-    const laterAsksChange = /(?:但|却|同时|又要|还得|另外|顺便)[^。；]{0,24}(?:修|改|加|删|换|补|重构|实现|去掉|移除|替换|加上|统一)/.test(prompt);
-    if (forbidWholeClass && laterAsksChange) {
-      add('self-contradiction', 'The request forbids touching any file/code and then asks for a change that cannot be made without touching them — both cannot hold as stated; say so and settle what the boundary really is.');
-    }
-
-    // English: "do not X but also X" (back-reference on the same action).
-    if (/(?:do not|don't|cannot|must not)\s+([a-z][a-z ']{2,30}?)\s+(?:but|yet|while)\s+(?:also\s+)?(?:do not|must|need to)?\s*\1/i.test(prompt)) {
-      add('self-contradiction', 'The request both prohibits and demands the same action — a direct contradiction.');
-    }
-
-    // English: contradictory directional extremes.
-    if (/\b(faster|more|bigger|higher|longer|earlier)\b[^.]{0,40}\b(slower|less|smaller|lower|shorter|later)\b/i.test(prompt)) {
-      add('self-contradiction', 'The request imposes contradictory directional constraints on the same quantity.');
-    }
-
-    // Dedupe (type + description) so overlapping rules don't spam the prompt.
-    const seen = new Set<string>();
-    return traps.filter(t => {
-      const k = `${t.type}|${t.description}`;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-  }
-
-  private detectComplexity(prompt: string): TaskComplexity {
-    const lower = prompt.toLowerCase();
-    const trimmed = prompt.trim();
-
-    // Chinese questions — hoisted so both the planning-rule guard below and
-    // the Chinese build rules can skip question phrasing ("怎么规划？" is
-    // ASKING, not planning; "如何搭建一个全栈项目" asks HOW, not to build).
-    // Leading prefixes AND question words anywhere in the prompt count — EXCEPT
-    // when the prompt starts with an imperative build verb ("帮我搭建…",
-    // "写一个…"): then the build intent dominates, and a trailing question
-    // ("…怎么做性能优化？") must not suppress planning.
-    const startsWithBuild = /^(?:请)?\s*(?:帮我|麻烦你|给我)?\s*(?:编写|写|做|开发|制作|创建|搭建|实现|构建|设计|生成|部署|重构|重写|迁移|规划)\s*/.test(trimmed);
-    // 纯破坏性单步命令（删除/清空整个项目）走“确认闸”处理，不应因为“整个项目”这种
-    // 范围词被升级成多步复杂计划——范围词只在“需要逐文件改动一大片”时才有意义。
-    const destructive = /(?:删除|移除|销毁|清空|drop\s+(?:table|database)|destroy|delete|rm\s|reset\s+--hard|force\s+push)/i.test(lower);
-    // 只读/查询类动作（查看/了解/解释/分析/总结/读…）即便目标范围是“整个项目”也只是
-    // 一次查看，不该被范围词升级成多步复杂计划；真正的改动广度由语义路由判断。
-    const readOnly = /(?:查看|查一下|查查|看下|看看|了解|理解|解释|说明|介绍|总结|概括|研究|调研|分析|评估|阅读|读一下|describe|explain|summar|analyz|understand|look at|inspect|view|read)/i.test(lower);
-    const cnQuestion = !startsWithBuild && (
-      /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|怎么办|该怎么办|应该怎么办|该不该|应不应该|(?:请)?帮我?(?:看看|查查|看下|分析|解释|介绍|讲讲|说说|告诉我|描述|总结|评估))/.test(trimmed) ||
-      /(?:怎么办|该怎么办|应该怎么办|怎么|如何|怎样|能否|能不能|是否|该不该|应不应该|为什么|吗|呢|什么(?!都|也|能))/.test(trimmed)
-    );
-
-    // User explicitly asks for planning. A request to write a project plan or
-    // documentation is a deliverable, not an instruction to plan the coding
-    // work, so keep that document intent out of the plan gate.
-    const documentationRequest = /(?:write|create|draft|生成|编写|写)\s+(?:a\s+)?(?:project\s+)?(?:plan|documentation|document|docs|summary|report|spec|tutorial|计划|文档|总结|报告|方案)/i.test(prompt);
-    if (!documentationRequest && /plan|先计划|think step by step|think through/i.test(prompt)) {
-      return 'complex';
-    }
-    if (!cnQuestion) {
-      // 规划/设计 + 交付物名词 → 多步复杂。但「设计一个应用的图标」要的是
-      // 那张图，不是那个应用——单资产所属结构不算复杂；「…图标管理系统」
-      // 这类资产词后面跟着真实构造词的仍是复杂。
-      const designScope = /(?:规划|设计)\s*(?:一个|一套|个|套|一下|一番)?\s*(?:工程|项目|系统|网站|应用|平台|框架|架构|方案|模块|功能|页面|界面)/gi;
-      designScope.lastIndex = 0;
-      let dm: RegExpExecArray | null;
-      while ((dm = designScope.exec(prompt)) !== null) {
-        const after = prompt.slice(dm.index + dm[0].length, dm.index + dm[0].length + 16);
-        if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return 'complex';
-      }
-    }
-
-    // Multiple file operations or new module creation
-    const fileOpPatterns = [
-      /create\s+(a\s+)?(new\s+)?(file|module|class|component|service|api)/i,
-      /refactor|重构|重写|rewrite/i,
-      /migrate|迁移/i,
-      /add\s+(a\s+)?(new\s+)?feature/i,
-      /implement\s+(a\s+)?(full|complete|end.to.end)/i,
-    ];
-
-    const matches = fileOpPatterns.filter(p => p.test(lower));
-    if (matches.length >= this.config.complexFileThreshold) {
-      return 'complex';
-    }
-
-    // 广义改动动词（重构/重写/迁移/跨整个项目…）意味着多步、跨文件的改动范围，属于
-    // “工作量/范围”证据而非把用户意图归类为某种固定类型——据此判定为复杂。它和具体的
-    // 破坏/只读动作无关，疑问句也不触发。
-    if (!cnQuestion && !destructive && !readOnly
-      && /(?:重构|重写|rewrite|refactor|迁移|migrate|across the (?:entire )?project|整个项目重|重?构.*项目)/i.test(lower)) {
-      return 'complex';
-    }
-
-    // Scope indicators
-    const scopeIndicators = [
-      /multiple\s+files/i,
-      /several\s+(files|modules|components)/i,
-      /whole\s+(project|app|system)/i,
-      /from\s+scratch/i,
-    ];
-
-    if (!cnQuestion && !destructive && !readOnly && scopeIndicators.some(p => p.test(lower))) {
-      return 'complex';
-    }
-
-    // Project creation is inherently multi-step. Keep this before the
-    // conservative fallback so semantic-router failures still enter a build
-    // plan; detectProjectRequest excludes questions and documentation requests.
-    if (detectProjectRequest(prompt)) {
-      return 'complex';
-    }
-
-    // Ordinary creation, advice, critique, research, and domain language are
-    // deliberately not classified here. The shared semantic router handles
-    // those from the complete request; this fallback stays direct rather than
-    // turning a noun such as “项目/网页/原型” into a plan by itself.
-    return 'simple';
-  }
-
-  /**
-   * 计划结构由语义路由给出的 mode（build / plan / yolo）决定，而不是用关键词把
-   * 用户意图重新归类为“创建 / 提问 / 其他”三种固定模板。只有当语义层面判定为
-   * build 时才走构建式计划；其余一律用中性、不预设任务类型的通用步骤。
-   * 具体的任务拆解属于 LLM 语义分析的职责，这里只在那层不可用时兜个底。
-   */
-  generatePlan(prompt: string, mode: TaskMode): Plan {
-    if (mode === 'build') {
-      return {
-        steps: [
-          {
-            id: '1',
-            action: '理解与分析需求',
-            description: '拆解这个需求的目标、数据来源、使用场景与约束，明确缺失的关键信息。',
-            expectedOutcome: '对要交付的东西有清楚、无歧义的理解。',
-          },
-          {
-            id: '2',
-            action: '确定技术栈与测试策略',
-            description: '根据交付物选择运行方式和测试框架，先定义测试入口、测试目录与首个主流程 smoke test。Web/DOM 项目优先选择适配的 DOM 测试环境。',
-            expectedOutcome: '技术栈、测试 runner、test script 和首个测试场景已明确。',
-          },
-          {
-            id: '3',
-            action: '搭建包含测试入口的项目骨架',
-            description: '建立目录、依赖和可运行脚本，同时写入测试配置与最小测试文件，不把测试基础设施留到收尾阶段。',
-            expectedOutcome: '项目和测试命令都能启动，最小测试可以被发现。',
-          },
-          {
-            id: '4',
-            action: '分模块实现并同步编写测试',
-            description: '按功能拆分实现，每个关键路径配套 focused/unit/integration 测试，保持实现和测试一起演进。',
-            expectedOutcome: '核心功能落地，关键行为有自动化保护。',
-          },
-          {
-            id: '5',
-            action: '运行测试、检查与构建并修复失败',
-            description: '实际执行 test、typecheck/lint（如有）和 build；任何失败都根据证据修复后重新运行，不能用手工检查替代自动化测试。',
-            expectedOutcome: '测试与项目验证命令真实通过，或明确记录无法解决的阻断。',
-          },
-          {
-            id: '6',
-            action: '收尾与交付',
-            description: '补齐运行说明和测试说明，报告真实执行过的命令、结果与仍存在的限制。',
-            expectedOutcome: '交付物完整，用户知道如何运行和验证项目。',
-          },
-        ],
-        reasoning: '这是一次构建型任务：先理解清楚要做什么，再搭骨架、逐模块实现，最后联调验证，保证结果可用。',
-      };
-    }
-
-    // 非构建类：中性通用步骤，不把请求归类为“确认范围 / 完成改动 / 验证结果”这类
-    // 预设编辑模板，也不按关键词判断是提问还是改动——交给实际执行时结合上下文决定。
+  generatePlan(_prompt: string, mode: TaskMode): Plan {
     return {
       steps: [
         {
           id: '1',
-          action: '先理解这次请求真正想要的结果',
-          description: '结合上下文确认目标、约束与已知条件，不急于套用固定模板。',
-          expectedOutcome: '目标与边界清楚。',
+          action: '明确这次要的结果',
+          description: '结合上下文确认目标、约束与已知条件，从最小可验证的一步开始。',
+          expectedOutcome: '目标与边界清楚，第一步可执行。',
         },
         {
           id: '2',
-          action: '用最小动作验证关键假设',
-          description: '先读相关代码或跑最小探针，确认理解无误再扩展改动。',
-          expectedOutcome: '关键未知点被证据消除。',
-        },
-        {
-          id: '3',
-          action: '按小步推进并持续验证',
-          description: '每步都可运行、可验证，必要时回头调整方向，最后说明仍存在的限制。',
+          action: '小步推进并持续验证',
+          description: '每一步都可运行、可验证，出现偏差就回头调整；收尾如实报告已验证与未验证的部分。',
           expectedOutcome: '结果可靠、可被验证。',
         },
       ],
-      reasoning: this.getComplexReasoning(prompt),
+      reasoning: mode === 'build'
+        ? '构建型任务：先搭最小可运行骨架，再逐块实现，随时用真实运行结果校准。'
+        : '按小步推进并持续验证。',
     };
   }
-
-  private getComplexReasoning(prompt: string): string {
-    // Shown above the plan review card — plain user-facing language.
-    return '这个任务涉及多文件或较大改动，按步骤推进并逐步验证，能保证结果正确可靠。';
-  }
 }
 
 /**
- * Detect whether the user is asking for fictional / alternate-history /
- * "ignore the rules" content — the case where the plausibility &
- * real-world consistency review must be skipped. Deterministic heuristic
- * (the model must NOT be the judge of this), deliberately conservative:
- * it fires only on explicit opt-outs of real-world constraints or explicit
- * fiction-creation markers, never on a bare genre noun in a factual question
- * ("介绍科幻小说的历史" stays reviewed).
- */
-export function detectFictionIntent(prompt: string): boolean {
-  const lower = prompt.toLowerCase();
-
-  // 1. Explicit opt-out of real-world constraints — strongest signal.
-  //    "不用管事实", "不考虑现实/物理/规律", "ignore physics", "make it up".
-  if (
-    /(?:(?:不用|无需|不需要|不必)(?:管|考虑|符合|在意|在乎|讲究)?|别(?:管|考虑|符合|在意|在乎|讲究))\s*(?:事实|现实|真实|逻辑|物理|化学|数学|时间线|历史|规律|合理性|严谨)/i.test(prompt)
-    || /(?:忽略|无视|不考虑|不管|不讲究|不追求|不严谨)\s*(?:事实|现实|真实|逻辑|物理|化学|数学|时间线|历史|规律|合理性)/i.test(prompt)
-    || /(?:ignore|disregard|don'?t\s+care\s+about|no\s+need\s+to\s+(?:be|follow|respect))\s*(?:the\s+)?(?:facts?|reality|realism|physics|chemistry|math(?:ematics)?|timeline|history|logic|rules?|science|accuracy|plausibility)/i.test(lower)
-    || /(?:make\s+it\s+up|make\s+something\s+up|don'?t\s+worry\s+about\s+(?:accuracy|facts|realism|physics|reality|rules|logic))/i.test(lower)
-  ) return true;
-
-  // 2. Creation-oriented fiction markers — unambiguously fictional.
-  if (
-    /(?:虚构|架空|编造|乱编|随便编|编一个|编个|天马行空|脑洞|平行世界|平行宇宙|异世界|架空的|架空世界|架空历史)/i.test(prompt)
-    || /\b(?:fiction|fictional|alternate[ -]history|alternate[ -]universe|make[- ]?believe|worldbuilding)\b/i.test(lower)
-    || /\b(?:write|make\s+up|invent)\s+(?:a\s+|some\s+)?(?:fiction|fictional|fantasy|fantastical|mythical)\b/i.test(lower)
-  ) return true;
-
-  // 3. Genre creation: a creation verb + an unambiguous fiction genre noun
-  //    ("写一个科幻小说", "write a fantasy story") — but NOT "介绍科幻".
-  const creationVerb = /(?:写|编|创作|编写|生成|制作|构思|设计|给我写|帮我写|来一个|give\s+me|write|create|invent|generate|draft)/i;
-  const fictionGenre = /(?:科幻|奇幻|玄幻|魔幻|魔法|神话|童话|穿越|架空)\s*(?:小说|故事|剧|剧本|剧情|设定|世界|世界观)|(?:sci[- ]?fi|science[- ]?fiction|fantasy|fairy[- ]?tale|myth(?:ology)?)\s*(?:story|stories|novel|tale|fiction|world)/i;
-  if (creationVerb.test(prompt) && fictionGenre.test(prompt)) return true;
-
-  return false;
-}
-
-/**
- * 语义路由不可用时的“安全兜底策略”：用关键词识别明确的高风险 / 不可逆操作
- * （删除、销毁、重构、迁移、force push…），把这些归为需要探针 / 确认的安全护栏。
- * 它只是兜底——一旦语义路由可用，完整的意图 / 风险判断以语义路由为准（见
- * requestWorkflow.ts 的 mergeSemanticAssessment），关键词不再覆盖语义结论。
- * 普通任务的意图分类仍交由语义路由结合“完整语句 + 上下文”决定。
+ * 语义路由不可用时的最后安全网：两级破坏词识别。这不是意图分类——
+ * 普通任务一律按「改动任务」直推（framework-reform 一期：宿主不再用词表
+ * 猜用户想干什么），只有命中破坏词才抬风险：
+ *   操作级毁灭形态（rm -rf / drop database / 删库 / force push / reset --hard）
+ *     → 确认卡（2026-09-17 定调「非常危险除外」的唯一例外）；
+ *   任务级动词（删除/清理/清空/重置/覆盖…）→ 探查推进：先只读探查列对象，
+ *     然后直接动手，不暂停（2026-11-01 用户判例落死：「能清理夏普电视吗」
+ *     不再整轮挂起等确认）。
+ * 「怎么做」是问方法不是让人动手（askingHow 豁免）；句末「可以吗」仍是
+ * 征求执行许可（不豁免）。语义路由可用时本函数不参与判定——结论整体由
+ * 路由给出（见 requestWorkflow.buildSemanticAnalysis）。
  */
 export function assessIntent(prompt: string): IntentAssessment {
   const text = prompt.trim();
   const lower = text.toLowerCase();
   const chinese = /[\u4e00-\u9fff]/.test(text);
-  // 语义路由不可用时的关键词兜底。2026-09-20：口语化破坏词（删了/删掉/清空/
-  // 重置/覆盖）纳入识别；三个负向断言把工程语境的良性用法挡在外面（清空输入
-  // 框、重置密码/按钮、覆盖率/覆盖测试）。2026-10-14：问「怎么做」不是「让你
-  // 动手做」（askingHow 豁免），句末「可以吗」仍是征求执行许可（不豁免）。
-  // 2026-11-01：识别到不再等于拦停——分级见下方正则处注释。
-  const mannerQuestion = /(?:如何|怎么|怎样|咋(?:办|样)|为什么|求(?:教|助)|请教|请问|该怎么|要怎么做|能否|能不能|可不可以|how\s+(?:do|can|should|to|would)|why|can\s+i|could\s+i|should\s+i|what'?s\s+the\s+way)/i.test(lower);
-  const askingHow = mannerQuestion;
-  // 2026-11-01 用户判例 + 2026-09-17 定调落死：破坏词拆两级。
-  //
-  // 任务级动词（删除/清理/清空/重置/覆盖…）不再弹确认卡——用户的指令本身就
-  // 是授权；兜底只保留探针纪律（先只读探查、列出会动到的对象），然后模型直接
-  // 动手，优先可恢复方式。直接动因：真机「能清理夏普电视吗（cleanyourtv）」
-  // 被「清理」二字拉进高危通道暂停整轮等确认，模型连探查计划都列完了还在等。
-  //
-  // 操作级毁灭形态（rm -rf / drop database / 删库 / force push / reset --hard
-  // …）是定调里唯一的例外（「非常危险除外」），保留确认卡。
-  //
-  // 历史判例仍有效：2026-09-20 口语化破坏词（删了/删掉/清空/重置/覆盖）要能
-  // 识别（只是降级不再拦人）；三个负向断言把良性工程语境挡在外面（清空输入
-  // 框、重置密码/按钮、覆盖率/覆盖测试）；2026-10-14 问「怎么做」不是让人
-  // 动手（askingHow 豁免），句末「可以吗」仍是征求执行许可（不豁免）。
+  const askingHow = /(?:如何|怎么|怎样|咋(?:办|样)|为什么|求(?:教|助)|请教|请问|该怎么|要怎么做|能否|能不能|可不可以|how\s+(?:do|can|should|to|would)|why|can\s+i|could\s+i|should\s+i|what'?s\s+the\s+way)/i.test(lower);
   const COMMAND_DESTRUCTIVE_RE = /(?:rm\s+-rf|drop\s+(?:table|database)|删库|清库|删表|清表|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire)|不可逆)/i;
   const TASK_DESTRUCTIVE_RE = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|destroy|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉))/i;
   const commandHit = COMMAND_DESTRUCTIVE_RE.exec(lower)?.[0];
   const taskHit = TASK_DESTRUCTIVE_RE.exec(lower)?.[0];
   const destructive = Boolean(commandHit || taskHit) && !askingHow;
-  const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
-  const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
-  const riskLevel: IntentAssessment['riskLevel'] = destructive
-    ? (commandHit ? 'high' : 'medium')
-    : migration || refactor ? 'medium' : 'low';
-  const intent: RequestIntent = destructive ? 'delete' : migration ? 'migrate' : refactor ? 'refactor' : 'question';
+  const riskLevel: IntentAssessment['riskLevel'] = destructive ? (commandHit ? 'high' : 'medium') : 'low';
+  const intent: RequestIntent = destructive ? 'delete' : 'modify';
   const reversibility: IntentAssessment['reversibility'] = destructive
     ? (commandHit ? 'irreversible' : 'hard-to-reverse')
-    : migration
-      ? 'hard-to-reverse'
-      : refactor
-        ? 'partially-reversible'
-        : 'reversible';
-  const requiresProbe = riskLevel !== 'low';
+    : 'reversible';
+  const requiresProbe = destructive;
   // 确认卡只挂在操作级毁灭上（2026-09-17 定调：默认自动允许，非常危险除外）。
   const requiresConfirmation = destructive && Boolean(commandHit);
   // impact 是被卡片直接展示给用户的那句话（见 ui/assessmentFlow.ts）——它要讲清
@@ -1194,31 +726,23 @@ export function assessIntent(prompt: string): IntentAssessment {
       ? `请求里有「${commandHit}」这类毁灭性操作（数据/库/系统级，基本无法恢复）：先把会动到的对象列清楚，等你确认后再动手。`
       : destructive
         ? `请求里有「${taskHit}」这类删除动作：先只读探查、把会动到的对象列出来，然后直接动手，优先用可恢复的方式，不必停下来等确认。`
-        : riskLevel === 'medium'
-          ? '改动可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
-          : '不根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
+        : '按普通改动任务直接推进，具体处理方式由模型结合完整请求与上下文决定。')
     : (commandHit
       ? `The request contains "${commandHit}", a system-scale destructive operation that cannot practically be undone — list what it would touch first and wait for approval.`
       : destructive
         ? `The request contains "${taskHit}", which deletes existing data or files: probe read-only, list what it would touch, then proceed directly with a recoverable approach — no confirmation pause.`
-        : riskLevel === 'medium'
-          ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
-          : 'No task type is inferred from keywords; semantic routing will use the complete request.');
+        : 'Carried as an ordinary change task; the model decides how to handle it from the complete request.');
   const recommendation = chinese
     ? (commandHit
       ? '先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。'
       : destructive
         ? '先只读检查并列出受影响对象，然后继续执行，不要停下来等确认；优先窄范围、可回退的做法。'
-        : riskLevel === 'medium'
-          ? '先做最小只读探针，再按小步修改并立即验证。'
-          : '先由语义理解确定用户要得到的结果；如果只是建议或解释，直接回答，不要擅自修改文件。')
+        : '直接按对结果最有利的方式推进；如果其实只是建议或解释，直接回答，不要擅自修改文件。')
     : (commandHit
       ? 'Inspect read-only first, list affected targets, propose a recoverable or narrower alternative, then ask for approval.'
       : destructive
         ? 'Inspect read-only, list affected targets, then continue without waiting for approval; prefer narrow, reversible steps.'
-        : riskLevel === 'medium'
-          ? 'Run a minimal read-only probe, then make a small change and verify it.'
-          : 'Use semantic understanding of the complete request; if it asks for advice or explanation, answer directly instead of editing files.');
+        : 'Proceed the way that best serves the requested outcome; if it turns out to be advice or explanation, answer directly instead of editing files.');
   return {
     intent,
     riskLevel,
@@ -1227,9 +751,6 @@ export function assessIntent(prompt: string): IntentAssessment {
     recommendation,
     requiresProbe,
     requiresConfirmation,
-    // Deterministic fiction detection: when set, the plausibility review is
-    // skipped programmatically (see requestWorkflow.ts).
-    skipPlausibilityReview: detectFictionIntent(text),
   };
 }
 
@@ -1242,125 +763,10 @@ export function formatIntentPrompt(assessment: IntentAssessment): string {
   return `<intent_assessment>\nIntent: ${assessment.intent}\nRisk: ${assessment.riskLevel}\nReversibility: ${assessment.reversibility}\nImpact: ${assessment.impact}\nRecommended approach: ${assessment.recommendation}\nBefore acting, follow this assessment. If a read-only probe can reduce uncertainty, do that first. Do not broaden the change beyond the assessed impact. ${closing}\n</intent_assessment>`;
 }
 
-export function formatTrapPrompt(traps: TrapWarning[]): string {
-  if (traps.length === 0) return '';
-  const bullets = traps.map(t => `- [${t.type}] ${t.description}`).join('\n');
-  return `\n\n<logical_trap_warning>\nThe user's request may contain a logical trap:\n${bullets}\nBefore acting, verify the premise. If a constraint is self-contradictory or impossible as stated, say so briefly and solve the most reasonable interpretation — do NOT blindly follow contradictory instructions into a failure loop. If your first attempt fails, re-read the ORIGINAL request and switch to a fundamentally different approach.\n</logical_trap_warning>`;
-}
-
-// ── Single-asset possessive guard ─────────────────────────────────────────
-// "给我生成一个桌面端应用的图标" asks for an ICON, not an app — the noun the
-// build regexes match (应用) is only a possessive modifier of the real
-// deliverable. Routing that through the project/artifact pipeline turned a
-// "draw one thing and show it" request into a multi-step engineering plan
-// with test scaffolding. The guard below recognizes 〈deliverable-noun〉 +
-// 的(+short filler)+〈asset word〉 and lets such matches go: the deliverable
-// is the asset. An asset word immediately heading a real construction
-// (图标库 / 图标管理系统 / icon manager) does NOT count — that is a build
-// whose topic happens to be assets.
-const ASSET_NOUN_SRC = '图标|标志|头像|封面|配图|插画|插图|壁纸|横幅|海报|吉祥物|徽章|表情包|贴纸|启动图|开屏图|设计图|原型图|草图|线框图|示意图|效果图|截图|名字|名称|标题|标语|口号|文案|icons?|logos?|avatars?|covers?|banners?|posters?|badges?|stickers?|illustrations?|wallpapers?|mascots?|splash|screenshots?|taglines?|slogans?|wireframes?|mockups?';
-const CONSTRUCTION_SRC = '工具|编辑器|生成器|管理器|管理|库|系统|平台|商店|市场|插件|引擎|manager|tools?|editors?|generators?|library|store|plugins?';
-/** An asset word that is NOT heading a construction noun. */
-const ASSET_NOT_CONSTRUCTION = `(?:${ASSET_NOUN_SRC})(?![a-z])(?![-\\s的]{0,2}?(?:${CONSTRUCTION_SRC}))`;
-/** Directly after a matched deliverable noun: 的(+≤4 filler chars)+asset —
- * the matched noun was a modifier; the asset is the real deliverable. */
-const ASSET_DELIVERABLE_AFTER = new RegExp(`^\\s*(?:的)?\\s*[^，。；、,.!?？：:]{0,4}?${ASSET_NOT_CONSTRUCTION}`, 'i');
-/** …unless that asset itself heads a construction (图标管理系统) — the build
- * is real after all. */
-const ASSET_AFTER_CONSTRUCTION = new RegExp(`^\\s*(?:的)?\\s*[^，。；、,.!?？：:]{0,4}?(?:${ASSET_NOUN_SRC})(?![a-z])[-\\s的]{0,2}?(?:${CONSTRUCTION_SRC})`, 'i');
-
 /**
- * Detect whether the user is asking the agent to create a project rather than
- * answer a question about one. Project requests always require a visible plan
- * and incremental execution, even when the prompt is short ("帮我创建一个项目").
- */
-export function detectProjectRequest(prompt: string): boolean {
-  const p = prompt.trim();
-  if (!p) return false;
-  const question = /^(?:如何|怎么|怎样|能否|能不能|是否|请问|为什么|what|how|can|could|should)\b/i.test(p)
-    || /(?:怎么|如何|怎样|吗|呢|什么|为什么|能否|能不能|应该怎么办|what|how)\s*(?:创建|搭建|开发|做|build|create|scaffold|develop)/i.test(p)
-    || /(?:怎么|如何|怎样|吗|呢|为什么|能否|能不能|应该怎么办)[^。！？?!]{0,24}(?:$|[。！？?!])/i.test(p);
-  if (question) return false;
-  // The deliverable noun may follow a project NAME, not just a quantifier —
-  // e.g. "创建一个5G保障大屏监控项目" puts "5G保障大屏监控" between the verb
-  // and "项目". A short name-like run is allowed in between, but doc-style
-  // words in that run (介绍/说明/文档…) are rejected so "写一段介绍项目的文字"
-  // stays a writing task instead of a build; a lone asset word in the run
-  // ("generate an icon for my desktop app") is rejected the same way — the
-  // asset is the deliverable. The lookahead after the noun still excludes
-  // "项目的技术方案/说明文档" style doc requests.
-  const creation = new RegExp(
-    '(?:请|帮我|麻烦你|给我)?\\s*(?:创建|建立|搭建|构建|开发|制作|做|实现|编写|写|生成|create|build|scaffold|develop|make|implement)\\s*'
-    + '(?:(?:一个|一套|个|整套|整个|完整的|全栈的|大型的|多文件的|多模块的|a|an|the)\\s*)?'
-    + `(?![^，。；、,.!?？：:]{0,32}(?:介绍|说明|文档|方案|总结|报告|教程|README|计划|清单|笔记|心得|简介|描述|演示|思路|${ASSET_NOT_CONSTRUCTION}))`
-    + '[^，。；、,.!?？：:]{0,32}?'
-    + '(?:项目|工程|平台|系统|应用|程序|网站|大屏|dashboard|project|application|app|website|site|system|platform)'
-    + '(?!\\s*(?:的)?\\s*(?:(?:技术|开发|产品|实施)\\s*)?(?:总结|方案|文档|介绍|报告|说明|计划|清单|列表|简介|笔记|教程|plan|documentation|document|docs|summary|report|spec|tutorial))',
-    'gi',
-  );
-  const scope = p.slice(0, 140);
-  creation.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = creation.exec(scope)) !== null) {
-    const after = scope.slice(m.index + m[0].length, m.index + m[0].length + 16);
-    // Possessive asset ("…应用的图标/logo/名字"): the matched noun was only a
-    // modifier — unless the asset itself heads a construction ("应用的图标
-    // 管理系统" is a real build). Keep scanning: a later clause may still
-    // hold a genuine project ("…的图标，另外帮我开发一个管理系统").
-    if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return true;
-  }
-  return false;
-}
-
-/**
- * Detect whether a request asks for a COMPLETE runnable artifact — a game,
-
- * web page/site, app, tool, script, or small project — as opposed to a simple
- * question or a short code snippet. When true, the agent should write the
- * artifact to disk (an HTML file / a small project directory) by default
- * instead of printing the full code inline. This is the "写一个小游戏/做一
- * 个网页" case: the user wants something runnable, not a paste.
- *
- * Heuristic, deliberately conservative: it matches an imperative build verb
- * (写/编写/做/开发/创建/实现/做一个/编写一个/写个…) directly followed (within
- * a few words) by a concrete artifact noun (游戏/小游戏/网页/网站/页面/工具/脚
- * 本/程序/工程/项目/应用/app/组件/动画/html 页面…). Pure questions ("这个
- * 游戏怎么玩") don't start with a build verb, so they won't match. A bare
- * "写一段代码" with no artifact noun also won't match — that stays inline.
- */
-export function detectArtifactRequest(prompt: string): boolean {
-  const p = prompt.trim();
-  if (!p) return false;
-
-  // Build verbs — the request must IMPERATIVELY create something. Keeping the
-  // list explicit avoids matching questions or analysis-only requests.
-  const buildVerb = /^(?:(?:请\s*)?(?:帮我|麻烦你|给我)|我想(?:要)?|希望(?:你)?|please\s+|can\s+you\s+)?(?:编写|编一个|写|写一个|写个|做|做一个|做个|开发|制作|创建|搭建|实现|搞一个|搞个|整一个|整个|设计|生成|做一个|给我写|重构|重写|迁移|build|create|make|write|develop|design|generate)/i;
-  if (detectProjectRequest(p)) return true;
-  // Artifact nouns that imply a runnable/complete deliverable.
-  const artifact =
-    /(?:小?游戏|网页|网站|页面|主页|首页|工具|脚本|程序|小程序|应用|app|工程|项目|组件|动画|演示|原型|demo|prototype|html\s*页面|web\s*app|web\s*page|mini[- ]?game|game|tool|script|app|project|prototype)/gi;
-
-  // Only look at the first ~40 chars — the artifact clause is almost always at
-  // the front of the request ("帮我写一个连连看小游戏，要求…").
-  const head = p.slice(0, 40);
-  if (!buildVerb.test(head)) return false;
-  artifact.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = artifact.exec(head)) !== null) {
-    // "设计一个网站的logo / 做一个应用的启动图标" — a single visual asset OF
-    // the matched noun is the deliverable, not a runnable artifact (an asset
-    // heading a construction — 图标管理系统 — still counts as a build).
-    const after = head.slice(m.index + m[0].length, m.index + m[0].length + 16);
-    if (!ASSET_DELIVERABLE_AFTER.test(after) || ASSET_AFTER_CONSTRUCTION.test(after)) return true;
-  }
-  return false;
-}
-
-/**
- * System-prompt fragment injected when detectArtifactRequest() fires: tells
- * the model to persist the artifact to disk instead of dumping code inline.
- * Pairs with the same rule assembled by PromptAssembler — the injection makes
- * the instruction explicit for this particular request.
+ * Build 请求注入的落盘协议片段（触发判定已归语义路由 needsDeliveryGate /
+ * intent=build——宿主不再用形态正则猜）。与 PromptAssembler 装配的同款规则
+ * 成对：这里让该指令对这一具体请求显式出现。
  */
 export function formatArtifactPrompt(): string {
   return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html. Before implementing feature code, choose the project-appropriate test runner and create a runnable test script plus at least one focused smoke/unit/integration test for the main path. For Web/DOM projects, use an appropriate DOM test environment such as happy-dom when needed; for other stacks use the stack's standard test runner. Do not replace automated tests with manual inspection unless the user explicitly opts out.\nAfter writing, run the actual test command (and typecheck/lint/build when the project provides them), fix failures, then briefly tell the user the file path(s), how to run/open the artifact, and the commands and results used to verify it. If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;

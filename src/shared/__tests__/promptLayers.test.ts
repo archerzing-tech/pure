@@ -434,14 +434,14 @@ describe('composeUserTurn (L2)', () => {
 
   it('wraps each provided fragment in <task_context> before the request', () => {
     const out = composeUserTurn('build me a game', {
-      traps: '<trap>contradiction</trap>',
+      envFacts: '<env>facts</env>',
       buildProtocol: '<build>protocol</build>',
     });
     expect(out.startsWith('<task_context>')).toBe(true);
-    expect(out).toContain('<trap>contradiction</trap>');
+    expect(out).toContain('<env>facts</env>');
     expect(out).toContain('<build>protocol</build>');
     expect(out.endsWith('build me a game')).toBe(true);
-    expect(out.indexOf('<trap>')).toBeLessThan(out.indexOf('<build>'));
+    expect(out.indexOf('<env>')).toBeLessThan(out.indexOf('<build>'));
     expect(out.indexOf('<build>')).toBeLessThan(out.indexOf('build me a game'));
     expect(out.indexOf('</task_context>')).toBeLessThan(out.indexOf('build me a game'));
   });
@@ -471,21 +471,14 @@ describe('composeUserTurn (L2)', () => {
     expect(out.endsWith('delete it')).toBe(true);
   });
 
-  it('includes the plausibility-review override beside the request', () => {
-    const out = composeUserTurn('写一个架空的故事', { plausibilityOverride: '<plausibility_review_override>skip</plausibility_review_override>' });
-    expect(out.startsWith('<task_context>')).toBe(true);
-    expect(out).toContain('<plausibility_review_override>skip</plausibility_review_override>');
-    expect(out.endsWith('写一个架空的故事')).toBe(true);
-  });
-
   it('ignores empty fragments', () => {
-    expect(composeUserTurn('x', { traps: '', buildProtocol: undefined, plan: '' })).toBe('x');
+    expect(composeUserTurn('x', { envFacts: '', buildProtocol: undefined, plan: '' })).toBe('x');
   });
 });
 
 describe('stripUserTurnContext (replay round-trip)', () => {
   it('strips the <task_context> block leaving the user text', () => {
-    const composed = composeUserTurn('build me a game', { traps: '<trap>x</trap>' });
+    const composed = composeUserTurn('build me a game', { envFacts: '<env>x</env>' });
     expect(stripUserTurnContext(composed)).toBe('build me a game');
   });
 
@@ -497,7 +490,7 @@ describe('stripUserTurnContext (replay round-trip)', () => {
   it('round-trips a multi-fragment turn exactly', () => {
     const text = '  带空格的请求  ';
     const composed = composeUserTurn(text, {
-      traps: 'a',
+      envFacts: 'a',
       buildProtocol: 'b',
       plan: '## Execution plan',
     });

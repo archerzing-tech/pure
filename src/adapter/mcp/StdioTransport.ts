@@ -115,7 +115,11 @@ export class StdioTransport implements MCPTransport {
     });
 
     proc.on('exit', (code: number) => {
-      this.teardownProcess(proc, `MCP server exited with code ${code}`);
+      // stderr 的 'data' 回调与 'exit' 并发：进程死了不代表最后一块 stderr
+      // 已投递（负载高时窗口拉大——tail 丢失恰恰丢的是崩溃时最需要的诊断
+      // 行）。让一拍事件循环再收尸：已到达内核的 stderr 会在 timer 之前的
+      // poll 阶段读完，pending 的 reject 只晚一个 tick。
+      setTimeout(() => this.teardownProcess(proc, `MCP server exited with code ${code}`), 0);
     });
 
     // 'error' covers spawn failures (ENOENT / EACCES) and stream faults.

@@ -135,7 +135,7 @@ import type {
 } from '../shared/types';
 import { EventFanout } from '../shared/asyncQueue';
 import { judgeModelFor, phaseModelOverrides } from '../shared/phaseModels';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, TrapWarning, Plan, PlanVerificationSpec, TaskMode, IntentAssessment, SemanticRouteDecision } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, Plan, PlanVerificationSpec, TaskMode, IntentAssessment, SemanticRouteDecision } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
@@ -161,15 +161,6 @@ function versionedCopyPath(path: string, version: number): string {
   if (dot <= slash + 1) return `${norm}-v${version}`;
   return `${norm.slice(0, dot)}-v${version}${norm.slice(dot)}`;
 }
-
-// Friendly labels for the logical-trap status bubble (raw type ids like
-// 'self-contradiction' are cryptic to users).
-const TRAP_TYPE_LABELS: Record<TrapWarning['type'], string> = {
-  'self-contradiction': '自相矛盾',
-  'impossible-constraint': '不可能满足的约束',
-  'mutually-exclusive': '互斥要求',
-  'trap-keyword': '悖论/陷阱题',
-};
 
 // Tool-call JSON re-parse throttle: streaming a giant argument (write_file
 // `content`, a whole HTML file) grows the buffer to tens of KB; re-parsing it
@@ -1200,11 +1191,12 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
  */
 export function isLightTurn(
   verdict: Pick<SemanticRouteDecision, 'complexity'> | null,
-  needsRouter: boolean,
   forcedMode: TaskMode | undefined,
 ): boolean {
   if (forcedMode) return false;
-  return verdict ? verdict.complexity === 'simple' : !needsRouter;
+  // 没有裁决就不轻档（框架改革一期后 floor 不存在了）：路由缺席=不知道这轮
+  // 是什么，保守留主档——不确定就当复杂。
+  return verdict ? verdict.complexity === 'simple' : false;
 }
 
 // Exported for the Settings evolution dashboard (13.3 part 3), which drafts a
@@ -4526,13 +4518,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     }
 
     // Stage 1 of the turn-route decision (turnRoute.ts): the synchronous half,
-    // needed before the workspace await below. `workspaceFree` is deliberately
-    // narrower than "no router needed" — a conversational turn like "现有页面很难看，
-    // 从哪些设计方向改善" still wants to read the code, so it must keep its
-    // workspace. The async half re-runs nothing here: it receives this object.
+    // needed before the workspace await below. 一期后它只读 timing 事实——
+    // 这轮是什么由语义路由说，宿主不再有同步意见；寒暄也过路由（快模型档
+    // 承担延迟），不再有免工作区直通。The async half re-runs nothing here:
+    // it receives this object.
     const routePrefetch = prefetchTurnRoute(userText, userImages);
-    const fastConversationalTurn = !sendWorkspace && routePrefetch.workspaceFree;
-    const effectiveWorkspace = sendWorkspace || (fastConversationalTurn ? '' : await withAbortTimeout(
+    const effectiveWorkspace = sendWorkspace || await withAbortTimeout(
       getApplicationTmpWorkspace(sendSessionId),
       turnController.signal,
       5_000,
@@ -4541,7 +4532,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (error.name === 'AbortError') return '';
       console.warn('[pure] workspace resolution timed out; continuing without a workspace:', error.message);
       return '';
-    }));
+    });
     if (gen !== this.generation) {
       // The immediately-rendered user bubble belongs to the superseded
       // transcript — drop it so no ghost message appears in the new session.
@@ -5214,14 +5205,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       let systemPrompt = '';
       // L2 per-request context (promptLayers.ts): task-specific fragments ride
       // with the USER message via composeUserTurn, not the system prompt.
-      let userTraps: string | undefined;
       let userBuildProtocol: string | undefined;
       let userPlan: string | undefined;
       // 刀 1.1：本回合计划声明的验证清单，从规划块带回收尾闸门（规划块与
       // 事件循环不同层作用域，清单经这里过桥）。
       let gatePlanVerification: PlanVerificationSpec[] | undefined;
       let userAssessment: string | undefined;
-      let userPlausibilityOverride: string | undefined;
       let taskContract: TaskContract | undefined;
 
       // ── 第 6 期 · 复杂度 → 思考档 ────────────────────────────────────────
@@ -5236,7 +5225,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 复杂活、以及用户明令的 plan/build（forcedMode）保持主档。工作形态但没有
       // 裁决（路由超时兜底）也保守留主档——不确定就当复杂。
       const routeVerdict = routeFetch ? await routeFetch : null;
-      const lightTurn = isLightTurn(routeVerdict, routePrefetch.needsRouter, forcedMode);
+      const lightTurn = isLightTurn(routeVerdict, forcedMode);
       // 嘴/手分开（2026-10-28 细化 1）：主流 THINK 流适配器经 wrapThinkStream
       // 包一层——进流 +1、finally -1，isThinkingStreamActive 读这个计数。
       const llm = this.wrapThinkStream(createLLMAdapter(config, lightTurn ? lightOpts : {}));
@@ -5541,7 +5530,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.mcpConfigSnapshot = JSON.stringify([config.mcpServers ?? [], mcpProxyUrl(config)]);
         this.mcpClient = codingAgent.mcpClient;
         this.codingAgentRef = codingAgent;
-        if (this.mcpClient && !fastConversationalTurn) {
+        if (this.mcpClient) {
           this.deferredInitDone = true;
           mcpConnectPromise = this.mcpClient.connectAll().catch((err: Error) => {
             console.warn('[pure] MCP connection failed:', err.message);
@@ -5640,16 +5629,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       turnTiming.workOrderRegister = workOrderRegister;
       setActiveWorkOrderRegister(workOrderRegister);
       if (!continuingPlan && !planPauseRequested) this.activePlanRegister = workOrderRegister;
-      // Semantic routing is the primary decision for ordinary turns. The
-      // synchronous Planner remains only a safety floor; it must not decide
-      // that a design critique is a build, or that a creative constraint needs
-      // a reasonableness card. Continuing plans skip this extra call and keep
-      // their already-approved route.
-      // A request that is deterministically a low-stakes conversational
-      // question (date/weather Q&A, casual questions) skips the hidden LLM
-      // classification round trip entirely: the sync fallback already
-      // reproduces the router's verdict for it, and on slow providers that
-      // call alone costs 6-12s of dead time before the first visible token.
+      // Semantic routing is the ONLY decision for ordinary turns (framework
+      // reform phase 1): the keyword floor is gone, so nothing the host does
+      // synchronously can decide that a design critique is a build, or that a
+      // creative constraint needs a reasonableness card. Continuing plans skip
+      // this extra call and keep their already-approved route.
       // Stage 2: the ONE producer (turnRoute.ts). It runs the router when stage
       // 1 said it is needed, folds the result through the shared workflow
       // compiler, and records the whole decision — action, confidence, timing,
@@ -5684,9 +5668,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const workflow = turnRoute.workflow;
       const analysis = workflow.analysis;
       let effectiveIntent: IntentAssessment = analysis.intent;
-      if (workflow.userContext.traps) userTraps = workflow.userContext.traps;
       userAssessment = workflow.userContext.assessment;
-      userPlausibilityOverride = workflow.userContext.plausibilityOverride;
 
       // 主动评估卡绝不在此刻同步弹出：这里只有规则启发式，还不是真实思考。卡片延后
       // 到 LLM 真正完成分析之后才出现（maybeShowAssessment）——thinking 卡先行展示
@@ -5733,7 +5715,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // task-specific plan. Reserve a separate assessment surface for a
         // real safety boundary (or a concrete trap), rather than showing a
         // fixed checklist for every non-trivial request.
-        const showAssessmentFlow = (effectiveIntent.requiresConfirmation || analysis.traps.length > 0)
+        const showAssessmentFlow = effectiveIntent.requiresConfirmation
           && effectiveIntent.intent !== 'question';
         if (!showAssessmentFlow) return;
         assessmentFlow = createAssessmentFlowCard(effectiveIntent);
@@ -6442,12 +6424,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         }
         return { completed: false, messages: latestMessages, output };
       };
-      // Surface detected logical traps as a neutral notice (not an error): the
-      // agent will verify the premise before executing.
-      if (analysis.traps.length > 0) {
-        const labels = [...new Set(analysis.traps.map(t => TRAP_TYPE_LABELS[t.type] ?? t.type))].join('、');
-        this.addStatusBubble(`检测到请求中可能包含逻辑陷阱（${labels}）— 将先验证前提，若前提有误会换思路处理`, false, false, 'warn');
-      }
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text. A
       // plain turn (no task analysis) reuses the card opened before the
@@ -6608,7 +6584,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
         // `conventions` is in scope from the pre-analysis build above.
         envFacts: buildEnvFacts(conventions),
-        traps: userTraps,
         buildProtocol: userBuildProtocol,
         plan: userPlan,
         contract: taskContract ? formatTaskContract(taskContract) : undefined,
@@ -6617,7 +6592,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 新会话零开销。
         ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
         assessment: userAssessment,
-        plausibilityOverride: userPlausibilityOverride,
         // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个
         // 阶段下发给模型本身执行；UI 工程额外携带设计先行协议（先出 design.html
         // 等用户在预览卡确认，再写实现代码）。

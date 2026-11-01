@@ -1,14 +1,12 @@
 import {
-  detectFictionIntent,
   formatArtifactPrompt,
   formatIntentPrompt,
-  formatTrapPrompt,
   Planner,
 } from '../coding-agent/Planner';
 import type { AnalysisResult, IntentAssessment, SemanticRouteDecision, TaskMode } from '../coding-agent/types';
 import { detectUiDesignRequest } from './delivery';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
-import { SKIP_PLAUSIBILITY_REVIEW_PROMPT, type UserTurnContext } from './promptLayers';
+import { type UserTurnContext } from './promptLayers';
 
 export type RequestWorkflowStage = 'direct' | 'probe' | 'plan' | 'confirm';
 
@@ -64,10 +62,8 @@ export interface CompiledRequestWorkflow {
 }
 
 /**
- * 语义路由可用时，构造分析结果直接以语义结论为准。这里不运行任何关键词启发式去“归类”
- * 用户意思——关键词逻辑只在语义路由不可用时（见下方 else 分支）作为最后的兜底。
- * 仍保留两类确定性的安全扫描（逻辑陷阱、虚构检测），它们不是意图分类，只是永不丢失
- * 的安全网。
+ * 语义路由可用时，构造分析结果直接以语义结论为准。宿主不运行任何关键词启发式去
+ * “归类”用户意思——理解与判定全部是路由模型的事（框架改革一期：形态归还）。
  */
 function buildSemanticAnalysis(
   planner: Planner,
@@ -85,13 +81,8 @@ function buildSemanticAnalysis(
     complexity: semantic.complexity,
     mode: semanticMode,
     plan: wantsPlan ? planner.generatePlan(prompt, semanticMode) : undefined,
-    reasoning: '本轮由语义路由结合完整请求与上下文理解目标，决定是否需要计划、探针或直接回答；关键词启发式仅作为语义路由不可用时的兜底。',
-    traps: planner.detectTraps(prompt),
-    intent: {
-      ...semantic.assessment,
-      // 确定性虚构检测：必须绝不丢失，因此即便语义路由存在也由这里兜底写入。
-      skipPlausibilityReview: detectFictionIntent(prompt),
-    },
+    reasoning: '本轮由语义路由结合完整请求与上下文理解目标，决定是否需要计划、探针或直接回答。',
+    intent: semantic.assessment,
   };
 }
 
@@ -151,14 +142,10 @@ export function compileRequestWorkflow(
     || options.forcedMode === 'build'
     || Boolean(options.continuingPlan || options.planPauseRequested);
   const userContext: UserTurnContext = {
-    traps: analysis.traps.length > 0 ? formatTrapPrompt(analysis.traps) : undefined,
     assessment: analysis.intent.riskLevel !== 'low' || analysis.intent.intent !== 'question'
       ? formatIntentPrompt(analysis.intent)
       : undefined,
     buildProtocol: buildRequested ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
-    plausibilityOverride: analysis.intent.skipPlausibilityReview
-      ? SKIP_PLAUSIBILITY_REVIEW_PROMPT
-      : undefined,
   };
   const stage: RequestWorkflowStage = analysis.intent.requiresConfirmation
     ? 'confirm'

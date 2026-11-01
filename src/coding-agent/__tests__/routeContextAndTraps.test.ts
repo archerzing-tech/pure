@@ -121,27 +121,6 @@ describe('inferSemanticRoute with conversation context', () => {
   });
 });
 
-describe('task-level contradiction trap', () => {
-  const planner = new Planner();
-
-  it('flags "touch nothing, but fix this" as a contradiction to verify', () => {
-    const traps = planner.detectTraps('不要改任何文件，但把这个函数里的 bug 修掉');
-    expect(traps.map((t) => t.type)).toContain('self-contradiction');
-  });
-
-  it('does not flag ordinary division of labour between objects', () => {
-    expect(planner.detectTraps('不要改配置文件，但把 README 里的版本号补上')).toEqual([]);
-    expect(planner.detectTraps('把登录页改成支持记住我')).toEqual([]);
-  });
-
-  it('a trap keeps the turn off the chit-chat fast path', () => {
-    // isPlainConversational requires traps.length === 0, so the flag alone is
-    // enough to make the router run (belt to the work-frame veto's braces).
-    const prefetch = prefetchTurnRoute('不要改任何文件，但把这个函数里的 bug 修掉');
-    expect(prefetch.needsRouter).toBe(true);
-  });
-});
-
 describe("router self-contradiction: mode 'plan' vs requiresPlan", () => {
   const PROMPT = '我想给这个项目加一个离线缓存层，先给我一个方案';
   /** A router verdict in the shape the real one produces (the parser rejects a

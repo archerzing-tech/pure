@@ -15,7 +15,9 @@ import {
 
 const highRisk = assessIntent('用 rm -rf 清掉整个目录');
 const deletionTask = assessIntent('删除整个项目');
-const mediumRisk = assessIntent('把认证模块重构成新的实现');
+// refactor/迁移词表已随 floor 退役（框架改革一期）：medium 档现在只有
+// 任务级破坏词——「要求探针」的样本随之换成破坏词句。
+const mediumRisk = assessIntent('把认证模块的旧实现清理掉');
 const lowRisk = assessIntent('解释这个文件的作用');
 
 describe('CLI proactive intent assessment', () => {

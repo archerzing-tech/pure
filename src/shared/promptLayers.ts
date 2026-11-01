@@ -142,14 +142,6 @@ Before delivering an answer, plan, route, itinerary, or sequence of events, sani
 - Physics: speeds, distances, forces, everyday mechanics feasible. Chemistry: real elements/compounds/properties only — never invent a substance. Math: arithmetic, units, orders of magnitude correct. History: chronology consistent — no anachronisms.
 When a fact is uncertain, look it up (web_search / web_public_api) instead of guessing. If the user's premise conflicts with reality, say so briefly and solve the most reasonable interpretation. If the user explicitly asks for fiction / alternate history / ignore-facts content, skip this review.`;
 
-/** Per-request override injected when the Planner deterministically detects a
- * fiction / alternate-history / ignore-facts request. It rides in the L2 user
- * turn (never the system prompt) so the model attends to it most strongly and
- * the skip is a rule, not a model judgment. */
-export const SKIP_PLAUSIBILITY_REVIEW_PROMPT = `<plausibility_review_override>
-The user has asked for fictional, alternate-history, or rule-free content (detected automatically). SKIP the plausibility & real-world consistency review for THIS request — do not fact-check geography, physics, chemistry, math, or history against reality, and do not "correct" the user's fictional or impossible premise. Embrace the requested fictional/creative constraints and deliver what was asked.
-</plausibility_review_override>`;
-
 /** Capability-gap protocol — identical in GUI and CLI (shared, not duplicated).
  * When the request needs a capability the current toolset lacks (vision /
  * OCR, PDF or Office parsing, audio/video transcription, …), the agent must
@@ -440,8 +432,6 @@ Long or multi-step tasks — several moving parts, external unknowns, or real am
 // every turn of a long session.
 
 export interface UserTurnContext {
-  /** formatTrapPrompt() output — logical-trap warnings for THIS request. */
-  traps?: string;
   /** 环境事实（P2 下沉，2026-10-27）：项目惯例（<project_conventions>）+
    * 运行时版本 + 网络状态 + shell 环境，由调用面拼好传入。住 user turn 不住
    * system 前缀——Claude Code 同款论据：环境细节进对话不进 system prompt，
@@ -470,11 +460,6 @@ export interface UserTurnContext {
   deliveryPipeline?: string;
   /** Freebuff-style intent/risk assessment for THIS request. */
   assessment?: string;
-  /** SKIP_PLAUSIBILITY_REVIEW_PROMPT — injected when the Planner
-   * deterministically detects a fiction / alternate-history / ignore-facts
-   * request, so the plausibility review is skipped by rule, not by model
-   * judgment. */
-  plausibilityOverride?: string;
 }
 
 /**
@@ -569,7 +554,6 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   const parts: string[] = [];
   // 环境事实是背景层，排在逐请求指令之前。
   if (ctx.envFacts) parts.push(ctx.envFacts);
-  if (ctx.traps) parts.push(ctx.traps);
   if (ctx.buildProtocol) parts.push(ctx.buildProtocol);
   if (ctx.plan) parts.push(ctx.plan);
   if (ctx.clarifications) parts.push(ctx.clarifications);
@@ -580,7 +564,6 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.ledgerFacts) parts.push(ctx.ledgerFacts);
   if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
   if (ctx.assessment) parts.push(ctx.assessment);
-  if (ctx.plausibilityOverride) parts.push(ctx.plausibilityOverride);
   if (parts.length === 0) return text;
   return `${TASK_CONTEXT_OPEN}\n${parts.join('\n\n')}\n${TASK_CONTEXT_CLOSE}\n\n${text}`;
 }

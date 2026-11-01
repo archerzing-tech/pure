@@ -36,7 +36,6 @@ import { branchResumeReceipt, branchUncertainPauseReceipt } from '../shared/inse
 import { priorityForLevel, type ProcessingLevel } from '../shared/scheduling';
 import type { DelegationControlPlane } from './delegationControl';
 import type { MessageImage, LLMAdapter } from '../shared/types';
-import { detectTaskKind, isFileMutating } from '../shared/taskKind';
 import { appendTrace } from '../evolution/trace';
 import type { InterjectionIngress } from './interjectionPort';
 
@@ -207,9 +206,6 @@ export class InterjectOrchestrator implements InterjectionIngress {
    * turn — by the time this link runs, the insert may belong to a fresh send
    * instead. */
   private async classifyAndApply(text: string, images: MessageImage[], displayText: string, ack: InterjectAck): Promise<void> {
-    // 轻微 taskKind 提示（仅用于未来保守过滤，不改现有分发）
-    const _taskKind = detectTaskKind(text);
-    const _fileMutating = isFileMutating(text);
     if (!this.deps.isStreaming()) {
       // The turn is over; a normal send renders the user's own bubble, so the
       // provisional ack would only orphan a promise nobody keeps.

@@ -20,23 +20,26 @@ const buildRoute: SemanticRouteDecision = {
 };
 
 describe('compileRequestWorkflow', () => {
-  it('keeps a direct question lightweight', () => {
+  it('keeps an unrouted ordinary request lightweight (no probe, no build gate)', () => {
+    // floor 退役后兜底不再假装读懂问题：按普通任务直推（modify/low），
+    // 安全网口径照注入，但不造探针、不造 build 协议。
     const workflow = compileRequestWorkflow('What does this file do?', { hasTools: true });
 
     expect(workflow.stage).toBe('direct');
     expect(workflow.needsProbe).toBe(false);
     expect(workflow.needsDeliveryGate).toBe(false);
     expect(workflow.userContext.buildProtocol).toBeUndefined();
-    expect(workflow.userContext.assessment).toBeUndefined();
+    expect(workflow.analysis.intent.riskLevel).toBe('low');
   });
 
-  it('keeps fallback project builds on the delivery-gated build path without semantic routing', () => {
+  it('the fallback never invents the build path — build shape waits for the router', () => {
+    // 框架改革一期：路由缺席时宿主不再从「创建/项目」等词造 build 形态
+    // （那正是把「问怎么做」读成「帮我建」的旧病）。普通任务直推。
     const workflow = compileRequestWorkflow('帮我创建一个项目', { hasTools: true });
-    expect(workflow.analysis.mode).toBe('build');
-    expect(workflow.stage).toBe('plan');
-    expect(workflow.needsDeliveryGate).toBe(true);
-    expect(workflow.needsProbe).toBe(true);
-    expect(workflow.userContext.buildProtocol).toContain('test strategy');
+    expect(workflow.analysis.mode).toBe('yolo');
+    expect(workflow.stage).toBe('direct');
+    expect(workflow.needsDeliveryGate).toBe(false);
+    expect(workflow.userContext.buildProtocol).toBeUndefined();
   });
   it('compiles the same probe and build context for GUI and CLI callers', () => {
     const prompt = 'Build a complete project for a team dashboard';
@@ -84,7 +87,6 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.probeRequired).toBe(true);
     expect(workflow.probeAvailable).toBe(true);
     expect(workflow.needsProbe).toBe(true);
-    expect(workflow.userContext.traps).toBeUndefined();
   });
 
   it('respects an explicit mode without changing the original prompt semantics', () => {
@@ -141,46 +143,6 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.stage).toBe('plan');
     expect(workflow.needsDeliveryGate).toBe(true);
     expect(workflow.userContext.buildProtocol).toContain('Incremental build protocol');
-    expect(workflow.userContext.traps).toBeUndefined();
   });
 
-  it('injects the plausibility-review override for detected fiction requests', () => {
-    const workflow = compileRequestWorkflow('不用管事实，帮我编一个架空世界的故事', { hasTools: true });
-    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(true);
-    expect(workflow.userContext.plausibilityOverride).toContain('<plausibility_review_override>');
-    expect(workflow.userContext.plausibilityOverride).toContain('SKIP the plausibility');
-    // Fiction is a creative question, not a safety boundary: no plan / probe.
-    expect(workflow.stage).toBe('direct');
-    expect(workflow.needsProbe).toBe(false);
-  });
-
-  it('preserves the fiction skip even when a semantic route is present', () => {
-    const workflow = compileRequestWorkflow('不用管事实，写一个科幻小说', {
-      hasTools: true,
-      semanticRoute: {
-        intent: 'build',
-        complexity: 'complex',
-        mode: 'build',
-        requiresPlan: true,
-        needsDeliveryGate: true,
-        assessment: {
-          intent: 'build',
-          riskLevel: 'low',
-          reversibility: 'reversible',
-          impact: '隔离的原型',
-          recommendation: '直接实现',
-          requiresProbe: false,
-          requiresConfirmation: false,
-        },
-      },
-    });
-    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(true);
-    expect(workflow.userContext.plausibilityOverride).toBeDefined();
-  });
-
-  it('does not inject the override for ordinary factual requests', () => {
-    const workflow = compileRequestWorkflow('规划一条从西安到上海的骑行路线', { hasTools: true });
-    expect(workflow.analysis.intent.skipPlausibilityReview).toBe(false);
-    expect(workflow.userContext.plausibilityOverride).toBeUndefined();
-  });
 });

@@ -2510,8 +2510,9 @@ describe('plan-by-thinking flow', () => {
     expect(src).toMatch(/const lightOpts = \{ disableThinking: true, reasoningEffort: 'low' \} as const;/);
     expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, lightOpts\)\s*:\s*createLLMAdapter\(config, lightOpts\);/);
     // 第 6 期 · 复杂度 → 思考档：路由裁决在手时按 complex/simple 定主回合的思考
-    // 档；用户明令的 plan/build（forcedMode）与工作形态无裁决（超时兜底）都留主档。
-    expect(src).toMatch(/const lightTurn = isLightTurn\(routeVerdict, routePrefetch\.needsRouter, forcedMode\);/);
+    // 档；用户明令的 plan/build（forcedMode）与无裁决（路由缺席/超时）都留主档
+    // ——floor 退役后「不确定就当复杂」，不再有 needsRouter 二档。
+    expect(src).toMatch(/const lightTurn = isLightTurn\(routeVerdict, forcedMode\);/);
     // 嘴/手分开（刀 B 细化 1）：主流 THINK 流适配器经 wrapThinkStream 包一层
     // （进流 +1 / finally -1）——isThinkingStreamActive 读这个计数，插话直投
     // 后要不要掐流重入就靠它。裸 createLLMAdapter 会让重入判据永远读到假。
@@ -2693,24 +2694,20 @@ describe('artifact-shape register wiring (刀 9)', () => {
 // 付不付深度推理。这里钉住映射本身——降多了会把复杂活做轻，降少了首字照旧慢。
 describe('isLightTurn（复杂度 → 思考档）', () => {
   it('路由明说 simple 才降档，complex 保持主档', () => {
-    expect(isLightTurn({ complexity: 'simple' }, true, undefined)).toBe(true);
-    expect(isLightTurn({ complexity: 'complex' }, true, undefined)).toBe(false);
+    expect(isLightTurn({ complexity: 'simple' }, undefined)).toBe(true);
+    expect(isLightTurn({ complexity: 'complex' }, undefined)).toBe(false);
   });
 
   it('用户明令 plan/build 时永远留主档（复杂度判定不覆盖用户意图）', () => {
-    expect(isLightTurn({ complexity: 'simple' }, true, 'plan')).toBe(false);
-    expect(isLightTurn({ complexity: 'simple' }, true, 'build')).toBe(false);
-    expect(isLightTurn(null, false, 'plan')).toBe(false);
+    expect(isLightTurn({ complexity: 'simple' }, 'plan')).toBe(false);
+    expect(isLightTurn({ complexity: 'simple' }, 'build')).toBe(false);
+    expect(isLightTurn(null, 'plan')).toBe(false);
   });
 
-  it('工作形态但路由没给裁决（超时兜底）保守留主档', () => {
-    // 地板把 debug / 加功能 / 要方案的请求全读成 question，路由输了就退回地板；
-    // 那正是不能降档的那一类——不确定就当复杂。
-    expect(isLightTurn(null, true, undefined)).toBe(false);
-  });
-
-  it('闲聊 / 直答（地板已复现裁决、无路由）走轻档', () => {
-    expect(isLightTurn(null, false, undefined)).toBe(true);
+  it('路由没给裁决（无适配器/超时/续跑）保守留主档', () => {
+    // floor 已退役：没有裁决=宿主不知道这轮是什么，不确定就当复杂——
+    // 绝不再有「地板已复现裁决所以免路由」的轻档通道。
+    expect(isLightTurn(null, undefined)).toBe(false);
   });
 });
 

@@ -1,12 +1,11 @@
-// src/coding-agent/__tests__/turnRoute.test.ts
-// The turn-level producer: five derivations that used to have no arbitration
-// now emit ONE InputDecision. These tests pin the two things that matter —
-// that it routes the way the separate call sites did, and that the decision it
-// records can be replayed as evidence.
+// src/coding-agent/__tests__/turnRoute.ts 的测试。
+// 框架改革一期后：floor 不存在了，prefetch 只带 timing 事实，「这轮是什么」
+// 唯一由语义路由裁决；路由缺席时按 work 保守推进。这些测试钉住三件事——
+// prefetch 不再对轮次形态有任何同步意见；路由缺席绝不冒充「答案」；
+// 记录下的决定可以回放为证据。
 
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { decideTurnRoute, prefetchTurnRoute, recordScheduledInput, startTurnRoute } from '../turnRoute';
-import { isPlainConversational } from '../Planner';
 import {
   INPUT_CLARIFY_CONFIDENCE,
   clearInputDecisionLog,
@@ -50,42 +49,24 @@ function fakeRouter(route: Partial<SemanticRouteDecision> | null): LLMAdapter {
 const WORK = { intent: 'modify', complexity: 'simple', mode: 'yolo' } satisfies Partial<SemanticRouteDecision>;
 const CHAT = { intent: 'question', complexity: 'simple', mode: 'yolo' } satisfies Partial<SemanticRouteDecision>;
 
-/** The prompt from the field report that the keyword floor read as a plain
- *  question, so the router never ran and the turn answered a question nobody
- *  asked. Kept verbatim: it is the regression fixture. */
-const FLOOR_BLIND_SPOT = '把 src/ui/scrollPin.ts 里的自动滚动改成按块触发，改用 IntersectionObserver。';
+/** The prompt from the field report that the keyword floor once read as a
+ *  plain question (so the router never ran and the turn answered a question
+ *  nobody asked). The floor is gone; kept verbatim as a routing regression
+ *  fixture — the router MUST be asked about it, and its verdict must win. */
+const WORK_REQUEST = '把 src/ui/scrollPin.ts 里的自动滚动改成按块触发，改用 IntersectionObserver。';
 
 beforeEach(() => {
   clearInputDecisionLog();
 });
 
 describe('prefetchTurnRoute (stage 1)', () => {
-  it('recognises small talk without spending a router call or a workspace', () => {
-    const prefetch = prefetchTurnRoute('好的');
-    expect(prefetch.kind).toBe('pleasantry');
-    expect(prefetch.needsRouter).toBe(false);
-    expect(prefetch.workspaceFree).toBe(true);
-    expect(prefetch.signals.rule).toBe('PLEASANTRY_BYPASS');
-  });
-
-  it('skips the router for the turns the synchronous floor already settles', () => {
-    const prefetch = prefetchTurnRoute('今天几号，星期几，天气如何');
-    expect(prefetch.kind).toBe('conversational');
-    expect(prefetch.needsRouter).toBe(false);
-    // Still NOT workspace-free: the answer may want to read the code, and the
-    // old bypass flag was only ever about small talk.
-    expect(prefetch.workspaceFree).toBe(false);
-  });
-
-  it('asks the router for anything the floor cannot settle', () => {
-    expect(prefetchTurnRoute('帮我把这个项目重构成插件架构，分阶段来').needsRouter).toBe(true);
-  });
-
-  it('never lets the chit-chat shortcut swallow an edit request', () => {
-    // Both halves are required: an edit verb AND something identifiable to
-    // edit. A question about the code must keep its fast path.
-    expect(prefetchTurnRoute('为什么 src/ui/scrollPin.ts 里要这样写？').signals.editFrameVeto).toBeUndefined();
-    expect(prefetchTurnRoute('把 src/ui/scrollPin.ts 里的自动滚动改成按块触发。').signals.editFrameVeto).toBe(true);
+  it('has NO synchronous opinion about what the turn is — everything goes to the router', () => {
+    for (const text of ['好的', '今天几号，星期几，天气如何', '帮我把这个项目重构成插件架构，分阶段来', WORK_REQUEST]) {
+      const prefetch = prefetchTurnRoute(text);
+      expect(prefetch.signals.rule).toBe('SEMANTIC_ROUTE');
+      // Timing facts are read; turn shape is NOT claimed here.
+      expect(prefetch.defer).toBe(false);
+    }
   });
 
   it('reads a named moment off the input and holds it', () => {
@@ -105,51 +86,26 @@ describe('prefetchTurnRoute (stage 1)', () => {
 });
 
 describe('decideTurnRoute (stage 2)', () => {
-  it('does not ask the router for a small-talk turn', async () => {
+  it('routes a plain chat turn through the router and answers on its verdict', async () => {
     let called = 0;
-    const llm = { complete: async () => ({ content: '' }), stream: () => { called++; return (async function* () {})(); } } as unknown as LLMAdapter;
-    const decision = await decideTurnRoute(prefetchTurnRoute('谢谢'), llm, { hasTools: true });
-    expect(called).toBe(0);
-    expect(decision.kind).toBe('pleasantry');
-    expect(decision.deterministic).toBe(true);
+    const llm = { complete: async () => ({ content: '' }), stream: () => { called++; return (async function* () { yield { type: 'content', content: '' }; })(); } } as unknown as LLMAdapter;
+    const decision = await decideTurnRoute(prefetchTurnRoute('谢谢'), fakeRouter(CHAT), { hasTools: true });
+    expect(called).toBe(0); // no preRoute → decideTurnRoute fires its own call via fakeRouter
+    expect(decision.kind).toBe('router-decided');
+    expect(decision.deterministic).toBe(false);
     expect(decision.action).toBe('answer');
-    expect(decision.route).toBeNull();
+    expect(decision.route?.intent).toBe('question');
   });
 
-  it('lets the router outrank the keyword floor when the two disagree', async () => {
-    // The floor's blind spot, asserted so the test keeps documenting WHY the
-    // router must still run here.
-    expect(isPlainConversational(FLOOR_BLIND_SPOT)).toBe(true);
-    expect(isPlainConversational('帮我把这个项目重构成插件架构，分阶段来')).toBe(false);
-    const prefetch = prefetchTurnRoute(FLOOR_BLIND_SPOT);
-    // The edit-frame veto is what stops the floor's "chat" from skipping the
-    // router — without it this prompt is routed as chit-chat.
-    expect(prefetch.floorChat).toBe(true);
-    expect(prefetch.signals.editFrameVeto).toBe(true);
-    expect(prefetch.needsRouter).toBe(true);
-
-    const decision = await decideTurnRoute(prefetch, fakeRouter(WORK), { hasTools: true });
+  it('lets the router decide a work-shaped edit request', async () => {
+    const decision = await decideTurnRoute(prefetchTurnRoute(WORK_REQUEST), fakeRouter(WORK), { hasTools: true });
     expect(decision.kind).toBe('router-decided');
     expect(decision.action).toBe('proceed');
     expect(decision.deterministic).toBe(false);
-    // The floor and the router read it differently — recorded, not hidden.
-    expect(decision.agreement).toBe(false);
     expect(decision.signals.routerIntent).toBe('modify');
-    expect(decision.signals.floor).toBe('chat');
   });
 
-  it('flags the opposite disagreement: the careful floor called work, the router says chat', async () => {
-    const decision = await decideTurnRoute(
-      prefetchTurnRoute('帮我把这个项目重构成插件架构，分阶段来'),
-      fakeRouter(CHAT),
-      { hasTools: true },
-    );
-    expect(decision.signals.floor).toBe('work');
-    expect(decision.agreement).toBe(false);
-    expect(decision.action).toBe('answer');
-  });
-
-  it('falls back to the Planner floor when the router produces nothing', async () => {
+  it('carries the turn as work when the router produces nothing', async () => {
     const decision = await decideTurnRoute(
       prefetchTurnRoute('帮我把这个项目重构成插件架构，分阶段来'),
       fakeRouter(null),
@@ -159,7 +115,9 @@ describe('decideTurnRoute (stage 2)', () => {
     expect(decision.kind).toBe('router-skipped');
     expect(decision.deterministic).toBe(true);
     expect(decision.signals.routerIntent).toBeUndefined();
-    // The floor still has to carry the turn.
+    // 保守读：没有裁决不冒充答案，按工作推进（先读后动）。
+    expect(decision.signals.workShapedFallback).toBe(true);
+    expect(decision.action).toBe('proceed');
     expect(decision.workflow.analysis).toBeDefined();
   });
 
@@ -174,6 +132,8 @@ describe('decideTurnRoute (stage 2)', () => {
     expect(decision.route).toBeNull();
     expect(decision.signals.continuing).toBe(true);
     expect(decision.action).toBe('proceed');
+    // 续跑轮不算 workShapedFallback：它有已批准的路线，不是路由缺席。
+    expect(decision.signals.workShapedFallback).toBeUndefined();
   });
 
   it('reports a named moment as a fact without claiming to hold the turn', async () => {
@@ -220,7 +180,7 @@ describe('decideTurnRoute (stage 2)', () => {
 
   it('records every decision in a log that replays to the same action', async () => {
     await decideTurnRoute(prefetchTurnRoute('谢谢'), null, { hasTools: false });
-    await decideTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), fakeRouter(WORK), { hasTools: true });
+    await decideTurnRoute(prefetchTurnRoute(WORK_REQUEST), fakeRouter(WORK), { hasTools: true });
     const log = getInputDecisionLog();
     expect(log.length).toBe(2);
     expect(log.map((entry) => entry.source)).toEqual(['turn-route', 'turn-route']);
@@ -241,16 +201,10 @@ describe('decideTurnRoute (stage 2)', () => {
   });
 });
 
-// ── Work-frame veto + the work-shaped fallback (2026-10-14) ───────────────
-// Field shape: the synchronous floor reads `question` by DEFAULT (assessIntent
-// answers `question` for everything it does not recognise as destructive /
-// migrate / refactor), `isPlainConversational` trusted that default as proof
-// that the floor had reproduced the router's verdict, and the hidden router was
-// therefore skipped — so a debug request, an add-a-feature request and a
-// "give me a plan" request were all carried as chit-chat: no assessment, no
-// probe, no plan review, no delivery gate. When the router DID run and lost its
-// race, the same flat default carried the turn, so the routing verdict was
-// decided by provider latency. Both halves are pinned here.
+// ── work-shaped fallback（floor 退役后的保守读）────────────────────────────
+// 每一轮都会到路由；路由没给裁决（无适配器 / 超时 / JSON 不可用）时，这轮按
+// 工作推进（先读后动），绝不当闲聊打发。field shape（2026-09）：同批请求句
+// 曾被 keyword floor 读成 chat——那类失败从结构上不再可能，这里钉的是新不变量。
 const WORK_SHAPED = [
   '登录页在我点登录后没有反应，帮我查一下为什么，然后修掉',
   '给这个登录页加上「记住我」和退出登录，并且补上测试',
@@ -263,43 +217,11 @@ const WORK_SHAPED = [
   '为什么线上会偶发 502，日志我贴在下面了',
 ];
 
-const CONVERSATIONAL = [
-  '今天几号，星期几，天气如何',
-  '给我做一首诗',
-  '写个关于秋天的故事',
-  '现有页面很难看，我应该从哪些设计方向改善？',
-  '为什么？',
-];
-
-describe('work-frame veto', () => {
-  it('sends every work-shaped phrasing to the router', () => {
-    for (const text of WORK_SHAPED) {
-      const prefetch = prefetchTurnRoute(text);
-      expect(`${text} → ${prefetch.kind}`).toBe(`${text} → needs-router`);
-      expect(prefetch.needsRouter).toBe(true);
-      expect(prefetch.signals.rule).toBe('SEMANTIC_ROUTE');
-    }
-  });
-
-  it('keeps genuinely conversational turns on the fast path', () => {
-    for (const text of CONVERSATIONAL) {
-      const prefetch = prefetchTurnRoute(text);
-      expect(`${text} → ${prefetch.kind}`).toBe(`${text} → conversational`);
-      expect(prefetch.signals.workFrameVeto).toBeUndefined();
-    }
-  });
-});
-
 describe('work-shaped fallback when the router answers nothing', () => {
   const DEBUG_REQUEST = '登录页在我点登录后没有反应，帮我查一下为什么，然后修掉';
 
   it('carries the turn as work instead of defaulting it to chat', async () => {
-    const prefetch = prefetchTurnRoute(DEBUG_REQUEST);
-    // The floor's own read — kept honest in the record rather than rewritten.
-    expect(prefetch.floorChat).toBe(true);
-    expect(prefetch.signals.workFrameVeto).toBe(true);
-
-    const decision = await decideTurnRoute(prefetch, fakeRouter(null), { hasTools: true });
+    const decision = await decideTurnRoute(prefetchTurnRoute(DEBUG_REQUEST), fakeRouter(null), { hasTools: true });
     expect(decision.kind).toBe('router-skipped');
     expect(decision.route).toBeNull();
     expect(decision.signals.workShapedFallback).toBe(true);
@@ -308,7 +230,7 @@ describe('work-shaped fallback when the router answers nothing', () => {
     expect(decision.action).toBe('proceed');
     expect(decision.workflow.stage).toBe('probe');
     expect(decision.workflow.needsProbe).toBe(true);
-    // It does not invent a plan or a risk level out of the keyword frame.
+    // It does not invent a plan or a risk level out of a keyword frame.
     expect(decision.workflow.requiresPlanReview).toBe(false);
     expect(decision.workflow.analysis.intent.riskLevel).toBe('low');
   });
@@ -321,12 +243,14 @@ describe('work-shaped fallback when the router answers nothing', () => {
     expect(decision.action).toBe('proceed');
   });
 
-  it('does not ask for a probe or flag work on a purely conversational turn', async () => {
-    const decision = await decideTurnRoute(prefetchTurnRoute('今天几号，星期几，天气如何'), fakeRouter(null), { hasTools: true });
-    expect(decision.kind).toBe('conversational');
-    expect(decision.signals.workShapedFallback).toBeUndefined();
-    expect(decision.action).toBe('answer');
-    expect(decision.workflow.needsProbe).toBe(false);
+  it('every work-shaped phrasing reaches the router and none is pre-judged', async () => {
+    for (const text of WORK_SHAPED) {
+      const prefetch = prefetchTurnRoute(text);
+      expect(`${text} → ${prefetch.signals.rule}`).toBe(`${text} → SEMANTIC_ROUTE`);
+      // 路由缺席时全部落 work（不冒充答案）——逐句钉死。
+      const decision = await decideTurnRoute(prefetch, fakeRouter(null), { hasTools: false });
+      expect(decision.action).toBe('proceed');
+    }
   });
 });
 
@@ -348,19 +272,17 @@ describe('startTurnRoute / preRoute（路由提前与前置并行）', () => {
     return { llm, calls: () => calls };
   }
 
-  it('不为不需要路由的回合预启动（闲聊 / 续计划 / 没有适配器）', () => {
+  it('不为不需要路由的回合预启动（续计划 / 没有适配器）', () => {
     const { llm } = countingRouter(WORK);
-    // 闲聊：同步地板已复现路由裁决，本来就不该有这一跳。
-    expect(startTurnRoute(prefetchTurnRoute('谢谢'), llm, { continuing: false })).toBeNull();
     // 续计划：保留已批准的路线，重路由会把「继续」读成新计划。
     expect(startTurnRoute(prefetchTurnRoute('继续'), llm, { continuing: true })).toBeNull();
-    // 工作形态但没有可用适配器（CLI / 探针路径）。
-    expect(startTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), null, { continuing: false })).toBeNull();
+    // 没有可用适配器（CLI / 探针路径）。
+    expect(startTurnRoute(prefetchTurnRoute(WORK_REQUEST), null, { continuing: false })).toBeNull();
   });
 
   it('宿主预启动的这一次调用被唯一产出者复用，不再发第二次', async () => {
     const { llm, calls } = countingRouter(WORK);
-    const prefetch = prefetchTurnRoute(FLOOR_BLIND_SPOT);
+    const prefetch = prefetchTurnRoute(WORK_REQUEST);
     const routeFetch = startTurnRoute(prefetch, llm, { continuing: false });
     expect(routeFetch).not.toBeNull();
 
@@ -372,7 +294,7 @@ describe('startTurnRoute / preRoute（路由提前与前置并行）', () => {
     expect(decision.route?.intent).toBe('modify');
     expect(decision.action).toBe('proceed');
     // 与不预启动的同一输入逐字结果一致，证明「提前」只搬了时机。
-    const baseline = await decideTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), fakeRouter(WORK), { hasTools: true });
+    const baseline = await decideTurnRoute(prefetchTurnRoute(WORK_REQUEST), fakeRouter(WORK), { hasTools: true });
     expect(decision.action).toBe(baseline.action);
     expect(decision.reason).toBe(baseline.reason);
     expect(decision.workflow.stage).toBe(baseline.workflow.stage);
@@ -380,7 +302,7 @@ describe('startTurnRoute / preRoute（路由提前与前置并行）', () => {
 
   it('宿主没预启动时 decideTurnRoute 照旧自己发（CLI / 探针路径不受影响）', async () => {
     const { llm, calls } = countingRouter(WORK);
-    const decision = await decideTurnRoute(prefetchTurnRoute(FLOOR_BLIND_SPOT), llm, { hasTools: true });
+    const decision = await decideTurnRoute(prefetchTurnRoute(WORK_REQUEST), llm, { hasTools: true });
     expect(calls()).toBe(1);
     expect(decision.kind).toBe('router-decided');
   });

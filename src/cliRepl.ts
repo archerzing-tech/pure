@@ -684,10 +684,6 @@ async function runOneShot(args: CliArgs) {
     mcpClient?.disconnectAll();
     return;
   }
-  const traps = analysis.traps;
-  if (traps.length > 0) {
-    console.log(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}`);
-  }
   printIntentAssessment(analysis.intent);
   printWorkflowStage(workflow.stage);
   if (workflow.probeRequired && !workflow.probeAvailable) {
@@ -979,10 +975,6 @@ async function runRepl(args: CliArgs) {
         continue;
       }
       streamMgr.start();
-    }
-    const traps = analysis.traps;
-    if (traps.length > 0) {
-      process.stdout.write(`  ${yellow('⚠')} ${yellow('potential logical trap')} ${dim('— verifying premise')}\n`);
     }
     printIntentAssessment(analysis.intent);
     printWorkflowStage(workflow.stage);

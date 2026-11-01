@@ -118,26 +118,6 @@ export interface IntentAssessment {
   requiresProbe: boolean;
   /** The user must explicitly approve the proposed direction before execution. */
   requiresConfirmation: boolean;
-  /**
-   * Deterministic fiction / alternate-history / ignore-facts detection from
-   * the Planner (detectFictionIntent). When true the plausibility &
-   * real-world consistency review is skipped programmatically — not left to
-   * the model's judgment. Never inferred from the semantic route JSON.
-   */
-  skipPlausibilityReview?: boolean;
-}
-
-/**
- * A potential logical trap detected in the user's request — a premise that is
- * self-contradictory, impossible, mutually exclusive, or explicitly framed as
- * a trick/paradox. Detected by the Planner before execution so the agent can
- * verify the premise and, if confirmed, escape the trap by switching to a
- * reasonable interpretation instead of blindly following contradictory
- * instructions into a failure loop.
- */
-export interface TrapWarning {
-  type: 'self-contradiction' | 'impossible-constraint' | 'mutually-exclusive' | 'trap-keyword';
-  description: string;
 }
 
 export interface AnalysisResult {
@@ -146,8 +126,6 @@ export interface AnalysisResult {
   mode: TaskMode;
   plan?: Plan;
   reasoning: string;
-  /** Potential logical traps in the prompt; empty when none were detected. */
-  traps: TrapWarning[];
   /** Freebuff-style intent, impact, reversibility, and next-action assessment. */
   intent: IntentAssessment;
 }

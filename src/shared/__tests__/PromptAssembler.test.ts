@@ -32,8 +32,8 @@ describe('composeUserTurn · 剧本事实素材', () => {
       surface: 'cli',
       capabilities: 'capabilities',
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0 },
-    }, '继续', { traps: 'trap '.repeat(4_000), taskScriptFacts: '<task_script_facts>证据</task_script_facts>' });
-    expect(assembly.budget.omittedFragmentIds).toContain('traps');
+    }, '继续', { envFacts: 'fact '.repeat(4_000), taskScriptFacts: '<task_script_facts>证据</task_script_facts>' });
+    expect(assembly.budget.omittedFragmentIds).toContain('env_facts');
     expect(assembly.userPrompt).toContain('<task_script_facts>证据</task_script_facts>');
   });
 
@@ -69,8 +69,8 @@ describe('session ledger · 协议与素材（第 4 期刀 4/5）', () => {
       surface: 'cli',
       capabilities: 'capabilities',
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
-    }, '继续', { ledgerFacts: '<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>', traps: 'trap '.repeat(4_000) });
-    expect(assembly.budget.omittedFragmentIds).toContain('traps');
+    }, '继续', { ledgerFacts: '<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>', envFacts: 'fact '.repeat(4_000) });
+    expect(assembly.budget.omittedFragmentIds).toContain('env_facts');
     expect(assembly.userPrompt).toContain('<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>');
     expect(assembly.budget.includedFragmentIds).toContain('ledger_facts');
   });
@@ -473,11 +473,6 @@ describe('PromptAssembler', () => {
     expect(assembler.buildUserPrompt('ship it', context)).toBe(composeUserTurn('ship it', context));
   });
 
-  it('carries the plausibility-review override through the user turn', () => {
-    const context = { plausibilityOverride: '<plausibility_review_override>skip</plausibility_review_override>' };
-    expect(assembler.buildUserPrompt('写一个架空的故事', context)).toContain('<plausibility_review_override>skip</plausibility_review_override>');
-  });
-
   it('preserves retrieved-memory composition for the Harness path', () => {
     const prompt = assembler.composeMemoryPrompt({
       template: 'Base',
@@ -750,9 +745,9 @@ describe('性格内核注入（人格轨道 刀 2）', () => {
       surface: 'cli',
       capabilities: 'capabilities',
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
-    }, 'do it', { traps: 'trap '.repeat(4_000) });
+    }, 'do it', { envFacts: 'fact '.repeat(4_000) });
     expect(tight.systemPrompt).toContain('<character_core>');
-    expect(tight.budget.omittedFragmentIds).toContain('traps');
+    expect(tight.budget.omittedFragmentIds).toContain('env_facts');
   });
 
   it('显式传 null 才关闭内核（对照实验用），空白串视同未传', () => {
@@ -784,9 +779,9 @@ describe('表达投影注入（人格轨道 刀 3）', () => {
       surface: 'cli',
       capabilities: 'capabilities',
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
-    }, 'do it', { traps: 'trap '.repeat(4_000) });
+    }, 'do it', { envFacts: 'fact '.repeat(4_000) });
     expect(tight.systemPrompt).toContain('<character_expression>');
-    expect(tight.budget.omittedFragmentIds).toContain('traps');
+    expect(tight.budget.omittedFragmentIds).toContain('env_facts');
   });
 
   it('显式传 null 才关闭表达投影（对照实验用），空白串视同未传', () => {

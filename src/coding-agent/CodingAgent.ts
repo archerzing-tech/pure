@@ -52,7 +52,6 @@ import type {
   PermissionContext,
   PermissionDecision,
   PermissionRequestHandler,
-  AnalysisResult,
   SemanticRouteDecision,
   SubagentDefinition,
   TaggedTool,
@@ -503,11 +502,6 @@ export class CodingAgent {
       onDone: (a) => { publish(a, a.status === 'paused' || a.status === 'cancelled' ? 'branch_aborted' : 'done'); ui?.onDone?.(a); },
       onError: (a) => { publish(a, a.status === 'paused' || a.status === 'cancelled' ? 'branch_aborted' : 'error'); ui?.onError?.(a); },
     };
-  }
-
-  /** Analyze a user prompt to determine complexity and optionally generate a plan. */
-  analyzeTask(prompt: string): AnalysisResult {
-    return this.planner.analyzeTask(prompt);
   }
 
   /** Check if a tool call is permitted. */
