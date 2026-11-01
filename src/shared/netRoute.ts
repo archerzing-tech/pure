@@ -247,6 +247,9 @@ interface RouteEntry {
   /** 死路半边：这条路由最近一次失败后，在此之前选路直接翻反向。
    *  缺省 = 没有死路信号（正常记忆）。 */
   deadUntil?: number;
+  /** 自上次成功以来的连续失败深度（跨路共享：两条路先后死光时退避加倍
+   *  才是「全都在死」想要的效果）。成功一刻随死期一起清零。 */
+  failStreak?: number;
   /** 旧版单槽时延（EMA α=0.3）：读档时按行的 route 迁进对应双路槽，
    *  之后不再写。保留字段仅为兼容旧存档。 */
   latencyEma?: number;
@@ -275,6 +278,8 @@ interface ProxyHealthEntry {
   latencyMs?: number;
   /** 探测失败时刻起的死期；死期内所有 proxy-first 决策翻直连。 */
   deadUntil?: number;
+  /** 连败深度（与 RouteEntry.failStreak 同语义，代理行独立记账）。 */
+  failStreak?: number;
 }
 
 type HealthEntry = RouteEntry | ProxyHealthEntry;
@@ -285,9 +290,23 @@ const isRouteEntry = (e: HealthEntry): e is RouteEntry => 'route' in e;
 export type ProxyHealthState = 'unknown' | 'alive' | 'dead';
 
 const PROXY_KEY_PREFIX = 'proxy:';
-/** 代理死期的保质期：与死路半边同量级——代理恢复（用户点开 FlClash）
- *  常在分钟级，5 分钟后自动重探，复活即恢复代理优先。 */
+/** 代理死期的基准保质期：与死路半边同量级——代理恢复（用户点开 FlClash）
+ *  常在分钟级，5 分钟后自动重探，复活即恢复代理优先。连败按指数退避加倍
+ *  （deadUntilFor），这不是固定 TTL。 */
 export const PROXY_DEAD_TTL_MS = 5 * 60_000;
+
+/** 死路退避封顶：连败再深，每 4 小时也保证一次复活重探——真死了的路不该
+ *  被永久除名（用户可能随时把代理开回来），但重探代价必须随连败塌缩。 */
+export const DEAD_ROUTE_BACKOFF_CAP_MS = 4 * 60 * 60_000;
+
+/** 死期计算：首次失败吃基准 TTL，连败指数加倍、封顶 CAP。
+ *  判例（2026-11-01 真机）：固定 5 分钟让真死路（FlClash 没开）每 5 分钟被
+ *  选回首选一次，每次都 failover+重试一轮——「已连上模型服务，等它开口」
+ *  每轮点亮。指数衰减把重探代价压到连败越深越稀有，复活通道照旧。 */
+export function deadUntilFor(failStreak: number, now: number, baseTtlMs: number): number {
+  const doubled = baseTtlMs * 2 ** Math.max(0, failStreak - 1);
+  return now + Math.min(doubled, DEAD_ROUTE_BACKOFF_CAP_MS);
+}
 
 function proxyKey(proxyUrl: string): string {
   return `${PROXY_KEY_PREFIX}${proxyUrl.trim().toLowerCase()}`;
@@ -298,12 +317,16 @@ export function recordProxyProbe(proxyUrl: string, ok: boolean, now = Date.now()
   const url = String(proxyUrl ?? '').trim();
   if (!url) return;
   ensureLoaded();
+  const prev = learned.get(proxyKey(url));
+  const prevStreak = prev && isProxyEntry(prev) ? (prev.failStreak ?? 0) : 0;
+  // 成功是复活证据：全量重建条目天然清掉 failStreak/deadUntil。
+  const streak = ok ? 0 : prevStreak + 1;
   learned.set(proxyKey(url), {
     proxy: true,
     at: now,
     ok,
     ...(latencyMs !== undefined ? { latencyMs } : {}),
-    ...(ok ? {} : { deadUntil: now + PROXY_DEAD_TTL_MS }),
+    ...(ok ? {} : { failStreak: streak, deadUntil: deadUntilFor(streak, now, PROXY_DEAD_TTL_MS) }),
   });
   persist();
 }
@@ -348,8 +371,9 @@ function proxyFallbackFor(proxyUrl: string, now: number, fallback: NetRoute): Ne
   return fallback;
 }
 
-/** 死路半边的保质期：代理故障恢复常在分钟级，5 分钟内跳过刚失败的路，
- *  过期后照常重探，复活即恢复首选。 */
+/** 死路半边的基准保质期：代理故障恢复常在分钟级，5 分钟内跳过刚失败的
+ *  路，过期后照常重探，复活即恢复首选。连败按指数退避加倍（deadUntilFor），
+ *  封顶 DEAD_ROUTE_BACKOFF_CAP_MS——固定 TTL 的真机判例见 deadUntilFor。 */
 export const DEAD_ROUTE_TTL_MS = 5 * 60_000;
 
 const learned = new Map<string, HealthEntry>();
@@ -587,8 +611,8 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
       // 实测成功高于死路推断：成功一刻必须清掉本路的死期——否则「直连刚
       // 跑通」却仍被上一次失败的死期翻面，学习表自相矛盾（证据读侧
       // directRouteDead 也会把刚成功的路读成死）。成功样本靠 EMA 槽位区分，
-      // 死期只属于失败。
-      const { deadUntil: _clearedDeath, ...alive } = entry;
+      // 死期只属于失败。连败深度随死期一起清零（下一次失败从基准 TTL 起步）。
+      const { deadUntil: _clearedDeath, failStreak: _clearedStreak, ...alive } = entry;
       if (headersMs !== undefined && headersMs > 0) {
         const slot = emaSlotOf(route);
         const prev = entry[slot];
@@ -625,7 +649,11 @@ function recordRouteForKey(key: string, route: NetRoute, ok: boolean, now: numbe
     // 路，比如 proxy-first 主机首选代理首连失败——只删记忆的话表还是空
     // 的，下一轮分类面原地再选它，永远学不会），以及记忆钉的正是这条
     // 失败路（旧记忆失效）。死期内选路翻反向，过期后照常重探。
-    learned.set(key, { route, at: now, deadUntil: now + DEAD_ROUTE_TTL_MS });
+    // 连败深度跨路共享（被覆盖条目可能是反向路的——两条路先后死光时，
+    // 退避加倍正是「全都在死」想要的效果），成功一刻随死期清零。
+    const prevStreak = entry?.failStreak ?? 0;
+    const streak = prevStreak + 1;
+    learned.set(key, { route, at: now, failStreak: streak, deadUntil: deadUntilFor(streak, now, DEAD_ROUTE_TTL_MS) });
     persist();
   }
   // else：钉着的是反向记忆（活路证据），死路信号不覆盖它——选路本来就

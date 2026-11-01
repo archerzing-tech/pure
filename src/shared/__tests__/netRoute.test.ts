@@ -459,7 +459,7 @@ describe('proxyHealth（代理健康行）', () => {
     const t0 = 1_700_000_000_000;
     netRoute.recordProxyProbe(P, false, t0);
     const raw = JSON.parse(localStorage.getItem('pure.netRoute.v1') ?? '{}');
-    expect(raw[`proxy:${P}`]).toEqual({ proxy: true, at: t0, ok: false, deadUntil: t0 + netRoute.PROXY_DEAD_TTL_MS });
+    expect(raw[`proxy:${P}`]).toEqual({ proxy: true, at: t0, ok: false, failStreak: 1, deadUntil: t0 + netRoute.PROXY_DEAD_TTL_MS });
     // 模拟重启：全清后原样回放存档、重读，死期结论仍然成立。
     netRoute.resetLearnedRoutes();
     localStorage.setItem('pure.netRoute.v1', JSON.stringify(raw));
@@ -798,5 +798,59 @@ describe('directRouteDead 与尸检覆盖', () => {
     // 复活后再次失败仍能重新记死：剥死期没有破坏失败记账。
     netRoute.recordNetOutcome('revive-gh.test', 'direct', false, T0 + 4);
     expect(netRoute.directRouteDead('revive-gh.test', T0 + 5)).toBe(true);
+  });
+});
+
+describe('死路指数退避（2026-11-01 真机判例：固定 5min 让真死路每 5min 被选回首选，每轮 failover+重试点亮「已连上」）', () => {
+  it('连败加深死期指数加倍：5min → 10min → 20min', () => {
+    const proxy = 'http://127.0.0.1:9091';
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(proxy, false, t0); // streak=1 → 5min
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 5 * 60_000 - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 5 * 60_000).state).toBe('unknown'); // 过期重探
+    netRoute.recordProxyProbe(proxy, false, t0 + 5 * 60_000); // streak=2 → 10min
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 15 * 60_000 - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 15 * 60_000).state).toBe('unknown');
+    netRoute.recordProxyProbe(proxy, false, t0 + 15 * 60_000); // streak=3 → 20min
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 35 * 60_000 - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 35 * 60_000).state).toBe('unknown');
+  });
+
+  it('连败极深也保 4 小时一次的复活重探（封顶）', () => {
+    const proxy = 'http://127.0.0.1:9092';
+    const t0 = 1_700_000_000_000;
+    let t = t0;
+    let tLast = t0;
+    for (let i = 0; i < 12; i++) {
+      netRoute.recordProxyProbe(proxy, false, t);
+      tLast = t;
+      t += 60_000;
+    }
+    // streak=12（最后失败在 tLast）：基准 5min × 2^11 远超封顶 → 死期钉在 4h。
+    expect(netRoute.proxyHealthInfo(proxy, tLast + 4 * 60 * 60_000 - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(proxy, tLast + 4 * 60 * 60_000).state).toBe('unknown');
+  });
+
+  it('成功一刻清连败账：复活后再失败从基准 5min 起步', () => {
+    const proxy = 'http://127.0.0.1:9093';
+    const t0 = 1_700_000_000_000;
+    netRoute.recordProxyProbe(proxy, false, t0);
+    netRoute.recordProxyProbe(proxy, false, t0 + 60_000); // streak=2
+    netRoute.recordProxyProbe(proxy, true, t0 + 120_000); // 复活，账清零
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 120_000).state).toBe('alive');
+    netRoute.recordProxyProbe(proxy, false, t0 + 180_000); // streak 回 1 → 5min
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 180_000 + 5 * 60_000 - 1).state).toBe('dead');
+    expect(netRoute.proxyHealthInfo(proxy, t0 + 180_000 + 10 * 60_000 - 1).state).toBe('unknown'); // 若退避账没清，这里还是 dead
+  });
+
+  it('路由死路半边同款退避（recordNetOutcome 连败 direct 加深死期）', () => {
+    const host = 'backoff-route.test';
+    const t0 = 1_700_000_000_000;
+    netRoute.recordNetOutcome(host, 'direct', false, t0); // streak=1 → 5min
+    expect(netRoute.directRouteDead(host, t0 + 5 * 60_000 - 1)).toBe(true);
+    expect(netRoute.directRouteDead(host, t0 + 5 * 60_000)).toBe(false);
+    netRoute.recordNetOutcome(host, 'direct', false, t0 + 5 * 60_000); // streak=2 → 10min
+    expect(netRoute.directRouteDead(host, t0 + 15 * 60_000 - 1)).toBe(true);
+    expect(netRoute.directRouteDead(host, t0 + 15 * 60_000)).toBe(false);
   });
 });

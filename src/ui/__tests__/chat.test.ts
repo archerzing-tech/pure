@@ -2739,8 +2739,10 @@ describe('传输层静默自愈（呈现纪律）', () => {
     expect(src).not.toContain('这条路不通，换条线路再试');
     expect(src).not.toContain('线路还是不稳，又换了一条');
     expect(src).not.toContain('FAILOVER_NOTICE_MIN_MS');
-    // 正向锚：connected 正向信号与遥测影子记账都在。
-    expect(src).toContain('已连上模型服务，等它开口');
+    // 正向锚：connected 带重试语境（2026-11-01：不带语境的「已连上」被读作
+    // 每轮无来由的等待）与遥测影子记账都在。
+    expect(src).toContain('链路抖了一下，重试后已连上');
+    expect(src).toContain('首选链路不通，已换备用路连上');
     expect(src).toContain("type: 'transport_status'");
     expect(src).toContain("stage === 'connected'");
   });

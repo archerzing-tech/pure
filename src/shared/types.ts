@@ -99,7 +99,7 @@ export type LLMChunk =
   // minutes, and the UI could only guess "waiting for the model". Yielded
   // between real chunks; streamWithDeadline deliberately does NOT count it as
   // the first token, so the first-token deadline keeps governing.
-  | { type: 'status'; stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number }
+  | { type: 'status'; stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number; afterFailover?: boolean }
   // Billing usage reported by the provider (OpenAI-style `usage` on the final
   // stream chunk; DeepSeek `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`).
   // Yielded once per stream so the engine can aggregate per-turn totals.
@@ -685,7 +685,7 @@ export type EngineEvent =
   // Wire-layer lifecycle (retries / backoff / route failover) forwarded from
   // the transport so a long silent connect window can be labeled honestly
   // ("连接不太顺，正在重试…") instead of reading as a frozen model.
-  | { type: 'TransportStatus'; payload: { stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number }; timestamp: number }
+  | { type: 'TransportStatus'; payload: { stage: 'retrying' | 'connected' | 'failover'; attempt?: number; maxAttempts?: number; waitMs?: number; afterFailover?: boolean }; timestamp: number }
   // Silent auto-resume after a stalled or cut stream: the engine keeps the
   // partial answer and asks the model to continue exactly where it stopped.
   // The resume itself is seamless, but the gap (a full request round-trip —

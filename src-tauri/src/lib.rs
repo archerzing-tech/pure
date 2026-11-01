@@ -717,7 +717,7 @@ mod llm_route_switch_tests {
     async fn connection_failure_switches_route_instead_of_retrying_the_dead_route() {
         let (addr, accepted) = spawn_dropping_server();
         let url = format!("http://{}/chat/completions", addr);
-        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", false, None).await;
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", false, false, None).await;
         assert!(result.is_err(), "a dropped connection must fail");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
@@ -731,7 +731,7 @@ mod llm_route_switch_tests {
     async fn single_route_keeps_the_backoff_retry_ladder() {
         let (addr, accepted) = spawn_dropping_server();
         let url = format!("http://{}/chat/completions", addr);
-        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", true, None).await;
+        let result = send_chat_request(&chat_client(), &url, &chat_body(), false, "k", true, false, None).await;
         assert!(result.is_err());
         assert_eq!(
             accepted.load(Ordering::SeqCst),
@@ -13689,6 +13689,10 @@ fn send_status(
     attempt: u32,
     max_attempts: u32,
     wait_ms: u64,
+    // 只有 connected 消费：换路成功的 connected 要把「首选路不通」的语境
+    // 带上屏，否则用户看到的是每轮无来由的「已连上」。retrying/failover 的
+    // GUI 处理不读它，恒传 false。
+    after_failover: bool,
 ) {
     if let Some(ch) = status {
         let payload = serde_json::json!({
@@ -13697,6 +13701,7 @@ fn send_status(
             "attempt": attempt,
             "maxAttempts": max_attempts,
             "waitMs": wait_ms,
+            "afterFailover": after_failover,
         });
         let _ = ch.send(payload.to_string());
     }
@@ -13715,6 +13720,9 @@ async fn send_chat_request(
     anthropic: bool,
     api_key: &str,
     retry_connection_failures: bool,
+    // 本请求是否跑在 failover 换来的备用出口上：connected 上屏带语境用
+    //（「首选链路不通，已换备用路连上」vs「重试后已连上」）。
+    after_failover: bool,
     // Wire-lifecycle status channel (chat_stream's on_chunk) for
     // retrying/connected notices. None in unit tests and non-interactive
     // callers. Named `status_channel` because the response's HTTP status
@@ -13750,7 +13758,7 @@ async fn send_chat_request(
             Err(_) => {
                 if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     let wait = sleep_backoff(attempts, None);
-                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64, false);
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -13763,7 +13771,7 @@ async fn send_chat_request(
             Ok(Err(e)) => {
                 if retry_connection_failures && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     let wait = sleep_backoff(attempts, None);
-                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64, false);
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -13777,7 +13785,7 @@ async fn send_chat_request(
                     // and a "已连上…" flash on every healthy request would be
                     // pure noise (tokens close the card on their own).
                     if attempts > 1 {
-                        send_status(status_channel, "connected", attempts, LLM_RETRY_MAX_ATTEMPTS, 0);
+                        send_status(status_channel, "connected", attempts, LLM_RETRY_MAX_ATTEMPTS, 0, after_failover);
                     }
                     return Ok(resp);
                 }
@@ -13785,7 +13793,7 @@ async fn send_chat_request(
                 if retryable_status(code) && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     let retry_after = parse_retry_after(&resp);
                     let wait = sleep_backoff(attempts, retry_after);
-                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                    send_status(status_channel, "retrying", attempts, LLM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64, false);
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -13982,7 +13990,7 @@ async fn chat_stream(
         _ = &mut cancel_rx => return Err("cancelled".into()),
         // 打通优先：有反向路由时，首选出口的连接层失败不原路重试——立刻换路，
         // 与 netRoute.unblockAttemptPlan 的「首选 → 反向 → 首选·重试」同序。
-        r = send_chat_request(&client, &url, &body, anthropic, &api_key, fallback_spec.is_none(), Some(&on_chunk)) => r,
+        r = send_chat_request(&client, &url, &body, anthropic, &api_key, fallback_spec.is_none(), false, Some(&on_chunk)) => r,
     } {
         Ok(r) => {
             resp = r;
@@ -14000,7 +14008,7 @@ async fn chat_stream(
                     // route's exhausted attempts — flip it to the failover
                     // wording BEFORE the fallback dials, so the route switch
                     // itself is visible instead of reading as more of the same.
-                    send_status(Some(&on_chunk), "failover", 1, 1, 0);
+                    send_status(Some(&on_chunk), "failover", 1, 1, 0, false);
                     // The primary just died at the connect layer — evict its
                     // poisoned pool so the NEXT request that picks this route
                     // dials fresh instead of slamming the same dead
@@ -14012,7 +14020,7 @@ async fn chat_stream(
                         _ = &mut cancel_rx => return Err("cancelled".into()),
                         // 反向出口已是最后一条路：它的连接层失败没有「下一条路」
                         // 可换，退避重试是仅剩的杆杆，保留原有韧性。
-                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key, true, Some(&on_chunk)) => r,
+                        r = send_chat_request(&fallback, &url, &body, anthropic, &api_key, true, true, Some(&on_chunk)) => r,
                     }
                     .map_err(|fallback_err| format!("{primary_err}\n兜底路由也失败：{fallback_err}"))?;
                     served_route = route_of(Some(fallback_spec.as_deref().unwrap_or("")));
@@ -14352,11 +14360,11 @@ async fn chat_stream(
         if let Some(error) = stream_error {
             if should_retry_stream_failure(stream_emitted, stream_attempt) {
                 let wait = sleep_backoff(stream_attempt, None);
-                send_status(Some(&on_chunk), "retrying", stream_attempt, LLM_STREAM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64);
+                send_status(Some(&on_chunk), "retrying", stream_attempt, LLM_STREAM_RETRY_MAX_ATTEMPTS, wait.as_millis() as u64, false);
                 tokio::time::sleep(wait).await;
                 // 流中断重试：出口本身刚才是通的（已收到响应头与部分字节），
                 // 重试的是「同一个出口上的流」，因而照旧允许原路退避重试。
-                resp = send_chat_request(&client, &url, &body, anthropic, &api_key, true, Some(&on_chunk)).await?;
+                resp = send_chat_request(&client, &url, &body, anthropic, &api_key, true, false, Some(&on_chunk)).await?;
                 continue 'stream_attempts;
             }
             return Err(format!(                "{} (stream attempt {} of {}; response body failed before output: {})",

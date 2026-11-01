@@ -6730,12 +6730,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               });
             } catch { /* 遥测失败不碰主流程 */ }
             if (thinkingCard && stage === 'connected') {
-              // 消化语境保活（2026-10-20）：connected 落在这里时间隔卡可能
-              // 正点名「正在消化 Read 的结果（…）」，整句覆盖会把工具与体量
-              // 归因抹掉、读作凭空又白等一轮——组合句把两件事一次说全。
+              // 重试语境上屏（2026-11-01 真机根因）：connected 只在重试后
+              // 发射（Rust 仅 attempts>1 时发），「已连上」不带语境会被读作
+              // 每轮无来由的等待——自救过程一句说完：链路抖动重试 vs 换路。
+              // 消化语境保活（2026-10-20）照旧拼接，两件事一次说全。
+              const retryPrefix = event.payload.afterFailover
+                ? '首选链路不通，已换备用路连上，'
+                : '链路抖了一下，重试后已连上，';
               setThinkingLabel(thinkingCard, digestNote
-                ? `已连上模型服务，还在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}），等它开口…`
-                : '已连上模型服务，等它开口…');
+                ? `${retryPrefix}还在消化 ${digestNote.tool} 的结果（${formatDigestSize(digestNote.chars)}），等它开口…`
+                : `${retryPrefix}等它开口…`);
             }
             break;
           }
