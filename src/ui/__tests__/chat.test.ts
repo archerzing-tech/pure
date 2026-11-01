@@ -33,7 +33,9 @@ describe('scrollUi convergence guard', () => {
 // bug doubled the "Output style:" header in the composed GUI base prompt.
 // Each section header must appear EXACTLY once in every persona variant.
 describe('BASE_SYSTEM_PROMPT structure', () => {
-  const HEADERS = ['Output style:', 'Tool-calling rules:', 'Smart typo tolerance:', 'Logical traps & approach switching:', '<capabilities>', '<agent_identity>'];
+  // Smart typo tolerance / Logical traps headers left with framework-reform
+  // phase 2 (blocks retired; absence locked in promptLayers.test.ts).
+  const HEADERS = ['Output style:', 'Tool-calling rules:', '<capabilities>', '<agent_identity>'];
 
   it('has no duplicated section headers (workspace variant)', () => {
     const prompt = BASE_SYSTEM_PROMPT(true);

@@ -8,9 +8,6 @@ import {
   SYSTEM_CORE_PROMPT,
   WORKFLOW_PROMPT,
   COMPLETION_PROMPT,
-  TYPO_TOLERANCE_PROMPT,
-  LOGICAL_TRAPS_PROMPT,
-  PLAUSIBILITY_REVIEW_PROMPT,
   SVG_OUTPUT_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
@@ -18,15 +15,9 @@ import {
   detectVisualRequest,
   HUMAN_TONE_PROMPT,
   INSERTION_PROTOCOL_PROMPT,
-  COMPLEX_TASK_PROTOCOL_PROMPT,
-  FILE_TOOLS_CORE,
   CAPABILITY_GAP_PROMPT,
-  CAPABILITY_GAP_CORE,
   CAPABILITY_GAP_LADDER,
-  MULTI_AGENT_PROTOCOL,
-  MULTI_AGENT_CORE,
-  MULTI_AGENT_MECHANICS,
-  PRE_COMMIT_REVIEW_CONTRACT,
+  MULTI_AGENT_MECHANICS_PROMPT,
   composeUserTurn,
   stripUserTurnContext,
   wantsCapabilityLadder,
@@ -34,6 +25,7 @@ import {
   wantsHandsOnWorkflow,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
+import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
 import { INCREMENTAL_BUILD_PROMPT, INFORMATION_VALUE_PRINCIPLE } from '../agentBehavior';
 import { PromptAssembler, buildGuiCapabilities } from '../PromptAssembler';
 import { estimatePromptTokens } from '../providers';
@@ -107,45 +99,21 @@ describe('L1 behavior contracts', () => {
     expect(prompt.split('<insertion_protocol>').length - 1).toBe(1);
   });
 
-  it('carries the complex-task conduct protocol (2026-09-24 复杂任务案例集)', () => {
-    // 10 例复杂任务案例集甄别后只固化四点真增量（其余点 tone/workflow/
-    // delivery 契约已覆盖）：
-    // ① 开场形状：一口气复述 + 2-4 条按假设推进（默认 + 错了坏哪），邀请纠正
-    //    一次就开干，绝不问卷、绝不挂起等答案——值得问的问题也自带默认。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('<complex_task_protocol>');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('2–4 points you will proceed on BY ASSUMPTION');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never send a questionnaire');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never idle waiting for answers');
-    // ② 承重假设加廉价护栏：失配要被检测、给清晰提示，绝不静默失败。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('fail loudly, never silently');
-    // ② 之后·第 5 期「调度」批/分协议：能一块干的并成一批一次汇报，强依赖的
-    //    拆 relay 链分步交接绝不硬凑；违背节奏地合/分要一句说清为什么。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('Batch what can be batched, split what must be split');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never one announcement per little errand');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('relay chain');
-    // ③ 失败表达全账：什么坏/为什么/修没修好/波及没有，且教训锁定防复发。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('whether anything else was touched');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('lock the lesson in');
-    // ④ 不确定性不许包装成完成：mock/TODO/协议没给/必须用户亲手做的逐一点名留缝。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('named AS such in the hand-over');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('the seam you left for it');
-    // ⑤ 收尾给裁决 + 效力边界（对哪成立、再扩要多少活）。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain("where the deliverable's validity ends");
-    // ⑥ 期 3b·每步收尾一句实质：阶段真的落地时，模型自己的话要带两件事——
-    // 现在多出来的是什么、拿什么验证的（真跑过的检查及其结果）；没验或验挂
-    // 就当场直说，不得拿「努力过」当完成。事实账只是证据，不是可照抄的稿子。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('what now exists that did not before');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('the check you actually ran and what it reported');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('say that in the same breath');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never as a script to recite');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).toContain('never repeat the phrasing you used for the previous stage');
-    // 防八股：不得给模型一段可以原样复用的收尾句式（本期只规定实质，不新增模板）。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toMatch(/say (exactly|verbatim)[: ]/i);
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toMatch(/##\s*(完成总结|Completion Summary|完成报告)/);
-    // 甄别否决项（负向锁）：固定产物名和结构化轨迹输出不得进协议——
-    // 定死即八股，机器侧轨迹由运行时（活动卡/可重放日志）原生承担。
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('assumptions.md');
-    expect(COMPLEX_TASK_PROTOCOL_PROMPT).not.toContain('UPGRADE.md');
+  it('phase-2 retirements: typo/traps/plausibility blocks are gone, the core sentence rides with workflow', () => {
+    // 框架改革二期（docs/framework-reform-2026-11.md）：typo 容错 / 逻辑陷阱
+    // / 可信度审查三段常驻块退役——现代模型已内化这些行为，唯一可机械校验的
+    // 一句（交付前对现实约束做健全性检查）并入 workflow 第 6 条（同为 verify
+    // 主题），其余不许回流常驻段。
+    const prompt = new PromptAssembler().buildSystemPrompt({
+      surface: 'gui',
+      capabilities: buildGuiCapabilities(true),
+      hasSubagents: false,
+    });
+    expect(prompt).not.toContain('Smart typo tolerance');
+    expect(prompt).not.toContain('Logical traps & approach switching');
+    expect(prompt).not.toContain('Plausibility & real-world consistency review');
+    expect(WORKFLOW_PROMPT).toContain('sanity-check it against basic real-world constraints');
+    expect(WORKFLOW_PROMPT).toContain('a route must advance toward its destination');
   });
 
   it('gates the 7-step workflow behind hands-on requests (2026-10-27 闸门化)', () => {
@@ -198,25 +166,6 @@ describe('L1 behavior contracts', () => {
     // structure.)
     expect(COMPLETION_PROMPT).not.toContain('## 完成总结\n- ');
     expect(COMPLETION_PROMPT).not.toContain('**交付依据');
-  });
-
-  it('shares typo tolerance and logical-traps defense', () => {
-    expect(TYPO_TOLERANCE_PROMPT).toContain('Smart typo tolerance');
-    expect(LOGICAL_TRAPS_PROMPT).toContain('Logical traps & approach switching');
-  });
-
-  it('reviews answers against real-world geography/physics/chemistry/math/history', () => {
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Plausibility & real-world consistency review');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Geography');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Physics');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Chemistry');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('Math');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('History');
-    // Route direction is a concrete case: waypoints must advance toward the goal.
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('西安→上海');
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('宝鸡/甘南');
-    // Fiction / alternate-history requests opt out of the review.
-    expect(PLAUSIBILITY_REVIEW_PROMPT).toContain('skip this review');
   });
 
   it('tells multi-image requests to emit one SVG per image (never a collage)', () => {
@@ -345,30 +294,26 @@ describe('L1 behavior contracts', () => {
     expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
   });
 
-  it('derives the resident cores and the on-demand details from one source', () => {
-    // 大头①②（2026-10-14）：常驻核心与按需细则由同一个常量切片而来——改一处
-    // 不可能只改半边，拼接回原文逐字相等就是这条不变式的锚。
-    expect(CAPABILITY_GAP_CORE + CAPABILITY_GAP_LADDER).toBe(CAPABILITY_GAP_PROMPT);
-    expect(CAPABILITY_GAP_CORE).toContain('never refuse, pretend to have it, or invent results');
-    expect(CAPABILITY_GAP_CORE).toContain('~/.pure/skills/');
-    expect(CAPABILITY_GAP_CORE).not.toContain('codeload.github.com');
-    expect(CAPABILITY_GAP_LADDER).toContain('codeload.github.com');
-    // 主动获取令（2026-10-16）在常驻核心：现成的都不合适 → 缺口是「去拿」的
-    // 信号，不是交代局限的理由。中途缺口只能靠常驻令触达（回合中提示词冻结，
-    // 闸门只看用户文本），所以工具名与「穷尽后才许说做不到」都必须在这一侧。
-    expect(CAPABILITY_GAP_CORE).toContain('treat the missing capability as something to ACQUIRE');
-    expect(CAPABILITY_GAP_CORE).toContain('whenever YOU discover the gap yourself');
-    expect(CAPABILITY_GAP_CORE).toContain('install_agent_skill(source, name)');
-    expect(CAPABILITY_GAP_CORE).toContain('only after the acquisition routes themselves have failed');
-    expect(CAPABILITY_GAP_CORE).not.toContain('npx skills find');
-    expect(CAPABILITY_GAP_LADDER).toContain('If nothing fits, INSTALL it yourself');
-    const mechanicsStart = MULTI_AGENT_PROTOCOL.indexOf('Artifact fit: ');
-    expect(mechanicsStart).toBeGreaterThan(0);
-    expect(MULTI_AGENT_CORE.slice(0, mechanicsStart) + MULTI_AGENT_MECHANICS + MULTI_AGENT_CORE.slice(mechanicsStart))
-      .toBe(MULTI_AGENT_PROTOCOL);
-    expect(MULTI_AGENT_CORE).toContain('T3 · context isolation');
-    expect(MULTI_AGENT_CORE).toContain('Exception (do NOT delegate)');
-    expect(MULTI_AGENT_MECHANICS).toContain('Relay rule');
+  it('keeps the capability ladder as an on-demand slice and the delegation mechanics on their gate', () => {
+    // 大头①切片派生不变式（2026-10-14）：梯子仍是 CAPABILITY_GAP_PROMPT 的
+    // 尾段切片——改一处不可能只改半边。
+    expect(CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER)).toBe(true);
+    expect(CAPABILITY_GAP_LADDER.startsWith('\n- If nothing fits, INSTALL it yourself')).toBe(true);
+    // 主动获取令（2026-10-16 → 二期改载体）：从常驻核心搬进 search_agent_skills
+    // 的工具描述——缺口出现在模型考虑找工具的那一刻，描述恰在眼前，比常驻段
+    // 更近的触发位；常驻协议本体只留「把缺口当获取信号」一句托底。
+    const skillsSearch = DYNAMIC_CAPABILITY_TOOL_DEFS.find((t) => t.name === 'search_agent_skills')?.description ?? '';
+    expect(skillsSearch).toContain('a capability gap is a signal to ACQUIRE');
+    expect(skillsSearch).toContain('only after the acquisition routes themselves have failed');
+    expect(CAPABILITY_GAP_PROMPT).toContain('treat the missing capability as something to ACQUIRE');
+    // 大头②（二期重构）：委派触发测试（何时拆）随 task_planner 的工具描述走
+    // （锁在其定义文件旁），机制段只教「怎么委派」，不再背触发测试与例外条。
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Artifact fit');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Fan-out rule');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Relay rule');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Orchestrator conduct');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).not.toContain('T1');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).not.toContain('Exception (do NOT delegate)');
     // 闸门：普通请求不带细则，装东西/缺能力或多主题的请求带。
     expect(wantsCapabilityLadder('把 README 里的 typo 修一下')).toBe(false);
     expect(wantsCapabilityLadder('帮我装 ffmpeg')).toBe(true);
@@ -401,27 +346,25 @@ describe('L1 behavior contracts', () => {
   });
 
   // 3.4 pre-commit review: the quality gate that replaced the per-commit
-  // permission prompt — the contract must name the trigger (git_commit), the
-  // reviewer (code_reviewer), the verdict protocol, and the escape hatches.
-  it('gates the first commit on a code_reviewer verdict with strict PASS/FAIL', () => {
-    expect(PRE_COMMIT_REVIEW_CONTRACT.startsWith('<pre_commit_review>')).toBe(true);
-    expect(PRE_COMMIT_REVIEW_CONTRACT.endsWith('</pre_commit_review>')).toBe(true);
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('git_commit');
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('code_reviewer');
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('VERDICT: PASS');
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('VERDICT: FAIL');
+  // permission prompt — phase 2 moved the contract into git_commit's own
+  // description: the rule is about THAT one tool call, so it lives where the
+  // model looks when making it, not in an always-on block.
+  it('gates the first commit on a code_reviewer verdict via the git_commit description', () => {
+    const gitCommit = BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_commit')?.description ?? '';
+    expect(gitCommit).toContain('code_reviewer');
+    expect(gitCommit).toContain('VERDICT: PASS / FAIL');
     // FAIL must actually gate; PASS/unavailable/trivial must not stall.
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('Never commit while a blocking finding stands');
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('trivial change');
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('reviewer unavailable');
+    expect(gitCommit).toContain('fix every blocking finding before committing');
+    expect(gitCommit).toContain('trivial change');
+    expect(gitCommit).toContain('reviewer unavailable');
     // One review per task — follow-up commits are not re-reviewed.
-    expect(PRE_COMMIT_REVIEW_CONTRACT).toContain('once per task');
+    expect(gitCommit).toContain('Review once per task');
   });
 
   it('documents the git write tools via their schema descriptions (2026-10-27 下沉)', () => {
-    // git 工具的散文清单已从 FILE_TOOLS_CORE 下沉到 schema description——
-    // pre_commit_review 的跨引用锚现在住在 git_commit 的 description 里。
-    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_commit')?.description).toContain('pre-commit review contract');
+    // git 工具的散文清单已下沉 schema description——pre-commit review 的
+    // 跨引用锚现住在 git_commit 的 description 里（二期后它是唯一载体）。
+    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_commit')?.description).toContain('Pre-commit review (automatic');
     expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_branch')?.description).toBeTruthy();
   });
 });
@@ -502,24 +445,33 @@ describe('stripUserTurnContext (replay round-trip)', () => {
   });
 });
 
-describe('FILE_TOOLS_CORE (L1 shared tool list)', () => {
-  it('lists the full file + shell/git tool set', () => {
-    // 2026-10-27 瘦身：逐工具散文下沉 schema，FILE_TOOLS_CORE 只留跨工具策略。
-    expect(FILE_TOOLS_CORE).toContain('File tool strategy');
-    expect(FILE_TOOLS_CORE).toContain('find_files FIRST');
-    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'read_file')?.description).toContain('startLine');
+describe('file & shell tool descriptions (framework-reform phase 2 carrier)', () => {
+  // FILE_TOOLS_CORE 常驻段随二期退役：跨工具策略改住各工具自己的描述——
+  // 教学跟着工具走，模型调工具前必读，两个 surface 不再重复维护一份散文。
+  const desc = (name: string) => BUILT_IN_TOOL_DEFS.find((t) => t.name === name)?.description ?? '';
+
+  it('carries the read/find discipline: locate first, read ranges, never paste whole files', () => {
+    expect(desc('read_file')).toContain('Never paste a whole file into the conversation');
+    expect(desc('read_file')).toContain('startLine');
+    expect(desc('find_files')).toContain('Use this FIRST');
+    expect(desc('find_files')).toContain('follow those suggestions instead of guessing');
     expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'replace_files')).toBeTruthy();
     expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_status')).toBeTruthy();
   });
 
+  it('carries the write + shell discipline: split big output, quiet flags, no re-read verification', () => {
+    expect(desc('write_file')).toContain('split it by concern');
+    expect(desc('execute_command')).toContain('Token discipline');
+    expect(desc('execute_command')).toContain('do NOT re-read the whole file to verify');
+  });
+
   it('teaches the serve-and-preview decision: static file vs web server', () => {
     // The "启动服务打开页面" protocol: the model must pick the right vehicle
-    // instead of faking a preview or letting a server time out. 现同时钉在
-    // FILE_TOOLS_CORE（策略段）与 execute_command schema（下沉承接）两处。
-    expect(FILE_TOOLS_CORE).toContain('a single self-contained .html');
-    expect(FILE_TOOLS_CORE).toContain('MUST go through http://localhost');
-    expect(FILE_TOOLS_CORE).toContain('never fake a preview with file://');
-    expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'execute_command')?.description).toContain('background:true');
+    // instead of faking a preview or letting a server time out.
+    expect(desc('execute_command')).toContain('a single self-contained .html');
+    expect(desc('execute_command')).toContain('MUST go through http://localhost');
+    expect(desc('execute_command')).toContain('never fake a preview with file://');
+    expect(desc('execute_command')).toContain('background:true');
   });
 });
 

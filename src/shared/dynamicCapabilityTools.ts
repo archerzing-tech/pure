@@ -13,7 +13,7 @@ export interface DynamicCapabilityHooks {
 export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
   {
     name: 'search_agent_skills',
-    description: 'Search community Agent Skills for the current business need. Returns matching skill names, descriptions, sources, and install ids. Use this when the current skills do not cover a required capability.',
+    description: 'Search community Agent Skills for the current business need. Returns matching skill names, descriptions, sources, and install ids. Use this when the current skills do not cover a required capability — a capability gap is a signal to ACQUIRE, not a limitation to report: this applies mid-task too, whenever you discover the gap yourself (a stalled parser, converter, CLI, service), go fetch the piece and keep the task moving; report "做不到 / 没有工具" only after the acquisition routes themselves have failed.',
     input_schema: {
       type: 'object',
       properties: {

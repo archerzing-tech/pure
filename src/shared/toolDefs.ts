@@ -21,7 +21,7 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Optionally specify startLine and endLine to read a range. Very large files: without a range only the head is returned, with a footer stating the total line count — continue from the suggested startLine or use code_searcher to pinpoint, instead of loading the whole file. Pointing path at a directory is not an error: the first-level contents of that directory are returned with the exact path echoed back, so you can immediately re-read a specific file.',
+    description: 'Read a file from the workspace. Supports plain text/code (UTF-8, UTF-16, GBK/GB18030 Chinese Windows encoding), PDF (with ToUnicode CMap for Chinese fonts), DOCX/XLSX/PPTX/ODT, and RTF — binary/scanned files get an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine to read a range. Very large files: without a range only the head is returned, with a footer stating the total line count — continue from the suggested startLine or use code_searcher to pinpoint, instead of loading the whole file. Pointing path at a directory is not an error: the first-level contents of that directory are returned with the exact path echoed back, so you can immediately re-read a specific file.',
     input_schema: {
       type: 'object',
       properties: {
@@ -34,7 +34,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically.',
+    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. Large output: never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works.',
     input_schema: {
       type: 'object',
       properties: {
@@ -75,7 +75,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'find_files',
-    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches. Dependency directories (node_modules, venv, target, vendor, …) are skipped unless path/filePattern names one explicitly.',
+    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "毕业证", "发票") without reading every file. Strategy: filename matches are ranked first (cheap, no content reads), then content hits across files are counted and the TOP candidate files are returned with a few snippet lines each (never full content). Works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK-encoded text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches — follow those suggestions instead of guessing or reading files one by one. Dependency directories (node_modules, venv, target, vendor, …) are skipped unless path/filePattern names one explicitly.',
     input_schema: {
       type: 'object',
       properties: {
@@ -103,7 +103,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'execute_command',
-    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit. Serving & previewing a project — pick the vehicle FIRST: a single self-contained .html (no build step, no server-only APIs) opens directly via its file:// path; anything with a dev-server script (vite/webpack/next/flask/fastapi…), fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost — install dependencies (finite command), start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, then open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows "Start-Process <url>") and report the URL + how to stop it (kill <pid>). Never leave a foreground server running and never fake a preview with file:// for something that needs a server.',
+    description: 'Execute a shell command in the workspace directory. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite. With background:true, starts a long-lived process (dev/static server, watcher) detached: returns {pid, logFile} immediately instead of waiting for exit. Serving & previewing a project — pick the vehicle FIRST: a single self-contained .html (no build step, no server-only APIs) opens directly via its file:// path; anything with a dev-server script (vite/webpack/next/flask/fastapi…), fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost — install dependencies (finite command), start the server with background:true, poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers, then open the page for the user (macOS "open <url>", Linux "xdg-open <url>", Windows "Start-Process <url>") and report the URL + how to stop it (kill <pid>). Never leave a foreground server running and never fake a preview with file:// for something that needs a server. Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to verify — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -310,7 +310,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'git_commit',
-    description: 'Stage changes and create a git commit in the workspace repository (must already be a git repo). Pass paths to stage specific files, or omit paths to stage every change. Write the message as a concise summary line of WHY the change matters. On your first commit of a non-trivial change, follow the pre-commit review contract in the system prompt. Never force-push or amend published history.',
+    description: 'Stage changes and create a git commit in the workspace repository (must already be a git repo). Pass paths to stage specific files, or omit paths to stage every change. Write the message as a concise summary line of WHY the change matters (no AI-attribution trailers). Pre-commit review (automatic — your call, never wait to be asked): before the FIRST commit of a non-trivial change, delegate a one-shot review to code_reviewer (when that tool exists) with the pending scope, and read its strict last line VERDICT: PASS / FAIL — fix every blocking finding before committing; PASS, reviewer unavailable, or a trivial change (docs, comments, formatting, version bumps) commits right away. Review once per task, not once per commit, and cite the verdict in one natural line when reporting. Never force-push or amend published history.',
     input_schema: {
       type: 'object',
       properties: {

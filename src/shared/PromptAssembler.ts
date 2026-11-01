@@ -9,29 +9,20 @@ import type { ToolDefinition } from './types';
 import { activeCharacterCore, activeCharacterExpression } from '../character';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
-  CAPABILITY_GAP_CORE,
   CAPABILITY_GAP_LADDER,
   CHART_DSL_PROMPT,
-  COMPLEX_TASK_PROTOCOL_PROMPT,
   MAP_DSL_PROMPT,
   PAINT_DSL_PROMPT,
   COMPLETION_PROMPT,
-  DELIVERY_CONTRACT,
-  FILE_TOOLS_CORE,
   HUMAN_TONE_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
   INFORMATION_VALUE_PRINCIPLE,
   INSERTION_PROTOCOL_PROMPT,
   LEDGER_PROTOCOL_PROMPT,
-  LOGICAL_TRAPS_PROMPT,
-  MULTI_AGENT_CORE,
-  MULTI_AGENT_MECHANICS,
-  PLAUSIBILITY_REVIEW_PROMPT,
-  PRE_COMMIT_REVIEW_CONTRACT,
+  MULTI_AGENT_MECHANICS_PROMPT,
   PUBLIC_API_DIRECTORIES_PROMPT,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
-  TYPO_TOLERANCE_PROMPT,
   VISUAL_BLOCK_POINTER,
   WORKFLOW_PROMPT,
   composeUserTurn,
@@ -226,16 +217,15 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
       ? '\nWorkspace: no user workspace is selected, so file changes go to an isolated application temporary workspace for this session.'
       : ''
     : '\nWorkspace: none selected — no local filesystem or shell access. Open Settings → Tools to add a workspace.';
-  const fileTools = hasWorkspace ? FILE_TOOLS_CORE : '';
   // 附件路径规则只在真带附件的回合注入：没有附件的回合它是纯噪音（带附件
   // 是少数回合，闸门与图像附件契约共用同一个 hasImageAttachment 信号）。
   const attachmentPaths =
     hasWorkspace && options.hasImageAttachment
       ? '\n\nAttachment paths: files Pure saved for you under the app-managed ".pure/workspace" directory inside the user home (pasted long text, dropped attachments) are read by their exact absolute path — never rewritten to a relative path or prefixed with the workspace.'
       : '';
-  const tools = hasWorkspace
-    ? `${GUI_WEB_TOOLS_PROMPT}\n\n${fileTools}${attachmentPaths}\n\n${GUI_SYS_INFO_PROMPT}`
-    : `${GUI_WEB_TOOLS_PROMPT}\n\n${GUI_SYS_INFO_PROMPT}`;
+  // 文件工具策略已随框架改革二期搬进各工具的 description（toolDefs.ts）——
+  // GUI/CLI 共用同一份工具表，教学跟着工具走，不再在此拼常驻块。
+  const tools = `${GUI_WEB_TOOLS_PROMPT}${attachmentPaths}\n\n${GUI_SYS_INFO_PROMPT}`;
   const imageGen = options.imageGeneration ? GUI_IMAGE_GEN_PROMPT : '';
   // 图像附件的行为契约只在真的带附件的回合注入——无附件回合不再为它付常驻
   // token（带附件是少数回合）。
@@ -244,7 +234,7 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
 }
 
 export function buildCliCapabilities(): string {
-  return `${FILE_TOOLS_CORE}\n\n${CLI_CAPABILITIES_PROMPT}`;
+  return CLI_CAPABILITIES_PROMPT;
 }
 
 function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
@@ -321,7 +311,7 @@ function buildRequestDetailFragments(
     fragment('capability_gap_ladder', wantsCapabilityLadder(text) ? CAPABILITY_GAP_LADDER : '', 59),
     fragment(
       'multi_agent_mechanics',
-      context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS : '',
+      context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS_PROMPT : '',
       58,
     ),
   ].filter((item): item is PromptFragment => item !== null);
@@ -570,36 +560,13 @@ export class PromptAssembler {
       // the model to consult ride with the user turn instead — a system-tail
       // change would invalidate the cached prefix on every turn).
       fragment('ledger_protocol', LEDGER_PROTOCOL_PROMPT, 105, true),
-      // Complex-task conduct — REQUIRED: on long tasks the kickoff/failure/
-      // fencing moves are the difference between a colleague and a receipt
-      // printer; dropping it under budget pressure is exactly the failure
-      // mode required-ness exists for.
-      fragment('complex_task', COMPLEX_TASK_PROTOCOL_PROMPT, 111, true),
       fragment('completion', COMPLETION_PROMPT, 80),
-      // Multi-agent delegation + delivery discipline are REQUIRED so they are
-      // never dropped under budget pressure (selectFragments always keeps
-      // required). multi_agent is gated on subagent availability: a plain Q&A
-      // or a workspace-less turn has no subagent tools and must not be told to
-      // delegate; delivery_contract is safe to always include.
-      ...(context.hasSubagents
-        ? [
-            fragment('multi_agent', MULTI_AGENT_CORE, 115, true),
-            // Pre-commit review delegates to code_reviewer, so it shares the
-            // subagent gate: no subagents → no reviewer to run → no contract.
-            fragment('pre_commit_review', PRE_COMMIT_REVIEW_CONTRACT, 113, true),
-          ]
-        : []),
-      fragment('delivery_contract', DELIVERY_CONTRACT, 112, true),
       fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),
       // Image requests follow ONE contract: the generate_image tool when the
       // provider supports it, otherwise the multi-SVG grid contract. Never both.
       // 契约与 DSL 细则一起搬到尾巴按需装配（见 buildVisualFragments）——它们的
       // 常驻部分（块标签 + 禁令）在 VISUAL_BLOCK_POINTER 里。
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
-      fragment('typo_tolerance', TYPO_TOLERANCE_PROMPT, 55),
-      fragment('logical_traps', LOGICAL_TRAPS_PROMPT, 70),
-      fragment('plausibility_review', PLAUSIBILITY_REVIEW_PROMPT, 72),
-      fragment('capability_gap', CAPABILITY_GAP_CORE, 75),
       fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('mcp_resources', buildMcpResources(context.mcpResources), 30),

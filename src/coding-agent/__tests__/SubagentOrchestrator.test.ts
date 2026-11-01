@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { SubagentOrchestrator, deriveSubagentBudget, makeAgentId, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentProgress } from '../SubagentOrchestrator';
 import { Verifier } from '../Verifier';
 import { Tags, ToolRegistry } from '../ToolRegistry';
-import { MULTI_AGENT_PROTOCOL } from '../../shared/promptLayers';
+import { MULTI_AGENT_MECHANICS_PROMPT } from '../../shared/promptLayers';
 import { DEFAULT_CHARACTER_PROFILE, VETERAN_FAST_LINES } from '../../character';
 import { MockLLMAdapter } from '../../adapter/mock/MockLLMAdapter';
 import { MemoryStateStore } from '../../adapter/storage/MemoryStateStore';
@@ -984,10 +984,31 @@ describe('SubagentOrchestrator relay schema exposure (北极星第 5 步)', () =
     expect((again.input_schema.properties as Record<string, unknown>).relay).toEqual(relay);
   });
 
-  it('the multi-agent protocol teaches the relay rule', () => {
-    expect(MULTI_AGENT_PROTOCOL).toContain('Relay rule');
-    expect(MULTI_AGENT_PROTOCOL).toContain('"relay": {"as"');
-    expect(MULTI_AGENT_PROTOCOL).toContain('"relay": {"from"');
+  it('the multi-agent mechanics teach the relay rule', () => {
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Relay rule');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('"relay": {"as"');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('"relay": {"from"');
+  });
+
+  it('task_planner description carries the delegation trigger + complex-task conduct (framework-reform phase 2)', () => {
+    // 二期改载体：委派触发测试（原 MULTI_AGENT_CORE 的 T1/T2/T3 + 例外）与
+    // 复杂任务案例集四真增量（原 COMPLEX_TASK_PROTOCOL_PROMPT）都搬进
+    // task_planner 的工具描述——模型拆解时描述恰在眼前，工具表 hasSubagents
+    // 才暴露委派工具，闸门天然成立。
+    const planner = CODING_AGENT_ROLES.find((d) => d.name === 'task_planner');
+    expect(planner).toBeDefined();
+    const text = planner!.description;
+    // 触发测试：T1 职能分离 / T2 可并行 / T3 上下文隔离 + 单线例外。
+    expect(text).toContain('≥2 种职能视角');
+    expect(text).toContain('可并行的独立子块');
+    expect(text).toContain('刷爆主会话');
+    expect(text).toContain('自己串行做');
+    // 四真增量：开场假设形状 / 假设护栏 / 失败全账 / 不确定性围栏。
+    expect(text).toContain('2-4 个按假设推进的点');
+    expect(text).toContain('邀一次纠偏就开工');
+    expect(text).toContain('假设要响亮地失败不要静默');
+    expect(text).toContain('失败时记全账');
+    expect(text).toContain('如实点名并留好接缝');
   });
 });
 

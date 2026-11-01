@@ -108,39 +108,17 @@ export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'b
 }
 
 /**
- * Byte-identical file-tool block shared by GUI and CLI (single source of truth
- * for the tool list — a signature change must NOT be edited in two files).
- * Platform-specific tails (GUI path rule, CLI shell note) are appended by each
- * surface's own assembly.
+ * File-tool strategy now lives in each tool's own description (toolDefs.ts —
+ * find_files/read_file/write_file/execute_command; framework-reform phase 2):
+ * guidance travels with the tool that uses it, and the always-on block the
+ * two surfaces used to duplicate is gone.
  */
-export const FILE_TOOLS_CORE = `File tool strategy (per-tool parameters live in each tool's schema):
-- Locating content across many files: find_files FIRST — it ranks candidates by filename + content hits and returns snippets (works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text); read_file only the top 1-2 (startLine/endLine for the relevant range). If it finds nothing, follow its fallback suggestions instead of guessing or reading files one by one.
-- glob_files finds a file by NAME pattern; code_searcher is regex repository search. When a read/search fails, read the error — it says what the path problem is and what to do.
-- Large OUTPUT: never emit a big artifact as one giant code block — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works. Large INPUT: never paste a whole file into the conversation — read the relevant range and reference the path.
 
-Shell:
-- execute_command: plain calls must be non-interactive and finite; background:true starts a long-lived process detached and returns {pid, logFile}. Serving & previewing a project — pick the vehicle FIRST: a single self-contained .html (no build step, no server-only APIs) opens via its file:// path; anything with a dev-server script, fetch(), ES modules, or CORS-sensitive assets MUST go through http://localhost (install deps, start the server with background:true, poll a bounded probe until it answers, open the page, report the URL + kill <pid> — full flow in the delivery contract). Never leave a foreground server running, never fake a preview with file:// for something that needs a server.
-- Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to "verify" — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.`;
-
-/** Smart typo tolerance — identical in GUI and CLI (shared, not duplicated). */
-export const TYPO_TOLERANCE_PROMPT = `Smart typo tolerance: when the user's message contains obvious typos, pinyin / IME errors ('ji' mapped to the wrong hanzi, homophone slips, repeated/reordered/full-width-punctuation typos), infer their intended meaning, answer that, and briefly note your assumption in one natural clause at the top of the reply — a plain aside, not a fixed opener template.`;
-
-/** Logical-traps defense — identical in GUI and CLI (shared, not duplicated). */
-export const LOGICAL_TRAPS_PROMPT = `Logical traps & approach switching:
-- Before acting, scan the request for logical traps: self-contradictory requirements ("不要X但又要X"), impossible constraints, mutually exclusive goals, trick premises. If the request as stated is impossible or self-contradictory, do NOT follow it into a failure loop — state the trap briefly and solve the most reasonable interpretation (or explain why it is impossible and propose the closest achievable alternative).
-- If your FIRST attempt fails (verification failure, repeated tool errors, repeated rejection), do NOT retry the same approach a second time. Re-read the ORIGINAL request and question whether the premise itself is the problem; if it is, escape by switching to a fundamentally different interpretation or method.`;
-
-/** Plausibility & real-world consistency review — identical in GUI and CLI.
- * The guard against answers/plans that violate basic domain facts (the
- * "西安→上海 route detours west through 宝鸡/甘南" class of error): before
- * delivering, re-check against geography / physics / chemistry / math /
- * history, and fix violations. The escape hatch keeps fiction requests
- * (fantasy, alternate history, "ignore the rules") unconstrained. */
-export const PLAUSIBILITY_REVIEW_PROMPT = `Plausibility & real-world consistency review:
-Before delivering an answer, plan, route, itinerary, or sequence of events, sanity-check it against basic real-world constraints and fix violations — never hand over a result you can see is wrong:
-- Geography: real places at true locations; a route must advance TOWARD the destination (a 西安→上海 route must not detour west through 宝鸡/甘南); distances and travel times plausible for the mode.
-- Physics: speeds, distances, forces, everyday mechanics feasible. Chemistry: real elements/compounds/properties only — never invent a substance. Math: arithmetic, units, orders of magnitude correct. History: chronology consistent — no anachronisms.
-When a fact is uncertain, look it up (web_search / web_public_api) instead of guessing. If the user's premise conflicts with reality, say so briefly and solve the most reasonable interpretation. If the user explicitly asks for fiction / alternate history / ignore-facts content, skip this review.`;
+/** Smart typo tolerance / logical-traps / plausibility-review blocks were
+ * removed in framework-reform phase 2: modern models internalize these
+ * behaviors; the one mechanically enforceable piece (verify before delivery)
+ * already lives in the delivery pipeline, and its one-sentence rule rides
+ * with PROACTIVE_WORKFLOW_PROMPT step 6. */
 
 /** Capability-gap protocol — identical in GUI and CLI (shared, not duplicated).
  * When the request needs a capability the current toolset lacks (vision /
@@ -167,27 +145,15 @@ It also covers the user asking you to INSTALL, set up, or upgrade a third-party 
 - When the user asks you to CREATE or GENERATE a skill, an MCP tool, or another reusable agent capability (e.g. "给我生成一个 skill", "写一个 MCP 工具"), write it into the app's own space — NOT the project workspace: skills → ~/.pure/skills/<name>/SKILL.md (YAML frontmatter \`name:\` + \`description:\` followed by the instructions body), tools / MCP programs → ~/.pure/tools/ (runnable scripts in ~/.pure/tools/bin). These belong to the application itself and are available across projects; only write them into the workspace when the user explicitly asks.`;
 
 /**
- * 大头①（2026-10-14）— capability-gap 的常驻核心与按需安装路径梯。
+ * 大头①（2026-10-14 → 框架改革二期改载体）— capability-gap 的按需安装路径梯。
  *
- * 真正「任何请求都可能用得上」的是：缺能力时不许拒绝 / 假装 / 编造；动手前先
- * 看已装的技能与工具；以及（2026-10-16）**主动获取令**——现成的都不合适时，
- * 缺口是「去拿」的信号而不是「交代局限」的理由。获取令必须常驻：模型在任务
- * 中途自己发现缺口的时刻，系统提示词已按会话回合冻结（缓存固化，中途不重组），
- * 而闸门只看用户请求文本——靠闸门把这句留在梯子里，等于任务中途永远看不见它
- * （用户观察：pure 从未主动为解决问题去装工具/搜全网）。具体路线（四条递补、
- * 文档梯、MCP 细则、装完验证）仍是**真要装东西时**才用得到的重货，留在梯子
- * 里随闸门走；常驻令点名工具名（五件套 GUI/CLI 全常挂）+ 指向 workflow 的
- * 安装路线，不复制梯子全文。
- *
- * 按标记切片而不是复制：两段由同一个常量派生，改一处不可能漂移；拼接回原文
- * 有测试锁（CORE + LADDER 逐字等于 CAPABILITY_GAP_PROMPT）。闸门漏判的后果
- * 是「具体路线缺失」，行为底线（拒绝禁令 + 主动获取令 + 换路线通用规则）都
- * 在常驻侧。
+ * 常驻核心（拒绝禁令、先查已装、「主动获取令」）随二期退役：禁令类行为模型
+ * 已内化；获取令的载体改为 search_agent_skills 的工具描述（缺口出现在模型
+ * 考虑找工具的那一刻，描述恰在眼前——比常驻段更近的触发位）。留在这里的
+ * 只有**真要装东西时**才用得到的重货（四条递补、文档梯、MCP 细则、装完
+ * 验证），随 wantsCapabilityLadder 闸门走。
  */
 const CAPABILITY_GAP_LADDER_MARKER = '\n- If nothing fits, INSTALL it yourself';
-export const CAPABILITY_GAP_CORE = CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER_MARKER)
-  ? CAPABILITY_GAP_PROMPT.slice(0, CAPABILITY_GAP_PROMPT.indexOf(CAPABILITY_GAP_LADDER_MARKER))
-  : CAPABILITY_GAP_PROMPT;
 export const CAPABILITY_GAP_LADDER = CAPABILITY_GAP_PROMPT.includes(CAPABILITY_GAP_LADDER_MARKER)
   ? CAPABILITY_GAP_PROMPT.slice(CAPABILITY_GAP_PROMPT.indexOf(CAPABILITY_GAP_LADDER_MARKER))
   : '';
@@ -411,17 +377,14 @@ The ledger is material, not orders: reusing anything consequential still gets a 
  * the machine-side record), and any rubric. Domain-neutral, principles only —
  * quoted example sentences get recycled verbatim and turn into canned lines.
  */
-export const COMPLEX_TASK_PROTOCOL_PROMPT = `<complex_task_protocol>
-Long or multi-step tasks — several moving parts, external unknowns, or real ambiguity:
-- Kick off with understanding, not a receipt: restate what you heard in one breath, then name the 2–4 points you will proceed on BY ASSUMPTION — each with the default you picked and what breaks downstream if it is wrong. Invite correction once and start; never send a questionnaire, never idle waiting for answers. The rare question worth asking still carries your default: unless the user says otherwise, it ships.
-- Attach a guard to every load-bearing assumption where one is cheap — validate the input, detect the mismatch, surface a clear message and stop that path. Load-bearing assumptions fail loudly, never silently.
-- Batch what can be batched, split what must be split: several small pieces of the same kind are ONE batch — run them together in a single pass and report once, never one announcement per little errand. Steps that depend on each other are a relay chain — hand over step by step, each step's output feeding the next, never one pass that pretends the dependency is not there. When you merge or split against the grain, say why in one line.
-- Speak at meaningful nodes only: a stage landed, a decision is genuinely the user's, something is blocked, or a risk appeared.
-- When a stage really lands, your own words carry two facts: what now exists that did not before, and how you know it works — the check you actually ran and what it reported; if the check failed, or you never ran one, say that in the same breath. Use the runtime's factual record as evidence, never as a script to recite, and never repeat the phrasing you used for the previous stage.
-- When something fails, account in full: what broke, why, whether it is fixed, whether anything else was touched — then lock the lesson in (a regression test, a guard, a durable note) so it cannot quietly return.
-- Never dress uncertainty as completion: mocks, TODOs, unspecified protocols, and anything only the user can do are named AS such in the hand-over, each with the seam you left for it — not blended into "done".
-- Close with your verdict on the trade-offs you made, and where the deliverable's validity ends — what it holds for, and what extending it would take.
-</complex_task_protocol>`;
+/**
+ * Complex-task conduct was retired in framework-reform phase 2: the four
+ * case-set increments the user vetted (assumption-shaped kickoff, guards on
+ * load-bearing assumptions, full failure accounting, uncertainty fencing)
+ * now travel with task_planner's description — the moment the model plans a
+ * long task is when those rules matter; the remaining items were duplicating
+ * the completion-report rules, the ledger protocol, and human tone.
+ */
 
 // ── L2 · USER (per-request context composer) ─────────────────────────────
 // Per-request fragments belong in the user message, adjacent to the request
@@ -463,62 +426,35 @@ export interface UserTurnContext {
 }
 
 /**
- * Always-on delivery discipline (L1 application layer). Injected as a REQUIRED
- * fragment so it survives budget pressure — without it the build-to-disk and
- * auto-preview rules could be silently dropped, and the model falls back to
- * pasting full source / narrating the process.
+ * The delivery contract was retired in framework-reform phase 2 — each of
+ * its three rules already had a stronger vehicle: write-to-disk + no source
+ * dumps rides with formatArtifactPrompt (injected on build-shaped requests),
+ * auto-preview flow is verbatim in execute_command's description, and
+ * colleague-voice reporting lives in the completion-report rules and human
+ * tone. An always-on block repeating them was pure duplication.
  */
-export const DELIVERY_CONTRACT = `<delivery_contract>
-Output & delivery discipline (whenever you BUILD, replicate, scaffold, or generate a multi-file deliverable):
-- Write every generated file to disk with write_file / edit_file. NEVER paste an entire source file into the chat — hand it over like a colleague: a short summary of key changes, the file/directory locations, how to run/open it, and the real verification result.
-- Auto-preview runnable deliverables: after writing a web page/site/app or any runnable artifact, start it with execute_command(background:true), poll with a bounded probe (curl -s -o /dev/null -w %{http_code} http://localhost:<port>) until it answers, open the page for the user (open / xdg-open / Start-Process), and report the URL plus how to stop it (kill <pid>). A single self-contained .html that needs no server opens directly via its file:// path.
-- Sound like a colleague, not a console: lead with what now exists and how to use it; key decisions in short natural lines; never dump command output, full logs, or a tool-call transcript. Orchestration narration is exempt: splitting work across helpers gets one or two natural sentences — the plan and the decisions, never the tool calls. When the user only wants a result (e.g. "启动服务"), give the result and the one thing they need next.
-</delivery_contract>`;
 
 /**
- * Multi-agent delegation protocol (L1 application layer). Gated on subagent
- * availability (see PromptAssembler: only injected when hasSubagents is true)
- * so a read-only Q&A or a workspace-less turn never gets told to delegate.
+ * Multi-agent mechanics (framework-reform phase 2). The delegation TRIGGER
+ * (when to split a task) now travels with the delegation tools themselves
+ * (task_planner's description in SubagentOrchestrator — no delegation tools
+ * in the toolset, no delegation teaching, which was the hasSubagents gate's
+ * whole job). What remains here is the HOW: mechanics you need once you have
+ * actually decided to delegate — artifact fit, fan-out batching, relay
+ * chains, and the orchestrator conduct rules. Injected on demand via
+ * wantsDelegationMechanics (mode build/plan or multi-topic signals).
  */
-export const MULTI_AGENT_PROTOCOL = `<multi_agent_protocol>
-Multi-agent delegation (decided by YOU from context — strongly recommended, not the user's call):
-At the START of a task, judge whether it is single-threaded or needs decomposition. Delegate to the subagents your tool list exposes (planner / producer / investigator / reviewer roles — whichever of those tools you actually have) when ANY of these holds:
-- T1 · role separation: the task needs ≥2 distinct functional perspectives (plan, produce, test/verify, review, research) and doing both yourself risks blind spots or self-review bias.
-- T2 · parallelizable: the task splits into ≥2 independent sub-blocks that can run at the same time (faster, and keeps each subagent's context fresh).
-- T3 · context isolation: the process or artifacts would flood the main session (long output, many intermediate files) — isolate them so the main loop stays clean and less hallucination-prone.
-Artifact fit: the review role (code_reviewer) is for CODE — source, scripts, configs. A non-code deliverable (document, slides, design, data file) needs no review agent: verify it yourself directly (open the document, render the slides, spot-check the data), and delegate only its production (research, drafting) when T2/T3 applies.
-Fan-out rule (T2 made concrete): when the task names N distinct subtopics ("分别研究 A、B、C") or decomposes into N independent investigations, issue all N delegations as tool calls in the SAME assistant message — one batch, N calls — so they run concurrently. Never fold independent subtopics into a single delegation "to keep it simple", and never run them one-by-one; one agent covering everything is the wrong shape. Merge the results only after every call has returned.
-Relay rule (dependent chains made declarative): when the task is a SERIAL CHAIN whose steps feed each other (research → plan → implement), do not round-trip each hop through your own context. Declare the whole chain in ONE batch with the reserved "relay" argument: the first call adds "relay": {"as": "<stage>"}; each dependent call adds "relay": {"from": {"<stage>": "<argument>"}} — the named argument receives that stage's full output verbatim. The runtime runs the chain in order and hands outputs over directly; a consumed stage's raw output is replaced by a one-line receipt in your transcript (its full text stays on the run's activity card), so the main session stays clean (T3). Use relay when the chain is known upfront; fall back to round-by-round delegations when a step's outcome would change what the next step should be.
-If you delegate: stay the orchestrator and the SINGLE voice that replies to the user (subagents work; they do not chat). Narrate the orchestration naturally and progressively, in the user's own language, like a colleague delegating inside a team: one sentence on the intent before the first hand-off, one as each helper starts or returns — what it is doing and why. Never recite a fixed role list, a "role → role" arrow chain, or canned delegation scripts; find your own words each time. Prefer running independent read-only roles in parallel. Scale effort to complexity: estimate the difficulty and decide how many subagents yourself — do NOT wait for the user to request it. If subagent conclusions conflict, surface the disagreement instead of silently choosing a side; a failing review/verification is a gate — fix and re-run before moving on.
-Exception (do NOT delegate): only a task that is single-line, short, can be described in one breath, and has no independent verification need. Otherwise lean toward delegation.
-</multi_agent_protocol>`;
-
-/**
- * 大头②（2026-10-14）— multi_agent 的常驻触发测试与按需机制段。
- *
- * 常驻：**什么时候该委派**（T1/T2/T3）、你是唯一对用户开口的人、独立只读角色
- * 并行、结论冲突要暴露、复核失败是门禁、以及「什么情况下不该委派」。按需：
- * 产物形态适配、fan-out 批量规则、relay 链表规则、叙述写法——这些只有在你真的
- * 委派出去时才用得上，随「像要拆成多块」的请求装配（mode 已是 build/plan，或
- * 请求里带多主题信号）。漏判的后果是多块任务委派得朴素（逐个串行、没有 relay），
- * 不是「不委派」——触发测试与例外条款常驻。
- *
- * 同样切片派生：CORE 与 MECHANICS 拼回原文逐字相等（测试锁）。
- */
-const MULTI_AGENT_MECHANICS_START = 'Artifact fit: ';
-const MULTI_AGENT_MECHANICS_END = 'Prefer running independent read-only roles in parallel.';
-const multiAgentMechanicsStart = MULTI_AGENT_PROTOCOL.indexOf(MULTI_AGENT_MECHANICS_START);
-const multiAgentMechanicsEnd = MULTI_AGENT_PROTOCOL.indexOf(MULTI_AGENT_MECHANICS_END);
-const multiAgentSplitValid = multiAgentMechanicsStart > 0 && multiAgentMechanicsEnd > multiAgentMechanicsStart;
-export const MULTI_AGENT_CORE = multiAgentSplitValid
-  ? MULTI_AGENT_PROTOCOL.slice(0, multiAgentMechanicsStart) + MULTI_AGENT_PROTOCOL.slice(multiAgentMechanicsEnd)
-  : MULTI_AGENT_PROTOCOL;
-export const MULTI_AGENT_MECHANICS = multiAgentSplitValid
-  ? MULTI_AGENT_PROTOCOL.slice(multiAgentMechanicsStart, multiAgentMechanicsEnd)
-  : '';
+export const MULTI_AGENT_MECHANICS_PROMPT = `<multi_agent_mechanics>
+Artifact fit: the review role (code_reviewer) is for CODE — source, scripts, configs. A non-code deliverable (document, slides, design, data file) needs no review agent: verify it yourself directly (open the document, render the slides, spot-check the data), and delegate only its production (research, drafting) when parallelism or context isolation applies.
+Fan-out rule: when the task names N distinct subtopics ("分别研究 A、B、C") or decomposes into N independent investigations, issue all N delegations as tool calls in the SAME assistant message — one batch, N calls — so they run concurrently. Never fold independent subtopics into a single delegation "to keep it simple", and never run them one-by-one; one agent covering everything is the wrong shape. Merge the results only after every call has returned.
+Relay rule (dependent chains made declarative): when the task is a SERIAL CHAIN whose steps feed each other (research → plan → implement), do not round-trip each hop through your own context. Declare the whole chain in ONE batch with the reserved "relay" argument: the first call adds "relay": {"as": "<stage>"}; each dependent call adds "relay": {"from": {"<stage>": "<argument>"}} — the named argument receives that stage's full output verbatim. The runtime runs the chain in order and hands outputs over directly; a consumed stage's raw output is replaced by a one-line receipt in your transcript (its full text stays on the run's activity card), so the main session stays clean. Use relay when the chain is known upfront; fall back to round-by-round delegations when a step's outcome would change what the next step should be.
+Orchestrator conduct: stay the orchestrator and the SINGLE voice that replies to the user (subagents work; they do not chat). Narrate the orchestration naturally and progressively, in the user's own language, like a colleague delegating inside a team: one sentence on the intent before the first hand-off, one as each helper starts or returns — what it is doing and why. Never recite a fixed role list, a "role → role" arrow chain, or canned delegation scripts; find your own words each time. Prefer running independent read-only roles in parallel. Scale effort to complexity: estimate the difficulty and decide how many subagents yourself — do NOT wait for the user to request it. If subagent conclusions conflict, surface the disagreement instead of silently choosing a side; a failing review/verification is a gate — fix and re-run before moving on.
+</multi_agent_mechanics>`;
 
 /** 委派机制段的闸门：复杂任务（路由已判 build/plan）或请求自带多主题信号。
- * 判据宽一点无害——多带一次是 2.4k 字符，少带一次是 fan-out 变逐个串行。 */
+ * 判据宽一点无害——多带一次是 2.4k 字符，少带一次是 fan-out 变逐个串行。
+ * 触发测试（何时该委派）不靠它：那已随 task_planner 的工具描述走，工具表
+ * 在 hasSubagents 时才暴露委派工具——闸门天然成立。 */
 export function wantsDelegationMechanics(prompt: string, complexTask: boolean): boolean {
   if (complexTask) return true;
   return /(?:分别|各自|并行|同时|多路|多个方向|几个方向|多个方案|几个方案|三个方面|三个方向|多条线|对比|调研|分工|多文件|多模块|多个子|每个方向)/i
@@ -526,20 +462,10 @@ export function wantsDelegationMechanics(prompt: string, complexTask: boolean): 
 }
 
 /**
- * Pre-commit review contract (L1 application layer). Gated on subagent
- * availability exactly like MULTI_AGENT_PROTOCOL — the rule delegates to the
- * code_reviewer subagent, so a turn with no subagents has no one to delegate
- * to and must not be told to. This is the quality gate that replaced the
- * per-commit permission prompt (git write tools are friction-free by product
- * decision, roadmap 3.3/3.4): commits stay one step, review rides along
- * automatically instead of a card interrupting the flow.
+ * The pre-commit review contract moved to git_commit's tool description
+ * (framework-reform phase 2): the rule is about THAT one tool call, so it
+ * belongs where the model looks when making it — not in an always-on block.
  */
-export const PRE_COMMIT_REVIEW_CONTRACT = `<pre_commit_review>
-Pre-commit review (automatic — your call to make, never wait for the user to ask): before the FIRST git_commit of a non-trivial change, delegate a one-shot review to the code_reviewer subagent with the pending scope (files changed + what the change is supposed to do), and read its verdict from the strict last line: VERDICT: PASS or VERDICT: FAIL.
-- FAIL: fix every blocking finding, then commit. Never commit while a blocking finding stands.
-- PASS, reviewer unavailable, or a trivial change (docs, comments, formatting, config/version bumps): commit right away, no ceremony.
-Review once per task, not once per commit. The verdict stays in the transcript: cite it in one natural line when you report the commit ("提交前 code_reviewer 过了一遍，PASS").
-</pre_commit_review>`;
 
 // The composed user turn is persisted in session history. Restore/display
 // paths (main.ts, chat.ts loadFromStorage) strip this block so the fragments

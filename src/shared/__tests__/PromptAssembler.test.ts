@@ -5,7 +5,8 @@ import {
   buildCliCapabilities,
   buildGuiCapabilities,
 } from '../PromptAssembler';
-import { composeUserTurn, FILE_TOOLS_CORE } from '../promptLayers';
+import { composeUserTurn } from '../promptLayers';
+import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
 import { VETERAN_FAST_EXPRESSION_PROMPT, VETERAN_FAST_LINES } from '../../character';
 
@@ -105,9 +106,10 @@ describe('output_style · 折叠长引用素材(details 卡)', () => {
     expect(system).toContain('ONE short plain sentence');
   });
 
-  it('shell 纪律进 FILE_TOOLS_CORE：省 token 的输出习惯 + 不整读回验', () => {
-    expect(FILE_TOOLS_CORE).toContain('Token discipline');
-    expect(FILE_TOOLS_CORE).toContain('do NOT re-read the whole file to "verify"');
+  it('shell 纪律进 execute_command 描述：省 token 的输出习惯 + 不整读回验（二期改载体）', () => {
+    const exec = BUILT_IN_TOOL_DEFS.find((t) => t.name === 'execute_command')?.description ?? '';
+    expect(exec).toContain('Token discipline');
+    expect(exec).toContain('do NOT re-read the whole file to verify');
   });
 });
 
@@ -133,10 +135,14 @@ describe('PromptAssembler', () => {
       capabilities: buildCliCapabilities(),
     });
 
-    for (const header of ['<agent_identity>', '<capabilities>', 'Output style:', 'Tool-calling rules:', 'Smart typo tolerance:', 'Logical traps & approach switching:', 'Capability-gap protocol:']) {
+    for (const header of ['<agent_identity>', '<capabilities>', 'Output style:', 'Tool-calling rules:']) {
       expect(gui.split(header).length - 1).toBe(1);
       expect(cli.split(header).length - 1).toBe(1);
     }
+    // 二期退役锁：capability-gap 常驻块两 surface 都不再回来（获取令改住
+    // search_agent_skills 工具描述，安装梯改按需）。
+    expect(gui).not.toContain('Capability-gap protocol:');
+    expect(cli).not.toContain('Capability-gap protocol:');
     expect(gui.indexOf('<agent_identity>')).toBeLessThan(gui.indexOf('<capabilities>'));
     // Mid-run insertion protocol is a REQUIRED stable-zone fragment on both
     // surfaces (2026-09-24 插话协议案例集): present exactly once, before the
@@ -275,23 +281,21 @@ describe('PromptAssembler', () => {
     expect(assembly).toContain('a &amp; b &lt; c');
   });
 
-  it('keeps the capability-gap protocol when budget allows, with install details on demand', () => {
+  it('phase-2: the resident capability-gap block is gone; only the install ladder rides on demand', () => {
     const assembly = assembler.buildSystemPrompt({ surface: 'cli', capabilities: 'test' });
-    // 大头①（2026-10-14）：常驻守门线永远在；安装路径梯只剩按需段——普通
-    // 请求不带（省量），装东西/缺能力的请求带（闸门放行）。
-    expect(assembly).toContain('Capability-gap protocol:');
-    expect(assembly).toContain('never refuse, pretend to have it, or invent results');
-    expect(assembly).toContain('~/.pure/skills/');
-    // 主动获取令（2026-10-16）常驻：普通请求（无闸门词）也要带「缺口=去拿」，
-    // 否则任务中途自己发现缺口时无协议可用。
-    expect(assembly).toContain('treat the missing capability as something to ACQUIRE');
-    expect(assembly).not.toContain('npx skills find');
+    // 常驻守门线随二期退役：拒绝禁令模型已内化，「缺口=去拿」改住
+    // search_agent_skills 的工具描述（载体锁在 promptLayers.test.ts）。
+    expect(assembly).not.toContain('Capability-gap protocol:');
+    expect(assembly).not.toContain('never refuse, pretend to have it, or invent results');
+    // 大头①（2026-10-14 → 二期收窄）：安装路径梯只对装东西/缺能力的请求在——
+    // 闸门放行时带全梯（含社区兜底路由），普通请求一个字都不付。
     const withLadder = assembler.buildSystemPrompt(
       { surface: 'cli', capabilities: 'test' },
       '帮我把 png 转成 webp，装一下需要的库',
     );
-    expect(withLadder).toContain('Capability-gap protocol:');
+    expect(withLadder).toContain('If nothing fits, INSTALL it yourself');
     expect(withLadder).toContain('npx skills find');
+    expect(withLadder).toContain('codeload.github.com');
   });
 
   it('tells the CLI to emit mermaid/puml and explains the wireframe rendering', () => {
@@ -539,53 +543,45 @@ describe('PromptAssembler', () => {
     expect(prompt).toContain('night strategy');
   });
 
-  it('injects the multi_agent + delivery_contract protocols when subagents are available', () => {
-    const assembly = assembler.assemble({
+  it('injects the multi_agent mechanics only when subagents AND a delegation-shaped request meet', () => {
+    const withBoth = assembler.assemble({
       surface: 'gui',
       capabilities: 'capabilities',
       hasSubagents: true,
     }, '造一个多文件的网页应用');
 
-    expect(assembly.budget.includedFragmentIds).toContain('multi_agent');
-    expect(assembly.budget.includedFragmentIds).toContain('delivery_contract');
-    expect(assembly.systemPrompt).toContain('<multi_agent_protocol>');
-    expect(assembly.systemPrompt).toContain('<delivery_contract>');
+    expect(withBoth.budget.includedFragmentIds).toContain('multi_agent_mechanics');
+    expect(withBoth.systemPrompt).toContain('<multi_agent_mechanics>');
+
+    // 委派工具不在场时机制段绝不注入（教学跟着工具走——没有工具可委派，
+    // 教了也是空转）。
+    const withoutSubagents = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      // hasSubagents unset = plain chat / no workspace → no subagent tools.
+    }, '造一个多文件的网页应用');
+
+    expect(withoutSubagents.budget.includedFragmentIds).not.toContain('multi_agent_mechanics');
+    expect(withoutSubagents.systemPrompt).not.toContain('<multi_agent_mechanics>');
   });
 
-  it('injects the pre-commit review contract only when subagents are available (3.4)', () => {
-    // The contract delegates to code_reviewer, so it rides the same gate as
-    // the multi-agent protocol: present with subagents, absent without.
-    const withSubagents = assembler.assemble({
+  it('phase-2 retirements: delivery_contract / pre_commit_review are no longer assembly fragments', () => {
+    // 交付契约与 pre-commit 审查常驻块随二期退役：前者三条规则各有更强载体
+    // （formatArtifactPrompt / execute_command 描述 / 收尾报告纪律），后者
+    // 搬进 git_commit 的工具描述——规则只关于那一次工具调用。
+    const assembly = assembler.assemble({
       surface: 'gui',
       capabilities: 'capabilities',
       hasSubagents: true,
     }, '改完记得提交');
 
-    expect(withSubagents.budget.includedFragmentIds).toContain('pre_commit_review');
-    expect(withSubagents.systemPrompt).toContain('<pre_commit_review>');
-    expect(withSubagents.systemPrompt).toContain('code_reviewer');
+    expect(assembly.budget.includedFragmentIds).not.toContain('delivery_contract');
+    expect(assembly.budget.includedFragmentIds).not.toContain('pre_commit_review');
+    expect(assembly.systemPrompt).not.toContain('<delivery_contract>');
+    expect(assembly.systemPrompt).not.toContain('<pre_commit_review>');
 
-    const withoutSubagents = assembler.assemble({
-      surface: 'gui',
-      capabilities: 'capabilities',
-      // hasSubagents unset = plain chat / no workspace → no subagent tools.
-    }, '2 + 2 = ?');
-
-    expect(withoutSubagents.budget.includedFragmentIds).not.toContain('pre_commit_review');
-    expect(withoutSubagents.systemPrompt).not.toContain('<pre_commit_review>');
-  });
-
-  it('omits the multi_agent protocol when no subagents are available, but keeps delivery_contract', () => {
-    const assembly = assembler.assemble({
-      surface: 'gui',
-      capabilities: 'capabilities',
-      // hasSubagents unset = plain chat / no workspace → no subagent tools.
-    }, '2 + 2 = ?');
-
-    expect(assembly.budget.includedFragmentIds).not.toContain('multi_agent');
-    expect(assembly.budget.includedFragmentIds).toContain('delivery_contract');
-    expect(assembly.systemPrompt).not.toContain('<multi_agent_protocol>');
-    expect(assembly.systemPrompt).toContain('<delivery_contract>');
+    const gitCommit = BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_commit')?.description ?? '';
+    expect(gitCommit).toContain('Pre-commit review (automatic');
   });
 
   it('omits low-priority fragments before required fragments when the model budget is tight', () => {
