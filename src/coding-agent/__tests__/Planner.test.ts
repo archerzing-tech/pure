@@ -18,25 +18,46 @@ describe('Planner', () => {
     expect(r.intent.requiresProbe).toBe(false);
   });
 
-  it('assesses destructive requests before execution', () => {
+  it('routes task-level destructive words to probe-and-proceed, not a confirmation pause', () => {
+    // 2026-11-01 用户判例 + 2026-09-17 定调落死：任务级破坏词（删除/清理/清空/
+    // 重置…）不再弹确认卡——指令本身就是授权，探针保留、动手照常。真机动因：
+    // 「能清理夏普电视吗」被「清理」二字拉进高危通道暂停整轮。
     const assessment = assessIntent('删除整个项目');
     expect(assessment.intent).toBe('delete');
-    expect(assessment.riskLevel).toBe('high');
-    expect(assessment.reversibility).toBe('irreversible');
+    expect(assessment.riskLevel).toBe('medium');
+    expect(assessment.reversibility).toBe('hard-to-reverse');
     expect(assessment.requiresProbe).toBe(true);
-    expect(assessment.requiresConfirmation).toBe(true);
+    expect(assessment.requiresConfirmation).toBe(false);
+    // plan mode keeps the probe-first discipline (read before deleting) without
+    // pausing the turn: analyzeTask marks it complex+plan, no safety stop.
     const result = new Planner().analyzeTask('删除整个项目');
     expect(result.mode).toBe('plan');
     expect(result.plan).toBeDefined();
+    // 真机原案：一句带 URL 的清理请求，不再暂停等待。
+    const sharp = assessIntent('https://github.com/Gathin23/cleanyourtv 能清理夏普电视吗');
+    expect([sharp.riskLevel, sharp.requiresConfirmation]).toEqual(['medium', false]);
+    expect(sharp.requiresProbe).toBe(true);
   });
 
-  it('flags the spoken and overwrite forms of destruction', () => {
-    // 2026-09-20: these used to pass as low risk even when spelled correctly —
-    // the floor only knew 删除/移除/清理/销毁/不可逆.
-    for (const draft of ['帮我把 build 目录清空', '删掉这些临时文件', '把缓存删了', '把 config.json 覆盖掉', '把数据库重置一下']) {
-      expect([draft, assessIntent(draft).riskLevel]).toEqual([draft, 'high']);
+  it('reserves the confirmation card for system-scale destruction only', () => {
+    // 「非常危险除外」的边界：命令级/库级毁灭形态（rm -rf / drop database /
+    // 删库 / force push / reset --hard）保留高危确认；口语破坏词一律探查通道。
+    for (const draft of ['用 rm -rf 清掉整个目录', '直接 drop database', '帮我删库', 'force push 到 main', 'git reset --hard 回退所有提交']) {
+      const verdict = assessIntent(draft);
+      expect([draft, verdict.riskLevel, verdict.requiresConfirmation]).toEqual([draft, 'high', true]);
     }
-    expect(assessIntent('删掉这些临时文件').requiresConfirmation).toBe(true);
+  });
+
+  it('flags the spoken and overwrite forms of destruction on the probe lane', () => {
+    // 2026-09-20: these used to pass as low risk even when spelled correctly —
+    // the floor only knew 删除/移除/清理/销毁/不可逆. 2026-11-01 起识别后不再
+    // 拦停：medium + probe + 自动动手（确认卡只留给操作级毁灭）。
+    for (const draft of ['帮我把 build 目录清空', '删掉这些临时文件', '把缓存删了', '把 config.json 覆盖掉', '把数据库重置一下']) {
+      const verdict = assessIntent(draft);
+      expect([draft, verdict.riskLevel]).toEqual([draft, 'medium']);
+      expect(verdict.requiresProbe).toBe(true);
+      expect(verdict.requiresConfirmation).toBe(false);
+    }
   });
 
   it('reads a question about how to reset as advice, not an order to delete', () => {
@@ -56,11 +77,13 @@ describe('Planner', () => {
     }
   });
 
-  it('keeps an imperative or permission-seeking destruction request in the high-risk lane', () => {
-    // 豁免只覆盖「问怎么做 / 问为什么」：命令式施动（把/帮我/给我 + 动作）与
-    // 句末征求许可（…可以吗）仍然留在高危通道上。
+  it('keeps imperative destruction on the probe lane; only command-scale stays high', () => {
+    // 问「怎么做」豁免不动；命令式施动（把/帮我/给我 + 动作）2026-11-01 起
+    // 走探查通道自动执行（medium、不确认），句末征求许可（…可以吗）同通道——
+    // 确认卡只留给上一条用例里的操作级毁灭形态。
     for (const draft of ['帮我把这个应用重置一下', '把缓存清掉吧', '帮我删掉这些临时文件', '给我把日志清理掉', '删除整个项目的文件，可以吗？']) {
-      expect([draft, assessIntent(draft).riskLevel]).toEqual([draft, 'high']);
+      const verdict = assessIntent(draft);
+      expect([draft, verdict.riskLevel, verdict.requiresConfirmation]).toEqual([draft, 'medium', false]);
     }
   });
 
@@ -92,11 +115,15 @@ describe('Planner', () => {
     expect(assessment.requiresConfirmation).toBe(false);
   });
 
-  it('formats the assessment as an execution contract', () => {
-    const text = formatIntentPrompt(assessIntent('删除整个项目'));
-    expect(text).toContain('<intent_assessment>');
-    expect(text).toContain('Do not broaden the change');
-    expect(text).toContain('wait for explicit user approval');
+  it('formats the assessment as an execution contract per lane', () => {
+    const confirmed = formatIntentPrompt(assessIntent('用 rm -rf 清掉整个目录'));
+    expect(confirmed).toContain('<intent_assessment>');
+    expect(confirmed).toContain('Do not broaden the change');
+    expect(confirmed).toContain('wait for explicit user approval');
+    // 探查级（任务级删除）不带 approval 字样，契约改为探查后直接动手。
+    const probe = formatIntentPrompt(assessIntent('删除整个项目'));
+    expect(probe).toContain('Proceed without pausing for approval');
+    expect(probe).not.toContain('wait for explicit user approval');
   });
 
   it('parses a semantic route without relying on local keyword rules', () => {

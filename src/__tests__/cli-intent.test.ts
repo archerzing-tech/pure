@@ -13,17 +13,21 @@ import {
   shouldProbeCliWorkspace,
 } from '../cliIntent';
 
-const highRisk = assessIntent('删除整个项目');
+const highRisk = assessIntent('用 rm -rf 清掉整个目录');
+const deletionTask = assessIntent('删除整个项目');
 const mediumRisk = assessIntent('把认证模块重构成新的实现');
 const lowRisk = assessIntent('解释这个文件的作用');
 
 describe('CLI proactive intent assessment', () => {
-  it('prints a visible high-risk summary instead of silently treating deletion as ordinary work', () => {
-    const output = formatCliIntentAssessment(highRisk);
-    expect(output).toContain('high risk');
-    expect(output).toContain('irreversible');
-    expect(output).toContain(highRisk.impact);
-    expect(output).toContain(highRisk.recommendation);
+  it('prints a visible risk summary for a deletion task instead of silently treating it as ordinary work', () => {
+    // 2026-11-01 分级：任务级删除走探查通道（medium），CLI 提示行照打但措辞
+    // 变为「探查后直接动手」，不再出现 high risk / approval 字样。
+    const output = formatCliIntentAssessment(deletionTask);
+    expect(output).toContain('medium risk');
+    expect(output).toContain('hard-to-reverse');
+    expect(output).toContain(deletionTask.impact);
+    expect(output).toContain(deletionTask.recommendation);
+    expect(output).not.toContain('high risk');
   });
 
   it('does not print a risk banner for a low-risk question', () => {
@@ -31,13 +35,20 @@ describe('CLI proactive intent assessment', () => {
   });
 
   it('keeps the high-risk approval instruction beside the CLI request in L2', () => {
-    const turn = composeCliIntentUserTurn('删除整个项目', highRisk, {
+    const turn = composeCliIntentUserTurn('用 rm -rf 清掉整个目录', highRisk, {
       contract: '<delivery_contract>inspect before changing</delivery_contract>',
     });
     expect((turn.match(/<intent_assessment>/g) ?? []).length).toBe(1);
     expect(turn).toContain('Risk: high');
     expect(turn).toContain('wait for explicit user approval');
     expect(turn).toContain('<delivery_contract>inspect before changing</delivery_contract>');
+    expect(turn.endsWith('用 rm -rf 清掉整个目录')).toBe(true);
+  });
+
+  it('deletion tasks reach L2 with the probe-and-proceed contract, no approval wording', () => {
+    const turn = composeCliIntentUserTurn('删除整个项目', deletionTask, {});
+    expect(turn).toContain('Risk: medium');
+    expect(turn).not.toContain('wait for explicit user approval');
     expect(turn.endsWith('删除整个项目')).toBe(true);
   });
 

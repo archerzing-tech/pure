@@ -78,7 +78,7 @@ Return ONLY one JSON object with this shape:
 - bash_executor — 跑命令、构建/验证（有真实命令要执行时）
 A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
 
-Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation only for an explicit destructive/irreversible action or a concrete safety boundary. Asking HOW is not asking you to DO it: "如何重置 X" / "怎么删掉 Y" / "how do I rotate the key" asks for a procedure, so classify it intent "question" with low risk and requiresConfirmation false even though the sentence names a destructive operation; reserve intent "delete" and requiresConfirmation for a request to perform that action now on a named target. Write "impact" as the concrete reasoning behind the safety decision rather than a category label — what this request would touch and why it cannot be undone (or why a probe comes first). The GUI shows impact verbatim as your assessment, so a label like "this is a delete request" tells the user nothing about why you stopped. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
+Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation ONLY for system-scale destruction (rm -rf, drop table/database, force push, reset --hard, wiping a whole database/system) or a concrete safety boundary — ordinary delete/clean/reset tasks on named targets do NOT need confirmation: probe read-only, list what will be touched, then proceed with a recoverable approach without pausing. Asking HOW is not asking you to DO it: "如何重置 X" / "怎么删掉 Y" / "how do I rotate the key" asks for a procedure, so classify it intent "question" with low risk and requiresConfirmation false even though the sentence names a destructive operation; reserve intent "delete" and requiresConfirmation for a request to perform that action now on a named target. Write "impact" as the concrete reasoning behind the safety decision rather than a category label — what this request would touch and why it cannot be undone (or why a probe comes first). The GUI shows impact verbatim as your assessment, so a label like "this is a delete request" tells the user nothing about why you stopped. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
 
 /** 只有非常短、明显是客套/承接语（不含任何实质任务内容）时才跳过语义路由。
  * 其余一律交给语义路由去理解“完整语句 + 对话上下文”，而不是用一张“动作词关键词
@@ -793,10 +793,15 @@ export class Planner {
     const traps = this.detectTraps(prompt);
     const intent = assessIntent(prompt);
     const needsSafetyPlan = intent.requiresConfirmation;
-    const complexity: TaskComplexity = intent.riskLevel === 'medium' ? 'complex' : heuristicComplexity;
+    // medium→complex 只服务 refactor/migration（波及面真的广）；删除类任务
+    // 保持启发式复杂度（删几个文件不是复杂任务），但保留 plan mode——先出
+    // 计划就是先探查列对象（2026-11-01 分级：删除不再暂停等确认，探针纪律
+    // 由计划承载）。
+    const complexity: TaskComplexity = intent.riskLevel === 'medium' && intent.intent !== 'delete' ? 'complex' : heuristicComplexity;
+    const needsPlan = needsSafetyPlan || intent.intent === 'delete';
 
-    if (complexity === 'complex' || needsSafetyPlan) {
-      const mode: TaskMode = needsSafetyPlan || intent.riskLevel === 'medium' ? 'plan' : this.detectMode(prompt, complexity);
+    if (complexity === 'complex' || needsPlan) {
+      const mode: TaskMode = needsPlan || intent.riskLevel === 'medium' ? 'plan' : this.detectMode(prompt, complexity);
       return {
         complexity,
         // Build intent ("写一个小游戏", "搭建全栈项目") switches the agent into
@@ -1139,63 +1144,81 @@ export function assessIntent(prompt: string): IntentAssessment {
   const text = prompt.trim();
   const lower = text.toLowerCase();
   const chinese = /[\u4e00-\u9fff]/.test(text);
-  // 破坏性说法（高危档）。2026-09-20 扩展：口语化的「删了 / 删掉」、清空、重置、
-  // 覆盖此前完全不在底线里——拼对也拦不住，比错字更糟（错字至少还能靠别名表展开
-  // 补上）。三个负向断言是刻意的，它们把同一个词在工程语境里的良性用法挡在外面：
-  // 清空输入框（UI 行为）、重置密码 / 重置按钮（功能需求）、覆盖率 / 覆盖测试（不是
-  // 覆写）。误判的代价不只是一次确认：CLI 会把整轮的自动批准关掉
-  // （cliRepl.ts 的 applyCliIntentPermission），所以这条底线宁窄勿宽——宁可漏掉
-  // 一个含糊说法，也不把日常请求拉进高危通道。
-  // 2026-10-14 再收窄一档：问「怎么做」不是「让你动手做」。以前只挡住紧跟在
-  // 「重置」后面的名词（重置密码），「你帮我看下如何重置」「怎么才能清空缓存」这类
-  // 求助句里的破坏词仍算高危——代价不是多问一句，而是确认卡把一句提问读成了删除
-  // 指令（卡片上还写着「我判断这是一次删除请求」）。判据分强弱两档：方式/可行性
-  // 疑问（如何、怎么、为什么…）本身就是求一段说明，直接豁免。这里刻意只豁免
-  // 「问方法 / 问原因」：句末的「可以吗 / 好吗」（"删除整个项目的文件，可以吗？"）
-  // 是在征求执行的许可，不是问怎么做，仍然留在高危通道上（保住那条既有判例：
-  // 破坏性措辞一律交给语义路由/确认通道，本地不自己拍低）。
+  // 语义路由不可用时的关键词兜底。2026-09-20：口语化破坏词（删了/删掉/清空/
+  // 重置/覆盖）纳入识别；三个负向断言把工程语境的良性用法挡在外面（清空输入
+  // 框、重置密码/按钮、覆盖率/覆盖测试）。2026-10-14：问「怎么做」不是「让你
+  // 动手做」（askingHow 豁免），句末「可以吗」仍是征求执行许可（不豁免）。
+  // 2026-11-01：识别到不再等于拦停——分级见下方正则处注释。
   const mannerQuestion = /(?:如何|怎么|怎样|咋(?:办|样)|为什么|求(?:教|助)|请教|请问|该怎么|要怎么做|能否|能不能|可不可以|how\s+(?:do|can|should|to|would)|why|can\s+i|could\s+i|should\s+i|what'?s\s+the\s+way)/i.test(lower);
   const askingHow = mannerQuestion;
-  const destructiveHit = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉)|删库|删表|清库|清表|不可逆|drop\s+(?:table|database)|destroy|rm\s+-rf|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire))/i.exec(lower)?.[0];
-  const destructive = Boolean(destructiveHit) && !askingHow;
+  // 2026-11-01 用户判例 + 2026-09-17 定调落死：破坏词拆两级。
+  //
+  // 任务级动词（删除/清理/清空/重置/覆盖…）不再弹确认卡——用户的指令本身就
+  // 是授权；兜底只保留探针纪律（先只读探查、列出会动到的对象），然后模型直接
+  // 动手，优先可恢复方式。直接动因：真机「能清理夏普电视吗（cleanyourtv）」
+  // 被「清理」二字拉进高危通道暂停整轮等确认，模型连探查计划都列完了还在等。
+  //
+  // 操作级毁灭形态（rm -rf / drop database / 删库 / force push / reset --hard
+  // …）是定调里唯一的例外（「非常危险除外」），保留确认卡。
+  //
+  // 历史判例仍有效：2026-09-20 口语化破坏词（删了/删掉/清空/重置/覆盖）要能
+  // 识别（只是降级不再拦人）；三个负向断言把良性工程语境挡在外面（清空输入
+  // 框、重置密码/按钮、覆盖率/覆盖测试）；2026-10-14 问「怎么做」不是让人
+  // 动手（askingHow 豁免），句末「可以吗」仍是征求执行许可（不豁免）。
+  const COMMAND_DESTRUCTIVE_RE = /(?:rm\s+-rf|drop\s+(?:table|database)|删库|清库|删表|清表|reset\s+--hard|force\s+push|delete\s+(?:all|the|entire)|remove\s+(?:all|the|entire)|不可逆)/i;
+  const TASK_DESTRUCTIVE_RE = /(?:删除|移除|清理|清空(?!输入框)|清掉|抹掉|销毁|destroy|重置(?!密码|按钮|表单|输入|选项|筛选)|覆盖(?!率|测试|范围|报告|度|统计|场景)|删(?:了|掉))/i;
+  const commandHit = COMMAND_DESTRUCTIVE_RE.exec(lower)?.[0];
+  const taskHit = TASK_DESTRUCTIVE_RE.exec(lower)?.[0];
+  const destructive = Boolean(commandHit || taskHit) && !askingHow;
   const migration = /(?:迁移|升级依赖|替换底层|切换框架|schema|database migration|migrat|upgrade dependencies|breaking change)/i.test(lower);
   const refactor = /(?:重构|重写|大规模修改|全量修改|refactor|rewrite|rewrite the whole|across the project)/i.test(lower);
-  const riskLevel: IntentAssessment['riskLevel'] = destructive ? 'high' : migration || refactor ? 'medium' : 'low';
+  const riskLevel: IntentAssessment['riskLevel'] = destructive
+    ? (commandHit ? 'high' : 'medium')
+    : migration || refactor ? 'medium' : 'low';
   const intent: RequestIntent = destructive ? 'delete' : migration ? 'migrate' : refactor ? 'refactor' : 'question';
   const reversibility: IntentAssessment['reversibility'] = destructive
-    ? 'irreversible'
+    ? (commandHit ? 'irreversible' : 'hard-to-reverse')
     : migration
       ? 'hard-to-reverse'
       : refactor
         ? 'partially-reversible'
         : 'reversible';
   const requiresProbe = riskLevel !== 'low';
-  const requiresConfirmation = riskLevel === 'high';
+  // 确认卡只挂在操作级毁灭上（2026-09-17 定调：默认自动允许，非常危险除外）。
+  const requiresConfirmation = destructive && Boolean(commandHit);
   // impact 是被卡片直接展示给用户的那句话（见 ui/assessmentFlow.ts）——它要讲清
   // 「这次请求会动到什么」，而不是给请求贴一个类别。带上命中的那个词，用户才看
   // 得出判断是怎么来的。
   const impact = chinese
-    ? (destructive
-      ? `请求里有「${destructiveHit}」这类动作：它会删掉或覆盖现有的数据、配置或文件，往往不可恢复，所以先把会动到的对象列清楚。`
-      : riskLevel === 'medium'
-        ? '改动可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
-        : '不根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
-    : (destructive
-      ? `The request contains "${destructiveHit}", which deletes or overwrites existing data, config, or files and usually cannot be undone — so list what it would touch first.`
-      : riskLevel === 'medium'
-        ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
-        : 'No task type is inferred from keywords; semantic routing will use the complete request.');
+    ? (commandHit
+      ? `请求里有「${commandHit}」这类毁灭性操作（数据/库/系统级，基本无法恢复）：先把会动到的对象列清楚，等你确认后再动手。`
+      : destructive
+        ? `请求里有「${taskHit}」这类删除动作：先只读探查、把会动到的对象列出来，然后直接动手，优先用可恢复的方式，不必停下来等确认。`
+        : riskLevel === 'medium'
+          ? '改动可能波及现有模块、依赖关系或行为，先读取真实结构再决定改动。'
+          : '不根据关键词假定任务类型；由语义路由结合完整请求决定处理方式。')
+    : (commandHit
+      ? `The request contains "${commandHit}", a system-scale destructive operation that cannot practically be undone — list what it would touch first and wait for approval.`
+      : destructive
+        ? `The request contains "${taskHit}", which deletes existing data or files: probe read-only, list what it would touch, then proceed directly with a recoverable approach — no confirmation pause.`
+        : riskLevel === 'medium'
+          ? 'This may affect existing modules, dependencies, or behavior; inspect the real structure before changing it.'
+          : 'No task type is inferred from keywords; semantic routing will use the complete request.');
   const recommendation = chinese
-    ? (destructive
+    ? (commandHit
       ? '先做只读检查并列出受影响对象，给出可恢复或更窄的替代方案，确认后再动手。'
-      : riskLevel === 'medium'
-        ? '先做最小只读探针，再按小步修改并立即验证。'
-        : '先由语义理解确定用户要得到的结果；如果只是建议或解释，直接回答，不要擅自修改文件。')
-    : (destructive
+      : destructive
+        ? '先只读检查并列出受影响对象，然后继续执行，不要停下来等确认；优先窄范围、可回退的做法。'
+        : riskLevel === 'medium'
+          ? '先做最小只读探针，再按小步修改并立即验证。'
+          : '先由语义理解确定用户要得到的结果；如果只是建议或解释，直接回答，不要擅自修改文件。')
+    : (commandHit
       ? 'Inspect read-only first, list affected targets, propose a recoverable or narrower alternative, then ask for approval.'
-      : riskLevel === 'medium'
-        ? 'Run a minimal read-only probe, then make a small change and verify it.'
-        : 'Use semantic understanding of the complete request; if it asks for advice or explanation, answer directly instead of editing files.');
+      : destructive
+        ? 'Inspect read-only, list affected targets, then continue without waiting for approval; prefer narrow, reversible steps.'
+        : riskLevel === 'medium'
+          ? 'Run a minimal read-only probe, then make a small change and verify it.'
+          : 'Use semantic understanding of the complete request; if it asks for advice or explanation, answer directly instead of editing files.');
   return {
     intent,
     riskLevel,
@@ -1211,7 +1234,12 @@ export function assessIntent(prompt: string): IntentAssessment {
 }
 
 export function formatIntentPrompt(assessment: IntentAssessment): string {
-  return `<intent_assessment>\nIntent: ${assessment.intent}\nRisk: ${assessment.riskLevel}\nReversibility: ${assessment.reversibility}\nImpact: ${assessment.impact}\nRecommended approach: ${assessment.recommendation}\nBefore acting, follow this assessment. If a read-only probe can reduce uncertainty, do that first. Do not broaden the change beyond the confirmed impact. If the operation is high risk, wait for explicit user approval before any write or destructive command.\n</intent_assessment>`;
+  // 尾句按通道分支（2026-11-01 分级）：确认卡级保留 approval 指令；探查级
+  // 的契约是「探查后直接动手」，approval 字样会产生自相矛盾的信号。
+  const closing = assessment.requiresConfirmation
+    ? 'If the operation is high risk, wait for explicit user approval before any write or destructive command.'
+    : 'Proceed without pausing for approval; if you discover the operation reaches system-scale destruction, stop and ask first.';
+  return `<intent_assessment>\nIntent: ${assessment.intent}\nRisk: ${assessment.riskLevel}\nReversibility: ${assessment.reversibility}\nImpact: ${assessment.impact}\nRecommended approach: ${assessment.recommendation}\nBefore acting, follow this assessment. If a read-only probe can reduce uncertainty, do that first. Do not broaden the change beyond the assessed impact. ${closing}\n</intent_assessment>`;
 }
 
 export function formatTrapPrompt(traps: TrapWarning[]): string {
