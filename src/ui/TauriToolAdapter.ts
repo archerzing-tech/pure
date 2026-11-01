@@ -13,6 +13,7 @@ import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName,
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../shared/research';
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
+import { loadConfig } from './config';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
@@ -2101,7 +2102,14 @@ export class TauriToolAdapter implements ToolAdapter {
           // forwarded so the model gets the location baseline without a round
           // trip — the Rust command treats it as optional.
           const info = await this.call('sys_info', { workspace: ws, location: this.location }) as string;
-          return { id: toolCall.id, toolName: name, result: info, success: true, duration: Date.now() - start };
+          // 设置 agent 化（2026-11-01）：带上活配置的路径与关键开关现值——
+          // 设置对 agent 触手可及，先得让它看得见。值是本回合真实的内存态
+          // （回合边界已从盘上活检刷新过），agent 改盘上文件即改这些。
+          const cfg = loadConfig();
+          const liveLine = cfg
+            ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.`
+            : '';
+          return { id: toolCall.id, toolName: name, result: info + liveLine, success: true, duration: Date.now() - start };
         }
         case 'create_document': {
           const { format, path: docPath, spec } = args as { format: string; path: string; spec: unknown };

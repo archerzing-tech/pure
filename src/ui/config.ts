@@ -531,16 +531,69 @@ export function invalidateConfigCache(): void {
   configCache = undefined;
 }
 
+/** 盘上 config.json 的 GUI 已知快照（设置 agent 化，2026-11-01 定调：设置对
+ *  agent 触手可及）：initConfigFile 镜像时、每次合并保存后更新。persistConfig
+ *  靠它做字段级 diff——GUI 没动而盘上动了的字段（agent 改的设置）在保存时
+ *  存活，不被面板的全量副本覆盖。 */
+let diskSnapshot: PureConfig | null = null;
+
+/**
+ * 字段级合并（纯函数）：GUI 面板要保存的完整配置（incoming）与盘上当前
+ * 内容（disk）在「GUI 已知快照」（known）的见证下合并。
+ * - 盘上没动过（disk === known）→ GUI 值：正常面板保存。
+ * - GUI 没动、盘上动了 → 盘上值：agent/手改的设置存活，不被 clobber。
+ * - 两边都动了 → 盘上值：真实源赢；GUI 下一次 loadConfig 会看到合并结果。
+ * 嵌套对象（mcpServers / providerOverrides / hubSkills…）整体比较不做深
+ * 合并：局部深合并会让「agent 删掉一个 server」被 GUI 的旧列表救回来。
+ */
+export function mergeConfigPreservingDisk<T extends object>(
+  incoming: T,
+  disk: T | null | undefined,
+  known: T | null | undefined,
+): T {
+  if (!disk || !known) return incoming;
+  const changed = (a: unknown, b: unknown): boolean => JSON.stringify(a) !== JSON.stringify(b);
+  const out: Record<string, unknown> = { ...(incoming as Record<string, unknown>) };
+  const d = disk as Record<string, unknown>;
+  const k = known as Record<string, unknown>;
+  // 先尊重「盘上删除」：known 有而 disk 没有的键 = agent/手改把它删了，
+  // 不许被 GUI 的陈旧副本复活（只遍历 disk 键的合并看不见删除）。
+  for (const key of Object.keys(k)) {
+    if (DISK_NEVER_WINS.has(key as keyof PureConfig)) continue;
+    if (!(key in d)) delete out[key];
+  }
+  for (const key of Object.keys(d)) {
+    if (DISK_NEVER_WINS.has(key as keyof PureConfig)) continue;
+    if (!(key in incoming)) {
+      // 盘上有而 GUI 副本没有的键（agent 新增/降级迁移遗留）：保留盘上值。
+      out[key] = d[key];
+      continue;
+    }
+    if (changed(d[key], k[key])) out[key] = d[key];
+    // 其余情况保持 incoming 值（GUI 改动的字段赢或双方都没动）。
+  }
+  return out as T;
+}
+
 /** Fire-and-forget write of the config to ~/.pure/config.json (desktop). The
  * WebView mirrors the file into localStorage at startup and writes it back on
  * every save, so a user who hand-edits config.json sees the change after the
- * next launch. Secrets are never in this object — autoSave scrubs them first. */
+ * next launch.
+ * 设置 agent 化（2026-11-01）：写盘前先读盘合并（mergeConfigPreservingDisk）
+ * ——agent 改过且 GUI 面板没碰的字段存活，面板保存不再是全量覆盖写。
+ * Secrets are never in this object — autoSave scrubs them first；apiKey 不参
+ * 与盘上赢面（防止把文件里的明文密钥合并复活）。 */
+const DISK_NEVER_WINS = new Set<keyof PureConfig>(['apiKey']);
+
 async function saveConfigToRust(cfg: PureConfig): Promise<void> {
   if (!isTauriRuntime()) return;
   const core = await loadTauriCore();
   if (!core) return;
   try {
-    await core.invoke('save_config', { config: cfg });
+    const disk = await core.invoke<unknown>('load_config').catch(() => null) as PureConfig | null;
+    const merged = mergeConfigPreservingDisk(cfg, disk, diskSnapshot);
+    await core.invoke('save_config', { config: merged });
+    diskSnapshot = merged;
   } catch (e) {
     console.warn('[pure] failed to save config file:', e);
   }
@@ -592,11 +645,14 @@ export async function initConfigFile(): Promise<void> {
     if (fileCfg != null) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(fileCfg));
       invalidateConfigCache();
+      diskSnapshot = fileCfg as PureConfig;
     } else {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         try {
-          await core.invoke('save_config', { config: JSON.parse(raw) });
+          const parsed = JSON.parse(raw) as PureConfig;
+          await core.invoke('save_config', { config: parsed });
+          diskSnapshot = parsed;
         } catch (err) {
           console.warn('[pure] failed to seed config file from localStorage:', err);
         }
@@ -610,8 +666,30 @@ export async function initConfigFile(): Promise<void> {
   syncTlsVerifyToRust(loadConfig() ?? defaults());
 }
 
-export function loadConfig(): PureConfig | null {
-  if (configCache !== undefined) {
+/**
+ * 回合边界活检（设置 agent 化，2026-11-01）：盘上 config.json 被 agent/手改
+ * 过（与已知快照不符）就重新 mirror 进 localStorage 并失效缓存——本回合
+ * 装配读到的就是新值，热生效，不用重启。每个用户回合开头调一次；返回是
+ * 否发生了变化。known 快照为 null（init 尚未跑过）时保守直接采纳盘上值。
+ */
+export async function refreshConfigFromFile(): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  const core = await loadTauriCore();
+  if (!core) return false;
+  try {
+    const fileCfg = await core.invoke<unknown>('load_config') as PureConfig | null;
+    if (fileCfg == null) return false;
+    if (diskSnapshot !== null && JSON.stringify(fileCfg) === JSON.stringify(diskSnapshot)) return false;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(fileCfg));
+    diskSnapshot = fileCfg;
+    invalidateConfigCache();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadConfig(): PureConfig | null {  if (configCache !== undefined) {
     return configCache === null ? null : { ...configCache };
   }
   const params = new URLSearchParams(window.location.search);

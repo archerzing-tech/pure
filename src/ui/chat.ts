@@ -2,7 +2,7 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, refreshConfigFromFile, type PureConfig } from './config';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
@@ -4227,6 +4227,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
+    // 设置 agent 化（2026-11-01）：回合边界活检盘上 config.json——agent 上一
+    // 回合用文件工具改的设置，本回合装配就生效（热生效，不重启）。
+    await refreshConfigFromFile();
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
     // A fresh turn's signals supersede any that were never consumed (defensive;
