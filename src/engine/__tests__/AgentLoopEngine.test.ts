@@ -1918,6 +1918,93 @@ describe('AgentLoopEngine', () => {
     expect(interrupted!.payload.reason).toContain('consecutive failures');
   });
 
+  it('四期 4a 强制 skip：隔离后的同参重发被引擎拒绝，第 3 次拒绝兜底交还', async () => {
+    const engine = new AgentLoopEngine();
+    // 8 轮模型都发同一个调用（同工具同参）：前 5 轮真执行并失败（阶梯走到
+    // 隔离），第 6-8 轮的重发由引擎合成拒绝——工具不再被碰，第 3 次拒绝
+    // 兜底停（旧口径这里是无隔离的 stop-at-8 空转）。
+    const ctx = baseCtx({
+      llm: multiRoundLLM(
+        Array.from({ length: 8 }, () => ({ toolName: 'read_file', toolArgs: '{"path":"blocked.txt"}' })),
+        'final',
+      ),
+      tools: failToolAdapter([READ_FILE_TOOL], 'read_file'),
+      toolsDefs: [READ_FILE_TOOL],
+      failurePolicy: new DefaultFailurePolicy(),
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-quarantine', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    const refusals = events.filter(e => e.type === 'ToolResult')
+      .filter(e => String(e.payload.result.result).includes('Refused by failure policy'));
+    expect(refusals).toHaveLength(3);
+    // 拒绝结果带完整指引进 transcript（模型要知道怎么绕）。
+    expect(String(refusals[0].payload.result.result)).toContain('workable alternative');
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reasonCode).toBe('failure_policy_stop');
+    expect(interrupted!.payload.reason).toContain('quarantined calls');
+  });
+
+  it('四期 4a 分型账本：混合轮的失败带 roundHadSuccess，纯失败轮不带', async () => {
+    const engine = new AgentLoopEngine();
+    // 第 1 轮：一次成功 + 一次失败（混合轮）→ 失败入账带 roundHadSuccess。
+    // 第 2 轮：纯失败 → 不带。用 policy 桩捕获 decide 收到的账本。
+    const seen: Array<Array<{ roundHadSuccess?: boolean }>> = [];
+    const policy = {
+      decide: (failures: Array<{ type: string; message: string; turnNumber: number; roundHadSuccess?: boolean }>) => {
+        seen.push(failures.map(f => ({ roundHadSuccess: f.roundHadSuccess })));
+        return { kind: 'retry' as const, hint: 'continue' };
+      },
+    };
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const fail: ToolCall = { id: 'call_bad', index: 0, function: { name: 'read_file', arguments: '{"path":"bad.txt"}' } };
+          const ok: ToolCall = { id: 'call_ok', index: 1, function: { name: 'read_file', arguments: '{"path":"good.txt"}' } };
+          yield { type: 'tool_call_delta', index: 0, name: 'read_file', arguments: '{"path":"bad.txt"}' };
+          yield { type: 'tool_call_delta', index: 1, name: 'read_file', arguments: '{"path":"good.txt"}' };
+          yield { type: 'done', content: '', toolCalls: [fail, ok] };
+        } else if (round === 2) {
+          const fail2: ToolCall = { id: 'call_bad2', index: 0, function: { name: 'read_file', arguments: '{"path":"worse.txt"}' } };
+          yield { type: 'tool_call_delta', index: 0, name: 'read_file', arguments: '{"path":"worse.txt"}' };
+          yield { type: 'done', content: '', toolCalls: [fail2] };
+        } else {
+          yield { type: 'content', content: 'done' };
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    let execCalls = 0;
+    const tools: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        execCalls++;
+        const bad = tc.function.arguments.includes('good') === false;
+        return { id: tc.id, toolName: tc.function.name, result: 'file body', error: bad ? 'nope' : undefined, success: !bad, duration: 1 };
+      },
+      getMetadata: () => undefined,
+      getTools: () => [READ_FILE_TOOL],
+    };
+    const ctx = baseCtx({ llm, tools, toolsDefs: [READ_FILE_TOOL], failurePolicy: policy as unknown as EngineContext['failurePolicy'] });
+
+    await collect(engine.run(
+      { sessionId: 's-mixed-round', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // 第一次 decide：混合轮那条失败带 roundHadSuccess=true；第二次 decide
+    // 的账本里追加的纯失败轮条目不带（缺省 undefined）。
+    expect(seen.length).toBe(2);
+    expect(seen[0]).toEqual([{ roundHadSuccess: true }]);
+    expect(seen[1]).toEqual([{ roundHadSuccess: true }, { roundHadSuccess: undefined }]);
+  });
+
   // ═══ Consecutive-identical dedupe (same round) ═══
   // A parallel batch containing the very same call twice used to execute both
   // copies: the dedupe cursor only covered the PREVIOUS round's last call, so

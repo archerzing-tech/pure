@@ -56,7 +56,19 @@ function isEditMismatch(failure: FailureRecord): boolean {
  *   alternative, CONTINUE the task (a hard stop here aborted multi-step work
  *   over one non-critical failing call — e.g. a website build dying on a
  *   blocked resource download)
- * - same error repeated 5× → stop (it kept failing even after the directive)
+ * - same error repeated 3-4× → degrade: SKIP the failing call, take a workable
+ *   alternative, CONTINUE the task (a hard stop here aborted multi-step work
+ *   over one non-critical failing call — e.g. a website build dying on a
+ *   blocked resource download)
+ * - same error repeated 5× → degrade + QUARANTINE (v0.13, framework-reform 4a):
+ *   the engine mechanically refuses further identical calls (same tool + same
+ *   args) for the rest of the turn — a directive the model kept ignoring
+ *   becomes an enforced skip. Refusals stay out of the failure ledger, so the
+ *   ladder does not grind on them; a third refusal hands the turn back.
+ *   llm_error is the carve-out: an LLM request has no skippable call (the
+ *   engine assembles the payload; the model cannot route around it) — 5
+ *   identical repeats stop deterministically, as before.
+ * - same error repeated 8× with *different* args each time → stop backstop.
  */
 function repeatKey(f: FailureRecord): string {
   // toolName separates "web_fetch failed on URL A" from "read_file failed";
@@ -76,7 +88,15 @@ export class DefaultFailurePolicy implements FailurePolicy {
     }
 
     const last = failures[failures.length - 1];
-    const count = failures.length;
+    // ── 分型阶梯（framework-reform 4a）──
+    // 通用 count 阶梯只数「与最近失败同类型、且来自纯失败轮」的记录：
+    // ① 混账过去把 2 条工具错误 + 2 条验证失败凑成「4 连败」的假象——
+    //    tool/llm/verify 各走各的阶梯，互不凑数；
+    // ② 部分成功轮的失败（roundHadSuccess）不喂通用阶梯——轮里有真实
+    //    成功就证明基础设施活着，与 Harness transient 豁免同尺（同调用
+    //    后来成功 = 瞬时故障）。重复/类环检测器不洗：同一调用跨轮硬试
+    //    仍是死路，环检测照旧全量计数。
+    const sameTypeCount = failures.filter(f => f.type === last.type && !f.roundHadSuccess).length;
 
     // ── Repeated-identical-error detection (v0.11) ──
     const repeats = failures.filter(f => repeatKey(f) === repeatKey(last)).length;
@@ -136,12 +156,34 @@ export class DefaultFailurePolicy implements FailurePolicy {
     }
 
     // Same call failed 5+ times with the same error: it kept failing even
-    // after the skip-it directive below — a genuine stuck loop. Stop instead
-    // of grinding toward the generic 6-failure ceiling.
-    if (repeats >= 5) {
+    // after the skip-it directive below — words alone stopped working, so the
+    // engine takes over mechanically (framework-reform 4a, 强制 skip): the
+    // identical call (same tool + same args) is quarantined and refused for
+    // the rest of the turn while the ladder itself stays open — the model
+    // keeps the turn and must route around the dead call. ≥8 with the same
+    // message but *escaping* args (refusals don't count here) is the stop
+    // backstop for a pathological loop.
+    if (repeats >= 8) {
       return {
         kind: 'stop',
-        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again. Please review and provide guidance.`,
+        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". Even after the engine started refusing the quarantined call, the same dead-end kept being hit with slightly different arguments. Stopping here rather than grinding on. Please review and provide guidance.`,
+      };
+    }
+    if (repeats >= 5) {
+      // LLM 请求没有「可跳过的调用」——payload 由引擎拼装，模型没有换法
+      // 的自由度（2026-10-30 流超时判例同源）：5 连败即确定性止损，注入
+      // 换法指令改变不了什么，只会白烧 3 轮。工具调用才有绕路空间，走
+      // 隔离强制 skip，把回合留给模型路由。
+      if (last.type === 'llm_error') {
+        return {
+          kind: 'stop',
+          reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again. Please review and provide guidance.`,
+        };
+      }
+      return {
+        kind: 'degrade',
+        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call (same tool, same arguments) is now QUARANTINED — the engine will refuse to execute it again this turn. Do not re-issue it; take a workable alternative that still serves the user's goal (a different source or tool, inline or substitute the content, or omit this step) and CONTINUE the task. Three refused attempts hand the turn back to the user.${webHint}`,
+        quarantineLastCall: true,
       };
     }
 
@@ -190,47 +232,48 @@ export class DefaultFailurePolicy implements FailurePolicy {
       };
     }
 
-    if (count <= 2) {
+    if (sameTypeCount <= 2) {
       // 2nd failure = the first round of testing already failed → prime the
       // model to consider that the REQUEST may be the trap, not its execution.
-      const trapNote = count === 2 ? TRAP_ESCAPE_HINT : '';
+      const trapNote = sameTypeCount === 2 ? TRAP_ESCAPE_HINT : '';
       return {
         kind: 'retry',
-        hint: `Attempt ${count}: ${last.message}. ${isEditMismatch(last) ? 'Re-read the current file before making any further edit.' : 'Please retry with a simpler approach.'}${webHint}${editHint}${trapNote}`,
+        // 钳到 1：全混合轮（sameTypeCount=0）不该给模型看 "Attempt 0"。
+        hint: `Attempt ${Math.max(1, sameTypeCount)}: ${last.message}. ${isEditMismatch(last) ? 'Re-read the current file before making any further edit.' : 'Please retry with a simpler approach.'}${webHint}${editHint}${trapNote}`,
       };
     }
 
-    if (count <= 4) {
+    if (sameTypeCount <= 4) {
       const toolHints = failures
         .filter(f => f.toolName)
         .map(f => f.toolName)
         .join(', ');
       return {
         kind: 'reflect',
-        hint: `${count} consecutive failures${toolHints ? ' involving ' + toolHints : ''}. ` +
+        hint: `${sameTypeCount} consecutive failures${toolHints ? ' involving ' + toolHints : ''}. ` +
           `Last error: ${last.message}. Reflect deeply on what went wrong and try a fundamentally different approach.${webHint}${editHint}${TRAP_ESCAPE_HINT}`,
       };
     }
 
-    // count >= 5 → salvage ladder: degrade with escalating directives. The
-    // model gets salvage turns at 5 AND 6-7 (the second one forbids every
+    // sameTypeCount >= 5 → salvage ladder: degrade with escalating directives.
+    // The model gets salvage turns at 5 AND 6-7 (the second one forbids every
     // failing path outright) — a hard stop fires only at 8, when even
     // "deliver with what you have" kept failing.
-    if (count >= 8) {
+    if (sameTypeCount >= 8) {
       return {
         kind: 'stop',
-        reason: `${count} consecutive failures. Last: ${last.message}. Salvage mode could not complete a delivery — stopping here. Please review and provide guidance.`,
+        reason: `${sameTypeCount} consecutive failures. Last: ${last.message}. Salvage mode could not complete a delivery — stopping here. Please review and provide guidance.`,
       };
     }
-    if (count >= 6) {
+    if (sameTypeCount >= 6) {
       return {
         kind: 'degrade',
-        reason: `${count} consecutive failures (last: ${last.message}). SALVAGE, final pass: every path that failed this turn is now OFF-LIMITS — do not call any tool that has failed, and do not start new side quests. Wrap up NOW: finish the minimal verifiable deliverable from what already exists, then report what was completed, what stayed blocked, and the recommended next step.`,
+        reason: `${sameTypeCount} consecutive failures (last: ${last.message}). SALVAGE, final pass: every path that failed this turn is now OFF-LIMITS — do not call any tool that has failed, and do not start new side quests. Wrap up NOW: finish the minimal verifiable deliverable from what already exists, then report what was completed, what stayed blocked, and the recommended next step.`,
       };
     }
     return {
       kind: 'degrade',
-      reason: `${count} consecutive failures (last: ${last.message}). Switched to degraded / simplified mode: stop retrying the failing approach, minimize further tool use, and deliver the simplest complete answer — or hand control back to the user with a clear summary of what was attempted and what failed.`,
+      reason: `${sameTypeCount} consecutive failures (last: ${last.message}). Switched to degraded / simplified mode: stop retrying the failing approach, minimize further tool use, and deliver the simplest complete answer — or hand control back to the user with a clear summary of what was attempted and what failed.`,
     };
   }
 }

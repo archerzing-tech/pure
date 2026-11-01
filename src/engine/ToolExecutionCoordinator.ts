@@ -31,6 +31,10 @@ export interface ExecutedToolResult {
    *  A→B→C 链 A 失败一次曾 = 账本 +3，三轮凑满 8 停整任务）。引擎的
    *  toolErrors 过滤这个标记；transcript 照常收录（模型要知道这一跳没跑）。 */
   relaySkip?: true;
+  /** 四期 4a 强制 skip：隔离调用的重发被引擎拒绝时的合成标记——transcript
+   *  照常收录（模型要知道这次调用没跑），但 toolErrors 过滤它（拒绝不是
+   *  新失败，是旧裁决的执行；再入账会让阶梯把「拒绝」当燃料继续升级）。 */
+  engineRefusal?: true;
 }
 
 export interface ToolExecutionBudget {

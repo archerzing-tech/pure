@@ -414,12 +414,19 @@ export interface FailureRecord {
    *  教训（write_file 权限失败的「勿重试」被写别的文件的成功抵消）。缺席
    *  时豁免退回旧口径（保守，不漏真 transient）。 */
   callArgs?: string;
+  /** 四期 4a 部分成功轮口径——该失败发生的那一轮里还有别的工具真成功
+   *  过。轮里有成功就证明基础设施活着：这类失败只喂重复/类环检测器（同
+   *  一调用跨轮硬试仍是死路），不喂通用 count 阶梯（2 条互不相干的失败
+   *  不该顶着「4 连败」的假象升级）。缺省 = 纯失败轮。 */
+  roundHadSuccess?: boolean;
 }
 
 export type FailureAction =
   | { kind: 'retry'; hint: string }
   | { kind: 'reflect'; hint: string }
-  | { kind: 'degrade'; reason: string }
+  | { kind: 'degrade'; reason: string; /** 四期 4a 强制 skip：引擎把该失败
+      * 的同工具同参调用拉入本轮黑名单，再收到就拒绝执行（确定性自救），
+      * 拒绝结果不入失败账。 */ quarantineLastCall?: boolean }
   | { kind: 'stop'; reason: string };
 
 export interface FailurePolicy {

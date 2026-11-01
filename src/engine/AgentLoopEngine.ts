@@ -214,6 +214,12 @@ export class AgentLoopEngine {
     let finalOutput: string | undefined;
     let interrupted = false;
     const failures: FailureRecord[] = [];
+    // 四期 4a 强制 skip（framework-reform）：策略标记 quarantineLastCall 后，
+    // 失败调用的同工具同参重发被引擎直接拒绝——措辞救不了装听不见的循环，
+    // 机械拒绝才是「阶梯裁决权下放模型」边界内的确定性自救。拒绝结果不入
+    // 失败账（不是新失败，是旧裁决的执行），连续 3 次拒绝兜底交还用户。
+    const turnQuarantined = new Set<string>();
+    let quarantinedRefusals = 0;
     // Aggregated billing usage across every LLM call in this turn (each
     // iteration's stream yields a `usage` chunk) — surfaced on Completed so
     // the GUI can accumulate per-session token totals + cost.
@@ -819,6 +825,14 @@ export class AgentLoopEngine {
         // deduped: re-executing after a failure is the legitimate
         // transient-fault retry path, so a failed anchor's repeats run for
         // real in a second pass below.
+        // 四期 4a：隔离名单（tool + args 原文）命中的调用先摘出执行流——
+        // 它们不 dedupe、不执行、不进权限闸，只领一条合成拒绝结果。
+        const refusedCalls: typeof toolCalls = [];
+        const executableCalls: typeof toolCalls = [];
+        for (const call of toolCalls) {
+          if (turnQuarantined.has(`${call.function.name}::${call.function.arguments}`)) refusedCalls.push(call);
+          else executableCalls.push(call);
+        }
         const dedupedCalls: Array<{ call: (typeof toolCalls)[number]; key: string }> = [];
         const sameRoundDups: Array<{ call: (typeof toolCalls)[number]; anchorId: string }> = [];
         const toExecute: typeof toolCalls = [];
@@ -827,7 +841,7 @@ export class AgentLoopEngine {
         // reuse — its result comes from lastExecuted, rule 1 above).
         let runKey: string | null = null;
         let runAnchorId: string | null = null;
-        for (const call of toolCalls) {
+        for (const call of executableCalls) {
           const key = callKey(call.function.name, call.function.arguments);
           // outcome 锚点（暂停/停掉的分支）永不跨轮复用：那记"成功"只是
           // 中断结算，重派同一支必须真执行——引擎从存档断点续跑。
@@ -861,6 +875,32 @@ export class AgentLoopEngine {
           } else {
             yield { type: 'SubagentActivity', payload: step.event, timestamp: Date.now() };
           }
+        }
+        // 四期 4a 强制 skip 的执行面：被隔离调用的重发不碰世界，合成拒绝
+        // 结果喂回 transcript（tool role 原文可见，模型知道这一跳没跑）。
+        // engineRefusal 标让它在下方账本环节被滤掉——拒绝不是新失败，是旧
+        // 裁决的执行，再入账就是把裁决当燃料继续升级。
+        for (const call of refusedCalls) {
+          quarantinedRefusals++;
+          // 指导文本同时放 error：transcript 配对对失败结果只取 error 字段
+          // （`Error: ${error}`），只写 result 的话模型下一请求看不到全文。
+          const refusalText = 'Refused by failure policy: this exact call (same tool, same arguments) failed repeatedly earlier this turn and was quarantined — the engine will not execute it again. Take a workable alternative (different tool, source, or route) or omit this step.';
+          const refusal: ExecutedToolResult = {
+            toolCallId: call.id,
+            toolName: call.function.name,
+            result: {
+              id: call.id,
+              toolName: call.function.name,
+              result: refusalText,
+              success: false,
+              error: refusalText,
+              duration: 0,
+            },
+            duration: 0,
+            engineRefusal: true,
+          };
+          executedResults.push(refusal);
+          yield { type: 'ToolResult', payload: refusal, timestamp: Date.now() };
         }
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
@@ -931,8 +971,11 @@ export class AgentLoopEngine {
           yield { type: 'ToolResult', payload: result, timestamp: Date.now() };
         }
         // Advance the consecutive-call cursor from the last REAL execution
-        // (second-pass retries included).
-        const lastExec = executedResults[executedResults.length - 1];
+        // (second-pass retries included). 合成拒绝不进游标：它没碰世界，
+        // 把它当「最近一次执行」会让紧随的真实同参调用错失复用或错拿
+        // 失败锚。
+        const realExecs = executedResults.filter(tr => !tr.engineRefusal);
+        const lastExec = realExecs[realExecs.length - 1];
         if (lastExec) {
           const callFor = toolCalls.find((c) => c.id === lastExec.toolCallId);
           lastExecuted = {
@@ -962,15 +1005,48 @@ export class AgentLoopEngine {
           budget.addTokens(resultText);
         }
 
+        // 拒绝兜底（4a）：连续 3 次重发被隔离调用——明确指令装听不见、机械
+        // 拒绝也没能改变行为，剩余阶梯全失去意义，真话交还。放在 transcript
+        // 配对之后：Interrupted 携带的 messages 必须已配平，续跑才不 400。
+        if (quarantinedRefusals >= 3) {
+          const reason = `The engine refused ${quarantinedRefusals} re-issues of quarantined calls this turn — the same dead-end call kept being repeated even after explicit skip directives and mechanical refusal. Handing the turn back for guidance.`;
+          yield* emitHandover(reason);
+          yield { type: 'Interrupted', payload: { reason, reasonCode: 'failure_policy_stop', lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
+          interrupted = true; break;
+        }
+
         // Track tool failures and consult policy. relaySkip（级联合成 skip）
         // 不入账：它本身就是降级动作，再当失败燃料会三条链三轮凑满 8 停
-        // （2026-11-01 审查判例）。
-        const toolErrors = toolResults.filter(tr => !tr.result.success && !tr.relaySkip);
+        // （2026-11-01 审查判例）。engineRefusal 同理（四期 4a）：拒绝是旧
+        // 裁决的执行，兜底走 quarantinedRefusals 计数，不走失败账。
+        const toolErrors = toolResults.filter(tr => !tr.result.success && !tr.relaySkip && !tr.engineRefusal);
+        // 部分成功轮口径（4a）：本轮里是否有调用真成功过——轮里有成功就证
+        // 明基础设施活着，这轮的失败只喂重复/类环检测器，不喂通用 count 阶梯。
+        // 引擎拒绝的合成结果不算成功（它没碰世界）。
+        const roundHadSuccess = toolResults.some(tr => tr.result.success && !tr.engineRefusal);
+        const callsById = new Map(toolCalls.map(c => [c.id, c]));
         for (const te of toolErrors) {
-          failures.push({ type: 'tool_error', message: te.result.error ?? 'Unknown', turnNumber: turnCount, toolName: te.toolName });
+          failures.push({
+            type: 'tool_error',
+            message: te.result.error ?? 'Unknown',
+            turnNumber: turnCount,
+            toolName: te.toolName,
+            callArgs: callsById.get(te.toolCallId)?.function.arguments,
+            // 纯失败轮缺省（false 是默认口径），只有混合轮才带标记。
+            ...(roundHadSuccess ? { roundHadSuccess: true as const } : {}),
+          });
         }
         if (toolErrors.length > 0 && ctx.failurePolicy) {
           const action = ctx.failurePolicy.decide(failures);
+          // 四期 4a：强制 skip 落地——把最近失败的调用拉入本轮隔离名单
+          // （tool + args 原文）。args 缺席（异常路径拿不到原文）就不入册：
+          // 策略措辞仍在，只是没有机械执行兜底。
+          if (action.kind === 'degrade' && action.quarantineLastCall) {
+            const lastFailure = failures[failures.length - 1];
+            if (lastFailure.toolName && typeof lastFailure.callArgs === 'string') {
+              turnQuarantined.add(`${lastFailure.toolName}::${lastFailure.callArgs}`);
+            }
+          }
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
             yield* emitHandover(action.reason);

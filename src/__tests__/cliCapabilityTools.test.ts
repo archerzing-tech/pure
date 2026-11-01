@@ -56,7 +56,7 @@ describe('ToolRegistry model-visible filter opens for dynamic + MCP tools', () =
     expect(names).toContain('register_mcp_server');
     // 三期 deferred 化：MCP 工具默认不进清单，经 discover_tools 搜索激活后才可见。
     expect(names).not.toContain('rea__trace');
-    await registry.execute({ id: 'c1', index: 0, toolName: 'discover_tools', function: { name: 'discover_tools', arguments: JSON.stringify({ query: 'rea trace' }) } });
+    await registry.execute({ id: 'c1', index: 0, function: { name: 'discover_tools', arguments: JSON.stringify({ query: 'rea trace' }) } });
     expect(registry.getTools().map((t) => t.name)).toContain('rea__trace');
     expect(names).not.toContain('mystery_tool');
   });

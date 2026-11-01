@@ -69,13 +69,64 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
     }
   });
 
-  it('stops on the 5th identical repeat after the skip directive was ignored', () => {
+  it('quarantines the call on the 5th identical repeat — enforced skip, not a stop', () => {
     const policy = new DefaultFailurePolicy();
     const err = () => toolError('download_file', 'download failed: connection reset');
     const action = policy.decide([err(), err(), err(), err(), err()]);
+    // The model ignored the skip-it directive — words stop, the engine takes
+    // over: the identical call is refused mechanically, but the TURN survives
+    // so the model can route around the dead call (framework-reform 4a).
+    expect(action.kind).toBe('degrade');
+    if (action.kind === 'degrade') {
+      expect(action.quarantineLastCall).toBe(true);
+      expect(action.reason).toContain('QUARANTINED');
+      expect(action.reason).toContain('CONTINUE the task');
+    }
+  });
+
+  it('keeps a stop backstop for 8+ identical repeats (args kept escaping quarantine)', () => {
+    const policy = new DefaultFailurePolicy();
+    const err = () => toolError('download_file', 'download failed: connection reset');
+    const action = policy.decide([err(), err(), err(), err(), err(), err(), err(), err()]);
     expect(action.kind).toBe('stop');
     if (action.kind === 'stop') {
-      expect(action.reason).toContain('even after a skip-it directive');
+      expect(action.reason).toContain('refusing the quarantined call');
+    }
+  });
+
+  it('分型阶梯：不同类型的失败不凑数，各走各的阶梯', () => {
+    const policy = new DefaultFailurePolicy();
+    // 2 条工具错误 + 2 条 llm 错误：旧混账口径数出「4 连败」→ reflect；
+    // 分型后 llm 阶梯只看到 2 条 → retry。互不相干的失败不该互相抬轿。
+    const mixed = policy.decide([
+      toolError('web_fetch', 'HTTP 503'),
+      toolError('web_fetch', 'HTTP 504'),
+      llmError('model overloaded'),
+      llmError('stream disconnected mid-response'),
+    ]);
+    expect(mixed.kind).toBe('retry');
+    // 纯 4 条同型（消息互异）→ reflect 不变。
+    const pure = policy.decide([
+      toolError('read_file', 'm1'),
+      toolError('read_file', 'm2'),
+      toolError('read_file', 'm3'),
+      toolError('read_file', 'm4'),
+    ]);
+    expect(pure.kind).toBe('reflect');
+  });
+
+  it('部分成功轮的失败不喂通用阶梯，但环检测器照旧全量计数', () => {
+    const policy = new DefaultFailurePolicy();
+    const mixedRound = (message: string): FailureRecord => ({ ...toolError('web_fetch', message), roundHadSuccess: true });
+    // 4 条失败都发生在「轮里还有真实成功」的混合轮：基础设施活着，通用
+    // 阶梯不升级（sameTypeCount=0 → 停在 retry 入口）。
+    const mixed = policy.decide([mixedRound('m1'), mixedRound('m2'), mixedRound('m3'), mixedRound('m4')]);
+    expect(mixed.kind).toBe('retry');
+    // 环检测器不洗：同一调用跨轮硬试仍是死路，3 连 identical 照发 skip。
+    const loop = policy.decide([mixedRound('same dead end'), mixedRound('same dead end'), mixedRound('same dead end')]);
+    expect(loop.kind).toBe('degrade');
+    if (loop.kind === 'degrade') {
+      expect(loop.reason).toContain('SKIP it now');
     }
   });
 
