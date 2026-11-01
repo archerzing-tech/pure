@@ -25,6 +25,7 @@ import {
   type ToolQuarantineState,
 } from '../harness/toolQuarantine';
 import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { sanitizeToolDefs } from '../shared/schemaSanitize';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type {
@@ -310,10 +311,10 @@ export class CodingAgent {
     // exposed: subagents get their own (public-only) tool list via
     // parentToolsDefsProvider, so a subagent cannot spawn a subagent (P0 keeps
     // delegation single-level).
-    const modelToolsDefs = (): ToolDefinition[] => [
+    const modelToolsDefs = (): ToolDefinition[] => sanitizeToolDefs([
       ...this.toolRegistry.getTools(),
       ...this.toolRegistry.getSubagentTools(),
-    ];
+    ]);
     this.harness = new Harness({
       sessionId: config.sessionId,
       llm: config.llm,

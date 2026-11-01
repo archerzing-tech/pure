@@ -10,6 +10,7 @@ import { TauriStdioTransport } from '../../adapter/mcp/TauriStdioTransport';
 import { isTauriRuntime } from '../../shared/tauri';
 import { settleWithin } from '../../shared/timing';
 import { parseToolArguments } from '../../shared/parseRepair';
+import { sanitizeToolSchemaInPlace } from '../../shared/schemaSanitize';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import type { TaggedTool } from '../../coding-agent/types';
 import { Tags } from '../../coding-agent/ToolRegistry';
@@ -266,6 +267,12 @@ export class MCPClient implements ToolAdapter {
           riskLevel: 'medium',
           serverName: config.name,
         };
+        // 端点正则方言不认的 pattern（\0、反向引用、lookaround）在入库前剥掉：
+        // 工具清单随每个请求整体发送，一个坏 schema 会 400 打死整个会话的每个
+        // 回合（2026-11-01 判例），不能等它上了 wire 才被端点退回。
+        if (tagged.input_schema && sanitizeToolSchemaInPlace(tagged.input_schema)) {
+          console.warn(`[MCP] stripped endpoint-incompatible pattern(s) from "${tagged.name}"`);
+        }
         // Prefix filter: excluded tools are not registered/exposed at all, so
         // third-party MCP servers (e.g. scrapling__bulk_*) can't crowd out
         // built-in tool selection. The server stays connected; only its

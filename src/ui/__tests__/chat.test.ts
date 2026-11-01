@@ -111,6 +111,19 @@ describe('interruption reason classification', () => {
     expect(message).toContain('messages 参数非法');
   });
 
+  it('surfaces the provider body from the schema-rejection stop cause (2026-11-01 rea 判例)', () => {
+    // The field error verbatim from the other machine: a strict OpenAI-style
+    // validator rejecting the `\0` escape in an MCP tool's pattern. The new
+    // engine template's fixed tail differs ("An MCP tool ships") — without
+    // its own anchor the card falls back to the generic wording and hides
+    // the validator line.
+    const raw = `Repeated request failures (1 consecutive failures): the provider rejected a TOOL PARAMETER SCHEMA in the bundled tool list, not the conversation — retrying cannot fix it. Last: "400 Bad Request: {"error":{"message":"Invalid schema for function 'rea__capture_process_scenario': \\"^[^=\\\\0]+$\\" is not a \\"regex\\" (request_id: bba38bbf)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}". An MCP tool ships a pattern the endpoint's regex dialect rejects; upgrading pure (it sanitizes incompatible patterns before sending) or disabling the offending MCP server clears it.`;
+    const message = sanitizeInterruptedReason(raw);
+    expect(message).toContain('失败原因');
+    expect(message).toContain('Invalid schema for function');
+    expect(message).toContain('is not a');
+  });
+
   it('reasonCode 结构化直达：引擎中文散文不再掉进 generic（2026-10-31 主诉）', () => {
     // c828c17 把引擎停时文案写成中文散文后，纯英文锚分类全部失联——用户
     // 看到的是「操作被中断，请重试或切换任务」。code 是契约第一依据，

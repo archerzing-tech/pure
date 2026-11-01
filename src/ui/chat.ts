@@ -223,6 +223,11 @@ function extractFailureCause(raw: string): string {
   // since the embedded provider body may itself contain quotes and periods.
   const rejected = raw.match(/^\s*Repeated request failures \(\d+ consecutive failures\): .*Last: (".*)\. The transcript may exceed/);
   if (rejected) return rejected[1];
+  // Schema rejection stop (2026-11-01 rea 判例): `Repeated request failures (1
+  // consecutive failures): the provider rejected a TOOL PARAMETER SCHEMA …
+  // Last: "msg". An MCP tool ships…` — same shape, fixed tail differs.
+  const schemaRejected = raw.match(/^\s*Repeated request failures \(\d+ consecutive failures\): .*Last: (".*)\. An MCP tool ships/);
+  if (schemaRejected) return schemaRejected[1];
   return '';
 }
 

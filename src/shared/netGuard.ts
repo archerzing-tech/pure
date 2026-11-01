@@ -596,6 +596,7 @@ export type FailureClass =
   | 'rate-limit'
   | 'context'
   | 'content'
+  | 'schema'
   | 'generic';
 
 export function classifyFailure(message: string): FailureClass {
@@ -612,6 +613,11 @@ export function classifyFailure(message: string): FailureClass {
   // grinds through retry/reflect rounds that only inflate the context further.
   // "prompt is too long" is the Anthropic route's wording for the same 400.
   if (/maximum context|context length|context_length_exceeded|input length exceeds|prompt is too long/.test(m)) return 'context';
+  // Before 'content': a strict-endpoint schema rejection ("Invalid schema for
+  // function 'x': "…" is not a "regex"") is deterministic and conversation-
+  // independent — the tool list ships with every request, so no model output
+  // can fix it. Its guidance must not tell the user to shrink the context.
+  if (/invalid schema for (function|tool)|is not a ["']regex["']/.test(m)) return 'schema';
   if (/unsupported content type|invalid json|parse|decode|encoding|乱码/.test(m)) return 'content';
   return 'generic';
 }
@@ -626,6 +632,7 @@ export const FAILURE_CLASS_HINTS: Record<FailureClass, string> = {
   'not-found': '此类失败 = 目标不存在。核对路径/名称/来源一次，仍失败就换目标或跳过。',
   'rate-limit': '此类失败 = 被限流。换后端或降低频率，不要立即原样重试。',
   context: '此类失败 = 对话已超出模型上下文窗口，属结构性失败。任何重试都只会原样 400（注入的指令还在加长上下文）；立即停止回合，交回用户压缩或新开会话。',
+  schema: '此类失败 = 端点严格校验拒绝了某个工具的参数格式定义，与对话内容无关。工具清单随每个请求整体发送，重试必然原样失败；新版 pure 会在发送前清洗不兼容的正则写法，或停用对应 MCP server。',
   content: '此类失败 = 返回内容不符合预期。换解析方式或来源；不要原样重试。',
   generic: '',
 };

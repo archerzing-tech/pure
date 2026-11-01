@@ -1493,6 +1493,86 @@ describe('AgentLoopEngine', () => {
     expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
   });
 
+  it('self-heals a schema rejection: quarantines the named tool, resends pattern-free, completes', async () => {
+    // 2026-11-01 rea 判例：严格端点拒收工具 schema 里的 `\0` 正则转义时，
+    // 老行为是搭 4xx 确定性拒绝的便车直接停——但这个 400 有具体的每工具
+    // 解法（剥掉 pattern 提示重发）。新行为：点名工具进 quarantine，重发的
+    // 清单里该工具不再带任何 pattern，回合照常完成，用户无感。
+    const SCHEMA_400 = `400 Bad Request: {"error":{"message":"Invalid schema for function 'rea__x': \\"^[^=\\\\0]+$\\" is not a \\"regex\\"","type":"invalid_request_error"}}`;
+    const seenTools: ToolDefinition[][] = [];
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (_messages, tools): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        seenTools.push(structuredClone(tools));
+        if (calls === 1) throw new Error(SCHEMA_400);
+        yield { type: 'content', content: 'healed' };
+        yield { type: 'done', content: 'healed', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      tools: { execute: async () => ({ id: 'x', name: 'x', result: '' }) } as unknown as ToolAdapter,
+      toolsDefs: [
+        { name: 'rea__x', description: 'x', input_schema: { properties: { k: { type: 'string', pattern: '^[^=\\0]+$' } } } },
+        { name: 'clean_tool', description: 'c', input_schema: { properties: { p: { type: 'string', pattern: '^[^\\x00]*$' } } } },
+      ],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-schema-selfheal', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    // First call 400s, second (quarantined) call succeeds — no stop, no ladder.
+    expect(calls).toBe(2);
+    const schemaOf = (defs: ToolDefinition[], name: string) =>
+      (defs.find(d => d.name === name)!.input_schema as { properties: { k?: { pattern?: string }; p?: { pattern?: string } } }).properties;
+    expect(schemaOf(seenTools[0], 'rea__x').k!.pattern).toBe('^[^=\\0]+$');
+    expect(schemaOf(seenTools[1], 'rea__x').k!.pattern).toBeUndefined();
+    // Quarantine is per-tool: the healthy neighbor keeps its accepted pattern.
+    expect(schemaOf(seenTools[1], 'clean_tool').p!.pattern).toBe('^[^\\x00]*$');
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+    expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
+  });
+
+  it('gives up after two schema strikes and stops with the schema wording', async () => {
+    // A sanitized (pattern-free) schema that STILL gets rejected is not a
+    // pattern problem — further stripping cannot fix it. Fall through to the
+    // deterministic stop, whose wording tells the user what resolves it.
+    const SCHEMA_400 = `400 Bad Request: {"error":{"message":"Invalid schema for function 'rea__x': \\"enum entries are invalid\\"","type":"invalid_request_error"}}`;
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error(SCHEMA_400);
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      tools: { execute: async () => ({ id: 'x', name: 'x', result: '' }) } as unknown as ToolAdapter,
+      toolsDefs: [{ name: 'rea__x', description: 'x', input_schema: { properties: { k: { type: 'string' } } } }],
+      budget: { ...STD_BUDGET, maxTurns: 12, graceTurns: 0 },
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-schema-giveup', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    // 1st 400 → self-heal resend; 2nd 400 → stop; 3rd call is the handover
+    // (tools: [], fails, swallowed). No compaction borrow was spent.
+    expect(calls).toBe(3);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('TOOL PARAMETER SCHEMA');
+    expect(interrupted!.payload.reason).toContain(SCHEMA_400);
+  });
+
   it('salvages the transcript before a policy stop so the next turn inherits a lean payload', async () => {
     const llm = errorLLM('fatal boom');
     const compactCalls: Array<{ options?: { skipSummary?: boolean } }> = [];

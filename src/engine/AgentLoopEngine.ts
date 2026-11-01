@@ -8,6 +8,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { applyLanguageDirective, detectReplyLanguage, lastHumanUserText, replyLanguageDirective } from '../shared/langDetect';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
+import { stripAllPatterns } from '../shared/schemaSanitize';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -255,6 +256,19 @@ export class AgentLoopEngine {
     // 9.1 reactive compactions this run: provider context-length rejections
     // answered by compacting harder and retrying (see the THINK catch).
     let reactiveCompactions = 0;
+    // Schema-rejection quarantine (2026-11-01 rea 判例): the endpoint's
+    // strict validator rejects a bundled tool schema — the whole request
+    // 400s and NO model output can fix it. Instead of stopping (the old
+    // deterministic-rejection shortcut these rode on), self-heal: strip
+    // every `pattern` hint from the named tool's schema and resend.
+    // `pattern` is optional validation sugar — the server still validates
+    // the arguments itself, so the worst case is one tool-level error
+    // instead of a dead session. A tool named twice means even the
+    // pattern-free schema was rejected (validator objects to something
+    // else entirely) — give up and let the deterministic stop take over.
+    // 声明在 THINK while 之外：跨轮存活（第一版放循环体内，continue 回顶
+    // 即被重置，quarantine 永远空转——测试抓出来的）。
+    const schemaQuarantineStrikes = new Map<string, number>();
 
     while (true) {
       if (ctx.signal?.aborted) {
@@ -415,7 +429,10 @@ export class AgentLoopEngine {
       try {
         if (!syntheticRound) {
           const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
-          const toolsDefs = ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [];
+          const toolsDefs = (ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [])
+            .map((d) => schemaQuarantineStrikes.has(d.name)
+              ? { ...d, input_schema: stripAllPatterns(d.input_schema) }
+              : d);
           // Stream deadline follows the budget line that ACTUALLY ends the run
           // (hardMaxTime, else the soft cap while it lasts, else the soft cap
           // duration once the run is elastic). remaining().time clamps at 0
@@ -538,6 +555,29 @@ export class AgentLoopEngine {
         // may still be an honest third-retry transient, and the policy's
         // identical-repeat ceiling already bounds that grind.
         const errClass = classifyFailure(errMessage);
+        // ── Schema-rejection self-heal: strip patterns, resend, THEN stop ──
+        // Runs before the deterministic-rejection split: unlike a context
+        // overflow, this 400 has a concrete per-tool fix. First strike
+        // quarantines the named tool (or the whole list when the validator
+        // didn't name one) — the map above swaps in a pattern-free schema on
+        // the resend. Second strike means the sanitized schema STILL got
+        // rejected, which no amount of further stripping can fix → fall
+        // through to the deterministic stop, whose schema wording below
+        // tells the user what actually resolves it.
+        if (errClass === 'schema') {
+          const named = errMessage.match(/Invalid schema for (?:function|tool) '([^']+)'/i)?.[1];
+          const bump = (n: string) => schemaQuarantineStrikes.set(n, (schemaQuarantineStrikes.get(n) ?? 0) + 1);
+          if (named) bump(named);
+          else for (const d of (ctx.toolsDefsProvider?.() ?? ctx.toolsDefs ?? [])) bump(d.name);
+          const strikes = named
+            ? schemaQuarantineStrikes.get(named)!
+            : Math.max(0, ...[...schemaQuarantineStrikes.values()]);
+          if (strikes <= 1) {
+            turnCount++; budget.incrementTurn();
+            yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+            continue;
+          }
+        }
         const identicalRepeats = failures.filter(f => f.type === 'llm_error' && f.message === errMessage).length;
         const deterministicRejection = errClass === 'context' || isProviderHttp4xx(errMessage);
         const structuralSendFailure = deterministicRejection || identicalRepeats >= 1;
@@ -557,8 +597,11 @@ export class AgentLoopEngine {
           }
           // Model-not-found / bad-method / schema rejections cannot be fixed
           // by shrinking the payload — don't spend a summarizer round (up to
-          // 60s) or a reactive attempt on them.
-          const compactionCanHelp = !isPayloadIndependentHttp4xx(errMessage);
+          // 60s) or a reactive attempt on them. Schema class rides the same
+          // gate: the tool list survives compaction byte-identical, so
+          // shedding transcript can never clear a validator rejection
+          // (2026-11-01 rea 判例：坏 pattern 400 不该白烧两轮压缩).
+          const compactionCanHelp = !isPayloadIndependentHttp4xx(errMessage) && errClass !== 'schema';
           if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS && compactionCanHelp) {
             reactiveCompactions++;
             // 压缩不是一段可以无声熬过的静默：L2 摘要是一次完整的非流式 LLM
@@ -607,6 +650,8 @@ export class AgentLoopEngine {
               // "consecutive failures" is the literal anchor
               // sanitizeInterruptedReason matches to surface the 失败原因 —
               // keep the plural even when the count is 1.
+              : errClass === 'schema'
+              ? `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected a TOOL PARAMETER SCHEMA in the bundled tool list, not the conversation — retrying cannot fix it. Last: "${errMessage}". An MCP tool ships a pattern the endpoint's regex dialect rejects; upgrading pure (it sanitizes incompatible patterns before sending) or disabling the offending MCP server clears it.`
               : `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "${errMessage}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: errMessage, turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
             const salvaged = await salvageStopMessages(messages);

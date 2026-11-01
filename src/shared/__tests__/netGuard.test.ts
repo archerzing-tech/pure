@@ -146,6 +146,16 @@ describe('classifyFailure', () => {
     expect(classifyFailure('Unsupported content type: application/json')).toBe('content');
     expect(classifyFailure('something inexplicable happened')).toBe('generic');
   });
+
+  it('classifies strict-endpoint schema rejections as schema, not content/generic (2026-11-01 rea 判例)', () => {
+    // The exact wire shape from the field: the Rust transport head + the
+    // provider's validator body. Deterministic, conversation-independent —
+    // its guidance must not tell the user to shrink the context.
+    expect(classifyFailure('400 Bad Request: {"error":{"message":"Invalid schema for function \'rea__capture_process_scenario\': \\"^[^=\\\\0]+$\\" is not a \\"regex\\"","type":"invalid_request_error"}}')).toBe('schema');
+    expect(classifyFailure('Invalid schema for tool \'x\': pattern is not a regex')).toBe('schema');
+    // Content-class neighbors must NOT drift into schema.
+    expect(classifyFailure('invalid json in response body')).toBe('content');
+  });
 });
 
 // ── 2026-10-29 会话楔死修复（刀1/刀2 的判别与学习原料）──
