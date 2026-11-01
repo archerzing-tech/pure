@@ -9,6 +9,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
+import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
 import { describeTiming, type InputTiming } from './coding-agent/inputDecision';
@@ -297,6 +298,7 @@ async function assembleCliPrompt(
   userText: string,
   context: UserTurnContext,
   mcpClient?: MCPClient,
+  worldState?: WorldStateRenderer,
 ) {
   const userWorkspace = args.workspace && args.workspace !== 'true'
     ? args.workspace
@@ -336,7 +338,14 @@ async function assembleCliPrompt(
     // delegation is possible — enable the multi_agent protocol fragment. Gated
     // on actual subagent tool presence (see hasSubagents above).
     hasSubagents,
-  }, userText, { ...context, envFacts: buildCliEnvFacts(conventions) });
+  }, userText, {
+    ...context,
+    // 四期 4b 分区化：REPL 传入了渲染器就走 diff（同内容回合只发指针）；
+    // 一次性 -p 模式不传，保持逐字全量。
+    envFacts: worldState
+      ? worldState.renderTurn({ envFacts: buildCliEnvFacts(conventions) }).envFacts
+      : buildCliEnvFacts(conventions),
+  });
 }
 
 /** P2 下沉（2026-10-27）：CLI 侧环境事实拼装，与 GUI 的 buildEnvFacts 同构。 */
@@ -767,6 +776,8 @@ async function runRepl(args: CliArgs) {
   let messages: Message[] = [];
   let compactedHistory: Message[] | null = null;
   let compactedTranscriptLength = 0;
+  // 四期 4b 分区化：REPL 进程即会话作用域，/clear 与 /compact 成功时 reset。
+  const cliWorldState = new WorldStateRenderer();
   let turnNum = 1;
   let firstTurn = true;
   let lastMode: TaskMode = 'yolo';
@@ -866,6 +877,7 @@ async function runRepl(args: CliArgs) {
       messages = [];
       compactedHistory = null;
       compactedTranscriptLength = 0;
+      cliWorldState.reset();
       firstTurn = true; turnNum = 1;
       process.stdout.write(`  ${dim('🧹 Context cleared.')}\n`);
       continue;
@@ -886,6 +898,8 @@ async function runRepl(args: CliArgs) {
         if (compacted.compacted) {
           compactedHistory = compacted.messages;
           compactedTranscriptLength = messages.length;
+          // 淘汰过历史，分区指针引用的全量拷贝可能不在了——下一回合全量。
+          cliWorldState.reset();
         }
         if (compacted.overBudget) {
           const warning = compacted.oversizedNewestGroup
@@ -1001,7 +1015,7 @@ async function runRepl(args: CliArgs) {
     const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, turnInput, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
-    }, mcpClient);
+    }, mcpClient, cliWorldState);
     const systemPrompt = assembly.systemPrompt;
     const userTurn = assembly.userPrompt ?? input;
 

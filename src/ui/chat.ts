@@ -11,6 +11,7 @@ import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessi
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
+import { WorldStateRenderer } from '../shared/worldStateRender';
 import { blockedHosts } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { notifyProxyFailure, startProxyProbeLoop } from './proxyProbe';
@@ -1768,6 +1769,11 @@ export class ChatController {
    * 账跨回合跨重启存活（快照持久化），记账点=委派结算、计划卡、旁答/澄清问。
    * 新对话/会话切换清零。 */
   private sessionLedger: SessionLedger = createSessionLedger();
+  /** 四期 4b 分区化渲染器（worldStateRender.ts）：世界状态分区逐回合 diff，
+   *  状态不变只发指针。控制器即会话作用域——每个会话自己的账，冷恢复/新建
+   *  控制器自然重置；历史被压缩替换时显式 reset（见 preCompactedMessages
+   *  赋值点）。 */
+  private worldState = new WorldStateRenderer();
   /** 澄清问的待回收句柄（UI 层细节，不进 shared 账本）：用户的回应被分类到
    * 与澄清预期同族的方向时，回填为该条 asked 的答案。一条澄清只等一次回应。 */
   private pendingClarification: { fingerprint: string; gatedFrom: 'stop' | 'replan'; ts: number } | null = null;
@@ -2674,6 +2680,8 @@ export class ChatController {
       this.preCompactSourceMessages = messages;
       this.preCompactSessionId = this.sessionId;
       this.preCompactMessageCount = messages.length;
+      // 分区指针引用的旧全量拷贝可能已被压缩掉——忘账，下一回合全量重发。
+      this.worldState.reset();
     }
     return result;
   }
@@ -6551,20 +6559,25 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // are no subagent tools — don't tell the model to delegate.
         hasSubagents: !!effectiveWorkspace,
       }, userText, {
-        // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
-        // `conventions` is in scope from the pre-analysis build above.
-        envFacts: buildEnvFacts(conventions),
-        buildProtocol: userBuildProtocol,
-        plan: userPlan,
-        contract: taskContract ? formatTaskContract(taskContract) : undefined,
-        taskScriptFacts: formatTaskScriptFacts(this.getTaskScriptHandOver()),
-        // 会话账本素材（第 4 期）：空账导出空串，composeUserTurn 自动略过，
-        // 新会话零开销。
-        ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
-        assessment: userAssessment,
+        // 四期 4b 分区化：世界状态分区走 diff 渲染——与上一回合相同的分区
+        // 只发一行指针（近零 token），变了自然全量重发。buildProtocol/plan/
+        // assessment 随请求预分析变化，hash 不同则照旧全量。
+        ...this.worldState.renderTurn({
+          // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
+          // `conventions` is in scope from the pre-analysis build above.
+          envFacts: buildEnvFacts(conventions),
+          buildProtocol: userBuildProtocol,
+          plan: userPlan,
+          contract: taskContract ? formatTaskContract(taskContract) : undefined,
+          taskScriptFacts: formatTaskScriptFacts(this.getTaskScriptHandOver()),
+          // 会话账本素材（第 4 期）：空账导出空串，composeUserTurn 自动略过，
+          // 新会话零开销。
+          ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
+          assessment: userAssessment,
+        }),
         // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个
         // 阶段下发给模型本身执行；UI 工程额外携带设计先行协议（先出 design.html
-        // 等用户在预览卡确认，再写实现代码）。
+        // 等用户在预览卡确认，再写实现代码）。请求作用域，不走分区 diff。
         deliveryPipeline: needsDeliveryGate
           ? formatDeliveryPipeline(workspaceProfile, workflow.needsDesignPhase)
           : undefined,
@@ -8825,6 +8838,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               this.preCompactSourceMessages = transcriptMessages;
               this.preCompactSessionId = this.sessionId;
               this.preCompactMessageCount = transcriptMessages.length;
+              // 淘汰过历史（evictedMessages>0）就让分区指针全部失效——
+              // 指针引用的全量拷贝可能正好在被淘汰的那段里。
+              if (compaction.evictedMessages > 0) this.worldState.reset();
             }
           } catch {
             // Background pre-compaction must never break the session.
