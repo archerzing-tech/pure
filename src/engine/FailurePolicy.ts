@@ -123,10 +123,15 @@ export class DefaultFailurePolicy implements FailurePolicy {
     // strictly larger. One repeat is enough to stop: grinding the usual
     // 8-failure ladder burned tokens and wedged the session against "继续"
     // (every new turn re-entered trim with the same overweight transcript).
-    if (lastClass === 'context' && count >= 2) {
+    // 口径（2026-11-01 审查判例）：只数 llm_error 的 context 类。工具级
+    // context 错误（子代理/委派打爆它自己的窗口）不是对话超窗——整个任务
+    // 可绕，走 classRepeats 阶梯 degrade（拆小/跳过），不该被「1 条任意旧
+    // 失败 + 1 条工具 context」的凑数 stop 掉整回合。
+    const contextLlmCount = failures.filter(f => f.type === 'llm_error' && classifyFailure(f.message) === 'context').length;
+    if (lastClass === 'context' && contextLlmCount >= 2) {
       return {
         kind: 'stop',
-        reason: `Context window exhausted: the conversation no longer fits the model's input window (${count} consecutive provider rejections). Last: "${last.message}". Retrying cannot shrink it — the user should start a fresh session or reduce the input; compaction must shed tool-call payloads too.`,
+        reason: `Context window exhausted: the conversation no longer fits the model's input window (${contextLlmCount} consecutive provider rejections). Last: "${last.message}". Retrying cannot shrink it — the user should start a fresh session or reduce the input; compaction must shed tool-call payloads too.`,
       };
     }
 

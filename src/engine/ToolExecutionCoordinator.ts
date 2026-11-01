@@ -26,6 +26,11 @@ export interface ExecutedToolResult {
   result: ToolResult;
   duration: number;
   toolCallId: string;
+  /** deadStage 合成 skip 标记（2026-11-01 审查判例）：接力链上游死了给每个
+   *  下游发一条 skip——级联本身就是降级动作，不该再进失败账本当燃料（一条
+   *  A→B→C 链 A 失败一次曾 = 账本 +3，三轮凑满 8 停整任务）。引擎的
+   *  toolErrors 过滤这个标记；transcript 照常收录（模型要知道这一跳没跑）。 */
+  relaySkip?: true;
 }
 
 export interface ToolExecutionBudget {
@@ -246,6 +251,7 @@ export class ToolExecutionCoordinator {
             },
             duration: 0,
             toolCallId: node.call.id,
+            relaySkip: true,
           };
           for (const released of noteSettled(node, skip)) yield released;
           yield skip;

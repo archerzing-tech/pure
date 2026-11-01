@@ -432,7 +432,12 @@ export class AgentLoopEngine {
           const toolsDefs = (ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [])
             .map((d) => schemaQuarantineStrikes.has(d.name)
               ? { ...d, input_schema: stripAllPatterns(d.input_schema) }
-              : d);
+              : d)
+            // 二振工具直接摘出清单：剥掉 pattern 仍被拒说明校验器挑的是别的
+            // 刺，再洗也救不了；摘除最坏只是「少一个工具」，比停整个任务好
+            // （2026-11-01 审查判例刀3）。三振不再发生——摘除后同名工具不在
+            // 清单里，端点无从再点名它。
+            .filter((d) => (schemaQuarantineStrikes.get(d.name) ?? 0) < 2);
           // Stream deadline follows the budget line that ACTUALLY ends the run
           // (hardMaxTime, else the soft cap while it lasts, else the soft cap
           // duration once the run is elastic). remaining().time clamps at 0
@@ -555,15 +560,19 @@ export class AgentLoopEngine {
         // may still be an honest third-retry transient, and the policy's
         // identical-repeat ceiling already bounds that grind.
         const errClass = classifyFailure(errMessage);
-        // ── Schema-rejection self-heal: strip patterns, resend, THEN stop ──
+        // ── Schema-rejection self-heal: strip patterns, THEN drop the tool ──
         // Runs before the deterministic-rejection split: unlike a context
-        // overflow, this 400 has a concrete per-tool fix. First strike
-        // quarantines the named tool (or the whole list when the validator
-        // didn't name one) — the map above swaps in a pattern-free schema on
-        // the resend. Second strike means the sanitized schema STILL got
-        // rejected, which no amount of further stripping can fix → fall
-        // through to the deterministic stop, whose schema wording below
-        // tells the user what actually resolves it.
+        // overflow, this 400 has a concrete per-tool fix. Strike 1 quarantines
+        // the named tool (or the whole list when the validator didn't name
+        // one) — the assembly above swaps in a pattern-free schema on the
+        // resend. Strike 2 DROPS the tool from the list (the filter above):
+        // even a pattern-free schema still rejected means the validator
+        // objects to something no stripping fixes, and "one tool fewer"
+        // beats a dead session. No-name strike 2 means the whole list is
+        // dropped and the request ships tool-less — a 400 after THAT is not
+        // a schema problem anymore, so it falls through to the deterministic
+        // stop. Falls through at strikes >= 3 (unreachable for a named tool
+        // once dropped; the no-name path lands here with an empty map).
         if (errClass === 'schema') {
           const named = errMessage.match(/Invalid schema for (?:function|tool) '([^']+)'/i)?.[1];
           const bump = (n: string) => schemaQuarantineStrikes.set(n, (schemaQuarantineStrikes.get(n) ?? 0) + 1);
@@ -572,7 +581,7 @@ export class AgentLoopEngine {
           const strikes = named
             ? schemaQuarantineStrikes.get(named)!
             : Math.max(0, ...[...schemaQuarantineStrikes.values()]);
-          if (strikes <= 1) {
+          if (strikes === 1 || (strikes === 2 && !!named)) {
             turnCount++; budget.incrementTurn();
             yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
             continue;
@@ -743,7 +752,7 @@ export class AgentLoopEngine {
             messages.length = 0;
             messages.push(...salvaged);
             yield* emitHandover(action.reason);
-            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: action.reason, reasonCode: 'failure_policy_stop', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           // retry/reflect carry a hint; degrade carries a reason. Inject
@@ -751,6 +760,11 @@ export class AgentLoopEngine {
           // the degraded-mode instruction, or the escalate levels are silent.
           const guidance = action.kind === 'degrade' ? action.reason : action.hint;
           messages.push({ role: 'user' as const, content: guidance, internal: true });
+          // rate-limit 阶梯重试退避（2026-11-01 审查判例）：429 每轮 t=0 补枪
+          // 限流端点是确定性重败，套用流超时同款指数退避。
+          if (errClass === 'rate-limit') {
+            await new Promise((resolve) => setTimeout(resolve, streamRetryBackoffMs(failures.length)));
+          }
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
           continue;
@@ -948,8 +962,10 @@ export class AgentLoopEngine {
           budget.addTokens(resultText);
         }
 
-        // Track tool failures and consult policy
-        const toolErrors = toolResults.filter(tr => !tr.result.success);
+        // Track tool failures and consult policy. relaySkip（级联合成 skip）
+        // 不入账：它本身就是降级动作，再当失败燃料会三条链三轮凑满 8 停
+        // （2026-11-01 审查判例）。
+        const toolErrors = toolResults.filter(tr => !tr.result.success && !tr.relaySkip);
         for (const te of toolErrors) {
           failures.push({ type: 'tool_error', message: te.result.error ?? 'Unknown', turnNumber: turnCount, toolName: te.toolName });
         }
@@ -958,7 +974,7 @@ export class AgentLoopEngine {
           yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
           if (action.kind === 'stop') {
             yield* emitHandover(action.reason);
-            yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: action.reason, reasonCode: 'failure_policy_stop', lastState: 'ACT', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           // v1.9.7 — every failed execution explicitly degrades the subsequent
@@ -1114,7 +1130,7 @@ export class AgentLoopEngine {
               yield { type: 'FailurePolicyDecision', payload: { action, failure: failures[failures.length - 1], turnNumber: turnCount }, timestamp: Date.now() };
               if (action.kind === 'stop') {
                 yield* emitHandover(action.reason);
-                yield { type: 'Interrupted', payload: { reason: action.reason, lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
+                yield { type: 'Interrupted', payload: { reason: action.reason, reasonCode: 'failure_policy_stop', lastState: 'VERIFY', completedSteps, messages, turnCount }, timestamp: Date.now() };
                 interrupted = true; break;
               }
               const recoveryAction = action.kind === 'retry' ? 'retry' as const : action.kind === 'degrade' ? 'skip' as const : 'reflect' as const;

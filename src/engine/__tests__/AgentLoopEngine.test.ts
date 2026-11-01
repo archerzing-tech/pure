@@ -1538,15 +1538,17 @@ describe('AgentLoopEngine', () => {
     expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
   });
 
-  it('gives up after two schema strikes and stops with the schema wording', async () => {
-    // A sanitized (pattern-free) schema that STILL gets rejected is not a
-    // pattern problem — further stripping cannot fix it. Fall through to the
-    // deterministic stop, whose wording tells the user what resolves it.
+  it('drops the named tool on strike 2, gives up only when the tool-less request still 400s', async () => {
+    // Strike 1 strips patterns; strike 2 removes the tool from the list
+    // outright ("one tool fewer" beats a dead session); a 400 arriving AFTER
+    // the tool is gone is not a schema problem → deterministic stop.
     const SCHEMA_400 = `400 Bad Request: {"error":{"message":"Invalid schema for function 'rea__x': \\"enum entries are invalid\\"","type":"invalid_request_error"}}`;
+    const seenToolLists: string[][] = [];
     let calls = 0;
     const llm: LLMAdapter = {
-      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+      stream: async function* (_messages, tools): AsyncGenerator<LLMChunk, void, void> {
         calls++;
+        seenToolLists.push(tools.map(d => d.name));
         throw new Error(SCHEMA_400);
       },
       complete: async () => ({ content: 'ok', toolCalls: [] }),
@@ -1564,13 +1566,56 @@ describe('AgentLoopEngine', () => {
       ctx,
     ));
 
-    // 1st 400 → self-heal resend; 2nd 400 → stop; 3rd call is the handover
-    // (tools: [], fails, swallowed). No compaction borrow was spent.
-    expect(calls).toBe(3);
+    // 1st 400 → strip resend; 2nd 400 → DROP the tool, resend; 3rd 400 (same
+    // validator text, but the tool is gone) → give up; 4th call is the
+    // handover (tools: []). No compaction borrow was spent.
+    expect(calls).toBe(4);
+    expect(seenToolLists[0]).toContain('rea__x');
+    expect(seenToolLists[1]).toContain('rea__x'); // strike 1 keeps the tool (stripped)
+    expect(seenToolLists[2]).not.toContain('rea__x'); // strike 2 drops it
     const interrupted = events.find(e => e.type === 'Interrupted');
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('TOOL PARAMETER SCHEMA');
     expect(interrupted!.payload.reason).toContain(SCHEMA_400);
+  });
+
+  it('recovers fully when dropping the offending tool lets the round complete', async () => {
+    // The happy end of the strike-2 drop: rounds 1-2 400 on the bad tool,
+    // round 3 ships without it and completes — task survives one poisoned MCP
+    // tool instead of dying with it.
+    const SCHEMA_400 = `400 Bad Request: {"error":{"message":"Invalid schema for function 'rea__x': \\"enum entries are invalid\\"","type":"invalid_request_error"}}`;
+    const seenToolLists: string[][] = [];
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (_messages, tools): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        seenToolLists.push(tools.map(d => d.name));
+        if (calls <= 2) throw new Error(SCHEMA_400);
+        yield { type: 'content', content: 'recovered without the tool' };
+        yield { type: 'done', content: 'recovered without the tool', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm,
+      tools: { execute: async () => ({ id: 'x', name: 'x', result: '' }) } as unknown as ToolAdapter,
+      toolsDefs: [
+        { name: 'rea__x', description: 'x', input_schema: { properties: { k: { type: 'string' } } } },
+        { name: 'healthy_tool', description: 'h', input_schema: { properties: { p: { type: 'string' } } } },
+      ],
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-schema-drop-recover', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    expect(calls).toBe(3);
+    expect(seenToolLists[2]).not.toContain('rea__x');
+    expect(seenToolLists[2]).toContain('healthy_tool'); // drop is per-tool, not scorched-earth
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+    expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
   });
 
   it('salvages the transcript before a policy stop so the next turn inherits a lean payload', async () => {

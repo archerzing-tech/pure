@@ -385,4 +385,18 @@ describe('DefaultFailurePolicy context-window overflow (structural stop)', () =>
       expect(action.reason).toContain('maximum context length');
     }
   });
+
+  it('does NOT stop on tool-level context errors (subagent blew its own window is bypassable)', () => {
+    // 2026-11-01 审查判例：context stop 只数 llm_error。工具（子代理/委派）
+    // 打爆它自己的窗口是任务可绕的——拆小输入重试即可；「1 条任意旧失败 +
+    // 1 条工具 context」的凑数不该 stop 掉整个回合。
+    const policy = new DefaultFailurePolicy();
+    const toolCtx = toolError('subagent', 'maximum context length is 8192 tokens, however messages resulted in 12000 tokens');
+    // One stale unrelated failure + one tool context failure: previously this
+    // combination reached the stop via the old count-based check.
+    const mixed = policy.decide([toolError('web_fetch', 'HTTP 503'), toolCtx]);
+    expect(mixed.kind).not.toBe('stop');
+    // Even two tool-level context failures stay on the class ladder.
+    expect(policy.decide([toolCtx, toolError('subagent', 'context length exceeded')]).kind).not.toBe('stop');
+  });
 });

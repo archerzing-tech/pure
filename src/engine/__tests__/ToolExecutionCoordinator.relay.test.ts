@@ -111,6 +111,9 @@ describe('ToolExecutionCoordinator relay pipeline', () => {
     expect(skip.result.success).toBe(false);
     expect(String(skip.result.error)).toContain('research');
     expect(String(skip.result.error)).toContain('provider 5xx');
+    // 合成 skip 带 relaySkip 标记：引擎失败计账时剔除它，A→B→C 链上一条
+    // 上游死掉不再给失败阶梯 +2（级联跳过不是新失败）。
+    expect((skip as { relaySkip?: true }).relaySkip).toBe(true);
     // The failed upstream's own result is untouched (no receipt on failures).
     const research = results.find((tr) => tr.toolCallId === 'c1')!;
     expect(research.result.success).toBe(false);
