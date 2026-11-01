@@ -30,7 +30,11 @@ export interface ExecutedToolResult {
    *  下游发一条 skip——级联本身就是降级动作，不该再进失败账本当燃料（一条
    *  A→B→C 链 A 失败一次曾 = 账本 +3，三轮凑满 8 停整任务）。引擎的
    *  toolErrors 过滤这个标记；transcript 照常收录（模型要知道这一跳没跑）。 */
-  relaySkip?: true;
+  relaySkip?: boolean;
+  /** 合成复用标（对抗评审 F2，2026-11-01）：dedupe 复用上一轮成功结果零真
+   *  实执行的调用带这个标——「轮里有真实成功」的 roundHadSuccess 口径要排
+   *  除它，否则零执行的轮会被当成基础设施活着的证据。transcript 照常收录。 */
+  synthetic?: true;
   /** 四期 4a 强制 skip：隔离调用的重发被引擎拒绝时的合成标记——transcript
    *  照常收录（模型要知道这次调用没跑），但 toolErrors 过滤它（拒绝不是
    *  新失败，是旧裁决的执行；再入账会让阶梯把「拒绝」当燃料继续升级）。 */

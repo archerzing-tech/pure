@@ -56,10 +56,6 @@ function isEditMismatch(failure: FailureRecord): boolean {
  *   alternative, CONTINUE the task (a hard stop here aborted multi-step work
  *   over one non-critical failing call — e.g. a website build dying on a
  *   blocked resource download)
- * - same error repeated 3-4× → degrade: SKIP the failing call, take a workable
- *   alternative, CONTINUE the task (a hard stop here aborted multi-step work
- *   over one non-critical failing call — e.g. a website build dying on a
- *   blocked resource download)
  * - same error repeated 5× → degrade + QUARANTINE (v0.13, framework-reform 4a):
  *   the engine mechanically refuses further identical calls (same tool + same
  *   args) for the rest of the turn — a directive the model kept ignoring
@@ -180,6 +176,16 @@ export class DefaultFailurePolicy implements FailurePolicy {
           reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again. Please review and provide guidance.`,
         };
       }
+      // verify_failure 没有可隔离的调用：账本记录不带 toolName/callArgs
+      // （验证器评的是产出，不是某次调用），引擎的隔离登记只认工具错误。
+      // 给它不带 QUARANTINE 措辞的诚实 degrade——照抄隔离文案就是向模型
+      // 撒谎（引擎从不执行那次「拒绝」）。
+      if (last.type === 'verify_failure') {
+        return {
+          kind: 'degrade',
+          reason: `${repeats} consecutive failures of the same verification: "${last.message}". The output keeps failing the same check — do not simply re-run the same fix. Change the approach that produces the output (different method, source, or a narrower goal) and CONTINUE the task.`,
+        };
+      }
       return {
         kind: 'degrade',
         reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call (same tool, same arguments) is now QUARANTINED — the engine will refuse to execute it again this turn. Do not re-issue it; take a workable alternative that still serves the user's goal (a different source or tool, inline or substitute the content, or omit this step) and CONTINUE the task. Three refused attempts hand the turn back to the user.${webHint}`,
@@ -197,7 +203,7 @@ export class DefaultFailurePolicy implements FailurePolicy {
     if (repeats >= 3) {
       return {
         kind: 'degrade',
-        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call keeps failing with the same error — SKIP it now. Do not retry it with the same or trivially-different arguments. Take a workable alternative that still serves the user's goal (a different source or tool, inline or substitute the content, or omit this step) and CONTINUE the task. A further identical failure will hand the turn back to the user.${webHint}`,
+        reason: `${repeats} consecutive failures of the identical call${toolLabel}: "${last.message}". This exact call keeps failing with the same error — SKIP it now. Do not retry it with the same or trivially-different arguments. Take a workable alternative that still serves the user's goal (a different source or tool, inline or substitute the content, or omit this step) and CONTINUE the task. One more identical failure and the engine quarantines this call — it will then be refused mechanically, not by advice.${webHint}`,
       };
     }
 

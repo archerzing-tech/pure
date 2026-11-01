@@ -217,7 +217,8 @@ export class AgentLoopEngine {
     // 四期 4a 强制 skip（framework-reform）：策略标记 quarantineLastCall 后，
     // 失败调用的同工具同参重发被引擎直接拒绝——措辞救不了装听不见的循环，
     // 机械拒绝才是「阶梯裁决权下放模型」边界内的确定性自救。拒绝结果不入
-    // 失败账（不是新失败，是旧裁决的执行），连续 3 次拒绝兜底交还用户。
+    // 失败账（不是新失败，是旧裁决的执行），累计 3 次拒绝（中间表现良好
+    // 也不清零——被拒绝本身就是回路已死的证据）兜底交还用户。
     const turnQuarantined = new Set<string>();
     let quarantinedRefusals = 0;
     // Aggregated billing usage across every LLM call in this turn (each
@@ -956,6 +957,7 @@ export class AgentLoopEngine {
               toolName: call.function.name,
               result: { id: call.id, toolName: call.function.name, result: reused ?? 'dedupe resolution failed', success: reused !== null, duration: 0 },
               duration: 0,
+              synthetic: true,
             });
             continue;
           }
@@ -1005,7 +1007,7 @@ export class AgentLoopEngine {
           budget.addTokens(resultText);
         }
 
-        // 拒绝兜底（4a）：连续 3 次重发被隔离调用——明确指令装听不见、机械
+        // 拒绝兜底（4a）：累计 3 次重发被隔离调用——明确指令装听不见、机械
         // 拒绝也没能改变行为，剩余阶梯全失去意义，真话交还。放在 transcript
         // 配对之后：Interrupted 携带的 messages 必须已配平，续跑才不 400。
         if (quarantinedRefusals >= 3) {
@@ -1022,8 +1024,9 @@ export class AgentLoopEngine {
         const toolErrors = toolResults.filter(tr => !tr.result.success && !tr.relaySkip && !tr.engineRefusal);
         // 部分成功轮口径（4a）：本轮里是否有调用真成功过——轮里有成功就证
         // 明基础设施活着，这轮的失败只喂重复/类环检测器，不喂通用 count 阶梯。
-        // 引擎拒绝的合成结果不算成功（它没碰世界）。
-        const roundHadSuccess = toolResults.some(tr => tr.result.success && !tr.engineRefusal);
+        // 引擎拒绝的合成结果不算成功（它没碰世界）；dedupe 复用的合成结果
+        // 也不算（零真实执行，评审 F2：别把「复读旧账」当「基础设施活着」）。
+        const roundHadSuccess = toolResults.some(tr => tr.result.success && !tr.engineRefusal && !tr.synthetic);
         const callsById = new Map(toolCalls.map(c => [c.id, c]));
         for (const te of toolErrors) {
           failures.push({

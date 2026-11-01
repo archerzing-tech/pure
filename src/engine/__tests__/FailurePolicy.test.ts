@@ -450,4 +450,25 @@ describe('DefaultFailurePolicy context-window overflow (structural stop)', () =>
     // Even two tool-level context failures stay on the class ladder.
     expect(policy.decide([toolCtx, toolError('subagent', 'context length exceeded')]).kind).not.toBe('stop');
   });
+
+  it('5 连败 verify_failure 拿到诚实 degrade：不带 QUARANTINE 措辞、不带隔离标记（对抗评审 F5d）', () => {
+    // verify 账本记录没有 toolName/callArgs（验证器评的是产出），引擎的隔离
+    // 登记只认工具错误——策略若照发「已隔离、引擎将拒绝」文案就是向模型
+    // 撒谎（那次「拒绝」永远不会发生）。
+    const policy = new DefaultFailurePolicy();
+    const verifyError = (message: string, turnNumber = 1): FailureRecord => ({ type: 'verify_failure', message, turnNumber });
+    const action = policy.decide([
+      verifyError('expected 3 rows, got 0'),
+      verifyError('expected 3 rows, got 0', 2),
+      verifyError('expected 3 rows, got 0', 3),
+      verifyError('expected 3 rows, got 0', 4),
+      verifyError('expected 3 rows, got 0', 5),
+    ]);
+    expect(action.kind).toBe('degrade');
+    if (action.kind === 'degrade') {
+      expect(action.reason).not.toContain('QUARANTINED');
+      expect(action.reason).toContain('Change the approach');
+    }
+    expect('quarantineLastCall' in action).toBe(false);
+  });
 });

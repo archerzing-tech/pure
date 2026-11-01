@@ -4114,6 +4114,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 截断 + 清屏：最后一个用户气泡之后的 DOM（旧回复、工具卡、状态行）
     // 全部让位，重跑的流式输出从同一位置长回来。
     this.messages = this.messages.slice(0, start);
+    // 被剪的回合可能正攥着历史里最近一次全量世界状态拷贝——reset 让重发
+    // 回合回退全量渲染，指针不悬空引用一段已不存在的「earlier copy」。
+    this.worldState.reset();
     this.pruneTranscriptAfterLastUserBubble();
     this.onTurnVariantsChanged?.('regenerated');
     await this.send(
@@ -4139,6 +4142,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const userMessage = this.messages[start];
     this.adoptTurnVariantLedger(this.messages.slice(start));
     this.messages = this.messages.slice(0, start);
+    // 同 regenerate：剪掉的回合可能攥着最近一次全量世界状态拷贝，reset 防
+    // 指针悬空（评审 F4）。
+    this.worldState.reset();
     // 截断即刻落盘：磁盘立刻与新链一致（旧实现等新回合落定才写，中途崩
     // 溃会把已被上下文淘汰的旧回合恢复回来）。变体账此时锚着被删回合，
     // sync 在落盘路径里锚不上、不会误追加。
