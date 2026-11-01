@@ -83,7 +83,7 @@ interface OrchestratorSpies {
   registered: Array<{ callId: string; topic: string }>;
   stripped: string[];
   settleAcks: Array<string | null>;
-  folds: Array<{ cancels: boolean; stopMissed?: boolean }>;
+  folds: Array<{ cancels: boolean; receipt?: string }>;
   steers: Array<{ target: SteerTarget; cancel: boolean }>;
   cancels: string[];
 }
@@ -139,8 +139,8 @@ function makeOrchestratorFace(opts: {
       spies.steers.push({ target, cancel });
     },
     queueInterjectTask: () => {},
-    foldInScopeAddition: (_text: string, _images: MessageImage[], _displayText: string, _mechanical: boolean, _ack: InterjectAck, cancels: boolean, stopMissed?: boolean) => {
-      spies.folds.push({ cancels, stopMissed });
+    foldInScopeAddition: (_text: string, _images: MessageImage[], _displayText: string, _mechanical: boolean, _ack: InterjectAck, cancels: boolean, receipt?: string) => {
+      spies.folds.push({ cancels, receipt });
     },
     answerMidrunQuestion: async () => {},
     askMidrunClarification: async () => {},
@@ -239,7 +239,7 @@ describe('A · 编排器判定：收工支被点名取消才登记/剔除', () =
     await orchestrator.interject(TOPIC);
     expect(spies.registered).toEqual([{ callId: CALL, topic: TOPIC }]);
     expect(spies.stripped).toEqual([CALL]);
-    expect(spies.folds).toEqual([{ cancels: true, stopMissed: false }]);
+    expect(spies.folds).toEqual([{ cancels: true, receipt: undefined }]);
   });
 
   it('候选面只认已收工（done）：暂停/停止/在飞的支不入 settledBranches', () => {

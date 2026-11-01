@@ -51,7 +51,7 @@ import { createToolQuarantineHost, type QuarantinedToolEntry } from './toolQuara
 import { delegableExternalSubagents, loadGeneratedRoles } from './delegableRoles';
 import { parseQuarantineMarker, type QuarantineMarker } from '../harness/toolQuarantine';
 import type { TaggedTool } from '../coding-agent/types';
-import { steerFrameText, cancelFoldInstruction as cancelFoldInstructionShared, cancelFoldUnmatchedReceipt, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, branchResumeReceipt, treeResumeReceipt, settledBranchCancelNote, queuedHandoffText } from '../shared/insertionMessaging';
+import { steerFrameText, cancelFoldInstruction as cancelFoldInstructionShared, foldInInstruction as foldInInstructionShared, foldInFollowUpText as foldInFollowUpTextShared, settledBranchCancelNote, queuedHandoffText } from '../shared/insertionMessaging';
 import { PermissionManager } from '../coding-agent/PermissionManager';
 import { createDefaultVerifier } from '../coding-agent/Verifier';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress, type SubagentActivity } from '../coding-agent/SubagentOrchestrator';
@@ -2046,7 +2046,7 @@ export class ChatController {
     stopBranchByCallId: (callId, mode) => this.stopBranchByCallId(callId, mode),
     steerRunningTurn: (text, images, ack, target, cancel, receipt) => this.steerRunningTurn(text, images, ack as InterjectEchoRef | null, target, cancel, receipt),
     queueInterjectTask: (text, images, displayText, priority) => this.queueInterjectTask(text, images, displayText, priority),
-    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, stopMissed, receipt) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as InterjectEchoRef | null, cancels, stopMissed, receipt),
+    foldInScopeAddition: (text, images, displayText, mechanical, ack, cancels, receipt) => this.foldInScopeAddition(text, images, displayText, mechanical, ack as InterjectEchoRef | null, cancels, receipt),
     answerMidrunQuestion: (text, images) => this.answerMidrunQuestion(text, images),
     askMidrunClarification: (decision, text, images, ack) => this.askMidrunClarification(decision, text, images, ack as InterjectEchoRef | null),
     deferTimedInsert: (timing, text, images, displayText) => this.deferTimedInsert(timing, text, images, displayText),
@@ -3937,7 +3937,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
    * mechanical=true（scope 追加）：汇合边界直接把这项跑完、把结果喂给汇总
    * 轮——顺序由机制保证；mechanical=false（steer 类）：注入强框架指令。
    * 两者收尾都核验，没兑现就转排队兜底，话绝不丢。 */
-  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, stopMissed = false, receipt?: string): void {
+  private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, receipt?: string): void {
     this.interjectEpoch++; // 插话纪元 +1（修复账作废条件，见字段注释）
     const bubble = this.addBubble('user', displayText, images);
     // 回显登记进引用匣：后续 settleAck 的收执气泡锚在它后面（用户原话在前）。
@@ -3948,22 +3948,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 指令型是给模型的框架不是活，照旧走汇合路由。早派不成（无编排器/
     // 无末位角色）静默回落原路由，收执口径随之不撒谎。
     const earlyDispatched = mechanical && !cancels && this.dispatchFoldImmediately(text, images);
-    // 取消型折入（2026-09-24 取消案例）：回执必须说"拿掉"，绝不能沿用追加
+    // 取消型折入（2026-09-24 取消案例）：框架必须说"拿掉"，绝不能沿用追加
     // 口径——案例里用户收掉一项，回执却说"先补这项"，与意图正好相反。
-    // 不说"调研"——折入的可能是任何活，点名的任务类型说错了才突兀。
-    // stopMissed（2026-10-10）：点名停支没停成的取消折入，收执换诚实口径
-    // ——支还在跑，说「其余照常」是失实收执（cancelFoldUnmatchedReceipt
-    // 是判例保留的事实播报：只有宿主知道「没停成」，裁决器的 receipt 写的
-    // 是转达口径，压不过宿主事实——收执纪律：只说真实发生的事）。
-    // 早派成功：foldInEarlyReceipt 已随刀 2 删除，追加委派的状态气泡亦随
-    // 呈现层契约退役——引擎沉默，产出由委派卡与汇合汇总自然呈现。
-    // 普通折入：裁决器现场写的 receipt 是唯一来源，缺席沉默（settleAck null
-    // 退场），绝不出固定话术（foldInReceipt 已随刀 2 删除）。
-    this.settleAck(ack, stopMissed
-      ? cancelFoldUnmatchedReceipt()
-      : earlyDispatched
-        ? null
-        : (receipt?.trim() || null));
+    // 收执（刀 A2 收口）：裁决器现场写的 receipt 是唯一来源；缺席（含早派
+    // 成功、点名停支没停成）一律沉默——机制状态由活动面板呈现，模型的
+    // 下一动作被框架告知事实后自然带出（cancelFoldUnmatchedReceipt 已退）。
+    this.settleAck(ack, earlyDispatched ? null : (receipt?.trim() || null));
   }
 
   /** 早派（刀 2.2 早派版，2026-10-10）：委派在飞时挂号进来的机械追加，宿主
@@ -4363,17 +4353,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // The activity panel is task-scoped: a continuation keeps the existing
     // rows, while a new top-level task starts a fresh collaboration trace.
     const preserveAgentActivities = this.activeComplexPlan !== null && this.hasHistory;
-    // 刀 3（第 3 期持久性）：暂停恢复回合的锚。sessionEndedPaused 在本函数
-    // 后段才清零，此刻它还带着真值；停着的旧支名单在活动面板可能被清空前
-    // 抓下——回执据此区分「旧支重派」（存档没跟上要明说）与「本轮新委派」
-    // （不出声）。防重账随闭包：段内续 slice 的二次 onStart 不再出声。
-    const resumingPausedTurn = this.sessionEndedPaused;
-    const pausedBranchNames = new Set(
-      this.agentActivities
-        .filter((item) => item.status === 'paused' || item.lifecycle === 'paused')
-        .map((item) => item.agentName),
-    );
-    const resumeReceiptShown = new Set<string>();
     this.agentActivityHistorical = false;
     if (!preserveAgentActivities) {
       this.agentActivities = [];
@@ -4383,14 +4362,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       onStart: (a) => {
         if (gen !== this.generation) return;
         this.updateAgentActivity(a);
-        // 整树续跑的对话流回执（判定与话术同源 insertionMessaging，与分支级
-        // 继续共用 branchResumeReceipt 一个出处）：命中存档说从第几轮接，
-        // 旧支存档没跟上明说重跑。
-        const receipt = treeResumeReceipt(a, { resumingPausedTurn, pausedBranches: pausedBranchNames });
-        if (receipt && !resumeReceiptShown.has(a.callId)) {
-          resumeReceiptShown.add(a.callId);
-          this.addStatusBubble(receipt, false, false, 'info');
-        }
       },
       onState: (a) => {
         if (gen !== this.generation) return;
@@ -5399,11 +5370,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             calls.push({ id: callId, index: calls.length, function: { name: role, arguments: JSON.stringify({ prompt: brief }) } });
           }
           // 分支级继续（第 2 期第三刀）：点名续跑的那支用**原始参数**同参
-          // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。收执按
-          // 排队时的预检凭据二分（命中说第几轮 / 没命中明说从头跑），与排
-          // 队收执同一出处（branchResumeReceipt）——两处不许漂移。
+          // 重派——稳定 sessionId 命中 checkpoint，子引擎 continue。引擎
+          // 沉默（branchResumeReceipt 已随刀 A2 退役）：续跑状态由活动面板
+          // 呈现；checkpoint 命中与否的诚实二分只对模型走（兜底指令）。
           for (const resume of this.delegationControl.takeResumes()) {
-            this.addStatusBubble(branchResumeReceipt(resume.label, resume.checkpoint, false), false, false, 'info');
             calls.push({ id: `resume_${resume.callId}`, index: calls.length, function: { name: resume.name, arguments: resume.args } });
           }
           return calls;

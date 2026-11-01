@@ -1196,7 +1196,7 @@ describe('plan overview completion state', () => {
       expect(body.indexOf('this.deps.settleAck(ack') !== -1 || body.indexOf('this.deps.discardAckRow(ack)') !== -1).toBe(true);
     }
     // 折入 / steer / 队列路径通过方法参数收场 ack（引用匣版签名）。
-    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, stopMissed = false, receipt?: string)')).toBeGreaterThan(-1);
+    expect(src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, receipt?: string)')).toBeGreaterThan(-1);
     expect(src.indexOf('private steerRunningTurn(text: string, images: MessageImage[], ack: InterjectEchoRef | null, target: SteerTarget, cancel: boolean, receipt?: string)')).toBeGreaterThan(-1);
   });
 
@@ -1280,12 +1280,11 @@ describe('plan overview completion state', () => {
     expect(armBody.indexOf('findCoveringBranch(coveredCallId)')).toBe(-1);
     // 核实不过（模型点错/那支刚结算）= 要求照常兑现，落下去走正常路由。
     expect(armBody.indexOf('核实不过')).toBeGreaterThan(-1);
-    // 核实通过即终稿：running/done 两口径 + 复核没结论的诚实暂停收执，
-    // 三句都是宿主核实过的事实话术（转普通气泡，无后续在途）。
+    // 核实通过即终稿（刀 A2）：去重/暂停全部沉默——settleAck(ack, null)，
+    // 状态由活动面板呈现（coveredName 仍喂复核提示词的 conflictNote）。
     const coveredBody = orch.slice(coveredAt, orch.indexOf('\n  private ', coveredAt));
-    expect(coveredBody.indexOf('「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。')).toBeGreaterThan(-1);
-    expect(coveredBody.indexOf('那路的结果就在汇总里，不重复派。')).toBeGreaterThan(-1);
-    expect(coveredBody.indexOf('branchUncertainPauseReceipt(')).toBeGreaterThan(-1);
+    expect(coveredBody.split('this.deps.settleAck(ack, null)').length - 1).toBe(2);
+    expect(coveredBody.indexOf('不重复派')).toBe(-1);
     // 判定遥测落盘（真机取证断链修复）：kind/点名/收执进 observations。
     expect(orch.indexOf("type: 'interject_decision'")).toBeGreaterThan(-1);
     // 花名册喂已收工支（裁决器看得见才点得出）。
@@ -1507,15 +1506,14 @@ describe('plan overview completion state', () => {
     expect(earlyBody.indexOf('this.folds.markMechanicallyDone(callId)')).toBeGreaterThan(-1);
     expect(earlyBody.indexOf('用户的主任务：「${this.activeTurnUserText}」')).toBeGreaterThan(-1);
     expect(ledger.indexOf('claimImmediate(input:')).toBeGreaterThan(-1);
-    // 早派收执沉默化（2026-10-28 刀 2）：早派成功 = 沉默（机制事实由「追加
-    // 委派：…立即补跑」状态气泡呈现），点名没停成才说（cancelFoldUnmatched
-    // Receipt），模型现场 receipt 优先——foldInEarlyReceipt 已随回应性收执
-    // 族删除，固定句零存活。
+    // 早派收执沉默化（2026-10-28 刀 2 → 刀 A2 收口）：早派成功 = 沉默，
+    // 模型现场 receipt 优先、缺席一律沉默——cancelFoldUnmatchedReceipt 与
+    // stopMissed 参数链已随判例播报族退役，固定句零存活。
     const additionFn = src.indexOf('private foldInScopeAddition(');
     const additionBody = src.slice(additionFn, additionFn + 2_600);
-    expect(additionBody.indexOf('stopMissed')).toBeGreaterThan(-1);
-    expect(additionBody.indexOf('cancelFoldUnmatchedReceipt()')).toBeGreaterThan(-1);
-    expect(additionBody.indexOf('receipt?.trim() || null')).toBeGreaterThan(-1);
+    expect(additionBody.indexOf('stopMissed')).toBe(-1);
+    expect(additionBody.indexOf('cancelFoldUnmatchedReceipt()')).toBe(-1);
+    expect(additionBody.indexOf('earlyDispatched ? null : (receipt?.trim() || null)')).toBeGreaterThan(-1);
     expect(additionBody.indexOf('foldInEarlyReceipt(')).toBe(-1);
     // 代执行接缝同边界 hold：其余代执行与追加产出的注入同轮发生。
     expect(synthBody.indexOf('await this.awaitEarlyDispatches()')).toBeGreaterThan(-1);
@@ -1630,28 +1628,23 @@ describe('plan overview completion state', () => {
     expect(steerBody).not.toContain('活不停，下个动作就带上这句');
     expect(steerBody).not.toContain('已直接转给');
     expect(src).not.toContain('在跑的 ${flying} 路都收到了');
-    // fold 收执：stopMissed → 早派沉默 → 现场收执的顺序不可倒——没停成是
-    // 只有宿主知道的事实（判例播报），早派成功引擎沉默（机制气泡已随呈现
-    // 层契约退役），普通折入 receipt 缺席同样沉默。
-    const foldFn = src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, stopMissed = false, receipt?: string): void {');
+    // fold 收执（刀 A2）：签名无 stopMissed；早派沉默 → 现场 receipt 转达
+    // ——缺席一律沉默，判例播报不再有专属臂。
+    const foldFn = src.indexOf('private foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectEchoRef | null, cancels: boolean, receipt?: string): void {');
     expect(foldFn).toBeGreaterThan(-1);
     const foldBody = src.slice(foldFn, foldFn + 1600);
-    const missAt = foldBody.indexOf('stopMissed\n      ? cancelFoldUnmatchedReceipt()');
-    const silenceAt = foldBody.indexOf(': earlyDispatched\n        ? null');
-    const receiptAt = foldBody.indexOf(': (receipt?.trim() || null))');
-    expect(missAt).toBeGreaterThan(-1);
-    expect(silenceAt).toBeGreaterThan(missAt);
-    expect(receiptAt).toBeGreaterThan(silenceAt);
+    const silenceAt = foldBody.indexOf('earlyDispatched ? null : (receipt?.trim() || null)');
+    expect(silenceAt).toBeGreaterThan(-1);
     // 编排器取信号、只传给路线与收执语义一致的臂：刀 B 后转达面收成两处
     // ——inline 直投 ×1（带 receipt）；出生前取消转达 ×1（null ack，不传
     // receipt——它的收执走 settleAck 的 receipt ?? null，机制承诺不进收执）。
     expect(orch.indexOf("typeof decision.signals.receipt === 'string'")).toBeGreaterThan(-1);
     expect(orch.split('this.deps.steerRunningTurn(text, images, ack, target, false, receipt)').length - 1).toBe(1);
     expect(orch.split("this.deps.steerRunningTurn(text, images, null, 'parent', true)").length - 1).toBe(1);
-    // 折入 ×2 全是取消落地：没停成（stopMissed=true，判例播报收执）与整理窗
-    // （带现场 receipt）；机械追加折入（mechanical=true）零存活。
-    expect(orch.split('foldInScopeAddition(text, images, displayText, false, ack, true, true)').length - 1).toBe(1);
-    expect(orch.split('foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt)').length - 1).toBe(1);
+    // 折入 ×2 全是取消落地（刀 A2 签名）：没停成的臂与整理窗（带现场
+    // receipt）；机械追加折入（mechanical=true）零存活。
+    expect(orch.split('foldInScopeAddition(text, images, displayText, false, ack, true)').length - 1).toBe(1);
+    expect(orch.split('foldInScopeAddition(text, images, displayText, false, ack, true, receipt)').length - 1).toBe(1);
     expect(orch.indexOf(', true, ack,')).toBe(-1);
     // settleAck(ack, receipt ?? null) 四处：new_task 排队/整树停/在飞停支/
     // 出生前取消——缺席沉默是唯一口径。
@@ -1671,12 +1664,11 @@ describe('plan overview completion state', () => {
     const foldInBody = src.slice(foldInFn, src.indexOf('private cancelFoldInstruction', foldInFn));
     expect(foldInBody.indexOf('this.folds.add(')).toBeGreaterThan(-1);
     expect(foldInBody.indexOf('mechanical, cancels')).toBeGreaterThan(-1);
-    // 收执链锁「没停成才说」的宿主事实：点名停支没停成的取消折入仍用判例
-    // 收执（cancelFoldUnmatchedReceipt，2026-10-10）；其余取消折入沉默——
-    // foldInReceipt 固定句族已随刀 2 删除（锁调用形态；注释里的历史提及
-    // 不算回潮）。
-    expect(foldInBody.indexOf('stopMissed')).toBeGreaterThan(-1);
-    expect(foldInBody.indexOf('cancelFoldUnmatchedReceipt()')).toBeGreaterThan(-1);
+    // 收执链沉默化（刀 A2）：点名停支没停成与其他取消折入一律沉默——
+    // cancelFoldUnmatchedReceipt 判例话术与 stopMissed 参数链已退役
+    // （锁调用形态；注释里的历史提及不算回潮）。
+    expect(foldInBody.indexOf('stopMissed')).toBe(-1);
+    expect(foldInBody.indexOf('cancelFoldUnmatchedReceipt()')).toBe(-1);
     expect(foldInBody.indexOf('foldInReceipt(')).toBe(-1);
     // 汇合轮框架反着说死：不许为取消项派新委派、部分产出不进汇总、幸存分
     // 支照常合并——绝不能沿用追加口径（"派出去做完…覆盖所有对象"）。
@@ -1728,7 +1720,8 @@ describe('plan overview completion state', () => {
     // 一声就续上），该停不停不可逆。拿不准选可逆的一边。
     expect(coveredBody.indexOf("recheck === null && covered.status === 'running'")).toBeGreaterThan(-1);
     expect(coveredBody.indexOf("this.deps.stopBranchByCallId(covered.callId, 'pause')")).toBeGreaterThan(-1);
-    expect(coveredBody.indexOf('branchUncertainPauseReceipt(')).toBeGreaterThan(-1);
+    // 暂停沉默（刀 A2）：branchUncertainPauseReceipt 已退役，状态由面板呈现。
+    expect(coveredBody.indexOf('this.deps.settleAck(ack, null)')).toBeGreaterThan(-1);
     // 复核提示词的契约面（Planner 侧）：dedupe_conflict 是 system 点名的顶层
     // 块、举证责任倒置写进指令、输出契约带 stop_branch 点名与现场收执。
     const plannerSrc = readSource(new URL('../../coding-agent/Planner.ts', import.meta.url));
@@ -1856,8 +1849,8 @@ describe('plan overview completion state', () => {
     expect(armBody.indexOf('cancelsPart')).toBe(-1);
     const resumeFn = orch.indexOf('private resumeNamedBranch(callId: string, text: string)');
     expect(resumeFn).toBeGreaterThan(-1);
-    // 第 2 期第三刀：返回类型带 checkpoint 预检凭据（收执诚实二分——收执、
-    // 兜底指令按同一份预检二分，见 insertionMessaging 的 RESUME_INVARIANTS）。
+    // 第 2 期第三刀：返回类型带 checkpoint 预检凭据（诚实二分只对模型走
+    // ——兜底指令按同一份预检二分，见 insertionMessaging 的 RESUME_INVARIANTS）。
     expect(orch.slice(resumeFn, resumeFn + 160)).toContain("{ label: string; checkpoint: { hit: boolean; turns: number } } | null");
     const resumeBody = orch.slice(resumeFn, orch.indexOf('private findCoveringBranch(', resumeFn));
     // 宿主读数缝的候选过滤（paused+cancelled 两腿都要）——scoped 到

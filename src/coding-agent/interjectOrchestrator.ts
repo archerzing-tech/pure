@@ -29,10 +29,10 @@
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from './DynamicInsertionCoordinator';
 import { needsClarification, isDestructiveAction, type InputAction, type InputTiming } from './inputDecision';
 import { matchInFlightBranch, type SteerTarget, type InFlightBranch } from '../shared/steerTargeting';
-// 收执纪律（2026-10-28 框架改革刀 2）：收执 = 裁决器现场写的 receipt 唯一来源，
-// 缺席时引擎沉默。这里只保留判例背书的事实播报（branchUncertainPauseReceipt）
-// 与续跑诚实二分（branchResumeReceipt，checkpoint 命中与否只有宿主知道）。
-import { branchResumeReceipt, branchUncertainPauseReceipt } from '../shared/insertionMessaging';
+// 收执纪律（2026-10-28 框架改革刀 2，一期刀 A2 收口）：收执 = 裁决器现场写
+// 的 receipt 唯一来源，缺席时引擎沉默——判例播报（branchUncertainPause/
+// branchResume/covered「不重复派」）已全族退役：暂停/续跑/去重是宿主动作，
+// 由活动面板呈现，模型被框架告知机制事实后自然带出叙述。
 import { priorityForLevel, type ProcessingLevel } from '../shared/scheduling';
 import type { DelegationControlPlane } from './delegationControl';
 import type { MessageImage, LLMAdapter } from '../shared/types';
@@ -113,9 +113,9 @@ export interface InterjectOrchestratorDeps {
    *  由调度级折算（见 shared/scheduling.ts）；缺省 = 队列级。 */
   queueInterjectTask(text: string, images: MessageImage[], displayText: string, priority?: number): void;
   /** 折入汇合轮的铺排（回显 + folds.add + 收执——铺排留宿主）。取消落地臂
-   *  专用：点名停支没停成时折入守汇报步（stopMissed=true 收执如实说没停），
-   *  或整理窗折入汇聚轮。加活不再走这里（原话直投/排队）。 */
-  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean, stopMissed?: boolean, receipt?: string): void;
+   *  专用：折入守汇报步，或整理窗折入汇聚轮。加活不再走这里（原话直投/
+   *  排队）。收执 = 裁决器 receipt 转达，缺席沉默。 */
+  foldInScopeAddition(text: string, images: MessageImage[], displayText: string, mechanical: boolean, ack: InterjectAck, cancels: boolean, receipt?: string): void;
   answerMidrunQuestion(text: string, images: MessageImage[]): Promise<void>;
   askMidrunClarification(decision: DynamicInsertionDecision, text: string, images: MessageImage[], ack: InterjectAck): Promise<void>;
   /** 输入自带执行时刻的排期 sink（false = 没接 sink 或拒收）。 */
@@ -366,11 +366,10 @@ export class InterjectOrchestrator implements InterjectionIngress {
       const resumed = this.resumeNamedBranch(resumeCallId, text);
       if (resumed) {
         echoUserBubble();
-        // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定），收执
-        // 是终稿——转普通气泡。命中说从第 N 轮接 / 没命中明说从头跑，
-        // 口径单一出处（branchResumeReceipt，checkpoint 命中与否只有宿主
-        // 知道的判例播报）。
-        this.deps.settleAck(ack, branchResumeReceipt(resumed.label, resumed.checkpoint, this.deps.hasDelegationInFlight()));
+        // 续跑由机制保证（同参重派在委派收齐后的代执行回合落定）。引擎
+        // 沉默：支重派的状态由活动面板呈现，checkpoint 命中与否随排队
+        // 预检凭据走（兜底指令按它对模型诚实二分）。
+        this.deps.settleAck(ack, null);
         return;
       }
     }
@@ -458,16 +457,16 @@ export class InterjectOrchestrator implements InterjectionIngress {
       if (stopped) {
         try { appendTrace({ type: 'covered_recheck_unresolved_pause', snippet: text.slice(0, 80) }); } catch {}
         echoUserBubble();
-        this.deps.settleAck(ack, branchUncertainPauseReceipt(coveredName));
+        // 沉默：暂停由活动面板呈现（误停可逆、说一声就续上）。
+        this.deps.settleAck(ack, null);
         return;
       }
       // 停不成（窗口刚好收尾）→ 落到下方终稿：活已不在跑，无方向性伤害。
     }
     echoUserBubble();
-    // 去重回执是终稿（没有后续在途）——转普通气泡（宿主核实过的事实话术）。
-    this.deps.settleAck(ack, covered.status === 'done'
-      ? `这个刚才已经跑完了——「${coveredName}」那路的结果就在汇总里，不重复派。`
-      : `您说的这个正在「${coveredName}」那路跑着，不重复派——收齐后一并汇总给您。`);
+    // 去重核实过的事实不再由引擎播报（「那路正在跑/已跑完」话术随刀 A2
+    // 退役）——覆盖支的状态在活动面板，模型的下一动作会自然带出。
+    this.deps.settleAck(ack, null);
   }
 
   /**
@@ -502,9 +501,10 @@ export class InterjectOrchestrator implements InterjectionIngress {
       // 缺口②扩窗：没停成的取消臂也点名了话题——若它同时命中某支**已收
       // 工**的支，登记进离场账（在飞支停没停成不影响已收工支的产出离场）。
       this.stripSettledTarget(text);
-      // stopMissed=true：支还在飞、但没停成（没指认/编排器缺位）——收执
-      // 必须如实说「没停」，不许说「其余照常」了事（收执纪律）。
-      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, true);
+      // 支还在飞、但没停成（没指认/编排器缺位）：折入只守汇报步，沉默
+      // 兜底——取消挂号与产出出清照常生效，那支还在跑的事实由活动面板
+      // 呈现（2026-10-10「没停要明说」判例的话术半边随刀 A2 退役）。
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true);
       return;
     }
     // 整理窗（委派收齐、汇总未完）的取消：无支可停，但「不进最终汇总」
@@ -515,7 +515,7 @@ export class InterjectOrchestrator implements InterjectionIngress {
     // 缺口②扩窗（第 6 期）：任何取消臂只要点名命中已收工支就登记。
     this.stripSettledTarget(text);
     if (this.deps.atAggregationWindow()) {
-      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, false, receipt);
+      this.deps.foldInScopeAddition(text, images, displayText, false, ack, true, receipt);
     } else {
       echoUserBubble();
       // 插话落在委派出生之前：此刻无支可停，话挂上起飞闸——委派批次出生
@@ -564,8 +564,8 @@ export class InterjectOrchestrator implements InterjectionIngress {
     const original = this.deps.delegation.delegationArgs.get(matched.callId);
     if (!original) return null;
     const label = this.deps.branchLabel(matched.name, matched.callId);
-    // 预检先行、凭据随记录走：排队收执、派工收执、兜底指令三处按同一份
-    // 预检二分——命中说从第 N 轮接，没命中明说从头跑，绝不预支断点承诺。
+    // 预检先行、凭据随记录走：排队预检凭据与兜底指令按同一份预检二分
+    // ——命中说从第 N 轮接，没命中明说从头跑，绝不预支断点承诺。
     const checkpoint = this.deps.probeResume(original.name, original.args);
     // 排队同参重派：同一支只排一次——重复点名按「点不出」退回，调用方
     // 落回普通插话。

@@ -1,30 +1,22 @@
 // src/shared/insertionMessaging.ts
-// 插话文本的单一事实来源。2026-10-28 框架改革刀 2（docs/
-// framework-reform-2026-10.md）重定收执纪律：
+// 插话文本的单一事实来源。框架改革一期刀 A2（docs/framework-reform-2026-11.md）
+// 收口：本模块只剩**框架文本**——面向模型的机制指令，只描述机制事实，不示范
+// 措辞，更不冒充模型的口吻对用户说话。
 //
-//   收执 = 承接插话的模型现场写的 receipt，唯一来源；模型缺席时引擎沉默
-//   （宁可无话，不出机械腔——机制状态由 UI 呈现）。回应性固定话术
-//   （branchStopReceipt / cancelBeforeDispatchReceipt / foldInReceipt /
-//   foldInEarlyReceipt / queuedReceipt / queuedUrgentReceipt /
-//   steerFallbackReceipt / holdReleaseReceipt / holdReleaseTurnReceipt /
-//   truePauseReceipt / selfCheckClearReceipt 一族）已随本刀全部删除。
-//
-//   本模块只存两类文本：
-//   ① 框架文本：面向模型的机制指令（steerFrameText / cancelFoldInstruction /
-//      foldInInstruction / foldInFollowUpText / queuedHandoffText /
-//      settledBranchCancelNote）——只描述机制事实，不示范措辞；
-//   ② 判例/事实播报：有真机判例背书的收执（branchUncertainPauseReceipt
-//      2026-10-21 真机三连；cancelFoldUnmatchedReceipt 2026-10-10 判例
-//      「没停要明说没停」；branchResumeReceipt/treeResumeReceipt 续跑诚实
-//      二分；frozenSideEffectReceipt v2 §六冻结+询问带用户决策点——已于
-//      2026-10-28 插话改版 D 刀随真暂停链退役）。
+//   收执 = 承接插话的模型现场写的 receipt，唯一来源；引擎在模型缺席时沉默
+//   （宁可无话，不出机械腔——机制状态由 UI 呈现）。回应性固定话术（branchStop
+//   / cancelBeforeDispatch / foldIn / foldInEarly / queued / queuedUrgent /
+//   steerFallback / holdRelease / truePause / selfCheckClear 一族，2026-10-28
+//   刀 2）与判例播报（branchUncertainPause / cancelFoldUnmatched /
+//   branchResume / treeResume 及 covered「不重复派」字面量，本刀）已全部退役：
+//   暂停、续跑、去重这些宿主动作由活动面板与生命周期卡呈现，模型的下一动作
+//   被框架告知机制事实后自然带出叙述。
 //
 // 纪律：这里只放文本，不放判定逻辑。判定（谁停、停哪支、何时停）归
-// DynamicInsertionCoordinator / chat.ts / steerTargeting.ts。
+// DynamicInsertionCoordinator / chat.ts / DelegationControlPlane。
 //
 // 核心口径不变：停/暂停一支是**宿主的动作**，模型永不亲自动手停；模型
-// 负责叙述、排除产出（不进最终汇总）、合并幸存者。存留收执与框架同向——
-// 「我先暂停了」是宿主已完成动作的汇报，不是模型去停。
+// 负责叙述、排除产出（不进最终汇总）、合并幸存者。
 
 /** steer 框架文本（chat.ts steerRunningTurn 的投递正文）。cancel=true 用
  *  取消口径——通用口径的「选最小动作，手头的活继续」会把取消引导成「计划
@@ -36,16 +28,6 @@ export function steerFrameText(text: string, cancel: boolean): string {
   return cancel
     ? `【用户插话·顺路带上】${text}\n（这是任务进行中的取消，不是新任务：用户收掉了一个方向/话题。把它从计划和后续动作里去掉，不要再为它派工，它的产出不进最终汇总；其余工作照常。复述计划时只说实际保留的部分——计划里有分路就数剩下的分路，没有分路就不要提分路。）`
     : `【用户插话·顺路带上】${text}\n（这是任务进行中的插话，不是新任务：按 <insertion_protocol> 判断它影响什么，选最小动作，手头的活继续。）`;
-}
-
-/** 拿不准暂停的收执（2026-10-21 真机三连，用户定调「方向性问题大
- *  bug」）：去重复核没给结论（超时/解析失败）时宿主的兜底不再是「不重复
- *  派」照旧跑——用户说了「不需要」却被任其继续，是当着用户的面背叛，且
- *  不可逆；误停一支是可逆的（说一声就续上）。拿不准选可逆的一边：暂停
- *  covered 那支，收执诚实交代没拿准+给出恢复口——绝不装「明白」（那会儿
- *  恰恰是没听懂）。 */
-export function branchUncertainPauseReceipt(label: string): string {
-  return `这句我没拿准您的意思——保险起见先把「${label}」那路暂停了，它的产出暂时不进汇总；该继续的话说一声，我马上让它接着跑。`;
 }
 
 /** 取消型折入的引擎侧框架（chat.ts cancelFoldInstruction）。与追加框架
@@ -61,15 +43,6 @@ export function cancelFoldInstruction(text: string): string {
  *  照折（宣布「已取消」的职责仍在框架文本里）。 */
 export function settledBranchCancelNote(): string {
   return '【已按用户要求取消】用户中途收掉了这一路的工作，其全部产出已从汇总素材中剔除。不要引用或复述本条的任何内容；最终汇总不包含这一路，只用一句话交代它已按用户要求取消。';
-}
-
-/** 取消折入但「点名停支」没停成时的收执（2026-10-10 修「取消后子 agent 不
- *  停」的收执半边）。此时只有取消挂号（拦新委派）与折入守门（产出不进汇
- *  总）在生效，在飞支一个没停——「这项不做了；其余照常」在这个场景是失实
- *  收执（什么都没停却说得像已停）。如实说「没停」，并把唯一能真停的说法
- *  （点名）交给用户——收执纪律：只说真实发生的事。 */
-export function cancelFoldUnmatchedReceipt(): string {
-  return '收到——这项不做了，产出不会进最终结果。不过正在跑的相关支我没点出是哪一支，先没停：要立刻停下的话，说「停掉 XX 那支」我就停。';
 }
 
 /** 追加型折入的引擎侧框架（chat.ts foldInInstruction）。与取消框架互补：
@@ -98,41 +71,6 @@ export function queuedHandoffText(text: string): string {
   return `【排队中的用户消息·现在轮到它】${text}\n（这是你忙于前一件事时用户发来的话，当时排进了队列；现在前一件事已收尾，轮到接这句话。结合刚做完的事和对话的来龙去脉消化它——它可能延续、补充或修正刚完成的成果，不要当成凭空而来的新请求从零开始。）`;
 }
 
-/** 分支级继续的收执（第 2 期第三刀）：排队（interjectOrchestrator）与派工
- *  （chat.ts takeSyntheticToolCalls）两处共用一个出处。二分口径（蓝图判例
- *  14「回执说清从哪轮接的」+「找不到断点不许悄悄从头跑」）：命中 checkpoint
- *  说从断点第几轮接上；没命中明说没找到存档、会重新跑——绝不预支「从断点
- *  继续」的承诺（GUI 的 checkpoint 在进程内存里，重启/旧会话后 miss 是常态，
- *  收执替机制许愿就是说谎）。pending=true = 还有委派在飞（这支等收齐再接），
- *  补一句时序交代；派工收执（本批就是它）不带走时不带。 */
-export function branchResumeReceipt(
-  label: string,
-  checkpoint: { hit: boolean; turns: number },
-  pending: boolean,
-): string {
-  const tail = pending ? '等手头这批收齐接上。' : '';
-  return checkpoint.hit
-    ? `续跑：「${label}」从存档断点（第 ${checkpoint.turns} 轮）接上。${tail}`
-    : `续跑：「${label}」——没找到存档，会重新跑一遍。${tail}`;
-}
-
-/** 整树续跑的对话流回执判定（第 3 期刀 3）：send('继续') 引导的恢复回合里，
- *  每个重派支起飞时宿主问一次本函数。命中存档说从第几轮接；停着的旧支存档
- *  没跟上就明说重跑；本轮新委派不出声——回执替机制许愿就是说谎，噪音回执
- *  稀释真信号同理。话术与分支级继续同源（branchResumeReceipt），两处不许
- *  漂移。防重（段内续 slice 的二次 onStart 不再出声）是宿主按 callId 记的
- *  账，纯函数只管单次判定。 */
-export function treeResumeReceipt(
-  activity: { resumed?: boolean; resumedTurns?: number; agentName: string },
-  ctx: { resumingPausedTurn: boolean; pausedBranches: ReadonlySet<string> },
-): string | null {
-  if (activity.resumed) return branchResumeReceipt(activity.agentName, { hit: true, turns: activity.resumedTurns ?? 0 }, false);
-  if (ctx.resumingPausedTurn && ctx.pausedBranches.has(activity.agentName)) {
-    return branchResumeReceipt(activity.agentName, { hit: false, turns: 0 }, false);
-  }
-  return null;
-}
-
 /** 取消口径的一致性锚（一致性测试读它，不读各处散文）——每条都是「取消」
  *  这个动作在系统里必须同时成立的三个面：宿主动手、产出出清、幸存者合并。 */
 export const CANCELLATION_INVARIANTS = {
@@ -147,14 +85,16 @@ export const CANCELLATION_INVARIANTS = {
   /** 收执安全线（2026-09-28）：出生前取消收执可能在没有任何委派/汇总的
    *  单任务场景发出，一个机制词汇都不能带——测试断言它**不匹配**这个正则。
    *  停支/折入收执不受此锁（那些路径机制真实在场）。
-   *  （2026-10-28 框架改革刀 2：断言对象 cancelBeforeDispatchReceipt 已随
-   *  回应性收执全族删除，锚保留——后续任何引擎侧兜底话术回潮时仍用此锁。） */
+   *  （引擎侧兜底话术已全族退役；锚保留——后续任何引擎侧兜底话术回潮时
+   *  仍用此锁。） */
   absentMechanismWords: /派|汇总|支/,
 } as const;
 
 /** 续跑口径的一致性锚（第 2 期第三刀）：命中必须说断点（最好带轮数）、
- *  未命中必须认账「没找到存档」——漂移到任何一头，都是收执在替机制许愿
- *  或把用户蒙在鼓里。 */
+ *  未命中必须认账「没找到存档」——漂移到任何一头，都是框架在替机制许愿
+ *  或把模型蒙在鼓里。用户侧续跑收执（branchResume/treeResume）已随刀 A2
+ *  退役；锚继续锁 DelegationControlPlane 的兜底指令（给模型的机制事实：
+ *  命中从断点续、没命中重新跑）。 */
 export const RESUME_INVARIANTS = {
   // 全角括号是字面量不是分组：锚必须真咬住轮数（\d+ 缺席即锚失效）。
   hitSaysFromCheckpoint: /从存档断点（第 \d+ 轮）/,

@@ -17,7 +17,6 @@ import type { CoveredRecheckVerdict, InsertionClassification } from '../Planner'
 import type { DelegationControlPlane } from '../delegationControl';
 import type { RoundClosePlane } from '../roundClosePlane';
 import type { InFlightBranch, SteerTarget } from '../../shared/steerTargeting';
-import { branchResumeReceipt, branchUncertainPauseReceipt } from '../../shared/insertionMessaging';
 import type { LLMAdapter, Message, MessageImage } from '../../shared/types';
 
 function llm(): LLMAdapter {
@@ -25,7 +24,7 @@ function llm(): LLMAdapter {
 }
 
 interface SteerRecord { text: string; target: SteerTarget; cancel: boolean; receipt: string | undefined }
-interface FoldRecord { cancels: boolean; stopMissed?: boolean; receipt?: string }
+interface FoldRecord { cancels: boolean; receipt?: string }
 
 interface Harness {
   deps: InterjectOrchestratorDeps;
@@ -121,8 +120,8 @@ function makeHarness(): Harness {
       holds.steers.push({ text, target, cancel, receipt });
     },
     queueInterjectTask: (text, _images, _displayText, priority) => { holds.queued.push({ text, priority }); },
-    foldInScopeAddition: (_text, _images, _displayText, _mechanical, _ack, cancels, stopMissed, receipt) => {
-      holds.folds.push({ cancels, stopMissed, receipt });
+    foldInScopeAddition: (_text, _images, _displayText, _mechanical, _ack, cancels, receipt) => {
+      holds.folds.push({ cancels, receipt });
     },
     answerMidrunQuestion: (text) => { holds.answers.push(text); return Promise.resolve(); },
     askMidrunClarification: async () => { holds.clarifies += 1; },
@@ -226,23 +225,21 @@ describe('InterjectOrchestrator — inline 臂（原话直投与机械信号）'
     expect(h.holds.folds).toHaveLength(0);
   });
 
-  it('点名停支指认不在花名册：退回取消折入（stopMissed=true），绝不停别的支', async () => {
+  it('点名停支指认不在花名册：退回取消折入，绝不停别的支', async () => {
     h.classifyWith({ verdict: 'inline', reason: '', confidence: 1, stopBranch: { callId: 'call_x' } });
     h.setDelegation(true);
     await new InterjectOrchestrator(h.deps).interject('B站那支别查了');
     expect(h.holds.stops).toHaveLength(0); // 核实不过不执行
     expect(h.holds.registers).toHaveLength(1); // 起飞闸挂号
-    expect(h.holds.folds).toEqual([{ cancels: true, stopMissed: true, receipt: undefined }]);
+    expect(h.holds.folds).toEqual([{ cancels: true, receipt: undefined }]);
   });
 
-  it('点名续支：同参重派排队，收执 checkpoint 诚实二分', async () => {
+  it('点名续支：同参重派排队，引擎沉默（状态由活动面板呈现）', async () => {
     h.classifyWith({ verdict: 'inline', reason: '', confidence: 1, resumesBranch: { callId: 'call_p1' } });
     h.setStopped([{ callId: 'call_p1', name: '暂停支', snippet: '' }]);
     await new InterjectOrchestrator(h.deps).interject('刚才那支接着跑');
     expect(h.holds.resumes).toBe(1);
-    expect(h.holds.settleAcks).toEqual([
-      branchResumeReceipt('暂停支', { hit: true, turns: 3 }, false),
-    ]);
+    expect(h.holds.settleAcks).toEqual([null]);
     expect(h.holds.steers).toHaveLength(0);
   });
 
@@ -320,25 +317,25 @@ describe('InterjectOrchestrator — sideline / new_task 臂', () => {
     expect(h.holds.queued).toHaveLength(0); // 取消绝不当活排队
   });
 
-  it('new_task 撞车在飞支 + 复核没结论：选可逆的一边，暂停那支如实交代', async () => {
+  it('new_task 撞车在飞支 + 复核没结论：选可逆的一边，暂停那支', async () => {
     h.classifyWith({ verdict: 'new_task', reason: '', confidence: 1 });
     h.recheckWith(null);
     h.setCovering([{ callId: 'call_youku', name: '优酷调研', snippet: '优酷调研', status: 'running' }]);
     await new InterjectOrchestrator(h.deps).interject('优酷调研不用再做了');
     expect(h.holds.stops).toEqual([{ callId: 'call_youku', mode: 'pause' }]);
-    expect(h.holds.settleAcks).toEqual([branchUncertainPauseReceipt('优酷调研')]);
+    // 沉默（刀 A2）：暂停由活动面板呈现，误停可逆、说一声就续上。
+    expect(h.holds.settleAcks).toEqual([null]);
   });
 
-  it('new_task 撞车 + 复核明确判加活：「不重复派」终稿', async () => {
+  it('new_task 撞车 + 复核明确判加活：去重落地，引擎沉默', async () => {
     h.classifyWith({ verdict: 'new_task', reason: '', confidence: 1 });
     h.recheckWith({ cancelsPart: false, reason: 'adds a new deliverable', confidence: 0.9 });
     h.setCovering([{ callId: 'call_youku', name: '优酷调研', snippet: '优酷调研', status: 'running' }]);
     await new InterjectOrchestrator(h.deps).interject('调研必须包括优酷');
     expect(h.holds.stops).toHaveLength(0);
     expect(h.holds.queued).toHaveLength(0);
-    expect(h.holds.settleAcks).toEqual([
-      '您说的这个正在「优酷调研」那路跑着，不重复派——收齐后一并汇总给您。',
-    ]);
+    // 沉默（刀 A2）：覆盖支的状态在活动面板，模型的下一动作自然带出。
+    expect(h.holds.settleAcks).toEqual([null]);
   });
 
   it('输入自带执行时刻（timing at）：交排期 sink，不进任何臂', async () => {

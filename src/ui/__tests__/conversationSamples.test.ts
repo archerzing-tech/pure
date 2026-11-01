@@ -863,7 +863,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.folds.entries()).toHaveLength(0);
   });
 
-  it('裁决器指认的支已结算：不硬停，退回取消折入并如实说没停', async () => {
+  it('裁决器指认的支已结算：不硬停，退回取消折入（沉默，折入守汇报步）', async () => {
     // 花名册有迟滞（agentActivities 投影 vs 编排器权威账）：指认的 id 在
     // branchView 里已不在飞时，宿主拒绝执行——宁可折入如实说，绝不拿错
     // id 停错支。
@@ -885,10 +885,12 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(touched).toHaveLength(0);
     expect(h.chat.folds.entries()).toHaveLength(1);
     expect(h.chat.folds.entries()[0].cancels).toBe(true);
-    expect(assistantJoined(h.root)).toContain('先没停');
+    // 沉默（刀 A2）：「先没停」判例话术已退役——那支还在跑的事实由活动
+    // 面板呈现，取消挂号与产出出清照常生效。
+    expect(assistantJoined(h.root)).not.toContain('先没停');
   });
 
-  it('复测案例一（2026-09-25）：加的活某支已经在跑——回「已经在跑着了」，不重复派', async () => {
+  it('复测案例一（2026-09-25）：加的活某支已经在跑——去重落地不重复派', async () => {
     // 真实事故：三路并行调研里爱奇艺本来就在跑，用户「新增一个平台，爱奇艺」
     // 被当加活折入，收齐后还真派了第四支重跑一遍。不重复做：加活先对在飞/
     // 已收工的支认一遍，认得出覆盖就如实回话，不折入不排队。
@@ -901,7 +903,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(assistantJoined(h.root)).toContain('您说的这个正在「爱奇艺调研员」那路跑着，不重复派——收齐后一并汇总给您。');
+    // 沉默（刀 A2）：「不重复派」话术退役——覆盖支状态在活动面板，模型
+    // 的下一动作自然带出；去重本身照常落地（不折入不排队）。
+    expect(assistantJoined(h.root)).not.toContain('不重复派');
     expect(userJoined(h.root)).toContain('新增一个平台，爱奇艺');
     // 重复的那支永远不该被派出去：折入账是空的，排队也不发生。
     expect(h.chat.folds.entries()).toHaveLength(0);
@@ -1033,7 +1037,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.steerBus.entries()[0].target).toBe('all');
   });
 
-  it('同名多支时收执带序号：researcher·2号，用户对得上号', async () => {
+  it('同名多支时复核现场带序号：researcher·2号，模型叙述对得上号', async () => {
     // 真机观感：两支同名 researcher，收执里裸的「researcher」指不清是哪支。
     // 同名不止一支时收执引用带 instanceNo（researcher·2号）。复核剧本给
     // cancels_part:false——真加活（补一个新平台）由复核明确背书，配「不
@@ -1048,7 +1052,11 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     );
 
     await h.chat.interject('新增一个平台，爱奇艺');
-    expect(assistantJoined(h.root)).toContain('您说的这个正在「researcher·2号」那路跑着，不重复派——收齐后一并汇总给您。');
+    // 沉默（刀 A2）：序号不再进引擎收执，改喂复核提示词的 conflictNote
+    // ——模型看见「researcher·2号」才能把话说清楚（裸 researcher 指不清）。
+    const recheckNote = llm.classifyCalls.find((c) => c.includes('researcher·2号'));
+    expect(recheckNote).toBeTruthy();
+    expect(assistantJoined(h.root)).not.toContain('不重复派');
   });
 
   it('复测三连击（2026-10-20 真机）：裁决器漏报 cancels_part 的取消话撞上去重——复核裁决接住，绝不回「不重复派」', async () => {
@@ -1175,9 +1183,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(paused).toEqual(['call_r2']); // 拿不准：暂停命中的那支，可逆
     const said = assistantJoined(h.root) + statusJoined(h.root);
     expect(said).not.toContain('不重复派');
-    expect(said).toContain('没拿准'); // 诚实收执：不装「明白」
-    expect(said).toContain('researcher·2号');
-    expect(said).toContain('接着跑'); // 给出恢复口
+    // 沉默（刀 A2）：「没拿准+恢复口」收执退役——暂停由活动面板呈现
+    // （误停可逆，说一声就续上），不再装「明白」也不再替引擎编恢复口。
+    expect(said).not.toContain('没拿准');
     expect(h.root.querySelectorAll('.bubble-row.user')).toHaveLength(1); // 单气泡（2026-10-20 双气泡判例）
   });
 
@@ -1232,9 +1240,9 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     // 裁决器点名 resumes_branch：判定一次往返，宿主核实后同参重派。
     await h.chat.interject('把竞品那支接着跑完。');
     expect(llm.classifyCalls.length).toBe(1);
-    // 回执诚实二分（判例 14 验收语）：命中存档必须说清从哪轮接的。
-    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」从存档断点（第 12 轮）接上。等手头这批收齐接上。');
-    expect(assistantJoined(h.root)).not.toContain('没找到存档');
+    // 沉默（刀 A2）：「从存档断点接上」话术退役——续跑由活动面板呈现；
+    // 诚实二分的活口只剩给模型的凭据（下断言）。
+    expect(assistantJoined(h.root)).not.toContain('从存档断点');
     expect(userJoined(h.root)).toContain('把竞品那支接着跑完');
     // 排上了同参重派：**原始参数**原样，不是新任务。
     expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
@@ -1247,7 +1255,7 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.steerBus.entries()).toHaveLength(0);
   });
 
-  it('第 2 期第三刀：续跑点名但存档不在（store 空）——回执明说没存档会重跑，不许预支断点承诺', async () => {
+  it('第 2 期第三刀：续跑点名但存档不在（store 空）——凭据如实 miss，话术沉默', async () => {
     // 反面对照（判例 14 下半句）：「resume 找不到断点不许悄悄从头跑——
     // 明说『没找到存档，重新跑了』」。收执不能比机制许的愿更多。
     // 点名归裁决器（刀 1 后 resumes_branch 随判词来）：store 空，probe 必 miss。
@@ -1261,10 +1269,10 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     h.chat.delegationControl.delegationArgs.set('call_b', { name: 'competitor_analyst', args: '{"prompt":"分析主要竞品的定价策略"}' });
 
     await h.chat.interject('把竞品那支接着跑完。');
-    // 无在飞委派 → 收执不带「等手头这批」尾巴（诚实二分的 pending 半边）。
-    expect(assistantJoined(h.root)).toContain('续跑：「竞品分析员」——没找到存档，会重新跑一遍。');
-    expect(assistantJoined(h.root)).not.toContain('断点'); // 没命中绝不预支断点承诺
-    // 照排不误：话不丢，重派照做（只是收执诚实）。
+    // 沉默（刀 A2）：「没找到存档，会重新跑一遍」话术退役——不预支断点
+    // 承诺的诚实二分由预检凭据承担（下断言），对模型的兜底指令按它分流。
+    expect(assistantJoined(h.root)).not.toContain('断点');
+    // 照排不误：话不丢，重派照做（凭据如实 miss）。
     expect(h.chat.delegationControl.pendingResumesView()).toHaveLength(1);
     expect(h.chat.delegationControl.pendingResumesView()[0].checkpoint).toEqual({ hit: false, turns: 0 });
   });
@@ -1552,43 +1560,21 @@ describe('思考窗吸收：正在产出的那一件东西改了构图', () => {
   });
 });
 
-// ── 插话回执的次序与形态（2026-09-25 用户实测）────────────────────────────
+// ── 插话回执的次序与形态（2026-09-25 用户实测；收执次序锁随刀 A2 沉默化
+//    退役——引擎不再出收执气泡，「回执压原话」的倒挂无对比物可复现）──────
 
 describe('插话回执次序与形态', () => {
-  it('判定期间有流式行插进来：用户原话仍在回执前面（多 agent 在飞必现的顺序倒挂）', async () => {
-    // 真实事故：ack 先上屏，秒级判定期间在飞回合不断往转写末尾流行内容，
-    // 回显走末尾追加 → 用户的话沉到流式行下面、回执压在原话头上。修后回显
-    // 插队到 ack 行正前，不管中间落了多少行，顺序永远是【原话 → 回话】。
-    let chat: Record<string, any> | null = null;
-    const llm = scriptedLlm([
-      { match: '爱奇艺', during: () => chat?.addStatusBubble('（在飞回合插进来的流式行）正在整理B站数据…', false), cls: { verdict: 'new_task', reason: 'r', confidence: 0.9 } },
-    ]);
-    const h = makeHarness(llm);
-    chat = h.chat;
-    h.chat.agentActivities.push(
-      { callId: 'call_a', agentName: '爱奇艺调研员', status: 'running', inputSnippet: '调研爱奇艺最新国漫上新信息' },
-    );
-
-    await h.chat.interject('新增一个平台，爱奇艺');
-    const rows = h.root.querySelectorAll('.bubble-row');
-    const texts = rows.map((r) => r.textContent);
-    const userIdx = texts.findIndex((t) => t.includes('新增一个平台'));
-    const receiptIdx = rows.findIndex((r) => String(r.className).includes('assistant') && r.textContent.includes('不重复派'));
-    expect(userIdx).toBeGreaterThan(-1);
-    expect(receiptIdx).toBeGreaterThan(userIdx); // 原话在前，pure 在后
-  });
-
-  it('终稿回执是普通助手气泡，不再是状态行', async () => {
+  it('终稿沉默（刀 A2）：引擎收执气泡与状态行都不再出现', async () => {
     const llm = scriptedLlm([]);
     const h = makeHarness(llm);
     h.chat.agentActivities.push({ callId: 'call_a', agentName: '爱奇艺调研员', status: 'running', inputSnippet: '调研爱奇艺最新国漫上新信息' });
 
     await h.chat.interject('新增一个平台，爱奇艺');
+    // 去重落地且沉默：没有助手收执、没有状态行——覆盖支状态在活动面板。
     const receiptRow = h.root.querySelectorAll('.bubble-row.assistant').find((r) => r.textContent.includes('不重复派'));
-    expect(receiptRow).toBeTruthy();
-    // 收执带 pure 名（正常气泡的标签），且不再以状态行的样子出现。
-    expect(receiptRow!.textContent).toContain('pure');
+    expect(receiptRow).toBeUndefined();
     expect(statusJoined(h.root)).not.toContain('不重复派');
+    expect(h.chat.folds.entries()).toHaveLength(0);
   });
 });
 
