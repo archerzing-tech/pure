@@ -1161,6 +1161,9 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.interrupted.repeatedFailuresCause': '失败原因：{detail}',
     'chat.interrupted.aborted': '已取消（用户停止，或网络/连接中断）',
     'chat.interrupted.streamTimeout': '生成超时：模型响应过久（输出内容过大或输入文件过大）。建议把任务拆小、分段生成文件，或先压缩/摘要超大输入',
+    // 模型失效自愈：原因（provider 原话）+ 已经做过的修改，用户不用自己排查。
+    'chat.interrupted.selfHeal': '模型「{dead}」在 {provider} 上不可用（{detail}）——已从模型库移除并切到「{next}」，再发一次就能继续。',
+    'chat.interrupted.selfHealNoModel': '模型「{dead}」在 {provider} 上不可用（{detail}）——已从模型库移除；该供应商已没有剩余模型，请在设置里加一个能用的模型。',
     'chat.interrupted.generic': '操作被中断，请重试或切换任务',
     'chat.cancelled': '（已取消）',
     'chat.error': '错误：{msg}',
@@ -2506,6 +2509,8 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.autoContinue.stalled': 'Two rounds without material progress — auto-continue paused. Add details or reply "continue" to resume.',
     'chat.interrupted.aborted': 'Cancelled (stopped by user, or network/connection dropped)',
     'chat.interrupted.streamTimeout': 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.',
+    'chat.interrupted.selfHeal': 'Model "{dead}" is not available on {provider} ({detail}) — removed it from the model library and switched to "{next}"; send again to continue.',
+    'chat.interrupted.selfHealNoModel': 'Model "{dead}" is not available on {provider} ({detail}) — removed it from the model library; that provider has no models left, add a working one in Settings.',
     'chat.interrupted.generic': 'Operation interrupted — please retry or try a different approach',
     'chat.cancelled': '(cancelled)',
     'chat.error': 'Error: {msg}',

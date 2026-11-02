@@ -121,7 +121,7 @@ import {
   storeSecretInRust,
   revokeProxyPasswordFromRust,
   storeProxyPasswordInRust,
-  customSecretKey,
+  providerSecretKeyFor,
   modelListForProvider,
   providerHasKey,
   normalizeProviderModels,
@@ -1918,13 +1918,10 @@ export class SettingsPanel {
       try {
         const core = await loadTauriCore();
         if (!core) throw new Error('Tauri runtime unavailable');
-        const override = providerOverrideFor(cfg.providerOverrides, provider);
         probe = await core.invoke('test_llm_connection', {
           baseUrl: baseURL,
           apiKey,
-          secretKey: custom ? customSecretKey(custom.id)
-            : override?.hasApiKey ? customSecretKey(provider)
-            : undefined,
+          secretKey: providerSecretKeyFor(provider, cfg.customProviders ?? []),
           proxyUrl: pair.proxyUrl,
           // Absent (not empty) when there is no fallback: '' means DIRECT.
           ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),

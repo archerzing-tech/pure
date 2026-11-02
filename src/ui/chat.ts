@@ -2,7 +2,8 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, customSecretKey, persistConfig, refreshConfigFromFile, type PureConfig } from './config';
+import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, applyModelSelfHeal, type PureConfig } from './config';
+import { planProviderSelfHeal } from '../shared/providerSelfHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
@@ -1289,13 +1290,13 @@ export function createLLMAdapter(
       model,
       protocol,
       baseURL,
-      // Built-in providers with their own saved key resolve it from the same
-      // per-provider Rust secret slot ('llm.apiKey.<id>') as custom providers;
-      // without an override the Rust backend falls back to the shared
-      // 'llm.apiKey' slot (or omits the header for keyless custom endpoints).
-      secretKey: custom ? customSecretKey(custom.id)
-        : builtinOverride?.hasApiKey ? customSecretKey(config.provider)
-        : undefined,
+      // Every provider resolves its key from its OWN Rust secret slot
+      // ('llm.apiKey.<id>'). The Rust backend only falls back to the legacy
+      // shared 'llm.apiKey' slot when that per-provider slot is empty, so a
+      // setup written before per-provider slots still works — see
+      // providerSecretKeyFor.
+      secretKey: providerSecretKeyFor(config.provider, customs),
+      allowLegacyKeyFallback: !custom,
       proxyUrl: llmProxy.proxyUrl,
       fallbackProxyUrl: llmProxy.fallbackProxyUrl,
       // 实测学习：这条路由真的通了（或真的失败）就按主机记住，下次直接走
@@ -1449,9 +1450,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
     provider: config.provider,
     model: imageGenModelFor(customs, config.provider, config.model),
     baseURL: customBaseURL(customs, config.provider, config.providerOverrides),
-    secretKey: custom ? customSecretKey(custom.id)
-      : providerOverrideFor(config.providerOverrides, config.provider)?.hasApiKey ? customSecretKey(config.provider)
-      : undefined,
+    secretKey: providerSecretKeyFor(config.provider, customs),
     // Image generation hits the provider's LLM-family API — same decision point
     // as chat traffic, so a direct-first host also gets the proxy fallback.
     proxyUrl: llmProxyPairFor(config, customBaseURL(customs, config.provider, config.providerOverrides), config.provider).proxyUrl,
@@ -5049,13 +5048,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           const pair = rawProxy
             ? netRouteProxyPair(probeBaseURL, rawProxy)
             : { proxyUrl: '', fallbackProxyUrl: null as string | null };
-          const custom = customProviderFor(config.customProviders ?? [], config.provider);
-          const override = providerOverrideFor(config.providerOverrides, config.provider);
           const probe = await core.invoke('test_llm_connection', {
             baseUrl: probeBaseURL,
-            secretKey: custom ? customSecretKey(custom.id)
-              : override?.hasApiKey ? customSecretKey(config.provider)
-              : undefined,
+            secretKey: providerSecretKeyFor(config.provider, config.customProviders ?? []),
             proxyUrl: pair.proxyUrl,
             ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),
             proxyBypassProviders: config.proxy?.bypassProviders ?? [],
@@ -8010,7 +8005,33 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // separate status row instead of flattening a bubble to text.
               // Runtime interrupt notices follow the UI language (were hard-
               // coded English) — see chat.* keys in i18n.ts.
-              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason, event.payload.reasonCode));
+              //
+              // 模型失效自愈（2026-11-02 判例）：provider 明确说「这个模型没
+              // 了」（下架 / 区域限制 / 账号未开通 / embedding 模型误入清单）时，
+              // 只把原文贴回去等于把设置问题丢给用户——设置本来就可以由 pure
+              // 自己修。剔除死模型、切到清单里下一个，并把 provider 原话一并
+              // 写出来，让「为什么调不通」有据可查。
+              let healingNote = '';
+              if (event.payload.reasonCode === 'failure_policy_stop') {
+                const heal = planProviderSelfHeal({
+                  message: event.payload.reason,
+                  provider: config.provider,
+                  model: config.model,
+                  models: modelListForProvider(config, config.provider),
+                });
+                if (heal) {
+                  persistConfig(applyModelSelfHeal(config, config.provider, heal.deadModel, heal.nextModel));
+                  const template = heal.nextModel
+                    ? t('chat.interrupted.selfHeal', 'Model "{dead}" is not available on {provider} ({detail}) — removed it and switched to "{next}"; send again to continue.')
+                    : t('chat.interrupted.selfHealNoModel', 'Model "{dead}" is not available on {provider} ({detail}) — removed it; no models left on that provider, add a working one in Settings.');
+                  healingNote = '\n' + template
+                    .replace('{dead}', heal.deadModel)
+                    .replace('{provider}', config.provider)
+                    .replace('{detail}', heal.detail)
+                    .replace('{next}', heal.nextModel ?? '');
+                }
+              }
+              const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason, event.payload.reasonCode)) + healingNote;
               if (hasContent) {
                 this.addStatusBubble(interrupted);
               } else if (lastSeg) {

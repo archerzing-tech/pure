@@ -32,11 +32,16 @@ export interface RustLLMConfig {
   temperature?: number;
   /**
    * Exact secrets-store key to resolve when `apiKey` is omitted (desktop).
-   * Defaults to 'llm.apiKey' (the main provider's key). Custom providers pass
-   * 'llm.apiKey.<id>' so each keeps its own key; keyless custom providers pass
-   * a key name that resolves to nothing → the Authorization header is omitted.
+   * Every provider passes 'llm.apiKey.<id>' so each keeps its own key; keyless
+   * custom providers pass a key name that resolves to nothing → the
+   * Authorization header is omitted.
    */
   secretKey?: string;
+  /** Allow the named `secretKey` slot to fall back to the legacy shared
+   *  'llm.apiKey' slot when it is missing. Built-in providers pass true (a key
+   *  written before per-provider slots still lives there); keyless custom
+   *  endpoints pass false so they never receive an unrelated key. */
+  allowLegacyKeyFallback?: boolean;
   proxyUrl?: string;
   /** One-shot opposite-route fallback for the Rust request layer: '' = direct,
    *  a URL = that proxy, undefined = no fallback (netRouteProxyPair shape). */
@@ -163,6 +168,7 @@ export class RustLLMAdapter implements LLMAdapter {
           apiKey: '',
           baseUrl: this.config.baseURL ?? '',
           secretKey: this.config.secretKey ?? '',
+          allowLegacyKeyFallback: this.config.allowLegacyKeyFallback ?? false,
           extraBody: this.config.extraBody,
           maxTokens: params.max_tokens,
           temperature: params.temperature,

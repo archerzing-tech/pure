@@ -466,7 +466,7 @@ async fn test_llm_connection(
     let proxy_bypass_providers = proxy_bypass_providers.unwrap_or_default();
     let provider = provider.unwrap_or_default();
     let secrets = load_secrets()?;
-    let resolved_key = resolve_api_key(&secrets, &api_key, &secret_key);
+    let resolved_key = resolve_api_key(&secrets, &api_key, &secret_key, true);
     let effective_proxy = if proxy_url.trim().is_empty()
         || proxy_matches(&provider, &proxy_bypass_providers)
     {
@@ -896,11 +896,11 @@ mod llm_probe_tests {
         // The command-level resolution (resolve_api_key) must prefer the
         // explicit key and fall back to the named secret — mirroring chat_stream.
         let secrets = serde_json::json!({ "llm.apiKey": "secret-key" });
-        assert_eq!(resolve_api_key(&secrets, "", ""), "secret-key");
-        assert_eq!(resolve_api_key(&secrets, "explicit", ""), "explicit");
-        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.custom"), "");
+        assert_eq!(resolve_api_key(&secrets, "", "", false), "secret-key");
+        assert_eq!(resolve_api_key(&secrets, "explicit", "", false), "explicit");
+        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.custom", false), "");
         let secrets2 = serde_json::json!({ "llm.apiKey.custom": "custom-key" });
-        assert_eq!(resolve_api_key(&secrets2, "", "llm.apiKey.custom"), "custom-key");
+        assert_eq!(resolve_api_key(&secrets2, "", "llm.apiKey.custom", true), "custom-key");
     }
 }
 
@@ -12981,6 +12981,13 @@ struct ChatStreamArgs {
     base_url: String,
     #[serde(default, rename = "secretKey")]
     secret_key: String,
+    /// Built-in providers keep their key in `llm.apiKey.<id>`; a setup whose
+    /// key predates that layout still lives in the shared `llm.apiKey` slot.
+    /// Sending the keyless request instead turns every turn into a 401 that
+    /// the GUI reports as a generic stop, so the caller opts into the legacy
+    /// fallback (custom/keyless endpoints leave it off).
+    #[serde(default, rename = "allowLegacyKeyFallback")]
+    allow_legacy_key_fallback: Option<bool>,
     #[serde(default, rename = "extraBody")]
     extra_body: Option<serde_json::Value>,
     #[serde(default, rename = "maxTokens")]
@@ -13168,6 +13175,7 @@ mod proxy_tests {
             api_key: String::new(),
             base_url: String::new(),
             secret_key: String::new(),
+            allow_legacy_key_fallback: None,
             extra_body: None,
             max_tokens_override: None,
             temperature: None,
@@ -13193,6 +13201,7 @@ mod proxy_tests {
             api_key: String::new(),
             base_url: String::new(),
             secret_key: String::new(),
+            allow_legacy_key_fallback: None,
             extra_body: None,
             max_tokens_override: None,
             temperature: None,
@@ -13552,9 +13561,9 @@ mod chat_stream_tests {
     #[test]
     fn resolve_api_key_prefers_explicit_key() {
         let secrets = serde_json::json!({"llm.apiKey": "from-secrets"});
-        assert_eq!(resolve_api_key(&secrets, "explicit", ""), "explicit");
+        assert_eq!(resolve_api_key(&secrets, "explicit", "", false), "explicit");
         assert_eq!(
-            resolve_api_key(&secrets, "explicit", "llm.apiKey.ollama"),
+            resolve_api_key(&secrets, "explicit", "llm.apiKey.ollama", true),
             "explicit"
         );
     }
@@ -13566,14 +13575,42 @@ mod chat_stream_tests {
             "llm.apiKey.ollama": "ollama-key",
         });
         // Default key name when the caller doesn't specify one.
-        assert_eq!(resolve_api_key(&secrets, "", ""), "main-key");
+        assert_eq!(resolve_api_key(&secrets, "", "", false), "main-key");
         // Custom providers look up their own named secret.
         assert_eq!(
-            resolve_api_key(&secrets, "", "llm.apiKey.ollama"),
+            resolve_api_key(&secrets, "", "llm.apiKey.ollama", true),
             "ollama-key"
         );
-        // Missing named secret → empty (keyless local provider path).
-        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.missing"), "");
+        // Missing named secret, no legacy fallback → empty (keyless path).
+        assert_eq!(
+            resolve_api_key(&secrets, "", "llm.apiKey.missing", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_falls_back_to_the_shared_slot_only_when_allowed() {
+        // 判例（2026-11-02，OpenRouter 全轮「已中断」）：内置 provider 的 key
+        // 由 CLI 交接 / 手改 secrets 写入，专属槽有值但 providers 表里没有
+        // hasApiKey 标记。旧逻辑回落到全局 llm.apiKey——那是另一家的 key，
+        // OpenRouter 每轮回 401。内置 provider 传 allow=true：专属槽优先，
+        // 缺失时才退回全局槽（老配置只有全局槽也能活）。
+        let secrets = serde_json::json!({
+            "llm.apiKey": "glm-key",
+            "llm.apiKey.openrouter": "sk-or-key",
+        });
+        // 专属槽有值：它就是答案，全局槽无关。
+        assert_eq!(
+            resolve_api_key(&secrets, "", "llm.apiKey.openrouter", true),
+            "sk-or-key"
+        );
+        // 专属槽缺失 + allow → 全局槽（迁移期的老配置）。
+        assert_eq!(
+            resolve_api_key(&secrets, "", "llm.apiKey.nvidia", true),
+            "glm-key"
+        );
+        // 专属槽缺失 + 不允许回落 → 空（keyless 本地端点不该拿到别人的 key）。
+        assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.ollama", false), "");
     }
 
     #[test]
@@ -13581,29 +13618,44 @@ mod chat_stream_tests {
         // Empty secrets + empty args = no key, but NOT an error: the caller
         // simply omits the Authorization header (Ollama / LM Studio).
         let empty = serde_json::json!({});
-        assert_eq!(resolve_api_key(&empty, "", "llm.apiKey.ollama"), "");
-        assert_eq!(resolve_api_key(&empty, "", ""), "");
+        assert_eq!(resolve_api_key(&empty, "", "llm.apiKey.ollama", true), "");
+        assert_eq!(resolve_api_key(&empty, "", "", false), "");
     }
 }
 
-/// Resolve the API key for a chat_stream call: an explicitly passed key wins;
-/// otherwise read the named secret (default `llm.apiKey`, custom providers use
-/// `llm.apiKey.<id>`). May return EMPTY — keyless local endpoints (Ollama /
-/// LM Studio) intentionally send no Authorization header at all.
-fn resolve_api_key(secrets: &serde_json::Value, arg_key: &str, secret_key: &str) -> String {
+/// Resolve a provider's key from the secrets store.
+///
+/// `secret_key` names the provider's own slot (`llm.apiKey.<id>`). Setups
+/// written before per-provider slots existed keep their only key in the shared
+/// `llm.apiKey` slot, so built-in providers pass `allow_legacy_fallback` and a
+/// missing per-provider slot falls back there instead of sending the request
+/// keyless. Keyless custom endpoints (Ollama / LM Studio / vLLM) pass false:
+/// handing them an unrelated provider's key would be a behaviour change, and
+/// the header is supposed to be omitted for them.
+fn resolve_api_key(
+    secrets: &serde_json::Value,
+    arg_key: &str,
+    secret_key: &str,
+    allow_legacy_fallback: bool,
+) -> String {
     if !arg_key.is_empty() {
         return arg_key.to_string();
     }
-    let key_name = if secret_key.is_empty() {
-        "llm.apiKey"
-    } else {
-        secret_key
+    let read = |name: &str| -> String {
+        secrets
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
     };
-    secrets
-        .get(key_name)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+    if secret_key.is_empty() {
+        return read("llm.apiKey");
+    }
+    let direct = read(secret_key);
+    if !direct.is_empty() || !allow_legacy_fallback {
+        return direct;
+    }
+    read("llm.apiKey")
 }
 
 /// 8.2 — prompt-cache breakpoints for the anthropic protocol (mirrors the TS
@@ -13829,7 +13881,12 @@ async fn chat_stream(
     // 预热循环的 busy 信号：请求在飞时 warm tick 直接跳过。RAII 归还。
     LLM_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let _inflight = LlmInflightGuard;
-    let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key);
+    let api_key = resolve_api_key(
+        &secrets,
+        &args.api_key,
+        &args.secret_key,
+        args.allow_legacy_key_fallback.unwrap_or(false),
+    );
 
     let base_url = if args.base_url.trim().is_empty() {
         "https://api.deepseek.com".to_string()
@@ -14500,7 +14557,7 @@ async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, St
     let n = args.n.unwrap_or(1).clamp(1, 4);
 
     let secrets = load_secrets()?;
-    let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key);
+    let api_key = resolve_api_key(&secrets, &args.api_key, &args.secret_key, true);
 
     let base_url = if args.base_url.trim().is_empty() {
         "https://api.openai.com/v1".to_string()

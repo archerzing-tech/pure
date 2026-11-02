@@ -8,6 +8,7 @@ import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
+import { modelsWithout } from '../shared/providerSelfHeal';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -472,6 +473,36 @@ export function modelListForProvider(cfg: PureConfig, provider: string): string[
     return uniqueModels([...stored, current]);
   }
   return uniqueModels([...(def?.models ?? [defaultModelFor(provider)]), current]);
+}
+
+/**
+ * 把「模型已失效」的自愈方案落到配置上：自定义 provider 的模型库挂在它自己
+ * 的条目里，内置 provider 的在 providerModels 下——两边都改对，下次发消息
+ * （config 缓存已失效）就会用新模型。只动模型库与当前模型，其余字段原样。
+ */
+export function applyModelSelfHeal(
+  cfg: PureConfig,
+  providerId: string,
+  dead: string,
+  next: string | null,
+): PureConfig {
+  const custom = customProviderFor(cfg.customProviders ?? [], providerId);
+  const model = next ?? cfg.model;
+  if (custom) {
+    const remaining = modelsWithout(custom.models ?? [], dead);
+    return {
+      ...cfg,
+      model,
+      customProviders: (cfg.customProviders ?? []).map((p) =>
+        p.id === custom.id ? { ...p, models: remaining } : p),
+    };
+  }
+  const remaining = modelsWithout(modelListForProvider(cfg, providerId), dead);
+  return {
+    ...cfg,
+    model,
+    providerModels: { ...cfg.providerModels, [providerId]: remaining },
+  };
 }
 
 /**
@@ -1000,6 +1031,28 @@ export async function revokeProxyPasswordFromRust(): Promise<void> {
  *  ('llm.apiKey.<id>' — custom providers and per-provider built-in keys). */
 export function customSecretKey(id: string): string {
   return `llm.apiKey.${id}`;
+}
+
+/**
+ * Which Rust secret slot a chat / probe request must read the key from.
+ *
+ * Built-ins address their OWN slot (`llm.apiKey.<id>`) unconditionally. The
+ * per-provider `hasApiKey` flag only records what the settings panel last
+ * saved; a key written by another path (CLI hand-off, a manual secrets edit,
+ * an older build) leaves secrets populated with the flag unset. Trusting the
+ * flag sent those requests to the legacy global slot instead, where a
+ * DIFFERENT provider's key sat — OpenRouter answered 401 and every turn died
+ * as "已中断：连续多次尝试均失败". Rust's resolve_api_key falls back to the
+ * global slot when the per-provider one is missing, so setups predating
+ * per-provider slots keep working.
+ */
+export function providerSecretKeyFor(
+  provider: string | undefined | null,
+  customs: readonly CustomProvider[] | undefined | null,
+): string | undefined {
+  if (!provider) return undefined;
+  const custom = customProviderFor(customs, provider);
+  return customSecretKey(custom ? custom.id : provider);
 }
 
 export async function storeCustomSecretInRust(id: string, value: string): Promise<void> {
