@@ -201,7 +201,7 @@ NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file show
  *  可靠性只能来自机械层：归宿词命中时把 routing 精要直接注入 system prompt
  *  （同一闸门通道，召回优先、漏判只多花 token）。全 ASCII（sidecar 锚纪律）。 */
 export const ROUTING_ESSENTIALS = `This request names a destination for the visual (docs/README/repo/slides/long-lived) - routing essentials:
-- DOUBLE DELIVERY: emit the diagram as a fenced block in the chat FIRST (mermaid / paint / svg - it renders inline and IS the authoritative version), THEN save the block's SOURCE to the requested path. A file alone hides the picture from the chat - never file-over-fence.
+- DOUBLE DELIVERY: emit the diagram as a fenced block in the chat FIRST (mermaid / paint / svg - it renders inline and IS the authoritative version), THEN save the block's SOURCE to that destination IN THE SAME TURN - the request naming a destination IS the authorization to save there (pick a sensible filename, no need to ask). A file alone hides the picture from the chat - never file-over-fence.
 - Which fenced form: edges carry the meaning (who-calls-whom topology) -> mermaid; layout carries the meaning (layers, poster flow, non-technical reader) -> paint/svg; destined for the repo and evolving with the code -> mermaid (source-diffable, layout-free edits). Full decision path: presentation_guide form:"routing".`;
 
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */

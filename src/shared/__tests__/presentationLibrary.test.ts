@@ -114,6 +114,11 @@ describe('presentation library cards', () => {
     expect(detail).toContain('0. Fence first, file second');
     expect(detail).toContain('deliver BOTH');
     expect(detail).toContain('the authoritative version');
+    // 归宿明示=存盘授权（三测判例：归宿当背景解读，围栏后落盘缺席）——
+    // 同轮交付、自选文件名、不再反问。
+    expect(detail).toContain('in the same turn');
+    expect(detail).toContain('IS the authorization to save there');
+    expect(detail).toContain('pick a sensible filename');
     expect(detail).toContain('never file-over-fence');
     expect(detail).toContain('TOPOLOGY'); // 拓扑重心 -> mermaid
     expect(detail).toContain('the layout IS the semantic'); // 版面重心 -> paint/svg
