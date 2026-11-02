@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.0.3
+
+**委派编排补体量拆路触发 + 文档资产对齐**
+
+借鉴 Claude Code「量检测→拆路并行→只收结论」编排形态：fan-out 规则补体量触发（素材量大到主线自己消化会刷屏 → 拆自包含只读子块并发派、主线只收结论），闸门正则补盘点/通读/批量类请求；回流格式纪律核实已在（subagentReportNote 全角色挂载）。同版完成文档资产整理：32 份被超越的老旧设计归档 `docs/archive/`（取代链与归档规则见 archive/README.md）、新增 docs/README.md 活文档索引、README 版本徽章与供应商清单对齐、CHANGELOG 补齐 v3.3.15→v4.0.2。
+
 ## v4.0.2
 
 **内网网关拦截讲真话终点：SWG/代理阻断不再读作「程序中断」**
