@@ -591,6 +591,7 @@ export type FailureClass =
   | 'network'
   | 'timeout'
   | 'auth'
+  | 'gateway'
   | 'permission'
   | 'not-found'
   | 'rate-limit'
@@ -599,8 +600,23 @@ export type FailureClass =
   | 'schema'
   | 'generic';
 
+/** 网关/出口拦截判据（2026-11-02 内网判例：公司 NetentSec SWG 策略阻断，
+ *  403 + 网关自产页——不是源站故障，也不是 pure 的问题）。判据三要素：
+ *  ①状态码锚 403/401/451（或 forbidden/unauthorized 字样）；
+ *  ②响应体**不**像 API 的 JSON 错误体（那才是凭证/配额问题，归 auth）；
+ *  ③响应体带网关特征词（HTML 页、SWG 厂商、blocked/拦截类策略用语）。
+ *  必须放在 classifyFailure 的 network/auth 判据之前——网关页几乎必含
+ *  connection/network 字样，后判必被抢类。 */
+export function isGatewayBlockedText(message: string): boolean {
+  const m = message.toLowerCase();
+  if (!/40[13]\b|451\b|\bforbidden\b|\bunauthorized\b/.test(m)) return false;
+  if (/"error"\s*:|invalid[_ ]?api[_ ]?key|\bquota\b|\bbilling\b/.test(m)) return false;
+  return /<html|<!doctype|netentsec|网康|上网行为|安全网关|sangfor|深信服|zscaler|forcepoint|palo ?alto|cloudflare|waf|firewall|blocked|rejected|denied|拦截|阻断|审查|违规|content filter/.test(m);
+}
+
 export function classifyFailure(message: string): FailureClass {
   const m = message.toLowerCase();
+  if (isGatewayBlockedText(message)) return 'gateway';
   if (/error sending request|connection|unable to connect|unable to resolve|unreachable|\bdns\b|econn|reset by peer|fetch failed|network|证书|certificate|tls|连接/.test(m)) return 'network';
   if (/timed?[\s-]?out|超时/.test(m)) return 'timeout';
   if (/401|403|unauthorized|forbidden|api[- ]?key|invalid.*key|凭证|未授权/.test(m)) return 'auth';
@@ -628,6 +644,7 @@ export const FAILURE_CLASS_HINTS: Record<FailureClass, string> = {
   network: '此类失败 = 该主机/网络在此环境不可达。换镜像或离线替代、内联内容，或跳过该资源；不要请求同一主机的其他地址。',
   timeout: '此类失败 = 操作超时。把任务拆小、换更快路径或改后台执行；不要原样重试。',
   auth: '此类失败 = 凭证缺失或无效。停止重试，向用户索要正确的密钥/登录。',
+  gateway: '此类失败 = 请求被中间网络设备（内网安全网关/上网行为管理/代理出口）的策略拦下——不是模型服务故障，与凭证无关。重试与换措辞改变不了网关策略：如实告知用户被拦截的事实与出路（拆小任务/减少附件/换网络/请管理员放行模型服务域名），不要继续重试。',
   permission: '此类失败 = 此环境不允许该操作。不要重试；换合规路径或向用户说明。',
   'not-found': '此类失败 = 目标不存在。核对路径/名称/来源一次，仍失败就换目标或跳过。',
   'rate-limit': '此类失败 = 被限流。换后端或降低频率，不要立即原样重试。',

@@ -156,6 +156,20 @@ describe('classifyFailure', () => {
     // Content-class neighbors must NOT drift into schema.
     expect(classifyFailure('invalid json in response body')).toBe('content');
   });
+
+  it('classifies gateway/SWG interception pages as gateway, not auth/network (2026-11-02 内网判例)', () => {
+    // 真机形态：公司 NetentSec SWG 策略阻断，403 + 网关自产页。网关页含
+    // connection/network 字样会被 network 抢类、403 会被 auth 抢类——
+    // gateway 判据必须先于两者。
+    expect(classifyFailure('403 Forbidden: <html><body>NetentSec SWG: 访问被策略阻断</body></html>')).toBe('gateway');
+    expect(classifyFailure('403 Forbidden: request blocked by corporate proxy policy')).toBe('gateway');
+    expect(classifyFailure('403 Forbidden: <html>Access Denied — your request was rejected by the firewall</html> this connection was reset')).toBe('gateway');
+    // API 的 JSON 403/401（凭证/配额）仍归 auth——网关判据不得吞掉它。
+    expect(classifyFailure('403 Forbidden: {"error":{"code":"invalid_api_key"}}')).toBe('auth');
+    expect(classifyFailure('HTTP 401 Unauthorized: bad api key')).toBe('auth');
+    // 没有网关特征的普通 403（如空体）不盲判，保持 auth 现状。
+    expect(classifyFailure('403 Forbidden')).toBe('auth');
+  });
 });
 
 // ── 2026-10-29 会话楔死修复（刀1/刀2 的判别与学习原料）──

@@ -12,7 +12,7 @@ import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
 import { WorldStateRenderer } from '../shared/worldStateRender';
-import { blockedHosts } from '../shared/netGuard';
+import { blockedHosts, isGatewayBlockedText } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { notifyProxyFailure, startProxyProbeLoop } from './proxyProbe';
 import { startLlmWarmLoop } from './llmWarm';
@@ -238,7 +238,28 @@ function extractProviderErrorDetail(raw: string): string {
   return '';
 }
 
+// 网关页线索（gateway 分支专用，2026-11-02）：extractProviderErrorDetail
+// 只认 API 的 JSON "message" 字段，网关自产 HTML/纯文本页抽不出。抓 stop
+// reason 的 Last 引文，剥标签留可读文本——拦截页常写明谁拦的、触发了哪
+// 条策略，这正是用户需要的归因证据。
+function extractGatewayPageDetail(raw: string): string {
+  const m = raw.match(/Last:\s*"([\s\S]*?)"\.(?:\s|$)/);
+  const body = m ? m[1] : raw;
+  const text = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 export function sanitizeInterruptedReason(raw: string, reasonCode?: string): string {
+  // 内网网关/出口拦截（2026-11-02 判例：公司 NetentSec SWG 策略阻断）放最
+  // 顶：403 带网关自产页 = 中间网络设备拦下请求，不是 pure 故障也不是模型
+  // 故障。用户必须读到「被谁拦的、能做什么」，而不是「连续多次尝试均失
+  // 败」读作程序中断。reasonCode 分支的通用模板会把归因抹平，此形态必须
+  // 先于它们讲真话。
+  if (isGatewayBlockedText(raw)) {
+    const detail = extractGatewayPageDetail(raw);
+    const base = t('chat.interrupted.gatewayBlocked', '请求被你所在网络的网关/代理拦截（如公司上网行为管理/安全网关对上传大小或内容的策略限制）——不是 pure 或模型服务出故障。可以：把任务拆小、减少附件；换到不受限的网络；或联系管理员放行模型服务域名');
+    return detail ? `${base}\n${detail}` : base;
+  }
   // 结构化 code 是分类第一依据（2026-10-31 判例：层间契约曾靠 prose 正则，
   // 引擎侧改写文案（c828c17 中文散文）即让分类失联、全部掉进 generic——
   // code 上锁后 prose 只是遗留回退，宿主事件不带 code 才走下方分支）。

@@ -1154,6 +1154,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.interrupted.maxTurns': '已达到本轮最大步数上限，已停止。可把任务拆小，或开启新会话',
     'chat.interrupted.policy': '被安全 / 策略检查中止',
     'chat.interrupted.repeatedFailures': '连续多次尝试均失败，已停止。请检查任务或更换方式后再试',
+    'chat.interrupted.gatewayBlocked': '请求被你所在网络的网关/代理拦截了（如公司上网行为管理/安全网关对上传大小或内容的策略限制）——不是 pure 或模型服务出故障。可以：把任务拆小、减少附件；换到不受限的网络；或联系管理员放行模型服务域名',
     'chat.interrupted.contextOverflow': '上下文超出模型窗口：压缩后仍装不下。请开新会话，或减小输入/附件后重试',
     'chat.autoContinue.capped': '已自动续跑 {n}/{max} 轮，达到本轮上限；回复「继续」我就接着干。',
     'chat.autoContinue.stalled': '连续两轮没有实质进展，已暂停自动续跑；补充信息或回复「继续」即可接着干。',

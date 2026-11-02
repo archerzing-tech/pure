@@ -471,4 +471,25 @@ describe('DefaultFailurePolicy context-window overflow (structural stop)', () =>
     }
     expect('quarantineLastCall' in action).toBe(false);
   });
+
+  it('gateway 拦截 2 连即定性止损，不再磨阶梯（2026-11-02 内网 NetentSec SWG 判例）', () => {
+    // 403 带网关自产页 = 请求被中间网络设备的策略拦下：重试改变不了网关
+    // 策略，磨 8 轮阶梯纯烧预算。2 连即 stop，归因直说「网关拦的、源站
+    // 没够着」，出路给全（拆小/减附件/换网/找管理员）。
+    const policy = new DefaultFailurePolicy();
+    const gw = (turnNumber: number): FailureRecord => ({
+      type: 'llm_error',
+      message: '403 Forbidden: <html><body>NetentSec SWG: request blocked by policy</body></html>',
+      turnNumber,
+    });
+    // 首次失败仍给一次重试机会（偶发 403 可能是瞬时波动）。
+    expect(policy.decide([gw(1)]).kind).not.toBe('stop');
+    const action = policy.decide([gw(1), gw(2)]);
+    expect(action.kind).toBe('stop');
+    if (action.kind === 'stop') {
+      expect(action.reason).toContain('blocked by a network gateway');
+      expect(action.reason).toContain('not a provider outage');
+      expect(action.reason).toContain('NetentSec');
+    }
+  });
 });

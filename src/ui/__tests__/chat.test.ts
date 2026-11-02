@@ -142,6 +142,17 @@ describe('interruption reason classification', () => {
     expect(message).toContain('失败原因');
     expect(message).toContain('messages 参数非法');
   });
+
+  it('内网网关拦截讲真话终点：归因网关策略而非「程序中断」（2026-11-02 NetentSec SWG 判例）', () => {
+    // 用户看到「已中断：连续多次尝试均失败」会误读成 pure 出故障——
+    // 403+网关页形态必须先于通用模板讲清「被谁拦的、能做什么」。
+    const raw = `The request is being blocked by a network gateway (most likely your corporate proxy / secure web gateway enforcing upload-size or content policies) — the model provider was never reached, so this is not a provider outage. Last: "403 Forbidden: <html><body>NetentSec SWG: URL blocked by policy</body></html>". Retrying cannot change the gateway's policy. Stop here and tell the user plainly.`;
+    const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');
+    expect(message).toContain('网关/代理拦截');
+    expect(message).toContain('不是 pure 或模型服务出故障');
+    expect(message).toContain('NetentSec'); // 网关页线索透出
+    expect(message).not.toContain('连续多次尝试均失败'); // 通用模板不得覆盖归因
+  });
 });
 
 describe('parseToolCallBuffer', () => {

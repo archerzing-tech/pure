@@ -151,6 +151,19 @@ export class DefaultFailurePolicy implements FailurePolicy {
       };
     }
 
+    // 网关拦截类（2026-11-02 内网判例：公司 NetentSec SWG 策略阻断）：403
+    // 带网关自产页 = 请求被中间网络设备的策略拦下——不是凭证问题，更不是
+    // 模型服务故障，重试与换措辞改变不了网关策略。两次即定性止损，不再磨
+    // 阶梯白烧轮次；终点呈现由 sanitizeInterruptedReason 对该形态出专属
+    // 拟人归因（讲真话终点：被谁拦的、能做什么、不是程序坏了）。
+    const gatewayLlmCount = failures.filter(f => f.type === 'llm_error' && classifyFailure(f.message) === 'gateway').length;
+    if (lastClass === 'gateway' && gatewayLlmCount >= 2) {
+      return {
+        kind: 'stop',
+        reason: `The request is being blocked by a network gateway (most likely your corporate proxy / secure web gateway enforcing upload-size or content policies) — the model provider was never reached, so this is not a provider outage. Last: "${last.message}". Retrying cannot change the gateway's policy. Stop here and tell the user plainly: split the task smaller, attach fewer/smaller files, switch to a network without this restriction, or ask the admin to allow the model service domain.`,
+      };
+    }
+
     // Same call failed 5+ times with the same error: it kept failing even
     // after the skip-it directive below — words alone stopped working, so the
     // engine takes over mechanically (framework-reform 4a, 强制 skip): the
