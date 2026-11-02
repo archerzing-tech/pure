@@ -156,10 +156,25 @@ describe('presentation_guide (presentation capability library, 2026-11-02)', () 
     const index = await registry.execute(call('presentation_guide', {}));
     const indexText = String(index.result);
     expect(indexText).toContain('Presentation forms you can deliver');
+    expect(indexText).toContain('- routing (meta)'); // 决策卡在目录首位
     expect(indexText).toContain('- mermaid (diagram)');
     expect(indexText).toContain('- table (document)');
     const miss = await registry.execute(call('presentation_guide', { form: 'zzz_no_such' }));
     expect(String(miss.result)).toContain('No presentation card matches');
     expect(String(miss.result)).toContain('Presentation forms you can deliver');
+  });
+
+  it('the routing card returns the full decision path (form-choice logic, 2026-11-02)', async () => {
+    const registry = new ToolRegistry(noopExecutor);
+    const result = await registry.execute(call('presentation_guide', { form: 'routing' }));
+    expect(result.success).toBe(true);
+    const text = String(result.result);
+    expect(text).toContain('── routing (meta)');
+    expect(text).toContain('Decision path, in order');
+    expect(text).toContain('TOPOLOGY');
+    expect(text).toContain('the layout IS the semantic');
+    // 别名同路。
+    const alias = await registry.execute(call('presentation_guide', { form: 'decision' }));
+    expect(String(alias.result)).toContain('── routing (meta)');
   });
 });

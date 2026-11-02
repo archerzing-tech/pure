@@ -95,4 +95,26 @@ describe('presentation library cards', () => {
     expect(byId.paint?.delivery).toContain('NEVER switch to SVG');
     expect(byId.chart?.whenNotToUse).toContain('GFM table');
   });
+
+  it('carries the form-choice decision logic as a meta card (2026-11-02 用户定调)', () => {
+    // 「形式跟着用途走」决策序列固化：版面 vs 拓扑（语义重心）、一次性 vs
+    // 长期演进（生命周期）、读者与规模。routing 放目录首位——先决策再拉
+    // 胜出形式的卡；判据写给人看（工具结果卡里用户直接可见）。
+    const routing = PRESENTATION_CARDS.find((card) => card.id === 'routing');
+    expect(routing?.family).toBe('meta');
+    expect(PRESENTATION_CARDS[0]?.id).toBe('routing'); // 目录首位
+    expect(routing?.whenNotToUse).toContain('it routes, it does not render');
+    const detail = routing?.detail ?? '';
+    expect(detail).toContain('Decision path, in order');
+    expect(detail).toContain('TOPOLOGY'); // 拓扑重心 -> mermaid
+    expect(detail).toContain('the layout IS the semantic'); // 版面重心 -> paint/svg
+    expect(detail).toContain('One-shot'); // 一次性讲给人听
+    expect(detail).toContain('evolving with the code'); // 长期演进翻 mermaid
+    expect(detail).toContain('~30 nodes'); // 规模闸
+    expect(detail).toContain('SAME form'); // 失败修正不换形式
+    // 生命周期让位句双卡呼应。
+    const byId = Object.fromEntries(PRESENTATION_CARDS.map((card) => [card.id, card]));
+    expect(byId.mermaid?.whenToUse).toContain('evolve with the code');
+    expect(byId.paint?.whenNotToUse).toContain('expensive to maintain');
+  });
 });

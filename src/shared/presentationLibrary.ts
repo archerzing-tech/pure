@@ -47,15 +47,44 @@ export interface PresentationCard {
   surfaces: string;
 }
 
-/** 首批卡片：全部来自既有实现（零新渲染器）。detail 引用 promptLayers 单源。 */
+/** 首批卡片：全部来自既有实现（零新渲染器）。detail 引用 promptLayers 单源。
+ * 2026-11-02 增补：routing 决策卡（形式跟着用途走——版面 vs 拓扑、一次性
+ * vs 长期演进、读者与规模；2026-11-02 三层架构图会话的用户问答定调），放
+ * 目录首位——先决策，再拉胜出形式的卡。 */
 export const PRESENTATION_CARDS: readonly PresentationCard[] = [
+  {
+    id: 'routing',
+    family: 'meta',
+    title: 'How to choose between forms',
+    aliases: ['choose', 'decision'],
+    trigger: 'A decision card - no fence of its own; it routes between the other cards',
+    whenToUse:
+      'Before producing any visual when two or more forms could fit - pull this first, decide, then pull the winning form\'s card for its exact syntax.',
+    whenNotToUse:
+      'Never emit anything FROM this card itself - it routes, it does not render. When the form is obvious from the content (numbers -> chart, places -> map, formulas -> math), skip it and go straight to that card.',
+    delivery:
+      'Nothing renders from this card - it ends in a choice. Go read the chosen form\'s card next; if a previous block failed to render, the last step below applies.',
+    detail:
+      'Decision path, in order - stop at the first match:\n' +
+      '1. Content check: numbers/comparison -> chart. Real-world places/routes -> map. Math -> math. Exact multi-column figures -> table. Photo-like artwork -> image_gen (or svg as fallback). Structure/diagram -> continue below.\n' +
+      '2. For structure, what is the diagram\'s center of gravity?\n' +
+      '   - TOPOLOGY (who calls whom, message order, state transitions - the edges carry the meaning) -> mermaid: automatic layout, adding or editing a node is one line of source.\n' +
+      '   - LAYOUT (layer boundaries, side-by-side grouping inside a tier, spatial metaphor, poster-like one-glance flow - the arrangement itself carries the meaning) -> paint (precise geometry) or svg (organic shapes): explicit coordinates, the layout IS the semantic.\n' +
+      '3. What is this diagram\'s life?\n' +
+      '   - One-shot, for humans in THIS conversation -> layout control wins (paint/svg): the 3-second read is designed on purpose, not delegated to a layout engine.\n' +
+      '   - Living in the repo, evolving with the code, reviewed and diffed -> source-form wins (mermaid): editing is a line change, not re-laying-out a pile of x/y coordinates.\n' +
+      '4. Who reads it? Non-technical audience, explained once -> minimal layout (big tier names + one-line duty per tier, few components). Engineers / formal documents -> full component anatomy; either form works, pick by steps 2-3.\n' +
+      '5. Size check: over ~30 nodes or deep nesting -> let automatic layout take over (mermaid); hand-laying that many coordinates tires out and drifts.\n' +
+      '6. Failure rule unchanged: if a block failed to render, fix it in the SAME form (a map is never re-emitted as SVG, and so on) - switching forms mid-retry hides the real error.',
+    surfaces: 'meta: no rendering anywhere - this card only routes',
+  },
   {
     id: 'mermaid',
     family: 'diagram',
     title: 'Mermaid structural diagram',
     trigger: 'Fenced block tagged mermaid',
     whenToUse:
-      'Structural relationships: flows with decisions (flowchart), message exchanges over time (sequence), class hierarchies / state machines / entity relations, schedules (gantt), composition shares (pie), idea hierarchies (mindmap), event lines (timeline), actors & use cases (usecase-beta). Default structural form unless the content clearly fits another card below.',
+      'Structural relationships: flows with decisions (flowchart), message exchanges over time (sequence), class hierarchies / state machines / entity relations, schedules (gantt), composition shares (pie), idea hierarchies (mindmap), event lines (timeline), actors & use cases (usecase-beta). Default structural form unless the content clearly fits another card below. If the diagram will live in the repo and evolve with the code, mermaid also wins over hand-laid coordinates - source-diffable, layout-free edits.',
     whenNotToUse:
       'Not for numeric comparisons (use a chart card), not for real-world routes or places (use the map card), not for precise geometric layouts (the paint card controls rectangles/arrows/groups better), not for photo-like artwork (svg / generate_image).',
     delivery:
@@ -127,7 +156,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     whenToUse:
       'Static geometric illustration: architecture sketches, flow schematics, layered diagrams, geometry, icons - when you want precise layout control (rect/circle/line/arrow/path/polygon/text/group, gradients).',
     whenNotToUse:
-      'Organic artwork / photo-like images -> svg or generate_image; animation, generative art, interactive drawings -> a standalone .html file with <canvas>; data charts -> chart card.',
+      'Organic artwork / photo-like images -> svg or generate_image; animation, generative art, interactive drawings -> a standalone .html file with <canvas>; data charts -> chart card. A diagram destined for the repo (docs that evolve with code) reads better as mermaid - hand-laid coordinates are expensive to maintain.',
     delivery:
       'Renders inline as a static canvas drawing (deterministic - no random values). Parse failures (e.g. empty shapes) show an error card with retry - re-emit valid paint JSON, NEVER switch to SVG.',
     detail: PAINT_DSL_PROMPT,
