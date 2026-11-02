@@ -120,3 +120,46 @@ describe('deferred tool table (framework-reform phase 3)', () => {
     }
   });
 });
+
+describe('presentation_guide (presentation capability library, 2026-11-02)', () => {
+  it('stays resident (a discovery tool nobody sees is dead weight) and never enters the deferred catalog', () => {
+    const registry = new ToolRegistry(noopExecutor);
+    const names = registry.getTools().map((t) => t.name);
+    expect(names).toContain('presentation_guide');
+    // deferred 目录不该收录它：零命中亮目录时也不出现。
+    const result = registry.searchDeferredTools('presentation guide cards', 20).map((t) => t.name);
+    expect(result).not.toContain('presentation_guide');
+  });
+
+  it('a form id returns the full card with the DSL detail text', async () => {
+    const registry = new ToolRegistry(noopExecutor);
+    const result = await registry.execute(call('presentation_guide', { form: 'chart' }));
+    expect(result.success).toBe(true);
+    const text = String(result.result);
+    expect(text).toContain('── chart (data-viz)');
+    expect(text).toContain('Avoid when:'); // 负面判据必须在场（防过度可视化）
+    expect(text).toContain('type: on its own line'); // CHART_DSL_PROMPT 全文在场
+  });
+
+  it('a family name pulls the whole family; aliases route to the same card', async () => {
+    const registry = new ToolRegistry(noopExecutor);
+    const family = await registry.execute(call('presentation_guide', { form: 'illustration' }));
+    const familyText = String(family.result);
+    expect(familyText).toContain('── svg (illustration)');
+    expect(familyText).toContain('── paint (illustration)');
+    const alias = await registry.execute(call('presentation_guide', { form: 'plantuml' }));
+    expect(String(alias.result)).toContain('── puml (diagram)');
+  });
+
+  it('no form → catalog index; unknown form → catalog too (directory only enters on search)', async () => {
+    const registry = new ToolRegistry(noopExecutor);
+    const index = await registry.execute(call('presentation_guide', {}));
+    const indexText = String(index.result);
+    expect(indexText).toContain('Presentation forms you can deliver');
+    expect(indexText).toContain('- mermaid (diagram)');
+    expect(indexText).toContain('- table (document)');
+    const miss = await registry.execute(call('presentation_guide', { form: 'zzz_no_such' }));
+    expect(String(miss.result)).toContain('No presentation card matches');
+    expect(String(miss.result)).toContain('Presentation forms you can deliver');
+  });
+});

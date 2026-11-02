@@ -12,6 +12,7 @@ import {
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
   PAINT_DSL_PROMPT,
+  VISUAL_BLOCK_POINTER,
   detectVisualRequest,
   HUMAN_TONE_PROMPT,
   INSERTION_PROTOCOL_PROMPT,
@@ -280,6 +281,17 @@ describe('L1 behavior contracts', () => {
       const wants = detectVisualRequest(text);
       expect(wants.picture, text).toBe(true);
     }
+  });
+
+  it('points the resident visual pointer at presentation_guide (2026-11-02 表现形式库)', () => {
+    // 常驻指针的最小语法兜底保持不动，尾部接上发现入口：闸门漏判的后果从
+    // 「细则缺失」降级为「多一次 presentation_guide 调用」。指针锚在这里，
+    // 卡片全文与匹配路由在 presentationLibrary.test.ts。
+    expect(VISUAL_BLOCK_POINTER).toContain('fenced block INSIDE the reply');
+    expect(VISUAL_BLOCK_POINTER).toContain('NEVER save a picture/chart/map/paint with write_file');
+    expect(VISUAL_BLOCK_POINTER).toContain('the fenced block IS the deliverable');
+    expect(VISUAL_BLOCK_POINTER).toContain('presentation_guide');
+    expect(VISUAL_BLOCK_POINTER).toContain('unsure which form fits');
   });
 
   it('asks for a human, conversational tone without canned boilerplate', () => {

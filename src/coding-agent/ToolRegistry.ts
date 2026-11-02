@@ -14,6 +14,7 @@ import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { withRelaySchema } from '../engine/relayPipeline';
+import { matchPresentationCards, renderPresentationCard, renderPresentationCatalog } from '../shared/presentationLibrary';
 
 // ── Tag constants ──
 
@@ -89,6 +90,9 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   // discover_tools 由注册表自持（索引+激活都在这里完成），永不下沉执行器；
   // 纯只读，无副作用。
   discover_tools: { tags: [Tags.SEARCH, Tags.READ], riskLevel: 'low' },
+  // presentation_guide 同为注册表自持（卡片目录住在本仓库
+  // shared/presentationLibrary.ts），永不下沉执行器；纯只读。
+  presentation_guide: { tags: [Tags.READ], riskLevel: 'low' },
 };
 
 export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(
@@ -276,6 +280,44 @@ export class ToolRegistry implements ToolAdapter {
     };
   }
 
+  /**
+   * presentation_guide 的执行半边：form 命中（id/别名/族/子串容错）→ 卡片全文；
+   * 省略或零命中 → 目录索引（复制 discover_tools 的「目录只在被搜索时进对话」
+   * 模式——展现是 push 型输出语法，卡片是知识不是工具，不需要激活态）。
+   */
+  private executePresentationGuide(toolCall: ToolCall): ToolResult {
+    const started = Date.now();
+    const args = safeParseArgs(toolCall.function.arguments);
+    const form = typeof args.form === 'string' ? args.form.trim() : '';
+    if (!form) {
+      return {
+        id: toolCall.id,
+        toolName: toolCall.function.name,
+        success: true,
+        duration: Date.now() - started,
+        result: renderPresentationCatalog(),
+      };
+    }
+    const matches = matchPresentationCards(form);
+    if (matches.length === 0) {
+      return {
+        id: toolCall.id,
+        toolName: toolCall.function.name,
+        success: true,
+        duration: Date.now() - started,
+        result: `No presentation card matches "${form}". The catalog currently holds:\n\n${renderPresentationCatalog()}`,
+      };
+    }
+    const rendered = matches.map(renderPresentationCard).join('\n\n');
+    return {
+      id: toolCall.id,
+      toolName: toolCall.function.name,
+      success: true,
+      duration: Date.now() - started,
+      result: rendered,
+    };
+  }
+
   getSnapshotPort(): WorkspaceSnapshotPort | undefined {
     return this.delegate.getSnapshotPort?.();
   }
@@ -374,6 +416,12 @@ export class ToolRegistry implements ToolAdapter {
     // 之后——它带 READ/low，所有模式静默放行，不影响写闸语义。
     if (toolCall.function.name === 'discover_tools') {
       return this.executeDiscoverTools(toolCall);
+    }
+
+    // presentation_guide 同为注册表自持：表现形式卡的目录与全文渲染都在
+    // 注册表完成（卡片本体在 shared/presentationLibrary.ts），不下沉执行器。
+    if (toolCall.function.name === 'presentation_guide') {
+      return this.executePresentationGuide(toolCall);
     }
 
     // Route subagent tools to the orchestrator

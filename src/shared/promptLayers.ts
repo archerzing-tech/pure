@@ -192,7 +192,7 @@ export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, char
 - \`\`\`chart — data as a chart: a \`type:\` line (bar/hbar/line/pie/scatter/kline/radar/tree/treemap/sunburst, default bar), optional \`title:\` / \`unit:\`, then one \`label value\` row per line.
 - \`\`\`map — routes/places as ONE JSON object {title, center:[lat,lng], zoom, markers:[{lat,lng,title,label}], route:[[lat,lng],…]} with REAL coordinates.
 - \`\`\`paint — a STATIC geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icons) as ONE JSON object {version, width, height, shapes:[rect/circle/line/arrow/path/polygon/text/group], defs.gradients}.
-NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable.`;
+NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it when the lines above are not enough or you are unsure which form fits.`;
 
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
 export interface VisualRequestParts {

@@ -223,6 +223,16 @@ export const BUILT_IN_TOOL_DEFS = [
     },
   },
   {
+    name: 'presentation_guide',
+    description: 'Pull the per-form guide for any presentation form you can deliver inside the reply (mermaid/puml diagrams, chart data visuals, map, svg & paint illustrations, generate_image & image, math, table, fold). The resident visual pointer only carries minimal fence syntax; each card holds the full contract: when the form fits, when it does NOT (form-fit judgments and mutual exclusions like map-is-never-SVG), the exact input syntax, and what the user sees when rendering fails. Call it with no form for the catalog index, with a form id or family name for the full card(s) — use it when unsure which form fits a request, when a visual request needs rules that were not injected, or when a previous block failed to render and you need the correct format.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        form: { type: 'string', description: 'A form id (e.g. "mermaid", "chart", "map", "paint", "math", "table"), an alias (e.g. "plantuml", "latex"), or a family name (diagram / data-viz / geo / illustration / media / formula / document). Omit for the catalog index.' },
+      },
+    },
+  },
+  {
     name: 'web_public_api',
     description: 'Structured-data lookup through curated no-key public APIs: weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators (GDP / population / unemployment / inflation). Use for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
     input_schema: {
@@ -413,6 +423,10 @@ export const PUBLIC_TOOL_NAMES = new Set([
   // 工具 deferred 化（框架改革三期）：discover_tools 是常驻的目录索引工具，
   // 长尾内置工具与 MCP 工具经它搜索并激活后才进模型可见清单。
   'discover_tools',
+  // 表现形式库（2026-11-02 docs/presentation-capability-library.md）：常驻的
+  // 语义卡索引工具——展现是 push 型输出语法不是工具，所以它跟 discover_tools
+  // 一样常驻可见、注册表自持执行。
+  'presentation_guide',
 ]);
 
 /**
@@ -428,7 +442,7 @@ export const PUBLIC_TOOL_NAMES = new Set([
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'read_file', 'write_file', 'edit_file', 'execute_command', 'find_files',
   'code_searcher', 'web_search', 'web_fetch', 'download_file',
-  'discover_tools', 'generate_image',
+  'discover_tools', 'presentation_guide', 'generate_image',
 ]);
 
 /**
@@ -495,6 +509,9 @@ const TOOL_METADATA_TABLE = {
   // discover_tools is the registry-owned catalog index: pure read, executed
   // inside ToolRegistry itself (never reaches the delegate adapters).
   discover_tools: { sideEffects: false, isWrite: false },
+  // presentation_guide is registry-owned too (the card catalog lives in
+  // shared/presentationLibrary.ts): pure read, never reaches the delegates.
+  presentation_guide: { sideEffects: false, isWrite: false },
   web_public_api: { sideEffects: false, isWrite: false },
   web_scrape: { sideEffects: false, isWrite: false },
   glob_files: { sideEffects: false, isWrite: false },

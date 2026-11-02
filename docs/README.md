@@ -12,6 +12,7 @@
 | [network-intelligence-2026-10.md](network-intelligence-2026-10.md) | 期 1–3 落，期 4 余主体 | 路由脑接管 runRouted/镜像链/兜底链顺序 + 统一真话模板 |
 | [remote-office-bridge-design.md](remote-office-bridge-design.md) | S1/S2 落，S3 未开工 | 会话=事件日志 + 单主宿主；S3 daemon 化是活蓝图 |
 | [persona-core-upgrade.md](persona-core-upgrade.md) | 刀 1–9 落（双语未做） | 人格系统行为权威：Character Core → 做事/说话双投影 |
+| [presentation-capability-library.md](presentation-capability-library.md) | MVP 刀落（后续刀未排期） | 表现形式库：语义卡注册表 + presentation_guide 发现工具，模型自主决策用哪种视觉形式交付 |
 
 ## 活参考（宪法 / 行为规格 / 操作手册）
 
