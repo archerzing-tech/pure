@@ -1,9 +1,9 @@
 # Pure
 
-**Pure** is an immersive AI agent: everything you need to get, see, and use lives inside one continuous conversation — files, commands, search results, charts, and decisions surface right where you are, so you never have to jump to a terminal, a browser, or another app to move your work forward. It is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, searches the web, renders structured results, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native macOS desktop app. Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
+**Pure** is an immersive AI agent: everything you need to get, see, and use lives inside one continuous conversation — files, commands, search results, charts, and decisions surface right where you are, so you never have to jump to a terminal, a browser, or another app to move your work forward. It is a local-first coding agent built around two ideas: **a loop that refuses to stop at the first plausible answer, and memory that learns without becoming a transcript dump**. Its Agent Loop is inspired by the Event Loop in JavaScript engines: it borrows the idea of event-driven phases that keep progressing until the work reaches a verified outcome, then applies it to tool-driven coding tasks. Pure reads, writes, and edits files, executes shell commands, searches the web, renders structured results, can verify its work when a verifier is configured, and carries compact project lessons across sessions — through a fast terminal CLI or a native desktop app (macOS / Windows). Its conversation window is a projection of session state, not a direct dump of long-term memory: stored transcript data is mapped into UI blocks, while retrieved memory stays in the model context unless the UI explicitly represents it.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.2.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-4.0.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -182,9 +182,12 @@ Retrieval uses local WASM embeddings when available, with a keyword-search fallb
 
 - **Terminal CLI** — One-shot prompts or interactive REPL with streaming output
 - **Desktop GUI** — Native macOS / Windows app (Tauri) with Notion-style sidebar and settings
-- **Multi-provider** — DeepSeek, Qwen (Tongyi), GLM (Zhipu), plus custom OpenAI-compatible endpoints
+- **Multi-provider** — DeepSeek, Qwen, GLM, OpenAI, OpenRouter, NVIDIA, Moonshot, MiniMax, Ollama, plus custom OpenAI-compatible endpoints; per-phase model routing (a strong model for THINK, cheaper ones for wrap-ups)
 - **IM channel gateway** — Reach the agent from Feishu / DingTalk / QQ / built-in WebChat over outbound WebSocket long connections — no public IP or callback URL needed. Includes a pairing gate, per-peer rate limits, permission-bound session bindings, and a read-only **session dashboard** served on the WebChat page (see which sessions are running or done from your phone). See [docs/channel-setup.md](docs/channel-setup.md)
 - **Self-correcting Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE with budgets, hooks, locks, and recovery policy
+- **Interjection while running (插话)** — talk to the agent mid-turn instead of waiting for it to finish: what you type is classified into nine relations (steer / cancel / merge / park / take over…), your original words reach the model intact, and the agent can be truly paused and resume in place
+- **Network intelligence (路由脑)** — route health learning with exponential dead-route backoff, warm-up pool with fastest-path arbitration, GitHub acceleration on evidence-driven auto mode, and gateway/proxy interception reported in plain language (who blocked it, what you can do) instead of a cryptic "interrupted after repeated failures"
+- **Character kernels (人格轨道)** — choose how the agent works, not just how it talks: veteran-fast by default (land it now, bad news first), craftsman-slow as the opt-in careful line (see CLI usage below)
 - **Evolving project memory** — Semantic retrieval, keyword fallback, decay, superseding, diagnostics, and export/import
 - **Subagent Orchestration** — Spawn file-pickers, code-searchers, web researchers in parallel
 - **MCP Protocol** — Connect Model Context Protocol servers for extensible tooling
@@ -199,6 +202,8 @@ Retrieval uses local WASM embeddings when available, with a keyword-search fallb
 - **Coding-task evaluation** — isolated real fixtures, control baseline, provider-backed CodingAgent runner, verification-only scoring, usage/cost metadata, and strict CI-friendly exit codes
 - **Fault-tolerant parsing** — Repair malformed JSON, Mermaid, and SVG before surfacing an error
 - **Auto-updater** — GUI checks for updates via signed `.app.tar.gz` artifacts
+- **Deferred tool discovery** — the resident tool table carries only the daily loop; long-tail and MCP tools surface on demand via `discover_tools`, keeping per-request token cost small
+- **Agent-operable settings** — every settings switch is semantically operable by the agent itself; the on-disk `~/.pure/config.json` is the source of truth and the GUI is just a view
 - **Multi-language UI** — English / Chinese interface
 
 > 📖 中文文档 → [README_zh.md](README_zh.md)
@@ -316,6 +321,7 @@ pure/
 │   │   ├── PermissionManager.ts  # YOLO / NORMAL / PLAN modes
 │   │   ├── Verifier.ts           # Output verification
 │   │   └── SubagentOrchestrator.ts  # Parallel subagent spawning
+│   ├── character/                # Personality system (Character Core → behavior/speech projections)
 │   ├── adapter/                  # I/O adapters (LLM, tools, storage, MCP)
 │   │   ├── openai/               # OpenAI-compatible API adapter
 │   │   ├── deepseek/             # DeepSeek Anthropic-style adapter
@@ -328,6 +334,8 @@ pure/
 │       ├── adaptiveControl.ts     # Runtime strategy selection from environment/evidence
 │       ├── requestWorkflow.ts     # Shared dynamic intake/probe/plan/confirm compiler
 │       ├── promptObservability.ts # Privacy-preserving trace model + collector
+│       ├── netRoute.ts           # Route health learning + dead-route exponential backoff
+│       ├── netGuard.ts           # Failure classification: network / auth / context / gateway
 │       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
 │   ├── evaluation/               # Deterministic coding-task fixtures + real runner
 │   │   ├── codingTaskBaseline.ts  # Fixtures, verification, reports
@@ -337,9 +345,15 @@ pure/
 │   ├── src/                      # IPC commands, session manager
 │   └── tauri.conf.json           # App config + updater keys
 ├── scripts/                      # Build, sign, deploy scripts
-├── system-prompt.md              # Agent system prompt (public contract)
-└── pure Spec.md                  # Architecture master spec
+├── docs/                         # Design docs & blueprints — index at docs/README.md; superseded docs in docs/archive/
+└── CHANGELOG.md                  # Release notes by product line
 ```
+
+---
+
+## Documentation
+
+Design docs and blueprints live in [`docs/`](docs/README.md). The index marks every document as an active blueprint, a living reference, or archived history; superseded designs are kept under `docs/archive/` for the record only. When a document and the code disagree, the code wins.
 
 ---
 

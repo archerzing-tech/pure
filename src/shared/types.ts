@@ -1,5 +1,6 @@
 // src/shared/types.ts
-// Canonical types per pure Spec §4 — single source of truth.
+// Canonical types — single source of truth. This file IS the contract; the
+// former "pure Spec §4" doc anchor is a frozen 2026-08 snapshot in docs/archive/.
 
 import type { UserHooksConfig } from './userHooks';
 import type { UserHookRunner } from './userHookRunner';

@@ -3,7 +3,7 @@
 **Pure** 是一个沉浸式的 AI Agent：你所需的「获取、查看、使用」都在**同一个对话**里完成 —— 文件、命令、搜索结果、图表与决策都直接出现在你当前的位置，你不必跳转到终端、浏览器或其他应用，就能把工作向前推进。它是一个本地优先的 AI 编程助手，核心只有两个坚持：**用一个不会轻易停下来的闭环完成任务，用会进化但不会无限膨胀的记忆延续经验**。它的 Agent Loop 灵感来自 JavaScript 引擎中的 Event Loop：借鉴事件驱动、分阶段调度和持续推进的思路，让编码任务不断消费工具结果，直到获得可验证的完成证据。Pure 可以读取、写入和编辑文件，执行 Shell 命令，联网搜索，渲染结构化结果，并在配置 verifier 时验证结果，再把紧凑的项目经验带到下一次会话 — 这一切都通过快速的终端 CLI 或原生 macOS / Windows 桌面应用完成。它的对话窗口是会话状态的映射，不是长期记忆的直接倾倒：已保存的会话转录会被映射成界面内容，而检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.2.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-4.0.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
@@ -171,9 +171,12 @@ Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩�
 
 - **终端 CLI** — 一次性问答或交互式 REPL，支持流式输出
 - **桌面 GUI** — 原生 macOS / Windows 应用（Tauri），Notion 风格侧边栏和设置面板
-- **多供应商** — DeepSeek、Qwen（通义）、GLM（智谱），以及自定义 OpenAI 兼容端点
+- **多供应商** — DeepSeek、Qwen、GLM、OpenAI、OpenRouter、NVIDIA、Moonshot、MiniMax、Ollama，以及自定义 OpenAI 兼容端点；支持按阶段模型路由（思考用强的、收尾反思用便宜的）
 - **IM 通道网关** — 从飞书 / 钉钉 / QQ / 内置 WebChat 直接对话 agent：出站 WebSocket 长连接接入，无需公网 IP 与回调地址；带配对门、按对端限速与权限绑定，WebChat 页面自带只读**会话总览**（手机上即可看到哪些会话在跑、哪些已完成）。详见 [docs/channel-setup.md](docs/channel-setup.md)
 - **自纠错 Agent Loop** — THINK → ACT → OBSERVE → VERIFY → TERMINATE，带预算、Hook、锁和恢复策略
+- **随时插话** — agent 干活中途直接说话，不必等它跑完：插话按九类关系分流（转向/取消/折入/押账/接管…），原话完整抵达模型，可真暂停并原位续跑
+- **网络智能（路由脑）** — 路由健康学习 + 死路指数退避、预热池谁快用谁、GitHub 加速证据驱动 auto；被公司网关/代理拦截时终点讲真话（被谁拦、能做什么），不再读成「程序中断」
+- **性格内核（人格轨道）** — 决定 agent 怎么做事而不只是怎么说话：默认老手快线，可选工匠慢线（见 CLI 用法）
 - **进化项目记忆** — 语义检索、关键词回退、衰减、取代、诊断和导入导出
 - **子智能体编排** — 并行调度文件搜索、代码搜索、Web 研究等子智能体
 - **MCP 协议** — 接入 Model Context Protocol 服务器，扩展工具能力
@@ -188,6 +191,8 @@ Pure 的记忆不是第二份聊天记录。Harness 会把已完成会话压缩�
 - **编码任务评测** — 独立真实 fixture、control baseline、provider-backed CodingAgent runner、只按验证结果评分、usage/成本元数据和适合 CI 的 strict 退出码
 - **智能容错解析** — 在报错前自动修复 JSON、Mermaid 和 SVG
 - **自动更新** — GUI 通过签名的 `.app.tar.gz` 产物检查并安装更新
+- **工具按需发现** — 常驻工具表只带日常回路，长尾与 MCP 工具走 `discover_tools` 按需上桌，压小每轮 Token 开销
+- **设置对 agent 可操作** — 设置面板每个开关 agent 都能语义化自我操作；盘上 `~/.pure/config.json` 是真实源，GUI 只是视图
 - **多语言界面** — 支持英文 / 中文
 
 > 📖 English docs → [README.md](README.md)
@@ -297,6 +302,7 @@ pure/
 │   │   ├── PermissionManager.ts  # YOLO / NORMAL / PLAN 权限模式
 │   │   ├── Verifier.ts           # 输出验证
 │   │   └── SubagentOrchestrator.ts  # 并行子智能体调度
+│   ├── character/                # 人格系统（Character Core → 做事/说话双投影）
 │   ├── adapter/                  # I/O 适配器（LLM、工具、存储、MCP）
 │   │   ├── openai/               # OpenAI 兼容 API 适配器
 │   │   ├── deepseek/             # DeepSeek Anthropic 风格适配器
@@ -309,6 +315,8 @@ pure/
 │       ├── adaptiveControl.ts     # 从环境/证据选择运行时策略
 │       ├── requestWorkflow.ts     # 统一动态接收/探针/计划/确认编译器
 │       ├── promptObservability.ts # 隐私安全 trace 模型与收集器
+│       ├── netRoute.ts           # 路由健康学习 + 死路指数退避
+│       ├── netGuard.ts           # 失败分类：network / auth / context / gateway
 │       └── FilePromptObservationStore.ts # Node-only JSONL trace sink
 │   ├── evaluation/               # 确定性编码任务 fixture + 真实 runner
 │   │   ├── codingTaskBaseline.ts  # fixture、验证和报告
@@ -318,9 +326,15 @@ pure/
 │   ├── src/                      # IPC 命令、会话管理器
 │   └── tauri.conf.json           # 应用配置 + 更新密钥
 ├── scripts/                      # 构建、签名、部署脚本
-├── system-prompt.md              # 智能体系统提示词（公开契约）
-└── pure Spec.md                  # 架构主规范
+├── docs/                         # 设计文档与蓝图（索引 docs/README.md；被取代文档在 docs/archive/）
+└── CHANGELOG.md                  # 按产品线的发布说明
 ```
+
+---
+
+## 文档
+
+设计文档与蓝图都在 [`docs/`](docs/README.md)。索引把每份文档标为活跃蓝图、活参考或已归档历史；被取代的设计收在 `docs/archive/`，只作历史记录。文档与代码冲突时，以代码为准。
 
 ---
 

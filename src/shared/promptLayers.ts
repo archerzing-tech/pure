@@ -3,8 +3,8 @@
 // shared PromptAssembler for GUI, CLI, and Harness so the surfaces do not drift.
 //
 //   L0 SYSTEM   — immutable core: identity, safety, permission modes, runtime,
-//                 response format. Rendered from system-prompt.md; changes only
-//                 when the product's contract changes.
+//                 response format. Changes only when the product's contract
+//                 changes.
 //   L1 APP      — per-session/per-run behavior: tool blocks, workflow +
 //                 completion contracts, output style, tool-calling rules,
 //                 typo tolerance, logical-traps defense, environment context,
@@ -16,7 +16,7 @@
 //                 request's task context rides next to the request itself.
 //
 // Rule of thumb for where a fragment lives:
-//   - immutable product contract        → L0 (this file / system-prompt.md)
+//   - immutable product contract        → L0 (this file)
 //   - depends on app state, not request → L1 (tools, env, skills, mode)
 //   - depends on THIS request           → L2 (composeUserTurn)
 
@@ -27,8 +27,9 @@ import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT, INFORMATION_VALUE_
 // lean: every token here is paid on EVERY turn of every session, so it holds
 // only what is true regardless of workspace, tools, or request.
 //
-// KEEP IN SYNC with system-prompt.md: this constant is the RUNTIME single
-// source of truth (system-prompt.md is the human-readable mirror). Detailed
+// This constant is the RUNTIME single source of truth — there is no doc
+// mirror anymore (the old system-prompt.md mirror is a frozen 2026-09 snapshot
+// in docs/archive/ and is no longer maintained). Detailed
 // procedural rules (workflow, diagnosis, verification, lessons) deliberately
 // live in the L1 workflow contract below — L0 only holds immutable identity /
 // safety / output-contract lines that must not duplicate them.

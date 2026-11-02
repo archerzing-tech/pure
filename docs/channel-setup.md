@@ -3,7 +3,7 @@
 面向「把 pure agent 接进聊天工具」的操作者。架构与设计见
 [`channel-gateway-design.md`](channel-gateway-design.md)，国内三家平台细节见
 [`cn-im-channels.md`](cn-im-channels.md)，投影渲染见
-[`channel-projection-design.md`](channel-projection-design.md)。
+[`channel-projection-design.md`](archive/channel-projection-design.md)。
 
 ---
 

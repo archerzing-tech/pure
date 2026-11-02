@@ -6,7 +6,7 @@
 > - P0：`src/channels/` + `src/adapter/channels/webchat/` + `pure gateway` / `pure channels`，验收 `bun run verify:channel-loop`。
 > - P1：飞书适配器（`src/adapter/channels/feishu/`，SDK 动态 import）+ 钉钉适配器（`src/adapter/channels/dingtalk/`，`dingtalk-stream` 动态 import；卡片实例原地更新尚未实现，一律降级为只发最终结果）+ 配对（`src/channels/pairing.ts`，`pure channels pending|approve`）+ 出站队列落盘重放（`~/.pure/channels/outbox.jsonl`）+ 通道档 LLM 复核验证器（`src/channels/verifierProfile.ts`），验收 `bun run verify:channel-feishu` / `bun run verify:channel-dingtalk`（mock transport）。
 > - P2（部分）：审计（`src/channels/audit.ts`，默认只记 hash/长度/元数据）+ 限流与每日预算（`src/channels/limits.ts`）+ 出站队列落盘（已随 P1 前移）+ 富输出降级矩阵（`src/channels/richOutput.ts` + `src/channels/rasterize/`：`chart`/`svg` 走 `@resvg/resvg-js`，`mermaid`/`puml` 走 headless Chrome —— 系统 Chrome + 裸 CDP，不引入 puppeteer/playwright，没装 Chrome 才降级为文本；飞书/钉钉出站图片上传已接入，按 `canDeliverImages` 投递成图片消息），验收 `bun run verify:channel-diagrams`。
-> - P2（部分）：**通道投影**（`src/channels/projection/`，设计见 [`docs/channel-projection-design.md`](channel-projection-design.md)）：目标是在通道里看到与桌面端 GUI 一致的表现——把桌面端自己的渲染管线（同一份 `src/ui/markdown.ts` + `src/ui/styles.css` + 同一 DOM 层级）搬进 headless Chrome 页面，按块截图成 PNG 投递；正文与段落列表保持原生 markdown，代码块/表格/图表与 GUI 同像素。渲染失败或图片超限时把富块源码并回正文，**内容永不丢失**；纯文本回答不启动浏览器。优先级：通道投影 > `richOutput` 单块光栅化 > 纯文本，验收 `bun run verify:channel-projection`。
+> - P2（部分）：**通道投影**（`src/channels/projection/`，设计见 [`docs/archive/channel-projection-design.md`](archive/channel-projection-design.md)）：目标是在通道里看到与桌面端 GUI 一致的表现——把桌面端自己的渲染管线（同一份 `src/ui/markdown.ts` + `src/ui/styles.css` + 同一 DOM 层级）搬进 headless Chrome 页面，按块截图成 PNG 投递；正文与段落列表保持原生 markdown，代码块/表格/图表与 GUI 同像素。渲染失败或图片超限时把富块源码并回正文，**内容永不丢失**；纯文本回答不启动浏览器。优先级：通道投影 > `richOutput` 单块光栅化 > 纯文本，验收 `bun run verify:channel-projection`。
 > - P3（部分，2026-10-07 补记）：**QQ 适配器已落**（`src/adapter/channels/qq/`，含 wsTransport，`8ace3c6`），原「企微占位」已主动撤掉——此前这份状态行完全没提 QQ，是个漏报。仍未做：WS 控制平面、GUI 只读看通道会话、`pure attach`。
 > - P3–P4 其余仍为设计稿；个人微信维持「默认关闭」。
 
@@ -162,7 +162,7 @@ src/channels/                     # 通道层（宿主 + 路由 + 渲染 + 审�
   config.ts                       # ~/.pure/channels.json 读写 + schema 校验
   richOutput.ts                   # 富输出提取 + 能力驱动的降级矩阵
   rasterize/                      # 光栅化：resvg 直转（chart/svg）+ headless Chrome（mermaid/puml）
-  projection/                     # 通道投影：桌面端同管线 headless Chrome 渲染 + 按块截图（docs/channel-projection-design.md）
+  projection/                     # 通道投影：桌面端同管线 headless Chrome 渲染 + 按块截图（docs/archive/channel-projection-design.md）
   __tests__/
 src/adapter/channels/
   webchat/                        # 零依赖自带通道（开发/内网自测）
@@ -358,7 +358,7 @@ InboundEvent ──► ChannelEventBus ──► SessionRouter ──► AgentSe
 
 注意通道投影与 richOutput 单块光栅化不是平级互斥的两行：投影在 deliverFrame 层**优先**于 richOutput，
 只有投影不可用（无 Chrome / 纯文本回答）或逐块失败时，才由 richOutput 与纯文本兜底。
-完整契约、尺寸硬限制与反方论证见 [`docs/channel-projection-design.md`](channel-projection-design.md)。
+完整契约、尺寸硬限制与反方论证见 [`docs/archive/channel-projection-design.md`](archive/channel-projection-design.md)。
 
 两条与流式相关的硬约束：
 
@@ -486,7 +486,7 @@ bundle 注入页面。代价是运行 gateway 的机器上要有 Chrome；没有
 | R11 | 用户忘了已经开着一个 gateway，又启了第二个。 | **正确性问题，不是优化**：飞书集群模式只有一个客户端收到消息、企微新连接会踢掉旧连接 → 消息会静默丢失且极难排查。启动时抢占 `~/.pure/channels/gateway.lock`，第二个实例直接报错退出（§8 专项文档 5.1） |
 | R12 | 三个国内通道是不是各写一套？ | 不是。共用同一份 `ChannelAdapter` 接口 + renderer 数据表，差异只落在适配器文件与能力声明里；第二个通道的边际成本 ≈ 一个适配器 + 一份凭证配置 |
 | R13 | 为了几张 mermaid/puml 图，值得在用户机器上起浏览器吗？ | 不值得**下载**一个浏览器：不引 puppeteer/playwright，用系统已有的 Chrome + 仓库既有的裸 CDP 模式，懒启动、空闲 5 分钟关闭。没有 Chrome 就不提供这两个渲染器，富输出照旧降级为文本 —— 能力是可选的，不是必需前提 |
-| R14 | 通道投影复用桌面渲染管线，GUI 改样式会不会悄悄改变通道出图？ | 这是**有意收益**（两端表现一致、改一处同步），但也意味着桌面端改 `markdown.ts`/`styles.css` 的 DOM 层级或尺寸假设（聊天列宽 1024px）时，需跑 `verify:channel-projection` 回归；投影页显式钉住 `#chat` 宽度，不依赖 app 布局，样式微调不影响。失败路径与更多反方论证见 [`docs/channel-projection-design.md`](channel-projection-design.md) P1–P5 |
+| R14 | 通道投影复用桌面渲染管线，GUI 改样式会不会悄悄改变通道出图？ | 这是**有意收益**（两端表现一致、改一处同步），但也意味着桌面端改 `markdown.ts`/`styles.css` 的 DOM 层级或尺寸假设（聊天列宽 1024px）时，需跑 `verify:channel-projection` 回归；投影页显式钉住 `#chat` 宽度，不依赖 app 布局，样式微调不影响。失败路径与更多反方论证见 [`docs/archive/channel-projection-design.md`](archive/channel-projection-design.md) P1–P5 |
 
 **未决 / 需要拍板**（不阻塞 P0–P1）：
 
@@ -503,7 +503,7 @@ bundle 注入页面。代价是运行 gateway 的机器上要有 Chrome；没有
 + 一层会话路由（(workspace, per-channel-peer) → Harness）**，其余全部复用 pure 已有的控制平面；
 安全性靠「默认只读 + 配对 + 审批超时拒绝」三层挡在工具层，而不是靠提示词；富输出靠一张能力降级矩阵统一处理；
 通道内看到的富内容与桌面端 GUI 同像素——同一份渲染管线在 headless Chrome 里逐块截图（通道投影，见
-[`docs/channel-projection-design.md`](channel-projection-design.md)），渲染不了就诚实地降级。
+[`docs/archive/channel-projection-design.md`](archive/channel-projection-design.md)），渲染不了就诚实地降级。
 
 国内落地（飞书 / 企业微信 / 钉钉）的全部平台细节与由此产生的设计修订，见
 [`docs/cn-im-channels.md`](cn-im-channels.md)：三家都支持无需公网的 WebSocket 长连接，
