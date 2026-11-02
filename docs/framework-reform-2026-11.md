@@ -116,6 +116,8 @@
 | **三期·工具 deferred 化**（盲区 A 升格） | 内置 28 工具分核心常驻 + 长尾 discover（ToolSearch 基建已有先例）；MCP 工具强制走 discover——与 schema 清洗天然衔接（清洗已挂 discover 入库前）；工具描述教学与 deferred 化同刀合并瘦身 | 工具表 ≈13k → 核心 3–4k | Anthropic tool search / code execution with MCP |
 | **四期·分区化 + 失败恢复深改**（蓝图五期 + 留档项） | ① 世界状态分区化 + diff 渲染：envFacts/taskState/ledger 分区 typed snapshot，重渲染只出 diff（状态不变零 token），缓存友好。② FailurePolicy 深改：count 混账分型（tool/llm/verify 分阶梯）、部分成功轮清零口径（镜像 Harness transient 豁免）、repeats≥5 强制 skip——对齐「引擎确定性护栏+模型自主恢复」：pure 只留确定性自救（schema 摘工具/4xx 分流），阶梯裁决权下放模型 | 阶梯裁决权下放；状态渲染零冗余 | GLM-5.2 anti-hack 范式 |
 
+**增补刀（2026-11-02，对齐 Claude Code 的「量检测→拆路并行→只收结论」编排形态）**：MULTI_AGENT_MECHANICS 的 fan-out 规则补体量触发（素材量大到主线自己读会刷屏 → 拆自包含只读子块并发派、主线只收结论）；闸门 wantsDelegationMechanics 正则补盘点/通读/批量类词。回流格式纪律核实已在——SubagentOrchestrator spawn 时 subagentReportNote 按 EN/ZH 全角色挂（结论+file:line 证据+短列表、禁报告腔），即终态验收「角色书精悍度」的回流半边已就位。
+
 **不变量四条（全程守住）**：插话不丢（原话直投底线）；账不平不收工；人格红线（character_core/expression/human_tone 不删不改写）；缓存纪律（常驻区稳定渲染序，动态装配只走消息层与分区 diff）。机械解析豁免清单照旧（钟表算术/PLAN_PHASE 标记/delivery 命令发现/autoContinue 机械参数）。
 
 **终态验收（更新版）**：常驻 system prompt ≈4k tokens（人格 ≈1.5k + 原则瘦身版 + 薄指针 + 索引）；运行时语义正则 ≤5 处（豁免清单不计）；收执话术模板 0（引擎沉默兜底）；工具表核心常驻 + 长尾 discover；引擎判定 prompts 纳入瘦身口径（SEMANTIC_ROUTE/角色书向 Claude Code 子代理 prompt 的精悍度看齐）；**每期真机对照验收**（形态正确率路由 vs 旧正则、任务完成率不回退、插话承接观感）。

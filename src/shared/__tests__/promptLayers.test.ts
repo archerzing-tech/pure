@@ -320,6 +320,11 @@ describe('L1 behavior contracts', () => {
     expect(wantsDelegationMechanics('改一下标题', false)).toBe(false);
     expect(wantsDelegationMechanics('改一下标题', true)).toBe(true);
     expect(wantsDelegationMechanics('分别研究 A、B、C 三个方向', false)).toBe(true);
+    // 2026-11-02 体量拆路增补：素材量大/盘点类请求也开闸（fan-out 规则同步补体量触发，
+    // 对齐 Claude Code「量检测→拆路并行→只收结论」编排形态）。
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('flood the main session');
+    expect(wantsDelegationMechanics('把这批历史文档盘点一遍', false)).toBe(true);
+    expect(wantsDelegationMechanics('通读所有文档写一份摘要', false)).toBe(true);
   });
 
   it('uses dynamic capability tools for skills and MCP services', () => {
