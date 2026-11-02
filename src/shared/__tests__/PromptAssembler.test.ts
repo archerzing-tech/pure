@@ -674,6 +674,36 @@ describe('PromptAssembler', () => {
     expect(paint.startsWith(chat)).toBe(true);
   });
 
+  it('injects the routing essentials when the request names a visual destination (2026-11-02 第三刀)', () => {
+    // 两轮真机判例：归宿词在场（图进 docs/README/repo、随代码演进）时模型
+    // 自信不拉 presentation_guide routing 卡，判据不在场就降维成「SVG 文件
+    // vs PNG」。劝导对没拉卡的模型是空转——机械层直接注入精要。
+    const base = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '这个函数是干什么的？');
+    const withDestination = assembler.buildSystemPrompt(
+      { surface: 'gui', capabilities: buildGuiCapabilities(true) },
+      '我需要一张图：向新人介绍我们的三层架构，放进 docs/ 里长期维护',
+    );
+    expect(withDestination).toContain('DOUBLE DELIVERY');
+    expect(withDestination).toContain('never file-over-fence');
+    expect(withDestination).toContain('presentation_guide form:"routing"');
+    // 演进语义单独命中（不靠归宿地名词）。
+    const evolving = assembler.buildSystemPrompt(
+      { surface: 'gui', capabilities: buildGuiCapabilities(true) },
+      '画一张部署流程图，要跟随代码演进经常更新',
+    );
+    expect(evolving).toContain('DOUBLE DELIVERY');
+    // 无归宿词的普通画图请求不注入（召回优先 ≠ 常驻）。
+    expect(base).not.toContain('DOUBLE DELIVERY');
+    // 精要住尾区：基线提示词仍是归宿请求的前缀（供应商前缀缓存纪律）。
+    expect(withDestination.startsWith(base)).toBe(true);
+    // CLI 面同样携带——形式竞争不分面。
+    const cli = assembler.buildSystemPrompt(
+      { surface: 'cli', capabilities: buildCliCapabilities() },
+      '把这张图放进 README 里',
+    );
+    expect(cli).toContain('DOUBLE DELIVERY');
+  });
+
   it('swaps SVG for generate_image when the provider supports text-to-image', () => {
     const prompt = assembler.buildSystemPrompt({
       surface: 'gui',

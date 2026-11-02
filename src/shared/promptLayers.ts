@@ -194,6 +194,16 @@ export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, char
 - \`\`\`paint — a STATIC geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icons) as ONE JSON object {version, width, height, shapes:[rect/circle/line/arrow/path/polygon/text/group], defs.gradients}.
 NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it when the lines above are not enough or you are unsure which form fits.`;
 
+/** routing 决策精要 — 机械注入版（2026-11-02 第三刀）。两轮真机判例
+ *  （session_1793600755798_1 / session_1793602596186_3）：请求点名图的归宿
+ *  （docs/README/repo）时模型自信不拉 presentation_guide routing 卡，判据不
+ *  在场就降维成「SVG 文件 vs PNG」。劝导（改卡内容）对没拉卡的模型是空转，
+ *  可靠性只能来自机械层：归宿词命中时把 routing 精要直接注入 system prompt
+ *  （同一闸门通道，召回优先、漏判只多花 token）。全 ASCII（sidecar 锚纪律）。 */
+export const ROUTING_ESSENTIALS = `This request names a destination for the visual (docs/README/repo/slides/long-lived) - routing essentials:
+- DOUBLE DELIVERY: emit the diagram as a fenced block in the chat FIRST (mermaid / paint / svg - it renders inline and IS the authoritative version), THEN save the block's SOURCE to the requested path. A file alone hides the picture from the chat - never file-over-fence.
+- Which fenced form: edges carry the meaning (who-calls-whom topology) -> mermaid; layout carries the meaning (layers, poster flow, non-technical reader) -> paint/svg; destined for the repo and evolving with the code -> mermaid (source-diffable, layout-free edits). Full decision path: presentation_guide form:"routing".`;
+
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
 export interface VisualRequestParts {
   /** 手绘图片/图标/插画（→ SVG 或 generate_image 契约）。静态几何示意词
@@ -208,6 +218,10 @@ export interface VisualRequestParts {
    *  「插画/图标」与 picture 重叠（有机形状手绘自由度高，SVG 合理）；
    *  几何示意词则独占——命中时 picture 让位，模型只见 paint 细则。 */
   paint: boolean;
+  /** 图的归宿被点名（进 docs/README/repo、随代码演进、长期维护 →
+   *  ROUTING_ESSENTIALS 机械注入）。形式竞争场景的判据必须在场——模型自信
+   *  时不会拉卡，两轮真机判例（2026-11-02）。 */
+  destination: boolean;
 }
 
 export function detectVisualRequest(prompt: string): VisualRequestParts {
@@ -223,7 +237,11 @@ export function detectVisualRequest(prompt: string): VisualRequestParts {
   const map = /(?:地图|路线|路径规划|导航|行程路线|骑行|自驾|怎么走|在哪[里儿]|坐标|经纬度|markers?|route|map\b|itinerary|directions)/i.test(text);
   // 几何示意/插画的召回词。不收裸「画」/「图」——那会吞掉 chart/picture 主通道。
   const paint = /(?:架构图|架构示意|示意图|几何|插画|图标|流程示意|分层图|层级图|schematic|geometric|layered diagram|icon\b)/i.test(text);
-  return { picture, chart, map, paint };
+  // 归宿词（图要进 docs/README/repo 或随代码演进）：动词+归宿地组合或演进
+  // 语义，裸「文档」不单独命中（「帮我看看文档」这类阅读请求不是图归宿）。
+  // 召回优先——误判只多注入 ~750 字符精要，漏判是判据缺失（判例同上）。
+  const destination = /(?:放进|放入|放到|存到|存进|保存到|归档|加到|加进|收进).{0,12}(?:docs|文档|README|仓库|repo|工程|项目)|\b(?:docs|README)\b|跟随?代码.{0,8}(?:演进|更新|维护)|长期(?:维护|演进|更新)|evolv(?:e|ing) with (?:the )?code|keep(?:ed)? in (?:the )?repo|long-lived/i.test(text);
+  return { picture, chart, map, paint, destination };
 }
 
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI

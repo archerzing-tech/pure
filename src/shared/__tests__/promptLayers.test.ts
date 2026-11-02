@@ -12,6 +12,7 @@ import {
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
   PAINT_DSL_PROMPT,
+  ROUTING_ESSENTIALS,
   VISUAL_BLOCK_POINTER,
   detectVisualRequest,
   HUMAN_TONE_PROMPT,
@@ -281,6 +282,39 @@ describe('L1 behavior contracts', () => {
       const wants = detectVisualRequest(text);
       expect(wants.picture, text).toBe(true);
     }
+  });
+
+  it('arms the destination gate only for real destination semantics (2026-11-02 真机判例)', () => {
+    // 归宿词 = 动词+归宿地组合或演进语义；裸「文档」不单独命中——「帮我看看
+    // 文档」是阅读请求不是图归宿。误判代价 ~750 字符精要，漏判代价是判据
+    // 缺席（两轮真机判例：自信模型不拉卡，改卡是空转）。
+    for (const hit of [
+      '我需要一张架构图，放进 docs/ 里',
+      '画一张流程图存到项目文档目录',
+      '把这张图放进 README 里',
+      '生成部署图归档到仓库',
+      '画一张流程图，要跟随代码演进经常更新',
+      '架构图长期维护',
+      'a layered diagram to keep in the repo',
+      'diagram for the docs, evolving with the code',
+    ]) {
+      expect(detectVisualRequest(hit).destination, hit).toBe(true);
+    }
+    for (const miss of ['帮我看看文档', '总结这段文档内容', '画一张三层架构示意图', '把这些数据做成柱状图']) {
+      expect(detectVisualRequest(miss).destination, miss).toBe(false);
+    }
+  });
+
+  it('pins the routing essentials contract (mechanical injection, 2026-11-02 第三刀)', () => {
+    // 劝导对没拉卡的模型是空转：归宿词命中时精要机械注入（装配断言在
+    // PromptAssembler.test.ts），这里锁文本契约——双交付纪律 + 判轴 + 发现
+    // 指针，全 ASCII（sidecar 锚纪律），铁律锚与 routing 卡共享（同锚断言
+    // 在 presentationLibrary.test.ts）。
+    expect(ROUTING_ESSENTIALS).toContain('DOUBLE DELIVERY');
+    expect(ROUTING_ESSENTIALS).toContain('never file-over-fence');
+    expect(ROUTING_ESSENTIALS).toContain('who-calls-whom topology');
+    expect(ROUTING_ESSENTIALS).toContain('presentation_guide form:"routing"');
+    expect(/^[\x20-\x7E\n]*$/.test(ROUTING_ESSENTIALS)).toBe(true);
   });
 
   it('points the resident visual pointer at presentation_guide (2026-11-02 表现形式库)', () => {

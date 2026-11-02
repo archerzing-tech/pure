@@ -21,6 +21,7 @@ import {
   LEDGER_PROTOCOL_PROMPT,
   MULTI_AGENT_MECHANICS_PROMPT,
   PUBLIC_API_DIRECTORIES_PROMPT,
+  ROUTING_ESSENTIALS,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
   VISUAL_BLOCK_POINTER,
@@ -279,6 +280,11 @@ function buildVisualFragments(
   // （以前 svg_output 是对所有面注入的，只有细则才是 GUI 专属）。
   const parts: Array<[string, string | undefined, number]> = [
     ['visual_pointer', VISUAL_BLOCK_POINTER, 64],
+    // 归宿词命中（图要进 docs/README/repo、随代码演进）：routing 精要机械
+    // 注入。判据必须在场，不赌模型拉卡——两轮真机判例证明自信模型不拉
+    // presentation_guide，改卡是空转。同样不分面：CLI/渠道的形式竞争与
+    // GUI 同构（2026-11-02 第三刀）。
+    ['routing_essentials', wants.destination ? ROUTING_ESSENTIALS : undefined, 63],
   ];
   if (surface === 'gui') {
     parts.push(

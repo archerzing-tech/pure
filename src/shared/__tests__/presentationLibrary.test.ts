@@ -18,6 +18,7 @@ import {
   IMAGE_GEN_OUTPUT_PROMPT,
   MAP_DSL_PROMPT,
   PAINT_DSL_PROMPT,
+  ROUTING_ESSENTIALS,
   SVG_OUTPUT_PROMPT,
 } from '../promptLayers';
 
@@ -106,11 +107,14 @@ describe('presentation library cards', () => {
     expect(routing?.whenNotToUse).toContain('it routes, it does not render');
     const detail = routing?.detail ?? '';
     expect(detail).toContain('Decision path, in order');
-    // 第 0 步：文件从选项空间除名（真机判例 session_1793600755798_1——
-    // 「图进 docs」被降维成 SVG 文件落盘，破围栏铁律）。
-    expect(detail).toContain('0. File is NOT an option');
+    // 第 0 步：双交付纪律（真机判例 session_1793600755798_1 + 复测
+    // session_1793602596186_3）——「图进 docs」是合法归宿，落盘是需求一部分；
+    // 纪律不是「文件不是选项」而是先后有序：围栏先进聊天（权威版本），再存
+    // 块源码到指定路径。无归宿明示时文件仍然不是聊天交付的替身。
+    expect(detail).toContain('0. Fence first, file second');
+    expect(detail).toContain('deliver BOTH');
+    expect(detail).toContain('the authoritative version');
     expect(detail).toContain('never file-over-fence');
-    expect(detail).toContain('emit the block first');
     expect(detail).toContain('TOPOLOGY'); // 拓扑重心 -> mermaid
     expect(detail).toContain('the layout IS the semantic'); // 版面重心 -> paint/svg
     expect(detail).toContain('One-shot'); // 一次性讲给人听
@@ -126,5 +130,9 @@ describe('presentation library cards', () => {
     const byId = Object.fromEntries(PRESENTATION_CARDS.map((card) => [card.id, card]));
     expect(byId.mermaid?.whenToUse).toContain('evolve with the code');
     expect(byId.paint?.whenNotToUse).toContain('expensive to maintain');
+    // 机械注入精要与卡共享铁律锚（两个载体一个口径）：精要注入给「没拉卡」
+    // 的请求，卡全文给拉了的请求——两处的交付纪律句子必须逐字同锚。
+    expect(ROUTING_ESSENTIALS).toContain('never file-over-fence');
+    expect(ROUTING_ESSENTIALS).toContain('DOUBLE DELIVERY');
   });
 });
