@@ -171,6 +171,7 @@ describe('presentation_guide (presentation capability library, 2026-11-02)', () 
     const text = String(result.result);
     expect(text).toContain('── routing (meta)');
     expect(text).toContain('Decision path, in order');
+    expect(text).toContain('0. File is NOT an option'); // 文件除名（真机判例）
     expect(text).toContain('TOPOLOGY');
     expect(text).toContain('the layout IS the semantic');
     // 别名同路。

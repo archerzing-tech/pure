@@ -39,6 +39,8 @@
 
 **MVP 后增补（同日）——routing 决策卡**：三层架构图会话（paint/svg 连用而未走 mermaid）引出用户问答，固化「形式跟着用途走」的决策序列进 `routing` meta 卡（目录首位）：① 内容路由 → ② 结构图的语义重心（TOPOLOGY=边承载语义 → mermaid 自动布局；LAYOUT=版面承载语义 → paint/svg 显式坐标）→ ③ 生命周期（一次性讲给人听 → 版面控制赢；进 repo 随代码演进 → 源码式 mermaid 赢）→ ④ 读者 → ⑤ 规模闸（~30 节点）→ ⑥ 失败修正不换形式。判据写给人看（工具结果卡用户直接可见）；mermaid/paint 两卡补生命周期让位句呼应。测试锁在 presentationLibrary.test.ts / deferredTools.test.ts。
 
+**真机二修（同日，session_1793600755798_1 判例）**：判轴对撞请求（非技术读者 + 图进 docs 长期演进）暴露两缺口——①「docs/」措辞引力把形式选择降维成「SVG 文件 vs PNG」，write_file 落盘破围栏铁律（SVG 细则在声仍破）；②拉卡触发词是主观 "unsure"，模型自信选错时永不触发。修法：routing 卡新增**第 0 步「File is NOT an option」**（文件从选项空间显式除名——"进 repo" 判据选的是 mermaid 围栏这个源码式形式，不是文件；归档=块先交付、需要时把块源码存进 repo）；③生命周期判据句补 "still a fenced block in the chat first"；拉卡触发词客观化（请求提到图的归宿 docs/slides/README 或读者时即拉，"whether or not you feel unsure"），工具 description 同步。对照组（9 家供应商对比）表现合格：跳过 routing 直拉 table/chart 两卡、按 chart 卡 "give both" 判据双形式交付——判据能落地，缺的是竞争场景的拉卡纪律与选项空间边界。
+
 ## 四、后续刀路线（未排期）
 
 - **刀 2 渲染器注册化**：`markdown.ts:174` 围栏分流改表驱动，与卡片注册表同源——加新视觉形式一处注册（卡 + 渲染器 + 校验器），消除「改渲染器+改提示词+改闸门+改测试」四处耦合。这是「可扩展」的工程化形态。

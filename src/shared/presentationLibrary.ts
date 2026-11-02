@@ -50,7 +50,12 @@ export interface PresentationCard {
 /** 首批卡片：全部来自既有实现（零新渲染器）。detail 引用 promptLayers 单源。
  * 2026-11-02 增补：routing 决策卡（形式跟着用途走——版面 vs 拓扑、一次性
  * vs 长期演进、读者与规模；2026-11-02 三层架构图会话的用户问答定调），放
- * 目录首位——先决策，再拉胜出形式的卡。 */
+ * 目录首位——先决策，再拉胜出形式的卡。
+ * 2026-11-02 真机二修（session_1793600755798_1）：「图进 docs」请求没拉卡、
+ * 把形式选择降维成「SVG 文件 vs PNG」并用 write_file 落盘，破了围栏铁律。
+ * 修法：①文件从选项空间里显式除名（第 0 步）——「进 repo」判据选的是
+ * mermaid 围栏这个源码式形式，不是文件；②拉卡触发词从主观 unsure（自信时
+ * 不触发）换成客观场景（请求提到图的归宿/读者时，正是形式竞争时）。 */
 export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   {
     id: 'routing',
@@ -59,20 +64,21 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     aliases: ['choose', 'decision'],
     trigger: 'A decision card - no fence of its own; it routes between the other cards',
     whenToUse:
-      'Before producing any visual when two or more forms could fit - pull this first, decide, then pull the winning form\'s card for its exact syntax.',
+      'Before producing any visual when two or more forms could fit - pull this first, decide, then pull the winning form\'s card for its exact syntax. Pull it whenever the request mentions WHERE the visual will live (docs, slides, README, chat) or WHO will read it - that is exactly when forms compete, whether or not you feel unsure.',
     whenNotToUse:
       'Never emit anything FROM this card itself - it routes, it does not render. When the form is obvious from the content (numbers -> chart, places -> map, formulas -> math), skip it and go straight to that card.',
     delivery:
       'Nothing renders from this card - it ends in a choice. Go read the chosen form\'s card next; if a previous block failed to render, the last step below applies.',
     detail:
       'Decision path, in order - stop at the first match:\n' +
+      '0. File is NOT an option. Never answer a picture/chart/map/diagram request by writing an .svg/.png/.html file - a file shows up as raw code or an artifact card, never as the picture in the chat, and it cannot be fixed by re-emitting. The fenced block IS the deliverable; if the user wants it archived, emit the block first, then save the block\'s SOURCE into the repo if asked. "Docs/slides/README" picks WHICH fenced form (step 3), never file-over-fence.\n' +
       '1. Content check: numbers/comparison -> chart. Real-world places/routes -> map. Math -> math. Exact multi-column figures -> table. Photo-like artwork -> image_gen (or svg as fallback). Structure/diagram -> continue below.\n' +
       '2. For structure, what is the diagram\'s center of gravity?\n' +
       '   - TOPOLOGY (who calls whom, message order, state transitions - the edges carry the meaning) -> mermaid: automatic layout, adding or editing a node is one line of source.\n' +
       '   - LAYOUT (layer boundaries, side-by-side grouping inside a tier, spatial metaphor, poster-like one-glance flow - the arrangement itself carries the meaning) -> paint (precise geometry) or svg (organic shapes): explicit coordinates, the layout IS the semantic.\n' +
       '3. What is this diagram\'s life?\n' +
       '   - One-shot, for humans in THIS conversation -> layout control wins (paint/svg): the 3-second read is designed on purpose, not delegated to a layout engine.\n' +
-      '   - Living in the repo, evolving with the code, reviewed and diffed -> source-form wins (mermaid): editing is a line change, not re-laying-out a pile of x/y coordinates.\n' +
+      '   - Living in the repo, evolving with the code, reviewed and diffed -> source-form wins (mermaid): editing is a line change, not re-laying-out a pile of x/y coordinates - and still a fenced block in the chat first, never a file (step 0).\n' +
       '4. Who reads it? Non-technical audience, explained once -> minimal layout (big tier names + one-line duty per tier, few components). Engineers / formal documents -> full component anatomy; either form works, pick by steps 2-3.\n' +
       '5. Size check: over ~30 nodes or deep nesting -> let automatic layout take over (mermaid); hand-laying that many coordinates tires out and drifts.\n' +
       '6. Failure rule unchanged: if a block failed to render, fix it in the SAME form (a map is never re-emitted as SVG, and so on) - switching forms mid-retry hides the real error.',

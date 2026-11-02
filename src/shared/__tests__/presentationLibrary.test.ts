@@ -106,12 +106,22 @@ describe('presentation library cards', () => {
     expect(routing?.whenNotToUse).toContain('it routes, it does not render');
     const detail = routing?.detail ?? '';
     expect(detail).toContain('Decision path, in order');
+    // 第 0 步：文件从选项空间除名（真机判例 session_1793600755798_1——
+    // 「图进 docs」被降维成 SVG 文件落盘，破围栏铁律）。
+    expect(detail).toContain('0. File is NOT an option');
+    expect(detail).toContain('never file-over-fence');
+    expect(detail).toContain('emit the block first');
     expect(detail).toContain('TOPOLOGY'); // 拓扑重心 -> mermaid
     expect(detail).toContain('the layout IS the semantic'); // 版面重心 -> paint/svg
     expect(detail).toContain('One-shot'); // 一次性讲给人听
     expect(detail).toContain('evolving with the code'); // 长期演进翻 mermaid
+    expect(detail).toContain('still a fenced block in the chat first'); // 演进判据不豁免铁律
     expect(detail).toContain('~30 nodes'); // 规模闸
     expect(detail).toContain('SAME form'); // 失败修正不换形式
+    // 拉卡触发词客观化：请求提到图的归宿/读者即拉（主观 unsure 自信时不触发，
+    // 同一真机判例）。
+    expect(routing?.whenToUse).toContain('WHERE the visual will live');
+    expect(routing?.whenToUse).toContain('whether or not you feel unsure');
     // 生命周期让位句双卡呼应。
     const byId = Object.fromEntries(PRESENTATION_CARDS.map((card) => [card.id, card]));
     expect(byId.mermaid?.whenToUse).toContain('evolve with the code');
