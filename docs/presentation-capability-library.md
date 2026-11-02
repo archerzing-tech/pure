@@ -39,7 +39,14 @@
 
 **MVP 后增补（同日）——routing 决策卡**：三层架构图会话（paint/svg 连用而未走 mermaid）引出用户问答，固化「形式跟着用途走」的决策序列进 `routing` meta 卡（目录首位）：① 内容路由 → ② 结构图的语义重心（TOPOLOGY=边承载语义 → mermaid 自动布局；LAYOUT=版面承载语义 → paint/svg 显式坐标）→ ③ 生命周期（一次性讲给人听 → 版面控制赢；进 repo 随代码演进 → 源码式 mermaid 赢）→ ④ 读者 → ⑤ 规模闸（~30 节点）→ ⑥ 失败修正不换形式。判据写给人看（工具结果卡用户直接可见）；mermaid/paint 两卡补生命周期让位句呼应。测试锁在 presentationLibrary.test.ts / deferredTools.test.ts。
 
-**真机二修（同日，session_1793600755798_1 判例）**：判轴对撞请求（非技术读者 + 图进 docs 长期演进）暴露两缺口——①「docs/」措辞引力把形式选择降维成「SVG 文件 vs PNG」，write_file 落盘破围栏铁律（SVG 细则在声仍破）；②拉卡触发词是主观 "unsure"，模型自信选错时永不触发。修法：routing 卡新增**第 0 步「File is NOT an option」**（文件从选项空间显式除名——"进 repo" 判据选的是 mermaid 围栏这个源码式形式，不是文件；归档=块先交付、需要时把块源码存进 repo）；③生命周期判据句补 "still a fenced block in the chat first"；拉卡触发词客观化（请求提到图的归宿 docs/slides/README 或读者时即拉，"whether or not you feel unsure"），工具 description 同步。对照组（9 家供应商对比）表现合格：跳过 routing 直拉 table/chart 两卡、按 chart 卡 "give both" 判据双形式交付——判据能落地，缺的是竞争场景的拉卡纪律与选项空间边界。
+**真机二修（同日，session_1793600755798_1 判例）**：判轴对撞请求（非技术读者 + 图进 docs 长期演进）暴露两缺口——①「docs/」措辞引力把形式选择降维成「SVG 文件 vs PNG」，write_file 落盘破围栏铁律（SVG 细则在声仍破）；②拉卡触发词是主观 "unsure"，模型自信选错时永不触发。修法：routing 卡新增第 0 步（当时判「File is NOT an option」，第三刀已重写）+ 生命周期判据句补 "still a fenced block in the chat first" + 拉卡触发词客观化，工具 description 同步。对照组（9 家供应商对比）表现合格：跳过 routing 直拉 table/chart 两卡、按 chart 卡 "give both" 判据双形式交付——判据能落地，缺的是竞争场景的拉卡纪律与选项空间边界。
+
+**第三刀：机械触发 + 双交付纪律（同日，d750ee4；复测 session_1793602596186_3 判例）**：二修后复测暴露更深的真因——第 0 步没进上下文（模型仍没拉卡），改卡是空转；同时第 0 步本身矫枉过正：用户明示「图进 docs/」时落盘是**需求的一部分**，不是违规。两刀一起落：
+
+1. **劝导 → 机械**：两刀都在改卡内容，但卡没被拉 = 判据不在场。可靠性只能来自机械层——`detectVisualRequest` 加 `destination` 路（动词+归宿地组合如「放进/存到/归档 + docs/文档/README/仓库」、演进语义如「跟随代码演进」「长期维护」、英文 "evolving with the code" 等；裸「文档」不单独命中，阅读请求不误伤），命中即把新常量 `ROUTING_ESSENTIALS`（~750 字符精要：双交付纪律 + 判轴浓缩 + 发现指针）随既有闸门通道注入 system prompt，不分面。召回优先判例同闸门：误判只多花 token，漏判是判据缺失。铁律锚（`never file-over-fence` / `DOUBLE DELIVERY`）与 routing 卡共享，测试同锚锁死——两个载体一个口径。
+2. **第 0 步重写为双交付**：「Fence first, file second」——聊天交付永远是围栏（无归宿明示时文件不是替身，铁律不变）；请求点名归宿时**交付两件**：围栏先发（渲染在聊天里、是权威版本），再把块的源码存到指定路径（repo 演进优先 mermaid 文本）。「docs/slides/README」选的是**哪种围栏形式**，永远不是用文件替代围栏。
+
+判例沉淀：行为判据的可靠性分层——**卡（pull）管深挖，机械注入（push）管在场**；判据能否生效先问「它在不在这个请求的上下文里」，不在场的内容改一万字也是零。
 
 ## 四、后续刀路线（未排期）
 
