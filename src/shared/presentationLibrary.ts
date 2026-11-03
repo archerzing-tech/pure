@@ -47,8 +47,13 @@ export interface PresentationCard {
   delivery: string;
   /** 详情全文（DSL 细则）。仅允许引用既有常量，不复制文本。 */
   detail?: string;
-  /** 各宿主面的呈现与降级（声明式，MVP 不做机器路由）。 */
+  /** 各宿主面的呈现与降级（声明式，给人读）。 */
   surfaces: string;
+  /** 刀 4 机器可读降级接口：无图形表面（CLI/渠道 text 模式）时这个形式
+   *  降级成什么。'wireframe' = ASCII 线框（cliDiagram）；'projection' = 文本
+   *  投影（formProjections）；缺省 = 'text'（源码/原文直出）。与 surfaces
+   *  文本、FORM_PROJECTIONS 注册表三方同源（测试锁死）；自定义卡继承 base。 */
+  textFallback?: 'wireframe' | 'projection' | 'text';
 }
 
 /** 首批卡片：全部来自既有实现（零新渲染器）。detail 引用 promptLayers 单源。
@@ -103,6 +108,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     detail:
       'Choosing the mermaid type: process with branches -> flowchart; who-says-what-to-whom over time -> sequence; code structure -> class / state / ER; time-planned work -> gantt; share-of-total -> pie (use a chart card when exact values matter); ideas radiating from a center -> mindmap; milestones over time -> timeline; actors and use cases -> usecase-beta (ASCII node ids only). Keep diagrams under ~30 nodes - deeper structures read better as a paint layout or a table.',
     surfaces: 'gui: inline SVG diagram | cli: ASCII wireframe | channel: source text',
+    textFallback: 'wireframe',
   },
   {
     id: 'puml',
@@ -117,6 +123,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     delivery:
       'Renders via the local PlantUML engine (offline, 30s timeout); failure shows an error card with retry.',
     surfaces: 'gui: inline diagram | cli: ASCII wireframe | channel: source text',
+    textFallback: 'wireframe',
   },
   {
     id: 'chart',
@@ -132,7 +139,8 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     delivery:
       'Renders inline as an interactive echarts chart. Parse failures / empty data show an error card with retry. The type: line DSL is the primary contract; a JSON payload is also accepted for every type.',
     detail: CHART_DSL_PROMPT,
-    surfaces: 'gui: inline echarts chart | cli & channel: source text',
+    surfaces: 'gui: inline echarts chart | cli & channel: text projection (ASCII bars for bar/hbar/pie; other types keep the readable rows)',
+    textFallback: 'projection',
   },
   {
     id: 'map',
@@ -146,7 +154,8 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     delivery:
       'Renders inline as an interactive Leaflet map (markers + route polyline). Malformed JSON shows the only error card WITHOUT a retry button - re-emit the whole block with valid JSON; wrong coordinates show an on-map warning bar. Use REAL coordinates; look them up (web_search) when unsure.',
     detail: MAP_DSL_PROMPT,
-    surfaces: 'gui: interactive Leaflet map | cli & channel: source JSON',
+    surfaces: 'gui: interactive Leaflet map | cli & channel: text projection (marker/route list)',
+    textFallback: 'projection',
   },
   {
     id: 'svg',
@@ -176,7 +185,8 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     delivery:
       'Renders inline as a static canvas drawing (deterministic - no random values). Parse failures (e.g. empty shapes) show an error card with retry - re-emit valid paint JSON, NEVER switch to SVG.',
     detail: PAINT_DSL_PROMPT,
-    surfaces: 'gui: inline canvas drawing | cli & channel: source JSON',
+    surfaces: 'gui: inline canvas drawing | cli & channel: text projection (shape list)',
+    textFallback: 'projection',
   },
   {
     id: 'image_gen',
@@ -330,6 +340,7 @@ export function registerCustomCards(inputs: readonly CustomCardInput[]): {
       delivery: input.delivery ?? baseCard.delivery,
       detail: input.detail ?? baseCard.detail,
       surfaces: input.surfaces ?? baseCard.surfaces,
+      textFallback: baseCard.textFallback, // 机器可读降级跟 base 管线走，不随 surfaces 文案变
     };
     // 同 id 更新：先摘旧卡再放新卡，别名/tag 占位同步刷新。
     customCards = customCards.filter((existing) => existing.id !== input.id);

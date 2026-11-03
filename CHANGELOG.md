@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.1.0
+
+**刀 4 投影降级器 + 刀 3 组合式自定义：表现形式库的文本表面与自定义卡**
+
+表现形式库两刀连落（蓝图 `docs/presentation-capability-library.md`）。刀 3 组合式自定义：`~/.pure/config.json` 写 `presentationCards` 键即注册自定义视觉形式——`{ id, base, 只写想改的字段 }` 得到一张完整卡（判据/交付/细则全继承 base），自定义围栏 tag 挂 base 既有渲染管线（零新渲染器）；真实源在盘上 config.json，agent 可语义自加卡、GUI 回合活检热生效，真机验证 agent 自加卡全程自愈（缩进写错归因重试、写后实测解析）。刀 4 投影降级器：chart/map/paint 在 CLI 与外部渠道不再裸 JSON 直出——新增 `formProjections` 三投影器（bar/hbar/pie → ASCII 条形图、map → 标记/航线清单、paint → 形状清单），解析失败一律回退源码（绝不产出错图）；CLI 流式与一次性转换、渠道 text 降级、目录 surfaces 文案三方同源锁（卡声明 textFallback ↔ 投影注册表 ↔ surfaces 文案），测试当场抓到 charts/leaflet 别名无投影的真缺口。版本笔含 4.1.0 五件套。
+
 ## v4.0.3
 
 **委派编排补体量拆路触发 + 文档资产对齐**

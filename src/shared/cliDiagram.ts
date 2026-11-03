@@ -23,6 +23,8 @@
 // Anything outside that subset yields null — the caller then prints the raw
 // source instead of a wrong picture.
 
+import { projectForm } from './formProjections';
+
 export interface DiagramGraph {
   /** id → display label (already stripped of markdown markup). */
   labels: Map<string, string>;
@@ -551,12 +553,18 @@ export function renderWireframe(source: string, lang: string): string | null {
 }
 
 // ── Streaming converter ──
-// Feeds TokenDelta content through to a writer; when a complete ```mermaid /
-// ```puml / ```plantuml fence closes, the block is rendered as a wireframe
-// instead of the raw source. All other text streams through immediately so
-// the CLI stays live.
+// Feeds TokenDelta content through to a writer; when a complete diagram /
+// projection fence closes, the block is rendered as a wireframe (mermaid /
+// puml: box-drawing graph) or a text projection (chart / map / paint, 刀 4
+// formProjections) instead of the raw source. All other text streams through
+// immediately so the CLI stays live.
 
 const DIAGRAM_LANGS = new Set(['mermaid', 'puml', 'plantuml']);
+// 刀 4：无图形表面的三个数据/几何形式——围栏关闭时投影成人可读文本（失败
+// 回退源码），不再裸 JSON 直出。别名与 FORM_PROJECTIONS 注册表同源（测试锁）。
+// 自定义卡 tag 不在此列（主表面是 GUI，已知边界）。
+const PROJECTION_LANGS = new Set(['chart', 'charts', 'map', 'leaflet', 'paint']);
+const BUFFERED_LANGS = new Set([...DIAGRAM_LANGS, ...PROJECTION_LANGS]);
 
 export class CliWireframeStream {
   private pending = '';
@@ -614,7 +622,7 @@ export class CliWireframeStream {
       if (nl < 0) return;
       const lineEnd = nl;
       const info = this.pending.slice(3, lineEnd).trim().toLowerCase().split(/\s+/)[0] ?? '';
-      if (DIAGRAM_LANGS.has(info)) {
+      if (BUFFERED_LANGS.has(info)) {
         this.fenceLang = info;
         this.fenceOpen = true;
         this.pending = this.pending.slice(lineEnd + 1); // consume the opener line
@@ -627,6 +635,21 @@ export class CliWireframeStream {
   }
 
   private emitWireframe(content: string): void {
+    const lang = this.fenceLang ?? '';
+    // 刀 4：投影形式走 formProjections（null 回退源码，同线框的诚实降级）。
+    if (PROJECTION_LANGS.has(lang)) {
+      const projected = projectForm(lang, content);
+      if (projected) {
+        this.write(`┌─ ${lang} 文本投影 · 图形表面不可用 ──────────────────────\n`);
+        this.write(projected);
+        this.write('\n└──────────────────────────────────────────────\n');
+      } else {
+        this.write('```' + lang + '\n');
+        this.write(content);
+        this.write('```\n');
+      }
+      return;
+    }
     const rendered = this.fenceLang ? renderWireframe(content, this.fenceLang) : null;
     if (rendered) {
       this.write(`┌─ ${this.fenceLang} 流程图 · 线框渲染 ──────────────────────────\n`);
@@ -677,8 +700,8 @@ export function renderWireframeFromMarkdown(text: string): string {
     const nl = text.indexOf('\n', open);
     const lineEnd = nl < 0 ? text.length : nl;
     const info = text.slice(open + 3, lineEnd).trim().toLowerCase().split(/\s+/)[0] ?? '';
-    if (!DIAGRAM_LANGS.has(info)) {
-      // Non-diagram fence: emit it verbatim and continue past it.
+    if (!BUFFERED_LANGS.has(info)) {
+      // Non-wireframe / non-projection fence: emit it verbatim and continue past it.
       const close = text.indexOf('```', lineEnd + 1);
       if (close < 0) {
         out.push(text.slice(open));
@@ -694,6 +717,17 @@ export function renderWireframeFromMarkdown(text: string): string {
       break;
     }
     const content = text.slice(lineEnd + 1, close);
+    if (PROJECTION_LANGS.has(info)) {
+      // 刀 4：投影形式——成功替换为文本投影，失败保留源码（诚实降级）。
+      const projected = projectForm(info, content);
+      if (projected) {
+        out.push(`┌─ ${info} 文本投影 · 图形表面不可用 ──────────────────────\n${projected}\n└──────────────────────────────────────────────\n`);
+      } else {
+        out.push(text.slice(open, close + 3));
+      }
+      i = close + 3;
+      continue;
+    }
     const rendered = renderWireframe(content, info);
     if (rendered) {
       out.push(`┌─ ${info} 流程图 · 线框渲染 ──────────────────────────\n${rendered}\n└──────────────────────────────────────────────\n`);

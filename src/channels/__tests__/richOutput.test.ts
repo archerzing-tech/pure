@@ -34,6 +34,23 @@ describe('rich output extraction', () => {
     expect(extractRichBlocks('no blocks here')).toEqual([]);
   });
 
+  it('extracts map/paint blocks too (刀 4 投影降级)', () => {
+    const blocks = extractRichBlocks(['```map', '{"markers":[]}', '```', '```paint', '{"shapes":[]}', '```'].join('\n'));
+    expect(blocks.map((b) => b.kind)).toEqual(['map', 'paint']);
+    // map/paint 没有 headless 渲染器——降级矩阵恒 text（投影分支）。
+    expect(degradationPlan(CAPS_IMAGES).map).toBe('text');
+    expect(degradationPlan(CAPS_IMAGES).paint).toBe('text');
+  });
+
+  it('projects a map block into a marker list on a text-only channel (刀 4)', async () => {
+    const answer = ['路线如下：', '', '```map', JSON.stringify({ title: '出行', markers: [{ lat: 34.34, lng: 108.94, title: '西安', label: '起点' }] }), '```'].join('\n');
+    const result = await renderRichOutput(answer, CAPS_TEXT);
+    expect(result.projectedText).toBeDefined();
+    expect(result.projectedText).toContain('● 西安（起点） — 34.34, 108.94');
+    expect(result.projectedText).not.toContain('```map');
+    expect(result.projectedText).toContain('路线如下：'); // 正文其余部分原样
+  });
+
   it('plans attachments only when the channel accepts images', () => {
     expect(degradationPlan(CAPS_IMAGES).chart).toBe('attach');
     expect(degradationPlan(CAPS_TEXT).chart).toBe('text');
@@ -68,8 +85,15 @@ describe('renderRichOutput', () => {
   it('degrades every block to text on a channel without image support', async () => {
     const result = await renderRichOutput(ANSWER, CAPS_TEXT, { svgToPng: async () => new Uint8Array([1]) });
     expect(result.attachments).toEqual([]);
+    // 刀 4：chart 是投影形式——text 降级先转 ASCII 条形（正文替换），不再是
+    // 「不支持图片」note；mermaid/svg 保持源码 note。
     expect(result.notes.length).toBe(3);
-    expect(result.notes[0]).toContain('不支持图片');
+    expect(result.notes[0]).toContain('可读投影');
+    expect(result.projectedText).toContain('苹果');
+    expect(result.projectedText).toContain('█'); // 条形图本体
+    expect(result.projectedText).not.toContain('```chart'); // 源码块已被替换
+    expect(result.projectedText).toContain('```mermaid'); // 非投影形式保持源码
+    expect(result.notes.join('\n')).toContain('mermaid 图未转成图片');
   });
 
   it('reports a failed render without throwing', async () => {

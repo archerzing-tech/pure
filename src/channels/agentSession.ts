@@ -202,6 +202,8 @@ export class AgentSession {
       try {
         const rich = await this.deps.richOutput(out.text, this.deps.capabilities);
         if (rich.attachments.length > 0) out.attachments = [...(out.attachments ?? []), ...rich.attachments];
+        // 刀 4：投影形式在 text 表面替换为可读文本（条形图/清单），不再是裸 JSON。
+        if (rich.projectedText !== undefined) out.text = rich.projectedText;
         if (rich.notes.length > 0) out.text = `${out.text}\n\n${rich.notes.join('\n')}`;
       } catch {
         // 附件生成失败不能影响回复本身。

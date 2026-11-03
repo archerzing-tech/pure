@@ -12,7 +12,7 @@
 
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { parseMapSource, type MapMarker, type MapSpec } from './mapSpec';
+import { parseMapSource, type MapMarker, type MapSpec } from '../shared/mapSpec';
 import { gcj02ToWgs84, wgs84ToGcj02 } from './mapCoord';
 import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';

@@ -14,8 +14,8 @@ import {
   validateRoute,
   describeViolations,
   type GeographicViolation,
-} from '../shared/geographicValidation';
-import { repairJsonSource } from '../shared/parseRepair';
+} from './geographicValidation';
+import { repairJsonSource } from './parseRepair';
 
 export interface MapSpec {
   title?: string;

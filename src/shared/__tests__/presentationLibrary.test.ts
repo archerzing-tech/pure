@@ -17,6 +17,7 @@ import {
   resetCustomCards,
   type CustomCardInput,
 } from '../presentationLibrary';
+import { FORM_PROJECTIONS } from '../formProjections';
 import {
   CHART_DSL_PROMPT,
   IMAGE_GEN_OUTPUT_PROMPT,
@@ -115,6 +116,31 @@ describe('presentation library cards', () => {
     }
   });
 
+  it('textFallback declarations match the machine tables and the surfaces copy (刀 4)', () => {
+    // 三方同源：卡声明（textFallback）↔ 机器表（FORM_PROJECTIONS /
+    // cliDiagram 的 BUFFERED_LANGS 行为）↔ 给人读的 surfaces 文案。
+    // wireframe 卡：surfaces 必须提及 ASCII wireframe；projection 卡：必须有
+    // 投影器（注册表全集相等在 formProjections.test.ts）且 surfaces 提及
+    // projection；无 textFallback 的卡 = text 降级，surfaces 不得吹投影。
+    for (const card of PRESENTATION_CARDS) {
+      if (card.textFallback === 'wireframe') {
+        expect(card.surfaces, `${card.id}.surfaces`).toContain('ASCII wireframe');
+        expect(card.fence?.length ?? 0).toBeGreaterThan(0);
+      } else if (card.textFallback === 'projection') {
+        expect(card.surfaces, `${card.id}.surfaces`).toContain('projection');
+        for (const tag of card.fence ?? []) {
+          expect(FORM_PROJECTIONS[tag], `${card.id} tag "${tag}"`).toBeDefined();
+        }
+      } else {
+        expect(card.textFallback, `${card.id} should default to text`).toBeUndefined();
+        expect(card.surfaces, `${card.id}.surfaces`).not.toContain('projection');
+      }
+    }
+    // 显式 'text' 声明等价缺省——目前七张围栏卡全显式，非围栏卡全缺省。
+    const declared = PRESENTATION_CARDS.filter((card) => card.textFallback !== undefined).map((card) => card.id);
+    expect(declared.sort()).toEqual(['chart', 'map', 'mermaid', 'paint', 'puml']);
+  });
+
   it('carries the form-choice decision logic as a meta card (2026-11-02 用户定调)', () => {
     // 「形式跟着用途走」决策序列固化：版面 vs 拓扑（语义重心）、一次性 vs
     // 长期演进（生命周期）、读者与规模。routing 放目录首位——先决策再拉
@@ -178,6 +204,7 @@ describe('custom presentation cards (刀 3 组合式自定义)', () => {
     expect(card.whenToUse).toBe(paint.whenToUse);
     expect(card.detail).toBe(paint.detail);
     expect(card.fence).toEqual(['paint']); // 缺省复用 base 围栏语法
+    expect(card.textFallback).toBe('projection'); // 机器可读降级也继承 base（刀 4）
   });
 
   it('rewrites the trigger when the card brings its own fence tag', () => {

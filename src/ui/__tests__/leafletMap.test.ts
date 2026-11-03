@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseMapSource } from '../mapSpec';
+import { parseMapSource } from '../../shared/mapSpec';
 
 const leafletSource = readFileSync(new URL('../leafletMap.ts', import.meta.url), 'utf8');
 

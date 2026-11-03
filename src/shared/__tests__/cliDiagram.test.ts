@@ -205,6 +205,37 @@ describe('CliWireframeStream', () => {
     stream.flush();
     expect(out()).toBe('反引号 ` 结束');
   });
+
+  it('projects a complete chart/map/paint block instead of dumping raw JSON (刀 4)', () => {
+    const { stream, out } = collect();
+    const full = ['数据：', '', '```chart', 'type: bar', '苹果 10', '香蕉 20', '```', '', '完'].join('\n');
+    for (const ch of full) stream.feed(ch);
+    stream.flush();
+    expect(out()).toContain('数据：');
+    expect(out()).toContain('文本投影');
+    expect(out()).toMatch(/香蕉 \| █+ 20/); // 条形本体
+    expect(out()).not.toContain('```chart');
+    expect(out()).toContain('完');
+  });
+
+  it('projects the leaflet alias and a paint payload', () => {
+    const { stream, out } = collect();
+    stream.feed(['```leaflet', JSON.stringify({ markers: [{ lat: 34.34, lng: 108.94, title: '西安' }] }), '```'].join('\n'));
+    stream.feed('\n');
+    stream.feed(['```paint', JSON.stringify({ width: 100, height: 50, shapes: [{ type: 'rect', x: 1, y: 2, w: 3, h: 4 }] }), '```'].join('\n'));
+    stream.flush();
+    expect(out()).toContain('● 西安 — 34.34, 108.94');
+    expect(out()).toContain('- rect (1,2) 3×4');
+  });
+
+  it('falls back to raw source when a projection form fails to parse', () => {
+    const { stream, out } = collect();
+    stream.feed(['```paint', 'not json', '```'].join('\n'));
+    stream.flush();
+    expect(out()).toContain('```paint');
+    expect(out()).toContain('not json');
+    expect(out()).not.toContain('文本投影');
+  });
 });
 
 describe('renderWireframeFromMarkdown', () => {
@@ -221,6 +252,17 @@ describe('renderWireframeFromMarkdown', () => {
   it('keeps non-diagram fences verbatim', () => {
     const out = renderWireframeFromMarkdown('```python\nprint(1)\n```');
     expect(out).toBe('```python\nprint(1)\n```');
+  });
+
+  it('one-shot pass also projects chart/map/paint blocks (刀 4)', () => {
+    const out = renderWireframeFromMarkdown(
+      ['前文', '', '```map', JSON.stringify({ title: '路线', markers: [{ lat: 1.5, lng: 2.5, title: 'A 点' }] }), '```', '', '后文'].join('\n'),
+    );
+    expect(out).toContain('前文');
+    expect(out).toContain('文本投影');
+    expect(out).toContain('● A 点 — 1.5, 2.5');
+    expect(out).not.toContain('```map');
+    expect(out).toContain('后文');
   });
 
   it('returns the input unchanged when there is no fence', () => {
