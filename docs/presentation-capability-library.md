@@ -1,6 +1,6 @@
 # 表现形式库（Presentation Capability Library）
 
-> **状态**：MVP + routing 卡 + 机械触发 + 刀 2 渲染器注册化（86d12d8）+ 刀 3 组合式自定义（f473c9c）+ **刀 4 投影降级器（34f1f87，2026-11-03，v4.1.0）** 已落。后续刀（常驻指针瘦身 / 校验前置共享）未排期。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
+> **状态**：MVP + routing 卡 + 机械触发 + 刀 2 渲染器注册化（86d12d8）+ 刀 3 组合式自定义（f473c9c）+ 刀 4 投影降级器（34f1f87，2026-11-03，v4.1.0）+ **刀 6 校验真话回流（f8bcfcd，2026-11-03）** 已落。余刀：常驻指针瘦身（刀 5，须真机复验围栏命中率勿先斩）。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
 
 ## 一、定位与三层结构
 
@@ -54,10 +54,10 @@
 
 **刀 4：投影降级器（2026-11-03，34f1f87，v4.1.0）**：`src/shared/formProjections.ts` 每形式一个投影器——chart（bar/hbar/pie → ASCII 条形图，line/scatter/kline/radar/tree 系行文本已可读不投影）、map（markers+route → 清单，**吃 GUI 同款 `parseMapSource`**——为此 mapSpec 纯解析器从 ui/ 搬进 shared/，字段名零漂移）、paint（shapes → 形状清单，group 递归缩进、40 条封顶防刷屏，字段名靠 PaintShape 类型 fixture 编译期锁）。纪律承 cliDiagram 判例：解析失败一律 null 回退源码，绝不产出错图。三处接线：CLI 流式（`BUFFERED_LANGS` 分流线框/投影两通道）+ 一次性转换；渠道 `richOutput` text 降级先投影、正文围栏块替换成投影文本（`projectedText`），图片能力在时仍走 PNG；卡注册表加机器可读 `textFallback` 字段（'wireframe'/'projection'/缺省 text），与投影注册表、surfaces 文案**三方同源锁**（自定义卡继承 base）。判例：同源锁当场抓到 charts/leaflet 别名无投影的真缺口——锁的不是文档是行为。已知边界：自定义卡 tag 的文本投影不做（主表面 GUI，回退源码）。
 
-## 四、后续刀路线（未排期）
+## 四、后续刀路线
 
-- **刀 5 常驻指针瘦身**：发现工具兜住后，`VISUAL_BLOCK_POINTER` 的五段最小语法可下放卡片，常驻只留落盘禁令 + 发现指针（≈2.1k → ≈600 字符）。须真机复验模型在没有最小语法时的围栏命中率，勿先斩。
-- **刀 6 校验前置共享**：卡片声明 validator 引用（mapSpec/paintSpec/chart 已有 parse），渲染前跑、失败前置提示，替代「渲染时才发现」。
+- **刀 5 常驻指针瘦身（未排期）**：发现工具兜住后，`VISUAL_BLOCK_POINTER` 的五段最小语法可下放卡片，常驻只留落盘禁令 + 发现指针（≈2.1k → ≈600 字符）。须真机复验模型在没有最小语法时的围栏命中率，勿先斩。
+- **刀 6 校验真话回流（已落，f8bcfcd，2026-11-03）**：蓝图原案「卡片声明 validator 引用、渲染前跑」被简化——校验本来就发生在渲染管线（hydration parse + parseRepair），唯一缺口是**结果对模型全盲**（错误卡/badge 是纯 DOM，引擎侧零引用，同样的语法错下次照犯）。落法：markdown.ts 三个收口点（setDiagramState('error') / setMapState('error') / markDiagramRepaired）记事件 → chat.ts 每回合装配 user-turn 时读走（读即清）注入 envFacts 区——形式、修没修成、失败原因（截 120 字符），pure 只报事实不加判断（连引擎加载失败也原样报，原因归类归模型）。聚合按 lang+outcome 计数、封顶 5 行、detail 截 120；无事件零注入。**v1 无门控的裁定**：历史重渲染（切会话/编辑重发）会混入事件，但块确实失败过信息仍真，封顶兜住噪音，真机观察噪音率后再定门控。已知边界：CLI 面投影失败静默回退源码，事件回流留后续小刀；修复器无 reason 字段，repaired 事件不带细节（YAGNI）。
 
 ## 五、红线与对齐
 
