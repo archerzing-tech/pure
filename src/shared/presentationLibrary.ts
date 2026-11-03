@@ -253,31 +253,157 @@ export const PRESENTATION_FAMILIES: readonly string[] = [
   ...new Set(PRESENTATION_CARDS.map((card) => card.family)),
 ];
 
+// ── 刀 3 组合式自定义（docs/presentation-capability-library.md）──
+// 自定义卡 = 现有原语 + 参数封装：基础形式（base）提供渲染通道与缺省判据，
+// 用户/agent 只写想改的字段。零新渲染器——fence 走 base 的围栏路由（前端
+// registerCustomFenceRoutes 把新 tag 挂到 base kind 的通道上）。注册表真实
+// 源在盘上 config.json 的 presentationCards 键（设置 agent 化铁律：agent 可
+// 语义操作、用户可直接改文件），这里只是运行时视图。
+
+/** 自定义卡的输入形态（config.json presentationCards 数组的元素）。除 id/base
+ *  外全部可选——缺省字段继承 base 卡（组合式封装的本意：只写想改的）。 */
+export interface CustomCardInput {
+  /** 唯一 id，`[a-z][a-z0-9-]*`，不得撞内置卡 id 或别名。 */
+  id: string;
+  /** 基础形式 id（必须是内置围栏卡之一）：渲染通道与缺省判据的来源。 */
+  base: string;
+  title?: string;
+  aliases?: string[];
+  trigger?: string;
+  whenToUse?: string;
+  whenNotToUse?: string;
+  delivery?: string;
+  detail?: string;
+  surfaces?: string;
+  /** 自定义围栏 tag（小写 ASCII，不得撞内置 tag）。缺省 = 直接复用 base 的
+   *  围栏语法——卡只定制判据，产出语法与 base 完全一致。 */
+  fence?: string[];
+}
+
+export interface CustomCardRejection {
+  id: string;
+  reason: string;
+}
+
+/** 运行时自定义卡（注册顺序即目录序，排在内置卡之后）。 */
+let customCards: PresentationCard[] = [];
+
+/** 内置 + 自定义的合并视图（自定义在后）。全库检索/目录/匹配都走这里。 */
+export function allPresentationCards(): PresentationCard[] {
+  return [...PRESENTATION_CARDS, ...customCards];
+}
+
+/** 注册自定义卡（幂等：同 id 重复注册 = 更新）。返回被拒清单及原因——
+ *  拒绝是逐卡的：坏一张不影响其余注册成功。 */
+export function registerCustomCards(inputs: readonly CustomCardInput[]): {
+  registered: string[];
+  rejected: CustomCardRejection[];
+} {
+  const registered: string[] = [];
+  const rejected: CustomCardRejection[] = [];
+  const takenTags = new Set(FENCE_IDS);
+  const takenNames = new Set<string>([
+    ...PRESENTATION_CARDS.flatMap((card) => [card.id, ...(card.aliases ?? [])]),
+    ...customCards.flatMap((card) => [card.id, ...(card.aliases ?? [])]),
+  ]);
+  for (const input of inputs ?? []) {
+    const reason = validateCustomCard(input, takenNames, takenTags);
+    if (reason) {
+      rejected.push({ id: input?.id ?? '(missing id)', reason });
+      continue;
+    }
+    const baseCard = PRESENTATION_CARDS.find((card) => card.id === input.base)!;
+    // 组合式封装：缺省字段继承 base；新 fence tag 时 trigger 改写成自定义语法。
+    const card: PresentationCard = {
+      id: input.id,
+      fence: input.fence ?? baseCard.fence,
+      family: baseCard.family,
+      title: input.title ?? `${baseCard.title} (custom)`,
+      aliases: input.aliases,
+      trigger:
+        input.trigger ??
+        (input.fence
+          ? `Fenced block tagged ${input.fence.join(' / ')} (rendered on the ${input.base} pipeline)`
+          : baseCard.trigger),
+      whenToUse: input.whenToUse ?? baseCard.whenToUse,
+      whenNotToUse: input.whenNotToUse ?? baseCard.whenNotToUse,
+      delivery: input.delivery ?? baseCard.delivery,
+      detail: input.detail ?? baseCard.detail,
+      surfaces: input.surfaces ?? baseCard.surfaces,
+    };
+    // 同 id 更新：先摘旧卡再放新卡，别名/tag 占位同步刷新。
+    customCards = customCards.filter((existing) => existing.id !== input.id);
+    customCards.push(card);
+    takenNames.add(input.id);
+    for (const alias of input.aliases ?? []) takenNames.add(alias);
+    for (const tag of input.fence ?? []) takenTags.add(tag);
+    registered.push(input.id);
+  }
+  return { registered, rejected };
+}
+
+/** 测试/重置用：清空运行时自定义卡。 */
+export function resetCustomCards(): void {
+  customCards = [];
+}
+
+function validateCustomCard(
+  input: CustomCardInput | undefined,
+  takenNames: Set<string>,
+  takenTags: Set<string>,
+): string | null {
+  if (!input || typeof input !== 'object') return 'entry is not an object';
+  if (!/^[a-z][a-z0-9-]*$/.test(input.id ?? '')) {
+    return `id "${input.id}" must match [a-z][a-z0-9-]*`;
+  }
+  if (!input.base || !FENCE_IDS.includes(input.base)) {
+    return `base "${input.base}" is not a built-in fence form (${FENCE_IDS.join(', ')})`;
+  }
+  if (takenNames.has(input.id) && !customCards.some((card) => card.id === input.id)) {
+    return `id "${input.id}" collides with a built-in card id or alias`;
+  }
+  for (const alias of input.aliases ?? []) {
+    if (takenNames.has(alias)) {
+      return `alias "${alias}" collides with an existing card id or alias`;
+    }
+  }
+  for (const tag of input.fence ?? []) {
+    if (!/^[a-z]+$/.test(tag)) return `fence tag "${tag}" must be lowercase ASCII letters`;
+    if (takenTags.has(tag)) return `fence tag "${tag}" is already a built-in or registered tag`;
+  }
+  return null;
+}
+
+/** 内置围栏卡 id（校验与 markdown 注册共用）。 */
+const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math'];
+
 /** form 参数 → 卡片：精确 id → 别名 → 族名 → 单 token 子串容错。空数组 = 未命中。 */
 export function matchPresentationCards(form: string): PresentationCard[] {
   const q = (form ?? '').trim().toLowerCase();
   if (!q) return [];
-  const byId = PRESENTATION_CARDS.filter((card) => card.id === q);
+  const cards = allPresentationCards();
+  const byId = cards.filter((card) => card.id === q);
   if (byId.length > 0) return byId;
-  const byAlias = PRESENTATION_CARDS.filter((card) => card.aliases?.includes(q));
+  const byAlias = cards.filter((card) => card.aliases?.includes(q));
   if (byAlias.length > 0) return byAlias;
-  const byFamily = PRESENTATION_CARDS.filter((card) => card.family === q);
+  const byFamily = cards.filter((card) => card.family === q);
   if (byFamily.length > 0) return byFamily;
   if (/\s/.test(q)) return [];
-  return PRESENTATION_CARDS.filter(
+  return cards.filter(
     (card) => card.id.includes(q) || q.includes(card.id),
   );
 }
 
 /** 目录索引文本（form 省略 / 零命中时返回——目录只在被搜索时进对话）。 */
 export function renderPresentationCatalog(): string {
-  const lines = PRESENTATION_CARDS.map(
+  const lines = allPresentationCards().map(
     (card) => `- ${card.id} (${card.family}) — ${card.trigger}`,
   );
   return [
     'Presentation forms you can deliver INSIDE the reply (id - family - trigger):',
     ...lines,
     'Call again with form:"<id>" (or a family name) for the full card: when to use it, when NOT to, failure behavior, and the exact DSL rules.',
+    'Custom forms live in ~/.pure/config.json under "presentationCards" ({ id, base, ...fields you want to override }) - register one by writing that key and it appears here on the next session.',
   ].join('\n');
 }
 

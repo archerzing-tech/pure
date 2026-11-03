@@ -17,6 +17,7 @@ import { DEFAULT_GITHUB_MIRROR } from '../shared/githubAccel';
 import type { PhaseModelConfig } from '../shared/phaseModels';
 import { sanitizePhaseModelConfig } from '../shared/phaseModels';
 import { activeCharacterProfile } from '../character';
+import type { CustomCardInput } from '../shared/presentationLibrary';
 
 export interface PureConfig {
   /** Provider id — typed from the registry so the two can never drift. */
@@ -61,6 +62,13 @@ export interface PureConfig {
    * filtering (main-model equality) happens at adapter-build time.
    */
   phaseModels?: PhaseModelConfig;
+  /**
+   * 刀 3 组合式自定义表现形式卡（docs/presentation-capability-library.md）：
+   * { id, base, ...想覆盖的判据字段 } 数组。真实源在本键——GUI 面板没有编辑
+   * 界面，agent 语义写盘与用户手改文件是两条同源通道；注册进表现库与围栏
+   * 路由后 presentation_guide 可拉、自定义围栏 tag 走 base 渲染管线。
+   */
+  presentationCards?: CustomCardInput[];
   baseURL: string;
   language: 'zh-CN' | 'en';
   theme: 'light' | 'dark' | 'system';

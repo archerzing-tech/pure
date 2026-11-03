@@ -78,6 +78,8 @@ export interface PureConfig {
    * 不认识的值一律回退默认内核「老手快线」，不报错——手改配置不该炸启动。
    */
   characterProfileId?: string;
+  /** 刀 3 组合式自定义表现形式卡（与 GUI 同源，见 src/ui/config.ts 同名键）。 */
+  presentationCards?: import('./shared/presentationLibrary').CustomCardInput[];
 }
 
 export function loadConfig(): PureConfig | null {

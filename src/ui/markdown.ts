@@ -23,6 +23,7 @@ import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
 import { stripToolCallXml } from './markdownCore';
 import { renderPaintInto, renderPaintToBlob, paintCanvasToDataUrl, parsePaintSource } from './paintCanvas';
+import { registerCustomCards, type CustomCardInput } from '../shared/presentationLibrary';
 export { stripToolCallXml } from './markdownCore';
 
 // ── Languages registered for hljs (tree-shaken subset) ──
@@ -202,10 +203,53 @@ export const FENCE_ROUTES: readonly FenceRoute[] = [
   { tags: ['math', 'latex', 'tex'], kind: 'math', build: (s) => renderKatex(s, true), stream: false },
 ];
 
-/** 围栏 tag → 路由。tag 一律小写比较（langOf 已归一）。 */
+/** 围栏 tag → 路由。tag 一律小写比较（langOf 已归一）。静态表查不到时落
+ *  运行时自定义路由（刀 3：自定义卡的 fence tag 挂 base 通道）。 */
 export function routeOf(lang: string): FenceRoute | undefined {
   const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
-  return FENCE_ROUTES.find((route) => route.tags.includes(l));
+  const route = FENCE_ROUTES.find((entry) => entry.tags.includes(l));
+  if (route) return route;
+  return customFenceRoutes.find((entry) => entry.tags.includes(l));
+}
+
+/** 刀 3 运行时自定义路由：把自定义卡的新 fence tag 挂到 base kind 的通道上
+ *  （kind/build/stream 全部复用静态表——零新渲染器）。slotFenceLang/
+ *  normalizeMapFence/routeOf 都查它，半截围栏截断口径与容器归一对自定义
+ *  tag 一视同仁。 */
+let customFenceRoutes: FenceRoute[] = [];
+
+/** 把自定义卡（带新 fence tag 的）注册进围栏路由。幂等短路：cards 引用与
+ *  上次相同（或序列化相同）时直接返回。 */
+let lastCustomCardsKey = '';
+export function registerCustomFenceRoutes(cards: readonly { id: string; base: string; fence?: readonly string[] }[]): void {
+  const usable = (cards ?? []).filter((card) => card.fence && card.fence.length > 0);
+  const key = JSON.stringify(usable.map((card) => [card.id, card.base, card.fence]));
+  if (key === lastCustomCardsKey) return;
+  lastCustomCardsKey = key;
+  customFenceRoutes = usable.flatMap((card) => {
+    const baseRoute = FENCE_ROUTES.find((entry) => entry.kind === card.base);
+    if (!baseRoute) return []; // base 必须是内置围栏形式（shared 层已校验；防御性跳过）
+    return card.fence!.map((tag) => ({ tags: [tag], kind: baseRoute.kind, build: baseRoute.build, stream: baseRoute.stream }));
+  });
+}
+
+/** 测试/重置用：清空运行时自定义路由。 */
+export function resetCustomFenceRoutes(): void {
+  customFenceRoutes = [];
+  lastCustomCardsKey = '';
+}
+
+/** 刀 3 接线入口：config.json 的 presentationCards → 表现库注册 + 围栏路由
+ *  注册，一次调用两处生效（presentation_guide 可拉 + 自定义围栏走 base 管
+ *  线）。短路：与上次同配置时零开销——挂在每回合活检后也无热路径代价。
+ *  调用点：main.ts 启动（initConfigFile 后）+ chat.ts 回合边界活检后。 */
+let lastSyncKey = '';
+export function syncPresentationCardsFromConfig(cards: readonly CustomCardInput[] | undefined): void {
+  const key = JSON.stringify(cards ?? []);
+  if (key === lastSyncKey) return;
+  lastSyncKey = key;
+  registerCustomCards(cards ?? []);
+  registerCustomFenceRoutes(cards ?? []);
 }
 
 /** DiagramKind 渲染管线：hydration kick 与失败重试共用同一条 render+bind。 */
@@ -248,8 +292,11 @@ renderer.code = (token: { text: string; lang?: string }): string => {
  * left untouched until the closing `:::` arrives, matching ``` fence behavior.
  */
 export function normalizeMapFence(src: string): string {
-  // 容器 tag 与 FENCE_ROUTES 的 map 路由同源——map 路由加别名时这里自动跟上。
-  const mapTags = FENCE_ROUTES.filter((route) => route.kind === 'map').flatMap((route) => route.tags);
+  // 容器 tag 与 map 路由同源（静态表 + 运行时自定义的 map 变体）——map 路由
+  // 加别名或自定义卡挂到 map 通道时这里自动跟上。
+  const mapTags = [...FENCE_ROUTES, ...customFenceRoutes]
+    .filter((route) => route.kind === 'map')
+    .flatMap((route) => route.tags);
   const pattern = new RegExp(`(^|\\n)([ \\t]*):::[ \\t]*(${mapTags.join('|')})\\b[^\\n]*\\n([\\s\\S]*?)\\n[ \\t]*:::[ \\t]*(?=\\n|$)`, 'gi');
   return src.replace(
     pattern,
@@ -3019,10 +3066,10 @@ function mapFenceClosed(raw: string): boolean {
  *  four image kinds, the map slot for ```map / ```leaflet). These get the
  *  append-only stability rule below while their fence is still open. */
 function slotFenceLang(lang: string): boolean {
-  // 口径=FENCE_ROUTES 里 stream:true 的全部 tag（diagram/map slot 栏在流式期
-  // 都要挂载；math 不挂 slot 栏，半截围栏按普通代码截断口径处理）。
+  // 口径=routeOf（静态表+运行时自定义）里 stream:true 的全部 tag（diagram/map
+  // slot 栏在流式期都要挂载；math 不挂 slot 栏，半截围栏按普通代码截断口径处理）。
   const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
-  return FENCE_ROUTES.some((route) => route.stream && route.tags.includes(l));
+  return routeOf(l)?.stream === true;
 }
 
 /** A streaming-mounted slot carries `data-md-raw` (the whole fenced token's

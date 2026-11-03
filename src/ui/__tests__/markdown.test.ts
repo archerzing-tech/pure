@@ -1141,8 +1141,8 @@ describe('paint code blocks', () => {
     expect(src).toContain("'mermaid' | 'svg' | 'chart' | 'puml' | 'paint'");
     // slotFenceLang — the ONE switch that keeps a growing fence's slot stable
     // across diff ticks (missing it was the map flicker class of bug). 刀 2
-    // 注册化后它派生自 FENCE_ROUTES 的 stream:true tag 全集，不再是手写清单。
-    expect(src).toContain('FENCE_ROUTES.some((route) => route.stream && route.tags.includes(l))');
+    // 注册化后它查 routeOf（静态表+运行时自定义）的 stream:true，不再是手写清单。
+    expect(src).toContain('return routeOf(l)?.stream === true;');
     // Closed-fence kick AND the retry button dispatch must both run the paint
     // renderer — a missing retry arm silently reruns PlantUML instead. 刀 2
     // 注册化后两处分发都查 KIND_PIPELINE，paint 条目在此。

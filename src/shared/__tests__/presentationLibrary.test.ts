@@ -5,13 +5,17 @@
 // 单源判例同款）、匹配路由、目录/全文渲染、全 ASCII（sidecar 特征串锚
 // 三形态全灭判例——卡片会被打进 sidecar，锚必须可 grep）。
 
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import {
   PRESENTATION_CARDS,
   PRESENTATION_FAMILIES,
+  allPresentationCards,
   matchPresentationCards,
+  registerCustomCards,
   renderPresentationCard,
   renderPresentationCatalog,
+  resetCustomCards,
+  type CustomCardInput,
 } from '../presentationLibrary';
 import {
   CHART_DSL_PROMPT,
@@ -153,5 +157,115 @@ describe('presentation library cards', () => {
     // 的请求，卡全文给拉了的请求——两处的交付纪律句子必须逐字同锚。
     expect(ROUTING_ESSENTIALS).toContain('never file-over-fence');
     expect(ROUTING_ESSENTIALS).toContain('DOUBLE DELIVERY');
+  });
+});
+
+describe('custom presentation cards (刀 3 组合式自定义)', () => {
+  // 每个用例自带注册/清理——注册表是进程全局，跨文件污染判例（bun test
+  // 单进程）要求用例间不串账。
+  afterEach(() => resetCustomCards());
+
+  it('registers a minimal card by inheriting everything from its base', () => {
+    // 组合式封装的本意：只写想改的——{ id, base } 就该得到一张完整卡，
+    // 判据/交付/细则全部继承 base（paint）。
+    const { registered, rejected } = registerCustomCards([{ id: 'myarch', base: 'paint' }]);
+    expect(rejected).toEqual([]);
+    expect(registered).toEqual(['myarch']);
+    const card = matchPresentationCards('myarch')[0];
+    const paint = PRESENTATION_CARDS.find((c) => c.id === 'paint')!;
+    expect(card.family).toBe('illustration'); // 族继承 base（paint 属 illustration 族）
+    expect(card.title).toContain('(custom)');
+    expect(card.whenToUse).toBe(paint.whenToUse);
+    expect(card.detail).toBe(paint.detail);
+    expect(card.fence).toEqual(['paint']); // 缺省复用 base 围栏语法
+  });
+
+  it('rewrites the trigger when the card brings its own fence tag', () => {
+    const { rejected } = registerCustomCards([
+      { id: 'myarch', base: 'paint', fence: ['myarch'], title: '我司架构图' },
+    ]);
+    expect(rejected).toEqual([]);
+    const card = matchPresentationCards('myarch')[0];
+    expect(card.fence).toEqual(['myarch']);
+    expect(card.trigger).toContain('myarch');
+    expect(card.trigger).toContain('paint pipeline');
+  });
+
+  it('rejects collisions and bad bases card-by-card without blocking the rest', () => {
+    const { registered, rejected } = registerCustomCards([
+      { id: 'mermaid', base: 'paint' }, // 撞内置 id
+      { id: 'flow', base: 'chart', aliases: ['latex'] }, // 别名撞内置
+      { id: 'bad base', base: 'zzz' }, // base 未知 + 坏 id
+      { id: 'mychart', base: 'chart', fence: ['map'] }, // fence 撞内置 tag
+      { id: 'okcard', base: 'chart', fence: ['oktag'] },
+    ]);
+    expect(registered).toEqual(['okcard']);
+    expect(rejected.map((r) => r.id)).toEqual(['mermaid', 'flow', 'bad base', 'mychart']);
+    expect(rejected.every((r) => r.reason.length > 0)).toBe(true);
+  });
+
+  it('rejects custom fence tags that are not lowercase ASCII (sidecar/anchor discipline)', () => {
+    const { rejected } = registerCustomCards([{ id: 'mybox', base: 'paint', fence: ['MyBox'] }]);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain('lowercase ASCII');
+  });
+
+  it('re-registering the same id updates in place (idempotent, no duplicates)', () => {
+    registerCustomCards([{ id: 'myarch', base: 'paint', title: 'v1' }]);
+    registerCustomCards([{ id: 'myarch', base: 'paint', title: 'v2' }]);
+    const hits = allPresentationCards().filter((card) => card.id === 'myarch');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].title).toBe('v2');
+  });
+
+  it('custom cards join the catalog, matching, and full-card rendering', () => {
+    registerCustomCards([{ id: 'myarch', base: 'paint', whenToUse: '公司内部的三层架构草图' }]);
+    // 目录含自定义卡 + 注册说明句（agent 怎么加新卡——设置 agent 化铁律）。
+    const catalog = renderPresentationCatalog();
+    expect(catalog).toContain('- myarch (illustration)');
+    expect(catalog).toContain('presentationCards');
+    // 匹配路由对自定义卡生效。
+    expect(matchPresentationCards('myarch').map((c) => c.id)).toEqual(['myarch']);
+    // 全卡渲染走同一渲染函数（工具返回体形态一致）。
+    const rendered = renderPresentationCard(matchPresentationCards('myarch')[0]);
+    expect(rendered).toContain('── myarch (illustration)');
+    expect(rendered).toContain('公司内部的三层架构草图');
+    // 合并视图：内置卡在前，自定义在后。
+    const all = allPresentationCards();
+    expect(all[all.length - 1].id).toBe('myarch');
+    expect(all.length).toBe(PRESENTATION_CARDS.length + 1);
+  });
+
+  it('reset clears the runtime view (test isolation + re-registration works)', () => {
+    registerCustomCards([{ id: 'myarch', base: 'paint' }]);
+    expect(matchPresentationCards('myarch')).toHaveLength(1);
+    resetCustomCards();
+    expect(matchPresentationCards('myarch')).toEqual([]);
+    expect(allPresentationCards()).toHaveLength(PRESENTATION_CARDS.length);
+    // 重置后再注册不受「takenNames 占位残留」影响。
+    const { rejected } = registerCustomCards([{ id: 'myarch', base: 'paint' }]);
+    expect(rejected).toEqual([]);
+  });
+
+  it('a fully-specified custom card overrides every provided field', () => {
+    const input: CustomCardInput = {
+      id: 'myarch',
+      base: 'paint',
+      title: 'Architecture sketch',
+      aliases: ['arch'],
+      trigger: 'Fenced block tagged myarch',
+      whenToUse: 'internal tier sketches',
+      whenNotToUse: 'never for topology',
+      delivery: 'same as paint',
+      surfaces: 'gui only',
+    };
+    const { rejected } = registerCustomCards([input]);
+    expect(rejected).toEqual([]);
+    const card = matchPresentationCards('arch')[0];
+    expect(card.title).toBe('Architecture sketch');
+    expect(card.whenToUse).toBe('internal tier sketches');
+    expect(card.whenNotToUse).toBe('never for topology');
+    expect(card.delivery).toBe('same as paint');
+    expect(card.surfaces).toBe('gui only');
   });
 });

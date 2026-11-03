@@ -10,6 +10,7 @@ import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, r
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
+import { syncPresentationCardsFromConfig } from './markdown';
 import { setActiveCharacterProfile } from '../character';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -975,6 +976,8 @@ function deferToIdle(fn: () => void): void {
 (async () => {
   tagPlatform();
   await initConfigFile();
+  // 刀 3：盘上 config.json 的自定义表现形式卡 → 表现库 + 围栏路由（启动注册）。
+  syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
   applySavedAppearance();
   applySavedCharacterProfile();
   // 冷启动就把运行时/网络探测放到后台：用户阅读 landing 页期间 sys_info 已完成，

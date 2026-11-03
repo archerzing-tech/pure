@@ -179,4 +179,24 @@ describe('presentation_guide (presentation capability library, 2026-11-02)', () 
     const alias = await registry.execute(call('presentation_guide', { form: 'decision' }));
     expect(String(alias.result)).toContain('── routing (meta)');
   });
+
+  it('custom presentation cards (config.json) join the catalog and matching (刀 3)', async () => {
+    // 引擎侧注册走惰性盘上加载；测试直接注注册表验证消费面——目录、匹配、
+    // 全卡渲染对自定义卡与内置卡同形态。
+    const { registerCustomCards, resetCustomCards } = await import('../../shared/presentationLibrary');
+    registerCustomCards([{ id: 'myarch', base: 'paint', whenToUse: '公司内部三层架构' }]);
+    try {
+      const registry = new ToolRegistry(noopExecutor);
+      const catalog = await registry.execute(call('presentation_guide', {}));
+      const catalogText = String(catalog.result);
+      expect(catalogText).toContain('- myarch (illustration)');
+      expect(catalogText).toContain('presentationCards'); // 注册说明句（agent 可语义加卡）
+      const full = await registry.execute(call('presentation_guide', { form: 'myarch' }));
+      const fullText = String(full.result);
+      expect(fullText).toContain('── myarch (illustration)');
+      expect(fullText).toContain('公司内部三层架构');
+    } finally {
+      resetCustomCards();
+    }
+  });
 });

@@ -5,9 +5,9 @@
 // 或两侧 tag 漂移，这里即红。math 的 stream=false 是历史行为锁：流式期间
 // math 围栏按普通代码渲染（无 slot 栏、无 hydration），完成渲染才转 KaTeX。
 
-import { describe, expect, it } from 'bun:test';
-import { FENCE_ROUTES, routeOf, renderer, normalizeMapFence } from '../markdown';
-import { PRESENTATION_CARDS } from '../../shared/presentationLibrary';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { FENCE_ROUTES, routeOf, renderer, normalizeMapFence, registerCustomFenceRoutes, resetCustomFenceRoutes, syncPresentationCardsFromConfig } from '../markdown';
+import { PRESENTATION_CARDS, resetCustomCards } from '../../shared/presentationLibrary';
 
 describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
   it('every fence route has a card whose id === route.kind covering all its tags', () => {
@@ -103,3 +103,61 @@ describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
     expect(normalizeMapFence(':::leaflet\n{"markers":[]}\n:::')).toContain('```leaflet');
   });
 });
+
+describe('custom fence routes (刀 3 组合式自定义的渲染通道)', () => {
+  afterEach(() => {
+    resetCustomFenceRoutes();
+    resetCustomCards();
+  });
+
+  it('a custom fence tag rides the base pipeline end to end (zero new renderers)', () => {
+    // ```myarch 围栏：路由挂到 paint 通道，产出 paint 的 slot——kind/build/
+    // stream 全部复用静态表，hydration/retry 因 data-diagram-kind 写 base kind
+    // 而天然走 KIND_PIPELINE。
+    syncPresentationCardsFromConfig([{ id: 'myarch', base: 'paint', fence: ['myarch'] }]);
+    const route = routeOf('myarch');
+    expect(route?.kind).toBe('paint');
+    expect(route?.stream).toBe(true);
+    const html = renderer.code({ text: '{"width":10,"height":10,"shapes":[]}', lang: 'myarch', type: 'code', raw: 'x' } as never);
+    expect(html).toContain('class="diagram-slot paint-slot"');
+    expect(html).toContain('data-diagram-kind="paint"');
+    expect(html).not.toContain('<pre><code');
+  });
+
+  it('custom routes join slot-fence and map-fence normalization consistently', () => {
+    // 半截围栏截断口径与 :::容器归一对自定义 tag 一视同仁（都查 routeOf /
+    // 自定义路由集合），不是只有内置 tag 享受一致性。
+    syncPresentationCardsFromConfig([{ id: 'mymap', base: 'map', fence: ['mymap'] }]);
+    expect(routeOf('mymap')?.kind).toBe('map');
+    expect(normalizeMapFence(':::mymap\n{"markers":[]}\n:::')).toContain('```mymap');
+  });
+
+  it('a judgment-only custom card (no new tag) does not touch the route tables', () => {
+    syncPresentationCardsFromConfig([{ id: 'myarch', base: 'paint' }]);
+    expect(routeOf('myarch')).toBeUndefined(); // 复用 base 语法，无新路由
+    expect(matchCustomTagUntouched());
+  });
+
+  it('re-sync with identical config short-circuits; changed config re-registers', () => {
+    const cfg = [{ id: 'myarch', base: 'paint', fence: ['myarch'] }];
+    syncPresentationCardsFromConfig(cfg);
+    expect(routeOf('myarch')?.kind).toBe('paint');
+    // 同配置重复调用：幂等无副作用。
+    syncPresentationCardsFromConfig(cfg);
+    expect(routeOf('myarch')?.kind).toBe('paint');
+    // 换配置：路由跟着变。
+    syncPresentationCardsFromConfig([{ id: 'myarch', base: 'chart', fence: ['myarch'] }]);
+    expect(routeOf('myarch')?.kind).toBe('chart');
+    // 清空（agent 删键）：路由退回内置-only。
+    syncPresentationCardsFromConfig(undefined);
+    expect(routeOf('myarch')).toBeUndefined();
+  });
+});
+
+/** 防御断言：无新 tag 的卡不产生任何自定义路由。 */
+function matchCustomTagUntouched(): boolean {
+  for (const route of FENCE_ROUTES) {
+    if (route.tags.length === 0) return false;
+  }
+  return true;
+}

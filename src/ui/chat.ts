@@ -94,7 +94,7 @@ import { capEventText, createSerializingSink, type SessionEventSink } from '../s
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
-import { rehydrateThemeStaleDiagrams } from './markdown';
+import { rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig } from './markdown';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
@@ -4250,6 +4250,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 设置 agent 化（2026-11-01）：回合边界活检盘上 config.json——agent 上一
     // 回合用文件工具改的设置，本回合装配就生效（热生效，不重启）。
     await refreshConfigFromFile();
+    // 刀 3：自定义表现形式卡随活检热生效（同配置短路，无热路径代价）。
+    syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
     const config = loadConfig();
     if (!hasConfiguredKey(config)) return;
     // A fresh turn's signals supersede any that were never consumed (defensive;

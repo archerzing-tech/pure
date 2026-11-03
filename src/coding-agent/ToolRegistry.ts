@@ -14,7 +14,8 @@ import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { withRelaySchema } from '../engine/relayPipeline';
-import { matchPresentationCards, renderPresentationCard, renderPresentationCatalog } from '../shared/presentationLibrary';
+import { matchPresentationCards, registerCustomCards, renderPresentationCard, renderPresentationCatalog } from '../shared/presentationLibrary';
+import { loadConfig } from '../cliConfig';
 
 // ── Tag constants ──
 
@@ -285,10 +286,31 @@ export class ToolRegistry implements ToolAdapter {
    * 省略或零命中 → 目录索引（复制 discover_tools 的「目录只在被搜索时进对话」
    * 模式——展现是 push 型输出语法，卡片是知识不是工具，不需要激活态）。
    */
+  /** 刀 3 组合式自定义：进程内一次惰性加载 ~/.pure/config.json 的
+   *  presentationCards 并注册进表现库。加载失败/键缺席都安静跳过（引擎侧
+   *  无 config 的环境照常工作）；与「设置必须被遵守」同口径——注册表真实
+   *  源在盘上，引擎不复制第二份真相。 */
+  private customPresentationCardsLoaded = false;
+  private ensureCustomPresentationCards(): void {
+    if (this.customPresentationCardsLoaded) return;
+    this.customPresentationCardsLoaded = true;
+    try {
+      const cards = loadConfig()?.presentationCards;
+      if (Array.isArray(cards) && cards.length > 0) {
+        registerCustomCards(cards);
+      }
+    } catch {
+      /* config unreadable — built-in cards only */
+    }
+  }
+
   private executePresentationGuide(toolCall: ToolCall): ToolResult {
     const started = Date.now();
     const args = safeParseArgs(toolCall.function.arguments);
     const form = typeof args.form === 'string' ? args.form.trim() : '';
+    // 刀 3：先惰性吸收盘上 config.json 的自定义卡（进程内一次）——目录与
+    // 匹配走 allPresentationCards 合并视图，注册后自定义卡即可被拉取。
+    this.ensureCustomPresentationCards();
     if (!form) {
       return {
         id: toolCall.id,
