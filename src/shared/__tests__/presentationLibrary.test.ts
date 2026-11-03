@@ -97,6 +97,20 @@ describe('presentation library cards', () => {
     expect(byId.chart?.whenNotToUse).toContain('GFM table');
   });
 
+  it('fence fields follow the registry discipline (刀 2 渲染器注册化)', () => {
+    // 围栏形式（与 ui/markdown.ts FENCE_ROUTES 同源的那七张）必须声明 fence
+    // tag 全集；非围栏形式（routing/image_gen/image/table/fold）不得声明——
+    // 双向同源锁在 src/ui/__tests__/fenceRegistry.test.ts。
+    const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math'];
+    for (const card of PRESENTATION_CARDS) {
+      if (FENCE_IDS.includes(card.id)) {
+        expect(card.fence?.length, `${card.id} must claim its fence tags`).toBeGreaterThan(0);
+      } else {
+        expect(card.fence, `${card.id} is not fence syntax`).toBeUndefined();
+      }
+    }
+  });
+
   it('carries the form-choice decision logic as a meta card (2026-11-02 用户定调)', () => {
     // 「形式跟着用途走」决策序列固化：版面 vs 拓扑（语义重心）、一次性 vs
     // 长期演进（生命周期）、读者与规模。routing 放目录首位——先决策再拉

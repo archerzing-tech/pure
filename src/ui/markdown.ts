@@ -166,7 +166,59 @@ function svgSourcesHtml(sources: string[]): string {
   return sources.length > 1 ? `<div class="svg-gallery">${slots}</div>` : slots;
 }
 
-// ── Custom renderer: route mermaid / puml code blocks away from hljs ──
+// ── Fence route registry (刀 2 渲染器注册化, docs/presentation-capability-library.md) ──
+// 围栏分流的唯一注册点：加新视觉形式 = 在这里加一条 route + 在
+// presentationLibrary.ts 加一张带 fence 字段的卡，双向同源由测试锁死
+// （src/ui/__tests__/fenceRegistry.test.ts）。此前分散在两处围栏分流
+// （renderer.code / streamRenderer.code）、slotFenceLang 九类清单、
+// normalizeMapFence 正则、kick/retry 两处 kind 分发——全部改查这张表。
+
+/** 一条围栏路由：哪些 tag 归哪个视觉形式、slot 怎么构造、流式期是否同路。 */
+interface FenceRoute {
+  /** 识别的全部围栏 tag（小写，含别名）。与卡的 `fence` 字段同源。 */
+  tags: string[];
+  /** 视觉形式 id；DiagramKind 的会挂 `.diagram-slot`，map/math 各走独立通道。 */
+  kind: DiagramKind | 'map' | 'math';
+  /** slot 构造（完成渲染与流式共用同一条——slot 栏在流式期就要挂载）。 */
+  build: (source: string) => string;
+  /** 流式期间是否同路。math=false 保真：流式期间按普通代码渲染（无图卡、
+   *  无 hydration），完成渲染才转 Katex——与历史行为逐字节一致。 */
+  stream: boolean;
+}
+
+export const FENCE_ROUTES: readonly FenceRoute[] = [
+  { tags: ['mermaid'], kind: 'mermaid', build: (s) => diagramSlot('mermaid', s, ''), stream: true },
+  // Rendered locally (src/ui/plantumlDiagram.ts) into `.puml-target` — no
+  // plantuml.com URL, no image, so the diagram still appears with no network.
+  { tags: ['puml', 'plantuml'], kind: 'puml', build: (s) => diagramSlot('puml', s, ''), stream: true },
+  { tags: ['svg'], kind: 'svg', build: (s) => svgSourcesHtml(splitTopLevelSvgSources(s)), stream: true },
+  { tags: ['chart', 'charts'], kind: 'chart', build: (s) => diagramSlot('chart', s, ''), stream: true },
+  { tags: ['map', 'leaflet'], kind: 'map', build: mapSlot, stream: true },
+  // Static geometric illustration (architecture sketch, schematic, icon) —
+  // one JSON object rendered by pure's own canvas renderer.
+  { tags: ['paint'], kind: 'paint', build: (s) => diagramSlot('paint', s, ''), stream: true },
+  // ```math fences: models habitually wrap multi-line formulas this way —
+  // render the whole body as one display formula instead of a code block.
+  { tags: ['math', 'latex', 'tex'], kind: 'math', build: (s) => renderKatex(s, true), stream: false },
+];
+
+/** 围栏 tag → 路由。tag 一律小写比较（langOf 已归一）。 */
+export function routeOf(lang: string): FenceRoute | undefined {
+  const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
+  return FENCE_ROUTES.find((route) => route.tags.includes(l));
+}
+
+/** DiagramKind 渲染管线：hydration kick 与失败重试共用同一条 render+bind。 */
+const KIND_PIPELINE: Record<DiagramKind, {
+  render: (container: HTMLElement) => Promise<unknown>;
+  bind: (container: HTMLElement) => void;
+}> = {
+  mermaid: { render: renderMermaidNodes, bind: bindMermaidPopup },
+  svg: { render: renderSvgNodes, bind: bindVectorPopup },
+  chart: { render: renderChartNodes, bind: bindVectorPopup },
+  paint: { render: renderPaintNodes, bind: bindPaintPopup },
+  puml: { render: renderPumlNodes, bind: bindVectorPopup },
+};
 
 export const renderer = new Renderer();
 
@@ -175,39 +227,8 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   const code: string = token.text;
   const lang: string = langOf(token.lang);
 
-  if (lang === 'mermaid') {
-    return diagramSlot('mermaid', code, '');
-  }
-
-  if (lang === 'puml' || lang === 'plantuml') {
-    // Rendered locally (src/ui/plantumlDiagram.ts) into `.puml-target` — no
-    // plantuml.com URL, no image, so the diagram still appears with no network.
-    return diagramSlot('puml', code, '');
-  }
-
-  if (lang === 'svg') {
-    return svgSourcesHtml(splitTopLevelSvgSources(code));
-  }
-
-  if (lang === 'chart' || lang === 'charts') {
-    return diagramSlot('chart', code, '');
-  }
-
-  if (lang === 'map' || lang === 'leaflet') {
-    return mapSlot(code);
-  }
-
-  // Static geometric illustration (architecture sketch, schematic, icon) —
-  // one JSON object rendered by pure's own canvas renderer.
-  if (lang === 'paint') {
-    return diagramSlot('paint', code, '');
-  }
-
-  // ```math fences: models habitually wrap multi-line formulas this way —
-  // render the whole body as one display formula instead of a code block.
-  if (lang === 'math' || lang === 'latex' || lang === 'tex') {
-    return renderKatex(code, true);
-  }
+  const route = routeOf(lang);
+  if (route) return route.build(code);
 
   // Other code blocks: emit <pre><code>; hljs tags inside after parse. The code
   // must be HTML-escaped here — marked hands us the raw source, and inserting it
@@ -222,13 +243,16 @@ renderer.code = (token: { text: string; lang?: string }): string => {
  * Accept map fences written as either a fenced code block (```map … ```) or a
  * `:::map … :::` container. Some clients (notably Windows setups) emit the
  * container form; rewrite any *closed* `:::map` / `:::leaflet` container into the
- * fenced form so the rest of the pipeline — which only treats `lang === 'map'`
- * code blocks as maps — renders it identically. Unclosed streaming fragments are
+ * fenced form so the rest of the pipeline — which only treats map-route code
+ * blocks as maps — renders it identically. Unclosed streaming fragments are
  * left untouched until the closing `:::` arrives, matching ``` fence behavior.
  */
 export function normalizeMapFence(src: string): string {
+  // 容器 tag 与 FENCE_ROUTES 的 map 路由同源——map 路由加别名时这里自动跟上。
+  const mapTags = FENCE_ROUTES.filter((route) => route.kind === 'map').flatMap((route) => route.tags);
+  const pattern = new RegExp(`(^|\\n)([ \\t]*):::[ \\t]*(${mapTags.join('|')})\\b[^\\n]*\\n([\\s\\S]*?)\\n[ \\t]*:::[ \\t]*(?=\\n|$)`, 'gi');
   return src.replace(
-    /(^|\n)([ \t]*):::[ \t]*(map|leaflet)\b[^\n]*\n([\s\S]*?)\n[ \t]*:::[ \t]*(?=\n|$)/gi,
+    pattern,
     (_match, lead: string, indent: string, lang: string, body: string) =>
       `${lead}${indent}\`\`\`${lang.toLowerCase()}\n${body}\n${indent}\`\`\``,
   );
@@ -2922,17 +2946,11 @@ streamRenderer.link = function (
 };
 streamRenderer.code = (token: { text: string; lang?: string }): string => {
   const lang = langOf(token.lang);
-  if (lang === 'mermaid') return diagramSlot('mermaid', token.text, '');
-  if (lang === 'puml' || lang === 'plantuml') return diagramSlot('puml', token.text, '');
-  if (lang === 'svg') {
-    return svgSourcesHtml(splitTopLevelSvgSources(token.text));
-  }
-  if (lang === 'chart' || lang === 'charts') return diagramSlot('chart', token.text, '');
   // Same slot as the completed render: a closed ```map fence mounts as a map
   // slot mid-stream (not a plain code block), so the streaming gate can start
   // hydrating it and hold later blocks until the tiles have painted.
-  if (lang === 'map' || lang === 'leaflet') return mapSlot(token.text);
-  if (lang === 'paint') return diagramSlot('paint', token.text, '');
+  const route = routeOf(lang);
+  if (route && route.stream) return route.build(token.text);
   return `<pre><code class="hljs language-${attr(lang)}">${esc(token.text)}</code></pre>`;
 };
 // 流式期间与完成渲染同一套 image 处理(含本机绝对路径 → asset protocol):
@@ -3001,9 +3019,10 @@ function mapFenceClosed(raw: string): boolean {
  *  four image kinds, the map slot for ```map / ```leaflet). These get the
  *  append-only stability rule below while their fence is still open. */
 function slotFenceLang(lang: string): boolean {
+  // 口径=FENCE_ROUTES 里 stream:true 的全部 tag（diagram/map slot 栏在流式期
+  // 都要挂载；math 不挂 slot 栏，半截围栏按普通代码截断口径处理）。
   const l = (lang ?? '').trim().split(/\s+/)[0] ?? '';
-  return l === 'mermaid' || l === 'puml' || l === 'plantuml' || l === 'svg'
-    || l === 'chart' || l === 'charts' || l === 'map' || l === 'leaflet' || l === 'paint';
+  return FENCE_ROUTES.some((route) => route.stream && route.tags.includes(l));
 }
 
 /** A streaming-mounted slot carries `data-md-raw` (the whole fenced token's
@@ -3060,17 +3079,10 @@ function kickStreamingDiagram(el: HTMLElement, container: HTMLElement): void {
     if (slot.hasAttribute('data-processed') || slot.hasAttribute('data-stream-kick')) continue;
     if (streamFenceOpen(slot)) continue;
     slot.setAttribute('data-stream-kick', '1');
-    const kind = slot.getAttribute('data-diagram-kind');
-    if (kind === 'mermaid') {
-      void renderMermaidNodes(container).then(() => bindMermaidPopup(container));
-    } else if (kind === 'svg') {
-      void renderSvgNodes(container).then(() => bindVectorPopup(container));
-    } else if (kind === 'chart') {
-      void renderChartNodes(container).then(() => bindVectorPopup(container));
-    } else if (kind === 'paint') {
-      void renderPaintNodes(container).then(() => bindPaintPopup(container));
-    } else if (kind === 'puml') {
-      void renderPumlNodes(container).then(() => bindVectorPopup(container));
+    const kind = slot.getAttribute('data-diagram-kind') as DiagramKind | null;
+    const pipeline = kind ? KIND_PIPELINE[kind] : undefined;
+    if (pipeline) {
+      void pipeline.render(container).then(() => pipeline.bind(container));
     }
   }
 }
@@ -3194,8 +3206,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
       : '';
     if (tk.type === 'code' && slotFenceLang(tokenLang)) {
       const closed = mapFenceClosed(tk.raw);
-      const lang0 = tokenLang.trim().split(/\s+/)[0];
-      const isMapSlot = lang0 === 'map' || lang0 === 'leaflet';
+      const isMapSlot = routeOf(tokenLang)?.kind === 'map';
       const oldIsSlot = isMapSlot
         ? !!oldEl?.classList.contains('map-slot')
         : !!(oldEl && (oldEl.classList.contains('diagram-slot') || oldEl.classList.contains('svg-gallery')));
@@ -3561,19 +3572,8 @@ function bindDiagramControls(container: HTMLElement): void {
       target.innerHTML = '';
       setDiagramState(slot, 'loading');
       const host = slot.parentElement ?? slot;
-      if (kind === 'mermaid') {
-        void renderMermaidNodes(host).then(() => {
-          bindMermaidPopup(host);
-        });
-      } else if (kind === 'svg') {
-        void renderSvgNodes(host).then(() => bindVectorPopup(host));
-      } else if (kind === 'chart') {
-        void renderChartNodes(host).then(() => bindVectorPopup(host));
-      } else if (kind === 'paint') {
-        void renderPaintNodes(host).then(() => bindPaintPopup(host));
-      } else {
-        void renderPumlNodes(host).then(() => bindVectorPopup(host));
-      }
+      const pipeline = KIND_PIPELINE[kind as DiagramKind];
+      if (pipeline) void pipeline.render(host).then(() => pipeline.bind(host));
     });
   }
 }
@@ -3922,7 +3922,13 @@ function diagramSourceName(slot: HTMLElement): string {
  * no extra <style> injection is needed. Supports chart, mermaid, and SVG slots.
  */
 function serializeDiagramSvg(slot: HTMLElement): { svg: string; nameBase: string } | null {
-  const svg = slot.querySelector<SVGSVGElement>('.chart-target svg, .svg-target svg, .mermaid-target svg, .puml-target svg');
+  // PNG 导出只吃 SVG 根；paint 走 live canvas 光栅化（exportDiagramPng 特判），
+  // 不在管线选择器里——其余 kind 从注册表派生，加新图形式自动跟上。
+  const selector = (Object.keys(KIND_PIPELINE) as DiagramKind[])
+    .filter((k) => k !== 'paint')
+    .map((k) => `.${k}-target svg`)
+    .join(', ');
+  const svg = slot.querySelector<SVGSVGElement>(selector);
   if (!svg) return null;
   const clone = svg.cloneNode(true) as SVGSVGElement;
   if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');

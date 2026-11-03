@@ -373,7 +373,9 @@ describe('multi-SVG placeholder layout', () => {
 
   it('groups independent SVG slots during streaming before the final render pass', () => {
     const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
-    expect(src).toContain('return svgSourcesHtml(splitTopLevelSvgSources(token.text));');
+    // 刀 2 注册化：svg 流式构造住在 FENCE_ROUTES 条目里（build 闭包），流式
+    // 与完成同一条 route。
+    expect(src).toContain('build: (s) => svgSourcesHtml(splitTopLevelSvgSources(s))');
     expect(src).toContain('groupAdjacentSvgSlots(container);');
   });
 });
@@ -1138,12 +1140,15 @@ describe('paint code blocks', () => {
     // DiagramKind union knows paint.
     expect(src).toContain("'mermaid' | 'svg' | 'chart' | 'puml' | 'paint'");
     // slotFenceLang — the ONE switch that keeps a growing fence's slot stable
-    // across diff ticks (missing it was the map flicker class of bug).
-    expect(src).toContain("l === 'map' || l === 'leaflet' || l === 'paint'");
+    // across diff ticks (missing it was the map flicker class of bug). 刀 2
+    // 注册化后它派生自 FENCE_ROUTES 的 stream:true tag 全集，不再是手写清单。
+    expect(src).toContain('FENCE_ROUTES.some((route) => route.stream && route.tags.includes(l))');
     // Closed-fence kick AND the retry button dispatch must both run the paint
-    // renderer — a missing retry arm silently reruns PlantUML instead.
-    expect(src).toContain('void renderPaintNodes(container).then(() => bindPaintPopup(container))');
-    expect(src).toContain('void renderPaintNodes(host).then(() => bindPaintPopup(host))');
+    // renderer — a missing retry arm silently reruns PlantUML instead. 刀 2
+    // 注册化后两处分发都查 KIND_PIPELINE，paint 条目在此。
+    expect(src).toContain('paint: { render: renderPaintNodes, bind: bindPaintPopup }');
+    expect(src).toContain('pipeline.render(container).then(() => pipeline.bind(container))');
+    expect(src).toContain('pipeline.render(host).then(() => pipeline.bind(host))');
     // The completion pipeline renders + binds paint like chart.
     expect(src).toContain('await renderPaintNodes(container)');
     expect(src).toContain('bindPaintPopup(container);');

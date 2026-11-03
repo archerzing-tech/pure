@@ -34,6 +34,10 @@ export interface PresentationCard {
   aliases?: readonly string[];
   /** 触发语法（围栏名 / 行内标记）——模型产出侧的契约。 */
   trigger: string;
+  /** 该卡对应的围栏 tag 全集（小写、含别名；非围栏形式如 image_gen/table
+   *  无此字段）。与 src/ui/markdown.ts 的 FENCE_ROUTES 双向同源（测试锁死）
+   *  ——加新围栏形式一处注册：卡 + 路由条目，漏任何一侧测试即红。 */
+  fence?: readonly string[];
   /** 何时该用（判据正面）。 */
   whenToUse: string;
   /** 何时别用 / 用什么替代（判据负面 + 互斥判例）。为空是设计错误：
@@ -86,6 +90,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'mermaid',
+    fence: ['mermaid'],
     family: 'diagram',
     title: 'Mermaid structural diagram',
     trigger: 'Fenced block tagged mermaid',
@@ -101,6 +106,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'puml',
+    fence: ['puml', 'plantuml'],
     family: 'diagram',
     title: 'PlantUML diagram',
     aliases: ['plantuml'],
@@ -114,6 +120,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'chart',
+    fence: ['chart', 'charts'],
     family: 'data-viz',
     title: 'Data chart (echarts)',
     aliases: ['charts', 'echarts'],
@@ -129,6 +136,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'map',
+    fence: ['map', 'leaflet'],
     family: 'geo',
     title: 'Interactive map (Leaflet)',
     trigger: 'Fenced block tagged map containing ONE JSON payload',
@@ -142,6 +150,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'svg',
+    fence: ['svg'],
     family: 'illustration',
     title: 'Hand-drawn SVG picture',
     trigger: 'Fenced block tagged svg (one standalone <svg> document per block)',
@@ -156,6 +165,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'paint',
+    fence: ['paint'],
     family: 'illustration',
     title: 'Static geometric illustration (paint JSON)',
     trigger: 'Fenced block tagged paint containing ONE JSON object (shapes/defs)',
@@ -185,6 +195,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
   },
   {
     id: 'math',
+    fence: ['math', 'latex', 'tex'],
     family: 'formula',
     title: 'Math notation (KaTeX)',
     aliases: ['latex', 'tex', 'formula', 'katex'],

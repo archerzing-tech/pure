@@ -250,8 +250,9 @@ describe('streaming diagram gate (图渲染完，后面的文字才开始显示)
     // exercised above; lock the wiring itself so a refactor cannot silently
     // strand them back on the Completed pass or drop the hold.
     const src = fs.readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
-    // puml mounts the same slot mid-stream as the completed render.
-    expect(src).toContain("if (lang === 'puml' || lang === 'plantuml') return diagramSlot('puml', token.text, '');");
+    // puml mounts the same slot mid-stream as the completed render. 刀 2 注册化：
+    // 流式与完成共用同一条 FENCE_ROUTES 条目（stream:true）。
+    expect(src).toContain("{ tags: ['puml', 'plantuml'], kind: 'puml', build: (s) => diagramSlot('puml', s, ''), stream: true }");
     // The hold-gate sits on all three diff paths: equal-raw skip, the slot
     // stability keep, and the fresh mount.
     expect(src.split('streamingDiagramGate(oldEl, container)').length - 1).toBeGreaterThanOrEqual(2);
