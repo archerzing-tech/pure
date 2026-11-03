@@ -688,6 +688,19 @@ unit: 万元
     expect(spec.series?.[1].data.map(d => d.value)).toEqual([20, 25, 30]);
   });
 
+  it('reads headerless equal-length value rows as one series PER ROW (2026-11-03 判例)', () => {
+    // session_1793706272041_1：模型写天气宽表（行=系列、每行 7 个等长值），
+    // 旧解析按列=系列硬解释 → 7 条鬼折线、每条只有 2 个点，人类无法读。
+    // 无 header + 等长(>=3)值行唯一自洽的语义就是行系列（转置归一）。
+    const spec = parseChartSource(`type: line\ntitle: 西安未来7天气温（°C）\nunit: °C\n最低温 8 9 8 7 9 7 4\n最高温 14 18 18 19 12 16 16`);
+    expect(spec.type).toBe('line');
+    expect(spec.series).toHaveLength(2);
+    expect(spec.series?.[0].name).toBe('最低温');
+    expect(spec.series?.[1].name).toBe('最高温');
+    expect(spec.series?.[0].data.map(d => d.value)).toEqual([8, 9, 8, 7, 9, 7, 4]);
+    expect(spec.series?.[1].data.map(d => d.value)).toEqual([14, 18, 18, 19, 12, 16, 16]);
+  });
+
   it('keeps single-series weather tables single (categorical columns stay non-numeric)', () => {
     const spec = parseChartSource(`日期 | 天气 | 平均气温 | 风力\n--- | --- | --- | ---\n周一 | 晴 | 25℃ | 3级\n周二 | 阴 | 23℃ | 2级`);
     expect(spec.series).toBeUndefined();

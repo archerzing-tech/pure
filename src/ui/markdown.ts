@@ -2090,6 +2090,29 @@ function parseMultiSeries(
     }
   }
   if (rows.length === 0) throw new Error('chart needs at least one data row');
+  // Row-series (transposed wide table): with NO header row, models naturally
+  // write weather-style data as one row PER SERIES with equal-length value
+  // lists (`最低温 8 9 8 7 9 7 4` / `最高温 14 18 18 19 12 16 16`). Reading
+  // that as column-series produced 7 ghost lines of 2 points each (2026-11-03
+  // real-machine case session_1793706272041_1). With a header the column
+  // reading is explicit; without one, equal-length (>=3) value rows unambiguously
+  // mean row-per-series. Two-value rows stay column-series (`2024 10 20` =
+  // x-label years, `周一 25 27` = 2 unnamed columns).
+  if (names === null && rows.length >= 2) {
+    const lens = rows.map((r) => r.values.length);
+    if (lens.every((l) => l === lens[0]) && lens[0] >= 3) {
+      return {
+        type,
+        title,
+        unit,
+        data: rows.map((r) => ({ label: r.label, value: r.values[0] ?? 0 })),
+        series: rows.map((r) => ({
+          name: r.label,
+          data: r.values.map((v, i) => ({ label: `#${i + 1}`, value: v })),
+        })),
+      };
+    }
+  }
   const seriesCount = Math.max(...rows.map((r) => r.values.length));
   const seriesNames = names !== null && names.length >= seriesCount
     ? names.slice(0, seriesCount)

@@ -283,7 +283,7 @@ export const IMAGE_GEN_OUTPUT_PROMPT = `When the user asks for images, icons, il
  * script whose output file is referenced inline (禁令已裁：asset:// 通道本就
  * 能内联脚本产图，交付判据取代 NEVER 禁令). */
 export const CHART_DSL_PROMPT = `To SHOW data as a chart, emit a fenced code block tagged chart. Put type: on its own line (default bar), then optional title: and unit: lines, then the data rows. Supported types:
-- bar | hbar | line | pie — one \`label value\` row per line (e.g. 一月 120); a header row plus >=2 numeric columns renders one series per column.
+- bar | hbar | line | pie — one \`label value\` row per line (e.g. 一月 120); a header row plus >=2 numeric columns renders one series per column (\`日期 最低 最高\` header + \`11-03 8 14\` rows — use this when each point needs a date/name on the x axis). Equal-length value rows (\`最低温 8 9 8 …\` / \`最高温 14 18 18 …\`) are read as one series PER ROW.
 - scatter — one point per line: \`name x y\` (e.g. 小明 170 65).
 - kline — a header \`日期 开盘 收盘 最低 最高\` then \`date open close low high\` rows (that OHLC order is required).
 - radar — \`indicators: 维度1 维度2 …\` (or a header row of axis names), then one series per line: \`名称 v1 v2 …\`.
