@@ -8,6 +8,7 @@ import {
   renderWireframe,
   renderWireframeFromMarkdown,
 } from '../cliDiagram';
+import { takeFormValidationFeedback } from '../formValidationFeedback';
 
 describe('parseMermaid', () => {
   it('extracts nodes, shapes, directions and edge labels', () => {
@@ -229,12 +230,31 @@ describe('CliWireframeStream', () => {
   });
 
   it('falls back to raw source when a projection form fails to parse', () => {
+    takeFormValidationFeedback(); // 清场：模块级事件器跨文件共享（e46be4a 判例）
     const { stream, out } = collect();
     stream.feed(['```paint', 'not json', '```'].join('\n'));
     stream.flush();
     expect(out()).toContain('```paint');
     expect(out()).toContain('not json');
     expect(out()).not.toContain('文本投影');
+    // 刀 6 CLI 面：回退不再是静默——失败事件已记，读走可验证（读即清）。
+    const feedback = takeFormValidationFeedback();
+    expect(feedback).toContain('paint FAILED');
+    expect(feedback).toContain('projection unavailable');
+    expect(takeFormValidationFeedback()).toBe('');
+  });
+
+  it('records a failed event when a wireframe render fails (刀 6)', () => {
+    takeFormValidationFeedback(); // 清场：模块级事件器跨文件共享（e46be4a 判例）
+    const { stream, out } = collect();
+    stream.feed(['```mermaid', '这段文字不是 mermaid 语法', '```'].join('\n'));
+    stream.flush();
+    // 渲染不出来 → 源码照显（诚实降级），但事件必须回流给模型。
+    expect(out()).toContain('```mermaid');
+    expect(out()).toContain('不是 mermaid 语法');
+    const feedback = takeFormValidationFeedback();
+    expect(feedback).toContain('mermaid FAILED');
+    expect(feedback).toContain('wireframe render failed');
   });
 });
 
@@ -268,5 +288,13 @@ describe('renderWireframeFromMarkdown', () => {
   it('returns the input unchanged when there is no fence', () => {
     const text = '普通文本，无代码块';
     expect(renderWireframeFromMarkdown(text)).toBe(text);
+  });
+
+  it('one-shot pass records projection failures too (刀 6)', () => {
+    takeFormValidationFeedback(); // 清场：模块级事件器跨文件共享（e46be4a 判例）
+    renderWireframeFromMarkdown(['```map', 'not json', '```'].join('\n'));
+    const feedback = takeFormValidationFeedback();
+    expect(feedback).toContain('map FAILED');
+    expect(takeFormValidationFeedback()).toBe('');
   });
 });

@@ -24,6 +24,7 @@
 // source instead of a wrong picture.
 
 import { projectForm } from './formProjections';
+import { recordFormValidation } from './formValidationFeedback';
 
 export interface DiagramGraph {
   /** id → display label (already stripped of markdown markup). */
@@ -644,6 +645,8 @@ export class CliWireframeStream {
         this.write(projected);
         this.write('\n└──────────────────────────────────────────────\n');
       } else {
+        // 刀 6 CLI 面：投影失败对模型不再静默——记事件，下一回合装配读走。
+        recordFormValidation(lang, 'failed', 'projection unavailable; raw source shown');
         this.write('```' + lang + '\n');
         this.write(content);
         this.write('```\n');
@@ -657,6 +660,7 @@ export class CliWireframeStream {
       this.write('\n└──────────────────────────────────────────────\n');
     } else {
       // Unparseable diagram — print the raw block so nothing is lost.
+      recordFormValidation(this.fenceLang, 'failed', 'wireframe render failed; raw source shown');
       this.write('```' + (this.fenceLang ?? '') + '\n');
       this.write(content);
       this.write('```\n');
@@ -723,6 +727,8 @@ export function renderWireframeFromMarkdown(text: string): string {
       if (projected) {
         out.push(`┌─ ${info} 文本投影 · 图形表面不可用 ──────────────────────\n${projected}\n└──────────────────────────────────────────────\n`);
       } else {
+        // 刀 6 CLI 面：投影失败记事件（完整块才是模型的语法责任）。
+        recordFormValidation(info, 'failed', 'projection unavailable; raw source shown');
         out.push(text.slice(open, close + 3));
       }
       i = close + 3;
@@ -732,6 +738,7 @@ export function renderWireframeFromMarkdown(text: string): string {
     if (rendered) {
       out.push(`┌─ ${info} 流程图 · 线框渲染 ──────────────────────────\n${rendered}\n└──────────────────────────────────────────────\n`);
     } else {
+      recordFormValidation(info, 'failed', 'wireframe render failed; raw source shown');
       out.push(text.slice(open, close + 3));
     }
     i = close + 3;

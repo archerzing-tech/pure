@@ -9,6 +9,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
+import { takeFormValidationFeedback } from './shared/formValidationFeedback';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
@@ -348,7 +349,10 @@ async function assembleCliPrompt(
   });
 }
 
-/** P2 下沉（2026-10-27）：CLI 侧环境事实拼装，与 GUI 的 buildEnvFacts 同构。 */
+/** P2 下沉（2026-10-27）：CLI 侧环境事实拼装，与 GUI 的 buildEnvFacts 同构。
+ *  刀 6 CLI 面回流（2026-11-03）：围栏块在文本投影/线框渲染失败时 cliDiagram
+ *  记了事件——每回合装配读走（读即清）注入 envFacts 区，模型看到自己上一
+ *  回合哪些块没渲染出来。无事件=空串，零注入。 */
 function buildCliEnvFacts(conventions?: string): string {
   const parts: string[] = [];
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
@@ -358,6 +362,8 @@ function buildCliEnvFacts(conventions?: string): string {
   if (runtimes) parts.push(runtimes);
   if (network) parts.push(network);
   if (shell) parts.push(shell);
+  const formFeedback = takeFormValidationFeedback();
+  if (formFeedback) parts.push(formFeedback);
   return parts.join('\n\n');
 }
 
