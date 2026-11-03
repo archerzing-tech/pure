@@ -211,10 +211,7 @@ body.window-maximized #boot-splash {
 .titlebar-controls button:active {
   background: color-mix(in srgb, var(--bg-hover) 60%, var(--border-light));
 }
-.titlebar-controls #win-close:hover {
-  background: var(--danger);
-  color: var(--danger-contrast);
-}
+/* 关闭钮不特殊化红色（2026-11-03 用户定调：与三颗一致走 bg-hover，应用内风格统一） */
 /* 最大化态换还原图标 */
 .titlebar-controls .glyph-restore { display: none; }
 .titlebar-controls .is-max .glyph-max { display: none; }
