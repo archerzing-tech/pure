@@ -331,6 +331,61 @@ describe('lessonToMemoryAdds term_alias mapping (阶段 11.4)', () => {
   });
 });
 
+describe('lessonToMemoryAdds truncation hygiene (2026-11-03 判例)', () => {
+  // 真机判例 session_1793706272041_1：四字段 parse 层各 300，最坏拼装 ~1,350，
+  // 旧 slice(0,900) 硬切落在词中——「after which the direct sys」腰斩后接
+  // 「. Prevention:」直达模型。修法=字段级预算（带 … 语义省略），永不切词中。
+  const ctx = {
+    sessionId: 'sess-trunc',
+    projectPath: '/ws/project-t',
+    dedupeKey: 'reflect:sess-trunc:long lesson',
+    verificationSummary: 'not needed',
+    verificationPassed: true,
+  };
+
+  function longLesson(): ReflectedLesson {
+    return {
+      symptom: 'S'.repeat(300),
+      rootCause: 'R'.repeat(300),
+      prevention: 'P'.repeat(300),
+      recovery: 'Rc'.repeat(150),
+      evidence: ['e1hash123456', 'e2hash123456', 'e3hash123456', 'e4hash123456', 'e5hash123456'],
+      confidence: 'medium',
+    };
+  }
+
+  it('caps content at 900 and never cuts mid-word (field budgets end with …)', () => {
+    const main = lessonToMemoryAdds(longLesson(), ctx).find((a) => a.type === 'successful_pattern')!;
+    expect(main.content.length).toBeLessThanOrEqual(900);
+    // 每个预算满载的字段都以省略号收尾（不是词中硬切后接下一字段）。
+    expect(main.content).toContain('S'.repeat(219) + '…');
+    expect(main.content).toContain('R'.repeat(189) + '…');
+    expect(main.content).toContain('P'.repeat(219) + '…');
+    // 不再出现「词中截断后直接拼下一字段」的旧形态（切点无省略号）。
+    expect(main.content).not.toMatch(/[A-Za-z0-9]\. Root cause:/);
+  });
+
+  it('lists at most 3 evidence ids', () => {
+    const main = lessonToMemoryAdds(longLesson(), ctx).find((a) => a.type === 'successful_pattern')!;
+    expect(main.content).toContain('Evidence: 5 tool call(s) (e1hash123456, e2hash123456, e3hash123456).');
+    expect(main.content).not.toContain('e4hash');
+  });
+
+  it('leaves a short lesson byte-for-byte intact (no ellipsis introduced)', () => {
+    const short: ReflectedLesson = {
+      symptom: 'short symptom',
+      rootCause: 'short cause',
+      prevention: 'short prevention',
+      recovery: 'not needed',
+      evidence: ['abc123'],
+      confidence: 'medium',
+    };
+    const main = lessonToMemoryAdds(short, ctx).find((a) => a.type === 'successful_pattern')!;
+    expect(main.content).toContain('Symptom: short symptom. Root cause: short cause. Prevention: short prevention.');
+    expect(main.content).not.toContain('…');
+  });
+});
+
 describe('countReflectionsToday', () => {
   const projectPath = '/ws';
 

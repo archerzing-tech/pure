@@ -332,19 +332,32 @@ export function lessonToMemoryAdds(lesson: ReflectedLesson, ctx: LessonPersistCo
   // 注入端走无条件通道（Harness 的 machineLessons，与 tool_preference 同构）。
   // correction 不跟随：用户纠正的是项目规矩/个人偏好，留在项目域。
   const persistPath = lesson.scope === 'machine' ? GLOBAL_MEMORY_SCOPE : ctx.projectPath;
+  // 注入面截断卫生（2026-11-03 真机判例 session_1793706272041_1）：四字段 parse
+  // 层各 300，最坏拼装 ~1,350 字符，旧 `slice(0, 900)` 硬切落在任意词中——
+  // 「after which the direct sys」腰斩后接「. Prevention:」直达模型，语料污染。
+  // 修法在拼装层做字段级预算（parse 层截断长度不动，sleep-time 编排器纪律）：
+  // 带 … 的语义省略，防预算漂移的兜底也走省略号，永不切词中。
+  const excerptEllipsis = (text: string, cap: number): string => {
+    const flat = text.replace(/\s+/gu, ' ').trim();
+    return flat.length <= cap ? flat : `${flat.slice(0, cap - 1)}…`;
+  };
+  const symptom = excerptEllipsis(lesson.symptom, 220);
+  const rootCause = excerptEllipsis(lesson.rootCause, 190);
+  const prevention = excerptEllipsis(lesson.prevention, 220);
+  const recovery = excerptEllipsis(lesson.recovery, 90);
   const evidenceNote = lesson.evidence.length > 0
-    ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.join(', ')}).`
+    ? ` Evidence: ${lesson.evidence.length} tool call(s) (${lesson.evidence.slice(0, 3).join(', ')}).`
     : '';
   const parts = [
-    `Symptom: ${lesson.symptom}`,
-    `Root cause: ${lesson.rootCause}`,
-    `Prevention: ${lesson.prevention}`,
-    `Recovery: ${lesson.recovery}`,
+    `Symptom: ${symptom}`,
+    `Root cause: ${rootCause}`,
+    `Prevention: ${prevention}`,
+    `Recovery: ${recovery}`,
   ];
   const adds: Omit<MemoryEntry, 'id'>[] = [
     {
       type: 'successful_pattern',
-      content: `Reflected lesson — ${parts.join('. ')}.${evidenceNote}`.slice(0, 900),
+      content: excerptEllipsis(`Reflected lesson — ${parts.join('. ')}.${evidenceNote}`, 900),
       timestamp: Date.now(),
       sessionId: ctx.sessionId,
       projectPath: persistPath,
