@@ -1,6 +1,6 @@
 # 表现形式库（Presentation Capability Library）
 
-> **状态**：MVP + routing 卡 + 机械触发 + **刀 2 渲染器注册化（86d12d8，2026-11-03）** 已落。后续刀（组合式自定义 / 投影降级器 / 常驻指针瘦身 / 校验前置共享）未排期。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
+> **状态**：MVP + routing 卡 + 机械触发 + 刀 2 渲染器注册化（86d12d8）+ **刀 3 组合式自定义（f473c9c，2026-11-03）** 已落。后续刀（投影降级器 / 常驻指针瘦身 / 校验前置共享）未排期。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
 
 ## 一、定位与三层结构
 
@@ -48,11 +48,12 @@
 
 判例沉淀：行为判据的可靠性分层——**卡（pull）管深挖，机械注入（push）管在场**；判据能否生效先问「它在不在这个请求的上下文里」，不在场的内容改一万字也是零。
 
-**刀 2：渲染器注册化（2026-11-03，86d12d8）**：markdown.ts 的围栏分流从七处散点收敛到两张表——`FENCE_ROUTES`（tag → kind + slot 构造 + stream 布尔，围栏分流的唯一注册点）与 `KIND_PIPELINE`（kind → render+bind，hydration kick 与失败重试共用）。改查表的散点：完成渲染 `renderer.code`、流式 `streamRenderer.code`、`slotFenceLang` 九类清单（派生自 stream:true tag 全集）、`normalizeMapFence` 容器正则（从 map 路由 tags 构造）、kick/retry 两处 kind 分发、PNG 导出的 target 选择器。卡注册表加 `fence` 字段（tag 全集），`fenceRegistry.test.ts` 双向同源锁（route↔卡 tag **全集相等**，单向包含会放过漂移）——加新视觉形式 = 一条 route + 一张卡，漏任何一侧测试即红。**零行为变化**：math 流式不挂 slot 栏（`stream: false` 保真）、流式与完成各自的 fallback 保留、paint 的 canvas 导出特判保留；三个源码形态锚测试随注册化更新。刀 2 是刀 3 的地基：自定义卡从此有渲染通道。
+**刀 2：渲染器注册化（2026-11-03，86d12d8）**：markdown.ts 的围栏分流从七处散点收敛到两张表——`FENCE_ROUTES`（tag → kind + slot 构造 + stream 布尔，围栏分流的唯一注册点）与 `KIND_PIPELINE`（kind → render+bind，hydration kick 与失败重试共用）。改查表的散点：完成渲染 `renderer.code`、流式 `streamRenderer.code`、`slotFenceLang`（查 routeOf 的 stream:true）、`normalizeMapFence` 容器正则（从 map 路由 tags 构造）、kick/retry 两处 kind 分发、PNG 导出的 target 选择器。卡注册表加 `fence` 字段（tag 全集），`fenceRegistry.test.ts` 双向同源锁（route↔卡 tag **全集相等**，单向包含会放过漂移）——加新视觉形式 = 一条 route + 一张卡，漏任何一侧测试即红。**零行为变化**：math 流式不挂 slot 栏（`stream: false` 保真）、流式与完成各自的 fallback 保留、paint 的 canvas 导出特判保留；三个源码形态锚测试随注册化更新。刀 2 是刀 3 的地基：自定义卡从此有渲染通道。
+
+**刀 3：组合式自定义（2026-11-03，f473c9c）**：用户/agent 在 `~/.pure/config.json` 写 `presentationCards` 键（`{ id, base, ...只写想改的字段 }`）即注册自定义视觉形式。**组合式封装本意**：`{ id, base }` 就得到一张完整卡（判据/触发/交付/细则/族全继承 base），`registerCustomCards` 只覆盖显式给出的字段；自定义围栏 tag（可选 `fence`）挂 base kind 的既有渲染管线——`registerCustomFenceRoutes` 产出的路由 kind/build/stream 全部复用刀 2 静态表条目，hydration/retry 因 `data-diagram-kind` 写 base kind 天然走 KIND_PIPELINE，**零新渲染器零沙箱问题**（放弃的方案：让自定义卡带全新渲染器——那要插件加载与沙箱，而真实需求是判据与触发的运行时定制）。纪律：base 必须是内置七类围栏形式；id/tag 小写 ASCII 且不撞内置；同 id 幂等更新；逐卡拒绝不阻塞其余；新 tag 卡的 trigger 改写为 "Fenced block tagged X (rendered on the base pipeline)"。**真实源是盘上 config.json**（设置 agent 化铁律）：GUI 侧启动注册 + 回合边界活检热生效（`syncPresentationCardsFromConfig`，lastSyncKey 短路）；引擎侧 `presentation_guide` 惰性加载一次（ToolRegistry）；目录尾带注册说明句，agent 可语义自加卡。测试三面：卡注册表（继承/改写/拒绝/幂等/目录合入/reset 隔离）、渲染注册表（自定义 tag 走 base 管线端到端、:::容器归一、无新 tag 卡不动路由表、re-sync 三态）、引擎消费面（presentation_guide 目录含自定义卡）。
 
 ## 四、后续刀路线（未排期）
 
-- **刀 3 组合式自定义**：用户/会话注册自定义卡 = 现有原语 + 参数封装（如「架构图 = paint + 主题 + 布局参数」），不引入沙箱问题；组件级自定义（真新 JS 组件）挂起。注册表落 config.json（同「设置必须被遵守」铁律：agent 可语义操作、用户可直接改文件）。刀 2 的 FENCE_ROUTES/KIND_PIPELINE 是它的渲染通道地基。
 - **刀 4 投影降级器**：`surfaces` 声明升级为机器可读接口，channel/cli 每 form 一个降级器（现状只有 mermaid/puml 有 ASCII 线框，chart/map 在 channel 是裸 JSON 文本）。
 - **刀 5 常驻指针瘦身**：发现工具兜住后，`VISUAL_BLOCK_POINTER` 的五段最小语法可下放卡片，常驻只留落盘禁令 + 发现指针（≈2.1k → ≈600 字符）。须真机复验模型在没有最小语法时的围栏命中率，勿先斩。
 - **刀 6 校验前置共享**：卡片声明 validator 引用（mapSpec/paintSpec/chart 已有 parse），渲染前跑、失败前置提示，替代「渲染时才发现」。
