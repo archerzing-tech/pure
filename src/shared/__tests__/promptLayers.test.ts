@@ -220,11 +220,11 @@ describe('L1 behavior contracts', () => {
     expect(CHART_DSL_PROMPT).toContain('the direct path');
     expect(CHART_DSL_PROMPT).toContain('referenced inline as ![desc](/absolute/path.png)');
     expect(CHART_DSL_PROMPT).not.toContain('NEVER write a Python');
-    // 人类读图判据（2026-11-03 真机判例：7 天天气趋势被画成柱状图——随附层
-    // DSL 只有 type 枚举+default bar，判据不在场时模型盲选）：选型判据必须
-    // 随 DSL 在场，趋势→折线是铁锚。
-    expect(CHART_DSL_PROMPT).toContain('change over time / forecast / trend -> line');
-    expect(CHART_DSL_PROMPT).toContain('not across bars');
+    // 人类读图判据唯一源=常驻指针（2026-11-03 二次真机判例 session_1793705169019_1：
+    // 「帮我分析一下未来7天的天气状况」零图表词→闸门不亮→判据不在场→模型连卡都
+    // 没拉、直接回落表格默认——判据留在 DSL 里只有已决定画图的模型才看得到，死
+    // 循环）。判据必须在形式选择点在场：上移 VISUAL_BLOCK_POINTER，DSL 删行防分叉。
+    expect(CHART_DSL_PROMPT).not.toContain('Picking the type');
   });
 
   it('keeps maps on the Leaflet JSON contract and never falls back to SVG', () => {
@@ -273,6 +273,20 @@ describe('L1 behavior contracts', () => {
     // 「只」不吞几何让位词：示意图类仍由 paint 独占。
     expect(detectVisualRequest('画一只三层架构示意图').picture).toBe(false);
     expect(detectVisualRequest('画一只三层架构示意图').paint).toBe(true);
+  });
+
+  it('arms the chart DSL for data-presentation requests with zero chart words (2026-11-03 判例)', () => {
+    // session_1793705169019_1：「帮我分析一下未来7天的天气状况」——用户说数据
+    // 需求时不说「图表」二字，keyword 族收数据呈现语义（趋势/走势/占比/环比/
+    // 同比/分布）+ 未来/近 N 天时间窗，命中即点亮 CHART_DSL 随附（读图判据
+    // 常驻兜底，语法随附省一次拉卡）。
+    for (const hit of ['帮我分析一下未来7天的天气状况', '展示气温变化趋势', '近30天销量走势', '各部门预算占比', '本月环比上月的数据', '用户年龄分布']) {
+      expect(detectVisualRequest(hit).chart, hit).toBe(true);
+    }
+    // 太泛的词不收：预测/分析/统计会误亮代码与问答场景。
+    for (const miss of ['预测一下这个函数的行为', '分析这段代码的问题', '帮我统计一下文件行数', '总结这篇文章']) {
+      expect(detectVisualRequest(miss).chart, miss).toBe(false);
+    }
   });
 
   it('does NOT arm the svg contract for static-geometry requests (2026-10-17 case)', () => {
@@ -333,6 +347,14 @@ describe('L1 behavior contracts', () => {
     // 本就能内联脚本产图，改交付判据（可见性底线 + 内联引用机制）。
     // 保留性锚 + 负锚（语法段/禁令复活即红）+ 长度上限。
     expect(VISUAL_BLOCK_POINTER).toContain('VISIBLE inside the reply');
+    // 根基原则常驻（2026-11-03 二次真机判例升维：原则不能条件在场——量化数据
+    // →图表优先于表格的触发判据+浓缩读图判据必须在形式选择点每轮在场）。
+    expect(VISUAL_BLOCK_POINTER).toContain('HUMAN EYES FIRST');
+    expect(VISUAL_BLOCK_POINTER).toContain('the eye traces a trend along a line');
+    expect(VISUAL_BLOCK_POINTER).toContain('trend -> line');
+    expect(VISUAL_BLOCK_POINTER).toContain('comparing categories -> bar / hbar');
+    expect(VISUAL_BLOCK_POINTER).toContain('share of a whole -> pie');
+    expect(VISUAL_BLOCK_POINTER).toContain('Table only when exact numbers matter');
     expect(VISUAL_BLOCK_POINTER).toContain('A fenced block IS the picture');
     expect(VISUAL_BLOCK_POINTER).toContain('![desc](/absolute/path.png)');
     expect(VISUAL_BLOCK_POINTER).not.toContain('NEVER save');
@@ -349,8 +371,10 @@ describe('L1 behavior contracts', () => {
     expect(VISUAL_BLOCK_POINTER).not.toContain('shapes:[rect');
     expect(VISUAL_BLOCK_POINTER).not.toContain('standalone <svg> document');
     expect(VISUAL_BLOCK_POINTER).not.toContain('usecase-beta');
-    // 瘦身目标 ≈600 字符；上限锚防语法段悄悄长回来。
-    expect(VISUAL_BLOCK_POINTER.length).toBeLessThan(900);
+    // 瘦身目标 ≈600 字符；上限锚防语法段悄悄长回来。900→1350（2026-11-03
+    // 二次真机判例裁定：根基原则（量化数据→图表+读图判据）入常驻 +~455 字符
+    // ≈105 tokens——这 105 tokens 是表格 vs 折线图的分界，正确性优先于瘦身地板）。
+    expect(VISUAL_BLOCK_POINTER.length).toBeLessThan(1350);
   });
 
   it('moves the mermaid beta catalog onto the card (刀 5 前置搬卡)', () => {

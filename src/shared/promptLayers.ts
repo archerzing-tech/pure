@@ -194,6 +194,7 @@ export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ON
  * 放尾部：它随请求变化，尾巴变动只让尾巴重预填（同 capabilities / task_mode）。
  */
 export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram so it ends up VISIBLE inside the reply. Fence tags: svg (hand-drawn picture), mermaid / puml (structural diagrams), chart (data visual), map (real-world geography), paint (static geometric illustration).
+HUMAN EYES FIRST (root rule): quantitative data (trends, forecasts, comparisons, shares, distributions) reads fastest as a CHART — not prose or a table (the eye traces a trend along a line, not across table cells or bars). Pick the type by human reading: change over time / forecast / trend -> line; comparing categories -> bar / hbar (long labels); share of a whole -> pie; two variables together -> scatter. Table only when exact numbers matter.
 A fenced block IS the picture — it renders inline as written. A script (Python/matplotlib etc.) also works, but its output file stays invisible until referenced inline as ![desc](/absolute/path.png); a bare path or tool result alone never renders as a picture. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it before emitting chart/map/paint blocks unless their syntax is already in context (svg/mermaid/puml you can write from your own knowledge), and whenever unsure which form fits.`;
 
 /** routing 决策精要 — 机械注入版（2026-11-02 第三刀）。两轮真机判例
@@ -235,7 +236,13 @@ export function detectVisualRequest(prompt: string): VisualRequestParts {
   const geometricStrong = /(?:架构图|架构示意|示意图|流程示意|分层图|层级图|schematic|geometric|layered diagram)/i.test(text);
   const picture = !geometricStrong &&
     /(?:画一?[张个只幅副]|画个|绘制|手绘|画出来|绘图|生成一?[张个只幅副].{0,4}?(?:图|图片)|做一?[张个只幅副]图|配图|插画|海报|封面|图标|logo|icon|贴纸|壁纸|svg|流程图|时序图|类图|思维导图|甘特图|uml|flow ?chart|draw|sketch|illustration|poster|thumbnail|mockup)/i.test(text);
-  const chart = /(?:图表|柱状图|条形图|折线图|饼图|散点图|k线|candlestick|雷达图|树图|矩形树图|旭日图|可视化|数据图|画个图|做成图|趋势图|占比图|统计图|chart|graph|plot|visuali[sz])/i.test(text);
+  // chart 召回两族（2026-11-03 真机判例 session_1793705169019_1：「帮我分析一下
+  // 未来7天的天气状况」零图表词→闸门不亮→DSL+判据全不在场→模型回落表格默认。
+  // 原则不能条件在场：读图判据已上移常驻指针（VISUAL_BLOCK_POINTER 根基句），
+  // 这里补数据呈现语义族（趋势/走势/占比/环比/同比/分布 + 未来N天/近N天时间
+  // 窗）点亮 DSL 语法随附。误判只多注入一份语法（召回优先）；「预测/预报/分析」
+  // 太泛不收——预测函数行为、分析代码都会误亮。
+  const chart = /(?:图表|柱状图|条形图|折线图|饼图|散点图|k线|candlestick|雷达图|树图|矩形树图|旭日图|可视化|数据图|画个图|做成图|趋势图|占比图|统计图|趋势|走势|占比|环比|同比|分布|未来\s*\d+\s*[天周月]|近\s*\d+\s*[天周月]|chart|graph|plot|visuali[sz])/i.test(text);
   const map = /(?:地图|路线|路径规划|导航|行程路线|骑行|自驾|怎么走|在哪[里儿]|坐标|经纬度|markers?|route|map\b|itinerary|directions)/i.test(text);
   // 几何示意/插画的召回词。不收裸「画」/「图」——那会吞掉 chart/picture 主通道。
   const paint = /(?:架构图|架构示意|示意图|几何|插画|图标|流程示意|分层图|层级图|schematic|geometric|layered diagram|icon\b)/i.test(text);
@@ -281,7 +288,6 @@ export const CHART_DSL_PROMPT = `To SHOW data as a chart, emit a fenced code blo
 - kline — a header \`日期 开盘 收盘 最低 最高\` then \`date open close low high\` rows (that OHLC order is required).
 - radar — \`indicators: 维度1 维度2 …\` (or a header row of axis names), then one series per line: \`名称 v1 v2 …\`.
 - tree | treemap | sunburst — indentation defines the hierarchy (2 spaces per level), the first line is the root; for treemap/sunburst end a line with a number to set its value (\`  电子 500\`).
-Picking the type is about how humans read the picture: change over time / forecast / trend -> line (a bar chart of a time series reads as unrelated buckets — the human eye traces a trend along a line, not across bars); comparing categories -> bar / hbar (hbar when labels are long); share of a whole -> pie; how two variables move together -> scatter.
 A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every type. A fenced chart / svg / mermaid / puml block IS the picture and renders inline — the direct path. A script (Python/matplotlib etc.) also works if its output file is referenced inline as ![desc](/absolute/path.png); an unreferenced file is never shown.`;
 
 /** ```map DSL contract — identical in GUI and CLI (shared, not duplicated). The
