@@ -13710,6 +13710,56 @@ fn apply_anthropic_cache_breakpoints(body: &mut serde_json::Value) {
     }
 }
 
+/// 用户消息里的图片以 OpenAI wire 形状传来（TS 面的 mapMessages 把
+/// Message.images 折成 {type:"image_url",image_url:{url:…}}，见
+/// src/adapter/openai/mapping.ts），而 anthropic 原生 API 只认
+/// {"type":"image","source":{…}} content block——原样透传等于把非法 block
+/// 直发服务端，请求 400 或图被静默丢弃。这里把 data URI
+/// （data:image/png;base64,…）改写成 anthropic image block，语义对齐 TS 面
+/// parseAnthropicImageSource（DeepSeekAnthropicAdapter）；其余形状（http(s)
+/// 直链、畸形 data URI、非 image_url block）保持原样——宁可让服务端报错
+/// 也不静默丢图。string content（无图消息）原样返回，其他角色不受影响。
+fn anthropic_image_blocks(message: &serde_json::Value) -> serde_json::Value {
+    let mut converted = message.clone();
+    if let Some(blocks) = converted.get_mut("content").and_then(|c| c.as_array_mut()) {
+        for block in blocks.iter_mut() {
+            let url = block
+                .get("image_url")
+                .and_then(|wrapper| wrapper.get("url"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let Some(url) = url else { continue };
+            if let Some(source) = data_uri_to_anthropic_source(&url) {
+                *block = serde_json::json!({ "type": "image", "source": source });
+            }
+        }
+    }
+    converted
+}
+
+/// data URI（data:<media type>[;base64],<payload>）→ anthropic base64 image
+/// source。非 data: 前缀、缺逗号、空 payload 都返回 None，调用方原样保留该
+/// block。media type 缺省回落 image/png——TS 面的 mimeType 字段不进 wire，
+/// 与 parseAnthropicImageSource 的最终兜底一致。
+fn data_uri_to_anthropic_source(url: &str) -> Option<serde_json::Value> {
+    let rest = url.strip_prefix("data:")?;
+    let comma = rest.find(',')?;
+    let payload = &rest[comma + 1..];
+    if payload.is_empty() {
+        return None;
+    }
+    let media_type = rest[..comma]
+        .split(';')
+        .next()
+        .filter(|media| !media.is_empty())
+        .unwrap_or("image/png");
+    Some(serde_json::json!({
+        "type": "base64",
+        "media_type": media_type,
+        "data": payload,
+    }))
+}
+
 /// 8.2 — translate Anthropic wire usage into the OpenAI-style raw shape the
 /// WebView's normalizeTokenUsage already understands (mirrors the TS
 /// `anthropicUsageToOpenAI`). Anthropic's `input_tokens` excludes the cached
@@ -13959,7 +14009,7 @@ async fn chat_stream(
                 messages.push(serde_json::json!({"role":"user","content":[result]}));
                 continue;
             }
-            messages.push(message.clone());
+            messages.push(anthropic_image_blocks(message));
         }
         let mut value = serde_json::json!({
             "model": args.model,
@@ -19217,6 +19267,69 @@ mod session_stats_tests {
         assert_eq!(bare["prompt_tokens"], 10.0);
         assert_eq!(bare["prompt_cache_hit_tokens"], 0.0);
         assert_eq!(bare["completion_tokens"], 0.0);
+    }
+
+    // ── anthropic user 图片：image_url data URI → image block ──
+
+    #[test]
+    fn anthropic_user_image_url_data_uri_becomes_image_block() {
+        // OpenAI wire 形状（mapMessages 折图后的 user turn）：text + image_url。
+        let message = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "这张图里是什么？" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,aGVsbG8=" } },
+            ],
+        });
+        let converted = anthropic_image_blocks(&message);
+        let image = &converted["content"][1];
+        assert_eq!(image["type"], "image");
+        assert_eq!(image["source"]["type"], "base64");
+        assert_eq!(image["source"]["media_type"], "image/png");
+        assert_eq!(image["source"]["data"], "aGVsbG8=");
+        // 相邻 text block 与消息其余字段不动。
+        assert_eq!(
+            converted["content"][0],
+            serde_json::json!({ "type": "text", "text": "这张图里是什么？" })
+        );
+        assert_eq!(converted["role"], "user");
+
+        // jpeg：header 里的 ;base64 标记剥干净，media_type 取分号前段。
+        let jpeg = anthropic_image_blocks(&serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,/9j/4AAQ" } },
+            ],
+        }));
+        assert_eq!(jpeg["content"][0]["source"]["media_type"], "image/jpeg");
+        assert_eq!(jpeg["content"][0]["source"]["data"], "/9j/4AAQ");
+    }
+
+    #[test]
+    fn anthropic_user_image_url_unknown_shapes_pass_through() {
+        // http(s) 直链不是 data URI：原样保留 image_url block，不静默丢。
+        let https = anthropic_image_blocks(&serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } },
+            ],
+        }));
+        assert_eq!(https["content"][0]["type"], "image_url");
+        assert_eq!(https["content"][0]["image_url"]["url"], "https://example.com/cat.png");
+
+        // 畸形 data URI（缺逗号 / 空 payload / 空串）：改不出来，原样透传。
+        for url in ["data:image/png", "data:image/png;base64,", ""] {
+            let shaped = anthropic_image_blocks(&serde_json::json!({
+                "role": "user",
+                "content": [ { "type": "image_url", "image_url": { "url": url } } ],
+            }));
+            assert_eq!(shaped["content"][0]["type"], "image_url");
+            assert_eq!(shaped["content"][0]["image_url"]["url"], url);
+        }
+
+        // 无图的 string content 消息（绝大多数 user turn）原样返回。
+        let plain = serde_json::json!({ "role": "user", "content": "只问一句" });
+        assert_eq!(anthropic_image_blocks(&plain), plain);
     }
 }
 
