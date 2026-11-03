@@ -14,8 +14,16 @@ import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { withRelaySchema } from '../engine/relayPipeline';
-import { matchPresentationCards, registerCustomCards, renderPresentationCard, renderPresentationCatalog } from '../shared/presentationLibrary';
-import { loadConfig } from '../cliConfig';
+import { matchPresentationCards, registerCustomCards, renderPresentationCard, renderPresentationCatalog, type CustomCardInput } from '../shared/presentationLibrary';
+
+// 刀 3 组合式自定义：自定义卡的盘上加载经注入口进入（ToolRegistry 同时活在
+// CLI 与 GUI 浏览器 bundle 里——GUI 侧只为常量引用，静态 import cliConfig
+// 会把 node:fs 拖进 vite 而炸打包）。宿主在创建 registry 前注册一次；
+// 缺席时表现库只含内置卡。
+let customCardsLoader: (() => CustomCardInput[] | undefined) | null = null;
+export function setCustomPresentationCardsLoader(loader: () => CustomCardInput[] | undefined): void {
+  customCardsLoader = loader;
+}
 
 // ── Tag constants ──
 
@@ -295,7 +303,7 @@ export class ToolRegistry implements ToolAdapter {
     if (this.customPresentationCardsLoaded) return;
     this.customPresentationCardsLoaded = true;
     try {
-      const cards = loadConfig()?.presentationCards;
+      const cards = customCardsLoader?.();
       if (Array.isArray(cards) && cards.length > 0) {
         registerCustomCards(cards);
       }

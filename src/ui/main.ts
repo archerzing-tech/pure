@@ -11,6 +11,7 @@ import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRou
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import { syncPresentationCardsFromConfig } from './markdown';
+import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
 import { setActiveCharacterProfile } from '../character';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -976,7 +977,11 @@ function deferToIdle(fn: () => void): void {
 (async () => {
   tagPlatform();
   await initConfigFile();
-  // 刀 3：盘上 config.json 的自定义表现形式卡 → 表现库 + 围栏路由（启动注册）。
+  // 刀 3：盘上 config.json 的自定义表现形式卡 → 表现库 + 围栏路由（启动注册）；
+  // 同款 loader 注给 ToolRegistry——GUI 引擎（CodingAgent）在 webview 里跑，
+  // 它的 presentation_guide 惰性加载走这里而不是 cliConfig（node:fs 进不了
+  // 浏览器 bundle）。
+  setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
   applySavedAppearance();
   applySavedCharacterProfile();

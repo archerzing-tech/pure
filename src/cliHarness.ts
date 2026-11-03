@@ -10,7 +10,7 @@ import { createDefaultHarnessConfig } from './coding-agent/defaultHarnessConfig'
 import { NodeToolAdapter } from './adapter/node/NodeToolAdapter';
 import { FSStore } from './adapter/storage/FSStore';
 import { SQLiteStore } from './adapter/storage/SQLiteStore';
-import { ToolRegistry, Tags, BUILT_IN_TOOLS } from './coding-agent/ToolRegistry';
+import { ToolRegistry, Tags, BUILT_IN_TOOLS, setCustomPresentationCardsLoader } from './coding-agent/ToolRegistry';
 import { MCPClient } from './harness/mcp/MCPClient';
 import { CliCapabilityToolAdapter, withConnectTimeout } from './harness/cliCapabilityTools';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from './shared/dynamicCapabilityTools';
@@ -389,6 +389,9 @@ async function createTools(
     },
   });
   registry = new ToolRegistry(capAdapter);
+  // 刀 3：自定义表现形式卡的盘上加载经注入口进来（ToolRegistry 不能静态
+  // import cliConfig——它同时活在 GUI 浏览器 bundle 里）。
+  setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   // 通道来源默认 PLAN（只读）并由 gateway 注入审批 handler；CLI 保持 NORMAL +
   // 终端 y/n/a。同一接口，两个表面，PermissionManager 本身零改动。
   registry.setPermissionManager(new PermissionManager(permissionMode, permissionHandler ?? createCliPermissionHandler(autoApprove)));

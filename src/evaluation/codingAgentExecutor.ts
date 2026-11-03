@@ -1,4 +1,6 @@
 import { CodingAgent } from '../coding-agent/CodingAgent';
+import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
+import { loadConfig } from '../cliConfig';
 import { MockLLMAdapter } from '../adapter/mock/MockLLMAdapter';
 import { NodeToolAdapter } from '../adapter/node/NodeToolAdapter';
 import { DeepSeekAnthropicAdapter } from '../adapter/deepseek/DeepSeekAnthropicAdapter';
@@ -153,6 +155,8 @@ export async function runCodingAgentEvaluationTask(
   // single-adapter baseline.
   const routedThinkModel = thinkPhaseModel(options);
   const thinkAdapter = routedThinkModel ? createAdapter({ ...options, model: routedThinkModel }) : undefined;
+  // 刀 3：评测侧同款注入口——presentation_guide 惰性吸收盘上自定义卡。
+  setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   const agent = new CodingAgent({
     sessionId,
     llm: createAdapter(options),
