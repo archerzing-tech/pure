@@ -1149,8 +1149,9 @@ describe('paint code blocks', () => {
     expect(src).toContain('paint: { render: renderPaintNodes, bind: bindPaintPopup }');
     expect(src).toContain('pipeline.render(container).then(() => pipeline.bind(container))');
     expect(src).toContain('pipeline.render(host).then(() => pipeline.bind(host))');
-    // The completion pipeline renders + binds paint like chart.
-    expect(src).toContain('await renderPaintNodes(container)');
+    // The completion pipeline renders paint through the document-order
+    // dispatcher (blockSerialTiming), and binds it like the other kinds.
+    expect(src).toContain("slot.classList.contains('paint-slot')");
     expect(src).toContain('bindPaintPopup(container);');
     // Loading card is pre-shaped to the finished aspect ratio.
     expect(src).toContain("'--paint-aspect'");

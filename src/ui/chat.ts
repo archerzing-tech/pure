@@ -7711,7 +7711,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // has changed the bubble height. Protocol control lines (「## 计划
               // n：…」) are folded so a model echo of an already-announced stage
               // cannot render as duplicated headings.
-              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(finalText)), seg.el).then(() => {
+              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(finalText)), seg.el, { visualTiming: 'serial' }).then(() => {
                 // The async diagram pass can resolve AFTER a session switch: the
                 // bubble may already be detached and the transcript re-rendered
                 // with another session's messages. Guard on the generation so a
@@ -7974,7 +7974,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // and path linkification — same treatment as Completed.
             for (const seg of assistantSegments) {
               if (!seg.text) continue;
-              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(seg.text)), seg.el).then(() => {
+              void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(seg.text)), seg.el, { visualTiming: 'serial' }).then(() => {
                 if (gen !== this.generation) return;
                 this.scrollUi(chatEl);
               });

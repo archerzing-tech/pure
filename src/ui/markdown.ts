@@ -1053,65 +1053,73 @@ async function renderMermaidNodes(container: HTMLElement): Promise<void> {
 
   for (const { slot, version } of attempts) {
     await yieldFrame(); // 多图分帧:每张之间让 UI 呼吸一格,不再整批冻结
-    const target = slot.querySelector<HTMLElement>('.mermaid-target');
-    if (!target) {
-      if (isCurrentDiagramRender(slot, version)) {
-        slot.setAttribute('data-processed', 'true');
-        setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    await processMermaidSlot(slot, version, mermaid);
+  }
+}
+
+/** One mermaid slot, claim → parse → render → 终态. Shared by the batch pass
+ *  (renderMermaidNodes) and the document-order dispatcher. Note: unlike the
+ *  other five kinds the mermaid claim lives INSIDE the body (claim happens
+ *  after the target check, per the original batch loop). */
+async function processMermaidSlot(slot: HTMLElement, version: number, mermaid: MermaidAPI): Promise<void> {
+  const target = slot.querySelector<HTMLElement>('.mermaid-target');
+  if (!target) {
+    if (isCurrentDiagramRender(slot, version)) {
+      slot.setAttribute('data-processed', 'true');
+      setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    }
+    return;
+  }
+  const raw = mermaidRawOf(slot);
+  if (!isCurrentDiagramRender(slot, version)) return;
+  slot.setAttribute('data-processed', 'true');
+  setDiagramState(slot, 'loading');
+  // 渲染缓存命中:同源码同主题直接复用上次渲染结果(冷会话恢复/回放零重渲)。
+  const cacheKey = diagramCacheKey('mermaid', raw);
+  const cachedSvg = lookupDiagramSvg(cacheKey);
+  if (cachedSvg !== undefined) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    target.innerHTML = dedupeSvgIds(cachedSvg);
+    setDiagramState(slot, 'preview');
+    return;
+  }
+  try {
+    const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
+    const { svg } = await withTimeout(mermaid.render(id, raw));
+    if (!isCurrentDiagramRender(slot, version)) return;
+    target.innerHTML = svg;
+    cacheDiagramSvg(cacheKey, svg);
+    setDiagramState(slot, 'preview');
+  } catch (err) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    // Smart fault tolerance: a slightly-broken source (stray fence/backticks,
+    // leading prose before the diagram start line, HTML comments, a trailing
+    // line truncated mid-edge) is repaired and re-rendered once. Only the
+    // ORIGINAL error surfaces when the repaired source also fails, so the
+    // user always sees the real reason and can retry by hand.
+    const repaired = repairMermaidSource(raw);
+    if (repaired.repaired) {
+      const repairedKey = diagramCacheKey('mermaid', repaired.source);
+      const repairedCached = lookupDiagramSvg(repairedKey);
+      if (repairedCached !== undefined) {
+        if (!isCurrentDiagramRender(slot, version)) return;
+        target.innerHTML = dedupeSvgIds(repairedCached);
+        markDiagramRepaired(slot, repaired.source);
+        setDiagramState(slot, 'preview');
+        return;
       }
-      continue;
+      try {
+        const retryId = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
+        const { svg } = await withTimeout(mermaid.render(retryId, repaired.source));
+        if (!isCurrentDiagramRender(slot, version)) return;
+        target.innerHTML = svg;
+        cacheDiagramSvg(repairedKey, svg);
+        markDiagramRepaired(slot, repaired.source);
+        setDiagramState(slot, 'preview');
+        return;
+      } catch { /* repaired source also failed → show the original error */ }
     }
-    const raw = mermaidRawOf(slot);
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    slot.setAttribute('data-processed', 'true');
-    setDiagramState(slot, 'loading');
-    // 渲染缓存命中:同源码同主题直接复用上次渲染结果(冷会话恢复/回放零重渲)。
-    const cacheKey = diagramCacheKey('mermaid', raw);
-    const cachedSvg = lookupDiagramSvg(cacheKey);
-    if (cachedSvg !== undefined) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      target.innerHTML = dedupeSvgIds(cachedSvg);
-      setDiagramState(slot, 'preview');
-      continue;
-    }
-    try {
-      const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
-      const { svg } = await withTimeout(mermaid.render(id, raw));
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      target.innerHTML = svg;
-      cacheDiagramSvg(cacheKey, svg);
-      setDiagramState(slot, 'preview');
-    } catch (err) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      // Smart fault tolerance: a slightly-broken source (stray fence/backticks,
-      // leading prose before the diagram start line, HTML comments, a trailing
-      // line truncated mid-edge) is repaired and re-rendered once. Only the
-      // ORIGINAL error surfaces when the repaired source also fails, so the
-      // user always sees the real reason and can retry by hand.
-      const repaired = repairMermaidSource(raw);
-      if (repaired.repaired) {
-        const repairedKey = diagramCacheKey('mermaid', repaired.source);
-        const repairedCached = lookupDiagramSvg(repairedKey);
-        if (repairedCached !== undefined) {
-          if (!isCurrentDiagramRender(slot, version)) continue;
-          target.innerHTML = dedupeSvgIds(repairedCached);
-          markDiagramRepaired(slot, repaired.source);
-          setDiagramState(slot, 'preview');
-          continue;
-        }
-        try {
-          const retryId = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
-          const { svg } = await withTimeout(mermaid.render(retryId, repaired.source));
-          if (!isCurrentDiagramRender(slot, version)) continue;
-          target.innerHTML = svg;
-          cacheDiagramSvg(repairedKey, svg);
-          markDiagramRepaired(slot, repaired.source);
-          setDiagramState(slot, 'preview');
-          continue;
-        } catch { /* repaired source also failed → show the original error */ }
-      }
-      setDiagramState(slot, 'error', t('diagram.renderFailed'));
-    }
+    setDiagramState(slot, 'error', t('diagram.renderFailed'));
   }
 }
 
@@ -1171,40 +1179,46 @@ async function renderPumlNodes(container: HTMLElement): Promise<void> {
   const dark = isDark();
   for (const { slot, version } of attempts) {
     await yieldFrame(); // 多图分帧:TeaVM 渲染是秒级同步开销,图间让帧
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    const target = slot.querySelector<HTMLElement>('.puml-target');
-    if (!target) {
-      setDiagramState(slot, 'error', t('diagram.missingTarget'));
-      continue;
+    await processPumlSlot(slot, version, mod, dark);
+  }
+}
+
+/** One puml slot, parse → render → sanitize → 终态 (claim lives in the batch
+ *  header / the dispatcher's claim helper). */
+async function processPumlSlot(slot: HTMLElement, version: number, mod: typeof import('./plantumlDiagram'), dark: boolean): Promise<void> {
+  if (!isCurrentDiagramRender(slot, version)) return;
+  const target = slot.querySelector<HTMLElement>('.puml-target');
+  if (!target) {
+    setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    return;
+  }
+  const source = diagramRawOf(slot);
+  // 渲染缓存命中(同 mermaid):省掉 TeaVM 引擎秒级渲染 + sanitize 整趟。
+  const cacheKey = diagramCacheKey('puml', source);
+  const cachedHtml = lookupDiagramSvg(cacheKey);
+  if (cachedHtml !== undefined) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    target.innerHTML = cachedHtml;
+    setDiagramState(slot, 'preview');
+    return;
+  }
+  try {
+    // The engine renders ARBITRARY source into a picture — including its own
+    // syntax-error picture — so a bad diagram still shows what is wrong.
+    const svg = await withTimeout(mod.renderPlantumlToSvg(source, { dark }), PUML_RENDER_TIMEOUT_MS);
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const clean = sanitizeSvgSource(svg);
+    if (!clean) {
+      setDiagramState(slot, 'error', t('diagram.renderFailed'));
+      return;
     }
-    const source = diagramRawOf(slot);
-    // 渲染缓存命中(同 mermaid):省掉 TeaVM 引擎秒级渲染 + sanitize 整趟。
-    const cacheKey = diagramCacheKey('puml', source);
-    const cachedHtml = lookupDiagramSvg(cacheKey);
-    if (cachedHtml !== undefined) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      target.innerHTML = cachedHtml;
-      setDiagramState(slot, 'preview');
-      continue;
-    }
-    try {
-      // The engine renders ARBITRARY source into a picture — including its own
-      // syntax-error picture — so a bad diagram still shows what is wrong.
-      const svg = await withTimeout(mod.renderPlantumlToSvg(source, { dark }), PUML_RENDER_TIMEOUT_MS);
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const clean = sanitizeSvgSource(svg);
-      if (!clean) {
-        setDiagramState(slot, 'error', t('diagram.renderFailed'));
-        continue;
-      }
-      target.innerHTML = clean;
-      cacheDiagramSvg(cacheKey, clean);
-      setDiagramState(slot, 'preview');
-    } catch (err) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const detail = err instanceof Error && err.message ? `：${err.message}` : '';
-      setDiagramState(slot, 'error', `${t('diagram.renderFailed')}${detail}`);
-    }
+    target.innerHTML = clean;
+    cacheDiagramSvg(cacheKey, clean);
+    setDiagramState(slot, 'preview');
+  } catch (err) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const detail = err instanceof Error && err.message ? `：${err.message}` : '';
+    setDiagramState(slot, 'error', `${t('diagram.renderFailed')}${detail}`);
   }
 }
 
@@ -1398,42 +1412,48 @@ async function renderSvgNodes(container: HTMLElement): Promise<void> {
   });
 
   for (const { slot, version } of attempts) {
-    // A retry or newer render invalidates this attempt while it is yielding.
-    // Never let stale sanitization overwrite the newer preview/error state.
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    const target = slot.querySelector<HTMLElement>('.svg-target');
-    if (!target) {
-      setDiagramState(slot, 'error', t('diagram.missingTarget'));
-      continue;
-    }
-    const src = diagramRawOf(slot);
-    if (!src.trim()) {
-      setDiagramState(slot, 'error', t('diagram.svgEmpty'));
-      continue;
-    }
-    let svg = sanitizeSvgSource(src);
-    let repairedSource: string | null = null;
-    if (!svg) {
-      // Smart fault tolerance: a fenced / prose-wrapped or truncated document
-      // is extracted or completed, then sanitized once more before giving up.
-      const repaired = repairSvgSource(src);
-      if (repaired.repaired) {
-        svg = sanitizeSvgSource(repaired.source);
-        if (svg) repairedSource = repaired.source;
-      }
-    }
-    if (!svg) {
-      setDiagramState(slot, 'error', t('diagram.svgFailed'));
-      continue;
-    }
-    // Commit to this render BEFORE touching the DOM: a stale attempt (already
-    // superseded by a retry/theme re-render) must never append its repair
-    // badge to a preview that did not actually come from a repaired source.
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    target.innerHTML = svg;
-    if (repairedSource) markDiagramRepaired(slot, repairedSource);
-    setDiagramState(slot, 'preview');
+    await processSvgSlot(slot, version);
   }
+}
+
+/** One svg slot, sanitize (+repair) → inject → 终态 (claim lives in the batch
+ *  header / the dispatcher's claim helper). */
+async function processSvgSlot(slot: HTMLElement, version: number): Promise<void> {
+  // A retry or newer render invalidates this attempt while it is yielding.
+  // Never let stale sanitization overwrite the newer preview/error state.
+  if (!isCurrentDiagramRender(slot, version)) return;
+  const target = slot.querySelector<HTMLElement>('.svg-target');
+  if (!target) {
+    setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    return;
+  }
+  const src = diagramRawOf(slot);
+  if (!src.trim()) {
+    setDiagramState(slot, 'error', t('diagram.svgEmpty'));
+    return;
+  }
+  let svg = sanitizeSvgSource(src);
+  let repairedSource: string | null = null;
+  if (!svg) {
+    // Smart fault tolerance: a fenced / prose-wrapped or truncated document
+    // is extracted or completed, then sanitized once more before giving up.
+    const repaired = repairSvgSource(src);
+    if (repaired.repaired) {
+      svg = sanitizeSvgSource(repaired.source);
+      if (svg) repairedSource = repaired.source;
+    }
+  }
+  if (!svg) {
+    setDiagramState(slot, 'error', t('diagram.svgFailed'));
+    return;
+  }
+  // Commit to this render BEFORE touching the DOM: a stale attempt (already
+  // superseded by a retry/theme re-render) must never append its repair
+  // badge to a preview that did not actually come from a repaired source.
+  if (!isCurrentDiagramRender(slot, version)) return;
+  target.innerHTML = svg;
+  if (repairedSource) markDiagramRepaired(slot, repairedSource);
+  setDiagramState(slot, 'preview');
 }
 
 // ── Native charts (```chart blocks) ──
@@ -2327,41 +2347,47 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
 
     for (const { slot, version } of attempts) {
       await yieldFrame(); // 多图分帧:echarts init+setOption 同步阻塞,图间让帧
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const target = slot.querySelector<HTMLElement>('.chart-target');
-    if (!target) {
-      setDiagramState(slot, 'error', t('diagram.missingTarget'));
-      continue;
+      await processChartSlot(slot, version, mod);
     }
-    try {
-      const { spec, repaired, repairedSource } = parseChartSourceWithMeta(diagramRawOf(slot));
-      // 渲染缓存命中(同 mermaid/puml):echarts init+setOption 是主线程同步
-      // 开销,冷会话恢复逐图重跑;命中直接复用上次渲染的 SVG(存入时已
-      // viewBox 化,CSS 的 100% 强制尺寸下不变形;id 已去重防 defs 引用串图)。
-      // 命中前先验适配:缓存的 viewBox 烙着「上次渲染时容器」的宽高比,回放
-      // 容器宽度不同(会话恢复/侧栏开合/窗口尺寸)时直接插会挤压变形或在
-      // overflow:hidden 下裁掉——比例不符或槽位还测不出尺寸就当 miss 走真
-      // 渲染(mountEchart 的 ResizeObserver 会在布局落地后重适配)。
-      const cacheKey = diagramCacheKey('chart', diagramRawOf(slot));
-      const cachedChart = lookupDiagramSvg(cacheKey);
-      if (cachedChart !== undefined && cachedChartFits(cachedChart, target)) {
-        if (!isCurrentDiagramRender(slot, version)) continue;
-        target.innerHTML = dedupeSvgIds(cachedChart);
-        if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
-        setDiagramState(slot, 'preview');
-        continue;
-      }
-      mod.renderEchartInto(target, spec);
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      cacheChartSvg(target, cacheKey);
+}
+
+/** One chart slot, parse → cache-or-render → 终态 (claim lives in the batch
+ *  header / the dispatcher's claim helper). */
+async function processChartSlot(slot: HTMLElement, version: number, mod: typeof import('./echartsChart')): Promise<void> {
+  if (!isCurrentDiagramRender(slot, version)) return;
+  const target = slot.querySelector<HTMLElement>('.chart-target');
+  if (!target) {
+    setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    return;
+  }
+  try {
+    const { spec, repaired, repairedSource } = parseChartSourceWithMeta(diagramRawOf(slot));
+    // 渲染缓存命中(同 mermaid/puml):echarts init+setOption 是主线程同步
+    // 开销,冷会话恢复逐图重跑;命中直接复用上次渲染的 SVG(存入时已
+    // viewBox 化,CSS 的 100% 强制尺寸下不变形;id 已去重防 defs 引用串图)。
+    // 命中前先验适配:缓存的 viewBox 烙着「上次渲染时容器」的宽高比,回放
+    // 容器宽度不同(会话恢复/侧栏开合/窗口尺寸)时直接插会挤压变形或在
+    // overflow:hidden 下裁掉——比例不符或槽位还测不出尺寸就当 miss 走真
+    // 渲染(mountEchart 的 ResizeObserver 会在布局落地后重适配)。
+    const cacheKey = diagramCacheKey('chart', diagramRawOf(slot));
+    const cachedChart = lookupDiagramSvg(cacheKey);
+    if (cachedChart !== undefined && cachedChartFits(cachedChart, target)) {
+      if (!isCurrentDiagramRender(slot, version)) return;
+      target.innerHTML = dedupeSvgIds(cachedChart);
       if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
       setDiagramState(slot, 'preview');
-    } catch (err) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw === 'empty chart source' ? t('diagram.chartEmptySource') : t('diagram.chartParseFailed');
-      setDiagramState(slot, 'error', msg);
+      return;
     }
+    mod.renderEchartInto(target, spec);
+    if (!isCurrentDiagramRender(slot, version)) return;
+    cacheChartSvg(target, cacheKey);
+    if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+    setDiagramState(slot, 'preview');
+  } catch (err) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const raw = err instanceof Error ? err.message : String(err);
+    const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw === 'empty chart source' ? t('diagram.chartEmptySource') : t('diagram.chartParseFailed');
+    setDiagramState(slot, 'error', msg);
   }
 }
 
@@ -2399,26 +2425,32 @@ async function renderPaintNodes(container: HTMLElement): Promise<void> {
   });
 
   for (const { slot, version } of attempts) {
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    const target = slot.querySelector<HTMLElement>('.paint-target');
-    if (!target) {
-      setDiagramState(slot, 'error', t('diagram.missingTarget'));
-      continue;
-    }
-    try {
-      const { spec, repaired, repairedSource } = parsePaintSource(diagramRawOf(slot));
-      renderPaintInto(target, spec);
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
-      setDiagramState(slot, 'preview');
-    } catch (err) {
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw.startsWith('paint 数据需要是一个 JSON 对象') ? t('paint.parseFailed')
-        : raw.startsWith('paint 绘图内容为空') ? t('paint.empty')
-        : t('diagram.renderFailed');
-      setDiagramState(slot, 'error', msg);
-    }
+    await processPaintSlot(slot, version);
+  }
+}
+
+/** One paint slot, parse → draw → 终态 (claim + aspect pre-shaping live in
+ *  the batch header / the dispatcher's claim helper). */
+async function processPaintSlot(slot: HTMLElement, version: number): Promise<void> {
+  if (!isCurrentDiagramRender(slot, version)) return;
+  const target = slot.querySelector<HTMLElement>('.paint-target');
+  if (!target) {
+    setDiagramState(slot, 'error', t('diagram.missingTarget'));
+    return;
+  }
+  try {
+    const { spec, repaired, repairedSource } = parsePaintSource(diagramRawOf(slot));
+    renderPaintInto(target, spec);
+    if (!isCurrentDiagramRender(slot, version)) return;
+    if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
+    setDiagramState(slot, 'preview');
+  } catch (err) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const raw = err instanceof Error ? err.message : String(err);
+    const msg = raw.startsWith('paint 数据需要是一个 JSON 对象') ? t('paint.parseFailed')
+      : raw.startsWith('paint 绘图内容为空') ? t('paint.empty')
+      : t('diagram.renderFailed');
+    setDiagramState(slot, 'error', msg);
   }
 }
 
@@ -2650,66 +2682,74 @@ async function renderMapNodes(container: HTMLElement): Promise<void> {
   }
 
   for (const { slot, version } of attempts) {
-    if (!isCurrentDiagramRender(slot, version)) continue;
-    const canvas = slot.querySelector<HTMLElement>('.map-canvas');
-    if (!canvas) {
-      setMapState(slot, 'error', t('diagram.missingTarget'));
-      continue;
-    }
-    let parsed: ReturnType<typeof mod.parseMapSource>;
-    try {
-      parsed = mod.parseMapSource(mapRawOf(slot));
-    } catch (err) {
-      // A malformed map payload is deterministic — retrying never fixes it —
-      // so this is the ONE map failure that stays visible (with the raw
-      // source view). No retry button: it would re-parse the same broken
-      // raw and land here again. Everything transient is silent.
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      const raw = err instanceof Error ? err.message : String(err);
-      setMapState(slot, 'error', raw.includes('map 数据') ? raw : t('diagram.renderFailed'));
-      continue;
-    }
-    try {
-      mod.renderMapInto(canvas, parsed.spec, {
-        onTileStatus: (status) => {
-          if (!isCurrentDiagramRender(slot, version)) return;
-          if (status === 'error') {
-            // 底图失败对用户不可见：卡片保持 loading（转圈圈），后台按退避
-            // 静默重试，直到瓦片真正渲染出来才撤销 loading、显示地图。
-            scheduleSilentMapRetry(slot, version);
-          } else if (status === 'ready') {
-            // 瓦片确认可见——这是唯一撤掉 loading 的时刻。
-            cancelSilentMapRetry(slot);
-            mapRetryAttempts.delete(slot);
-            setMapState(slot, 'preview');
-          }
-        },
-      });
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      if (parsed.repaired && parsed.repairedSource) markDiagramRepaired(slot, parsed.repairedSource);
-      // Programmatic route-direction warning: surfaced as a visible banner
-      // on the map when waypoints head away from the destination.
-      if (parsed.spec.routeWarningText) {
-        const warnEl = slot.querySelector<HTMLElement>('.map-route-warning');
-        if (warnEl) {
-          warnEl.textContent = '';
-          const icon = document.createElement('span');
-          icon.className = 'map-route-warning-icon';
-          icon.textContent = '⚠️';
-          warnEl.appendChild(icon);
-          const msg = document.createElement('span');
-          msg.className = 'map-route-warning-text';
-          msg.textContent = parsed.spec.routeWarningText;
-          warnEl.appendChild(msg);
+    await processMapSlot(slot, version, mod);
+  }
+}
+
+/** One map slot, parse → renderMapInto (tiles settle asynchronously via the
+ *  onTileStatus callback) → route warning. The caller decides whether to wait
+ *  for the tile-level settle (waitForMapSlotSettled) — the batch pass doesn't
+ *  (fire-and-forget, same as before), the document-order dispatcher does. */
+async function processMapSlot(slot: HTMLElement, version: number, mod: LeafletMapModule): Promise<void> {
+  if (!isCurrentDiagramRender(slot, version)) return;
+  const canvas = slot.querySelector<HTMLElement>('.map-canvas');
+  if (!canvas) {
+    setMapState(slot, 'error', t('diagram.missingTarget'));
+    return;
+  }
+  let parsed: ReturnType<typeof mod.parseMapSource>;
+  try {
+    parsed = mod.parseMapSource(mapRawOf(slot));
+  } catch (err) {
+    // A malformed map payload is deterministic — retrying never fixes it —
+    // so this is the ONE map failure that stays visible (with the raw
+    // source view). No retry button: it would re-parse the same broken
+    // raw and land here again. Everything transient is silent.
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const raw = err instanceof Error ? err.message : String(err);
+    setMapState(slot, 'error', raw.includes('map 数据') ? raw : t('diagram.renderFailed'));
+    return;
+  }
+  try {
+    mod.renderMapInto(canvas, parsed.spec, {
+      onTileStatus: (status) => {
+        if (!isCurrentDiagramRender(slot, version)) return;
+        if (status === 'error') {
+          // 底图失败对用户不可见：卡片保持 loading（转圈圈），后台按退避
+          // 静默重试，直到瓦片真正渲染出来才撤销 loading、显示地图。
+          scheduleSilentMapRetry(slot, version);
+        } else if (status === 'ready') {
+          // 瓦片确认可见——这是唯一撤掉 loading 的时刻。
+          cancelSilentMapRetry(slot);
+          mapRetryAttempts.delete(slot);
+          setMapState(slot, 'preview');
         }
+      },
+    });
+    if (!isCurrentDiagramRender(slot, version)) return;
+    if (parsed.repaired && parsed.repairedSource) markDiagramRepaired(slot, parsed.repairedSource);
+    // Programmatic route-direction warning: surfaced as a visible banner
+    // on the map when waypoints head away from the destination.
+    if (parsed.spec.routeWarningText) {
+      const warnEl = slot.querySelector<HTMLElement>('.map-route-warning');
+      if (warnEl) {
+        warnEl.textContent = '';
+        const icon = document.createElement('span');
+        icon.className = 'map-route-warning-icon';
+        icon.textContent = '⚠️';
+        warnEl.appendChild(icon);
+        const msg = document.createElement('span');
+        msg.className = 'map-route-warning-text';
+        msg.textContent = parsed.spec.routeWarningText;
+        warnEl.appendChild(msg);
       }
-    } catch {
-      // Render-time failure (DOM/timing/tile layer) is transient by nature —
-      // keep the spinner up and retry in the background instead of flashing
-      // an error card.
-      if (!isCurrentDiagramRender(slot, version)) continue;
-      scheduleSilentMapRetry(slot, version);
     }
+  } catch {
+    // Render-time failure (DOM/timing/tile layer) is transient by nature —
+    // keep the spinner up and retry in the background instead of flashing
+    // an error card.
+    if (!isCurrentDiagramRender(slot, version)) return;
+    scheduleSilentMapRetry(slot, version);
   }
 }
 
@@ -2774,6 +2814,199 @@ function scheduleSilentMapRetry(slot: HTMLElement, version: number): void {
     scheduleSilentMapRetry(slot, version);
   }, delay);
   mapRetryTimers.set(slot, timer);
+}
+
+// ── Block-level serial timing (document-order dispatcher) ──
+// 2026-11-03 定调（用户）：对话流时序不变量——文档序相邻块 a→b，b 进入可见
+// DOM 前 a 必须已落「渲染终态」（preview/error 或图片 load/error），形式
+// 无关。completion 面按形式分批（svg 全部→chart 全部→…→mermaid 全部）是
+// 形式间乱序：文档序 [mermaid, map] 会先出 map 后出 mermaid。此 dispatcher
+// 把六种 fence slot + markdown 图片按 DOM 序逐个渲染，一个落终态才轮下一个。
+// 文字段不扣：同步渲染无空窗，「未完成态」不存在。流式面的同一不变量由
+// streamingMapGate / streamingDiagramGate / streamingImageGate 保证。
+
+const MAP_SETTLE_POLL_MS = 60;
+
+/** 双 rAF 让 loading 占位先布局——leaflet/echarts 量 0 宽容器会渲出变形图。 */
+async function yieldTwoFrames(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+/** map slot 的瓦片级 settle 等待：renderMapInto 同步返回但瓦片异步 ready，
+ *  静默重试期间 data-map-state 停在 loading；preview（瓦片可见）与 error
+ *  （含重试耗尽的 tilesFailed）是仅有的两个终态。预算是挂死保险丝，不是
+ *  限速——正常渲染秒级落定，永远等不到超时。 */
+export async function waitForMapSlotSettled(slot: HTMLElement, budgetMs: number): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    const state = slot.getAttribute('data-map-state');
+    if (state === 'preview' || state === 'error') return;
+    await new Promise((resolve) => setTimeout(resolve, MAP_SETTLE_POLL_MS));
+  }
+}
+
+/** markdown 图片（.md-img-wrap）的加载 settle。视口外的 lazy 图跳过——
+ *  loading="lazy" 让它们在滚动到位前不 fetch，「未加载」不是「未完成」。 */
+export async function waitForImagesSettled(wrap: HTMLElement, budgetMs: number): Promise<void> {
+  const imgs = Array.from(wrap.querySelectorAll<HTMLImageElement>('img.md-img'));
+  const deadline = Date.now() + budgetMs;
+  for (const img of imgs) {
+    if (img.complete) continue;
+    const rect = img.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+    const remaining = Math.max(0, deadline - Date.now());
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        img.removeEventListener('load', done);
+        img.removeEventListener('error', done);
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(done, remaining);
+      img.addEventListener('load', done);
+      img.addEventListener('error', done);
+    });
+  }
+}
+
+/** 文档序 dispatcher 的单 slot 路径：模块懒加载 → claim（含各形式的批首
+ *  特有动作）→ 双 rAF → process 体。map 的瓦片级 settle 等待由 dispatcher
+ *  循环按「是否还有下一个异步块」决定（等待扣的是下一个块的放行，不扣
+ *  renderMarkdown 尾部的绑定/chips——它们不是可视块）。 */
+async function renderOneSlotInOrder(slot: HTMLElement): Promise<void> {
+  if (slot.classList.contains('mermaid-slot')) {
+    let mermaid: MermaidAPI;
+    try {
+      mermaid = await withTimeout(ensureMermaid());
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slot.setAttribute('data-processed', 'true');
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（流程图模块）：${detail}`);
+      return;
+    }
+    await yieldTwoFrames();
+    await processMermaidSlot(slot, nextDiagramRenderVersion(slot), mermaid);
+    return;
+  }
+  if (slot.classList.contains('puml-slot')) {
+    let mod: typeof import('./plantumlDiagram');
+    try {
+      mod = await ensurePlantuml();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slot.setAttribute('data-processed', 'true');
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（PlantUML 模块）：${detail}`);
+      return;
+    }
+    slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+    await yieldTwoFrames();
+    await processPumlSlot(slot, nextDiagramRenderVersion(slot), mod, isDark());
+    return;
+  }
+  if (slot.classList.contains('svg-slot')) {
+    // svg 的 claim 带批首特有动作：preview 视图 + 清 target（防大源码闪烁）。
+    slot.setAttribute('data-processed', 'true');
+    slot.setAttribute('data-view', 'preview');
+    const target = slot.querySelector<HTMLElement>('.svg-target');
+    if (target) target.innerHTML = '';
+    setDiagramState(slot, 'loading');
+    await yieldTwoFrames();
+    await processSvgSlot(slot, nextDiagramRenderVersion(slot));
+    return;
+  }
+  if (slot.classList.contains('chart-slot')) {
+    let mod: typeof import('./echartsChart');
+    try {
+      mod = await ensureEchartsChart();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slot.setAttribute('data-processed', 'true');
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（图表模块）：${detail}`);
+      return;
+    }
+    slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+    await yieldTwoFrames();
+    await processChartSlot(slot, nextDiagramRenderVersion(slot), mod);
+    return;
+  }
+  if (slot.classList.contains('paint-slot')) {
+    slot.setAttribute('data-processed', 'true');
+    setDiagramState(slot, 'loading');
+    // Pre-shape the loading card to the finished aspect ratio (same as the
+    // batch header) so the reveal doesn't jump geometry.
+    try {
+      const { spec } = parsePaintSource(diagramRawOf(slot));
+      slot.style.setProperty('--paint-aspect', `${spec.width} / ${spec.height}`);
+    } catch { /* parse fails → error card later */ }
+    await yieldTwoFrames();
+    await processPaintSlot(slot, nextDiagramRenderVersion(slot));
+    return;
+  }
+  if (slot.classList.contains('map-slot')) {
+    let mod: LeafletMapModule;
+    try {
+      mod = await ensureLeafletMap();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slot.setAttribute('data-processed', 'true');
+      setMapState(slot, 'error', `${t('diagram.loadFailed')}（地图模块）：${detail}。请重启应用后重试；如持续出现请检查应用完整性。`);
+      return;
+    }
+    slot.setAttribute('data-processed', 'true');
+    setMapState(slot, 'loading');
+    await yieldTwoFrames();
+    await processMapSlot(slot, nextDiagramRenderVersion(slot), mod);
+  }
+}
+
+/** Completion 面的可视块渲染编排。serial（活渲染）=六种 fence slot +
+ *  markdown 图片按 DOM 序逐个渲完（含 map 瓦片 settle / 图片 load settle）
+ *  才轮下一个——选择器并集的 querySelectorAll 天然文档序；preserve 采纳
+ *  （data-processed / data-timing-pass 在身）与未闭合 fence 的 slot 自然
+ *  跳过。parallel（冷恢复/回放，默认）=旧批处理序，无等待。 */
+async function renderAsyncBlocksInDocumentOrder(container: HTMLElement, timing: 'serial' | 'parallel'): Promise<void> {
+  if (timing === 'parallel') {
+    await renderSvgNodes(container);
+    await renderChartNodes(container);
+    await renderPaintNodes(container);
+    await renderMapNodes(container);
+    await renderPumlNodes(container);
+    await renderMermaidNodes(container);
+    return;
+  }
+  const selector = [
+    '.mermaid-slot:not([data-processed])',
+    '.puml-slot:not([data-processed])',
+    '.svg-slot:not([data-processed])',
+    '.chart-slot:not([data-processed])',
+    '.paint-slot:not([data-processed])',
+    '.map-slot:not([data-processed])',
+    '.md-img-wrap:not([data-timing-pass])',
+  ].join(',');
+  const units = Array.from(container.querySelectorAll<HTMLElement>(selector))
+    .filter((el) => !el.classList.contains('md-img-wrap') && !streamFenceOpen(el));
+  for (let i = 0; i < units.length; i++) {
+    const unit = units[i];
+    if (unit.classList.contains('md-img-wrap')) {
+      await waitForImagesSettled(unit, DIAGRAM_HOLD_BUDGET_MS);
+      unit.setAttribute('data-timing-pass', '1');
+      continue;
+    }
+    await renderOneSlotInOrder(unit);
+    // map 瓦片 settle 只扣下一个异步块的放行；map 是最后一个 unit 时不等
+    // （尾部绑定/chips 不是可视块，不被渲染时序扣）。
+    if (unit.classList.contains('map-slot') && i < units.length - 1) {
+      await waitForMapSlotSettled(unit, DIAGRAM_HOLD_BUDGET_MS);
+    }
+  }
 }
 
 function bindMapControls(container: HTMLElement): void {
@@ -2844,7 +3077,7 @@ function highlightAll(container: HTMLElement): void {
 export async function renderMarkdown(
   text: string,
   container: HTMLElement,
-  options: { yieldBeforeParse?: boolean } = {},
+  options: { yieldBeforeParse?: boolean; visualTiming?: 'serial' | 'parallel' } = {},
 ): Promise<void> {
   // Yield before the expensive parse/sanitize/highlight pipeline during live
   // completion. Session replay already slices work into batches, so it opts
@@ -2916,23 +3149,14 @@ export async function renderMarkdown(
   // re-linking churn on every token.
   linkifyPaths(container);
 
-  // 3) Inline SVG (```svg) + native charts (```chart) — both synchronous.
-  // Group before awaiting sanitization so independent loading placeholders are
-  // already laid out as a gallery while their SVGs are being prepared.
+  // 3) All async visual blocks — the six fence kinds (svg/chart/paint/map/
+  // puml/mermaid) plus markdown images. serial（活渲染完成面）=文档序逐块，
+  // a 落渲染终态才轮 b（2026-11-03 时序不变量，形式无关）；parallel（默认，
+  // 冷会话恢复/回放）=旧批处理序——恢复时用户不在观看生成过程，全块一屏
+  // 快速出现，严格序等待是纯开销。Group svg slots first so a multi-svg
+  // gallery is laid out as a whole while its slots render one by one.
   groupAdjacentSvgSlots(container);
-  await renderSvgNodes(container);
-  // SVG targets become visible before chart/Mermaid rendering can finish. Bind
-  // their double-click handler now, not at the end of the whole pipeline.
-  bindVectorPopup(container);
-  await renderChartNodes(container);
-  await renderPaintNodes(container);
-  await renderMapNodes(container);
-
-  // 4) Async: PlantUML renders locally (its own lazy engine chunk) into
-  // .puml-target, then mermaid fills .mermaid-target. Both are awaited so the
-  // viewer/export bindings below only ever see rendered previews.
-  await renderPumlNodes(container);
-  await renderMermaidNodes(container);
+  await renderAsyncBlocksInDocumentOrder(container, options.visualTiming ?? 'parallel');
 
   // 5) Bind the post-render preview/source controls and diagram viewers.
   bindDiagramControls(container);
@@ -3228,6 +3452,44 @@ function streamingDiagramGate(el: HTMLElement, container: HTMLElement): boolean 
   return true;
 }
 
+/**
+ * Streaming hold-gate for markdown images (.md-img) — the last form in the
+ * block-level serial-timing invariant. An <img> mounted earlier in the stream
+ * loads asynchronously (decoding/asset fetch); without this gate the text
+ * below it flows up while the picture area is still blank, and the picture
+ * pops in later with a layout jump. Once an img is present BEFORE the block
+ * about to be shown, every later block holds until it completes (load/error
+ * both count — a broken picture is a terminal state, never a wedge).
+ * Attribute fuse on the wrap, same shape as the diagram gates: budget
+ * releases the text, the picture keeps loading in place.
+ * Viewport-off lazy images are exempt — loading="lazy" means "not fetching
+ * yet", which is not "unfinished".
+ */
+export function streamingImageGate(el: HTMLElement): boolean {
+  const root = el.parentElement ?? el;
+  let pending: HTMLImageElement | null = null;
+  for (const img of Array.from(root.querySelectorAll<HTMLImageElement>('img.md-img'))) {
+    if (img.complete) continue;
+    const rect = img.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+    const beforeEl = img === el || el.contains(img)
+      || (img.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    if (beforeEl) { pending = img; break; }
+  }
+  if (!pending) return false;
+  const anchor = pending.closest<HTMLElement>('.md-img-wrap') ?? pending;
+  if (anchor.getAttribute('data-hold-released') === '1') return false;
+  if (anchor.hasAttribute('data-hold-since')) {
+    if (Date.now() - Number(anchor.getAttribute('data-hold-since')) >= DIAGRAM_HOLD_BUDGET_MS) {
+      anchor.setAttribute('data-hold-released', '1');
+      return false;
+    }
+  } else {
+    anchor.setAttribute('data-hold-since', String(Date.now()));
+  }
+  return true;
+}
+
 function diffStreaming(container: HTMLElement, text: string): void {
   ungroupStreamingSvgGalleries(container);
   // During streaming, chat.ts sets `bubble.textContent = …` for instant raw
@@ -3289,6 +3551,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
       childIdx++;
       if (streamingMapGate(oldEl)) break;
       if (streamingDiagramGate(oldEl, container)) break;
+      if (streamingImageGate(oldEl)) break;
       continue;
     }
 
@@ -3315,6 +3578,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
         childIdx++;
         if (streamingMapGate(oldEl)) break;
         if (streamingDiagramGate(oldEl, container)) break;
+        if (streamingImageGate(oldEl)) break;
         continue;
       }
       // No mounted slot yet + open fence → fall through and mount the plain
@@ -3370,6 +3634,9 @@ function diffStreaming(container: HTMLElement, text: string): void {
     // holds the text below it until the picture is on screen (or the render
     // definitively failed) — 2026-09-23 user requirement.
     if (streamingDiagramGate(newEl, container)) break;
+    // Same for markdown images: an unfinished picture holds every later block
+    // until it completes (2026-11-03 时序不变量，形式无关).
+    if (streamingImageGate(newEl)) break;
   }
 
   // Trim trailing old children beyond the elements we just reconciled (rare

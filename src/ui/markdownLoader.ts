@@ -29,7 +29,7 @@ export function stripToolCallXml(text: string): string {
 export function renderMarkdown(
   text: string,
   container: HTMLElement,
-  options?: { yieldBeforeParse?: boolean },
+  options?: { yieldBeforeParse?: boolean; visualTiming?: 'serial' | 'parallel' },
 ): Promise<void> {
   return loadMarkdown()
     .then((module) => module.renderMarkdown(text, container, options))
