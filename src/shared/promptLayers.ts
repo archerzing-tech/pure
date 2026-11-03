@@ -193,8 +193,8 @@ export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ON
  *
  * 放尾部：它随请求变化，尾巴变动只让尾巴重预填（同 capabilities / task_mode）。
  */
-export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply, and never as a file or a script. Fence tags: svg (hand-drawn picture), mermaid / puml (structural diagrams), chart (data visual), map (real-world geography), paint (static geometric illustration).
-NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it before emitting chart/map/paint blocks unless their syntax is already in context (svg/mermaid/puml you can write from your own knowledge), and whenever unsure which form fits.`;
+export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram so it ends up VISIBLE inside the reply. Fence tags: svg (hand-drawn picture), mermaid / puml (structural diagrams), chart (data visual), map (real-world geography), paint (static geometric illustration).
+A fenced block IS the picture — it renders inline as written. A script (Python/matplotlib etc.) also works, but its output file stays invisible until referenced inline as ![desc](/absolute/path.png); a bare path or tool result alone never renders as a picture. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it before emitting chart/map/paint blocks unless their syntax is already in context (svg/mermaid/puml you can write from your own knowledge), and whenever unsure which form fits.`;
 
 /** routing 决策精要 — 机械注入版（2026-11-02 第三刀）。两轮真机判例
  *  （session_1793600755798_1 / session_1793602596186_3）：请求点名图的归宿
@@ -272,14 +272,17 @@ export const IMAGE_GEN_OUTPUT_PROMPT = `When the user asks for images, icons, il
  * The GUI renders fenced ```chart blocks inline as echarts charts (bar/hbar/
  * line/pie/scatter/kline/radar/tree/treemap/sunburst). The CLI renders the
  * block as plain code. The closing rule matters beyond syntax: charts and
- * pictures are DELIVERED as fenced blocks — never as a script that draws them. */
+ * pictures are DELIVERED so they render inline — a fenced block directly, or a
+ * script whose output file is referenced inline (禁令已裁：asset:// 通道本就
+ * 能内联脚本产图，交付判据取代 NEVER 禁令). */
 export const CHART_DSL_PROMPT = `To SHOW data as a chart, emit a fenced code block tagged chart. Put type: on its own line (default bar), then optional title: and unit: lines, then the data rows. Supported types:
 - bar | hbar | line | pie — one \`label value\` row per line (e.g. 一月 120); a header row plus >=2 numeric columns renders one series per column.
 - scatter — one point per line: \`name x y\` (e.g. 小明 170 65).
 - kline — a header \`日期 开盘 收盘 最低 最高\` then \`date open close low high\` rows (that OHLC order is required).
 - radar — \`indicators: 维度1 维度2 …\` (or a header row of axis names), then one series per line: \`名称 v1 v2 …\`.
 - tree | treemap | sunburst — indentation defines the hierarchy (2 spaces per level), the first line is the root; for treemap/sunburst end a line with a number to set its value (\`  电子 500\`).
-A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every type. NEVER write a Python/matplotlib or other script to draw a chart or picture — the fenced chart / svg / mermaid / puml block IS the deliverable and renders inline as the image.`;
+Picking the type is about how humans read the picture: change over time / forecast / trend -> line (a bar chart of a time series reads as unrelated buckets — the human eye traces a trend along a line, not across bars); comparing categories -> bar / hbar (hbar when labels are long); share of a whole -> pie; how two variables move together -> scatter.
+A JSON payload (\`{ "type": "tree", "data": [...] }\`) is accepted for every type. A fenced chart / svg / mermaid / puml block IS the picture and renders inline — the direct path. A script (Python/matplotlib etc.) also works if its output file is referenced inline as ![desc](/absolute/path.png); an unreferenced file is never shown.`;
 
 /** ```map DSL contract — identical in GUI and CLI (shared, not duplicated). The
  * GUI renders fenced ```map blocks inline as an interactive Leaflet +

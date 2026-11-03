@@ -652,9 +652,10 @@ describe('PromptAssembler', () => {
   });
 
   it('carries the visual pointer always, and the DSL detail only for a request that needs it', () => {
-    // 常驻：块标签 + 「不写文件 / 不用脚本画」守门线（漏判闸门时行为不会翻车）。
+    // 常驻：块标签 + 交付判据守门线（可见性底线 + 脚本产图须内联引用；
+    // 漏判闸门时行为不会翻车）。
     const chat = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '这个函数是干什么的？');
-    expect(chat).toContain('Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply');
+    expect(chat).toContain('Visual output — deliver any picture, chart, map, or diagram so it ends up VISIBLE inside the reply');
     // 细则特有的句子（就在细则段里，指针段没有），用来区分「细则到位/没到位」。
     expect(chat).not.toContain('A JSON payload');
     expect(chat).not.toContain('A MAP IS NEVER SVG');

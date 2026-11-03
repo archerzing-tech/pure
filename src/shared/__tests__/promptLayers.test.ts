@@ -214,9 +214,17 @@ describe('L1 behavior contracts', () => {
     expect(CHART_DSL_PROMPT).toContain('treemap');
     expect(CHART_DSL_PROMPT).toContain('sunburst');
     expect(CHART_DSL_PROMPT).toContain('tree');
-    // Charts/pictures are delivered as fenced blocks — never a script that draws them.
-    expect(CHART_DSL_PROMPT).toContain('NEVER write a Python/matplotlib');
-    expect(CHART_DSL_PROMPT).toContain('IS the deliverable');
+    // Charts render inline as fenced blocks — the direct path; a script also
+    // works if its output file is referenced inline (2026-11-03 裁禁令：
+    // asset:// 通道本就能内联脚本产图，交付判据取代 NEVER 禁令).
+    expect(CHART_DSL_PROMPT).toContain('the direct path');
+    expect(CHART_DSL_PROMPT).toContain('referenced inline as ![desc](/absolute/path.png)');
+    expect(CHART_DSL_PROMPT).not.toContain('NEVER write a Python');
+    // 人类读图判据（2026-11-03 真机判例：7 天天气趋势被画成柱状图——随附层
+    // DSL 只有 type 枚举+default bar，判据不在场时模型盲选）：选型判据必须
+    // 随 DSL 在场，趋势→折线是铁锚。
+    expect(CHART_DSL_PROMPT).toContain('change over time / forecast / trend -> line');
+    expect(CHART_DSL_PROMPT).toContain('not across bars');
   });
 
   it('keeps maps on the Leaflet JSON contract and never falls back to SVG', () => {
@@ -319,12 +327,16 @@ describe('L1 behavior contracts', () => {
   });
 
   it('points the resident visual pointer at presentation_guide (2026-11-02 表现形式库)', () => {
-    // 刀 5 瘦身（2026-11-03）：常驻指针只剩 tag 枚举 + 落盘禁令 + 发现指针，
+    // 刀 5 瘦身（2026-11-03）：常驻指针只剩 tag 枚举 + 交付判据 + 发现指针，
     // 五段最小语法斩掉（完整 DSL 与卡 detail 同源、闸门随附三面通用、beta
-    // 清单搬卡）。保留性锚 + 负锚（语法段复活即红）+ 长度上限。
-    expect(VISUAL_BLOCK_POINTER).toContain('fenced block INSIDE the reply');
-    expect(VISUAL_BLOCK_POINTER).toContain('NEVER save a picture/chart/map/paint with write_file');
-    expect(VISUAL_BLOCK_POINTER).toContain('the fenced block IS the deliverable');
+    // 清单搬卡）。同日差距分析①：落盘/脚本 NEVER 禁令裁掉——asset:// 通道
+    // 本就能内联脚本产图，改交付判据（可见性底线 + 内联引用机制）。
+    // 保留性锚 + 负锚（语法段/禁令复活即红）+ 长度上限。
+    expect(VISUAL_BLOCK_POINTER).toContain('VISIBLE inside the reply');
+    expect(VISUAL_BLOCK_POINTER).toContain('A fenced block IS the picture');
+    expect(VISUAL_BLOCK_POINTER).toContain('![desc](/absolute/path.png)');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('NEVER save');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('NEVER draw');
     expect(VISUAL_BLOCK_POINTER).toContain('presentation_guide');
     expect(VISUAL_BLOCK_POINTER).toContain('unsure which form fits');
     // tag 枚举仍在（模型必须知道存在哪些形式）。
