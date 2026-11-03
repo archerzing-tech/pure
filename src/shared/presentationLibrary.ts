@@ -403,7 +403,7 @@ export function renderPresentationCatalog(): string {
     'Presentation forms you can deliver INSIDE the reply (id - family - trigger):',
     ...lines,
     'Call again with form:"<id>" (or a family name) for the full card: when to use it, when NOT to, failure behavior, and the exact DSL rules.',
-    'Custom forms live in ~/.pure/config.json under "presentationCards" ({ id, base, ...fields you want to override }) - register one by writing that key and it appears here on the next session.',
+    'Custom forms live in ~/.pure/config.json under "presentationCards" ({ id, base, ...fields you want to override }) - register one by writing that key: desktop sessions hot-reload it every turn (the NEXT message can already pull it and use its fence), fresh CLI sessions pick it up on start.',
   ].join('\n');
 }
 

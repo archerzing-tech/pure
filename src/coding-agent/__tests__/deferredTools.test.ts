@@ -191,6 +191,7 @@ describe('presentation_guide (presentation capability library, 2026-11-02)', () 
       const catalogText = String(catalog.result);
       expect(catalogText).toContain('- myarch (illustration)');
       expect(catalogText).toContain('presentationCards'); // 注册说明句（agent 可语义加卡）
+      expect(catalogText).toContain('hot-reload it every turn'); // 生效口径两面同锚（GUI 热生效判例）
       const full = await registry.execute(call('presentation_guide', { form: 'myarch' }));
       const fullText = String(full.result);
       expect(fullText).toContain('── myarch (illustration)');

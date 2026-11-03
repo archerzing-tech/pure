@@ -224,6 +224,11 @@ describe('custom presentation cards (刀 3 组合式自定义)', () => {
     const catalog = renderPresentationCatalog();
     expect(catalog).toContain('- myarch (illustration)');
     expect(catalog).toContain('presentationCards');
+    // 生效口径两面都要说真话（真机判例 session_1793686078551_1：旧句只写
+    // 「下个会话生效」，模型据此预期保守、不敢在本会话用新卡围栏——GUI
+    // 回合活检实际下一条消息就热生效）。
+    expect(catalog).toContain('hot-reload it every turn');
+    expect(catalog).toContain('NEXT message');
     // 匹配路由对自定义卡生效。
     expect(matchPresentationCards('myarch').map((c) => c.id)).toEqual(['myarch']);
     // 全卡渲染走同一渲染函数（工具返回体形态一致）。
