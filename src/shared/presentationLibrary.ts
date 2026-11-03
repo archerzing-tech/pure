@@ -106,7 +106,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     delivery:
       'Renders inline as an SVG diagram. On a parse failure a repair pass retries once, then an error card with a retry button appears - fix by re-emitting the block with corrected syntax (quote node labels containing special characters; ASCII node ids only for usecase-beta).',
     detail:
-      'Choosing the mermaid type: process with branches -> flowchart; who-says-what-to-whom over time -> sequence; code structure -> class / state / ER; time-planned work -> gantt; share-of-total -> pie (use a chart card when exact values matter); ideas radiating from a center -> mindmap; milestones over time -> timeline; actors and use cases -> usecase-beta (ASCII node ids only). Keep diagrams under ~30 nodes - deeper structures read better as a paint layout or a table.',
+      'Choosing the mermaid type: process with branches -> flowchart; who-says-what-to-whom over time -> sequence; code structure -> class / state / ER; time-planned work -> gantt; share-of-total -> pie (use a chart card when exact values matter); ideas radiating from a center -> mindmap; milestones over time -> timeline; actors and use cases -> usecase-beta (ASCII node ids only). Enabled experimental *-beta types: architecture, radar, kanban, sankey, xychart, quadrantChart. Keep diagrams under ~30 nodes - deeper structures read better as a paint layout or a table.',
     surfaces: 'gui: inline SVG diagram | cli: ASCII wireframe | channel: source text',
     textFallback: 'wireframe',
   },

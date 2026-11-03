@@ -175,24 +175,26 @@ export function wantsCapabilityLadder(prompt: string): boolean {
 export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ONLY when web_search / web_public_api / web_scrape cannot obtain the data): github.com/public-apis/public-apis — large curated list by category (weather, geocoding, transportation, travel, finance, industry, …; some entries are stale or need a key — prefer auth: "No"); github.com/n0shake/Public-APIs — supplementary list. When a lookup fails or no built-in tool fits, find a suitable no-key API in one of these directories and fetch its documented endpoint directly (web_fetch / web_scrape, or curl for raw JSON). NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.`;
 
 /**
- * 可视化交付的常驻一行契约（2026-10-14 ⑦ 低风险子集）。
+ * 可视化交付的常驻指针（2026-10-14 ⑦ 低风险子集；刀 5 瘦身 2026-11-03）。
  *
  * 背景：五段可视化细则（svg / mermaid·puml 说明、```chart DSL、```map DSL、
  * generate_image）合计约 4.3k 字符，对所有请求常驻——而只有少数请求会产出图、
  * 图、地图。但「常驻→按需」的风险落在两件事上：交付形态（写文件 / 用脚本画图）
- * 与块标签写错。所以常驻这一行把这两件事守住（含 chart/map 的最小可用语法），
- * 细则只在请求可能用到时随附（见 PromptAssembler 的 detectVisualRequest 闸门）。
- * 闸门漏判的后果因此是「细则缺失」而不是「行为错」——不是那条会翻车的清空边界。
+ * 与块标签写错。所以常驻这一行把这两件事守住，细则只在请求可能用到时随附
+ * （见 PromptAssembler 的 detectVisualRequest 闸门）。闸门漏判的后果因此是
+ * 「细则缺失」而不是「行为错」——不是那条会翻车的清空边界。
+ *
+ * 刀 5 瘦身（2026-11-03）：五段最小语法（曾 1623 字符）斩掉——完整 DSL 本就
+ * 与卡 detail 同源（CHART/MAP/PAINT_DSL_PROMPT 同一常量），闸门随附已放宽到
+ * 三面（CLI/渠道不再只有这一行语法源），mermaid *-beta 清单搬进 mermaid 卡。
+ * 常驻只留：tag 枚举 + 落盘禁令 + 发现指针。私有 DSL（chart/map/paint）的
+ * 发现指针升格为「语法不在场就先拉卡」——漏判场景从瞎写→错误卡→回流→拉卡
+ * （两败）收敛为先拉卡→写对（一次调用）。真机复验闸门漏判命中率后再定松紧。
  *
  * 放尾部：它随请求变化，尾巴变动只让尾巴重预填（同 capabilities / task_mode）。
  */
-export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply, and never as a file or a script:
-- \`\`\`svg — a picture/icon/illustration/diagram you draw by hand (one complete standalone <svg> document per block).
-- \`\`\`mermaid or \`\`\`puml — structural diagrams. Mermaid (default): the standard types (flowchart, sequence, class/state/ER, gantt, pie, mindmap, timeline, …), usecase-beta (UML use case; ASCII node ids), and the other *-beta experimental ones (architecture, radar, kanban, sankey, xychart, quadrantChart, …). PlantUML only for component/deployment/activity.
-- \`\`\`chart — data as a chart: a \`type:\` line (bar/hbar/line/pie/scatter/kline/radar/tree/treemap/sunburst, default bar), optional \`title:\` / \`unit:\`, then one \`label value\` row per line.
-- \`\`\`map — routes/places as ONE JSON object {title, center:[lat,lng], zoom, markers:[{lat,lng,title,label}], route:[[lat,lng],…]} with REAL coordinates.
-- \`\`\`paint — a STATIC geometric illustration (architecture sketch, flow schematic, layered diagram, geometry, icons) as ONE JSON object {version, width, height, shapes:[rect/circle/line/arrow/path/polygon/text/group], defs.gradients}.
-NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it when the lines above are not enough or you are unsure which form fits.`;
+export const VISUAL_BLOCK_POINTER = `Visual output — deliver any picture, chart, map, or diagram as a fenced block INSIDE the reply, and never as a file or a script. Fence tags: svg (hand-drawn picture), mermaid / puml (structural diagrams), chart (data visual), map (real-world geography), paint (static geometric illustration).
+NEVER save a picture/chart/map/paint with write_file (an .svg/.png/… file shows up as raw code, not as the picture) and NEVER draw one with a Python/matplotlib-style script — the fenced block IS the deliverable. Full per-form guides (when each form fits, when NOT, exact DSL rules, failure behavior) live behind the presentation_guide tool — call it before emitting chart/map/paint blocks unless their syntax is already in context (svg/mermaid/puml you can write from your own knowledge), and whenever unsure which form fits.`;
 
 /** routing 决策精要 — 机械注入版（2026-11-02 第三刀）。两轮真机判例
  *  （session_1793600755798_1 / session_1793602596186_3）：请求点名图的归宿

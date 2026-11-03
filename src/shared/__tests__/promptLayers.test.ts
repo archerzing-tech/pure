@@ -28,6 +28,7 @@ import {
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
+import { PRESENTATION_CARDS } from '../presentationLibrary';
 import { INCREMENTAL_BUILD_PROMPT, INFORMATION_VALUE_PRINCIPLE } from '../agentBehavior';
 import { PromptAssembler, buildGuiCapabilities } from '../PromptAssembler';
 import { estimatePromptTokens } from '../providers';
@@ -318,14 +319,33 @@ describe('L1 behavior contracts', () => {
   });
 
   it('points the resident visual pointer at presentation_guide (2026-11-02 表现形式库)', () => {
-    // 常驻指针的最小语法兜底保持不动，尾部接上发现入口：闸门漏判的后果从
-    // 「细则缺失」降级为「多一次 presentation_guide 调用」。指针锚在这里，
-    // 卡片全文与匹配路由在 presentationLibrary.test.ts。
+    // 刀 5 瘦身（2026-11-03）：常驻指针只剩 tag 枚举 + 落盘禁令 + 发现指针，
+    // 五段最小语法斩掉（完整 DSL 与卡 detail 同源、闸门随附三面通用、beta
+    // 清单搬卡）。保留性锚 + 负锚（语法段复活即红）+ 长度上限。
     expect(VISUAL_BLOCK_POINTER).toContain('fenced block INSIDE the reply');
     expect(VISUAL_BLOCK_POINTER).toContain('NEVER save a picture/chart/map/paint with write_file');
     expect(VISUAL_BLOCK_POINTER).toContain('the fenced block IS the deliverable');
     expect(VISUAL_BLOCK_POINTER).toContain('presentation_guide');
     expect(VISUAL_BLOCK_POINTER).toContain('unsure which form fits');
+    // tag 枚举仍在（模型必须知道存在哪些形式）。
+    expect(VISUAL_BLOCK_POINTER).toContain('Fence tags: svg');
+    // 私有 DSL 的发现指针升格：语法不在场先拉卡。
+    expect(VISUAL_BLOCK_POINTER).toContain('before emitting chart/map/paint blocks');
+    // 负锚：五段语法段不得复活（每段曾是独立一行最小语法）。
+    expect(VISUAL_BLOCK_POINTER).not.toContain('label value');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('{title, center');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('shapes:[rect');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('standalone <svg> document');
+    expect(VISUAL_BLOCK_POINTER).not.toContain('usecase-beta');
+    // 瘦身目标 ≈600 字符；上限锚防语法段悄悄长回来。
+    expect(VISUAL_BLOCK_POINTER.length).toBeLessThan(900);
+  });
+
+  it('moves the mermaid beta catalog onto the card (刀 5 前置搬卡)', () => {
+    // *-beta 启用清单是常驻段曾有、卡上原本没有的信息——斩常驻前先搬家，
+    // 否则是纯信息丢失。锚在 mermaid 卡 detail。
+    const card = PRESENTATION_CARDS.find((c) => c.id === 'mermaid');
+    expect(card?.detail).toContain('Enabled experimental *-beta types: architecture, radar, kanban, sankey, xychart, quadrantChart');
   });
 
   it('asks for a human, conversational tone without canned boilerplate', () => {

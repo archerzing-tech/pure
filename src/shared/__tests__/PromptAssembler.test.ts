@@ -381,16 +381,15 @@ describe('PromptAssembler', () => {
   });
 
   it('offers mermaid and puml as offline GUI diagram formats', () => {
-    // GUI 的图全部本地渲染：mermaid 与 PlantUML 引擎都随应用打包，断网也能画，
-    // 所以 puml 不再被禁止，只声明各自擅长的图型（mermaid 默认、含 v12 起原生的
-    // usecase-beta 等；PlantUML 只负责 component / deployment / activity）。
+    // GUI 的图全部本地渲染：mermaid 与 PlantUML 引擎都随应用打包，断网也能画。
+    // 刀 5 瘦身（2026-11-03）后指针只剩 tag 枚举；puml 的图型限定
+    // （component/deployment/activity）与 usecase-beta 细节搬到 presentation_guide
+    // 的 puml / mermaid 卡（见 promptLayers.test.ts 搬卡锚）。
     const gui = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: buildGuiCapabilities(true),
     });
-    expect(gui).toContain('PlantUML only for component/deployment/activity');
-    expect(gui).toContain('Mermaid (default)');
-    expect(gui).toContain('usecase-beta (UML use case; ASCII node ids)');
+    expect(gui).toContain('mermaid / puml (structural diagrams)');
     expect(gui).not.toContain('NEVER emit puml/plantuml');
     expect(gui).not.toContain('fail without network');
 
@@ -401,7 +400,7 @@ describe('PromptAssembler', () => {
       capabilities: buildGuiCapabilities(true, false, { imageGeneration: true }),
       imageGeneration: true,
     });
-    expect(withImageGen).toContain('PlantUML only for component/deployment/activity');
+    expect(withImageGen).toContain('mermaid / puml (structural diagrams)');
     expect(withImageGen).toContain('Call generate_image ONLY to CREATE');
     expect(withImageGen).toContain('the fallback when generate_image fails');
     expect(withImageGen).not.toContain('plantuml.com');
@@ -672,6 +671,25 @@ describe('PromptAssembler', () => {
     // 前缀逐字不变，供应商的前缀缓存只重预填尾巴。
     expect(chart.startsWith(chat)).toBe(true);
     expect(paint.startsWith(chat)).toBe(true);
+  });
+
+  it('attaches the chart/map/paint DSL on CLI and channel surfaces too (刀 5)', () => {
+    // 常驻指针瘦身（五段最小语法斩掉）后，闸门随附是私有 DSL 的命中场景
+    // 兜底——CLI/渠道若不随附则语法清零（CLI capabilities 只有 mermaid/
+    // puml 线框行）。三面同构，routing_essentials 同判例。image 契约保持
+    // GUI 闸（generate_image 是条件注册工具，CLI 面未装配该信号）。
+    const cliChart = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() }, '把这些数据做成柱状图');
+    expect(cliChart).toContain('Supported types:'); // chart DSL 随附（chart 独有锚）
+    const cliMap = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() }, '给我一条西安到上海的骑行路线');
+    expect(cliMap).toContain('A MAP IS NEVER SVG');
+    const channelPaint = assembler.buildSystemPrompt({ surface: 'channel', capabilities: '' }, '画一张架构示意图');
+    expect(channelPaint).toContain('A PAINT BLOCK IS NEVER SVG');
+    // 尾巴纪律三面成立：基线提示词仍是带细则提示词的前缀。
+    const cliBase = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() }, '这个函数是干什么的？');
+    expect(cliChart.startsWith(cliBase)).toBe(true);
+    // image 契约不越界：CLI 面即使 picture 词命中也不带 SVG/image 契约。
+    const cliPicture = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() }, '画一只鸟');
+    expect(cliPicture).not.toContain('ONE separate fenced code block tagged svg PER image');
   });
 
   it('injects the routing essentials when the request names a visual destination (2026-11-02 第三刀)', () => {

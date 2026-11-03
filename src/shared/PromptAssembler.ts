@@ -241,8 +241,9 @@ export function buildCliCapabilities(): string {
 function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
   // 可视化细则（chart / map / svg / image）已从常驻块搬出，见 buildVisualFragments：
   // 那四段约 4.3k 字符只对少数请求有用，常驻代价却是每轮都付。GUI/CLI 的可视化
-  // 定位由常驻 VISUAL_BLOCK_POINTER / CLI capabilities 的 Diagram rendering 兜底
-  // （2026-10-27 瘦身：本段曾与两者逐句重复）；渠道侧的降级行为别处没有，保留。
+  // 定位由常驻 VISUAL_BLOCK_POINTER（tag 枚举+禁令+发现指针）/ CLI capabilities
+  // 的 Diagram rendering 兜底（2026-10-27 瘦身：本段曾与两者逐句重复）；
+  // 渠道侧的降级行为别处没有，保留。
   const visualOutput = surface === 'channel'
     ? '- For diagrams (processes, flows, architecture, sequences), emit a fenced code block tagged mermaid (graph/flowchart: A --> B) or puml/plantuml (activity: :step; --> / sequence: Alice -> Bob: message) — the channel host rasterizes or degrades them per the platform\'s capabilities. Keep the response readable as a chat message, not as a terminal dump.'
     : '';
@@ -267,8 +268,9 @@ ${visualOutput}
  * 缓存只重预填尾巴。同一次请求里常驻段逐字不变（有测试钉住「非可视请求的
  * 系统提示词是可视请求的前缀」）。
  *
- * 守门线不强依赖闸门：常驻段已有 VISUAL_BLOCK_POINTER（块标签 +「不写文件 /
- * 不用脚本画」+ chart/map 最小语法），所以漏判的后果是细则缺失，不是行为错。
+ * 守门线不强依赖闸门：常驻段已有 VISUAL_BLOCK_POINTER（tag 枚举 +「不写文件 /
+ * 不用脚本画」+ 发现指针），闸门命中时 chart/map/paint 的 DSL 随附三面通用；
+ * 漏判的后果是细则缺失（发现指针教模型先拉卡），不是行为错。
  */
 function buildVisualFragments(
   surface: PromptSurface,
@@ -286,11 +288,18 @@ function buildVisualFragments(
     // GUI 同构（2026-11-02 第三刀）。
     ['routing_essentials', wants.destination ? ROUTING_ESSENTIALS : undefined, 63],
   ];
+  // 刀 5（2026-11-03）：chart/map/paint 的 DSL 随附不分面——常驻指针瘦身
+  // （五段最小语法斩掉）后，这三段私有 DSL 是闸门命中时的语法兜底，CLI/
+  // 渠道面若不随附则语法清零（CLI capabilities 只有 mermaid/puml 线框行）。
+  // 形式竞争不分面，routing_essentials 同判例。image 契约保持 GUI 闸：
+  // generate_image 是 imageGenEnabled 条件注册工具，CLI/渠道面未装配该信号。
+  parts.push(
+    ['paint_dsl', wants.paint ? PAINT_DSL_PROMPT : undefined, 63],
+    ['chart_dsl', wants.chart ? CHART_DSL_PROMPT : undefined, 63],
+    ['map_dsl', wants.map ? MAP_DSL_PROMPT : undefined, 62],
+  );
   if (surface === 'gui') {
     parts.push(
-      ['paint_dsl', wants.paint ? PAINT_DSL_PROMPT : undefined, 63],
-      ['chart_dsl', wants.chart ? CHART_DSL_PROMPT : undefined, 63],
-      ['map_dsl', wants.map ? MAP_DSL_PROMPT : undefined, 62],
       ['image_gen', imageGeneration && wants.picture ? IMAGE_GEN_OUTPUT_PROMPT : undefined, 61],
       ['svg_output', !imageGeneration && wants.picture ? SVG_OUTPUT_PROMPT : undefined, 60],
     );
