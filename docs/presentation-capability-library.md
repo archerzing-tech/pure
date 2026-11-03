@@ -57,7 +57,7 @@
 ## 四、后续刀路线
 
 - **刀 5 常驻指针瘦身（未排期）**：发现工具兜住后，`VISUAL_BLOCK_POINTER` 的五段最小语法可下放卡片，常驻只留落盘禁令 + 发现指针（≈2.1k → ≈600 字符）。须真机复验模型在没有最小语法时的围栏命中率，勿先斩。
-- **刀 6 校验真话回流（已落，f8bcfcd，2026-11-03）**：蓝图原案「卡片声明 validator 引用、渲染前跑」被简化——校验本来就发生在渲染管线（hydration parse + parseRepair），唯一缺口是**结果对模型全盲**（错误卡/badge 是纯 DOM，引擎侧零引用，同样的语法错下次照犯）。落法：markdown.ts 三个收口点（setDiagramState('error') / setMapState('error') / markDiagramRepaired）记事件 → chat.ts 每回合装配 user-turn 时读走（读即清）注入 envFacts 区——形式、修没修成、失败原因（截 120 字符），pure 只报事实不加判断（连引擎加载失败也原样报，原因归类归模型）。聚合按 lang+outcome 计数、封顶 5 行、detail 截 120；无事件零注入。**v1 无门控的裁定**：历史重渲染（切会话/编辑重发）会混入事件，但块确实失败过信息仍真，封顶兜住噪音，真机观察噪音率后再定门控。已知边界：CLI 面投影失败静默回退源码，事件回流留后续小刀；修复器无 reason 字段，repaired 事件不带细节（YAGNI）。
+- **刀 6 校验真话回流（已落，f8bcfcd，2026-11-03）**：蓝图原案「卡片声明 validator 引用、渲染前跑」被简化——校验本来就发生在渲染管线（hydration parse + parseRepair），唯一缺口是**结果对模型全盲**（错误卡/badge 是纯 DOM，引擎侧零引用，同样的语法错下次照犯）。落法：markdown.ts 三个收口点（setDiagramState('error') / setMapState('error') / markDiagramRepaired）记事件 → chat.ts 每回合装配 user-turn 时读走（读即清）注入 envFacts 区——形式、修没修成、失败原因（截 120 字符），pure 只报事实不加判断（连引擎加载失败也原样报，原因归类归模型）。聚合按 lang+outcome 计数、封顶 5 行、detail 截 120；无事件零注入。**v1 无门控的裁定**：历史重渲染（切会话/编辑重发）会混入事件，但块确实失败过信息仍真，封顶兜住噪音，真机观察噪音率后再定门控。**CLI 面收口（884e86e，同日）**：事件器抽到 `src/shared/formValidationFeedback.ts` 双面共用一实例（markdown.ts re-export 保测试锚）；cliDiagram 四个**完整块**失败分支（流式/一次性 × 投影/线框）记事件，cliRepl 每回合装配读走注入 envFacts——**截断残片不记**（flush 与 close<0 分支：输出被切断不是语法错，记了会把截断教成格式问题，即 session_memory 围栏残片的教训）；一次性 -p 模式无「下一回合」事件无人读（单回合进程的固有边界）。已知边界收窄为：修复器无 reason 字段，repaired 事件不带细节（YAGNI）。
 
 ## 五、红线与对齐
 
