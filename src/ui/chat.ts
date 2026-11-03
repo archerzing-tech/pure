@@ -94,7 +94,7 @@ import { capEventText, createSerializingSink, type SessionEventSink } from '../s
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
-import { rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig } from './markdown';
+import { rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig, takeFormValidationFeedback } from './markdown';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
@@ -962,7 +962,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
 
 /** P2 下沉（2026-10-27）：惯例 + 运行时 + 网络 + shell 拼成 user-turn 环境事实。
  * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。 */
-function buildEnvFacts(conventions?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string): string {
   const parts: string[] = [];
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
@@ -971,6 +971,10 @@ function buildEnvFacts(conventions?: string): string {
   if (runtimes) parts.push(runtimes);
   if (network) parts.push(network);
   if (shell) parts.push(shell);
+  // 刀 6 校验真话回流（2026-11-03）：渲染层（错误卡/自动修复）对模型全盲，
+  // 同样的围栏语法错下次照犯。有事件才出现——没出错零注入，不常驻刷屏。
+  const feedback = formFeedback?.trim();
+  if (feedback) parts.push(feedback);
   return parts.join('\n\n');
 }
 
@@ -6592,7 +6596,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback()),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,

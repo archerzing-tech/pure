@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -1241,5 +1241,44 @@ describe('markdown 图片的本机绝对路径(asset protocol)', () => {
     const conf = readFileSync('src-tauri/tauri.conf.json', 'utf8');
     expect(conf).toContain('"assetProtocol"');
     expect(conf).toContain('"enable": true');
+  });
+});
+
+// 刀 6 校验真话回流（2026-11-03）：渲染层的错误卡/自动修复对模型全盲，
+// record→take 把校验事实注入下一回合 user-turn（envFacts 区）。聚合封顶、
+// 读即清——事件器是模块级 let（bun test 单进程跨文件污染判例），每用例
+// 先 take() 清残留。
+describe('form validation truth feedback（刀 6）', () => {
+  it('aggregates per lang+outcome with counts, clears on read, empty when quiet', () => {
+    expect(takeFormValidationFeedback()).toBe(''); // 清残留 + 无事件=空串
+    recordFormValidation('chart', 'failed', '渲染失败（缺闭合）');
+    recordFormValidation('chart', 'failed', '渲染失败（缺闭合）');
+    recordFormValidation('chart', 'repaired');
+    recordFormValidation('map', 'failed', 'marker lat 超范围');
+    const line = takeFormValidationFeedback();
+    expect(line).toContain('chart FAILED ×2 (渲染失败（缺闭合）)');
+    expect(line).toContain('chart auto-repaired');
+    expect(line).toContain('map FAILED (marker lat 超范围)');
+    expect(line).toContain('presentation_guide form:"<id>"');
+    // 读即清：第二次读为空。
+    expect(takeFormValidationFeedback()).toBe('');
+  });
+
+  it('caps aggregation at 5 rows with an and-N-more tail', () => {
+    expect(takeFormValidationFeedback()).toBe('');
+    for (let i = 0; i < 7; i++) recordFormValidation(`form${i}`, 'failed', 'x');
+    const line = takeFormValidationFeedback();
+    expect(line).toContain('and 2 more');
+    expect(line).toContain('form4 FAILED');
+    expect(line).not.toContain('form5 FAILED');
+    expect(takeFormValidationFeedback()).toBe('');
+  });
+
+  it('truncates long details to keep the injected line bounded', () => {
+    expect(takeFormValidationFeedback()).toBe('');
+    recordFormValidation('chart', 'failed', 'x'.repeat(500));
+    const line = takeFormValidationFeedback();
+    expect(line.length).toBeLessThan(400);
+    expect(line).toContain('x'.repeat(120));
   });
 });
