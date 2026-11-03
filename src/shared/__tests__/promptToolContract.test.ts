@@ -64,21 +64,24 @@ describe('提示词 ↔ 工具集契约（审计 §2.1/§4.7）', () => {
   });
 });
 
-describe('正向锚：一线 web 工具应以调用形态被提示词教到（本次修复缺陷的正向面）', () => {
-  // 以读到的源文本事实为准：调用形态的锚点当前在 PromptAssembler 的联网
-  // 工具清单里（web_search(query, maxResults?) / web_fetch(url, maxChars?)）。
-  // 若将来提示词改写导致锚点消失，这里会红——届时应确认新文案仍在教调用，
-  // 而不是默默删除本断言。
+describe('正向锚：一线 web 工具的用法教学应住在模型可见的描述面（本次修复缺陷的正向面）', () => {
+  // 以读到的源文本事实为准：2026-11-03 B 档把 web 工具教学从 PromptAssembler
+  // 的 capabilities 常量迁入 toolDefs 的 description（模型选工具时描述恰在
+  // 眼前；调用签名由 schema 的 parameters 承载，描述面教的是用法判据）。
+  // 锚随教学走：一线 web 工具必须保持公开可见，且用法教学必须持续住在工具
+  // 描述里——而不是默默删除本断言。
 
-  it('web_search 以调用形态出现在 PromptAssembler.ts 里', () => {
-    const assembler = SOURCES.find((s) => s.file === 'PromptAssembler.ts');
-    expect(assembler).toBeDefined();
-    expect(callFormHits(assembler!.text, 'web_search').length).toBeGreaterThan(0);
+  const defOf = (name: string) => BUILT_IN_TOOL_DEFS.find((def) => def.name === name);
+
+  it('web_search 公开可见且 description 教重述纪律（失败不原样重试）', () => {
+    expect(PUBLIC_TOOL_NAMES.has('web_search')).toBe(true);
+    expect(defOf('web_search')?.description).toContain('do NOT repeat the same or a near-identical query');
   });
 
-  it('web_fetch 以调用形态出现在 PromptAssembler.ts 里', () => {
-    const assembler = SOURCES.find((s) => s.file === 'PromptAssembler.ts');
-    expect(assembler).toBeDefined();
-    expect(callFormHits(assembler!.text, 'web_fetch').length).toBeGreaterThan(0);
+  it('web_fetch 公开可见且 description 教换页纪律与公共 API 目录兜底', () => {
+    expect(PUBLIC_TOOL_NAMES.has('web_fetch')).toBe(true);
+    const description = defOf('web_fetch')?.description ?? '';
+    expect(description).toContain('do NOT retry the same URL');
+    expect(description).toContain('public-apis');
   });
 });

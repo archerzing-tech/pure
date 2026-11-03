@@ -161,7 +161,13 @@ describe('PromptAssembler', () => {
         capabilities: buildGuiCapabilities(true, false, { hasImageAttachment: true }),
       }),
     ).toContain('Attachment paths: files Pure saved for you');
-    expect(cli).toContain('researcher_web(prompt');
+    // capabilities 差异面（2026-11-03 B 档后）：工具教学全部住 toolDefs 的
+    // description，capabilities 不再广告任何工具——researcher_* 等长尾的
+    // 存在线索由 discover_tools 的 description 承载；CLI 侧唯一保留的
+    // capability 差异是 Diagram rendering（客户端渲染事实无 description 可挂）。
+    expect(cli).toContain('Diagram rendering');
+    expect(gui).not.toContain('Web tools:');
+    expect(cli).not.toContain('Web tools:');
   });
 
   it('lets the model choose between advice, skills, and implementation from the whole request context', () => {
@@ -641,7 +647,9 @@ describe('PromptAssembler', () => {
     });
     expect(prompt).toContain('Workspace: none selected');
     expect(prompt).not.toContain('write_file(path, content)');
-    expect(prompt).toContain('web_search(query');
+    // B 档：capabilities 不再广告任何工具（web 教学住 toolDefs 的 description，
+    // 可见性由 CORE 名单决定）——退役的 Web tools 块不得回流。
+    expect(prompt).not.toContain('Web tools:');
   });
 
   it('keeps the SVG output contract when image generation is off (default)', () => {

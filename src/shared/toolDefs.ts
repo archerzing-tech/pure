@@ -199,7 +199,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_fetch',
-    description: 'Fetch and extract readable text from a text/HTML/JSON/PDF page — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. Pages longer than ~8k characters are auto-condensed to key points before entering your context (the reply notes this and the original size); pass raw:true to bypass condensation when you need exact verbatim text (pair with maxChars to bound length). If it still returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page.',
+    description: 'Fetch and extract readable text from a text/HTML/JSON/PDF page — follows meta-refresh redirects and falls back across Jina Reader / Wayback Machine / Firecrawl when the direct fetch is blocked or binary. Pages longer than ~8k characters are auto-condensed to key points before entering your context (the reply notes this and the original size); pass raw:true to bypass condensation when you need exact verbatim text (pair with maxChars to bound length). If it still returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page; for a factual lookup no built-in tool can serve, find a no-key API via the public-API directories (github.com/public-apis/public-apis, github.com/n0shake/Public-APIs) and fetch its documented endpoint — never invent data.',
     input_schema: {
       type: 'object',
       properties: {
@@ -234,7 +234,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_public_api',
-    description: 'Structured-data lookup through curated no-key public APIs: weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators (GDP / population / unemployment / inflation). Use for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those.',
+    description: 'Structured-data lookup through curated no-key public APIs: weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators (GDP / population / unemployment / inflation). Use for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — returns ready-to-use formatted data directly. When no structured source matches, it automatically falls back to web search (disable with searchOnMiss:false). Not for general discovery or ambiguous questions — use researcher_web for those. When no built-in source fits a factual lookup either, consult the public-API directories (github.com/public-apis/public-apis — large curated list by category; some entries are stale or need a key, prefer auth: "No"; github.com/n0shake/Public-APIs as supplement) for a no-key API and fetch its documented endpoint with web_fetch / web_scrape — NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.',
     input_schema: {
       type: 'object',
       properties: {

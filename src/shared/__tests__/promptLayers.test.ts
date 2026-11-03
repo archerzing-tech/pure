@@ -149,11 +149,17 @@ describe('L1 behavior contracts', () => {
     // Reuse-first: the model must check for an existing skill / MCP tool /
     // standard CLI before hand-rolling code (user feedback: it used to always
     // write bespoke code instead of reaching for a good skill or tool).
-    expect(WORKFLOW_PROMPT).toContain('reusing or installing the right tool beats reimplementing it by hand');
+    // 2026-11-03 B 档：教学搬进 discover_tools 的 description（决策点常驻），
+    // workflow 行只留 session_memory 检查——锚跟着教学走。
+    expect(
+      BUILT_IN_TOOL_DEFS.find((def) => def.name === 'discover_tools')?.description,
+    ).toContain('before reporting that a capability is missing');
     // Install-route ladder: a network failure is a route problem, not a dead
     // end (user feedback: npm blocked → declared "cannot install" and gave up
-    // while the official docs offered several install methods).
-    expect(WORKFLOW_PROMPT).toContain('ROUTE problem, not a dead end');
+    // while the official docs offered several install methods). 2026-11-03 B 档：
+    // 路线枚举梯住 CAPABILITY_GAP_LADDER（按需注入），workflow 行只留换路规则。
+    expect(WORKFLOW_PROMPT).toContain('materially different route');
+    expect(CAPABILITY_GAP_LADDER).toContain('walk the ladder');
     // P2 — the model must consult session memory for procedures and error
     // lessons BEFORE starting work (self-evolution: recorded experience only
     // helps if the workflow contract tells the model to look at it up front).

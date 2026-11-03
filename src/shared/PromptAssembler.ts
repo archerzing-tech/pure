@@ -20,7 +20,6 @@ import {
   INSERTION_PROTOCOL_PROMPT,
   LEDGER_PROTOCOL_PROMPT,
   MULTI_AGENT_MECHANICS_PROMPT,
-  PUBLIC_API_DIRECTORIES_PROMPT,
   ROUTING_ESSENTIALS,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -189,23 +188,17 @@ export interface PromptMemoryContext {
   adaptiveStrategy?: string;
 }
 
-const GUI_WEB_TOOLS_PROMPT = `Web tools:
-- web_search(query, maxResults?) — with a Serper/Tavily API key it uses those backends first; the network state from sys_info() tells you which backends are reachable. If a search returns nothing, do NOT repeat the same or a near-identical query — rephrase it (broader, simpler, or English), or use web_fetch on a URL you expect to be authoritative.
-- web_fetch(url, maxChars?) — fetch readable text from a text/HTML/JSON/PDF page. If it returns nothing usable, do NOT retry the same URL — use web_search instead or pick a different page.`;
+// 2026-11-03 prompt 审计 B 档：capabilities 块里的工具一行简介全部退役——
+// 常驻工具（web_search/web_fetch/sys_info）的简介与用法规则逐字住在 toolDefs
+// 的 description 里（模型选工具时描述恰在眼前）；deferred 工具（researcher_*
+// /web_scrape/web_public_api）的存在线索由 discover_tools 的常驻描述承载
+// （点名长尾清单），用法规则同样住各自 description、激活即见——capabilities
+// 再抄一份既重复、又教模型直呼看不见的工具（2026-10-31 审计 P0-1 同款形状）。
+// 块内只留 workspace 状态行（GUI）与 Diagram rendering（CLI）——客户端渲染
+// 事实没有工具 description 可挂。GUI_WEB_TOOLS_PROMPT / GUI_SYS_INFO_PROMPT
+// 两个常量随之退役。
 
-const GUI_SYS_INFO_PROMPT = `System:
-- sys_info() — the user's environment: timezone, locale, location, current time, OS version, network/proxy state. Call it FIRST whenever a question depends on where the user is or what time it is (trip planning "from my city", weather, delivery, local events, time/date questions) — never guess from your training data.`;
-
-const CLI_CAPABILITIES_PROMPT = `System:
-- sys_info() — timezone (IANA name), language/locale, character encoding, public IP (masked) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user's configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, OR anything that depends on where the user is (trip planning "from my city", weather, delivery, local services, events), call sys_info() FIRST — never guess from your training data.
-
-Web tools:
-- researcher_web(prompt, maxSources?, fetchContent?) — research a web question and return cited sources, extracted evidence, retrieval time, and partial failures. Do not repeat an unchanged query after a failure.
-- researcher_docs(library, topic, version?, maxSources?, fetchContent?) — research version-aware official documentation and return cited evidence.
-- web_public_api(query, category?, location?) — structured-data lookup through curated no-key public APIs (weather, air quality, geocode, news, wiki, IP, FX, stock, GitHub, World Bank economic indicators like GDP/population/unemployment/inflation). Use it for concrete factual lookups like "北京天气", "北京PM2.5", "中国GDP是多少", "100 usd to cny", or "苹果股价" — the web_search alias also auto-routes these, and when no structured source matches this tool auto-falls back to web search (searchOnMiss:false opts out). Not for general discovery or ambiguous questions — use researcher_web.
-- web_scrape(url, selector?, maxChars?) — fetch a KNOWN URL and extract readable text (navigation stripped; optional #id/.class/tag selector; RSS feeds and JSON auto-formatted; follows meta-refresh redirects; extracts text-based PDFs directly; falls back across Jina Reader → Wayback Machine → Firecrawl for blocked, removed, JS-heavy, or binary pages). Use when you already have the URL; use researcher_web when you need to find one.
-
-Diagram rendering:
+const CLI_CAPABILITIES_PROMPT = `Diagram rendering:
 - The CLI renders \`\`\`mermaid graph/flowchart and \`\`\`puml / \`\`\`plantuml blocks as a terminal WIREFRAME (boxes + connecting lines drawn with box-drawing characters) — no browser, no image. Prefer mermaid for process/flow diagrams, puml for activity/sequence. Emit them as normal fenced blocks; the client converts them.`;
 
 const GUI_IMAGE_INPUT_PROMPT = `Image attachments:\n- When the current user message includes a native image attachment, inspect that image directly and answer what it shows or means. Do NOT call web_scrape/web_fetch to find the image, do NOT treat the temporary file path as a web URL, and do NOT claim the image is missing.\n- If the user asks what the attached image is, to describe it, or to analyze/explain it ("这张图是什么", "这个图片是什么意思"), answer directly from the attachment — do NOT call generate_image, which only CREATES new images from text and can never explain the picture the user already has.\n- If the provider/model explicitly rejects image content because it is text-only, say clearly that this selected model does not support image understanding and ask the user to switch to a vision-capable model; do not retry the same image through web scraping.`;
@@ -224,14 +217,16 @@ export function buildGuiCapabilities(hasWorkspace: boolean, temporaryWorkspace =
     hasWorkspace && options.hasImageAttachment
       ? '\n\nAttachment paths: files Pure saved for you under the app-managed ".pure/workspace" directory inside the user home (pasted long text, dropped attachments) are read by their exact absolute path — never rewritten to a relative path or prefixed with the workspace.'
       : '';
-  // 文件工具策略已随框架改革二期搬进各工具的 description（toolDefs.ts）——
-  // GUI/CLI 共用同一份工具表，教学跟着工具走，不再在此拼常驻块。
-  const tools = `${GUI_WEB_TOOLS_PROMPT}${attachmentPaths}\n\n${GUI_SYS_INFO_PROMPT}`;
+  // 文件/web/sys_info 工具策略已随框架改革二期与 2026-11-03 审计 B 档搬进
+  // 各工具的 description（toolDefs.ts）——GUI/CLI 共用同一份工具表，教学跟着
+  // 工具走，不再在此拼常驻块；本块只留 workspace 状态行与附件路径闸门行。
+  const tools = attachmentPaths;
   const imageGen = options.imageGeneration ? GUI_IMAGE_GEN_PROMPT : '';
   // 图像附件的行为契约只在真的带附件的回合注入——无附件回合不再为它付常驻
   // token（带附件是少数回合）。
   const imageInput = options.hasImageAttachment ? GUI_IMAGE_INPUT_PROMPT : '';
-  return `${workspaceNote}\n${tools}\n\n${imageInput}${imageGen}`;
+  const body = [tools, imageInput, imageGen].filter((part) => part.length > 0).join('\n\n');
+  return body ? `${workspaceNote.replace(/^\n/, '')}\n\n${body}` : workspaceNote.replace(/^\n/, '');
 }
 
 export function buildCliCapabilities(): string {
@@ -582,7 +577,6 @@ export class PromptAssembler {
       // 契约与 DSL 细则一起搬到尾巴按需装配（见 buildVisualFragments）——它们的
       // 常驻部分（块标签 + 禁令）在 VISUAL_BLOCK_POINTER 里。
       fragment('tool_calling', buildToolCallingRules(context.surface), 115, true),
-      fragment('public_api_directory', PUBLIC_API_DIRECTORIES_PROMPT, 62),
       fragment('skills', buildSkills(context.skills), 30),
       fragment('mcp_resources', buildMcpResources(context.mcpResources), 30),
       // ── Volatile fragments LAST ──

@@ -155,11 +155,10 @@ export function wantsCapabilityLadder(prompt: string): boolean {
     .test(prompt ?? '');
 }
 
-/** 公开 API 目录 — 当内置 web 工具拿不到所需信息时的兜底数据源。目录本身
- * 无需 key，列出大量按分类组织的免费/自托管公共 API（天气、地理、交通、
- * 旅游、金融、行业统计等）。模型应在此处找到合适端点后直接 web_fetch /
- * web_scrape / execute_command(curl) 调用，而不是放弃或编造数据。 */
-export const PUBLIC_API_DIRECTORIES_PROMPT = `Public-API directories (consult ONLY when web_search / web_public_api / web_scrape cannot obtain the data): github.com/public-apis/public-apis — large curated list by category (weather, geocoding, transportation, travel, finance, industry, …; some entries are stale or need a key — prefer auth: "No"); github.com/n0shake/Public-APIs — supplementary list. When a lookup fails or no built-in tool fits, find a suitable no-key API in one of these directories and fetch its documented endpoint directly (web_fetch / web_scrape, or curl for raw JSON). NEVER invent data; if only key-gated APIs fit, say so and ask whether the user can provide a key.`;
+/** 公开 API 目录段已退役（2026-11-03 prompt 审计 B 档）：目录清单与
+ * 「找不到就查目录、别编造」规则整体搬进 web_public_api / web_fetch 两个
+ * 工具的 description——数据查找失败的那一刻模型正看着这两个工具，目录
+ * 指引在眼前比常驻段更近。PUBLIC_API_DIRECTORIES_PROMPT 随之删除。 */
 
 /**
  * 可视化交付的常驻指针（2026-10-14 ⑦ 低风险子集；刀 5 瘦身 2026-11-03）。
