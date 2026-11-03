@@ -4779,6 +4779,77 @@ fn is_chinese_query(query: &str) -> bool {
     })
 }
 
+fn is_cjk_char(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+}
+
+/// Chars that glue Chinese queries together (particles / prepositions /
+/// function words) — a CJK bigram containing one is NOT a meaningful content
+/// token ("西安到重庆" keeps 西安/重庆; 安到/到重 are dropped). Content words
+/// like 时间/价格 are deliberately NOT here — they are what relevance is
+/// measured against. Mirrors `CJK_FUNCTION_CHARS` in NodeToolAdapter.ts
+/// (same table, same semantics); direction/position words (上下左右中) are
+/// absent — they start too many content words (上海/中国).
+fn is_cjk_function_char(c: char) -> bool {
+    matches!(c,
+        '到' | '从' | '的' | '与' | '和' | '及' | '了' | '在' | '是' | '这' | '那' | '之'
+        | '而' | '或' | '把' | '被' | '让' | '为' | '对' | '于' | '等' | '些' | '个'
+        | '吗' | '呢' | '吧' | '啊' | '呀' | '过' | '并' | '但' | '可' | '就' | '最'
+        | '很' | '也' | '都' | '不' | '没' | '无' | '来' | '去' | '要' | '将' | '会'
+        | '正' | '已' | '经' | '还' | '又' | '请' | '问' | '想' | '有' | '里' | '给'
+        | '做' | '用' | '得' | '着' | '所' | '以' | '且' | '者' | '起' | '向' | '往'
+        | '自' | '于')
+}
+
+/// Significant CJK content bigrams of a query (deduped, glue chars dropped).
+/// Mirrors `significantCJKBigrams` in NodeToolAdapter.ts.
+fn significant_cjk_bigrams(query: &str) -> Vec<String> {
+    let chars: Vec<char> = query.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..chars.len().saturating_sub(1) {
+        let (a, b) = (chars[i], chars[i + 1]);
+        if is_cjk_char(a) && is_cjk_char(b) && !is_cjk_function_char(a) && !is_cjk_function_char(b) {
+            let pair: String = a.to_string() + &b.to_string();
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+    }
+    out
+}
+
+/// Relevance gate: accept a free HTML backend's result set only if the top-5
+/// results actually address the query — cn.bing.com returning 天眼查 tax-lookup
+/// pages for "西安未来7天天气预报" covers none of 天气/预报/西安 → REJECTED, so
+/// the race rolls over to the next backend instead of handing the model garbage
+/// that triggers repeated searches (2026-11-03 real-machine case
+/// session_1793706272041_1). Accept when ≥2 distinct bigrams are covered, or
+/// ≥ half of a short query's bigrams. Non-CJK-ish queries with <2 significant
+/// bigrams are always accepted. Mirrors `resultsRelevant` in NodeToolAdapter.ts
+/// (the Node side has gated its scraping backends with this since long ago;
+/// the Rust side's "free HTML backends are fine ungated" call is overturned by
+/// the case above).
+fn results_relevant(query: &str, results: &[SearchResult]) -> bool {
+    let sig = significant_cjk_bigrams(query);
+    if sig.len() < 2 {
+        return true;
+    }
+    let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for r in results.iter().take(5) {
+        let hay = format!("{}\n{}\n{}", r.title, r.snippet, r.url);
+        for bg in &sig {
+            if hay.contains(bg.as_str()) {
+                covered.insert(bg.as_str());
+            }
+        }
+    }
+    if covered.len() >= 2 {
+        return true;
+    }
+    (covered.len() as f64) / (sig.len() as f64) >= 0.5
+}
+
 /// China Bing: real Chinese results with the same b_algo markup as
 /// www.bing.com, so it reuses `parse_bing_results` unchanged.
 async fn search_backend_bing_cn(query: &str, max: usize, proxy_url: Option<&str>) -> Result<Vec<SearchResult>, String> {
@@ -5727,6 +5798,18 @@ async fn probe_html_backends(
     while let Some((label, outcome)) = pending.next().await {
         match outcome {
             Ok(r) if !r.is_empty() => {
+                // Relevance gate first: a backend whose top results don't
+                // address the query (cn.bing.com SEO garbage — 天眼查 tax pages
+                // for a weather query) is treated as failed so the race rolls
+                // over to the next backend instead of returning garbage.
+                if chinese && !results_relevant(query, &r) {
+                    failed.push(format!(
+                        "{}: relevance gate (top results don't address the query)",
+                        label
+                    ));
+                    any_empty = true;
+                    continue;
+                }
                 let chinese_relevant =
                     matches!(label.as_str(), "Sogou" | "cn.bing.com" | "360" | "Baidu");
                 if chinese && !chinese_relevant && !pending.is_empty() {
@@ -5738,6 +5821,7 @@ async fn probe_html_backends(
                     {
                         if let Ok(cn_r) = cn_outcome {
                             if !cn_r.is_empty()
+                                && results_relevant(query, &cn_r)
                                 && matches!(cn_label.as_str(), "Sogou" | "cn.bing.com" | "360" | "Baidu")
                             {
                                 return (cn_r, failed, any_empty);
@@ -19521,6 +19605,39 @@ mod tool_quarantine_tests {
         assert!(set_tool_quarantined_in(&dir, "good_tool", QuarantineOp::Quarantine, Some("x".into()), Some(serde_json::json!("nope"))).is_err());
         assert!(set_tool_quarantined_in(&dir, "not_a_tool", QuarantineOp::Quarantine, Some("x".into()), Some(state())).is_err());
         assert!(set_tool_quarantined_in(&dir, "not_a_tool", QuarantineOp::Reinstate, None, None).is_err());
+    }
+
+    #[test]
+    fn relevance_gate_rejects_seo_garbage_and_accepts_real_results() {
+        // 2026-11-03 real-machine case session_1793706272041_1: cn.bing.com
+        // answered "西安未来7天天气预报" with 天眼查 company/tax-lookup pages.
+        // Significant bigrams of the query: 西安/安未/天天/天气/气预/预报 (来7
+        // etc. dropped by the function-char table). None of them appear in the
+        // garbage set → 0 coverage → REJECTED, so the race rolls over.
+        let garbage = vec![
+            SearchResult {
+                title: "南方电网公司企业信息免费查询平台_年报/公示信息查询 - 天眼查".into(),
+                snippet: "南方电网公司 热门公司有哪些？天眼查热门公司频道为您提供南方电网公司企业查询、公司查询、工商信息查询".into(),
+                url: "https://www.tianyancha.com/8509c0".into(),
+            },
+            SearchResult {
+                title: "至本医疗科技（上海）有限公司税号查询_纳税人识别号".into(),
+                snippet: "至本医疗科技 (上海) 有限公司，成立于2016年，位于上海市".into(),
+                url: "https://tax.tianyancha.com/3052820770".into(),
+            },
+        ];
+        assert!(!results_relevant("西安未来7天天气预报", &garbage));
+        // A real weather result covers 西安/天气/预报 → ACCEPTED.
+        let real = vec![SearchResult {
+            title: "西安天气预报7天查询".into(),
+            snippet: "西安未来7天天气预报，今日多云，气温 8~14°C".into(),
+            url: "https://www.weather.com.cn/xian7d".into(),
+        }];
+        assert!(results_relevant("西安未来7天天气预报", &real));
+        // Queries with <2 significant bigrams are always accepted (can't judge).
+        assert!(results_relevant("的了吗", &garbage));
+        // Non-CJK queries are always accepted.
+        assert!(results_relevant("rust async runtime", &garbage));
     }
 
     #[test]
