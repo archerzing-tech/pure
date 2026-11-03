@@ -4,7 +4,7 @@
 //  • highlightExt   — the `==text==` → <mark> inline highlight extension
 //    (marked parses headlessly; no document/window required)
 
-import { describe, it, expect } from 'bun:test';
+import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
 import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, type DiagramKind } from '../markdown';
@@ -1246,11 +1246,15 @@ describe('markdown 图片的本机绝对路径(asset protocol)', () => {
 
 // 刀 6 校验真话回流（2026-11-03）：渲染层的错误卡/自动修复对模型全盲，
 // record→take 把校验事实注入下一回合 user-turn（envFacts 区）。聚合封顶、
-// 读即清——事件器是模块级 let（bun test 单进程跨文件污染判例），每用例
-// 先 take() 清残留。
+// 读即清——事件器是模块级 let（bun test 单进程跨文件污染判例）。CI 三连红
+// 判例：paintStreaming.test 这类 happy-dom 文件真跑完整渲染管线（CI 文件序
+// 与本地不同，它先跑），paint parse 失败真的触发 record——残留必须无条件
+// 清（beforeEach/afterEach），清的动作不能与「期待空」断言绑在一起。
 describe('form validation truth feedback（刀 6）', () => {
+  beforeEach(() => takeFormValidationFeedback());
+  afterEach(() => takeFormValidationFeedback());
   it('aggregates per lang+outcome with counts, clears on read, empty when quiet', () => {
-    expect(takeFormValidationFeedback()).toBe(''); // 清残留 + 无事件=空串
+    expect(takeFormValidationFeedback()).toBe(''); // beforeEach 刚清过：无事件=空串（纯行为断言）
     recordFormValidation('chart', 'failed', '渲染失败（缺闭合）');
     recordFormValidation('chart', 'failed', '渲染失败（缺闭合）');
     recordFormValidation('chart', 'repaired');
