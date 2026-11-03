@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.2.0
+
+**感知手脚 + 表现形式库刀 5/6 + 图先于文硬时序 + 瓦片路由脑**
+
+四线一批。设置自愈定位裁定落地（感知手脚三件套）：引擎自动闭环被否——替模型决策有章法，pure 只保证「现状可见/知识可查/改了真生效」，sys_info 尾带 LLM 预算现状行（explicit-override/family-defaults/conservative-fallback 三态真话，GUI 下一回合生效、CLI 下一会话生效两面如实）。刀 6 校验真话回流：渲染层错误卡/修复 badge 与 CLI 投影失败此前纯 DOM 静默——模型对自己写错的围栏全盲；事件器双面共用（GUI 三收口点 + CLI 四失败分支，截断残片不记——输出被切断不是语法错），每回合装配读走注入 envFacts，聚合封顶防噪。「图先于文」升级为时序硬保证：hold 放行锚渲染 settle 而非动作发生，15s 兜底降级为挂死保险丝（旧 2.5s 真机判例推翻其常态放行语义），瓦片重试耗尽落明确终态不再永转。刀 5 常驻指针瘦身：五段最小语法斩掉（1623→818 字符）——完整 DSL 本就与卡同源，闸门随附放宽到 CLI/渠道三面（原 GUI 独占，裸斩即 CLI 语法清零）、mermaid beta 清单搬卡，私有 DSL 发现指针升格「语法不在场先拉卡」，真机漏判场景先拉卡再写对（2/2）。瓦片 fetch 接路由脑：config 残留死代理时地图全盲（每块瓦片撞死端口而 shell curl 直连同源 200）——瓦片域全部直连优先+代理兜底，失败喂回路由脑健康表，高频小瓦片即最便宜的探针。
+
 ## v4.1.0
 
 **刀 4 投影降级器 + 刀 3 组合式自定义：表现形式库的文本表面与自定义卡**
