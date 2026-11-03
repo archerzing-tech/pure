@@ -14,6 +14,7 @@ import { filterResearchSources, isOfficialDocumentationSource, makeResearchPaylo
 export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { loadConfig } from './config';
+import { promptBudgetLiveLine } from '../shared/providers';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
@@ -2106,8 +2107,14 @@ export class TauriToolAdapter implements ToolAdapter {
           // 设置对 agent 触手可及，先得让它看得见。值是本回合真实的内存态
           // （回合边界已从盘上活检刷新过），agent 改盘上文件即改这些。
           const cfg = loadConfig();
+          // 设置自愈的感知手脚（2026-11-03）：预算行跟在活配置行后——模型
+          // 看得见当前窗口/输出预留与家族天花板，才知道预算错配长什么样、
+          // 有没有优化空间。GUI 回合边界活检热生效，scope 说「next turn」。
+          const budgetLine = cfg
+            ? promptBudgetLiveLine(cfg.customProviders, cfg.provider, cfg.model, cfg.providerOverrides, 'next turn')
+            : '';
           const liveLine = cfg
-            ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.`
+            ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.\n${budgetLine}`
             : '';
           return { id: toolCall.id, toolName: name, result: info + liveLine, success: true, duration: Date.now() - start };
         }

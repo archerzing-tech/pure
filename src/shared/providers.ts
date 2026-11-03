@@ -461,6 +461,36 @@ export function promptBudgetForProvider(
   };
 }
 
+/** The model-visible budget snapshot for sys_info's live-settings line
+ *  (2026-11-03 定调：设置自愈的裁决权归模型，pure 只补感知手脚——现状可见
+ *  +知识可查+改了真生效；何时调、调成多少全部归模型)。一行 ASCII 说清三件
+ *  事：本会话实际跑的值（promptBudgetForProvider 从 config.json 捡到的配置
+ *  经 resolvePromptBudget 解析）、这个模型的家族天花板（认不认识）、去哪调。
+ *  `scope` 必须按面说真话（说明句=行为判据判例）：GUI 回合边界活检热生效，
+ *  CLI 启动时装配一次 config，改了要新会话才生效。 */
+export function promptBudgetLiveLine(
+  customs: readonly CustomProvider[] | undefined | null,
+  provider: string | undefined,
+  model: string | undefined,
+  overrides?: Record<string, ProviderOverride> | null,
+  scope: 'next turn' | 'next session' = 'next turn',
+): string {
+  const effective = resolvePromptBudget(promptBudgetForProvider(customs, provider, model, overrides));
+  const family = promptBudgetDefaultFor(provider ?? '', model ?? '');
+  const source = effective.source === 'override'
+    ? 'explicit-override'
+    : effective.source === 'provider-model'
+      ? 'family-defaults'
+      : 'conservative-fallback';
+  const familyNote = effective.source === 'fallback'
+    ? `family defaults unknown (model not recognized - conservative fallback window=${family.contextWindowTokens} is in effect; set an override if you know the real limits)`
+    : `family defaults window=${family.contextWindowTokens} outputReserve=${family.outputReserveTokens}`;
+  const scopeNote = scope === 'next turn'
+    ? 'applies from your next turn'
+    : 'applies from your NEXT session (CLI reads config at startup)';
+  return `llm budget: provider=${provider ?? 'unknown'} model=${model ?? 'unknown'} window=${effective.contextWindowTokens} outputReserve=${effective.outputReserveTokens} safetyMargin=${effective.safetyMarginTokens} source=${source}; ${familyNote}; tune with "providerOverrides" or "customProviders.modelBudgets" in ~/.pure/config.json - ${scopeNote}`;
+}
+
 /** True when `id` refers to a user-defined custom provider. */
 export function isCustomProviderId(
   customs: readonly CustomProvider[] | undefined | null,

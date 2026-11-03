@@ -191,6 +191,9 @@ export interface NodeToolConfig {
   /** 主目录替身（测试注入）。create_document 无工作区时的 ~/Downloads 锚、
    * 路径参数里的 `~`/`$HOME` 展开都用它；缺省 = 真实 homedir()。 */
   homeDir?: string;
+  /** sys_info 追加的预算行（promptBudgetLiveLine 产物）。CLI 面的 adapter
+   * 不持有 LLM config，由 cliHarness 装配会话时算好传入；缺省不拼。 */
+  llmBudgetLine?: string;
 }
 
 // ── 代理 / 内网识别 ──
@@ -220,6 +223,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private maxFileSize: number;
   private maxSnapshotBytes: number;
   private location: string;
+  private readonly llmBudgetLine: string | undefined;
   private sessionId: string;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
@@ -235,6 +239,7 @@ export class NodeToolAdapter implements ToolAdapter {
     this.maxFileSize = config.maxFileSize ?? 64 * 1024 * 1024; // 64MB — matches the Rust read_file cap
     this.maxSnapshotBytes = config.maxSnapshotBytes ?? 8 * 1024 * 1024;
     this.location = (config.location ?? '').trim();
+    this.llmBudgetLine = config.llmBudgetLine;
   }
 
   getTools(): ToolDefinition[] {
@@ -2955,7 +2960,7 @@ export class NodeToolAdapter implements ToolAdapter {
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\nencoding:  ${encoding}\nip:        ${ipLine}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\nencoding:  ${encoding}\nip:        ${ipLine}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}${this.llmBudgetLine ? `\n\n${this.llmBudgetLine}` : ''}`,
       success: true,
       duration: Date.now() - start,
     };

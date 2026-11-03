@@ -356,7 +356,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'sys_info',
-    description: 'Get operating system information: timezone (IANA name), language/locale, character encoding, public IP (masked — last octet redacted) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), and the user\'s configured location. When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
+    description: 'Get operating system information: timezone (IANA name), language/locale, character encoding, public IP (masked — last octet redacted) with city-level geolocation, current time, OS version, network state (system/env proxy, VPN, domestic/international reachability), installed runtimes (node/bun/python3/rustc/git versions), the user\'s configured location, and the live LLM prompt budget (context window / output reserve, with the model family ceilings — call it before tuning ~/.pure/config.json budget keys). When the user asks for the current time, date, timezone, language, OS version, network/proxy status, a runtime version, a git capability, or anything that depends on where the user is (trip planning, weather, local services), call sys_info() FIRST — never guess from your training data.',
     input_schema: { type: 'object', properties: {} },
   },
   {

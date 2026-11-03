@@ -42,7 +42,7 @@ import { createEmbeddingMemoryStore } from './shared/memoryFactory';
 import { harvestUserPreferences } from './shared/memory';
 import { distillSkill, pickDistillSource } from './shared/skillDistill';
 import { writeAutoSkillDir } from './cliSkillStore';
-import { promptBudgetForProvider } from './shared/providers';
+import { promptBudgetForProvider, promptBudgetLiveLine } from './shared/providers';
 import { promptAssembler } from './shared/PromptAssembler';
 import { promptObservability } from './shared/promptObservability';
 import { FilePromptObservationStore } from './shared/FilePromptObservationStore';
@@ -327,6 +327,7 @@ async function createTools(
   permissionMode: PermissionMode = 'NORMAL',
   permissionHandler?: PermissionRequestHandler,
   evolutionEnabled = true,
+  llmBudgetLine?: string,
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
@@ -341,6 +342,11 @@ async function createTools(
     workspace: resolved,
     sessionId,
     location: process.env.PURE_LOCATION ?? process.env.PURE_CITY,
+    // 设置自愈的感知手脚（2026-11-03）：sys_info 带预算现状行，模型看得见
+    // 当前窗口/输出预留才知道预算错配长什么样。值由调用点算好传入（与
+    // promptAssembler 的预算同源——args 装配态），scope 必须说真话——CLI 的
+    // 会话参数启动时装配一次，盘上改动新会话才生效。
+    llmBudgetLine,
   });
 
   // P1-8: wire PermissionManager + write confirmation into the CLI direct
@@ -616,6 +622,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     overrides.permissionMode,
     overrides.permissionHandler,
     evolutionEnabled,
+    // 预算现状行与 631/747 的 promptAssembler 同源（args 装配态），scope=
+    // next session 说真话：CLI 盘上改动新会话才生效。
+    promptBudgetLiveLine(args.customProviders, args.provider, args.model, args.providerOverrides, 'next session'),
   );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;

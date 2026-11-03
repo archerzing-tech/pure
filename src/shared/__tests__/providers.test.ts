@@ -19,6 +19,7 @@ import {
   isProviderId,
   promptBudgetForProvider,
   promptBudgetDefaultFor,
+  promptBudgetLiveLine,
   protocolForURL,
   firstTokenHintTimeoutMs,
   resolveProviderProtocol,
@@ -181,6 +182,58 @@ describe('resolvePromptBudget', () => {
     const unknown = promptBudgetDefaultFor('some-unknown', 'mystery-model');
     expect(unknown.contextWindowTokens).toBe(32_768);
     expect(unknown.outputReserveTokens).toBe(4_096);
+  });
+});
+
+describe('promptBudgetLiveLine（sys_info 的预算现状行——模型自调预算的感知手脚）', () => {
+  // 2026-11-03 定调：pure 不做自动闭环，只保证「现状可见+知识可查+改了真
+  // 生效」；何时调、调成多少归模型。这行就是前两件的载体——生效值、家族
+  // 天花板、source 三态、调法指路，一行 ASCII 说清。
+  it('known model reports family-defaults source with the ceilings side by side', () => {
+    const line = promptBudgetLiveLine([], 'deepseek-openai', 'deepseek-v4-pro');
+    expect(line).toContain('provider=deepseek-openai model=deepseek-v4-pro');
+    expect(line).toContain('window=1000000 outputReserve=131072');
+    expect(line).toContain('source=family-defaults');
+    expect(line).toContain('family defaults window=1000000 outputReserve=131072');
+    expect(line).toContain('providerOverrides');
+    expect(line).toContain('~/.pure/config.json');
+  });
+
+  it('an explicit config override is labeled as such so the model can see it deviates from the family', () => {
+    const overrides: Record<string, ProviderOverride> = {
+      'deepseek-openai': { modelBudgets: { 'deepseek-chat': { contextWindowTokens: 16_000, outputReserveTokens: 4_000 } } },
+    };
+    const line = promptBudgetLiveLine([], 'deepseek-openai', 'deepseek-chat', overrides);
+    expect(line).toContain('window=16000 outputReserve=4000');
+    expect(line).toContain('source=explicit-override');
+    // 对比空间在场：配置 16k vs 家族天花板 128k，模型一眼看出差距。
+    expect(line).toContain('family defaults window=128000');
+  });
+
+  it('an unknown model names the conservative fallback instead of fabricating a ceiling', () => {
+    const line = promptBudgetLiveLine([], 'some-unknown', 'mystery-model');
+    expect(line).toContain('window=32768 outputReserve=4096');
+    expect(line).toContain('source=conservative-fallback');
+    expect(line).toContain('family defaults unknown');
+    expect(line).toContain('set an override');
+  });
+
+  it('the scope note tells the truth per surface (GUI hot-reload vs CLI startup-time config)', () => {
+    // 说明句=行为判据判例：GUI 回合边界活检热生效；CLI 启动装配一次，写
+    // 「next turn」模型就会在当会话空等一个永不生效的改动。
+    expect(promptBudgetLiveLine([], 'glm', 'glm-5.3-flash', undefined, 'next turn')).toContain('applies from your next turn');
+    expect(promptBudgetLiveLine([], 'glm', 'glm-5.3-flash', undefined, 'next session')).toContain('applies from your NEXT session');
+    expect(promptBudgetLiveLine([], 'glm', 'glm-5.3-flash', undefined, 'next session')).toContain('CLI reads config at startup');
+  });
+
+  it('stays pure ASCII so the line is greppable in a compiled sidecar', () => {
+    // sidecar 中文锚不可靠判例：打进 sidecar 的模型可见行全 ASCII。
+    for (const line of [
+      promptBudgetLiveLine([], 'deepseek-openai', 'deepseek-v4-pro'),
+      promptBudgetLiveLine([], 'some-unknown', 'mystery-model', undefined, 'next session'),
+    ]) {
+      expect(/^[\x20-\x7E]*$/.test(line)).toBe(true);
+    }
   });
 });
 
