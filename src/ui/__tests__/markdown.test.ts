@@ -1282,3 +1282,30 @@ describe('form validation truth feedback（刀 6）', () => {
     expect(line).toContain('x'.repeat(120));
   });
 });
+
+// 「图先于文」时序硬保证（2026-11-03 用户定调 + 真机判例：map gate 旧实现
+// 「kick 即放行」让说明文字抢在图前面）。gate 是 DOM 交互逻辑 headless 测
+// 不了，按本文件「接线点全在」先例用源码形态锚锁三件行为。
+describe('diagram-first timing (hold-to-settle gates)', () => {
+  const src = () => readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+
+  it('map gate holds until settle, not until kicked', () => {
+    const s = src();
+    // 已 kick 仍 loading 时必须有 hold-since 计时与 settle 判定——不再裸 return false。
+    expect(s).toContain("el.getAttribute('data-hold-since')");
+    expect(s).toContain('data-hold-released');
+  });
+
+  it('the hold budget is a 15s dead-chain fuse, not a 2.5s pacing release', () => {
+    const s = src();
+    expect(s).toContain('const DIAGRAM_HOLD_BUDGET_MS = 15_000;');
+    // 旧值不得复活：2.5s 把常态慢渲染全漏给了文字（真机判例）。
+    expect(s).not.toContain('= 2500;');
+  });
+
+  it('tile retry exhaustion lands a terminal error state (settle must be reachable)', () => {
+    const s = src();
+    expect(s).toContain("setMapState(slot, 'error', t('diagram.tilesFailed'))");
+    expect(s).toContain('MAX_SILENT_MAP_RETRIES');
+  });
+});

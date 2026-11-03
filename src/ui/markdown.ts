@@ -2786,7 +2786,15 @@ function scheduleSilentMapRetry(slot: HTMLElement, version: number): void {
   if (mapRetryTimers.has(slot)) return;
   const attempts = (mapRetryAttempts.get(slot) ?? 0) + 1;
   mapRetryAttempts.set(slot, attempts);
-  if (attempts > MAX_SILENT_MAP_RETRIES) return;
+  if (attempts > MAX_SILENT_MAP_RETRIES) {
+    // 耗尽必须落终态：此前直接 return，loading 遮罩永远不撤——spinner
+    // 无限转，用户不知道图死在哪一步；hold gate 也永远等不到 settle
+    // （2026-11-03 时序定调的配套：hold 到 settle 的前提是 settle 必达）。
+    // 刀 6 同步受益：错误终态会被记成校验事件回流给模型（瓦片受限是环境
+    // 问题，模型看到可自行决定换静态形式，不用改 map 源码）。
+    setMapState(slot, 'error', t('diagram.tilesFailed'));
+    return;
+  }
   // 5s → 10s → 20s → capped 30s. Each round reloads only the tile layer of
   // the live map, so even a failed attempt cannot flash anything on screen.
   const delay = Math.min(5_000 * 2 ** (attempts - 1), 30_000);
@@ -3007,7 +3015,14 @@ const STREAM_HLJS_SKIP_ABOVE = 30_000;
 
 /** Diagram hold-gate budget: after this long a still-rendering slot stops
  *  holding up the text below it (the render itself continues in place). */
-const DIAGRAM_HOLD_BUDGET_MS = 2500;
+// 「图先于文」的硬保证（2026-11-03 用户定调：先看到图再看文字才是正常时
+// 序）+ 异常保险丝二合一：hold gate 把图后面的文字扣到渲染 settle
+// （preview/error）为止；这个预算只防「渲染链自身挂死」的极端情况，不是
+// 对慢渲染的常态放行。15s 的量级=初始渲染窗口（引擎/模块懒加载冷启动 +
+// 地图瓦片首试的 12s 一次性 timer），正常渲染秒级 settle，永远等不到它。
+// 旧值 2.5s 是「兜底放行」语义（2026-09-23 防图卡死文），真机证明它把
+// 常态慢渲染全漏给了文字——说明文字抢跑在图前面。
+const DIAGRAM_HOLD_BUDGET_MS = 15_000;
 
 /** Let one frame paint between sequential diagram renders: echarts
  *  init+setOption and mermaid layout are synchronous main-thread work, and
@@ -3147,10 +3162,14 @@ function streamFenceOpen(slot: HTMLElement): boolean {
  *    stable while the JSON streams in.
  *  - Closed and not yet hydrated → kick renderMapNodes and return true: the
  *    caller holds later blocks until the map has been given its chance.
- *  - Anything else (already hydrated, painted, or in its invisible retry
- *    phase) → false; later blocks always flow.
+ *  - Already hydrated but still loading (lazy module / tiles / silent retry) →
+ *    keep holding until preview/error settles, releasing at most after
+ *    DIAGRAM_HOLD_BUDGET_MS (same fallback as streamingDiagramGate — the
+ *    old "kicked → release" read let text flow while the map was still
+ *    spinning, 2026-11-03 field report).
  * Map render errors are invisible by design (hidden canvas + silent retry),
- * so the gate can never wedge the stream on them.
+ * so the gate can never wedge the stream: the budget releases the text, the
+ * map keeps rendering in place and lights up when done.
  */
 function streamingMapGate(el: HTMLElement): boolean {
   if (!el.classList.contains('map-slot')) return false;
@@ -3160,7 +3179,22 @@ function streamingMapGate(el: HTMLElement): boolean {
     void renderMapNodes(el.parentElement ?? el);
     return true;
   }
-  return false;
+  // 已 kick 但仍在 loading（模块懒加载/瓦片/静默重试）：继续 hold 到渲染
+  // settle（preview/error）。原实现「kick 过即放行」——hold 只维持到渲染
+  // 启动的瞬间，文字几乎必然先于图（2026-11-03 真机判例：图未渲染、图下
+  // 的说明文字先出）。与 streamingDiagramGate 同款机制：hold 到 settle，
+  // DIAGRAM_HOLD_BUDGET_MS 只作渲染链挂死的异常保险丝；瓦片受限时 retry
+  // 链耗尽落 tilesFailed 错误终态（settle 必达的配套），图框已就绪。
+  if (el.getAttribute('data-hold-released') === '1') return false;
+  if (el.hasAttribute('data-hold-since')) {
+    if (Date.now() - Number(el.getAttribute('data-hold-since')) >= DIAGRAM_HOLD_BUDGET_MS) {
+      el.setAttribute('data-hold-released', '1');
+      return false;
+    }
+  } else {
+    el.setAttribute('data-hold-since', String(Date.now()));
+  }
+  return true;
 }
 
 /**
@@ -3212,9 +3246,10 @@ function streamingDiagramGate(el: HTMLElement, container: HTMLElement): boolean 
   const settled = (slot: HTMLElement): boolean => {
     const state = slot.getAttribute('data-state');
     if (state === 'preview' || state === 'error' || streamFenceOpen(slot)) return true;
-    // 兜底超时:「图先于文」不能变成「图卡住文」。PlantUML 引擎启动、被墙
-    // 的地图瓦片这类慢渲染曾把后续段落无限期扣住——hold 满 2.5s 就放行后文,
-    // 图在原地继续渲染,画好后仍亮在原位(占位卡已被换掉,布局不跳)。
+    // 异常保险丝（不是常态放行）：渲染链必达 preview/error 终态，正常渲染
+    // 秒级 settle 永远等不到这里。只有渲染链自身挂死（如引擎加载既不成功
+    // 也不报错的僵尸态）才由 15s 预算救场——放行后文，图在原地继续渲染，
+    // 画好后仍亮在原位（占位卡已被换掉，布局不跳）。
     if (slot.getAttribute('data-hold-released') === '1') return true;
     if (slot.hasAttribute('data-hold-since')) {
       if (Date.now() - Number(slot.getAttribute('data-hold-since')) >= DIAGRAM_HOLD_BUDGET_MS) {
