@@ -4,7 +4,11 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
-四线一批。设置自愈定位裁定落地（感知手脚三件套）：引擎自动闭环被否——替模型决策有章法，pure 只保证「现状可见/知识可查/改了真生效」，sys_info 尾带 LLM 预算现状行（explicit-override/family-defaults/conservative-fallback 三态真话，GUI 下一回合生效、CLI 下一会话生效两面如实）。刀 6 校验真话回流：渲染层错误卡/修复 badge 与 CLI 投影失败此前纯 DOM 静默——模型对自己写错的围栏全盲；事件器双面共用（GUI 三收口点 + CLI 四失败分支，截断残片不记——输出被切断不是语法错），每回合装配读走注入 envFacts，聚合封顶防噪。「图先于文」升级为时序硬保证：hold 放行锚渲染 settle 而非动作发生，15s 兜底降级为挂死保险丝（旧 2.5s 真机判例推翻其常态放行语义），瓦片重试耗尽落明确终态不再永转。刀 5 常驻指针瘦身：五段最小语法斩掉（1623→818 字符）——完整 DSL 本就与卡同源，闸门随附放宽到 CLI/渠道三面（原 GUI 独占，裸斩即 CLI 语法清零）、mermaid beta 清单搬卡，私有 DSL 发现指针升格「语法不在场先拉卡」，真机漏判场景先拉卡再写对（2/2）。瓦片 fetch 接路由脑：config 残留死代理时地图全盲（每块瓦片撞死端口而 shell curl 直连同源 200）——瓦片域全部直连优先+代理兜底，失败喂回路由脑健康表，高频小瓦片即最便宜的探针。
+## v4.1.2
+
+**提示词审计 A/B/C 三批落地：真 bug 修复 + 教学搬进决策点 + 常驻面去重**
+
+提示词全面审计（双 agent 产出 A/B/C 三档）本批全落。A 档三件真 bug：adaptive 策略卡的委派信号脱钩——roles 行在 delegation=none 时照排、research/design 角色不看复杂度、路由自声明 simple 仍给人选，简单单线程任务被过度编排（文案改判据教学、roles 行与 delegation 联动、信号层复杂度门三层修）；「用用户语言」教学散落八处——独立调用点（插话答复/确认问/语义路由）是唯一载体保留，主会话冗余六处删，思考语言仍走动态 tag 机械通道（3c069dd 实证静态教学拦不住，不采信审计的判删意见）；session_memory 注入面策展——模板 lesson 双写在例行成功回合写样板噪音，压单行事实、procedure 只在反常回合写。B 档：capabilities 块的工具一行简介整体退役——与 toolDefs 的 description 两份同源，且对 deferred 工具教调用语法而模型看不见（2026-10-31「教模型调用看不见的工具」同款形状反向）；教学全部住工具 description（选工具时恰在眼前），deferred 存在线索由 discover_tools 常驻描述承载；public API 目录常驻段退役迁 web_public_api/web_fetch description（数据查找失败那一刻模型正看着这两个工具）；workflow 删三处与其他面重复的教学。C 档：ledger「先查账再开口/动手/立计划」时机判据焊进 session_ledger_facts 注入头——素材到场的一刻才是决策点，判据机械在场，稳定区 protocol 保持双通道。附带：lesson 落库截断卫生——字段级预算取代整行硬切，不再词中腰斩直达模型。
 
 ## v4.1.1
 
