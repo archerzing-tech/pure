@@ -399,7 +399,7 @@ describe('Harness cross-session memory (v0.10)', () => {
               yield { type: 'done', content: 'recovered and done', toolCalls: [] } as LLMChunk;
             }
           },
-        } as LLMAdapter;
+        } as unknown as LLMAdapter;
       })(),
       tools: flakyTool,
       toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],

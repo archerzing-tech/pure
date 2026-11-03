@@ -350,7 +350,7 @@ describe('lessonToMemoryAdds truncation hygiene (2026-11-03 判例)', () => {
       prevention: 'P'.repeat(300),
       recovery: 'Rc'.repeat(150),
       evidence: ['e1hash123456', 'e2hash123456', 'e3hash123456', 'e4hash123456', 'e5hash123456'],
-      confidence: 'medium',
+      confidence: 'high',
     };
   }
 
@@ -378,7 +378,7 @@ describe('lessonToMemoryAdds truncation hygiene (2026-11-03 判例)', () => {
       prevention: 'short prevention',
       recovery: 'not needed',
       evidence: ['abc123'],
-      confidence: 'medium',
+      confidence: 'high',
     };
     const main = lessonToMemoryAdds(short, ctx).find((a) => a.type === 'successful_pattern')!;
     expect(main.content).toContain('Symptom: short symptom. Root cause: short cause. Prevention: short prevention.');
