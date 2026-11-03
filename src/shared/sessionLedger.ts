@@ -213,8 +213,10 @@ function excerpt(text: string, cap: number): string {
 /**
  * 把三本账排成一段**给模型看的素材**（user-turn context，不是对话流）：问过
  * 什么、答了什么、做过什么、计划怎么演化的——只排事实清单，不是替模型写好的
- * 决定。怎么用（复用并告知 / 按你刚才说的）由 LEDGER_PROTOCOL 教，这里不替它
- * 说。空账返回空串：宁可不给素材，也不给一份空清单占提示词。
+ * 决定。注入头焊「先查账再开口/动手/立计划」的时机判据（2026-11-03 审计 C 档）：
+ * 稳定区的 LEDGER_PROTOCOL 教存在与复用规则，但那是常驻教学——账本素材到场
+ * 的这一刻才是决策点，时机判据必须机械在场（原则不能条件在场）。空账返回
+ * 空串：宁可不给素材，也不给一份空清单占提示词。
  */
 export function formatSessionLedgerFacts(ledger: SessionLedger | null | undefined): string {
   if (!ledger) return '';
@@ -240,7 +242,7 @@ export function formatSessionLedgerFacts(ledger: SessionLedger | null | undefine
   if (lines.length === 0) return '';
   return [
     '<session_ledger_facts>',
-    '以下是宿主按真实交互记下的会话账：这些问题用户真答过，这些动作真做过，这些计划真立过。它只是素材——复用前仍可与用户确认；它没记到的事按你实际知道的讲，不要因为清单里没写就当作没发生。',
+    '以下是宿主按真实交互记下的会话账：这些问题用户真答过，这些动作真做过，这些计划真立过。开口提问、动手执行、另立计划之前，先扫一遍这份账——已答过的直接用答案并说一声复用，别重问；已做过的直接引用结果，别重跑；已立过的计划在它基础上细化，别另开一份。它只是素材——复用前仍可与用户确认；它没记到的事按你实际知道的讲，不要因为清单里没写就当作没发生。',
     ...lines,
     '</session_ledger_facts>',
   ].join('\n');

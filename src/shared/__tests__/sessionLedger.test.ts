@@ -93,6 +93,18 @@ describe('formatSessionLedgerFacts', () => {
     expect(formatSessionLedgerFacts(null)).toBe('');
   });
 
+  it('注入头焊「先查账再开口」的时机判据（审计 C 档：判据在数据到场的一刻）', () => {
+    let ledger = createSessionLedger();
+    ledger = recordDone(ledger, { ts: 1, intent: 'write_file', args: '{}', ok: true, summary: '写过 /a' });
+    const facts = formatSessionLedgerFacts(ledger);
+    // 时机 + 三分支复用规则逐句在场（稳定区 protocol 是同一判据的第二通道，
+    // 这里的锚钉住数据头这份——素材与判据同块到落，不会被预算分开裁）。
+    expect(facts).toContain('先扫一遍这份账');
+    expect(facts).toContain('别重问');
+    expect(facts).toContain('别重跑');
+    expect(facts).toContain('别另开一份');
+  });
+
   it('未回收的提问不进素材；已回收的问答/已做/计划按事实列出', () => {
     let ledger = createSessionLedger();
     ledger = recordAsked(ledger, { ts: 1, question: '用哪个端口？', source: 'clarification' });
