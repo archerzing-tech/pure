@@ -35,7 +35,7 @@ describe('scrollUi convergence guard', () => {
 describe('BASE_SYSTEM_PROMPT structure', () => {
   // Smart typo tolerance / Logical traps headers left with framework-reform
   // phase 2 (blocks retired; absence locked in promptLayers.test.ts).
-  const HEADERS = ['Output style:', 'Tool-calling rules:', '<capabilities>', '<agent_identity>'];
+  const HEADERS = ['Output style:', 'Tool-calling rules:', '<capabilities>'];
 
   it('has no duplicated section headers (workspace variant)', () => {
     const prompt = BASE_SYSTEM_PROMPT(true);
@@ -63,7 +63,7 @@ describe('BASE_SYSTEM_PROMPT structure', () => {
 
   it('wraps tools in <capabilities> and keeps volatile fragments at the tail', () => {
     const prompt = BASE_SYSTEM_PROMPT(true);
-    expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('</agent_identity>'));
+    expect(prompt.indexOf('<capabilities>')).toBeGreaterThan(prompt.indexOf('</operating_principles>'));
     // Cache stability: capabilities carries the mid-session-volatile
     // blocked-hosts list, so it sits at the system-prompt TAIL — AFTER the
     // stable L0/L1 blocks (the old order had it right after agent_identity,

@@ -75,6 +75,36 @@ describe('AdaptiveControlPlane', () => {
     expect(strategy.directive).not.toContain('do not delegate by default');
   });
 
+  it('does not over-orchestrate a simple single-thread lookup (weather-query case)', () => {
+    // 真机判例 session_1793706272041_1：「分析未来7天天气」simple/research 被
+    // 推 researcher + 文案带「do not do a multi-role job alone by default」强
+    // 默认——单线短任务应自己干，裁决权归模型（AGENTS.md 多 agent 例外条款）。
+    const strategy = plane.select({
+      prompt: '帮我分析一下西安未来7天的天气趋势',
+      environment: environment(),
+    });
+
+    expect(strategy.recommendedRoles).toEqual([]);
+    expect(strategy.directive).not.toContain('researcher');
+
+    // 真机形态：语义路由判 simple/research 且推了 researcher——同样被门住。
+    const routed = plane.select({
+      prompt: '帮我分析一下西安未来7天的天气趋势',
+      environment: environment(),
+      semantic: { tags: ['research'], complexity: 'simple', roles: ['researcher'] },
+    });
+
+    expect(routed.delegation).toBe('targeted');
+    expect(routed.recommendedRoles).toEqual([]);
+    expect(routed.directive).not.toContain('researcher');
+    // 文案教判定判据而不是下强默认；引擎自述遥测枚举行不再进模板。
+    expect(routed.directive).toContain('single-threaded, short');
+    expect(routed.directive).not.toContain('by default');
+    expect(routed.directive).not.toContain('- Signals:');
+    expect(routed.directive).not.toContain('- Confidence:');
+    expect(routed.directive).not.toContain('- Rationale:');
+  });
+
   it('does not route a non-code travel plan to code roles (planning ≠ code)', () => {
     const strategy = plane.select({
       prompt: '帮我安排一个从西安到广西柳州的旅游计划',

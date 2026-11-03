@@ -187,8 +187,10 @@ function recommendRoles(intent: RequestIntent, complexity: AdaptiveStrategy['com
   if (codeTask && (intent.planning || intent.refactor || intent.multiFile || intent.build)) {
     roles.push('task_planner', 'code_editor', 'code_reviewer');
   }
-  if (intent.research) roles.push('researcher', 'deep_thinker');
-  if (intent.design) roles.push('ui_designer');
+  // research/design 角色同样带复杂度门：simple/trivial 的调研（如天气查询）
+  // 是单线短任务，推 researcher+deep_thinker 是过度编排（session_1793706272041_1 判例）。
+  if (intent.research && complexity !== 'simple' && complexity !== 'trivial') roles.push('researcher', 'deep_thinker');
+  if (intent.design && complexity !== 'simple' && complexity !== 'trivial') roles.push('ui_designer');
   // 评审/审计角色同样跟着代码走（与上方管线、下方兜底同门）：「评审这份合
   // 同」「审计我的计划」不是 code_reviewer/project_auditor 的活——它们读的
   // 是代码库，非代码 review/audit 推过去是同款误配，且正是 code_reviewer 描述
@@ -254,17 +256,23 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     ? 'Explore the relevant workspace and dependencies broadly enough to test competing hypotheses before editing.'
     : 'Start with a targeted read of the smallest relevant surface, expanding only when evidence requires it.';
   const delegation = strategy.delegation === 'parallel'
-    ? 'This task needs parallel decomposition. Delegate to the matching subagent tools and run independent read-only roles in parallel, then integrate their results. Narrate the orchestration to the user like a colleague setting up a shared effort: one natural sentence about your overall approach first, then hand each piece to its subagent and weave the results into ONE reply in the user\'s language. Never recite a role list or an arrow-chain of subagents.'
+    ? 'This task needs parallel decomposition. Delegate to the matching subagent tools and run independent read-only roles in parallel, then integrate their results. Narrate the orchestration to the user like a colleague setting up a shared effort: one natural sentence about your overall approach first, then hand each piece to its subagent and weave the results into ONE reply. Never recite a role list or an arrow-chain of subagents.'
     : strategy.delegation === 'targeted'
-      ? 'Delegate the well-scoped pieces of this task to the matching subagent roles when it reduces context or execution risk, and parallelize independent read-only roles where possible — do not do a multi-role job alone by default. Tell the user about each hand-off in one natural sentence at the moment you make it, and keep the single-voice final answer in the user\'s language.'
+      // 2026-11-03 真机判例（session_1793706272041_1）：「天气查询 simple/research」
+      // 被推 researcher 且文案带「do not do a multi-role job alone by default」
+      // 强默认——旧文案替模型做裁决，单线短任务被过度编排。改为教判定判据
+      // （职能制衡/可并行/上下文隔离命中才拆），裁决权归还模型。
+      ? 'Delegate only where it genuinely helps — distinct role perspectives that would otherwise blur into each other, independent chunks that can run in parallel, or output volume that would flood one context; a task that is single-threaded, short, and needs no independent verification runs fine without subagents. Parallelize independent read-only roles where they do exist. Tell the user about each hand-off in one natural sentence at the moment you make it, and keep the single-voice final answer.'
       : 'This is a trivial/simple task — keep the loop local and avoid the overhead of delegation; delegate only if new evidence shows it is needed.';
-  const roles = strategy.recommendedRoles.length > 0
+  // roles 行与 delegation 联动：delegation='none'（quick/trivial/语义路由显式免委派）
+  // 时不再输出「推荐子 agent」——无委派意图却给人选是同款信号脱钩噪音
+  //（session_1793706272041_1 判例：simple 天气查询被推 researcher）。
+  const roles = strategy.delegation !== 'none' && strategy.recommendedRoles.length > 0
     ? `\n- 推荐的本任务子 agent：${strategy.recommendedRoles.join(', ')}。${strategy.parallelRoles.length > 0 ? ` 其中可并行：${strategy.parallelRoles.join(', ')}。` : ''}（建议人选；具体怎么跟用户说由你自然表达，不要列成机械清单。）`
     : '';
   const priorArt = strategy.priorArtHint
     ? '\n- Prior art: no stored procedure covers this task. Before writing bespoke code, search for a ready-made open-source solution or official documentation, and reuse or adapt the best fit instead of building from scratch.'
     : '';
-  const complexityLine = `\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}`;
   const recovery = strategy.recovery === 'switch-approach'
     ? 'Treat prior failures as evidence: change the hypothesis, tool, or scope instead of repeating the failed path.'
     : strategy.recovery === 'use-verified-procedure'
@@ -275,7 +283,10 @@ function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
     : strategy.autonomy === 'assisted'
       ? 'Proceed on safe local work, but surface missing capability or decisions before crossing a boundary.'
       : 'Do not claim autonomous progress when the workspace or required capability is unavailable.';
-  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Signals: ${strategy.signals.join(', ')}\n- Exploration: ${strategy.exploration}\n- Verification: ${strategy.verification}\n- Delegation: ${strategy.delegation}\n- Recovery: ${strategy.recovery}\n- Autonomy: ${strategy.autonomy}\n- Confidence: ${strategy.confidence.toFixed(2)}\n- Rationale: ${strategy.rationale}\n${exploration}\n${verification}\n${delegation}${complexityLine}${roles}${priorArt}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
+  // 模板只留模型需要的：复杂度/意图分类 + 三段行为 prose + 人选/现成方案。
+  // Signals/Confidence/Rationale 等枚举行是引擎自述遥测——每个枚举的下一段
+  // prose 已完整表达同一信息，枚举行纯冗余（2026-11-03 prompt 审计 A 档）。
+  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}\n${exploration}\n${verification}\n${delegation}${roles}${priorArt}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
 }
 
 export class AdaptiveControlPlane {
@@ -305,6 +316,14 @@ export class AdaptiveControlPlane {
       // 即使路由误选了也兜住——与关键词路径的 involvesCode 门对称。
       if (!involvesCode(intent, input.prompt)) {
         roles = roles.filter((r) => !CODE_OR_EXEC_ROLES.has(r));
+      }
+      // 路由自声明 simple/trivial 却给了人选=自相矛盾：以复杂度自判为准
+      // 兜住（session_1793706272041_1 判例：simple 天气查询被路由推 researcher）。
+      // 路由未声明复杂度时尊重其人选（理解驱动分配优先，不信关键词估算反杀）；
+      // 有失败证据时例外——扩面响应本就该多角色并行。
+      const routerDeclaredSimple = input.semantic?.complexity === 'simple' || input.semantic?.complexity === 'trivial';
+      if (routerDeclaredSimple && !hasEvidenceOfFailure) {
+        roles = [];
       }
       recommendedRoles = roles;
     } else {

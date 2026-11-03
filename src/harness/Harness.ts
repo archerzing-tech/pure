@@ -1414,37 +1414,35 @@ export class Harness {
     // 前缀通道不受影响）。
     const dedupeKey = `lesson:${userPrompt.trim().toLowerCase()}`;
     if (this.writtenLessonKeys.has(dedupeKey)) return;
-    const parts = [
-      `Symptom: ${lesson.symptom}`,
-      `Root cause: ${lesson.rootCause}`,
-      `Recovery path: ${lesson.recoveryPath}`,
-      `Verification: ${lesson.verification}`,
-      `Avoid next time: ${lesson.avoidNextTime}`,
-      tools.length > 0 ? `Tools used: ${tools.join(', ')}` : 'Tools used: none recorded',
-    ];
-    if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
-    if (this.currentAdaptiveStrategy) {
-      parts.push(`Runtime strategy: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery`);
+    // 注入面策展（2026-11-03 prompt 审计 A 档）：模板 lesson 压单行，只留有
+    // 信息的字段；结构化 lesson 对象全量留盘（entry 的 lesson 字段）。
+    // 正信号裁剪：passed 的验证证据链是过程噪音，注入面只留状态词；反常
+    // （failed/incomplete）证据链保留——回读价值高。工具清单/策略复诵/固定
+    // 样板句（Avoid next time 等）不再进注入面。
+    const abnormal = retriedFailures.length > 0;
+    const verificationLine = this.verificationPassed
+      ? 'passed'
+      : this.verificationSummary.slice(0, 300);
+    const parts = [`Task: ${symptom}`];
+    if (abnormal) {
+      parts.push(`Recovered from: ${lesson.rootCause}`, `Recovery: ${recovery}`);
     }
+    parts.push(`Verification: ${verificationLine}`);
+    if (finalOutput) parts.push(`Outcome: ${finalOutput.substring(0, 180)}`);
     await memory.add({
       type: 'successful_pattern',
-      content: `Reusable lesson — ${parts.join('. ')}.`.slice(0, 900),
+      content: `Reusable lesson — ${parts.join('; ')}.`.slice(0, 900),
       timestamp: Date.now(),
       sessionId: this.config.sessionId,
       projectPath: this.projectPath(),
       lesson,
       dedupeKey,
     });
-    // Skill/experience sink (procedure layer): a compact, actionable version of
-    // the lesson — WHAT was achieved and the verified HOW — so future sessions
-    // can apply the proven procedure instead of rediscovering it. Kept short
-    // (the full lesson lives in the successful_pattern entry above).
-    const strategyNote = this.currentAdaptiveStrategy
-      ? ` Runtime strategy selected from live signals: ${this.currentAdaptiveStrategy.exploration} exploration, ${this.currentAdaptiveStrategy.verification} verification, ${this.currentAdaptiveStrategy.recovery} recovery. Re-evaluate it against the next workspace evidence.`
-      : '';
-    const hasVerifiedEvidence = this.verificationPassed;
-    const procedure = `When facing "${lesson.symptom}": apply the verified procedure — ${lesson.recoveryPath}. Verify via: ${lesson.verification}.${strategyNote}${lesson.avoidNextTime.startsWith('Do not repeat') ? ` If it fails, ${lesson.avoidNextTime}` : ''}`;
-    if (hasVerifiedEvidence) {
+    // 同事件双记去重：procedure 只在真恢复路径存在（反常回合）时写——例行
+    // 成功回合的 procedure 是「No retry was required」样板噪音，双重注入
+    // 同一事件没有增量信息。
+    if (abnormal && this.verificationPassed) {
+      const procedure = `When facing "${symptom}": apply the verified procedure — ${recovery}. Verify via: ${verificationLine}.`;
       await memory.add({
         type: 'procedure',
         content: procedure.slice(0, 600),

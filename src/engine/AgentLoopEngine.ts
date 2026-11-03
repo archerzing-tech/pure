@@ -379,7 +379,7 @@ export class AgentLoopEngine {
         try {
           const ask: Message = {
             role: 'user',
-            content: `HANDOVER (system directive): this turn is ending now. Reason: ${reason}. Do NOT call any tools — reply with text only, in the user's language: (1) what was completed (files written / verified), (2) what remains blocked and why, (3) the single recommended next step. 2-5 sentences of plain flowing text, no headings.`,
+            content: `HANDOVER (system directive): this turn is ending now. Reason: ${reason}. Do NOT call any tools — reply with text only: (1) what was completed (files written / verified), (2) what remains blocked and why, (3) the single recommended next step. 2-5 sentences of plain flowing text, no headings.`,
             internal: true,
           };
           let text = '';

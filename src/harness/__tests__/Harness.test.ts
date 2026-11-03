@@ -360,8 +360,77 @@ describe('Harness cross-session memory (v0.10)', () => {
 
     await collect(harness.run('SYS', 'learn from the verified change'));
 
+    // 例行成功回合（无失败）：procedure 是「No retry was required」样板噪音，
+    // 不再写（2026-11-03 prompt 审计 A 档双记去重）；模板 lesson 压单行落一条。
+    expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(0);
+    const routine = memStore.entries.find(e => e.content.startsWith('Reusable lesson'));
+    expect(routine?.content).toContain('Verification: passed');
+    expect(routine?.content).not.toContain('Engine verification status');
+    expect(routine?.content).not.toContain('Tools used');
+    expect(routine?.content).not.toContain('Runtime strategy');
+  });
+
+  it('writes the procedure with the real recovery path only on abnormal (retried-failure) turns', async () => {
+    const memStore = new FakeMemoryStore();
+    let calls = 0;
+    const flakyTool: ToolAdapter = {
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        calls++;
+        return calls <= 2
+          ? { id: tc.id, toolName: 'web_fetch', error: 'transient socket timeout', success: false, duration: 3 }
+          : { id: tc.id, toolName: 'web_fetch', result: 'ok', success: true, duration: 3 };
+      },
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+    };
+    const harness = new Harness({
+      sessionId: 'sess-abnormal-procedure',
+      llm: (() => {
+        let call = 0;
+        return {
+          stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+            call++;
+            if (call <= 3) {
+              const tc = { id: `call_${call}`, index: 0, function: { name: 'web_fetch', arguments: '{"url":"https://x"}' } };
+              yield { type: 'tool_call', index: 0, id: tc.id, name: 'web_fetch', arguments: tc.function.arguments } as LLMChunk;
+              yield { type: 'done', content: '', toolCalls: [tc] } as LLMChunk;
+            } else {
+              yield { type: 'content', content: 'recovered and done' } as LLMChunk;
+              yield { type: 'done', content: 'recovered and done', toolCalls: [] } as LLMChunk;
+            }
+          },
+        } as LLMAdapter;
+      })(),
+      tools: flakyTool,
+      toolsDefs: [{ name: 'web_fetch', description: 'fetch', input_schema: {} }],
+      budget: STD_BUDGET,
+      memory: memStore,
+      projectPath: '/ws',
+      failurePolicy: new DefaultFailurePolicy(),
+      verifier: {
+        evaluate: async () => ({
+          passed: true,
+          evidence: [{
+            id: 'check-1',
+            checkName: 'focused check',
+            status: 'passed',
+            summary: 'focused check passed',
+            source: 'command',
+            timestamp: Date.now(),
+          }],
+        }),
+      },
+    });
+
+    await collect(harness.run('SYS', 'fix the flaky deploy step'));
+    await harness.settleReflections();
+
+    // 反常回合（有重试失败+真恢复）：procedure 带 recovery path 落一条。
     expect(memStore.entries.filter(e => e.type === 'procedure')).toHaveLength(1);
-    expect(memStore.entries.find(e => e.type === 'procedure')?.content).toContain('Runtime strategy selected from live signals');
+    const procedure = memStore.entries.find(e => e.type === 'procedure')?.content ?? '';
+    expect(procedure).toContain('fix the flaky deploy step');
+    expect(procedure).toContain('recovered from');
+    expect(procedure).not.toContain('Runtime strategy');
   });
 
   it('does not duplicate a lesson when the same prompt is completed twice in one session', async () => {

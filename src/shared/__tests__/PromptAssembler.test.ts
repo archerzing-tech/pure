@@ -135,7 +135,7 @@ describe('PromptAssembler', () => {
       capabilities: buildCliCapabilities(),
     });
 
-    for (const header of ['<agent_identity>', '<capabilities>', 'Output style:', 'Tool-calling rules:']) {
+    for (const header of ['<capabilities>', 'Output style:', 'Tool-calling rules:']) {
       expect(gui.split(header).length - 1).toBe(1);
       expect(cli.split(header).length - 1).toBe(1);
     }
@@ -143,7 +143,9 @@ describe('PromptAssembler', () => {
     // search_agent_skills 工具描述，安装梯改按需）。
     expect(gui).not.toContain('Capability-gap protocol:');
     expect(cli).not.toContain('Capability-gap protocol:');
-    expect(gui.indexOf('<agent_identity>')).toBeLessThan(gui.indexOf('<capabilities>'));
+    // 2026-11-03 审计去重锁：agent_identity 段删（身份出典在 character_core）。
+    expect(gui).not.toContain('<agent_identity>');
+    expect(cli).not.toContain('<agent_identity>');
     // Mid-run insertion protocol is a REQUIRED stable-zone fragment on both
     // surfaces (2026-09-24 插话协议案例集): present exactly once, before the
     // volatile tail, on GUI and CLI alike.
@@ -335,7 +337,10 @@ describe('PromptAssembler', () => {
     // 任务被这条不变量带得先跑 list_files 探路径（2026-10-26 用户实测），
     // 纯属浪费一轮工具调用，必须显式豁免。
     const cli = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() });
-    expect(cli).toContain('when a request means changing code IN this workspace (implement / fix / extend), start with find_files / code_searcher');
+    // 2026-11-03 审计压切：点名工具的半句（start with find_files / code_searcher）
+    // 删——选哪个工具是模型的事（北极星：工具无章法），不变量只钉行为。
+    expect(cli).toContain('when a request means changing code IN this workspace (implement / fix / extend), locate the relevant files first');
+    expect(cli).not.toContain('start with find_files / code_searcher');
     expect(cli).toContain('the deliverable is the change written into those files plus their tests passing, never a code block in the reply');
     expect(cli).toContain('existing file names, signatures, and test structure are the contract, not suggestions');
     expect(cli).toContain('Analysis / review / explanation / summary requests are the opposite');
@@ -591,7 +596,7 @@ describe('PromptAssembler', () => {
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0 },
     }, 'do the task', { plan: 'plan '.repeat(8_000) });
 
-    expect(assembly.systemPrompt).toContain('<agent_identity>');
+    expect(assembly.systemPrompt).toContain('<operating_principles>');
     expect(assembly.systemPrompt).toContain('Tool-calling rules:');
     expect(assembly.budget.includedFragmentIds).toContain('system_core');
     expect(assembly.budget.includedFragmentIds).toContain('user_request');
@@ -780,7 +785,7 @@ describe('性格内核注入（人格轨道 刀 2）', () => {
       modelIdentity: { provider: 'deepseek-openai', model: 'deepseek-v4-flash' },
     });
     const core = prompt.indexOf('<character_core>');
-    expect(prompt.indexOf('<agent_identity>')).toBeLessThan(core);
+    expect(core).toBeGreaterThan(-1);
     expect(core).toBeLessThan(prompt.indexOf('<model_identity>'));
     // conventions 已随 P2 下沉 user turn：system 不再出现 project_conventions。
     expect(prompt).not.toContain('<project_conventions>');

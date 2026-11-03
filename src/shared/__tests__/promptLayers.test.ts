@@ -34,16 +34,18 @@ import { PromptAssembler, buildGuiCapabilities } from '../PromptAssembler';
 import { estimatePromptTokens } from '../providers';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
-  it('carries the immutable identity + operating contract', () => {
-    expect(SYSTEM_CORE_PROMPT).toContain('<agent_identity>');
-    expect(SYSTEM_CORE_PROMPT).toContain('pure');
+  it('carries the immutable operating contract', () => {
+    // 2026-11-03 审计去重锁：agent_identity/runtime 段不回来——身份出典在
+    // character_core 内核锚句（K1/C1），路径约定在 toolDefs，循环纪律在 L1
+    // workflow 与 operating_principles。
+    expect(SYSTEM_CORE_PROMPT).not.toContain('<agent_identity>');
+    expect(SYSTEM_CORE_PROMPT).not.toContain('<runtime>');
     expect(SYSTEM_CORE_PROMPT).toContain('<operating_principles>');
     // The reasoning phase plans the work — it is not a scratch draft of the
     // deliverable (drafting code in thinking doubled tokens and latency).
     expect(SYSTEM_CORE_PROMPT).toContain('Reason to plan, not to draft');
     expect(SYSTEM_CORE_PROMPT).toContain('never to write out the deliverable');
     expect(SYSTEM_CORE_PROMPT).toContain('<permission_modes>');
-    expect(SYSTEM_CORE_PROMPT).toContain('<runtime>');
     expect(SYSTEM_CORE_PROMPT).toContain('<response_format>');
   });
 
