@@ -16,6 +16,7 @@ import { parseMapSource, type MapMarker, type MapSpec } from '../shared/mapSpec'
 import { gcj02ToWgs84, wgs84ToGcj02 } from './mapCoord';
 import { isTauriRuntime, tauriInvoke } from '../shared/tauri';
 import { t } from '../shared/i18n';
+import { netRouteProxyPair, recordProxyProbe } from '../shared/netRoute';
 
 export { parseMapSource };
 export type { MapMarker, MapSpec };
@@ -191,9 +192,27 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 async function loadTile(url: string): Promise<string> {
   if (isTauriRuntime()) {
     const { proxyUrl, maxBytes } = await resolveTileConfig();
-    const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl, maxBytes });
-    if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
-    return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
+    // 瓦片接路由脑（2026-11-03 真机判例）：此前 proxyUrl 拿 effectiveProxyUrl
+    // 裸值——config 残留死代理（7897 端口，FlClash 判例同款）时每块瓦片都
+    // 撞死端口，地图「始终没显示」而 shell curl 直连同源 200。瓦片域全是
+    // direct-first/neutral：netRouteProxyPair 给直连优先 + 代理兜底，代理
+    // 进死期（proxyHealthy）时兜底自动翻直连。真命令一次失败即换兜底路线
+    // 重试，两条都失败时把代理路线的死活喂回路由脑（瓦片高频小请求，是
+    // 最便宜的探针）。
+    const pair = netRouteProxyPair(url, proxyUrl);
+    try {
+      const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl: pair.proxyUrl, maxBytes });
+      if (pair.proxyUrl) recordProxyProbe(pair.proxyUrl, true);
+      if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
+      return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
+    } catch (err) {
+      if (pair.fallbackProxyUrl === null) throw err;
+      if (pair.proxyUrl) recordProxyProbe(pair.proxyUrl, false);
+      const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl: pair.fallbackProxyUrl, maxBytes });
+      if (pair.fallbackProxyUrl) recordProxyProbe(pair.fallbackProxyUrl, true);
+      if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
+      return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
+    }
   }
   const resp = await fetch(url, { mode: 'cors', signal: AbortSignal.timeout(8000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

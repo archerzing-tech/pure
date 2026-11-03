@@ -286,6 +286,24 @@ describe('netRouteProxyPair', () => {
       expect(Boolean(pair.proxyUrl)).toBe(!Boolean(pair.fallbackProxyUrl));
     }
   });
+
+  it('tile hosts go DIRECT first even when the config proxy is a dead port (2026-11-03 判例)', () => {
+    // 真机判例：config 残留死代理（127.0.0.1:7897，FlClash 判例同款）时，瓦片
+    // fetch 曾拿 effectiveProxyUrl 裸值——每块瓦片撞死端口，地图「始终没显示」
+    // 而 shell curl 直连同源 200。leafletMap.loadTile 现走 pair：瓦片域（amap/
+    // tencent/tianditu/esri/carto）全部直连优先，代理只作兜底；真机复验锚。
+    for (const url of [
+      'https://webrd01.is.autonavi.com/appmaptile?x=1&y=1&z=8',
+      'https://rt0.map.gtimg.com/tile?z=8&x=1&y=1',
+      'https://t0.tianditu.gov.cn/vec_w/wmts?x=1',
+      'https://server.arcgisonline.com/ArcGIS/tile/8/1/1',
+      'https://a.basemaps.cartocdn.com/rastertiles/8/1/1.png',
+    ]) {
+      const pair = netRoute.netRouteProxyPair(url, 'http://127.0.0.1:7897');
+      expect(pair.proxyUrl, url).toBe('');
+      expect(pair.fallbackProxyUrl, url).toBe('http://127.0.0.1:7897');
+    }
+  });
 });
 
 describe('netRouteSurfacePair (无单一目标 host 的出口)', () => {
