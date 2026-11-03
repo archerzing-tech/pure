@@ -1,6 +1,6 @@
 # 表现形式库（Presentation Capability Library）
 
-> **状态**：MVP + routing 卡 + 机械触发 + 刀 2 渲染器注册化（86d12d8）+ **刀 3 组合式自定义（f473c9c，2026-11-03）** 已落。后续刀（投影降级器 / 常驻指针瘦身 / 校验前置共享）未排期。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
+> **状态**：MVP + routing 卡 + 机械触发 + 刀 2 渲染器注册化（86d12d8）+ 刀 3 组合式自定义（f473c9c）+ **刀 4 投影降级器（34f1f87，2026-11-03，v4.1.0）** 已落。后续刀（常驻指针瘦身 / 校验前置共享）未排期。设计定调源于用户提案：展现形式抽成独立层，模型自主决策用哪种，可扩展可自定义。
 
 ## 一、定位与三层结构
 
@@ -52,9 +52,10 @@
 
 **刀 3：组合式自定义（2026-11-03，f473c9c）**：用户/agent 在 `~/.pure/config.json` 写 `presentationCards` 键（`{ id, base, ...只写想改的字段 }`）即注册自定义视觉形式。**组合式封装本意**：`{ id, base }` 就得到一张完整卡（判据/触发/交付/细则/族全继承 base），`registerCustomCards` 只覆盖显式给出的字段；自定义围栏 tag（可选 `fence`）挂 base kind 的既有渲染管线——`registerCustomFenceRoutes` 产出的路由 kind/build/stream 全部复用刀 2 静态表条目，hydration/retry 因 `data-diagram-kind` 写 base kind 天然走 KIND_PIPELINE，**零新渲染器零沙箱问题**（放弃的方案：让自定义卡带全新渲染器——那要插件加载与沙箱，而真实需求是判据与触发的运行时定制）。纪律：base 必须是内置七类围栏形式；id/tag 小写 ASCII 且不撞内置；同 id 幂等更新；逐卡拒绝不阻塞其余；新 tag 卡的 trigger 改写为 "Fenced block tagged X (rendered on the base pipeline)"。**真实源是盘上 config.json**（设置 agent 化铁律）：GUI 侧启动注册 + 回合边界活检热生效（`syncPresentationCardsFromConfig`，lastSyncKey 短路）；引擎侧 `presentation_guide` 惰性加载一次（ToolRegistry 经 `setCustomPresentationCardsLoader` 注入口收盘上读取——ToolRegistry/CodingAgent 都在 GUI 浏览器 bundle 里，静态 import cliConfig 会把 node:fs 拖进 vite 炸打包，宿主各自注册 loader：cliHarness/ui main/评测三处）；目录尾带注册说明句，agent 可语义自加卡。测试三面：卡注册表（继承/改写/拒绝/幂等/目录合入/reset 隔离）、渲染注册表（自定义 tag 走 base 管线端到端、:::容器归一、无新 tag 卡不动路由表、re-sync 三态）、引擎消费面（presentation_guide 目录含自定义卡）。
 
+**刀 4：投影降级器（2026-11-03，34f1f87，v4.1.0）**：`src/shared/formProjections.ts` 每形式一个投影器——chart（bar/hbar/pie → ASCII 条形图，line/scatter/kline/radar/tree 系行文本已可读不投影）、map（markers+route → 清单，**吃 GUI 同款 `parseMapSource`**——为此 mapSpec 纯解析器从 ui/ 搬进 shared/，字段名零漂移）、paint（shapes → 形状清单，group 递归缩进、40 条封顶防刷屏，字段名靠 PaintShape 类型 fixture 编译期锁）。纪律承 cliDiagram 判例：解析失败一律 null 回退源码，绝不产出错图。三处接线：CLI 流式（`BUFFERED_LANGS` 分流线框/投影两通道）+ 一次性转换；渠道 `richOutput` text 降级先投影、正文围栏块替换成投影文本（`projectedText`），图片能力在时仍走 PNG；卡注册表加机器可读 `textFallback` 字段（'wireframe'/'projection'/缺省 text），与投影注册表、surfaces 文案**三方同源锁**（自定义卡继承 base）。判例：同源锁当场抓到 charts/leaflet 别名无投影的真缺口——锁的不是文档是行为。已知边界：自定义卡 tag 的文本投影不做（主表面 GUI，回退源码）。
+
 ## 四、后续刀路线（未排期）
 
-- **刀 4 投影降级器**：`surfaces` 声明升级为机器可读接口，channel/cli 每 form 一个降级器（现状只有 mermaid/puml 有 ASCII 线框，chart/map 在 channel 是裸 JSON 文本）。
 - **刀 5 常驻指针瘦身**：发现工具兜住后，`VISUAL_BLOCK_POINTER` 的五段最小语法可下放卡片，常驻只留落盘禁令 + 发现指针（≈2.1k → ≈600 字符）。须真机复验模型在没有最小语法时的围栏命中率，勿先斩。
 - **刀 6 校验前置共享**：卡片声明 validator 引用（mapSpec/paintSpec/chart 已有 parse），渲染前跑、失败前置提示，替代「渲染时才发现」。
 
