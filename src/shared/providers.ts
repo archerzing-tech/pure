@@ -2,6 +2,8 @@
 import type { ToolDefinition } from './types';
 import { estimateTextTokens } from './tokenEstimate';
 import { modelCapabilitySummary, resolveModelCapability } from './modelCapabilities';
+import type { ProbedCapability } from './capabilityProbe';
+import { probedCapabilityKey } from './capabilityProbe';
 
 // Declarative registry of supported LLM providers — the single source of
 // truth for provider ids, display labels and default models, shared by the
@@ -30,6 +32,10 @@ export interface PromptBudgetConfig {
   safetyMarginTokens?: number;
   /** Tokens already consumed by an assembled system prompt. */
   usedInputTokens?: number;
+  /** W1b-1 自探测的缓存读数（config.json `capabilityProbes`）。插在
+   * manifest 之后、保守回落之前——探测只填 manifest 的空档，不推翻族
+   * 知识（一次探测读数不该盖过厂商策展值）。 */
+  probedBudget?: { contextWindowTokens: number; outputReserveTokens?: number };
 }
 
 export interface ResolvedPromptBudget {
@@ -39,7 +45,7 @@ export interface ResolvedPromptBudget {
   outputReserveTokens: number;
   safetyMarginTokens: number;
   availableInputTokens: number;
-  source: 'override' | 'provider-model' | 'fallback';
+  source: 'override' | 'provider-model' | 'probed' | 'fallback';
 }
 
 const PROMPT_BUDGET_FALLBACK = {
@@ -85,7 +91,7 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
   const hasOverride = config.contextWindowTokens !== undefined
     || config.outputReserveTokens !== undefined
     || config.safetyMarginTokens !== undefined;
-  const contextWindowTokens = Math.max(1, config.contextWindowTokens ?? defaults?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens);
+  const contextWindowTokens = Math.max(1, config.contextWindowTokens ?? defaults?.contextWindowTokens ?? config.probedBudget?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens);
   // At least a quarter of the window must stay available for input. An
   // output reserve equal to the whole window — a mis-paired combination,
   // e.g. a 128_000 provider-level window override meeting glm's 128_000
@@ -93,7 +99,7 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
   // assembled fragment. No shipped default exceeds this share (the highest
   // is minimax at 64%), so the cap only fires on mis-paired overrides.
   const outputReserveTokens = Math.max(0, Math.min(
-    config.outputReserveTokens ?? defaults?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
+    config.outputReserveTokens ?? defaults?.outputReserveTokens ?? config.probedBudget?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
     Math.max(1, Math.floor(contextWindowTokens * OUTPUT_RESERVE_MAX_SHARE)),
   ));
   const safetyMarginTokens = Math.max(0, Math.min(
@@ -111,7 +117,7 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
     outputReserveTokens,
     safetyMarginTokens,
     availableInputTokens,
-    source: hasOverride ? 'override' : defaults ? 'provider-model' : 'fallback',
+    source: hasOverride ? 'override' : defaults ? 'provider-model' : config.probedBudget ? 'probed' : 'fallback',
   };
 }
 
@@ -389,18 +395,25 @@ export function providerOverrideFor(
   return override;
 }
 
-/** Build a budget input from persisted custom-provider metadata. */
+/** Build a budget input from persisted custom-provider metadata. `probed` 是
+ * config.json `capabilityProbes` 的缓存（W1b-1 自探测）：manifest 没档的
+ * 组合才消费它，且端点与探测时不一致即作废——窗口是端点的事实，换了
+ * 端点旧读数就是别人的窗口。 */
 export function promptBudgetForProvider(
   customs: readonly CustomProvider[] | undefined | null,
   provider: string | undefined,
   model: string | undefined,
   overrides?: Record<string, ProviderOverride> | null,
+  probed?: Record<string, ProbedCapability> | null,
 ): PromptBudgetConfig {
   const custom = customProviderFor(customs, provider);
   const normalizedModel = model?.trim() || undefined;
   const modelOverride = normalizedModel ? custom?.modelBudgets?.[normalizedModel] : undefined;
   const providerOverride = providerOverrideFor(overrides, provider);
   const builtinModelOverride = normalizedModel ? providerOverride?.modelBudgets?.[normalizedModel] : undefined;
+  const probe = normalizedModel && provider && probed ? probed[probedCapabilityKey(provider, normalizedModel)] : undefined;
+  const currentEndpoint = custom?.baseURL ?? providerOverride?.baseURL ?? PROVIDER_BY_ID.get(provider ?? '')?.baseURL;
+  const probeUsable = probe && (!probe.endpoint || !currentEndpoint || probe.endpoint === currentEndpoint) ? probe : undefined;
   return {
     provider,
     model: normalizedModel,
@@ -416,6 +429,7 @@ export function promptBudgetForProvider(
       ?? custom?.safetyMarginTokens
       ?? builtinModelOverride?.safetyMarginTokens
       ?? providerOverride?.safetyMarginTokens,
+    ...(probeUsable?.contextWindowTokens ? { probedBudget: { contextWindowTokens: probeUsable.contextWindowTokens, outputReserveTokens: probeUsable.outputReserveTokens } } : {}),
   };
 }
 
@@ -432,17 +446,22 @@ export function promptBudgetLiveLine(
   model: string | undefined,
   overrides?: Record<string, ProviderOverride> | null,
   scope: 'next turn' | 'next session' = 'next turn',
+  probed?: Record<string, ProbedCapability> | null,
 ): string {
-  const effective = resolvePromptBudget(promptBudgetForProvider(customs, provider, model, overrides));
+  const effective = resolvePromptBudget(promptBudgetForProvider(customs, provider, model, overrides, probed));
   const family = promptBudgetDefaultFor(provider ?? '', model ?? '');
   const source = effective.source === 'override'
     ? 'explicit-override'
     : effective.source === 'provider-model'
       ? 'family-defaults'
-      : 'conservative-fallback';
+      : effective.source === 'probed'
+        ? 'probed-from-endpoint'
+        : 'conservative-fallback';
   const familyNote = effective.source === 'fallback'
-    ? `family defaults unknown (model not recognized - conservative fallback window=${family.contextWindowTokens} is in effect; set an override if you know the real limits)`
-    : `family defaults window=${family.contextWindowTokens} outputReserve=${family.outputReserveTokens}`;
+    ? `family defaults unknown (model not recognized - conservative fallback window=${family.contextWindowTokens} is in effect; set an override or run a settings connectivity test to probe the endpoint if you know the real limits)`
+    : effective.source === 'probed'
+      ? `window probed from the endpoint's /models metadata (manifest has no family entry - set an explicit override if you know better than the endpoint)`
+      : `family defaults window=${family.contextWindowTokens} outputReserve=${family.outputReserveTokens}`;
   const scopeNote = scope === 'next turn'
     ? 'applies from your next turn'
     : 'applies from your NEXT session (CLI reads config at startup)';

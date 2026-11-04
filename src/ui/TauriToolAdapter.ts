@@ -2077,7 +2077,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // 看得见当前窗口/输出预留与家族天花板，才知道预算错配长什么样、
           // 有没有优化空间。GUI 回合边界活检热生效，scope 说「next turn」。
           const budgetLine = cfg
-            ? promptBudgetLiveLine(cfg.customProviders, cfg.provider, cfg.model, cfg.providerOverrides, 'next turn')
+            ? promptBudgetLiveLine(cfg.customProviders, cfg.provider, cfg.model, cfg.providerOverrides, 'next turn', cfg.capabilityProbes)
             : '';
           const liveLine = cfg
             ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.\n${budgetLine}`

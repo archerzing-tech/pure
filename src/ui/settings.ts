@@ -104,6 +104,8 @@ function compactBudgetTokens(n: number): string {
 }
 import { composeProxyUrl, effectiveProxyUrl, isUsableProxyUrl, normalizeProxyConfig, normalizeProxyList, parseProxyUrl, proxyUrlWithAuth } from '../shared/proxy';
 import { probeLlmEndpoint } from '../shared/llmProbe';
+import { probeModelCapability, probedCapabilityKey } from '../shared/capabilityProbe';
+import { resolveModelCapability } from '../shared/modelCapabilities';
 import { netRouteProxyPair } from '../shared/netRoute';
 import {
   defaults,
@@ -1942,6 +1944,9 @@ export class SettingsPanel {
       btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
       btn.title = `${t('llm.model.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed))} · ${routeLabel}`;
+      // W1b-1 自探测：连通性通过后顺延向端点拉一次 /models 窗口元数据
+      //（manifest 无档的模型组合才需要；写缓存不弹卡，详见方法注释）。
+      void this.probeCapabilityAfterConn(loadConfig() ?? defaults(), provider, baseURL, apiKey);
     } else {
       btn.textContent = '✗ ' + t('llm.connection.testFailed');
       btn.classList.add('llm-model-test-fail');
@@ -1951,6 +1956,42 @@ export class SettingsPanel {
       btn.textContent = t('llm.connection.verify');
       btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
     }, 2500);
+  }
+
+  /** W1b-1 自探测（双腿蓝图）：连通性测试通过后顺延向端点拉一次 /models
+   * 元数据。manifest（modelCapabilities）已认得的模型直接跳过——探测只填
+   * provider 收窄后的空档，不推翻族知识；`probeCapabilities === false`
+   * 整个关闭。读数写进 config.capabilityProbes（键 provider::model，含
+   * 端点快照，换端点即失效）；下一回合 sys_info 预算现状行说真话
+   *（source=probed-from-endpoint）。失败静默——现状行本身就是明确告警出口。 */
+  private async probeCapabilityAfterConn(cfg: PureConfig, provider: string, baseURL: string, apiKey: string): Promise<void> {
+    if (cfg.probeCapabilities === false) return;
+    const model = (document.getElementById('cfg-model') as HTMLInputElement | null)?.value.trim()
+      || cfg.model.trim()
+      || providerDef(provider)?.defaultModel
+      || '';
+    if (!model) return;
+    // manifest 有档 = 族知识已在，探测读数不会被消费，省一次请求。
+    if (resolveModelCapability(provider, model).budget) return;
+    try {
+      const result = await probeModelCapability(baseURL, apiKey, model, { protocol: protocolForURL(baseURL) });
+      if (!result.ok || !result.modelFound || !result.contextWindowTokens) return;
+      const current = loadConfig() ?? defaults();
+      persistConfig({
+        ...current,
+        capabilityProbes: {
+          ...(current.capabilityProbes ?? {}),
+          [probedCapabilityKey(provider, model)]: {
+            contextWindowTokens: result.contextWindowTokens,
+            ...(result.outputReserveTokens ? { outputReserveTokens: result.outputReserveTokens } : {}),
+            endpoint: baseURL,
+            probedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch {
+      // 探测是增强，不把连通性测试的成败拖下水。
+    }
   }
 
   // ── Default-model bar (top strip) ──

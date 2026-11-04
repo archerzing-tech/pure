@@ -9,6 +9,7 @@ import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import { modelsWithout } from '../shared/providerSelfHeal';
+import type { ProbedCapability } from '../shared/capabilityProbe';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
 import type { ProxyConfig } from '../shared/proxy';
@@ -40,6 +41,13 @@ export interface PureConfig {
    * so this map only ever holds entries for the built-ins.
    */
   providerOverrides: Record<string, ProviderOverride>;
+  /** W1b-1 自探测的缓存（shared/capabilityProbe 产出，键 provider::model，
+   * 条目含端点快照——换端点即失效）。manifest 没档的模型组合从这里拿
+   * 端点自述的窗口；设置面连通性测试顺延写入，agent 可按键删改。 */
+  capabilityProbes?: Record<string, ProbedCapability>;
+  /** 自探测开关（默认开）：false 时连通性测试不再顺延探测、缓存值也不
+   * 再生效——窗口全部回落保守档 + 现状行告警。 */
+  probeCapabilities?: boolean;
   apiKey: string;
   /**
    * True when an API key is stored outside the WebView (Rust secrets in the

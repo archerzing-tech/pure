@@ -42,7 +42,7 @@ function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}):
     }
     const model = args.model || custom.defaultModel;
     const maxTokens = resolvePromptBudget(
-      promptBudgetForProvider(args.customProviders, args.provider, model, args.providerOverrides),
+      promptBudgetForProvider(args.customProviders, args.provider, model, args.providerOverrides, args.capabilityProbes),
     ).outputReserveTokens;
     const apiKey = custom.apiKey || args.apiKey;
     return {
@@ -60,7 +60,7 @@ function createAdapter(args: CliArgs, opts: { disableThinking?: boolean } = {}):
   }
 
   const maxTokens = resolvePromptBudget(
-    promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+    promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes),
   ).outputReserveTokens;
 
   // Built-in providers honor a per-provider endpoint override (proxy / mirror)

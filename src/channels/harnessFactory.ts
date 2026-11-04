@@ -32,7 +32,7 @@ export function createCliChannelHarnessFactory(deps: ChannelHarnessFactoryDeps):
       // 通道档：规则 + LLM 复核（同步）。CLI 仍是纯规则。
       verifierFactory: createChannelVerifier,
     });
-    const budget = promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides);
+    const budget = promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes);
     const hasSubagents = built.toolsDefs.some((t) => SUBAGENT_NAMES.has(t.name));
     const assembly = assembleChannelPrompt({
       capabilities: spec.capabilities,

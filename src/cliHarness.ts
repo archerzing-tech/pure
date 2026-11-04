@@ -629,7 +629,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     evolutionEnabled,
     // 预算现状行与 631/747 的 promptAssembler 同源（args 装配态），scope=
     // next session 说真话：CLI 盘上改动新会话才生效。
-    promptBudgetLiveLine(args.customProviders, args.provider, args.model, args.providerOverrides, 'next session'),
+    promptBudgetLiveLine(args.customProviders, args.provider, args.model, args.providerOverrides, 'next session', args.capabilityProbes),
     // 提炼回调复用主 adapter（GUI 版特意造 disableThinking 实例；CLI 的
     // createAdapter 错误分支是 process.exit 不能在提炼工厂里复用——提炼是
     // 增强，慢/失败都被编排兜住：45s 硬上限防拖死，空要点回退原文）。
@@ -649,7 +649,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   // escalating failure policy.
   const plumbing = createDefaultHarnessConfig({
     llm: adapter,
-    promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+    promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes),
     toolsProvider: () => tools?.getTools() ?? toolsDefs,
     // E1.2 — preload the cross-session failure history from error_pattern
     // memories so already-seen traps escalate the failure ladder immediately.
@@ -765,7 +765,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     memory: memoryStore,
     projectPath,
     workspaceAvailable: overrides.workspaceAvailable ?? true,
-    promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+    promptAssembler,      promptBudget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes),
     // G-3 fix: the ContextEngine (with LLM summarization fallback) is wired in
     // so long REPL sessions don't grow without bound — the CLI's Harness never
     // had a contextEngine configured.

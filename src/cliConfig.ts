@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { red } from './termcolors';
 import { customProviderFor, defaultModelFor } from './shared/providers';
 import type { CustomProvider, ProviderOverride } from './shared/providers';
+import type { ProbedCapability } from './shared/capabilityProbe';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
 import { activeCharacterProfile } from './character';
 import type { EvolutionConfig } from './adapter/memory/evolution';
@@ -46,6 +47,12 @@ export interface PureConfig {
    * sit here as plain `apiKey` entries.
    */
   providerOverrides?: Record<string, ProviderOverride>;
+  /** W1b-1 自探测的缓存（shared/capabilityProbe 产出，键 provider::model）。
+   * manifest 没档的模型组合从这里拿端点自述的窗口；agent 可按键删改。 */
+  capabilityProbes?: Record<string, ProbedCapability>;
+  /** 自探测开关（默认开）。关掉后设置面连通性测试不再顺延探测、缓存值
+   * 也不再生效——窗口全部回落保守档 + 现状行告警。 */
+  probeCapabilities?: boolean;
   /**
    * Third-party skills installed via the GUI's Skill Hub (Settings → Skills →
    * Skill Hub). Enabled entries' SKILL.md bodies are injected into the CLI's
@@ -157,6 +164,9 @@ export interface CliArgs {
   customProviders?: CustomProvider[];
   /** Per-provider built-in overrides (name / Base URL / key) from ~/.pure/config.json. */
   providerOverrides?: Record<string, ProviderOverride>;
+  /** 自探测缓存与开关（~/.pure/config.json，W1b-1）。 */
+  capabilityProbes?: Record<string, ProbedCapability>;
+  probeCapabilities?: boolean;
   /**
    * MCP servers: ~/.pure/config.json `mcpServers` (written by GUI Settings →
    * MCP) plus repeatable `--mcp-server "<name>:<command-or-url>"` flags — e.g.

@@ -956,7 +956,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
     // 模型看得见当前真实放行口径：不再自行编造「命令需要审批/被禁用」。
     permissionMode: config?.permissionMode,
     skills: config?.hubSkills,
-    budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides),
+    budget: promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides, config?.capabilityProbes),
   });
 }
 
@@ -1250,7 +1250,7 @@ export function createLLMAdapter(
   // visible answer comes back EMPTY → verify failure → retry loop. Give
   // DeepSeek a larger budget; Qwen/GLM/custom keep the shared default.
   const maxTokens = resolvePromptBudget(
-    promptBudgetForProvider(customs, config.provider, model, config.providerOverrides),
+    promptBudgetForProvider(customs, config.provider, model, config.providerOverrides, config.capabilityProbes),
   ).outputReserveTokens;
   const builtinOverride = providerOverrideFor(config.providerOverrides, config.provider);
   const providerProtocol = providerDef(config.provider)?.protocol;
@@ -2694,7 +2694,7 @@ export class ChatController {
     const config = loadConfig();
     const contextEngine = this.contextEngine ?? new ContextEngine({
       maxMessages: 20,
-      maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides)).availableInputTokens,
+      maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides, config?.capabilityProbes)).availableInputTokens,
       rehydration: this.contextRehydration(),
     });
     this.contextEngine = contextEngine;
@@ -5493,7 +5493,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 视图（T4）因此永远读空，13.2 的试用制裁决也没有结局可读。这里补的就是
         // 那个键——与 main.ts 挂持久化 sink 的是同一个单例，GUI 的记账直接落 JSONL。
         observability: promptObservability,
-        promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
+        promptBudget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides, config.capabilityProbes),
         mcpClient: this.mcpClient,
         mcpServers: this.deferredInitDone ? undefined : (config.mcpServers ?? []),
         mcpExcludedPrefixes: config.mcpExcludedPrefixes,
@@ -6583,7 +6583,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ],
         mcpResources: mcpResourceContext,
         mode: analysis.mode,
-        budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides),
+        budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides, config.capabilityProbes),
         // Subagent tools join the model-visible list only in workspace mode
         // (finalPromptTools above), so the multi_agent protocol should only
         // fire when delegation is actually possible. Without a workspace there
@@ -8811,7 +8811,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (this.streaming || this.messages.length === 0) return;
       const transcriptMessages = this.messages;
       const cfg = loadConfig();
-      const maxTokens = resolvePromptBudget(promptBudgetForProvider(cfg?.customProviders, cfg?.provider, cfg?.model, cfg?.providerOverrides)).availableInputTokens;
+      const maxTokens = resolvePromptBudget(promptBudgetForProvider(cfg?.customProviders, cfg?.provider, cfg?.model, cfg?.providerOverrides, cfg?.capabilityProbes)).availableInputTokens;
       const placeholderSystem = BASE_SYSTEM_PROMPT(!!(this.effectiveWorkspace || this.workspace));
       const priorSummaries = transcriptMessages.filter((message) => message.role === 'system' && message.content.startsWith('Earlier conversation summary:'));
       const compactionInput: Message[] = [

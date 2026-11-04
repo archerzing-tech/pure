@@ -1,6 +1,6 @@
 # 双腿路线图：能力供给 × 模型代际（2026-11）
 
-> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 未开工。基线与源码行号取证于 `e3a72e2`，P0 改动建立在该 commit 之上、尚未提交。
+> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 进行中——W1b-2 / W1b-1 / web 信噪比刀已落，见「四之二」，余 W1b-3 / W1b-4 / W2b。基线与源码行号取证于 `e3a72e2`。
 >
 > 定调（用户，2026-11-03）：「pure 是一堆杂乱的工具和插件的集合，没有章法、没有规矩、只保留基本的输入、输出和做事底线和原则。至于事情怎么做、如何做、用什么做、用哪些工具做、怎么用、怎么呈现，都是大模型的事情。pure 今后两条腿走路：1）不断增强应用本身的基础能力（手脚），尽可能不要影响束缚大模型的表现；2）结合业界最新的 SOTA 模型。」
 
@@ -38,9 +38,9 @@
 | 核心常驻工具集 | `CORE_TOOL_NAMES` 12 个名字（`toolDefs.ts:442`），实际常驻 def 11 个 | 未变 |
 | 工具执行实现份数 | **3**：`src-tauri/src/lib.rs` 19,728 行 + `NodeToolAdapter` 4,731 + `TauriToolAdapter` 2,472 | 未变（P2） |
 | 模型能力知识位置 | 预算 if 链 + reasoning 正则 + 视觉无判定 = 三处 | **已改**：单一 manifest（P0） |
-| 内置 provider | 8 家，无 Anthropic；无 Responses 协议 | 未变（P1） |
+| 内置 provider | 8 家，无 Anthropic；无 Responses 协议 | **已改**：9 家含 Anthropic（P1 W1b-2）；Responses 协议未变（P1） |
 | eval 基线区分度 | **0**：DeepSeek v4-flash / deepseek-flash / NVIDIA nemotron / GLM-5.3-flash 全部 15/15 | 矩阵未变，过程指标已具备（P0） |
-| 能力探测深度 | 仅连通性（`/models` 2xx）；Rust `probe_llm_endpoint`(`lib.rs:417`) | 未变（P1） |
+| 能力探测深度 | 仅连通性（`/models` 2xx）；Rust `probe_llm_endpoint`(`lib.rs:417`) | **已改**：`/models` 元数据解析窗口与输出上限（P1 W1b-1） |
 | 自进化闭环 | 复用 ≥2 → 建议卡 → 用户点头 → 起草试跑 → **下一会话生效**（`toolSolidification.ts:24`） | 未变（P3） |
 
 数字指向同一件事：**固定成本花在「教怎么想」，可变能力花在「三份实现」，而模型代际靠人肉追。**
@@ -55,8 +55,8 @@
 
 **P1 剩余（W1b）**：
 
-1. **自探测**：manifest 未声明时，首次连接做一次有界探测（`/models` + 一次极小请求），结果作为覆盖缓存；`llmProbe.ts` 的形状可复用，不新建通路。探测必须有界、可关、按模型缓存。
-2. **Anthropic 内置**：不是缺 adapter（`DeepSeekAnthropicAdapter` 与 `protocol: 'anthropic'` 都在），缺的是 provider 条目。落地要同步 i18n 与 `index.html` 的 option，且 `providers.test.ts` 现在断言 `PROVIDERS` 长度 = 8——三处同步 + 改测试，所以不进「零风险」的 P0。
+1. ~~**自探测**~~：**已落（W1b-1，2026-11-04，见「四之二」）**。
+2. ~~**Anthropic 内置**~~：**已落（W1b-2，2026-11-04，见「四之二」）**。
 3. **Responses 协议**：`LLMProtocol` 增加 `responses`，按模型能力选择；缺能力时降级回 chat-completions 而不是报错。必须真机验证，不能凭文档写。
 4. **能力事实的送达位置**：P0 把能力现状挂在 `sys_info`，而它是 deferred 工具——模型很可能永远不会去问。P1 要定一件事：是在首个回合按已知模型注入一行 ability 事实（会动缓存前缀，需权衡），还是等「图片附件 / 推理参数」这类具体事件把它推到模型眼前。现状是「能力可查」，不是「能力可见」。
 
@@ -125,6 +125,24 @@
 **验证**：`bun run typecheck` 通过；`bun test src/shared/__tests__ src/evaluation/__tests__` = 1301 pass / 0 fail；`bun run lint:conventions` 通过。
 
 **有意留在 P1 的两件事**：自探测（要发请求、要接调用面）、Anthropic / Responses（要真机验证 + PROVIDERS 长度断言 + i18n/index.html 同步）。P0 的边界是「零网络、零 UI 改动」。
+
+## 四之二、P1 落地记录（2026-11-04，进行中）
+
+| commit | 刀 | 摘要 |
+|---|---|---|
+| `3f8f955` | **W1b-2 Anthropic 内置** | PROVIDERS 增第 9 家（`protocol: 'anthropic'`，baseURL `https://api.anthropic.com/v1`，defaultModel `claude-sonnet-5`）；`protocolForURL` 补官方域 `anthropic.com` 识别；i18n 与 index.html 计数徽章同步；`providers.test.ts` 长度断言 9 |
+| `d57194f` | **web 工具信噪比四刀**（会话插题：用户点名 web 工具是否全量塞上下文。取证结论=不是全量无界：工具层 maxChars + 引擎层 40k 帽早已在，真缺口在别处） | ①CLI 与 overlay 流补提炼回调——此前提炼层只接 GUI 主聊天，CLI/overlay 对模型是虚假承诺；②Tavily/SearXNG snippet 两端 600 字帽（对齐 Exa 服务端帽）；③缓存帽统一 TS 60k UTF-16 字符 / Rust 180k UTF-8 字节（60k 全中文最大字节形态，两侧互不二次截断），截断副本带诚实标记且标记留在帽内；④提炼编排抽共享 `condenseToolBody` 单源，Node 与 Tauri 同一编排，`raw:true` 旁路与缓存语义两端一致 |
+| 本次 | **W1b-1 自探测** | 新模块 `src/shared/capabilityProbe.ts` + 全链消费接线，见下 |
+
+**W1b-1 自探测要点**：
+
+- **哲学：探测填 manifest 空档，不推翻族知识。** 消费层插在 manifest 之后、FALLBACK 之前：显式 override > provider-model defaults > probed > fallback。P0 收窄规则时制造的真实空档（openrouter 上的 moonshot-v1 等老模型）由探测补上，而不是把猜测加回规则表。
+- **蓝图原写「`/models` + 一次极小请求」；落地裁定砍掉极小请求**：挂点（设置面板连通性测试）前已有连通性 probe 兜底；官方 API 的 `/models` 不返回窗口、极小请求也拿不到；读数薄、每挂钩一次多花一次调用。复验按 `/models` 缺失率再议要不要补。
+- **诚实出口**：聚合商（openrouter `/models` 带 `context_length` / `top_provider.max_completion_tokens`）才有窗口元数据；官方 `/models` 不给 → 如实报告「端点活着但没给窗口」，fallback 继续兜底，现状行提示可跑连通性测试探测。不编数。
+- **缓存与开关**：config.json `capabilityProbes`（键 `provider::model`，条目带 endpoint 快照——换端点即失效，防止 A 端点的读数污染 B 端点）；`probeCapabilities` 开关默认开；agent 可按键删改（「agent 怎么改」铁律）。
+- **接线面**：`resolvePromptBudget` / `promptBudgetForProvider` / `promptBudgetLiveLine` 全部加 probed 插层与现状行 `source: probed-from-endpoint`；GUI（chat/settings/overlayFlowHost）与 CLI（cli/cliAdapter/cliHarness/cliRepl/harnessFactory）全调用点接 `capabilityProbes`；挂点=设置面板连通性测试成功后静默追加（manifest 已有档的模型跳过，省请求）。
+
+**验证**：`bun run typecheck` 通过；`bun test src` = 4983 pass / 0 fail；`bun run lint:conventions` 通过。
 
 ## 五、分期
 

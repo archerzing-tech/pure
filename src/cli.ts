@@ -150,6 +150,8 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
       provider, model, apiKey, workspace, resume, stateDb, autoApprove,
       customProviders: fileCfg?.customProviders,
       providerOverrides: fileCfg?.providerOverrides,
+      capabilityProbes: fileCfg?.capabilityProbes,
+      probeCapabilities: fileCfg?.probeCapabilities,
       mcpServers,
       mcpExcludedPrefixes,
       phaseModels,

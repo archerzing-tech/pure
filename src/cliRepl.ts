@@ -334,7 +334,7 @@ async function assembleCliPrompt(
     // delays the turn indefinitely.
     mcpResources: mcpClient ? await mcpClient.collectResourceContext() : undefined,
     mode,
-    budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides),
+    budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes),
     // The CLI merges subagent tools into toolsDefs when it has a workspace, so
     // delegation is possible — enable the multi_agent protocol fragment. Gated
     // on actual subagent tool presence (see hasSubagents above).

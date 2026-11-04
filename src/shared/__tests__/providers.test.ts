@@ -102,6 +102,36 @@ describe('resolvePromptBudget', () => {
     expect(o1.outputReserveTokens).toBe(100_000);
   });
 
+  it('inserts the probed window between the manifest and the fallback (W1b-1)', () => {
+    // 探测只填 manifest 的空档，不推翻族知识：有档的模型读数不消费。
+    const known = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash', probedBudget: { contextWindowTokens: 1 } });
+    expect(known.source).toBe('provider-model');
+    expect(known.contextWindowTokens).toBe(1_000_000);
+    // manifest 无档（收窄后的自定义组合）才落到探得值；探得输出缺席时
+    // 输出预留仍保守。
+    const probed = resolvePromptBudget({ provider: 'openrouter', model: 'foo-1', probedBudget: { contextWindowTokens: 983_040 } });
+    expect(probed.source).toBe('probed');
+    expect(probed.contextWindowTokens).toBe(983_040);
+    expect(probed.outputReserveTokens).toBe(4_096);
+    // 显式 override 永远最高——探得值连 override 的补空位都占不到。
+    const overridden = resolvePromptBudget({ provider: 'openrouter', model: 'foo-1', contextWindowTokens: 128_000, probedBudget: { contextWindowTokens: 983_040 } });
+    expect(overridden.source).toBe('override');
+    expect(overridden.contextWindowTokens).toBe(128_000);
+  });
+
+  it('picks up the probed cache only when the endpoint still matches', () => {
+    const probed = { 'openrouter::foo-1': { contextWindowTokens: 983_040, endpoint: 'https://openrouter.ai/api/v1', probedAt: '2026-11-04T00:00:00Z' } };
+    const picked = promptBudgetForProvider(undefined, 'openrouter', 'foo-1', undefined, probed);
+    expect(picked.probedBudget?.contextWindowTokens).toBe(983_040);
+    // provider 后来改了 endpoint（override）：端点快照不符，读数作废——
+    // 窗口是端点的事实，换了端点旧读数就是别人的窗口。
+    const moved = promptBudgetForProvider(undefined, 'openrouter', 'foo-1', { openrouter: { baseURL: 'https://mirror.example/v1' } }, probed);
+    expect(moved.probedBudget).toBeUndefined();
+    // manifest 有档的组合连读都不会读（探测挂点也跳过，这里兜底）。
+    const known = promptBudgetForProvider(undefined, 'deepseek-openai', 'deepseek-v4-flash', undefined, probed);
+    expect(known.probedBudget).toBeUndefined();
+  });
+
   it('keeps at least a quarter of the window for input across every shipped default pairing', () => {
     // Guards the whole fleet, not just glm: any future default (or new
     // provider) whose reserve outgrows its window fails here, not in
