@@ -148,6 +148,38 @@ fn write_profile_file(workspace: &Path) -> Result<std::path::PathBuf, std::io::E
     Ok(path)
 }
 
+/// argv-direct version of the wrapper used by run_argv (the W3 single-executor
+/// process primitive): `sandbox-exec -f <profile> <argv…>` — the profile
+/// confines the target process itself, no `sh -c` in the middle, so quoting
+/// never enters the picture. When Seatbelt is unavailable the argv is
+/// returned unchanged, matching wrap_command's graceful-degradation contract.
+pub fn wrap_argv(workspace: &Path, argv: Vec<String>) -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if argv.is_empty() || !seatbelt_available() {
+            return argv;
+        }
+        let exec = std::path::PathBuf::from("/usr/bin/sandbox-exec");
+        let exec = if exec.exists() { exec } else { which_sandbox_exec().unwrap_or(exec) };
+        let profile_path = match write_profile_file(workspace) {
+            Ok(p) => p,
+            Err(_) => return argv,
+        };
+        let mut wrapped = vec![
+            exec.display().to_string(),
+            "-f".to_string(),
+            profile_path.display().to_string(),
+        ];
+        wrapped.extend(argv);
+        wrapped
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = workspace;
+        argv
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +247,39 @@ mod tests {
         let (argv, wrapped) = wrap_command(ws, "echo hi");
         assert!(!wrapped);
         assert_eq!(argv, vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wrap_argv_prepends_sandbox_exec_but_never_touches_the_tail() {
+        let ws = std::path::Path::new("/tmp");
+        let argv = wrap_argv(ws, vec!["git".into(), "status".into(), "--short".into()]);
+        if seatbelt_available() {
+            assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+            assert_eq!(argv[1], "-f");
+            assert_eq!(argv[3], "git");
+            assert_eq!(argv[4], "status");
+            assert_eq!(argv[5], "--short");
+        } else {
+            assert_eq!(argv, vec!["git".to_string(), "status".to_string(), "--short".to_string()]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wrap_argv_passthrough_when_seatbelt_missing() {
+        if seatbelt_available() {
+            return; // only meaningful on machines without sandbox-exec
+        }
+        let argv = wrap_argv(std::path::Path::new("/tmp"), vec!["git".into()]);
+        assert_eq!(argv, vec!["git".to_string()]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn wrap_argv_is_a_noop_off_macos() {
+        let argv = wrap_argv(std::path::Path::new("/tmp"), vec!["git".into(), "status".into()]);
+        assert_eq!(argv, vec!["git".to_string(), "status".to_string()]);
     }
 
     #[test]

@@ -15,6 +15,8 @@ import { spawn } from 'node:child_process';
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
+import { runGitTool, type GitToolName } from '../../tools/impl/git';
+import type { ArgvRunOptions, ArgvRunResult } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
@@ -308,11 +310,11 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'web_scrape': return await this.handleWebScrape(args, signal, start);
         case 'glob_files': return await this.handleGlobFiles(args, start);
         case 'replace_files': return await this.handleReplaceFiles(args, start);
-        case 'git_diff': return await this.handleGitCmd(args, ['diff', ...(args.staged ? ['--staged'] : []), ...(typeof args.path === 'string' ? ['--', args.path as string] : [])], signal, start);
-        case 'git_log': return await this.handleGitCmd(args, ['log', '-n', String(args.maxCount ?? 10), ...(args.oneline !== false ? ['--oneline'] : [])], signal, start);
-        case 'git_status': return await this.handleGitCmd(args, ['status', '--short'], signal, start);
-        case 'git_commit': return await this.handleGitCommit(args, signal, start);
-        case 'git_branch': return await this.handleGitBranch(args, signal, start);
+        case 'git_diff':
+        case 'git_log':
+        case 'git_status':
+        case 'git_commit':
+        case 'git_branch': return await this.handleGitTool(toolCall.function.name as GitToolName, args, signal, start);
         case 'sys_info': return await this.handleSysInfo(start);
         case 'diagnose_network': return await this.handleDiagnoseNetwork(args, start);
         case 'switch_package_source': return await this.handleSwitchPackageSource(args, start);
@@ -2872,75 +2874,44 @@ export class NodeToolAdapter implements ToolAdapter {
     };
   }
 
-  private async handleGitCmd(_args: Record<string, unknown>, gitArgs: string[], signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
-    const abort = createAbortController(signal, this.commandTimeout);
+  /** The five git tools share the single-source implementation; this adapter
+   * contributes the runtime primitive only (W3/D1=A). */
+  private async handleGitTool(name: GitToolName, args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
+    const outcome = await runGitTool(name, args, this, { signal, timeoutMs: this.commandTimeout });
+    if (outcome.ok) {
+      return { id: `tool_${Date.now()}`, toolName: name, result: outcome.output, success: true, duration: Date.now() - start };
+    }
+    return this.fail(null, start, outcome.output, name);
+  }
 
+  /** ToolRuntime primitive: run an argv array directly — no shell, so quoting
+   * never enters the picture. Generalized from the old git spawn skeleton;
+   * timeout and user-abort both resolve with exit code 124 + a note on
+   * stderr (mirroring execute_command's Rust-side timeout shape). Public:
+   * the adapter itself satisfies ToolRuntime, which implementations pass as
+   * `this`. */
+  async runArgv(argv: string[], options: ArgvRunOptions = {}): Promise<ArgvRunResult> {
+    const timeoutMs = options.timeoutMs ?? this.commandTimeout;
+    const abort = createAbortController(options.signal, timeoutMs);
     try {
-      const proc = Bun.spawn(['git', ...gitArgs], {
-        cwd: this.workspace,
+      const proc = Bun.spawn(argv, {
+        cwd: options.cwd ?? this.workspace,
         stdout: 'pipe',
         stderr: 'pipe',
         signal: abort.signal,
       });
-
       const stdout = await new Response(proc.stdout).text();
       const stderr = await new Response(proc.stderr).text();
       await proc.exited;
-
-      if (proc.exitCode !== 0) {
-        // Some git failures explain themselves on stdout ("nothing to commit,
-        // working tree clean"), not stderr — fall back to stdout before the
-        // generic exit-code line so the model sees the actual reason.
-        return this.fail(null, start, stderr.trim() || stdout.trim() || `git failed with exit code ${proc.exitCode}`);
-      }
-
-      return {
-        id: `tool_${Date.now()}`,
-        toolName: `git_${gitArgs[0] ?? 'unknown'}`,
-        result: stdout.trim() || '(no output)',
-        success: true,
-        duration: Date.now() - start,
-      };
+      return { exitCode: proc.exitCode ?? -1, stdout, stderr };
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        return this.fail(null, start, `Git command timed out after ${this.commandTimeout}ms`);
+        return { exitCode: 124, stdout: '', stderr: `Command timed out after ${timeoutMs}ms` };
       }
-      return this.fail(null, start, err?.message ?? 'Git command failed');
+      throw err;
     } finally {
       abort.cleanup();
     }
-  }
-
-  /** git_commit: stage (subset or all), then commit. Every argument travels in
-   * argv — the message and paths never pass through a shell, so quoting is
-   * not a concern on this side. */
-  private async handleGitCommit(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
-    const message = typeof args.message === 'string' ? args.message.trim() : '';
-    if (!message) return this.fail(null, start, 'git_commit requires a non-empty commit message');
-    const paths = Array.isArray(args.paths) ? args.paths.map(String).filter((p) => p.trim().length > 0) : [];
-    const staged = await this.handleGitCmd(args, paths.length > 0 ? ['add', '--', ...paths] : ['add', '-A'], signal, start);
-    if (!staged.success) return staged;
-    const committed = await this.handleGitCmd(args, ['commit', '-m', message], signal, start);
-    if (!committed.success) return committed;
-    return { ...committed, toolName: 'git_commit' };
-  }
-
-  /** git_branch: create/switch ride `git checkout`; the name is rejected when
-   * it starts with "-" so it can never re-enter git's flag parser. */
-  private async handleGitBranch(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
-    const action = typeof args.action === 'string' ? args.action : 'list';
-    const name = typeof args.name === 'string' ? args.name.trim() : '';
-    if (action === 'create' || action === 'switch') {
-      if (!name) return this.fail(null, start, `git_branch action "${action}" requires a branch name`);
-      if (name.startsWith('-')) return this.fail(null, start, `invalid branch name: ${name}`);
-    }
-    const gitArgs = action === 'create' ? ['checkout', '-b', name]
-      : action === 'switch' ? ['checkout', name]
-      : action === 'list' ? ['branch']
-      : null;
-    if (!gitArgs) return this.fail(null, start, `unknown git_branch action: ${action}`);
-    const result = await this.handleGitCmd(args, gitArgs, signal, start);
-    return { ...result, toolName: 'git_branch' };
   }
 
   private async handleSysInfo(start: number): Promise<ToolResult> {

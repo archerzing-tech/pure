@@ -6,6 +6,8 @@
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage } from '../shared/types';
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
+import { runGitTool, type GitToolName } from '../tools/impl/git';
+import type { ArgvRunOptions, ArgvRunResult } from '../tools/runtime';
 import { READ_FILE_HEAD_LINES } from '../shared/readFileHead';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload, communityMcpCandidates, type McpCandidate } from '../shared/mcpRegistry';
@@ -517,6 +519,31 @@ export class TauriToolAdapter implements ToolAdapter {
     const invoke = this.invokeFn ?? tauriInvoke;
     if (!invoke) return Promise.reject(new Error('Tauri runtime not available — tools disabled'));
     return invoke(command, args);
+  }
+
+  /** The five git tools share the single-source implementation (W3/D1=A);
+   * this adapter contributes the runtime primitive only. */
+  private async handleGitTool(name: GitToolName, args: Record<string, unknown>, toolCallId: string, start: number): Promise<ToolResult> {
+    const outcome = await runGitTool(name, args, this, { cwd: this.workspace });
+    if (outcome.ok) {
+      return { id: toolCallId, toolName: name, result: outcome.output, success: true, duration: Date.now() - start };
+    }
+    return { id: toolCallId, toolName: name, error: outcome.output, success: false, duration: Date.now() - start };
+  }
+
+  /** ToolRuntime primitive: direct argv via the Rust run_argv command — no
+   * shell on any platform, so the implementation layer never quotes. The
+   * Seatbelt sandbox follows the same switch as execute_command (run_argv
+   * wraps the argv itself). Timeout is the Rust-side hard cap; git-level
+   * tools are local operations, so no proxy env is injected. Public: the
+   * adapter itself satisfies ToolRuntime, which implementations pass as
+   * `this`. */
+  async runArgv(argv: string[], options: ArgvRunOptions = {}): Promise<ArgvRunResult> {
+    return await this.call('run_argv', {
+      workspace: options.cwd ?? this.workspace,
+      argv,
+      sandbox: this.sandbox,
+    }) as ArgvRunResult;
   }
 
   /**
@@ -1791,57 +1818,11 @@ export class TauriToolAdapter implements ToolAdapter {
           }
           return { id: toolCall.id, toolName: 'download_file', result: `下载失败（退出码 ${exec.exitCode}）`, success: false, duration: Date.now() - start };
         }
-        case 'git_diff': {
-          const diff = await this.call('git_diff', { workspace: ws, staged: args.staged ?? false, path: args.path ?? null }) as string;
-          return { id: toolCall.id, toolName: name, result: diff, success: true, duration: Date.now() - start };
-        }
-        case 'git_log': {
-          const log = await this.call('git_log', { workspace: ws, maxCount: args.maxCount ?? null, oneline: args.oneline ?? true }) as string;
-          return { id: toolCall.id, toolName: name, result: log, success: true, duration: Date.now() - start };
-        }
-        case 'git_status': {
-          const status = await this.call('git_status', { workspace: ws }) as string;
-          return { id: toolCall.id, toolName: name, result: status, success: true, duration: Date.now() - start };
-        }
-        case 'git_commit': {
-          const message = typeof args.message === 'string' ? args.message.trim() : '';
-          if (!message) {
-            return { id: toolCall.id, toolName: name, error: 'git_commit requires a non-empty commit message', success: false, duration: Date.now() - start };
-          }
-          const commitPaths = Array.isArray(args.paths) ? args.paths.map(String).filter((p) => p.trim().length > 0) : [];
-          // Shell git via the existing execute_command Rust command — no new
-          // Rust surface for git. The single-quote escapers below are the
-          // complete escaping story for exactly the two shells the backend
-          // picks (`sh -c` on Unix, PowerShell on Windows).
-          const addCmd = commitPaths.length > 0 ? `git add -- ${commitPaths.map(quoteShellArg).join(' ')}` : 'git add -A';
-          const add = await this.call('execute_command', { workspace: ws, command: addCmd, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
-          if (add.exitCode !== 0) {
-            return { id: toolCall.id, toolName: name, error: add.stderr || add.stdout || 'git add failed', success: false, duration: Date.now() - start };
-          }
-          const commit = await this.call('execute_command', { workspace: ws, command: `git commit -m ${quoteShellArg(message)}`, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
-          if (commit.exitCode !== 0) {
-            return { id: toolCall.id, toolName: name, error: commit.stderr || commit.stdout || 'git commit failed', success: false, duration: Date.now() - start };
-          }
-          return { id: toolCall.id, toolName: name, result: (commit.stdout || commit.stderr || 'Committed.').trim(), success: true, duration: Date.now() - start };
-        }
-        case 'git_branch': {
-          const action = typeof args.action === 'string' ? args.action : 'list';
-          const branchName = typeof args.name === 'string' ? args.name.trim() : '';
-          if ((action === 'create' || action === 'switch') && !branchName) {
-            return { id: toolCall.id, toolName: name, error: `git_branch action "${action}" requires a branch name`, success: false, duration: Date.now() - start };
-          }
-          if ((action === 'create' || action === 'switch') && branchName.startsWith('-')) {
-            return { id: toolCall.id, toolName: name, error: `invalid branch name: ${branchName}`, success: false, duration: Date.now() - start };
-          }
-          const branchCmd = action === 'create' ? `git checkout -b ${quoteShellArg(branchName)}`
-            : action === 'switch' ? `git checkout ${quoteShellArg(branchName)}`
-            : 'git branch';
-          const branchOut = await this.call('execute_command', { workspace: ws, command: branchCmd, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
-          if (branchOut.exitCode !== 0) {
-            return { id: toolCall.id, toolName: name, error: branchOut.stderr || branchOut.stdout || 'git branch failed', success: false, duration: Date.now() - start };
-          }
-          return { id: toolCall.id, toolName: name, result: (branchOut.stdout || branchOut.stderr || '').trim() || '(no output)', success: true, duration: Date.now() - start };
-        }
+        case 'git_diff':
+        case 'git_log':
+        case 'git_status':
+        case 'git_commit':
+        case 'git_branch': return await this.handleGitTool(name as GitToolName, args, toolCall.id, start);
         case 'create_directory': {
           const path = String(args.path ?? '');
           const batch = await this.captureWriteBatch('create_directory', [path]);

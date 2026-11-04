@@ -1,6 +1,6 @@
 # 双腿路线图：能力供给 × 模型代际（2026-11）
 
-> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 进行中——W1b-2 / W1b-1 / W1b-4 / W2b-3 / W2b-1（首两 fixture）/ web 信噪比刀已落，见「四之二」，余 W1b-3 / W2b-2 / W2b-1 尾巴（长时程 fixture）。基线与源码行号取证于 `e3a72e2`。
+> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 进行中——W1b-2 / W1b-1 / W1b-4 / W2b-3 / W2b-1（首两 fixture）/ web 信噪比刀已落，见「四之二」，余 W1b-3 / W2b-2 / W2b-1 尾巴（长时程 fixture）全被真机或真实 key 阻塞；**P2 已开工（2026-11-04）：D1 拍板=A（TS 单执行器），刀序见「四之三」**。基线与源码行号取证于 `e3a72e2`。
 >
 > 定调（用户，2026-11-03）：「pure 是一堆杂乱的工具和插件的集合，没有章法、没有规矩、只保留基本的输入、输出和做事底线和原则。至于事情怎么做、如何做、用什么做、用哪些工具做、怎么用、怎么呈现，都是大模型的事情。pure 今后两条腿走路：1）不断增强应用本身的基础能力（手脚），尽可能不要影响束缚大模型的表现；2）结合业界最新的 SOTA 模型。」
 
@@ -74,15 +74,24 @@
 
 **判据**：矩阵最高-最低 ≥ 2 个 fixture；报告含过程指标；连续两个版本的 compare 有变化可读。
 
-### W3 · 执行器归一（决策点 D1，需拍板）
+### W3 · 执行器归一（~~决策点 D1，需拍板~~ → **已拍板（2026-11-04）：A**）
 
-**现状证据**：加一个工具要改 Rust + Node + Tauri 三处，三端各测。这不是「不会写工具」，是「写一个工具的成本乘三」。
+**现状证据**：加一个工具要改 Rust + Node + Tauri 三处，三端各测。这不是「不会写工具」，是「写一个工具的成本乘三」。取证补强（2026-11-04 全量盘点，见「四之三」）：定义已单源（`toolDefs.ts` 30 工具 + `ToolRegistry` 权限标签层），执行三份——NodeToolAdapter 4743 行 / TauriToolAdapter 2438 行 / Rust 101 个 command（其中 ~60 个是可搬 TS 的纯工具逻辑）；8 处行为分叉今天就在漂（web_search 后端 10 vs 20、劫持正则手工镜像、公共 API 解析器 1318 vs 757 行、execute_command 沙箱只 GUI 有、git 参数拼装两份……）。
 
 **候选**（二者取一，不建议长期并存）：
 - **A. TS 单执行器**：Rust 只留不可替代部分（API key 中转、path policy、沙箱、原生系统能力），工具逻辑统一走 TS。
 - **B. 单执行器 daemon**：GUI / CLI / 渠道共连一个本地执行器，口径复用 [remote-office-bridge](remote-office-bridge-design.md)，Rust 退化为壳。
 
-**取舍标准**：冷启动与内存、权限模型复用度、GUI/CLI 一致性测试可维护性、离线可用性。建议倾向 B（与 S3 缓行项合并，一次解决两件事），但 A 改造面更小。**需要拍板，不在本文替你定。**
+~~**取舍标准**：冷启动与内存、权限模型复用度、GUI/CLI 一致性测试可维护性、离线可用性。建议倾向 B（与 S3 缓行项合并，一次解决两件事），但 A 改造面更小。**需要拍板，不在本文替你定。~~
+
+**D1 裁定：A（TS 单执行器）；B 不否决，降级为 A 落稳后的可选第二阶（届时与 S3 拍板合并考虑）。** 理由四条：
+
+1. **B 的「现成通道」不存在**（取证推翻主要想象）：GUI 主聊天完全不经过 sidecar——引擎跑在 WebView、工具走 Tauri IPC、LLM 走 RustLLMAdapter；sidecar 唯一角色是 gateway spawn。选 B 起步成本=进程模型搬家，remote-office-bridge 文档自己计价「最大的一步」且 GUI 新增 daemon 运行时依赖（新故障形态「GUI 降级提示而非假死」）。
+2. **A 的切面比表面小**：不可替代面恰好=候选 A 写的清单（key 中转/secret_*/spawn_mcp+oauth/进程流+进程组+Seatbelt/gateway spawn/系统能力）；其余 ~60 个 command 是可搬 TS 的纯工具逻辑。归一后 Rust 从「每工具一个 command」退化为「每原语一个 command」（fs/spawn/fetch/TCP 等约 15 个）+ 不可替代面。
+3. **取舍四条逐项过**：冷启动与内存——A 零新增进程（引擎本在 WebView、CLI 本是 bun 进程），B 要常驻 daemon；权限复用与一致性测试——两者同收益（单源后 8 处分叉机械消失）；离线——A 全本地不变，B 多一个 daemon 依赖面。B 唯一净赢是省一次冷启动，不足以抵进程模型风险。
+4. **捆绑是负收益**：本文原写 B「与 S3 合并一次解决两件事」，但 S3 的结构动机（消灭双主 V2）与工具成本正交——remote-office-bridge 已写明 S1/S2 不做 S3 也完成全部结构收益。捆绑的真实效果是一次回归承担两个最大手术，与「共用一次回归」的初衷（W3/W4 都碰执行层）相反。**A 是 B 的必经第一阶**：daemon 化时该搬的是已单源的执行器，不是两份 adapter。
+
+**A 的落地形态**（取证修正后的精确表述）：工具实现单源在新 TS 层（`src/tools/impl/`），两个 adapter 退化为「运行时原语注入」——fs（node:fs vs Rust IPC）、spawn（child_process vs execute_command IPC）、fetch（undici vs Rust fetch 原语）、TCP（node:net vs Rust 探针原语）。归一优先级：web 栈（漂移面最大：后端集并、劫持检测单源、解析器收敛）→ 文件类工具（path_policy 注入点上移 TS 单源）。
 
 ### W4 · 视觉闭环：让 agent 看见自己的产出
 
@@ -147,13 +156,30 @@
 
 **验证**：`bun run typecheck` 通过；`bun test src` = 4983 pass / 0 fail；`bun run lint:conventions` 通过。
 
+## 四之三、P2 落地记录（2026-11-04，进行中）
+
+**开工取证（2026-11-04 全量盘点）**：30 个内置工具，定义单源（toolDefs + ToolRegistry），执行三份。8 处行为分叉：①web_search 后端集 Node ~10 vs Rust ~20（toolDefs 注释自认「probe different sets」）；②劫持检测正则表 TS/Rust 手工镜像「逐条对齐」必漂移；③web 公共 API 解析器 Rust 1318 行 vs TS 757 行两份；④path_policy 只在 Rust 文件命令、Node 侧只有词法 resolve；⑤execute_command 沙箱只 GUI 有（Seatbelt）；⑥sys_info 两端输出形不同；⑦git_commit/branch GUI 借道 execute_command 拼参数 vs CLI 独立 spawn；⑧共享缓存文件 ~/.pure/cache/web-cache.json 同键不同帽靠注释互镜像。**sidecar 现状**：GUI 主聊天不经过它（引擎在 WebView、工具走 IPC），唯一消费方 gateway_start。**W4 基建**：HeadlessChrome（port=0+stderr 解析、CDP 透传、findChromePath→null 降级）+ browserProjection 的 navigate+captureScreenshot 先例齐备；缺口在引擎侧——ToolResult 无 images 字段、两条 adapter 映射只在 user role 生效。**安全面裁定（W4 开工前说清）**：browser 不做 SSRF/私网拒绝——与文件工具「绝对路径全盘可达」同契约，localhost/file:// 恰是「改→截→判→修」核心场景；唯一纪律=不开放外部调试端口（port=0+stderr 解析，基建已有；防端口抢占属工程正确性非安全加固）。netGuard（死 host 熔断）不接 browser——navigate 失败模型自己会看到错误，熔断器是防重复浪费的机制非安全边界。
+
+| commit | 刀 | 摘要 |
+|---|---|---|
+| 本次 | **D1 拍板** | 裁定 A（TS 单执行器），B 降级为可选第二阶。理由与形态见 W3 节（sidecar 零复用 / A 切面小 / 四条逐项 / 捆绑负收益） |
+| 本次 | **P2-1 执行器骨架（git 五工具归一）** | 立起单源层：`src/tools/runtime.ts`（`ToolRuntime` 原语注入接口，首发原语 `runArgv`——argv 直通无 shell）+ `src/tools/impl/git.ts`（git_diff/log/status/commit/branch 单源实现，行为口径=CLI 旧形态）。两 adapter 退化为原语提供者：Node 端 `runArgv`=Bun.spawn（自旧 handleGitCmd 泛化），GUI 端 `runArgv`=新 Rust command **`run_argv`**（execute_command 骨架 minus shell wrapper/代理 env；Seatbelt 经新增 `sandbox::wrap_argv` 直接包 argv，无 sh -c 中介）。**Rust 面 3→1**：git_diff/git_log/git_status 三 command + run_git helper 退役，`run_argv` 一个原语 command 顶上——「每工具一个 command」→「每原语一个 command」的第一个实证（GUI 的 git_commit/branch 不再借道 execute_command shell 拼接 quoteShellArg；TA 的 quoteShellArg 保留给 workspace.ts，列后续归一候选）。GUI 侧行为几乎零变化（旧 Rust git_status 本就是 --short、log 默认 -n 10 --oneline 一致）；CLI 侧仅 git_log maxCount 加了正整数校验、失败文案超时行对齐 execute_command。**契约测试单份两端生效**：git.test.ts 11 用例（argv 组装/校验拒收/失败取材序/真 git 集成），adapter 不再各测一份。验证：cargo check/test 绿、typecheck 绿、bun test 5004 全过、lint 绿 |
+
+**P2 刀序**（绞杀者式，每刀独立可回退）：
+
+1. **P2-1 执行器骨架**：立 `src/tools/impl/` TS 实现层 + 原语注入接口，首批收敛 git 五兄弟（diff/log/status/commit/branch）——两份转义/解析逻辑归一，验证骨架形态。
+2. **P2-2 browser 工具**（W4-1）：落在单源层，复用 HeadlessChrome（会话常驻+空闲关闭抄 headlessRenderer 模式）；GUI spawn 经新 Rust 原语 command（WebView 不能 spawn，壳边界内）；开工前先验 WebView WebSocket 连 CDP 的 CSP 可行性（若 CSP 挡 localhost ws，CDP 会话改走 Rust 侧薄代理，实现仍单源 TS 经原语调用）。
+3. **P2-3 截图进上下文**（W4-2）：ToolResult 加 images 通道 + 引擎把工具图折进下一轮 + 两条 adapter 映射扩展到 tool 消息（anthropic tool_result image 块已有形状；openai tool content 数组 / DeepSeek 兼容性**真机验证**，W1b-3 同款纪律）。
+4. **P2-4 screenshot 工具+逃生舱**（W4-3）：本地文件/URL→图；呈现逃生舱（枚举 DSL 之外允许任意 HTML/JS 卡片）；判据验收「改→截→判→修」无人提示跑通（复用 W2 呈现指标）。
+5. **P2-5+ web 栈归一**（W3-A2，后续会话）：搜索后端集并（10∪20）、劫持检测单源、公共 API 解析器收敛 → 文件类工具归一（path_policy 注入点上移）。
+
 ## 五、分期
 
 | 期 | 内容 | 为什么这个顺序 |
 |---|---|---|
 | **P0**（已落） | W1a 能力 manifest + 现状可见；W2a 过程指标 | 零网络、零 UI、可测，先把「模型知识」和「度量口径」的地基打好 |
 | **P1**（v4.3） | W1b 自探测 + Anthropic 内置 + Responses；W2b 硬 fixture + 官方列 + 发布门 | 两者互为前提：W1b 的收益只能靠 W2b 证明，W2b 扩列依赖 W1b 的 provider。做完这条腿才能自我证伪 |
-| **P2**（v5.0） | W3 执行器归一（D1 拍板）+ W4 视觉闭环 | 都碰执行层与安全面，合并推进共用一次回归；W4 验收复用 W2 的呈现指标 |
+| **P2**（v5.0，进行中） | W3 执行器归一（D1 已拍板=A）+ W4 视觉闭环 | 都碰执行层与安全面，合并推进共用一次回归；W4 验收复用 W2 的呈现指标 |
 | **P3**（v5.x） | W5 判断权归还 + 自进化收口 | 依赖前几期把度量与执行器稳住，否则「删规矩」无法对照验证 |
 
 自进化收口：`toolSolidification` 现在是「建议 → 点头 → 下一会话生效」，缺采纳后的效果归因与自动回滚。`strategyEffect` 已有按策略维度的聚合，把「固化后的工具是否真的减少了调用数/失败率」接进去才算闭环。

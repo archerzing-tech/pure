@@ -3694,6 +3694,66 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
     }))
 }
 
+/// Run an argv array directly — no shell on any platform. The process
+/// primitive for the TS single-executor tool layer (W3/D1=A): tool logic
+/// lives once in TS, adapters inject host primitives, and this command is the
+/// GUI side's spawn. Mirrors execute_command's skeleton (probed PATH,
+/// workspace cwd, kill_on_drop hard timeout, ANSI strip) minus the shell
+/// wrapper and the proxy env — argv-level tools (git et al.) are local
+/// operations. When `sandbox` is requested and Seatbelt is available,
+/// wrap_argv puts sandbox-exec in front of the argv itself.
+#[tauri::command]
+async fn run_argv(workspace: String, argv: Vec<String>, sandbox: Option<bool>) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    let full_argv = if sandbox_arg_enabled(&workspace, sandbox) {
+        sandbox::wrap_argv(std::path::Path::new(&workspace), argv)
+    } else {
+        argv
+    };
+    #[cfg(windows)]
+    let full_argv = argv;
+
+    let mut parts = full_argv.into_iter();
+    let program = parts.next().ok_or_else(|| "run_argv: argv must not be empty".to_string())?;
+    let mut cmd = silent_child_tokio(TokioCommand::new(&program));
+    cmd.args(parts.collect::<Vec<_>>());
+    // Same PATH injection as execute_command: a Finder-launched app inherits a
+    // minimal PATH, and `git` is exactly the kind of binary that needs the
+    // probed dirs to resolve.
+    #[cfg(unix)]
+    cmd.env("PATH", probe_path());
+    cmd.current_dir(&workspace);
+    // Same hard-timeout discipline as execute_command: wait_with_output
+    // consumes the child, so on timeout the dropped future takes it along
+    // (kill_on_drop = SIGKILL; kill_process_group additionally takes out any
+    // descendants).
+    cmd.kill_on_drop(true);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = cmd.spawn().map_err(|e| format!("run_argv: {}", e))?;
+    let pid = child.id();
+    let output = match tokio::time::timeout(COMMAND_STREAM_TIMEOUT, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|e| format!("run_argv: {}", e))?,
+        Err(_) => {
+            if let Some(pid) = pid {
+                let _ = kill_process_group(pid as i32);
+            }
+            return Ok(serde_json::json!({
+                "exitCode": 124,
+                "stdout": "",
+                "stderr": format!("Command timed out after {}s and was terminated.", COMMAND_STREAM_TIMEOUT.as_secs()),
+            }));
+        }
+    };
+
+    Ok(serde_json::json!({
+        "exitCode": output.status.code().unwrap_or(-1),
+        "stdout": strip_ansi(&String::from_utf8_lossy(&output.stdout).to_string()),
+        "stderr": strip_ansi(&String::from_utf8_lossy(&output.stderr).to_string()),
+    }))
+}
+
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
 /// cancel one mid-run: execute_command_stream registers the child pid when it
 /// starts and removes it when it exits; kill_command SIGKILLs the process
@@ -4474,87 +4534,6 @@ async fn kill_command(
     // cancel entry, so checking both is race-free.
     let _ = cancel_chat_stream_inner(&downloads.inner().0, &id);
     Ok(())
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Git Tools
-// ═══════════════════════════════════════════════════════════════════════════════
-
-fn run_git(workspace: &str, args: &[String]) -> Result<String, String> {
-    let output = silent_child(std::process::Command::new("git"))
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| format!("git: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        let msg = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("git failed: {}", msg.trim()));
-    }
-    Ok(if stdout.is_empty() { stderr } else { stdout })
-}
-
-#[tauri::command]
-async fn git_diff(
-    workspace: String,
-    staged: Option<bool>,
-    path: Option<String>,
-) -> Result<String, String> {
-    run_blocking(move || git_diff_impl(workspace, staged, path)).await
-}
-
-fn git_diff_impl(
-    workspace: String,
-    staged: Option<bool>,
-    path: Option<String>,
-) -> Result<String, String> {
-    let mut args: Vec<String> = vec!["diff".into()];
-    if staged.unwrap_or(false) {
-        args.push("--staged".into());
-    }
-    args.push("--".into());
-    if let Some(p) = path {
-        args.push(p);
-    }
-    run_git(&workspace, &args)
-}
-
-#[tauri::command]
-async fn git_log(
-    workspace: String,
-    max_count: Option<u32>,
-    oneline: Option<bool>,
-) -> Result<String, String> {
-    run_blocking(move || git_log_impl(workspace, max_count, oneline)).await
-}
-
-fn git_log_impl(
-    workspace: String,
-    max_count: Option<u32>,
-    oneline: Option<bool>,
-) -> Result<String, String> {
-    let mut args: Vec<String> = vec!["log".into()];
-    let n = max_count
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "10".into());
-    args.push("-n".into());
-    args.push(n);
-    if oneline.unwrap_or(true) {
-        args.push("--oneline".into());
-    }
-    run_git(&workspace, &args)
-}
-
-#[tauri::command]
-async fn git_status(workspace: String) -> Result<String, String> {
-    run_blocking(move || git_status_impl(workspace)).await
-}
-
-fn git_status_impl(workspace: String) -> Result<String, String> {
-    run_git(&workspace, &["status".into(), "--short".into()])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -18555,10 +18534,8 @@ pub fn run() {
             execute_command_stream,
             download_file_stream,
             kill_command,
-            // Git tools
-            git_diff,
-            git_log,
-            git_status,
+            // W3/D1=A process primitive for the TS single-executor tool layer
+            run_argv,
             // MCP subprocess
             spawn_mcp,
             mcp_request,
