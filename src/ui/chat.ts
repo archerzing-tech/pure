@@ -37,6 +37,7 @@ import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPor
 import { decideTurnRoute, prefetchTurnRoute, startTurnRoute } from '../coding-agent/turnRoute';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
+import { capabilityTurnFacts } from '../shared/capabilityFacts';
 import { DynamicInsertionCoordinator, type DynamicInsertionDecision } from '../coding-agent/DynamicInsertionCoordinator';
 import { describeTiming, formatInputDecision, type InputTiming } from '../coding-agent/inputDecision';
 import { InterjectOrchestrator } from '../coding-agent/interjectOrchestrator';
@@ -962,7 +963,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
 
 /** P2 下沉（2026-10-27）：惯例 + 运行时 + 网络 + shell 拼成 user-turn 环境事实。
  * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string): string {
   const parts: string[] = [];
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
@@ -975,6 +976,10 @@ function buildEnvFacts(conventions?: string, formFeedback?: string): string {
   // 同样的围栏语法错下次照犯。有事件才出现——没出错零注入，不常驻刷屏。
   const feedback = formFeedback?.trim();
   if (feedback) parts.push(feedback);
+  // W1b-4 能力事实送达（2026-11-04）：带图×视觉未知/不支持、模型切换后首回合。
+  // 同款「有事件才出现」。
+  const capability = capabilityFacts?.trim();
+  if (capability) parts.push(capability);
   return parts.join('\n\n');
 }
 
@@ -1793,6 +1798,9 @@ export class ChatController {
    * 账跨回合跨重启存活（快照持久化），记账点=委派结算、计划卡、旁答/澄清问。
    * 新对话/会话切换清零。 */
   private sessionLedger: SessionLedger = createSessionLedger();
+  // W1b-4：上次实际发出的 provider::model。装配时对比出「模型切换」事件；
+  // 只在请求真正装配时推进（改配置没发话不触发）。
+  private lastSentModelKey?: string;
   /** 四期 4b 分区化渲染器（worldStateRender.ts）：世界状态分区逐回合 diff，
    *  状态不变只发指针。控制器即会话作用域——每个会话自己的账，冷恢复/新建
    *  控制器自然重置；历史被压缩替换时显式 reset（见 preCompactedMessages
@@ -6564,6 +6572,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ? await this.mcpClient.collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS })
         : undefined;
       turnTiming.contextMs = (turnTiming.contextMs ?? 0) + Math.round(performance.now() - mcpResourceStartMs);
+      // W1b-4 能力事实送达：事件驱动（带图×视觉未知/不支持、模型切换后首回合），
+      // 无常驻行——首回合不注（sys_info 可查通道已有），事实只在模型要做能力
+      // 判断的瞬间出现（capabilityFacts.ts 头注释有裁定全文）。
+      const capabilityTurn = capabilityTurnFacts({
+        imageCount: userImages.length,
+        provider: config.provider,
+        model: config.model,
+        lastSentModelKey: this.lastSentModelKey,
+      });
+      this.lastSentModelKey = capabilityTurn.currentKey;
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen, hasImageAttachment: (userMessageAttachments?.length ?? 0) > 0 }),
@@ -6596,7 +6614,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback()),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,
