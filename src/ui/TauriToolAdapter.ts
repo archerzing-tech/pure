@@ -8,6 +8,8 @@ import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { runGitTool, type GitToolName } from '../tools/impl/git';
 import { runBrowserTool, runScreenshotTool } from '../tools/impl/browser';
+import { runWebSearch } from '../tools/impl/webSearch';
+import type { PageFetchInit, PageFetchResult } from '../tools/impl/webSearch';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../tools/runtime';
 import { READ_FILE_HEAD_LINES } from '../shared/readFileHead';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
@@ -955,7 +957,7 @@ export class TauriToolAdapter implements ToolAdapter {
    *  决策而不是 host 决策，兜底契约不变。 */
   private async runRoutedSurface<T>(
     surface: 'web_search' | 'web_public_api',
-    run: (proxyUrl: string) => Promise<T>,
+    run: (proxyUrl: string, attempt: number) => Promise<T>,
   ): Promise<T> {
     const pair = netRouteSurfacePair(surface, this.proxyUrl);
     const learn = (proxyUrl: string, ok: boolean): void => recordNetSurfaceOutcome(surface, proxyUrl ? 'proxy' : 'direct', ok);
@@ -966,7 +968,7 @@ export class TauriToolAdapter implements ToolAdapter {
     let lastErr: unknown = new Error(`${surface} network failed`);
     for (let i = 0; i < seq.length; i++) {
       try {
-        const value = await run(seq[i]!);
+        const value = await run(seq[i]!, i);
         learn(seq[i]!, true);
         return value;
       } catch (err) {
@@ -977,6 +979,72 @@ export class TauriToolAdapter implements ToolAdapter {
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  /** web_search 单源编排（tools/impl/webSearch）的 GUI 接线：编排、cookie
+   * jar、CJK 相关性门、缓存键全部与 CLI 共用同一份 TS 实现；本方法只提供
+   * 三个原语——网络走 Rust fetch_page（reqwest + 学习到的 proxyUrl），env
+   * 只映射 Settings 三值，缓存走 Rust 的 WebCache（与 CLI 共盘同键）。 */
+  private async searchViaSingleSource(query: string, maxResults: number, proxyUrl: string, attempt = 0): Promise<string> {
+    const fetchPage = async (url: string, init?: PageFetchInit): Promise<PageFetchResult> => {
+      const raw = await this.call('fetch_page', {
+        url,
+        headers: init?.headers && Object.keys(init.headers).length > 0 ? init.headers : null,
+        method: init?.method ?? null,
+        body: init?.body ?? null,
+        timeoutMs: init?.timeoutMs ?? null,
+        proxyUrl: proxyUrl || null,
+      }) as { status: number; finalUrl: string; contentType: string; setCookie: string | null; bodyBase64: string };
+      const bytes = new Uint8Array(Math.ceil(raw.bodyBase64.length * 3 / 4));
+      const written = atob(raw.bodyBase64);
+      for (let i = 0; i < written.length; i++) bytes[i] = written.charCodeAt(i);
+      return {
+        status: raw.status,
+        finalUrl: raw.finalUrl,
+        contentType: raw.contentType,
+        setCookie: raw.setCookie,
+        body: bytes.subarray(0, written.length),
+      };
+    };
+    // WebView 无 process.env：API 后端凭据只能来自 Settings → Tools 的三值。
+    // EXA / JINA 在 GUI 无配置渠道，显式不启用（env 返回空即跳过这两个后端）。
+    const env = (key: string): string => {
+      if (key === 'TAVILY') return this.tavilyApiKey;
+      if (key === 'SERPER') return this.serperApiKey;
+      if (key === 'SEARXNG') return this.searxngUrl;
+      return '';
+    };
+    const outcome = await runWebSearch(query, maxResults, {
+      fetchPage,
+      env,
+      cacheGet: async (key) => {
+        const hit = await this.call('web_cache_get', { key }) as string | null;
+        return hit ?? undefined;
+      },
+      cacheSet: (key, value, ttlMs) => { void this.call('web_cache_set', { key, value, ttlMs }); },
+    }, { ignoreCooldown: attempt > 0 });
+    // ok:false（全后端网络级失败）按旧 Rust command 的 Err 语义上抛，交给
+    // runRoutedSurface 换路重试；ok:true（含空结果附注）原样返回文本。
+    if (!outcome.ok) throw new Error(outcome.output);
+    return outcome.output;
+  }
+
+  /** Tier-2 fast path 的 GUI 直连：透传 Rust 内部 cached_direct_public_api
+   *（结构化 Option，不玩 miss 文案匹配）。任何异常都算 miss，由调用方静默
+   * 落回完整编排。 */
+  private async fastPathDirectApi(query: string, proxyUrl: string): Promise<string | null> {
+    try {
+      const hit = await this.call('direct_public_api', {
+        query,
+        category: null,
+        location: this.location || null,
+        proxyUrl: proxyUrl || null,
+      }) as { source: string; text: string; cached: boolean } | null;
+      if (!hit) return null;
+      return `${hit.cached ? '[cached] ' : ''}[${hit.source}] ${hit.text}`;
+    } catch {
+      return null;
+    }
   }
 
   /** 抓取后提炼层(期4 第一刀):超阈值全文先经宿主 LLM 压成要点再进主
@@ -1265,13 +1333,8 @@ export class TauriToolAdapter implements ToolAdapter {
           const official = parseMcpRegistryPayload(officialRaw, maxResults);
           let community = [] as McpCandidate[];
           try {
-            const communityRaw = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
-              'web_search',
-              buildWebSearchArgs(this.workspace, {
-                query: `${query} MCP server (Smithery OR mcp.so)`,
-                maxResults: Math.min(8, maxResults),
-              }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
-            ) as Promise<string>);
+            const communityRaw = await this.runRoutedSurface('web_search', (proxyUrl, attempt) =>
+              this.searchViaSingleSource(`${query} MCP server (Smithery OR mcp.so)`, Math.min(8, maxResults), proxyUrl, attempt));
             community = communityMcpCandidates(parseWebSearchText(communityRaw), maxResults);
           } catch {
             // The official Registry remains useful when community search is unavailable.
@@ -1886,10 +1949,8 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'researcher_web': {
           const prompt = String(args.prompt ?? args.query ?? '').trim();
           const limits = researchLimits(args);
-          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
-            'web_search',
-            buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
-          ) as Promise<string>);
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl, attempt) =>
+            this.searchViaSingleSource(prompt, Math.min(20, limits.maxSources * 2), proxyUrl, attempt));
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -1935,10 +1996,8 @@ export class TauriToolAdapter implements ToolAdapter {
             return researchFailure(toolCall.id, name, start, 'researcher_docs requires both library and topic');
           }
           const limits = researchLimits(args);
-          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
-            'web_search',
-            buildWebSearchArgs(ws, { ...args, query: prompt, maxResults: Math.min(20, limits.maxSources * 2) }, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
-          ) as Promise<string>);
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl, attempt) =>
+            this.searchViaSingleSource(prompt, Math.min(20, limits.maxSources * 2), proxyUrl, attempt));
           const rawSources = parseWebSearchText(searchData);
           const filteredSources = filterResearchSources(rawSources, args.allowedDomains);
           const filtered = rawSources.length - filteredSources.length;
@@ -1985,14 +2044,27 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: raw, success: true, duration: Date.now() - start };
         }
         case 'web_search': {
+          // Tier-2 fast path: structured intents (weather/geocode/news/wiki/IP/
+          // FX/stock/GitHub) are answered from curated no-key public APIs
+          // instead of search backends; only general queries fall through to
+          // a real search. The research surfaces below call searchViaSingleSource
+          // directly, so this fast path never hijacks research queries.
+          const searchQuery = String(args.query ?? '');
+          const direct = await this.fastPathDirectApi(searchQuery, netRouteSurfacePair('web_search', this.proxyUrl).proxyUrl);
+          if (direct !== null) {
+            return { id: toolCall.id, toolName: name, result: direct, success: true, duration: Date.now() - start };
+          }
           // 搜索后端是一整个扇出（API + 结构化 + HTML 多引擎），没有单一目标
           // host：走 web_search 出口面 —— 直连优先 + 一次反向兜底。以前是
           // this.proxyUrl 直传，代理一挂所有后端一起死（web_search 尤其惨：
           // 同一个坏代理喂给全部后端，无一幸免）。
-          const searchData = await this.runRoutedSurface('web_search', (proxyUrl) => this.call(
-            'web_search',
-            buildWebSearchArgs(ws, args, this.tavilyApiKey, this.serperApiKey, proxyUrl, this.location, this.searxngUrl),
-          ) as Promise<string>);
+          const searchData = await this.runRoutedSurface('web_search', (proxyUrl, attempt) =>
+            this.searchViaSingleSource(
+              searchQuery,
+              Math.min(typeof args.maxResults === 'number' ? args.maxResults : 10, 20),
+              proxyUrl,
+              attempt,
+            ));
           return { id: toolCall.id, toolName: name, result: searchData, success: true, duration: Date.now() - start };
         }
         case 'web_fetch': {
@@ -2379,38 +2451,6 @@ export function researchLimits(args: Record<string, unknown>): { maxSources: num
 
 function researchFailure(id: string, toolName: string, start: number, error: string): ToolResult {
   return { id, toolName, error, success: false, duration: Date.now() - start };
-}
-
-/** Pure arg builder for the web_search invoke. Exported so a unit test locks
- * the exact Tauri arg names (apiKey → Rust api_key, serperApiKey → Rust
- * serper_api_key) — a typo here would only fail at runtime in the packaged
- * app, since tauriInvoke is unavailable in tests. */
-export function buildWebSearchArgs(
-  workspace: string,
-  args: Record<string, unknown>,
-  tavilyApiKey: string,
-  serperApiKey: string,
-  proxyUrl = '',
-  location = '',
-  searxngUrl = '',
-): Record<string, unknown> {
-  return {
-    workspace,
-    query: String(args.query ?? ''),
-    maxResults: args.maxResults ?? 10,
-    // Optional API keys from Settings → Tools: when set, the Rust backend
-    // searches via Serper (Google index) then Tavily first, falling back to
-    // the free HTML backends otherwise.
-    apiKey: tavilyApiKey,
-    serperApiKey,
-    // Optional SearXNG instance (Settings → Tools → Web Tools): intranet /
-    // self-hosted metasearch, tried after the API backends.
-    ...(searxngUrl ? { searxngUrl } : {}),
-    ...(proxyUrl ? { proxyUrl } : {}),
-    // User-configured city (Settings → General → Environment): the Tier-2
-    // fast path uses it as the weather fallback when the query names no city.
-    ...(location ? { location } : {}),
-  };
 }
 
 // ── Command output formatting (shared by the streamed and buffered paths) ──

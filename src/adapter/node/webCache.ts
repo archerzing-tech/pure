@@ -17,6 +17,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fnv1a64, normalizeQuery, searchCacheKey } from '../../tools/impl/webSearch';
 
 /** Maximum number of entries before oldest-first eviction. */
 export const MAX_ENTRIES = 200;
@@ -53,33 +54,16 @@ export function webCacheEnabled(): boolean {
 }
 
 /** Stable cache key — hashed so queries/URLs never leak into the file name.
- * FNV-1a 64-bit over the UTF-8 bytes of the parts joined with NUL — byte-
- * identical to the Rust mirror's fnv1a64 (src-tauri/src/lib.rs), so CLI and
- * GUI produce the SAME keys and genuinely share the cache file. */
+ * FNV-1a 的单源实现是 tools/impl/webSearch 的 fnv1a64（P2-5 收敛，键不变）。 */
 export function hashKey(parts: string[]): string {
-  const bytes = new TextEncoder().encode(parts.join('\u0000'));
-  let h = 0xcbf29ce484222325n;
-  for (const b of bytes) {
-    h ^= BigInt(b);
-    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return h.toString(16);
+  return fnv1a64(parts);
 }
 
-/** Query normalization: lowercase + trim + collapse whitespace; CJK queries
- * also drop INTERNAL whitespace ("北京天气" == "北京 天气" — the space is just
- * typing variance for Chinese, and a separate cache entry would re-run the
- * geocode+forecast chain for no semantic difference). */
-export function normalizeQuery(query: string): string {
-  const q = query.trim().toLowerCase().replace(/\s+/g, ' ');
-  return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(q) ? q.replace(/\s+/g, '') : q;
-}
+// normalizeQuery / searchCacheKey 的单源在 tools/impl/webSearch（P2-5）：
+// 同一 FNV-1a、同一键序，盘上缓存键完全兼容。
+export { normalizeQuery, searchCacheKey };
 
-/** Key for web_search result sets (query + result count; location not needed —
- * the Tier-2 fast path is cached separately under its own key). */
-export function searchCacheKey(query: string, maxResults: number): string {
-  return hashKey(['search', String(maxResults), normalizeQuery(query)]);
-}
+
 
 /** Key for URL content (web_scrape / web_fetch) — selector and the maxChars
  * bucket are part of the cache identity because they change the output. */

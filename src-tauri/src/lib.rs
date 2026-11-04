@@ -5977,27 +5977,116 @@ async fn probe_html_backends(
     (Vec::new(), failed, any_empty)
 }
 
+// ── TS 单源原语（tools/impl/webSearch，P2-5）──
+// web_search 的编排/解析器/CJK 相关性门/cookie jar 全部单源在 TS（双端同码），
+// GUI 侧只提供四个无逻辑原语。web_search command 本体已退役（web_search_inner
+// 仍被 web_public_api 的 searchOnMiss 复用，等公共 API 解析器收敛刀一并退役）。
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageFetchOutcome {
+    status: u16,
+    /// redirect follow 后落点（cookie 域归属与劫持检测要用）。
+    final_url: String,
+    content_type: String,
+    /// 原始 Set-Cookie 头（多值逗号连接）：jar 的管理权在 TS 侧——本原语
+    /// 不带 cookie store（reqwest 默认即无），否则两侧 jar 会打架。
+    set_cookie: Option<String>,
+    /// body 字节 base64 过 IPC（charset 解码在 TS 单源——GBK 页必须活着过桥）。
+    body_base64: String,
+}
+
+/// Bare page-fetch primitive for the TS web-search single source.
 #[tauri::command]
-async fn web_search(
-    _workspace: String,
+async fn fetch_page(
+    url: String,
+    headers: Option<std::collections::HashMap<String, String>>,
+    method: Option<String>,
+    body: Option<String>,
+    timeout_ms: Option<u64>,
+    proxy_url: Option<String>,
+) -> Result<PageFetchOutcome, String> {
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000));
+    let client = build_http_client(timeout, proxy_url.as_deref())?;
+    let method = method.unwrap_or_else(|| "GET".to_string());
+    let upper = method.to_ascii_uppercase();
+    let mut req = if upper == "POST" {
+        client.post(&url)
+    } else if upper == "PUT" {
+        client.put(&url)
+    } else {
+        client.get(&url)
+    };
+    if let Some(hs) = &headers {
+        for (k, v) in hs {
+            req = req.header(k, v);
+        }
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("fetch: {}", e))?;
+    let status = resp.status().as_u16();
+    let final_url = resp.url().to_string();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let set_cookie = {
+        let values: Vec<String> = resp
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect();
+        if values.is_empty() { None } else { Some(values.join(", ")) }
+    };
+    let bytes = resp.bytes().await.map_err(|e| format!("read: {}", e))?;
+    Ok(PageFetchOutcome {
+        status,
+        final_url,
+        content_type,
+        set_cookie,
+        body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
+/// 共享盘上 web-cache（~/.pure/cache/web-cache.json，与 CLI 同 key 方案）的
+/// 读写原语：缓存的 key 归一/TTL 语义在 TS 单源，这里只管存取。
+#[tauri::command]
+fn web_cache_get(key: String) -> Option<String> {
+    web_cache().lock().unwrap().get(&key)
+}
+
+#[tauri::command]
+fn web_cache_set(key: String, value: String, ttl_ms: u64) {
+    web_cache().lock().unwrap().set(&key, &value, ttl_ms);
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectApiHit {
+    source: String,
+    text: String,
+    cached: bool,
+}
+
+/// Tier-2 fast path 原语：结构化意图（weather/geocode/news/wiki/IP/FX/stock/
+/// GitHub）从免 key 公共 API 直答。返回 None 表示 miss（调用方落进搜索编排）。
+/// 与 web_search 分开暴露，让 TS 侧保持「fast path 先行、不劫持 researcher」
+/// 的调用序。
+#[tauri::command]
+async fn direct_public_api(
     query: String,
-    max_results: Option<usize>,
-    api_key: Option<String>,
-    serper_api_key: Option<String>,
+    category: Option<String>,
     location: Option<String>,
     proxy_url: Option<String>,
-    searxng_url: Option<String>,
-) -> Result<String, String> {
-    web_search_inner(
-        &query,
-        max_results,
-        api_key.as_deref(),
-        serper_api_key.as_deref(),
-        location.as_deref(),
-        proxy_url.as_deref(),
-        searxng_url.as_deref(),
-    )
-    .await
+) -> Result<Option<DirectApiHit>, String> {
+    let (outcome, cached) =
+        cached_direct_public_api(&query, category.as_deref(), location.as_deref(), proxy_url.as_deref()).await?;
+    Ok(outcome.map(|o| DirectApiHit { source: o.source, text: o.text, cached }))
 }
 
 fn urlencoding(s: &str) -> String {
@@ -18793,8 +18882,11 @@ pub fn run() {
             test_proxy,
             github_mirror_probe,
             detect_system_proxy,
-            // Web tools
-            web_search,
+            // Web tools（web_search 编排已单源 TS；这四个是它的 GUI 原语）
+            fetch_page,
+            web_cache_get,
+            web_cache_set,
+            direct_public_api,
             web_fetch,
             web_fetch_probe,
             web_public_api,

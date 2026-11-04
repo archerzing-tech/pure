@@ -6,6 +6,8 @@
 // by its own suite.
 
 import { describe, expect, it } from 'bun:test';
+// P2-5 单源迁移：被测面全部在 tools/impl/webSearch（编排/解析器/后端/CJK 门）；
+// readResponseText 是 Response 适配胶水，仍住 NodeToolAdapter（web_fetch 链共用）。
 import {
   parseBingResults,
   parseDuckDuckGoResults,
@@ -25,7 +27,6 @@ import {
   tavilySearch,
   exaSearch,
   firstRelevantResult,
-  readResponseText,
   charsetFromContentType,
   sniffHtmlCharset,
   googleNewsSearch,
@@ -33,7 +34,25 @@ import {
   wikipediaSearch,
   jinaGoogleSearch,
   jinaDuckDuckGoSearch,
-} from '../NodeToolAdapter';
+  type SearchNetDeps,
+} from '../../../tools/impl/webSearch';
+import { readResponseText } from '../NodeToolAdapter';
+
+/** 假网络面：固定应答的 PageFetchResult；env 按表取（缺省 '' —— 正好让
+ * throws 用例走到「key not set」分支）。 */
+function fakeNet(body: string | unknown, envs: Record<string, string> = {}): SearchNetDeps {
+  const raw = typeof body === 'string' ? body : JSON.stringify(body);
+  return {
+    fetchPage: async () => ({
+      status: 200,
+      finalUrl: 'https://fake.example/',
+      contentType: typeof body === 'string' ? 'text/html' : 'application/json',
+      setCookie: null,
+      body: new TextEncoder().encode(raw),
+    }),
+    env: (k) => envs[k] ?? '',
+  };
+}
 
 describe('Bing HTML result parser (mirrors Rust web_search_tests)', () => {
   it('parses result blocks with titles, snippets, and URLs', () => {
@@ -258,65 +277,43 @@ describe('Relevance gate (mirrors Rust results_relevant)', () => {
 
 describe('Serper API backend (mirrors Rust lib.rs search_backend_serper)', () => {
   it('maps Serper organic results to SearchResult (title/link/snippet)', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        organic: [
-          { title: '西安到重庆机票查询', link: 'https://flights.example.com/1', snippet: '携程特价机票：西安到重庆 ¥380 起', position: 1 },
-          { title: 'Second', link: 'https://b.com', snippet: 'plain snippet' },
-          { title: 'No link', snippet: 'x' },
-          { title: '', link: 'https://empty.example', snippet: 'y' },
-        ],
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    process.env.SERPER_API_KEY = 'serper-test';
-    try {
-      const results = await serperSearch('西安到重庆 机票', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toBe('西安到重庆机票查询');
-      expect(results[0].url).toBe('https://flights.example.com/1');
-      expect(results[0].snippet).toContain('携程');
-      expect(results[1].snippet).toBe('plain snippet');
-    } finally {
-      delete process.env.SERPER_API_KEY;
-      globalThis.fetch = originalFetch;
-    }
+    const results = await serperSearch('西安到重庆 机票', 10, fakeNet({
+      organic: [
+        { title: '西安到重庆机票查询', link: 'https://flights.example.com/1', snippet: '携程特价机票：西安到重庆 ¥380 起', position: 1 },
+        { title: 'Second', link: 'https://b.com', snippet: 'plain snippet' },
+        { title: 'No link', snippet: 'x' },
+        { title: '', link: 'https://empty.example', snippet: 'y' },
+      ],
+    }, { SERPER_API_KEY: 'serper-test' }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('西安到重庆机票查询');
+    expect(results[0].url).toBe('https://flights.example.com/1');
+    expect(results[0].snippet).toContain('携程');
+    expect(results[1].snippet).toBe('plain snippet');
   });
 
   it('throws when no SERPER_API_KEY is set', async () => {
-    delete process.env.SERPER_API_KEY;
-    await expect(serperSearch('query', 10)).rejects.toThrow('SERPER_API_KEY');
+    await expect(serperSearch('query', 10, fakeNet({}))).rejects.toThrow('SERPER_API_KEY');
   });
 });
 
 describe('Tavily API backend + parallel first-win (mirrors Rust lib.rs)', () => {
   it('maps Tavily JSON results to SearchResult (title/url/content → snippet)', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        results: [
-          { title: '西安到重庆机票查询', url: 'https://flights.example.com/1', content: '携程特价机票：西安到重庆 ¥380 起', score: 0.95 },
-          { title: 'Second', url: 'https://b.com', content: 'plain snippet' },
-        ],
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    process.env.TAVILY_API_KEY = 'tvly-test';
-    try {
-      const results = await tavilySearch('西安到重庆 机票', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toBe('西安到重庆机票查询');
-      expect(results[0].url).toBe('https://flights.example.com/1');
-      expect(results[0].snippet).toContain('携程');
-      expect(results[1].snippet).toBe('plain snippet');
-    } finally {
-      delete process.env.TAVILY_API_KEY;
-      globalThis.fetch = originalFetch;
-    }
+    const results = await tavilySearch('西安到重庆 机票', 10, fakeNet({
+      results: [
+        { title: '西安到重庆机票查询', url: 'https://flights.example.com/1', content: '携程特价机票：西安到重庆 ¥380 起', score: 0.95 },
+        { title: 'Second', url: 'https://b.com', content: 'plain snippet' },
+      ],
+    }, { TAVILY_API_KEY: 'tvly-test' }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('西安到重庆机票查询');
+    expect(results[0].url).toBe('https://flights.example.com/1');
+    expect(results[0].snippet).toContain('携程');
+    expect(results[1].snippet).toBe('plain snippet');
   });
 
   it('throws when no TAVILY_API_KEY is set', async () => {
-    delete process.env.TAVILY_API_KEY;
-    await expect(tavilySearch('query', 10)).rejects.toThrow('TAVILY_API_KEY');
+    await expect(tavilySearch('query', 10, fakeNet({}))).rejects.toThrow('TAVILY_API_KEY');
   });
   it('first-win: returns the first backend whose results pass the relevance gate', async () => {
     // The slow backend is the RELEVANT one (passes the gate); the fast one is
@@ -405,33 +402,22 @@ describe('Charset-aware response decoding (mirrors Rust response_text_with_chars
 
 describe('Exa API backend', () => {
   it('maps Exa results to SearchResult with the publish date in the title', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        results: [
-          { title: 'Exa result one', url: 'https://exa.example/1', text: 'content one', publishedDate: '2026-08-10T00:00:00.000Z' },
-          { title: 'Exa result two', url: 'https://exa.example/2', text: 'content two' },
-          { title: 'No url', text: 'x' },
-        ],
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    process.env.EXA_API_KEY = 'exa-test';
-    try {
-      const results = await exaSearch('rust web framework', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toContain('Exa result one');
-      expect(results[0].title).toContain('2026-08-10');
-      expect(results[0].url).toBe('https://exa.example/1');
-      expect(results[1].snippet).toBe('content two');
-    } finally {
-      delete process.env.EXA_API_KEY;
-      globalThis.fetch = originalFetch;
-    }
+    const results = await exaSearch('rust web framework', 10, fakeNet({
+      results: [
+        { title: 'Exa result one', url: 'https://exa.example/1', text: 'content one', publishedDate: '2026-08-10T00:00:00.000Z' },
+        { title: 'Exa result two', url: 'https://exa.example/2', text: 'content two' },
+        { title: 'No url', text: 'x' },
+      ],
+    }, { EXA_API_KEY: 'exa-test' }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toContain('Exa result one');
+    expect(results[0].title).toContain('2026-08-10');
+    expect(results[0].url).toBe('https://exa.example/1');
+    expect(results[1].snippet).toBe('content two');
   });
 
   it('throws when no EXA_API_KEY is set', async () => {
-    delete process.env.EXA_API_KEY;
-    await expect(exaSearch('query', 10)).rejects.toThrow('EXA_API_KEY');
+    await expect(exaSearch('query', 10, fakeNet({}))).rejects.toThrow('EXA_API_KEY');
   });
 });
 
@@ -519,102 +505,68 @@ describe('Query normalization retry (mirrors Rust normalize_query_for_retry)', (
 
 describe('SearXNG JSON backend', () => {
   it('maps SearXNG JSON results to SearchResult', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        results: [
-          { title: 'Rust', url: 'https://rust-lang.org/', content: 's1' },
-          { title: '', url: 'https://empty.example/', content: 'skip me' },
-          { title: 'T2', url: 'https://t2.example/', content: 's2' },
-        ],
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    process.env.SEARXNG_URL = 'https://searxng.internal';
-    try {
-      const results = await searxngSearch('rust', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toBe('Rust');
-      expect(results[1].snippet).toBe('s2');
-    } finally {
-      delete process.env.SEARXNG_URL;
-      globalThis.fetch = originalFetch;
-    }
+    const results = await searxngSearch('rust', 10, fakeNet({
+      results: [
+        { title: 'Rust', url: 'https://rust-lang.org/', content: 's1' },
+        { title: '', url: 'https://empty.example/', content: 'skip me' },
+        { title: 'T2', url: 'https://t2.example/', content: 's2' },
+      ],
+    }, { SEARXNG_URL: 'https://searxng.internal' }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust');
+    expect(results[1].snippet).toBe('s2');
   });
 
   it('throws when SEARXNG_URL is not set', async () => {
-    delete process.env.SEARXNG_URL;
-    await expect(searxngSearch('query', 10)).rejects.toThrow('SEARXNG_URL');
+    await expect(searxngSearch('query', 10, fakeNet({}))).rejects.toThrow('SEARXNG_URL');
   });
 });
 
 describe('Google News RSS backend', () => {
   it('parses news RSS items into SearchResult', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(`<rss version="2.0"><channel><item><title>Rust 1.85 发布</title><link>https://news.example.com/1</link><pubDate>Wed, 28 Aug 2026 10:00:00 GMT</pubDate><description>新的工具链稳定发布。</description></item><item><title>Second item</title><link>https://news.example.com/2</link><description>s2</description></item></channel></rss>`, { status: 200 })
-    ) as unknown as typeof fetch;
-    try {
-      const results = await googleNewsSearch('rust', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toContain('Rust');
-      expect(results[0].url).toBe('https://news.example.com/1');
-      expect(results[0].snippet).toContain('工具链');
-      expect(results[1].title).toBe('Second item');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    const rss = `<rss version="2.0"><channel><item><title>Rust 1.85 发布</title><link>https://news.example.com/1</link><pubDate>Wed, 28 Aug 2026 10:00:00 GMT</pubDate><description>新的工具链稳定发布。</description></item><item><title>Second item</title><link>https://news.example.com/2</link><description>s2</description></item></channel></rss>`;
+    const results = await googleNewsSearch('rust', 10, fakeNet(rss));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toContain('Rust');
+    expect(results[0].url).toBe('https://news.example.com/1');
+    expect(results[0].snippet).toContain('工具链');
+    expect(results[1].title).toBe('Second item');
   });
 });
 
 describe('DuckDuckGo Instant Answer API', () => {
   it('maps abstract + related topics to SearchResult', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        Heading: 'Rust (programming language)',
-        AbstractText: 'A systems programming language.',
-        AbstractURL: 'https://en.wikipedia.org/wiki/Rust_(programming_language)',
-        RelatedTopics: [
-          { Text: 'Rust (band) — a band', FirstURL: 'https://duckduckgo.com/Rust_(band)' },
-          { Topics: [{ Text: 'Rust (fungus)', FirstURL: 'https://duckduckgo.com/Rust_(fungus)' }] },
-        ],
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    try {
-      const results = await ddgInstantSearch('rust', 10);
-      expect(results.length).toBe(3);
-      expect(results[0].title).toContain('Rust');
-      expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
-      expect(results[1].url).toBe('https://duckduckgo.com/Rust_(band)');
-      expect(results[2].url).toBe('https://duckduckgo.com/Rust_(fungus)');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    const results = await ddgInstantSearch('rust', 10, fakeNet({
+      Heading: 'Rust (programming language)',
+      AbstractText: 'A systems programming language.',
+      AbstractURL: 'https://en.wikipedia.org/wiki/Rust_(programming_language)',
+      RelatedTopics: [
+        { Text: 'Rust (band) — a band', FirstURL: 'https://duckduckgo.com/Rust_(band)' },
+        { Topics: [{ Text: 'Rust (fungus)', FirstURL: 'https://duckduckgo.com/Rust_(fungus)' }] },
+      ],
+    }));
+    expect(results.length).toBe(3);
+    expect(results[0].title).toContain('Rust');
+    expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
+    expect(results[1].url).toBe('https://duckduckgo.com/Rust_(band)');
+    expect(results[2].url).toBe('https://duckduckgo.com/Rust_(fungus)');
   });
 });
 
 describe('Wikipedia search API', () => {
   it('maps search hits, stripping HTML snippet highlights', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({
-        query: { search: [
-          { title: 'Rust (programming language)', snippet: 'A <span class="searchmatch">systems</span> programming language.' },
-          { title: 'Rust', snippet: 'A genus of fungi.' },
-        ] },
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    ) as unknown as typeof fetch;
-    try {
-      const results = await wikipediaSearch('rust programming language', 10);
-      expect(results.length).toBe(2);
-      expect(results[0].title).toBe('Rust (programming language)');
-      expect(results[0].snippet).toContain('systems');
-      expect(results[0].snippet).not.toContain('<span');
-      expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
-      expect(results[1].snippet).toBe('A genus of fungi.');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    const results = await wikipediaSearch('rust programming language', 10, fakeNet({
+      query: { search: [
+        { title: 'Rust (programming language)', snippet: 'A <span class="searchmatch">systems</span> programming language.' },
+        { title: 'Rust', snippet: 'A genus of fungi.' },
+      ] },
+    }));
+    expect(results.length).toBe(2);
+    expect(results[0].title).toBe('Rust (programming language)');
+    expect(results[0].snippet).toContain('systems');
+    expect(results[0].snippet).not.toContain('<span');
+    expect(results[0].url).toBe('https://en.wikipedia.org/wiki/Rust_(programming_language)');
+    expect(results[1].snippet).toBe('A genus of fungi.');
   });
 });
 
@@ -633,26 +585,22 @@ describe('Mojeek parser (mirrors Rust parse_mojeek_results)', () => {
 
 describe('Jina-rendered Google / DuckDuckGo backends', () => {
   it('renders each engine through r.jina.ai and parses the markdown', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown) => {
-      const url = String(input);
-      if (url.includes('r.jina.ai/https://www.google.com/search?q=')) {
-        return new Response(`## [Rust Programming Language](https://rust-lang.org/)\n\nA language empowering everyone.`, { status: 200 });
-      }
-      if (url.includes('r.jina.ai/https://html.duckduckgo.com/html/?q=')) {
-        return new Response(`## [DDG result](https://ddg.example/1)\n\nsnippet one`, { status: 200 });
-      }
-      return new Response('not found', { status: 404 });
-    }) as unknown as typeof fetch;
-    try {
-      const google = await jinaGoogleSearch('rust language', 10);
-      expect(google.length).toBe(1);
-      expect(google[0].url).toBe('https://rust-lang.org/');
-      const ddg = await jinaDuckDuckGoSearch('rust language', 10);
-      expect(ddg.length).toBe(1);
-      expect(ddg[0].url).toBe('https://ddg.example/1');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    const deps: SearchNetDeps = {
+      fetchPage: async (url) => {
+        const text = url.includes('r.jina.ai/https://www.google.com/search?q=')
+          ? `## [Rust Programming Language](https://rust-lang.org/)\n\nA language empowering everyone.`
+          : url.includes('r.jina.ai/https://html.duckduckgo.com/html/?q=')
+            ? `## [DDG result](https://ddg.example/1)\n\nsnippet one`
+            : 'not found';
+        return { status: 200, finalUrl: url, contentType: 'text/plain', setCookie: null, body: new TextEncoder().encode(text) };
+      },
+      env: () => '',
+    };
+    const google = await jinaGoogleSearch('rust language', 10, deps);
+    expect(google.length).toBe(1);
+    expect(google[0].url).toBe('https://rust-lang.org/');
+    const ddg = await jinaDuckDuckGoSearch('rust language', 10, deps);
+    expect(ddg.length).toBe(1);
+    expect(ddg[0].url).toBe('https://ddg.example/1');
   });
 });

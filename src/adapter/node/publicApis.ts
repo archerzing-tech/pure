@@ -38,51 +38,9 @@ export interface PublicApiOutcome {
   source: string;
 }
 
-// ── Backend quota / cooldown (in-memory) ──
-// Free tiers die silently: a used-up Serper key or a rate-limited SearXNG
-// instance would otherwise be retried forever. This registry keeps per-key
-// cooldowns + sliding-window usage counts for the whole process; the search
-// backends in NodeToolAdapter use the same instance. In-memory only (a
-// process restart resets it) — deliberately simple, no persistence.
-
-export class BackendQuota {
-  private blockedUntil = new Map<string, number>();
-  private uses = new Map<string, number[]>();
-
-  isBlocked(key: string): boolean {
-    const until = this.blockedUntil.get(key);
-    return until !== undefined && until > Date.now();
-  }
-
-  /** Block a backend for `ms` (rate limit, quota exhausted, dead instance). */
-  markBlocked(key: string, ms: number): void {
-    this.blockedUntil.set(key, Date.now() + ms);
-  }
-
-  /** Record one successful use; returns true when the window is over budget. */
-  registerUse(key: string, windowMs: number, cap: number): boolean {
-    const now = Date.now();
-    const windowStart = now - windowMs;
-    const list = (this.uses.get(key) ?? []).filter((t) => t > windowStart);
-    list.push(now);
-    this.uses.set(key, list);
-    return list.length > cap;
-  }
-
-  /** Number of uses in the sliding window (for diagnostics). */
-  countInWindow(key: string, windowMs: number): number {
-    const now = Date.now();
-    return (this.uses.get(key) ?? []).filter((t) => t > now - windowMs).length;
-  }
-
-  /** Drop all cooldowns and usage history (diagnostics / tests). */
-  clear(): void {
-    this.blockedUntil.clear();
-    this.uses.clear();
-  }
-}
-
-export const quota = new BackendQuota();
+// BackendQuota / quota 的单源在 tools/impl/webSearch（P2-5 收敛：搜索编排
+// 与这层的冷却共用同一实例，Web 端 WebView 也跑同一份）。
+export { BackendQuota, quota } from '../../tools/impl/webSearch';
 
 // ── Result cache (per-intent TTLs) ──
 // Structured answers have very different freshness needs: weather/stock/news
@@ -514,31 +472,10 @@ async function resolveWorldbank(query: string): Promise<PublicApiOutcome | null>
   };
 }
 
-function cleanXmlText(s: string): string {
-  return s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').trim();
-}
-
-export interface RssItem { title: string; link: string; date: string; description: string; }
-
-/** Parse RSS/Atom <item>/<entry> blocks (no XML dependency, mirrors the
- * regex-based HTML parsers elsewhere in the codebase). */
-export function parseRssItems(xml: string, maxItems = 8): RssItem[] {
-  const items: RssItem[] = [];
-  const re = /<(item|entry)>([\s\S]*?)<\/\1>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null && items.length < maxItems) {
-    const block = m[2];
-    const pick = (tag: string): string => {
-      const mm = block.match(new RegExp(`<${tag}(?:[^>]*)>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-      return mm ? cleanXmlText(mm[1]) : '';
-    };
-    const title = pick('title');
-    const link = pick('link').trim();
-    if (!title) continue;
-    items.push({ title, link, date: pick('pubDate') || pick('published') || pick('updated'), description: pick('description') || pick('summary') });
-  }
-  return items;
-}
+// RssItem / parseRssItems 的单源在 tools/impl/webSearch（P2-5 收敛，
+// Google News RSS 搜索后端与本层 news intent 共用同一解析器）。
+import { parseRssItems, type RssItem } from '../../tools/impl/webSearch';
+export { parseRssItems, type RssItem };
 
 async function resolveNews(query: string): Promise<PublicApiOutcome | null> {
   const zh = containsCJK(query);

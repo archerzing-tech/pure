@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildWebSearchArgs, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk, resolveDownloadOutSpec, buildDownloadCommand, type SummarizeForExtract } from '../TauriToolAdapter';
+import { formatCommandOutput, buildCommandResult, formatWriteProgress, buildCodeSearchArgs, filterResearchSources, researchLimits, TauriToolAdapter, parseCommandStreamChunk, resolveDownloadOutSpec, buildDownloadCommand, type SummarizeForExtract } from '../TauriToolAdapter';
 import { resetExtractCache } from '../../shared/webExtract';
 import type { ToolCall } from '../../shared/types';
 import { formatCommandError, formatBytes } from '../../shared/format';
@@ -20,6 +20,7 @@ import { recordNetOutcome, resetLearnedRoutes } from '../../shared/netRoute';
 import { beforeEach } from 'bun:test';
 import { resetNetGuardForTests } from '../../shared/netGuard';
 import { resetMirrorHealth } from '../../shared/githubAccel';
+import { quota, resetSearchCookieJar } from '../../tools/impl/webSearch';
 
 describe('formatCommandOutput', () => {
   it('joins plain stdout lines', () => {
@@ -97,40 +98,6 @@ describe('formatBytes', () => {
   });
 });
 
-describe('buildWebSearchArgs (Rust web_search invoke arg lock)', () => {
-  it('passes the query, default maxResults, and both API keys', () => {
-    expect(buildWebSearchArgs('/ws', { query: '西安到重庆 机票' }, 'tvly-1', 'serper-2')).toEqual({
-      workspace: '/ws',
-      query: '西安到重庆 机票',
-      maxResults: 10,
-      apiKey: 'tvly-1',
-      serperApiKey: 'serper-2',
-    });
-  });
-
-  it('keeps a caller-supplied maxResults and defaults empty keys to empty strings', () => {
-    expect(buildWebSearchArgs('/ws', { query: 'rust', maxResults: 5 }, '', '')).toEqual({
-      workspace: '/ws',
-      query: 'rust',
-      maxResults: 5,
-      apiKey: '',
-      serperApiKey: '',
-    });
-  });
-
-  it('forwards a configured proxy only when one is enabled', () => {
-    expect(buildWebSearchArgs('/ws', { query: 'rust' }, '', '', 'socks5://127.0.0.1:1080').proxyUrl)
-      .toBe('socks5://127.0.0.1:1080');
-  });
-
-  it('forwards the configured location so the Tier-2 weather fallback works', () => {
-    expect(buildWebSearchArgs('/ws', { query: '明天天气' }, '', '', '', '上海').location)
-      .toBe('上海');
-    expect(buildWebSearchArgs('/ws', { query: '明天天气' }, '', '', '', '').location)
-      .toBeUndefined();
-  });
-});
-
 describe('research tool argument contracts', () => {
   it('forwards the full code search contract to Rust', () => {
     expect(buildCodeSearchArgs('/ws', {
@@ -165,6 +132,18 @@ describe('research tool argument contracts', () => {
 
 function toolCall(name: string, args: Record<string, unknown>): ToolCall {
   return { id: `test_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
+}
+
+/** fetch_page 原语的假应答（web_search 单源编排走 Rust fetch_page，不再有
+ * web_search command）：包装一段文本为 200 HTML 响应，供 mock invoke 返回。 */
+function fakePage(body: string): Record<string, unknown> {
+  return { status: 200, finalUrl: 'https://example.org/', contentType: 'text/html', setCookie: null, bodyBase64: btoa(body) };
+}
+
+/** 单源编排的 mock invoke 公共分流：Tier-2 fast path miss + 缓存 miss。
+ * 返回 null 让调用方落到各自的 fetch_page 应答逻辑。 */
+function searchMiss(command: string): boolean {
+  return command === 'direct_public_api' || command === 'web_cache_get';
 }
 
 describe('create_document save path', () => {
@@ -205,7 +184,10 @@ describe('dynamic capability tools', () => {
           }],
         });
       }
-      if (command === 'web_search') return '1. Community CRM MCP\n   hosted directory\n   https://mcp.so/crm';
+      if (searchMiss(command) || command === 'web_cache_set') return null;
+      if (command === 'fetch_page') {
+        return fakePage('<li class="b_algo"><h2><a href="https://mcp.so/crm">Community CRM MCP</a></h2><p>hosted directory</p></li>');
+      }
       throw new Error(`unexpected command: ${command}`);
     };
     const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
@@ -219,9 +201,12 @@ describe('dynamic capability tools', () => {
 
   it('connects only a searched MCP candidate and returns newly discovered tools', async () => {
     let connectedName = '';
-    const invoke = async (command: string) => command === 'web_fetch'
-      ? JSON.stringify({ servers: [{ server: { name: 'com.example/crm', version: '1.0.0', remotes: [{ type: 'streamable-http', url: 'https://example.com/mcp' }] } }] })
-      : 'No results found';
+    const invoke = async (command: string) => {
+      if (command === 'web_fetch') return JSON.stringify({ servers: [{ server: { name: 'com.example/crm', version: '1.0.0', remotes: [{ type: 'streamable-http', url: 'https://example.com/mcp' }] } }] });
+      if (command === 'fetch_page') return fakePage('<html></html>'); // 社区搜索全空 → 注册路径
+      if (searchMiss(command) || command === 'web_cache_set') return null;
+      return 'No results found';
+    };
     const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, 'session-1', '', undefined, '', {
       connectMcpServer: async (config) => {
         connectedName = config.name;
@@ -347,7 +332,11 @@ describe('Tauri Tier-2/3 web tool execution paths', () => {
 
 describe('Tauri researcher execution paths', () => {
   it('reports empty web research as a failed tool result', async () => {
-    const invoke = async (command: string) => command === 'web_search' ? 'No results found' : '';
+    const invoke = async (command: string) => {
+      if (searchMiss(command) || command === 'web_cache_set') return null;
+      if (command === 'fetch_page') return { status: 200, finalUrl: '', contentType: 'text/plain', setCookie: null, bodyBase64: '' };
+      return '';
+    };
     const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(toolCall('researcher_web', { prompt: 'missing' }));
     expect(result.success).toBe(false);
     expect(result.error).toContain('No usable research sources');
@@ -357,7 +346,10 @@ describe('Tauri researcher execution paths', () => {
     const calls: string[] = [];
     const invoke = async (command: string) => {
       calls.push(command);
-      if (command === 'web_search') return ['1. React docs', '   API reference', '   https://docs.example.com/react'].join('\n');
+      if (searchMiss(command) || command === 'web_cache_set') return null;
+      if (command === 'fetch_page') {
+        return fakePage('<li class="b_algo"><h2><a href="https://docs.example.com/react">React docs</a></h2><p>API reference</p></li>');
+      }
       if (command === 'web_fetch') return 'useActionState reference';
       throw new Error(`unexpected command: ${command}`);
     };
@@ -367,7 +359,9 @@ describe('Tauri researcher execution paths', () => {
       maxSources: 1,
     }));
     expect(result.success).toBe(true);
-    expect(calls).toEqual(['web_search', 'web_fetch']);
+    // 搜索走单源编排的 fetch_page 原语，取到来源后才逐源 web_fetch。
+    expect(calls).toContain('fetch_page');
+    expect(calls.indexOf('web_fetch')).toBeGreaterThan(calls.indexOf('fetch_page'));
     const payload = JSON.parse(String(result.result)) as { sources: Array<{ content?: string }>; officialVerified?: boolean };
     expect(payload.sources[0].content).toBe('useActionState reference');
     expect(payload.officialVerified).toBe(false);
@@ -616,30 +610,46 @@ describe('Tauri egress routing', () => {
   });
 
   it('web_search 直连优先：代理不再被无条件喂给所有搜索后端', async () => {
-    const seen: Array<string | undefined> = [];
-    const invoke = async (_command: string, args?: Record<string, unknown>) => {
-      seen.push(args?.proxyUrl as string | undefined);
-      return '1. Result\n   snippet\n   https://example.org/';
+    quota.clear();
+    resetSearchCookieJar();
+    // web_search 单源编排走 fetch_page 原语；应答一个非搜索页（各后端解析
+    // 为空 → 空结果），直连/代理路由才是本用例的观察对象。
+    const seen: Array<string | null> = [];
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'web_cache_set') return null;
+      if (searchMiss(command)) return null; // Tier-2 fast path miss + 缓存 miss
+      seen.push((args?.proxyUrl ?? null) as string | null);
+      return fakePage('1. Result\n   snippet\n   https://example.org/');
     };
     const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, '', PROXY);
     const result = await adapter.execute(toolCall('web_search', { query: 'rust' }));
     expect(result.success).toBe(true);
-    // 修复前这里恒为 [PROXY]：代理一挂，全部搜索后端一起死。直连时 Rust
-    // args 里干脆不带 proxyUrl（buildWebSearchArgs 的既有约定）。
-    expect(seen).toEqual([undefined]);
+    // 修复前这里恒为 [PROXY]：代理一挂，全部搜索后端一起死。编排首选仍是
+    // 直连（fetch_page 收到 proxyUrl=null），200 应答不算失败、不触发换路。
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((p) => p === null)).toBe(true);
   });
 
   it('web_search 直连全线失败时整轮改走代理', async () => {
-    const seen: Array<string | undefined> = [];
-    const invoke = async (_command: string, args?: Record<string, unknown>) => {
-      seen.push(args?.proxyUrl as string | undefined);
-      if (seen.length === 1) throw new Error('Web search failed on all backends (Tavily: request: error sending request)');
-      return '1. Result\n   snippet\n   https://example.org/';
+    quota.clear();
+    resetSearchCookieJar();
+    const seen: Array<string | null> = [];
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'web_cache_set') return null;
+      if (searchMiss(command)) return null;
+      const proxy = (args?.proxyUrl ?? null) as string | null;
+      seen.push(proxy);
+      if (proxy === null) throw new Error('request: error sending request');
+      return fakePage('1. Result\n   snippet\n   https://example.org/');
     };
     const adapter = new TauriToolAdapter('/ws', 'tvly-1', '', '', invoke, '', PROXY);
     const result = await adapter.execute(toolCall('web_search', { query: 'rust' }));
     expect(result.success).toBe(true);
-    expect(seen).toEqual([undefined, PROXY]);
+    // 首选直连全灭（网络层错误 → ok:false 上抛）→ runRoutedSurface 换代理
+    // 重试；重试轮带 ignoreCooldown 跳过第一轮刚进的后端冷却，否则冷却
+    // 单例会让第二轮空跑（全后端失败 ⟺ 全部进冷却，旧 Rust 同此缺陷）。
+    expect(seen[0]).toBeNull();
+    expect(seen).toContain(PROXY);
   });
 
   it('web_public_api 同样按出口面决策，而不是代理永远优先', async () => {
