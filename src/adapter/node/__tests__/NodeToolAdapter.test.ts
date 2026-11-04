@@ -99,7 +99,7 @@ describe('NodeToolAdapter execute_command', () => {
     const r = await adapter.execute(makeCall('Get-Content C:/definitely-missing-pure-test-file.txt'));
     expect(r.success).toBe(false);
     expect(resultOf(r).exitCode).not.toBe(0);
-  });
+  }, 30000); // PowerShell cold start on a loaded runner exceeds the 5s default (v4.1.3 Windows judge case); same budget as the not-found test below.
 
   it('reports failure when the command is not found', async () => {
     const r = await adapter.execute(makeCall('definitely-not-a-real-command-xyz'));
