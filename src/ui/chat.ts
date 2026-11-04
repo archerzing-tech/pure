@@ -1468,7 +1468,7 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
  * 见 isLightTurn 的实测注)。构造失败(无 key/无配置)返回 undefined,
  * adapter 侧抓取行为与旧版完全一致。
  */
-function extractSummarizerFor(config: PureConfig): SummarizeForExtract | undefined {
+export function extractSummarizerFor(config: PureConfig): SummarizeForExtract | undefined {
   let adapter: import('../shared/types').LLMAdapter;
   try {
     adapter = createLLMAdapter(config, { disableThinking: true });

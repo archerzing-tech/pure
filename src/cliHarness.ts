@@ -43,6 +43,7 @@ import { harvestUserPreferences } from './shared/memory';
 import { distillSkill, pickDistillSource } from './shared/skillDistill';
 import { writeAutoSkillDir } from './cliSkillStore';
 import { promptBudgetForProvider, promptBudgetLiveLine } from './shared/providers';
+import { buildExtractPrompt, type SummarizeForExtract } from './shared/webExtract';
 import { promptAssembler } from './shared/PromptAssembler';
 import { promptObservability } from './shared/promptObservability';
 import { FilePromptObservationStore } from './shared/FilePromptObservationStore';
@@ -328,6 +329,7 @@ async function createTools(
   permissionHandler?: PermissionRequestHandler,
   evolutionEnabled = true,
   llmBudgetLine?: string,
+  extractSummarizer?: SummarizeForExtract,
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
@@ -347,6 +349,9 @@ async function createTools(
     // promptAssembler 的预算同源——args 装配态），scope 必须说真话——CLI 的
     // 会话参数启动时装配一次，盘上改动新会话才生效。
     llmBudgetLine,
+    // 抓取后提炼层（shared/webExtract 编排）：CLI 侧此前未接，工具
+    // description 的 auto-condensed 承诺在 CLI 上不兑现（虚假承诺）。
+    summarizeForExtract: extractSummarizer,
   });
 
   // P1-8: wire PermissionManager + write confirmation into the CLI direct
@@ -625,6 +630,13 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 预算现状行与 631/747 的 promptAssembler 同源（args 装配态），scope=
     // next session 说真话：CLI 盘上改动新会话才生效。
     promptBudgetLiveLine(args.customProviders, args.provider, args.model, args.providerOverrides, 'next session'),
+    // 提炼回调复用主 adapter（GUI 版特意造 disableThinking 实例；CLI 的
+    // createAdapter 错误分支是 process.exit 不能在提炼工厂里复用——提炼是
+    // 增强，慢/失败都被编排兜住：45s 硬上限防拖死，空要点回退原文）。
+    // mock 会话不给回调：mock 回复包上「已提炼」头等于毒化上下文。
+    args.provider === 'mock'
+      ? undefined
+      : (url, text, signal) => adapter.complete([{ role: 'user', content: buildExtractPrompt(url, text) }], [], signal).then((res) => res.content),
   );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;

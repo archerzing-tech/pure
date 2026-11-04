@@ -20,6 +20,7 @@ import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
+import { condenseToolBody, type SummarizeForExtract } from '../../shared/webExtract';
 import { recordNetOutcome, unblockAttemptsBeforeMirror } from '../../shared/netRoute';
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
@@ -194,6 +195,11 @@ export interface NodeToolConfig {
   /** sys_info 追加的预算行（promptBudgetLiveLine 产物）。CLI 面的 adapter
    * 不持有 LLM config，由 cliHarness 装配会话时算好传入；缺省不拼。 */
   llmBudgetLine?: string;
+  /** web_fetch/web_scrape 超长正文的提炼回调（shared/webExtract 编排）。
+   * CLI 侧由 cliAdapter 按当前会话配置构造；缺席 = 原文直返（与未接线时
+   * 行为一致），工具 description 的 auto-condensed 承诺必须有这个回调才
+   * 兑现。 */
+  summarizeForExtract?: SummarizeForExtract;
 }
 
 // ── 代理 / 内网识别 ──
@@ -224,6 +230,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private maxSnapshotBytes: number;
   private location: string;
   private readonly llmBudgetLine: string | undefined;
+  private readonly summarizeForExtract: SummarizeForExtract | undefined;
   private sessionId: string;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
@@ -240,6 +247,7 @@ export class NodeToolAdapter implements ToolAdapter {
     this.maxSnapshotBytes = config.maxSnapshotBytes ?? 8 * 1024 * 1024;
     this.location = (config.location ?? '').trim();
     this.llmBudgetLine = config.llmBudgetLine;
+    this.summarizeForExtract = config.summarizeForExtract;
   }
 
   getTools(): ToolDefinition[] {
@@ -1862,7 +1870,7 @@ export class NodeToolAdapter implements ToolAdapter {
       return {
         id: `tool_${Date.now()}`,
         toolName: 'web_fetch',
-        result: cachedPage,
+        result: await condenseToolBody(url, args, cachedPage, this.summarizeForExtract),
         success: true,
         duration: Date.now() - start,
       };
@@ -1900,7 +1908,7 @@ export class NodeToolAdapter implements ToolAdapter {
       return {
         id: `tool_${Date.now()}`,
         toolName: 'web_fetch',
-        result: truncated || '(empty page)',
+        result: await condenseToolBody(url, args, truncated || '(empty page)', this.summarizeForExtract),
         success: true,
         duration: Date.now() - start,
       };
@@ -2667,7 +2675,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const pageKey = pageCacheKey(url, selector, maxChars);
     const cachedPage = webCache().get(pageKey);
     if (cachedPage !== undefined) {
-      return this.okResult('web_scrape', cachedPage, start);
+      return this.okResult('web_scrape', await condenseToolBody(url, args, cachedPage, this.summarizeForExtract), start);
     }
     // The full chain (direct + Jina + Wayback + Firecrawl) needs a wider budget
     // than a single direct fetch; the user-cancel signal still aborts it.
@@ -2684,7 +2692,7 @@ export class NodeToolAdapter implements ToolAdapter {
       }
       const page = truncateText(outcome.text, maxChars);
       webCache().set(pageKey, page, PAGE_TTL_MS);
-      return this.okResult('web_scrape', page, start);
+      return this.okResult('web_scrape', await condenseToolBody(url, args, page, this.summarizeForExtract), start);
     } finally {
       abort.cleanup();
     }
@@ -3761,7 +3769,9 @@ export async function tavilySearch(query: string, maxResults: number): Promise<S
   const data: { results?: Array<{ title?: string; url?: string; content?: string }> } = await resp.json();
   return (data.results ?? [])
     .filter((r) => r.title && r.url)
-    .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
+    // snippet 帽 600 字符（对齐 Exa 后端 maxCharacters）：content 字段是
+    // 页面级正文，不裁的话 20 条结果能把单次搜索塞进数万字符。
+    .map((r) => ({ title: r.title!, snippet: (r.content ?? '').slice(0, 600), url: r.url! }));
 }
 
 /**
@@ -3818,7 +3828,9 @@ export async function searxngSearch(query: string, maxResults: number): Promise<
   const data: { results?: Array<{ title?: string; url?: string; content?: string }> } = await resp.json();
   return (data.results ?? [])
     .filter((r) => r.title && r.url)
-    .map((r) => ({ title: r.title!, snippet: r.content ?? '', url: r.url! }));
+    // snippet 帽 600 字符（对齐 Exa 后端 maxCharacters）：content 字段是
+    // 页面级正文，不裁的话 20 条结果能把单次搜索塞进数万字符。
+    .map((r) => ({ title: r.title!, snippet: (r.content ?? '').slice(0, 600), url: r.url! }));
 }
 
 /** Google News RSS backend (free, no key): recent news matching the query in

@@ -9,7 +9,8 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   MAX_ENTRIES,
-  MAX_VALUE_BYTES,
+  MAX_VALUE_CHARS,
+  TRUNCATION_MARKER,
   WebCache,
   hashKey,
   pageCacheKey,
@@ -89,9 +90,12 @@ describe('WebCache TTL behavior', () => {
 
   it('caps oversized values so the file stays bounded', () => {
     const c = new WebCache();
-    c.set('big', 'x'.repeat(MAX_VALUE_BYTES + 10_000), 60_000);
+    c.set('big', 'x'.repeat(MAX_VALUE_CHARS + 10_000), 60_000);
     const stored = c.get('big') ?? '';
-    expect(stored.length).toBeLessThanOrEqual(MAX_VALUE_BYTES);
+    // 截断点在帽内（标记字节留在帽里），且缩短的副本必须诚实声明——
+    // 静默变短的缓存值会冒充全文（2026-11-04 判例）。
+    expect(stored.length).toBeLessThanOrEqual(MAX_VALUE_CHARS);
+    expect(stored).toContain(TRUNCATION_MARKER);
   });
 
   it('clear() drops everything including the file', () => {

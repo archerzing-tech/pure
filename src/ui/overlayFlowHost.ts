@@ -7,7 +7,7 @@
 
 import { loadTauriCore, getApplicationTmpWorkspace } from '../shared/tauri';
 import { join, homeDir } from '@tauri-apps/api/path';
-import { createLLMAdapter } from './chat';
+import { createLLMAdapter, extractSummarizerFor } from './chat';
 import { TauriToolAdapter } from './TauriToolAdapter';
 import { draftPersonaOverlay } from '../harness/personaOverlayReflector';
 import { SubagentOrchestrator } from '../coding-agent/SubagentOrchestrator';
@@ -129,7 +129,9 @@ export async function buildOverlayFlowDeps(opts: OverlayHostOptions): Promise<Ov
     },
     confirm: opts.confirm,
     runCase: async (fixture, ov) => {
-      const tools = new TauriToolAdapter(workspace, opts.cfg.tavilyApiKey, opts.cfg.serperApiKey, opts.cfg.city, undefined, `role-overlay-${opts.role}`);
+      // 第 13 参提炼回调：缺席时 overlay 流的 web_fetch/web_scrape 恒走原文
+      // 分支，description 的 auto-condensed 承诺对 overlay 角色流不兑现。
+      const tools = new TauriToolAdapter(workspace, opts.cfg.tavilyApiKey, opts.cfg.serperApiKey, opts.cfg.city, undefined, `role-overlay-${opts.role}`, '', undefined, '', undefined, false, '', '', extractSummarizerFor(opts.cfg));
       const orch = new SubagentOrchestrator({
         llm: adapter,
         parentTools: tools,

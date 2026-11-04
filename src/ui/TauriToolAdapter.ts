@@ -383,19 +383,12 @@ const GUI_BENCH_TIMEOUT_MS = 8_000;
 
 /** 测速路径与拼接规则在 shared/mirrorSources（纯函数，CLI 同一份）。 */
 import { benchmarkUrlFor } from '../shared/mirrorSources';
-import {
-  buildExtractPrompt,
-  cacheExtract,
-  EXTRACT_TIMEOUT_MS,
-  extractCacheKey,
-  getCachedExtract,
-  shouldExtractText,
-  wrapSummary,
-} from '../shared/webExtract';
+import { condenseToolBody, type SummarizeForExtract } from '../shared/webExtract';
 
-/** 提炼回调:宿主用当前配置的模型把超长网页正文压成要点。抛错=提炼失败
- *  (调用方回退原文截断,提炼是增强,不允许它把抓取结果弄丢)。 */
-export type SummarizeForExtract = (url: string, text: string, signal?: AbortSignal) => Promise<string>;
+/** 提炼回调:宿主用当前配置的模型把超长网页正文压成要点。类型单源已挪
+ *  shared/webExtract(2026-11-04,CLI 侧也要接线),这里 re-export 兜住既有
+ *  import 方。 */
+export type { SummarizeForExtract } from '../shared/webExtract';
 export { benchmarkUrlFor };
 
 /** DoH 端点：WebView 里少了裸 IP 那家（1.12.12.12 的证书在浏览器侧校验不
@@ -922,36 +915,9 @@ export class TauriToolAdapter implements ToolAdapter {
    *  失败/回调缺席回退原文——提炼是增强,不允许它把抓取结果弄丢。要点
    *  按 URL+入参形态缓存 30min,同页二次调用零成本命中。 */
   private async maybeExtract(url: string, args: Record<string, unknown>, text: string): Promise<string> {
-    if (args.raw === true || !shouldExtractText(text) || !this.summarizeForExtract) return text;
-    const key = extractCacheKey(
-      url,
-      typeof args.selector === 'string' ? args.selector : undefined,
-      typeof args.maxChars === 'number' ? args.maxChars : undefined,
-    );
-    const cached = getCachedExtract(key);
-    if (cached) return wrapSummary(cached, url, text.length);
-    try {
-      // 双保险:signal 交给守约的 LLM 通道,Promise.race 兜底硬上限——
-      // 通道若无视 signal 也不许提炼把工具调用拖死。
-      const ac = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { ac.abort(); reject(new Error(`提炼超时(${Math.round(EXTRACT_TIMEOUT_MS / 1000)}s)`)); }, EXTRACT_TIMEOUT_MS);
-      });
-      let summary: string;
-      try {
-        summary = await Promise.race([this.summarizeForExtract(url, text, ac.signal), timeout]);
-      } finally {
-        clearTimeout(timer);
-      }
-      const trimmed = summary.trim();
-      // 空要点或越提越长=没提炼出东西,回退原文,不拿空壳冒充。
-      if (!trimmed || trimmed.length >= text.length) return text;
-      cacheExtract(key, trimmed);
-      return wrapSummary(trimmed, url, text.length);
-    } catch {
-      return text;
-    }
+    // 编排单源在 shared/webExtract(2026-11-04 抽出):CLI 侧 NodeToolAdapter
+    // 接同一份,description 的 auto-condensed 承诺不再只对 GUI 兑现。
+    return condenseToolBody(url, args, text, this.summarizeForExtract);
   }
 
   getTools(): ToolDefinition[] {

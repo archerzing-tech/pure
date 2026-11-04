@@ -1,12 +1,13 @@
 // src/shared/__tests__/webExtract.test.ts
 // 期4 抓取后提炼层的纯逻辑:阈值、prompt、包裹形态、缓存(键桶化/FIFO
-// 淘汰/LRU 触碰/TTL 过期)。提炼调用与工具接线在 TauriToolAdapter(源码锚
-// 钉在 ui/__tests__/tauriToolAdapter.test.ts)。
+// 淘汰/LRU 触碰/TTL 过期)、编排(condenseToolBody——2026-11-04 起为
+// TauriToolAdapter 与 NodeToolAdapter 两端共用的单源)。
 
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from 'bun:test';
 import {
   buildExtractPrompt,
   cacheExtract,
+  condenseToolBody,
   EXTRACT_CACHE_CAP,
   EXTRACT_TARGET_CHARS,
   EXTRACT_THRESHOLD_CHARS,
@@ -15,6 +16,7 @@ import {
   resetExtractCache,
   shouldExtractText,
   wrapSummary,
+  type SummarizeForExtract,
 } from '../webExtract';
 
 describe('shouldExtractText', () => {
@@ -109,5 +111,41 @@ describe('extract cache', () => {
     cacheExtract(extractCacheKey('https://a'), '要点');
     setSystemTime(now + 31 * 60_000);
     expect(getCachedExtract(extractCacheKey('https://a'))).toBeUndefined();
+  });
+});
+
+describe('condenseToolBody · 两端共用的提炼编排', () => {
+  const big = 'x'.repeat(EXTRACT_THRESHOLD_CHARS + 100);
+
+  it('passes raw:true, short pages and missing callbacks through untouched', async () => {
+    const never: SummarizeForExtract = async () => { throw new Error('must not be called'); };
+    await expect(condenseToolBody('https://r', { raw: true }, big, never)).resolves.toBe(big);
+    await expect(condenseToolBody('https://s', {}, 'short', never)).resolves.toBe('short');
+    await expect(condenseToolBody('https://n', {}, big, undefined)).resolves.toBe(big);
+  });
+
+  it('condenses via the callback and wraps with the raw escape hatch', async () => {
+    resetExtractCache();
+    const served = await condenseToolBody('https://x', {}, big, async () => '  要点  ');
+    expect(served).toContain('要点');
+    expect(served).toContain('raw: true');
+  });
+
+  it('falls back to the original when the callback fails, empties or lengthens', async () => {
+    resetExtractCache();
+    await expect(condenseToolBody('https://f', {}, big, async () => { throw new Error('llm down'); })).resolves.toBe(big);
+    // 空要点不冒充提炼。
+    await expect(condenseToolBody('https://e', {}, big, async () => '   ')).resolves.toBe(big);
+    // 越提越长=没提炼出东西。
+    await expect(condenseToolBody('https://l', {}, big, async () => `${big}更长`)).resolves.toBe(big);
+  });
+
+  it('serves the cached summary for the same key without recalling the LLM', async () => {
+    resetExtractCache();
+    let calls = 0;
+    const cb: SummarizeForExtract = async () => { calls += 1; return '要点'; };
+    await condenseToolBody('https://c', {}, big, cb);
+    await condenseToolBody('https://c', {}, big, cb);
+    expect(calls).toBe(1);
   });
 });

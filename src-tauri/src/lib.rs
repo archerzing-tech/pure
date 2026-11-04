@@ -5297,6 +5297,7 @@ fn parse_searxng_results(body: &serde_json::Value, max: usize) -> Vec<SearchResu
             let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let snippet = item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let snippet = snippet.chars().take(SEARCH_SNIPPET_MAX_CHARS).collect::<String>();
             if !title.is_empty() && !url.is_empty() {
                 out.push(SearchResult {
                     title,
@@ -5483,8 +5484,11 @@ fn parse_tavily_results(body: &serde_json::Value, max: usize) -> Vec<SearchResul
             let snippet = item
                 .get("content")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                // snippet cap at 600 chars (mirrors the Node tavilySearch
+                // slice): Tavily's `content` is page-level text — 20
+                // unclipped results can flood a single search into context.
+                .map(|s| s.chars().take(SEARCH_SNIPPET_MAX_CHARS).collect::<String>())
+                .unwrap_or_default();
             if !title.is_empty() && !url.is_empty() {
                 out.push(SearchResult {
                     title,
@@ -6773,6 +6777,14 @@ mod web_search_tests {
         assert!(results[0].snippet.contains("航班时刻表"));
         assert_eq!(results[1].url, "https://b.example");
         assert_eq!(results[1].snippet, "");
+        // snippet 帽与 Node slice(0, 600) 同源：page-level content 不裁会把
+        // 单次搜索灌成数万字符。
+        let flood = "y".repeat(SEARCH_SNIPPET_MAX_CHARS + 500);
+        let flooded = serde_json::json!({
+            "results": [{ "title": "T", "url": "https://f.example", "content": flood }]
+        });
+        let clipped = parse_tavily_results(&flooded, 10);
+        assert_eq!(clipped[0].snippet.chars().count(), SEARCH_SNIPPET_MAX_CHARS);
     }
 
     #[test]
@@ -7670,7 +7682,18 @@ mod command_cancel_tests {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const WEB_CACHE_MAX_ENTRIES: usize = 200;
-const WEB_CACHE_MAX_VALUE_BYTES: usize = 30_000;
+/// Search snippet cap in chars — mirrors the Node slice(0, 600) on Tavily /
+/// SearXNG backends (Exa already caps at 600 server-side). Tavily's
+/// `content` field is page-level text; 20 unclipped results can flood a
+/// single web_search into tens of thousands of chars.
+const SEARCH_SNIPPET_MAX_CHARS: usize = 600;
+/// 180_000 bytes = the largest UTF-8 shape 60k all-CJK chars can produce —
+/// the TS mirror caps at MAX_VALUE_CHARS = 60_000 (UTF-16 units), so both
+/// sides of the shared cache file accept the same page without re-truncating
+/// each other. A shortened value carries TRUNCATION_MARKER (kept inside the
+/// cap) instead of passing silently as the full page.
+const WEB_CACHE_MAX_VALUE_BYTES: usize = 180_000;
+const WEB_CACHE_TRUNCATION_MARKER: &str = "\n\n[cache copy truncated - re-run the tool for the full text]";
 const SEARCH_TTL_MS: u64 = 15 * 60 * 1000;
 const PAGE_TTL_MS: u64 = 60 * 60 * 1000;
 
@@ -9410,15 +9433,16 @@ impl WebCache {
             .unwrap_or(0);
         let mut value = value.to_string();
         if value.len() > WEB_CACHE_MAX_VALUE_BYTES {
-            // String::truncate 只能落在字符边界。30_000 恰被 3 字节 CJK 整除，
-            // 纯中文/纯 ASCII 永远撞不上；中英混排（真实网页的常态）才会切进
-            // 多字节字符中间 panic——且发生在全局锁内，mutex 中毒后所有
-            // web_cache().lock().unwrap() 永久 panic，web 工具瘫痪到重启。
-            let mut end = WEB_CACHE_MAX_VALUE_BYTES;
+            // String::truncate 只能落在字符边界。中英混排（真实网页的常态）
+            // 会切进多字节字符中间 panic——且发生在全局锁内，mutex 中毒后
+            // 所有 web_cache().lock().unwrap() 永久 panic，web 工具瘫痪到
+            // 重启。标记字节量留在帽内，缩短的缓存副本不再冒充全文。
+            let mut end = WEB_CACHE_MAX_VALUE_BYTES - WEB_CACHE_TRUNCATION_MARKER.len();
             while !value.is_char_boundary(end) {
                 end -= 1;
             }
             value.truncate(end);
+            value.push_str(WEB_CACHE_TRUNCATION_MARKER);
         }
         self.records.insert(
             key.to_string(),

@@ -20,8 +20,18 @@ import { dirname, join } from 'node:path';
 
 /** Maximum number of entries before oldest-first eviction. */
 export const MAX_ENTRIES = 200;
-/** Per-value size cap (bytes) — a single scraped page must not blow up the file. */
-export const MAX_VALUE_BYTES = 30_000;
+/**
+ * Per-value cap in UTF-16 chars. 60k covers the largest shape the tools
+ * promise (web_scrape maxChars caps at 50k) — a smaller cap made a cached
+ * big page come back SHORTER on the second read, silently. Truncation now
+ * also says so (marker below), so a shortened cache copy can never pass as
+ * the full page. (The old name MAX_VALUE_BYTES lied: value.length counts
+ * UTF-16 units, not bytes. The Rust mirror caps by UTF-8 bytes at 180_000 —
+ * the largest byte shape 60k all-CJK chars can produce.)
+ */
+export const MAX_VALUE_CHARS = 60_000;
+/** Truncation marker stored INSIDE the cap, appended to shortened values. */
+export const TRUNCATION_MARKER = '\n\n[cache copy truncated - re-run the tool for the full text]';
 
 export interface CacheRecord {
   /** Serialized value (string or JSON string). */
@@ -130,7 +140,7 @@ export class WebCache {
   set(key: string, value: string, ttlMs: number): void {
     if (!webCacheEnabled()) return;
     this.load();
-    if (value.length > MAX_VALUE_BYTES) value = value.slice(0, MAX_VALUE_BYTES);
+    if (value.length > MAX_VALUE_CHARS) value = value.slice(0, MAX_VALUE_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
     this.records.set(key, { v: value, t: Date.now(), ttl: ttlMs });
     while (this.records.size > MAX_ENTRIES) {
       // Evict the entry with the oldest storedAt (approximate LRU).

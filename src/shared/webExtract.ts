@@ -4,8 +4,12 @@
 // 之后每一轮 THINK 都要重复 prefill——「处理大数据耗时」的真身是上下文
 // 膨胀,不是抓取本身。超阈值全文先经一次 flash 档提炼压成要点,主上下文
 // 只进要点;模型需要精确原文时传 raw: true 旁路(诚实注明,不给死胡同)。
-// 本模块只放纯逻辑(prompt/阈值/包裹/缓存);提炼调用与工具接线在宿主侧
-// (TauriToolAdapter 注入 summarizeForExtract 回调),CLI 侧暂未接。
+// 本模块只放纯逻辑(prompt/阈值/包裹/缓存/编排);提炼调用是宿主注入的
+// summarizeForExtract 回调——GUI(chat.ts)与 CLI(cliAdapter)各自构造,
+// 工具端(TauriToolAdapter / NodeToolAdapter)调同一份 condenseToolBody。
+
+/** 宿主提炼回调的形状:发一次非流式 complete,返回要点文本。 */
+export type SummarizeForExtract = (url: string, text: string, signal?: AbortSignal) => Promise<string>;
 
 /** 全文超过该字符数才提炼:短页面提炼反而丢信息+白付一次调用。 */
 export const EXTRACT_THRESHOLD_CHARS = 8000;
@@ -82,4 +86,49 @@ export function getCachedExtract(key: string): string | undefined {
 /** 测试隔离:清空提炼缓存。 */
 export function resetExtractCache(): void {
   extractCache.clear();
+}
+
+// ── 提炼编排(2026-11-04 从 TauriToolAdapter.maybeExtract 抽出,单源) ──
+// 之前只 GUI 主聊天接了提炼,CLI 与 overlay 流拿不到(description 却对所有
+// 端承诺 auto-condensed = 虚假承诺);两端工具适配器现在都走这份编排。
+
+/** 抓取返回体的统一入口:raw:true / 短页 / 回调缺席 → 原文;超时双保险
+ * (signal 交守约通道 + Promise.race 硬上限);空要点或越提越长回退原文,
+ * 不拿空壳冒充提炼。 */
+export async function condenseToolBody(
+  url: string,
+  args: Record<string, unknown>,
+  text: string,
+  summarize: SummarizeForExtract | undefined,
+): Promise<string> {
+  if (args.raw === true || !shouldExtractText(text) || !summarize) return text;
+  const key = extractCacheKey(
+    url,
+    typeof args.selector === 'string' ? args.selector : undefined,
+    typeof args.maxChars === 'number' ? args.maxChars : undefined,
+  );
+  const cached = getCachedExtract(key);
+  if (cached) return wrapSummary(cached, url, text.length);
+  try {
+    // 双保险:signal 交给守约的 LLM 通道,Promise.race 兜底硬上限——
+    // 通道若无视 signal 也不许提炼把工具调用拖死。
+    const ac = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { ac.abort(); reject(new Error(`提炼超时(${Math.round(EXTRACT_TIMEOUT_MS / 1000)}s)`)); }, EXTRACT_TIMEOUT_MS);
+    });
+    let summary: string;
+    try {
+      summary = await Promise.race([summarize(url, text, ac.signal), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+    const trimmed = summary.trim();
+    // 空要点或越提越长=没提炼出东西,回退原文。
+    if (!trimmed || trimmed.length >= text.length) return text;
+    cacheExtract(key, trimmed);
+    return wrapSummary(trimmed, url, text.length);
+  } catch {
+    return text;
+  }
 }
