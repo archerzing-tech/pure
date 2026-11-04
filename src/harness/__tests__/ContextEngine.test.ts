@@ -1,7 +1,7 @@
 // src/harness/__tests__/ContextEngine.test.ts
 
 import { describe, it, expect } from 'bun:test';
-import { ContextEngine, collectModifiedFilePaths } from '../ContextEngine';
+import { ContextEngine, collectModifiedFilePaths, buildRehydrationMessage } from '../ContextEngine';
 import type { Message } from '../../shared/types';
 
 function makeMsgs(count: number, prefix = 'msg'): Message[] {
@@ -651,5 +651,45 @@ describe('ContextEngine', () => {
     // Newest window untouched, placeholders in place of the old results.
     expect(result.messages).toHaveLength(msgs.length);
     expect(result.messages.some(m => m.content?.includes('old read_file result cleared'))).toBe(true);
+  });
+});
+
+describe('注入面围栏卫生（fenceHygiene，渲染侧同族判例 0b5679f 的另一半）', () => {
+  const fenceCount = (text: string): number => (text.match(/^[ \t]{0,3}```/gm) ?? []).length;
+
+  it('rehydrate 的 cap 截断停在 ``` 中途：补收栏，truncated 标记不被吞进围栏', async () => {
+    // 前 36 字符处是闭合的 ```ts 围栏；cap 截点落在后面那个未闭合的 ```map
+    // 围栏内容里——不卫生的话，[...truncated] 和文件头都会被读进代码块。
+    const content = '普通正文。\n```ts\nconst a = 1;\n```\n后续正文。\n```map\n半截流程';
+    const writeCall = {
+      role: 'assistant' as const,
+      content: '',
+      toolCalls: [{ id: 't1', index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'a.md' }) } }],
+    };
+    const built = await buildRehydrationMessage(
+      [writeCall, { role: 'tool', content: 'ok', toolCallId: 't1', toolName: 'write_file' }],
+      { readFile: async () => content, maxCharsPerFile: 45 },
+    );
+    expect(built).toBeDefined();
+    const text = built!.message.content;
+    expect(text).toContain('[...truncated]');
+    expect(text).toContain('半截');
+    expect(fenceCount(text) % 2).toBe(0);
+    // 标记行必须出现在收栏之后（不被围栏吞掉）：最后一个围栏行在标记行之前。
+    expect(text.lastIndexOf('```')).toBeLessThan(text.indexOf('[...truncated]'));
+  });
+
+  it('rehydrate 的未截断文件不受影响（偶数围栏原样通过）', async () => {
+    const content = '```ts\nconst a = 1;\n```\n尾注';
+    const writeCall = {
+      role: 'assistant' as const,
+      content: '',
+      toolCalls: [{ id: 't2', index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'b.md' }) } }],
+    };
+    const built = await buildRehydrationMessage(
+      [writeCall, { role: 'tool', content: 'ok', toolCallId: 't2', toolName: 'write_file' }],
+      { readFile: async () => content },
+    );
+    expect(built!.message.content).toContain(content);
   });
 });

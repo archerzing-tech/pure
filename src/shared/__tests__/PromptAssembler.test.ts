@@ -875,3 +875,44 @@ describe('activePermissionLine · 当前权限模式注入', () => {
     expect(built).toContain('<permission_modes>');
   });
 });
+
+describe('assembleMemory · 注入面围栏卫生（fenceHygiene，渲染侧同族判例 0b5679f 的另一半）', () => {
+  const fenceCount = (text: string): number => (text.match(/^[ \t]{0,3}```/gm) ?? []).length;
+  const template = '<session_memory></session_memory>';
+
+  it('记忆条目停在 ``` 中途：逐条补收栏，条目内容无损', () => {
+    const prompt = assembler.assembleMemory({
+      template,
+      memory: {
+        preferences: [],
+        errorPatterns: ['踩坑：备份命令别用管道\n```bash\ncd "$d" && tar -czf out.tgz .'],
+      },
+    });
+    expect(prompt).toContain('tar -czf out.tgz');
+    expect(fenceCount(prompt) % 2).toBe(0);
+  });
+
+  it('A 条半截开栏不被 B 条半截开栏「假配对」——逐条判定，不是整段判定', () => {
+    // 两条各含一个未闭合围栏：整段计数=2（偶）会漏补；逐条卫生后每条都被收栏。
+    const prompt = assembler.assembleMemory({
+      template,
+      memory: {
+        preferences: [],
+        errorPatterns: ['甲条\n```bash\nrm -rf "$X"', '乙条\n```ts\nlet a ='],
+      },
+    });
+    expect(fenceCount(prompt) % 2).toBe(0);
+    // 每条内容后面都紧跟自己的收栏（截到两条之间不应有裸内容）。
+    expect(prompt).toContain('rm -rf "$X"\n```');
+    expect(prompt).toContain('let a =\n```');
+  });
+
+  it('已闭合围栏的原样通过，字面不动', () => {
+    const entry = '正常教训\n```ts\ncode()\n```';
+    const prompt = assembler.assembleMemory({
+      template,
+      memory: { preferences: [], errorPatterns: [entry] },
+    });
+    expect(prompt).toContain(entry);
+  });
+});

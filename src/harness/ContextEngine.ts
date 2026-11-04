@@ -24,6 +24,7 @@
 import { estimateToolDefinitionTokens } from '../shared/providers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { stripUserTurnContext } from '../shared/promptLayers';
+import { closeDanglingFence } from '../shared/fenceHygiene';
 import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextMicrocompactionConfig {
@@ -160,7 +161,12 @@ function summarizeExcerpt(message: Message): string {
   if (text.length <= cap) return text;
   const headLen = Math.max(1, Math.ceil(cap * 0.7));
   const tailLen = Math.max(1, cap - headLen);
-  return `${text.slice(0, headLen)}\n[...excerpt...]\n${text.slice(text.length - tailLen)}`;
+  // head/tail 各自做围栏卫生再拼 excerpt 标记：head 停在 ``` 中途时不补收
+  // 栏，标记行和它后面的一切都会被模型吞进围栏里读（注入面截断卫生，
+  // fenceHygiene.ts——渲染侧同族判例 0b5679f）。
+  const head = closeDanglingFence(text.slice(0, headLen));
+  const tail = closeDanglingFence(text.slice(text.length - tailLen));
+  return `${head}\n[...excerpt...]\n${tail}`;
 }
 
 /** Single source for compaction sizing: content + tool-call arguments, shared
@@ -287,7 +293,9 @@ export async function buildRehydrationMessage(
       }
       if (typeof text !== 'string' || text.length === 0) continue;
       const cap = Math.min(maxCharsPerFile, remaining);
-      const body = text.length > cap ? `${text.slice(0, cap)}\n[...truncated]` : text;
+      // 先闭合围栏再拼 truncated 标记：cap 停在 ``` 中途时，标记行不能跟着
+      // 被吞进未闭合围栏（同 summarizeExcerpt 的注入面卫生）。
+      const body = text.length > cap ? `${closeDanglingFence(text.slice(0, cap))}\n[...truncated]` : text;
       remaining -= body.length;
       files++;
       parts.push(`--- ${path} ---\n${body}`);

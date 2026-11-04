@@ -6,6 +6,7 @@ import {
   type ResolvedPromptBudget,
 } from './providers';
 import type { ToolDefinition } from './types';
+import { closeDanglingFence } from './fenceHygiene';
 import { activeCharacterCore, activeCharacterExpression } from '../character';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
@@ -437,6 +438,30 @@ function fragment(id: string, content: string, priority: number, required = fals
   return content.trim() ? { id, content, priority, required } : null;
 }
 
+/**
+ * session_memory 的逐条围栏卫生：记忆条目写入时有长度截断（slice(0,300) 族），
+ * 可能停在 ``` 中途——未闭合围栏注入提示词会把后面的内容吞进代码块读
+ * （注入面截断卫生，fenceHygiene.ts；渲染侧同族判例 0b5679f）。必须在每个
+ * 条目上判定奇偶：拖到整段拼完再补，A 条的半截开栏会被 B 条的半截开栏
+ * 「假配对」成偶数而漏补。
+ */
+function hygieneMemoryEntries(memory?: PromptMemoryContext): PromptMemoryContext | undefined {
+  if (!memory) return memory;
+  const each = (values?: string[]) => values?.map(closeDanglingFence);
+  return {
+    ...memory,
+    preferences: each(memory.preferences) ?? memory.preferences,
+    errorPatterns: each(memory.errorPatterns) ?? memory.errorPatterns,
+    successes: each(memory.successes),
+    projectSuccesses: each(memory.projectSuccesses),
+    procedures: each(memory.procedures),
+    projectConventions: each(memory.projectConventions),
+    toolPreferences: each(memory.toolPreferences),
+    machineLessons: each(memory.machineLessons),
+    ...(memory.adaptiveStrategy ? { adaptiveStrategy: closeDanglingFence(memory.adaptiveStrategy) } : {}),
+  };
+}
+
 function selectFragments(fragments: (PromptFragment | null)[], maxTokens: number): { fragments: PromptFragment[]; omitted: string[] } {
   // fragment() 对空 content 返回 null；构造点漏过滤时在这里收口，而不是让
   // .required 摸到 null 崩掉整个回合装配（空白用户输入曾炸过这里）。
@@ -677,7 +702,8 @@ export class PromptAssembler {
   }
 
   composeMemoryPrompt(input: { template: string; memory?: PromptMemoryContext; budget?: PromptBudgetConfig; toolDefinitions?: ToolDefinition[] }): string {
-    const memory = input.memory;
+    // 逐条围栏卫生在 hygieneMemoryEntries（注入面截断，见其注释）。
+    const memory = hygieneMemoryEntries(input.memory);
     const hasMemory = !!memory && (
       memory.preferences.length > 0
       || memory.errorPatterns.length > 0
