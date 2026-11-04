@@ -180,6 +180,10 @@ export interface CodingTaskEvaluationOptions {
   keepWorkspace?: boolean;
   metadata?: Partial<Omit<CodingTaskEvaluationMetadata, 'runtime' | 'platform'>>;
   agent?: (input: { task: CodingTaskFixture; workspace: string }) => Promise<CodingTaskAgentResult | void>;
+  /** W2b-1 frontier 套件（2026-11-04）：套件版本跟随被跑的题集，默认仍是
+   *  主套件。compare-evals 与快照按 suiteVersion 隔离两套件——v5 基线表不因
+   *  frontier 档扩容而作废。 */
+  suiteVersion?: string;
 }
 
 /** 套件版本的单一来源在 shared/baseline.ts：进化仪表盘也要用它判断快照是否
@@ -1538,7 +1542,7 @@ export async function evaluateCodingTaskSuite(
   const passAt1 = results.filter((result) => result.passAt1).length;
   const fixtureHash = codingTaskFixtureHash(tasks);
   return {
-    suiteVersion: CODING_TASK_SUITE_VERSION,
+    suiteVersion: options.suiteVersion ?? CODING_TASK_SUITE_VERSION,
     generatedAt: new Date().toISOString(),
     fixtureHash,
     metadata: {

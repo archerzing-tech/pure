@@ -1,6 +1,6 @@
 # 双腿路线图：能力供给 × 模型代际（2026-11）
 
-> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 进行中——W1b-2 / W1b-1 / W1b-4 / W2b-3 / web 信噪比刀已落，见「四之二」，余 W1b-3 / W2b-1 / W2b-2。基线与源码行号取证于 `e3a72e2`。
+> 状态：活蓝图。P0（W1a + W2a）已于 2026-11-03 落地，2026-11-04 复审通过（迁移等价性缺口已收窄修正，见第四节末行）；P1 进行中——W1b-2 / W1b-1 / W1b-4 / W2b-3 / W2b-1（首两 fixture）/ web 信噪比刀已落，见「四之二」，余 W1b-3 / W2b-2 / W2b-1 尾巴（长时程 fixture）。基线与源码行号取证于 `e3a72e2`。
 >
 > 定调（用户，2026-11-03）：「pure 是一堆杂乱的工具和插件的集合，没有章法、没有规矩、只保留基本的输入、输出和做事底线和原则。至于事情怎么做、如何做、用什么做、用哪些工具做、怎么用、怎么呈现，都是大模型的事情。pure 今后两条腿走路：1）不断增强应用本身的基础能力（手脚），尽可能不要影响束缚大模型的表现；2）结合业界最新的 SOTA 模型。」
 
@@ -68,7 +68,7 @@
 
 **P1 剩余（W2b）**：
 
-1. **难度分层**：15 fixture 之外补「长时程 + 多文件 + 需自我验证」的硬 fixture，把 frontier 之间的差距重新拉开。
+1. **难度分层**：15 fixture 之外补「长时程 + 多文件 + 需自我验证」的硬 fixture，把 frontier 之间的差距重新拉开。**首两件已落（2026-11-04，见「四之二」：自我验证约束网 + 跨模块契约传播，独立 frontier 套件）**；**长时程（staged migration）留作下一个内容增量**——等 W2b-2 的真实区分度读数决定它要不要按现在的形状写。
 2. **矩阵扩列**：Claude 与 GPT-5 官方各一列（依赖 W1b 的内置 provider）。
 3. ~~**发布门**~~：**已落（W2b-3，2026-11-04，见「四之二」）**。
 
@@ -135,6 +135,7 @@
 | 本次 | **W1b-1 自探测** | 新模块 `src/shared/capabilityProbe.ts` + 全链消费接线，见下 |
 | 本次 | **W1b-4 能力事实送达** | 蓝图两难（首回合注入动缓存前缀 vs 事件推送）裁定走事件驱动：新模块 `src/shared/capabilityFacts.ts`，注入走 envFacts 区（formValidationFeedback 同款「事件→装配时读走」通道，user-turn 动态层不碰 system 前缀），无常驻行。事件源 v1 两个：①带图回合 × 视觉非确认支持（known&&supported 零注入；其余 unknown 式措辞「读不到就直说别假装」——manifest 纪律「未命中≠不支持」，不写 known&&false 强警告分支，该形态今天不存在）；②模型切换后首回合一行新模型事实（复用 modelCapabilitySummary），首回合不注（每会话第一条都注=变相常驻，sys_info 可查通道已有）。推理参数不设事件源（effort 是请求参数非模型盲区）；CLI 无图、模型随启动固定 → CLI 零接线。lastSentModelKey 由频道保存、只在请求真正装配时推进 |
 | 本次 | **W2b-3 发布门（sanity 档）** | release.yml 加 `eval-smoke` job：LLM 冒烟固定 3 题（`run-evals.ts --limit 3`，metadata.sanitySubset 自证子集 + fixtureHash 随子集天然变、snapshot 的 hash 门堵误当基线之路），读数三态（ran/skipped/failed）**必进 release body**。v1 是**可见性门不是数字门**——退步不挡发布：compare-evals.ts 红线「阈值要有真实数据支撑再谈」，`--strict` 硬门等攒两三版读数再上；无 key=skipped、跑挂=failed，都写进 body，缺席必须可见。**full 档留在发布者本机**（eval:baseline + eval:compare，数字随版本笔进 CHANGELOG）——CI 自动跑 full 是 30 分钟+真金白银，tag 触发无法预算批准。`--limit` 与 `--heldout` 互斥（子集留出集毁留出性质）。启用条件：repo 设 `PURE_EVAL_API_KEY`（或厂商 key）secret + 可选 `PURE_EVAL_AGENT`/`PURE_EVAL_MODEL` vars，未设则 body 标注 skipped 并给出设置指引 |
+| 本次 | **W2b-1 frontier 档（首两 fixture）** | 新文件 `src/evaluation/codingTaskFrontierFixtures.ts`，**独立套件**（`pure-coding-frontier-v1`）不并 v5——并入会换 fixtureHash 让已提交基线表全作废，而无 key 重跑前矩阵会空窗；compare-evals 与快照按 suiteVersion 天然隔离。①`frontier-selfverify-pricing-web`（自我验证·约束网）：七条计费规则互相咬合，种子是「单测全绿的草率实现」，错在组合——cap 顺序/取整位置/钳制记账成网，修对一条的天真改法弄坏另一条，必须跑验收读 FAIL 成假设迭代（12 属性 13 检查，全部手算可复验）；②`frontier-contract-window-units`（跨模块契约传播）：限流器单位契约横跨 core/adapters，换算错在 adapters、边界拒收缺在 core，只修任一层过不了审计，「比申请的更宽松」藏在亚毫秒窗口与小数计数里。管线面：`CodingTaskEvaluationOptions.suiteVersion`、run-evals `--suite frontier`（与 `--heldout` 互斥）、`eval:sanity` 扩成双套件门（17 fixtures）、held-out 碰撞集含 frontier、完整性双测与 v5 同款。**区分度读数等 W2b-2 真实 key**；档案设计纪律与 hard/extreme 相同（控制组按种子失败、金标准解通过，确定性验证） |
 
 **W1b-1 自探测要点**：
 

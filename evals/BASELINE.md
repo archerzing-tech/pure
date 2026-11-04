@@ -13,6 +13,7 @@ solutions pass); this matrix only adds the real-agent column on top.
 | Field | Value |
 |---|---|
 | Suite | `pure-coding-baseline-v5` (15 fixtures: 9 core + 4 hard + 2 extreme) |
+| Frontier suite | `pure-coding-frontier-v1` (2 fixtures, 2026-11-04: self-verify pricing web + cross-module contract window)。独立套件与独立 suiteVersion——v5 基线表不受其扩容影响，compare/快照按版本隔离。运行：`eval:baseline -- --suite frontier`；完整性门已并入 `eval:sanity`（17 fixtures across 2 suites）。现有 frontier 模型在 v5 上全部 15/15，本档的意义是把 frontier 之间的差距重新拉开——首个区分度读数等真实 key 的矩阵运行（W2b-2） |
 | `fixtureHash` | `6087e3be` |
 | Git revision | `bc793e5` (DeepSeek v4-flash + GLM columns), `4f6b722` (`deepseek-flash` + NVIDIA column) |
 | Runtime | `bun/1.3.14` on `darwin` |

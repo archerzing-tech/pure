@@ -1,4 +1,5 @@
 import { CODING_TASK_FIXTURES, evaluateCodingTask, evaluateCodingTaskSuite, writeEvaluationReport, type CodingTaskSuiteReport } from '../src/evaluation/codingTaskBaseline';
+import { FRONTIER_SUITE_VERSION, FRONTIER_TASK_FIXTURES } from '../src/evaluation/codingTaskFrontierFixtures';
 import { GOLDEN_SOLUTIONS } from '../src/evaluation/codingTaskGoldenSolutions';
 import { runCodingAgentEvaluationTask } from '../src/evaluation/codingAgentExecutor';
 import { FSMemoryStore } from '../src/adapter/memory/FSMemoryStore';
@@ -19,6 +20,10 @@ const sanity = argv.includes('--sanity');
 // 互斥——子集留出集既毁留出性质，也没省出意义。
 const limitFlag = argv.indexOf('--limit');
 const limitArg = limitFlag >= 0 ? Number(argv[limitFlag + 1]) : undefined;
+// W2b-1 frontier 档：--suite frontier 跑独立套件（独立 suiteVersion，v5 基线
+// 表不受影响）。与 --heldout 互斥（两者都在「替换要跑的题集」这个槽位上）。
+const suiteFlag = argv.indexOf('--suite');
+const suiteArg = suiteFlag >= 0 ? argv[suiteFlag + 1] : undefined;
 const notes = argv.includes('--notes');
 const withMemory = argv.includes('--with-memory');
 const compare = argv.includes('--compare');
@@ -62,8 +67,9 @@ const tracePath = traceFlag >= 0
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
 if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--'))) || (heldoutRootFlag >= 0 && !heldoutRootArg)
-  || (limitFlag >= 0 && (!Number.isInteger(limitArg) || (limitArg as number) < 1))) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--limit N] [--with-memory] [--compare] [--heldout] [--heldout-dir path] [--keep-workspaces] [--strict]');
+  || (limitFlag >= 0 && (!Number.isInteger(limitArg) || (limitArg as number) < 1))
+  || (suiteFlag >= 0 && suiteArg !== 'frontier')) {
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--limit N] [--suite frontier] [--with-memory] [--compare] [--heldout] [--heldout-dir path] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -95,37 +101,52 @@ const observability = new PromptObservability(
 // gate is red.
 if (sanity || notes) {
   let violations = 0;
-  const control = await evaluateCodingTaskSuite();
-  for (const task of control.tasks) {
-    const failedAsSeeded = task.status === 'control' && task.verificationPassed === false;
-    if (!failedAsSeeded) violations += 1;
-    if (!notes) process.stdout.write(`control ${task.taskId}: ${failedAsSeeded ? 'failed as seeded' : `UNEXPECTED ${task.status}`}\n`);
-  }
-  let goldenPassed = 0;
-  for (const task of CODING_TASK_FIXTURES) {
-    const solve = GOLDEN_SOLUTIONS[task.id];
-    const result = solve
-      ? await evaluateCodingTask(task, {
-          agent: async ({ workspace }) => {
-            await solve(workspace);
-          },
-        })
-      : undefined;
-    const passed = result?.status === 'passed';
-    if (passed) goldenPassed += 1;
-    else violations += 1;
-    if (!notes) process.stdout.write(`golden  ${task.id}: ${passed ? 'passed' : 'MISSING GOLDEN SOLUTION OR FAILED'}\n`);
+  // W2b-1：完整性门覆盖两个套件（v5 + frontier）——frontier fixture 不带门
+  // 等于种金漂移没人拦。
+  const suites = [
+    { label: 'v5', tasks: CODING_TASK_FIXTURES, options: {} },
+    { label: 'frontier', tasks: FRONTIER_TASK_FIXTURES, options: { suiteVersion: FRONTIER_SUITE_VERSION } },
+  ];
+  let totalFixtures = 0;
+  let controlVersion = '';
+  let controlHash = '';
+  for (const suite of suites) {
+    const control = await evaluateCodingTaskSuite(suite.tasks, suite.options);
+    totalFixtures += control.taskCount;
+    if (suite.label === 'v5') {
+      controlVersion = control.suiteVersion;
+      controlHash = control.fixtureHash;
+    }
+    for (const task of control.tasks) {
+      const failedAsSeeded = task.status === 'control' && task.verificationPassed === false;
+      if (!failedAsSeeded) violations += 1;
+      if (!notes) process.stdout.write(`control[${suite.label}] ${task.taskId}: ${failedAsSeeded ? 'failed as seeded' : `UNEXPECTED ${task.status}`}\n`);
+    }
+    for (const task of suite.tasks) {
+      const solve = GOLDEN_SOLUTIONS[task.id];
+      const result = solve
+        ? await evaluateCodingTask(task, {
+            suiteVersion: suite.options.suiteVersion,
+            agent: async ({ workspace }) => {
+              await solve(workspace);
+            },
+          })
+        : undefined;
+      const passed = result?.status === 'passed';
+      if (!passed) violations += 1;
+      if (!notes) process.stdout.write(`golden[${suite.label}]  ${task.id}: ${passed ? 'passed' : 'MISSING GOLDEN SOLUTION OR FAILED'}\n`);
+    }
   }
   if (notes) {
     if (violations > 0) {
       process.stdout.write(`eval sanity FAILED: ${violations} violation(s); refusing to emit release notes from a broken baseline\n`);
       process.exit(1);
     }
-    process.stdout.write(`**评测基线**（${control.suiteVersion}，fixtureHash ${control.fixtureHash}）\n\n`);
-    process.stdout.write(`- ${control.taskCount} 个 fixture：控制组全部按种子失败、金标准解全部通过（无 LLM 完整性自检，CI 门禁 \`eval:sanity\`）。\n`);
+    process.stdout.write(`**评测基线**（${controlVersion}，fixtureHash ${controlHash}）\n\n`);
+    process.stdout.write(`- ${totalFixtures} 个 fixture（含 frontier 档）：控制组全部按种子失败、金标准解全部通过（无 LLM 完整性自检，CI 门禁 \`eval:sanity\`）。\n`);
   } else {
     process.stdout.write(violations === 0
-      ? `eval sanity ok: ${control.taskCount} fixtures fail from seed and solve clean\n`
+      ? `eval sanity ok: ${totalFixtures} fixtures across ${suites.length} suites fail from seed and solve clean\n`
       : `eval sanity FAILED: ${violations} violation(s)\n`);
   }
   if (violations > 0) process.exit(1);
@@ -207,9 +228,9 @@ if (heldout) {
     process.stdout.write('held-out 集为空，跳过本次运行（用 PURE_EVAL_HELDOUT_DIR 或 --heldout-dir 指定目录）。\n');
     process.exit(0);
   }
-  // An id shared with the committed suite means the tuning set leaked in (or
-  // vice versa) — the report would then compare against itself.
-  const committed = new Set(CODING_TASK_FIXTURES.map((f) => f.id));
+  // An id shared with a committed suite (v5 or frontier) means the tuning set
+  // leaked in (or vice versa) — the report would then compare against itself.
+  const committed = new Set([...CODING_TASK_FIXTURES, ...FRONTIER_TASK_FIXTURES].map((f) => f.id));
   const collided = loaded.fixtures.map((f) => f.id).filter((id) => committed.has(id));
   if (collided.length > 0) {
     process.stderr.write(`held-out 集与已提交套件 id 冲突（${collided.join(', ')}）——留出集已污染，拒绝运行。\n`);
@@ -229,6 +250,17 @@ const suiteMetadata = {
   seed: process.env.PURE_EVAL_SEED,
 };
 
+// W2b-1 frontier 档选择：替换要跑的题集与套件版本。与 --heldout 互斥——
+// 两者占同一个「题集替换」槽位，同时给等于什么都没定义。
+const frontierSuite = suiteArg === 'frontier';
+if (frontierSuite) {
+  if (heldout) {
+    process.stderr.write('--suite frontier 与 --heldout 互斥：两者都在替换要跑的题集。\n');
+    process.exit(2);
+  }
+  heldOutFixtures = FRONTIER_TASK_FIXTURES;
+}
+
 // W2b-3 sanity 档：固定序前 N 题冒烟。metadata.sanitySubset 让报告自证是子集；
 // fixtureHash 随子集天然变化，build-baseline-snapshot 的 hash 门把误当基线
 // 之路堵死。
@@ -240,6 +272,10 @@ if (limitArg !== undefined) {
   heldOutFixtures = (heldOutFixtures ?? CODING_TASK_FIXTURES).slice(0, limitArg);
   suiteMetadata.sanitySubset = limitArg;
 }
+
+// frontier 套件的报告带自己的 suiteVersion——compare 与快照按版本把 v5 与
+// frontier 天然隔离，互不污染。
+const suiteVersionOverride = frontierSuite ? { suiteVersion: FRONTIER_SUITE_VERSION } : {};
 
 // ── E0.2 compare table ──
 
@@ -305,6 +341,7 @@ try {
     const suiteOptions = (memoryPhase: string) => ({
       keepWorkspace: keepWorkspaces,
       agent,
+      ...suiteVersionOverride,
       metadata: {
         ...suiteMetadata,
         memoryPhase,
@@ -333,6 +370,7 @@ try {
     const report = await evaluateCodingTaskSuite(heldOutFixtures, {
       keepWorkspace: keepWorkspaces,
       agent,
+      ...suiteVersionOverride,
       metadata: {
         ...suiteMetadata,
         ...(memoryStores ? { memoryPhase: 'single' } : {}),

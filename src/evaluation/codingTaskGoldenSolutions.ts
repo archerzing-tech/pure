@@ -363,4 +363,125 @@ export function findDuplicateGroups(records: readonly LogRecord[]): DuplicateGro
 }
 `, 'utf8');
   },
+
+  // W2b-1 frontier 档金标准解。取整口 quality 与规则组合严格按 docs/pricing.md 的
+  // R1–R7：百分比折扣每步四舍五入、税在 cap 之前定、零钳不是 cap 事件。
+  'frontier-selfverify-pricing-web': async (workspace) => {
+    await writeFile(join(workspace, 'src/pricing.ts'), `import type { Adjustment, InvoiceLine, InvoiceTotals, PricingOptions } from './types';
+
+/** 四舍五入到整分（docs/pricing.md 的 round）。 */
+export function roundCents(value: number): number {
+  return Math.floor(value + 0.5);
+}
+
+/**
+ * 按文档规则算一张发票的六项总额。规则口径见 docs/pricing.md。
+ */
+export function computeInvoice(
+  lines: readonly InvoiceLine[],
+  adjustments: readonly Adjustment[],
+  options: PricingOptions,
+): InvoiceTotals {
+  const subtotalCents = lines.reduce((sum, line) => sum + line.unitPriceCents * line.quantity, 0);
+
+  let running = subtotalCents;
+  for (const adjustment of adjustments) {
+    if (adjustment.kind === 'percent-discount') {
+      running -= roundCents((running * (adjustment.basisPoints ?? 0)) / 10_000);
+    } else if (adjustment.kind === 'amount-discount') {
+      running -= adjustment.amountCents ?? 0;
+    } else if (adjustment.kind === 'surcharge') {
+      running += adjustment.amountCents ?? 0;
+    } else {
+      running -= adjustment.amountCents ?? 0;
+    }
+  }
+
+  const taxableCents = running;
+  const taxCents = roundCents((taxableCents * options.taxBasisPoints) / 10_000);
+  const preCapTotal = taxableCents + taxCents;
+
+  let capAppliedCents = 0;
+  let totalCents = preCapTotal;
+  if (options.spendCapCents !== undefined && preCapTotal > options.spendCapCents) {
+    capAppliedCents = preCapTotal - options.spendCapCents;
+    totalCents = options.spendCapCents;
+  }
+  if (totalCents < 0) totalCents = 0;
+
+  return {
+    subtotalCents,
+    adjustmentCents: running - subtotalCents,
+    taxableCents,
+    taxCents,
+    capAppliedCents,
+    totalCents,
+  };
+}
+`, 'utf8');
+  },
+
+  // 契约修复必须同时落两层：core 边界拒收非整数（§1），adapters 换算方向
+  // ceil/floor（§3）——只修任一层都过不了审计。
+  'frontier-contract-window-units': async (workspace) => {
+    await writeFile(join(workspace, 'src/core/window.ts'), `export interface SlidingWindowOptions {
+  /** 窗口宽度，正整数毫秒。 */
+  windowMs: number;
+  /** 窗口内允许的最大次数，正整数。 */
+  maxEvents: number;
+}
+
+/**
+ * 单桶滑动窗口限流器。单位契约见 docs/contract.md：core 只说整数毫秒，
+ * 非整数与非正输入在边界上抛 RangeError（§1）。
+ */
+export class SlidingWindow {
+  private readonly windowMs: number;
+  private readonly maxEvents: number;
+  private entries: number[] = [];
+
+  constructor(options: SlidingWindowOptions) {
+    if (!(Number.isInteger(options.windowMs) && options.windowMs > 0)) {
+      throw new RangeError('windowMs must be a positive integer number of milliseconds');
+    }
+    if (!(Number.isInteger(options.maxEvents) && options.maxEvents >= 1)) {
+      throw new RangeError('maxEvents must be a positive integer count');
+    }
+    this.windowMs = options.windowMs;
+    this.maxEvents = options.maxEvents;
+  }
+
+  /** 在时间戳 atMs 尝试获取一个事件名额；获取成功时记录时间戳。 */
+  tryAcquire(atMs: number): boolean {
+    if (!(Number.isInteger(atMs) && atMs >= 0)) {
+      throw new RangeError('atMs must be a non-negative integer number of milliseconds');
+    }
+    this.entries = this.entries.filter((entry) => atMs - entry < this.windowMs);
+    if (this.entries.length >= this.maxEvents) return false;
+    this.entries.push(atMs);
+    return true;
+  }
+}
+`, 'utf8');
+    await writeFile(join(workspace, 'src/adapters/seconds.ts'), `import { SlidingWindow } from '../core/window';
+
+/**
+ * 秒单位入口：调用方可以给小数秒与小数计数。换算方向是契约钉死的：
+ * 时长 ceil、计数 floor（docs/contract.md §3）——限流结果绝不能比申请的更宽松。
+ */
+export function createWindowFromSeconds(options: { windowSeconds: number; maxEvents: number }): SlidingWindow {
+  if (!(options.windowSeconds > 0)) {
+    throw new RangeError('windowSeconds must be a positive number of seconds');
+  }
+  const maxEvents = Math.floor(options.maxEvents);
+  if (maxEvents < 1) {
+    throw new RangeError('maxEvents must be at least 1 after flooring');
+  }
+  return new SlidingWindow({
+    windowMs: Math.ceil(options.windowSeconds * 1_000),
+    maxEvents,
+  });
+}
+`, 'utf8');
+  },
 };

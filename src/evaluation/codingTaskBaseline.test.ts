@@ -9,6 +9,7 @@ import {
   type CodingTaskFixture,
 } from './codingTaskBaseline';
 import { GOLDEN_SOLUTIONS } from './codingTaskGoldenSolutions';
+import { FRONTIER_SUITE_VERSION, FRONTIER_TASK_FIXTURES } from './codingTaskFrontierFixtures';
 
 const fixture: CodingTaskFixture = {
   id: 'writes-answer',
@@ -47,6 +48,39 @@ describe('coding task baseline', () => {
       expect(task.verification[0]?.passed).toBe(false);
     }
   }, 120_000);
+
+  // W2b-1 frontier 档的完整性双门（control 失败 / golden 通过）与 v5 同款。
+  // 没有这两门，frontier fixture 的种子与金标准解可以无声漂移。注意断言的是
+  // 「验收整体失败」而不是首条命令——frontier 种子是「单测绿的草率实现」，
+  // bun test 按设计就是过的，错在验收脚本那一层。
+  it('control run fails every frontier fixture', async () => {
+    const report = await evaluateCodingTaskSuite(FRONTIER_TASK_FIXTURES, { suiteVersion: FRONTIER_SUITE_VERSION });
+    expect(report.suiteVersion).toBe('pure-coding-frontier-v1');
+    expect(report.taskCount).toBe(FRONTIER_TASK_FIXTURES.length);
+    for (const task of report.tasks) {
+      expect(task.status).toBe('control');
+      expect(task.verificationPassed).toBe(false);
+      expect(task.verification.some((command) => !command.passed)).toBe(true);
+    }
+  }, 120_000);
+
+  describe('golden solutions pass every frontier fixture', () => {
+    for (const task of FRONTIER_TASK_FIXTURES) {
+      it(task.id, async () => {
+        const solve = GOLDEN_SOLUTIONS[task.id];
+        if (!solve) throw new Error('missing golden solution for ' + task.id);
+        const result = await evaluateCodingTask(task, {
+          agent: async ({ workspace }) => {
+            await solve(workspace);
+            return undefined;
+          },
+        });
+        expect(result.status).toBe('passed');
+        expect(result.agentCompleted).toBe(true);
+        expect(result.verificationPassed).toBe(true);
+      });
+    }
+  });
 
   // Fixture sanity, the solvable half: a known-correct solution applied
   // without an LLM must pass every verification command. When this fails the
