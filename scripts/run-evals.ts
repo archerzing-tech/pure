@@ -15,6 +15,10 @@ const reportPath = reportFlag >= 0 ? argv[reportFlag + 1] : undefined;
 const keepWorkspaces = argv.includes('--keep-workspaces');
 const strict = argv.includes('--strict');
 const sanity = argv.includes('--sanity');
+// W2b-3 发布门 sanity 档：取固定序前 N 题的冒烟（默认全量）。与 --heldout
+// 互斥——子集留出集既毁留出性质，也没省出意义。
+const limitFlag = argv.indexOf('--limit');
+const limitArg = limitFlag >= 0 ? Number(argv[limitFlag + 1]) : undefined;
 const notes = argv.includes('--notes');
 const withMemory = argv.includes('--with-memory');
 const compare = argv.includes('--compare');
@@ -57,8 +61,9 @@ const tracePath = traceFlag >= 0
   : process.env.PURE_EVAL_TRACE;
 const traceStore = tracePath ? new FilePromptObservationStore(tracePath) : undefined;
 
-if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--'))) || (heldoutRootFlag >= 0 && !heldoutRootArg)) {
-  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--with-memory] [--compare] [--heldout] [--heldout-dir path] [--keep-workspaces] [--strict]');
+if ((reportFlag >= 0 && (!reportPath || reportPath.startsWith('--'))) || (traceFlag >= 0 && (!tracePath || tracePath.startsWith('--'))) || (heldoutRootFlag >= 0 && !heldoutRootArg)
+  || (limitFlag >= 0 && (!Number.isInteger(limitArg) || (limitArg as number) < 1))) {
+  console.error('Usage: bun run eval:baseline -- [--agent provider] [--model model] [--think-model model] [--report path] [--trace path] [--sanity] [--notes] [--limit N] [--with-memory] [--compare] [--heldout] [--heldout-dir path] [--keep-workspaces] [--strict]');
   process.exit(2);
 }
 
@@ -223,6 +228,18 @@ const suiteMetadata = {
   gitRevision: process.env.GIT_COMMIT ?? process.env.GITHUB_SHA,
   seed: process.env.PURE_EVAL_SEED,
 };
+
+// W2b-3 sanity 档：固定序前 N 题冒烟。metadata.sanitySubset 让报告自证是子集；
+// fixtureHash 随子集天然变化，build-baseline-snapshot 的 hash 门把误当基线
+// 之路堵死。
+if (limitArg !== undefined) {
+  if (heldout) {
+    process.stderr.write('--limit 与 --heldout 互斥：子集留出集毁掉留出性质，也省不出意义。\n');
+    process.exit(2);
+  }
+  heldOutFixtures = (heldOutFixtures ?? CODING_TASK_FIXTURES).slice(0, limitArg);
+  suiteMetadata.sanitySubset = limitArg;
+}
 
 // ── E0.2 compare table ──
 

@@ -92,6 +92,10 @@ export interface CodingTaskEvaluationMetadata {
    *  as a drop-in replacement for a suite row: the two sets are scored on
    *  different fixtures, so the numbers are only comparable within themselves. */
   heldOut?: boolean;
+  /** W2b-3 发布门 sanity 档（2026-11-04）— `--limit N` 的子集报告。子集与全量
+   *  不可比：fixtureHash 天然不同（build-baseline-snapshot 按 hash 排除），
+   *  这个字段让报告自己说清它是几题的冒烟，而不是让消费方去数 tasks。 */
+  sanitySubset?: number;
   runtime: string;
   platform: string;
 }

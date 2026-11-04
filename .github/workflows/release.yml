@@ -292,12 +292,90 @@ jobs:
           path: pure_x86_64
           if-no-files-found: error
 
+  # ── W2b-3 发布门（sanity 档，2026-11-04）──
+  # LLM 冒烟：固定 3 题（--limit 3），验证发布时点 agent 真的还能跑题。v1 是
+  # **可见性门不是数字门**：读数（或缺席原因）必进 release body，退步不挡发布
+  # ——compare-evals.ts 红线「阈值要有真实数据支撑再谈」，--strict 硬门等攒出
+  # 两三版读数再上。full 档（15 题可比数字）留在发布者本机（eval:baseline +
+  # eval:compare），数字随版本笔进 CHANGELOG；CI 自动跑 full 是 30 分钟+真金
+  # 白银，tag 触发无法预算批准。无 key=skipped、跑挂=failed，都写进 body——
+  # 缺席必须可见，不能静默。
+  eval-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      eval_status: ${{ steps.smoke.outputs.eval_status }}
+      eval_summary: ${{ steps.smoke.outputs.eval_summary }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      # 同 ci.yml：多源轮换装依赖，CDN 掐大包时哪条通路活着走哪条。
+      - name: Install dependencies
+        shell: bash
+        run: |
+          registries=(
+            "https://mirrors.cloud.tencent.com/npm/"
+            "https://registry.npmmirror.com"
+            "https://repo.huaweicloud.com/repository/npm/"
+            "https://registry.npmjs.org"
+          )
+          for r in "${registries[@]}"; do
+            for i in 1 2; do
+              echo "::group::bun install via $r (attempt $i)"
+              if NPM_CONFIG_REGISTRY="$r" bun install; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::bun install via $r attempt $i failed"
+              echo "::endgroup::"
+              sleep 10
+            done
+          done
+          exit 1
+
+      - name: Eval smoke (sanity tier)
+        id: smoke
+        continue-on-error: true
+        env:
+          PURE_EVAL_API_KEY: ${{ secrets.PURE_EVAL_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          PURE_EVAL_AGENT: ${{ vars.PURE_EVAL_AGENT }}
+          PURE_EVAL_MODEL: ${{ vars.PURE_EVAL_MODEL }}
+        run: |
+          if [ -z "$PURE_EVAL_API_KEY" ] && [ -z "$ZHIPU_API_KEY" ] && [ -z "$DEEPSEEK_API_KEY" ] && [ -z "$DASHSCOPE_API_KEY" ]; then
+            echo "eval_status=skipped" >> "$GITHUB_OUTPUT"
+            echo "eval_summary=no API key secret configured (PURE_EVAL_API_KEY or a provider key) — set one to attach eval readouts to releases" >> "$GITHUB_OUTPUT"
+            echo "::notice::eval gate skipped: no API key secret"
+            exit 0
+          fi
+          AGENT_ARGS=()
+          [ -n "$PURE_EVAL_AGENT" ] && AGENT_ARGS+=(--agent "$PURE_EVAL_AGENT")
+          [ -n "$PURE_EVAL_MODEL" ] && AGENT_ARGS+=(--model "$PURE_EVAL_MODEL")
+          if bun run scripts/run-evals.ts --limit 3 --report "$RUNNER_TEMP/eval-smoke.json" "${AGENT_ARGS[@]}"; then
+            PASS="$(jq -r '.passAt1 // 0' "$RUNNER_TEMP/eval-smoke.json")"
+            COUNT="$(jq -r '.taskCount // 0' "$RUNNER_TEMP/eval-smoke.json")"
+            echo "eval_status=ran" >> "$GITHUB_OUTPUT"
+            echo "eval_summary=${PASS}/${COUNT} passed on a ${COUNT}-fixture smoke (sanity tier — subset is not compared to the full baseline; run eval:baseline + eval:compare locally for comparable numbers)" >> "$GITHUB_OUTPUT"
+          else
+            echo "eval_status=failed" >> "$GITHUB_OUTPUT"
+            echo "eval_summary=smoke run failed (provider unreachable / all agent_error) — release proceeds, but investigate before trusting quality signals" >> "$GITHUB_OUTPUT"
+          fi
+
   # ── 发布收尾：Release 的唯一写者 ──
   # 创建 Release、传全部资产、拼 latest.json，全部在这一处：双平台并行后
   # 「谁先到谁建 Release」的竞争不存在了。latest.json 的 darwin 签名 `cat`
   # 原样进 json（.sig 已是 base64，勿再编码——见文件头 bug 说明）。
   publish:
-    needs: [build-windows, build-macos-x64]
+    needs: [build-windows, build-macos-x64, eval-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -324,7 +402,16 @@ jobs:
           if [ -z "$NOTES" ]; then
             NOTES="See the changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md"
           fi
-          NOTES="${NOTES}"$'\n\n---\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
+          # W2b-3 发布门：eval 读数（或缺席原因）必进 release body——可见性门，
+          # 三态都写，不静默（eval-smoke job 头注释有裁定全文）。
+          EVAL_STATUS="${{ needs.eval-smoke.outputs.eval_status }}"
+          EVAL_SUMMARY="${{ needs.eval-smoke.outputs.eval_summary }}"
+          case "$EVAL_STATUS" in
+            ran)     EVAL_NOTES="Eval gate (sanity tier): ${EVAL_SUMMARY}";;
+            skipped) EVAL_NOTES="Eval gate: skipped — ${EVAL_SUMMARY}";;
+            *)       EVAL_NOTES="Eval gate: FAILED — ${EVAL_SUMMARY}";;
+          esac
+          NOTES="${NOTES}"$'\n\n---\n\n'"${EVAL_NOTES}"$'\n\nDownload the macOS DMG, the Windows installer (.exe), or the CLI binary (`pure` / `pure.exe`) below.'
           {
             echo 'body<<EOF'
             echo "$NOTES"
