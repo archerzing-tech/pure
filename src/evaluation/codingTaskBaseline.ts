@@ -108,7 +108,67 @@ export interface CodingTaskSuiteReport {
   meanDurationMs: number;
   totalUsage?: TokenUsage;
   estimatedCostUsd: number;
+  /** 过程指标（W2，2026-11）：终态 pass@1 在饱和后没有区分度，剩下的信号在
+   *  「怎么跑完的」——回合数、工具调用、通过一题花多少 token、缓存命中、以及
+   *  跑断的题数。旧报告没有这个块，消费方必须当它可选。 */
+  process?: CodingTaskProcessMetrics;
   tasks: CodingTaskResult[];
+}
+
+/** 过程指标：只聚合有读数的题，不把缺失当 0 稀释平均水平。 */
+export interface CodingTaskProcessMetrics {
+  /** 有 turns 读数的题的平均引擎回合。`sampled` = 参与聚合的题数。 */
+  meanTurns: number;
+  /** 有 toolCalls 读数的题的平均工具调用数。 */
+  meanToolCalls: number;
+  /** 通过题平均花几次工具调用——效率信号，不是成功率。 */
+  toolCallsPerPass: number;
+  /** 通过题平均消耗的 prompt token（成本信号）。 */
+  promptTokensPerPass: number;
+  /** cacheHit / (cacheHit + cacheMiss)；整份报告无缓存读数时为 0。 */
+  cacheHitRate: number;
+  /** 被 harness 上限 / 引擎故障打断的题数——与「做错了」分开计数。 */
+  unfinished: number;
+  sampled: number;
+}
+
+function meanOf(values: readonly number[]): number {
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+/**
+ * 从逐题结果聚合过程指标。纯函数、无 IO——所有数字都能从报告本身复算，
+ * 这样 compare 才不用信任另一份预处理产物。
+ */
+export function codingTaskProcessMetrics(results: readonly CodingTaskResult[]): CodingTaskProcessMetrics {
+  const turns: number[] = [];
+  const toolCalls: number[] = [];
+  const passToolCalls: number[] = [];
+  const passPromptTokens: number[] = [];
+  let cacheHit = 0;
+  let cacheMiss = 0;
+  for (const result of results) {
+    const agent = result.agent;
+    if (agent) {
+      if (typeof agent.turns === 'number') turns.push(agent.turns);
+      if (typeof agent.toolCalls === 'number') toolCalls.push(agent.toolCalls);
+      if (result.passAt1 && typeof agent.toolCalls === 'number') passToolCalls.push(agent.toolCalls);
+      if (result.passAt1 && typeof agent.usage?.promptTokens === 'number') {
+        passPromptTokens.push(agent.usage.promptTokens);
+      }
+      cacheHit += agent.usage?.cacheHitTokens ?? 0;
+      cacheMiss += agent.usage?.cacheMissTokens ?? 0;
+    }
+  }
+  return {
+    meanTurns: meanOf(turns),
+    meanToolCalls: meanOf(toolCalls),
+    toolCallsPerPass: meanOf(passToolCalls),
+    promptTokensPerPass: meanOf(passPromptTokens),
+    cacheHitRate: cacheHit + cacheMiss > 0 ? cacheHit / (cacheHit + cacheMiss) : 0,
+    unfinished: results.filter((result) => result.status === 'agent_error').length,
+    sampled: turns.length,
+  };
 }
 
 export interface CodingTaskEvaluationOptions {
@@ -1489,6 +1549,7 @@ export async function evaluateCodingTaskSuite(
     meanDurationMs: results.length > 0 ? results.reduce((sum, result) => sum + result.durationMs, 0) / results.length : 0,
     totalUsage,
     estimatedCostUsd: estimateCostUsd(totalUsage, options.metadata?.provider ?? 'deepseek-openai'),
+    process: codingTaskProcessMetrics(results),
     tasks: results,
   };
 }

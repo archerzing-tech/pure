@@ -58,6 +58,16 @@ export interface ReportComparison {
     meanDurationMs: MetricDelta;
     estimatedCostUsd: MetricDelta;
   };
+  /** 过程指标增减（W2）。仅在**两份报告都带** process 块时出现：旧报告没有
+   *  这个块，硬比会把「没记录」读成 0，产生一个假的效率提升。 */
+  process?: {
+    meanTurns: MetricDelta;
+    meanToolCalls: MetricDelta;
+    toolCallsPerPass: MetricDelta;
+    promptTokensPerPass: MetricDelta;
+    cacheHitRate: MetricDelta;
+    unfinished: MetricDelta;
+  };
 }
 
 /** 报告里的数字字段可能是坏的（旧报告 / 手改）——坏值当 0，不做猜测。 */
@@ -185,6 +195,19 @@ export function compareSuiteReports(
           ? 'mixed'
           : 'unchanged';
 
+  const beforeProcess = baseline.process;
+  const afterProcess = candidate.process;
+  const processDelta = beforeProcess && afterProcess
+    ? {
+        meanTurns: metricDelta(beforeProcess.meanTurns, afterProcess.meanTurns),
+        meanToolCalls: metricDelta(beforeProcess.meanToolCalls, afterProcess.meanToolCalls),
+        toolCallsPerPass: metricDelta(beforeProcess.toolCallsPerPass, afterProcess.toolCallsPerPass),
+        promptTokensPerPass: metricDelta(beforeProcess.promptTokensPerPass, afterProcess.promptTokensPerPass),
+        cacheHitRate: metricDelta(beforeProcess.cacheHitRate, afterProcess.cacheHitRate),
+        unfinished: metricDelta(beforeProcess.unfinished, afterProcess.unfinished),
+      }
+    : undefined;
+
   return {
     comparable,
     reasons,
@@ -203,5 +226,6 @@ export function compareSuiteReports(
       meanDurationMs: metricDelta(baseline.meanDurationMs, candidate.meanDurationMs),
       estimatedCostUsd: metricDelta(baseline.estimatedCostUsd, candidate.estimatedCostUsd),
     },
+    ...(processDelta ? { process: processDelta } : {}),
   };
 }

@@ -226,6 +226,15 @@ describe('promptBudgetLiveLine（sys_info 的预算现状行——模型自调�
     expect(promptBudgetLiveLine([], 'glm', 'glm-5.3-flash', undefined, 'next session')).toContain('CLI reads config at startup');
   });
 
+  it('carries the manifest verdict so the model can see what it is assumed to be running on', () => {
+    // 能力清单（W1）落地后，这行不只说窗口：命中了哪条规则、推理参数发不发、
+    // 能不能看图，一并可见——模型不需要猜「我这个模型有什么能力」。
+    expect(promptBudgetLiveLine([], 'deepseek-openai', 'deepseek-v4-pro'))
+      .toContain('capabilities: rule=deepseek reasoning=yes vision=unknown');
+    expect(promptBudgetLiveLine([], 'some-unknown', 'mystery-model'))
+      .toContain('capabilities: rule=none reasoning=no vision=unknown');
+  });
+
   it('stays pure ASCII so the line is greppable in a compiled sidecar', () => {
     // sidecar 中文锚不可靠判例：打进 sidecar 的模型可见行全 ASCII。
     for (const line of [

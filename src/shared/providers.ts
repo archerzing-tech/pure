@@ -1,6 +1,7 @@
 // src/shared/providers.ts
 import type { ToolDefinition } from './types';
 import { estimateTextTokens } from './tokenEstimate';
+import { modelCapabilitySummary, resolveModelCapability } from './modelCapabilities';
 
 // Declarative registry of supported LLM providers — the single source of
 // truth for provider ids, display labels and default models, shared by the
@@ -51,61 +52,16 @@ const OUTPUT_RESERVE_MAX_SHARE = 0.75;
 
 /**
  * Per-family budget defaults = each model generation's published maximums
- * (blank settings input inherits these). Verified against 2026-08 vendor docs
- * and release notes; where a ceiling claim came from a single source, the
- * request cap is set one safe tier below it because max_tokens is validated
- * server-side — an over-ceiling cap would fail EVERY request.
+ * (blank settings input inherits these). The knowledge now lives in the
+ * capability manifest (src/shared/modelCapabilities.ts) — one ordered rule
+ * table shared with the reasoning/vision traits, so adding a model generation
+ * is a data edit instead of a third hand-written branch. Verified against
+ * 2026-08 vendor docs; where a ceiling claim came from a single source the
+ * request cap sits one safe tier below it, because max_tokens is validated
+ * server-side and an over-ceiling cap fails EVERY request.
  */
 function promptBudgetDefaults(provider: string, model: string): { contextWindowTokens: number; outputReserveTokens: number } | undefined {
-  const id = provider.toLowerCase();
-  const name = model.toLowerCase();
-  // DeepSeek V4.x (app default `deepseek-flash` = V4.1-Flash, plus
-  // `deepseek-v4-pro` and the `deepseek-v4-flash` compatibility alias): 1M
-  // context, output ceiling reported at 384k — cap requests at a 128k tier.
-  // Legacy V3 endpoints (deepseek-chat / deepseek-reasoner) stay on the
-  // 128k/32k generation. The V4 line is named by generation (`v4`) *or* by
-  // tier (`flash` / `pro`) — matching only `v4` left the current default on
-  // the legacy tier.
-  if (id.includes('deepseek') || name.includes('deepseek')) {
-    return /v4|flash|pro/.test(name)
-      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 131_072 }
-      : { contextWindowTokens: 128_000, outputReserveTokens: 32_768 };
-  }
-  // GLM-5.x (z.ai): lossless 1,048,576-token context; 128k output tier.
-  if (id === 'glm' || name.includes('glm')) return { contextWindowTokens: 1_000_000, outputReserveTokens: 128_000 };
-  // Qwen: qwen3-coder family (incl. qwen3-coder-next) 262,144 ctx / 65,536
-  // out; the 3.7/3.8-Max tier advertises 1M.
-  if (id === 'qwen' || name.includes('qwen')) {
-    return name.includes('max')
-      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 65_536 }
-      : { contextWindowTokens: 262_144, outputReserveTokens: 65_536 };
-  }
-  // Kimi: K2.x ships 262,144 ctx via YaRN; K3 extends to 1M. Max output is a
-  // separate smaller limit (K2.7-Code default 32k) — cap at 64k.
-  if (id === 'moonshot' || name.includes('kimi')) {
-    return name.includes('k3')
-      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 65_536 }
-      : { contextWindowTokens: 262_144, outputReserveTokens: 65_536 };
-  }
-  // MiniMax M2.x: 204,800 ctx / 131,072 out. (M3's 1M claim is inconsistent
-  // across providers — stay on the verified 200k tier.)
-  if (id === 'minimax' || name.includes('minimax')) return { contextWindowTokens: 204_800, outputReserveTokens: 131_072 };
-  // Claude: Opus 5 / Sonnet 4.6+ / Sonnet 5 ship 1M-context tiers with 128k
-  // output; 4.5-and-earlier stay at 200k / 64k (the 1M beta was retired).
-  if (name.includes('claude') || id.includes('anthropic')) {
-    return /opus-5|sonnet-[456]-?6|sonnet-5|haiku-5/.test(name)
-      ? { contextWindowTokens: 1_000_000, outputReserveTokens: 128_000 }
-      : { contextWindowTokens: 200_000, outputReserveTokens: 64_000 };
-  }
-  // OpenAI: GPT-5.x = 400k total (272k in + 128k out); o1/o3 reasoning tiers
-  // 200k/100k; gpt-4o 128k/16k.
-  if (name.includes('gpt-5')) return { contextWindowTokens: 400_000, outputReserveTokens: 128_000 };
-  if (name.includes('gpt-4o')) return { contextWindowTokens: 128_000, outputReserveTokens: 16_384 };
-  if (name.includes('o1') || name.includes('o3')) return { contextWindowTokens: 200_000, outputReserveTokens: 100_000 };
-  // Local runtimes: bounded by host RAM, not vendor ceilings — stay
-  // conservative so an unknown 8k model never gets a 128k input budget.
-  if (id === 'ollama' || id === 'lmstudio' || name.includes('llama')) return { contextWindowTokens: 32_768, outputReserveTokens: 4_096 };
-  return undefined;
+  return resolveModelCapability(provider, model).budget;
 }
 
 /** Effective budget defaults for the settings placeholders: the model
@@ -488,7 +444,8 @@ export function promptBudgetLiveLine(
   const scopeNote = scope === 'next turn'
     ? 'applies from your next turn'
     : 'applies from your NEXT session (CLI reads config at startup)';
-  return `llm budget: provider=${provider ?? 'unknown'} model=${model ?? 'unknown'} window=${effective.contextWindowTokens} outputReserve=${effective.outputReserveTokens} safetyMargin=${effective.safetyMarginTokens} source=${source}; ${familyNote}; tune with "providerOverrides" or "customProviders.modelBudgets" in ~/.pure/config.json - ${scopeNote}`;
+  const capabilityNote = modelCapabilitySummary(resolveModelCapability(provider ?? '', model ?? ''));
+  return `llm budget: provider=${provider ?? 'unknown'} model=${model ?? 'unknown'} window=${effective.contextWindowTokens} outputReserve=${effective.outputReserveTokens} safetyMargin=${effective.safetyMarginTokens} source=${source}; ${familyNote}; ${capabilityNote}; tune with "providerOverrides" or "customProviders.modelBudgets" in ~/.pure/config.json - ${scopeNote}`;
 }
 
 /** True when `id` refers to a user-defined custom provider. */
@@ -565,15 +522,11 @@ export type ReasoningEffortLevel = 'low' | 'medium' | 'high';
  * (undefined) means auto — the 2026+ name pattern decides, then medium. */
 export type ReasoningEffortSetting = 'off' | ReasoningEffortLevel;
 
-// Kept consistent with promptBudgetDefaults' generation map below: the
-// families it treats as current (sonnet-4.6+, the qwen N-max tier, K3,
-// MiniMax-M2, GLM-5, DeepSeek-V4, GPT-5) are exactly the reasoning list.
-const REASONING_EFFORT_MODEL_PATTERN =
-  /(?:gpt-[5-9]|glm-[5-9]|deepseek-(?:v[4-9]|r[2-9])|qwen[4-9]|qwen[3-9]\.[5-9]|qwen[3-9]-max|qwq|qmax|claude-[5-9]|claude-(?:opus|sonnet|haiku)-[5-9]|claude-(?:opus|sonnet|haiku)-4[-.]?[6-9]|fable|gemini-[3-9]|kimi-k[3-9]|moonshot-v[2-9]|minimax-m[2-9])/i;
-
-/** True when a model id matches a known 2026+ reasoning-capable family. */
+/** True when a model id matches a known 2026+ reasoning-capable family. The
+ *  family list is part of the capability manifest, next to the budget tables
+ *  it has to stay consistent with (providers.test.ts pins the agreement). */
 export function isReasoningModelName(model: string | undefined | null): boolean {
-  return !!model && REASONING_EFFORT_MODEL_PATTERN.test(model.trim());
+  return resolveModelCapability(undefined, model).reasoning.supported;
 }
 
 /**
