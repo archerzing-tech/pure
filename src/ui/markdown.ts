@@ -2561,7 +2561,9 @@ function htmlRawOf(slot: HTMLElement): string {
 
 function setHtmlState(slot: HTMLElement, state: 'loading' | 'ready' | 'error', message?: string): void {
   slot.setAttribute('data-html-state', state);
-  slot.querySelector<HTMLElement>('.html-error')!.textContent = state === 'error' ? (message ?? '') : '';
+  const errorBox = slot.querySelector<HTMLElement>('.html-error');
+  if (!errorBox) return;
+  errorBox.textContent = state === 'error' ? (message ?? '') : '';
 }
 
 /** One ```html slot: persist the source (save_artifact 'card' →
