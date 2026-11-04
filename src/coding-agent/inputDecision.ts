@@ -135,16 +135,19 @@ export interface InputDecision {
  *           reform, knife 1 deleted the whole literal fast-path family); kept
  *           only so old exported logs still read back correctly
  *  - net:   the literal safety net answered because no verdict was available —
- *           also retired by knife 1 (no relation is ever guessed now; the
- *           judge-less fallback is a verbatim passthrough to the queue)
+ *           also retired by knife 1
+ *  - passthrough: no semantic judgement happened at all — the user's words
+ *           were forwarded verbatim into the queue (knife 1's only fallback).
+ *           Reading this as 'judge' would make the diag panel report rulings
+ *           that never happened; it gets its own bucket (2026-11-05).
  * Producers that do not set `signals.via` are judged by their main path, so
- * this reads 'judge' for them rather than inventing a fourth bucket.
+ * this reads 'judge' for them rather than inventing a fifth bucket.
  */
-export type InputDecisor = 'judge' | 'rule' | 'net';
+export type InputDecisor = 'judge' | 'rule' | 'net' | 'passthrough';
 
 export function decisorOf(decision: InputDecision): InputDecisor {
   const via = decision.signals.via;
-  return via === 'rule' || via === 'net' ? via : 'judge';
+  return via === 'rule' || via === 'net' || via === 'passthrough' ? via : 'judge';
 }
 
 /** Below this, the action is downgraded to `clarify`. */

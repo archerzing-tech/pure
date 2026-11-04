@@ -66,10 +66,6 @@ import { loadRevertedOverlays, reinstateOverlay } from './overlayRevertHost';
 import { detectContributionDrift } from '../adapter/memory/ratchet';
 import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
-import { auditInsertionDecision, auditSummary, auditTrend, type InsertionAnomaly } from '../coding-agent/insertionAudit';
-import { ALL_CASES } from '../coding-agent/insertionCorpus';
-import { HARVESTED_CASES } from '../coding-agent/insertionCorpusHarvested';
-import { harvestCasesFromLog, loadHarvestRounds, recordHarvestRound, renderHarvestedModule } from '../coding-agent/insertionHarvest';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
 import {
@@ -415,28 +411,6 @@ export class SettingsPanel {
       // 样本，而不是一张要人肉誊抄的图。
       void copyTextToClipboard(formatInputDecisionLog(getInputDecisionLog())).then((ok) => {
         this.toast(ok ? t('insertionDiag.copied') : t('insertionDiag.copyFailed'));
-      });
-    });
-    document.getElementById('insertion-diag-harvest')?.addEventListener('click', () => {
-      // 一键收割（2026-09-28）：把审计标出的疑点句并进回归语料，而不是让它随
-      // 会话日志一起被清掉。浏览器里写不了源文件，所以给出的是**整份**生成文件
-      // （既有收割项 + 新增），粘贴覆盖即生效——与「复制」按钮同一条路子，但
-      // 产物是可直接落盘的语料，不是要人肉誊抄的日志。
-      const entries = getInputDecisionLog().filter((entry) => entry.source !== 'turn-route');
-      const { added } = harvestCasesFromLog(entries, ALL_CASES, new Date().toISOString().slice(0, 10));
-      if (added.length === 0) {
-        this.toast(t('insertionDiag.harvestNone'));
-        return;
-      }
-      // 记下这一轮（收割了多少句 + 当时的疑点率）：下一轮与它对照，"收割有没有
-      // 让契约字段报得更准"才有读数，而不是只靠感觉。
-      const summary = auditSummary(entries);
-      recordHarvestRound({ ts: Date.now(), harvested: added.length, rate: summary.rate, total: summary.total });
-      this.renderInsertionDecisionLog();
-      void copyTextToClipboard(renderHarvestedModule([...HARVESTED_CASES, ...added])).then((ok) => {
-        this.toast(ok
-          ? t('insertionDiag.harvested').replace('{n}', String(added.length))
-          : t('insertionDiag.copyFailed'));
       });
     });
     document.getElementById('insertion-diag-clear')?.addEventListener('click', () => {
@@ -3313,13 +3287,6 @@ export class SettingsPanel {
   /** Show the newest N entries; the log itself caps at 200 (inputDecision.ts). */
   private static readonly INSERTION_DIAG_ROWS = 50;
 
-  /** 事后审计的疑点标签（insertionAudit.ts）——词族只用来"事后挑可疑句子"，
-   *  绝不参与决策（决策只看裁决器的契约字段）。 */
-  private static readonly INSERTION_ANOMALY_KEYS: Record<InsertionAnomaly, string> = {
-    'cancels-missed': 'insertionDiag.anomaly.cancelsMissed',
-    'adds-along-missed': 'insertionDiag.anomaly.addsAlongMissed',
-  };
-
   private renderInsertionDecisionLog(): void {
     const el = document.getElementById('insertion-diag');
     if (!el) return;
@@ -3328,17 +3295,7 @@ export class SettingsPanel {
     // 插话，不进这个面板。
     const entries = getInputDecisionLog().filter((entry) => entry.source !== 'turn-route');
     const countEl = document.getElementById('insertion-diag-count');
-    // 疑点数先算：契约字段漏报是"零关键词"改动的代价，必须一眼可见，
-    // 否则它只会在下一个反向执行事故里才被发现。
-    const anomalyCount = entries.filter((entry) => auditInsertionDecision(entry).anomalies.length > 0).length;
-    // 「收割」按钮只在有活可干时可用：没有疑点就点不动，少一次"点了没反应"。
-    const harvestBtn = document.getElementById('insertion-diag-harvest') as HTMLButtonElement | null;
-    if (harvestBtn) harvestBtn.disabled = anomalyCount === 0;
-    if (countEl) {
-      countEl.textContent = anomalyCount > 0
-        ? t('insertionDiag.anomalyCount').replace('{n}', String(anomalyCount)).replace('{total}', String(entries.length))
-        : String(entries.length);
-    }
+    if (countEl) countEl.textContent = String(entries.length);
     if (entries.length === 0) {
       el.innerHTML = `<div class="insertion-diag-empty">${escapeHtml(t('insertionDiag.empty'))}</div>`;
       return;
@@ -3355,20 +3312,22 @@ export class SettingsPanel {
           ? t('insertionDiag.via.judge')
           : decisor === 'rule'
             ? t('insertionDiag.via.rule')
-            : netReason === 'no-judge'
-              ? t('insertionDiag.via.netNoJudge')
-              : t('insertionDiag.via.netDown');
+            : decisor === 'passthrough'
+              ? netReason === 'no-judge'
+                ? t('insertionDiag.via.passthroughNoJudge')
+                : t('insertionDiag.via.passthroughDown')
+              : netReason === 'no-judge'
+                ? t('insertionDiag.via.netNoJudge')
+                : t('insertionDiag.via.netDown');
       const rule = typeof entry.signals.rule === 'string' ? entry.signals.rule : '';
       const time = new Date(entry.ts);
       const hhmmss = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`;
       const gatedFrom = typeof entry.signals.gatedFrom === 'string'
         ? ` · ${t('insertionDiag.gated').replace('{action}', entry.signals.gatedFrom)}`
         : '';
-      const { anomalies } = auditInsertionDecision(entry);
-      // 场景徽章：判它时看到的是什么局面（思考中 / 在飞 N / 执行中）。被标疑点
-      // 的行把完整场景展开——"判错了"只有配上"在什么场景下判的"才可行动。
-      // 没记下场景的行（排期插话没经过裁决器）不挂徽章：给它编一个"执行中"
-      // 就是伪造一次没发生过的观察。
+      // 场景徽章：判它时看到的是什么局面（思考中 / 在飞 N / 执行中）——"判
+      // 错了"只有配上"在什么场景下判的"才可行动。没记下场景的行（排期插话
+      // 没经过裁决器）不挂徽章：给它编一个"执行中"就是伪造一次没发生过的观察。
       const scene = describeInsertionScene(entry.inputContext);
       const sceneLabel = scene.key === 'unrecorded'
         ? ''
@@ -3377,7 +3336,7 @@ export class SettingsPanel {
           : scene.key === 'thinking'
             ? t('insertionDiag.scene.thinking')
             : t('insertionDiag.scene.executing');
-      return `<div class="insertion-diag-entry${anomalies.length > 0 ? ' has-anomaly' : ''}"${entry.inputContext ? ` title="${escapeHtml(entry.inputContext)}"` : ''}>
+      return `<div class="insertion-diag-entry"${entry.inputContext ? ` title="${escapeHtml(entry.inputContext)}"` : ''}>
         <div class="insertion-diag-head">
           <i class="insertion-diag-via via-${badge}">${escapeHtml(label)}</i>
           ${rule ? `<span class="insertion-diag-rule">${escapeHtml(rule)}</span>` : ''}
@@ -3389,58 +3348,8 @@ export class SettingsPanel {
         </div>
         ${entry.inputText ? `<div class="insertion-diag-said">「${escapeHtml(entry.inputText)}」</div>` : ''}
         <div class="insertion-diag-reason">${escapeHtml(entry.reason)}${escapeHtml(gatedFrom)}</div>
-        ${anomalies.length > 0 && entry.inputContext ? `<div class="insertion-diag-scene-full">${escapeHtml(t('insertionDiag.sceneFull'))}${escapeHtml(entry.inputContext)}</div>` : ''}
-        ${anomalies.map((a) => `<div class="insertion-diag-anomaly">${escapeHtml(t('insertionDiag.anomaly'))}${escapeHtml(t(SettingsPanel.INSERTION_ANOMALY_KEYS[a]))}</div>`).join('')}
       </div>`;
-    }).join('') + this.renderInsertionTrend(entries);
-  }
-
-  /**
-   * 契约字段遵守率的走势（2026-09-28）：每一批插话里"该报的契约字段报了吗"的
-   * 疑点率画成柱条，下面接收割轮次。做成趋势而不是一个总数，是因为总数把"一直
-   * 就这样"与"最近才变坏"混成一句话，而收割的价值恰好只能从走势上看出来。
-   */
-  private renderInsertionTrend(entries: readonly InputDecision[]): string {
-    const batches = auditTrend(entries);
-    if (batches.length === 0) {
-      return `<div class="insertion-diag-trend">
-        <div class="insertion-diag-trend-head"><span class="insertion-diag-trend-label">${escapeHtml(t('insertionDiag.trend'))}</span></div>
-        <div class="insertion-diag-trend-empty">${escapeHtml(t('insertionDiag.trendNone'))}</div>
-      </div>`;
-    }
-    const { total, anomalies } = auditSummary(entries);
-    const rate = total > 0 ? Math.round((anomalies / total) * 100) : 0;
-    const bars = batches.map((b) => {
-      // 高度直接读疑点率；0 疑点也留一条底座，否则"全对"与"没数据"长得一样。
-      const height = Math.max(3, Math.round(b.rate * 100));
-      const title = t('insertionDiag.trendBarTitle')
-        .replace('{i}', String(b.index))
-        .replace('{n}', String(b.anomalies))
-        .replace('{total}', String(b.total));
-      return `<i class="insertion-diag-trend-bar${b.anomalies > 0 ? ' has-anomaly' : ''}" style="height:${height}%" title="${escapeHtml(title)}"></i>`;
     }).join('');
-    const rounds = loadHarvestRounds();
-    const last = rounds[rounds.length - 1];
-    const roundsLine = last
-      ? t('insertionDiag.trendRounds')
-        .replace('{rounds}', String(rounds.length))
-        .replace('{n}', String(rounds.reduce((sum, r) => sum + r.harvested, 0)))
-        .replace('{time}', new Date(last.ts).toLocaleTimeString())
-        .replace('{rate}', String(Math.round(last.rate * 100)))
-      : t('insertionDiag.trendNoRounds');
-    const caption = t('insertionDiag.trendCaption')
-      .replace('{batches}', String(batches.length))
-      .replace('{n}', String(anomalies))
-      .replace('{total}', String(total))
-      .replace('{rate}', String(rate));
-    return `<div class="insertion-diag-trend">
-      <div class="insertion-diag-trend-head">
-        <span class="insertion-diag-trend-label">${escapeHtml(t('insertionDiag.trend'))}</span>
-        <span class="insertion-diag-trend-caption">${escapeHtml(caption)}</span>
-      </div>
-      <div class="insertion-diag-trend-bars">${bars}</div>
-      <div class="insertion-diag-trend-rounds">${escapeHtml(roundsLine)}</div>
-    </div>`;
   }
 
   // ── Memory runtime diagnostics（记忆页诊断区）──

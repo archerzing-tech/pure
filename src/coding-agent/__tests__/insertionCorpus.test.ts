@@ -36,8 +36,9 @@ describe('插话语料：行为边界', () => {
   });
 
   it('收割段是审计来的，一律标 suspected 而不是断言', () => {
-    // 审计网的假阳性是可接受的（见 insertionAudit 注），所以它收割出来的期望
-    // 不能冒充人工核对过的断言——准确率统计必须能把两段分开算。
+    // 审计收割的假阳性是可接受的（收割管线 2026-11-05 退役，存量语料保留），
+    // 所以它收割出来的期望不能冒充人工核对过的断言——准确率统计必须能把两段
+    // 分开算。
     const harvested = ALL_CASES.filter((c) => !CASES.includes(c));
     for (const c of harvested) {
       expect(c.expectation).toBe('suspected');

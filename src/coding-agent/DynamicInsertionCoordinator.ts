@@ -21,7 +21,7 @@ import {
  *  - judge      ：裁决器（LLM）按「时机 × 内容对结果的影响」综合判的——唯一
  *                 判定路径，停/停支/续支的语义也归它，宿主只核实执行
  *  - passthrough：裁决器缺席/倒下时的原话直投（不猜，signals.netReason
- *                 说明原因；inputDecision.decisorOf 暂把它读作 judge）
+ *                 说明原因；decisorOf 独立桶，诊断面板不再误标成裁决）
  *  决策日志（inputDecision.ts）据此对账。 */
 
 /**

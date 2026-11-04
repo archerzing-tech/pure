@@ -6127,21 +6127,7 @@ body.window-maximized #boot-splash {
   word-break: break-word;
 }
 
-/* 事后审计的疑点（insertionAudit.ts）：契约字段漏报在决策那一刻看不见
-   （宿主已经不嗅措辞了），只能在日志里一眼标出来给人复核。 */
-.insertion-diag-entry.has-anomaly {
-  border-left: 2px solid var(--danger);
-  padding-left: 10px;
-}
-
-.insertion-diag-anomaly {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--danger);
-  word-break: break-word;
-}
-
-/* 场景徽章与展开的场景（2026-09-28）：「判错了」只有配上"在什么场景下判的"
+/* 场景徽章（2026-09-28）：「判错了」只有配上"在什么场景下判的"
    才可行动——同一句换场景能从错到对（我在西安 chatter→premise-change）。 */
 .insertion-diag-scene {
   font-size: 11px;
@@ -6153,68 +6139,6 @@ body.window-maximized #boot-splash {
   padding: 1px 8px;
   flex-shrink: 0;
   user-select: none;
-}
-
-.insertion-diag-scene-full {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--bg-hover);
-}
-
-/* 契约字段遵守率的走势（2026-09-28）：柱子高度就是那一批插话的疑点率。看的是
-   走势——一个总数分不出"一直就这样"与"最近才变坏"，而收割的价值只在走势里
-   才看得见。 */
-.insertion-diag-trend {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-light);
-}
-
-.insertion-diag-trend-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.insertion-diag-trend-label {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.insertion-diag-trend-caption,
-.insertion-diag-trend-rounds,
-.insertion-diag-trend-empty {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
-.insertion-diag-trend-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 26px;
-}
-
-.insertion-diag-trend-bar {
-  flex: 1 1 0;
-  min-width: 3px;
-  max-width: 14px;
-  background: var(--accent);
-  border-radius: 2px 2px 0 0;
-}
-
-.insertion-diag-trend-bar.has-anomaly {
-  background: var(--danger);
 }
 
 /* ── Update Status ── */

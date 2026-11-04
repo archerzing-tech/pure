@@ -34,57 +34,15 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ALL_CASES, DEFAULT_SCENARIO, SCENARIOS, aligns, mainHit, mechanicalHits, scenarioFor, type Case, type MechanicalHit } from '../src/coding-agent/insertionCorpus';
+import { ALL_CASES, DEFAULT_SCENARIO, SCENARIOS, scenarioFor, type Case } from '../src/coding-agent/insertionCorpus';
 import { classifyInsertion, type InsertionKind } from '../src/coding-agent/Planner';
 import { DeepSeekAnthropicAdapter } from '../src/adapter/deepseek/DeepSeekAnthropicAdapter';
 import type { LLMAdapter } from '../src/shared/types';
 
-function offlineReport(): void {
-  const mainRight: string[] = [];
-  const mainWrong: string[] = [];
-  const netRight: string[] = [];
-  const netWrong: string[] = [];
-
-  console.log('\n═══ 离线：机械路径会不会抢答，抢答的方向对不对 ═══\n');
-  for (const c of ALL_CASES) {
-    const hits = mechanicalHits(c.text);
-    const main = hits.find((h) => h.lane === 'main');
-    const nets = hits.filter((h) => h.lane === 'net');
-    const tag = (h: MechanicalHit) => `${h.name}→${h.gives}`;
-    const want = c.detail ?? c.kind;
-
-    if (main) {
-      (aligns(c, main.gives) ? mainRight : mainWrong)
-        .push(`「${c.text}」  ${tag(main)}  期望 ${want}\n      出处：${c.source}`);
-      continue;
-    }
-    if (nets.length > 0) {
-      (aligns(c, nets[0].gives) ? netRight : netWrong)
-        .push(`「${c.text}」  ${nets.map(tag).join(' + ')}  期望 ${want}\n      出处：${c.source}`);
-    }
-  }
-
-  const section = (title: string, rows: string[], note: string) => {
-    console.log(`${title}（${rows.length}）${note}`);
-    if (rows.length === 0) console.log('  （无）');
-    else rows.forEach((r) => console.log(`  ${r}\n`));
-  };
-
-  section('【仍在主路】机械快路径命中且方向正确', mainRight,
-    '\n —— 整停 / 点名停支 / 点名续支：人喊停不需要 deliberation，正则留着是对的\n');
-  section('【仍在主路】机械快路径命中但方向错', mainWrong,
-    '\n —— 每一句都是一个反向执行事故，必须留给裁决器\n');
-  section('【已降级】裁决器倒下时会被网接住，方向一致', netRight,
-    '\n —— 日常不参与；代价只落在裁决器超时/失败那一轮\n');
-  section('【已降级】裁决器倒下时会被网接住，方向会判偏', netWrong,
-    '\n —— 裁决器挂掉的那一轮，这些句子会被推到错的目的地\n');
-
-  console.log(`语料 ${ALL_CASES.length} 句（含诊断区审计收割 ${ALL_CASES.filter((c) => c.expectation === 'suspected').length} 句）。`);
-  console.log(`主路：命中 ${mainRight.length + mainWrong.length} 句，判错 ${mainWrong.length} 句`
-    + `（这就是把 main 也交给裁决器能拿到的全部收益）；`);
-  console.log(`降级：命中 ${netRight.length + netWrong.length} 句，方向偏差 ${netWrong.length} 句（只在裁决器倒下时兑现）。`);
-  console.log('取消类不再有宿主粗筛的兜底（已于 2026-09-28 移除），全部押在 cancels_part 上。\n');
-}
+// 离线通道（机械路径截胡面）已随 2026-10-28 框架改革刀 1 退役：机械快路径
+// 正则族整体删除、判定全归裁决器，「哪句会被正则抢答」的对象不存在了
+// （insertionCorpus 撤掉 mechanicalHits/mainHit 时本脚本没跟上，import 已删
+// 导出直到本次修复前一直是坏的）。裁决器契约遵守率的量测全在 --llm 通道。
 
 // ── 真跑裁决器（--llm）────────────────────────────────────────────────────
 
@@ -246,10 +204,8 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
   }
 
   // ── 契约遵守率：漏报与误报分开算（漏报 = 反向执行，误报 = 少排一个队）──
-  // 契约统计只算「裁决器主战场」的句子：命令族（detail 已定）本来就由快路径
-  // 接走，把裁决器单独问它们，它只能用 cancels_part 表达「停掉那一路」——那
-  // 不是误报，是同一个意思的另一种说法。
-  const judicable = judged.filter((r) => mainHit(r.c) === undefined);
+  // 机械快路径退役后全部句子都是裁决器主战场，不再剔除「命令族」。
+  const judicable = judged;
   // 收割段单独看契约字段：这正是它们被收进来的原因（当初就是这里漏报）。
   const harvested = rows.filter((r) => r.c.expectation === 'suspected');
   const harvestedJudged = harvested.filter((r) => r.kinds[0] !== null);
@@ -312,7 +268,7 @@ const fromArg = process.argv.indexOf('--from');
 const from = fromArg >= 0 ? Number(process.argv[fromArg + 1]) || 0 : 0;
 const pauseArg = process.argv.indexOf('--pause');
 const pauseMs = pauseArg >= 0 ? Number(process.argv[pauseArg + 1]) || 0 : 300;
-offlineReport();
+console.log(`语料 ${ALL_CASES.length} 句（含审计收割 ${ALL_CASES.filter((c) => c.expectation === 'suspected').length} 句）。机械路径截胡面的离线通道已随框架改革刀 1 退役；量裁决器请加 --llm。\n`);
 if (wantLlm) {
   const llm = resolveLlm();
   if (!llm) {
