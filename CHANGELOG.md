@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.1.4
+
+**执行器线收官（P2-3~P2-5 五刀）+ 插话诊断三单清账 + 注入面围栏卫生**
+
+执行器线三刀连落：截图进上下文（ToolResult.images 通道四处接线，视觉回环闭合）、呈现逃生舱（```html 围栏卡落盘 asset:// iframe 渲染，无 node 依赖 WebView 与 Bun 同码跑）、本地无 key API 服务全链打通（isLocalEndpoint 判定单源 + 空头净除）。P2-5 绞杀者三子刀收官：劫持检测跨语言双锁（数据锁比对 Rust 源码表 + 行为锁两侧同 fixtures）→ web_search 执行单源化（TS 单源编排 + 原语注入双端接线）→ 公共 API 解析器收敛（web_public_api.rs 1318 行全删，消费者图谱保三留守函数）→ path_policy 注入点上移（impl/pathPolicy.ts 单源 + PathPolicyFs 原语注入，三真实分叉收 Rust 权威语义，行为锁平台结构按语言可达性定：posix 段全平台、windowsOnly 段 TS 全跑/Rust cfg(windows)、expandTilde Rust cfg(unix)）。诊断面清账三单：replay 脚本 import 已删导出（离线通道随机械路径退役，--llm 契约遵守率通道保留）；passthrough 原话直投在诊断面板被误标成「裁决器」徽章（独立成桶细分文案，不把没判说成判了）；收割按钮恒收 0 不是 bug 而是正确终态没被 UI 跟上（审计疑点家族 2026-10-28 退役后 auditInsertionDecision 恒空）——按钮/疑点标签/趋势区/模块/CLI 脚本整链退役，存量收割语料资产保留。注入面围栏卫生：压缩摘要/rehydrate/记忆条目的长度截断可能停在 ``` 围栏中途，未闭合围栏会把之后的提示词吞进代码块读（渲染侧同族判例 0b5679f 的另一半）——补收栏修法内容无损，session_memory 逐条入口判定防条目间假配对。
+
 ## v4.1.3
 
 **双腿 P0+P1 八刀 + P2 执行器前两刀：模型自知、度量门、执行归一起步**
