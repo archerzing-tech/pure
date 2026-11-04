@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.1.3
+
+**双腿 P0+P1 八刀 + P2 执行器前两刀：模型自知、度量门、执行归一起步**
+
+「双腿走路」蓝图（docs/two-legs-plan-2026-11.md）P0 全落、P1 落其六、P2 开工两刀，余项（W1b-3 Responses 真机、W2b-2 矩阵真实 key、长时程 fixture）全被真机或真实 key 阻塞而非代码未完。自知腿（W1）：模型代际知识收进能力 manifest、manifest 空档由端点 /models 元数据自探测补齐（读数按 provider::model 缓存、换端点即失效）、能力事实走事件驱动 envFacts 注入无常驻行、预算档补已退役 moonshot-v1 系（窗口真值由模型 id 自描述）、内置 Anthropic 官方 provider。度量腿（W2）：评测报告补过程指标；发布门加 sanity 档——LLM 冒烟读数必进 release body（可见性门而非数字门，生效需 repo 设 PURE_EVAL_API_KEY）；frontier 档首两 fixture 落独立套件（装自我验证与契约传播，v5 基线表不动）。信噪比：web 工具提炼层两端接线、搜索 snippet 加帽、缓存截断不再静默。执行器线（W3/W4，D1 拍板=A=TS 单执行器）：git 五工具归一 TS 单源、run_argv 原语落地（Rust 面 3→1，契约测试单份两端生效）；browser/screenshot 工具落单源实现层——零 node 依赖 WebView 与 Bun 同码跑，共享 headless Chrome 会话常驻、5min 空闲关闭、死会话自愈，ToolRuntime 原语面扩到四（run_argv/resolveExecutable/launchHeadlessChrome/writeArtifact），Rust 新增 find_chrome/launch_chrome/save_artifact，不做 SSRF 拒绝与文件工具同契约、唯一纪律是不绑外部调试端口。W4 视觉闭环的执行面就位，截图进上下文（P2-3）为下一刀。
+
 ## v4.1.2
 
 **提示词审计 A/B/C 三批落地：真 bug 修复 + 教学搬进决策点 + 常驻面去重**
