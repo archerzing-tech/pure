@@ -36,11 +36,30 @@ describe('resolveModelCapability · 预算规则表', () => {
 
   it('does not let a custom provider id fabricate a family ceiling', () => {
     // provider 名里的自定义段是用户自由文本，子串只是命名习惯——旧 if 链对
-    // 这三组都无档（回落保守），迁移必须保真这个口径。尤其 moonshot-v1-8k：
-    // 真实 8k 窗口，曾被放宽匹配喂到 262k（超天花板 32 倍，每个请求都炸）。
+    // 这两组都无档（回落保守），迁移必须保真这个口径。
     expect(resolveModelCapability('kimi-gateway', 'foo-1').budget).toBeUndefined();
-    expect(resolveModelCapability('openrouter', 'moonshot-v1-8k').budget).toBeUndefined();
     expect(resolveModelCapability('my-glm-proxy', 'foo').budget).toBeUndefined();
+    // 模型名的证据是另一回事：moonshot-v1-8k 的窗口由 id 自描述（见下一条），
+    // 而它此前曾被 provider 名路径（openrouter 含 "moonshot"）喂到 262k——
+    // 真实 8k，超发 32 倍。「provider 名不给档、模型名自描述给真值」的边界
+    // 就是证据分层本身。
+  });
+
+  it('pins the retired moonshot-v1 series to the window its id names', () => {
+    expect(resolveModelCapability('openrouter', 'moonshot-v1-8k').budget)
+      .toEqual({ contextWindowTokens: 8_192, outputReserveTokens: 4_096 });
+    expect(resolveModelCapability('moonshot', 'moonshot-v1-32k').budget)
+      .toEqual({ contextWindowTokens: 32_768, outputReserveTokens: 8_192 });
+    expect(resolveModelCapability('moonshot', 'moonshot-v1-128k').budget?.contextWindowTokens).toBe(131_072);
+    // vision-preview 变体的尺寸段后面还有内容，\b 边界要照样命中。
+    expect(resolveModelCapability('openrouter', 'moonshot-v1-8k-vision-preview').budgetRuleId).toBe('moonshot-v1-legacy');
+    // 名字里没带尺寸的变体（-auto 等）：按最小档保守。
+    expect(resolveModelCapability('moonshot', 'moonshot-v1-auto').budget)
+      .toEqual({ contextWindowTokens: 8_192, outputReserveTokens: 4_096 });
+    // v1 规则不得吞掉在役的 K 系。
+    expect(resolveModelCapability('moonshot', 'kimi-k3').budgetRuleId).toBe('moonshot-kimi');
+    // provider-only 查询（空 model）不该落进 v1 的最小档，家族默认仍是 K 系兜底。
+    expect(resolveModelCapability('moonshot', '').budgetRuleId).toBe('moonshot-kimi');
   });
 
   it('still reaches family rules through the vendor model name or the built-in word', () => {

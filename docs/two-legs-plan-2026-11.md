@@ -120,6 +120,7 @@
 | `src/evaluation/reportCompare.ts` | `ReportComparison` 加可选 `process` 块（两边都有才比） | 新读数 |
 | `src/evaluation/__tests__/processMetrics.test.ts` | 新增：只聚合有读数的题、缺读数不稀释、旧报告不产生假 delta | 新测试 |
 | `src/shared/modelCapabilities.ts` | 复审修正（2026-11-04）：glm / qwen / moonshot / minimax / claude 五条规则的 provider 侧从 eitherIncludes 子串放宽收窄回旧链口径（providerIn 精确 id；providerIncludes 仅显式厂商词根 anthropic）。放宽会让 openrouter 上的 moonshot-v1-8k（真实 8k 窗口）拿到 262k 默认——预算错配的代价是每个请求超限失败，比「没默认值」贵；自定义 provider 的空档由 W1b-1 探测填，不靠猜名字 | 等价性回归 |
+| `src/shared/modelCapabilities.ts` | 数据编辑（2026-11-04，独立笔）：补已退役 moonshot-v1 系的预算档（`moonshot-v1-legacy` 规则，8k/32k/128k 三档 + 无尺寸变体落最小档）。窗口数字由模型 id 自描述（厂商策展命名硬事实），与被禁的 provider 名猜测是两种证据类型——收窄收的是证据类型，不是覆盖范围。现行定价页（.ai/.cn 双站核实）只剩 K2/K3、v1 规格表随页下架，输出上限按窗口一半保守预留（多预留只压紧输入，方向安全）；这批老模型至今挂在 openrouter 等网关，是收窄制造的真实空档 | 数据编辑（非猜测） |
 
 **验证**：`bun run typecheck` 通过；`bun test src/shared/__tests__ src/evaluation/__tests__` = 1301 pass / 0 fail；`bun run lint:conventions` 通过。
 

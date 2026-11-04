@@ -96,6 +96,22 @@ export const MODEL_BUDGET_RULES: readonly ModelBudgetRule[] = [
     ],
   },
   {
+    // 已退役的 v1 系（2023 上线；现行定价页只剩 K2/K3，v1 规格表已随页下架）。
+    // 窗口数字由模型 id 自描述（v1-8k/32k/128k，含 *-vision-preview 变体）——
+    // 这是厂商策展的命名硬事实，按数据入账不属猜测；这批老模型至今挂在
+    // openrouter 等网关上，是自定义 provider 的现实路径。输出上限已无从复核，
+    // 按窗口的一半保守预留：多预留只是压紧输入预算，方向安全。
+    id: 'moonshot-v1-legacy',
+    modelIncludes: ['moonshot-v1'],
+    tiers: [
+      { when: /-8k\b/, contextWindowTokens: 8_192, outputReserveTokens: 4_096 },
+      { when: /-32k\b/, contextWindowTokens: 32_768, outputReserveTokens: 8_192 },
+      { when: /-128k\b/, contextWindowTokens: 131_072, outputReserveTokens: 16_384 },
+      // 名字里没带尺寸的 v1 变体（如 moonshot-v1-auto）：按最小档保守。
+      { contextWindowTokens: 8_192, outputReserveTokens: 4_096 },
+    ],
+  },
+  {
     id: 'moonshot-kimi',
     providerIn: ['moonshot'],
     modelIncludes: ['kimi'],
