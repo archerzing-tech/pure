@@ -158,6 +158,21 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
     textFallback: 'projection',
   },
   {
+    id: 'html',
+    fence: ['html'],
+    family: 'escape',
+    title: 'HTML escape hatch',
+    trigger: 'Fenced block tagged html containing a complete self-contained HTML document fragment (inline <style>/<script> allowed)',
+    whenToUse:
+      'LAST RESORT when NO enumerated form can express the visualization: a bespoke interactive widget (clickable/animated), a layout the DSLs cannot shape, or a self-contained demo the user can play with. This is the escape hatch from the enumerated cards, not a shortcut past them.',
+    whenNotToUse:
+      'Any enumerated form that fits WINS: numbers -> chart, structure -> mermaid/paint, geography -> map, static organic shapes -> svg. Plain styled text -> markdown, not this card. Reaching for html because it "feels easier" than learning the right DSL is exactly the overuse this card guards against.',
+    delivery:
+      'Renders inline as a sandboxed iframe (asset:// - inline scripts RUN). Verify before trusting: save the same source to a file (write_file) and screenshot it (screenshot with path), look at the capture, then fix and re-emit - change -> capture -> judge -> repair, WITHOUT being asked. The iframe viewport is 480px tall with internal scrolling; size your layout to fit or scroll gracefully.',
+    surfaces: 'gui: sandboxed iframe (inline JS runs) | cli & channel: source shown as code',
+    textFallback: 'text',
+  },
+  {
     id: 'svg',
     fence: ['svg'],
     family: 'illustration',
@@ -385,8 +400,8 @@ function validateCustomCard(
   return null;
 }
 
-/** 内置围栏卡 id（校验与 markdown 注册共用）。 */
-const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math'];
+/** 内置围栏卡 id（校验与 markdown 注册共用）。导出供测试与自定义卡校验单源引用。 */
+export const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math', 'html'];
 
 /** form 参数 → 卡片：精确 id → 别名 → 族名 → 单 token 子串容错。空数组 = 未命中。 */
 export function matchPresentationCards(form: string): PresentationCard[] {

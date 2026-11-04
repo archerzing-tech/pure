@@ -58,6 +58,8 @@ export interface ToolRuntime {
    * one. Returns null when Chrome exits before reporting a port. */
   launchHeadlessChrome(chromePath: string, args: string[]): Promise<ChromeLaunch | null>;
   /** Persist tool-produced bytes under the host's artifact directory and
-   * return the absolute path written (~/.pure/cache/<kind>/ on both hosts). */
-  writeArtifact(kind: 'screenshot', basename: string, bytes: Uint8Array): Promise<string>;
+   * return the absolute path written (~/.pure/cache/<kind>/ on both hosts).
+   * 'screenshot' = browser captures; 'card' = the ```html escape-hatch card
+   * payload (W4-3), loaded back via asset:// in an iframe. */
+  writeArtifact(kind: 'screenshot' | 'card', basename: string, bytes: Uint8Array): Promise<string>;
 }

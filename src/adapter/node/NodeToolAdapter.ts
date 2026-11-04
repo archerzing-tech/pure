@@ -2955,7 +2955,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   /** ToolRuntime primitive: artifacts persist under ~/.pure/cache/<kind>/ on
    * both hosts (same tree the generated-image cache uses). */
-  async writeArtifact(kind: 'screenshot', basename: string, bytes: Uint8Array): Promise<string> {
+  async writeArtifact(kind: 'screenshot' | 'card', basename: string, bytes: Uint8Array): Promise<string> {
     const dir = join(homedir(), '.pure', 'cache', kind === 'screenshot' ? 'screenshots' : kind);
     mkdirSync(dir, { recursive: true });
     const path = join(dir, basename.replace(/[^a-zA-Z0-9._-]+/g, '-'));

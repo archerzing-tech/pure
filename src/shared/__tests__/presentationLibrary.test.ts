@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
+  FENCE_IDS,
   PRESENTATION_CARDS,
   PRESENTATION_FAMILIES,
   allPresentationCards,
@@ -102,11 +103,27 @@ describe('presentation library cards', () => {
     expect(byId.chart?.whenNotToUse).toContain('GFM table');
   });
 
+  it('html escape hatch guards against overuse (W4-3 判据两面)', () => {
+    // 逃生舱卡的判据必须两面都硬：whenToUse 只放行「枚举形式全部表达不了」，
+    // whenNotToUse 反向压住「觉得 DSL 难学就用 html」的捷径冲动——只说好处
+    // 的卡会催生过度可视化（判例：卡管深挖、机械注入管在场）。delivery 钉
+    // 「改→截→判→修」闭环：写盘 + screenshot 亲眼验证，不许盲交。
+    const card = PRESENTATION_CARDS.find((c) => c.id === 'html');
+    expect(card, 'html card exists').toBeDefined();
+    expect(card!.family).toBe('escape');
+    expect(card!.whenToUse).toContain('LAST RESORT');
+    expect(card!.whenNotToUse).toContain('WINS');
+    expect(card!.delivery).toContain('screenshot');
+    expect(card!.delivery).toContain('WITHOUT being asked');
+    expect(card!.textFallback).toBe('text');
+    expect(matchPresentationCards('html').some((c) => c.id === 'html')).toBe(true);
+  });
+
   it('fence fields follow the registry discipline (刀 2 渲染器注册化)', () => {
-    // 围栏形式（与 ui/markdown.ts FENCE_ROUTES 同源的那七张）必须声明 fence
+    // 围栏形式（与 ui/markdown.ts FENCE_ROUTES 同源的那批）必须声明 fence
     // tag 全集；非围栏形式（routing/image_gen/image/table/fold）不得声明——
-    // 双向同源锁在 src/ui/__tests__/fenceRegistry.test.ts。
-    const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math'];
+    // 双向同源锁在 src/ui/__tests__/fenceRegistry.test.ts。清单本身单源引用
+    // 库导出（2026-11-04：html 逃生舱加入后手写复刻漂移判例，改直接 import）。
     for (const card of PRESENTATION_CARDS) {
       if (FENCE_IDS.includes(card.id)) {
         expect(card.fence?.length, `${card.id} must claim its fence tags`).toBeGreaterThan(0);
@@ -131,14 +148,18 @@ describe('presentation library cards', () => {
         for (const tag of card.fence ?? []) {
           expect(FORM_PROJECTIONS[tag], `${card.id} tag "${tag}"`).toBeDefined();
         }
+      } else if (card.textFallback === 'text') {
+        // 显式 'text' 等价缺省（html 逃生舱 2026-11-04 起显式声明），同样
+        // 不得吹投影。
+        expect(card.surfaces, `${card.id}.surfaces`).not.toContain('projection');
       } else {
         expect(card.textFallback, `${card.id} should default to text`).toBeUndefined();
         expect(card.surfaces, `${card.id}.surfaces`).not.toContain('projection');
       }
     }
-    // 显式 'text' 声明等价缺省——目前七张围栏卡全显式，非围栏卡全缺省。
+    // 显式 'text' 声明等价缺省——围栏卡显式，非围栏卡全缺省。
     const declared = PRESENTATION_CARDS.filter((card) => card.textFallback !== undefined).map((card) => card.id);
-    expect(declared.sort()).toEqual(['chart', 'map', 'mermaid', 'paint', 'puml']);
+    expect(declared.sort()).toEqual(['chart', 'html', 'map', 'mermaid', 'paint', 'puml']);
   });
 
   it('carries the form-choice decision logic as a meta card (2026-11-02 用户定调)', () => {

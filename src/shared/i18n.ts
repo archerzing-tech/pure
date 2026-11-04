@@ -118,6 +118,13 @@ const translations: Record<Language, Record<string, string>> = {
     'map.expand': '展开地图',
     'map.close': '关闭',
 
+    // ── HTML escape-hatch card (```html blocks) ──
+    'htmlCard.title': 'HTML 卡',
+    'htmlCard.loading': '正在准备 HTML 卡…',
+    'htmlCard.sourceToggle': '查看源码',
+    'htmlCard.sourceHide': '收起源码',
+    'htmlCard.failed': 'HTML 卡落盘失败，已退回源码显示',
+
     // ── Paint (```paint blocks) ──
     'paint.parseFailed': '绘图数据格式无法识别，请检查是否符合 paint JSON 格式',
     'paint.empty': '绘图内容为空（shapes 为空或全部无效）',
@@ -1466,6 +1473,11 @@ const translations: Record<Language, Record<string, string>> = {
     'map.refresh': 'Refresh map',
     'map.sourceToggle': 'View data',
     'map.sourceHide': 'Hide data',
+    'htmlCard.title': 'HTML card',
+    'htmlCard.loading': 'Preparing HTML card…',
+    'htmlCard.sourceToggle': 'View source',
+    'htmlCard.sourceHide': 'Hide source',
+    'htmlCard.failed': 'HTML card persistence failed — showing source instead',
     'map.truncatedInterrupted': 'Generation was interrupted mid-block — this data was incomplete and has been dropped.',
     'map.expand': 'Expand map',
     'map.close': 'Close',

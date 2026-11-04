@@ -564,7 +564,7 @@ export class TauriToolAdapter implements ToolAdapter {
   /** ToolRuntime primitive: screenshots persist via the Rust save_artifact
    * command (it computes ~/.pure/cache/<kind>/ itself, matching the CLI
    * side's writeArtifact). */
-  async writeArtifact(kind: 'screenshot', basename: string, bytes: Uint8Array): Promise<string> {
+  async writeArtifact(kind: 'screenshot' | 'card', basename: string, bytes: Uint8Array): Promise<string> {
     let binary = '';
     for (const byte of bytes) binary += String.fromCharCode(byte);
     return await this.call('save_artifact', { kind, basename, dataBase64: btoa(binary) }) as string;

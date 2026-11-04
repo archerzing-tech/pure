@@ -84,6 +84,11 @@ describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
     expect(
       renderer.code({ text: '{"markers":[]}', lang: 'map', type: 'code', raw: 'x' } as never),
     ).toContain('map-slot');
+    // html 逃生舱（W4-3）：```html 围栏挂独立形态 slot（不经 diagram-slot
+    // 管线，map-slot 先例），落盘 + asset:// iframe 由 DOM 层 hydration 完成。
+    expect(
+      renderer.code({ text: '<h1>hi</h1>', lang: 'html', type: 'code', raw: 'x' } as never),
+    ).toContain('html-slot');
     // 完成渲染的 math 走 KaTeX（stream=false 只影响流式）。
     expect(
       renderer.code({ text: 'a^2+b^2=c^2', lang: 'math', type: 'code', raw: 'x' } as never),

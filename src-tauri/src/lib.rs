@@ -3888,7 +3888,8 @@ async fn launch_chrome(chrome_path: String, args: Vec<String>) -> Result<Option<
 /// (NodeToolAdapter.writeArtifact).
 #[tauri::command]
 async fn save_artifact(kind: String, basename: String, data_base64: String) -> Result<String, String> {
-    if kind != "screenshot" {
+    // 'card' = W4-3 呈现逃生舱的 ```html 卡落盘（asset:// iframe 加载的宿主）。
+    if kind != "screenshot" && kind != "card" {
         return Err(format!("save_artifact: unsupported kind {}", kind));
     }
     let safe: String = basename

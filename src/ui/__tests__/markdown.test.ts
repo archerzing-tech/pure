@@ -53,6 +53,47 @@ describe('map code blocks', () => {
   });
 });
 
+// ```html blocks render as the W4-3 escape-hatch slot: a standalone-form card
+// (map-slot precedent) that hydrates into a sandboxed asset:// iframe, with
+// the fenced source kept viewable and a degrade path when persistence fails.
+describe('html escape-hatch card (W4-3)', () => {
+  it('renders a ```html block as an .html-slot with source view, not a code block', () => {
+    const html = renderer.code({ text: '<h1>hi</h1>', lang: 'html', type: 'code', raw: '<h1>hi</h1>' } as never);
+    expect(html).toContain('class="html-slot"');
+    expect(html).toContain('data-html-state="loading"');
+    expect(html).toContain('class="html-frame-wrap"');
+    expect(html).toContain('class="html-source-toggle"');
+    expect(html).toContain('class="html-source"');
+    expect(html).toContain('data-html-raw');
+    expect(html).not.toContain('<pre><code');
+  });
+
+  it('keeps the degrade path honest: persist failure surfaces, basename stays hash-stable', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    // iframe hygiene: sandbox WITHOUT allow-same-origin (opaque origin — the
+    // card never reaches host DOM/storage), loaded via the same asset://
+    // conversion the GeneratedImage <img> uses.
+    expect(src).toContain(`frame.setAttribute('sandbox', 'allow-scripts')`);
+    expect(src).toContain('frame.src = assetUrlFor(String(path))');
+    // Persist failure degrades to the source view with a visible message,
+    // never silent and never a dead spinner.
+    expect(src).toContain(`setHtmlState(slot, 'error', t('htmlCard.failed'))`);
+    // Basename is pure FNV-1a hash: same source re-render overwrites the same
+    // file instead of piling up timestamped copies (comment/impl 同源判例).
+    expect(src).toContain('`card-${Math.abs(hashString(source)).toString(36)}.html`');
+    expect(src).not.toContain('card-${Date.now()}');
+    // Hydrated slots survive the streaming innerHTML swap (map 同款 preserve).
+    expect(src).toContain('function preserveLiveHtmlSlots');
+    expect(src).toContain('adoptPreservedHtmlSlots');
+  });
+
+  it('treats other languages as plain code blocks (html tag not over-eager)', () => {
+    const html = renderer.code({ text: 'const a = 1;', lang: 'javascript', type: 'code', raw: 'x' } as never);
+    expect(html).toContain('<pre><code');
+    expect(html).not.toContain('html-slot');
+  });
+});
+
 // `:::map … :::` container form (some clients / Windows emit this instead of a
 // ```map fenced block) must render as a map slot, identical to the fenced form.
 describe(':::map container fence compatibility', () => {

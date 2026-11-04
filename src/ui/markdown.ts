@@ -179,8 +179,8 @@ function svgSourcesHtml(sources: string[]): string {
 interface FenceRoute {
   /** 识别的全部围栏 tag（小写，含别名）。与卡的 `fence` 字段同源。 */
   tags: string[];
-  /** 视觉形式 id；DiagramKind 的会挂 `.diagram-slot`，map/math 各走独立通道。 */
-  kind: DiagramKind | 'map' | 'math';
+  /** 视觉形式 id；DiagramKind 的会挂 `.diagram-slot`，map/math/html 各走独立通道。 */
+  kind: DiagramKind | 'map' | 'math' | 'html';
   /** slot 构造（完成渲染与流式共用同一条——slot 栏在流式期就要挂载）。 */
   build: (source: string) => string;
   /** 流式期间是否同路。math=false 保真：流式期间按普通代码渲染（无图卡、
@@ -202,6 +202,11 @@ export const FENCE_ROUTES: readonly FenceRoute[] = [
   // ```math fences: models habitually wrap multi-line formulas this way —
   // render the whole body as one display formula instead of a code block.
   { tags: ['math', 'latex', 'tex'], kind: 'math', build: (s) => renderKatex(s, true), stream: false },
+  // W4-3 呈现逃生舱：枚举 DSL 全部表达不了的可视化，模型直出 HTML/JS。
+  // iframe 在 hydration 时才造（DOMPurify 会剥模板里的 iframe），宿主文档
+  // 的 CSP script-src 管不到 asset:// 子文档——源码经 save_artifact('card')
+  // 落盘后以 asset:// 加载，任意 JS 可跑。
+  { tags: ['html'], kind: 'html', build: htmlCardSlot, stream: true },
 ];
 
 /** 围栏 tag → 路由。tag 一律小写比较（langOf 已归一）。静态表查不到时落
@@ -2518,6 +2523,136 @@ function mapRawOf(slot: HTMLElement): string {
     ?? '';
 }
 
+// ── HTML escape-hatch card (```html, W4-3) ──
+// 呈现逃生舱：枚举 DSL（chart/map/paint/svg/mermaid/puml）都表达不了的可视
+// 化，模型直出任意 HTML/JS。独立形态 slot（同 map-slot 模式，不进 diagram-slot
+// 管线）：无重依赖、无 retry——hydration 只做「落盘 → asset:// iframe 加载」。
+// iframe 为什么 hydration 时才造：DOMPurify 会剥模板里的 iframe；而所有活组件
+// 都是 sanitize 之后才挂 DOM，这条路径已经过全量回归。为什么走 asset:// 而不
+// 是 srcdoc/blob:：宿主文档的 CSP script-src（'self'）会沿 srcdoc/blob 继承、
+// 拦掉卡里的 inline script；asset protocol 加载的是独立文档、无 CSP 头，卡里
+// 的任意 JS 才跑得起来（与 GeneratedImage 的 img-src asset:// 同一套基建）。
+// sandbox="allow-scripts"：卡与宿主本来就异 origin（asset.localhost），不给
+// same-origin 就无法触碰宿主 DOM——这是渲染正确性需要的隔离，不是安全加固。
+
+function htmlCardSlot(source: string): string {
+  return `<div class="html-slot" data-html-state="loading" data-html-raw="${attr(encodeRawAttr(source))}">` +
+    `<div class="map-toolbar">` +
+      `<span class="map-toolbar-title">${esc(t('htmlCard.title'))}</span>` +
+      `<div class="map-toolbar-actions">` +
+        `<button type="button" class="html-source-toggle" title="${attr(t('htmlCard.sourceToggle'))}" aria-label="${attr(t('htmlCard.sourceToggle'))}">${esc(t('htmlCard.sourceToggle'))}</button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="map-loading html-loading" role="status" aria-live="polite">` +
+      `<span class="diagram-loading-visual" aria-hidden="true"><span class="loading-sun">${'<i></i>'.repeat(12)}</span></span>` +
+      `<span class="diagram-loading-label">${esc(t('htmlCard.loading'))}</span>` +
+    `</div>` +
+    `<div class="html-frame-wrap"></div>` +
+    `<div class="html-error" role="alert"></div>` +
+    `<pre class="html-source"><code class="hljs language-html">${esc(source)}</code></pre>` +
+    `</div>`;
+}
+
+function htmlRawOf(slot: HTMLElement): string {
+  return slot.querySelector<HTMLElement>('.html-source code')?.textContent
+    ?? slot.getAttribute('data-html-raw')
+    ?? '';
+}
+
+function setHtmlState(slot: HTMLElement, state: 'loading' | 'ready' | 'error', message?: string): void {
+  slot.setAttribute('data-html-state', state);
+  slot.querySelector<HTMLElement>('.html-error')!.textContent = state === 'error' ? (message ?? '') : '';
+}
+
+/** One ```html slot: persist the source (save_artifact 'card' →
+ * ~/.pure/cache/card/) and load it back through asset:// in a sandboxed
+ * iframe. 480px tall with internal scrolling — the card is the frame; a
+ * taller/interactive layout is the model's job inside the frame. Persist
+ * failure (no Tauri, disk error) degrades to the source view, never silent. */
+async function hydrateHtmlCard(slot: HTMLElement): Promise<void> {
+  const source = htmlRawOf(slot);
+  const wrap = slot.querySelector<HTMLElement>('.html-frame-wrap');
+  if (!wrap) return;
+  let dataBase64 = '';
+  try {
+    dataBase64 = btoa(unescape(encodeURIComponent(source)));
+  } catch {
+    setHtmlState(slot, 'error', t('htmlCard.failed'));
+    return;
+  }
+  try {
+    const core = await loadTauriCore();
+    if (!core) throw new Error('Tauri core unavailable');
+    const basename = `card-${Math.abs(hashString(source)).toString(36)}.html`;
+    const path = await core.invoke('save_artifact', { kind: 'card', basename, dataBase64 });
+    const frame = document.createElement('iframe');
+    frame.className = 'html-frame';
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('title', t('htmlCard.title'));
+    // Same local-path → asset:// conversion the GeneratedImage <img> uses.
+    frame.src = assetUrlFor(String(path));
+    wrap.innerHTML = '';
+    wrap.appendChild(frame);
+    setHtmlState(slot, 'ready');
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    setHtmlState(slot, 'error', `${t('htmlCard.failed')}：${detail}`);
+  }
+}
+
+/** FNV-1a over UTF-8 bytes — basename stability for identical card sources
+ * (same source + re-render does not pile up files with fresh timestamps). */
+function hashString(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+async function renderHtmlCards(container: HTMLElement): Promise<void> {
+  const slots = Array.from(container.querySelectorAll<HTMLElement>('.html-slot:not([data-processed])'));
+  if (slots.length === 0) return;
+  for (const slot of slots) {
+    slot.setAttribute('data-processed', 'true');
+    void hydrateHtmlCard(slot);
+  }
+}
+
+function bindHtmlControls(container: HTMLElement): void {
+  for (const slot of Array.from(container.querySelectorAll<HTMLElement>('.html-slot'))) {
+    if (slot.hasAttribute('data-html-controls-bound')) continue;
+    slot.setAttribute('data-html-controls-bound', 'true');
+    const toggle = slot.querySelector<HTMLButtonElement>('.html-source-toggle');
+    toggle?.addEventListener('click', () => {
+      slot.classList.toggle('show-source');
+      toggle.textContent = slot.classList.contains('show-source')
+        ? t('htmlCard.sourceHide')
+        : t('htmlCard.sourceToggle');
+    });
+  }
+}
+
+/** Carry hydrated html slots across the innerHTML swap (same rationale as
+ * preserveLiveMapSlots: rebuilding would visibly flash painted → loading). */
+function preserveLiveHtmlSlots(container: HTMLElement): PreservedSlot[] {
+  const preserved: PreservedSlot[] = [];
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.html-slot'))) {
+    preserved.push({ raw: htmlRawOf(el), el });
+  }
+  return preserved;
+}
+
+function adoptPreservedHtmlSlots(container: HTMLElement, preserved: PreservedSlot[]): void {
+  for (const { raw, el } of preserved) {
+    const incoming = Array.from(container.querySelectorAll<HTMLElement>('.html-slot'))
+      .find((slot) => !slot.hasAttribute('data-processed') && htmlRawOf(slot) === raw);
+    if (!incoming) continue;
+    incoming.replaceWith(el);
+  }
+}
+
 /** A hydrated (or errored/in-flight) live slot that must survive an innerHTML
  *  swap. Shared by maps and the four diagram kinds. */
 interface PreservedSlot {
@@ -2987,6 +3122,11 @@ async function renderOneSlotInOrder(slot: HTMLElement): Promise<void> {
     setMapState(slot, 'loading');
     await yieldTwoFrames();
     await processMapSlot(slot, nextDiagramRenderVersion(slot), mod);
+    return;
+  }
+  if (slot.classList.contains('html-slot')) {
+    slot.setAttribute('data-processed', 'true');
+    await hydrateHtmlCard(slot);
   }
 }
 
@@ -3003,6 +3143,7 @@ async function renderAsyncBlocksInDocumentOrder(container: HTMLElement, timing: 
     await renderMapNodes(container);
     await renderPumlNodes(container);
     await renderMermaidNodes(container);
+    await renderHtmlCards(container);
     return;
   }
   const selector = [
@@ -3012,6 +3153,7 @@ async function renderAsyncBlocksInDocumentOrder(container: HTMLElement, timing: 
     '.chart-slot:not([data-processed])',
     '.paint-slot:not([data-processed])',
     '.map-slot:not([data-processed])',
+    '.html-slot:not([data-processed])',
     '.md-img-wrap:not([data-timing-pass])',
   ].join(',');
   const units = Array.from(container.querySelectorAll<HTMLElement>(selector))
@@ -3133,6 +3275,7 @@ export async function renderMarkdown(
   // answers. Finished slots with an identical payload are adopted back
   // untouched; still-loading ones re-render through the normal hydration.
   const preservedMaps = preserveLiveMapSlots(container);
+  const preservedHtml = preserveLiveHtmlSlots(container);
   const preservedDiagrams = preserveLiveDiagramSlots(container);
   const preservedImages = preserveLiveImageWraps(container);
   container.innerHTML = DOMPurify.sanitize(html, {
@@ -3145,6 +3288,7 @@ export async function renderMarkdown(
     ADD_URI_SAFE_ATTR: ['src'],
   });
   adoptPreservedMapSlots(container, preservedMaps);
+  adoptPreservedHtmlSlots(container, preservedHtml);
   adoptPreservedDiagramSlots(container, preservedDiagrams);
   adoptPreservedImageWraps(container, preservedImages);
   // Bind image viewers immediately after DOM replacement. Waiting until after
@@ -3184,6 +3328,7 @@ export async function renderMarkdown(
   // 5) Bind the post-render preview/source controls and diagram viewers.
   bindDiagramControls(container);
   bindMapControls(container);
+  bindHtmlControls(container);
   bindMermaidPopup(container);
   bindVectorPopup(container);
   bindPaintPopup(container);
@@ -3677,6 +3822,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
   // no listener it was dead weight. Both binders are idempotent (per-slot
   // data attributes), so re-running per tick is safe.
   bindMapControls(container);
+  bindHtmlControls(container);
   bindDiagramControls(container);
 }
 
