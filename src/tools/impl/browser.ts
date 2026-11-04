@@ -24,7 +24,8 @@
 // 达」同一契约，localhost/file:// 恰是「改→截→判→修」的核心场景。唯一的
 // 纪律是不绑定外部调试端口（port=0）。
 
-import { CdpSession, allChromeCandidates } from '../../channels/rasterize/headlessChrome';
+import { CdpSession } from '../../channels/rasterize/cdpSession';
+import { allChromeCandidates } from '../../channels/rasterize/chromeCandidates';
 import type { ToolRuntime } from '../runtime';
 
 const IDLE_CLOSE_MS = 5 * 60_000;

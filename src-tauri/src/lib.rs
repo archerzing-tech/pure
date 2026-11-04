@@ -3817,7 +3817,8 @@ async fn launch_chrome(chrome_path: String, args: Vec<String>) -> Result<Option<
     cmd.arg(format!("--user-data-dir={}", profile.display()));
     // Same PATH injection as execute_command: Finder-launched apps inherit a
     // minimal PATH; Chrome itself is passed as an absolute path but its
-    // helpers may want the probed dirs.
+    // helpers may want the probed dirs. Windows inherits a full PATH already.
+    #[cfg(unix)]
     cmd.env("PATH", probe_path());
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
