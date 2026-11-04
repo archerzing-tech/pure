@@ -16,6 +16,7 @@ export type ProviderId =
   | 'qwen'
   | 'glm'
   | 'moonshot'
+  | 'anthropic'
   | 'minimax'
   | 'openai'
   | 'openrouter'
@@ -332,6 +333,7 @@ export const PROVIDERS: readonly ProviderDef[] = [
   { id: 'glm', label: 'GLM', defaultModel: 'glm-5.3-flash', models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.2-flash'], i18nKey: 'provider.glm', baseURL: 'https://api.z.ai/api/coding/paas/v4', protocol: 'openai', deepSeekFamily: false },
   { id: 'moonshot', label: 'Moonshot', defaultModel: 'kimi-k3', models: ['kimi-k3', 'kimi-k2.6'], i18nKey: 'provider.moonshot', baseURL: 'https://api.moonshot.cn/v1', protocol: 'openai', deepSeekFamily: false },
   { id: 'minimax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', models: ['MiniMax-M2.7', 'MiniMax-M2'], i18nKey: 'provider.minimax', baseURL: 'https://api.minimaxi.com/anthropic', protocol: 'anthropic', deepSeekFamily: false },
+  { id: 'anthropic', label: 'Anthropic', defaultModel: 'claude-sonnet-5', models: ['claude-sonnet-5', 'claude-sonnet-4-5', 'claude-opus-5', 'claude-haiku-5'], i18nKey: 'provider.anthropic', baseURL: 'https://api.anthropic.com/v1', protocol: 'anthropic', deepSeekFamily: false },
   { id: 'openai', label: 'OpenAI', defaultModel: 'gpt-5.2', models: ['gpt-5.2', 'gpt-4o-mini', 'o3-mini'], i18nKey: 'provider.openai', baseURL: 'https://api.openai.com/v1', protocol: 'openai', deepSeekFamily: false, imageGenModel: 'gpt-image-1' },
   { id: 'openrouter', label: 'OpenRouter', defaultModel: 'openai/gpt-4o-mini', models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-r1'], i18nKey: 'provider.openrouter', baseURL: 'https://openrouter.ai/api/v1', protocol: 'openai', deepSeekFamily: false },
   { id: 'nvidia', label: 'NVIDIA', defaultModel: 'meta/llama-3.1-8b-instruct', models: ['meta/llama-3.1-8b-instruct', 'deepseek-ai/deepseek-r1', 'mistralai/mixtral-8x7b-instruct'], i18nKey: 'provider.nvidia', baseURL: 'https://integrate.api.nvidia.com/v1', protocol: 'openai', deepSeekFamily: false },
@@ -638,7 +640,9 @@ export function baseURLFor(id: string): string {
 
 /** Infer the wire protocol from a configured endpoint. */
 export function protocolForURL(baseURL: string | undefined | null): Exclude<LLMProtocol, 'auto'> {
-  return /(?:\/api\/anthropic|\/anthropic(?:\/|$))/i.test(baseURL?.trim() ?? '')
+  // /anthropic 路径段（minimax / deepseek 兼容端点）与官方域（api.anthropic.com）
+  // 都是厂商事实；其余端点默认 openai 兼容（用户可显式覆盖协议）。
+  return /(?:\/anthropic(?:\/|$)|anthropic\.com)/i.test(baseURL?.trim() ?? '')
     ? 'anthropic'
     : 'openai';
 }

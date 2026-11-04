@@ -505,6 +505,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.addedConfig': '{name} 已添加 — 点击卡片即可启用',
 
     // ── Provider options ──
+    'provider.anthropic': 'Anthropic',
     'provider.deepseek-openai': 'DeepSeek',
     'provider.qwen': '通义千问 (Tongyi)',
     'provider.glm': '智谱 GLM (Zhipu)',
@@ -1856,6 +1857,7 @@ const translations: Record<Language, Record<string, string>> = {
     'llm.custom.addedConfig': '{name} added — click the card to enable it',
 
     // ── Provider options ──
+    'provider.anthropic': 'Anthropic',
     'provider.deepseek-openai': 'DeepSeek',
     'provider.qwen': 'Qwen (Tongyi)',
     'provider.glm': 'GLM (Zhipu)',

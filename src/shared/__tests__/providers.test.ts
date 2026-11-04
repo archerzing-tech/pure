@@ -112,9 +112,8 @@ describe('resolvePromptBudget', () => {
         combos.push({ id: provider.id, model });
       }
     }
-    // anthropic ships budget defaults but sits outside PROVIDERS.
-    combos.push({ id: 'anthropic', model: 'claude-sonnet-5' });
-    combos.push({ id: 'anthropic', model: 'claude-sonnet-4-5' });
+    // anthropic is now a built-in provider — its model library rides the
+    // PROVIDERS loop above (W1b-2), so the fleet guard covers it implicitly.
     expect(combos.length).toBeGreaterThanOrEqual(20);
     for (const { id, model } of combos) {
       const budget = resolvePromptBudget({ provider: id, model });
@@ -456,6 +455,8 @@ describe('text-to-image capability detection', () => {
     expect(protocolForURL('https://api.minimaxi.com/anthropic')).toBe('anthropic');
     expect(protocolForURL('https://api.minimaxi.com/anthropic/')).toBe('anthropic');
     expect(protocolForURL('https://api.deepseek.com/anthropic')).toBe('anthropic');
+    // 官方域也是厂商事实（W1b-2 内置后）。
+    expect(protocolForURL('https://api.anthropic.com/v1')).toBe('anthropic');
     expect(protocolForURL('https://api.openai.com/v1')).toBe('openai');
     expect(protocolForURL('https://openrouter.ai/api/v1')).toBe('openai');
     expect(protocolForURL('')).toBe('openai');
@@ -480,7 +481,7 @@ describe('text-to-image capability detection', () => {
   });
 
   it('ships the 8 built-in providers with the official endpoints and model libraries', () => {
-    expect(PROVIDERS).toHaveLength(8);
+    expect(PROVIDERS).toHaveLength(9);
     expect(baseURLFor('moonshot')).toBe('https://api.moonshot.cn/v1');
     expect(baseURLFor('minimax')).toBe('https://api.minimaxi.com/anthropic');
     expect(baseURLFor('openai')).toBe('https://api.openai.com/v1');
