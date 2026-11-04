@@ -17,7 +17,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fnv1a64, normalizeQuery, searchCacheKey } from '../../tools/impl/webSearch';
+import { fnv1a64, searchCacheKey } from '../../tools/impl/webSearch';
+import { publicApiCacheKey } from '../../tools/impl/publicApi';
 
 /** Maximum number of entries before oldest-first eviction. */
 export const MAX_ENTRIES = 200;
@@ -59,23 +60,17 @@ export function hashKey(parts: string[]): string {
   return fnv1a64(parts);
 }
 
-// normalizeQuery / searchCacheKey 的单源在 tools/impl/webSearch（P2-5）：
-// 同一 FNV-1a、同一键序，盘上缓存键完全兼容。
-export { normalizeQuery, searchCacheKey };
-
-
+// searchCacheKey 的单源在 tools/impl/webSearch、publicApiCacheKey 的单源在
+// tools/impl/publicApi（P2-5 收敛刀）：同一 FNV-1a、同一键序，盘上缓存键
+// 完全兼容。
+export { searchCacheKey };
+export { publicApiCacheKey };
 
 /** Key for URL content (web_scrape / web_fetch) — selector and the maxChars
  * bucket are part of the cache identity because they change the output. */
 export function pageCacheKey(url: string, selector: string | undefined, maxChars: number): string {
   const bucket = maxChars <= 20000 ? '20k' : maxChars <= 50000 ? '50k' : 'big';
   return hashKey(['page', url.trim(), selector ?? '', bucket]);
-}
-
-/** Key for direct public-API outcomes (query + optional forced category +
- * location — weather answers differ by city). */
-export function publicApiCacheKey(query: string, category: string | undefined, location: string | undefined): string {
-  return hashKey(['publicapi', category ?? '', normalizeQuery(query), location ?? '']);
 }
 
 export class WebCache {

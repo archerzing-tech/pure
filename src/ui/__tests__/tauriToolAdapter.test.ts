@@ -140,10 +140,10 @@ function fakePage(body: string): Record<string, unknown> {
   return { status: 200, finalUrl: 'https://example.org/', contentType: 'text/html', setCookie: null, bodyBase64: btoa(body) };
 }
 
-/** 单源编排的 mock invoke 公共分流：Tier-2 fast path miss + 缓存 miss。
+/** 单源编排的 mock invoke 公共分流：缓存 miss（fast path 与搜索共用）。
  * 返回 null 让调用方落到各自的 fetch_page 应答逻辑。 */
 function searchMiss(command: string): boolean {
-  return command === 'direct_public_api' || command === 'web_cache_get';
+  return command === 'web_cache_get';
 }
 
 describe('create_document save path', () => {
@@ -280,24 +280,24 @@ describe('dynamic capability tools', () => {
 });
 
 describe('Tauri Tier-2/3 web tool execution paths', () => {
-  it('forwards web_public_api with the search keys, location, and searchOnMiss', async () => {
-    let seen: Record<string, unknown> = {};
+  it('web_public_api 直查走 TS 单源三原语（fetch_page + web_cache IPC），不再透传 Rust command', async () => {
+    const seenCommands: string[] = [];
     const invoke = async (command: string, args?: Record<string, unknown>) => {
-      expect(command).toBe('web_public_api');
-      seen = args ?? {};
-      return '[Frankfurter (ECB)] 1 USD = 7.2 CNY';
+      seenCommands.push(command);
+      if (command === 'fetch_page') {
+        expect(String(args?.url)).toContain('api.frankfurter.app');
+        return fakePage(JSON.stringify({ rates: { CNY: 7.2 }, date: '2026-08-16' }));
+      }
+      if (command === 'web_cache_get' || command === 'web_cache_set') return null;
+      throw new Error(`unexpected command: ${command}`);
     };
     const result = await new TauriToolAdapter('/ws', 'tvly-1', 'serper-2', '上海', invoke).execute(toolCall('web_public_api', { query: '1 usd to cny' }));
     expect(result.success).toBe(true);
     expect(String(result.result)).toContain('[Frankfurter (ECB)]');
-    expect(seen).toMatchObject({
-      workspace: '/ws',
-      query: '1 usd to cny',
-      apiKey: 'tvly-1',
-      serperApiKey: 'serper-2',
-      location: '上海',
-      searchOnMiss: true,
-    });
+    // 透传 command 已退役：单源接线只允许触碰三个原语。
+    expect(seenCommands).not.toContain('web_public_api');
+    expect(seenCommands).toContain('fetch_page');
+    expect(seenCommands).toContain('web_cache_set');
   });
 
   it('forwards web_scrape with the selector and maxChars contract', async () => {
@@ -652,15 +652,26 @@ describe('Tauri egress routing', () => {
     expect(seen).toContain(PROXY);
   });
 
-  it('web_public_api 同样按出口面决策，而不是代理永远优先', async () => {
-    const seen: Array<string | undefined> = [];
-    const invoke = async (_command: string, args?: Record<string, unknown>) => {
-      seen.push(args?.proxyUrl as string | undefined);
-      return '1 USD = 7.2 CNY';
+  it('web_public_api 直查用首选出口，miss 升级搜索按出口面换路', async () => {
+    quota.clear();
+    resetSearchCookieJar();
+    const seen: Array<string | null> = [];
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'web_cache_set') return null;
+      if (searchMiss(command)) return null;
+      if (command === 'fetch_page') {
+        seen.push((args?.proxyUrl ?? null) as string | null);
+        throw new Error('request: error sending request');
+      }
+      throw new Error(`unexpected command: ${command}`);
     };
     const adapter = new TauriToolAdapter('/ws', 'tvly-1', '', '上海', invoke, '', PROXY);
-    await adapter.execute(toolCall('web_public_api', { query: '1 usd to cny' }));
-    expect(seen).toEqual(['']);
+    const result = await adapter.execute(toolCall('web_public_api', { query: '1 usd to cny' }));
+    // 直查一次（首选出口=直连）→ miss → searchOnMiss 升级搜索扇出：直连全灭
+    // 后整轮改走代理（出口面决策与 web_search 同一份 runRoutedSurface）。
+    expect(seen[0]).toBeNull();
+    expect(seen).toContain(PROXY);
+    expect(result.success).toBe(false);
   });
 
   it('execute_command 的子进程代理来自 command 出口面决策，而非裸配置值', async () => {

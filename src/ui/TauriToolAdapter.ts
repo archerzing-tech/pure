@@ -8,8 +8,9 @@ import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { runGitTool, type GitToolName } from '../tools/impl/git';
 import { runBrowserTool, runScreenshotTool } from '../tools/impl/browser';
+import { cachedDirectPublicApi } from '../tools/impl/publicApi';
 import { runWebSearch } from '../tools/impl/webSearch';
-import type { PageFetchInit, PageFetchResult } from '../tools/impl/webSearch';
+import type { PageFetchFn, PageFetchInit, PageFetchResult } from '../tools/impl/webSearch';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../tools/runtime';
 import { READ_FILE_HEAD_LINES } from '../shared/readFileHead';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
@@ -981,12 +982,10 @@ export class TauriToolAdapter implements ToolAdapter {
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
-  /** web_search 单源编排（tools/impl/webSearch）的 GUI 接线：编排、cookie
-   * jar、CJK 相关性门、缓存键全部与 CLI 共用同一份 TS 实现；本方法只提供
-   * 三个原语——网络走 Rust fetch_page（reqwest + 学习到的 proxyUrl），env
-   * 只映射 Settings 三值，缓存走 Rust 的 WebCache（与 CLI 共盘同键）。 */
-  private async searchViaSingleSource(query: string, maxResults: number, proxyUrl: string, attempt = 0): Promise<string> {
-    const fetchPage = async (url: string, init?: PageFetchInit): Promise<PageFetchResult> => {
+  /** Rust fetch_page command 的 PageFetchFn 包装（web_search 与公共 API
+   *  直查共用）：reqwest 透传 + base64 解码 + 学习到的 proxyUrl。 */
+  private makeIpcFetchPage(proxyUrl: string): PageFetchFn {
+    return async (url, init) => {
       const raw = await this.call('fetch_page', {
         url,
         headers: init?.headers && Object.keys(init.headers).length > 0 ? init.headers : null,
@@ -1006,6 +1005,26 @@ export class TauriToolAdapter implements ToolAdapter {
         body: bytes.subarray(0, written.length),
       };
     };
+  }
+
+  /** web_cache IPC 的 deps 片段（web_search 与公共 API 直查共用同一份
+   *  Rust WebCache，键与 CLI 共盘）。 */
+  private webCacheDeps(): { cacheGet: (key: string) => Promise<string | undefined>; cacheSet: (key: string, value: string, ttlMs: number) => void } {
+    return {
+      cacheGet: async (key) => {
+        const hit = await this.call('web_cache_get', { key }) as string | null;
+        return hit ?? undefined;
+      },
+      cacheSet: (key, value, ttlMs) => { void this.call('web_cache_set', { key, value, ttlMs }); },
+    };
+  }
+
+  /** web_search 单源编排（tools/impl/webSearch）的 GUI 接线：编排、cookie
+   * jar、CJK 相关性门、缓存键全部与 CLI 共用同一份 TS 实现；本方法只提供
+   * 三个原语——网络走 Rust fetch_page（reqwest + 学习到的 proxyUrl），env
+   * 只映射 Settings 三值，缓存走 Rust 的 WebCache（与 CLI 共盘同键）。 */
+  private async searchViaSingleSource(query: string, maxResults: number, proxyUrl: string, attempt = 0): Promise<string> {
+    const fetchPage = this.makeIpcFetchPage(proxyUrl);
     // WebView 无 process.env：API 后端凭据只能来自 Settings → Tools 的三值。
     // EXA / JINA 在 GUI 无配置渠道，显式不启用（env 返回空即跳过这两个后端）。
     const env = (key: string): string => {
@@ -1017,11 +1036,7 @@ export class TauriToolAdapter implements ToolAdapter {
     const outcome = await runWebSearch(query, maxResults, {
       fetchPage,
       env,
-      cacheGet: async (key) => {
-        const hit = await this.call('web_cache_get', { key }) as string | null;
-        return hit ?? undefined;
-      },
-      cacheSet: (key, value, ttlMs) => { void this.call('web_cache_set', { key, value, ttlMs }); },
+      ...this.webCacheDeps(),
     }, { ignoreCooldown: attempt > 0 });
     // ok:false（全后端网络级失败）按旧 Rust command 的 Err 语义上抛，交给
     // runRoutedSurface 换路重试；ok:true（含空结果附注）原样返回文本。
@@ -1029,19 +1044,19 @@ export class TauriToolAdapter implements ToolAdapter {
     return outcome.output;
   }
 
-  /** Tier-2 fast path 的 GUI 直连：透传 Rust 内部 cached_direct_public_api
-   *（结构化 Option，不玩 miss 文案匹配）。任何异常都算 miss，由调用方静默
-   * 落回完整编排。 */
-  private async fastPathDirectApi(query: string, proxyUrl: string): Promise<string | null> {
+  /** Tier-2 结构化直查（tools/impl/publicApi 单源）的 GUI 接线：解析器栈
+   *  与 CLI 共用同一份 TS 实现（分类器/10 resolver/缓存键），缓存读写走
+   *  Rust WebCache（与 CLI 共盘同键）。命中返回 fast-path 文本；miss（非
+   *  结构化意图或全后端失败）与任何异常都返回 null，由调用方静默落回
+   *  完整编排。 */
+  private async directPublicApi(query: string, category: string | undefined, proxyUrl: string): Promise<string | null> {
     try {
-      const hit = await this.call('direct_public_api', {
-        query,
-        category: null,
-        location: this.location || null,
-        proxyUrl: proxyUrl || null,
-      }) as { source: string; text: string; cached: boolean } | null;
-      if (!hit) return null;
-      return `${hit.cached ? '[cached] ' : ''}[${hit.source}] ${hit.text}`;
+      const { outcome, cached } = await cachedDirectPublicApi(query, category, this.location, {
+        fetchPage: this.makeIpcFetchPage(proxyUrl),
+        ...this.webCacheDeps(),
+      });
+      if (!outcome) return null;
+      return `${cached ? '[cached] ' : ''}[${outcome.source}] ${outcome.text}`;
     } catch {
       return null;
     }
@@ -2050,7 +2065,7 @@ export class TauriToolAdapter implements ToolAdapter {
           // a real search. The research surfaces below call searchViaSingleSource
           // directly, so this fast path never hijacks research queries.
           const searchQuery = String(args.query ?? '');
-          const direct = await this.fastPathDirectApi(searchQuery, netRouteSurfacePair('web_search', this.proxyUrl).proxyUrl);
+          const direct = await this.directPublicApi(searchQuery, undefined, netRouteSurfacePair('web_search', this.proxyUrl).proxyUrl);
           if (direct !== null) {
             return { id: toolCall.id, toolName: name, result: direct, success: true, duration: Date.now() - start };
           }
@@ -2098,21 +2113,24 @@ export class TauriToolAdapter implements ToolAdapter {
           }
         }
         case 'web_public_api': {
-          // Structured direct lookups (Tier-2) with the same search keys so
-          // searchOnMiss escalation hits Serper/Tavily first, like web_search.
-          // 同样是「多后端 + searchOnMiss 升级」的扇出，出口面决策。
-          const data = await this.runRoutedSurface('web_public_api', (proxyUrl) => this.call('web_public_api', {
-            workspace: ws,
-            query: String(args.query ?? ''),
-            category: typeof args.category === 'string' ? args.category : null,
-            location: this.location,
-            apiKey: this.tavilyApiKey,
-            serperApiKey: this.serperApiKey,
-            searchOnMiss: args.searchOnMiss !== false,
-            proxyUrl,
-            searxngUrl: this.searxngUrl || null,
-          }) as Promise<string>);
-          return { id: toolCall.id, toolName: name, result: data, success: true, duration: Date.now() - start };
+          // Tier-2 直查：结构化意图经 TS 单源解析器（与 CLI 同一份 impl，
+          // 缓存共盘）。直查不换路——换路语义属于搜索扇出，单源内部的
+          // geocode 冷却 / fallback 链自管降级。
+          const query = String(args.query ?? '').trim();
+          if (!query) return researchFailure(toolCall.id, name, start, 'web_public_api query must not be empty');
+          const category = typeof args.category === 'string' ? args.category : undefined;
+          const direct = await this.directPublicApi(query, category, netRouteSurfacePair('web_public_api', this.proxyUrl).proxyUrl);
+          if (direct !== null) {
+            return { id: toolCall.id, toolName: name, result: direct, success: true, duration: Date.now() - start };
+          }
+          // L2→L1 自动升级：直查无果 fall through 到搜索（searchOnMiss:false
+          // 退出）——搜索扇出走出口面决策，attempt>0 时 ignoreCooldown。
+          if (args.searchOnMiss !== false) {
+            const search = await this.runRoutedSurface('web_public_api', (proxyUrl, attempt) =>
+              this.searchViaSingleSource(query, 8, proxyUrl, attempt));
+            return { id: toolCall.id, toolName: name, result: search, success: true, duration: Date.now() - start };
+          }
+          return researchFailure(toolCall.id, name, start, `No structured-data source matched "${query}" and web search also failed. web_public_api covers weather/geocode/news/wiki/IP/FX/stock/GitHub lookups — for anything else use researcher_web instead of retrying this tool with the same query (auto-fallback to search is off when searchOnMiss:false).`);
         }
         case 'web_scrape': {
           // 与 web_fetch 同一个执行器：首选路由 → 网络类失败/劫持页 → 反向兜底。

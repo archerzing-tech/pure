@@ -8,6 +8,7 @@ import {
   runWebSearch,
   quota,
   resetSearchCookieJar,
+  resultsRelevant,
   type PageFetchResult,
   type SearchNetDeps,
 } from '../webSearch';
@@ -144,5 +145,45 @@ describe('runWebSearch 编排契约', () => {
     expect(stored).not.toBeNull();
     expect(stored!.value).toContain('https://rust-lang.org/');
     expect(stored!.ttlMs).toBe(15 * 60 * 1000);
+  });
+});
+
+describe('resultsRelevant 纯函数判例（原 Rust relevance_gate 行为锁随收敛刀搬 TS）', () => {
+  // 2026-11-03 真机案例 session_1793706272041_1：cn.bing.com 用天眼查
+  // 企业/税号页回答「西安未来7天天气预报」。查询的显著 bigram
+  // 西安/安未/天天/天气/气预/预报 在垃圾集 0 覆盖 → 拒收，竞速滚动到
+  // 下一个后端，而不是把诱发反复搜索的垃圾递给模型。
+  const garbage = [
+    {
+      title: '南方电网公司企业信息免费查询平台_年报/公示信息查询 - 天眼查',
+      snippet: '南方电网公司 热门公司有哪些？天眼查热门公司频道为您提供南方电网公司企业查询、公司查询、工商信息查询',
+      url: 'https://www.tianyancha.com/8509c0',
+    },
+    {
+      title: '至本医疗科技（上海）有限公司税号查询_纳税人识别号',
+      snippet: '至本医疗科技 (上海) 有限公司，成立于2016年，位于上海市',
+      url: 'https://tax.tianyancha.com/3052820770',
+    },
+  ];
+
+  it('0 覆盖的垃圾集被拒收', () => {
+    expect(resultsRelevant('西安未来7天天气预报', garbage)).toBe(false);
+  });
+
+  it('覆盖 ≥2 个显著 bigram 的真实结果被接受', () => {
+    const real = [{
+      title: '西安天气预报7天查询',
+      snippet: '西安未来7天天气预报，今日多云，气温 8~14°C',
+      url: 'https://www.weather.com.cn/xian7d',
+    }];
+    expect(resultsRelevant('西安未来7天天气预报', real)).toBe(true);
+  });
+
+  it('显著 bigram <2 的查询恒接受（无法判断）', () => {
+    expect(resultsRelevant('的了吗', garbage)).toBe(true);
+  });
+
+  it('非 CJK 查询恒接受', () => {
+    expect(resultsRelevant('rust async runtime', garbage)).toBe(true);
   });
 });
