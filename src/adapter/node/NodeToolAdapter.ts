@@ -2971,7 +2971,12 @@ export class NodeToolAdapter implements ToolAdapter {
       const outcome = name === 'browser'
         ? await runBrowserTool(args, this)
         : await runScreenshotTool(args, this);
-      return { id: toolCallId, toolName: name, result: outcome.output, success: outcome.ok, duration: Date.now() - start };
+      // W4-2: the screenshot rides ToolResult.images so the engine folds it
+      // into the next tool message and the model actually sees the page.
+      const images = outcome.screenshot
+        ? [{ dataUrl: outcome.screenshot.dataUrl, mimeType: outcome.screenshot.mimeType, path: outcome.screenshot.path }]
+        : undefined;
+      return { id: toolCallId, toolName: name, result: outcome.output, success: outcome.ok, duration: Date.now() - start, images };
     } catch (err) {
       return this.fail(null, start, err instanceof Error ? err.message : 'browser tool failed', name);
     }

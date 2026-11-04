@@ -13979,6 +13979,47 @@ fn anthropic_image_blocks(message: &serde_json::Value) -> serde_json::Value {
     converted
 }
 
+/// W4-2: tool 消息（openai wire 形状）→ anthropic tool_result block。带截图
+/// 的 tool 消息由 TS mapMessages 折成 content 数组（text + image_url parts），
+/// 这里重排成 tool_result 的 block 数组：text 在前、data URI 图经
+/// data_uri_to_anthropic_source 改写为 image block；改写失败的 part 原样保留
+/// ——与 anthropic_image_blocks 同一哲学：宁可让服务端报错也不静默丢图。
+/// 空文本 part 跳过（anthropic 拒收空 text block）；全部 block 为空时回落空
+/// 字符串。纯 string content 保持旧形状。
+fn anthropic_tool_result(message: &serde_json::Value) -> serde_json::Value {
+    let tool_use_id = message.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
+    let content_value = message.get("content").cloned().unwrap_or(serde_json::Value::Null);
+    let content = if let Some(parts) = content_value.as_array() {
+        let mut blocks: Vec<serde_json::Value> = Vec::new();
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    blocks.push(serde_json::json!({"type":"text","text":text}));
+                }
+                continue;
+            }
+            if let Some(url) = part.get("image_url").and_then(|w| w.get("url")).and_then(|v| v.as_str()) {
+                match data_uri_to_anthropic_source(url) {
+                    Some(source) => blocks.push(serde_json::json!({"type":"image","source":source})),
+                    None => blocks.push(part.clone()),
+                }
+            }
+        }
+        if blocks.is_empty() {
+            serde_json::Value::String(String::new())
+        } else {
+            serde_json::Value::Array(blocks)
+        }
+    } else {
+        serde_json::Value::String(content_value.as_str().unwrap_or("").to_string())
+    };
+    serde_json::json!({
+        "type":"tool_result",
+        "tool_use_id":tool_use_id,
+        "content":content,
+    })
+}
+
 /// data URI（data:<media type>[;base64],<payload>）→ anthropic base64 image
 /// source。非 data: 前缀、缺逗号、空 payload 都返回 None，调用方原样保留该
 /// block。media type 缺省回落 image/png——TS 面的 mimeType 字段不进 wire，
@@ -14237,11 +14278,7 @@ async fn chat_stream(
                 continue;
             }
             if role == "tool" {
-                let result = serde_json::json!({
-                    "type":"tool_result",
-                    "tool_use_id":message.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "content":message.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                });
+                let result = anthropic_tool_result(message);
                 if let Some(last) = messages.last_mut() {
                     if last.get("role").and_then(|v| v.as_str()) == Some("user") {
                         let content = last.get_mut("content").and_then(|v| v.as_array_mut());
@@ -19574,6 +19611,49 @@ mod session_stats_tests {
         // 无图的 string content 消息（绝大多数 user turn）原样返回。
         let plain = serde_json::json!({ "role": "user", "content": "只问一句" });
         assert_eq!(anthropic_image_blocks(&plain), plain);
+    }
+
+    #[test]
+    fn anthropic_tool_result_reshapes_wire_array_into_block_array() {
+        // W4-2 带截图的 tool 消息（TS mapMessages 产物）→ text + image blocks。
+        let shaped = anthropic_tool_result(&serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                { "type": "text", "text": "Screenshot saved" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+            ],
+        }));
+        assert_eq!(shaped["type"], "tool_result");
+        assert_eq!(shaped["tool_use_id"], "call_1");
+        assert_eq!(shaped["content"][0], serde_json::json!({"type":"text","text":"Screenshot saved"}));
+        assert_eq!(shaped["content"][1]["type"], "image");
+        assert_eq!(shaped["content"][1]["source"]["media_type"], "image/png");
+        assert_eq!(shaped["content"][1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn anthropic_tool_result_keeps_string_content_and_skips_empty_text() {
+        // 无图 string content：旧形状原样。
+        let plain = anthropic_tool_result(&serde_json::json!({
+            "role": "tool", "tool_call_id": "c2", "content": "plain",
+        }));
+        assert_eq!(plain["content"], "plain");
+
+        // 空文本 part 跳过（anthropic 拒收空 text block）；全空回落空串。
+        let empties = anthropic_tool_result(&serde_json::json!({
+            "role": "tool", "tool_call_id": "c3",
+            "content": [ { "type": "text", "text": "" } ],
+        }));
+        assert_eq!(empties["content"], "");
+
+        // 非 data URI 的 image_url（https 直链）：改写不出来，原样保留不静默丢。
+        let https = anthropic_tool_result(&serde_json::json!({
+            "role": "tool", "tool_call_id": "c4",
+            "content": [ { "type": "image_url", "image_url": { "url": "https://x/cat.png" } } ],
+        }));
+        assert_eq!(https["content"][0]["type"], "image_url");
+        assert_eq!(https["content"][0]["image_url"]["url"], "https://x/cat.png");
     }
 }
 

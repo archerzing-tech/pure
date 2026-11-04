@@ -364,6 +364,20 @@ export function mapAnthropicMessages(
         tool_use_id: m.toolCallId ?? '',
         content: m.content,
       };
+      // W4-2: tool_result content takes a block array — text first, then the
+      // tool's screenshots as image blocks. Empty text is skipped (Anthropic
+      // rejects empty text blocks, same as the user-path rule above); if no
+      // image survives parsing, fall back to plain string content.
+      if (m.images?.some(i => i.dataUrl)) {
+        const blocks: (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] = m.content.trim()
+          ? [{ type: 'text', text: m.content }]
+          : [];
+        for (const image of m.images) {
+          const source = parseAnthropicImageSource(image.dataUrl, image.mimeType);
+          if (source) blocks.push({ type: 'image', source } as Anthropic.ImageBlockParam);
+        }
+        if (blocks.length > 0) toolResultBlock.content = blocks;
+      }
       const prevMsg = lastMessage();
       if (prevMsg?.role === 'user') {
         // Normal case: previous user turn is the tool-result array — append.

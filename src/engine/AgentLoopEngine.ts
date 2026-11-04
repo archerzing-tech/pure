@@ -1003,7 +1003,15 @@ export class AgentLoopEngine {
             ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
             : `Error: ${tr.result.error}`;
           const resultText = capToolResult(rawText, tr.toolName);
-          messages.push({ role: 'tool', content: resultText, toolCallId: tr.toolCallId, toolName: tr.toolName });
+          // W4-2: tool screenshots fold into the tool message as images — the
+          // model sees the page it just captured (visual loop 改→截→判→修).
+          messages.push({
+            role: 'tool',
+            content: resultText,
+            toolCallId: tr.toolCallId,
+            toolName: tr.toolName,
+            images: tr.result.images,
+          });
           budget.addTokens(resultText);
         }
 

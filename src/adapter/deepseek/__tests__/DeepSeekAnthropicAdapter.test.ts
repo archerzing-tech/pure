@@ -97,6 +97,26 @@ describe('mapAnthropicMessages — consecutive user merging', () => {
     expect(blocks[0]).toMatchObject({ type: 'text', text: 'a hint from an earlier flow' });
     expect(blocks[1]).toMatchObject({ type: 'tool_result', tool_use_id: 'call_9' });
   });
+
+  it('folds tool screenshots into the tool_result block as an image block (W4-2)', () => {
+    const messages: Message[] = [
+      { role: 'tool', toolCallId: 'call_s', toolName: 'browser', content: 'Screenshot saved', images: [{ dataUrl: 'data:image/png;base64,CCCC', mimeType: 'image/png' }] },
+    ];
+    const { conversationMessages } = mapAnthropicMessages(messages);
+    const block = (conversationMessages[0].content as unknown as Array<{ type: string; tool_use_id?: string; content?: unknown }>)[0];
+    expect(block).toMatchObject({ type: 'tool_result', tool_use_id: 'call_s' });
+    const inner = block.content as Array<{ type: string; text?: string; source?: { type: string; media_type?: string; data?: string } }>;
+    expect(inner[0]).toEqual({ type: 'text', text: 'Screenshot saved' });
+    expect(inner[1]).toMatchObject({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCC' } });
+  });
+
+  it('keeps plain-string tool_result content when the tool message has no images', () => {
+    const { conversationMessages } = mapAnthropicMessages([
+      { role: 'tool', toolCallId: 'c3', toolName: 'x', content: 'plain' },
+    ]);
+    const block = (conversationMessages[0].content as unknown as Array<{ type: string; content?: unknown }>)[0];
+    expect(block).toMatchObject({ type: 'tool_result', content: 'plain' });
+  });
 });
 
 describe('8.2 — anthropic prompt-cache breakpoints', () => {

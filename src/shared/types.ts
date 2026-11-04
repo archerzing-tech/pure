@@ -61,6 +61,11 @@ export interface ToolResult {
    *  可复用的成功去重（同参重派是断点续跑的入口，吞掉就永远续不上）。
    *  'paused' = 暂停可续；'stopped' = 用户取消，不计入任务。 */
   outcome?: 'paused' | 'stopped';
+  /** 工具产出的图（browser/screenshot 截图，W4-2 视觉闭环）：引擎折进下一条
+   *  tool 消息，适配器映射为原生图块——模型必须亲眼看到截图才能「改→截→判
+   *  →修」。与 GeneratedImage（只给 UI、LLM 永远不见）刻意相反：那是交付物，
+   *  这是模型的眼睛。 */
+  images?: MessageImage[];
 }
 
 export interface ToolDefinition {

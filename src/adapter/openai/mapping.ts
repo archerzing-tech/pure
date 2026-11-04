@@ -48,8 +48,22 @@ export function mapMessages(messages: Message[]): OpenAIWireMessage[] {
             function: { name: tc.function.name, arguments: tc.function.arguments },
           })),
         };
-      case 'tool':
+      case 'tool': {
+        // W4-2: a tool message may carry screenshots — content becomes an
+        // array of content parts (string content stays a plain string, the
+        // shape every OpenAI-compatible backend already expects). DeepSeek
+        // compatibility with array tool content is a real-machine item.
+        if (m.images?.some(i => i.dataUrl)) {
+          const content: OpenAIWireContent = [
+            ...(m.content ? [{ type: 'text' as const, text: m.content }] : []),
+            ...m.images
+              .filter(i => i.dataUrl)
+              .map(i => ({ type: 'image_url' as const, image_url: { url: i.dataUrl } })),
+          ];
+          return { role: 'tool', tool_call_id: m.toolCallId ?? '', content };
+        }
         return { role: 'tool', tool_call_id: m.toolCallId ?? '', content: m.content };
+      }
       default:
         return { role: 'user', content: m.content };
     }
