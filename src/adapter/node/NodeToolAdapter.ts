@@ -5,7 +5,7 @@
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm } from 'node:fs/promises';
+import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm, appendFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import type { Readable } from 'node:stream';
 import * as http from 'node:http';
@@ -457,6 +457,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const pathArg = String(args.path);
     const path = await this.resolve(pathArg);
     const content = String(args.content);
+    const append = args.append === true;
     const batch = await this.captureWriteBatch('write_file', [pathArg]);
 
     // Ensure parent directory exists
@@ -465,13 +466,14 @@ export class NodeToolAdapter implements ToolAdapter {
       await mkdir(dir, { recursive: true });
     }
 
-    await Bun.write(path, content);
+    if (append) await appendFile(path, content);
+    else await Bun.write(path, content);
     const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
     return {
       id: `tool_${Date.now()}`,
       toolName: 'write_file',
-      result: `Wrote ${content.length} bytes to ${String(args.path)}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
+      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
       success: true,
       duration: Date.now() - start,
     };

@@ -1425,13 +1425,30 @@ fn remove_path_impl(workspace: String, path: String, recursive: Option<bool>) ->
 }
 
 #[tauri::command]
-fn write_file(workspace: String, path: String, content: String) -> Result<String, String> {
+fn write_file(
+    workspace: String,
+    path: String,
+    content: String,
+    append: Option<bool>,
+) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
     }
-    fs::write(&full, &content).map_err(|e| format!("write_file: {}", e))?;
-    Ok(format!("Wrote {} bytes to {}", content.len(), path))
+    if append.unwrap_or(false) {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full)
+            .map_err(|e| format!("write_file append: {}", e))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("write_file append: {}", e))?;
+        Ok(format!("Appended {} bytes to {}", content.len(), path))
+    } else {
+        fs::write(&full, &content).map_err(|e| format!("write_file: {}", e))?;
+        Ok(format!("Wrote {} bytes to {}", content.len(), path))
+    }
 }
 
 /// Byte-for-byte file copy used by the GUI to snapshot generated files as
@@ -1467,9 +1484,10 @@ async fn write_file_stream(
     workspace: String,
     path: String,
     content: String,
+    append: Option<bool>,
     on_progress: Channel<String>,
 ) -> Result<String, String> {
-    write_file_stream_inner(&workspace, &path, &content, &on_progress).await
+    write_file_stream_inner(&workspace, &path, &content, append.unwrap_or(false), &on_progress).await
 }
 
 /// Core of write_file_stream, split out for unit testing (a Tauri Channel
@@ -1479,6 +1497,7 @@ async fn write_file_stream_inner(
     workspace: &str,
     path: &str,
     content: &str,
+    append: bool,
     on_progress: &Channel<String>,
 ) -> Result<String, String> {
     let full = resolve(workspace, path)?;
@@ -1487,7 +1506,15 @@ async fn write_file_stream_inner(
     }
     let bytes = content.as_bytes();
     let total = bytes.len();
-    let mut file = fs::File::create(&full).map_err(|e| format!("create: {}", e))?;
+    let mut file = if append {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full)
+            .map_err(|e| format!("create: {}", e))?
+    } else {
+        fs::File::create(&full).map_err(|e| format!("create: {}", e))?
+    };
     use std::io::Write as _;
     const CHUNK: usize = 64 * 1024;
     let mut written = 0usize;
@@ -1499,7 +1526,11 @@ async fn write_file_stream_inner(
         let evt = serde_json::json!({ "type": "progress", "written": written, "total": total });
         let _ = on_progress.send(evt.to_string());
     }
-    Ok(format!("Wrote {} bytes to {}", total, path))
+    Ok(if append {
+        format!("Appended {} bytes to {}", total, path)
+    } else {
+        format!("Wrote {} bytes to {}", total, path)
+    })
 }
 
 /// Save a code block to an absolute path chosen by the user via the GUI's
@@ -5504,7 +5535,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "sub/dir/app.js", &content, &ch)
+        let msg = write_file_stream_inner(&workspace, "sub/dir/app.js", &content, false, &ch)
             .await
             .unwrap();
         assert!(msg.contains("131073 bytes"), "msg: {}", msg);
@@ -5540,7 +5571,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "hi.txt", "hello", &ch)
+        let msg = write_file_stream_inner(&workspace, "hi.txt", "hello", false, &ch)
             .await
             .unwrap();
         assert_eq!(msg, "Wrote 5 bytes to hi.txt");
@@ -5558,7 +5589,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "empty.txt", "", &ch)
+        let msg = write_file_stream_inner(&workspace, "empty.txt", "", false, &ch)
             .await
             .unwrap();
         assert_eq!(msg, "Wrote 0 bytes to empty.txt");
@@ -5568,6 +5599,49 @@ mod write_file_stream_tests {
         );
         // No chunks → no events (nothing to report for a zero-byte write).
         assert!(events.lock().unwrap().is_empty());
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    /// 刀 2 行为锁：append=true 续写不覆盖；目标不存在时新建。大文件分段
+    /// 写入的机械兜底——模型撞输出上限后的可自愈出路。
+    #[tokio::test]
+    async fn append_continues_and_creates_missing_file() {
+        let workspace = temp_workspace("append");
+        let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let ch = capturing_channel(&events);
+        let dir = PathBuf::from(&workspace);
+
+        // 第一段正常写。
+        write_file_stream_inner(&workspace, "big.txt", "part-1", false, &ch)
+            .await
+            .unwrap();
+        // 追加第二段：原文保留 + Appended 口径文案。
+        let msg = write_file_stream_inner(&workspace, "big.txt", "part-2", true, &ch)
+            .await
+            .unwrap();
+        assert_eq!(msg, "Appended 6 bytes to big.txt");
+        assert_eq!(fs::read_to_string(dir.join("big.txt")).unwrap(), "part-1part-2");
+
+        // 追加到不存在的文件 = 新建（分段写的第一段用 append 起笔也合法）。
+        let msg = write_file_stream_inner(&workspace, "fresh/nested.txt", "seed", true, &ch)
+            .await
+            .unwrap();
+        assert_eq!(msg, "Appended 4 bytes to fresh/nested.txt");
+        assert_eq!(fs::read_to_string(dir.join("fresh/nested.txt")).unwrap(), "seed");
+
+        // 非流式 write_file 的 append 同语义。
+        let msg = write_file(
+            workspace.clone(),
+            "big.txt".to_string(),
+            "part-3".to_string(),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(msg, "Appended 6 bytes to big.txt");
+        assert_eq!(
+            fs::read_to_string(dir.join("big.txt")).unwrap(),
+            "part-1part-2part-3"
+        );
         fs::remove_dir_all(&workspace).unwrap();
     }
 }
@@ -12144,7 +12218,10 @@ async fn chat_stream(
         serde_json::json!({
             "model": args.model,
             "messages": args.messages,
-            "max_tokens": args.max_tokens_override.unwrap_or(4096),
+            // 8192 = DeepSeek 上限正好、大多数 OpenAI-spec 端点 ≥8192 的公共交集；
+            // 抬到 32768 会在 DeepSeek 直接 400。4096 时代大文件 write_file 的
+            // arguments 生成到一半就触顶，JSON 半截、回合中断。
+            "max_tokens": args.max_tokens_override.unwrap_or(8192),
             "stream": true,
             // OpenAI-spec providers (GLM among them) only report usage in a
             // stream when this is set — without it the session stats (cost,
@@ -12252,7 +12329,7 @@ async fn chat_stream(
     }
 
     let mut stream_attempt: u32 = 0;
-    let (text, usage, tc_map) = 'stream_attempts: loop {
+    let (text, usage, tc_map, truncated) = 'stream_attempts: loop {
         stream_attempt += 1;
         let mut stream = resp.bytes_stream();
         // Keep the SSE buffer as bytes until a full line is available. Decoding
@@ -12267,6 +12344,10 @@ async fn chat_stream(
         // and forwarded through the same `usage` channel as the openai branch.
         let mut anthropic_usage: Option<serde_json::Value> = None;
         let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+        // 刀 3：回合是被说完还是被输出上限砍半。OpenAI `finish_reason: "length"`
+        // / Anthropic `stop_reason: "max_tokens"` 都归一为 true——引擎拿它区分
+        // 「模型写错 JSON」与「参数被截断」，后者给可自愈的精准文案而不是含糊失败。
+        let mut truncated = false;
         let mut stream_emitted = false;
         let mut stream_error: Option<String> = None;
     // Last time a tool-call delta was forwarded to the WebView (throttle
@@ -12353,6 +12434,15 @@ async fn chat_stream(
                         }
                     }
                     "message_delta" => {
+                        // Anthropic 的终止原因（max_tokens = 输出上限截断）与 usage
+                        // 同乘这一班车——不捕获引擎就分不清「说完」和「砍半」。
+                        if json.get("delta")
+                            .and_then(|d| d.get("stop_reason"))
+                            .and_then(|s| s.as_str())
+                            == Some("max_tokens")
+                        {
+                            truncated = true;
+                        }
                         // The single emission point: message_delta arrives once
                         // near the end carrying the final cumulative usage.
                         // Merge EVERY delta key over the message_start usage,
@@ -12467,6 +12557,12 @@ async fn chat_stream(
                     _ => {}
                 }
                 continue;
+            }
+
+            // finish_reason 常在最后一个 chunk 上且那时 delta 已空——必须在
+            // delta 提取（空则 continue）之前捕获，否则截断信号被丢弃。
+            if json["choices"][0]["finish_reason"].as_str() == Some("length") {
+                truncated = true;
             }
 
             let delta = match json["choices"][0]["delta"].as_object() {
@@ -12598,7 +12694,7 @@ async fn chat_stream(
                 },
             ));
         }
-        break (text, usage, tc_map);
+        break (text, usage, tc_map, truncated);
     };
 
     // Build tool_calls list
@@ -12615,7 +12711,7 @@ async fn chat_stream(
         }
     }
 
-    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route, "headersMs": headers_ms }))
+    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route, "headersMs": headers_ms, "truncated": truncated }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

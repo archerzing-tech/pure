@@ -110,7 +110,7 @@ export type LLMChunk =
   // stream chunk; DeepSeek `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`).
   // Yielded once per stream so the engine can aggregate per-turn totals.
   | { type: 'usage'; usage: TokenUsage }
-  | { type: 'done'; content: string; toolCalls: ToolCall[] };
+  | { type: 'done'; content: string; toolCalls: ToolCall[]; truncated?: boolean };
 
 /** Normalized per-request token usage (provider fields mapped into one shape). */
 export interface TokenUsage {

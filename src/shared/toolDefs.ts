@@ -34,12 +34,13 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. Large output: never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works.',
+    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. With append:true the content is appended instead (missing file is created) — for large files write the first chunk normally, then append each following chunk, so no single call has to carry the whole file. Large output: never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works.',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too. The workspace is only the default base for relative paths, not a confinement boundary.' },
         content: { type: 'string', description: 'Content to write to the file' },
+        append: { type: 'boolean', description: 'Append to the file instead of overwriting (created if missing). For files too large for one call: write part 1 normally, then append part 2, part 3, …' },
       },
       required: ['path', 'content'],
     },

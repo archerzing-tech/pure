@@ -70,6 +70,20 @@ function callKey(name: string, argsJson: string): string {
   return `${name}::${typeof parsed === 'string' ? parsed : stableStringify(parsed)}`;
 }
 const DEDUPE_NOTE = '[dedupe] This call is identical to the immediately preceding call (same tool, same arguments) — its result was REUSED instead of executing again. If you genuinely need fresh data, change the call or say why in your reply.';
+
+/** 参数字符串是不是结构完整的 JSON——截断检测专用（刀 3）：parse 失败 +
+ * finish_reason=截断 ⇒ 参数被输出上限砍半；parse 失败但非截断 ⇒ 模型真写
+ * 错 JSON，维持原 invalid-arguments 口径。空串算合法（无参调用）。 */
+function parsesAsJson(raw: string): boolean {
+  const s = raw.trim();
+  if (s === '') return true;
+  try {
+    JSON.parse(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
 // first-token / TTFT → stream timeout) and can blow the context window. Cap the
@@ -349,6 +363,10 @@ export class AgentLoopEngine {
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
+      // 刀 3：本回合是否被输出上限截断（Rust finish_reason 透传）。用于把
+      // 「截断导致的坏 JSON」与「模型真写错 JSON」分开——前者给可自愈的
+      // 精准文案（append 分段），后者维持原 invalid-arguments 口径。
+      let turnTruncated = false;
       // 代执行回合（2026-09-22 插话重设计）：宿主在本边界直接给出本轮的
       // toolCalls 时，完全跳过模型调用，把这些调用交给下面原生的 ACT 管线
       // （ToolStarted → runBatch → ToolResult → transcript 配对）。用意：必须
@@ -489,6 +507,7 @@ export class AgentLoopEngine {
               case 'done':
                 content = chunk.content || content;
                 toolCalls = chunk.toolCalls;
+                if (chunk.truncated === true) turnTruncated = true;
                 sawDone = true;
                 if (toolCalls.length > 0) sawToolCall = true;
                 for (const tc of toolCalls) {
@@ -829,9 +848,11 @@ export class AgentLoopEngine {
         // 四期 4a：隔离名单（tool + args 原文）命中的调用先摘出执行流——
         // 它们不 dedupe、不执行、不进权限闸，只领一条合成拒绝结果。
         const refusedCalls: typeof toolCalls = [];
+        const truncatedCalls: typeof toolCalls = [];
         const executableCalls: typeof toolCalls = [];
         for (const call of toolCalls) {
           if (turnQuarantined.has(`${call.function.name}::${call.function.arguments}`)) refusedCalls.push(call);
+          else if (turnTruncated && !parsesAsJson(call.function.arguments)) truncatedCalls.push(call);
           else executableCalls.push(call);
         }
         const dedupedCalls: Array<{ call: (typeof toolCalls)[number]; key: string }> = [];
@@ -902,6 +923,28 @@ export class AgentLoopEngine {
           };
           executedResults.push(refusal);
           yield { type: 'ToolResult', payload: refusal, timestamp: Date.now() };
+        }
+        // 刀 3：被输出上限截断的 tool call（参数 JSON 不完整）不进执行池——
+        // 半截参数执行了也是灾难。合成结果同时写 result 与 error（transcript
+        // 配对对失败结果只取 error 字段），模型拿到的是可自愈的出路而不是
+        // 含糊的 invalid-arguments（那只会原样重试再撞一次上限）。
+        for (const call of truncatedCalls) {
+          const cutText = 'This tool call was cut off by the model output-token limit: the arguments JSON arrived incomplete, so it was NOT executed. Split the work into smaller calls — write the first chunk with write_file, then append the rest with append:true (part 2, part 3, …) — or reduce the payload size and retry.';
+          const cut: ExecutedToolResult = {
+            toolCallId: call.id,
+            toolName: call.function.name,
+            result: {
+              id: call.id,
+              toolName: call.function.name,
+              result: cutText,
+              success: false,
+              error: cutText,
+              duration: 0,
+            },
+            duration: 0,
+          };
+          executedResults.push(cut);
+          yield { type: 'ToolResult', payload: cut, timestamp: Date.now() };
         }
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)

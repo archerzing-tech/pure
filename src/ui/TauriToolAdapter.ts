@@ -1414,13 +1414,15 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'write_file': {
           const path = String(args.path ?? '');
           const content = String(args.content ?? '');
+          const append = args.append === true;
           const batch = await this.captureWriteBatch('write_file', [path]);
           // diff 旁路:旧内容取自撤销快照(新建文件时为空串→纯新增视图)。
+          // append 的新视图 = 旧全文 + 追加段,diff 自然只高亮追加的部分。
           cacheToolDiff(toolCall.id, {
             path,
             old: batch.entries[0]?.content ?? '',
-            new: content,
-            overwrite: batch.entries[0]?.existed === true,
+            new: append ? `${batch.entries[0]?.content ?? ''}${content}` : content,
+            overwrite: !append && batch.entries[0]?.existed === true,
           });
           // Stream byte-level progress while the file is written so the tool
           // row shows "正在写入 … 45% (230/512 KB)" instead of a silent
@@ -1442,12 +1444,13 @@ export class TauriToolAdapter implements ToolAdapter {
               workspace: ws,
               path,
               content,
+              append,
               onProgress: channel,
             }) as string;
             const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
             return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
           }
-          const msg = await this.call('write_file', { workspace: ws, path, content }) as string;
+          const msg = await this.call('write_file', { workspace: ws, path, content, append }) as string;
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
           return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
         }

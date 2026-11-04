@@ -321,7 +321,10 @@ export class RustLLMAdapter implements LLMAdapter {
           arguments: (tc.function?.arguments as string | undefined) ?? '',
         },
       }));
-      yield { type: 'done', content: text, toolCalls };
+      // 刀 3：Rust 侧截断信号（finish_reason=length / stop_reason=max_tokens）
+      // 原样透传——引擎靠它区分「模型写错 JSON」与「参数被输出上限砍半」。
+      const truncated = finalResult?.truncated === true;
+      yield { type: 'done', content: text, toolCalls, truncated };
     } finally {
       signal?.removeEventListener('abort', abortHandler);
       if (!closed && !invokeDone) {
