@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.2.0
+
+**决策边界改革首期：触发门槛与流程规则归位「LLM 决策、系统执行」**
+
+网络路由（42 条静态名单）与文件写入（v4.1.5 三刀）已证明同一病根：系统替模型持有决策。本次把判据通用化并清掉两族存量，判据本体（四分归属表+准入铁律：新机制只准回答「怎么做成」，不准回答「何时做」——例外仅物理不变量与交互契约）沉淀为 docs/decision-boundary-2026-11.md。prompt 侧六刀：workflow 段七条步骤流程瘦为四条原则+契约（session_memory 复用/失败换路线/验证与常识核查/危险动作问询，「先读后改」四重重复归一到 edit_file 描述与 work_invariant 交付契约）；output_style 的「Call web_search FIRST」步骤句与「用户嫌结果差五件套配方」退役（never-invent 原则保留并迁 web_search 描述）；task_mode 分阶段方法句退役（BUILD 留交付契约、PLAN 留模式标注）。常驻段纯问答轮 4654→约 4450 tk、动手轮 5185→约 4740 tk。运行时侧四刀：模型失效自愈从静默落盘改配置（5856e63 被否的闭环形状）反转为处方事件——宿主只识别「模型没了」并记处方，下回合经 envFacts 送达模型（GUI/CLI 双面），模型自己改模型库接续或转告用户；插话复核没结论从「宿主代停 covered 支+沉默」改为原话直投父引擎+callId 现场事实随附，与同链路超时 passthrough 口径对齐，两个裁判宕机不再一个直投一个代裁；读图词表覆写（正则强制 question/yolo）退役——它把「分析这张截图并改前端」类复合请求压成只读问答，正是越位的现实代价；策略面五档打法指令（探索/验证/委派/恢复/自主的命令式 prose）改为纯事实件（路由分类+证据行+角色名录「a roster, not an order」+现成方案提示），档位计算保留做观测分类、策略→效果仪表盘语义不变。验证：bun test 5052 例全过、tsc 零错、lint:conventions 过。挂账（未点名不做）：workShapedFallback 口径分叉写明、偏好收割语义改写、研究收束令与 continueGuard 措辞降级、schema 摘工具披露行。
+
 ## v4.1.5
 
 **大文件写入中断根治三刀：截断信号透传 + append 分段原语 + 精准截断文案**
