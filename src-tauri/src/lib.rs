@@ -5098,6 +5098,27 @@ mod web_search_tests {
 mod resolve_tests {
     use super::*;
 
+    /// P2-5 path_policy 刀的行为锁：expandTilde 输入输出表与 TS 单源
+    /// （src/tools/impl/pathPolicy.ts 的 expandTilde）同源消费
+    /// src/shared/__fixtures__/pathPolicyFixtures.json。cfg(unix)：展开产物
+    /// 的拼接分隔符随 MAIN_SEPARATOR，Windows 形状会漂——那边已有行为断言
+    /// 单测兜底（expands_tilde_prefixes_with_injected_home），posix 形状在
+    /// unix 上精确锁死。
+    #[test]
+    #[cfg(unix)]
+    fn expand_tilde_matches_shared_fixture_table() {
+        let raw = include_str!("../../src/shared/__fixtures__/pathPolicyFixtures.json");
+        let fixtures: serde_json::Value = serde_json::from_str(raw).expect("parse pathPolicyFixtures.json");
+        let rows = fixtures["expandTilde"].as_array().expect("expandTilde array");
+        assert!(rows.len() >= 10, "fixture coverage shrank");
+        for row in rows {
+            let input = row["input"].as_str().expect("input");
+            let home = row["home"].as_str().expect("home");
+            let output = row["output"].as_str().expect("output");
+            assert_eq!(expand_tilde_with(input, home), output, "input: {input}");
+        }
+    }
+
     fn temp_workspace(name: &str) -> String {
         let dir =
             std::env::temp_dir().join(format!("pure-resolve-{}-{}", name, std::process::id()));

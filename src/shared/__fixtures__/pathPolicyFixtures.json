@@ -1,0 +1,36 @@
+{
+  "comment": "path_policy 行为锁（P2-5 第三子刀）：expandTilde + normalizeLexical 纯函数输入输出表。TS 侧消费 src/tools/impl/pathPolicy.ts，Rust 侧消费 expand_tilde_with（lib.rs）与 normalize_lexical（path_policy.rs）。两侧测试同源消费本表，任一侧改行为不同步本表即测试红。normalizeLexical 的 output 用 [root, parts] 分量形状（平台中立——TS 产物统一正斜杠、Rust 产物用平台分隔符，join 后的字符串形状不算行为差异）。windows 盘符/UNC 形状的 normalizeLexical 条目标 windowsOnly：Rust 份的 Components 盘符语义只在 Windows 生效，Rust 侧测试按 cfg(windows) 跳过；TS 份是纯字符串逻辑全平台可测。",
+  "expandTilde": [
+    { "input": "~", "home": "/Users/tester", "output": "/Users/tester" },
+    { "input": "~/Downloads/a.md", "home": "/Users/tester", "output": "/Users/tester/Downloads/a.md" },
+    { "input": "~/", "home": "/Users/tester", "output": "/Users/tester" },
+    { "input": "$HOME", "home": "/Users/tester", "output": "/Users/tester" },
+    { "input": "$HOME/doc.txt", "home": "/Users/tester", "output": "/Users/tester/doc.txt" },
+    { "input": "$HOMEWORK/x", "home": "/Users/tester", "output": "$HOMEWORK/x" },
+    { "input": "~user/x", "home": "/Users/tester", "output": "~user/x" },
+    { "input": "relative/a.txt", "home": "/Users/tester", "output": "relative/a.txt" },
+    { "input": "~/a", "home": "/Users/tester/", "output": "/Users/tester/a" },
+    { "input": "~\\Downloads\\a.md", "home": "/Users/tester", "output": "/Users/tester/Downloads\\a.md" },
+    { "input": "%USERPROFILE%\\doc.txt", "home": "/Users/tester", "output": "/Users/tester/doc.txt" },
+    { "input": "%USERPROFILE%X\\doc.txt", "home": "/Users/tester", "output": "%USERPROFILE%X\\doc.txt" },
+    { "input": "$HOME\\nested\\f.txt", "home": "C:\\Users\\tester", "output": "C:\\Users\\tester/nested\\f.txt" }
+  ],
+  "normalizeLexical": [
+    { "input": "/a/b/../c/./d", "output": ["/", ["a", "c", "d"]] },
+    { "input": "/a//b", "output": ["/", ["a", "b"]] },
+    { "input": "/", "output": ["/", []] },
+    { "input": "a/b", "output": ["", ["a", "b"]] },
+    { "input": "./a/./b", "output": ["", ["a", "b"]] },
+    { "input": "../a", "output": ["", ["..", "a"]] },
+    { "input": "a/../../b", "output": ["", ["..", "b"]] },
+    { "input": "/..", "output": null },
+    { "input": "/a/../../b", "output": null },
+    { "input": "/a/b/../../../c", "output": null },
+    { "windowsOnly": true, "input": "C:/x/../y", "output": ["C:/", ["y"]] },
+    { "windowsOnly": true, "input": "C:\\x\\..\\y", "output": ["C:/", ["y"]] },
+    { "windowsOnly": true, "input": "C:x", "output": ["C:", ["x"]] },
+    { "windowsOnly": true, "input": "C:/../y", "output": null },
+    { "windowsOnly": true, "input": "//server/share/a/../b", "output": ["//server/share", ["b"]] },
+    { "windowsOnly": true, "input": "//server/share/../b", "output": null }
+  ]
+}

@@ -38,6 +38,9 @@ import { pageCacheKey, PAGE_TTL_MS, webCache } from './webCache';
 // web_search 执行单源在 tools/impl/webSearch（P2-5）：编排/解析器/CJK 相关性门/
 // cookie jar 全在这份模块里，本适配器只注入原语并把结果包成 ToolResult。
 import { cookieHeaderFor, decodeBody, runWebSearch } from '../../tools/impl/webSearch';
+// 路径解析链单源在 tools/impl/pathPolicy（P2-5 第三子刀）：tilde 展开/词法归一/
+// workspace 解析/symlink 守卫全在这份模块里，本适配器只注入 node:fs 原语。
+import { expandTilde, resolveWorkspacePath, type PathPolicyFs } from '../../tools/impl/pathPolicy';
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
 import { cliFetch, hostMatchesNoProxy, isPrivateHost, parseProxy } from '../../shared/cliFetch';
 import { extractMetaRefreshUrl, extractPdfText, extractPdfViaPdftotext, fetchWithRetry, refererFor, resolveRedirectTarget, scrapeViaFirecrawl, scrapeViaWayback } from './fetchFallback';
@@ -341,7 +344,7 @@ export class NodeToolAdapter implements ToolAdapter {
   // ── Tool handlers ──
 
   private async handleReadFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
-    const path = this.resolve(String(args.path));
+    const path = await this.resolve(String(args.path));
 
     if (!existsSync(path)) {
       // 后台日志的引用悬空（见 BACKGROUND_LOG_MISS_HINT）：给结构化出路，别让
@@ -452,7 +455,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleWriteFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pathArg = String(args.path);
-    const path = this.resolve(pathArg);
+    const path = await this.resolve(pathArg);
     const content = String(args.content);
     const batch = await this.captureWriteBatch('write_file', [pathArg]);
 
@@ -476,7 +479,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleEditFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pathArg = String(args.path);
-    const path = this.resolve(pathArg);
+    const path = await this.resolve(pathArg);
     const oldStr = String(args.oldString);
     const newStr = String(args.newString);
     const allowMultiple = Boolean(args.allowMultiple);
@@ -517,7 +520,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleSearchFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pattern = String(args.pattern);
     const pathArg = args.path ? String(args.path) : '';
-    const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
+    const searchDir = pathArg.trim() ? await this.resolve(pathArg) : await this.resolve('.');
 
     if (!existsSync(searchDir)) {
       return this.fail(null, start, `search_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
@@ -602,7 +605,7 @@ export class NodeToolAdapter implements ToolAdapter {
       return this.fail(null, start, 'find_files: query 不能为空。请给出要查找的主题词，例如 "学历" 或 "education"。');
     }
     const pathArg = args.path ? String(args.path) : '';
-    const searchDir = pathArg.trim() ? this.resolve(pathArg) : this.resolve('.');
+    const searchDir = pathArg.trim() ? await this.resolve(pathArg) : await this.resolve('.');
 
     if (!existsSync(searchDir)) {
       return this.fail(null, start, `find_files: '${pathArg || '.'}' 不存在。若这是 Windows 绝对路径，请确认路径拼写正确且磁盘上确实存在。`);
@@ -781,7 +784,7 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleListFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
-    const dirPath = this.resolve(String(args.path || '.'));
+    const dirPath = await this.resolve(String(args.path || '.'));
     const recursive = Boolean(args.recursive);
 
     // Bun.file(dirPath).exists() returns false for DIRECTORIES (Bun.file only
@@ -967,7 +970,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleCreateDirectory(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pathArg = String(args.path);
-    const dirPath = this.resolve(pathArg);
+    const dirPath = await this.resolve(pathArg);
     const batch = await this.captureWriteBatch('create_directory', [pathArg]);
 
     await mkdir(dirPath, { recursive: true });
@@ -1003,7 +1006,7 @@ export class NodeToolAdapter implements ToolAdapter {
     // 相对路径锚定语义与 Rust resolve_document_path 一致（见该函数注释）；
     // 落点再过 this.resolve 拿 symlink 之后的真实路径。报告必须用落盘实路径
     // ——用模型输入报就是「卡片在、文件不在」的 2026-10-11 bug 类。
-    const target = this.resolve(resolveDocumentPath(pathArg, this.workspaceGiven ? this.workspace : '', this.homeDir));
+    const target = await this.resolve(resolveDocumentPath(pathArg, this.workspaceGiven ? this.workspace : '', this.homeDir));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, bytes);
 
@@ -1017,8 +1020,8 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 
   private async handleDiffFiles(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
-    const pathA = this.resolve(String(args.pathA));
-    const pathB = this.resolve(String(args.pathB));
+    const pathA = await this.resolve(String(args.pathA));
+    const pathB = await this.resolve(String(args.pathB));
     // Diff can hang on huge files or network-mounted workspaces (a stuck NFS
     // read blocks forever) — bound it with the same timeout/abort treatment as
     // the other subprocess tools instead of stalling the whole agent loop.
@@ -1181,7 +1184,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleCodeSearcher(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const query = String(args.query ?? args.pattern ?? '').trim();
     if (!query) return this.fail(null, start, 'code_searcher query must not be empty', 'code_searcher');
-    const searchDir = this.resolve(String(args.path || '.'));
+    const searchDir = await this.resolve(String(args.path || '.'));
     const workspaceRoot = realpathSync(this.workspace);
     const scope = pathRelative(workspaceRoot, searchDir) || '.';
     const perFile = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
@@ -2475,7 +2478,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleGlobFiles(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pattern = String(args.pattern);
-    const searchDir = this.resolve(String(args.path || '.'));
+    const searchDir = await this.resolve(String(args.path || '.'));
     const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 200;
 
     const results: string[] = [];
@@ -2518,7 +2521,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
     for (const filePath of files) {
       try {
-        const path = this.resolve(filePath);
+        const path = await this.resolve(filePath);
         const file = Bun.file(path);
         if (!(await file.exists())) {
           results.push(`✗ ${filePath}: file not found`);
@@ -2704,7 +2707,7 @@ export class NodeToolAdapter implements ToolAdapter {
       if (hasSymlinkComponent(this.workspace, path)) {
         throw new Error(`Snapshot refuses symlink path: ${path}`);
       }
-      const full = this.resolve(path);
+      const full = await this.resolve(path);
       if (!existsSync(full)) {
         entries.push({ path, existed: false, kind: 'file' });
         continue;
@@ -2735,7 +2738,7 @@ export class NodeToolAdapter implements ToolAdapter {
     const finished: WorkspaceSnapshotEntry[] = [];
     for (const entry of batch.entries) {
       if (!changed.has(entry.path)) continue;
-      const full = this.resolve(entry.path);
+      const full = await this.resolve(entry.path);
       if (existsSync(full) && !lstatSync(full).isDirectory()) {
         entry.afterContent = await Bun.file(full).text();
         if (new TextEncoder().encode(entry.afterContent).byteLength > this.maxSnapshotBytes) continue;
@@ -2773,7 +2776,7 @@ export class NodeToolAdapter implements ToolAdapter {
         continue;
       }
       let full: string;
-      try { full = this.resolve(entry.path); } catch { conflicts.push(entry.path); continue; }
+      try { full = await this.resolve(entry.path); } catch { conflicts.push(entry.path); continue; }
       const exists = existsSync(full);
       const currentIsDirectory = exists && lstatSync(full).isDirectory();
       if (!entry.existed) {
@@ -2836,27 +2839,11 @@ export class NodeToolAdapter implements ToolAdapter {
 
   // ── Helpers ──
 
-  private resolve(filePath: string): string {
-    const resolved = pathResolve(this.workspace, expandTilde(filePath));
-    // Workspace confinement is REMOVED: absolute paths anywhere on disk are
-    // allowed (relative paths still resolve against the workspace root). The
-    // remaining checks only guard against symlink tricks.
-
-    let existing = resolved;
-    const missing: string[] = [];
-    while (!existsSync(existing)) {
-      if (lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
-        throw new Error(`Path uses an unresolved symlink: ${filePath}`);
-      }
-      const parent = dirname(existing);
-      if (parent === existing) throw new Error(`Path cannot be resolved: ${filePath}`);
-      missing.push(basename(existing));
-      existing = parent;
-    }
-
-    let safePath = realpathSync(existing);
-    for (const component of missing.reverse()) safePath = pathResolve(safePath, component);
-    return safePath;
+  // 路径解析链上移 impl/pathPolicy（P2-5 第三子刀）：本适配器只注 node:fs
+  // 原语；词法归一/`..` 越根拒绝/workspace 空校验/trim 语义与 GUI 侧 Rust
+  // path_policy 由行为锁（pathPolicyFixtures.json）钉住。
+  private resolve(filePath: string): Promise<string> {
+    return resolveWorkspacePath(this.workspace, filePath, nodePathPolicyFs, this.homeDir);
   }
 
   private fail(toolCall: ToolCall | null, start: number, error: string, fallbackToolName?: string): ToolResult {
@@ -2870,27 +2857,24 @@ export class NodeToolAdapter implements ToolAdapter {
   }
 }
 
-/** `~`/`~\`/`$HOME`/`%USERPROFILE%` 前缀展开为真实主目录——模型常把 shell
- * 习惯带进工具参数（真机判例 2026-10-16：read_file "~/Downloads/…" 报 os
- * error 2，只因 `~` 没人展开）。跨平台差异在这里收口：home 用 node:os 的
- * homedir（Windows 只设 USERPROFILE，它已处理）；`~\` 与 `%USERPROFILE%\`
- * 是 Windows 侧惯用写法，光认 `~/` 会漏。`~user`、`$HOMEWORK` 这类非边界
- * 前缀按字面不动（展开反而错）。展开产物再走常规解析，绝对路径全盘可达的
- * 契约不变。与 Rust 侧 expand_tilde_with（src-tauri/src/lib.rs）同构，改
- * 必须同步。home 可注入，测试不碰进程环境。 */
-export function expandTilde(path: string, home = homedir()): string {
-  const trimmedHome = home.replace(/[/\\]+$/, '');
-  const joined = (rest: string): string => {
-    const restClean = rest.replace(/^[/\\]+/, '');
-    return restClean ? `${trimmedHome}/${restClean}` : trimmedHome;
-  };
-  const atBoundary = (rest: string): boolean => rest === '' || rest.startsWith('/') || rest.startsWith('\\');
-  if (path === '~') return trimmedHome;
-  if (path.startsWith('~/') || path.startsWith('~\\')) return joined(path.slice(2));
-  if (path.startsWith('$HOME') && atBoundary(path.slice(5))) return joined(path.slice(5));
-  if (path.startsWith('%USERPROFILE%') && atBoundary(path.slice(13))) return joined(path.slice(13));
-  return path;
-}
+// expandTilde 已上移 impl/pathPolicy（P2-5 第三子刀，与 Rust expand_tilde_with
+// 同构互为镜像、行为锁 pathPolicyFixtures.json 两侧同源消费）。旧导入经
+// re-export 保持兼容；默认 home 仍是真实 homedir（Windows 只设 USERPROFILE，
+// node:os homedir 已处理）。
+export { expandTilde };
+
+// path_policy 的 node:fs 原语（同步函数直接注入，async 签名 await 同步值零
+// 开销）。symlinkMeta 用 lstatSync(throwIfNoEntry:false)：悬空 symlink 本身
+// lstat 得到（isSymlink:true），纯缺失段返回 null——爬升循环靠这个区分。
+const nodePathPolicyFs: PathPolicyFs = {
+  canonicalize: (p) => realpathSync(p),
+  exists: (p) => existsSync(p),
+  symlinkMeta: (p) => {
+    const s = lstatSync(p, { throwIfNoEntry: false });
+    return s ? { isSymlink: s.isSymbolicLink() } : null;
+  },
+  isDir: (p) => statSync(p, { throwIfNoEntry: false })?.isDirectory() ?? false,
+};
 
 type EditMatch = {
   text: string;
