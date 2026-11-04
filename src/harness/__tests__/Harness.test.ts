@@ -221,7 +221,8 @@ describe('Harness cross-session memory (v0.10)', () => {
     await collect(harness.run('BASE SYSTEM', 'inspect the project'));
 
     expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
-    expect(llm.received[0][0].content).toContain('Runtime-selected strategy');
+    // 刀四（2026-11-04）：策略段事实化——指令腔换事实腔。
+    expect(llm.received[0][0].content).toContain('Context facts (yours to weigh');
   });
 
   it('injects relevant memories into the system prompt at session start', async () => {

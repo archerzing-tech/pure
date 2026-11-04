@@ -44,7 +44,7 @@ export const SYSTEM_CORE_PROMPT = `<operating_principles>
   Produce code and artifacts exactly once, directly in write_file / edit_file
   calls; a full draft inside reasoning doubles tokens and latency for zero
   benefit.
-- Prefer the smallest correct change; always read a file before editing it.
+- Prefer the smallest correct change.
 - Plan before big changes; verify your work and report limitations honestly.
 - Follow the active permission mode exactly — the harness asks for approval
   where the mode requires it, so never add extra confirmation rounds of your
@@ -78,11 +78,13 @@ export const COMPLETION_PROMPT = COMPLETION_LESSON_PROMPT;
 export { INFORMATION_VALUE_PRINCIPLE };
 
 /**
- * workflow 闸门（2026-10-27）：7 条操作流程（先读后改/失败诊断/换路线/安装/
- * 验证/教训）只对「会动手」的请求有意义，纯问答轮是纯开销。召回优先：
- * 动词命中即带；纯问答特征且无动作词才免带；其余默认带（漏判的后果是
- * 纪律缺失——work_invariant 与 capability_gap CORE 兜底，可接受；误判只是
- * 多 ≈570 tokens，无害）。
+ * workflow 闸门（2026-10-27；2026-11-04 决策边界改革瘦为 4 条原则+契约）：
+ * 段内只留教训复用/失败换路线/验证与常识核查/危险动作问询——「先读后改」
+ * 等步骤方法已沉 edit_file/write_file 描述与 work_invariant 交付契约
+ * （决策边界判据：步骤性流程不驻 system prompt）。只对「会动手」的请求
+ * 有意义，纯问答轮是纯开销。召回优先：动词命中即带；纯问答特征且无动作词
+ * 才免带；其余默认带（漏判的后果是纪律缺失——work_invariant 与
+ * capability_gap CORE 兜底，可接受；误判只是多 ≈250 tokens，无害）。
  */
 export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'build'): boolean {
   if (mode === 'build' || mode === 'plan') return true;

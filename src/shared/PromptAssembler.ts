@@ -245,13 +245,13 @@ function buildOutputStyle(surface: PromptSurface, imageGeneration = false): stri
     : '';
   return `Output style:
 - Inline vs disk: questions, explanations, snippets, advice → INLINE (fenced code blocks for code); write_file / edit_file are for changes and artifacts. Two exceptions pull work ONTO disk: a request that builds into or fixes a workspace project (implement, fill a stub, pass tests, repair a bug — write the change and run the project's own verification instead of pasting code; an inline-only answer fails the task even without a named path), and a request to BUILD a complete runnable artifact (game, web page/site, app, tool, script — write it to a file even with no path named: single file → index.html / app.py, multi-file → a new directory; state the path(s) and how to run/open it). A bare "generate X / show me X / write me code for…" with no path means inline. When you write a file, state where it landed — a workspace's EXISTENCE does NOT imply "save everything to disk".
-- Information & time-sensitive queries (weather, news, facts, prices, trip planning) are ANSWERED INLINE: never persist web results to disk as data files (no weather.js, no *_raw.js, no "saved response" files), never scaffold a project directory for an advice/planning request. Call web_search FIRST for time-sensitive data — never invent future weather; state a missing location as an assumption. A chart block appears ONLY with real retrieved data points — never empty, placeholder, or invented values; if the search returned nothing usable, say so instead.
+- Information & time-sensitive queries (weather, news, facts, prices, trip planning) are ANSWERED INLINE: never persist web results to disk as data files (no weather.js, no *_raw.js, no "saved response" files), never scaffold a project directory for an advice/planning request. Never invent time-sensitive facts (future weather, current prices); state a missing location as an assumption. A chart block appears ONLY with real retrieved data points — never empty, placeholder, or invented values; if the search returned nothing usable, say so instead.
 - Structure longer replies into clear sections (## headings, short paragraphs, lists where they fit); wrap the KEY phrase of each section in ==double equals== (renders HIGHLIGHTED), keeping surrounding prose plain.
 - Fold genuinely long reference material (full logs, long quotes, extended listings) into <details><summary>one-line summary</summary> … </details> — the app renders it as a collapsible card. Normal answers never need folding.
 - Reference code locations as \`path:line\` (e.g. src/app.ts:42) — a bare path makes the reader hunt for the line.
 - When a reply opens an obvious next step, end with ONE HTML comment on its own line: <!-- suggested: question? ;; question? --> (2-3 SHORT follow-ups, rendered as tappable chips). Only when a genuine next step exists — never pad filler onto simple answers.
 ${visualOutput}
-- When the user reports an existing result is poor or asks for a better one, infer the outcome they want from the whole request, then combine diagnosis, concrete directions, relevant specialist skills/tools, trade-offs, and an offer to inspect or implement. For visual/product-quality problems make advice concrete (hierarchy, typography, spacing, color, interaction). Do not force a fixed advice-only or build-only route from isolated words; if genuinely ambiguous, present the most useful options and ask one focused question.`;
+- When the user reports an existing result is poor or asks for a better one, infer the outcome they want from the whole request and work toward it. Do not force a fixed advice-only or build-only route from isolated words; if genuinely ambiguous, present the most useful options and ask one focused question.`;
 }
 
 /**
@@ -346,10 +346,15 @@ ${workspaceRule}`;
 function buildMode(mode?: PromptTaskMode): string {
   if (!mode || mode === 'yolo') return '';
   const label = mode === 'build' ? 'BUILD' : 'PLAN';
+  // 2026-11-04 决策边界改革：分阶段/逐步方法句退役（怎么做是模型的事；
+  // build 轮的进度汇报教学已由 INCREMENTAL_BUILD 同注入承载，verify 由
+  // workflow 承载）。BUILD 只留交付契约（落盘+跑项目验证），PLAN 只留模式
+  // 标注（现状可见）。
   const directive = mode === 'build'
-    ? 'Work through the request in clear phases; when you complete each phase, briefly state what was done and what remains. The deliverable lives in the workspace: implement and fix with the file tools and verify by running the project checks — never an implement/fix request answered with inline code alone.'
-    : 'Work through the request in ordered steps and verify after each change.';
-  return `<task_mode>\nOperating mode: ${label} — auto-detected from the user's request as a complex multi-step task. ${directive}\n</task_mode>`;
+    ? 'The deliverable lives in the workspace: implement and fix with the file tools and verify by running the project checks — never an implement/fix request answered with inline code alone.'
+    : '';
+  const directiveText = directive ? ` ${directive}` : '';
+  return `<task_mode>\nOperating mode: ${label} — auto-detected from the user's request as a complex multi-step task.${directiveText}\n</task_mode>`;
 }
 
 /** XML 属性值转义(path/name 进属性)。 */
@@ -572,7 +577,12 @@ export class PromptAssembler {
       // 变化），不破坏 provider 的缓存前缀。
       fragment('character_core', characterCore, 119, true),
       fragment('model_identity', buildModelIdentity(context.modelIdentity), 118, true),
-      fragment('work_invariant', 'Work step by step. Read before you write — when a request means changing code IN this workspace (implement / fix / extend), locate the relevant files first (existing file names, signatures, and test structure are the contract, not suggestions), and the deliverable is the change written into those files plus their tests passing, never a code block in the reply. Analysis / review / explanation / summary requests are the opposite — do NOT scout the workspace first; go straight to the target the user named (file, path, app, or topic) and read only what answers the question. Before asking the user for approval or a decision, finish everything already authorized and make the pending item concrete (a specific diff, path, or choice). Do not add unsolicited warnings, disclaimers, or compliance checklists for hypothetical risks; address risks that are real and immediate. Be concise.', 110, true),
+      // 2026-11-04 决策边界改革：段内步骤框架（Work step by step / Read
+      // before you write / locate files first / scout 对立补偿）退役——读前
+      // 先查已由 edit_file 描述承载，交付契约与问答直达是本段的行为判据，
+      // 逐字保留（保 fragment 瘦文本，勿删整个 fragment：prio 110 坐在
+      // model_identity 与 human_tone 之间，删位会前移后者破坏缓存前缀）。
+      fragment('work_invariant', 'When a request means changing code IN this workspace (implement / fix / extend), the deliverable is the change written into the relevant files plus their tests passing, never a code block in the reply — the existing code you read (file names, signatures, test structure) is the contract, not suggestions. Analysis / review / explanation / summary requests go straight to the target the user named (file, path, app, or topic) and read only what answers the question. Before asking the user for approval or a decision, finish everything already authorized and make the pending item concrete (a specific diff, path, or choice). Do not add unsolicited warnings, disclaimers, or compliance checklists for hypothetical risks; address risks that are real and immediate. Be concise.', 110, true),
       // Tone is REQUIRED: it is the persona of the product, not decoration —
       // it used to be priority 35, optional, and was silently dropped first
       // under budget pressure on small-context models. Priority 108 sits
@@ -627,9 +637,10 @@ export class PromptAssembler {
       ...buildRequestDetailFragments(context, userText),
       // ── workflow 闸门块（2026-10-27）住在数组绝对尾部──
       // 渲染序 = 数组序（priority 只管预算裁剪序）：闸门随请求出现/消失，
-      // 坐数组中部就会插进共享块中间、打破前缀缓存纪律。7 条操作流程只对
-      // 「会动手」的请求装配（wantsHandsOnWorkflow），纯问答轮省 ≈830 tokens；
-      // work_invariant（required）与 capability_gap CORE 兜底先读后改与换路线。
+      // 坐数组中部就会插进共享块中间、打破前缀缓存纪律。4 条原则+契约
+      // （2026-11-04 决策边界改革）只对「会动手」的请求装配
+      // （wantsHandsOnWorkflow），纯问答轮省 ≈500 tokens；
+      // work_invariant（required）与 capability_gap CORE 兜底交付契约与换路线。
       // p25 = 预算紧张时它先被裁（priority 只影响裁剪序）。
       fragment('workflow', wantsHandsOnWorkflow(userText ?? '', context.mode) ? WORKFLOW_PROMPT : '', 25),
     ].filter((item): item is PromptFragment => item !== null);

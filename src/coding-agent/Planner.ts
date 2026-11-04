@@ -193,7 +193,11 @@ export async function inferSemanticRoute(
     { role: 'user', content: prompt, images },
   ];
   const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute);
-  return decision ? applyImageReadOverride(decision, prompt) : null;
+  // applyImageReadOverride 已退役（2026-11-04 决策边界改革刀三）：词表正则
+  // 覆写 LLM 路由判决是最硬的越位形状——「读图是只读」这类判断模型自己能做
+  // （路由 LLM 看得到原文），而复合请求（「分析这张截图并改前端」）被词表
+  // 压成 question 正是越位的现实代价。intent/复杂度/门禁全交语义路由判决。
+  return decision;
 }
 
 export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
@@ -632,16 +636,6 @@ export async function recheckCoveredInsertion(
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
     confidence: clampConfidence(parsed.confidence),
   };
-}
-
-const IMAGE_READ_PATTERN = /(图|截图|照片|图像)[^。；\n]{0,25}?(文字|内容|读|提取|识别|转写)|读图|extract.{0,20}text.{0,20}(image|图)|read.{0,20}text.{0,20}(image|图)/i;
-function applyImageReadOverride(
-  decision: SemanticRouteDecision,
-  prompt: string,
-): SemanticRouteDecision {
-  if (!IMAGE_READ_PATTERN.test(prompt)) return decision;
-  // 读图 / 提取图片文字是只读请求，不应被当成构建任务或进入交付验证门禁。
-  return { ...decision, intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false };
 }
 
 export class Planner {

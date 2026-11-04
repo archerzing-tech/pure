@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { takeFormValidationFeedback } from './shared/formValidationFeedback';
+import { takeProviderHealFacts } from './shared/providerSelfHeal';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
@@ -364,6 +365,10 @@ function buildCliEnvFacts(conventions?: string): string {
   if (shell) parts.push(shell);
   const formFeedback = takeFormValidationFeedback();
   if (formFeedback) parts.push(formFeedback);
+  // 刀一 自愈处方回流（2026-11-04）：与 GUI 面同构，模型失效中断的处方
+  // 下回合送达，裁决权归模型。
+  const healFacts = takeProviderHealFacts();
+  if (healFacts) parts.push(healFacts);
   return parts.join('\n\n');
 }
 

@@ -247,46 +247,27 @@ function describeEnvironment(environment: AdaptiveEnvironment, phase: AdaptiveSt
 }
 
 function buildDirective(strategy: Omit<AdaptiveStrategy, 'directive'>): string {
-  const verification = strategy.verification === 'thorough'
-    ? 'Run layered verification and preserve concrete evidence before declaring completion.'
-    : strategy.verification === 'standard'
-      ? 'Run focused checks after each meaningful change and a matching final check.'
-      : 'Run the narrowest meaningful check and state clearly when stronger verification is unavailable.';
-  const exploration = strategy.exploration === 'broad'
-    ? 'Explore the relevant workspace and dependencies broadly enough to test competing hypotheses before editing.'
-    : 'Start with a targeted read of the smallest relevant surface, expanding only when evidence requires it.';
-  const delegation = strategy.delegation === 'parallel'
-    ? 'This task needs parallel decomposition. Delegate to the matching subagent tools and run independent read-only roles in parallel, then integrate their results. Narrate the orchestration to the user like a colleague setting up a shared effort: one natural sentence about your overall approach first, then hand each piece to its subagent and weave the results into ONE reply. Never recite a role list or an arrow-chain of subagents.'
-    : strategy.delegation === 'targeted'
-      // 2026-11-03 真机判例（session_1793706272041_1）：「天气查询 simple/research」
-      // 被推 researcher 且文案带「do not do a multi-role job alone by default」
-      // 强默认——旧文案替模型做裁决，单线短任务被过度编排。改为教判定判据
-      // （职能制衡/可并行/上下文隔离命中才拆），裁决权归还模型。
-      ? 'Delegate only where it genuinely helps — distinct role perspectives that would otherwise blur into each other, independent chunks that can run in parallel, or output volume that would flood one context; a task that is single-threaded, short, and needs no independent verification runs fine without subagents. Parallelize independent read-only roles where they do exist. Tell the user about each hand-off in one natural sentence at the moment you make it, and keep the single-voice final answer.'
-      : 'This is a trivial/simple task — keep the loop local and avoid the overhead of delegation; delegate only if new evidence shows it is needed.';
-  // roles 行与 delegation 联动：delegation='none'（quick/trivial/语义路由显式免委派）
-  // 时不再输出「推荐子 agent」——无委派意图却给人选是同款信号脱钩噪音
+  // 决策边界改革刀四（2026-11-04）：五段打法指令退役（exploration/verification/
+  // delegation/recovery/autonomy 各档的命令式 prose）——「怎么排」是模型的裁决
+  // （2026-10-28 定调：何时用怎么排由模型决策），宿主只递事实。档位计算保留在
+  // select() 做观测分类（E4.1 策略→效果记录只记不裁，仪表盘切片语义不变）。
+  // roles 行与 delegation 联动保留：delegation='none'（quick/trivial/语义路由
+  // 显式免委派）时不输出名录——无委派意图却给人选是信号脱钩噪音
   //（session_1793706272041_1 判例：simple 天气查询被推 researcher）。
+  const evidence: string[] = [];
+  const failures = strategy.signals.find((s) => s.startsWith('recent-failures:'));
+  if (failures) evidence.push(failures.replace('recent-failures:', 'recent failures ×'));
+  const procedures = strategy.signals.find((s) => s.startsWith('learned-procedures:'));
+  if (procedures) evidence.push(procedures.replace('learned-procedures:', 'reusable stored procedures ×'));
+  evidence.push(strategy.signals.includes('verification:available') ? 'verification tooling available' : 'verification tooling limited');
+  if (!strategy.signals.includes('workspace:available')) evidence.push('no writable workspace');
   const roles = strategy.delegation !== 'none' && strategy.recommendedRoles.length > 0
-    ? `\n- 推荐的本任务子 agent：${strategy.recommendedRoles.join(', ')}。${strategy.parallelRoles.length > 0 ? ` 其中可并行：${strategy.parallelRoles.join(', ')}。` : ''}（建议人选；具体怎么跟用户说由你自然表达，不要列成机械清单。）`
+    ? `\n- Roles the routing saw as fitting: ${strategy.recommendedRoles.join(', ')}${strategy.parallelRoles.length > 0 ? ` (parallel-safe: ${strategy.parallelRoles.join(', ')})` : ''} — a roster, not an order; whether and how to delegate is your call.`
     : '';
   const priorArt = strategy.priorArtHint
-    ? '\n- Prior art: no stored procedure covers this task. Before writing bespoke code, search for a ready-made open-source solution or official documentation, and reuse or adapt the best fit instead of building from scratch.'
+    ? '\n- No stored procedure covers this task; a ready-made solution may exist.'
     : '';
-  const recovery = strategy.recovery === 'switch-approach'
-    ? 'Treat prior failures as evidence: change the hypothesis, tool, or scope instead of repeating the failed path.'
-    : strategy.recovery === 'use-verified-procedure'
-      ? 'Use a retrieved procedure only when the current workspace evidence still matches it; otherwise revise the strategy.'
-      : 'Continue only when the next action adds new evidence; otherwise pause, simplify, or switch approach.';
-  const autonomy = strategy.autonomy === 'unattended-local'
-    ? 'Proceed autonomously for local reversible work within the configured budget; stop at programmatic safety gates.'
-    : strategy.autonomy === 'assisted'
-      ? 'Proceed on safe local work, but surface missing capability or decisions before crossing a boundary.'
-      : 'Do not claim autonomous progress when the workspace or required capability is unavailable.';
-  // 模板只留模型需要的：复杂度/意图分类 + 三段行为 prose + 人选/现成方案。
-  // Signals/Confidence/Rationale 等枚举行是引擎自述遥测——每个枚举的下一段
-  // prose 已完整表达同一信息，枚举行纯冗余（2026-11-03 prompt 审计 A 档）。
-  return `<adaptive_strategy>\nRuntime-selected strategy (not a fixed task plan):\n- Task complexity: ${strategy.complexity}.${strategy.intentTags.length > 0 ? ` Intent: ${strategy.intentTags.join(', ')}.` : ''}\n${exploration}\n${verification}\n${delegation}${roles}${priorArt}\n${recovery}\n${autonomy}\nRevise this strategy when workspace evidence, tool results, or verification contradict it. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
+  return `<adaptive_strategy>\nContext facts (yours to weigh — the host does not prescribe an approach):\n- Routing classification: complexity ${strategy.complexity}${strategy.intentTags.length > 0 ? `, intents: ${strategy.intentTags.join(', ')}` : ''}.\n- Evidence: ${evidence.join('; ')}.${roles}${priorArt}\nWeigh these against what you can see; pick and revise your own approach as evidence dictates. Never weaken permission, path, budget, or external-side-effect safeguards.\n</adaptive_strategy>`;
 }
 
 export class AdaptiveControlPlane {

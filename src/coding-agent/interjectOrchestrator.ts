@@ -421,9 +421,10 @@ export class InterjectOrchestrator implements InterjectionIngress {
    * /范围确认撞上"已在跑/已跑完"本身就是矛盾信号——没人会要求加一个正在跑
    * 的东西，最可能的解释恰是漏报的取消。宿主不猜措辞，把现场事实喂回复核
    * 单独问一遍（decider.recheckCovered，独立窄问题提示词）。复核报取消 →
-   * stopishArm 落地（点名还能精确停支）；复核没结论 + 那支还在跑 → 拿不准
-   * 选可逆的一边（暂停那支，收执诚实交代）；复核明确判加活 → 「不重复派」
-   * 终稿。语义判断全程归模型，宿主零词表。
+   * stopishArm 落地（点名还能精确停支）；复核没结论 + 那支还在跑 → 原话
+   * 直投父引擎自裁（2026-11-04 决策边界改革刀二：宿主不再自行暂停在飞支
+   ——与本文件超时 passthrough 口径对齐，covered 的 callId 随原话带给模型）；
+   * 复核明确判加活 → 「不重复派」终稿。语义判断全程归模型，宿主零词表。
    */
   private async coveredConflict(
     text: string,
@@ -449,19 +450,19 @@ export class InterjectOrchestrator implements InterjectionIngress {
       return;
     }
     if (recheck === null && covered.status === 'running') {
-      // 复核超时/失败 = 没结论：旧兜底「宁可照旧」在取消场景方向反了——
-      // 用户说了「不需要」却被任其继续跑，等于当着用户的面背叛，且不可逆；
-      // 误停一支是可逆的（说一声就续上）。直接暂停 covered 那支（callId 是
-      // covered 命中给的宿主事实，不需要模型点名）。
-      const stopped = this.deps.stopBranchByCallId(covered.callId, 'pause');
-      if (stopped) {
-        try { appendTrace({ type: 'covered_recheck_unresolved_pause', snippet: text.slice(0, 80) }); } catch {}
-        echoUserBubble();
-        // 沉默：暂停由活动面板呈现（误停可逆、说一声就续上）。
-        this.deps.settleAck(ack, null);
-        return;
-      }
-      // 停不成（窗口刚好收尾）→ 落到下方终稿：活已不在跑，无方向性伤害。
+      // 复核超时/失败 = 没结论（2026-11-04 决策边界改革刀二）：宿主不再自
+      // 行暂停在飞支——「要不要停」是任务裁决，归模型。原话直投父引擎并
+      // 附现场事实（covered 命中的 callId 是宿主核实过的，随原话带给模型，
+      // 不需要它重新点名）；模型下一 THINK 拿着原话自行裁决。与本文件 :418
+      // 复核超时 passthrough 口径对齐——两个裁判宕机不再一个直投一个代裁。
+      try { appendTrace({ type: 'covered_recheck_unresolved_passthrough', snippet: text.slice(0, 80) }); } catch {}
+      echoUserBubble();
+      this.deps.steerRunningTurn(
+        `${text}\n（复核没出结论：这句话撞上仍在跑的「${coveredName}」（call_id=${covered.callId}）。它可能是在收掉/暂停这支，也可能只是措辞撞车——原话在上面，你自行裁决。）`,
+        images, ack, 'parent', false, undefined,
+      );
+      if (this.deps.isThinkingStreamActive()) this.deps.abortReenter();
+      return;
     }
     echoUserBubble();
     // 去重核实过的事实不再由引擎播报（「那路正在跑/已跑完」话术随刀 A2

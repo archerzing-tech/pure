@@ -25,7 +25,10 @@ describe('AdaptiveControlPlane', () => {
     expect(strategy.recovery).toBe('continue-with-evidence');
     expect(strategy.autonomy).toBe('unattended-local');
     expect(strategy.directive).toContain('<adaptive_strategy>');
-    expect(strategy.directive).toContain('Revise this strategy');
+    expect(strategy.directive).toContain('revise your own approach');
+    // 决策边界改革刀四（2026-11-04）：指令腔退役——五档打法 prose 不再出现。
+    expect(strategy.directive).not.toContain('Run layered verification');
+    expect(strategy.directive).not.toContain('keep the loop local');
   });
 
   it('widens exploration and verification after observed failures', () => {
@@ -50,7 +53,8 @@ describe('AdaptiveControlPlane', () => {
 
     expect(strategy.autonomy).toBe('blocked');
     expect(strategy.delegation).toBe('none');
-    expect(strategy.directive).toContain('Do not claim autonomous progress');
+    // blocked 场景的事实行（刀四后宿主递事实不递指令）。
+    expect(strategy.directive).toContain('no writable workspace');
   });
 
   it('changes with runtime context instead of returning one fixed path', () => {
@@ -59,7 +63,8 @@ describe('AdaptiveControlPlane', () => {
 
     expect(morning.id).not.toBe(night.id);
     expect(morning.timePhase).not.toBe(night.timePhase);
-    expect(morning.directive).not.toBe(night.directive);
+    // 刀四后 directive 只递事实：时段影响的是档位观测（verification/autonomy），
+    // 不再渲染进 prompt——两个事实件相等是合法结果，改锁 id/timePhase 的区分度。
   });
 
   it('biases delegation to parallel for a complex build / replicate request', () => {
@@ -97,12 +102,12 @@ describe('AdaptiveControlPlane', () => {
     expect(routed.delegation).toBe('targeted');
     expect(routed.recommendedRoles).toEqual([]);
     expect(routed.directive).not.toContain('researcher');
-    // 文案教判定判据而不是下强默认；引擎自述遥测枚举行不再进模板。
-    expect(routed.directive).toContain('single-threaded, short');
+    // 名录不出现、指令腔不出现（刀四后宿主只递事实）。
     expect(routed.directive).not.toContain('by default');
     expect(routed.directive).not.toContain('- Signals:');
     expect(routed.directive).not.toContain('- Confidence:');
     expect(routed.directive).not.toContain('- Rationale:');
+    expect(routed.directive).not.toContain('Delegate only where it genuinely helps');
   });
 
   it('does not route a non-code travel plan to code roles (planning ≠ code)', () => {
@@ -200,7 +205,9 @@ describe('AdaptiveControlPlane', () => {
     const strategy = plane.select({ prompt: '2 + 2 = ?', environment: environment() });
 
     expect(strategy.delegation).toBe('none');
-    expect(strategy.directive).toContain('trivial/simple task — keep the loop local');
+    // 刀四：不下「保持本地」的指令，只如实渲染分类事实且不带名录。
+    expect(strategy.directive).toContain('complexity trivial');
+    expect(strategy.directive).not.toContain('Roles the routing saw as fitting');
   });
 
   it('hints at ready-made solutions for a code task with no stored procedure (P1)', () => {
@@ -210,7 +217,7 @@ describe('AdaptiveControlPlane', () => {
     });
 
     expect(strategy.priorArtHint).toBe(true);
-    expect(strategy.directive).toContain('search for a ready-made open-source solution or official documentation');
+    expect(strategy.directive).toContain('a ready-made solution may exist');
   });
 
   it('drops the prior-art hint once a learned procedure is available', () => {

@@ -170,11 +170,10 @@ describe('PromptAssembler', () => {
     expect(cli).not.toContain('Web tools:');
   });
 
-  it('lets the model choose between advice, skills, and implementation from the whole request context', () => {
+  it('lets the model choose between advice and implementation from the whole request context', () => {
     const prompt = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) });
 
     expect(prompt).toContain('infer the outcome they want from the whole request');
-    expect(prompt).toContain('relevant specialist skills/tools');
     expect(prompt).toContain('Do not force a fixed advice-only or build-only route from isolated words');
     expect(prompt).toContain('present the most useful options and ask one focused question');
     expect(prompt).not.toContain('Do NOT create or modify a page unless the user explicitly asks');
@@ -336,21 +335,18 @@ describe('PromptAssembler', () => {
     expect(cli).toContain('never an implement/fix request answered with inline code alone');
   });
 
-  it('tells the model to inspect an existing project before writing — and NOT before analysis (work invariant)', () => {
+  it('keeps the write-code contract and the analysis shortcut in the work invariant', () => {
     // S02 残留：写了自创文件名 fizzbuzzjazz.py 而不是补全种子的 fizzbuzz.py stub；
-    // S01 残留：全程没看工作区，用 execute_command 硬跑。work_invariant 必须
-    // 把「先看项目、按既有契约动手」立成不变量——但只对写码场景：分析/汇总类
-    // 任务被这条不变量带得先跑 list_files 探路径（2026-10-26 用户实测），
-    // 纯属浪费一轮工具调用，必须显式豁免。
+    // S01 残留：全程没看工作区，用 execute_command 硬跑。work_invariant 钉两个
+    // 行为判据：写码场景=交付落盘进相关文件+测试过（读到的既有代码是契约）；
+    // 分析/汇总类=直达用户点名目标、只读答题所需——2026-11-04 决策边界改革
+    // 后「先看项目」的步骤句退役（读前先查沉 edit_file 描述），判据本体不变。
     const cli = assembler.buildSystemPrompt({ surface: 'cli', capabilities: buildCliCapabilities() });
-    // 2026-11-03 审计压切：点名工具的半句（start with find_files / code_searcher）
-    // 删——选哪个工具是模型的事（北极星：工具无章法），不变量只钉行为。
-    expect(cli).toContain('when a request means changing code IN this workspace (implement / fix / extend), locate the relevant files first');
-    expect(cli).not.toContain('start with find_files / code_searcher');
-    expect(cli).toContain('the deliverable is the change written into those files plus their tests passing, never a code block in the reply');
-    expect(cli).toContain('existing file names, signatures, and test structure are the contract, not suggestions');
-    expect(cli).toContain('Analysis / review / explanation / summary requests are the opposite');
-    expect(cli).toContain('do NOT scout the workspace first');
+    expect(cli).toContain('the deliverable is the change written into the relevant files plus their tests passing, never a code block in the reply');
+    expect(cli).toContain('the existing code you read (file names, signatures, test structure) is the contract, not suggestions');
+    expect(cli).toContain('go straight to the target the user named');
+    expect(cli).toContain('read only what answers the question');
+    expect(cli).not.toContain('Work step by step');
   });
 
   it('carries the engineering exception so project work lands in files, not inline code blocks', () => {
@@ -375,14 +371,14 @@ describe('PromptAssembler', () => {
 
   it('keeps every information/time-sensitive query predicate through the merged output-style rule', () => {
     // 刀 2(2026-10-20)合并天气/信息查询两条前的逐字锁定:合并只压结构,
-    // 行为谓词一个不少——先搜后答、不编造未来值、缺位置先问、inline 不落盘、
+    // 行为谓词一个不少——不编造时敏值（2026-11-04 起「先搜后答」步骤句
+    // 退役，不编造即须查证，谓词本体保留）、缺位置先问、inline 不落盘、
     // 不为咨询请求搭项目骨架、只有真数据才出 chart、搜不到就明说。
     const gui = assembler.buildSystemPrompt({
       surface: 'gui',
       capabilities: buildGuiCapabilities(true),
     });
-    expect(gui).toContain('Call web_search FIRST');
-    expect(gui).toContain('never invent future weather');
+    expect(gui).toContain('Never invent time-sensitive facts (future weather, current prices)');
     expect(gui).toContain('state a missing location as an assumption');
     expect(gui).toContain('ANSWERED INLINE');
     expect(gui).toContain('no weather.js');

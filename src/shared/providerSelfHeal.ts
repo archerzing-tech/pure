@@ -21,6 +21,8 @@ export interface ProviderSelfHealInput {
 }
 
 export interface ProviderSelfHealPlan {
+  /** 拒收的 provider id（处方行的主语）。 */
+  provider: string;
   /** 已失效的模型：从模型库里剔除它。 */
   deadModel: string;
   /** 建议切换到的模型；null 表示清单里再没有别的模型可选。 */
@@ -74,6 +76,7 @@ export function planProviderSelfHeal(input: ProviderSelfHealInput): ProviderSelf
   if (!MODEL_GONE_RE.test(input.message)) return null;
   const alternatives = input.models.map((m) => m.trim()).filter((m) => m && m !== model);
   return {
+    provider: input.provider,
     deadModel: model,
     nextModel: alternatives[0] ?? null,
     detail: excerpt(input.message),
@@ -89,4 +92,36 @@ export function modelsWithout(models: readonly string[], dead: string): string[]
     if (!out.includes(m)) out.push(m);
   }
   return out;
+}
+
+// ── 处方事件器（2026-11-04 决策边界改革刀一）──────────────────────────
+// 5856e63 反转定调：自愈裁决权归模型，pure 只做感知手脚。命中「模型没了」
+// 时宿主不再静默落盘改配置（原 persistConfig(applyModelSelfHeal(...)) 是被
+// 否的自动闭环形状），改记处方事件——各面的 user-turn 装配（GUI
+// buildEnvFacts / CLI buildCliEnvFacts）读走注入，模型看到处方自己改模型库
+// （设置语义操作 1cf8181 已确保改了真生效）或转告用户。读即清，无事件零注入。
+
+let providerHealPrescriptions: ProviderSelfHealPlan[] = [];
+
+export function recordProviderHealEvent(plan: ProviderSelfHealPlan): void {
+  providerHealPrescriptions.push(plan);
+  if (providerHealPrescriptions.length > 8) {
+    providerHealPrescriptions.splice(0, providerHealPrescriptions.length - 8);
+  }
+}
+
+/** 读走全部处方（读即清）渲染成 user-turn 处方行；无事件返回空串。
+ *  按 provider+dead 去重（同模型反复被拒天然归并）。 */
+export function takeProviderHealFacts(): string {
+  const plans = providerHealPrescriptions;
+  providerHealPrescriptions = [];
+  if (plans.length === 0) return '';
+  const seen = new Map<string, ProviderSelfHealPlan>();
+  for (const p of plans) seen.set(`${p.provider}\n${p.deadModel}`, p);
+  const rows = [...seen.values()].map((p) =>
+    p.nextModel
+      ? `${p.provider} rejected "${p.deadModel}" as gone (${p.detail}) — prescription: remove it from the model list and switch to "${p.nextModel}" (config.json / Settings), then carry on`
+      : `${p.provider} rejected "${p.deadModel}" as gone (${p.detail}) — prescription: that provider has no models left, a working one must be added (config.json / Settings) before retrying`,
+  );
+  return `Provider self-heal prescriptions (the host has NOT changed any config — the decision is yours): ${rows.join('; ')}.`;
 }

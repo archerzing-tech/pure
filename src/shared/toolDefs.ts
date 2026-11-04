@@ -188,7 +188,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'web_search',
-    description: 'Web search. With a Serper or Tavily API key it uses those API backends first; otherwise free backends are tried in order (DuckDuckGo / Wikipedia / Bing / Sogou / Baidu / Brave, plus a Jina-proxy last resort); an intranet SearXNG instance is tried first when configured. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative.',
+    description: 'Web search. With a Serper or Tavily API key it uses those API backends first; otherwise free backends are tried in order (DuckDuckGo / Wikipedia / Bing / Sogou / Baidu / Brave, plus a Jina-proxy last resort); an intranet SearXNG instance is tried first when configured. If a search returns no results or fails, do NOT repeat the same or a near-identical query — rephrase it (broader terms, simpler wording, or English), or use web_fetch on a URL you expect to be authoritative. Never invent time-sensitive facts (future weather, current prices).',
     input_schema: {
       type: 'object',
       properties: {

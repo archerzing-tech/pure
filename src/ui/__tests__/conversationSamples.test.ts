@@ -1139,15 +1139,15 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     expect(h.chat.folds.entries()).toHaveLength(0);
   });
 
-  it('复核没结论（超时/失败）时兜底反转：暂停 covered 那支，绝不任其继续（2026-10-21 真机三连，方向性）', async () => {
+  it('复核没结论（超时/失败）时原话直投父引擎自裁，宿主零裁决（2026-10-21 真机三连出身；2026-11-04 刀二反转兜底）', async () => {
     // 真机账本：主判定→终稿恰 8003ms = 复核 8s 超时 → null → 旧兜底回「不
-    // 重复派」终稿，用户说了「不需要」的活继续烧。用户定调「方向性问题，
-    // 大 bug」：拿不准要选可逆的一边——误停一支说一声就续上；该停不停是
-    // 当着用户的面背叛。复核 null + covered running → 宿主直接暂停命中那
-    // 支（callId 是 covered 命中给的宿主事实，不需要模型点名），收执诚实
-    // 交代没拿准+给出恢复口。scriptedLlm 的 fallback 会给复核喂回一个成功
-    // 的 task 判定（那走的是「明确判加活」路），所以这里用局部 llm 让复核
-    // 调用输出非 JSON——真模拟解析失败 → null。
+    // 重复派」终稿，用户说了「不需要」的活继续烧——这是当年兜底反转的出身。
+    // 2026-11-04 决策边界改革刀二：宿主代裁（自行暂停）也退役——「要不要
+    // 停」是任务裁决归模型。复核 null + covered running → 原话直投父引擎并
+    // 附 covered 命中的 callId 现场事实，模型下一 THINK 自行裁决。宿主零停
+    // 支、零词表。scriptedLlm 的 fallback 会给复核喂回一个成功的 task 判定
+    // （那走的是「明确判加活」路），所以这里用局部 llm 让复核调用输出非
+    // JSON——真模拟解析失败 → null。
     const classifyCalls: string[] = [];
     const llm = {
       classifyCalls,
@@ -1180,11 +1180,14 @@ describe('样本回放：samples.txt 的对话流在宿主侧跑通', () => {
     };
 
     await h.chat.interject('不需要优酷的调研');
-    expect(paused).toEqual(['call_r2']); // 拿不准：暂停命中的那支，可逆
+    expect(paused).toEqual([]); // 宿主零代裁：不暂停任何一支
+    // 原话直投：话进转向通道，附 covered 的 callId 现场事实（模型自裁的依据）。
+    expect(h.chat.steerBus.entries()).toHaveLength(1);
+    const steered = String(h.chat.steerBus.entries()[0]?.message.content ?? '');
+    expect(steered).toContain('不需要优酷的调研');
+    expect(steered).toContain('call_r2');
     const said = assistantJoined(h.root) + statusJoined(h.root);
     expect(said).not.toContain('不重复派');
-    // 沉默（刀 A2）：「没拿准+恢复口」收执退役——暂停由活动面板呈现
-    // （误停可逆，说一声就续上），不再装「明白」也不再替引擎编恢复口。
     expect(said).not.toContain('没拿准');
     expect(h.root.querySelectorAll('.bubble-row.user')).toHaveLength(1); // 单气泡（2026-10-20 双气泡判例）
   });

@@ -1295,8 +1295,10 @@ describe('plan overview completion state', () => {
     expect(armBody.indexOf('核实不过')).toBeGreaterThan(-1);
     // 核实通过即终稿（刀 A2）：去重/暂停全部沉默——settleAck(ack, null)，
     // 状态由活动面板呈现（coveredName 仍喂复核提示词的 conflictNote）。
+    // 2026-11-04 决策边界改革刀二：复核没结论臂改原话直投（steerRunningTurn
+    // 内部结算 ack），coveredConflict 内 settleAck(ack, null) 只剩尾臂一处。
     const coveredBody = orch.slice(coveredAt, orch.indexOf('\n  private ', coveredAt));
-    expect(coveredBody.split('this.deps.settleAck(ack, null)').length - 1).toBe(2);
+    expect(coveredBody.split('this.deps.settleAck(ack, null)').length - 1).toBe(1);
     expect(coveredBody.indexOf('不重复派')).toBe(-1);
     // 判定遥测落盘（真机取证断链修复）：kind/点名/收执进 observations。
     expect(orch.indexOf("type: 'interject_decision'")).toBeGreaterThan(-1);
@@ -1728,12 +1730,14 @@ describe('plan overview completion state', () => {
     const coveredBody = orch.slice(orch.indexOf('private async coveredConflict('), orch.indexOf('\n  private ', orch.indexOf('private async coveredConflict(')));
     expect(coveredBody.indexOf("recheck && recheck.verdict === 'inline'")).toBeGreaterThan(-1);
     expect(coveredBody.indexOf('await this.stopishArm(text, images, displayText, ack, recheckReceipt')).toBeGreaterThan(-1);
-    // 兜底反转（2026-10-21 真机三连，用户定调「方向性问题，大 bug」）：复核
-    // 超时/失败=没结论时，暂停 covered 那支而不是任其继续——误停可逆（说
-    // 一声就续上），该停不停不可逆。拿不准选可逆的一边。
+    // 复核没结论臂（2026-10-21 真机三连出身；2026-11-04 决策边界改革刀二
+    // 反转其兜底）：宿主不再自行暂停在飞支——原话直投父引擎+callId 现场事
+    // 实随附，「要不要停」归模型（与超时 passthrough 口径对齐）。
     expect(coveredBody.indexOf("recheck === null && covered.status === 'running'")).toBeGreaterThan(-1);
-    expect(coveredBody.indexOf("this.deps.stopBranchByCallId(covered.callId, 'pause')")).toBeGreaterThan(-1);
-    // 暂停沉默（刀 A2）：branchUncertainPauseReceipt 已退役，状态由面板呈现。
+    expect(coveredBody.indexOf('covered_recheck_unresolved_passthrough')).toBeGreaterThan(-1);
+    expect(coveredBody.indexOf('this.deps.steerRunningTurn(')).toBeGreaterThan(-1);
+    expect(coveredBody.indexOf('stopBranchByCallId')).toBe(-1);
+    // 尾臂沉默保留（刀 A2）：复核明确判加活时 settleAck(ack, null)。
     expect(coveredBody.indexOf('this.deps.settleAck(ack, null)')).toBeGreaterThan(-1);
     // 复核提示词的契约面（Planner 侧）：dedupe_conflict 是 system 点名的顶层
     // 块、举证责任倒置写进指令、输出契约带 stop_branch 点名与现场收执。
@@ -1825,12 +1829,13 @@ describe('plan overview completion state', () => {
     // 两个停支入口都在编排器——经引擎动作缝（stopBranchByCallId）回宿主执
     // 行；目标统一先过核实。2026-10-28 刀 1：mode 三元（abort 形）已死——
     // BRANCH_STOP_RE 的祈使中止口径随快路径删除，点名停支一律 pause（收掉
-    // 一项=暂停，误停可逆）。刀 B 后两处：stopishArm 按裁决器指认（在飞核
-    // 实），coveredConflict 复核没结论时按 covered 命中的宿主事实暂停。
+    // 一项=暂停，误停可逆）。刀 B 后宿主代裁的 covered 暂停已随决策边界
+    // 改革刀二退役（2026-11-04）：复核没结论改原话直投，「要不要停」归模
+    // 型——stopBranchByCallId 只剩 stopishArm 按裁决器指认一处。
     const orch = readSource(new URL('../../coding-agent/interjectOrchestrator.ts', import.meta.url));
     expect(orch.split("stopBranchByCallId(target, pause ? 'pause' : 'abort')").length - 1).toBe(0);
     expect(orch.split("this.deps.stopBranchByCallId(target, 'pause')").length - 1).toBe(1);
-    expect(orch.split("this.deps.stopBranchByCallId(covered.callId, 'pause')").length - 1).toBe(1);
+    expect(orch.split("this.deps.stopBranchByCallId(covered.callId, 'pause')").length - 1).toBe(0);
     expect(orch.indexOf("'abort')")).toBe(-1);
     // 取消挂号簿随回合清空（出生前取消的闸）：回合收尾与 new chat 两条清扫
     // 都要在——控制器跨会话单例，new chat 不摘簿子，旧会话的取消挂号会闯

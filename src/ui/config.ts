@@ -8,7 +8,6 @@ import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
-import { modelsWithout } from '../shared/providerSelfHeal';
 import type { ProbedCapability } from '../shared/capabilityProbe';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
@@ -492,34 +491,10 @@ export function modelListForProvider(cfg: PureConfig, provider: string): string[
 }
 
 /**
- * 把「模型已失效」的自愈方案落到配置上：自定义 provider 的模型库挂在它自己
- * 的条目里，内置 provider 的在 providerModels 下——两边都改对，下次发消息
- * （config 缓存已失效）就会用新模型。只动模型库与当前模型，其余字段原样。
+ * （applyModelSelfHeal 已随决策边界改革刀一退役，2026-11-04：自动改配置是
+ * 5856e63 被否的闭环形状；处方改走 providerSelfHeal 事件器 → envFacts，
+ * 模型自己经设置语义操作改 config.json。）
  */
-export function applyModelSelfHeal(
-  cfg: PureConfig,
-  providerId: string,
-  dead: string,
-  next: string | null,
-): PureConfig {
-  const custom = customProviderFor(cfg.customProviders ?? [], providerId);
-  const model = next ?? cfg.model;
-  if (custom) {
-    const remaining = modelsWithout(custom.models ?? [], dead);
-    return {
-      ...cfg,
-      model,
-      customProviders: (cfg.customProviders ?? []).map((p) =>
-        p.id === custom.id ? { ...p, models: remaining } : p),
-    };
-  }
-  const remaining = modelsWithout(modelListForProvider(cfg, providerId), dead);
-  return {
-    ...cfg,
-    model,
-    providerModels: { ...cfg.providerModels, [providerId]: remaining },
-  };
-}
 
 /**
  * True when an API key is available (localStorage in browser / Rust secrets

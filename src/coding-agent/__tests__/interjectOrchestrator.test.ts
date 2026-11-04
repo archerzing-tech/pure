@@ -317,14 +317,19 @@ describe('InterjectOrchestrator — sideline / new_task 臂', () => {
     expect(h.holds.queued).toHaveLength(0); // 取消绝不当活排队
   });
 
-  it('new_task 撞车在飞支 + 复核没结论：选可逆的一边，暂停那支', async () => {
+  it('new_task 撞车在飞支 + 复核没结论：原话直投父引擎自裁（宿主零裁决）', async () => {
     h.classifyWith({ verdict: 'new_task', reason: '', confidence: 1 });
     h.recheckWith(null);
     h.setCovering([{ callId: 'call_youku', name: '优酷调研', snippet: '优酷调研', status: 'running' }]);
     await new InterjectOrchestrator(h.deps).interject('优酷调研不用再做了');
-    expect(h.holds.stops).toEqual([{ callId: 'call_youku', mode: 'pause' }]);
-    // 沉默（刀 A2）：暂停由活动面板呈现，误停可逆、说一声就续上。
-    expect(h.holds.settleAcks).toEqual([null]);
+    // 决策边界改革刀二（2026-11-04）：宿主不再自行暂停在飞支——原话直投+
+    // callId 现场事实随附，模型下一 THINK 自裁（与超时 passthrough 口径对齐）。
+    expect(h.holds.stops).toHaveLength(0);
+    expect(h.holds.steers).toHaveLength(1);
+    expect(h.holds.steers[0]?.text).toContain('优酷调研不用再做了');
+    expect(h.holds.steers[0]?.text).toContain('call_youku');
+    expect(h.holds.steers[0]?.target).toBe('parent');
+    expect(h.holds.steers[0]?.cancel).toBe(false);
   });
 
   it('new_task 撞车 + 复核明确判加活：去重落地，引擎沉默', async () => {

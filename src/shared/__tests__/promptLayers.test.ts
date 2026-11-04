@@ -163,7 +163,7 @@ describe('L1 behavior contracts', () => {
     // P2 — the model must consult session memory for procedures and error
     // lessons BEFORE starting work (self-evolution: recorded experience only
     // helps if the workflow contract tells the model to look at it up front).
-    expect(WORKFLOW_PROMPT).toContain('check the <session_memory> block for a matching procedure');
+    expect(WORKFLOW_PROMPT).toContain('Check the <session_memory> block for a matching procedure');
     expect(COMPLETION_PROMPT).toContain('Completion report');
     expect(COMPLETION_PROMPT).toContain('依据');
     expect(COMPLETION_PROMPT).toContain('改动');

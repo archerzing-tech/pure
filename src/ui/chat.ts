@@ -2,8 +2,8 @@
 // v0.6 — Uses CodingAgent/Harness instead of self-built ReAct loop.
 // Iterates over EngineEvents stream to update the UI reactively.
 
-import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, applyModelSelfHeal, type PureConfig } from './config';
-import { planProviderSelfHeal } from '../shared/providerSelfHeal';
+import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
+import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
@@ -963,7 +963,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
 
 /** P2 下沉（2026-10-27）：惯例 + 运行时 + 网络 + shell 拼成 user-turn 环境事实。
  * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string): string {
   const parts: string[] = [];
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
@@ -980,6 +980,10 @@ function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFa
   // 同款「有事件才出现」。
   const capability = capabilityFacts?.trim();
   if (capability) parts.push(capability);
+  // 刀一 自愈处方回流（2026-11-04）：模型失效中断时宿主只记处方不落盘，
+  // 下回合在这里送达模型——裁决权归模型（5856e63 同构）。无事件零注入。
+  const heal = providerHealFacts?.trim();
+  if (heal) parts.push(heal);
   return parts.join('\n\n');
 }
 
@@ -6614,7 +6618,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts()),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,
@@ -8030,11 +8034,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // Runtime interrupt notices follow the UI language (were hard-
               // coded English) — see chat.* keys in i18n.ts.
               //
-              // 模型失效自愈（2026-11-02 判例）：provider 明确说「这个模型没
-              // 了」（下架 / 区域限制 / 账号未开通 / embedding 模型误入清单）时，
-              // 只把原文贴回去等于把设置问题丢给用户——设置本来就可以由 pure
-              // 自己修。剔除死模型、切到清单里下一个，并把 provider 原话一并
-              // 写出来，让「为什么调不通」有据可查。
+              // 模型失效处方（2026-11-02 判例；2026-11-04 决策边界改革刀一
+              // 反转）：provider 明确说「这个模型没了」时，宿主不再静默剔除/
+              // 切换——persistConfig 自动闭环是 5856e63 被否的形状（自愈裁决
+              // 权归模型，pure 只做感知手脚）。改记处方事件：下回合 envFacts
+              // 送达模型，模型自己改模型库接续或转告用户；本回合 UI 如实宣告
+              // 现状与出路，不宣告既成事实。
               let healingNote = '';
               if (event.payload.reasonCode === 'failure_policy_stop') {
                 const heal = planProviderSelfHeal({
@@ -8044,10 +8049,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   models: modelListForProvider(config, config.provider),
                 });
                 if (heal) {
-                  persistConfig(applyModelSelfHeal(config, config.provider, heal.deadModel, heal.nextModel));
+                  recordProviderHealEvent(heal);
                   const template = heal.nextModel
-                    ? t('chat.interrupted.selfHeal', 'Model "{dead}" is not available on {provider} ({detail}) — removed it and switched to "{next}"; send again to continue.')
-                    : t('chat.interrupted.selfHealNoModel', 'Model "{dead}" is not available on {provider} ({detail}) — removed it; no models left on that provider, add a working one in Settings.');
+                    ? t('chat.interrupted.selfHeal', 'Model "{dead}" is not available on {provider} ({detail}) — prescription recorded: pure can update the model list itself next turn, or adjust it in Settings.')
+                    : t('chat.interrupted.selfHealNoModel', 'Model "{dead}" is not available on {provider} ({detail}) — that provider has no models left; pure will relay this next turn, or add a working one in Settings.');
                   healingNote = '\n' + template
                     .replace('{dead}', heal.deadModel)
                     .replace('{provider}', config.provider)
