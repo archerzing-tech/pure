@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
+  DeepSeekAnthropicAdapter,
   anthropicUsageToOpenAI,
   applyAnthropicCacheBreakpoints,
   cacheableAnthropicRequest,
@@ -171,5 +172,16 @@ describe('8.2 — anthropic prompt-cache breakpoints', () => {
     const bare = anthropicUsageToOpenAI({ input_tokens: 10 });
     expect(bare.prompt_cache_hit_tokens).toBe(0);
     expect(bare.completion_tokens).toBe(0);
+  });
+});
+
+// 2026-11-04 本地无 key 服务支持：SDK 在 apiKey 为空时发请求即抛
+// 「Could not find an API key」——keyless 本地端点（anthropic 兼容路由器）
+// 传占位值（服务端忽略头值），对齐 OpenAICompatibleAdapter 的 'ollama' 占位。
+describe('DeepSeekAnthropicAdapter keyless construction (本地无 key)', () => {
+  it('constructs with an empty key without throwing', () => {
+    expect(() => new DeepSeekAnthropicAdapter({ apiKey: '', baseURL: 'http://localhost:8080' })).not.toThrow();
+    expect(() => new DeepSeekAnthropicAdapter({ apiKey: 'sk-real' })).not.toThrow();
+    expect(() => new DeepSeekAnthropicAdapter({})).not.toThrow();
   });
 });

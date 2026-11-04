@@ -78,6 +78,7 @@ import {
   customProviderLabel,
   defaultModelFor,
   isCustomProviderId,
+  isLocalEndpoint,
   OLLAMA_PRESET,
   OPENAI_PRESET,
   OPENROUTER_PRESET,
@@ -1791,7 +1792,10 @@ export class SettingsPanel {
     const imageGenModel = customEntry?.imageGenModel ?? '';
     const keyPlaceholder = savedKey
       ? t('llm.apiKey.savedPlaceholder')
-      : (customEntry?.local ? t('llm.custom.apiKeyOptional.hint') : t('llm.apiKey.placeholder'));
+      // local 标记（Ollama 预设）或 loopback URL 都算本地服务——key 可留空。
+      : ((customEntry?.local || isLocalEndpoint(customEntry?.baseURL ?? override?.baseURL))
+        ? t('llm.custom.apiKeyOptional.hint')
+        : t('llm.apiKey.placeholder'));
     const urlPlaceholder = custom
       ? t('llm.baseURL.placeholder')
       : t('llm.baseURL.builtinPlaceholder').replace('{url}', def?.baseURL ?? '');
@@ -1892,7 +1896,9 @@ export class SettingsPanel {
       this.toast(t('llm.custom.needURL'));
       return;
     }
-    if (!apiKey && !custom?.local && !(custom?.hasApiKey || providerOverrideFor(cfg.providerOverrides, provider)?.hasApiKey)) {
+    // Keyless 豁免：本地服务（local 标记或 loopback URL）不带 key 也放行，
+    // 对齐 isLocalEndpoint 读取时判定（预设标记 ∥ URL 判定，无快照失步）。
+    if (!apiKey && !(custom?.local || isLocalEndpoint(baseURL)) && !(custom?.hasApiKey || providerOverrideFor(cfg.providerOverrides, provider)?.hasApiKey)) {
       this.toast(t('llm.model.testNeedKey'));
       return;
     }

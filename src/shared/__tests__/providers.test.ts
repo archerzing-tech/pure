@@ -30,6 +30,7 @@ import {
   planThinkingOffExtraBody,
   isCustomKeyless,
   isCustomProviderId,
+  isLocalEndpoint,
   type CustomProvider,
   type ProviderOverride,
 } from '../providers';
@@ -379,6 +380,40 @@ describe('isCustomKeyless', () => {
   it('a stored key (Rust secrets, hasApiKey) counts as configured', () => {
     const withStoredKey: CustomProvider = { ...OLLAMA, apiKey: '', hasApiKey: true };
     expect(isCustomKeyless([withStoredKey], 'ollama')).toBe(false);
+  });
+});
+
+describe('isLocalEndpoint (2026-11-04 本地无 key 服务支持)', () => {
+  it('loopback hosts and mDNS-style suffixes are local — key stays optional', () => {
+    // LM Studio / vLLM / llama.cpp / Ollama 默认端口形态全命中。
+    expect(isLocalEndpoint('http://localhost:1234/v1')).toBe(true);
+    expect(isLocalEndpoint('http://127.0.0.1:8080/v1')).toBe(true);
+    expect(isLocalEndpoint('http://127.9.1.1:8000')).toBe(true); // 127/8 全段
+    expect(isLocalEndpoint('http://[::1]:11434/v1')).toBe(true);
+    expect(isLocalEndpoint('http://0.0.0.0:8000')).toBe(true);
+    expect(isLocalEndpoint('http://mybox.local:1234/v1')).toBe(true);
+    expect(isLocalEndpoint('http://box.internal:8080')).toBe(true);
+    expect(isLocalEndpoint('localhost:11434/v1')).toBe(true); // 无 scheme 容错
+  });
+
+  it('remote endpoints are not local — the key requirement stays on', () => {
+    expect(isLocalEndpoint('https://api.openai.com/v1')).toBe(false);
+    expect(isLocalEndpoint('https://api.deepseek.com')).toBe(false);
+    // 相似形状反例：域名后缀骗不过（notlocalhost / evil.local.attacker）。
+    expect(isLocalEndpoint('https://notlocalhost.example.com/v1')).toBe(false);
+    expect(isLocalEndpoint('https://api.example.local.attacker.com')).toBe(false);
+    // 公网 IPv4（哪怕 10.x 内网穿透）不算「本地无 key」——判定只钉 loopback。
+    expect(isLocalEndpoint('http://10.0.0.5:8000/v1')).toBe(false);
+    // 垃圾输入不炸。
+    expect(isLocalEndpoint('')).toBe(false);
+    expect(isLocalEndpoint(undefined)).toBe(false);
+    expect(isLocalEndpoint('http://[bad ipv6')).toBe(false);
+  });
+
+  it('hostname match is case-insensitive and IPv6 bracket forms both work', () => {
+    expect(isLocalEndpoint('http://LOCALHOST:1234/v1')).toBe(true);
+    expect(isLocalEndpoint('http://MyBox.LOCAL:1234')).toBe(true);
+    expect(isLocalEndpoint('http://[::1]:8080')).toBe(true);
   });
 });
 

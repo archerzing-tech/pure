@@ -13864,6 +13864,38 @@ mod chat_stream_tests {
         assert_eq!(resolve_api_key(&empty, "", "llm.apiKey.ollama", true), "");
         assert_eq!(resolve_api_key(&empty, "", "", false), "");
     }
+
+    #[test]
+    fn apply_auth_headers_omits_auth_for_keyless_local_endpoints() {
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({});
+        let build = |anthropic: bool, key: &str| {
+            apply_auth_headers(
+                client
+                    .post("http://localhost:11434/v1/chat/completions")
+                    .header("Content-Type", "application/json")
+                    .json(&body),
+                anthropic,
+                key,
+            )
+            .build()
+            .unwrap()
+        };
+        // Keyless: NO auth header on either protocol — the anthropic path
+        // historically sent `x-api-key: ""` unconditionally, which strict
+        // local routers reject.
+        let openai_keyless = build(false, "").headers().clone();
+        assert!(openai_keyless.get("Authorization").is_none());
+        let anthropic_keyless = build(true, "").headers().clone();
+        assert!(anthropic_keyless.get("x-api-key").is_none());
+        // …but anthropic-version still goes out (servers need it regardless).
+        assert!(anthropic_keyless.get("anthropic-version").is_some());
+        // Keyed: each protocol carries its header with the real value.
+        let openai_keyed = build(false, "sk-test").headers().clone();
+        assert_eq!(openai_keyed.get("Authorization").unwrap(), "Bearer sk-test");
+        let anthropic_keyed = build(true, "sk-test").headers().clone();
+        assert_eq!(anthropic_keyed.get("x-api-key").unwrap(), "sk-test");
+    }
 }
 
 /// Resolve a provider's key from the secrets store.
@@ -14099,6 +14131,31 @@ fn send_status(
 /// 是 10s 连接超时 × 3 + 退避 ≈ 32s 才轮到代理，而工具出口在第 2 步就换路
 /// （netRoute.unblockAttemptPlan 把「首选·重试」排在第 3 步）。状态类失败
 /// （429/5xx）仍按原样退避重试：那说明链路是通的，重试才是正解。
+/// Auth headers for one outgoing LLM request, keyed by wire protocol.
+/// Keyless local endpoints (api_key == "") get NO auth header on either
+/// protocol — an empty-valued `x-api-key`/`Authorization` is worse than none:
+/// strict servers reject the empty string outright, and the anthropic
+/// protocol historically sent `x-api-key: ""` unconditionally. Returns the
+/// request so the send loop can keep chaining.
+fn apply_auth_headers(
+    request: reqwest::RequestBuilder,
+    anthropic: bool,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if anthropic {
+        let request = request.header("anthropic-version", "2023-06-01");
+        if api_key.is_empty() {
+            request
+        } else {
+            request.header("x-api-key", api_key)
+        }
+    } else if api_key.is_empty() {
+        request
+    } else {
+        request.header("Authorization", format!("Bearer {}", api_key))
+    }
+}
+
 async fn send_chat_request(
     client: &reqwest::Client,
     url: &str,
@@ -14118,7 +14175,7 @@ async fn send_chat_request(
     let mut attempts: u32 = 0;
     loop {
         attempts += 1;
-        let mut request = client
+        let base_request = client
             .post(url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
@@ -14128,13 +14185,7 @@ async fn send_chat_request(
             // generic `error decoding response body` from its decompressor.
             .header("Accept-Encoding", "identity")
             .json(body);
-        if anthropic {
-            request = request
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01");
-        } else if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
+        let mut request = apply_auth_headers(base_request, anthropic, api_key);
         let send_result = tokio::time::timeout(
             std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
             request.send(),

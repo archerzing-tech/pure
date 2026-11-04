@@ -13,7 +13,9 @@ import { safeParseArgs } from '../../shared/format';
 import { normalizeTokenUsage } from '../../shared/usage';
 
 export interface DeepSeekAnthropicConfig {
-  apiKey: string;
+  /** Optional: keyless local endpoints (anthropic 兼容路由器) legitimately
+   *  have no key — the constructor passes a placeholder the server ignores. */
+  apiKey?: string;
   model?: string;
   maxTokens?: number;
   temperature?: number;
@@ -39,7 +41,10 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     // browser dev harness — where the SDK's browser guard otherwise refuses to
     // construct and every anthropic-protocol turn dies before the request.
     this.client = new Anthropic({
-      apiKey: config.apiKey,
+      // Keyless local endpoints: the SDK throws on an empty key at request
+      // time, so pass a placeholder (the header value is ignored by keyless
+      // servers) — same rationale as OpenAICompatibleAdapter's 'ollama'.
+      apiKey: config.apiKey || 'keyless-local',
       baseURL: config.baseURL || 'https://api.deepseek.com/anthropic',
       dangerouslyAllowBrowser: true,
     });

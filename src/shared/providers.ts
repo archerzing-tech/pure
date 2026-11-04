@@ -638,6 +638,31 @@ export function isCustomKeyless(
   return !!custom && !custom.apiKey && !custom.hasApiKey;
 }
 
+/**
+ * True when the base URL points at a loopback / mDNS-style local service
+ * (localhost, 127.x, ::1, *.local, *.internal): such services ship without an
+ * API key, so the settings form relaxes its key requirement and hints that the
+ * field may stay empty. Judged from the URL at read time — NOT persisted — so
+ * editing a provider from a remote endpoint to a local one (or back) takes
+ * effect immediately instead of waiting for a stale `local` snapshot flag.
+ */
+export function isLocalEndpoint(baseURL: string | undefined | null): boolean {
+  if (!baseURL) return false;
+  let host: string;
+  try {
+    const url = new URL(baseURL.includes('://') ? baseURL : `http://${baseURL}`);
+    // WHATWG URL keeps brackets on IPv6 hostnames — strip before matching.
+    host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return false;
+  }
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '::' || host.endsWith('.local') || host.endsWith('.internal')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) return m[1] === '127' || (m[1] === '0' && m[2] === '0' && m[3] === '0' && m[4] === '0');
+  return false;
+}
+
 export function providerDef(id: string | undefined | null): ProviderDef | undefined {
   return id ? PROVIDER_BY_ID.get(id) : undefined;
 }
