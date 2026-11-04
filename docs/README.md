@@ -10,6 +10,7 @@
 | [conversational-intelligence-upgrade.md](conversational-intelligence-upgrade.md) | 主线蓝图（1–4 期落，5 期半落，6–8 待定） | 对话智能八期：调度与止损分寸是后续候选 |
 | [interjection-inline-sideline.md](interjection-inline-sideline.md) | 插话当前权威（有尾刀） | 三值 inline/sideline/new_task 二分制；P2 fold 退役待执行（insertionMessaging.ts 内有下一刀标注） |
 | [network-intelligence-2026-10.md](network-intelligence-2026-10.md) | 期 1–3 落，期 4 余主体 | 路由脑接管 runRouted/镜像链/兜底链顺序 + 统一真话模板 |
+| [network-layer-design-2026-11.md](network-layer-design-2026-11.md) | 设计稿（未开工，2026-11-04 拍板） | 单一 NetworkPort + 代理资源化：代理只提供健康/成本，路由按目标类与实测证据决策；含 P0–P3 分期与七项已定决策 |
 | [remote-office-bridge-design.md](remote-office-bridge-design.md) | S1/S2 落，S3 未开工 | 会话=事件日志 + 单主宿主；S3 daemon 化是活蓝图 |
 | [persona-core-upgrade.md](persona-core-upgrade.md) | 刀 1–9 落（双语未做） | 人格系统行为权威：Character Core → 做事/说话双投影 |
 | [presentation-capability-library.md](presentation-capability-library.md) | MVP 刀落（后续刀未排期） | 表现形式库：语义卡注册表 + presentation_guide 发现工具，模型自主决策用哪种视觉形式交付 |
@@ -31,6 +32,7 @@
 |---|---|
 | [差距分析：pure 与主流 Agent（截至 2026-10）](差距分析：pure%20与主流%20Agent（截至%202026-10）.md) | 对标差距清单（含 2026-11-02 对齐补记）与明确不追清单 |
 | [two-legs-plan-2026-11.md](two-legs-plan-2026-11.md) | 双腿定位（能力供给 × 模型代际）差距判定与 W1–W5 施工计划；含可复现基线（2026-11-03） |
+| [pure-positioning-audit-2026-11.md](pure-positioning-audit-2026-11.md) | 定位审计（外部视角五维差距扫描，2026-11-04） | 大部分 Phase 建议已是完成时；净增量「模型主导自进化」与 11-03 定调同向，作 P3 候选参考而非施工单 |
 
 ## 其他
 
