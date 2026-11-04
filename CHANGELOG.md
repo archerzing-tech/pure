@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.1.5
+
+**大文件写入中断根治三刀：截断信号透传 + append 分段原语 + 精准截断文案**
+
+真机主诉「写大文件经常直接中断」的真凶不在写入在生成：整个文件内容作为 tool call 的 arguments 由模型逐 token 生成，OpenAI-spec 链（DeepSeek/GLM 等国内常用全走此链）的 max_tokens 默认只有 4096，大文件必然在半路触顶——JSON 参数不完整，回合中断。引擎对半截 tool call 放弃本是对的（半截 JSON 无法安全续写），错在截断后模型只拿到含糊的 invalid-arguments：不知道真因就原样重试再撞一次。工具描述里早已写了分段建议，但劝导对自信模型空转，机械上限才是根因——修法全是机制不是教做事。刀 1：OpenAI 链默认抬到 8192（DeepSeek 上限正好、大多数端点的公共交集，32768 会在 DeepSeek 直接 400）。刀 2：write_file 新增 append 参数双端落地（Rust OpenOptions 追加写 + 流式进度同支持 + CLI appendFile），大文件可分段写入合并，append 时 diff 视图=旧全文+追加段、撤销快照天然兼容。刀 3：Rust 流透传截断信号（finish_reason=length / stop_reason=max_tokens 归一；截断标记常在最后一个 chunk 且彼时 delta 已空，必须先于 delta 提取捕获），引擎对「截断 + 参数 JSON 解析失败」的调用不进执行池，合成结果直接写明出路（用 append 分段），空参数算合法无参调用不误判。验证：cargo test 272 全过（新增 append 行为锁：续写不覆盖/缺文件新建/非流式同语义）、bun test 5053 全过。
+
 ## v4.1.4
 
 **执行器线收官（P2-3~P2-5 五刀）+ 插话诊断三单清账 + 注入面围栏卫生**
