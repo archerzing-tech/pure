@@ -40,36 +40,65 @@ const WIN_CANDIDATES = [
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ];
 
+const WHICH_NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
+
+/** 平台候选表单源：browser 工具（tools/impl/browser.ts）经 runtime 原语探测
+ * 时传的是**全平台并集**——impl 层不碰 process.platform（WebView 里没有
+ * process），exists 探测天然平台盲：别的平台的路径在本机自然 miss。env 读
+ * 取带 typeof 防御，宿主端之外静默跳过。 */
+export function allChromeCandidates(): { paths: string[]; whichNames: string[] } {
+  const envPaths = typeof process !== 'undefined'
+    ? [process.env.PURE_CHROME_PATH, process.env.CHROME_PATH].filter((p): p is string => Boolean(p))
+    : [];
+  return {
+    paths: [...envPaths, ...MAC_CANDIDATES, ...LINUX_CANDIDATES, ...WIN_CANDIDATES],
+    whichNames: [...WHICH_NAMES],
+  };
+}
+
 /** 探测可用的 Chrome；找不到返回 null（调用方据此降级，而不是抛错）。 */
 export function findChromePath(explicit?: string): string | null {
-  const platform = process.platform === 'darwin'
-    ? MAC_CANDIDATES
-    : process.platform === 'win32' ? WIN_CANDIDATES : LINUX_CANDIDATES;
-  const candidates = [explicit, process.env.PURE_CHROME_PATH, process.env.CHROME_PATH, ...platform];
+  const { paths, whichNames } = allChromeCandidates();
+  // 全量候选（含其他平台的路径）过一遍也无妨——exists 直接 miss；显式参数
+  // 仍排最前。
+  const candidates = [explicit, ...paths];
   for (const candidate of candidates) {
     if (candidate && existsSync(candidate)) return candidate;
   }
-  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+  for (const name of whichNames) {
     const found = Bun.which(name);
     if (found) return found;
   }
   return null;
 }
 
-interface CdpMessage {
+export interface CdpMessage {
   id?: number;
+  method?: string;
+  params?: Record<string, unknown>;
   result?: Record<string, unknown>;
   error?: { message?: string };
 }
 
-class CdpSession {
+export class CdpSession {
   private nextId = 0;
   private readonly pending = new Map<number, (message: CdpMessage) => void>();
+  private readonly eventWaiters = new Map<string, ((message: CdpMessage) => void)[]>();
 
   constructor(private readonly ws: WebSocket) {
     ws.onmessage = (event) => {
       const message = JSON.parse(String(event.data)) as CdpMessage;
-      if (message.id === undefined) return;
+      if (message.id === undefined) {
+        // CDP 事件（无 id）：唤醒等在这个方法名上的 waitForEvent。
+        if (message.method) {
+          const waiters = this.eventWaiters.get(message.method);
+          if (waiters?.length) {
+            this.eventWaiters.delete(message.method);
+            for (const resolve of waiters) resolve(message);
+          }
+        }
+        return;
+      }
       const resolve = this.pending.get(message.id);
       if (!resolve) return;
       this.pending.delete(message.id);
@@ -92,6 +121,30 @@ class CdpSession {
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`CDP ${method} timed out`));
       }, 120_000).unref?.();
+    });
+  }
+
+  /** 等下一个指定名字的 CDP 事件，与截止时间竞速——页面迟迟不发事件时
+   * 不能把调用方吊死（navigate 等 load 的唯一通道）。 */
+  waitForEvent(method: string, timeoutMs: number): Promise<CdpMessage> {
+    return new Promise((resolve, reject) => {
+      const onEvent = (message: CdpMessage) => {
+        clearTimeout(timer);
+        resolve(message);
+      };
+      const timer = setTimeout(() => {
+        const list = this.eventWaiters.get(method);
+        if (list) {
+          const idx = list.indexOf(onEvent);
+          if (idx >= 0) list.splice(idx, 1);
+          if (list.length === 0) this.eventWaiters.delete(method);
+        }
+        reject(new Error(`CDP event ${method} timed out`));
+      }, timeoutMs);
+      timer.unref?.();
+      const existing = this.eventWaiters.get(method) ?? [];
+      existing.push(onEvent);
+      this.eventWaiters.set(method, existing);
     });
   }
 }

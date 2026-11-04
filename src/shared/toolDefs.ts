@@ -212,7 +212,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'discover_tools',
-    description: 'Search the deferred tool catalog and ACTIVATE the matches for this session. The resident table only carries the everyday loop (file read/write/edit, find_files/code_searcher, execute_command, web_search/web_fetch, download_file); the long tail — git family, deep-research variants (researcher_web/researcher_docs/web_scrape/web_public_api), document writers, network diagnostics, package-source switching — and EVERY connected MCP server\'s tools live behind this index. Search it when the job at hand sounds like one of those (e.g. "git commit", "docx", "diagnose network", an MCP tool name) or before reporting that a capability is missing. Returns each match\'s full schema; matches are immediately callable and stay available for the rest of the session.',
+    description: 'Search the deferred tool catalog and ACTIVATE the matches for this session. The resident table only carries the everyday loop (file read/write/edit, find_files/code_searcher, execute_command, web_search/web_fetch, download_file); the long tail — git family, deep-research variants (researcher_web/researcher_docs/web_scrape/web_public_api), document writers, network diagnostics, package-source switching, browser automation & screenshots (browser/screenshot) — and EVERY connected MCP server\'s tools live behind this index. Search it when the job at hand sounds like one of those (e.g. "git commit", "docx", "diagnose network", "open this page in a browser and screenshot it", an MCP tool name) or before reporting that a capability is missing. Returns each match\'s full schema; matches are immediately callable and stay available for the rest of the session.',
     input_schema: {
       type: 'object',
       properties: {
@@ -406,6 +406,34 @@ export const BUILT_IN_TOOL_DEFS = [
       required: ['ecosystem'],
     },
   },
+  {
+    name: 'browser',
+    description: 'Drive a headless Chrome in this workspace: navigate to a URL or a local file, click, type into inputs, run JavaScript in the page, and screenshot what is on screen. Use it to check your own visual output (open the page you just wrote and look at it before calling it done), fill and submit forms, or read JS-heavy pages that web_fetch cannot render. Actions: navigate (url), click (CSS selector), type (selector + text), evaluate (js expression), screenshot (fullPage optional). The browser session stays warm between calls; screenshots come back as images you can see. Requires a local Chrome/Chromium install.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['navigate', 'click', 'type', 'evaluate', 'screenshot'], description: 'The action to perform' },
+        url: { type: 'string', description: 'navigate: the URL (https://...) or local file path to open' },
+        selector: { type: 'string', description: 'click/type: CSS selector of the target element' },
+        text: { type: 'string', description: 'type: text to enter into the element' },
+        expression: { type: 'string', description: 'evaluate: JavaScript expression to run in the page; its return value comes back to you' },
+        fullPage: { type: 'boolean', description: 'screenshot: capture the whole scrollable page instead of just the viewport' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'screenshot',
+    description: 'Take a screenshot of a web URL, a local HTML file, or the current headless-browser page, returned as an image you can see. Pass url for a page, path for a local file (file:// is added for you), or neither to capture whatever the browser session currently shows. Requires a local Chrome/Chromium install.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Web URL to open and capture' },
+        path: { type: 'string', description: 'Local HTML (or file) path to open and capture' },
+        fullPage: { type: 'boolean', description: 'Capture the whole scrollable page instead of just the viewport' },
+      },
+    },
+  },
 ] as const satisfies readonly ToolDefinition[];
 
 /** Side-effect / write classification per tool (same table the CLI and GUI
@@ -420,6 +448,9 @@ export const PUBLIC_TOOL_NAMES = new Set([
   // 维护的（独立实现、TOOL_TAGS/元数据齐全、提示词多处指引、设置页 web 组
   // 早就列名），此前漏在公开集外——提示词教模型调用模型看不见的工具。
   'web_search', 'web_fetch',
+  // W4 视觉闭环（2026-11-04）：browser/screenshot 走 deferred 目录（不进
+  // CORE 常驻），模型判断要看渲染结果时经 discover_tools 激活。
+  'browser', 'screenshot',
   // 工具 deferred 化（框架改革三期）：discover_tools 是常驻的目录索引工具，
   // 长尾内置工具与 MCP 工具经它搜索并激活后才进模型可见清单。
   'discover_tools',
@@ -521,6 +552,10 @@ const TOOL_METADATA_TABLE = {
   create_document: { sideEffects: true, isWrite: true },
   // Image generation hits a paid provider API but never touches the workspace.
   generate_image: { sideEffects: false, isWrite: false },
+  // W4 visual loop: browser actions mutate page state (external), never the
+  // workspace; screenshot is a pure observation.
+  browser: { sideEffects: true, isWrite: false },
+  screenshot: { sideEffects: false, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },
   // diagnose_network only observes the network, so it stays a pure read.
   //

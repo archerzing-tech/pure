@@ -3754,6 +3754,160 @@ async fn run_argv(workspace: String, argv: Vec<String>, sandbox: Option<bool>) -
     }))
 }
 
+static_regex!(
+    devtools_port_line,
+    r"DevTools listening on ws://127\.0\.0\.1:(\d+)/"
+);
+
+fn which_in_path(name: &str) -> Option<String> {
+    let path_env = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path_env)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// First existing candidate: absolute paths checked as-is, bare names
+/// resolved against PATH. The candidates list is the platform UNION
+/// single-sourced in the TS rasterizer module (allChromeCandidates) —
+/// existence probing is naturally platform-blind, so this stays a dumb
+/// exists/PATH walk with no platform logic.
+#[tauri::command]
+async fn find_chrome(candidates: Vec<String>) -> Result<Option<String>, String> {
+    run_blocking(move || {
+        for candidate in &candidates {
+            if candidate.is_empty() {
+                continue;
+            }
+            if candidate.contains('/') || candidate.contains('\\') {
+                if std::path::Path::new(candidate).exists() {
+                    return Ok(Some(candidate.clone()));
+                }
+            } else if let Some(found) = which_in_path(candidate) {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
+    })
+    .await
+}
+
+/// Spawn a headless Chrome for the browser tools (W4): the host prepends a
+/// throwaway user-data-dir and binds `--remote-debugging-port=0` — the
+/// kernel picks a loopback port, never an external debugging port. The
+/// "DevTools listening on ws://127.0.0.1:<port>/" line is parsed off stderr
+/// with a 30s deadline (deadline bounds the reads themselves, mirroring
+/// readDevToolsPort in src/channels/rasterize/headlessChrome.ts — one-line
+/// regex, comment-linked). Returns {port, pid} or null when Chrome exits
+/// before reporting; a background task reaps the process and removes the
+/// profile dir after exit (Browser.close from the CDP side is the normal
+/// teardown path).
+#[tauri::command]
+async fn launch_chrome(chrome_path: String, args: Vec<String>) -> Result<Option<serde_json::Value>, String> {
+    let profile = std::env::temp_dir().join(format!(
+        "pure-browser-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&profile).map_err(|e| format!("launch_chrome: mkdir: {}", e))?;
+    let mut cmd = silent_child_tokio(TokioCommand::new(&chrome_path));
+    cmd.args(&args);
+    cmd.arg(format!("--user-data-dir={}", profile.display()));
+    // Same PATH injection as execute_command: Finder-launched apps inherit a
+    // minimal PATH; Chrome itself is passed as an absolute path but its
+    // helpers may want the probed dirs.
+    cmd.env("PATH", probe_path());
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("launch_chrome: {}", e))?;
+    let pid = child.id().unwrap_or(0);
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "launch_chrome: stderr unavailable".to_string())?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut buffer = String::new();
+    let mut chunk = [0u8; 4096];
+    let mut port: Option<u32> = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stderr.read(&mut chunk)).await {
+            Err(_) => break,          // deadline while a read hung
+            Ok(Err(_)) => break,      // stream error
+            Ok(Ok(0)) => break,       // EOF — Chrome died before reporting
+            Ok(Ok(n)) => {
+                buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                if let Some(captures) = devtools_port_line().captures(&buffer) {
+                    port = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+                    if port.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    match port {
+        Some(port) => {
+            let profile_for_cleanup = profile.clone();
+            // Reap + drain in the background: the exit path is CDP
+            // Browser.close from the tool layer, not anything here.
+            tokio::spawn(async move {
+                let mut child = child;
+                if let Some(mut stderr) = child.stderr.take() {
+                    let mut sink = [0u8; 8192];
+                    loop {
+                        match stderr.read(&mut sink).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                let _ = child.wait().await;
+                let _ = std::fs::remove_dir_all(&profile_for_cleanup);
+            });
+            Ok(Some(serde_json::json!({ "port": port, "pid": pid })))
+        }
+        None => {
+            let _ = child.kill().await;
+            let _ = std::fs::remove_dir_all(&profile);
+            Ok(None)
+        }
+    }
+}
+
+/// Persist tool artifacts (screenshots) under ~/.pure/cache/<kind>/ — the
+/// directory rule mirrors writeArtifact on the CLI side
+/// (NodeToolAdapter.writeArtifact).
+#[tauri::command]
+async fn save_artifact(kind: String, basename: String, data_base64: String) -> Result<String, String> {
+    if kind != "screenshot" {
+        return Err(format!("save_artifact: unsupported kind {}", kind));
+    }
+    let safe: String = basename
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    run_blocking(move || {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        let dir = PathBuf::from(home).join(".pure").join("cache").join(&kind);
+        fs::create_dir_all(&dir).map_err(|e| format!("save_artifact: mkdir: {}", e))?;
+        let bytes = decode_paste_image(&data_base64)?;
+        let path = dir.join(safe);
+        fs::write(&path, &bytes).map_err(|e| format!("save_artifact: {}", e))?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
 /// cancel one mid-run: execute_command_stream registers the child pid when it
 /// starts and removes it when it exits; kill_command SIGKILLs the process
@@ -18536,6 +18690,10 @@ pub fn run() {
             kill_command,
             // W3/D1=A process primitive for the TS single-executor tool layer
             run_argv,
+            // W4 browser tools: Chrome discovery/spawn + artifact persistence
+            find_chrome,
+            launch_chrome,
+            save_artifact,
             // MCP subprocess
             spawn_mcp,
             mcp_request,

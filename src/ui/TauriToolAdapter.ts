@@ -7,7 +7,8 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage 
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { runGitTool, type GitToolName } from '../tools/impl/git';
-import type { ArgvRunOptions, ArgvRunResult } from '../tools/runtime';
+import { runBrowserTool, runScreenshotTool } from '../tools/impl/browser';
+import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../tools/runtime';
 import { READ_FILE_HEAD_LINES } from '../shared/readFileHead';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, isDynamicCapabilityTool, type DynamicCapabilityHooks } from '../shared/dynamicCapabilityTools';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload, communityMcpCandidates, type McpCandidate } from '../shared/mcpRegistry';
@@ -544,6 +545,43 @@ export class TauriToolAdapter implements ToolAdapter {
       argv,
       sandbox: this.sandbox,
     }) as ArgvRunResult;
+  }
+
+  /** ToolRuntime primitive: the WebView cannot stat arbitrary paths — the
+   * candidates list (platform union, single-sourced in the rasterizer
+   * module) is probed by the Rust find_chrome command. */
+  async resolveExecutable(candidates: string[]): Promise<string | null> {
+    return await this.call('find_chrome', { candidates }) as string | null;
+  }
+
+  /** ToolRuntime primitive: Chrome spawn + stderr DevTools-port parsing live
+   * in the Rust launch_chrome command (the host owns the throwaway
+   * user-data-dir and its cleanup). */
+  async launchHeadlessChrome(chromePath: string, args: string[]): Promise<ChromeLaunch | null> {
+    return await this.call('launch_chrome', { chromePath, args }) as ChromeLaunch | null;
+  }
+
+  /** ToolRuntime primitive: screenshots persist via the Rust save_artifact
+   * command (it computes ~/.pure/cache/<kind>/ itself, matching the CLI
+   * side's writeArtifact). */
+  async writeArtifact(kind: 'screenshot', basename: string, bytes: Uint8Array): Promise<string> {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return await this.call('save_artifact', { kind, basename, dataBase64: btoa(binary) }) as string;
+  }
+
+  /** browser / screenshot share the single-source headless-Chrome
+   * implementation; this adapter contributes the OS primitives only
+   * (W3/D1=A + W4). */
+  private async handleBrowserTool(name: 'browser' | 'screenshot', args: Record<string, unknown>, toolCallId: string, start: number): Promise<ToolResult> {
+    try {
+      const outcome = name === 'browser'
+        ? await runBrowserTool(args, this)
+        : await runScreenshotTool(args, this);
+      return { id: toolCallId, toolName: name, result: outcome.output, success: outcome.ok, duration: Date.now() - start };
+    } catch (err) {
+      return { id: toolCallId, toolName: name, error: err instanceof Error ? err.message : 'browser tool failed', success: false, duration: Date.now() - start };
+    }
   }
 
   /**
@@ -1823,6 +1861,8 @@ export class TauriToolAdapter implements ToolAdapter {
         case 'git_status':
         case 'git_commit':
         case 'git_branch': return await this.handleGitTool(name as GitToolName, args, toolCall.id, start);
+        case 'browser':
+        case 'screenshot': return await this.handleBrowserTool(name as 'browser' | 'screenshot', args, toolCall.id, start);
         case 'create_directory': {
           const path = String(args.path ?? '');
           const batch = await this.captureWriteBatch('create_directory', [path]);

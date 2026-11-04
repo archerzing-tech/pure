@@ -102,6 +102,10 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   // presentation_guide 同为注册表自持（卡片目录住在本仓库
   // shared/presentationLibrary.ts），永不下沉执行器；纯只读。
   presentation_guide: { tags: [Tags.READ], riskLevel: 'low' },
+  // W4 视觉闭环（tools/impl/browser.ts 单源执行）：browser 驱动页面——导航/
+  // 点击/输入是外部可见动作（EXTERNAL），非文件写；screenshot 纯只读。
+  browser: { tags: [Tags.EXTERNAL], riskLevel: 'low' },
+  screenshot: { tags: [Tags.READ], riskLevel: 'low' },
 };
 
 export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(

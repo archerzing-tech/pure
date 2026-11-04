@@ -4,7 +4,7 @@
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
 import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import type { Readable } from 'node:stream';
@@ -16,7 +16,9 @@ import { spawn } from 'node:child_process';
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../../shared/types';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA } from '../../shared/toolDefs';
 import { runGitTool, type GitToolName } from '../../tools/impl/git';
-import type { ArgvRunOptions, ArgvRunResult } from '../../tools/runtime';
+import { runBrowserTool, runScreenshotTool } from '../../tools/impl/browser';
+import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
+import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
@@ -315,6 +317,8 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'git_status':
         case 'git_commit':
         case 'git_branch': return await this.handleGitTool(toolCall.function.name as GitToolName, args, signal, start);
+        case 'browser':
+        case 'screenshot': return await this.handleBrowserTool(toolCall.function.name as 'browser' | 'screenshot', args, toolCall.id, start);
         case 'sys_info': return await this.handleSysInfo(start);
         case 'diagnose_network': return await this.handleDiagnoseNetwork(args, start);
         case 'switch_package_source': return await this.handleSwitchPackageSource(args, start);
@@ -2911,6 +2915,65 @@ export class NodeToolAdapter implements ToolAdapter {
       throw err;
     } finally {
       abort.cleanup();
+    }
+  }
+
+  /** ToolRuntime primitive: existence probe the CLI host can do directly. */
+  async resolveExecutable(candidates: string[]): Promise<string | null> {
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      if (candidate.includes('/') || candidate.includes('\\')) {
+        if (existsSync(candidate)) return candidate;
+      } else {
+        const found = Bun.which(candidate);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  /** ToolRuntime primitive: spawn a throwaway-profile headless Chrome and
+   * parse the DevTools port off its stderr (same bare-CDP pattern as the
+   * channel rasterizer — no puppeteer). The background task reaps the
+   * process and removes the profile after Chrome exits (Browser.close or a
+   * crash). */
+  async launchHeadlessChrome(chromePath: string, args: string[]): Promise<ChromeLaunch | null> {
+    const profileDir = mkdtempSync(join(tmpdir(), 'pure-browser-'));
+    const proc = Bun.spawn([chromePath, ...args, `--user-data-dir=${profileDir}`], { stdout: 'ignore', stderr: 'pipe' });
+    const port = await readDevToolsPort(proc, 30_000);
+    if (!port) {
+      try { proc.kill(); } catch { /* already gone */ }
+      try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      return null;
+    }
+    void (async () => {
+      await proc.exited;
+      try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    })();
+    return { port, pid: proc.pid };
+  }
+
+  /** ToolRuntime primitive: artifacts persist under ~/.pure/cache/<kind>/ on
+   * both hosts (same tree the generated-image cache uses). */
+  async writeArtifact(kind: 'screenshot', basename: string, bytes: Uint8Array): Promise<string> {
+    const dir = join(homedir(), '.pure', 'cache', kind === 'screenshot' ? 'screenshots' : kind);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, basename.replace(/[^a-zA-Z0-9._-]+/g, '-'));
+    writeFileSync(path, bytes);
+    return path;
+  }
+
+  /** browser / screenshot share the single-source headless-Chrome
+   * implementation; this adapter contributes the OS primitives only
+   * (W3/D1=A + W4). */
+  private async handleBrowserTool(name: 'browser' | 'screenshot', args: Record<string, unknown>, toolCallId: string, start: number): Promise<ToolResult> {
+    try {
+      const outcome = name === 'browser'
+        ? await runBrowserTool(args, this)
+        : await runScreenshotTool(args, this);
+      return { id: toolCallId, toolName: name, result: outcome.output, success: outcome.ok, duration: Date.now() - start };
+    } catch (err) {
+      return this.fail(null, start, err instanceof Error ? err.message : 'browser tool failed', name);
     }
   }
 

@@ -5,13 +5,19 @@ import { join } from 'node:path';
 import { runGitTool } from './git';
 import type { ArgvRunOptions, ArgvRunResult, ToolRuntime } from '../runtime';
 
-/** Records every argv it is handed; scripted replies or a per-call handler. */
+/** Records every argv it is handed; scripted replies or a per-call handler.
+ * The non-argv primitives are stubbed — git tools never touch them. */
 function makeRuntime(handler: (argv: string[]) => ArgvRunResult) {
   const calls: string[][] = [];
   const runtime: ToolRuntime = {
     runArgv: async (argv: string[], _options?: ArgvRunOptions) => {
       calls.push(argv);
       return handler(argv);
+    },
+    resolveExecutable: async () => null,
+    launchHeadlessChrome: async () => null,
+    writeArtifact: async () => {
+      throw new Error('writeArtifact not expected in git tests');
     },
   };
   return { runtime, calls };
@@ -133,6 +139,9 @@ describe('runGitTool argv assembly (contract — one test suite covers both adap
       runArgv: async () => {
         throw new Error('spawn git ENOENT');
       },
+      resolveExecutable: async () => null,
+      launchHeadlessChrome: async () => null,
+      writeArtifact: async () => '',
     };
     const outcome = await runGitTool('git_status', {}, runtime);
     expect(outcome).toEqual({ ok: false, output: 'spawn git ENOENT' });
@@ -151,6 +160,9 @@ describe('runGitTool against a real git repo (same argv the GUI runtime runs)', 
           await proc.exited;
           return { exitCode: proc.exitCode ?? -1, stdout, stderr };
         },
+        resolveExecutable: async () => null,
+        launchHeadlessChrome: async () => null,
+        writeArtifact: async () => '',
       };
       const bootstrap = Bun.spawn(['git', 'init', '-b', 'main'], { cwd: dir, stdout: 'ignore', stderr: 'ignore' });
       await bootstrap.exited;
