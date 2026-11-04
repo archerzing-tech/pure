@@ -129,7 +129,11 @@ export const HIJACK_JS_SCAN_CHARS = 4096;
  * 与 src-tauri/src/lib.rs 的 MULTI_LABEL_PUBLIC_SUFFIXES 保持一致（事实数据，
  * 不受版权保护；表达方式自研）。这里覆盖 Rust 表里全部 ccTLD 二级后缀与托管平台。
  */
-const MULTI_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+/**
+ * 导出供跨语言契约测试（netGuard.test.ts 的数据锁）与 Rust 侧
+ * MULTI_LABEL_PUBLIC_SUFFIXES 逐项比对——「逐条对齐」的注释由机械断言背书。
+ */
+export const MULTI_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
   // ── ccTLD 下的二级公共后缀 ──
   'co.uk', 'org.uk', 'me.uk', 'ac.uk', 'gov.uk', 'net.uk', 'sch.uk', 'ltd.uk', 'plc.uk',
   'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'go.jp', 'co.kr', 'or.kr', 're.kr',
@@ -168,25 +172,29 @@ const MULTI_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
 ]);
 
 /** 已知的 GFW/运营商劫持与挡板页指纹。要求组合出现，避免单关键词误伤。
- *  与 Rust 侧 hijack_blockpage_patterns() 逐条对应。 */
-const HIJACK_BLOCKPAGE_PATTERNS: readonly RegExp[] = [
+ *  与 Rust 侧 hijack_blockpage_patterns() 逐条对应——导出供跨语言契约测试
+ *  锁序（netGuard.test.ts 数据锁：模式、flags、顺序三面比对 Rust 源码表）。 */
+export const HIJACK_BLOCKPAGE_PATTERNS: readonly RegExp[] = [
   // nginx 默认 403 挡板（部分劫持设备直接吐这个）
   /<title>\s*403\s+Forbidden\s*<\/title>/is,
   /<h1>\s*403\s+Forbidden\s*<\/h1>/is,
   // 运营商/云厂商的「访问受限」模板
-  /网页无法打开|该页面暂时无法访问|访问被拒绝|您的访问被拒绝/,
+  /(网页无法打开|该页面暂时无法访问|访问被拒绝|您的访问被拒绝)/,
   /由于以下原因.{0,120}无法访问/s,
   // Cloudflare / Akamai 人机墙（正常站点偶尔也会触发，但正文几乎为空时才采信）
-  /<title>Just a moment\.\.\.\s*<\/title>/is,
+  /<title>\s*Just a moment\.\.\.\s*<\/title>/is,
   /Checking your browser before accessing/i,
   /Enable JavaScript and cookies to continue/i,
 ];
 
-/** 文档里「立即跳站外」的两种形态。顺序与 Rust 侧一致（meta 优先）。 */
+/** 文档里「立即跳站外」的两种形态。顺序与 Rust 侧一致（meta 优先）。
+ *  JS_ASSIGN_RE / JS_REPLACE_RE 导出供跨语言契约测试与 Rust 侧
+ *  hijack_js_assign_re / hijack_js_replace_re 比对。META_REFRESH 两式无 Rust
+ *  正则对应（Rust 侧是手写解析 extract_meta_refresh），行为由 fixtures 锁。 */
 const META_REFRESH_RE = /<meta[^>]*>/gis;
 const META_REFRESH_URL_RE = /(?:^|;)\s*url\s*=\s*(.+)/is;
-const JS_ASSIGN_RE = /(?:window\.)?location(?:\.href)?\s*=\s*["']?(https?:\/\/[^"'\s<>]+)/is;
-const JS_REPLACE_RE = /(?:window\.)?location\.replace\(\s*["']?(https?:\/\/[^"'\s<>]+)/is;
+export const JS_ASSIGN_RE = /(?:window\.)?location(?:\.href)?\s*=\s*["']?(https?:\/\/[^"'\s<>]+)/is;
+export const JS_REPLACE_RE = /(?:window\.)?location\.replace\(\s*["']?(https?:\/\/[^"'\s<>]+)/is;
 
 export interface HijackVerdict {
   hijacked: boolean;

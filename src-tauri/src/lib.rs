@@ -7157,6 +7157,36 @@ Install the toolchain.
         assert_eq!(extract_meta_refresh_url("<html><body>plain</body></html>"), None);
         assert_eq!(extract_meta_refresh_url(r#"<meta http-equiv="refresh" content="5">"#), None);
     }
+
+    /// P2-5b 锁 2（行为锁）：劫持判定与 TS detectResponseHijack 同源 fixtures
+    /// —— src/shared/__fixtures__/hijackFixtures.json 由两侧测试同源消费，
+    /// 一侧改判定另一侧立刻现红。锁 1（数据锁：static_regex 全表/后缀表/阈值
+    /// 与 TS 常量逐条比对）在 TS 侧 netGuard.test.ts。
+    #[test]
+    fn detect_response_hijack_matches_shared_fixtures() {
+        let raw = include_str!("../../src/shared/__fixtures__/hijackFixtures.json");
+        let fixtures: serde_json::Value = serde_json::from_str(raw).expect("parse hijackFixtures.json");
+        let cases = fixtures["cases"]
+            .as_array()
+            .expect("cases array");
+        assert!(cases.len() >= 15, "fixture coverage shrank");
+        for case in cases {
+            let probe = HijackProbe {
+                request_url: case["requestUrl"].as_str().unwrap_or(""),
+                final_url: case["finalUrl"].as_str().unwrap_or(""),
+                content_type: case["contentType"].as_str().unwrap_or(""),
+                body: case["body"].as_str().unwrap_or(""),
+            };
+            let expected = case["expectSignal"].as_str();
+            let actual = detect_response_hijack(&probe).map(|v| v.signal);
+            assert_eq!(
+                actual,
+                expected,
+                "case \"{}\" diverges from the shared fixture",
+                case["name"].as_str().unwrap_or("?")
+            );
+        }
+    }
 }
 
 #[cfg(test)]

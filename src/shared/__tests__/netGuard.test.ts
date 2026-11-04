@@ -5,11 +5,16 @@
 // it, and classifyFailure maps real error strings to recovery classes.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import {
+  HIJACK_BLOCKPAGE_PATTERNS,
   HIJACK_JS_SCAN_CHARS,
   HIJACK_META_REFRESH_MAX_DELAY_SECS,
   HIJACK_VISIBLE_TEXT_MAX_CHARS,
+  JS_ASSIGN_RE,
+  JS_REPLACE_RE,
+  MULTI_LABEL_PUBLIC_SUFFIXES,
   blockedHostMessage,
   blockedHosts,
   classifyFailure,
@@ -47,6 +52,102 @@ beforeAll(() => {
   localStorage.removeItem('pure.netGuard.hosts.v1');
 });
 afterAll(() => GlobalRegistrator.unregister());
+
+// ── P2-5b 劫持检测跨语言双锁（2026-11-04）──────────────────────────────
+// 蓝图四之三刀序 5 的「劫持检测单源」：TS/Rust 两份运行时实现（netGuard.ts ↔
+// lib.rs detect_response_hijack）在浏览器 bundle 与 Rust 传输层必须逐条一致，
+// 但 Rust 不能 import TS——真单源不可达，机械锁可达。两把锁：
+//   锁 1（数据锁）：本文件直接读 lib.rs 源码，把 static_regex! 全表、后缀表、
+//     三阈值与 TS 侧逐条比对——「逐条对齐」注释升格为机械断言，漂移即红。
+//   锁 2（行为锁）：__fixtures__/hijackFixtures.json 共享 fixture，TS 与 Rust
+//     测试同源消费，一侧改判定另一侧立刻现红。
+// fenceRegistry 双向同源锁的跨语言同款哲学：锁管在场，不管实现形态。
+
+import hijackFixtures from '../__fixtures__/hijackFixtures.json';
+
+/** Rust raw string 字面量 → (pattern, rustFlags)：剥 (?flags) inline 前缀。 */
+function rustPatternToJs(rust: string): { source: string; flags: string } {
+  const m = /^\(\?([a-z]+)\)/.exec(rust);
+  const flags = m ? m[1]! : '';
+  return { source: rust.slice(m ? m[0].length : 0), flags };
+}
+
+/** JS RegExp.source 归一：①正则字面量里 / 被转义成 \/（Rust raw string 不转义）；
+ *  ②Bun/JSC 的 source 对非 ASCII 输出 \uXXXX 转义（V8 保持明文）——序列化行为
+ *  差异，两侧都解码到明文再比（判例 2026-11-04：Bun source 不可直接跨语言比对
+ *  中文模式）。 */
+function jsSource(re: RegExp): string {
+  return unescapeUnicode(re.source.replace(/\\\//g, '/'));
+}
+
+function unescapeUnicode(s: string): string {
+  return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+describe('hijack detection cross-language locks (P2-5b 劫持检测双锁)', () => {
+  const rustSrc = readFileSync(new URL('../../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+
+  it('锁 1a — blockpage 指纹表与 Rust static_regex! 逐条相等且同序', () => {
+    // 抽 Rust 侧全部 static_regex!(name, r"...") / r#"..."# 声明。
+    const decls = new Map<string, string>();
+    for (const m of rustSrc.matchAll(/static_regex!\(\s*(\w+)\s*,\s*r(#*)"(.*?)"\2\s*,?\s*\)/gs)) {
+      decls.set(m[1]!, m[3]!);
+    }
+    // hijack_blockpage_patterns() 的 vec 顺序 = 权威顺序。
+    const fnBody = rustSrc.match(/fn hijack_blockpage_patterns\(\)[\s\S]*?vec!\s*\[([\s\S]*?)\]/);
+    expect(fnBody, 'Rust hijack_blockpage_patterns() must exist').toBeTruthy();
+    const order = [...(fnBody![1]!.matchAll(/(hijack_\w+_re)\(\)/g))].map((m) => m[1]!);
+    expect(order.length).toBe(HIJACK_BLOCKPAGE_PATTERNS.length);
+    for (let i = 0; i < order.length; i++) {
+      const rustPattern = decls.get(order[i]!);
+      expect(rustPattern, `Rust decl for ${order[i]}`).toBeTruthy();
+      const { source, flags } = rustPatternToJs(rustPattern!);
+      const js = HIJACK_BLOCKPAGE_PATTERNS[i]!;
+      expect(jsSource(js), `${order[i]} pattern body`).toBe(unescapeUnicode(source));
+      expect(js.flags, `${order[i]} flags`).toBe(flags);
+    }
+  });
+
+  it('锁 1b — JS 跳转两式与 Rust hijack_js_*_re 相等', () => {
+    for (const [rustName, jsRe] of [
+      ['hijack_js_assign_re', JS_ASSIGN_RE],
+      ['hijack_js_replace_re', JS_REPLACE_RE],
+    ] as const) {
+      const m = new RegExp(`static_regex!\\(\\s*${rustName}\\s*,\\s*r(?:#*)"(.*?)"(?:#*)\\s*\\)`, 's').exec(rustSrc);
+      expect(m, `Rust decl for ${rustName}`).toBeTruthy();
+      const { source, flags } = rustPatternToJs(m![1]!);
+      expect(jsSource(jsRe), rustName).toBe(source);
+      expect(jsRe.flags, `${rustName} flags`).toBe(flags);
+    }
+  });
+
+  it('锁 1c — 多标签公共后缀表与 Rust 数组集合相等', () => {
+    const block = rustSrc.match(/const MULTI_LABEL_PUBLIC_SUFFIXES:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/);
+    expect(block, 'Rust MULTI_LABEL_PUBLIC_SUFFIXES must exist').toBeTruthy();
+    const rustEntries = [...(block![1]!.matchAll(/"([^"]+)"/g))].map((m) => m[1]!);
+    expect(rustEntries.length).toBe(MULTI_LABEL_PUBLIC_SUFFIXES.size);
+    for (const entry of rustEntries) {
+      expect(MULTI_LABEL_PUBLIC_SUFFIXES.has(entry), `suffix "${entry}" missing in TS`).toBe(true);
+    }
+  });
+
+  it('锁 1d — 三阈值常量两侧同值', () => {
+    const rustConst = (name: string): string | undefined =>
+      new RegExp(`const ${name}:\\s*\\w+\\s*=\\s*(\\d+);`).exec(rustSrc)?.[1];
+    expect(rustConst('HIJACK_VISIBLE_TEXT_MAX_CHARS')).toBe(String(HIJACK_VISIBLE_TEXT_MAX_CHARS));
+    expect(rustConst('HIJACK_META_REFRESH_MAX_DELAY_SECS')).toBe(String(HIJACK_META_REFRESH_MAX_DELAY_SECS));
+    expect(rustConst('HIJACK_JS_SCAN_CHARS')).toBe(String(HIJACK_JS_SCAN_CHARS));
+  });
+
+  it('锁 2 — 行为 fixtures：与 Rust detect_response_hijack 同输入同 verdict', () => {
+    const cases = (hijackFixtures as { cases: Array<{ name: string; requestUrl: string; finalUrl: string; contentType: string; body: string; expectSignal: string | null }> }).cases;
+    expect(cases.length).toBeGreaterThanOrEqual(15);
+    for (const c of cases) {
+      const verdict = detectResponseHijack({ requestUrl: c.requestUrl, finalUrl: c.finalUrl, contentType: c.contentType, body: c.body });
+      expect(verdict?.signal ?? null, `case "${c.name}"`).toBe(c.expectSignal);
+    }
+  });
+});
 
 describe('host circuit breaker', () => {
   it('extracts the host from a URL and rejects garbage', () => {

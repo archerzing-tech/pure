@@ -1,0 +1,149 @@
+{
+  "_comment": "hijack 判定行为级同源 fixtures（P2-5b 锁 2，2026-11-04）：TS detectResponseHijack 与 Rust detect_response_hijack 对同一输入必须给出同一 verdict。expectSignal 为 null 表示放行（Rust 侧 = detect_response_hijack 返回 None）。改判定逻辑时先改这份清单——两侧测试同源消费，一侧改行为立刻在另一侧现红。",
+  "cases": [
+    {
+      "name": "nginx 403 挡板（同域，短正文）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://example.com/doc",
+      "contentType": "text/html; charset=utf-8",
+      "body": "<html><head><title>403 Forbidden</title></head><body><p>nginx</p></body></html>",
+      "expectSignal": "blockpage-fingerprint"
+    },
+    {
+      "name": "Cloudflare 人机墙（同域，短正文）",
+      "requestUrl": "https://example.com/page",
+      "finalUrl": "https://example.com/page",
+      "contentType": "text/html",
+      "body": "<html><head><title>Just a moment...</title></head><body><p>Checking your browser before accessing example.com</p><p>Enable JavaScript and cookies to continue</p></body></html>",
+      "expectSignal": "blockpage-fingerprint"
+    },
+    {
+      "name": "IP 直连 + 挡板指纹（跨域信号缺失也定罪）",
+      "requestUrl": "http://192.168.1.1/admin",
+      "finalUrl": "http://192.168.1.1/admin",
+      "contentType": "text/html",
+      "body": "<html><head><title>该页面暂时无法访问</title></head><body><p>err</p></body></html>",
+      "expectSignal": "blockpage-fingerprint"
+    },
+    {
+      "name": "指纹命中但正文充实（长正文放行——正常页面引用挡板文案不算劫持）",
+      "requestUrl": "https://example.com/article",
+      "finalUrl": "https://example.com/article",
+      "contentType": "text/html",
+      "body": "<html><head><title>为什么你会看到访问被拒绝</title></head><body><p>很多用户在浏览器里看到「访问被拒绝」就以为自己被网站拉黑了，其实绝大多数情况下这只是网络路径上的某个环节出了问题。本教程会逐层拆解常见的成因：本机代理配置错误、DNS 解析被污染、运营商中间盒注入、以及目标站点自身的风控策略。理解了这些机制之后，你就能判断「访问被拒绝」究竟是哪一个环节发出的，从而对症下药，而不是盲目地反复刷新页面或者更换浏览器。另外也别忘了检查系统时间——证书校验失败时某些中间设备也会以拒绝访问的页面作答，这类细节往往是排查时最容易被忽略的一环。</p></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "跨可注册域 + 短 html（无指纹）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://ad.example.net/doc",
+      "contentType": "text/html",
+      "body": "<html><body><p>hi</p></body></html>",
+      "expectSignal": "cross-domain-short-html"
+    },
+    {
+      "name": "跨可注册域 + 挡板指纹（长正文——指纹+短正文的组合优先判 blockpage-fingerprint）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://evil.co.uk/catch",
+      "contentType": "text/html",
+      "body": "<html><head><title>403 Forbidden</title></head><body><p>很多用户在浏览器里看到「访问被拒绝」就以为自己被网站拉黑了，其实绝大多数情况下这只是网络路径上的某个环节出了问题。本教程会逐层拆解常见的成因：本机代理配置错误、DNS 解析被污染、运营商中间盒注入、以及目标站点自身的风控策略。理解了这些机制之后，你就能判断「访问被拒绝」究竟是哪一个环节发出的，从而对症下药，而不是盲目地反复刷新页面或者更换浏览器。另外也别忘了检查系统时间——证书校验失败时某些中间设备也会以拒绝访问的页面作答，这类细节往往是排查时最容易被忽略的一环。</p></body></html>",
+      "expectSignal": "cross-domain-blockpage"
+    },
+    {
+      "name": "跨可注册域 + meta refresh 立即跳站外（长正文排除 short 分支，钉 D 信号独立命中）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://tracker.example.net/doc",
+      "contentType": "text/html",
+      "body": "<html><head><meta http-equiv=\"refresh\" content=\"0; url=https://ads.example.org/landing\"></head><body><p>炖一锅好汤的秘诀往往不在食材贵贱，而在火候与节奏：大火煮沸是为了让蛋白质快速析出，转小火慢煨则是让风味物质有充足的时间彼此渗透。很多人急着加盐，其实盐放早了会让肉质收紧，鲜味反而锁在里头出不来。耐心等上一个半小时，开盖的那一瞬间香气扑面而来，这才是对等待最好的回报。挑一口厚底的铸铁锅，让热量沿着锅壁均匀地渗进每一层食材，比什么秘方都管用。夜里小火煨着，满屋都是暖意，这样的时刻值得慢慢体会。第二天回锅重新加热，味道反而比刚炖好时更加醇厚，这是时间给耐心的人额外的礼物。</p></body></html>",
+      "expectSignal": "cross-domain-immediate-redirect"
+    },
+    {
+      "name": "跨可注册域 + JS location.assign 跳站外（长正文钉 D 信号）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://tracker.example.net/doc",
+      "contentType": "text/html",
+      "body": "<html><head><script>window.location.href=\"https://ads.example.org/landing\";</script></head><body><p>炖一锅好汤的秘诀往往不在食材贵贱，而在火候与节奏：大火煮沸是为了让蛋白质快速析出，转小火慢煨则是让风味物质有充足的时间彼此渗透。很多人急着加盐，其实盐放早了会让肉质收紧，鲜味反而锁在里头出不来。耐心等上一个半小时，开盖的那一瞬间香气扑面而来，这才是对等待最好的回报。挑一口厚底的铸铁锅，让热量沿着锅壁均匀地渗进每一层食材，比什么秘方都管用。夜里小火煨着，满屋都是暖意，这样的时刻值得慢慢体会。第二天回锅重新加热，味道反而比刚炖好时更加醇厚，这是时间给耐心的人额外的礼物。</p></body></html>",
+      "expectSignal": "cross-domain-immediate-redirect"
+    },
+    {
+      "name": "跨可注册域 + JS location.replace 跳站外（长正文钉 D 信号）",
+      "requestUrl": "https://example.com/doc",
+      "finalUrl": "https://tracker.example.net/doc",
+      "contentType": "text/html",
+      "body": "<html><head><script>window.location.replace(\"https://ads.example.org/go\");</script></head><body><p>炖一锅好汤的秘诀往往不在食材贵贱，而在火候与节奏：大火煮沸是为了让蛋白质快速析出，转小火慢煨则是让风味物质有充足的时间彼此渗透。很多人急着加盐，其实盐放早了会让肉质收紧，鲜味反而锁在里头出不来。耐心等上一个半小时，开盖的那一瞬间香气扑面而来，这才是对等待最好的回报。挑一口厚底的铸铁锅，让热量沿着锅壁均匀地渗进每一层食材，比什么秘方都管用。夜里小火煨着，满屋都是暖意，这样的时刻值得慢慢体会。第二天回锅重新加热，味道反而比刚炖好时更加醇厚，这是时间给耐心的人额外的礼物。</p></body></html>",
+      "expectSignal": "cross-domain-immediate-redirect"
+    },
+    {
+      "name": "同站子域跳转放行（api.github.com 是站点自己的事）",
+      "requestUrl": "https://github.com/api",
+      "finalUrl": "https://api.github.com/graphql",
+      "contentType": "text/html",
+      "body": "<html><body><p>short page</p></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "ccTLD 二级后缀钓鱼判出（github.co.uk ≠ evil.co.uk）",
+      "requestUrl": "https://github.co.uk/login",
+      "finalUrl": "https://evil.co.uk/login",
+      "contentType": "text/html",
+      "body": "<html><body><p>login</p></body></html>",
+      "expectSignal": "cross-domain-short-html"
+    },
+    {
+      "name": "托管平台子目录是独立站点（a.github.io ≠ b.github.io）",
+      "requestUrl": "https://alice.github.io/",
+      "finalUrl": "https://mallory.github.io/gift",
+      "contentType": "text/html",
+      "body": "<html><body><p>claim your prize</p></body></html>",
+      "expectSignal": "cross-domain-short-html"
+    },
+    {
+      "name": "IP 字面量视为同站（短页无指纹放行）",
+      "requestUrl": "http://192.168.1.1/",
+      "finalUrl": "http://192.168.1.1/blocked.html",
+      "contentType": "text/html",
+      "body": "<html><body><p>ok</p></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "非 html content-type 放行（JSON 应答不算挡板页）",
+      "requestUrl": "https://example.com/api/data",
+      "finalUrl": "https://example.com/api/data",
+      "contentType": "application/json",
+      "body": "{\"error\": \"访问被拒绝\"}",
+      "expectSignal": null
+    },
+    {
+      "name": "meta refresh 延迟 5 秒不算立即跳站外（阈值 3s 排除 D 信号）",
+      "requestUrl": "https://example.com/old",
+      "finalUrl": "https://tracker.example.net/old",
+      "contentType": "text/html",
+      "body": "<html><head><meta http-equiv=\"refresh\" content=\"5; url=https://ads.example.org/landing\"></head><body><p>炖一锅好汤的秘诀往往不在食材贵贱，而在火候与节奏：大火煮沸是为了让蛋白质快速析出，转小火慢煨则是让风味物质有充足的时间彼此渗透。很多人急着加盐，其实盐放早了会让肉质收紧，鲜味反而锁在里头出不来。耐心等上一个半小时，开盖的那一瞬间香气扑面而来，这才是对等待最好的回报。挑一口厚底的铸铁锅，让热量沿着锅壁均匀地渗进每一层食材，比什么秘方都管用。夜里小火煨着，满屋都是暖意，这样的时刻值得慢慢体会。第二天回锅重新加热，味道反而比刚炖好时更加醇厚，这是时间给耐心的人额外的礼物。</p></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "同 registrable 的站外跳转放行（短链/SSO 是正常站点行为）",
+      "requestUrl": "https://example.com/sso",
+      "finalUrl": "https://api.example.com/sso",
+      "contentType": "text/html",
+      "body": "<html><head><meta http-equiv=\"refresh\" content=\"0; url=https://cdn.example.com/callback\"></head><body></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "请求 URL 解析不出 host（信号缺失不定罪）",
+      "requestUrl": "not-a-url",
+      "finalUrl": "not-a-url",
+      "contentType": "text/html",
+      "body": "<html><body><p>lonely</p></body></html>",
+      "expectSignal": null
+    },
+    {
+      "name": "空 Content-Type 按 html 处理（缺头不漏网）",
+      "requestUrl": "https://example.com/x",
+      "finalUrl": "https://example.com/x",
+      "contentType": "",
+      "body": "<html><head><title>403 Forbidden</title></head><body><p>nginx</p></body></html>",
+      "expectSignal": "blockpage-fingerprint"
+    }
+  ]
+}
