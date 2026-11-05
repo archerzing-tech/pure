@@ -214,6 +214,26 @@ describe('ToolRegistry subagent exposure and routing', () => {
     // It went through the orchestrator, not the stub delegate.
     expect((result.result as SubagentResult).agentName).toBe('test_researcher');
   });
+
+  it('routes stop_branch to the orchestrator too (name-based passthrough, not AGENT tags)', async () => {
+    const registry = new ToolRegistry(stubAdapter);
+    const orch = new SubagentOrchestrator({
+      llm: new MockLLMAdapter('findings'),
+      parentTools: registry,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+    });
+    orch.register(subagentDef('test_researcher'));
+    registry.setSubagentExecutor(orch);
+    // stop_branch 不在 defs 里（无 AGENT tags 可路由）——转发成功的证据 =
+    // 错误文案来自编排器执行器（call_id required），不是注册表的 unknown。
+    const result = await registry.execute({
+      id: 'call_sb', index: 0,
+      function: { name: 'stop_branch', arguments: '{}' },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('call_id is required');
+  });
 });
 
 // ── P1: parallel/serial classification, depth, budget, status, checkpoint ──
@@ -1245,6 +1265,94 @@ describe('SubagentOrchestrator branch lifecycle (第 2 期分支中断)', () => 
     expect(orch.pauseBranch('call_pauseme')).toBe(false);
     expect(orch.branchView()).toHaveLength(0);
   });
+
+describe('stop_branch 分支控制工具（决策边界补手脚，2026-11-05）', () => {
+  // 刀二把复核没结论的裁决权交回父引擎后，模型裁决「该停」没有执行通路——
+  // 这组锁住补上的手脚：条件在场 / pause/abort 语义 / 诚实错误 / 结果人话。
+
+  it('条件在场：无在飞支零暴露，有在飞支时 def 在清单，结算出账即隐身', async () => {
+    const { store } = memoryStore();
+    const orch = makeBranchOrchestrator(store);
+    expect(orch.branchControlToolDefs()).toHaveLength(0);
+    const stopme = orch.execute(branchToolCall('call_stopme', { prompt: 'STOPME long research' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const defs = orch.branchControlToolDefs();
+    expect(defs).toHaveLength(1);
+    expect(defs[0]?.name).toBe('stop_branch');
+    expect(JSON.stringify(defs[0]?.input_schema)).toContain('call_id');
+    orch.abortBranch('call_stopme');
+    await stopme;
+    expect(orch.branchControlToolDefs()).toHaveLength(0);
+  });
+
+  it('stop_branch pause：命中在飞支 → success + outcome paused + 人话结果，支按 paused 结算', async () => {
+    const { sessions, store } = memoryStore();
+    const orch = makeBranchOrchestrator(store);
+    const stopme = orch.execute(branchToolCall('call_stopme', { prompt: 'STOPME long research' }));
+    const sibling = orch.execute(branchToolCall('call_sibling', { prompt: 'quick research' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const stop = await orch.execute({
+      id: 'call_tool_sb', index: 0,
+      function: { name: 'stop_branch', arguments: JSON.stringify({ call_id: 'call_stopme' }) },
+    });
+    expect(stop.success).toBe(true);
+    expect(stop.outcome).toBe('paused');
+    expect(String(stop.result)).toContain('已暂停');
+    expect(String(stop.result)).toContain('call_stopme');
+
+    const [branchResult, siblingResult] = await Promise.all([stopme, sibling]);
+    // 被停支走既有点名通路结算：paused、产出不入账、断点照存。
+    expect(branchResult.success).toBe(true);
+    expect((branchResult.result as { outcome?: string }).outcome).toBe('paused');
+    const subSessionId = Array.from(sessions.keys()).find((id) => id.startsWith('sub_'));
+    expect(sessions.get(subSessionId!)!.checkpoints.some((c) => c.label === 'subagent_interrupted')).toBe(true);
+    // 兄弟支零感知。
+    expect(siblingResult.success).toBe(true);
+  });
+
+  it('stop_branch abort：mode=abort 终停 → outcome stopped，支按 aborted 结算', async () => {
+    const { store } = memoryStore();
+    const orch = makeBranchOrchestrator(store);
+    const stopme = orch.execute(branchToolCall('call_stopme', { prompt: 'STOPME long research' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const stop = await orch.execute({
+      id: 'call_tool_sb', index: 0,
+      function: { name: 'stop_branch', arguments: JSON.stringify({ call_id: 'call_stopme', mode: 'abort' }) },
+    });
+    expect(stop.success).toBe(true);
+    expect(stop.outcome).toBe('stopped');
+    expect(String(stop.result)).toContain('已停止');
+    expect((await stopme).success).toBe(true);
+  });
+
+  it('不命中给诚实错误：缺 call_id / 未知 id 都回当前在飞清单让模型自纠', async () => {
+    const { store } = memoryStore();
+    const orch = makeBranchOrchestrator(store);
+    const hanging = orch.execute(branchToolCall('call_live', { prompt: 'STOPME long research' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const missing = await orch.execute({
+      id: 'call_sb1', index: 0,
+      function: { name: 'stop_branch', arguments: '{}' },
+    });
+    expect(missing.success).toBe(false);
+    expect(missing.error).toContain('call_id is required');
+    expect(missing.error).toContain('call_live'); // 在飞清单随错误给出
+
+    const unknown = await orch.execute({
+      id: 'call_sb2', index: 0,
+      function: { name: 'stop_branch', arguments: JSON.stringify({ call_id: 'call_invented' }) },
+    });
+    expect(unknown.success).toBe(false);
+    expect(unknown.error).toContain('No live branch with call_id=call_invented');
+    expect(unknown.error).toContain('call_live');
+
+    orch.abortBranch('call_live');
+    await hanging;
+  });
+});
 });
 
 describe('SubagentOrchestrator branch events (第 2 期第四刀)', () => {

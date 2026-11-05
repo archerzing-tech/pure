@@ -13,7 +13,7 @@
 | **模型** | 何时做、做什么、按什么顺序、触发与否 | —— | 路由选择、是否分段写、是否拆 agent、是否启用某机制 |
 | **系统（手脚）** | 怎么做成、失败怎么递回、现状怎么照给模型 | 正当 | append 原语、截断信号透传、证据账本、envFacts 注入、watchdog 亮灯 |
 | **物理不变量** | 预算上限、超时、原子写、终态保证 | 正当 | max_tokens、prompt budget、watchdog 超时本身、锁 |
-| **契约（用户意志固化）** | 人格、语言、交互接口语义、呈现标准 | 正当 | 插话九类裁决器、取消/steer 语义、复杂任务四原则、拟人语气 |
+| **契约（用户意志固化）** | 人格、语言、交互接口语义、呈现标准 | 正当 | 插话裁决器（三值判定 inline/sideline/new_task）、取消/steer 语义、复杂任务四原则、拟人语气 |
 
 **裁定规则：系统持有第一行的任一决策 = 越位。持有后三行 = 正当。**
 
@@ -38,7 +38,7 @@
 三层判据（2026-10-28 定调，本文确认延续）：**原则留 / 方法机制化 / 长尾索引化**。
 
 - 原则：一句话讲「产出要什么形状/什么不能违背」（复杂任务四原则、人格红线、拟人语气）——留。
-- 契约：交互接口语义（插话协议九类、取消/steer）——留，且不可被「瘦身」稀释语义。
+- 契约：交互接口语义（插话裁决器（三值判定 inline/sideline/new_task）、取消/steer）——留，且不可被「瘦身」稀释语义。
 - 流程规则：「必须先 X 再 Y」「不得跳过 Z」的步骤性教条=越位候选——删（模型自己会排）或机制化（检查器/注入件在事实层兜底，不在指令层约束）。
 - 机制说明：该由工具 description 自己带的，不占常驻段。
 
@@ -59,7 +59,7 @@ A 档（越位候选）9 项裁定：**落刀 4**——A1 模型失效自愈闭�
 复核六点全清：autoJudge=纯设置谓词（D）；路由脑决策面全在 TS（目标态主结构达成，Rust 单请求内尝试经济的收编挂网络层设计稿尾刀）；插话链除 A2 外全 D；自动压缩=C（物理+有披露）；机械触卡=D（用户定调通道）；watchdog=亮灯形状完整（不动）。
 保持不动：失败阶梯主体（框架改革 4a 既定裁决）、路由脑与 GitHub 加速（网络智能最高权）、权限链（设置即用户意志）、commandGuard（红线）、reactive/预压缩、劫持/毒化门。
 
-## 五、施工记录（2026-11-05，v4.1.5 后）
+## 五、施工记录（2026-11-05，v4.1.5 后，已随 v4.2.0 发布）
 
 **Prompt 六刀**（src/shared/）：agentBehavior.ts workflow 段重写（7→4 条，session_memory 锚/换路线锚/verify+sanity-check 锚逐字保留，ask-before 危险问询契约清单保留——capability_ladder CORE 只覆盖安装）；promptLayers.ts SYSTEM_CORE 先读后改句删+闸门注释更新；PromptAssembler.ts work_invariant 瘦文本/output_style 两处句级切除/task_mode 压缩；toolDefs.ts web_search 描述补 never-invent 原则；promptLayers.ts 渲染尾注释同步。测试：promptLayers/PromptAssembler/promptToolContract 106 全过（锚同步 3 处：session_memory 大写、work invariant 判据改锁交付契约+直达、time-sensitive 谓词换 never-invent）。
 
@@ -76,7 +76,7 @@ A 档（越位候选）9 项裁定：**落刀 4**——A1 模型失效自愈闭�
 三路 fresh-context 审视（A1 处方链端到端 / A2+A4 / prompt 六刀+A3）结论：0 条运行时 bug；功能完整性缺口 1 条已补——**A1 CLI 生产端断链**（此前 CLI 只有消费端 buildCliEnvFacts 读处方、没有生产端，纯 CLI 跑模型失效处方永不入账）：cliRepl.ts Interrupted 臂在 failure_policy_stop 时同判同记（cliProviderHealContext 按 CLI 可见来源组清单，与 GUI modelListForProvider 同构不引 GUI 模块），三个调用点全透传。另修：providerSelfHeal.ts 头注旧口径、DynamicInsertionCoordinator recheckCovered doc 旧口径、interjectOrchestrator 直投附注快照语义（「复核时仍在跑，此刻可能已收工」）与去行号注释、promptLayers 死文本两行（指向已删 workflow install 路线梯）与四条注释失真（edit_file/write_file 并列只对一半/步骤号/CORE 兜底不存在/token 数统一 ≈300 实测）、modelSelfHeal 测试补三覆盖（上限 8 弹旧保新/跨 provider 不误合并/no-next 整行形状）+ 每用例读即清场防御（顺序地雷判例）。
 
 **审视暴露的边界记录（记入，不擅自扩机制）**：
-- **A2 停支执行通路**：宿主零代裁后，父引擎工具面无停支工具（pauseBranch/abortBranch 只在宿主缝与 UI）——模型裁决「该停」时只能软消化（不采纳/不再等/叙述交代），硬停支仍需下一句插话或用户手停。裁决权已交、机械手未配；补停支工具是「手脚」（准入铁律正当），待用户点名再动。
+- **A2 停支执行通路**：宿主零代裁后，父引擎工具面无停支工具（pauseBranch/abortBranch 只在宿主缝与 UI）——模型裁决「该停」时只能软消化（不采纳/不再等/叙述交代），硬停支仍需下一句插话或用户手停。裁决权已交、机械手未配。→ **已落（2026-11-05 用户点名，v4.2.1）**：stop_branch 分支控制工具——定义/执行住 SubagentOrchestrator（何时停归模型，怎么停归工具；call_id 从委派调用或插话附注精确取），有在飞支时才进模型清单（branchControlToolDefs 条件在场，GUI CodingAgent / CLI cliHarness 合并点接入），ToolRegistry 在 known 名单检查前按名转发；pause（默认，断点存档可续）/abort（终态）走既有点名通路，不命中给诚实错误+在飞清单自纠；停支不设权限卡（非破坏，与宿主缝同口径）。
 - **A2 收尾重入丢附注**：父引擎在复核 8s 内已收尾时，steer 走 roundClosePlane leftoverSteers 重入，取裸原话，callId 现场事实附注不随话走（既有「重入用用户原话」口径）；缓解=下一 THINK 的 live_branches 新鲜花名册。挂账观察真机出现率。
 - **CAPABILITY_GAP_PROMPT 前半段死文本**（先在，非本刀引入）：CORE 半段全 src 无装配点，只 LADDER 切片进 prompt；本刀清了其中指向已删内容的两句，前半段存废（整体退役 or 恢复装配）待用户点名。
 

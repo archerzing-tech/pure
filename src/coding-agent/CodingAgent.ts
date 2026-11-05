@@ -313,6 +313,8 @@ export class CodingAgent {
     const modelToolsDefs = (): ToolDefinition[] => sanitizeToolDefs([
       ...this.toolRegistry.getTools(),
       ...this.toolRegistry.getSubagentTools(),
+      // 分支控制工具（stop_branch）条件追加：有在飞委派支时才可见。
+      ...this.subagentOrchestrator.branchControlToolDefs(),
     ]);
     this.harness = new Harness({
       sessionId: config.sessionId,

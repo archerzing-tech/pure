@@ -640,6 +640,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;
+  // 分支控制工具（stop_branch）的清单追加面：编排器在下面有注册表的分支里
+  // 才创建，先给空实现占位（无编排器 = 无在飞支 = 工具不可见，语义一致）。
+  let branchControlDefs: () => ToolDefinition[] = () => [];
   const store = (args.resume || overrides.persistState) ? createStore(args) : undefined;
 
   // Default Harness plumbing (ContextEngine + rule-based verifier + default
@@ -730,7 +733,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     tools.setSubagentExecutor(orchestrator);
     // Model-visible tools = public tools + subagent tools, so the parent LLM
     // can actually delegate (getTools() alone filters subagents out).
-    toolsDefs = [...tools.getTools(), ...tools.getSubagentTools()];
+    // stop_branch 条件追加：有在飞委派支时才可见（分支控制工具）。
+    branchControlDefs = () => orchestrator.branchControlToolDefs();
+    toolsDefs = [...tools.getTools(), ...tools.getSubagentTools(), ...branchControlDefs()];
   }
 
   // User hooks (hooks.json): only the global layer (~/.pure) is loaded for
@@ -758,7 +763,7 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 在同一 run 的下一个请求就可见——清单逐请求重算（与 GUI 的 CodingAgent
     // 同款），启动时钉死的 toolsDefs 只作无注册表路径的兜底。
     toolsDefsProvider: tools instanceof ToolRegistry
-      ? () => [...tools.getTools(), ...tools.getSubagentTools()]
+      ? () => [...tools.getTools(), ...tools.getSubagentTools(), ...branchControlDefs()]
       : undefined,
     budget: DEFAULT_BUDGET,
     stateStore: store,

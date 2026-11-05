@@ -393,6 +393,12 @@ export class SubagentOrchestrator implements ToolAdapter {
     const startTime = Date.now();
     const done = (durationMs: number): number => Date.now() - startTime;
 
+    // 分支控制工具（2026-11-05 决策边界改革补手脚）：宿主零代裁后，父引擎
+    // 裁决「该停」要有执行通路——stop_branch 按名短路，不进委派 def 流程。
+    if (toolCall.function.name === STOP_BRANCH_TOOL_NAME) {
+      return this.executeStopBranchTool(toolCall);
+    }
+
     if (!def) {
       return {
         id: toolCall.id,
@@ -1076,9 +1082,77 @@ export class SubagentOrchestrator implements ToolAdapter {
       role: entry.role,
     }));
   }
+
+  // ── 分支控制工具（2026-11-05 决策边界改革：停支执行通路）────────────
+  // 刀二把复核没结论的裁决权交回父引擎后，父引擎工具面没有任何停支手段——
+  // 裁决权已交、机械手没配（审视发现的边界）。stop_branch 补上这条手脚：
+  // 何时停归模型（决策），怎么停归这里（机制）。只在有在飞支时出现在模型
+  // 清单（branchControlToolDefs），与宿主缝 stopBranchByCallId 的在飞口径
+  // 一致（delegating|running|pausing）。
+
+  private liveBranches(): Array<{ callId: string; agentName: string; state: BranchState }> {
+    return this.branchView().filter((b) => b.state === 'delegating' || b.state === 'running' || b.state === 'pausing');
+  }
+
+  /** 模型清单追加面：有在飞支时暴露 stop_branch，无支零噪音。 */
+  branchControlToolDefs(): ToolDefinition[] {
+    return this.liveBranches().length > 0 ? [STOP_BRANCH_TOOL_DEF] : [];
+  }
+
+  /** stop_branch 执行器：call_id 精确核实（在飞账本命中），pause/abort 走
+   *  既有点名通路（断点存档/终态）。不命中 = 诚实错误 + 当前在飞 id 清单，
+   *  模型拿到能自我纠正。结果给人话（人类可读标准），带 outcome 语义让
+   *  失败策略/汇总不把「已暂停」当失败。 */
+  private async executeStopBranchTool(toolCall: ToolCall): Promise<ToolResult> {
+    const startTime = Date.now();
+    const base = { id: toolCall.id, toolName: STOP_BRANCH_TOOL_NAME };
+    let parsed: { call_id?: string; callId?: string; mode?: string } = {};
+    try {
+      parsed = JSON.parse(toolCall.function.arguments || '{}') as typeof parsed;
+    } catch {
+      // fall through to the missing-id error below
+    }
+    const callId = (parsed.call_id ?? parsed.callId ?? '').trim();
+    const mode = parsed.mode === 'abort' ? 'abort' : 'pause';
+    const live = this.liveBranches();
+    const liveList = live.map((b) => `${b.callId}（${b.agentName}）`).join(', ') || '（当前没有在飞的委派支）';
+    const fail = (error: string): ToolResult => ({ ...base, error, success: false, duration: Date.now() - startTime });
+    if (!callId) return fail(`call_id is required — copy it EXACTLY from your delegation tool call or the interjection note. Live branches right now: ${liveList}.`);
+    const branch = live.find((b) => b.callId === callId);
+    if (!branch) return fail(`No live branch with call_id=${callId} — it may have already finished or been stopped. Live branches right now: ${liveList}.`);
+    const ok = mode === 'abort' ? this.abortBranch(callId) : this.pauseBranch(callId);
+    if (!ok) return fail(`Branch ${callId}（${branch.agentName}）could not be ${mode === 'abort' ? 'aborted' : 'paused'} — it likely just settled. Live branches right now: ${liveList}.`);
+    const content = mode === 'abort'
+      ? `已停止「${branch.agentName}」（call_id=${callId}）。产出未入账，这支到此为止。`
+      : `已暂停「${branch.agentName}」（call_id=${callId}），进度已存档；想续跑时用同样的任务书重新委派即可。`;
+    return {
+      ...base,
+      success: true,
+      result: content,
+      outcome: mode === 'abort' ? 'stopped' : 'paused',
+      duration: Date.now() - startTime,
+    };
+  }
 }
 
 // ── Built-in subagent definitions ──
+
+// 分支控制工具定义（stop_branch）：手脚说明——call_id 的两个真实出处（自己的
+// 委派调用 / 插话附注）+ pause/abort 语义。不写「何时该停」的流程规则（决策
+// 边界判据：何时归模型）。条件在场由 branchControlToolDefs 控制。
+export const STOP_BRANCH_TOOL_NAME = 'stop_branch';
+const STOP_BRANCH_TOOL_DEF: ToolDefinition = {
+  name: STOP_BRANCH_TOOL_NAME,
+  description: 'Stop one delegated branch you have decided to stop. Copy call_id EXACTLY from your own delegation tool call or from an interjection note naming the branch (call_id=...). mode "pause" (default) keeps the checkpoint — resume later by re-delegating with the same task; "abort" ends the branch for good. If the id is unknown or the branch already settled, the result says so and lists the currently-live ids.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      call_id: { type: 'string', description: 'The exact id of the live branch to stop (as shown in your delegation tool call or the interjection note).' },
+      mode: { type: 'string', enum: ['pause', 'abort'], description: 'pause keeps a resumable checkpoint (default); abort ends the branch for good.' },
+    },
+    required: ['call_id'],
+  },
+};
 
 export const BUILT_IN_SUBAGENTS: SubagentDefinition[] = [
   {

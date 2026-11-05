@@ -382,6 +382,15 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+    // stop_branch（分支控制工具，2026-11-05）不走 defs 名单：编排器在飞时
+    // 才出现在模型清单（branchControlToolDefs），执行转发编排器（其 execute
+    // 顶部按名短路）。放在 known 检查之前——它天然不在公共/委派 defs 里。
+    // 停支不设权限卡：pause/abort 都保留断点存档（非破坏），与插话链的
+    // 宿主缝 stopBranchByCallId 同为直接执行。
+    if (toolCall.function.name === 'stop_branch' && this.subagentExecutor) {
+      return this.subagentExecutor.execute(toolCall, signal);
+    }
+
     const known = this.tools.find(t => t.name === toolCall.function.name);
     if (!known) {
       return {
