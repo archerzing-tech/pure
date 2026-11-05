@@ -7,7 +7,7 @@
 定位是**三层，不是两条腿**。**能力层**持续变厚：接入成本更低、原语更强、反馈更真。**模型层**持续跟进：任何一代 SOTA 接入即用，并用评测回答它适合什么。**机制层**——前两层的地基——保持稳定：权限、可逆、审计、上下文预算、缓存序、验证回路、失败事实注入。由此，Pure 是一个**并行优先**的 agent（子代理与工具调用默认并发，跑在一个可见的 THINK → ACT → OBSERVE → VERIFY 闭环里，绝不在第一个看似合理的答案处停笔）、**可自进化**（经验被写下 → 下次被检索到 → 任务指标改善 → 可归因可回滚；缺了闭环的自进化是负债不是资产）、**能力面开放**（能力的种类无上限，但同一件事只有一个权威入口、一份实现）、**不盲从**（必须明确提出自己的意见，而不是照单执行）、**默认可视化**（图表、图示、地图、卡片直接在对话窗口渲染）、**拟人对话**（任何时刻都可以插话打断——你的原话完整抵达模型，它在原地接着跑）。它的 Agent Loop 借鉴了 JavaScript Event Loop 事件驱动、分阶段推进的思想；对话窗口是会话状态的映射，不是长期记忆的直接倾倒——检索到的记忆只留在模型上下文中，除非界面明确把它展示出来。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.2.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-4.2.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
