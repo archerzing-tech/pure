@@ -22,6 +22,19 @@ describe('map tile delivery chain', () => {
     expect(leafletSource).toContain('groupMarkers');
     expect(leafletSource).not.toContain('openstreetmap.org');
   });
+
+  it('poisoned source memory is invalidated when the chain walks off the end (2026-11-05 判例)', () => {
+    // 记忆只记成功：carto 8 月成功写入记忆 5，网络一变直连死了，链每次都
+    // 从记忆起点起、缓存命中还持续给「源活着」续命，直连通着的 amap 永远
+    // 轮不到——全灭 8 轮错误卡收场。破除：链走到头（attempt 越界）时作废
+    // 记忆，下一轮从链头重探。
+    expect(leafletSource).toContain('localStorage.removeItem(SOURCE_MEMORY_KEY)');
+    // 只在记忆钉了非链头起点时作废（记忆本来就是 0 时无意义）。
+    expect(leafletSource).toContain('recalledTileSource(this.sources.length) !== 0');
+    // 下一轮渲染恢复链头靠 constructor/newGeneration 读记忆（删除后读到 0）。
+    expect(leafletSource).toContain('this.active = recalledTileSource(sources.length)');
+    expect(leafletSource).toContain('this.active = recalledTileSource(this.sources.length)');
+  });
 });
 
 describe('parseMapSource', () => {

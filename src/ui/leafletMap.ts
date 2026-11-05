@@ -319,6 +319,13 @@ class ChainedTileLayer extends L.TileLayer {
       while (this.deadSources.has(index)) index++;
       if (index >= this.sources.length) {
         this.genFail++;
+        // 毒记忆破除（2026-11-05 真机判例）：记忆只记成功，网络环境一变它
+        // 就成了把链起点钉死在死源上的毒药——carto 直连已死，缓存命中还在
+        // 给「源活着」续命，直连通着的 amap 却永远轮不到。链走到头即记忆
+        // 起点是死路的证据，作废它，下一轮渲染从链头重探。
+        if (recalledTileSource(this.sources.length) !== 0) {
+          try { localStorage.removeItem(SOURCE_MEMORY_KEY); } catch { /* private mode */ }
+        }
         done(new Error(lastTileFetchError ? `all tile sources unavailable (last: ${lastTileFetchError})` : 'all tile sources unavailable'), img);
         return;
       }
