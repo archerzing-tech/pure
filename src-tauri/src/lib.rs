@@ -6014,6 +6014,7 @@ async fn fetch_map_tile(
     if let Ok(bytes) = std::fs::read(&path) {
         if !bytes.is_empty() {
             if let Ok(payload) = map_tile_payload(&bytes) {
+                map_tile_debug_log(&url, proxy_url.as_deref(), "cache-hit", 0, "");
                 return Ok(payload);
             }
             let _ = std::fs::remove_file(&path);
@@ -6030,31 +6031,78 @@ async fn fetch_map_tile(
             built
         }
     };
-    let resp = client
-        .get(&url)
-        .header("User-Agent", BROWSER_UA)
-        .send()
-        .await
-        .map_err(|e| format!("tile fetch: {}", e))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("tile HTTP {}", status.as_u16()));
+    let started = std::time::Instant::now();
+    let outcome = async {
+        let resp = client
+            .get(&url)
+            .header("User-Agent", BROWSER_UA)
+            .send()
+            .await
+            .map_err(|e| format!("tile fetch: {}", e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("tile HTTP {}", status.as_u16()));
+        }
+        if resp.content_length().is_some_and(|size| size > MAP_TILE_MAX_BYTES as u64) {
+            return Err("tile response exceeded 8 MB".to_string());
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("tile read: {}", e))?;
+        if bytes.len() > MAP_TILE_MAX_BYTES {
+            return Err("tile response exceeded 8 MB".to_string());
+        }
+        let payload = map_tile_payload(&bytes)?;
+        let dir = map_tile_cache_dir();
+        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
+            if map_tile_evict_tick() {
+                evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
+            }
+        }
+        Ok(payload)
     }
-    if resp.content_length().is_some_and(|size| size > MAP_TILE_MAX_BYTES as u64) {
-        return Err("tile response exceeded 8 MB".to_string());
+    .await;
+    let ms = started.elapsed().as_millis() as u64;
+    match &outcome {
+        Ok(_) => map_tile_debug_log(&url, proxy_url.as_deref(), "ok", ms, ""),
+        Err(e) => map_tile_debug_log(&url, proxy_url.as_deref(), "fail", ms, e),
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("tile read: {}", e))?;
-    if bytes.len() > MAP_TILE_MAX_BYTES {
-        return Err("tile response exceeded 8 MB".to_string());
-    }
-    let payload = map_tile_payload(&bytes)?;
+    outcome
+}
+
+/// One-line-per-fetch debug log for the tile chain (2026-11-05 field
+/// regression): the WebView layer keeps only the LAST failure and the silent
+/// retry keeps the card dark by design, so a whole grid's real per-source
+ /// outcomes were unobservable from the outside. Append-only, size-capped;
+ /// diagnostics can read it straight from disk after a repro.
+fn map_tile_debug_log(url: &str, proxy_url: Option<&str>, outcome: &str, ms: u64, err: &str) {
+    use std::io::Write;
     let dir = map_tile_cache_dir();
-    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
-        if map_tile_evict_tick() {
-            evict_map_tile_cache(&dir, max_bytes.unwrap_or(MAP_TILE_CACHE_DEFAULT_MAX_BYTES));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("tile-fetch-debug.log");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let host = url.split("://").nth(1).and_then(|h| h.split('/').next()).unwrap_or("?");
+    let line = format!(
+        "{} {} {} proxy={} {}ms{}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        outcome,
+        host,
+        proxy_url.unwrap_or("none"),
+        ms,
+        if err.is_empty() { String::new() } else { format!(" err={}", err.chars().take(180).collect::<String>()) },
+    );
+    let _ = f.write_all(line.as_bytes());
+    // 尺寸封顶：超 256KB 截断重来，诊断日志不该无限生长。
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            let _ = std::fs::rename(&path, dir.join("tile-fetch-debug.log.old"));
         }
     }
-    Ok(payload)
 }
 
 /// Settings → General: current offline basemap tile cache footprint. Also

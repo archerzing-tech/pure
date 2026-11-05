@@ -683,10 +683,18 @@ export function netRouteProxyPair(url: string, proxyUrl: string): NetRoutePair {
   const host = normalizeRouteHost(url);
   if (!proxyUrl || !host) return { proxyUrl: '', fallbackProxyUrl: null, host: null };
   if (classifyHostName(host) === 'neutral') return { proxyUrl: '', fallbackProxyUrl: null, host };
-  const fallback = classifyHostName(host) === 'proxy-first' ? 'proxy' : 'direct';
-  return routeForKey(host, true, Date.now(), proxyFallbackFor(proxyUrl, Date.now(), fallback)) === 'proxy'
+  const hostClass = classifyHostName(host);
+  const fallback = proxyFallbackFor(proxyUrl, Date.now(), hostClass === 'proxy-first' ? 'proxy' : 'direct');
+  return routeForKey(host, true, Date.now(), fallback) === 'proxy'
     ? { proxyUrl, fallbackProxyUrl: '', host }
-    : { proxyUrl: '', fallbackProxyUrl: proxyUrl, host };
+    : hostClass === 'proxy-first'
+      // proxy-first 死期翻直连：直连大概率必败，回头撞代理值得——死期只是估计，
+      // 翻直连已经是降级，兜底再砍掉就真没路了。
+      ? { proxyUrl: '', fallbackProxyUrl: proxyUrl, host }
+      // 原生直连优先的代理兜底，在代理已知死亡（死期内）时直接不给（2026-11-05
+      // 真机判例）：死期健康行本来就有，兜底却照打——瓦片这种高频小请求一格
+      // 几十块，每块对着已知死期的端口再白等一次满超时，grid 全灭还灭得极慢。
+      : { proxyUrl: '', fallbackProxyUrl: proxyHealthy(proxyUrl, Date.now()) ? proxyUrl : null, host };
 }
 
 // ── 打通路径：枚举与预算 ─────────────────────────────────────────────────
