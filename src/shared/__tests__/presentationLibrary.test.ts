@@ -159,7 +159,7 @@ describe('presentation library cards', () => {
     }
     // 显式 'text' 声明等价缺省——围栏卡显式，非围栏卡全缺省。
     const declared = PRESENTATION_CARDS.filter((card) => card.textFallback !== undefined).map((card) => card.id);
-    expect(declared.sort()).toEqual(['chart', 'html', 'map', 'mermaid', 'paint', 'puml']);
+    expect(declared.sort()).toEqual(['ascii', 'chart', 'html', 'map', 'mermaid', 'paint', 'puml']);
   });
 
   it('carries the form-choice decision logic as a meta card (2026-11-02 用户定调)', () => {

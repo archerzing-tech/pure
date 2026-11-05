@@ -168,6 +168,18 @@ function svgSourcesHtml(sources: string[]): string {
   return sources.length > 1 ? `<div class="svg-gallery">${slots}</div>` : slots;
 }
 
+/** ```ascii fence: the block IS the picture - render the source verbatim in a
+ *  quiet monospace frame. No parsing, no hydration, no error state: an ASCII
+ *  wireframe cannot fail to render, so the frame carries no toolbar and no
+ *  fallback (the card's textFallback='text' is here the full behavior, not a
+ *  degradation). stream=false (math 同款保真): during streaming the block
+ *  shows as a plain code block - a half ASCII diagram reads fine as code, and
+ *  stripUnterminatedSlotFences leaves it alone because slotFenceLang is false
+ *  for this route (half fence keeps its content instead of being truncated). */
+function asciiFrame(source: string): string {
+  return `<div class="ascii-frame"><pre class="ascii-frame-body"><code>${esc(source)}</code></pre></div>`;
+}
+
 // ── Fence route registry (刀 2 渲染器注册化, docs/presentation-capability-library.md) ──
 // 围栏分流的唯一注册点：加新视觉形式 = 在这里加一条 route + 在
 // presentationLibrary.ts 加一张带 fence 字段的卡，双向同源由测试锁死
@@ -179,8 +191,8 @@ function svgSourcesHtml(sources: string[]): string {
 interface FenceRoute {
   /** 识别的全部围栏 tag（小写，含别名）。与卡的 `fence` 字段同源。 */
   tags: string[];
-  /** 视觉形式 id；DiagramKind 的会挂 `.diagram-slot`，map/math/html 各走独立通道。 */
-  kind: DiagramKind | 'map' | 'math' | 'html';
+  /** 视觉形式 id；DiagramKind 的会挂 `.diagram-slot`，map/math/html/ascii 各走独立通道。 */
+  kind: DiagramKind | 'map' | 'math' | 'html' | 'ascii';
   /** slot 构造（完成渲染与流式共用同一条——slot 栏在流式期就要挂载）。 */
   build: (source: string) => string;
   /** 流式期间是否同路。math=false 保真：流式期间按普通代码渲染（无图卡、
@@ -207,6 +219,10 @@ export const FENCE_ROUTES: readonly FenceRoute[] = [
   // 的 CSP script-src 管不到 asset:// 子文档——源码经 save_artifact('card')
   // 落盘后以 asset:// 加载，任意 JS 可跑。
   { tags: ['html'], kind: 'html', build: htmlCardSlot, stream: true },
+  // ASCII wireframe (console-style box-drawing): the source itself is the
+  // picture - a static monospace frame, no renderer, cannot fail. Per-form
+  // contract lives on the ascii presentation card.
+  { tags: ['ascii'], kind: 'ascii', build: (s) => asciiFrame(s), stream: false },
 ];
 
 /** 围栏 tag → 路由。tag 一律小写比较（langOf 已归一）。静态表查不到时落

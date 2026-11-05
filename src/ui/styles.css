@@ -10209,6 +10209,28 @@ button svg,
  * loading view. A slot starts as a quiet square glass placeholder, then swaps
  * to the rendered picture. The toolbar appears only after rendering finishes,
  * so the first thing the user sees is the image—not implementation text. */
+/* ASCII wireframe frame (```ascii): the block IS the picture - a quiet
+   monospace frame, no toolbar, no states. Box-drawing alignment needs
+   ligatures off and a generous line-height; horizontal scroll instead of
+   wrap so wide frames keep their columns. */
+.ascii-frame {
+  margin: 12px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  overflow-x: auto;
+}
+.ascii-frame pre.ascii-frame-body {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  white-space: pre;
+  color: var(--text);
+}
 .bubble .diagram-slot {
   position: relative;
   width: 100%;

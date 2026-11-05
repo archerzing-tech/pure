@@ -85,6 +85,7 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
       '2. For structure, what is the diagram\'s center of gravity?\n' +
       '   - TOPOLOGY (who calls whom, message order, state transitions - the edges carry the meaning) -> mermaid: automatic layout, adding or editing a node is one line of source.\n' +
       '   - LAYOUT (layer boundaries, side-by-side grouping inside a tier, spatial metaphor, poster-like one-glance flow - the arrangement itself carries the meaning) -> paint (precise geometry) or svg (organic shapes): explicit coordinates, the layout IS the semantic.\n' +
+      '   - TEXT-NATIVE medium (console deliverable, log-adjacent content, or a lightweight sketch in plain text) -> ascii: the block itself is the picture, no layout engine involved - keep it under ~15 boxes.\n' +
       '3. What is this diagram\'s life?\n' +
       '   - One-shot, for humans in THIS conversation -> layout control wins (paint/svg): the 3-second read is designed on purpose, not delegated to a layout engine.\n' +
       '   - Living in the repo, evolving with the code, reviewed and diffed -> source-form wins (mermaid): editing is a line change, not re-laying-out a pile of x/y coordinates - and still a fenced block in the chat first, never a file (step 0).\n' +
@@ -124,6 +125,22 @@ export const PRESENTATION_CARDS: readonly PresentationCard[] = [
       'Renders via the local PlantUML engine (offline, 30s timeout); failure shows an error card with retry.',
     surfaces: 'gui: inline diagram | cli: ASCII wireframe | channel: source text',
     textFallback: 'wireframe',
+  },
+  {
+    id: 'ascii',
+    fence: ['ascii'],
+    family: 'diagram',
+    title: 'ASCII wireframe diagram',
+    aliases: ['wireframe', 'textdiagram'],
+    trigger: 'Fenced block tagged ascii',
+    whenToUse:
+      'Structure drawn in plain text: console/CLI-facing deliverables, log-adjacent sketches, small hierarchies and pipelines that read well as indented boxes. The only form that renders on EVERY surface (gui, cli, channel) with zero rendering step - pick it when the medium is plain text or when a lightweight structural sketch beats wiring a layout engine.',
+    whenNotToUse:
+      'Not for real topology (mermaid auto-layouts and diffs better), not for precise geometry or overlapping shapes (paint/svg), not for numeric data (chart), not for audience-facing polish (a rendered diagram reads better). Past ~15 boxes or with crossing arrows, hand alignment drifts - switch to mermaid.',
+    delivery:
+      'Cannot fail to render: the block IS the picture, shown as-is in a monospace frame on every surface. There is no error card and no repair pass - fix an ugly diagram by re-emitting it with adjusted alignment.',
+    surfaces: 'gui: monospace frame | cli & channel: verbatim text (natively text - no fallback step)',
+    textFallback: 'text',
   },
   {
     id: 'chart',
@@ -401,7 +418,7 @@ function validateCustomCard(
 }
 
 /** 内置围栏卡 id（校验与 markdown 注册共用）。导出供测试与自定义卡校验单源引用。 */
-export const FENCE_IDS = ['mermaid', 'puml', 'chart', 'map', 'svg', 'paint', 'math', 'html'];
+export const FENCE_IDS = ['mermaid', 'puml', 'ascii', 'chart', 'map', 'svg', 'paint', 'math', 'html'];
 
 /** form 参数 → 卡片：精确 id → 别名 → 族名 → 单 token 子串容错。空数组 = 未命中。 */
 export function matchPresentationCards(form: string): PresentationCard[] {

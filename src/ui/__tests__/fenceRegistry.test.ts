@@ -63,11 +63,14 @@ describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
     expect(routeOf('zzz_no_such_lang')).toBeUndefined();
   });
 
-  it('math stays out of streaming slot mounts; every other route streams (behavior pin)', () => {
+  it('math and ascii stay out of streaming slot mounts; every other route streams (behavior pin)', () => {
     // 历史行为锁：streamRenderer 六路（无 math），math 围栏流式按普通代码走。
+    // ascii 同款保真形态（2026-11-05）：半截 ASCII 当代码显示内容不丢，且
+    // slotFenceLang=false 让 stripUnterminatedSlotFences 不摘半截 ascii 围栏
+    // ——ASCII 没有解析，摘掉是纯丢失。
     for (const route of FENCE_ROUTES) {
-      if (route.kind === 'math') {
-        expect(route.stream, 'math must not mount a slot mid-stream').toBe(false);
+      if (route.kind === 'math' || route.kind === 'ascii') {
+        expect(route.stream, `${route.kind} must not mount a slot mid-stream`).toBe(false);
       } else {
         expect(route.stream, `${route.kind} must stream`).toBe(true);
       }
@@ -97,6 +100,20 @@ describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
     expect(
       renderer.code({ text: '{"a":1}', lang: 'json', type: 'code', raw: 'x' } as never),
     ).toContain('<pre><code class="language-json">');
+  });
+
+  it('ascii fences render as a static monospace frame - no slot, no hydration (behavioral pin)', () => {
+    const html = renderer.code({ text: '+--+    +--+\n| A |--->| B |\n+--+    +--+', lang: 'ascii', type: 'code', raw: 'x' } as never);
+    // 源码逐字保真（box-drawing 与空白是图的本体）；HTML 特殊字符按 esc
+    // 转义（`>` → `&gt;`，防注入的正确行为），渲染后浏览器显示回原字符。
+    expect(html).toContain('| A |---&gt;| B |');
+    expect(html).toContain('ascii-frame');
+    // 无 slot 栏、无 hydration、无 loading/错误态——ASCII 不可能渲染失败。
+    expect(html).not.toContain('diagram-slot');
+    expect(html).not.toContain('data-state');
+    expect(html).not.toContain('diagram-toolbar');
+    // 完成渲染的流式别名 tag 也归一（wireframe 不在 route 表，走普通代码块）。
+    expect(routeOf('wireframe')).toBeUndefined();
   });
 
   it('normalizeMapFence derives its container tags from the map route (no hardcode)', () => {
