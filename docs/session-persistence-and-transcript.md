@@ -258,7 +258,7 @@ cargo check
 ### 建议的下一阶段优化
 
 1. **用稳定的模型消息 ID 替代位置索引**：当前 `modelMessageIndex` 在上下文裁剪、插入摘要或消息重写后仍可能发生错位。下一版可以在 canonical message 生成时分配持久化 `modelMessageId`，让转录和模型消息通过 ID 关联。
-2. **把 message-shaped transcript 逐步演进为事件序列**：当前投影层已经独立，但仍需根据 assistant/tool 顺序推断部分工具批次。长期可以采用带 `sequence` 的 `TranscriptEvent[]`，直接表达 `analysis → thinking → tool_start → tool_result → assistant → artifact`，减少恢复时的推断。
+2. **（已基本落地）事件序列回放已是主路径**：V3 恢复经 `projectCanonicalSession` 优先走 `projectSessionEvents(events)` 按事件序直接铺开（即 §2 的核心增量），本条原目标已实现；`transcript` 仍为 message-shaped，仅作旧档兜底投影与 V2→V3 派生源保留。残留优化面 = 评估 `transcript` 落盘能否退役为纯派生缓存（待 V2 迁移通道退役后再议）。
 3. **增加快照 schema 校验与迁移注册表**：当前读取层对 V2 字段做了兼容归一化，但主要依赖类型断言。随着字段增加，应为每个版本提供运行时校验、迁移函数和坏数据错误提示。
 4. **补充真实 WebView 端到端测试**：现有单元测试验证投影结果，仍应在真实 Tauri/WKWebView 中点击历史会话，检查正文、Markdown、分析、工具行、计划卡和继续操作是否全部存在于 DOM。
 5. **长会话富内容虚拟化**：持久化和上下文已有 400 条消息上限，当前活动 WebView 仍保留完整 DOM。若单条消息包含大量图表、图片或终端输出，可进一步采用分段渲染/虚拟列表，但必须保证复制、路径链接和滚动定位不退化。

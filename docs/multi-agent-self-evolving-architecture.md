@@ -92,7 +92,7 @@ agent 复用插话分类器 + SteerInjected 同款机制；接力流水线是委
 | 阶段 13.4 工具生成 | 进化层→产物层 | ✅ 已落地：装载半边 `5c3d431`（`~/.pure/tools/<name>/TOOL.json`）+ 生成半边 `5d7dcf0`（procedure→工具固化全链路）+ sleep-time 自动触发 `87b43ce` |
 | 自进化飞轮首次转动 | 进化层 | ✅ 已落地（`cd638c0`）：真实样本收割 + overlay 首次 ALLOW 落盘 |
 | 两柱焊点（子代理吃得到记忆） | 进化层→运行时 | ✅ 已落地（`a648aa9`）：spawn 时按角色 + 委派参数检索经验，拼在该支 system prompt 尾部 |
-| 团队可观测（进度聚合 / 瓶颈 / 成本视图） | 观测层→UI | 🟡 部分落地：T3 团队卡 `3ca03dc`/`8f85399` + T4 成本视图（角色 × provider × model 聚合）；瓶颈视图聚合器 `src/shared/bottleneckSummary.ts` 已落地（含单测），尚无 UI 消费者（设计 `docs/team-observability-design.md`） |
+| 团队可观测（进度聚合 / 瓶颈 / 成本视图） | 观测层→UI | 🟡 部分落地：T3 团队卡 `3ca03dc`/`8f85399` + T4 成本视图（角色 × provider × model 聚合）；瓶颈视图聚合器 `src/shared/bottleneckSummary.ts` 已落地（含单测），尚无 UI 消费者（设计 `docs/archive/team-observability-design.md`） |
 | A1 会话 = 可追加事件日志 | 持久层 | ✅ 已落地（四刀收官：O_APPEND 地基 / 词汇表与时间线投影 / 转录增量 / fold 水位） |
 | A2 引擎所有权收敛单主 daemon | 运行时 | ⏸ 未开工：卡点 = 控制面焊死 `chat.ts`（P3-2/S2），按绞杀者序 S2 → S3；不做也已消除 v1 桥接的 V1/V3/V4 |
 | S2 控制面抽出（P3-2） | 运行时 | ✅ 已收官（2026-10-08，五刀 `2411279`→`18e8583`+收口）：SteerBus / DelegationControlPlane / FoldInLedger+续跑账 / RoundClosePlane / InterjectOrchestrator+暂停宽限收口；chat.ts 退为投影与组装，CLI 同接（插话输入路落地时接通） |
@@ -115,7 +115,7 @@ agent 复用插话分类器 + SteerInjected 同款机制；接力流水线是委
 ```
 ~~七、13.2 试用制准入与归档~~ —— ✅ 已落（观测切片可注入 `c36f263` + 旁挂账角标裁决
    + 空闲循环自动归档；归档是隔离不删，可重新启用）
-八、S2 控制面抽出（chat.ts 减重）→ S3 daemon 化 —— A2 引擎单主   ← 现最高价值缺口
+八、S3 daemon 化（S2 控制面抽出已于 2026-10-08 收官）—— A2 引擎单主   ← 现最高价值缺口
 九、团队可观测瓶颈视图 —— 聚合器已落（`bottleneckSummary.ts`，含单测），待补 UI 消费者，把 T3/T4 补成完整
 ```
 

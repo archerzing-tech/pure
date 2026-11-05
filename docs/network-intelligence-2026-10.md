@@ -85,7 +85,7 @@ LLM 与 web 两条消费者各用各的决策路径。学习信号只有 LLM 在
   运行期过期抢救双槽做最后一次裁定)。附带:空正文流超时改专属短阶梯
   (2 次即停,不再走 identical-call 5 级阶梯白等 10 分钟,c828c17)
 - **期4 web 工具接入**:runRouted/镜像链/兜底链顺序改由路由脑出,错误文案
-  统一真话模板。**第一刀:web_fetch/web_scrape 抓取后提炼层** —— ✅ 落地
+  统一真话模板。**第一刀:web_fetch/web_scrape 抓取后提炼层** —— ✅ 落地 v3.5.3
   (2026-10-30 用户报「汇总任务全量大返回,处理耗时」——20k 字符原文直灌
   主上下文,每轮 THINK 重复 prefill 是耗时真身)。实施注:>8k 字符全文先经
   宿主一次 LLM 调用(disableThinking)压成 ≤2.5k 要点,原文不再进主上下文;
@@ -94,7 +94,10 @@ LLM 与 web 两条消费者各用各的决策路径。学习信号只有 LLM 在
   只有 web_scrape(web_fetch 是隐藏兼容别名),raw 参数两个 schema 都带上。
   CLI 侧(NodeToolAdapter)无 LLM 通道,暂不接。同笔附带:聊天 markdown
   本机绝对路径图片经 asset protocol 渲染(assetProtocol 全盘 scope + CSP
-  img-src 补 https:),修掉技能配图/本地截图不显示。
+  img-src 补 https:),修掉技能配图/本地截图不显示。补记(2026-11-05):GitHub
+  加速默认智能 auto(证据驱动替代静态镜像链顺序尝试)已随 v3.5.4 发布。
+  余主体承接指针:施工口径以 docs/network-layer-design-2026-11.md(单一
+  NetworkPort + 代理资源化)为准,本文期 4 余项待其落地后归档。
 
 ## 四、验收口径
 - 正常网络:从「hello」到首字,全程零过程文案
