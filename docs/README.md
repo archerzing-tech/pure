@@ -16,6 +16,7 @@
 | [persona-core-upgrade.md](persona-core-upgrade.md) | 刀 1–9 落（双语未做） | 人格系统行为权威：Character Core → 做事/说话双投影 |
 | [presentation-capability-library.md](presentation-capability-library.md) | 刀 1–6 全落（刀 5 真机复验待用户） | 表现形式库：语义卡注册表 + presentation_guide 发现工具，模型自主决策用哪种视觉形式交付 |
 | [pure-vs-industry-2026-11.md](pure-vs-industry-2026-11.md) | 现役对照评估（2026-11-05） | pure 4.2.2 与业界 agent 水位对照：七项差异化优势 + 八项差距（按严重度）+ 行动含义 |
+| [presentation-pack-blueprint-2026-11.md](presentation-pack-blueprint-2026-11.md) | 设计稿（未开工，2026-11-05 裁定可行分期） | 表现形式包化：一期文本形态包（扫描装载+create 技能，零沙箱）+ 二期沙箱渲染器（挂账等真需求） |
 
 ## 活参考（宪法 / 行为规格 / 操作手册）
 
