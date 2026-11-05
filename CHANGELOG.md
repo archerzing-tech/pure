@@ -4,6 +4,12 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.2.1
+
+**停支执行通路补齐：stop_branch 分支控制工具 + v4.2.0 发布后审视收口**
+
+v4.2.0 的 A2 裁定（复核失败 passthrough 化）把停支裁决权交还模型后，留下「裁决权已交、机械手未配」的缺口：父引擎工具面没有停支工具，模型裁决「该停」时只能软消化（不采纳/不再等/叙述交代），硬停支仍需下一句插话或用户手停。本版补上执行通路——stop_branch 分支控制工具，严格按四分归属切分：何时停归模型（决策），怎么停归工具（机制）。定义与执行住 SubagentOrchestrator（branches 账本私有，call_id 从父引擎自己的委派 tool_call id 或插话附注精确取，同一 id 源）；有在飞支时才进模型清单（branchControlToolDefs 条件在场，GUI CodingAgent 与 CLI cliHarness 两处合并点接入）；pause（默认，断点存档可续）与 abort（终态，产出不入账）走既有点名通路；call_id 不命中回诚实错误并附在飞清单让模型自纠；停支不设权限卡（非破坏，与插话链宿主缝 stopBranchByCallId 同口径）。同版落地发布后审视收口：三路 fresh-context 审视 0 条运行时 bug，唯一功能缺口已补——模型失效处方链的 CLI 生产端断链（此前 CLI 只有消费端读处方，纯 CLI 跑模型失效处方永不入账）：cliRepl 的 Interrupted 臂在 failure_policy_stop 时同判同记，三个调用点全透传，处方经 envFacts 下回合送达模型。另清一批注释失真（providerSelfHeal 头注旧口径、recheckCovered doc 旧口径、直投附注快照语义、promptLayers 死文本与四条失真）并补 modelSelfHeal 测试三覆盖（上限 8 弹旧保新/跨 provider 不误合并/no-next 整行形状）+ 每用例读即清场防御。验证：bun test 5060 例全过、tsc 零错。
+
 ## v4.2.0
 
 **决策边界改革首期：触发门槛与流程规则归位「LLM 决策、系统执行」**
