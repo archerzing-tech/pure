@@ -2586,4 +2586,48 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     // 最后一条真人输入是中文（internal 英文轮被跳过）→ 指令仍是中文。
     expect(sys.content).toContain('用户要求用中文来思考与输出。');
   });
+
+  // ═══ 流超时：首块/中途分流 + 现场注入 + 重试放宽（2026-11-05 真机判例）═══
+  // 三个大文档做 PPT：输入巨大 → 预填充确定性慢 → 300s 首块线撞满两次 →
+  // 中断。修法三件：两种 TimeoutError 分开讲、现场事实注入 salvaged 上下文、
+  // 重试首块线放宽一倍（物理参数校准，不替模型决策）。
+
+  it('流超时两次中断：首块形态分流 + 现场事实注入 + 重试首块线放宽', async () => {
+    const callTimes: number[] = [];
+    const hanging: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        callTimes.push(Date.now());
+        await new Promise(() => {}); // 永不出首块——首块线管的就是它
+        yield { type: 'done', content: '', toolCalls: [] }; // unreachable
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const budget: BudgetConfig = { ...STD_BUDGET, firstTokenTimeoutMs: 150 };
+    const engine = new AgentLoopEngine();
+
+    const events = await collect(engine.run(
+      { sessionId: 's_stream_timeout', systemPrompt: 'sys', userPrompt: '基于三个大文档写一个 PPT', budget },
+      baseCtx({ llm: hanging, budget }),
+    ));
+
+    const resumed = events.find(e => e.type === 'StreamResuming');
+    expect(resumed).toBeDefined();
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reasonCode).toBe('stream_timeout_first_token');
+    expect(interrupted!.payload.reason).toContain('没有输出第一个内容块');
+    expect(interrupted!.payload.reason).toContain('不是你的网络问题');
+    // 现状注入：internal user 消息随存档走，下一回合模型知道上次死在哪
+    const injected = (interrupted!.payload.messages ?? []).filter(m => m.role === 'user' && m.internal);
+    expect(injected.length).toBe(1);
+    expect(injected[0]!.content).toContain('系统现状');
+    expect(injected[0]!.content).toContain('等满');
+    expect(injected[0]!.content).toContain('k token');
+    // 重试首块线放宽 ×2：第二次 stream 到中断的间隔 ≥ 首块线本身则放宽
+    // 生效（不放宽时第二次 150ms 就断，落在下界之下）。下界足以分辨，
+    // 上界防 CI 慢机误杀。
+    const gap = interrupted!.timestamp - callTimes[1]!;
+    expect(gap).toBeGreaterThanOrEqual(250);
+    expect(gap).toBeLessThan(2000);
+  }, 20000);
 });

@@ -135,6 +135,17 @@ describe('interruption reason classification', () => {
     expect(message).not.toContain('操作被中断');
   });
 
+  it('首块超时与中途停顿分流：各自文案 + 引擎散文细节透传（2026-11-05 真机判例）', () => {
+    const firstToken = sanitizeInterruptedReason('模型在 5m 内没有输出第一个内容块（连续 2 次，每次都是新建连接重发完整请求）——大请求（长文档、大上下文）在服务端预处理慢，或端点当时卡住；不是你的网络问题。', 'stream_timeout_first_token');
+    expect(firstToken).toContain('一直没有输出第一个内容块');
+    expect(firstToken).toContain('连续 2 次');
+    expect(firstToken).not.toContain('模型响应过久（输出内容过大');
+
+    const midstream = sanitizeInterruptedReason('模型的输出中途停了 2.0m 没有后续（连续 2 次，每次都是新建连接）——服务端或中转链路在流中卡住了，不是你的网络问题。', 'stream_timeout_midstream');
+    expect(midstream).toContain('中途停住没有后续');
+    expect(midstream).toContain('连续 2 次');
+  });
+
   it('reasonCode=failure_policy_stop 透出失败原因，与 prose 锚同款文案', () => {
     const raw = `Repeated request failures (1 consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
     const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');

@@ -265,6 +265,15 @@ export function sanitizeInterruptedReason(raw: string, reasonCode?: string): str
   // 结构化 code 是分类第一依据（2026-10-31 判例：层间契约曾靠 prose 正则，
   // 引擎侧改写文案（c828c17 中文散文）即让分类失联、全部掉进 generic——
   // code 上锁后 prose 只是遗留回退，宿主事件不带 code 才走下方分支）。
+  // 首块超时与中途停顿分开讲（2026-11-05）：前者是大请求服务端预处理慢或
+  // 端点卡死，后者才是链路在流中卡住。raw（引擎散文）已含等待时长与次数，
+  // 透传作细节段；旧 'stream_timeout' 兜底保留给无 label 的历史形态。
+  if (reasonCode === 'stream_timeout_first_token' || reasonCode === 'stream_timeout_midstream') {
+    const base = reasonCode === 'stream_timeout_first_token'
+      ? t('chat.interrupted.streamTimeoutFirstToken', 'Generation timed out: the model never produced its first block — a large request is slow to prefill server-side, or the endpoint stalled (not your network). You can resend directly (retries wait twice as long), or start a fresh session and have Pure summarize/compress the big material first')
+      : t('chat.interrupted.streamTimeoutMidstream', 'Generation timed out: the model stopped mid-answer and stayed silent — the server or relay stalled mid-stream (not your network). You can resend directly, or try again later');
+    return raw ? `${base}\n${raw}` : base;
+  }
   if (reasonCode === 'stream_timeout') {
     return t('chat.interrupted.streamTimeout', 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.');
   }

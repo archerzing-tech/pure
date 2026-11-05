@@ -1156,6 +1156,8 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.autoContinue.stalled': '连续两轮没有实质进展，已暂停自动续跑；补充信息或回复「继续」即可接着干。',
     'chat.interrupted.repeatedFailuresCause': '失败原因：{detail}',
     'chat.interrupted.aborted': '已取消（用户停止，或网络/连接中断）',
+    'chat.interrupted.streamTimeoutFirstToken': '生成超时：模型一直没有输出第一个内容块——大请求在服务端预处理慢，或端点卡住（不是你的网络问题）。可以：直接重发（重试会等得更久）；或新会话先摘要/压缩大材料再继续',
+    'chat.interrupted.streamTimeoutMidstream': '生成超时：模型输出中途停住没有后续——服务端或中转链路在流中卡住（不是你的网络问题）。可直接重发，或稍后再试',
     'chat.interrupted.streamTimeout': '生成超时：模型响应过久（输出内容过大或输入文件过大）。建议把任务拆小、分段生成文件，或先压缩/摘要超大输入',
     // 模型失效自愈：原因（provider 原话）+ 已经做过的修改，用户不用自己排查。
     'chat.interrupted.selfHeal': '模型「{dead}」在 {provider} 上不可用（{detail}）——已记下处方，下一回合 pure 可自行调整模型库接续，也可在设置里手动改。',
@@ -2498,6 +2500,8 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.autoContinue.capped': 'Auto-continued {n}/{max} rounds — reply "continue" and I will pick it up.',
     'chat.autoContinue.stalled': 'Two rounds without material progress — auto-continue paused. Add details or reply "continue" to resume.',
     'chat.interrupted.aborted': 'Cancelled (stopped by user, or network/connection dropped)',
+    'chat.interrupted.streamTimeoutFirstToken': 'Generation timed out: the model never produced its first block — a large request is slow to prefill server-side, or the endpoint stalled (not your network). You can resend directly (retries wait twice as long), or start a fresh session and have Pure summarize/compress the big material first',
+    'chat.interrupted.streamTimeoutMidstream': 'Generation timed out: the model stopped mid-answer and stayed silent — the server or relay stalled mid-stream (not your network). You can resend directly, or try again later',
     'chat.interrupted.streamTimeout': 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.',
     'chat.interrupted.selfHeal': 'Model "{dead}" is not available on {provider} ({detail}) — prescription recorded: pure can update the model list itself next turn, or adjust it in Settings.',
     'chat.interrupted.selfHealNoModel': 'Model "{dead}" is not available on {provider} ({detail}) — that provider has no models left; pure will relay this next turn, or add a working one in Settings.',

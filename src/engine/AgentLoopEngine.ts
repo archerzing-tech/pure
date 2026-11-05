@@ -10,6 +10,7 @@ import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
 import { stripAllPatterns } from '../shared/schemaSanitize';
 import { branchOutcomeOf } from '../shared/branchOutcome';
+import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
@@ -475,7 +476,12 @@ export class AgentLoopEngine {
             tools: toolsDefs,
             signal: ctx.signal,
             timeoutMs: streamTimeoutMs,
-            firstTokenTimeoutMs: budget.streamFirstTokenMs(),
+            // 首块等待随重试放宽一倍（2026-11-05）：大输入场景预填充时间是
+            // 确定性的——同样的请求原样重发还撞同一条 300s 线，两次全烧满
+            // 上限后中断（三个大文档做 PPT 真机判例）。第一次保持 300s 快速
+            // 反馈；重试已证明不是端点死（死链 120s 块间线会先咬住），放宽
+            // 让慢预填充渡过，是物理参数校准不是替模型决策。
+            firstTokenTimeoutMs: budget.streamFirstTokenMs() * (streamTimeoutRepeats > 0 ? 2 : 1),
           })) {
             switch (chunk.type) {
               case 'content':
@@ -747,14 +753,31 @@ export class AgentLoopEngine {
         if (isTimeout) {
           streamTimeoutRepeats++;
           if (streamTimeoutRepeats >= MAX_STREAM_TIMEOUT_RETRIES) {
-            const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次在传输中无响应（每次等满超时上限后放弃）——服务端或中转链路在流中卡住了，不是你的网络问题（每次重试都是新建的连接）。本回合已停止；可直接重新发送，或稍后再试。`;
+            // 两种 TimeoutError 必须分开讲（2026-11-05，三个大文档做 PPT 真
+            // 机判例）：「等不到第一个块」是大请求在服务端预处理慢或端点卡
+            // 死；「中途停顿」才是链路在流中卡住。混成一句「无响应」会让大
+            // 文档场景的用户去查网络，也让下一回合的模型不知道上次死在哪。
+            // err.message 的 label（'LLM stream first token' / 'LLM stream
+            // read'）是流层给的最准锚。
+            const waitedForFirstToken = /first.?token/i.test(err?.message ?? '');
+            const waitedMatch = /timed out after (\d+(?:\.\d+)?)(m|s)/.exec(err?.message ?? '');
+            const waitedHuman = waitedMatch ? `${waitedMatch[1]}${waitedMatch[2]}` : '超时上限';
+            const stopReason = waitedForFirstToken
+              ? `模型在 ${waitedHuman} 内没有输出第一个内容块（连续 ${streamTimeoutRepeats} 次，每次都是新建连接重发完整请求）——大请求（长文档、大上下文）在服务端预处理慢，或端点当时卡住；不是你的网络问题。已停止；可直接重发（重试时首块等待上限已放宽一倍），或开新会话先摘要/压缩大材料再继续。`
+              : `模型的输出中途停了 ${waitedHuman} 没有后续（连续 ${streamTimeoutRepeats} 次，每次都是新建连接）——服务端或中转链路在流中卡住了，不是你的网络问题。已停止；可直接重新发送，或稍后再试。`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
             const salvaged = await salvageStopMessages(messages);
             messages.length = 0;
             messages.push(...salvaged);
+            // 现状注入（决策边界形状：系统递现场事实，怎么继续归模型）——
+            // 不打这个针，用户点「继续」后模型不知道上次死在等首块，可能原
+            // 样再读一遍同样的大输入再撞同一条线。internal 消息随存档走
+            // （进请求不进 UI，TOOL_CALL_RESUME_HINT 同形态）。
+            const inputTokens = messages.reduce((n, m) => n + (typeof m.content === 'string' ? estimateTextTokens(m.content) : 0), 0);
+            messages.push({ role: 'user', internal: true, content: `系统现状：上一回合因流超时中断——${waitedForFirstToken ? `等待模型第一个输出块等满 ${waitedHuman}，共 ${streamTimeoutRepeats} 次` : `模型输出中途停顿 ${waitedHuman}，共 ${streamTimeoutRepeats} 次`}；中断时上下文约 ${Math.max(1, Math.round(inputTokens / 1000))}k token。` });
             // reasonCode 是 UI 分类的第一依据（prose 正则只是遗留回退）——
             // 引擎散文改写曾让纯文本锚分类失联、全部掉进 generic（2026-10-31）。
-            yield { type: 'Interrupted', payload: { reason: stopReason, reasonCode: 'stream_timeout', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            yield { type: 'Interrupted', payload: { reason: stopReason, reasonCode: waitedForFirstToken ? 'stream_timeout_first_token' : 'stream_timeout_midstream', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
             interrupted = true; break;
           }
           yield { type: 'StreamResuming', payload: { attempt: streamTimeoutRepeats, max: MAX_STREAM_TIMEOUT_RETRIES, reason: 'timeout' }, timestamp: Date.now() };
