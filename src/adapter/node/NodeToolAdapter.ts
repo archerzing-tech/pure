@@ -3,7 +3,7 @@
 // shared/toolDefs.ts (single source of truth shared with the GUI adapter).
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
-import { basename, dirname, isAbsolute, join, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm, appendFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
@@ -1008,7 +1008,10 @@ export class NodeToolAdapter implements ToolAdapter {
     // 相对路径锚定语义与 Rust resolve_document_path 一致（见该函数注释）；
     // 落点再过 this.resolve 拿 symlink 之后的真实路径。报告必须用落盘实路径
     // ——用模型输入报就是「卡片在、文件不在」的 2026-10-11 bug 类。
-    const target = await this.resolve(resolveDocumentPath(pathArg, this.workspaceGiven ? this.workspace : '', this.homeDir));
+    // 报告文案走 normalize：Windows 下 this.resolve 保留输入里的正斜杠，
+    // 报出去 C:\…\docs/报表.xlsx 混分隔符（2026-11-05 CI 判例）——normalize
+    // 给平台原生形态，指向同一文件，落盘语义不变。
+    const target = normalize(await this.resolve(resolveDocumentPath(pathArg, this.workspaceGiven ? this.workspace : '', this.homeDir)));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, bytes);
 
