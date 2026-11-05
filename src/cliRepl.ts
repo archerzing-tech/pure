@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { takeFormValidationFeedback } from './shared/formValidationFeedback';
-import { takeProviderHealFacts } from './shared/providerSelfHeal';
+import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from './shared/providerSelfHeal';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
@@ -32,7 +32,7 @@ import { buildShellContext } from './shared/shellEnv';
 import { parseSkillMarkdown } from './shared/skillFiles';
 import { mergeTranscriptWithTurn } from './shared/conversation';
 import { formatCliIntentAssessment, resolveCliAutoApprove } from './cliIntent';
-import { promptBudgetForProvider } from './shared/providers';
+import { customProviderFor, promptBudgetForProvider, providerDef } from './shared/providers';
 import { parseInputHistory, rememberInput } from './shared/inputHistory';
 import { blockedHosts } from './shared/netGuard';
 import { detectNetworkSummary, detectRuntimeVersions } from './adapter/node/NodeToolAdapter';
@@ -44,7 +44,7 @@ import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
-import { loadConfig, defaultCliAutoApprove, PURE_DIR } from './cliConfig';
+import { loadConfig, defaultCliAutoApprove, PURE_DIR, resolveDefaultModel } from './cliConfig';
 import { runCliSleepCycle } from './evolution/cliHost';
 
 /**
@@ -350,6 +350,22 @@ async function assembleCliPrompt(
   });
 }
 
+/** CLI 面的模型失效处方上下文（2026-11-05 审视补齐刀一 CLI 生产端）：与 GUI
+ *  modelListForProvider 同构地组「该 provider 当前的模型清单」——自定义 provider
+ *  用其模型库，内置 provider 用注册表默认库；args.model（已按 flag>env>config>
+ *  defaults 兜底）作为当前模型并入。CLI 不读 GUI 侧的 providerModels 存储字段
+ *  （不进 CliArgs），清单如实按 CLI 可见来源组。 */
+function cliProviderHealContext(args: CliArgs): { provider: string; model: string; models: string[] } {
+  const custom = customProviderFor(args.customProviders, args.provider);
+  const def = providerDef(args.provider);
+  const fallback = resolveDefaultModel(args.provider, args.customProviders);
+  const raw = custom
+    ? [...(custom.models ?? []), custom.defaultModel?.trim() || def?.defaultModel || '', args.model]
+    : [...(def?.models ?? [fallback]), args.model];
+  const models = [...new Set(raw.map((m) => m.trim()).filter(Boolean))];
+  return { provider: args.provider, model: args.model, models };
+}
+
 /** P2 下沉（2026-10-27）：CLI 侧环境事实拼装，与 GUI 的 buildEnvFacts 同构。
  *  刀 6 CLI 面回流（2026-11-03）：围栏块在文本投影/线框渲染失败时 cliDiagram
  *  记了事件——每回合装配读走（读即清）注入 envFacts 区，模型看到自己上一
@@ -436,6 +452,7 @@ function applyCliIntentPermission(
 async function consumeTurn(
   events: AsyncGenerator<EngineEvent, void, void>,
   streamMgr: StreamManager,
+  heal?: { provider: string; model: string; models: string[] },
 ): Promise<{ output: string; messages: Message[]; turnCount: number; ok: boolean }> {
   let finalOutput = '';
   let messages: Message[] = [];
@@ -562,12 +579,29 @@ async function consumeTurn(
           process.stdout.write(`\n  ${recoverableErr ? yellow('↻') : red('⚠')}  ${recoverableErr ? yellow(event.payload.code) : red(event.payload.code)}: ${dim(event.payload.message)}\n`);
           ok = false;
           break;
-        case 'Interrupted':
+        case 'Interrupted': {
           endThinking();
           streamMgr.stop();
           process.stdout.write(`\n  ${yellow('⏹')}  ${dim(event.payload.reason)}\n`);
+          // 刀一 CLI 生产端（2026-11-05 审视补齐）：此前 CLI 只有消费端
+          // （buildCliEnvFacts 读处方）没有生产端——纯 CLI 跑模型失效时处方
+          // 永不入账，消费端是死接线。与 GUI 面同判同记：命中「模型没了」
+          // 即记处方事件，下一回合 envFacts 送达模型自行裁决。
+          if (heal && event.payload.reasonCode === 'failure_policy_stop') {
+            const plan = planProviderSelfHeal({
+              message: event.payload.reason,
+              provider: heal.provider,
+              model: heal.model,
+              models: heal.models,
+            });
+            if (plan) {
+              recordProviderHealEvent(plan);
+              process.stdout.write(`  ${dim('  ↳ 处方已记下：下一回合 pure 会看到它，可自行调整模型库接续。')}\n`);
+            }
+          }
           ok = false;
           break;
+        }
       }
     }
   } finally {
@@ -617,6 +651,7 @@ async function runCliDeliveryGateWithRepair(
   messages: Message[],
   streamMgr: StreamManager,
   signal?: AbortSignal,
+  heal?: { provider: string; model: string; models: string[] },
 ): Promise<{ result: ProjectQualityGateResult; messages: Message[] }> {
   let currentProfile = profile;
   let currentMessages = messages;
@@ -628,6 +663,7 @@ async function runCliDeliveryGateWithRepair(
     const repairResult = await consumeTurn(
       harness.continueTurn(systemPrompt, currentMessages, buildRepairPrompt(result), signal),
       streamMgr,
+      heal,
     );
     if (repairResult.messages.length > 0) currentMessages = repairResult.messages;
     if (!repairResult.ok) break;
@@ -737,12 +773,12 @@ async function runOneShot(args: CliArgs) {
   streamMgr.start();
 
   const startTime = Date.now();
-  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, route.route), streamMgr);
+  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, route.route), streamMgr, cliProviderHealContext(args));
   let ok = result.ok;
   if (needsDeliveryGate && tools) {
     const profile = workspaceProfile ?? await discoverWorkspace(tools);
     if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
-    const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr);
+    const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, undefined, cliProviderHealContext(args));
     ok = ok && delivery.result.passed;
   }
 
@@ -1037,13 +1073,13 @@ async function runRepl(args: CliArgs) {
       ? harness.run(systemPrompt, userTurn, currentAbort.signal, undefined, semanticRoute)
       : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal, undefined, semanticRoute);
 
-    const result = await consumeTurn(events, streamMgr);
+    const result = await consumeTurn(events, streamMgr, cliProviderHealContext(args));
     let turnOk = result.ok;
     let turnMessages = result.messages;
     if (needsDeliveryGate && tools && !currentAbort.signal.aborted) {
       const profile = workspaceProfile ?? await discoverWorkspace(tools);
       if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
-      const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, currentAbort.signal);
+      const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, currentAbort.signal, cliProviderHealContext(args));
       turnOk = turnOk && delivery.result.passed;
       turnMessages = delivery.messages;
     }

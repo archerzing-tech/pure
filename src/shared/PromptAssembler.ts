@@ -639,8 +639,8 @@ export class PromptAssembler {
       // 渲染序 = 数组序（priority 只管预算裁剪序）：闸门随请求出现/消失，
       // 坐数组中部就会插进共享块中间、打破前缀缓存纪律。4 条原则+契约
       // （2026-11-04 决策边界改革）只对「会动手」的请求装配
-      // （wantsHandsOnWorkflow），纯问答轮省 ≈500 tokens；
-      // work_invariant（required）与 capability_gap CORE 兜底交付契约与换路线。
+      // （wantsHandsOnWorkflow），纯问答轮省 ≈300 tokens；
+      // work_invariant（required）与 capability_gap 的 ladder 闸门兜底交付契约与换路线。
       // p25 = 预算紧张时它先被裁（priority 只影响裁剪序）。
       fragment('workflow', wantsHandsOnWorkflow(userText ?? '', context.mode) ? WORKFLOW_PROMPT : '', 25),
     ].filter((item): item is PromptFragment => item !== null);

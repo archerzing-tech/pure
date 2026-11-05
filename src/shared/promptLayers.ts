@@ -80,11 +80,12 @@ export { INFORMATION_VALUE_PRINCIPLE };
 /**
  * workflow 闸门（2026-10-27；2026-11-04 决策边界改革瘦为 4 条原则+契约）：
  * 段内只留教训复用/失败换路线/验证与常识核查/危险动作问询——「先读后改」
- * 等步骤方法已沉 edit_file/write_file 描述与 work_invariant 交付契约
- * （决策边界判据：步骤性流程不驻 system prompt）。只对「会动手」的请求
+ * 已沉 edit_file 描述（write_file 只管新建/盲覆盖，read-first 由 work_invariant
+ * 的交付契约间接承载，这是最薄边）；步骤性流程不驻 system prompt（决策边界
+ * 判据）。只对「会动手」的请求
  * 有意义，纯问答轮是纯开销。召回优先：动词命中即带；纯问答特征且无动作词
  * 才免带；其余默认带（漏判的后果是纪律缺失——work_invariant 与
- * capability_gap CORE 兜底，可接受；误判只是多 ≈250 tokens，无害）。
+ * capability_gap 的 ladder 闸门兜底，可接受；误判只是多 ≈300 tokens，无害）。
  */
 export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'build'): boolean {
   if (mode === 'build' || mode === 'plan') return true;
@@ -108,7 +109,7 @@ export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'b
  * removed in framework-reform phase 2: modern models internalize these
  * behaviors; the one mechanically enforceable piece (verify before delivery)
  * already lives in the delivery pipeline, and its one-sentence rule rides
- * with PROACTIVE_WORKFLOW_PROMPT step 6. */
+ * with PROACTIVE_WORKFLOW_PROMPT（瘦身后为第 3 条 verify+sanity-check）. */
 
 /** Capability-gap protocol — identical in GUI and CLI (shared, not duplicated).
  * When the request needs a capability the current toolset lacks (vision /
@@ -119,9 +120,9 @@ export function wantsHandsOnWorkflow(prompt: string, mode?: 'yolo' | 'plan' | 'b
  * space (~/.pure/skills, ~/.pure/tools), not the project workspace. */
 export const CAPABILITY_GAP_PROMPT = `Capability-gap protocol:
 When the user's request needs a capability you do NOT currently have (image understanding on a text-only model, PDF/Office/scan parsing, audio/video transcription, OCR, …), never refuse, pretend to have it, or invent results; if the message carries a native image attachment, inspect it directly instead of calling it a missing capability.
-It also covers the user asking you to INSTALL, set up, or upgrade a third-party tool, CLI, app, or service ("帮我装 opencode"). A failed route is a diagnosis, never a dead end or a final answer — switch routes instead of retrying (the concrete route ladder ships with the workflow contract when included).
+It also covers the user asking you to INSTALL, set up, or upgrade a third-party tool, CLI, app, or service ("帮我装 opencode"). A failed route is a diagnosis, never a dead end or a final answer — switch routes instead of retrying.
 - First check what is already available: the <skills> blocks in this prompt (Skill Hub included), ~/.pure/skills/, and the project's .agents/skills/. If a suitable skill or tool exists, use it. When the user wants better quality or style from an existing result, a specialist skill is one option — explain why it would help; never pretend installing one is the only solution.
-- If nothing available fits, treat the missing capability as something to ACQUIRE, not a limitation to report — this applies mid-task too, whenever YOU discover the gap yourself (a stalled parser, converter, CLI, service): go fetch the piece and keep the task moving. Typical moves: a matching skill (\`search_agent_skills(query)\` → \`install_agent_skill(source, name)\`), a CLI or library the task needs (find via \`web_search\`, install by the workflow's install routes), or an external service (\`search_mcp_servers(query)\`). One line on what you are fetching and why; install, verify it on the real input, continue. Report "做不到 / 没有工具" only after the acquisition routes themselves have failed — naming what you tried and what exactly is missing.
+- If nothing available fits, treat the missing capability as something to ACQUIRE, not a limitation to report — this applies mid-task too, whenever YOU discover the gap yourself (a stalled parser, converter, CLI, service): go fetch the piece and keep the task moving. Typical moves: a matching skill (\`search_agent_skills(query)\` → \`install_agent_skill(source, name)\`), a CLI or library the task needs (find via \`web_search\`, install via its documented install routes), or an external service (\`search_mcp_servers(query)\`). One line on what you are fetching and why; install, verify it on the real input, continue. Report "做不到 / 没有工具" only after the acquisition routes themselves have failed — naming what you tried and what exactly is missing.
 - If nothing fits, INSTALL it yourself — and treat a failed route as a diagnosis, not a dead end. When a route fails (npm registry unreachable, host blocked, 404), say why, then walk the ladder:
   1) Prefer \`search_agent_skills(query)\` to search the configured community hubs (available in both the desktop GUI and the CLI), then call \`install_agent_skill(source, name)\`. \`source\` also accepts a GitHub repo the USER gave you ("owner/repo" or a full github.com URL) — you do not need a search hit for that. The tool fetches over several routes (raw CDN → GitHub API → repo zip) and lands the SKILL.md in ~/.pure/skills/ automatically; the installed instructions are loaded into the current turn.
   2) If the capability tools (search_agent_skills / install_agent_skills) are unavailable in this runtime, use the community skills.sh flow: run \`npx skills find <关键词>\` to search, then \`npx skills add <owner/repo> --skill <name> --yes\` to install into .agents/skills/ (the CLI and desktop app auto-load that directory).

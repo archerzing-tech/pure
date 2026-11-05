@@ -453,12 +453,12 @@ export class InterjectOrchestrator implements InterjectionIngress {
       // 复核超时/失败 = 没结论（2026-11-04 决策边界改革刀二）：宿主不再自
       // 行暂停在飞支——「要不要停」是任务裁决，归模型。原话直投父引擎并
       // 附现场事实（covered 命中的 callId 是宿主核实过的，随原话带给模型，
-      // 不需要它重新点名）；模型下一 THINK 拿着原话自行裁决。与本文件 :418
-      // 复核超时 passthrough 口径对齐——两个裁判宕机不再一个直投一个代裁。
+      // 不需要它重新点名）；模型下一 THINK 拿着原话自行裁决。与下方 inlineArm
+      // 的复核超时 passthrough 口径对齐——两个裁判宕机不再一个直投一个代裁。
       try { appendTrace({ type: 'covered_recheck_unresolved_passthrough', snippet: text.slice(0, 80) }); } catch {}
       echoUserBubble();
       this.deps.steerRunningTurn(
-        `${text}\n（复核没出结论：这句话撞上仍在跑的「${coveredName}」（call_id=${covered.callId}）。它可能是在收掉/暂停这支，也可能只是措辞撞车——原话在上面，你自行裁决。）`,
+        `${text}\n（复核没出结论：这句话撞上一支复核时仍在跑的「${coveredName}」（call_id=${covered.callId}），此刻可能已收工。它可能是在收掉/暂停这支，也可能只是措辞撞车——原话在上面，结合活动面板自行裁决。）`,
         images, ack, 'parent', false, undefined,
       );
       if (this.deps.isThinkingStreamActive()) this.deps.abortReenter();

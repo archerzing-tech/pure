@@ -70,3 +70,14 @@ A 档（越位候选）9 项裁定：**落刀 4**——A1 模型失效自愈闭�
 4. **A3 策略面事实化**：adaptiveControl.ts buildDirective 重写——五档打法指令（exploration/verification/delegation/recovery/autonomy 命令式 prose）退役，改为纯事实件（路由分类+证据行+角色名录「a roster, not an order」+priorArt+红线）；档位计算保留在 select() 做观测分类（E4.1 仪表盘切片语义不变）；adaptiveControl 测试五处锚同步（指令腔反锁加码）、Harness 漏网锚一处同步。
 
 **验证**：bun test 全量绿（5052 例）+ tsc 零错 + lint:conventions 过。
+
+## 六、发布后审视补刀（2026-11-05，三路独立审视）
+
+三路 fresh-context 审视（A1 处方链端到端 / A2+A4 / prompt 六刀+A3）结论：0 条运行时 bug；功能完整性缺口 1 条已补——**A1 CLI 生产端断链**（此前 CLI 只有消费端 buildCliEnvFacts 读处方、没有生产端，纯 CLI 跑模型失效处方永不入账）：cliRepl.ts Interrupted 臂在 failure_policy_stop 时同判同记（cliProviderHealContext 按 CLI 可见来源组清单，与 GUI modelListForProvider 同构不引 GUI 模块），三个调用点全透传。另修：providerSelfHeal.ts 头注旧口径、DynamicInsertionCoordinator recheckCovered doc 旧口径、interjectOrchestrator 直投附注快照语义（「复核时仍在跑，此刻可能已收工」）与去行号注释、promptLayers 死文本两行（指向已删 workflow install 路线梯）与四条注释失真（edit_file/write_file 并列只对一半/步骤号/CORE 兜底不存在/token 数统一 ≈300 实测）、modelSelfHeal 测试补三覆盖（上限 8 弹旧保新/跨 provider 不误合并/no-next 整行形状）+ 每用例读即清场防御（顺序地雷判例）。
+
+**审视暴露的边界记录（记入，不擅自扩机制）**：
+- **A2 停支执行通路**：宿主零代裁后，父引擎工具面无停支工具（pauseBranch/abortBranch 只在宿主缝与 UI）——模型裁决「该停」时只能软消化（不采纳/不再等/叙述交代），硬停支仍需下一句插话或用户手停。裁决权已交、机械手未配；补停支工具是「手脚」（准入铁律正当），待用户点名再动。
+- **A2 收尾重入丢附注**：父引擎在复核 8s 内已收尾时，steer 走 roundClosePlane leftoverSteers 重入，取裸原话，callId 现场事实附注不随话走（既有「重入用用户原话」口径）；缓解=下一 THINK 的 live_branches 新鲜花名册。挂账观察真机出现率。
+- **CAPABILITY_GAP_PROMPT 前半段死文本**（先在，非本刀引入）：CORE 半段全 src 无装配点，只 LADDER 切片进 prompt；本刀清了其中指向已删内容的两句，前半段存废（整体退役 or 恢复装配）待用户点名。
+
+**验证（补刀后）**：tsc 零错 + 相关测试文件全绿 + 全量复跑。

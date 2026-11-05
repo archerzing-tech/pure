@@ -195,8 +195,9 @@ export class DynamicInsertionCoordinator {
    *  recheckCoveredInsertion 的独立窄问题提示词（举证责任倒置：谁会要求加
    *  一个正在跑的东西）。判定折回三值面：cancelsPart=收掉一支（inline 原话
    *  直投 + stop_branch 信号，宿主核实执行）；否则=要回来的新活排队
-   *  （new_task）。LLM 缺席或复核失败返回 null——调用方回终稿，宁可照旧不可
-   *  误停。 */
+   *  （new_task）。LLM 缺席或复核失败返回 null——调用方不再代裁（2026-11-04
+   *  决策边界改革刀二）：原话直投父引擎随附 call_id 现场，由父引擎自行裁决
+   *  收/不停。 */
   async recheckCovered(
     llm: LLMAdapter | null,
     context: string,

@@ -332,6 +332,17 @@ describe('InterjectOrchestrator — sideline / new_task 臂', () => {
     expect(h.holds.steers[0]?.cancel).toBe(false);
   });
 
+  it('new_task 撞车在飞支 + 复核没结论：思考流在飞时掐流重入（abortReenter 真分支）', async () => {
+    h.classifyWith({ verdict: 'new_task', reason: '', confidence: 1 });
+    h.recheckWith(null);
+    h.setCovering([{ callId: 'call_youku', name: '优酷调研', snippet: '优酷调研', status: 'running' }]);
+    h.setThinking(true);
+    await new InterjectOrchestrator(h.deps).interject('优酷调研不用再做了');
+    expect(h.holds.reenters).toBe(1); // 直投后掐主 THINK 流，宿主带 steerBus 重开
+    expect(h.holds.stops).toHaveLength(0);
+    expect(h.holds.steers).toHaveLength(1);
+  });
+
   it('new_task 撞车 + 复核明确判加活：去重落地，引擎沉默', async () => {
     h.classifyWith({ verdict: 'new_task', reason: '', confidence: 1 });
     h.recheckWith({ cancelsPart: false, reason: 'adds a new deliverable', confidence: 0.9 });
