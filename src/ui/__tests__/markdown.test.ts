@@ -1364,7 +1364,23 @@ describe('diagram-first timing (hold-to-settle gates)', () => {
 
   it('tile retry exhaustion lands a terminal error state (settle must be reachable)', () => {
     const s = src();
-    expect(s).toContain("setMapState(slot, 'error', t('diagram.tilesFailed'))");
+    // 终态文案带瓦片链最后失败详情（2026-11-05 判例：通用「瓦片全部失败」
+    // 让真凶不可观测）；无详情时回落通用文案。
+    expect(s).toContain('const detail = slot.dataset.mapErrorDetail;');
+    expect(s).toContain('? `${t(\'diagram.tilesFailed\')}（${detail}）`');
+    expect(s).toContain(': t(\'diagram.tilesFailed\'));');
     expect(s).toContain('MAX_SILENT_MAP_RETRIES');
+  });
+
+  it('tile failures surface their detail on the first hop, not after exhaustion', () => {
+    const s = src();
+    // 真话第一跳回流：静默重试保持 loading 是设计，但失败原因必须即刻进
+    // 校验事件（下一轮 envFacts 可见），并挂 slot 备错误卡取用。
+    expect(s).toContain("recordFormValidation('map', 'failed', detail ?? 'tiles unsettled')");
+    expect(s).toContain('slot.dataset.mapErrorDetail = detail ?? \'\';');
+    // renderMapInto 的 throw 不再空吞（marker+瓦片一起死时 spinner 不该是
+    // 唯一症状）：console + 校验事件 + 重试链都要接住。
+    expect(s).toContain("console.error('[pure] map render failed:', detail)");
+    expect(s).toContain("recordFormValidation('map', 'failed', `render: ${detail}`)");
   });
 });

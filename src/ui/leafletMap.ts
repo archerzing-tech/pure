@@ -185,6 +185,25 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+/** Last tile-fetch failure message, kept for the visible truth pass: the
+ *  silent retry keeps the card on its spinner by design, and the generic
+ *  "all tile sources unavailable" left every real cause (IPC error, HTTP
+ *  status, dead proxy port) unobservable — the 2026-11-05 field regression
+ *  cost a full diagnosis pass just to learn the chain was dark. Success
+ *  clears it, so the detail always names the CURRENT failure. */
+let lastTileFetchError = '';
+
+function noteTileFetchError(err: unknown): void {
+  lastTileFetchError = err instanceof Error ? err.message : String(err);
+}
+
+/** The detail line for an 'error' tile status — empty when the chain went
+ *  dark without any fetch-level failure (grid never settled, no attempt
+ *  reported). `all tile sources unavailable` alone would say nothing new. */
+function tileFailureDetail(): string | undefined {
+  return lastTileFetchError || undefined;
+}
+
 /** Load one tile as a data URL. In the Tauri app the Rust backend serves it
  * from the disk cache (~/.pure/cache/map-tiles) or fetches + caches it, which
  * is what makes already-viewed areas available offline. Plain web dev falls
@@ -203,20 +222,28 @@ async function loadTile(url: string): Promise<string> {
     try {
       const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl: pair.proxyUrl, maxBytes });
       if (pair.proxyUrl) recordProxyProbe(pair.proxyUrl, true);
+      lastTileFetchError = '';
       if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
       return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
     } catch (err) {
+      noteTileFetchError(err);
       if (pair.fallbackProxyUrl === null) throw err;
       if (pair.proxyUrl) recordProxyProbe(pair.proxyUrl, false);
       const payload = await tauriInvoke<{ data: string; mime: string } | string>('fetch_map_tile', { url, proxyUrl: pair.fallbackProxyUrl, maxBytes });
       if (pair.fallbackProxyUrl) recordProxyProbe(pair.fallbackProxyUrl, true);
+      lastTileFetchError = '';
       if (typeof payload === 'string') return `data:image/png;base64,${payload}`;
       return `data:${payload.mime || 'image/png'};base64,${payload.data}`;
     }
   }
   const resp = await fetch(url, { mode: 'cors', signal: AbortSignal.timeout(8000) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return blobToDataUrl(await resp.blob());
+  if (!resp.ok) {
+    noteTileFetchError(new Error(`HTTP ${resp.status}`));
+    throw new Error(`HTTP ${resp.status}`);
+  }
+  const dataUrl = await blobToDataUrl(await resp.blob());
+  lastTileFetchError = '';
+  return dataUrl;
 }
 
 /** Remember which chain index last served tiles so the NEXT map's first
@@ -292,7 +319,7 @@ class ChainedTileLayer extends L.TileLayer {
       while (this.deadSources.has(index)) index++;
       if (index >= this.sources.length) {
         this.genFail++;
-        done(new Error('all tile sources unavailable'), img);
+        done(new Error(lastTileFetchError ? `all tile sources unavailable (last: ${lastTileFetchError})` : 'all tile sources unavailable'), img);
         return;
       }
       const source = this.sources[index];
@@ -348,7 +375,9 @@ class ChainedTileLayer extends L.TileLayer {
  * so the user can pan, zoom, and tap markers/spots. */
 export interface RenderMapOptions {
   interactive?: boolean;
-  onTileStatus?: (status: 'loading' | 'ready' | 'error') => void;
+  /** `error` carries the tile chain's last failure detail when known — the
+   *  caller turns it into the visible error card / validation feedback. */
+  onTileStatus?: (status: 'loading' | 'ready' | 'error', detail?: string) => void;
 }
 
 /**
@@ -483,14 +512,14 @@ export function renderMapInto(target: HTMLElement, spec: MapSpec, options: Rende
     if (healthy) {
       finishReady();
     } else {
-      options.onTileStatus?.('error');
+      options.onTileStatus?.('error', tileFailureDetail());
     }
   });
   tiles.addTo(map);
   options.onTileStatus?.('loading');
   tileTimer = setTimeout(() => {
     tileTimer = null;
-    if (!readyReported) options.onTileStatus?.('error');
+    if (!readyReported) options.onTileStatus?.('error', tileFailureDetail());
   }, 12000);
 
   renderOverlays();

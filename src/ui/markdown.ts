@@ -2872,9 +2872,14 @@ async function processMapSlot(slot: HTMLElement, version: number, mod: LeafletMa
   }
   try {
     mod.renderMapInto(canvas, parsed.spec, {
-      onTileStatus: (status) => {
+      onTileStatus: (status, detail) => {
         if (!isCurrentDiagramRender(slot, version)) return;
         if (status === 'error') {
+          // 真话第一跳就回流（2026-11-05 判例）：静默重试按设计保持 loading，
+          // 但失败原因不能等 8 次退避耗尽才见——事件器聚合归并重复计数，
+          // 下一轮 user-turn 的 envFacts 就能看到瓦片链死在哪一步。
+          recordFormValidation('map', 'failed', detail ?? 'tiles unsettled');
+          slot.dataset.mapErrorDetail = detail ?? '';
           // 底图失败对用户不可见：卡片保持 loading（转圈圈），后台按退避
           // 静默重试，直到瓦片真正渲染出来才撤销 loading、显示地图。
           scheduleSilentMapRetry(slot, version);
@@ -2882,6 +2887,7 @@ async function processMapSlot(slot: HTMLElement, version: number, mod: LeafletMa
           // 瓦片确认可见——这是唯一撤掉 loading 的时刻。
           cancelSilentMapRetry(slot);
           mapRetryAttempts.delete(slot);
+          delete slot.dataset.mapErrorDetail;
           setMapState(slot, 'preview');
         }
       },
@@ -2904,12 +2910,20 @@ async function processMapSlot(slot: HTMLElement, version: number, mod: LeafletMa
         warnEl.appendChild(msg);
       }
     }
-  } catch {
+  } catch (err) {
     // Render-time failure (DOM/timing/tile layer) is transient by nature —
     // keep the spinner up and retry in the background instead of flashing
-    // an error card.
-    if (!isCurrentDiagramRender(slot, version)) return;
-    scheduleSilentMapRetry(slot, version);
+    // an error card. But it must not be silent to the console and the
+    // validation feed: a throw here kills markers AND tiles together
+    // (2026-11-05 field regression — the empty catch left the spinner as
+    // the only symptom and nothing observable anywhere else).
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error('[pure] map render failed:', detail);
+    if (isCurrentDiagramRender(slot, version)) {
+      slot.dataset.mapErrorDetail = detail;
+      recordFormValidation('map', 'failed', `render: ${detail}`);
+      scheduleSilentMapRetry(slot, version);
+    }
   }
 }
 
@@ -2954,7 +2968,12 @@ function scheduleSilentMapRetry(slot: HTMLElement, version: number): void {
     // （2026-11-03 时序定调的配套：hold 到 settle 的前提是 settle 必达）。
     // 刀 6 同步受益：错误终态会被记成校验事件回流给模型（瓦片受限是环境
     // 问题，模型看到可自行决定换静态形式，不用改 map 源码）。
-    setMapState(slot, 'error', t('diagram.tilesFailed'));
+    // 文案带瓦片链的最后失败详情（同日判例：通用「瓦片全部失败」让真凶
+    // 不可观测，诊断只能靠猜）。
+    const detail = slot.dataset.mapErrorDetail;
+    setMapState(slot, 'error', detail
+      ? `${t('diagram.tilesFailed')}（${detail}）`
+      : t('diagram.tilesFailed'));
     return;
   }
   // 5s → 10s → 20s → capped 30s. Each round reloads only the tile layer of
