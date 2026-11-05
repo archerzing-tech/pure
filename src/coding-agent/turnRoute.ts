@@ -77,8 +77,16 @@ export interface TurnRoutePrefetch {
  *  at all: the router is started as early as possible (startTurnRoute) and a
  *  lost race is carried as work via `workShapedFallback`, never as chat.
  *  The way to shrink the wait further is a faster routing model (the
- *  per-phase adapter seam in phaseModels.ts), not a keyword floor. */
-const ROUTER_TIMEOUT_MS = 8_000;
+ *  per-phase adapter seam in phaseModels.ts), not a keyword floor.
+ *
+ *  2026-11-05 真机判例把这条线从 8s 压到 3s：deepseek 端点时段性慢时路由
+ *  裁决 8s 不回，hello 每轮撞满线白等 8s 才发主请求（ttft 9.9s＝白等 8s＋
+ *  主请求 1.9s）；快时段路由 1.3-2.3s 全程在线内。超时的兜底是当工作轮
+ *  保守推进——对闲聊轮无损（主请求照常快出字），对工作轮无新增损失
+ *  （plan/probe 判定在 8s 超时年代本来就丢，且工作轮本就主档）。裁决的
+ *  价值边界与插话判定缝的 2.5s（U1）同构：轻裁决值得付的等待就是秒级，
+ *  「这轮是什么」仍归路由模型裁决，这里只校准「等多久」这个物理预算。 */
+const ROUTER_TIMEOUT_MS = 3_000;
 
 /**
  * Stage 1 — synchronous, no I/O, no LLM. Everything needed before the first
