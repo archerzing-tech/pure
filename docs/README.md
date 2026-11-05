@@ -15,6 +15,7 @@
 | [remote-office-bridge-design.md](remote-office-bridge-design.md) | S1/S2 落，S3 未开工 | 会话=事件日志 + 单主宿主；S3 daemon 化是活蓝图 |
 | [persona-core-upgrade.md](persona-core-upgrade.md) | 刀 1–9 落（双语未做） | 人格系统行为权威：Character Core → 做事/说话双投影 |
 | [presentation-capability-library.md](presentation-capability-library.md) | 刀 1–6 全落（刀 5 真机复验待用户） | 表现形式库：语义卡注册表 + presentation_guide 发现工具，模型自主决策用哪种视觉形式交付 |
+| [pure-vs-industry-2026-11.md](pure-vs-industry-2026-11.md) | 现役对照评估（2026-11-05） | pure 4.2.2 与业界 agent 水位对照：七项差异化优势 + 八项差距（按严重度）+ 行动含义 |
 
 ## 活参考（宪法 / 行为规格 / 操作手册）
 
@@ -30,7 +31,7 @@
 
 ## 分析与改进计划
 
-> 注记（2026-11-05）：10 月及以前的对比评估文档已清理（git history 可考），其中仍有效的未落项：瓶颈视图无 UI 消费者、父回合 checkpoint 未实现、CLI 插话输入路未接（cliHarness.ts:542）。
+> 注记（2026-11-05）：10 月及以前的对比评估文档已清理（git history 可考），现役对比评估为活跃蓝图区的 [pure-vs-industry-2026-11.md](pure-vs-industry-2026-11.md)；旧档中仍有效的未落项：瓶颈视图无 UI 消费者、父回合 checkpoint 未实现、CLI 插话输入路未接（cliHarness.ts:542）。
 
 | 文档 | 一句话 |
 |---|---|
