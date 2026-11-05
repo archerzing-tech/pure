@@ -24,6 +24,10 @@ const GAP_RESET_MS = 30 * 60 * 1000;
 const ALL_MISS_STREAK = 3;
 /** 少于这个样本数只报「信号不足」，不下缓存质量结论。 */
 const MIN_SAMPLES = 3;
+/** 窗口内全 miss 笔数占比达到这个比例判「间歇缓存」（2026-11-05 第四态，
+ *  GLM flash 实测判例：同一端点轮间命中率 3%~97% 抽签——多实例无共享缓存
+ *  的负载均衡形态，hitRate 均值看着「active」其实轮间大幅抖动）。 */
+const INTERMITTENT_RATIO = 0.4;
 
 export interface CacheQualityWindow {
   /** 窗口内报了缓存分账的回合数。 */
@@ -32,6 +36,8 @@ export interface CacheQualityWindow {
   hitRate: number | null;
   /** 连续全 miss 的笔数（时间断档清零后重数）。 */
   consecutiveAllMiss: number;
+  /** 窗口内全 miss（hit=0 且 miss>0）的笔数——intermittent 判据的原料。 */
+  allMissCount: number;
 }
 
 interface Sample {
@@ -86,9 +92,11 @@ export function cacheQualityFor(
   if (!state || state.samples.length === 0) return undefined;
   let hit = 0;
   let miss = 0;
+  let allMissCount = 0;
   for (const sample of state.samples) {
     hit += sample.hit;
     miss += sample.miss;
+    if (sample.hit === 0 && sample.miss > 0) allMissCount++;
   }
   const total = hit + miss;
   // 读侧同样做断档清零：归账后隔了很久才读，连续计数已经不代表现状。
@@ -97,13 +105,15 @@ export function cacheQualityFor(
     sampleCount: state.samples.length,
     hitRate: total > 0 ? Math.round((hit / total) * 1000) / 10 : null,
     consecutiveAllMiss: stale ? 0 : state.consecutiveAllMiss,
+    allMissCount,
   };
 }
 
 /** sys_info 活设置行的缓存质量行（promptBudgetLiveLine 的姊妹行，同一处
- *  2026-11-03 定调的感知手脚）。三态：样本不足 / 持续全 miss / 健康读数。
- *  该键无任何样本（provider 从不报缓存分账）返回 undefined——行不出现，
- *  不冤枉没有缓存概念的端点。 */
+ *  2026-11-03 定调的感知手脚）。四态：样本不足 / 持续全 miss / 间歇缓存 /
+ *  健康读数。全 miss 态优先于 intermittent（连续 3 笔全 miss 是正在发生的
+ *  坏状态，比占比更紧急）。该键无任何样本（provider 从不报缓存分账）返回
+ *  undefined——行不出现，不冤枉没有缓存概念的端点。 */
 export function cacheQualityLiveLine(
   provider: string | undefined,
   model: string | undefined,
@@ -117,6 +127,9 @@ export function cacheQualityLiveLine(
   }
   if (window.consecutiveAllMiss >= ALL_MISS_STREAK || window.hitRate === 0) {
     return `llm cache quality: hit rate ${window.hitRate ?? 0}% over last ${window.sampleCount} billed turns (${window.consecutiveAllMiss} consecutive all-miss) - this endpoint likely lacks prompt caching or drops the cached prefix between turns; a caching endpoint cuts latency and input cost sharply (cache-hit input is priced far cheaper)`;
+  }
+  if (window.allMissCount / window.sampleCount >= INTERMITTENT_RATIO) {
+    return `llm cache quality: hit rate ${window.hitRate}% over last ${window.sampleCount} billed turns (${window.allMissCount} of ${window.sampleCount} turns fully missed) - caching is intermittent: this endpoint likely load-balances across instances without a shared cache, so latency and input cost will swing between turns`;
   }
   return `llm cache quality: hit rate ${window.hitRate}% over last ${window.sampleCount} billed turns - prompt caching is active on this endpoint`;
 }

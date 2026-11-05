@@ -112,6 +112,38 @@ describe('cacheQualityLiveLine（sys_info 姊妹行的三态）', () => {
     expect(line).toContain('likely lacks prompt caching');
   });
 
+  it('intermittent: all-miss share >= 40% says so even with a positive hit rate (GLM flash draw-lottery shape)', () => {
+    // 2026-11-05 实测形态的锐化版：同一端点轮间命中率大幅抖动——hitRate
+    // 均值看着 active，4/8 轮真全 miss（hit=0）的「间歇缓存」必须说成真话。
+    const turns = [billed(0, 60000), billed(10048, 51469), billed(0, 68188), billed(72320, 2053), billed(0, 69384), billed(0, 50000), billed(3264, 58986), billed(53376, 31299)];
+    turns.forEach((usage, i) => recordEndpointCacheOutcome('glm', 'glm-5.3-flash', usage, T0 + i));
+    const line = cacheQualityLiveLine('glm', 'glm-5.3-flash', T0 + turns.length)!;
+    expect(line).toContain('4 of 8 turns fully missed');
+    expect(line).toContain('caching is intermittent');
+    expect(line).toContain('load-balances across instances without a shared cache');
+    expect(line).not.toContain('prompt caching is active');
+  });
+
+  it('healthy: all-miss share under 40% keeps the active line', () => {
+    // 7 笔里 2 笔全 miss = 29% < 40%：抖动但不判间歇。
+    const turns = [billed(70000, 5000), billed(70000, 5000), billed(0, 75000), billed(70000, 5000), billed(0, 75000), billed(70000, 5000), billed(70000, 5000)];
+    turns.forEach((usage, i) => recordEndpointCacheOutcome('glm', 'm', usage, T0 + i));
+    const line = cacheQualityLiveLine('glm', 'm', T0 + turns.length)!;
+    expect(line).toContain('prompt caching is active');
+    expect(line).not.toContain('fully missed');
+  });
+
+  it('sustained streak outranks intermittent (3 consecutive all-miss is the live failure)', () => {
+    // 窗口内前 5 笔健康、最后 3 笔连续全 miss：占比 3/8=37.5% 不触发
+    // intermittent，但 streak>=3 的全 miss 态必须优先说话。
+    const turns = [billed(70000, 5000), billed(70000, 5000), billed(70000, 5000), billed(70000, 5000), billed(70000, 5000), billed(0, 75000), billed(0, 75000), billed(0, 75000)];
+    turns.forEach((usage, i) => recordEndpointCacheOutcome('glm', 'm', usage, T0 + i));
+    const line = cacheQualityLiveLine('glm', 'm', T0 + turns.length)!;
+    expect(line).toContain('(3 consecutive all-miss)');
+    expect(line).toContain('likely lacks prompt caching');
+    expect(line).not.toContain('fully missed');
+  });
+
   it('healthy hit rate -> the active line with the number', () => {
     for (let i = 0; i < 3; i++) recordEndpointCacheOutcome('deepseek-openai', 'm', billed(75000, 25000), T0 + i);
     const line = cacheQualityLiveLine('deepseek-openai', 'm', T0 + 3)!;
