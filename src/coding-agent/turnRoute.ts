@@ -246,7 +246,7 @@ export async function decideTurnRoute(
       ? `semantic router: ${route.intent}/${route.complexity}/${route.mode}`
       : continuing
         ? 'continuing an approved plan; no re-route'
-        : 'router produced no verdict; carried as work (read first) rather than defaulted to chat',
+        : 'router produced no verdict; carried neutral — the host expresses no opinion on what this turn is (2026-11-05: forced read-first probe made "hello" answer as a deliverable)',
     signals: {
       ...prefetch.signals,
       ...(route ? { routerIntent: route.intent, routerMode: route.mode, routerComplexity: route.complexity } : {}),

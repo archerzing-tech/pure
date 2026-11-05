@@ -114,8 +114,12 @@ export function compileRequestWorkflow(
   // matters for the FIRST implementation turn).
   const needsDesignPhase = needsDeliveryGate && !options.continuingPlan
     && detectUiDesignRequest(prompt);
-  const probeRequired = workShapedFallback
-    || assessment.requiresProbe
+  // 路由缺席（workShapedFallback）不再把探针拧成强制（2026-11-05 真机判例）：
+  // 「先读后动」曾是 fallback 的默认形状，但它是宿主对「这轮是什么」的隐形
+  // 意见——hello 被强制探工作区后答成「这个交付目标没有可改的东西」。缺席
+  // 就是无意见：探针回归各判定源自身（词表兜底的 requiresProbe / 语义裁决 /
+  // 交付闸），宿主不额外加码。
+  const probeRequired = assessment.requiresProbe
     || semantic?.requiresPlan === true
     || needsDeliveryGate;
   const probeAvailable = options.hasTools !== false;
@@ -142,7 +146,14 @@ export function compileRequestWorkflow(
     || options.forcedMode === 'build'
     || Boolean(options.continuingPlan || options.planPauseRequested);
   const userContext: UserTurnContext = {
-    assessment: analysis.intent.riskLevel !== 'low' || analysis.intent.intent !== 'question'
+    // 词表兜底猜出的 intent 不注入主请求（2026-11-05 真机判例）：路由缺席时
+    // analyzeTask 对「hello」猜出 intent=modify——把猜测放大成「用户想修改」
+    // 的指令注进去，模型就答成「"hello"这个交付目标没有可改的东西」。缺席
+    // =无意见，词表猜测只服务内部判定（stage/gate），不塑形主请求。真活轮
+    // 的交付契约由 work_invariant 常驻与 buildProtocol（词表命中 build 时）
+    // 承载，不依赖这条注入。
+    assessment: !workShapedFallback
+      && (analysis.intent.riskLevel !== 'low' || analysis.intent.intent !== 'question')
       ? formatIntentPrompt(analysis.intent)
       : undefined,
     buildProtocol: buildRequested ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,

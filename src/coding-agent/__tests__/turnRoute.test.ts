@@ -115,7 +115,8 @@ describe('decideTurnRoute (stage 2)', () => {
     expect(decision.kind).toBe('router-skipped');
     expect(decision.deterministic).toBe(true);
     expect(decision.signals.routerIntent).toBeUndefined();
-    // 保守读：没有裁决不冒充答案，按工作推进（先读后动）。
+    // 中性承载（2026-11-05 判例）：没有裁决不冒充答案，也不按工作塑形——
+    // 宿主对「这轮是什么」不表达意见（信号字段名留 history，回放兼容）。
     expect(decision.signals.workShapedFallback).toBe(true);
     expect(decision.action).toBe('proceed');
     expect(decision.workflow.analysis).toBeDefined();
@@ -220,16 +221,17 @@ const WORK_SHAPED = [
 describe('work-shaped fallback when the router answers nothing', () => {
   const DEBUG_REQUEST = '登录页在我点登录后没有反应，帮我查一下为什么，然后修掉';
 
-  it('carries the turn as work instead of defaulting it to chat', async () => {
+  it('carries the turn neutrally instead of defaulting it to chat or work', async () => {
     const decision = await decideTurnRoute(prefetchTurnRoute(DEBUG_REQUEST), fakeRouter(null), { hasTools: true });
     expect(decision.kind).toBe('router-skipped');
     expect(decision.route).toBeNull();
     expect(decision.signals.workShapedFallback).toBe(true);
-    // Not an "answer" turn any more, and the cheap move that is right under
-    // every work reading — read the workspace first — is on.
+    // 2026-11-05 判例反转：缺席不再强制「先读后动」探针——那是宿主对「这轮
+    // 是什么」的隐形意见，hello 被它答成「这个交付目标没有可改的东西」。
+    // 路由缺席 = 宿主无意见：不探工作区、不注入词表猜测的意图提示。
     expect(decision.action).toBe('proceed');
-    expect(decision.workflow.stage).toBe('probe');
-    expect(decision.workflow.needsProbe).toBe(true);
+    expect(decision.workflow.stage).not.toBe('probe');
+    expect(decision.workflow.needsProbe).toBe(false);
     // It does not invent a plan or a risk level out of a keyword frame.
     expect(decision.workflow.requiresPlanReview).toBe(false);
     expect(decision.workflow.analysis.intent.riskLevel).toBe('low');
