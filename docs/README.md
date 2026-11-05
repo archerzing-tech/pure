@@ -19,6 +19,7 @@
 
 | 文档 | 一句话 |
 |---|---|
+| [pure-positioning-2026-11.md](pure-positioning-2026-11.md) | **定位表述权威**：一句话定义、三条原则、三层结构、不做清单与走偏信号（2026-11-05 定稿） |
 | [multi-agent-self-evolving-architecture.md](multi-agent-self-evolving-architecture.md) | 多 agent × 自进化北极星（防缠三原则），上游宪法 |
 | [session-persistence-and-transcript.md](session-persistence-and-transcript.md) | 会话持久化与界面转录架构（V3 快照 + 事件日志） |
 | [auto-continue-design.md](auto-continue-design.md) | 长任务自动续跑行为规格 |
