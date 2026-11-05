@@ -132,7 +132,10 @@ export interface TurnRouteOptions {
   /** 第 6 期：宿主已用 startTurnRoute 抢先开始了这一跳（与工作区/探针并行），
    *  把 promise 交给这里，避免再发第二次调用。undefined = 宿主没预启动，按老
    *  路自己发；null = 宿主已认定这一跳不该跑（续计划）。裁决仍由本函数
-   *  唯一产出——这里只搬「何时开始」，不搬「意味着什么」。 */
+   *  唯一产出——这里只搬「何时开始」，不搬「意味着什么」。
+   *  2026-11-05 判定前移：promise resolve 的是九字段 early 判定（见
+   *  parseSemanticRouteEarly），impact/recommendation 散文随后台 drain 原位
+   *  补进同一对象——消费时读不到散文不是丢件，是 drain 还在路上。 */
   preRoute?: Promise<SemanticRouteDecision | null> | null;
 }
 

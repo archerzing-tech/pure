@@ -50,8 +50,8 @@ export function markParallelPlanSteps(plan: Plan, parallelRoles: readonly string
 
 const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. When earlier turns are included they are CONTEXT, not requests: what you classify is always the LAST user message, read as the continuation of that conversation. A short follow-up ("还是不行", "再加一个导出按钮", "用它做", "就先这样") takes its meaning from the preceding turn — judge what it asks for IN that conversation (a repeat of a failed fix, another change to the same deliverable, a switch to a resource the assistant already has), never as a standalone sentence with no subject. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
 
-Return ONLY one JSON object with this shape:
-{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"subagents":["researcher","deep_thinker"],"confidence":0.9,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","impact":"...","recommendation":"...","requiresProbe":false,"requiresConfirmation":false}}
+Return ONLY one JSON object with this shape, emitting the keys in EXACTLY this order (the consumer starts acting on the verdict as soon as the last key before "impact" arrives; "impact"/"recommendation" prose, then "subagents" and "confidence", trail behind it):
+{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","requiresProbe":false,"requiresConfirmation":false,"impact":"...","recommendation":"..."},"subagents":["researcher","deep_thinker"],"confidence":0.9}
 
 "confidence" — how sure you are of the intent above, 0..1, and answer it honestly rather than politely: a message that genuinely reads two ways (a complaint that could be feedback or a request to change the code, a question that could also be an instruction) rates around 0.5, an unambiguous one 0.9+. Omit the field when the call is obvious — the caller treats a missing number as "not doubtful", so a number given out of habit is worse than no number.
 
@@ -85,30 +85,70 @@ async function streamUntilParsed<T>(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   parse: (text: string) => T | null,
+  parseEarly?: (text: string) => T | null,
 ): Promise<T | null> {
   const controller = new AbortController();
-  const forwardAbort = (): void => controller.abort();
+  // caller abort（用户停轮）：无 early 在途时判定也一并放手，别让 race 干等超时线。
+  let deliveredEarly = false;
+  // settle 挂在对象属性上：裸 let 在同步执行的 IIFE 闭包里被 TS 收窄成 null→
+  // never（赋值发生在闭包创建之后），属性收窄不跨闭包，optional call 合法。
+  const sink: { resolve?: (v: T | null) => void } = {};
+  const settle = (v: T | null): void => { sink.resolve?.(v); };
+  const forwardAbort = (): void => {
+    controller.abort();
+    if (!deliveredEarly) settle(null);
+  };
   signal?.addEventListener('abort', forwardAbort, { once: true });
+  // 判定一落地（完整版 / early 版 / 流尽无判定）都从这里出来，外层不必等流收尾。
+  const settled = new Promise<T | null>((resolve) => { sink.resolve = resolve; });
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let result: T | null = null;
-  try {
-    await Promise.race([
-      (async () => {
-        let text = '';
-        for await (const chunk of llm.stream(request, [], controller.signal)) {
-          if (chunk.type === 'content' && chunk.content) {
-            text += chunk.content;
-          } else if (chunk.type === 'done' && chunk.content && chunk.content.length > text.length) {
-            // Adapters that only deliver the full text on the terminal chunk.
-            text = chunk.content;
-          }
-          if (text) {
-            result = parse(text);
-            if (result) break;
+  const stopTimer = (): void => { if (timer !== undefined) { clearTimeout(timer); timer = undefined; } };
+
+  const drain = (async (): Promise<void> => {
+    let text = '';
+    let early: T | null = null;
+    try {
+      for await (const chunk of llm.stream(request, [], controller.signal)) {
+        if (chunk.type === 'content' && chunk.content) {
+          text += chunk.content;
+        } else if (chunk.type === 'done' && chunk.content && chunk.content.length > text.length) {
+          // Adapters that only deliver the full text on the terminal chunk.
+          text = chunk.content;
+        }
+        if (!text) continue;
+        const full = parse(text);
+        if (full) {
+          // early 在手时完整版补进同一对象（散文/subagents/confidence 齐装），
+          // full 字段优先覆盖 early 的同名字段。
+          if (early !== null) Object.assign(early as object, full as object);
+          stopTimer();
+          controller.abort();
+          settle?.(early ?? full);
+          return;
+        }
+        if (early === null && parseEarly) {
+          const candidate = parseEarly(text);
+          if (candidate) {
+            early = candidate;
+            deliveredEarly = true;
+            stopTimer();          // 超时线只守「判定未出」的阶段；散文尾巴不占它
+            settle?.(candidate);  // 外层即刻走人，drain 自己把尾巴收完
           }
         }
-        if (!result && text) result = parse(text);
-      })(),
+      }
+      if (early === null && text) {
+        const tail = parse(text);
+        if (tail) { stopTimer(); settle?.(tail); return; }
+      }
+      if (early === null && settle) settle(null);  // 流尽而无判定：外层不必干等超时线（现状同此）
+    } catch {
+      /* abort 后的流错误静默：判定若已在手，settle 早已发生 */
+    }
+  })();
+
+  try {
+    return await Promise.race([
+      settled,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           controller.abort();
@@ -118,14 +158,16 @@ async function streamUntilParsed<T>(
     ]);
   } catch {
     /* aborted (timeout / caller) — a parse that already landed still counts */
+    return null;
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    stopTimer();
     signal?.removeEventListener('abort', forwardAbort);
     // Stop upstream generation once the decision is in hand (or on any exit)
     // so the provider does not keep billing a response we will discard.
-    controller.abort();
+    // early 已交付时例外：流尾散文还在后台 drain，掐流会把它掐死。
+    if (!deliveredEarly) controller.abort();
+    void drain.catch(() => {});  // 后台 drain 永不炸出 unhandled rejection
   }
-  return result;
 }
 
 /** One prior turn handed to the router. Declared structural rather than reusing
@@ -192,12 +234,70 @@ export async function inferSemanticRoute(
     ...routeHistoryMessages(history, prompt),
     { role: 'user', content: prompt, images },
   ];
-  const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute);
+  const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute, parseSemanticRouteEarly);
   // applyImageReadOverride 已退役（2026-11-04 决策边界改革刀三）：词表正则
   // 覆写 LLM 路由判决是最硬的越位形状——「读图是只读」这类判断模型自己能做
   // （路由 LLM 看得到原文），而复合请求（「分析这张截图并改前端」）被词表
   // 压成 question 正是越位的现实代价。intent/复杂度/门禁全交语义路由判决。
   return decision;
+}
+
+/** Nine fields the workflow compile and its gates cannot go without:
+ *  intent/complexity/mode + requiresPlan/needsDeliveryGate up top, and in the
+ *  assessment the four gate fields (riskLevel/reversibility/requiresProbe/
+ *  requiresConfirmation). The prompt pins them ahead of the prose, so a stream
+ *  that has reached `requiresConfirmation` is safe to act on — the workflow's
+ *  ENTIRE input is on the table; only the two display strings (impact/
+ *  recommendation) are still missing, and those keep streaming in behind and
+ *  get merged into the SAME object (see streamUntilParsed), so downstream
+ *  consumers (assessment card / CLI risk line) read the completed form unless
+ *  they beat the drain.
+ *
+ *  2026-11-05 判例（GLM 端点逐轮 routeMs 3001-3005 撞满 3s 线、15 轮 11 超时）：
+ *  判定的 decode 大头是散文——完整 JSON 闭合要 3.7-5.8s（晚间时段），3s 线下
+ *  判定成功率 ~50%，超时轮 3s 纯白等。键序前移 + 九字段即判把判定时刻拉回
+ *  线内（首字节 ~1.4s + 判定字段 ~55 tok），散文不再压在临界路径上。 */
+export function parseSemanticRouteEarly(raw: string): SemanticRouteDecision | null {
+  const braceAt = raw.indexOf('{');
+  if (braceAt < 0) return null;
+  const s = raw.slice(braceAt);
+  const enumField = <T extends string>(field: string, allowed: readonly T[]): T | null => {
+    const m = s.match(new RegExp(`"${field}"\\s*:\\s*"([a-z-]+)"`));
+    return m && (allowed as readonly string[]).includes(m[1]) ? m[1] as T : null;
+  };
+  const boolField = (field: string): boolean | null => {
+    const m = s.match(new RegExp(`"${field}"\\s*:\\s*(true|false)`));
+    return m ? m[1] === 'true' : null;
+  };
+  const intent = enumField<RequestIntent>('intent', ['question', 'research', 'add', 'modify', 'debug', 'refactor', 'migrate', 'delete', 'build']);
+  const complexity = enumField<TaskComplexity>('complexity', ['simple', 'complex']);
+  const mode = enumField<TaskMode>('mode', ['yolo', 'plan', 'build']);
+  const requiresPlan = boolField('requiresPlan');
+  const needsDeliveryGate = boolField('needsDeliveryGate');
+  const riskLevel = enumField<IntentAssessment['riskLevel']>('riskLevel', ['low', 'medium', 'high']);
+  const reversibility = enumField<IntentAssessment['reversibility']>('reversibility', ['reversible', 'partially-reversible', 'hard-to-reverse', 'irreversible']);
+  const requiresProbe = boolField('requiresProbe');
+  const requiresConfirmation = boolField('requiresConfirmation');
+  if (!intent || !complexity || !mode || requiresPlan === null || needsDeliveryGate === null) return null;
+  if (!riskLevel || !reversibility || requiresProbe === null || requiresConfirmation === null) return null;
+  return {
+    intent,
+    complexity,
+    mode,
+    requiresPlan,
+    needsDeliveryGate,
+    // 散文先行落空串（下游 assessmentFlow 直接 .trim()，undefined 会炸），
+    // 后台 drain 收到真值原位补全同一对象。
+    assessment: {
+      intent,
+      riskLevel,
+      reversibility,
+      impact: '',
+      recommendation: '',
+      requiresProbe,
+      requiresConfirmation,
+    },
+  };
 }
 
 export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {

@@ -4,6 +4,14 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.2.3
+
+**语义路由判定前移：九字段即判，散文不再压在临界路径上**
+
+真机归因判例：同端点 opencode 每轮首字 4-5s 体感理想、pure 每轮 7-10s，逐轮拆账锁定 pure 侧固定开销=语义路由这一跳——GLM 端点 15 轮 routeMs 里 11 轮撞满 3s 超时线、判定成功率恰好 ~50%，超时轮 3 秒纯白等按保守档推进。根因不是等待线数值而是判定迟到：路由 JSON 的 decode 大头是 impact/recommendation 两段散文，完整 JSON 闭合要 3.7-5.8s（晚间时段实测），turbo/air/flash 三个候选模型无一能在 3s 线内交齐（decode 速度是瓶颈，换模型无解）。刀分三面：其一，路由 prompt 的 JSON 键序机械重排——intent/complexity/mode/requiresPlan/needsDeliveryGate 与 assessment 的四个门禁枚举（riskLevel/reversibility/requiresProbe/requiresConfirmation）先出、散文殿后，requiresConfirmation 保持先于散文在场是安全前提（rm -rf 类操作的确认门禁不因前移而失明）。其二，新增 parseSemanticRouteEarly 流式前缀判定：九字段齐即构成合法 SemanticRouteDecision 提前交付（散文占位空串防下游 trim 炸），confidence/subagents 缺席走既有缺省语义，模型不守键序时 early 通道空转、完整版兜底无损降级。其三，streamUntilParsed 加 early 通道——early 命中即 resolve 不等流收尾，流尾散文转入后台 drain 原位补进同一对象（评估卡/风险条后读即得全量），超时线只守「判定未出」阶段、caller abort（停轮）即刻放手不吞超时线白等、无 early 在途时掐流防计费的既有语义保留。判定时刻从完整闭合的 3.7-5.8s 拉回「首字节+判定字段 decode」≈2s 量级，3s 线内判定成功率从掷硬币回到常态，plan/probe 门禁恢复每轮在场。turnRoute 侧 preRoute 注释同步说明 early 对象会被后台补全的形态。
+
+验证：bun test 5088 例全过、tsc 零错（新增三用例：九字段即判含门禁缺一不判的安全锁、early 即返+后台原位补全散文/subagents/confidence 的同一引用断言、caller abort 即刻返回不等超时线）。
+
 ## v4.2.2
 
 **流超时三刀 + 路由等待线压缩 + 地图瓦片链毒记忆根治（重发布补全）**

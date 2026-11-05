@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { Planner, assessIntent, formatArtifactPrompt, formatIntentPrompt, inferSemanticRoute, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute } from '../Planner';
+import { Planner, assessIntent, formatArtifactPrompt, formatIntentPrompt, inferSemanticRoute, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, parseSemanticRouteEarly } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
 
@@ -246,6 +246,67 @@ describe('Planner', () => {
     // Early-exit: the router stopped the stream the moment the decision object
     // was complete instead of draining the provider's trailing tokens.
     expect(consumed).toEqual(['a', 'b']);
+  });
+
+  it('parses the early verdict once the nine gate fields are on the wire', () => {
+    // 2026-11-05 判定前移：prompt 把枚举门禁钉在散文前——到 requiresConfirmation
+    // 为止，workflow 编译的全部输入都在场，散文没到也必须能判。缺一个门禁
+    // 字段（requiresConfirmation 还在路上）就绝不判：安全语义不靠猜。
+    const partial = '{"intent":"modify","complexity":"simple","mode":"yolo","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low","reversibility":"reversible","requiresProbe":false,"requiresConfirmation":false';
+    const route = parseSemanticRouteEarly(partial);
+    expect(route).toMatchObject({ intent: 'modify', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false });
+    expect(route?.assessment.requiresConfirmation).toBe(false);
+    expect(route?.assessment.requiresProbe).toBe(false);
+    // 散文占位空串：下游 assessmentFlow 直接 .trim()，undefined 会炸。
+    expect(route?.assessment.impact).toBe('');
+    expect(route?.assessment.recommendation).toBe('');
+    expect(parseSemanticRouteEarly('{"intent":"modify","complexity":"simple","mode":"yolo","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low","reversibility":"reversible","requiresProbe":false')).toBeNull();
+    expect(parseSemanticRouteEarly('{"intent":"question","complexity":"simple"')).toBeNull();
+    expect(parseSemanticRouteEarly('plain prose, no JSON yet')).toBeNull();
+  });
+
+  it('returns the early verdict immediately and merges the trailing prose into the same object', async () => {
+    const head = '{"intent":"question","complexity":"simple","mode":"yolo","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low","reversibility":"reversible","requiresProbe":false,"requiresConfirmation":false';
+    const tail = ',"impact":"design feedback","recommendation":"explain options"},"subagents":[],"confidence":0.8}';
+    let releaseTail: () => void = () => {};
+    const tailGate = new Promise<void>((resolve) => { releaseTail = resolve; });
+    const llm = {
+      complete: async () => ({ content: '' }),
+      async *stream() {
+        yield { type: 'content', content: head };
+        // 判定（head）此刻已可交付；散文（tail）是流尾——主消费方不等它。
+        await tailGate;
+        yield { type: 'content', content: tail };
+      },
+    } as unknown as LLMAdapter;
+    const route = await inferSemanticRoute(llm, '这句话什么意思？');
+    expect(route?.intent).toBe('question');
+    expect(route?.assessment.impact).toBe('');  // 返回时散文还在路上
+    releaseTail();
+    await new Promise((resolve) => setTimeout(resolve, 0));  // 让后台 drain 跑完
+    // 同一对象原位补全：先拿到引用的消费方（评估卡/风险条）读得到散文。
+    expect(route?.assessment.impact).toBe('design feedback');
+    expect(route?.assessment.recommendation).toBe('explain options');
+    expect(route?.subagents).toEqual([]);
+    expect(route?.confidence).toBe(0.8);
+  });
+
+  it('returns null immediately when the caller aborts mid-route', async () => {
+    const llm = {
+      complete: async () => ({ content: '' }),
+      async *stream() {
+        yield { type: 'content', content: '{"intent":"question"' };
+        await new Promise<void>(() => {});  // 流停在这里，永不推进
+      },
+    } as unknown as LLMAdapter;
+    const controller = new AbortController();
+    const pending = inferSemanticRoute(llm, '你好', controller.signal, undefined, 10_000);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    const startedAt = Date.now();
+    expect(await pending).toBeNull();
+    // 停轮即刻放手：不吞 10s 超时线的白等。
+    expect(Date.now() - startedAt).toBeLessThan(500);
   });
 
   it('the fallback never invents a plan or mode from keywords', () => {
