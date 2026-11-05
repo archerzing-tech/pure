@@ -75,14 +75,18 @@ describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
   });
 
   it('第 2 次停时说真话:链路卡住不是用户网络问题,可直接重发', () => {
+    // 2026-11-05 流超时三刀把散文按流层 label 分成两种 TimeoutError 形态:
+    // 中途停顿=链路卡,首块超时=大请求服务端预处理慢——两形态都必须说真话。
     expect(engine).toContain('服务端或中转链路在流中卡住了，不是你的网络问题');
-    expect(engine).toContain('本回合已停止；可直接重新发送，或稍后再试。');
-    // 散文不再写死分钟数——首块超时上限(300s)与流中 idle(120s)不同,写死「2 分钟」曾是错的。
-    expect(engine).toContain('每次等满超时上限后放弃');
+    expect(engine).toContain('没有输出第一个内容块');
+    expect(engine).toContain('大请求（长文档、大上下文）在服务端预处理慢');
+    expect(engine).toContain('已停止；可直接重新发送，或稍后再试。');
+    // 散文不写死分钟数——等待时长从 err.message 的实际值动态取(waitedHuman)。
+    expect(engine).toContain('每次都是新建连接重发完整请求');
   });
 
   it('停时不做收尾轮:刚连卡两次,handover 大概率再卡满 2 分钟', () => {
-    const stopAt = engine.indexOf('const stopReason = `模型的流式连接连续 ${streamTimeoutRepeats} 次');
+    const stopAt = engine.indexOf('const stopReason = waitedForFirstToken');
     const tail = engine.slice(stopAt, engine.indexOf('interrupted = true; break;', stopAt));
     expect(tail).not.toContain('emitHandover');
     expect(tail).toContain('salvageStopMessages');
@@ -117,7 +121,9 @@ describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
   });
 
   it('停时 Interrupted 带结构化 reasonCode(UI 分类第一依据,prose 只是回退)', () => {
-    expect(engine).toContain("reasonCode: 'stream_timeout'");
+    // 2026-11-05 流超时三刀:旧 'stream_timeout' 分流成首块/中途两枚独立码
+    // (UI 文案分流;旧码只在 chat.ts sanitize 里作遗留回退兜底,引擎不再发)。
+    expect(engine).toContain("reasonCode: waitedForFirstToken ? 'stream_timeout_first_token' : 'stream_timeout_midstream'");
     expect(engine).toContain("reasonCode: 'failure_policy_stop'");
   });
 });
