@@ -21,6 +21,7 @@ export { filterResearchSources } from '../shared/research';
 import { formatBytes, formatCommandError, safeParseArgs } from '../shared/format';
 import { loadConfig } from './config';
 import { promptBudgetLiveLine } from '../shared/providers';
+import { cacheQualityLiveLine } from '../shared/endpointCacheQuality';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
@@ -2198,8 +2199,11 @@ export class TauriToolAdapter implements ToolAdapter {
           const budgetLine = cfg
             ? promptBudgetLiveLine(cfg.customProviders, cfg.provider, cfg.model, cfg.providerOverrides, 'next turn', cfg.capabilityProbes)
             : '';
+          // 缓存质量行（2026-11-05）：本进程该端点的滑动窗口读数——连续全
+          // miss 时模型看得见「端点可能没有 prompt cache」，裁决归模型。
+          const cacheLine = cfg ? cacheQualityLiveLine(cfg.provider, cfg.model) : undefined;
           const liveLine = cfg
-            ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.\n${budgetLine}`
+            ? `\n\nLive settings (~/.pure/config.json is the source of truth; edit the file and they apply from your next turn): permissionMode=${cfg.permissionMode ?? 'confirm'}; autoApprove read/write/cmd/git=${cfg.autoPermRead === true}/${cfg.autoPermWrite === true}/${cfg.autoPermCmd === true}/${cfg.autoPermGit === true}; proxy llm/tools=${cfg.proxy?.llmEnabled === true}/${cfg.proxy?.toolsEnabled === true}; tlsVerify=${cfg.tlsVerify === true}.\n${budgetLine}${cacheLine ? `\n${cacheLine}` : ''}`
             : '';
           return { id: toolCall.id, toolName: name, result: info + liveLine, success: true, duration: Date.now() - start };
         }

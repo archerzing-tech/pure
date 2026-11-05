@@ -85,13 +85,22 @@ export function mergeConventions(appText: string | null, userText: string | null
   return out.filter((b) => b.length > 0).join('\n\n');
 }
 
+/** Convention filename precedence within one layer: AGENTS.md is the open
+ *  standard (60k+ projects); CLAUDE.md is the Claude Code dialect honored as
+ *  a fallback so projects from that ecosystem load with zero migration.
+ *  Same layer never reads both — AGENTS.md wins, no double-source conflicts.
+ *  Seeding always targets AGENTS.md (the canonical name) regardless. */
+const CONVENTION_FILENAMES = ['AGENTS.md', 'CLAUDE.md'] as const;
+
 async function readAgentsMdNode(root: string | null | undefined): Promise<string | null> {
   if (!root) return null;
   try {
     const fs = await import('node:fs');
     const path = await import('node:path');
-    const p = path.join(root, 'AGENTS.md');
-    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+    for (const name of CONVENTION_FILENAMES) {
+      const p = path.join(root, name);
+      if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+    }
   } catch {
     /* ignore an unreadable layer */
   }

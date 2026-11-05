@@ -6,8 +6,9 @@ import { createHarness } from '../cliHarness';
 import { assembleChannelPrompt } from './prompting';
 import { createChannelVerifier } from './verifierProfile';
 import { promptBudgetForProvider } from '../shared/providers';
+import { loadMergedConventions } from '../shared/conventions';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/SubagentOrchestrator';
-import type { CliArgs } from '../cliConfig';
+import { PURE_DIR, type CliArgs } from '../cliConfig';
 import type { HarnessFactory } from './agentSession';
 
 export interface ChannelHarnessFactoryDeps {
@@ -34,11 +35,17 @@ export function createCliChannelHarnessFactory(deps: ChannelHarnessFactoryDeps):
     });
     const budget = promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes);
     const hasSubagents = built.toolsDefs.some((t) => SUBAGENT_NAMES.has(t.name));
+    // 项目惯例三层合并（与 CLI/GUI 同构；app 层走 conventions.ts 默认解析）。
+    // cd26110「三面接线」时此处漏改——prompting.ts 的 conventions 入参一直
+    // 悬空，飞书/钉钉/QQ/WebChat 实际收不到 AGENTS.md（2026-11-05 补齐）。
+    // factory 每会话只跑一次，不需要 GUI 那种 30s TTL 缓存。
+    const conventions = await loadMergedConventions({ globalUserRoot: PURE_DIR, userSpaceRoot: spec.workspace ?? undefined });
     const assembly = assembleChannelPrompt({
       capabilities: spec.capabilities,
       toolDefinitions: built.toolsDefs,
       budget,
       modelIdentity: args.model ? { provider: args.provider, model: args.model } : undefined,
+      conventions,
       hasSubagents,
       sessionId: spec.sessionId,
     });

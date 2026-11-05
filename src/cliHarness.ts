@@ -330,6 +330,7 @@ async function createTools(
   evolutionEnabled = true,
   llmBudgetLine?: string,
   extractSummarizer?: SummarizeForExtract,
+  cacheQualityKeys?: { provider: string; model: string },
 ): Promise<{ tools?: ToolAdapter; toolsDefs: ToolDefinition[]; mcpClient?: MCPClient }> {
   if (!workspace) return { toolsDefs: [] };
 
@@ -352,6 +353,9 @@ async function createTools(
     // 抓取后提炼层（shared/webExtract 编排）：CLI 侧此前未接，工具
     // description 的 auto-condensed 承诺在 CLI 上不兑现（虚假承诺）。
     summarizeForExtract: extractSummarizer,
+    // 缓存质量行取数键（2026-11-05 感知手脚）：键在装配时给，行文案 sys_info
+    // 时现算——滑动窗口随会话跑动变化，装配态快照会失真。
+    cacheQualityKeys,
   });
 
   // P1-8: wire PermissionManager + write confirmation into the CLI direct
@@ -637,6 +641,8 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     args.provider === 'mock'
       ? undefined
       : (url, text, signal) => adapter.complete([{ role: 'user', content: buildExtractPrompt(url, text) }], [], signal).then((res) => res.content),
+    // 端点缓存质量行取数键：provider/model 与预算行同源（args 装配态）。
+    args.provider === 'mock' ? undefined : { provider: args.provider, model: args.model },
   );
   const tools = createdTools.tools;
   let toolsDefs = createdTools.toolsDefs;

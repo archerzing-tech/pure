@@ -119,4 +119,23 @@ describe('loadMergedConventions (disk)', () => {
     expect(merged).toContain('app only');
     expect(merged).not.toContain('user only');
   });
+
+  it('falls back to CLAUDE.md in a layer that has no AGENTS.md (Claude Code ecosystem, zero migration)', async () => {
+    const claudeRoot = mkdtempSync(join(tmpdir(), 'pure-claude-'));
+    try {
+      writeFileSync(join(claudeRoot, 'CLAUDE.md'), '# Shared\n\nclaude value\n\n# ClaudeOnly\n\nclaude only');
+      const merged = await loadMergedConventions({ appSpaceRoot: appRoot, userSpaceRoot: claudeRoot });
+      expect(merged).toContain('claude value');
+      expect(merged).toContain('claude only');
+      // 与同层 AGENTS.md 共存时……
+      writeFileSync(join(claudeRoot, 'AGENTS.md'), '# Shared\n\nagents value');
+      const both = await loadMergedConventions({ appSpaceRoot: appRoot, userSpaceRoot: claudeRoot });
+      // ……AGENTS.md 赢，CLAUDE.md 整层被忽略（不双源）。
+      expect(both).toContain('agents value');
+      expect(both).not.toContain('claude value');
+      expect(both).not.toContain('claude only');
+    } finally {
+      rmSync(claudeRoot, { recursive: true, force: true });
+    }
+  });
 });

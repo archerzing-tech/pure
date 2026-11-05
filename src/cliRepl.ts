@@ -11,6 +11,7 @@ import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { takeFormValidationFeedback } from './shared/formValidationFeedback';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from './shared/providerSelfHeal';
+import { recordEndpointCacheOutcome } from './shared/endpointCacheQuality';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
@@ -568,6 +569,11 @@ async function consumeTurn(
           // Completed (also after Interrupted, with interrupted=true), so gate
           // on the payload: aborted/budget-exhausted runs must stay ❌.
           if (!event.payload.interrupted) ok = true;
+          // 端点缓存质量归账（感知手脚）：heal 三处调用点都传（provider/model
+          // 从 args 解析），缺省消费者（无 heal）不采集——安全缺省。
+          if (heal && event.payload.usage) {
+            recordEndpointCacheOutcome(heal.provider, heal.model, event.payload.usage);
+          }
           break;
         case 'Error':
           endThinking();
@@ -1109,6 +1115,37 @@ async function runRepl(args: CliArgs) {
       await harness.saveTranscriptCheckpoint(messages, result.turnCount);
       firstTurn = false;
       turnNum++;
+      // CLI 闲时预压缩（2026-11-05 补齐双面一致）：GUI 已有 idle soft 预压缩
+      // （窗口过 85% 就在空闲槽 shed 到 70%），CLI 此前只有反应式撞墙与手动
+      // /compact——长会话的下一轮发送要在关键路径上同步跑 trim + LLM 摘要
+      // （最长 60s）。REPL 的轮间空隙就是 idle 槽：结果写 compactedHistory
+      // （与 /compact 同一消费通道，下一轮发送免摘要等待）。写缓存时守卫
+      // messages 引用——摘要期间用户已提交新一轮（引用被换）就不写脏；
+      // soft 档低于触发线时 compact 内部是 no-op（零 LLM 调用），闲调度
+      // 本身近乎零成本。
+      {
+        const ctx = harness.getContextEngine();
+        const source = messages;
+        if (ctx && source.length > 0) {
+          void (async () => {
+            try {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              if (messages !== source) return;
+              const compaction = await ctx.compact(source, { soft: { trigger: 0.85, target: 0.7 } });
+              if (messages !== source) return;
+              if (compaction.compacted) {
+                compactedHistory = compaction.messages;
+                compactedTranscriptLength = source.length;
+                // 淘汰过历史，分区指针引用的全量拷贝可能不在了（/compact 同款）。
+                if (compaction.evictedMessages > 0) cliWorldState.reset();
+                process.stdout.write(`  ${dim('↳ 上下文已在后台压缩，下一轮发送免去摘要等待。')}\n`);
+              }
+            } catch {
+              // 后台预压缩绝不打断会话：失败静默，反应式压缩仍在兜底。
+            }
+          })();
+        }
+      }
     } else if (wasAborted) {
       if (turnMessages.length > 0) {
         messages = firstTurn

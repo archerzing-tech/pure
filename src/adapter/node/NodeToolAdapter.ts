@@ -22,6 +22,7 @@ import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/ru
 import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { cacheQualityLiveLine } from '../../shared/endpointCacheQuality';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
 import { condenseToolBody, type SummarizeForExtract } from '../../shared/webExtract';
@@ -205,6 +206,10 @@ export interface NodeToolConfig {
   /** sys_info 追加的预算行（promptBudgetLiveLine 产物）。CLI 面的 adapter
    * 不持有 LLM config，由 cliHarness 装配会话时算好传入；缺省不拼。 */
   llmBudgetLine?: string;
+  /** sys_info 追加的缓存质量行的取数键（2026-11-05 感知手脚）。行文案在
+   * sys_info 时现算（滑动窗口是活的，装配态快照会失真）；adapter 仍不持有
+   * config，只拿键。缺省不拼。 */
+  cacheQualityKeys?: { provider: string; model: string };
   /** web_fetch/web_scrape 超长正文的提炼回调（shared/webExtract 编排）。
    * CLI 侧由 cliAdapter 按当前会话配置构造；缺席 = 原文直返（与未接线时
    * 行为一致），工具 description 的 auto-condensed 承诺必须有这个回调才
@@ -240,6 +245,7 @@ export class NodeToolAdapter implements ToolAdapter {
   private maxSnapshotBytes: number;
   private location: string;
   private readonly llmBudgetLine: string | undefined;
+  private readonly cacheQualityKeys: { provider: string; model: string } | undefined;
   private readonly summarizeForExtract: SummarizeForExtract | undefined;
   private sessionId: string;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
@@ -257,6 +263,7 @@ export class NodeToolAdapter implements ToolAdapter {
     this.maxSnapshotBytes = config.maxSnapshotBytes ?? 8 * 1024 * 1024;
     this.location = (config.location ?? '').trim();
     this.llmBudgetLine = config.llmBudgetLine;
+    this.cacheQualityKeys = config.cacheQualityKeys;
     this.summarizeForExtract = config.summarizeForExtract;
   }
 
@@ -2696,10 +2703,13 @@ export class NodeToolAdapter implements ToolAdapter {
     const network = `${detectNetworkSummary()}; reach: ${await detectReachability()}`;
     const ipLine = await detectIpGeoLine();
 
+    const cacheLine = this.cacheQualityKeys
+      ? cacheQualityLiveLine(this.cacheQualityKeys.provider, this.cacheQualityKeys.model)
+      : undefined;
     return {
       id: `tool_${Date.now()}`,
       toolName: 'sys_info',
-      result: `timezone:  ${tz}\nlanguage:  ${lang}\nencoding:  ${encoding}\nip:        ${ipLine}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}${this.llmBudgetLine ? `\n\n${this.llmBudgetLine}` : ''}`,
+      result: `timezone:  ${tz}\nlanguage:  ${lang}\nencoding:  ${encoding}\nip:        ${ipLine}\ntime:      ${time}\nos:        ${osVersion}\nlocation:  ${location}\nruntimes:  ${runtimes}\nnetwork:   ${network}${this.llmBudgetLine ? `\n\n${this.llmBudgetLine}` : ''}${cacheLine ? `\n${cacheLine}` : ''}`,
       success: true,
       duration: Date.now() - start,
     };

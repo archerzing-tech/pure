@@ -10,6 +10,7 @@ import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
+import { recordEndpointCacheOutcome } from '../shared/endpointCacheQuality';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
 import { createSessionLedger, formatSessionLedgerFacts, markPlanReplaced, normalizeSessionLedger, recordAsked, recordAnswer, recordDone, recordPlan, actionFingerprint, type SessionLedger } from '../shared/sessionLedger';
 import { WorldStateRenderer } from '../shared/worldStateRender';
@@ -771,11 +772,17 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
     const appRoot = await resourceDir();
     const globalRoot = await join(await homeDir(), '.pure');
     const read = async (root: string): Promise<string | null> => {
-      try {
-        return (await invoke<string>('read_file', { workspace: root, path: 'AGENTS.md' })) || null;
-      } catch {
-        return null;
+      // 与 conventions.ts 同一优先级：AGENTS.md 开放标准优先，CLAUDE.md 是
+      // Claude Code 生态项目的 fallback——同层读到一个就停，不双源。
+      for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+        try {
+          const text = await invoke<string>('read_file', { workspace: root, path: name });
+          if (text) return text;
+        } catch {
+          /* try the next alias */
+        }
       }
+      return null;
     };
     const [appMd, globalMd, userMd] = await Promise.all([
       read(appRoot),
@@ -7782,6 +7789,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (event.payload.usage) {
               turnTiming.usage = event.payload.usage;
               this.sessionStats.usage = mergeTokenUsage(this.sessionStats.usage, event.payload.usage);
+              // 端点缓存质量归账（感知手脚）：连续全 miss 的端点在 sys_info
+              // 活设置行里对模型可见——裁决（换不换端点）归模型，宿主只记账。
+              recordEndpointCacheOutcome(config.provider, config.model, event.payload.usage);
             }
             this.sessionStats.provider = config.provider;
             this.persistStats();
