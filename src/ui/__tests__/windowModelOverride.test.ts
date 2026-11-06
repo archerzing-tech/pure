@@ -1,9 +1,10 @@
-// 窗口级模型覆盖（2026-11-06 多窗口各自选模型）：
-//   - 每窗口一个实例对应一份用户选择：A 窗口 glm、B 窗口 deepseek、C 窗口 qwen
-//     互不串线——修复前模型选择写全局 config（localStorage + config.json 双通
-//     道），最后选择的窗口覆盖前面所有窗口（adapter 与 model_identity 全变）。
-//   - override 挂 SessionChatManager（窗口单例），经 options 注入 getter 给
-//     controller；getter 形状让覆盖变更对已活 controller 立即可见。
+// 会话级持久模型覆盖（2026-11-06 多窗口各自选模型，第二刀）：
+//   - 模型跟会话存档走：窗口是视图、会话是实体。A 会话 deepseek、B 会话 glm
+//     互不串线；重启后模型随 session.json 回来（adoptSessionModel 固化恢复），
+//     修复前覆盖是窗口内存态、重启全归零（用户复验打回）。
+//   - 覆盖挂 SessionChatManager 的会话表（sessionModels），经 options 注入
+//     getter 给 controller；getter 按会话 id 查表，选模型/恢复对已活
+//     controller 立即可见。
 //   - config.json 的 model 仍是全局默认（新窗口初值 / agent 可改），覆盖为空
 //     时行为与旧版完全一致（单窗口用户零感知）。
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -20,6 +21,14 @@ function makeConfig(model: string, provider = 'glm'): PureConfig {
 
 function makeController(opts: ChatControllerOptions = {}): Record<string, any> {
   return new ChatController(opts) as unknown as Record<string, any>;
+}
+
+/** openSession 的宿主容器：manager.container() 非空断言 #chat。 */
+function mountChatRoot(): void {
+  if (document.getElementById('chat')) return;
+  const root = document.createElement('div');
+  root.id = 'chat';
+  document.body.appendChild(root);
 }
 
 describe('窗口级模型覆盖', () => {
@@ -51,12 +60,59 @@ describe('窗口级模型覆盖', () => {
     expect(controller.resolvedGuiConfig(base)?.provider).toBe('qwen');
   });
 
-  test('SessionChatManager setter/getter 读写窗口覆盖', () => {
+  test('SessionChatManager:选模型落当前会话,各会话互不串线', () => {
     const manager = new SessionChatManager();
-    expect(manager.windowModelOverrideValue()).toBeNull();
-    manager.setModelOverride('deepseek', 'deepseek-chat');
-    expect(manager.windowModelOverrideValue()).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
-    manager.setModelOverride('qwen', 'qwen-max');
-    expect(manager.windowModelOverrideValue()).toEqual({ provider: 'qwen', model: 'qwen-max' });
+    mountChatRoot();
+    manager.openSession('session_a');
+    manager.openSession('session_b');
+    // 当前会话 = b（最后 open）：选择只落 b，a 保持未覆盖。
+    manager.setActiveSessionModel('glm', 'glm-5.3');
+    expect(manager.sessionModelFor('session_b')).toEqual({ provider: 'glm', model: 'glm-5.3' });
+    expect(manager.sessionModelFor('session_a')).toBeNull();
+    // 切回 a 选 deepseek：a/b 各自保持——这是「A 窗口 deepseek、B 窗口 glm」
+    // 的核心语义（会话是实体，覆盖跟会话走）。
+    manager.openSession('session_a');
+    manager.setActiveSessionModel('deepseek', 'deepseek-chat');
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    expect(manager.sessionModelFor('session_b')).toEqual({ provider: 'glm', model: 'glm-5.3' });
+    // activeSessionModel 跟当前会话（此刻 a）走：显示链读它。
+    expect(manager.activeSessionModel()).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    manager.openSession('session_b');
+    expect(manager.activeSessionModel()).toEqual({ provider: 'glm', model: 'glm-5.3' });
+  });
+
+  test('adoptSessionModel:存档模型随冷恢复固化,字段不全不落表', () => {
+    const manager = new SessionChatManager();
+    manager.adoptSessionModel('session_a', 'deepseek', 'deepseek-chat');
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    // 老档/未覆盖（model/provider 为空）不落表：走全局默认，改全局默认不被
+    // 旧会话钉死。
+    manager.adoptSessionModel('session_old1', '', 'deepseek-chat');
+    manager.adoptSessionModel('session_old2', 'deepseek', '');
+    manager.adoptSessionModel('', 'deepseek', 'deepseek-chat');
+    expect(manager.sessionModelFor('session_old1')).toBeNull();
+    expect(manager.sessionModelFor('session_old2')).toBeNull();
+  });
+
+  test('极早期兜底:无活动会话时选模型进 pending,绑会话后固化且不泄漏', () => {
+    const manager = new SessionChatManager();
+    mountChatRoot();
+    manager.setActiveSessionModel('qwen', 'qwen-max');
+    // 未绑会话：pending 对任意会话可见（controller 消费链不空转）。
+    expect(manager.sessionModelFor('session_x')).toEqual({ provider: 'qwen', model: 'qwen-max' });
+    // 绑真实 id 后固化到该会话，pending 清掉——不再泄漏给别的会话。
+    manager.openSession('session_x');
+    expect(manager.sessionModelFor('session_x')).toEqual({ provider: 'qwen', model: 'qwen-max' });
+    expect(manager.sessionModelFor('session_y')).toBeNull();
+  });
+
+  test('存档值优先:已 adopt 的会话不被极早期 pending 抢走', () => {
+    const manager = new SessionChatManager();
+    mountChatRoot();
+    manager.adoptSessionModel('session_a', 'deepseek', 'deepseek-chat');
+    manager.setActiveSessionModel('glm', 'glm-5.3'); // currentSessionId='' → pending
+    manager.openSession('session_a');
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    expect(manager.activeSessionModel()).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
   });
 });

@@ -538,6 +538,8 @@ async function reloadVisibleSessionTranscript(): Promise<void> {
   const sessionId = chat.getSessionId();
   const loaded = await loadSession(sessionId);
   if (!loaded || chat.getSessionId() !== sessionId) return;
+  // 变体重放也补固化存档模型（幂等）：盘上是最新的选择时以此为准。
+  chat.adoptSessionModel(sessionId, loaded.provider ?? '', loaded.model ?? '');
   const opened = chat.openSession(sessionId);
   await renderSessionMessages(loaded.snapshot, opened.host);
 }
@@ -796,9 +798,10 @@ function ensureComposerSelects(): void {
       const model = value.split('::')[1];
       cfg.provider = providerId as ProviderId;
       cfg.model = model !== undefined ? (modelListForProvider(cfg, providerId)[Number(model)] ?? defaultModelFor(providerId)) : defaultModelFor(providerId);
-      // 窗口级覆盖先行（多窗口各自选模型）：本窗口立即以此生效；写盘只是
-      // 更新全局默认（新窗口初值），不动别的窗口。
-      chat.setModelOverride(providerId, cfg.model);
+      // 会话级覆盖先行（多窗口各自选模型）：本会话立即以此生效，且随存档
+      // 落 session.json（重启后模型跟会话回来）；写盘只是更新全局默认
+      // （新窗口初值），不动别的窗口。
+      chat.setActiveSessionModel(providerId, cfg.model);
       persistConfig(cfg);
       invalidateConfigCache();
       // updateSidebarModel() cascades into the status footer + context panel.
@@ -870,12 +873,13 @@ function wireComposerSelects(): void {
 
 // ── Context panel display ──
 
-/** 本窗口生效的模型配置：窗口覆盖（chat.setModelOverride，2026-11-06 多窗口
- *  各自选模型）优先于全局 config。所有「当前用的是哪个模型」的显示与下拉回
- *  填都读这里；config.json 的 model 只是默认与新窗口初值。 */
+/** 本会话生效的模型配置：会话级覆盖（chat.setActiveSessionModel，2026-11-06
+ *  多窗口各自选模型，模型跟会话存档走）优先于全局 config。所有「当前用的是
+ *  哪个模型」的显示与下拉回填都读这里；config.json 的 model 只是默认与新窗
+ *  口初值。 */
 function effectiveModelConfig(): PureConfig | null {
   const base = loadConfig();
-  const override = chat.windowModelOverrideValue();
+  const override = chat.activeSessionModel();
   if (!base || !override) return base;
   return { ...base, provider: override.provider as ProviderId, model: override.model };
 }
@@ -997,9 +1001,9 @@ function deferToIdle(fn: () => void): void {
   // 浏览器 bundle）。
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
-  // LLM 预热目标跟本窗口覆盖走（多窗口各自选模型）：不注入的话预热循环
+  // LLM 预热目标跟本会话覆盖走（多窗口各自选模型）：不注入的话预热循环
   // 永远打全局 config 的端点，被覆盖选中的模型端点零预热、每回合付全款握手。
-  setWindowModelOverrideGetter(() => chat.windowModelOverrideValue());
+  setWindowModelOverrideGetter(() => chat.activeSessionModel());
   applySavedAppearance();
   await applySoulOverrideFromDisk();
   applySavedCharacterProfile();
@@ -1930,8 +1934,9 @@ function applyModelChoice(entry: ModelEntry): void {
   const cfg = loadConfig() ?? defaults();
   cfg.provider = entry.provider as ProviderId;
   cfg.model = entry.model;
-  // 与下拉同一语义：本窗口立即生效，写盘只更新全局默认。
-  chat.setModelOverride(entry.provider, entry.model);
+  // 与下拉同一语义：本会话立即生效且随存档走（重启后模型跟会话回来），
+  // 写盘只更新全局默认。
+  chat.setActiveSessionModel(entry.provider, entry.model);
   persistConfig(cfg);
   invalidateConfigCache();
   // Same cascade as the dropdown's onSelect: the composer selects re-mirror

@@ -40,6 +40,9 @@ export interface SessionSidebarDeps {
     getRunningLiveSessions(): Array<{ id: string; title: string; workspace: string }>;
     /** Whether this app instance still holds a live controller for the id. */
     hasOpenSession(sessionId: string): boolean;
+    /** 会话级模型覆盖（2026-11-06）：冷恢复时把存档里的模型固化进会话表，
+     *  重启后模型跟会话回来。字段不全（老档/未覆盖）时为无害空操作。 */
+    adoptSessionModel(sessionId: string, provider: string, model: string): void;
   };
   pasteChips: { clear(): void };
   confirm(message: string): Promise<boolean>;
@@ -266,6 +269,9 @@ export class SessionSidebar {
     // latest click owns the transcript — drop this stale result entirely,
     // including its tail effects (render / focus).
     if (this.isLoadStale(seq)) return;
+    // 会话级模型覆盖（2026-11-06）：存档里的模型随恢复固化进会话表——重启后
+    // 模型跟会话回来（A deepseek / B glm 各自保持），不是都回全局默认。
+    if (loaded) this.deps.chat.adoptSessionModel(id, loaded.provider ?? '', loaded.model ?? '');
     if (!loaded) {
       // Neither a disk archive nor a live controller: a stale card (deleted
       // from another window, swept by the empty-session prune). Re-render so

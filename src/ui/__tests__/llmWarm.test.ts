@@ -71,8 +71,8 @@ describe('llmWarm 预热调度纪律', () => {
     expect(glm).toBe(resolveWarmEndpoint(config, { provider: 'glm', model: 'glm-5.3' } as { provider: string }));
   });
 
-  it('main 注入 getter：预热读窗口覆盖值', () => {
+  it('main 注入 getter：预热读会话覆盖值（模型跟会话存档走）', () => {
     const main = readSource(new URL('../main.ts', import.meta.url));
-    expect(main).toContain('setWindowModelOverrideGetter(() => chat.windowModelOverrideValue())');
+    expect(main).toContain('setWindowModelOverrideGetter(() => chat.activeSessionModel())');
   });
 });

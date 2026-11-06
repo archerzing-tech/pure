@@ -8850,7 +8850,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         turnVariants: this.turnVariants ?? undefined,
       },
     };
-    await saveSession(sessionId, nextSnapshot, workspace);
+    // 会话级模型覆盖（2026-11-06）：生效模型随存档走（重启后模型跟会话回来）。
+    // 只在真有覆盖时传值——undefined 让 Rust 侧保留旧档值，未覆盖的会话
+    // 存档保持空（读全局默认），改全局默认不影响已有会话的「未覆盖」语义。
+    const modelOverride = this.readWindowModelOverride();
+    await saveSession(sessionId, nextSnapshot, workspace, modelOverride?.model, modelOverride?.provider);
   }
 
   /** Cancel a queued idle pre-compaction pass before a new user turn. */
@@ -9303,19 +9307,44 @@ export class SessionChatManager {
   private current: ChatController | null = null;
   private currentHost: HTMLElement | null = null;
   private nextSessionSeq = 1;
-  /** 窗口级模型覆盖（2026-11-06 多窗口各自选模型）：每窗口一个实例对应一份
-   *  用户选择。config.json 的 model 仍是全局默认（新窗口初值 / agent 可改）；
-   *  覆盖只改本窗口的生效模型，别的窗口不受影响。 */
-  private windowModelOverride: { provider: string; model: string } | null = null;
+  /** 会话级模型覆盖（2026-11-06 多窗口各自选模型）：模型跟会话存档走——窗口
+   *  是视图、会话是实体，重启后模型随会话回来（session.json 的 model/provider
+   *  字段，恢复链 adoptSessionModel 直写本表）。config.json 的 model 仍是全局
+   *  默认（新窗口初值 / agent 可改）；无覆盖的会话行为与旧版完全一致。 */
+  private sessionModels = new Map<string, { provider: string; model: string }>();
+  /** 尚无活动会话时的极早期兜底（选择器先于首会话被用），绑会话时固化进 map。 */
+  private pendingModel: { provider: string; model: string } | null = null;
 
-  /** 选模型时由选择器调用：本窗口后续回合以该 provider/model 生效。 */
-  setModelOverride(provider: string, model: string): void {
-    this.windowModelOverride = { provider, model };
+  /** 选模型时由选择器调用：当前会话后续回合以该 provider/model 生效。 */
+  setActiveSessionModel(provider: string, model: string): void {
+    const value = { provider, model };
+    if (this.currentSessionId) this.sessionModels.set(this.currentSessionId, value);
+    else this.pendingModel = value;
   }
 
-  /** 当前窗口覆盖（main.ts 显示链读）：null = 未覆盖，显示全局默认。 */
-  windowModelOverrideValue(): { provider: string; model: string } | null {
-    return this.windowModelOverride;
+  /** 某会话的生效覆盖：会话表优先，回退极早期兜底（null = 走全局默认）。 */
+  sessionModelFor(sessionId: string): { provider: string; model: string } | null {
+    return this.sessionModels.get(sessionId) ?? this.pendingModel;
+  }
+
+  /** 当前会话的生效覆盖（main.ts 显示链/预热读）：null = 未覆盖，显示全局默认。 */
+  activeSessionModel(): { provider: string; model: string } | null {
+    return this.sessionModelFor(this.currentSessionId);
+  }
+
+  /** 恢复链：从 session.json 读回的 model/provider 直写会话表——重启后模型
+   *  跟会话回来。字段不全（老档/未覆盖）时不落表，走全局默认。 */
+  adoptSessionModel(sessionId: string, provider: string, model: string): void {
+    if (!sessionId || !provider || !model) return;
+    this.sessionModels.set(sessionId, { provider, model });
+  }
+
+  /** 极早期兜底固化：会话绑真实 id 时把无会话期选的模型挂到它名下（已有一
+   *  对话历史/存档覆盖时不抢——存档值优先）。 */
+  private bindSessionModel(sessionId: string): void {
+    if (!this.pendingModel || !sessionId) return;
+    if (!this.sessionModels.has(sessionId)) this.sessionModels.set(sessionId, this.pendingModel);
+    this.pendingModel = null;
   }
   /** 冷会话回收的否决钩子（main 注册）：返回 true = 队列仍在此会话上有
    *  在册/在跑任务，逐出会搁浅它们（controllerFor 返 null 即挂起）。 */
@@ -9483,11 +9512,14 @@ export class SessionChatManager {
     const warm = controller !== null;
     if (!controller) {
       host = this.createSessionHost(sessionId);
-      controller = new ChatController({ host, viewActive: false, readWindowModelOverride: () => this.windowModelOverride });
+      // 会话级覆盖 getter：闭包捕获本会话 id，controller 每回合消费时按会话
+      // 查表（bindSessionModel 在绑真实 id 后固化极早期兜底）。
+      controller = new ChatController({ host, viewActive: false, readWindowModelOverride: () => this.sessionModelFor(sessionId) });
       // Bind the fresh controller to the REAL session id (the constructor only
       // mints a placeholder) before it goes live, so persistence, stats and
       // MCP ownership all key on the actual session.
       controller.setSessionId(sessionId);
+      this.bindSessionModel(sessionId);
       this.wireController(controller, sessionId);
       this.controllers.set(sessionId, controller);
       this.hosts.set(sessionId, host);

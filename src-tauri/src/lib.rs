@@ -13125,9 +13125,9 @@ mod generate_image_tests {
                 "uiState": {}
             })
         };
-        let first_save = save_session_impl(revision_session_id.clone(), snapshot(2, "new"), Some(String::new()));
+        let first_save = save_session_impl(revision_session_id.clone(), snapshot(2, "new"), Some(String::new()), None, None);
         assert!(first_save.is_ok(), "first save failed: {first_save:?}");
-        let error = save_session_impl(revision_session_id.clone(), snapshot(1, "old"), Some(String::new())).unwrap_err();
+        let error = save_session_impl(revision_session_id.clone(), snapshot(1, "old"), Some(String::new()), None, None).unwrap_err();
         assert_eq!(error, "stale session revision");
         let stored = load_session_impl(revision_session_id).unwrap().unwrap();
         assert_eq!(stored["snapshot"]["revision"], 2);
@@ -13209,7 +13209,7 @@ mod generate_image_tests {
             "transcript": [],
             "uiState": {}
         });
-        let first_save = save_session_impl(workspace_session_id.clone(), snapshot, Some("/old/workspace".to_string()));
+        let first_save = save_session_impl(workspace_session_id.clone(), snapshot, Some("/old/workspace".to_string()), None, None);
         assert!(first_save.is_ok(), "first save failed: {first_save:?}");
         let workspace_save = save_session_workspace_sync(&workspace_session_id, "/new/workspace");
         assert!(workspace_save.is_ok(), "workspace save failed: {workspace_save:?}");
@@ -13273,6 +13273,13 @@ struct SessionData {
     // readable until they are next saved.
     #[serde(default)]
     workspace: String,
+    // 会话级模型覆盖（2026-11-06 多窗口各自选模型）：模型跟会话存档走——
+    // 窗口是视图、会话是实体，重启后模型随会话回来。空串 = 未覆盖（用全局
+    // config 默认）。Serde default 老档可读。
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    provider: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -13322,6 +13329,21 @@ fn load_stored_session_revision(session_id: &str) -> Result<u64, String> {
     Ok(data.snapshot
         .and_then(|snapshot| snapshot.get("revision").and_then(|value| value.as_u64()))
         .unwrap_or(0))
+}
+
+/// 旧档里的会话级模型覆盖（旁路保存合并用）：档案不存在或解析失败返回空对。
+fn load_stored_session_model_provider(session_id: &str) -> (Option<String>, Option<String>) {
+    let path = sessions_dir().join(session_id).join("session.json");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(data) = serde_json::from_str::<SessionData>(&raw) else {
+        return (None, None);
+    };
+    (
+        (!data.model.is_empty()).then_some(data.model),
+        (!data.provider.is_empty()).then_some(data.provider),
+    )
 }
 
 // ── 架构评审 v2 A1：会话事件日志（events.jsonl，只追加）──
@@ -13480,14 +13502,18 @@ async fn save_session(
     session_id: String,
     snapshot: serde_json::Value,
     workspace: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
 ) -> Result<(), String> {
-    run_blocking(move || save_session_impl(session_id, snapshot, workspace)).await
+    run_blocking(move || save_session_impl(session_id, snapshot, workspace, model, provider)).await
 }
 
 fn save_session_impl(
     session_id: String,
     snapshot: serde_json::Value,
     workspace: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
     let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
@@ -13518,10 +13544,15 @@ fn save_session_impl(
         .and_then(|messages| messages.as_array())
         .cloned()
         .unwrap_or_default();
+    // 会话级模型覆盖：None = 调用方不关心（read-modify-write 的旁路保存），
+    // 保留旧档值，别让旁路保存把用户选的模型洗掉。
+    let existing = load_stored_session_model_provider(&session_id);
     let data = SessionData {
         message_count: messages.len(),
         updated_at: now,
         workspace: workspace.clone(),
+        model: model.or_else(|| existing.0.clone()).unwrap_or_default(),
+        provider: provider.or_else(|| existing.1.clone()).unwrap_or_default(),
         messages,
         snapshot: Some(snapshot),
     };
@@ -13579,6 +13610,8 @@ fn load_session_impl(session_id: String) -> Result<Option<serde_json::Value>, St
         "updatedAt": data.updated_at,
         "messageCount": data.message_count,
         "workspace": workspace,
+        "model": data.model,
+        "provider": data.provider,
     })))
 }
 

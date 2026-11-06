@@ -255,6 +255,9 @@ export type SessionSnapshotV2 = SessionSnapshotV3;
 export interface LoadedSession {
   snapshot: SessionSnapshot;
   workspace: string;
+  /** 会话级模型覆盖（2026-11-06）：随存档走，重启后模型跟会话回来。 */
+  model?: string;
+  provider?: string;
 }
 
 export interface ToolExecMeta {
@@ -1037,10 +1040,14 @@ interface RawLoadLastPayload {
   sessionId?: string;
   snapshot?: unknown;
   workspace?: string;
+  model?: string;
+  provider?: string;
 }
 interface RawLoadSessionPayload {
   snapshot?: unknown;
   workspace?: string;
+  model?: string;
+  provider?: string;
 }
 interface RawSessionMeta {
   id?: string;
@@ -1051,24 +1058,37 @@ interface RawSessionMeta {
   workspace?: string;
 }
 
-async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
-  await withTauriTimeout(tauriInvoke('save_session', { sessionId, snapshot, workspace }), 'save_session');
+async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string, model?: string, provider?: string): Promise<void> {
+  // 会话级模型覆盖（2026-11-06）：随 save_session 落 session.json；undefined
+  // 时 Rust 侧保留旧档值（read-modify-write 的旁路保存不洗掉用户选择）。
+  await withTauriTimeout(tauriInvoke('save_session', { sessionId, snapshot, workspace, model: model || undefined, provider: provider || undefined }), 'save_session');
 }
 
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
   await withTauriTimeout(tauriInvoke('save_session_workspace', { sessionId, workspace }), 'save_session_workspace');
 }
 
-async function tauriLoadLast(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
+async function tauriLoadLast(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string; model?: string; provider?: string } | null> {
   const data = await withTauriTimeout<RawLoadLastPayload | null>(tauriInvoke<RawLoadLastPayload | null>('load_last_session'), 'load_last_session');
   if (!data) return null;
-  return { sessionId: data.sessionId ?? '', snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
+  return {
+    sessionId: data.sessionId ?? '',
+    snapshot: normalizeSessionSnapshot(data.snapshot ?? data),
+    workspace: data.workspace ?? '',
+    model: data.model || undefined,
+    provider: data.provider || undefined,
+  };
 }
 
 async function tauriLoad(sessionId: string): Promise<LoadedSession | null> {
   const data = await withTauriTimeout<RawLoadSessionPayload | null>(tauriInvoke<RawLoadSessionPayload | null>('load_session', { sessionId }), 'load_session');
   if (!data) return null;
-  return { snapshot: normalizeSessionSnapshot(data.snapshot ?? data), workspace: data.workspace ?? '' };
+  return {
+    snapshot: normalizeSessionSnapshot(data.snapshot ?? data),
+    workspace: data.workspace ?? '',
+    model: data.model || undefined,
+    provider: data.provider || undefined,
+  };
 }
 
 async function tauriLoadList(): Promise<SessionMeta[]> {
@@ -1244,12 +1264,12 @@ const sessionSaveRevisions = new Map<string, number>();
 const sessionLoadedRevisions = new Map<string, number>();
 const sessionSaveRetries = 2;
 
-async function saveWithRetry(sessionId: string, snapshot: SessionSnapshotV2, workspace: string): Promise<void> {
+async function saveWithRetry(sessionId: string, snapshot: SessionSnapshotV2, workspace: string, model?: string, provider?: string): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= sessionSaveRetries; attempt++) {
     try {
       if (tauriAvailable) {
-        await tauriSave(sessionId, snapshot, workspace);
+        await tauriSave(sessionId, snapshot, workspace, model, provider);
       } else {
         lsSave(sessionId, snapshot, workspace);
       }
@@ -1411,7 +1431,13 @@ export function createSessionPlanProgressPersistence(
  * mid-session — but unlike the old silent catch, the user is told the save
  * was NOT durable, so a restart losing the session is not a surprise.
  */
-export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2, workspace = ''): Promise<void> {
+export async function saveSession(
+  sessionId: string,
+  snapshot: SessionSnapshotV2,
+  workspace = '',
+  model?: string,
+  provider?: string,
+): Promise<void> {
   const boundedSnapshot = limitSessionSnapshot(snapshot);
   // A conversation the user has not talked to is not a session: persisting it
   // would put a "New chat" row in the sidebar that restores to nothing.
@@ -1429,7 +1455,7 @@ export async function saveSession(sessionId: string, snapshot: SessionSnapshotV2
     .catch(() => {})
     .then(async () => {
       try {
-        await saveWithRetry(sessionId, revisionedSnapshot, workspace);
+        await saveWithRetry(sessionId, revisionedSnapshot, workspace, model, provider);
       } catch (err) {
         console.error('[pure] save_session failed:', err);
         const now = Date.now();

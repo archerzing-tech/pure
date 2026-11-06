@@ -76,6 +76,7 @@ function makeSidebar(overrides: {
     clearAll: () => {},
     getRunningLiveSessions: () => [],
     hasOpenSession: (sessionId: string) => state.live.has(sessionId),
+    adoptSessionModel: () => {},
     ...overrides.chat,
   };
   const sidebar = new SessionSidebar({
