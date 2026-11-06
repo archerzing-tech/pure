@@ -1,14 +1,16 @@
-// 会话级持久模型覆盖（2026-11-06 多窗口各自选模型，第二刀）：
+// 会话级持久模型覆盖（2026-11-06 多窗口各自选模型）：
 //   - 模型跟会话存档走：窗口是视图、会话是实体。A 会话 deepseek、B 会话 glm
-//     互不串线；重启后模型随 session.json 回来（adoptSessionModel 固化恢复），
-//     修复前覆盖是窗口内存态、重启全归零（用户复验打回）。
+//     互不串线；重启后模型随 session.json 回来（adoptSessionModel 固化恢复）。
 //   - 覆盖挂 SessionChatManager 的会话表（sessionModels），经 options 注入
-//     getter 给 controller；getter 按会话 id 查表，选模型/恢复对已活
-//     controller 立即可见。
-//   - config.json 的 model 仍是全局默认（新窗口初值 / agent 可改），覆盖为空
-//     时行为与旧版完全一致（单窗口用户零感知）。
+//     getter 给 controller；查不到落到窗口级常驻 lastChoice（复验二判例：
+//     会话更替换 id 不丢选择），再查不到才是全局默认。
+//   - 首发定型（复验三判例）：从没选过模型的会话回退全局＝跟共享值串线——
+//     别的窗口换模型写盘,本会话跟着变。首次发送把当时生效值钉进会话表,
+//     之后全局怎么变都不影响;显式换模型照常覆盖。
+//   - config.json 的 model 仍是全局默认（新窗口初值 / agent 可改）。
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { readFileSync } from 'node:fs';
 import { ChatController, SessionChatManager, type ChatControllerOptions } from '../chat';
 import type { PureConfig } from '../config';
 
@@ -130,5 +132,31 @@ describe('窗口级模型覆盖', () => {
     // session_a 在表里有存档模型,优先于窗口 lastChoice。
     expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
     expect(manager.activeSessionModel()).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+  });
+
+  test('首发定型:首问钉住当时全局值,之后全局被别的窗口改掉不再串(复验三)', () => {
+    const manager = new SessionChatManager();
+    mountChatRoot();
+    manager.openSession('session_a');
+    // A 首问:无覆盖,controller 经注入的 pinSessionModel 把当时全局值(glm)
+    // 钉进会话表——private,经类型桥调用真实现。
+    const pin = (manager as unknown as { pinSessionModelIfUnset(id: string, p: string, m: string): void }).pinSessionModelIfUnset.bind(manager, 'session_a');
+    pin('glm', 'glm-4.7');
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'glm', model: 'glm-4.7' });
+    // B 窗口换模型写全局(全局是共享值,manager 管不到)——A 已定型,不受影响。
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'glm', model: 'glm-4.7' });
+    // 幂等:显式选择后 pin 不覆盖(用户换模型权最高);表里有条目时 pin 是 no-op。
+    manager.setActiveSessionModel('qwen', 'qwen-max');
+    pin('deepseek', 'deepseek-chat');
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'qwen', model: 'qwen-max' });
+    // 未定型的会话不沾光也不受害:照旧走窗口兜底/全局。
+    expect(manager.sessionModelFor('session_b')).toEqual({ provider: 'qwen', model: 'qwen-max' }); // lastChoice
+  });
+
+  test('send 链接线:定型只在无覆盖时发生,写的是快照的 provider/model', () => {
+    const chat = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8');
+    expect(chat).toContain('if (!this.readWindowModelOverride() && config) {');
+    expect(chat).toContain('this.pinSessionModel(config.provider, config.model);');
+    expect(chat).toContain('pinSessionModelIfUnset(sessionId, provider, model)');
   });
 });

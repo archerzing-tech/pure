@@ -1699,8 +1699,12 @@ export interface ChatControllerOptions {
   /** 窗口级模型覆盖的读取口（SessionChatManager 注入 getter，2026-11-06 多窗
    *  口各自选模型）：send 链的 adapter 构建 / model_identity / 预算全部以覆
    *  盖值优先，config.json 仍是全局默认（新窗口初值）。getter 形状让覆盖变
-   *  更对已活 controller 立即可见，不必逐个通知。null = 未覆盖，回退全局。 */
+   *  更对已活 controller 立即可见，不必逐个通知。null = 未覆盖，回退全局。
+   *  首发定型（2026-11-06 复验三）：getter 为 null 时本会话钉进 manager 会话
+   *  表——全局是共享值，被别的窗口写盘就串，定型后本会话不再跟全局走。 */
   readWindowModelOverride?: () => { provider: string; model: string } | null;
+  /** 首发定型写入口（manager 注入，幂等：表里已有条目则不写）。 */
+  pinSessionModel?: (provider: string, model: string) => void;
 }
 
 // ── Agent activity host layout ──
@@ -1776,6 +1780,7 @@ export class ChatController {
   private viewActive: boolean;
   /** 窗口级模型覆盖读取口（manager 注入）：null = 未覆盖，回退全局 config。 */
   private readonly readWindowModelOverride: () => { provider: string; model: string } | null;
+  private readonly pinSessionModel: (provider: string, model: string) => void;
   private messages: Message[] = [];
   private hasHistory = false;
   // Cross-turn complex-task workflow state. The plan and cursor survive the
@@ -2262,6 +2267,7 @@ export class ChatController {
     this.transcriptHost = options.host ?? null;
     this.viewActive = options.viewActive ?? true;
     this.readWindowModelOverride = options.readWindowModelOverride ?? (() => null);
+    this.pinSessionModel = options.pinSessionModel ?? (() => {});
     this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
     this.wireFollowupChips();
     // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
@@ -4305,6 +4311,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // 全部带覆盖——adapter / model_identity / 预算下游七处一并生效。
     const config = this.resolvedGuiConfig(loadConfig());
     if (!hasConfiguredKey(config)) return;
+    // 首发定型（2026-11-06 复验三串线根治）：本会话没有任何覆盖（无表项也无
+    // 窗口 lastChoice）时，把此刻生效的模型钉进会话表——全局 config 是共享
+    // 值，别的窗口换模型就写盘，未定型的会话每回合跟全局走＝串线。定型只在
+    // 表项空缺时发生（manager 侧幂等），之后用户在本会话显式换模型照常覆盖。
+    if (!this.readWindowModelOverride() && config) {
+      this.pinSessionModel(config.provider, config.model);
+    }
     // A fresh turn's signals supersede any that were never consumed (defensive;
     // the finally of a completed turn always consumes them).
     this.pendingAutoContinue = null;
@@ -9346,6 +9359,15 @@ export class SessionChatManager {
     if (!sessionId || !provider || !model) return;
     this.sessionModels.set(sessionId, { provider, model });
   }
+
+  /** 首发定型（复验三串线根治）：会话首次发送且无任何覆盖时,把当时生效的
+   *  模型钉进会话表。幂等——表里已有条目（显式选择/上次定型/存档回填）绝不
+   *  覆盖：定型一次,之后全局怎么变都不影响本会话。 */
+  private pinSessionModelIfUnset(sessionId: string, provider: string, model: string): void {
+    if (!sessionId || !provider || !model) return;
+    if (this.sessionModels.has(sessionId)) return;
+    this.sessionModels.set(sessionId, { provider, model });
+  }
   /** 冷会话回收的否决钩子（main 注册）：返回 true = 队列仍在此会话上有
    *  在册/在跑任务，逐出会搁浅它们（controllerFor 返 null 即挂起）。 */
   private reapGuard: ((sessionId: string) => boolean) | null = null;
@@ -9514,7 +9536,13 @@ export class SessionChatManager {
       host = this.createSessionHost(sessionId);
       // 会话级覆盖 getter：闭包捕获本会话 id，controller 每回合消费时按会话
       // 查表；表里没有落到窗口 lastChoice 兜底（新会话继承最近选择）。
-      controller = new ChatController({ host, viewActive: false, readWindowModelOverride: () => this.sessionModelFor(sessionId) });
+      // pinSessionModel：首发定型写入口（幂等,见 pinSessionModelIfUnset）。
+      controller = new ChatController({
+        host,
+        viewActive: false,
+        readWindowModelOverride: () => this.sessionModelFor(sessionId),
+        pinSessionModel: (provider, model) => this.pinSessionModelIfUnset(sessionId, provider, model),
+      });
       // Bind the fresh controller to the REAL session id (the constructor only
       // mints a placeholder) before it goes live, so persistence, stats and
       // MCP ownership all key on the actual session.
