@@ -9310,21 +9310,29 @@ export class SessionChatManager {
   /** 会话级模型覆盖（2026-11-06 多窗口各自选模型）：模型跟会话存档走——窗口
    *  是视图、会话是实体，重启后模型随会话回来（session.json 的 model/provider
    *  字段，恢复链 adoptSessionModel 直写本表）。config.json 的 model 仍是全局
-   *  默认（新窗口初值 / agent 可改）；无覆盖的会话行为与旧版完全一致。 */
+   *  默认（新窗口初值 / agent 可改）；无覆盖的会话行为与旧版完全一致。
+   *  真机判例（2026-11-06 复验二打回）：选择不能只挂 currentSessionId——它随
+   *  「新对话」/landing 懒创建随时换新 id，挂在旧 id 上的选择不会跟到新会话，
+   *  新会话悄悄回退全局（等于按最后写盘的全局值执行，正是用户看到的串线）。
+   *  所以兜底层是窗口级常驻 lastChoice（只进不出）：会话表优先，查不到落到
+   *  「本窗口最近一次选择」——用户直觉是「我在这个窗口选了 glm，接下来都用
+   *  glm」，新开对话照旧继承。 */
   private sessionModels = new Map<string, { provider: string; model: string }>();
-  /** 尚无活动会话时的极早期兜底（选择器先于首会话被用），绑会话时固化进 map。 */
-  private pendingModel: { provider: string; model: string } | null = null;
+  /** 本窗口最近一次显式选择的模型（跨会话常驻，不落盘——重启归零，靠存档
+   *  回填已有会话；全新会话无存档时以它兜底而非全局）。 */
+  private lastChoice: { provider: string; model: string } | null = null;
 
-  /** 选模型时由选择器调用：当前会话后续回合以该 provider/model 生效。 */
+  /** 选模型时由选择器调用：当前会话立即生效（钉进会话表），本窗口后续新
+   *  会话也以它兜底（lastChoice 常驻）。 */
   setActiveSessionModel(provider: string, model: string): void {
     const value = { provider, model };
+    this.lastChoice = value;
     if (this.currentSessionId) this.sessionModels.set(this.currentSessionId, value);
-    else this.pendingModel = value;
   }
 
-  /** 某会话的生效覆盖：会话表优先，回退极早期兜底（null = 走全局默认）。 */
+  /** 某会话的生效覆盖：会话表优先，回退窗口最近选择（null = 走全局默认）。 */
   sessionModelFor(sessionId: string): { provider: string; model: string } | null {
-    return this.sessionModels.get(sessionId) ?? this.pendingModel;
+    return this.sessionModels.get(sessionId) ?? this.lastChoice;
   }
 
   /** 当前会话的生效覆盖（main.ts 显示链/预热读）：null = 未覆盖，显示全局默认。 */
@@ -9333,18 +9341,10 @@ export class SessionChatManager {
   }
 
   /** 恢复链：从 session.json 读回的 model/provider 直写会话表——重启后模型
-   *  跟会话回来。字段不全（老档/未覆盖）时不落表，走全局默认。 */
+   *  跟会话回来。字段不全（老档/未覆盖）时不落表，走窗口兜底/全局默认。 */
   adoptSessionModel(sessionId: string, provider: string, model: string): void {
     if (!sessionId || !provider || !model) return;
     this.sessionModels.set(sessionId, { provider, model });
-  }
-
-  /** 极早期兜底固化：会话绑真实 id 时把无会话期选的模型挂到它名下（已有一
-   *  对话历史/存档覆盖时不抢——存档值优先）。 */
-  private bindSessionModel(sessionId: string): void {
-    if (!this.pendingModel || !sessionId) return;
-    if (!this.sessionModels.has(sessionId)) this.sessionModels.set(sessionId, this.pendingModel);
-    this.pendingModel = null;
   }
   /** 冷会话回收的否决钩子（main 注册）：返回 true = 队列仍在此会话上有
    *  在册/在跑任务，逐出会搁浅它们（controllerFor 返 null 即挂起）。 */
@@ -9513,13 +9513,12 @@ export class SessionChatManager {
     if (!controller) {
       host = this.createSessionHost(sessionId);
       // 会话级覆盖 getter：闭包捕获本会话 id，controller 每回合消费时按会话
-      // 查表（bindSessionModel 在绑真实 id 后固化极早期兜底）。
+      // 查表；表里没有落到窗口 lastChoice 兜底（新会话继承最近选择）。
       controller = new ChatController({ host, viewActive: false, readWindowModelOverride: () => this.sessionModelFor(sessionId) });
       // Bind the fresh controller to the REAL session id (the constructor only
       // mints a placeholder) before it goes live, so persistence, stats and
       // MCP ownership all key on the actual session.
       controller.setSessionId(sessionId);
-      this.bindSessionModel(sessionId);
       this.wireController(controller, sessionId);
       this.controllers.set(sessionId, controller);
       this.hosts.set(sessionId, host);

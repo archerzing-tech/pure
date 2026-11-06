@@ -65,11 +65,13 @@ describe('窗口级模型覆盖', () => {
     mountChatRoot();
     manager.openSession('session_a');
     manager.openSession('session_b');
-    // 当前会话 = b（最后 open）：选择只落 b，a 保持未覆盖。
+    // 当前会话 = b（最后 open）：选择钉进 b 的表项，同时成为窗口 lastChoice。
     manager.setActiveSessionModel('glm', 'glm-5.3');
     expect(manager.sessionModelFor('session_b')).toEqual({ provider: 'glm', model: 'glm-5.3' });
-    expect(manager.sessionModelFor('session_a')).toBeNull();
-    // 切回 a 选 deepseek：a/b 各自保持——这是「A 窗口 deepseek、B 窗口 glm」
+    // a 没有自己的表项 → 落窗口 lastChoice（glm），不回全局——「本窗口最近
+    // 一次选择」对没选过模型的会话生效，这是真机判例（复验二）的兜底语义。
+    expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'glm', model: 'glm-5.3' });
+    // 切回 a 选 deepseek：a 有了自己的表项——这是「同窗口多会话各自保持」
     // 的核心语义（会话是实体，覆盖跟会话走）。
     manager.openSession('session_a');
     manager.setActiveSessionModel('deepseek', 'deepseek-chat');
@@ -85,8 +87,8 @@ describe('窗口级模型覆盖', () => {
     const manager = new SessionChatManager();
     manager.adoptSessionModel('session_a', 'deepseek', 'deepseek-chat');
     expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
-    // 老档/未覆盖（model/provider 为空）不落表：走全局默认，改全局默认不被
-    // 旧会话钉死。
+    // 老档/未覆盖（model/provider 为空）不落表：走窗口兜底/全局默认，改全局
+    // 默认不被旧会话钉死。
     manager.adoptSessionModel('session_old1', '', 'deepseek-chat');
     manager.adoptSessionModel('session_old2', 'deepseek', '');
     manager.adoptSessionModel('', 'deepseek', 'deepseek-chat');
@@ -94,24 +96,38 @@ describe('窗口级模型覆盖', () => {
     expect(manager.sessionModelFor('session_old2')).toBeNull();
   });
 
-  test('极早期兜底:无活动会话时选模型进 pending,绑会话后固化且不泄漏', () => {
+  test('窗口兜底:无活动会话时选模型,lastChoice 对后续会话常驻可见', () => {
     const manager = new SessionChatManager();
     mountChatRoot();
     manager.setActiveSessionModel('qwen', 'qwen-max');
-    // 未绑会话：pending 对任意会话可见（controller 消费链不空转）。
+    // 未绑会话：lastChoice 对任意会话可见（controller 消费链不空转）。
     expect(manager.sessionModelFor('session_x')).toEqual({ provider: 'qwen', model: 'qwen-max' });
-    // 绑真实 id 后固化到该会话，pending 清掉——不再泄漏给别的会话。
     manager.openSession('session_x');
     expect(manager.sessionModelFor('session_x')).toEqual({ provider: 'qwen', model: 'qwen-max' });
-    expect(manager.sessionModelFor('session_y')).toBeNull();
   });
 
-  test('存档值优先:已 adopt 的会话不被极早期 pending 抢走', () => {
+  test('真机判例(2026-11-06 复验二):新对话换 id 不丢选择', () => {
+    const manager = new SessionChatManager();
+    mountChatRoot();
+    // landing 懒创建出 id0,用户在 id0 上选了 glm。
+    manager.openSession('session_id0');
+    manager.setActiveSessionModel('glm', 'glm-5.3');
+    // 「新对话」:clear→forget(id0)→mint 新 id1——选择必须跟过来,
+    // 不能悄悄回退全局(复验二打回的串线根因)。
+    manager.openSession('session_id1');
+    expect(manager.sessionModelFor('session_id1')).toEqual({ provider: 'glm', model: 'glm-5.3' });
+    expect(manager.activeSessionModel()).toEqual({ provider: 'glm', model: 'glm-5.3' });
+    // 旧会话的选择也钉在表里:切回 id0 仍是 glm。
+    expect(manager.sessionModelFor('session_id0')).toEqual({ provider: 'glm', model: 'glm-5.3' });
+  });
+
+  test('存档值优先:已 adopt 的会话不被窗口 lastChoice 抢走', () => {
     const manager = new SessionChatManager();
     mountChatRoot();
     manager.adoptSessionModel('session_a', 'deepseek', 'deepseek-chat');
-    manager.setActiveSessionModel('glm', 'glm-5.3'); // currentSessionId='' → pending
+    manager.setActiveSessionModel('glm', 'glm-5.3'); // lastChoice=glm + map[current]
     manager.openSession('session_a');
+    // session_a 在表里有存档模型,优先于窗口 lastChoice。
     expect(manager.sessionModelFor('session_a')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
     expect(manager.activeSessionModel()).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
   });
