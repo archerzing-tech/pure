@@ -1385,13 +1385,17 @@ mod read_file_slice_tests {
 }
 
 #[tauri::command]
-fn path_info(workspace: String, path: String) -> Result<serde_json::Value, String> {
-    let full = resolve(&workspace, &path)?;
+async fn path_info(workspace: String, path: String) -> Result<serde_json::Value, String> {
+    run_blocking(move || path_info_impl(&workspace, &path)).await
+}
+
+fn path_info_impl(workspace: &str, path: &str) -> Result<serde_json::Value, String> {
+    let full = resolve(workspace, path)?;
     Ok(serde_json::json!({
         "exists": full.exists(),
         "isDirectory": full.is_dir(),
         "size": full.metadata().map(|metadata| metadata.len()).unwrap_or(0),
-        "isSymlink": has_symlink_component(&workspace, &path),
+        "isSymlink": has_symlink_component(workspace, path),
     }))
 }
 
@@ -1424,14 +1428,28 @@ fn remove_path_impl(workspace: String, path: String, recursive: Option<bool>) ->
     Ok(format!("Removed: {}", path))
 }
 
+// File-mutating commands run through run_blocking like the read/search family:
+// Tauri executes sync (`fn`) commands inline on the main thread, and on Windows
+// (slow NTFS metadata + Defender filtering + CRLF making edit_file do full-file
+// passes) a batch of writes there freezes the whole WebView — no input, and the
+// CloseRequested handler never runs, so the window cannot even be closed.
 #[tauri::command]
-fn write_file(
+async fn write_file(
     workspace: String,
     path: String,
     content: String,
     append: Option<bool>,
 ) -> Result<String, String> {
-    let full = resolve(&workspace, &path)?;
+    run_blocking(move || write_file_impl(&workspace, &path, &content, append)).await
+}
+
+fn write_file_impl(
+    workspace: &str,
+    path: &str,
+    content: &str,
+    append: Option<bool>,
+) -> Result<String, String> {
+    let full = resolve(workspace, path)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
     }
@@ -1458,9 +1476,13 @@ fn write_file(
 /// preserved. Both paths are resolved the same way `write_file` resolves them,
 /// so relative paths join the workspace and absolute paths pass through.
 #[tauri::command]
-fn copy_file(workspace: String, src: String, dst: String) -> Result<String, String> {
-    let src_full = resolve(&workspace, &src)?;
-    let dst_full = resolve(&workspace, &dst)?;
+async fn copy_file(workspace: String, src: String, dst: String) -> Result<String, String> {
+    run_blocking(move || copy_file_impl(&workspace, &src, &dst)).await
+}
+
+fn copy_file_impl(workspace: &str, src: &str, dst: &str) -> Result<String, String> {
+    let src_full = resolve(workspace, src)?;
+    let dst_full = resolve(workspace, dst)?;
     if !src_full.exists() {
         return Err(format!("copy_file: source does not exist: {}", src));
     }
@@ -1517,13 +1539,31 @@ async fn write_file_stream_inner(
     };
     use std::io::Write as _;
     const CHUNK: usize = 64 * 1024;
+    // Progress events are time-throttled, not per-chunk: on a fast SSD a
+    // multi-MB write would otherwise queue thousands of IPC messages into the
+    // WebView in a burst (each one a JSON.parse + DOM repaint on the renderer);
+    // on a slow disk (Defender scanning, OneDrive sync) the same flood just
+    // stretches out. ~10 updates/s reads as live to a human; the FINAL event is
+    // always sent so the row never ends below 100%.
+    const PROGRESS_EMIT_MS: u128 = 100;
     let mut written = 0usize;
+    let mut last_progress =
+        Instant::now() - std::time::Duration::from_millis(PROGRESS_EMIT_MS as u64);
+    let mut last_sent = 0usize;
     while written < total {
         let end = (written + CHUNK).min(total);
         file.write_all(&bytes[written..end])
             .map_err(|e| format!("write: {}", e))?;
         written = end;
-        let evt = serde_json::json!({ "type": "progress", "written": written, "total": total });
+        if last_progress.elapsed().as_millis() >= PROGRESS_EMIT_MS {
+            last_progress = Instant::now();
+            let evt = serde_json::json!({ "type": "progress", "written": written, "total": total });
+            let _ = on_progress.send(evt.to_string());
+            last_sent = written;
+        }
+    }
+    if last_sent != total {
+        let evt = serde_json::json!({ "type": "progress", "written": total, "total": total });
         let _ = on_progress.send(evt.to_string());
     }
     Ok(if append {
@@ -1538,14 +1578,18 @@ async fn write_file_stream_inner(
 /// takes the path verbatim — no workspace resolution, no traversal guard —
 /// because the dialog path is user-chosen, not LLM-supplied.
 #[tauri::command]
-fn save_file(path: String, content: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
+async fn save_file(path: String, content: String) -> Result<(), String> {
+    run_blocking(move || save_file_impl(&path, &content)).await
+}
+
+fn save_file_impl(path: &str, content: &str) -> Result<(), String> {
+    let p = PathBuf::from(path);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
     }
-    fs::write(&p, &content).map_err(|e| format!("save_file: {}", e))?;
+    fs::write(&p, content).map_err(|e| format!("save_file: {}", e))?;
     Ok(())
 }
 
@@ -1619,14 +1663,24 @@ fn save_file_binary_impl(
 }
 
 #[tauri::command]
-fn edit_file(
+async fn edit_file(
     workspace: String,
     path: String,
     old_string: String,
     new_string: String,
     allow_multiple: Option<bool>,
 ) -> Result<String, String> {
-    let full = resolve(&workspace, &path)?;
+    run_blocking(move || edit_file_impl(&workspace, &path, &old_string, &new_string, allow_multiple)).await
+}
+
+fn edit_file_impl(
+    workspace: &str,
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    allow_multiple: Option<bool>,
+) -> Result<String, String> {
+    let full = resolve(workspace, path)?;
     let text = fs::read_to_string(&full).map_err(|e| format!("read: {}", e))?;
 
     let crlf_file = text.contains("\r\n");
@@ -1638,7 +1692,7 @@ fn edit_file(
     let old_for_match = if line_ending_adjusted {
         normalized_old.replace('\n', "\r\n")
     } else {
-        old_string.clone()
+        old_string.to_string()
     };
 
     if !text.contains(&old_for_match) {
@@ -1663,7 +1717,7 @@ fn edit_file(
     let replacement = if crlf_file {
         new_string.replace("\r\n", "\n").replace('\n', "\r\n")
     } else {
-        new_string.clone()
+        new_string.to_string()
     };
     let new_text = if multi {
         text.replace(&old_for_match, &replacement)
@@ -5166,7 +5220,7 @@ mod resolve_tests {
         let ws = temp_workspace("snapshot");
         let file = PathBuf::from(&ws).join("new.txt");
         fs::write(&file, "agent").unwrap();
-        let info = path_info(ws.clone(), "new.txt".into()).unwrap();
+        let info = path_info_impl(&ws, "new.txt").unwrap();
         assert_eq!(info["exists"], true);
         assert_eq!(info["isDirectory"], false);
         remove_path_impl(ws.clone(), "new.txt".into(), Some(false)).unwrap();
@@ -5181,11 +5235,11 @@ mod resolve_tests {
         // is gone, path_info must REJECT (canonicalize fails) rather than
         // report exists=false — rejection is the detection signal.
         let ws = temp_workspace("gone");
-        let info = path_info(ws.clone(), ".".into()).unwrap();
+        let info = path_info_impl(&ws, ".").unwrap();
         assert_eq!(info["exists"], true);
         assert_eq!(info["isDirectory"], true);
         fs::remove_dir_all(&ws).unwrap();
-        assert!(path_info(ws, ".".into()).is_err());
+        assert!(path_info_impl(&ws, ".").is_err());
     }
 
     #[test]
@@ -5529,8 +5583,11 @@ mod write_file_stream_tests {
     #[tokio::test]
     async fn streams_chunked_progress_and_writes_the_file() {
         let workspace = temp_workspace("chunked");
-        // 128 KB + 1 byte forces 3 chunks (64 KB each) → ≥3 progress events
-        // with monotonic written counts ending exactly at the total.
+        // 128 KB + 1 byte forces 3 chunks (64 KB each). Progress events are
+        // time-throttled (~10/s, final event always sent), so a same-instant
+        // 3-chunk write legitimately collapses to ONE mid-stream event + the
+        // guaranteed final event; the contract here is: at least one event,
+        // monotonic counts, and the last one reports the FULL write.
         let content = "x".repeat(128 * 1024 + 1);
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
@@ -5548,9 +5605,8 @@ mod write_file_stream_tests {
 
         let events = events.lock().unwrap();
         assert!(
-            events.len() >= 3,
-            "expected ≥3 chunk events, got {}",
-            events.len()
+            !events.is_empty(),
+            "expected at least one progress event, got none"
         );
         let mut last = 0usize;
         for ev in events.iter() {
@@ -5630,13 +5686,7 @@ mod write_file_stream_tests {
         assert_eq!(fs::read_to_string(dir.join("fresh/nested.txt")).unwrap(), "seed");
 
         // 非流式 write_file 的 append 同语义。
-        let msg = write_file(
-            workspace.clone(),
-            "big.txt".to_string(),
-            "part-3".to_string(),
-            Some(true),
-        )
-        .unwrap();
+        let msg = write_file_impl(&workspace, "big.txt", "part-3", Some(true)).unwrap();
         assert_eq!(msg, "Appended 6 bytes to big.txt");
         assert_eq!(
             fs::read_to_string(dir.join("big.txt")).unwrap(),
@@ -9499,11 +9549,21 @@ mod net_hijack_tests {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tauri::command]
-fn replace_files(
+async fn replace_files(
     workspace: String,
     files: Vec<String>,
     old_string: String,
     new_string: String,
+    allow_multiple: Option<bool>,
+) -> Result<String, String> {
+    run_blocking(move || replace_files_impl(&workspace, files, &old_string, &new_string, allow_multiple)).await
+}
+
+fn replace_files_impl(
+    workspace: &str,
+    files: Vec<String>,
+    old_string: &str,
+    new_string: &str,
     allow_multiple: Option<bool>,
 ) -> Result<String, String> {
     if files.is_empty() {
@@ -11203,6 +11263,56 @@ fn route_of(proxy_spec: Option<&str>) -> &'static str {
 // on top of this, so the WebView only re-parses roughly every other event.
 const TOOL_CALL_EMIT_MS: u128 = 100;
 
+// Past this many accumulated argument bytes the preview switches to the slow
+// lane: 1 emit/s and a char-boundary-truncated payload (see
+// forward_tool_call_delta for why the full buffer must never go out at the
+// fast cadence).
+const TOOL_CALL_EMIT_CAP_BYTES: usize = 64 * 1024;
+const TOOL_CALL_EMIT_MS_SLOW: u128 = 1000;
+
+/// Forward the accumulated tool-call arguments buffer to the GUI as a
+/// `tool_call_delta` preview. Returns Ok(true) when an event went out, Ok(false)
+/// when the throttle gate skipped it, Err("cancelled") when the WebView is gone.
+///
+/// Why the truncation exists: a multi-MB write_file `content` previously went
+/// out IN FULL every TOOL_CALL_EMIT_MS — O(n²) over an IPC channel whose
+/// WebView2 end (per tauri's own ipc/channel.rs) is the slowest in the fleet —
+/// and on Windows that flood saturated the renderer and the main thread into a
+/// full window freeze: no input, and the CloseRequested handler never ran, so
+/// the window could not even be closed. The GUI's tool row only needs a live
+/// preview: its strict parse fails on the cut JSON and its fault-tolerant probe
+/// shows path + partial content instead; the engine's real tool calls arrive
+/// via the `done` event, never through this preview.
+fn forward_tool_call_delta(
+    on_chunk: &Channel<String>,
+    index: u32,
+    name: &str,
+    arguments: &str,
+    last_emit: &mut Instant,
+) -> Result<bool, String> {
+    let slow = arguments.len() > TOOL_CALL_EMIT_CAP_BYTES;
+    let gate = if slow { TOOL_CALL_EMIT_MS_SLOW } else { TOOL_CALL_EMIT_MS };
+    if last_emit.elapsed().as_millis() < gate {
+        return Ok(false);
+    }
+    *last_emit = Instant::now();
+    let mut end = TOOL_CALL_EMIT_CAP_BYTES.min(arguments.len());
+    while end > 0 && !arguments.is_char_boundary(end) {
+        end -= 1;
+    }
+    let payload = if slow { &arguments[..end] } else { arguments };
+    let chunk = serde_json::json!({
+        "type": "tool_call_delta",
+        "index": index,
+        "name": name,
+        "arguments": payload,
+    });
+    on_chunk
+        .send(chunk.to_string())
+        .map(|_| true)
+        .map_err(|_| "cancelled".to_string())
+}
+
 const COMMAND_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const COMMAND_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const COMMAND_PIPE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -12547,26 +12657,25 @@ async fn chat_stream(
                                 let cur = tc_map.entry(index).or_insert_with(|| serde_json::json!({"id":"","name":"","arguments":""}));
                                 cur["arguments"] = serde_json::Value::String(format!("{}{}", cur["arguments"].as_str().unwrap_or(""), partial));
                                 // Mirror of the openai branch below: forward the
-                                // FULL accumulated arguments buffer (not just this
-                                // delta), throttled to TOOL_CALL_EMIT_MS, so the
-                                // GUI's tool row grows live while a giant argument
-                                // (write_file `content`) is generated instead of
-                                // the UI staying empty until the stream ends. The
-                                // final id + full args still arrive only via the
-                                // returned result, so nothing is duplicated.
+                                // accumulated arguments buffer (throttled, and
+                                // truncated past the cap — forward_tool_call_delta
+                                // documents why) so the GUI's tool row grows live
+                                // while a giant argument (write_file `content`) is
+                                // generated instead of the UI staying empty until
+                                // the stream ends. The final id + full args still
+                                // arrive only via the returned result, so nothing
+                                // is duplicated.
                                 if !partial.is_empty()
                                     && !cur["name"].as_str().map_or(true, |n| n.is_empty())
-                                    && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
                                 {
-                                    last_tool_emit = Instant::now();
-                                    let chunk = serde_json::json!({
-                                        "type": "tool_call_delta",
-                                        "index": index,
-                                        "name": cur["name"].as_str().unwrap_or(""),
-                                        "arguments": cur["arguments"].as_str().unwrap_or(""),
-                                    });
-                                    if on_chunk.send(chunk.to_string()).is_err() {
-                                        return Err("cancelled".into());
+                                    if forward_tool_call_delta(
+                                        &on_chunk,
+                                        index,
+                                        cur["name"].as_str().unwrap_or(""),
+                                        cur["arguments"].as_str().unwrap_or(""),
+                                        &mut last_tool_emit,
+                                    )? {
+                                        stream_emitted = true;
                                     }
                                 }
                             }
@@ -12586,18 +12695,15 @@ async fn chat_stream(
                             // moment the model starts the call, not when the
                             // first partial_json lands. Same throttle, same
                             // message shape as the input_json_delta forward.
-                            if !block["name"].as_str().map_or(true, |n| n.is_empty())
-                                && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
-                            {
-                                last_tool_emit = Instant::now();
-                                let chunk = serde_json::json!({
-                                    "type": "tool_call_delta",
-                                    "index": index,
-                                    "name": block["name"].as_str().unwrap_or(""),
-                                    "arguments": "",
-                                });
-                                if on_chunk.send(chunk.to_string()).is_err() {
-                                    return Err("cancelled".into());
+                            if !block["name"].as_str().map_or(true, |n| n.is_empty()) {
+                                if forward_tool_call_delta(
+                                    &on_chunk,
+                                    index,
+                                    block["name"].as_str().unwrap_or(""),
+                                    "",
+                                    &mut last_tool_emit,
+                                )? {
+                                    stream_emitted = true;
                                 }
                             }
                         }
@@ -12700,20 +12806,15 @@ async fn chat_stream(
                         ));
                         updated = true;
                     }
-                    if updated
-                        && !cur["name"].as_str().map_or(true, |n| n.is_empty())
-                        && last_tool_emit.elapsed().as_millis() >= TOOL_CALL_EMIT_MS
-                    {
-                        last_tool_emit = Instant::now();
-                        let chunk = serde_json::json!({
-                            "type": "tool_call_delta",
-                            "index": idx,
-                            "name": cur["name"].as_str().unwrap_or(""),
-                            "arguments": cur["arguments"].as_str().unwrap_or(""),
-                        });
-                        stream_emitted = true;
-                        if on_chunk.send(chunk.to_string()).is_err() {
-                            return Err("cancelled".into());
+                    if updated && !cur["name"].as_str().map_or(true, |n| n.is_empty()) {
+                        if forward_tool_call_delta(
+                            &on_chunk,
+                            idx,
+                            cur["name"].as_str().unwrap_or(""),
+                            cur["arguments"].as_str().unwrap_or(""),
+                            &mut last_tool_emit,
+                        )? {
+                            stream_emitted = true;
                         }
                     }
                 }
