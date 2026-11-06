@@ -455,6 +455,11 @@ export interface UserTurnContext {
    * commands discovered from THIS workspace, plus the design-first protocol
    * for UI builds. */
   deliveryPipeline?: string;
+  /** 语言对齐指令（2026-11-06 P3）：replyLanguageDirective(detectReplyLanguage(真人文本))
+   * 的产物，由 compileRequestWorkflow 统一判定填入。住 user-turn 不住 system
+   * 尾——同 ledgerFacts 的论据：逐回合可能变化（中英切换）的指令进对话不进
+   * system 前缀，语言切换回合不再打断端点前缀缓存。 */
+  languageDirective?: string;
 }
 
 /**
@@ -521,6 +526,8 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.taskScriptFacts) parts.push(ctx.taskScriptFacts);
   if (ctx.ledgerFacts) parts.push(ctx.ledgerFacts);
   if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
+  // 语言指令排最后：紧贴真人文本，围栏剥掉后它也随语境自然消失。
+  if (ctx.languageDirective) parts.push(ctx.languageDirective);
   if (parts.length === 0) return text;
   return `${TASK_CONTEXT_OPEN}\n${parts.join('\n\n')}\n${TASK_CONTEXT_CLOSE}\n\n${text}`;
 }

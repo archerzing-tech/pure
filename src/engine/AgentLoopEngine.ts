@@ -5,7 +5,6 @@
 
 import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
-import { applyLanguageDirective, detectReplyLanguage, lastHumanUserText, replyLanguageDirective } from '../shared/langDetect';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
 import { stripAllPatterns } from '../shared/schemaSanitize';
@@ -188,8 +187,11 @@ export class AgentLoopEngine {
     ctx: EngineContext,
   ): AsyncGenerator<EngineEvent, void, void> {
     const budget = new BudgetManager(input.budget);
+    // 语言对齐（P3 2026-11-06）已搬 host 侧：指令随 user-turn 注入件走
+    // （compileRequestWorkflow 判定 → UserTurnContext.languageDirective），
+    // system 回归全静态前缀。引擎不再判语言、不再挂 <user_language> 标记。
     const messages: Message[] = [
-      { role: 'system', content: applyLanguageDirective(input.systemPrompt, replyLanguageDirective(detectReplyLanguage(input.userPrompt))) },
+      { role: 'system', content: input.systemPrompt },
       { role: 'user', content: input.userPrompt, images: input.images },
     ];
     budget.addTokens(input.systemPrompt + input.userPrompt);
@@ -207,13 +209,6 @@ export class AgentLoopEngine {
     const messages: Message[] = [...input.messages, { role: 'user' as const, content: input.newUserPrompt, images: input.images, internal: input.userInternal || undefined }];
     budget.addTokens(input.newUserPrompt);
     for (const m of input.messages) budget.addTokens(m.content);
-    // 语言对齐（2026-10-09）：语言指令按**最后一条真人输入**判定——newUserPrompt
-    // 常是宿主代劳的 internal 轮（语言不代表用户）；标记可替换，续跑重注入
-    // 不堆积。
-    const lang = detectReplyLanguage(lastHumanUserText(messages));
-    if (messages[0] && messages[0].role === 'system') {
-      messages[0] = { ...messages[0], content: applyLanguageDirective(messages[0].content, replyLanguageDirective(lang)) };
-    }
 
     yield* this.runLoop(messages, ctx, budget, 1);
   }
@@ -1304,8 +1299,8 @@ export class AgentLoopEngine {
               // hint already resolves degrade → action.reason, so the degraded
               // directive reaches the model instead of vanishing.
               // internal: true（审计批 5③）——这是给模型的机制指令，不是用户
-              // 说话：漏标会渲染成用户气泡，且 lastHumanUserText 拿它当最近
-              // 人话做语言判定，后续回复语言被一条验证器反馈带跑。
+              // 说话：漏标会渲染成用户气泡。语言判定已搬宿主（2026-11-06 P3），
+              // 但 internal 纪律不随之退役。
               messages.push({ role: 'user' as const, content: hint, internal: true });
             } else {
               yield {

@@ -75,6 +75,19 @@ describe('session ledger · 协议与素材（第 4 期刀 4/5）', () => {
     expect(assembly.userPrompt).toContain('<session_ledger_facts>已做｜write_file｜成功</session_ledger_facts>');
     expect(assembly.budget.includedFragmentIds).toContain('ledger_facts');
   });
+
+  it('语言对齐指令是 required：预算顶满也不得丢（丢了回复就跑英文）', () => {
+    // 同款 required 判例：丢掉的后果（回复语言跑偏）恰是这条指令存在的
+    // 理由，所以它必须像账本素材一样顶住装箱。
+    const assembly = assembler.assemble({
+      surface: 'cli',
+      capabilities: 'capabilities',
+      budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 5_000, outputReserveTokens: 0, safetyMarginTokens: 0, usedInputTokens: 5_000 },
+    }, '继续', { languageDirective: '用户要求用中文来思考与输出。', envFacts: 'fact '.repeat(4_000) });
+    expect(assembly.userPrompt).toContain('用户要求用中文来思考与输出。');
+    expect(assembly.budget.includedFragmentIds).toContain('language_directive');
+    expect(assembly.budget.omittedFragmentIds).not.toContain('language_directive');
+  });
 });
 
 describe('output_style · 折叠长引用素材(details 卡)', () => {

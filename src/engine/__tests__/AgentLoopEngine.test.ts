@@ -604,8 +604,7 @@ describe('AgentLoopEngine', () => {
   });
 
   // 审计批 5③：验证失败的恢复提示是给模型的机制指令。漏标 internal 会渲染
-  // 成用户气泡，且 lastHumanUserText 把它当最近人话做语言判定——后续回复
-  // 语言被一条验证器反馈带跑。
+  // 成用户气泡（语言判定已搬宿主，但 internal 纪律是渲染层契约，不变）。
   it('marks the VERIFY recovery hint internal so it is not mistaken for user speech', async () => {
     const engine = new AgentLoopEngine();
     let decideCalls = 0;
@@ -2585,10 +2584,11 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     expect(toolSawAbort).toBe(true);
   });
 
-  it('injects a reply-language directive from the latest human input into the system prompt (2026-10-09)', async () => {
-    // 思考跑英文的机制对治：语言指令按**最后一条真人输入**判定（internal
-    // 机器轮跳过），挂在 system prompt 尾部的可替换标记里——续跑重注入
-    // 幂等替换，不一行行堆积。
+  it('keeps the system prompt free of language directives (moved to host, 2026-11-06)', async () => {
+    // 语言对齐已搬宿主：判定在 compileRequestWorkflow（只吃用户原话，零注
+    // 入块污染），指令随 user-turn 注入件走——引擎侧 system prompt 回归
+    // 纯静态前缀（端点前缀缓存不被语言切换打断），旧 <user_language> 标
+    // 记退役，continue 的 system 消息原样透传。
     const seen: Message[][] = [];
     const capturing: LLMAdapter = {
       stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
@@ -2605,28 +2605,26 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
       ctx,
     ));
     expect(seen[0]![0]!.role).toBe('system');
-    expect(seen[0]![0]!.content).toContain('<user_language>用户要求用中文来思考与输出。</user_language>');
-    expect(seen[0]![0]!.content).toContain('You are helpful.');
+    expect(seen[0]![0]!.content).toBe('You are helpful.');
+    expect(seen[0]![0]!.content).not.toContain('<user_language>');
+    expect(seen[0]![0]!.content).not.toContain('用户要求用中文');
 
     await collect(engine.continue({
       sessionId: 's_lang',
       messages: [
-        { role: 'system', content: 'You are helpful.\n<user_language>用户要求用中文来思考与输出。</user_language>' },
+        { role: 'system', content: 'You are helpful.' },
         { role: 'user', content: '帮我看看这个崩溃怎么回事' },
         { role: 'assistant', content: 'paused mid-way' },
         { role: 'user', content: 'Resume the paused branch from its checkpoint.', internal: true },
       ],
-      // 宿主代劳的续跑轮（internal）：语言不代表用户——判定必须跳过它，
-      // 落到最后一条真人输入（中文）。
       newUserPrompt: 'retry the failed step',
       userInternal: true,
       budget: STD_BUDGET,
     }, ctx));
     const sys = seen[1]![0]!;
     expect(sys.role).toBe('system');
-    expect(sys.content.match(/<user_language>/g)?.length).toBe(1); // 替换不堆积
-    // 最后一条真人输入是中文（internal 英文轮被跳过）→ 指令仍是中文。
-    expect(sys.content).toContain('用户要求用中文来思考与输出。');
+    expect(sys.content).toBe('You are helpful.');
+    expect(sys.content).not.toContain('<user_language>');
   });
 
   // ═══ 流超时：首块/中途分流 + 现场注入 + 重试放宽（2026-11-05 真机判例）═══

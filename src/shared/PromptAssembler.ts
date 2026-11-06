@@ -530,6 +530,10 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     // 模型就该重问重做了，恰是这条素材要防的失败模式。体量有上限
     // （sessionLedger 的 ASKED/DONE/PLANS_MAX + excerpt 截断），不会裸灌。
     ['ledger_facts', context.ledgerFacts, 94, true],
+    // 语言对齐指令（P3 2026-11-06）：一句、几十字符、required——丢了的
+    // 后果（回复跑英文）恰是这条指令存在的理由。rendered order 与
+    // composeUserTurn 一致：排 fragments 末尾，紧贴用户文本本体。
+    ['language_directive', context.languageDirective, 108, true],
   ];
   return parts
     .map(([id, content, priority, required]) => fragment(id, content ?? '', priority, required))

@@ -6,6 +6,7 @@ import type { AnalysisResult, TaskMode } from '../coding-agent/types';
 import { detectUiDesignRequest } from './delivery';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
 import { turnShape } from '../coding-agent/turnRoute';
+import { detectReplyLanguage, replyLanguageDirective } from './langDetect';
 import { type UserTurnContext } from './promptLayers';
 
 export type RequestWorkflowStage = 'direct' | 'probe' | 'plan' | 'confirm';
@@ -96,6 +97,10 @@ export function compileRequestWorkflow(
     || Boolean(options.continuingPlan || options.planPauseRequested);
   const userContext: UserTurnContext = {
     buildProtocol: buildRequested ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
+    // 语言对齐单源（P3 2026-11-06）：这里的 prompt 是用户原话（GUI/CLI 共用
+    // 本函数），判定零污染——引擎侧曾直接判整条 user 消息，被 2000 字符
+    // 注入块灌满样本。指令随 user-turn 注入件走，system 回归全静态。
+    languageDirective: replyLanguageDirective(detectReplyLanguage(prompt)),
   };
   const stage: RequestWorkflowStage = assessment.requiresConfirmation
     ? 'confirm'

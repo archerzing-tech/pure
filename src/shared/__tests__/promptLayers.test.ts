@@ -521,6 +521,14 @@ describe('composeUserTurn (L2)', () => {
     expect(out.endsWith('build it')).toBe(true);
   });
 
+  it('appends the reply-language directive inside the fence, right before the request (P3 2026-11-06)', () => {
+    const out = composeUserTurn('继续这个任务', { languageDirective: '用户要求用中文来思考与输出。' });
+    expect(out).toContain('用户要求用中文来思考与输出。');
+    // 指令住围栏内（剥围栏的通道一并带走它），紧贴真人文本。
+    expect(out.indexOf('用户要求用中文')).toBeLessThan(out.indexOf('继续这个任务'));
+    expect(out.endsWith('继续这个任务')).toBe(true);
+  });
+
   it('includes the delivery contract beside the approved task context', () => {
     const out = composeUserTurn('build it', { contract: '<delivery_contract>tests are required</delivery_contract>' });
     expect(out).toContain('<delivery_contract>tests are required</delivery_contract>');

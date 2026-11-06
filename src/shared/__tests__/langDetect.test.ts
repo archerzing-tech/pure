@@ -1,15 +1,37 @@
 // src/shared/__tests__/langDetect.test.ts
-// 思考/输出语言对齐（2026-10-09 用户需求）的检测与注入契约。背景：提示词
-// 里"Match the user's language"的教学实测拦不住思考跑英文——机制化：每轮
-// 按用户输入的主要文字判定，显式指令挂 system prompt 尾部（可替换标记幂等）。
+// 思考/输出语言对齐（2026-10-09 用户需求）的判定契约。2026-11-06 P3 判定源
+// 收口：user 消息前面拼着注入块围栏，判定前先剥掉只看真人自己的话；显式
+// 指令离开 system 尾部，随 user-turn 注入件走（语言切换不再打断前缀缓存）。
 
 import { describe, expect, it } from 'bun:test';
 import {
-  applyLanguageDirective,
   detectReplyLanguage,
-  lastHumanUserText,
   replyLanguageDirective,
+  stripInjectionBlocks,
 } from '../langDetect';
+
+describe('stripInjectionBlocks（剥离注入块围栏）', () => {
+  it('剥掉头部注入块，留下真人文本', () => {
+    const msg = '<task_context>\n背景资料一堆\n</task_context>\n\n今天天气不错';
+    expect(stripInjectionBlocks(msg)).toBe('今天天气不错');
+  });
+
+  it('三种围栏（task_context/session_memory/adaptive_context）都剥', () => {
+    expect(stripInjectionBlocks('<session_memory>\n记性\n</session_memory>\n正文')).toBe('正文');
+    expect(stripInjectionBlocks('<adaptive_context>\nX\n</adaptive_context>\n正文')).toBe('正文');
+  });
+
+  it('无注入块的输入原样返回（普通回合常态）', () => {
+    expect(stripInjectionBlocks('直接说事')).toBe('直接说事');
+    expect(stripInjectionBlocks('')).toBe('');
+  });
+
+  it('真人文本里出现同名闭合字样不误剥（围栏成对才剥）', () => {
+    expect(stripInjectionBlocks('帮我看看 </task_context> 这个正则为什么贪心')).toBe(
+      '帮我看看 </task_context> 这个正则为什么贪心',
+    );
+  });
+});
 
 describe('detectReplyLanguage（中英混杂看主要文字）', () => {
   it('纯中文 → zh；纯英文 → en', () => {
@@ -32,36 +54,23 @@ describe('detectReplyLanguage（中英混杂看主要文字）', () => {
     expect(detectReplyLanguage('{"json":"only"}')).toBe('zh');
     expect(detectReplyLanguage('~/work/config.json')).toBe('zh');
   });
-});
 
-describe('applyLanguageDirective（幂等注入）', () => {
-  it('把指令挂到 system prompt 尾部的可替换标记里', () => {
-    const out = applyLanguageDirective('BASE PROMPT', replyLanguageDirective('zh'));
-    expect(out).toContain('BASE PROMPT');
-    expect(out).toContain('<user_language>用户要求用中文来思考与输出。</user_language>');
+  it('注入块灌满样本也判真人语言（P3 污染定案回归锚）', () => {
+    // GUI 的 user 消息 = 注入块 + 真人文本；中文真人文本排在 2000 字符
+    // 样本之外也要被判对——剥离发生在采样之前。
+    const filler = '<session_memory>\n' + '英文 memory digest line here. '.repeat(80) + '\n</session_memory>\n';
+    expect(detectReplyLanguage(filler + '继续这个任务，先跑一下测试')).toBe('zh');
   });
 
-  it('重复应用替换旧标记，不一行行堆积（续跑重注入幂等）', () => {
-    const once = applyLanguageDirective('BASE', replyLanguageDirective('zh'));
-    const twice = applyLanguageDirective(once, replyLanguageDirective('en'));
-    expect(twice.match(/<user_language>/g)?.length).toBe(1);
-    expect(twice).toContain('The user expects reasoning and output in English.');
-    expect(twice).not.toContain('用户要求用中文');
+  it('纯英文真人文本不被中文注入块带偏', () => {
+    const filler = '<task_context>\n' + '中文背景资料确实很长。'.repeat(120) + '\n</task_context>\n';
+    expect(detectReplyLanguage(filler + 'Run the full test suite before pushing.')).toBe('en');
   });
 });
 
-describe('lastHumanUserText（internal 不代表用户）', () => {
-  it('取最后一条非 internal 的真人输入', () => {
-    const lang = detectReplyLanguage(lastHumanUserText([
-      { role: 'user', content: '你好，帮我看看这个崩溃的堆栈是怎么回事' },
-      { role: 'assistant', content: 'ok' },
-      // 宿主代劳的续跑/修复轮是英文机器话，语言不代表用户——必须跳过。
-      { role: 'user', content: 'Resume the paused branch from its checkpoint.', internal: true },
-    ]));
-    expect(lang).toBe('zh');
-  });
-
-  it('全是 internal 时退化为空串 → 默认 zh', () => {
-    expect(lastHumanUserText([{ role: 'user', content: 'machine turn', internal: true }])).toBe('');
+describe('replyLanguageDirective（user-turn 注入指令）', () => {
+  it('zh/en 两档各给一句显式指令（含思考）', () => {
+    expect(replyLanguageDirective('zh')).toContain('中文');
+    expect(replyLanguageDirective('en')).toContain('English');
   });
 });

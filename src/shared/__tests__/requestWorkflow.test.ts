@@ -17,6 +17,16 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.analysis.intent.riskLevel).toBe('low');
   });
 
+  it('derives the reply-language directive from the raw prompt (P3 2026-11-06)', () => {
+    // 判定源=用户原话（本函数是 GUI/CLI 共用的零污染单源），指令随
+    // user-turn 注入件走，不再住 system 尾。
+    const zh = compileRequestWorkflow('帮我看看这个崩溃怎么回事');
+    expect(zh.userContext.languageDirective).toBe('用户要求用中文来思考与输出。');
+
+    const en = compileRequestWorkflow('Please take a look at this crash stack and explain the root cause.');
+    expect(en.userContext.languageDirective).toBe('The user expects reasoning and output in English.');
+  });
+
   it('reads a declarative artifact request as build, a how-asking one as not', () => {
     // 框架改革一期纪律的退役后形态：旧病是「问怎么做」被读成「帮我建」。
     // 陈述式创作（创建×项目同现）走 build 形态是判据的预期行为；问法被
