@@ -18,8 +18,8 @@ function makeConfig(model: string, provider = 'glm'): PureConfig {
   return { provider, model, taskMode: 'auto' } as unknown as PureConfig;
 }
 
-function makeController(opts: ChatControllerOptions = {}): ChatController & Record<string, any> {
-  return new ChatController(opts) as unknown as ChatController & Record<string, any>;
+function makeController(opts: ChatControllerOptions = {}): Record<string, any> {
+  return new ChatController(opts) as unknown as Record<string, any>;
 }
 
 describe('窗口级模型覆盖', () => {
@@ -33,12 +33,12 @@ describe('窗口级模型覆盖', () => {
   test('有覆盖时 provider/model 被替换，其余字段原样保留', () => {
     const controller = makeController({ readWindowModelOverride: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) });
     const base = makeConfig('glm-4.7');
-    (base as Record<string, unknown>).proxy = 'http://127.0.0.1:7890';
+    (base as unknown as Record<string, unknown>).proxy = 'http://127.0.0.1:7890';
     const resolved = controller.resolvedGuiConfig(base);
     expect(resolved).not.toBe(base);
     expect(resolved?.provider).toBe('deepseek');
     expect(resolved?.model).toBe('deepseek-chat');
-    expect((resolved as Record<string, unknown> | null)?.proxy).toBe('http://127.0.0.1:7890');
+    expect((resolved as unknown as Record<string, unknown> | null)?.proxy).toBe('http://127.0.0.1:7890');
   });
 
   test('覆盖 getter 变更对已建 controller 立即可见（不必重建）', () => {

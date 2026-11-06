@@ -27,8 +27,12 @@ describe('llmWarm 预热调度纪律', () => {
 
   it('无端点不预热：初始化早期不发网络请求', () => {
     // 端点解析与 chat_stream 同一套（customBaseURL），且必须是 http(s) URL。
-    expect(src).toContain('return customBaseURL(customs, config.provider, config.providerOverrides);');
+    expect(src).toContain('return customBaseURL(customs, provider, config.providerOverrides);');
     expect(src).toContain("if (!baseUrl || !/^https?:\\/\\//.test(baseUrl)) return;");
+    // 窗口覆盖优先（2026-11-06 多窗口各自选模型）：预热目标跟本窗口生效
+    // 模型走，全局 config 只兜底——否则被覆盖选中的端点零预热。
+    expect(src).toContain('const override = windowModelOverrideGetter?.() ?? null;');
+    expect(src).toContain('resolveWarmEndpoint(cfg, override)');
   });
 
   it('失败静默：预热是尽力而为，不进学习表不上屏', () => {
@@ -52,5 +56,23 @@ describe('llmWarm 预热调度纪律', () => {
     const chat = readSource(new URL('../chat.ts', import.meta.url));
     expect(chat).toContain('startLlmWarmLoop();');
     expect(chat).toContain("import { startLlmWarmLoop } from './llmWarm';");
+  });
+
+  it('窗口覆盖改变预热端点：A 窗口 override glm 时预热 glm 而非全局 deepseek', () => {
+    const { resolveWarmEndpoint } = require('../llmWarm') as typeof import('../llmWarm');
+    const config = {
+      provider: 'deepseek-openai',
+      customProviders: [],
+      providerOverrides: {},
+    } as unknown as import('../config').PureConfig;
+    expect(resolveWarmEndpoint(config, null)).toContain('deepseek');
+    const glm = resolveWarmEndpoint(config, { provider: 'glm', model: 'glm-5.3' } as { provider: string });
+    expect(glm).not.toContain('deepseek');
+    expect(glm).toBe(resolveWarmEndpoint(config, { provider: 'glm', model: 'glm-5.3' } as { provider: string }));
+  });
+
+  it('main 注入 getter：预热读窗口覆盖值', () => {
+    const main = readSource(new URL('../main.ts', import.meta.url));
+    expect(main).toContain('setWindowModelOverrideGetter(() => chat.windowModelOverrideValue())');
   });
 });

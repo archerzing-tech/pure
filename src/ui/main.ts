@@ -11,6 +11,7 @@ import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRou
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import { syncPresentationCardsFromConfig } from './markdown';
+import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
 import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character';
 import type { SettingsPanel } from './settings';
@@ -996,6 +997,9 @@ function deferToIdle(fn: () => void): void {
   // 浏览器 bundle）。
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
+  // LLM 预热目标跟本窗口覆盖走（多窗口各自选模型）：不注入的话预热循环
+  // 永远打全局 config 的端点，被覆盖选中的模型端点零预热、每回合付全款握手。
+  setWindowModelOverrideGetter(() => chat.windowModelOverrideValue());
   applySavedAppearance();
   await applySoulOverrideFromDisk();
   applySavedCharacterProfile();

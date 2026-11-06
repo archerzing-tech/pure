@@ -18,6 +18,15 @@ let loopStarted = false;
 let loopTimer: number | null = null;
 let warmInFlight = false;
 let lastWarm: { baseUrl: string; proxied: boolean } | null = null;
+/** 窗口级模型覆盖的读取口（main.ts 注入，2026-11-06 多窗口各自选模型）：
+ *  预热目标必须跟本窗口生效模型走——全局 config 被 B 窗口写成 deepseek 时，
+ *  A 窗口 override 的 glm 端点若不跟着覆盖，每回合都付全套 DNS+TCP+TLS
+ *  握手（真机取证：glm 窗口 TTFT 均值 10s，传输层白付约 3-4s）。 */
+let windowModelOverrideGetter: (() => { provider: string; model: string } | null) | null = null;
+
+export function setWindowModelOverrideGetter(fn: () => { provider: string; model: string } | null): void {
+  windowModelOverrideGetter = fn;
+}
 
 export function isWarmInFlight(): boolean {
   return warmInFlight;
@@ -28,10 +37,12 @@ export function lastWarmRouteInfo(): { baseUrl: string; proxied: boolean } | nul
   return lastWarm;
 }
 
-/** 当前会话的 LLM 端点（与 chat_stream 用同一套解析，永不各说各话）。 */
-function currentLlmBaseUrl(config: PureConfig): string {
+/** 当前会话的 LLM 端点（与 chat_stream 用同一套解析，永不各说各话）。
+ *  窗口覆盖优先：override 的 provider 生效时预热它的端点，全局兜底。 */
+export function resolveWarmEndpoint(config: PureConfig, override: { provider: string } | null): string {
   const customs = config.customProviders ?? [];
-  return customBaseURL(customs, config.provider, config.providerOverrides);
+  const provider = override?.provider ?? config.provider;
+  return customBaseURL(customs, provider, config.providerOverrides);
 }
 
 /**
@@ -41,7 +52,8 @@ function currentLlmBaseUrl(config: PureConfig): string {
 export async function warmLlmRoutesNow(): Promise<void> {
   if (warmInFlight) return;
   const cfg = loadConfig();
-  const baseUrl = cfg ? currentLlmBaseUrl(cfg) : '';
+  const override = windowModelOverrideGetter?.() ?? null;
+  const baseUrl = cfg ? resolveWarmEndpoint(cfg, override) : '';
   const proxyUrl = cfg ? effectiveProxyUrl(cfg.proxy) : '';
   if (!baseUrl || !/^https?:\/\//.test(baseUrl)) return;
   warmInFlight = true;
