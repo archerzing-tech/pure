@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.3.0
+
+**人格运行时可编辑 + Windows 写文件冻结根治 + 插话死循环根治**
+
+本版三刀各有真机出处，共同点是都发生在「系统替用户/模型把死了一扇门」的地方。其一，人格从编译期常量变成盘上可编辑：内置人格一直是 TS 源句表，改一个字要重发版——人格本质是产品对「怎么做事、怎么说话」的立场，立场该随用户与场景演化，不该锁死在发布物里。SOUL.md 覆盖层两层落地（~/.pure/SOUL.md 全局层、工作区 SOUL.md 工作区层，同块后者整份覆盖前者，不拼接——两份人格拼起来是精神分裂），启动读一次、会话内冻结（system prompt 惯例），块级容忍（缺哪块不覆盖哪块），内核级生效（任一面校验失败整内核回退内置，半个内核覆盖同样是精神分裂），派生完整性（覆盖后源句表必须仍覆盖 decisionDerivation 与 derivedFrom 引用的全部 id，断裂即拒绝）、红线负向锁（谄媚/陪伴话术清单对覆盖文本同样生效，红线是产品物理定律不因用户编辑豁免）、注入文本同上限 <2000 字符。GUI 经 Tauri invoke 读盘、拒绝走 toast 明示，CLI 直读盘；生效点唯一 activeCharacterProfile()，PromptAssembler 与子代理继承三路全通。同步修掉校验链上的静默真凶：「空数组=通过」契约被 if(fatal) 真值判定打穿，所有覆盖曾被无声丢弃——调用处必须判 .length。
+
+其二，Windows 实机 v4.2.3 长时间写文件整窗冻死（无法输入无法关闭）三层根因全是 macOS 不可感知、Windows 放大的平台差异：Tauri sync 命令内联跑主线程，重活在上=整个 WebView 冻结、消息泵停摆连 CloseRequested 都不跑（read/search/git/session 族早已转 async+run_blocking，写系六命令漏掉——补齐 write_file/edit_file/replace_files/path_info/copy_file/save_file）；tool_call 预览每 100ms 全量重发累积参数是 O(n²) IPC 洪泛（超 64KB 走慢车道：1s 一次+字符边界截断，引擎真实调用走 done 事件不经预览通道，截断零功能影响）；write_file_stream 进度事件每 64KB 一条=快盘短时排队上千条（改 100ms 时间节流，终态 100% 必达）。
+
+其三，Windows 实机工具执行中插话后工具反复输出同样文字、按停停不住、只能打断整个会话。复活环链路：插话落工具执行中时未到 THINK 边界留在 steer 账，用户按停后收尾派发照常跑，leftoverSteers 把残留插话原话重入新回合，模型重发同工具，再停再复活，唯一断链是开新会话。修法=「停止即终局」闸：cancel() 武装 RoundClosePlane，下一拍 dispatch 拦截态只清账不复活（残留 steer 弃、残账转账进队列等下一自然派发点），插话掐流重入同样让路。判例两条：武装态读探针必须只读不清位，清位权归 dispatch 拦截态（否则宿主 finally 提前消费、拦截失效）；引擎重放复用只覆盖紧邻同参情形，插话引发的非紧邻重发是真执行、属于模型决策权不动，配套子代理 stall tick 的恒定 waiting 文案加相邻同文折叠（展示层不再把同一行堆成「工具反复输出」的假象）。
+
+验证：bun test 5116 例全过、tsc 零错、cargo test 272 例全过、Windows 交叉编译绿（x86_64-pc-windows-gnu）、新增 soulOverride 15 用例与 roundClosePlane「停止即终局」4 用例。
+
 ## v4.2.3
 
 **语义路由判定前移：九字段即判，散文不再压在临界路径上**
