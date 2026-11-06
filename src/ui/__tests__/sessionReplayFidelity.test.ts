@@ -316,7 +316,8 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     // 引擎链路（GUI 测试集 [39] 实证）：存档的回合段取引擎副本（merge 取
     // modelMessages.slice(turnStart)），chat 侧标记到不了存档——isAuto 必须
     // 穿进 continueTurn，由引擎把 internal 打在它自己的轮入消息上。
-    expect(chatSource).toContain('codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal, isAuto)');
+    // 预判层退役（2026-11-06）：semanticRoute 参数位随路由一起退役。
+    expect(chatSource).toContain('codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, turnHardStop.signal, isAuto)');
     const engineSource = readFileSync(new URL('../../engine/AgentLoopEngine.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     expect(engineSource).toContain('internal: input.userInternal || undefined');
   });

@@ -52,7 +52,6 @@ import type {
   PermissionContext,
   PermissionDecision,
   PermissionRequestHandler,
-  SemanticRouteDecision,
   SubagentDefinition,
   TaggedTool,
 } from './types';
@@ -517,10 +516,9 @@ export class CodingAgent {
     userPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
-    semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.run(systemPrompt, userPrompt, signal, images, semantic, hardStopSignal);
+    yield* this.harness.run(systemPrompt, userPrompt, signal, images, hardStopSignal);
   }
 
   /** Continue an existing session with a follow-up prompt. */
@@ -530,11 +528,10 @@ export class CodingAgent {
     newUserPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
-    semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
     userInternal?: boolean,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, semantic, hardStopSignal, userInternal);
+    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, hardStopSignal, userInternal);
   }
 
   /** Get the underlying Harness instance (for advanced use). */

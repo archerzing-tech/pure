@@ -6,12 +6,7 @@ import { readFileSync } from 'node:fs';
 import { assessIntent } from '../coding-agent/Planner';
 import { activeCharacterProfileId, setActiveCharacterProfile } from '../character';
 import { defaultCliAutoApprove, resolveCharacterProfileId } from '../cliConfig';
-import {
-  composeCliIntentUserTurn,
-  formatCliIntentAssessment,
-  resolveCliAutoApprove,
-  shouldProbeCliWorkspace,
-} from '../cliIntent';
+import { formatCliIntentAssessment, resolveCliAutoApprove } from '../cliIntent';
 
 const highRisk = assessIntent('用 rm -rf 清掉整个目录');
 const deletionTask = assessIntent('删除整个项目');
@@ -34,31 +29,6 @@ describe('CLI proactive intent assessment', () => {
 
   it('does not print a risk banner for a low-risk question', () => {
     expect(formatCliIntentAssessment(lowRisk)).toBe('');
-  });
-
-  it('keeps the high-risk approval instruction beside the CLI request in L2', () => {
-    const turn = composeCliIntentUserTurn('用 rm -rf 清掉整个目录', highRisk, {
-      contract: '<delivery_contract>inspect before changing</delivery_contract>',
-    });
-    expect((turn.match(/<intent_assessment>/g) ?? []).length).toBe(1);
-    expect(turn).toContain('Risk: high');
-    expect(turn).toContain('wait for explicit user approval');
-    expect(turn).toContain('<delivery_contract>inspect before changing</delivery_contract>');
-    expect(turn.endsWith('用 rm -rf 清掉整个目录')).toBe(true);
-  });
-
-  it('deletion tasks reach L2 with the probe-and-proceed contract, no approval wording', () => {
-    const turn = composeCliIntentUserTurn('删除整个项目', deletionTask, {});
-    expect(turn).toContain('Risk: medium');
-    expect(turn).not.toContain('wait for explicit user approval');
-    expect(turn.endsWith('删除整个项目')).toBe(true);
-  });
-
-  it('only probes when tools are available and the assessment requires it', () => {
-    expect(shouldProbeCliWorkspace(true, highRisk)).toBe(true);
-    expect(shouldProbeCliWorkspace(true, mediumRisk)).toBe(true);
-    expect(shouldProbeCliWorkspace(true, lowRisk)).toBe(false);
-    expect(shouldProbeCliWorkspace(false, highRisk)).toBe(false);
   });
 
   it('defaults to CLI auto-approval but switches to interactive tool confirmation', () => {
@@ -120,13 +90,14 @@ describe('CLI proactive intent assessment', () => {
     expect(entry).toContain("resolveCliAutoApprove(flags['prompt-on-tool'] !== undefined, defaultCliAutoApprove())");
   });
 
-  it('routes both CLI paths through the one shared turn-route producer', () => {
-    // The CLI used to re-derive the route inline (bypass / conversational /
-    // inferSemanticRoute / compileRequestWorkflow), which is exactly how the
-    // two surfaces drifted apart. Both loops now call the shared producer, and
-    // neither reaches for the individual layers any more.
+  it('routes both CLI paths through the one shared turn-route compiler', () => {
+    // The CLI used to re-derive the route inline, which is exactly how the
+    // two surfaces drifted apart. Both loops now call the shared mechanical
+    // compiler, and neither reaches for the retired router any more
+    // (2026-11-06 预判层退役).
     const source = readFileSync(new URL('../cliRepl.ts', import.meta.url), 'utf8');
-    expect((source.match(/decideTurnRoute\(/g) ?? []).length).toBe(2);
+    expect((source.match(/compileTurnRoute\(/g) ?? []).length).toBe(2);
+    expect(source).not.toContain('decideTurnRoute');
     expect(source).not.toContain('inferSemanticRoute');
     expect(source).not.toContain('compileRequestWorkflow');
     expect(source).toContain('printWorkflowStage(workflow.stage)');

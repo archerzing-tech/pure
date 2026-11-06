@@ -479,7 +479,7 @@ describe('PromptAssembler', () => {
   });
 
   it('keeps user-turn composition on the same shared compiler path', () => {
-    const context = { assessment: '<intent_assessment>medium</intent_assessment>' };
+    const context = { contract: '<delivery_contract>tests are required</delivery_contract>' };
     expect(assembler.buildUserPrompt('ship it', context)).toBe(composeUserTurn('ship it', context));
   });
 

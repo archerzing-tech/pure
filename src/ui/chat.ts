@@ -32,10 +32,10 @@ import { ContextEngine, estimateTokens, type ContextCompactionResult, type Conte
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { formatIntentPrompt, markParallelPlanSteps, parsePlanJsonWithMeta, renderLiveContext, type RouteContextTurn } from '../coding-agent/Planner';
+import { markParallelPlanSteps, parsePlanJsonWithMeta, renderLiveContext } from '../coding-agent/Planner';
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
 import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
-import { decideTurnRoute, prefetchTurnRoute, startTurnRoute } from '../coding-agent/turnRoute';
+import { compileTurnRoute, prefetchTurnRoute, turnShape, type TurnShape } from '../coding-agent/turnRoute';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
 import { capabilityTurnFacts } from '../shared/capabilityFacts';
@@ -139,7 +139,7 @@ import type {
 } from '../shared/types';
 import { EventFanout } from '../shared/asyncQueue';
 import { judgeModelFor, phaseModelOverrides } from '../shared/phaseModels';
-import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, Plan, PlanVerificationSpec, TaskMode, IntentAssessment, SemanticRouteDecision } from '../coding-agent/types';
+import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, PermissionDecision, Plan, PlanVerificationSpec, TaskMode, IntentAssessment } from '../coding-agent/types';
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
@@ -1261,20 +1261,21 @@ function createPermissionHandler(config: PureConfig, hostFor?: () => HTMLElement
 // ── Adapter factory ──
 
 /**
- * 第 6 期 · 复杂度 → 思考档：这一回合要不要为深度推理付首字代价。实测
- * （glm-5.3-flash，同一段提示词）暗思考开首字 10.9–35.1s、关 2.4–3.9s。裁决
- * 在手时按 complex/simple 定；工作形态但路由没给出裁决（超时兜底）保守留主档；
- * 用户明令的 plan/build（forcedMode）永远留主档；闲聊/直答（地板已复现裁决、
- * 无路由）走轻档。纯函数，行为在 chat.test.ts 钉住。
+ * 思考档的形态判据（预判层退役 2026-11-06）：这一回合要不要为深度推理付
+ * 首字代价。没有路由裁决了——寒暄形状（短输入、无代码块、无 URL、会话
+ * 历史里没有工具活动）走轻档，其余一律主档：不确定就当复杂。判错方向是
+ * 安全的：寒暄误判主档只慢一两秒，工作误判轻档被工具历史判据挡住
+ * （历史里有 tool 消息=干过活的会话，永不轻档）。纯函数，行为在
+ * chat.test.ts 钉住。
  */
-export function isLightTurn(
-  verdict: Pick<SemanticRouteDecision, 'complexity'> | null,
+export function isLightShapedTurn(
+  shape: TurnShape,
   forcedMode: TaskMode | undefined,
+  historyHadToolUse: boolean,
 ): boolean {
   if (forcedMode) return false;
-  // 没有裁决就不轻档（框架改革一期后 floor 不存在了）：路由缺席=不知道这轮
-  // 是什么，保守留主档——不确定就当复杂。
-  return verdict ? verdict.complexity === 'simple' : false;
+  if (historyHadToolUse) return false;
+  return shape.shortChat;
 }
 
 // Exported for the Settings evolution dashboard (13.3 part 3), which drafts a
@@ -1515,8 +1516,8 @@ function imageGenContextFor(config: PureConfig): ImageGenContext | undefined {
 
 /**
  * 期4 抓取后提炼层的宿主回调:超长网页正文用当前配置的模型压成要点(一次
- * 非流式 complete,暗思考关——提炼是机械活,不值得付 10-35s 的首字代价,
- * 见 isLightTurn 的实测注)。构造失败(无 key/无配置)返回 undefined,
+ * 非流式 complete,暗思考关——提炼是机械活,不值得付深度推理的首字代价)。
+ * 构造失败(无 key/无配置)返回 undefined,
  * adapter 侧抓取行为与旧版完全一致。
  */
 export function extractSummarizerFor(config: PureConfig): SummarizeForExtract | undefined {
@@ -3002,17 +3003,6 @@ export class ChatController {
     return this.messages;
   }
 
-  /** The tail of the conversation for the semantic router (2026-10-14): a
-   *  follow-up (「还是不行」「再加一个导出按钮」) has no meaning on its own, so
-   *  routing it as a standalone sentence is what let a debugging continuation
-   *  be carried as chit-chat. User/assistant text only — tool noise is not
-   *  context a router can use. Truncation happens in routeHistoryMessages. */
-  private routeHistory(): RouteContextTurn[] {
-    return this.messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' }));
-  }
-
   private updateTurnCount(turnCount: number, persist = false): void {
     if (!Number.isFinite(turnCount)) return;
     const next = Math.max(0, Math.floor(turnCount));
@@ -4361,7 +4351,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // committed in the turn's finally (generation-guarded so a turn superseded
     // by a session switch never writes into the session the user switched TO).
     const turnStartMs = performance.now();
-    const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, routeMs: null, probeMs: null, contextMs: null, engineMs: null, totalMs: null };
+    const turnTiming: TurnTiming = { ts: Date.now(), ttftMs: null, probeMs: null, contextMs: null, engineMs: null, totalMs: null };
     // 落定账已提交过没有：成功路径在 setStreaming(false) 之前提交（见该调用点），
     // finally 只补失败/中断路径的账，防双写。
     let turnSettledCommitted = false;
@@ -5220,13 +5210,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         keepOrDropUserBubble('已暂停：你的请求已保留在对话中。');
         return;
       }
-      // ── 第 6 期 · 路由前移 ─────────────────────────────────────────────
-      // 「计划态判定 + 判例适配器 + 隐藏语义路由」都只读回合开始时的状态（config
-      // 与上一回合留下的计划/历史），不依赖工作区、记忆或运行时探针。所以先把它
-      // 们算出来，并把路由这一跳抢在记忆落库与探针之前发出去，让它的往返与它们
-      // 并行，而不是像原来那样压在引擎装配之后的临界路径上干等。裁决仍由
-      // decideTurnRoute 唯一产出——这里只提前「开始」，不搬「意味着什么」，
-      // 语义与引入前逐字节一致。
+      // ── 回合开头的事实收集 ──────────────────────────────────────────────
+      // 「计划态判定 + 调度事实」都只读回合开始时的状态（config 与上一回合
+      // 留下的计划/历史），不依赖工作区、记忆或运行时探针。回合前的语义路由
+      // 已整体退役（2026-11-06）：主请求零预判秒发，workflow 编译在探针之后
+      // 同步完成（compileTurnRoute，纯机械）。
       const forcedMode: TaskMode | undefined =
         config.taskMode && config.taskMode !== 'auto' ? config.taskMode : undefined;
       // A plan that already reached its final "## 计划 n 已完成" (or the turn-end
@@ -5243,36 +5231,22 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const continuingPlan = !activePlanFinished && this.activeComplexPlan !== null && this.hasHistory && !forcedMode;
       const planPauseRequested = !activePlanFinished && this.activeComplexPlan !== null && !this.hasHistory && !forcedMode;
       // 裁决实例：插话裁决要的是「时机×内容」那一下判断，不是一段思考散文，
-      // 而暗推理会把 8s 预算整个吃掉（见 judgeLlm 字段注的实测数字）。
+      // 而暗推理会把预算整个吃掉（见 judgeLlm 字段注的实测数字）。
       // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时，这个缝整体换轻模型
-      // ——插话分类/聚焦点名/语义路由（同一 decideLlm 缝）这类「判断但轻」的
-      // 调用走轻档；没配时保持主模型 + 关暗思考。
+      // ——插话分类/聚焦点名这类「判断但轻」的调用走轻档；没配时保持主模型
+      // + 关暗思考。（回合前的语义路由已退役 2026-11-06：路由不再消费这个
+      // 实例，judgeLlm 只剩插话裁决一个消费方。）
       // 第 6 期：disableThinking 只有 GLM 端真有「关思考」开关（thinking:
       // disabled）；别的 provider 会给 undefined，于是回落到 reasoning_effort
-      // 的每模型默认（推理模型往往就是 medium）——「关暗思考」在 DeepSeek/OpenAI
-      // 这些推理模型上名不副实，8s 路由预算照旧被推理吃掉。再显式压一档到 low：
+      // 的每模型默认（推理模型往往就是 medium）。再显式压一档到 low：
       // 判例只产一个小 JSON，不需要深度推理，把首字从十几秒拉回秒级。
-      // lightOpts = 「不值得为一段深度思考空等」的共用轻档：判例/路由这一缝，以及
-      // 下面按复杂度判定为 simple 的主回合共用（见复杂度 → 思考档）。
+      // lightOpts = 「不值得为一段深度思考空等」的共用轻档：插话裁决这一缝，
+      // 以及下面按形态判定为寒暄的主回合共用（见 isLightShapedTurn）。
       const lightOpts = { disableThinking: true, reasoningEffort: 'low' } as const;
       const judgeModel = judgeModelFor(config.phaseModels, config.model);
       this.judgeLlm = judgeModel
         ? createLLMAdapter({ ...config, model: judgeModel }, lightOpts)
         : createLLMAdapter(config, lightOpts);
-      // 提前开始这一跳：与下面的记忆落库、运行时探针并行。
-      const routeStartMs = performance.now();
-      const routeFetch = startTurnRoute(routePrefetch, this.judgeLlm, {
-        continuing: continuingPlan || planPauseRequested,
-        history: this.routeHistory(),
-      }, this.abortController?.signal);
-      // 路由与前置并行后，routeMs 仍记这一跳自己的往返时长（不是压在临界路径上
-      // 的等待），统计口径不变。
-      if (routeFetch) {
-        void routeFetch.then(
-          () => { turnTiming.routeMs = Math.round(performance.now() - routeStartMs); },
-          () => { turnTiming.routeMs = Math.round(performance.now() - routeStartMs); },
-        );
-      }
       // All setup that could throw synchronously (adapter creation, agent construction)
       // Memory skill toggle: when disabled, skip learning + memory injection.
       const memoryEnabled = config.skills?.memory ?? true;
@@ -5310,22 +5284,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 刀 1.1：本回合计划声明的验证清单，从规划块带回收尾闸门（规划块与
       // 事件循环不同层作用域，清单经这里过桥）。
       let gatePlanVerification: PlanVerificationSpec[] | undefined;
-      let userAssessment: string | undefined;
       let taskContract: TaskContract | undefined;
 
-      // ── 第 6 期 · 复杂度 → 思考档 ────────────────────────────────────────
-      // 路由裁决此刻已经在手（routeFetch 在回合开头就发出去了，已与记忆落库、
-      // 运行时探针并行），于是用它决定这一回合付不付深度推理的首字代价。实测
-      // （glm-5.3-flash，同一段提示词）：暗思考开首字 10.9–35.1s / 关 2.4–3.9s。
-      // 2026-10-30 z.ai 端点四参数形态复测（hello，各 2-3 轮）：thinking 各
-      // 形态（enabled+low / disabled / enabled / 不带）首字无显著差异
-      // （reason 1-4s、content 6-9s）——「关 2.4-3.9s」是历史服务端状态，
-      // 参数层已无杠杆，快回合的观感由呈现层延迟闸承担（见 preflight 卡）。
-      // 闲聊（地板已定）与路由明说 simple 的活都不值得为一段思考空等十几秒；
-      // 复杂活、以及用户明令的 plan/build（forcedMode）保持主档。工作形态但没有
-      // 裁决（路由超时兜底）也保守留主档——不确定就当复杂。
-      const routeVerdict = routeFetch ? await routeFetch : null;
-      const lightTurn = isLightTurn(routeVerdict, forcedMode);
+      // ── 思考档：形态判据（预判层退役 2026-11-06）─────────────────────────
+      // 没有路由裁决了，档位由纯机械形态决定：寒暄形状（短输入、无代码块、
+      // 无 URL、会话历史里没有工具活动）走轻档，其余一律主档——不确定就当
+      // 复杂。2026-10-30 z.ai 端点四参数形态复测（hello，各 2-3 轮）：thinking
+      // 各形态首字无显著差异——轻档的杠杆只在 DeepSeek/OpenAI 系推理模型的
+      // reasoning_effort 上；判错方向是安全的（寒暄误判主档只慢一两秒，
+      // 工作误判轻档被工具历史判据挡住）。
+      const historyHadToolUse = this.messages.some((m) => m.role === 'tool');
+      const lightTurn = isLightShapedTurn(turnShape(userText), forcedMode, historyHadToolUse);
       // 嘴/手分开（2026-10-28 细化 1）：主流 THINK 流适配器经 wrapThinkStream
       // 包一层——进流 +1、finally -1，isThinkingStreamActive 读这个计数。
       const llm = this.wrapThinkStream(createLLMAdapter(config, lightTurn ? lightOpts : {}));
@@ -5739,17 +5708,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // scope, and which layer decided — into the replayable log. The callers
       // below consume `route` / `workflow` exactly as the five separate
       // derivations used to produce them.
-      // 刀 4.2：判例轻档配了轻模型时，语义路由也走轻档（路由是「判断但轻」
-      // 的一次性调用）；没配留主适配器，路由行为与引入前一致。路由走裁决实例
-      // （暗思考关 + 低推理档），不随「有没有配轻档」开关切换。
-      // 2026-10-14 实测（glm-5.3-flash，同一段路由提示词，四个真实请求）：
-      //   thinking 关 → 首字 2.4–3.9s、出全 3.1–6.0s
-      //   thinking 开 → 首字 10.9–35.1s、出全 12.2–38.3s
-      // 第 6 期起这一跳已在回合开头提前开始（routeFetch），与记忆落库/探针并行；
-      // 这里只等它回来，由唯一产出者 decideTurnRoute 落定裁决（preRoute）。原注释
-      // 里「默认路径 judgeModelFor 返回 undefined，路由跑在暗思考主 adapter 上」
-      // 的隐患已由判例缝统一压到低推理档 + 提前并行解决。
-      const turnRoute = await decideTurnRoute(routePrefetch, this.judgeLlm ?? llm, {
+      // 预判层退役（2026-11-06）：workflow 编译是纯机械步骤（形态 + 词表安全
+      // 闸 + 事实），同步完成，不再等任何判定调用。
+      const turnRoute = compileTurnRoute(routePrefetch, {
         forcedMode,
         hasTools: !!effectiveWorkspace,
         continuingPlan,
@@ -5758,16 +5719,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // turns, not the continuation prompt ("继续" must not silently lose
         // the gate, and an ordinary complex plan must not gain it).
         continuingProjectBuild: this.activePlanProjectBuild,
-        // 追问只有放在对话里才读得懂：「还是不行」本身什么也说明不了。
-        history: this.routeHistory(),
-        // 提前开始的那一跳；undefined 时 decideTurnRoute 自行发（CLI/探针路径）。
-        preRoute: routeFetch,
-      }, this.abortController?.signal);
-      const semanticRoute = turnRoute.route;
+      });
       const workflow = turnRoute.workflow;
       const analysis = workflow.analysis;
       let effectiveIntent: IntentAssessment = analysis.intent;
-      userAssessment = workflow.userContext.assessment;
 
       // 主动评估卡绝不在此刻同步弹出：这里只有规则启发式，还不是真实思考。卡片延后
       // 到 LLM 真正完成分析之后才出现（maybeShowAssessment）——thinking 卡先行展示
@@ -6008,9 +5963,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               verifierAvailable: true,
               memoryAvailable: true,
             },
-            semantic: semanticRoute
-              ? { tags: [semanticRoute.intent], complexity: semanticRoute.complexity, roles: semanticRoute.subagents }
-              : undefined,
+            // semantic 路由退役（2026-11-06）：策略层回落到自己的关键词兜底
+            // 路径（select 的既有行为，undefined 即无理解输入）。
           });
           if (planForReview) {
             planForReview = markParallelPlanSteps(planForReview, planStrategy.parallelRoles);
@@ -6477,7 +6431,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           : null;
         this.addStatusBubble('修复阶段：正在根据真实失败输出修复并重新验证…', true);
         const fixSegment = createSegment();
-        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, undefined, true);
+        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
         let output = '';
         let latestMessages = messages;
@@ -6704,7 +6658,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 会话账本素材（第 4 期）：空账导出空串，composeUserTurn 自动略过，
           // 新会话零开销。
           ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
-          assessment: userAssessment,
         }),
         // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个
         // 阶段下发给模型本身执行；UI 工程额外携带设计先行协议（先出 design.html
@@ -6736,8 +6689,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // the plan, or a follow-up after the previous plan finished), do not
       // attach any stale plan presentation to the new turn.
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal, isAuto)
-        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, semanticRoute, turnHardStop.signal);
+        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, turnHardStop.signal, isAuto)
+        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, turnHardStop.signal);
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;

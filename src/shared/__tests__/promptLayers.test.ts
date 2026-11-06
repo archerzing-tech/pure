@@ -527,10 +527,12 @@ describe('composeUserTurn (L2)', () => {
     expect(out.endsWith('build it')).toBe(true);
   });
 
-  it('includes the proactive intent assessment beside the request', () => {
-    const out = composeUserTurn('delete it', { assessment: '<intent_assessment>high risk</intent_assessment>' });
-    expect(out).toContain('<intent_assessment>high risk</intent_assessment>');
-    expect(out.endsWith('delete it')).toBe(true);
+  it('carries the plan context beside the request (assessment injection retired with the router)', () => {
+    // 预判层退役（2026-11-06）：词表猜测不再注入主请求（2026-11-05 判例
+    // 常态化）——user-turn 通道只剩 buildProtocol/plan/contract 等结构化料。
+    const out = composeUserTurn('build it', { plan: '<plan_context>step 1</plan_context>' });
+    expect(out).toContain('<plan_context>step 1</plan_context>');
+    expect(out.endsWith('build it')).toBe(true);
   });
 
   it('ignores empty fragments', () => {

@@ -14,7 +14,7 @@ import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } 
 import { recordEndpointCacheOutcome } from './shared/endpointCacheQuality';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
-import { decideTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
+import { compileTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
 import { describeTiming, type InputTiming } from './coding-agent/inputDecision';
 import { currentTimeContext, formatTimeContextLine } from './shared/timeContext';
 import type { IntentAssessment, TaskMode } from './coding-agent/types';
@@ -76,7 +76,7 @@ async function waitForScheduledInput(timing: InputTiming, signal?: AbortSignal):
   });
 }
 import type { CliArgs } from './cliConfig';
-import { createAdapter, resolveJudgeAdapter, resolveReflectAdapter } from './cliAdapter';
+import { createAdapter, resolveReflectAdapter } from './cliAdapter';
 import { createHarness, distillSkillFromMemory, learnFromInput, printToolCorrectionHints } from './cliHarness';
 import { matchSkillDistillInstruction } from './shared/skillDistill';
 
@@ -735,15 +735,10 @@ async function runOneShot(args: CliArgs) {
   // Logical-trap pre-scan: if the request itself is contradictory/impossible,
   // warn the user and inject the trap notice into the system prompt so the
   // model verifies the premise instead of following it into a failure loop.
-  // One producer, shared with the GUI (turnRoute.ts): the same rules, the same
-  // recorded decision. The CLI used to re-derive this inline, which is how the
-  // two surfaces could drift apart.
-  // Routing runs on the judge flavour of the adapter (hidden reasoning off) —
-  // the same class of "judge but light" call as insert classification. On a
-  // thinking-enabled adapter the route call takes 12–38s (measured) against a
-  // 12s cap, so the verdict was decided by provider latency and a lost race
-  // silently handed the turn to the keyword floor.
-  const route = await decideTurnRoute(prefetchTurnRoute(args.prompt), resolveJudgeAdapter(args, adapter), { hasTools });
+  // One producer, shared with the GUI (turnRoute.ts): the same mechanical
+  // shape + word-list safety gates, the same recorded decision. The pre-turn
+  // LLM router retired 2026-11-06 — nothing here awaits a verdict.
+  const route = compileTurnRoute(prefetchTurnRoute(args.prompt), { hasTools });
   const workflow = route.workflow;
   const analysis = workflow.analysis;
   if (route.defer && !(await waitForScheduledInput(route.timing))) {
@@ -783,7 +778,7 @@ async function runOneShot(args: CliArgs) {
   streamMgr.start();
 
   const startTime = Date.now();
-  const result = await consumeTurn(harness.run(systemPrompt, userTurn, undefined, undefined, route.route), streamMgr, cliProviderHealContext(args));
+  const result = await consumeTurn(harness.run(systemPrompt, userTurn), streamMgr, cliProviderHealContext(args));
   let ok = result.ok;
   if (needsDeliveryGate && tools) {
     const profile = workspaceProfile ?? await discoverWorkspace(tools);
@@ -818,7 +813,6 @@ async function runOneShot(args: CliArgs) {
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const judgeAdapter = resolveJudgeAdapter(args, adapter);
   const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
   const hasTools = toolsDefs.length > 0;
 
@@ -1023,19 +1017,11 @@ async function runRepl(args: CliArgs) {
 
     // Trap pre-scan per REPL turn (same as one-shot): surface the warning and
     // inject it into the system prompt so the model verifies the premise.
-    const route = await decideTurnRoute(
-      prefetchTurnRoute(turnInput),
-      judgeAdapter,
-      {
-        hasTools: toolsDefs.length > 0,
-        // 追问要在对话里读（「还是不行」alone 什么也说明不了）。
-        history: messages
-          .filter((m) => m.role === 'user' || m.role === 'assistant')
-          .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' })),
-      },
-      currentAbort.signal,
-    );
-    const semanticRoute = route.route;
+    // The pre-turn LLM router retired 2026-11-06 — compileTurnRoute is
+    // synchronous and holds the turn for nothing.
+    const route = compileTurnRoute(prefetchTurnRoute(turnInput), {
+      hasTools: toolsDefs.length > 0,
+    });
     const workflow = route.workflow;
     const analysis = workflow.analysis;
     if (route.defer) {
@@ -1080,8 +1066,8 @@ async function runRepl(args: CliArgs) {
       ? compactedHistory
       : messages;
     const events = firstTurn
-      ? harness.run(systemPrompt, userTurn, currentAbort.signal, undefined, semanticRoute)
-      : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal, undefined, semanticRoute);
+      ? harness.run(systemPrompt, userTurn, currentAbort.signal)
+      : harness.continueTurn(systemPrompt, historyMessages, userTurn, currentAbort.signal);
 
     const result = await consumeTurn(events, streamMgr, cliProviderHealContext(args));
     let turnOk = result.ok;

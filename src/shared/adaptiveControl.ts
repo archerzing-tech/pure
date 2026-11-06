@@ -23,15 +23,17 @@ export interface AdaptiveControlInput {
   learnedProcedures?: string[];
   recentFailures?: string[];
   verification?: VerificationSummary;
-  /** When the shared semantic router has already understood the request, feed
-   * its tags/complexity here so delegation (看人下菜) is driven by semantic
-   * understanding rather than re-scanning keywords. Keyword inference in
-   * parseIntent remains only as a fallback when this is absent. */
+  /** An upstream understanding of the request (tags/complexity/roles), fed by
+   * whoever last understood it. The semantic router that used to fill this
+   * every turn retired 2026-11-06, so callers currently omit it and select
+   * runs its keyword path — the seam stays because the interface is generic
+   * (a model-driven planner can feed it again without reshaping select).
+   * Keyword inference in parseIntent is the path taken when this is absent. */
   semantic?: {
     tags?: string[];
     complexity?: AdaptiveStrategy['complexity'];
-    /** 语义路由按任务属性挑选的子 agent（真实名录精确名）。undefined=路由没给
-     * → 关键词兜底；显式 [] = 路由判断无需委派，不回退关键词。 */
+    /** 理解方按任务属性挑选的子 agent（真实名录精确名）。undefined=没给
+     * → 关键词兜底；显式 [] = 判断无需委派，不回退关键词。 */
     roles?: string[];
   };
 }

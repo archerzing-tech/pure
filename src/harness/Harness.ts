@@ -44,8 +44,6 @@ import { runUserHooksForEvent } from '../shared/userHookRunner';
 import type { UserHookRunner } from '../shared/userHookRunner';
 import { settleWithin, withTimeout } from '../shared/timing';
 import type { UserHooksConfig } from '../shared/userHooks';
-import type { SemanticRouteDecision } from '../coding-agent/types';
-
 // Bounded wait for the memory retrieval that feeds the system prompt. The
 // embedder's one-time load (WASM + ~80MB model) happens lazily inside the
 // first search; capping it here keeps that cold load off the first token's
@@ -521,7 +519,6 @@ export class Harness {
     userPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
-    semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
@@ -542,7 +539,7 @@ export class Harness {
     // relevant preferences / error patterns as a USER-TURN injection block
     // (composeMemoryPrompt → injection), never into the system prompt —
     // §2.1 cache freeze 的一部分:检索漂移不再重写 system 前缀。
-    const composed = await this.composeMemoryPrompt(systemPrompt, userPrompt, semantic);
+    const composed = await this.composeMemoryPrompt(systemPrompt, userPrompt);
     const effectiveSystemPrompt = composed.systemPrompt;
     // §2.1 cache freeze: this composed prompt is the session's system prompt
     // from now on — continueTurn reuses it instead of recomposing. The
@@ -718,7 +715,6 @@ export class Harness {
     newUserPrompt: string,
     signal?: AbortSignal,
     images?: MessageImage[],
-    semantic?: SemanticRouteDecision | null,
     hardStopSignal?: AbortSignal,
     userInternal?: boolean,
   ): AsyncGenerator<EngineEvent, void, void> {
@@ -750,7 +746,7 @@ export class Harness {
         // 正确反映新 model_identity；同模型回合与历史前缀逐字节相同。
         this.sessionSystemPrompt = systemPrompt;
       } else {
-        const composed = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+        const composed = await this.composeMemoryPrompt(systemPrompt, newUserPrompt);
         this.sessionSystemPrompt = composed.systemPrompt;
         this.sessionMemoryInjection = composed.injection || undefined;
         if (composed.injection) turnUserPrompt = `${composed.injection}\n\n${newUserPrompt}`;
@@ -924,7 +920,7 @@ export class Harness {
    * preferences / error patterns into the system prompt. Never throws — a
    * memory failure degrades to the plain system prompt.
    */
-  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string, semantic?: SemanticRouteDecision | null): Promise<{ systemPrompt: string; injection: string }> {
+  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string): Promise<{ systemPrompt: string; injection: string }> {
     let memories = [] as Awaited<ReturnType<IMemoryStore['search']>>;
     try {
       if (this.config.memory) {
@@ -1041,12 +1037,6 @@ export class Harness {
       },
       learnedProcedures: procedures,
       recentFailures: errorPatterns,
-      // 理解驱动的角色分配：把 LLM 语义路由的意图/复杂度/角色选择喂给策略层，
-      // 让委托建议来自对任务的理解而不是关键词。undefined（路由超时/失败/续跑
-      // 置 null）时策略层照旧走关键词兜底。
-      semantic: semantic
-        ? { tags: [semantic.intent], complexity: semantic.complexity, roles: semantic.subagents }
-        : undefined,
     });
     this.currentAdaptiveStrategy = strategy;
     const composed = this.promptAssembler.composeMemoryPrompt({

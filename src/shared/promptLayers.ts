@@ -455,8 +455,6 @@ export interface UserTurnContext {
    * commands discovered from THIS workspace, plus the design-first protocol
    * for UI builds. */
   deliveryPipeline?: string;
-  /** Freebuff-style intent/risk assessment for THIS request. */
-  assessment?: string;
 }
 
 /**
@@ -523,7 +521,6 @@ export function composeUserTurn(text: string, ctx: UserTurnContext = {}): string
   if (ctx.taskScriptFacts) parts.push(ctx.taskScriptFacts);
   if (ctx.ledgerFacts) parts.push(ctx.ledgerFacts);
   if (ctx.deliveryPipeline) parts.push(ctx.deliveryPipeline);
-  if (ctx.assessment) parts.push(ctx.assessment);
   if (parts.length === 0) return text;
   return `${TASK_CONTEXT_OPEN}\n${parts.join('\n\n')}\n${TASK_CONTEXT_CLOSE}\n\n${text}`;
 }

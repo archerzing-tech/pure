@@ -2473,11 +2473,11 @@ function renderSessionStats() {
   const bar = document.getElementById('stat-cache-bar');
   if (bar) bar.style.width = rate === null ? '0%' : `${Math.max(2, Math.min(100, rate))}%`;
 
-  // 首字延迟：均值 + 上一轮的 TTFT 与其中的路由耗时（隐藏语义路由是首字慢的头号嫌疑）。
+  // 首字延迟：均值 + 上一轮的 TTFT。回合前路由已退役（2026-11-06），
+  // 首字慢的剩余嫌疑只有探针/MCP 等待与模型本身。
   const { avgTtftMs, last } = summarizeTurnTimings(stats.turnTimings ?? []);
   setText('stat-ttft-avg', avgTtftMs === null ? '—' : formatLatencyMs(avgTtftMs));
   setText('stat-ttft-last', !last || last.ttftMs === null ? t('stats.ttft.missing', '本轮未出字') : formatLatencyMs(last.ttftMs));
-  setText('stat-ttft-route', !last || last.routeMs === null ? '—' : formatLatencyMs(last.routeMs));
 
   const fileGroups = groupFileWrites(stats.fileWrites);
   setText('stat-search-count', String(stats.searches.length));
@@ -2698,8 +2698,7 @@ function buildStatsExportMarkdown(stats: SessionStats, provider: string, meta?: 
     ...(last
       ? [
           `- **上轮首字延迟**: ${last.ttftMs === null ? '未出字' : formatLatencyMs(last.ttftMs)}` +
-            `（其中路由 ${last.routeMs === null ? '—' : formatLatencyMs(last.routeMs)}` +
-            `、引擎装配 ${last.engineMs == null ? '—' : formatLatencyMs(last.engineMs)}` +
+            `（引擎装配 ${last.engineMs == null ? '—' : formatLatencyMs(last.engineMs)}` +
             `、线上首字 ${last.engineMs != null && last.ttftMs != null ? formatLatencyMs(last.ttftMs - last.engineMs) : '—'}）`,
         ]
       : []),

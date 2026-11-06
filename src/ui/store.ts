@@ -817,8 +817,6 @@ export interface TurnTiming {
   ts: number;
   /** Send → first streamed token (reasoning or answer). Null if the turn ended without streaming anything. */
   ttftMs: number | null;
-  /** Time in decideTurnRoute (the hidden semantic-router LLM call when it fires). */
-  routeMs: number | null;
   /** Time awaiting the one-shot runtime probe (≈0 once cached). */
   probeMs: number | null;
   /** Bounded MCP waits on the critical path (connect budget + resource prefetch). */

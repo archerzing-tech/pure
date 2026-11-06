@@ -530,7 +530,6 @@ function buildTaskFragments(context: UserTurnContext): PromptFragment[] {
     // 模型就该重问重做了，恰是这条素材要防的失败模式。体量有上限
     // （sessionLedger 的 ASKED/DONE/PLANS_MAX + excerpt 截断），不会裸灌。
     ['ledger_facts', context.ledgerFacts, 94, true],
-    ['assessment', context.assessment, 90],
   ];
   return parts
     .map(([id, content, priority, required]) => fragment(id, content ?? '', priority, required))

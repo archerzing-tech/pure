@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply, isLightTurn } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply, isLightShapedTurn } from '../chat';
+import { turnShape } from '../../coding-agent/turnRoute';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 
@@ -379,10 +380,12 @@ describe('rules-layer risk calibration settles the safety card', () => {
 
   it('keeps the heuristic judgment end to end with no post-hoc recompute path', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 规则层判断在预检早期落定 userAssessment（workflow.userContext.assessment），
-    // 之后不再有任何“合并后重算”的路径。
-    expect(src.indexOf('userAssessment = workflow.userContext.assessment;')).toBeGreaterThan(-1);
-    expect(src.indexOf('userAssessment = formatIntentPrompt(effectiveIntent);')).toBe(-1);
+    // 预判层退役后：规则层安全判断由 workflow 的词表闸（analysis.intent）一次
+    // 落定为 effectiveIntent，riskReview 直接读它——userAssessment 中转层随
+    // 路由一起退役，之后不再有任何「合并后重算」的路径。
+    expect(src.indexOf('let effectiveIntent: IntentAssessment = analysis.intent;')).toBeGreaterThan(-1);
+    expect(src.indexOf('const riskReview = effectiveIntent.requiresConfirmation;')).toBeGreaterThan(-1);
+    expect(src.includes('userAssessment')).toBe(false);
     const gate = src.indexOf("const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';");
     expect(gate).toBeGreaterThan(src.indexOf('const riskReview = effectiveIntent.requiresConfirmation;'));
   });
@@ -2579,17 +2582,16 @@ describe('plan-by-thinking flow', () => {
     // 读数缝（decideLlm）——判据锁在宿主绑定上。
     expect(src).toContain('decideLlm: () => this.judgeLlm ?? this.turnLlm ?? null');
     // 刀 4.2 判例轻档：phaseModels.judge 配了轻模型时裁决缝整体换轻模型
-    // （插话分类/聚焦点名/语义路由同走 decideLlm 缝），没配保持主模型 + 关暗思考。
+    // （插话分类/聚焦点名同走 decideLlm 缝），没配保持主模型 + 关暗思考。
     expect(src).toMatch(/const judgeModel = judgeModelFor\(config\.phaseModels, config\.model\);/);
     // 第 6 期：disableThinking 只在 GLM 端真关思考，别的 provider 会回落
     // reasoning_effort 的 medium——判例/路由必须再显式压一档到 low，否则这
     // 一跳照样吃掉 8s 路由预算。两条分支共用同一 lightOpts（单一来源）。
     expect(src).toMatch(/const lightOpts = \{ disableThinking: true, reasoningEffort: 'low' \} as const;/);
     expect(src).toMatch(/this\.judgeLlm = judgeModel\s*\?\s*createLLMAdapter\(\{ \.\.\.config, model: judgeModel \}, lightOpts\)\s*:\s*createLLMAdapter\(config, lightOpts\);/);
-    // 第 6 期 · 复杂度 → 思考档：路由裁决在手时按 complex/simple 定主回合的思考
-    // 档；用户明令的 plan/build（forcedMode）与无裁决（路由缺席/超时）都留主档
-    // ——floor 退役后「不确定就当复杂」，不再有 needsRouter 二档。
-    expect(src).toMatch(/const lightTurn = isLightTurn\(routeVerdict, forcedMode\);/);
+    // 预判层退役（2026-11-06）：思考档由形态判据落定——寒暄形状（短输入/
+    // 无代码/无 URL/历史无工具活动）轻档，其余主档；「不确定就当复杂」。
+    expect(src).toMatch(/const lightTurn = isLightShapedTurn\(turnShape\(userText\), forcedMode, historyHadToolUse\);/);
     // 嘴/手分开（刀 B 细化 1）：主流 THINK 流适配器经 wrapThinkStream 包一层
     // （进流 +1 / finally -1）——isThinkingStreamActive 读这个计数，插话直投
     // 后要不要掐流重入就靠它。裸 createLLMAdapter 会让重入判据永远读到假。
@@ -2600,15 +2602,12 @@ describe('plan-by-thinking flow', () => {
     // 的 parentSignal 全体 abort 成 tree-cancel。委派在飞时「嘴」读数失真，
     // 必须一律不打断（话已入 steerBus，下一 THINK 边界消化）。
     expect(src).toMatch(/isThinkingStreamActive: \(\) => this\.thinkStreamDepth > 0 && !this\.hasDelegationInFlight\(\),/);
-    // 路由不走门控：路由与插话裁决同为「判断但轻」的一次性调用，一律关暗
-    // 推理。旧门控（配了轻档才换 judgeLlm）默认路径下（没配轻档）把路由绑在
-    // 主适配器上，2026-10-14 实测 glm-5.3-flash 同一段路由提示词：暗思考开
-    // 首字 10.9–35.1s / 出全 12.2–38.3s，对上 12s 超时帽 ⇒ 判定由延迟抽签，
-    // 输的那次静默退回关键词地板（debug / 加功能 / 要方案的请求全被读成
-    // question）。judgeLlm 本身就是同一 provider+model 的关思考适配器，语义
-    // 不变，只是让这一跳回得来。
-    expect(src).toMatch(/decideTurnRoute\(routePrefetch, this\.judgeLlm \?\? llm,/);
-    expect(src).not.toMatch(/decideTurnRoute\(routePrefetch, judgeModel \?/);
+    // 预判层退役（2026-11-06）：回合前的路由 LLM 调用整体撤出——曾经的判例
+    // （路由绑关思考适配器；2026-10-14 glm 暗思考开首字 10.9–35.1s 撞 12s
+    // 超时帽、判定由延迟抽签）随路由一起退役。judgeLlm 只剩插话裁决一个
+    // 消费方；回合 workflow 编译是同步机械步骤，零判定调用。
+    expect(src).not.toMatch(/decideTurnRoute|startTurnRoute/);
+    expect(src).toMatch(/const turnRoute = compileTurnRoute\(routePrefetch, \{/);
     // 裁决器看得见"此刻在思考"与思考最新说到哪：时机证据随上下文过河
     // （v2 三要素投影的 outputGist 节——阶段行 + 思考叙述尾都在那里）。
     expect(src).toContain("gistParts.push('当前状态：模型正在思考这个任务的规划、还未开始执行——此刻纠正事实或补充约束会并进请求重新思考')");
@@ -2765,26 +2764,30 @@ describe('artifact-shape register wiring (刀 9)', () => {
   });
 });
 
-// ── 第 6 期 · 复杂度 → 思考档 ───────────────────────────────────────────────
-// 首字慢的头号来源是主回合的暗思考（实测 glm-5.3-flash：开 10.9–35.1s、关
-// 2.4–3.9s）。路由裁决在这一版里已经在适配器构造前拿到，于是按它决定这一回合
-// 付不付深度推理。这里钉住映射本身——降多了会把复杂活做轻，降少了首字照旧慢。
-describe('isLightTurn（复杂度 → 思考档）', () => {
-  it('路由明说 simple 才降档，complex 保持主档', () => {
-    expect(isLightTurn({ complexity: 'simple' }, undefined)).toBe(true);
-    expect(isLightTurn({ complexity: 'complex' }, undefined)).toBe(false);
+// ── 思考档：形态判据（预判层退役 2026-11-06）─────────────────────────────
+// 没有路由裁决了——寒暄形状（短输入、无代码块、无 URL、历史无工具活动）
+// 轻档，其余一律主档：不确定就当复杂。降多了会把工作活做轻（第一跳质量降），
+// 降少了寒暄慢一两秒——判据的保守方向永远是主档。
+describe('isLightShapedTurn（形态 → 思考档）', () => {
+  it('寒暄形状轻档，工作形状保持主档', () => {
+    expect(isLightShapedTurn(turnShape('你好'), undefined, false)).toBe(true);
+    expect(isLightShapedTurn(turnShape('今天天气怎么样'), undefined, false)).toBe(true);
+    expect(isLightShapedTurn(turnShape('把 src/ui/scrollPin.ts 里的自动滚动改成按块触发，改用 IntersectionObserver。'), undefined, false)).toBe(false);
   });
 
-  it('用户明令 plan/build 时永远留主档（复杂度判定不覆盖用户意图）', () => {
-    expect(isLightTurn({ complexity: 'simple' }, 'plan')).toBe(false);
-    expect(isLightTurn({ complexity: 'simple' }, 'build')).toBe(false);
-    expect(isLightTurn(null, 'plan')).toBe(false);
+  it('带代码块或 URL 的短输入也不轻档', () => {
+    expect(isLightShapedTurn(turnShape('```ts\nconst a = 1;\n```'), undefined, false)).toBe(false);
+    expect(isLightShapedTurn(turnShape('看看 https://example.com'), undefined, false)).toBe(false);
   });
 
-  it('路由没给裁决（无适配器/超时/续跑）保守留主档', () => {
-    // floor 已退役：没有裁决=宿主不知道这轮是什么，不确定就当复杂——
-    // 绝不再有「地板已复现裁决所以免路由」的轻档通道。
-    expect(isLightTurn(null, undefined)).toBe(false);
+  it('历史里有工具活动的会话永不轻档（干过活的会话=工作会话）', () => {
+    expect(isLightShapedTurn(turnShape('继续'), undefined, true)).toBe(false);
+    expect(isLightShapedTurn(turnShape('好的'), undefined, true)).toBe(false);
+  });
+
+  it('用户明令 plan/build 时永远留主档（形态判定不覆盖用户意图）', () => {
+    expect(isLightShapedTurn(turnShape('你好'), 'plan', false)).toBe(false);
+    expect(isLightShapedTurn(turnShape('你好'), 'build', false)).toBe(false);
   });
 });
 

@@ -1,21 +1,21 @@
 // src/coding-agent/Planner.ts
-// 框架改革一期（docs/framework-reform-2026-11.md）：形态判定归还语义路由。
-// 这个文件现在只做三件事——语义路由的 prompt/解析（inferSemanticRoute /
-// parseSemanticRoute）、路由不可用时的两级破坏词安全网（assessIntent）、
+// 预判层退役后（2026-11-06）这个文件只做三件事——插话判定的三段 prompt/解析
+// （classifyInsertion / resolveStopBranchTarget / recheckCoveredInsertion，共用
+// streamUntilParsed）、破坏词安全网（assessIntent，只服务内部判定不塑形主请求）、
 // 计划卡的占位骨架与计划 JSON 解析（generatePlan / parsePlanJson）。
-// 曾经住在这里的 keyword floor（复杂度/陷阱/虚构/项目形态/寒暄直通判定）
-// 已全部删除：理解用户是模型的事，宿主不再用词表猜。
+// 曾经住在这里的语义路由（SEMANTIC_ROUTE_PROMPT / inferSemanticRoute /
+// parseSemanticRoute / routeHistoryMessages）随预判层整体退役（2026-11-06）：
+// 更早的 keyword floor（复杂度/陷阱/虚构/项目形态/寒暄直通判定）在框架改革
+// 一期已删除——理解用户始终是模型的事，宿主不再用词表猜，也不再雇预判。
 
-import type { AnalysisResult, IntentAssessment, RequestIntent, SemanticRouteDecision, TaskComplexity, TaskMode, Plan, PlanStep, PlanVerificationSpec } from './types';
+import type { AnalysisResult, IntentAssessment, RequestIntent, TaskMode, Plan, PlanStep, PlanVerificationSpec } from './types';
 import type { LLMAdapter, Message, MessageImage } from '../shared/types';
 import { repairJsonSource } from '../shared/parseRepair';
-import { KNOWN_SUBAGENT_ROLES } from '../shared/adaptiveControl';
 import { activeCharacterProfile, registerScaledDecision, type RegisterScaledCaps, type WorkOrderRegister } from '../character';
 // Shared confidence vocabulary + gate. One-way dependency (inputDecision knows
-// nothing about Planner) so the router and the insertion classifier can be
-// judged by the same threshold without a cycle.
+// nothing about Planner) so the insertion classifiers can be judged by the same
+// threshold without a cycle.
 import { clampConfidence, inputDefaultConfidence } from './inputDecision';
-import { recordRouterOutcome } from './routerWaitBudget';
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -48,26 +48,6 @@ export function markParallelPlanSteps(plan: Plan, parallelRoles: readonly string
     steps: plan.steps.map(step => (qualifies(step) ? { ...step, parallel: true } : step)),
   };
 }
-
-const SEMANTIC_ROUTE_PROMPT = `You are the routing layer for a coding assistant. Understand the user's complete message semantically; do not classify from isolated words or a fixed keyword list. When earlier turns are included they are CONTEXT, not requests: what you classify is always the LAST user message, read as the continuation of that conversation. A short follow-up ("还是不行", "再加一个导出按钮", "用它做", "就先这样") takes its meaning from the preceding turn — judge what it asks for IN that conversation (a repeat of a failed fix, another change to the same deliverable, a switch to a resource the assistant already has), never as a standalone sentence with no subject. Decide what outcome the user is asking for: answer/explanation, research, advice, debugging, a small change, a broad refactor/migration, or creation of a runnable artifact. Distinguish feedback about an existing result from a request to create a new result. A clear creative request is not a reasonableness review merely because it is large, has several variants, or contains style constraints.
-
-Return ONLY one JSON object with this shape, emitting the keys in EXACTLY this order (the consumer starts acting on the verdict as soon as the last key before "impact" arrives; "impact"/"recommendation" prose, then "subagents" and "confidence", trail behind it):
-{"intent":"question|research|add|modify|debug|refactor|migrate|delete|build","complexity":"simple|complex","mode":"yolo|plan|build","requiresPlan":false,"needsDeliveryGate":false,"assessment":{"riskLevel":"low|medium|high","reversibility":"reversible|partially-reversible|hard-to-reverse|irreversible","requiresProbe":false,"requiresConfirmation":false,"impact":"...","recommendation":"..."},"subagents":["researcher","deep_thinker"],"confidence":0.9}
-
-"confidence" — how sure you are of the intent above, 0..1, and answer it honestly rather than politely: a message that genuinely reads two ways (a complaint that could be feedback or a request to change the code, a question that could also be an instruction) rates around 0.5, an unambiguous one 0.9+. Omit the field when the call is obvious — the caller treats a missing number as "not doubtful", so a number given out of habit is worse than no number.
-
-"subagents" — pick the SMALLEST useful subset of the real subagent roster below (exact names) that this request genuinely needs to delegate real work to. Use [] (empty) for anything you can answer or do directly yourself; never name a helper you would not actually invoke. Cap at 3-4 roles:
-- researcher — 查资料/网络/文档调研，只读可并行（查景点、天气、汇率、预算参考等）
-- deep_thinker — 复杂推理、架构权衡、多方案评估，把长推理隔离出主会话
-- task_planner — 拆解复杂代码任务（仅真正改代码时）
-- code_editor — 按计划修改代码（仅真正改代码时）
-- code_reviewer — 代码审查把关（仅改代码且需要独立评审时）
-- project_auditor — 项目安全/依赖审计
-- ui_designer — 界面/视觉/交互设计
-- bash_executor — 跑命令、构建/验证（有真实命令要执行时）
-A travel plan / itinerary / event arrangement is NOT a coding task: never pick task_planner / code_editor / code_reviewer just because the word "计划/规划" appears. Prefer researcher and/or deep_thinker (or [] if you already know enough).
-
-Use plan/build only when the user's actual outcome benefits from ordered execution or a runnable multi-file deliverable. Do not use them for ordinary advice, critique, explanation, or research. Set needsDeliveryGate only when the user wants files/project output that needs workspace-level delivery verification. Set requiresConfirmation ONLY for system-scale destruction (rm -rf, drop table/database, force push, reset --hard, wiping a whole database/system) or a concrete safety boundary — ordinary delete/clean/reset tasks on named targets do NOT need confirmation: probe read-only, list what will be touched, then proceed with a recoverable approach without pausing. Asking HOW is not asking you to DO it: "如何重置 X" / "怎么删掉 Y" / "how do I rotate the key" asks for a procedure, so classify it intent "question" with low risk and requiresConfirmation false even though the sentence names a destructive operation; reserve intent "delete" and requiresConfirmation for a request to perform that action now on a named target. Write "impact" as the concrete reasoning behind the safety decision rather than a category label — what this request would touch and why it cannot be undone (or why a probe comes first). The GUI shows impact verbatim as your assessment, so a label like "this is a delete request" tells the user nothing about why you stopped. Keep impact and recommendation concise and in the user's language. If uncertain between advice and implementation, choose the conversational path and let the assistant explain options rather than modifying files. When the user message is about an image and the goal is to READ, EXTRACT, TRANSCRIBE, or DESCRIBE the text/content shown in that image (e.g. "把图片里的文字读出来", "extract the text from this screenshot", "读出图里的字"), classify it as intent "question", mode "yolo", needsDeliveryGate false — it is a read-only request, NOT a build/delivery task. Never invent a plan or workspace change for reading an image. A request for a SINGLE visual or naming asset — an icon, logo, avatar, cover, illustration, banner, poster, sticker, wallpaper, UI mockup, or a name/title/slogan ("给我生成一个桌面端应用的图标", "设计一个网站的logo", "给这个项目起个名字") — is a direct creative output even though it mentions an app/website/project: classify it intent "add", mode "yolo", needsDeliveryGate false, requiresPlan false, and produce the asset itself (e.g. write an SVG/HTML file or render it inline) to show the user. The mentioned app/site is only what the asset is FOR — it is not the deliverable, and no multi-step engineering plan or test scaffold belongs to it. Reserve plan/build for deliverables that are themselves runnable or multi-file.`;
 
 /**
  * Stream a classification prompt while accumulating text and stop the moment
@@ -169,197 +149,6 @@ async function streamUntilParsed<T>(
     if (!deliveredEarly) controller.abort();
     void drain.catch(() => {});  // 后台 drain 永不炸出 unhandled rejection
   }
-}
-
-/** One prior turn handed to the router. Declared structural rather than reusing
- *  Message so a caller cannot smuggle tool results or images into the context. */
-export interface RouteContextTurn {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-/** How many prior turns the router may see, and how much of each. Small on
- *  purpose: the router needs WHAT the conversation is working on, not the
- *  transcript — and this call rides in front of every non-trivial turn. */
-export const ROUTE_HISTORY_TURNS = 6;
-export const ROUTE_HISTORY_CHARS = 600;
-
-/**
- * Build the router's context messages from the tail of the conversation.
- *
- * Field shape this exists for: a follow-up ("还是不行" / "再加一个导出按钮" /
- * "用它做") carries almost none of its meaning by itself — routed as a standalone
- * sentence it reads as a fresh, tiny, unclassifiable request, which is how a
- * debugging continuation got carried as chit-chat. The last user message is the
- * request being classified; everything before it is context only.
- *
- * A trailing user turn identical to the current prompt is dropped: the caller's
- * transcript already contains the message being routed, and feeding it twice
- * reads as "the user said this twice".
- */
-export function routeHistoryMessages(
-  turns: readonly RouteContextTurn[] | undefined,
-  current: string,
-): Message[] {
-  if (!turns?.length) return [];
-  const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim();
-  const target = normalize(current);
-  const usable = turns.filter((turn) => turn.role === 'user' || turn.role === 'assistant');
-  while (usable.length > 0) {
-    const last = usable[usable.length - 1];
-    if (last.role === 'user' && normalize(last.content) === target) usable.pop();
-    else break;
-  }
-  return usable
-    .filter((turn) => turn.content.trim().length > 0)
-    .slice(-ROUTE_HISTORY_TURNS)
-    .map((turn) => ({
-      role: turn.role,
-      content: turn.content.length > ROUTE_HISTORY_CHARS
-        ? `${turn.content.slice(0, ROUTE_HISTORY_CHARS)}…`
-        : turn.content,
-    }));
-}
-
-export async function inferSemanticRoute(
-  llm: LLMAdapter,
-  prompt: string,
-  signal?: AbortSignal,
-  images?: MessageImage[],
-  timeoutMs = 12_000,
-  history?: readonly RouteContextTurn[],
-): Promise<SemanticRouteDecision | null> {
-  if (!prompt.trim() || signal?.aborted) return null;
-  const request: Message[] = [
-    { role: 'system', content: SEMANTIC_ROUTE_PROMPT },
-    ...routeHistoryMessages(history, prompt),
-    { role: 'user', content: prompt, images },
-  ];
-  const decision = await streamUntilParsed(llm, request, signal, timeoutMs, parseSemanticRoute, parseSemanticRouteEarly);
-  // applyImageReadOverride 已退役（2026-11-04 决策边界改革刀三）：词表正则
-  // 覆写 LLM 路由判决是最硬的越位形状——「读图是只读」这类判断模型自己能做
-  // （路由 LLM 看得到原文），而复合请求（「分析这张截图并改前端」）被词表
-  // 压成 question 正是越位的现实代价。intent/复杂度/门禁全交语义路由判决。
-  // 等待预算记账：caller abort（用户停轮/切会话）是人手掐的不是端点慢，
-  // 不进 streak——只有端点真实落空的笔才推动自适应降线。
-  if (!signal?.aborted) recordRouterOutcome(decision !== null);
-  return decision;
-}
-
-/** Nine fields the workflow compile and its gates cannot go without:
- *  intent/complexity/mode + requiresPlan/needsDeliveryGate up top, and in the
- *  assessment the four gate fields (riskLevel/reversibility/requiresProbe/
- *  requiresConfirmation). The prompt pins them ahead of the prose, so a stream
- *  that has reached `requiresConfirmation` is safe to act on — the workflow's
- *  ENTIRE input is on the table; only the two display strings (impact/
- *  recommendation) are still missing, and those keep streaming in behind and
- *  get merged into the SAME object (see streamUntilParsed), so downstream
- *  consumers (assessment card / CLI risk line) read the completed form unless
- *  they beat the drain.
- *
- *  2026-11-05 判例（GLM 端点逐轮 routeMs 3001-3005 撞满 3s 线、15 轮 11 超时）：
- *  判定的 decode 大头是散文——完整 JSON 闭合要 3.7-5.8s（晚间时段），3s 线下
- *  判定成功率 ~50%，超时轮 3s 纯白等。键序前移 + 九字段即判把判定时刻拉回
- *  线内（首字节 ~1.4s + 判定字段 ~55 tok），散文不再压在临界路径上。 */
-export function parseSemanticRouteEarly(raw: string): SemanticRouteDecision | null {
-  const braceAt = raw.indexOf('{');
-  if (braceAt < 0) return null;
-  const s = raw.slice(braceAt);
-  const enumField = <T extends string>(field: string, allowed: readonly T[]): T | null => {
-    const m = s.match(new RegExp(`"${field}"\\s*:\\s*"([a-z-]+)"`));
-    return m && (allowed as readonly string[]).includes(m[1]) ? m[1] as T : null;
-  };
-  const boolField = (field: string): boolean | null => {
-    const m = s.match(new RegExp(`"${field}"\\s*:\\s*(true|false)`));
-    return m ? m[1] === 'true' : null;
-  };
-  const intent = enumField<RequestIntent>('intent', ['question', 'research', 'add', 'modify', 'debug', 'refactor', 'migrate', 'delete', 'build']);
-  const complexity = enumField<TaskComplexity>('complexity', ['simple', 'complex']);
-  const mode = enumField<TaskMode>('mode', ['yolo', 'plan', 'build']);
-  const requiresPlan = boolField('requiresPlan');
-  const needsDeliveryGate = boolField('needsDeliveryGate');
-  const riskLevel = enumField<IntentAssessment['riskLevel']>('riskLevel', ['low', 'medium', 'high']);
-  const reversibility = enumField<IntentAssessment['reversibility']>('reversibility', ['reversible', 'partially-reversible', 'hard-to-reverse', 'irreversible']);
-  const requiresProbe = boolField('requiresProbe');
-  const requiresConfirmation = boolField('requiresConfirmation');
-  if (!intent || !complexity || !mode || requiresPlan === null || needsDeliveryGate === null) return null;
-  if (!riskLevel || !reversibility || requiresProbe === null || requiresConfirmation === null) return null;
-  return {
-    intent,
-    complexity,
-    mode,
-    requiresPlan,
-    needsDeliveryGate,
-    // 散文先行落空串（下游 assessmentFlow 直接 .trim()，undefined 会炸），
-    // 后台 drain 收到真值原位补全同一对象。
-    assessment: {
-      intent,
-      riskLevel,
-      reversibility,
-      impact: '',
-      recommendation: '',
-      requiresProbe,
-      requiresConfirmation,
-    },
-  };
-}
-
-export function parseSemanticRoute(raw: string): SemanticRouteDecision | null {
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    try {
-      parsed = JSON.parse(repairJsonSource(match[0]).source);
-    } catch {
-      return null;
-    }
-  }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const value = parsed as Record<string, unknown>;
-  const intent = value.intent as RequestIntent;
-  const complexity = value.complexity as TaskComplexity;
-  const mode = value.mode as TaskMode;
-  const assessment = value.assessment;
-  if (!['question', 'research', 'add', 'modify', 'debug', 'refactor', 'migrate', 'delete', 'build'].includes(intent)
-    || !['simple', 'complex'].includes(complexity)
-    || !['yolo', 'plan', 'build'].includes(mode)
-    || !assessment || typeof assessment !== 'object') return null;
-  const a = assessment as Record<string, unknown>;
-  const riskLevel = a.riskLevel as IntentAssessment['riskLevel'];
-  const reversibility = a.reversibility as IntentAssessment['reversibility'];
-  if (!['low', 'medium', 'high'].includes(riskLevel)
-    || !['reversible', 'partially-reversible', 'hard-to-reverse', 'irreversible'].includes(reversibility)) return null;
-  // subagents 宽松解析：畸形（非数组/元素非字符串）不整体拒绝决策，按缺失处理；
-  // 未知角色过滤到已知名录、去重、上限 4。显式空数组保留（= 路由判断无需委派）。
-  let subagents: string[] | undefined;
-  if (Array.isArray(value.subagents)) {
-    subagents = Array.from(new Set(
-      value.subagents.filter((s): s is string => typeof s === 'string' && KNOWN_SUBAGENT_ROLES.has(s)),
-    )).slice(0, 4);
-  }
-  return {
-    intent,
-    complexity,
-    mode,
-    requiresPlan: value.requiresPlan === true,
-    needsDeliveryGate: value.needsDeliveryGate === true,
-    subagents,
-    // 只在模型真的给了数字时带上：缺字段与 clamp 后的默认值必须能区分开，否则
-    // "没报"会被读成"报了 0.7"，日志里就再也看不出一轮路由到底有没有表态。
-    ...(Number.isFinite(Number(value.confidence)) ? { confidence: clampConfidence(value.confidence) } : {}),
-    assessment: {
-      intent,
-      riskLevel,
-      reversibility,
-      impact: typeof a.impact === 'string' ? a.impact : '',
-      recommendation: typeof a.recommendation === 'string' ? a.recommendation : '',
-      requiresProbe: a.requiresProbe === true,
-      requiresConfirmation: a.requiresConfirmation === true,
-    },
-  };
 }
 
 /** 三值判定（2026-10-28 并线/另线改版，docs/interjection-inline-sideline.md
@@ -850,15 +639,6 @@ export function assessIntent(prompt: string): IntentAssessment {
     requiresProbe,
     requiresConfirmation,
   };
-}
-
-export function formatIntentPrompt(assessment: IntentAssessment): string {
-  // 尾句按通道分支（2026-11-01 分级）：确认卡级保留 approval 指令；探查级
-  // 的契约是「探查后直接动手」，approval 字样会产生自相矛盾的信号。
-  const closing = assessment.requiresConfirmation
-    ? 'If the operation is high risk, wait for explicit user approval before any write or destructive command.'
-    : 'Proceed without pausing for approval; if you discover the operation reaches system-scale destruction, stop and ask first.';
-  return `<intent_assessment>\nIntent: ${assessment.intent}\nRisk: ${assessment.riskLevel}\nReversibility: ${assessment.reversibility}\nImpact: ${assessment.impact}\nRecommended approach: ${assessment.recommendation}\nBefore acting, follow this assessment. If a read-only probe can reduce uncertainty, do that first. Do not broaden the change beyond the assessed impact. ${closing}\n</intent_assessment>`;
 }
 
 /**

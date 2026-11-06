@@ -1,11 +1,11 @@
 import {
   formatArtifactPrompt,
-  formatIntentPrompt,
   Planner,
 } from '../coding-agent/Planner';
-import type { AnalysisResult, IntentAssessment, SemanticRouteDecision, TaskMode } from '../coding-agent/types';
+import type { AnalysisResult, TaskMode } from '../coding-agent/types';
 import { detectUiDesignRequest } from './delivery';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
+import { turnShape } from '../coding-agent/turnRoute';
 import { type UserTurnContext } from './promptLayers';
 
 export type RequestWorkflowStage = 'direct' | 'probe' | 'plan' | 'confirm';
@@ -21,24 +21,6 @@ export interface RequestWorkflowOptions {
    * conversation is continuing. */
   continuingProjectBuild?: boolean;
   planner?: Planner;
-  /** Semantic decision from the shared model router. When absent, the planner
-   * supplies only a conservative fallback and does not infer ordinary intent
-   * from artifact nouns. */
-  semanticRoute?: SemanticRouteDecision | null;
-  /** The turn reached the router because the deterministic floor could NOT
-   * settle it (work-shaped input: an edit, a malfunction report, a plan ask),
-   * and the router produced no verdict (timeout / unusable JSON).
-   *
-   * The floor's read of such a turn is a DEFAULT, not a verdict — `assessIntent`
-   * answers `question` for everything it does not recognise — so falling back to
-   * it here would answer a different question than the one asked: the turn gets
-   * carried as an "answer" with no assessment, no probe, no plan review and no
-   * delivery gate, i.e. the harness abstains precisely where the request asks
-   * for work. Set this instead: the turn is carried as work, and the one move
-   * that is right under EVERY work reading is the cheap read-only probe
-   * ("look before you leap"). It does not invent a plan, a mode, or a risk
-   * level — only refuses to claim the cheap reading it already rejected. */
-  workShapedFallback?: boolean;
 }
 
 export interface CompiledRequestWorkflow {
@@ -53,75 +35,39 @@ export interface CompiledRequestWorkflow {
   probeAvailable: boolean;
   needsProbe: boolean;
   requiresPlanReview: boolean;
-  /** The router was asked because the floor could not settle this turn and
-   *  returned nothing — the turn is carried as work on the conservative
-   *  reading (see RequestWorkflowOptions.workShapedFallback). Exposed so the
-   *  action classifier cannot report it to the user as an "answer" turn. */
-  workShapedFallback: boolean;
   userContext: UserTurnContext;
 }
 
-/**
- * 语义路由可用时，构造分析结果直接以语义结论为准。宿主不运行任何关键词启发式去
- * “归类”用户意思——理解与判定全部是路由模型的事（框架改革一期：形态归还）。
- */
-function buildSemanticAnalysis(
-  planner: Planner,
-  prompt: string,
-  semantic: SemanticRouteDecision,
-  options: RequestWorkflowOptions,
-): AnalysisResult {
-  const semanticMode = options.forcedMode ?? semantic.mode ?? 'yolo';
-  const wantsPlan = semantic.complexity === 'complex'
-    || semantic.assessment.requiresConfirmation
-    || semanticMode === 'build'
-    || options.forcedMode === 'build'
-    || semantic.needsDeliveryGate === true;
-  return {
-    complexity: semantic.complexity,
-    mode: semanticMode,
-    plan: wantsPlan ? planner.generatePlan(prompt, semanticMode) : undefined,
-    reasoning: '本轮由语义路由结合完整请求与上下文理解目标，决定是否需要计划、探针或直接回答。',
-    intent: semantic.assessment,
-  };
-}
-
+// 预判层退役后的 workflow 编译（2026-11-06，Claude Code / opencode / Codebuff
+// 三家对照定案）：没有语义路由了，本函数的全部判定源只剩两类——
+//   1. 机械事实：forcedMode / continuingPlan / planPauseRequested /
+//      continuingProjectBuild（用户显式或已批准流程的接续）；
+//   2. 形态判据（turnShape）+ 词表安全闸（assessIntent 只在毁灭性操作上抬
+//      requiresProbe/requiresConfirmation，规则只会抬高安全要求）。
+// 2026-11-05 判例既定纪律在这里常态化：词表猜测只服务内部判定（stage / 探针 /
+// 交付闸 / build 注入），绝不塑形主请求——assessment 不再注入 user turn。
 export function compileRequestWorkflow(
   prompt: string,
   options: RequestWorkflowOptions = {},
 ): CompiledRequestWorkflow {
   const planner = options.planner ?? new Planner();
-  const semantic = options.semanticRoute ?? null;
-  const workShapedFallback = !semantic && options.workShapedFallback === true;
-
-  // 语义路由可用 → 它是理解用户意图的唯一来源，不调用任何关键词分类逻辑。
-  // 语义路由不可用（null）→ 才退回关键词启发式（planner.analyzeTask），这是最后的兜底。
-  const analysis: AnalysisResult = semantic
-    ? buildSemanticAnalysis(planner, prompt, semantic, options)
-    : planner.analyzeTask(prompt);
-  // forcedMode 是外部显式覆盖，无论走语义路径还是关键词兜底都要生效。
+  const analysis: AnalysisResult = planner.analyzeTask(prompt);
+  // forcedMode 是外部显式覆盖，无论词表怎么判都要生效。
   if (options.forcedMode) analysis.mode = options.forcedMode;
   const assessment = analysis.intent;
-  const isPureQuestion = semantic?.intent === 'question' && !options.forcedMode;
-  const needsDeliveryGate = !isPureQuestion && (
-    options.forcedMode === 'build'
+  const shape = turnShape(prompt);
+  const needsDeliveryGate = options.forcedMode === 'build'
     || analysis.mode === 'build'
-    || semantic?.needsDeliveryGate === true
-    || options.continuingProjectBuild === true
-  );
+    // 工程创作形态（写×项目/应用/游戏…同现，排除问法与单资产创意）：没有
+    // 路由分类 build 了，交付闸/探针/落盘协议由这个形态事实保持常开。
+    || shape.buildShaped
+    || options.continuingProjectBuild === true;
   // Design-first applies to project builds that look like UI work. A
   // continuing build keeps its original routing decision (the marker only
   // matters for the FIRST implementation turn).
   const needsDesignPhase = needsDeliveryGate && !options.continuingPlan
     && detectUiDesignRequest(prompt);
-  // 路由缺席（workShapedFallback）不再把探针拧成强制（2026-11-05 真机判例）：
-  // 「先读后动」曾是 fallback 的默认形状，但它是宿主对「这轮是什么」的隐形
-  // 意见——hello 被强制探工作区后答成「这个交付目标没有可改的东西」。缺席
-  // 就是无意见：探针回归各判定源自身（词表兜底的 requiresProbe / 语义裁决 /
-  // 交付闸），宿主不额外加码。
-  const probeRequired = assessment.requiresProbe
-    || semantic?.requiresPlan === true
-    || needsDeliveryGate;
+  const probeRequired = assessment.requiresProbe || needsDeliveryGate;
   const probeAvailable = options.hasTools !== false;
   const needsProbe = probeRequired && probeAvailable;
   const requiresPlanReview = Boolean(
@@ -130,35 +76,28 @@ export function compileRequestWorkflow(
     || assessment.requiresConfirmation
     || options.forcedMode === 'plan'
     || options.forcedMode === 'build'
-    || semantic?.requiresPlan
-    // 路由器自身矛盾的优先级（2026-10-14 定死一处）：它可以一边给 mode=plan
-    // 一边留 requiresPlan=false——实测「我想给这个项目加一个离线缓存层，先给我
-    // 一个方案」正是如此，于是这一轮直接走成回答，一个计划都没有。规则：
-    // complex + plan 模式 ⇒ 要计划；simple + plan 模式不罢（小改动上 mode=plan
-    // 很常见，强制出卡就是本仓库一直在拒的过度规划）。不一致本身进 signals
-    // 记录（routerPlanFlagInconsistent），不静默选边。
-    || (semantic?.mode === 'plan' && semantic.complexity === 'complex')
-    || (!semantic && analysis.complexity === 'complex' && analysis.plan),
+    // 形态判据：带代码块、长文或工程创作形态 → 走规划流程。它不回答「这轮
+    // 是什么」，只决定「要不要过一遍当着用户的思考」（planByThinking 想完
+    // 自己决定出不出卡，「宁可不卡」契约不变），判错代价是多付一次可见思考，
+    // 不是 2026-09 词表 floor 那种「判闲聊→打发」。buildShaped 在这里保持
+    // 与退役前的行为等价：语义路由判 build 时会把 forcedMode 抬成 'build'
+    // → 同样进规划流程。
+    || shape.codeShaped
+    || shape.longForm
+    || shape.buildShaped
+    // 词表认出的复杂任务（plan 已生成）保守走规划；寒暄猜不出 plan，自然不触发。
+    || (analysis.complexity === 'complex' && analysis.plan),
   );
+  // 落盘协议跟闸走：工程创作形态（buildShaped）开着交付闸，协议就必须在场
+  // ——退役前由语义路由抬 forcedMode='build' 到这里，现在由形态事实直接抬。
   const buildRequested = analysis.mode === 'build'
-    || semantic?.intent === 'build'
-    || semantic?.needsDeliveryGate === true
     || options.forcedMode === 'build'
+    || shape.buildShaped
     || Boolean(options.continuingPlan || options.planPauseRequested);
   const userContext: UserTurnContext = {
-    // 词表兜底猜出的 intent 不注入主请求（2026-11-05 真机判例）：路由缺席时
-    // analyzeTask 对「hello」猜出 intent=modify——把猜测放大成「用户想修改」
-    // 的指令注进去，模型就答成「"hello"这个交付目标没有可改的东西」。缺席
-    // =无意见，词表猜测只服务内部判定（stage/gate），不塑形主请求。真活轮
-    // 的交付契约由 work_invariant 常驻与 buildProtocol（词表命中 build 时）
-    // 承载，不依赖这条注入。
-    assessment: !workShapedFallback
-      && (analysis.intent.riskLevel !== 'low' || analysis.intent.intent !== 'question')
-      ? formatIntentPrompt(analysis.intent)
-      : undefined,
     buildProtocol: buildRequested ? formatArtifactPrompt() + INCREMENTAL_BUILD_PROMPT : undefined,
   };
-  const stage: RequestWorkflowStage = analysis.intent.requiresConfirmation
+  const stage: RequestWorkflowStage = assessment.requiresConfirmation
     ? 'confirm'
     : requiresPlanReview
       ? 'plan'
@@ -174,7 +113,6 @@ export function compileRequestWorkflow(
     probeAvailable,
     needsProbe,
     requiresPlanReview,
-    workShapedFallback,
     userContext,
   };
 }
