@@ -26,6 +26,7 @@
 import type { LLMAdapter, MessageImage } from '../shared/types';
 import { compileRequestWorkflow, type CompiledRequestWorkflow, type RequestWorkflowStage } from '../shared/requestWorkflow';
 import { inferSemanticRoute, type RouteContextTurn } from './Planner';
+import { routerTimeoutMs } from './routerWaitBudget';
 import { appendTrace } from '../evolution/trace';
 import type { SemanticRouteDecision, TaskMode } from './types';
 import {
@@ -85,8 +86,13 @@ export interface TurnRoutePrefetch {
  *  保守推进——对闲聊轮无损（主请求照常快出字），对工作轮无新增损失
  *  （plan/probe 判定在 8s 超时年代本来就丢，且工作轮本就主档）。裁决的
  *  价值边界与插话判定缝的 2.5s（U1）同构：轻裁决值得付的等待就是秒级，
- *  「这轮是什么」仍归路由模型裁决，这里只校准「等多久」这个物理预算。 */
-const ROUTER_TIMEOUT_MS = 3_000;
+ *  「这轮是什么」仍归路由模型裁决，这里只校准「等多久」这个物理预算。
+ *
+ *  2026-11-06 线改自适应（routerWaitBudget）：固定 3s 对端点时段波动是盲的
+ *  ——判定前移（九字段 ~2-3s）只够在快/中时段兑现，慢时段照样 71% 撞满线
+ *  白等。连续落空 → 降线 2.2s 少白等；连续拿到判定 → 回 3s 别漏判定。
+ *  落空 streak 的记账在 inferSemanticRoute（caller abort 不记账）。 */
+const ROUTER_TIMEOUT_MS = routerTimeoutMs;
 
 /**
  * Stage 1 — synchronous, no I/O, no LLM. Everything needed before the first
@@ -199,7 +205,7 @@ export async function decideTurnRoute(
     // The host may have already started this call (startTurnRoute) so the round
     // trip overlapped its preflight; otherwise fire it here as before.
     route = options.preRoute === undefined
-      ? await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, options.history)
+      ? await inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS(), options.history)
       : await (options.preRoute ?? null);
   }
   const deterministic = route === null;
@@ -254,7 +260,7 @@ export async function decideTurnRoute(
       ...prefetch.signals,
       ...(route ? { routerIntent: route.intent, routerMode: route.mode, routerComplexity: route.complexity } : {}),
       ...(route && route.confidence === undefined ? { confidenceDefaulted: true } : {}),
-      ...(workShapedFallback ? { workShapedFallback: true, routerTimeoutMs: ROUTER_TIMEOUT_MS } : {}),
+      ...(workShapedFallback ? { workShapedFallback: true, routerTimeoutMs: ROUTER_TIMEOUT_MS() } : {}),
       ...(route ? { routeHistoryTurns: options.history?.length ?? 0 } : {}),
       // The router contradicting itself is recorded, not hidden: it is the rate
       // that tells us whether the route prompt needs fixing (see the precedence
@@ -294,7 +300,7 @@ export function startTurnRoute(
   signal?: AbortSignal,
 ): Promise<SemanticRouteDecision | null> | null {
   if (opts.continuing || !llm) return null;
-  return inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS, opts.history);
+  return inferSemanticRoute(llm, prefetch.text, signal, prefetch.images, ROUTER_TIMEOUT_MS(), opts.history);
 }
 
 /**

@@ -15,6 +15,7 @@ import { activeCharacterProfile, registerScaledDecision, type RegisterScaledCaps
 // nothing about Planner) so the router and the insertion classifier can be
 // judged by the same threshold without a cycle.
 import { clampConfidence, inputDefaultConfidence } from './inputDecision';
+import { recordRouterOutcome } from './routerWaitBudget';
 
 // ── E2.3 计划层并行标注 ──
 // 策略层的 parallelRoles 说的是"这个任务推荐了哪些可并行的角色"；计划步骤是
@@ -239,6 +240,9 @@ export async function inferSemanticRoute(
   // 覆写 LLM 路由判决是最硬的越位形状——「读图是只读」这类判断模型自己能做
   // （路由 LLM 看得到原文），而复合请求（「分析这张截图并改前端」）被词表
   // 压成 question 正是越位的现实代价。intent/复杂度/门禁全交语义路由判决。
+  // 等待预算记账：caller abort（用户停轮/切会话）是人手掐的不是端点慢，
+  // 不进 streak——只有端点真实落空的笔才推动自适应降线。
+  if (!signal?.aborted) recordRouterOutcome(decision !== null);
   return decision;
 }
 

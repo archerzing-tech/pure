@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Planner, assessIntent, formatArtifactPrompt, formatIntentPrompt, inferSemanticRoute, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta, parseSemanticRoute, parseSemanticRouteEarly } from '../Planner';
+import { resetRouterWaitBudgetForTests, routerTimeoutMs } from '../routerWaitBudget';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
 
@@ -307,6 +308,51 @@ describe('Planner', () => {
     expect(await pending).toBeNull();
     // 停轮即刻放手：不吞 10s 超时线的白等。
     expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
+  it('router outcomes feed the adaptive wait budget (timeout streak shrinks, verdicts recover)', async () => {
+    // 2026-11-06 接线锁：inferSemanticRoute 出口把每笔往返记账进
+    // routerWaitBudget——两笔连续落空降线、两笔判定回基线，都在返回值之外的
+    // 模块状态里，没有这条锁接线断了也是静默的。
+    resetRouterWaitBudgetForTests();
+    const json = JSON.stringify({
+      intent: 'question', complexity: 'simple', mode: 'yolo', requiresPlan: false, needsDeliveryGate: false,
+      assessment: { riskLevel: 'low', reversibility: 'reversible', impact: '', recommendation: '', requiresProbe: false, requiresConfirmation: false },
+    });
+    const hanging = {
+      complete: async () => ({ content: '' }),
+      async *stream() { await new Promise<void>(() => {}); },  // 判定永不落地
+    } as unknown as LLMAdapter;
+    const verdict = {
+      complete: async () => ({ content: '' }),
+      async *stream() { yield { type: 'content', content: json }; },
+    } as unknown as LLMAdapter;
+    expect(await inferSemanticRoute(hanging, '你好', undefined, undefined, 30)).toBeNull();
+    expect(routerTimeoutMs()).toBe(3_000);  // 一笔落空是偶发，不动线
+    expect(await inferSemanticRoute(hanging, '你好', undefined, undefined, 30)).toBeNull();
+    expect(routerTimeoutMs()).toBe(2_200);  // 连续两笔落空 → 降线
+    expect(await inferSemanticRoute(verdict, '你好')).not.toBeNull();
+    expect(routerTimeoutMs()).toBe(2_200);  // 一笔快成功不够回升
+    expect(await inferSemanticRoute(verdict, '你好')).not.toBeNull();
+    expect(routerTimeoutMs()).toBe(3_000);  // 连续两笔判定 → 回基线
+    resetRouterWaitBudgetForTests();
+  });
+
+  it('a caller abort is not a router failure — the wait budget ignores it', async () => {
+    // 用户停轮是人手掐的，不是端点慢：这一笔不进 streak，否则停一次轮就
+    // 白降一次线。挂在基线状态上验证（降到 2.2s 后 abort 恰好无观测差异）。
+    resetRouterWaitBudgetForTests();
+    const hanging = {
+      complete: async () => ({ content: '' }),
+      async *stream() { await new Promise<void>(() => {}); },
+    } as unknown as LLMAdapter;
+    const controller = new AbortController();
+    const pending = inferSemanticRoute(hanging, '你好', controller.signal, undefined, 10_000);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    expect(await pending).toBeNull();
+    expect(routerTimeoutMs()).toBe(3_000);  // streak 没被动过
+    resetRouterWaitBudgetForTests();
   });
 
   it('the fallback never invents a plan or mode from keywords', () => {
