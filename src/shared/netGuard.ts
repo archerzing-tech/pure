@@ -618,7 +618,10 @@ export type FailureClass =
 export function isGatewayBlockedText(message: string): boolean {
   const m = message.toLowerCase();
   if (!/40[13]\b|451\b|\bforbidden\b|\bunauthorized\b/.test(m)) return false;
-  if (/"error"\s*:|invalid[_ ]?api[_ ]?key|\bquota\b|\bbilling\b/.test(m)) return false;
+  // API JSON 错误体排除兼容原生与转义引号两种形态：错误串经 JSON 序列化
+  // (落盘/跨进程)后 "error" 变 \"error\"，排除正则若只认原生引号，序列化
+  // 形态会漏排除、被下方特征词(rejected/blocked)抢判成网关拦截。
+  if (/"\\?error\\?"\s*:|invalid[_ ]?api[_ ]?key|\bquota\b|\bbilling\b/.test(m)) return false;
   return /<html|<!doctype|netentsec|网康|上网行为|安全网关|sangfor|深信服|zscaler|forcepoint|palo ?alto|cloudflare|waf|firewall|blocked|rejected|denied|拦截|阻断|审查|违规|content filter/.test(m);
 }
 

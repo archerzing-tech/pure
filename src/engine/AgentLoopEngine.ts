@@ -620,7 +620,11 @@ export class AgentLoopEngine {
           }
         }
         const identicalRepeats = failures.filter(f => f.type === 'llm_error' && f.message === errMessage).length;
-        const deterministicRejection = errClass === 'context' || isProviderHttp4xx(errMessage);
+        // auth（401/403 凭证被拒，2026-11-06 nemotron 判例）与 context 同性质：
+        // key 不换，重试一百次也是同一个 401。之前它落进通用阶梯——5 连败 +
+        // 一轮白烧的 L2 压缩 + 收尾轮，38 秒后才说「连续多次尝试均失败」，既
+        // 不快也不准（错误与对话内容零相关，压缩/重试都改变不了凭证）。
+        const deterministicRejection = errClass === 'context' || errClass === 'auth' || isProviderHttp4xx(errMessage);
         const structuralSendFailure = deterministicRejection || identicalRepeats >= 1;
         if (structuralSendFailure) {
           // Provider-taught budget: the body's own limit beats the advertised
@@ -642,7 +646,7 @@ export class AgentLoopEngine {
           // gate: the tool list survives compaction byte-identical, so
           // shedding transcript can never clear a validator rejection
           // (2026-11-01 rea 判例：坏 pattern 400 不该白烧两轮压缩).
-          const compactionCanHelp = !isPayloadIndependentHttp4xx(errMessage) && errClass !== 'schema';
+          const compactionCanHelp = errClass !== 'schema' && errClass !== 'auth' && !isPayloadIndependentHttp4xx(errMessage);
           if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS && compactionCanHelp) {
             reactiveCompactions++;
             // 压缩不是一段可以无声熬过的静默：L2 摘要是一次完整的非流式 LLM
@@ -693,6 +697,10 @@ export class AgentLoopEngine {
               // keep the plural even when the count is 1.
               : errClass === 'schema'
               ? `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected a TOOL PARAMETER SCHEMA in the bundled tool list, not the conversation — retrying cannot fix it. Last: "${errMessage}". An MCP tool ships a pattern the endpoint's regex dialect rejects; upgrading pure (it sanitizes incompatible patterns before sending) or disabling the offending MCP server clears it.`
+              : errClass === 'auth'
+              ? // 凭证被拒的止损散文（tail「This is not a network problem」是
+                // sanitizeInterruptedReason 第五锚的固定尾，别改写）。
+                `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected the API credentials (HTTP 401/403). Last: "${errMessage}". This is not a network problem and retrying cannot fix it — the API key for this provider is missing, invalid, or lacks inference permission (e.g. an OpenRouter management/provisioning key manages the account but cannot send chat requests). Check or replace the key in Settings, then resend.`
               : `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "${errMessage}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: errMessage, turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
             const salvaged = await salvageStopMessages(messages);

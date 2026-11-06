@@ -146,6 +146,42 @@ describe('interruption reason classification', () => {
     expect(midstream).toContain('连续 2 次');
   });
 
+  it('answers "能访问吗" in plain words when the provider rejects the API key (2026-11-06 nemotron 判例)', () => {
+    // 真机形态：openrouter 管理型 key → 401 User not found。旧行为两层不对：
+    // ①引擎把 auth 磨满 5 连败阶梯才止损，卡片第一行是「连续多次尝试均失败」，
+    //   不回答用户的第一个问题（能不能访问）；
+    // ②失败原因段是英文引擎散文 + raw JSON，等于天书。
+    // 新行为：引擎 auth 类首轮确定性止损（散文 tail 供第五锚），卡片首行
+    // 讲人话——网络通、服务能连上、key 被拒、去设置换 key。
+    const raw = `Repeated request failures (1 consecutive failures): the provider rejected the API credentials (HTTP 401/403). Last: "401 Unauthorized: {"error":{"message":"User not found.","code":401}}". This is not a network problem and retrying cannot fix it — the API key for this provider is missing, invalid, or lacks inference permission (e.g. an OpenRouter management/provisioning key manages the account but cannot send chat requests). Check or replace the key in Settings, then resend.`;
+    const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');
+    expect(message).toContain('拒绝了你的 API key');
+    expect(message).toContain('网络是通的');
+    expect(message).toContain('User not found.');
+    expect(message).toContain('失败原因');
+    // 「连续多次尝试均失败」不再当首行——它答不了「能不能访问」。
+    expect(message.indexOf('API key')).toBeLessThan(message.indexOf('失败原因'));
+  });
+
+  it('legacy ladder stop form (identical-call, no reasonCode) gets the same auth verdict via the prose fallback', () => {
+    // 老宿主事件不带 reasonCode：prose 回退分支也要吃到人话结论，不能只有
+    // 新引擎散文才讲人话。
+    const raw = `5 consecutive failures of the identical call: "401 Unauthorized: {"error":{"message":"User not found.","code":401}}". This exact call kept failing even after a skip-it directive was issued — stopping here rather than retrying again. Please review and provide guidance.`;
+    const message = sanitizeInterruptedReason(raw);
+    expect(message).toContain('拒绝了你的 API key');
+    expect(message).toContain('User not found.');
+    expect(message).toContain('失败原因');
+  });
+
+  it('does not misread a generic 400 rejection as an auth problem', () => {
+    // 400 参数非法（无 401/403 锚）不走凭证人话分支——保持通用文案+原因段。
+    const raw = `Repeated request failures (1 consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
+    const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');
+    expect(message).not.toContain('拒绝了你的 API key');
+    expect(message).toContain('失败原因');
+    expect(message).toContain('messages 参数非法');
+  });
+
   it('reasonCode=failure_policy_stop 透出失败原因，与 prose 锚同款文案', () => {
     const raw = `Repeated request failures (1 consecutive failures): the provider rejected this request and retrying cannot fix it. Last: "400 Bad Request: {"error":{"code":"1214","message":"messages 参数非法"}}". The transcript may exceed the provider's real per-request limit — start a fresh session or reduce the context.`;
     const message = sanitizeInterruptedReason(raw, 'failure_policy_stop');

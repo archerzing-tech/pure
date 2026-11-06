@@ -1493,6 +1493,48 @@ describe('AgentLoopEngine', () => {
     expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
   });
 
+  it('stops an auth rejection on the FIRST failure — no ladder grind, no compaction round (2026-11-06 nemotron 判例)', async () => {
+    // 真机形态：openrouter 管理型 key → 401 User not found。旧行为把 auth
+    // 磨满通用阶梯（retry/reflect/degrade×2/stop）+ 一轮白烧的 L2 压缩
+    // （压缩器自己也 401），38 秒后才止损。key 不换，重试一百次也是同一个
+    // 401——auth 与 context 同性质：首轮即确定性止损，压缩轮一张都不烧。
+    const AUTH_401 = '401 Unauthorized: {"error":{"message":"User not found.","code":401}}';
+    let calls = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        throw new Error(AUTH_401);
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const compactCalls: number[] = [];
+    const contextEngine = {
+      compact: async (messages: Message[], options?: { force?: boolean; aggressive?: boolean }) => {
+        compactCalls.push(messages.length);
+        return { messages: messages.slice(-1), evictedMessages: messages.length - 1, reclaimedTokens: 10, estimatedTokens: 1 };
+      },
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine, failurePolicy: new DefaultFailurePolicy() });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-auth-401', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    // 一次 doomed THINK + 一次 handover（复用死 adapter，失败被 catch 落纯
+    // stop reason）——不再是 5 连败阶梯。压缩只剩 stop 收尾的 salvage 一刀
+    // （2026-10-29 楔死修复的设计内行为）；旧行为下 reactive 白烧会再加一次。
+    expect(calls).toBe(2);
+    expect(compactCalls.length).toBe(1);
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reason).toContain('rejected the API credentials');
+    expect(interrupted!.payload.reason).toContain(AUTH_401);
+    const decision = events.find(e => e.type === 'FailurePolicyDecision');
+    expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
+  });
+
   it('self-heals a schema rejection: quarantines the named tool, resends pattern-free, completes', async () => {
     // 2026-11-01 rea 判例：严格端点拒收工具 schema 里的 `\0` 正则转义时，
     // 老行为是搭 4xx 确定性拒绝的便车直接停——但这个 400 有具体的每工具

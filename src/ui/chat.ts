@@ -223,6 +223,11 @@ function extractFailureCause(raw: string): string {
   // Last: "msg". An MCP tool ships…` — same shape, fixed tail differs.
   const schemaRejected = raw.match(/^\s*Repeated request failures \(\d+ consecutive failures\): .*Last: (".*)\. An MCP tool ships/);
   if (schemaRejected) return schemaRejected[1];
+  // Auth rejection stop (2026-11-06 nemotron 判例): `Repeated request failures
+  // (1 consecutive failures): the provider rejected the API credentials …
+  // Last: "msg". This is not a network problem…` — fixed tail differs again.
+  const authRejected = raw.match(/^\s*Repeated request failures \(\d+ consecutive failures\): .*Last: (".*)\. This is not a network problem/);
+  if (authRejected) return authRejected[1];
   return '';
 }
 
@@ -250,6 +255,18 @@ function extractGatewayPageDetail(raw: string): string {
   const body = m ? m[1] : raw;
   const text = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
   return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+// 凭证被拒（HTTP 401/403）的人话结论行（2026-11-06 nemotron 判例）。用户
+// 的第一个问题是「到底能不能访问」——答案是：网络是通的、服务能连上，但
+// key 被拒。结论在上，引擎散文留作失败原因段给想深挖的人（交付物给人看
+// 的判例：具体问题、例优先，机器腔原文不上首行）。cause 形态不认（如
+// 429/超时）返回 null，走各自分支。
+function authRejectedVerdict(cause: string): string | null {
+  if (!(/\b40[13]\b/.test(cause) && /api[\s-]?key|unauthorized|forbidden|凭证/i.test(cause))) return null;
+  const detail = extractProviderErrorDetail(cause);
+  return t('chat.interrupted.authRejected', '模型服务拒绝了你的 API key（HTTP 401/403{detail}）——网络是通的、服务能连上，但这个 key 不能用于对话。常见原因：key 填错或已过期；或用的是管理型/provisioning key（只能管账号，不能发起对话）。请在设置里检查并更换该服务的 API key 后重发')
+    .replace('{detail}', detail ? `：${detail}` : '');
 }
 
 export function sanitizeInterruptedReason(raw: string, reasonCode?: string): string {
@@ -281,9 +298,11 @@ export function sanitizeInterruptedReason(raw: string, reasonCode?: string): str
   if (reasonCode === 'failure_policy_stop') {
     const cause = extractFailureCause(raw);
     const base = t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
-    return cause
-      ? `${base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
-      : base;
+    if (!cause) return base;
+    const verdict = authRejectedVerdict(cause);
+    return verdict
+      ? `${verdict}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
+      : `${base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`;
   }
   const lower = raw.toLowerCase();
   // ── User stop / frontend-or-network disconnect (signal aborted) ──
@@ -317,9 +336,10 @@ export function sanitizeInterruptedReason(raw: string, reasonCode?: string): str
   // know WHY the run was halted, not just that it stopped.
   if (/consecutive failures|keeps failing|same error|switch to a fundamentally different approach/i.test(raw)) {
     const cause = extractFailureCause(raw);
+    const auth = cause ? authRejectedVerdict(cause) : null;
     const base = t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');
     return cause
-      ? `${base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
+      ? `${auth ?? base}\n${t('chat.interrupted.repeatedFailuresCause', '失败原因：{detail}').replace('{detail}', cause)}`
       : base;
   }
   // ── Stream idle / first-token timeout (huge output buffering OR huge input

@@ -24,6 +24,7 @@ import {
   hijackReason,
   hostBlocked,
   hostOf,
+  isGatewayBlockedText,
   isHtmlContentType,
   isNetworkError,
   isPayloadIndependentHttp4xx,
@@ -270,6 +271,23 @@ describe('classifyFailure', () => {
     expect(classifyFailure('HTTP 401 Unauthorized: bad api key')).toBe('auth');
     // 没有网关特征的普通 403（如空体）不盲判，保持 auth 现状。
     expect(classifyFailure('403 Forbidden')).toBe('auth');
+  });
+
+  it('classifies the openrouter management-key 401 as auth in both quote forms (2026-11-06 nemotron 判例)', () => {
+    // 真机形态：管理型 key 调 chat/completions → 401 + JSON 错误体。原生引号
+    // （引擎内存态）与转义引号（落盘/序列化态）都必须归 auth——转义形态若
+    // 漏排除，isGatewayBlockedText 的特征词（rejected 等）会把它抢判成网关。
+    expect(classifyFailure('401 Unauthorized: {"error":{"message":"User not found.","code":401}}')).toBe('auth');
+    expect(classifyFailure('401 Unauthorized: {\\"error\\":{\\"message\\":\\"User not found.\\",\\"code\\":401}}')).toBe('auth');
+  });
+
+  it('isGatewayBlockedText does not misread serialized API error bodies as gateway pages', () => {
+    // 排除正则须同时认原生与转义引号：原生是内存形态，转义是 events.jsonl
+    // /IPC 形态——只认原生会让序列化形态漏进网关分支。
+    expect(isGatewayBlockedText('401 Unauthorized: {"error":{"message":"User not found."}}')).toBe(false);
+    expect(isGatewayBlockedText('401 Unauthorized: {\\"error\\":{\\"message\\":\\"User not found.\\"}}')).toBe(false);
+    // 真网关页仍然命中。
+    expect(isGatewayBlockedText('403 Forbidden: <html>blocked by corporate proxy</html>')).toBe(true);
   });
 });
 
