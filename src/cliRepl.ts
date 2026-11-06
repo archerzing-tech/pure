@@ -216,22 +216,17 @@ function renderLogo() {
 }
 
 // Lightweight environment context for the CLI, mirroring the GUI's
-// buildEnvironmentContext (chat.ts): a stable location/language pre-seed, with
-// time/timezone left to sys_info() so they never go stale. The location comes
-// from the PURE_LOCATION env var (PURE_CITY as a fallback) and is also what
-// NodeToolAdapter reports inside sys_info() output.
+// buildEnvironmentContext (chat.ts): only the location pre-seed lives here —
+// it derives from PURE_LOCATION and holds for the whole session. Time and
+// circuit-broken hosts are turn-scoped and ride buildCliEnvFacts (user-turn
+// injection, 缓存地基刀A 2026-11-06) so the session prefix never carries a
+// stale date or a per-session host list.
 function buildEnvironmentContext(): string {
   const city = (process.env.PURE_LOCATION ?? process.env.PURE_CITY ?? '').trim();
-  // Capability brief: hosts that tripped the network circuit breaker this
-  // session — the planner must not schedule steps that depend on them.
-  const blocked = blockedHosts();
-  const netNote = blocked.length
-    ? ` Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`
-    : '';
   if (!city) {
-    return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.${netNote}`;
+    return `Environment: the user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
   }
-  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.${formatTimeContextLine(currentTimeContext())}${netNote}`;
+  return `Environment: user location is ${city} (PURE_LOCATION). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.`;
 }   // Probe installed runtime versions (node / bun / python3 / rustc / git) once per process
 // and inject them into the system prompt, reusing the NodeToolAdapter probe so
 // sys_info() and the prompt always report identical versions. CLI runs inside
@@ -373,12 +368,21 @@ function cliProviderHealContext(args: CliArgs): { provider: string; model: strin
  *  回合哪些块没渲染出来。无事件=空串，零注入。 */
 function buildCliEnvFacts(conventions?: string): string {
   const parts: string[] = [];
+  // 时间基准行常驻（刀A，2026-11-06）：每回合现算现注入，timeContext 设计
+  // 意图落地；不再冻进 system 首回合前缀。
+  const time = formatTimeContextLine(currentTimeContext()).trim();
+  if (time) parts.push(time);
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
   const network = buildNetworkContext().trim();
   const shell = buildShellContextLine().trim();
   if (runtimes) parts.push(runtimes);
   if (network) parts.push(network);
+  // Capability brief (planner reads this): hosts that tripped the network
+  // circuit breaker this session must not appear in any plan step that
+  // depends on reaching them. 有熔断才出现。
+  const blocked = blockedHosts();
+  if (blocked.length) parts.push(`Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`);
   if (shell) parts.push(shell);
   const formFeedback = takeFormValidationFeedback();
   if (formFeedback) parts.push(formFeedback);

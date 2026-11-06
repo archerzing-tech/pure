@@ -712,9 +712,22 @@ export class PromptAssembler {
     return { systemPrompt, userPrompt: userSelection.prompt, budget: report, traceId };
   }
 
-  composeMemoryPrompt(input: { template: string; memory?: PromptMemoryContext; budget?: PromptBudgetConfig; toolDefinitions?: ToolDefinition[] }): string {
+  /**
+   * 会话记忆装配（2026-11-06 缓存地基刀B）：产出从「拼回 system 模板」改为
+   * 二元组 —— systemPrompt（模板挖掉空围栏后的纯静态面，会话内零变化）+
+   * injection（`<session_memory>`/`<adaptive_context>` 注入块，随首轮 user
+   * 消息走，不进 system 前缀）。检索漂移从此打不穿前缀缓存。
+   */
+  composeMemoryPrompt(input: { template: string; memory?: PromptMemoryContext; budget?: PromptBudgetConfig; toolDefinitions?: ToolDefinition[] }): { systemPrompt: string; injection: string } {
     // 逐条围栏卫生在 hygieneMemoryEntries（注入面截断，见其注释）。
     const memory = hygieneMemoryEntries(input.memory);
+    // 围栏标签无条件挖除：模板若自带 <session_memory> 空围栏，剥离后返回，
+    // 避免空标签残留进静态面（原实现「选中为零」分支会漏挖）。
+    const open = input.template.indexOf('<session_memory>');
+    const close = open >= 0 ? input.template.indexOf('</session_memory>', open) : -1;
+    const templateBase = close >= 0
+      ? input.template.slice(0, open) + input.template.slice(close + '</session_memory>'.length)
+      : input.template;
     const hasMemory = !!memory && (
       memory.preferences.length > 0
       || memory.errorPatterns.length > 0
@@ -726,7 +739,7 @@ export class PromptAssembler {
       || (memory.machineLessons?.length ?? 0) > 0
       || Boolean(memory.adaptiveStrategy?.trim())
     );
-    if (!hasMemory) return input.template;
+    if (!hasMemory) return { systemPrompt: templateBase, injection: '' };
 
     const memoryFragments = [
       fragment('memory_project', memory?.project ? `Project: ${memory.project}` : '', 35),
@@ -749,18 +762,13 @@ export class PromptAssembler {
       fragment('memory_errors', memory?.errorPatterns.length ? `Known error patterns (avoid repeating these calls):\n${memory.errorPatterns.map((value) => `- ${value}`).join('\n')}` : '', 55),
       fragment('adaptive_strategy', memory?.adaptiveStrategy ?? '', 95),
     ].filter((item): item is PromptFragment => item !== null);
-    const open = input.template.indexOf('<session_memory>');
-    const close = open >= 0 ? input.template.indexOf('</session_memory>', open) : -1;
-    const templateBase = close >= 0
-      ? input.template.slice(0, open) + input.template.slice(close + '</session_memory>'.length)
-      : input.template;
     const budget = input.budget ? resolvePromptBudget(input.budget) : undefined;
     const toolTokens = estimateToolDefinitionTokens(input.toolDefinitions);
     const memoryLimit = budget
       ? Math.max(1, budget.availableInputTokens - estimatePromptTokens(templateBase) - toolTokens)
       : Number.MAX_SAFE_INTEGER;
     const selection = selectFragments(memoryFragments, memoryLimit);
-    if (selection.fragments.length === 0) return input.template;
+    if (selection.fragments.length === 0) return { systemPrompt: templateBase, injection: '' };
     const adaptive = selection.fragments.filter((item) => item.id === 'adaptive_strategy');
     const retainedMemory = selection.fragments.filter((item) => item.id !== 'adaptive_strategy');
     const sections = [
@@ -771,13 +779,7 @@ export class PromptAssembler {
         ? `<adaptive_context>\n${adaptive.map((item) => item.content).join('\n')}\n</adaptive_context>`
         : '',
     ].filter(Boolean).join('\n\n');
-    return close >= 0
-      ? input.template.slice(0, open) + sections + input.template.slice(close + '</session_memory>'.length)
-      : `${input.template}\n\n${sections}`;
-  }
-
-  assembleMemory(input: { template: string; memory?: PromptMemoryContext; budget?: PromptBudgetConfig }): string {
-    return this.composeMemoryPrompt(input);
+    return { systemPrompt: templateBase, injection: sections };
   }
 }
 

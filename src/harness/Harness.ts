@@ -380,6 +380,11 @@ export class Harness {
   // block or a shifted adaptive directive. Mid-session lessons still reach
   // the model through the failure-policy hint channel (engine user messages).
   private sessionSystemPrompt?: string;
+  // 缓存地基刀B（2026-11-06）— 与 sessionSystemPrompt 同寿命的记忆注入块:
+  // run()(或恢复会话的首次 continueTurn)落值,随那条 user 消息进历史后,
+  // 后续回合靠历史看到记忆,不再重复注入。检索漂移只改 user 消息形状,
+  // 永不触碰 system 前缀。
+  private sessionMemoryInjection?: string;
   // E1.1 — lesson reflections launched at turn end. Fire-and-forget on the
   // turn's critical path, but tracked so entrypoints that exit right after a
   // one-shot turn can drain them (settleReflections) instead of killing the
@@ -534,12 +539,20 @@ export class Harness {
 
     // ── Memory retrieval (Layer 2 per Harness 设计文档 §3.8): at session
     // start, search the IMemoryStore with the user prompt and inject the
-    // relevant preferences / error patterns into the system prompt's
-    // <session_memory> section (composeMemoryPrompt → promptAssembler).
-    const effectiveSystemPrompt = await this.composeMemoryPrompt(systemPrompt, userPrompt, semantic);
+    // relevant preferences / error patterns as a USER-TURN injection block
+    // (composeMemoryPrompt → injection), never into the system prompt —
+    // §2.1 cache freeze 的一部分:检索漂移不再重写 system 前缀。
+    const composed = await this.composeMemoryPrompt(systemPrompt, userPrompt, semantic);
+    const effectiveSystemPrompt = composed.systemPrompt;
     // §2.1 cache freeze: this composed prompt is the session's system prompt
-    // from now on — continueTurn reuses it instead of recomposing.
+    // from now on — continueTurn reuses it instead of recomposing. The
+    // injection rides the FIRST user message (this one) and stays visible via
+    // history afterwards; follow-up turns do not re-inject it.
     this.sessionSystemPrompt = effectiveSystemPrompt;
+    this.sessionMemoryInjection = composed.injection || undefined;
+    const turnUserPrompt = composed.injection
+      ? `${composed.injection}\n\n${userPrompt}`
+      : userPrompt;
 
     // ── Resume (P1-7): feed the checkpoint as initial context ──
     // Previously the loaded messages were only used for checkpoint saving —
@@ -562,7 +575,7 @@ export class Harness {
       ? this.engine.continue(
           {
             sessionId: this.config.sessionId,
-            newUserPrompt: userPrompt,
+            newUserPrompt: turnUserPrompt,
             messages: msgs,
             budget: this.config.budget,
           },
@@ -572,7 +585,7 @@ export class Harness {
           {
             sessionId: this.config.sessionId,
             systemPrompt: effectiveSystemPrompt,
-            userPrompt,
+            userPrompt: turnUserPrompt,
             images,
             budget: this.config.budget,
           },
@@ -580,7 +593,7 @@ export class Harness {
         );
 
     const traceId = this.observability.startRun({
-      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, userPrompt, systemPrompt),
+      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, turnUserPrompt, systemPrompt),
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
@@ -717,9 +730,16 @@ export class Harness {
     // system prompt between turns, which invalidates provider-side cache
     // breakpoints that assume an identical system prefix. Reuse the prompt
     // frozen at run(); compose only when this Harness never ran in this
-    // process (session restored from a checkpoint) and freeze that instead.
+    // process (session restored from a checkpoint) and freeze that instead —
+    // that recovery turn is the "first turn", so its injection rides the user
+    // message exactly like run() does. Normal follow-ups never re-inject:
+    // the session's memory block already lives in the first user message.
+    let turnUserPrompt = newUserPrompt;
     if (this.sessionSystemPrompt === undefined) {
-      this.sessionSystemPrompt = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+      const composed = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+      this.sessionSystemPrompt = composed.systemPrompt;
+      this.sessionMemoryInjection = composed.injection || undefined;
+      if (composed.injection) turnUserPrompt = `${composed.injection}\n\n${newUserPrompt}`;
     }
     const effectiveSystemPrompt = this.sessionSystemPrompt;
 
@@ -735,7 +755,7 @@ export class Harness {
     const stream = this.engine.continue(
       {
         sessionId: this.config.sessionId,
-        newUserPrompt,
+        newUserPrompt: turnUserPrompt,
         images,
         messages: msgs,
         budget: this.config.budget,
@@ -745,7 +765,7 @@ export class Harness {
     );
 
     const traceId = this.observability.startRun({
-      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, newUserPrompt, systemPrompt),
+      traceId: this.recordRuntimeAssembly(effectiveSystemPrompt, turnUserPrompt, systemPrompt),
       sessionId: this.config.sessionId,
       provider: this.config.promptBudget?.provider,
       model: this.config.promptBudget?.model,
@@ -889,7 +909,7 @@ export class Harness {
    * preferences / error patterns into the system prompt. Never throws — a
    * memory failure degrades to the plain system prompt.
    */
-  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string, semantic?: SemanticRouteDecision | null): Promise<string> {
+  private async composeMemoryPrompt(systemPrompt: string, userPrompt: string, semantic?: SemanticRouteDecision | null): Promise<{ systemPrompt: string; injection: string }> {
     let memories = [] as Awaited<ReturnType<IMemoryStore['search']>>;
     try {
       if (this.config.memory) {
@@ -1049,7 +1069,7 @@ export class Harness {
         entryIds,
         entryTypes,
         skills: this.config.injectedSkills?.length ? [...this.config.injectedSkills] : undefined,
-        injected: composed.includes('<session_memory>'),
+        injected: Boolean(composed.injection),
       };
     }
     return composed;

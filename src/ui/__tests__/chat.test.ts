@@ -33,6 +33,25 @@ describe('scrollUi convergence guard', () => {
 // bug doubled the "Output style:" header in the composed GUI base prompt.
 // Each section header must appear EXACTLY once in every persona variant.
 describe('BASE_SYSTEM_PROMPT structure', () => {
+  it('缓存地基刀A：时间与熔断注不进 system 稳定面，走每回合的 envFacts', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // buildEnvironmentContext 只准携带会话稳定事实（语言/城市，config 派生）——
+    // 时间行曾与 netNote 一起拼在这里，首回合被 Harness 冻结链冻进 system：
+    // 第 10 回合看到的是 10 回合前的日期，且跨会话前缀互不一致打穿缓存。
+    const builder = src.slice(
+      src.indexOf('function buildEnvironmentContext'),
+      src.indexOf('/** LLM 主对话的代理路由'),
+    );
+    expect(builder).not.toContain('formatTimeContextLine');
+    expect(builder).not.toContain('blockedHosts()');
+    // 两件回合级事实在 buildEnvFacts（task_context，user-turn 注入件）落地。
+    const envFacts = src.slice(
+      src.indexOf('function buildEnvFacts'),
+      src.indexOf('function formatDigestSize'),
+    );
+    expect(envFacts).toContain('formatTimeContextLine(currentTimeContext())');
+    expect(envFacts).toContain('blockedHosts()');
+  });
   // Smart typo tolerance / Logical traps headers left with framework-reform
   // phase 2 (blocks retired; absence locked in promptLayers.test.ts).
   const HEADERS = ['Output style:', 'Tool-calling rules:', '<capabilities>'];

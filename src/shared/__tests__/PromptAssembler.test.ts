@@ -484,7 +484,7 @@ describe('PromptAssembler', () => {
   });
 
   it('preserves retrieved-memory composition for the Harness path', () => {
-    const prompt = assembler.composeMemoryPrompt({
+    const { systemPrompt, injection } = assembler.composeMemoryPrompt({
       template: 'Base',
       memory: {
         project: '/workspace/demo',
@@ -494,16 +494,18 @@ describe('PromptAssembler', () => {
       },
     });
 
-    expect(prompt).toContain('<session_memory>');
-    expect(prompt).toContain('Project: /workspace/demo');
-    expect(prompt).toContain('- Use TypeScript');
-    expect(prompt).toContain('- TS2307 was fixed by adding the import');
-    expect(prompt).toContain('- Run typecheck after editing');
-    expect(prompt).toContain('</session_memory>');
+    // 缓存地基刀B（2026-11-06）：记忆只住注入块，system 保持纯静态。
+    expect(systemPrompt).toBe('Base');
+    expect(injection).toContain('<session_memory>');
+    expect(injection).toContain('Project: /workspace/demo');
+    expect(injection).toContain('- Use TypeScript');
+    expect(injection).toContain('- TS2307 was fixed by adding the import');
+    expect(injection).toContain('- Run typecheck after editing');
+    expect(injection).toContain('</session_memory>');
   });
 
   it('injects proven successes before error patterns (v1.9.7)', () => {
-    const prompt = assembler.composeMemoryPrompt({
+    const { injection } = assembler.composeMemoryPrompt({
       template: 'Base',
       memory: {
         preferences: [],
@@ -512,15 +514,15 @@ describe('PromptAssembler', () => {
       },
     });
 
-    expect(prompt).toContain('Proven successful approaches (prefer these when the situation matches):');
-    expect(prompt).toContain('- TS2307 resolved by adding the missing import');
-    expect(prompt).toContain('Known error patterns (avoid repeating these calls):');
-    expect(prompt).toContain('- TS2307 needs the import added');
-    expect(prompt.indexOf('Proven successful approaches')).toBeLessThan(prompt.indexOf('Known error patterns'));
+    expect(injection).toContain('Proven successful approaches (prefer these when the situation matches):');
+    expect(injection).toContain('- TS2307 resolved by adding the missing import');
+    expect(injection).toContain('Known error patterns (avoid repeating these calls):');
+    expect(injection).toContain('- TS2307 needs the import added');
+    expect(injection.indexOf('Proven successful approaches')).toBeLessThan(injection.indexOf('Known error patterns'));
   });
 
   it('injects machine-level lessons as an always-on section (E1 落地, 2026-10-13)', () => {
-    const prompt = assembler.composeMemoryPrompt({
+    const { injection } = assembler.composeMemoryPrompt({
       template: 'Base',
       memory: {
         preferences: [],
@@ -529,13 +531,13 @@ describe('PromptAssembler', () => {
       },
     });
 
-    expect(prompt).toContain('Machine-level lessons (environment/network/platform facts about THIS computer');
-    expect(prompt).toContain('- On this network prefer GitHub API file listing over full clone for large repos');
-    expect(prompt).toContain('<session_memory>');
+    expect(injection).toContain('Machine-level lessons (environment/network/platform facts about THIS computer');
+    expect(injection).toContain('- On this network prefer GitHub API file listing over full clone for large repos');
+    expect(injection).toContain('<session_memory>');
   });
 
   it('injects a runtime adaptive strategy even when no long-term memory is available', () => {
-    const prompt = assembler.composeMemoryPrompt({
+    const { systemPrompt, injection } = assembler.composeMemoryPrompt({
       template: 'Base',
       memory: {
         preferences: [],
@@ -544,9 +546,10 @@ describe('PromptAssembler', () => {
       },
     });
 
-    expect(prompt).not.toContain('<session_memory>');
-    expect(prompt).toContain('<adaptive_context>');
-    expect(prompt).toContain('night strategy');
+    expect(injection).not.toContain('<session_memory>');
+    expect(injection).toContain('<adaptive_context>');
+    expect(injection).toContain('night strategy');
+    expect(systemPrompt).toBe('Base');
   });
 
   it('injects the multi_agent mechanics only when subagents AND a delegation-shaped request meet', () => {
@@ -633,7 +636,8 @@ describe('PromptAssembler', () => {
       memory: { preferences: ['memory '.repeat(800)], errorPatterns: [] },
       budget: { provider: 'custom-local', model: 'tiny', contextWindowTokens: 1_000, outputReserveTokens: 0, safetyMarginTokens: 0 },
     });
-    expect(result).toBe(template);
+    expect(result.systemPrompt).toBe(template);
+    expect(result.injection).toBe('');
   });
 
   it('does not advertise filesystem capabilities in GUI plain-chat mode', () => {
@@ -872,43 +876,43 @@ describe('activePermissionLine · 当前权限模式注入', () => {
   });
 });
 
-describe('assembleMemory · 注入面围栏卫生（fenceHygiene，渲染侧同族判例 0b5679f 的另一半）', () => {
+describe('composeMemoryPrompt · 注入面围栏卫生（fenceHygiene，渲染侧同族判例 0b5679f 的另一半）', () => {
   const fenceCount = (text: string): number => (text.match(/^[ \t]{0,3}```/gm) ?? []).length;
   const template = '<session_memory></session_memory>';
 
   it('记忆条目停在 ``` 中途：逐条补收栏，条目内容无损', () => {
-    const prompt = assembler.assembleMemory({
+    const { injection } = assembler.composeMemoryPrompt({
       template,
       memory: {
         preferences: [],
         errorPatterns: ['踩坑：备份命令别用管道\n```bash\ncd "$d" && tar -czf out.tgz .'],
       },
     });
-    expect(prompt).toContain('tar -czf out.tgz');
-    expect(fenceCount(prompt) % 2).toBe(0);
+    expect(injection).toContain('tar -czf out.tgz');
+    expect(fenceCount(injection) % 2).toBe(0);
   });
 
   it('A 条半截开栏不被 B 条半截开栏「假配对」——逐条判定，不是整段判定', () => {
     // 两条各含一个未闭合围栏：整段计数=2（偶）会漏补；逐条卫生后每条都被收栏。
-    const prompt = assembler.assembleMemory({
+    const { injection } = assembler.composeMemoryPrompt({
       template,
       memory: {
         preferences: [],
         errorPatterns: ['甲条\n```bash\nrm -rf "$X"', '乙条\n```ts\nlet a ='],
       },
     });
-    expect(fenceCount(prompt) % 2).toBe(0);
+    expect(fenceCount(injection) % 2).toBe(0);
     // 每条内容后面都紧跟自己的收栏（截到两条之间不应有裸内容）。
-    expect(prompt).toContain('rm -rf "$X"\n```');
-    expect(prompt).toContain('let a =\n```');
+    expect(injection).toContain('rm -rf "$X"\n```');
+    expect(injection).toContain('let a =\n```');
   });
 
   it('已闭合围栏的原样通过，字面不动', () => {
     const entry = '正常教训\n```ts\ncode()\n```';
-    const prompt = assembler.assembleMemory({
+    const { injection } = assembler.composeMemoryPrompt({
       template,
       memory: { preferences: [], errorPatterns: [entry] },
     });
-    expect(prompt).toContain(entry);
+    expect(injection).toContain(entry);
   });
 });

@@ -709,25 +709,20 @@ export const BASE_SYSTEM_PROMPT = (hasWorkspace: boolean, temporaryWorkspace = f
 // so the settings panel can render the memory dashboard without importing this
 // whole chat pipeline).
 
-// Lightweight environment context injected into every turn's system prompt.
-// Time/timezone intentionally stay OUT (they go stale immediately — the model
-// calls sys_info() for those); only the location + answer language are stable
-// enough to pre-seed. This is what lets "帮我安排一个去上海的旅游计划" resolve
-// its departure point to the user's configured city without a lookup.
+// Cross-session-stable environment context for the system prompt. Only
+// location + answer language qualify: both derive from Settings and hold for
+// the whole session, so they are safe to freeze into the session prefix
+// (§2.1 cache freeze). Time and circuit-broken hosts are turn-scoped facts —
+// they ride buildEnvFacts (task_context) and refresh every turn (缓存地基
+// 刀A, 2026-11-06): the frozen system prompt used to carry turn 1's date into
+// turn 10, and per-session host lists made every session's prefix unique.
 function buildEnvironmentContext(config: PureConfig | null): string {
   const lang = config?.language === 'en' ? 'English' : 'Chinese (zh-CN)';
   const city = config?.city?.trim();
-  // Capability brief (planner + executor both read this): hosts that tripped
-  // the network circuit breaker this session must not appear in any plan
-  // step that depends on reaching them.
-  const blocked = blockedHosts();
-  const netNote = blocked.length
-    ? ` Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`
-    : '';
   if (!city) {
-    return `Environment: reply in ${lang}. The user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.${formatTimeContextLine(currentTimeContext())}${netNote}`;
+    return `Environment: reply in ${lang}. The user has NOT configured a location — when a task depends on where they are (trip planning, weather, local services), ask for it or state the assumption clearly.`;
   }
-  return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.${formatTimeContextLine(currentTimeContext())}${netNote}`;
+  return `Environment: reply in ${lang}; user location is ${city} (configured in Settings → General → Environment). Use ${city} as the user's home base — e.g. the departure point for trip planning, the reference for weather / local services.`;
 }
 
 /** LLM 主对话的代理路由（见 netRoute.ts）：唯一决策点是 netRouteProxyPair。
@@ -998,15 +993,26 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
 }
 
 /** P2 下沉（2026-10-27）：惯例 + 运行时 + 网络 + shell 拼成 user-turn 环境事实。
- * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。 */
+ * 住对话层不住 system 前缀——项目切换/reflector 更新不再击穿缓存。
+ * 缓存地基刀A（2026-11-06）吞并两件回合级事实：时间基准行（每回合现算现注入,
+ * timeContext 设计意图在此真正落地——冻进 system 时首回合日期会被用到会话结束）
+ * 与本会话网络熔断注（随熔断发生逐轮出现,不再让跨会话前缀互不一致）。 */
 function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string): string {
   const parts: string[] = [];
+  // 时间基准行常驻：时间是每回合都要校准的参考点（timeContext.ts 顶部定调）。
+  const time = formatTimeContextLine(currentTimeContext()).trim();
+  if (time) parts.push(time);
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
   const network = buildNetworkContext().trim();
   const shell = buildShellContextLine().trim();
   if (runtimes) parts.push(runtimes);
   if (network) parts.push(network);
+  // Capability brief (planner + executor both read this): hosts that tripped
+  // the network circuit breaker this session must not appear in any plan
+  // step that depends on reaching them. 有熔断才出现——与 feedback/heal 同款。
+  const blocked = blockedHosts();
+  if (blocked.length) parts.push(`Known-unreachable hosts this session (circuit-broken): ${blocked.join(', ')} — do not plan or attempt downloads/fetches from them; use inline/local alternatives instead.`);
   if (shell) parts.push(shell);
   // 刀 6 校验真话回流（2026-11-03）：渲染层（错误卡/自动修复）对模型全盲，
   // 同样的围栏语法错下次照犯。有事件才出现——没出错零注入，不常驻刷屏。

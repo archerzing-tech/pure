@@ -185,7 +185,7 @@ describe('Harness cross-session memory (v0.10)', () => {
     });
     class RecordingAssembler extends PromptAssembler {
       calls = 0;
-      override composeMemoryPrompt(input: Parameters<PromptAssembler['composeMemoryPrompt']>[0]): string {
+      override composeMemoryPrompt(input: Parameters<PromptAssembler['composeMemoryPrompt']>[0]): { systemPrompt: string; injection: string } {
         this.calls++;
         return super.composeMemoryPrompt(input);
       }
@@ -205,7 +205,13 @@ describe('Harness cross-session memory (v0.10)', () => {
     await collect(harness.run('BASE SYSTEM', 'use the shared assembler path'));
 
     expect(assembler.calls).toBe(1);
-    expect(llm.received[0][0].content).toContain('Use the shared assembler path');
+    // 缓存地基刀B:记忆只住 user 消息注入块,system 保持纯静态。
+    const firstCall = llm.received[0];
+    expect(firstCall[0].content).toContain('BASE SYSTEM');
+    const userMsg = firstCall.find(m => m.role === 'user');
+    expect(userMsg?.content).toContain('<session_memory>');
+    expect(userMsg?.content).toContain('Use the shared assembler path');
+    expect(userMsg?.content).toContain('use the shared assembler path');
   });
 
   it('injects a runtime strategy through Harness even without a memory store', async () => {
@@ -220,12 +226,12 @@ describe('Harness cross-session memory (v0.10)', () => {
 
     await collect(harness.run('BASE SYSTEM', 'inspect the project'));
 
-    expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
+    expect(llm.received[0][1].content).toContain('<adaptive_strategy>');
     // 刀四（2026-11-04）：策略段事实化——指令腔换事实腔。
-    expect(llm.received[0][0].content).toContain('Context facts (yours to weigh');
+    expect(llm.received[0][1].content).toContain('Context facts (yours to weigh');
   });
 
-  it('injects relevant memories into the system prompt at session start', async () => {
+  it('injects relevant memories into the user turn at session start, keeping the system prompt static', async () => {
     const memStore = new FakeMemoryStore();
     await memStore.add({
       type: 'user_preference',
@@ -256,9 +262,12 @@ describe('Harness cross-session memory (v0.10)', () => {
 
     const sys = llm.received[0][0].content;
     expect(sys).toContain('BASE SYSTEM');
-    expect(sys).toContain('<session_memory>');
-    expect(sys).toContain('User prefers the TypeScript language');
-    expect(sys).toContain('Error TS2307 fixed by adding missing import');
+    expect(sys).not.toContain('<session_memory>');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('<session_memory>');
+    expect(userTurn).toContain('User prefers the TypeScript language');
+    expect(userTurn).toContain('Error TS2307 fixed by adding missing import');
+    expect(userTurn).toContain('fix the TS error in my project');
     expect(llm.received[0].length).toBeGreaterThanOrEqual(2); // system + user
   });
 
@@ -284,9 +293,11 @@ describe('Harness cross-session memory (v0.10)', () => {
     await collect(harness.run('BASE SYSTEM', 'inspect the project'));
 
     const sys = llm.received[0][0].content;
-    expect(sys).toContain('Machine-level lessons');
-    expect(sys).toContain('HIGHCONF');
-    expect(sys).not.toContain('LOWCONF');
+    expect(sys).not.toContain('Machine-level lessons');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('Machine-level lessons');
+    expect(userTurn).toContain('HIGHCONF');
+    expect(userTurn).not.toContain('LOWCONF');
   });
 
   it('writes a successful_pattern when a session completes', async () => {
@@ -470,17 +481,21 @@ describe('Harness cross-session memory (v0.10)', () => {
     });
     await collect(harness.run('SYS', 'hello'));
     expect(llm.received[0][0].content).toContain('SYS');
-    expect(llm.received[0][0].content).toContain('<adaptive_strategy>');
-    expect(llm.received[0][0].content).not.toContain('User prefers');
-    expect(llm.received[0][0].content).not.toContain('Known error patterns:');
+    // 无 store 也有 adaptive strategy——现在住 user 注入块,system 纯静态。
+    expect(llm.received[0][0].content).not.toContain('<adaptive_strategy>');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('<adaptive_strategy>');
+    expect(userTurn).not.toContain('User prefers');
+    expect(userTurn).not.toContain('Known error patterns:');
   });
 });
 
 // ── E0.2 §2.1 — system-prompt cache freeze ──
-// <session_memory> (and the adaptive directive) are composed once at run()
-// and reused verbatim for every continuation: a re-searched memory block
-// rewrites the system prefix mid-session and invalidates provider-side
-// prompt-cache breakpoints that assume an identical system prompt.
+// The memory injection block and the adaptive directive are composed once at
+// run() (刀B: as a user-turn injection, never into the system prompt) and the
+// system prompt is reused verbatim for every continuation: a re-searched
+// memory block would rewrite the user shape mid-session and invalidate
+// provider-side prompt-cache breakpoints that assume an identical prefix.
 
 describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
   it('reuses the run()-composed system prompt on continueTurn instead of re-searching memory', async () => {
@@ -505,6 +520,10 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
     await collect(harness.run('BASE SYSTEM', 'write the module in typescript'));
     expect(memStore.searchCalls).toBe(1);
     const coldSystem = llm.received[0][0].content;
+    // 刀B:首轮记忆块随 user 消息走,system 纯静态。
+    expect(coldSystem).not.toContain('<session_memory>');
+    expect(llm.received[0][1].content).toContain('<session_memory>');
+    expect(llm.received[0][1].content).toContain('write the module in typescript');
 
     // A session-end write lands a NEW memory the follow-up would match.
     // Pre-freeze, continueTurn re-searched and rewrote the system prompt —
@@ -526,6 +545,9 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
 
     expect(memStore.searchCalls).toBe(1); // frozen — continuation does not re-search
     expect(llm.received[1][0].content).toBe(coldSystem); // byte-identical system prompt
+    // 首轮注入块已随首轮 user 消息活在历史里,续回合不重复注入。
+    const followUpUser = llm.received[1][llm.received[1].length - 1].content;
+    expect(followUpUser).toBe('the typescript build now fails, fix it');
   });
 
   it('composes once on a restored session and freezes that prompt for later turns', async () => {
@@ -555,6 +577,10 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
     ];
     await collect(harness.continueTurn('BASE SYSTEM', messages, 'the typescript build now fails, fix it'));
     expect(memStore.searchCalls).toBe(1);
+    // 恢复轮=本进程首轮:注入块随这条 user 消息走(刀B)。
+    const restoredUser = llm.received[0][llm.received[0].length - 1].content;
+    expect(restoredUser).toContain('<session_memory>');
+    expect(restoredUser).toContain('the typescript build now fails, fix it');
 
     await memStore.add({
       type: 'error_pattern',
@@ -572,6 +598,9 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
 
     expect(memStore.searchCalls).toBe(1); // still frozen
     expect(llm.received[1][0].content).toBe(llm.received[0][0].content);
+    // 后续回合不再注入(记忆已随恢复轮 user 消息活在历史)。
+    const laterUser = llm.received[1][llm.received[1].length - 1].content;
+    expect(laterUser).toBe('one more typescript question');
   });
 
   it('throttles memory decay to once per interval even across turns (v0.13)', async () => {
@@ -1021,10 +1050,10 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
 
     await collect(harness.run('BASE SYSTEM', 'tool works on this machine'));
 
-    const sys = llm.received[0][0].content;
-    expect(sys).toContain('Platform-verified tools');
-    expect(sys).toContain('pnpm');
-    expect(sys).not.toContain('choco');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('Platform-verified tools');
+    expect(userTurn).toContain('pnpm');
+    expect(userTurn).not.toContain('choco');
   });
 
   it('always injects machine-global tool preferences for the current platform', async () => {
@@ -1049,11 +1078,11 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
     // 用户提示与工具名零 token 重叠 —— 语义检索命中不了，常驻注入必须仍能看到。
     await collect(harness.run('BASE SYSTEM', 'unrelated question about math'));
 
-    const sys = llm.received[0][0].content;
-    expect(sys).toContain('Platform-verified tools');
-    expect(sys).toContain('brew');
-    expect(sys).not.toContain('choco');
-    expect(sys).not.toContain('stale');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('Platform-verified tools');
+    expect(userTurn).toContain('brew');
+    expect(userTurn).not.toContain('choco');
+    expect(userTurn).not.toContain('stale');
   });
 
   it('skips the do-not-retry memory when a repeated failure is later overcome (v0.12 transient exemption)', async () => {
@@ -1247,11 +1276,11 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
 
     await collect(harness.run('BASE SYSTEM', 'fix the TS error in my project'));
 
-    const sys = llm.received[0][0].content;
-    expect(sys).toContain('Proven successful approaches');
-    expect(sys).toContain('Successful lesson: fixed TS2307');
-    expect(sys).toContain('Known error patterns');
-    expect(sys.indexOf('Proven successful approaches')).toBeLessThan(sys.indexOf('Known error patterns'));
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('Proven successful approaches');
+    expect(userTurn).toContain('Successful lesson: fixed TS2307');
+    expect(userTurn).toContain('Known error patterns');
+    expect(userTurn.indexOf('Proven successful approaches')).toBeLessThan(userTurn.indexOf('Known error patterns'));
   });
 
   it('does NOT write a retry error_pattern when the session ends interrupted', async () => {
@@ -1327,9 +1356,12 @@ describe('Harness resume (P1-7)', () => {
 
     const msgs = llm.received[0];
     // Current system prompt swapped in, history preserved, new prompt appended
+    // (with the adaptive injection riding its head — 刀B).
     expect(contents(msgs)[0]).toContain('NEW SYSTEM');
-    expect(contents(msgs)[0]).toContain('<adaptive_strategy>');
-    expect(contents(msgs).slice(1)).toEqual(['v1', 'a1', 'continue here']);
+    expect(contents(msgs)[0]).not.toContain('<adaptive_strategy>');
+    expect(contents(msgs)[msgs.length - 1]).toContain('<adaptive_strategy>');
+    expect(contents(msgs)[msgs.length - 1]).toContain('continue here');
+    expect(contents(msgs).slice(1, -1)).toEqual(['v1', 'a1']);
   });
 
   it('runs fresh from [system, user] when no checkpoint exists', async () => {
@@ -1347,8 +1379,9 @@ describe('Harness resume (P1-7)', () => {
     expect(events.find(e => e.type === 'Completed')).toBeDefined();
     expect(llm.received).toHaveLength(1);
     expect(contents(llm.received[0])[0]).toContain('SYS');
-    expect(contents(llm.received[0])[0]).toContain('<adaptive_strategy>');
-    expect(contents(llm.received[0]).slice(1)).toEqual(['hello']);
+    expect(contents(llm.received[0])[0]).not.toContain('<adaptive_strategy>');
+    expect(contents(llm.received[0])[1]).toContain('<adaptive_strategy>');
+    expect(contents(llm.received[0])[1]).toContain('hello');
   });
 
   it('replaces the checkpoint system message with the current systemPrompt', async () => {
@@ -1380,8 +1413,11 @@ describe('Harness resume (P1-7)', () => {
     const msgs = llm.received[0];
     expect(msgs[0].role).toBe('system');
     expect(msgs[0].content).toContain('FRESH instructions + memory');
-    expect(msgs[0].content).toContain('<adaptive_strategy>');
+    expect(msgs[0].content).not.toContain('<adaptive_strategy>');
     expect(msgs[1]).toEqual({ role: 'user', content: 'v1' });
+    // Adaptive injection rides the appended user turn (刀B), not the system message.
+    expect(msgs[msgs.length - 1].content).toContain('<adaptive_strategy>');
+    expect(msgs[msgs.length - 1].content).toContain('next');
     // No stale system message remains anywhere in the history
     expect(contents(msgs).filter(c => c === 'STALE instructions')).toHaveLength(0);
   });
@@ -1415,8 +1451,10 @@ describe('Harness resume (P1-7)', () => {
     const msgs = llm.received[0];
     expect(msgs[0].role).toBe('system');
     expect(msgs[0].content).toContain('SYS v2');
-    expect(msgs[0].content).toContain('<adaptive_strategy>');
-    expect(contents(msgs).slice(1)).toEqual(['v1', 'a1', 'next']);
+    expect(msgs[0].content).not.toContain('<adaptive_strategy>');
+    expect(contents(msgs).slice(1, -1)).toEqual(['v1', 'a1']);
+    expect(msgs[msgs.length - 1].content).toContain('<adaptive_strategy>');
+    expect(msgs[msgs.length - 1].content).toContain('next');
   });
 
   it('saves an interrupted checkpoint with live messages (P0 fix)', async () => {
@@ -1440,9 +1478,12 @@ describe('Harness resume (P1-7)', () => {
     expect(session).not.toBeNull();
     const cp = session!.checkpoints.find(c => c.label === 'interrupted');
     expect(cp).toBeDefined();
-    // Live messages (system + user) persisted, not an empty array.
+    // Live messages (system + user) persisted, not an empty array. The user
+    // turn carries the adaptive injection block on its head (刀B) — assert on
+    // the original text being present rather than byte equality.
     expect(cp!.state.messages.length).toBeGreaterThanOrEqual(2);
-    expect(cp!.state.messages[1]).toMatchObject({ role: 'user', content: 'hello' });
+    expect(cp!.state.messages[1]).toMatchObject({ role: 'user' });
+    expect(cp!.state.messages[1].content).toContain('hello');
   });
 
   it('trims trailing unresolved toolCalls from interrupted checkpoint', async () => {
@@ -1812,7 +1853,7 @@ describe('Harness lesson reflector (E1.1)', () => {
     expect(memStore.entries.some(e => e.content.startsWith('Reusable lesson'))).toBe(true);
   });
 
-  it('never injects low-confidence lessons into the system prompt (default)', async () => {
+  it('never injects low-confidence lessons into the turn (default)', async () => {
     const memStore = new FakeMemoryStore();
     await memStore.add({
       type: 'successful_pattern',
@@ -1843,8 +1884,11 @@ describe('Harness lesson reflector (E1.1)', () => {
     await collect(harness.run('SYS', 'how do I fix the deploy scripts'));
 
     const sys = llm.received[0][0].content;
-    expect(sys).toContain('grounded lesson about flaky deploy scripts');
+    expect(sys).not.toContain('grounded lesson about flaky deploy scripts');
     expect(sys).not.toContain('speculative lesson about lunar retrograde deploys');
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('grounded lesson about flaky deploy scripts');
+    expect(userTurn).not.toContain('speculative lesson about lunar retrograde deploys');
   });
 
   describe('correction drafts (E3.1)', () => {
@@ -1944,6 +1988,8 @@ describe('Harness lesson reflector (E1.1)', () => {
       const draftSys = llm.received[0][0].content;
       expect(draftSys).not.toContain(convention);
       expect(draftSys).not.toContain(preference);
+      expect(llm.received[0][1].content).not.toContain(convention);
+      expect(llm.received[0][1].content).not.toContain(preference);
 
       // 用户在仪表盘点「确认」→ removeById + 重写（IMemoryStore 无 update）。
       for (const id of memStore.entries.map(e => e.id)) {
@@ -1968,11 +2014,11 @@ describe('Harness lesson reflector (E1.1)', () => {
       });
       await collect(harness2.run('SYS', 'how should I answer — any comments in this repo?'));
 
-      const sys = llm2.received[0][0].content;
-      expect(sys).toContain(convention);
-      expect(sys).toContain('Project conventions you corrected or confirmed');
-      expect(sys).toContain(preference);
-      expect(sys).toContain('User preferences:');
+      const userTurn = llm2.received[0][1].content;
+      expect(userTurn).toContain(convention);
+      expect(userTurn).toContain('Project conventions you corrected or confirmed');
+      expect(userTurn).toContain(preference);
+      expect(userTurn).toContain('User preferences:');
     });
 
     it('takes a term_alias draft through confirmation into the injected conventions', async () => {
@@ -1998,13 +2044,15 @@ describe('Harness lesson reflector (E1.1)', () => {
       expect(draft!.confidence).toBe('low');
       expect(draft!.content).toContain('f3.ts');
 
-      // 未确认（low）不进 prompt。
+      // 未确认（low）不进 prompt。原话本身含 f3.ts，所以改判区块标题缺席
+      //（草稿若确认，session_memory 里会出现 Project conventions 区）。
       const before = recordingLLM('answer');
       await collect(new Harness({
         sessionId: 'sess-alias-before', llm: before, toolsDefs: [], budget: STD_BUDGET,
         memory: memStore, projectPath: '/ws',
       }).run('SYS', 'open the f3.ts file for me'));
       expect(before.received[0][0].content).not.toContain('f3.ts');
+      expect(before.received[0][1].content).not.toContain('Project conventions');
 
       // 用户确认 → confidence:'high'（走既有确认机制）。
       await memStore.removeById(draft!.id);
@@ -2015,9 +2063,9 @@ describe('Harness lesson reflector (E1.1)', () => {
         sessionId: 'sess-alias-after', llm: after, toolsDefs: [], budget: STD_BUDGET,
         memory: memStore, projectPath: '/ws',
       }).run('SYS', 'open the f3.ts file for me'));
-      const sys = after.received[0][0].content;
-      expect(sys).toContain('f3.ts');
-      expect(sys).toContain('Project conventions you corrected or confirmed');
+      const userTurn = after.received[0][1].content;
+      expect(userTurn).toContain('f3.ts');
+      expect(userTurn).toContain('Project conventions you corrected or confirmed');
     });
   });
 });
@@ -2154,9 +2202,9 @@ describe('Harness memory injection attribution (P0 ratchet)', () => {
     expect(runs[0].memoryInjection).toBeUndefined();
     expect('memoryInjection' in runs[0]).toBe(false);
     // Injection behavior itself is NOT governed by the switch: memory still
-    // composes into the prompt exactly as before.
-    expect(llm.received[0][0].content).toContain('<session_memory>');
-    expect(llm.received[0][0].content).toContain('User prefers bun over npm');
+    // composes into the turn exactly as before (user-turn injection block).
+    expect(llm.received[0][1].content).toContain('<session_memory>');
+    expect(llm.received[0][1].content).toContain('User prefers bun over npm');
   });
 
   it('produces a byte-identical system prompt with the switch on vs off', async () => {
@@ -2191,7 +2239,7 @@ describe('Harness memory injection attribution (P0 ratchet)', () => {
     // 红线断言：归因记账绝不改写运行时提示 —— 开关两态下模型看到的系统提示
     // 逐字节一致（记的那笔只落在观测记录里）。
     expect(onLlm.received[0][0].content).toBe(offLlm.received[0][0].content);
-    expect(onLlm.received[0][0].content).toContain('<session_memory>');
+    expect(onLlm.received[0][1].content).toContain('<session_memory>');
   });
 });
 
@@ -2227,9 +2275,9 @@ describe('Harness tool-correction notes (E1.3)', () => {
     // 与工具名零 token 重叠的提示词 —— 常驻注入必须仍然带上这张卡。
     await collect(harness.run('SYS', 'unrelated question about mathematics'));
 
-    const sys = llm.received[0][0].content;
-    expect(sys).toContain('Platform-verified tools');
-    expect(sys).toContain(suggestion.note);
+    const userTurn = llm.received[0][1].content;
+    expect(userTurn).toContain('Platform-verified tools');
+    expect(userTurn).toContain(suggestion.note);
   });
 });
 
