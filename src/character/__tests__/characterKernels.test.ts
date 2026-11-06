@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   buildCharacterExpressionPrompt,
+  CHARACTER_BANNED_PHRASES,
   CHARACTER_PROFILES,
   EXPRESSION_RED_LINES,
   listCharacterProfiles,
@@ -39,18 +40,8 @@ function extractExampleBlocks(markdown: string): Map<string, string[]> {
   return blocks;
 }
 
-/** 红线 1/2 的负向短语：注入文本里一律不许出现（两个内核共用一份清单）。 */
-const BANNED_PHRASES = [
-  'always be here',
-  'always here for you',
-  "I'm always",
-  '陪着你',
-  '我一直',
-  'hope this helps',
-  'Hope this helps',
-  'Great question',
-  'Certainly!',
-];
+/** 红线 1/2 的负向短语：单一来源在 ../soulOverride.ts（运行时覆盖层同用一份），这里只引用。 */
+const BANNED_PHRASES = CHARACTER_BANNED_PHRASES;
 
 describe('性格内核名册的公共断言（刀 5：对每个内核逐条跑）', () => {
   const profiles = listCharacterProfiles();

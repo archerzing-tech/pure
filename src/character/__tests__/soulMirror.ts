@@ -6,20 +6,19 @@
 // `<!-- soul:expression:<id> -->`。逐字同文的断言语义不变，只换读取面：
 // 块内文本 = 断言面，块外（总纲、版本史等）改动不红。
 //
-// 缺块直接抛错而非返回空串：镜像丢失必须红在「缺块」，不能红在后续某个
-// toContain 上让人去猜。
+// 切块逻辑与运行时覆盖层（../soulOverride.ts 的 sliceSoulSection）同源；这里
+// 只保留「缺块即抛错」的测试语义——镜像丢失必须红在「缺块」，不能红在后续
+// 某个 toContain 上让人去猜。运行时同函数返回 null（缺块=不覆盖）。
 
 import { readFileSync } from 'node:fs';
+import { sliceSoulSection } from '../soulOverride';
 
 const SOUL = readFileSync(new URL('../../../SOUL.md', import.meta.url), 'utf8');
 
 export function soulSection(kind: 'kernel' | 'expression', kernelId: string): string {
-  const open = `<!-- soul:${kind}:${kernelId} -->`;
-  const close = `<!-- /soul:${kind}:${kernelId} -->`;
-  const start = SOUL.indexOf(open);
-  const end = SOUL.indexOf(close);
-  if (start < 0 || end < 0 || end < start) {
-    throw new Error(`SOUL.md 缺 ${open} 块：人格人读面归一后，缺块=镜像丢失`);
+  const section = sliceSoulSection(SOUL, kind, kernelId);
+  if (section === null) {
+    throw new Error(`SOUL.md 缺 soul:${kind}:${kernelId} 块：人格人读面归一后，缺块=镜像丢失`);
   }
-  return SOUL.slice(start + open.length, end);
+  return section;
 }

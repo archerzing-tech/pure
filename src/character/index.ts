@@ -43,6 +43,21 @@ export {
   setActiveCharacterProfile,
 } from './active';
 
+// SOUL.md 运行时覆盖层（2026-11-06）：宿主启动时把盘上文本喂进来（CLI 走
+// soulOverrideIO 直读，GUI 经 Tauri invoke），生效点在 active.ts。
+export {
+  applySoulOverrideTexts,
+  soulOverrideOf,
+  resetSoulOverridesForTests,
+  CHARACTER_BANNED_PHRASES,
+  sliceSoulSection,
+  parseKernelLines,
+  parseScenarios,
+  type SoulOverrideReport,
+  type SoulOverrideRejection,
+  type SoulOverrideTexts,
+} from './soulOverride';
+
 // 分量档位的回合级状态（刀 6）：宿主每回合判定后注入，子代理 spawn 时读走。
 export {
   activeWorkOrderNote,

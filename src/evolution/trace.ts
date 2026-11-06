@@ -14,7 +14,8 @@ export type TraceEventType =
   | 'route_decided'
   | 'delegate'
   | 'turn_route_prefetch'
-  | 'turn_route_decided';
+  | 'turn_route_decided'
+  | 'soul_override';
 
 export interface TraceEvent {
   ts: number;

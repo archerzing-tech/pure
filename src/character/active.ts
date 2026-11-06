@@ -16,6 +16,7 @@
 import type { CharacterProfile, WorkOrderRegister } from './types';
 import { DEFAULT_CHARACTER_PROFILE } from './defaultProfile';
 import { isCharacterProfileId, resolveCharacterProfile } from './registry';
+import { soulOverrideOf } from './soulOverride';
 
 /**
  * 活跃内核 id。`null` = 没人注入过（或宿主显式重置），此时回退默认内核。
@@ -50,11 +51,17 @@ export function resetActiveCharacterProfile(): void {
  * 当前激活的性格内核（**唯一读取点**）。没人注入过、或注入后被重置时，回退默认
  * 内核（老手快线）——这也是刀 1–4 的全部行为，逐字节不变。
  *
+ * SOUL.md 覆盖层（2026-11-06）在此收口：宿主启动时把盘上 SOUL.md 解析进
+ * soulOverride（soulOverride.ts），这里按生效内核 id 返回覆盖版——PromptAssembler
+ * 两张投影与子代理继承都从本函数派生，一处生效三路全通。覆盖只改叙事层
+ * （core/kernelLines/scenarios），决策面旋钮仍走内置 profile。
+ *
  * 调用方每次真读（不是模块加载时取一次）：决策面的上限与阈值散在五个模块里，
  * 模块加载早于宿主读配置，早读会把切内核变成静默失效。
  */
 export function activeCharacterProfile(): CharacterProfile {
-  return resolveCharacterProfile(activeProfileId) ?? DEFAULT_CHARACTER_PROFILE;
+  const base = resolveCharacterProfile(activeProfileId) ?? DEFAULT_CHARACTER_PROFILE;
+  return soulOverrideOf(base.id) ?? base;
 }
 
 /** 当前激活内核的 id（决策日志 / 事件账 / 漂移探针都用它记「这一轮是谁在台上」）。 */

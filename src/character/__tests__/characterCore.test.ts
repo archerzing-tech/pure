@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  CHARACTER_BANNED_PHRASES,
   DEFAULT_CHARACTER_PROFILE,
   VETERAN_FAST_CORE_PROMPT,
   VETERAN_FAST_KERNEL_VERSION,
@@ -71,18 +72,7 @@ describe('性格内核「老手快线」v0（刀 2）', () => {
   });
 
   it('红线 1/2 负向锁：注入文本不含谄媚 / 陪伴话术', () => {
-    const banned = [
-      'always be here',
-      'always here for you',
-      "I'm always",
-      '陪着你',
-      '我一直',
-      'hope this helps',
-      'Hope this helps',
-      'Great question',
-      'Certainly!',
-    ];
-    for (const phrase of banned) {
+    for (const phrase of CHARACTER_BANNED_PHRASES) {
       expect(CORE).not.toContain(phrase);
     }
   });

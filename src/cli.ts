@@ -12,8 +12,9 @@ import { resolveCliAutoApprove } from './cliIntent';
 import { CUSTOM_PRESETS, customProviderFor, customProviderLabel, isCustomProviderId, nextCustomProviderId, providerOverrideFor } from './shared/providers';
 import { bold, cyan, dim, green, red } from './termcolors';
 import type { MCPServerConfig } from './adapter/mcp/MCPTransport';
-import { autoDetectProvider, defaultCliAutoApprove, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, resolveCharacterProfileId, CONFIG_PATH } from './cliConfig';
+import { autoDetectProvider, defaultCliAutoApprove, envKeyForProvider, hasAnyApiKeyEnv, loadConfig, mergeWizardConfig, resolveDefaultModel, resolveOverrideSecretKey, saveConfig, resolveCharacterProfileId, CONFIG_PATH, PURE_DIR } from './cliConfig';
 import { setActiveCharacterProfile } from './character';
+import { applySoulOverridesFromDisk } from './character/soulOverrideIO';
 import type { CliArgs } from './cliConfig';
 import { mergePhaseModelConfig } from './shared/phaseModels';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
@@ -85,6 +86,17 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   }
 
   const fileCfg = loadConfig();
+  // SOUL.md 覆盖层（2026-11-06）：人格用户可编辑。两层（~/.pure/SOUL.md 先铺、
+  // <workspace>/SOUL.md 覆盖）在注入活跃内核之前应用，之后 activeCharacterProfile()
+  // 的三个读取面（两张投影+子代理继承）自然吃到。校验失败的内核回退内置并落
+  // trace；stderr 一行真话，不拦启动。
+  const soulReport = applySoulOverridesFromDisk({
+    globalUserRoot: PURE_DIR,
+    workspaceRoot: process.cwd(),
+  });
+  for (const rejection of soulReport.rejected) {
+    console.error(dim(`[soul] ${rejection.id}/${rejection.face} 覆盖被拒：${rejection.reason}`));
+  }
   // 人格轨道 刀 5：活跃性格内核由配置（--character > config.json）注入运行时。
   // 必须在下面读 defaultCliAutoApprove() 之前完成——那个默认值就来自内核的
   // 确认倾向。认不出的 id 不生效（保持默认内核）且不报错：手改配置不该炸启动。

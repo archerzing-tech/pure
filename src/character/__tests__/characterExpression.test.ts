@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   activeCharacterExpression,
+  CHARACTER_BANNED_PHRASES,
   DEFAULT_CHARACTER_PROFILE,
   EXPRESSION_RED_LINES,
   VETERAN_FAST_EXPRESSION_PROMPT,
@@ -121,18 +122,7 @@ describe('性格内核「老手快线」表达投影 v0（刀 3）', () => {
   });
 
   it('红线 1/2 负向锁：注入文本不含谄媚 / 陪伴话术', () => {
-    const banned = [
-      'always be here',
-      'always here for you',
-      "I'm always",
-      '陪着你',
-      '我一直',
-      'hope this helps',
-      'Hope this helps',
-      'Great question',
-      'Certainly!',
-    ];
-    for (const phrase of banned) {
+    for (const phrase of CHARACTER_BANNED_PHRASES) {
       expect(PROMPT).not.toContain(phrase);
     }
   });

@@ -12,7 +12,7 @@ import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
 import { syncPresentationCardsFromConfig } from './markdown';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
-import { setActiveCharacterProfile } from '../character';
+import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectCanonicalSession } from './sessionEvents';
@@ -984,6 +984,7 @@ function deferToIdle(fn: () => void): void {
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
   applySavedAppearance();
+  await applySoulOverrideFromDisk();
   applySavedCharacterProfile();
   // 冷启动就把运行时/网络探测放到后台：用户阅读 landing 页期间 sys_info 已完成，
   // 首条消息不再在关键路径上等环境探针（与 memoryStore.warmUp() 同一预热模式）。
@@ -1219,6 +1220,33 @@ function applySavedAppearance() {
  */
 function applySavedCharacterProfile(): void {
   setActiveCharacterProfile(loadConfig()?.characterProfileId);
+}
+
+/**
+ * SOUL.md 运行时覆盖层的 GUI 读盘（2026-11-06）。GUI 只做 global 层：
+ * `~/.pure/SOUL.md`（WebView 不能拉 node:fs，读盘走 Tauri invoke；CLI 侧
+ * 另有 workspace 覆盖层，见 character/soulOverrideIO.ts）。覆盖必须在
+ * applySavedCharacterProfile 之前落位——覆盖生效点是 activeCharacterProfile()
+ * 的读取瞬间，先选内核再铺覆盖会把首条消息打在内置人格上。
+ *
+ * 缺文件/读不了 = 缺省走内置（静默，与 CLI readSoulAt 同语义）；覆盖文本被
+ * 校验拒绝时 toast 一行（拒绝原因已落 trace，soul_override 事件），人不能
+ * 对「改了人格却没生效」全盲。
+ */
+async function applySoulOverrideFromDisk(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    const { homeDir, join } = await import('@tauri-apps/api/path');
+    const pureHome = await join(await homeDir(), '.pure');
+    const raw = await tauriInvoke<string | null>('read_file', { workspace: pureHome, path: 'SOUL.md' });
+    if (typeof raw !== 'string' || !raw.trim()) return;
+    const report = applySoulOverrideTexts({ global: raw });
+    for (const rejection of report.rejected) {
+      showToast(`[soul] ${rejection.id}/${rejection.face} 覆盖被拒：${rejection.reason}`, 6000);
+    }
+  } catch {
+    // 缺文件或读盘失败 = 缺省，内置人格照常生效。
+  }
 }
 
 let sessionRestoreToken = 0;

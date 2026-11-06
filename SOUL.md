@@ -10,6 +10,21 @@
 > 机器锚点是四个块标记：`<!-- soul:kernel:<内核id> -->` 与
 > `<!-- soul:expression:<内核id> -->`，块内文本就是断言面，**块外改动不红**。
 >
+> **运行时覆盖层（2026-11-06）**：用户可以用同构的 SOUL.md 覆盖内置人格——
+> 放 `~/.pure/SOUL.md`（全局层）或 `<workspace>/SOUL.md`（工作区层，同块覆盖
+> 全局层），**按块整份替换，绝不拼接**。宿主启动读一次，改人格**下次启动生效**
+> （会话内 system prompt 冻结的既有惯例不变）。规则：
+> - 块级容忍：文件里缺哪个块就不覆盖哪个面，不必抄全两个内核；
+> - 内核级生效：任一面校验失败 → 该内核整体回退内置，绝不半覆盖；
+>   拒绝原因落 trace（`soul_override` 事件）并在 CLI stderr / GUI toast 各报一行；
+> - 校验链：源句 ≥8 条且 id 唯一、每条 >20 字符；五场景齐、label/义务/禁止/
+>   源句齐备；覆盖后的源句表必须仍覆盖 `decisionDerivation` 与场景 `derivedFrom`
+>   引用的全部 id（引用断裂即拒绝）；注入文本各 <2000 字符；
+> - 红线不可越过：谄媚/陪伴话术（`CHARACTER_BANNED_PHRASES`）出现在覆盖文本里
+>   即整内核拒绝——红线是产品物理定律，覆盖层不豁免；
+> - 只覆盖叙事层（core / kernelLines / scenarios）：决策面旋钮、name、version
+>   是产品机制与 GUI 资产，覆盖层不得改写。
+>
 > **改动纪律**：人格文本变更是**行为变更**（OpenAI 2024 谄媚事故的教训：人格
 > 变更必须有回归闸门），按 `docs/persona-core-upgrade.md` §4 跑探针集后才许上线；
 > 改源句要同步改 `CharacterProfile.decisionDerivation` 里引用它的旋钮（铁律 1）。
