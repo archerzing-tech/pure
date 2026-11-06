@@ -118,7 +118,7 @@ export type CharacterDecisionDerivation = Record<keyof CharacterDecisionProfile,
 export interface CharacterProfile {
   /** 稳定 id（存 PureConfig，做活跃内核选择）。 */
   id: string;
-  /** 内核叙事版本号（刀 2 起与 src/character/kernels/<id>.md 对齐）。 */
+  /** 内核叙事版本号（刀 2 起与项目根 SOUL.md 的 soul:kernel:<id> 块对齐）。 */
   version: string;
   /** 人读名（GUI 选择器 / 文档用）。 */
   name: string;

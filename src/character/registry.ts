@@ -11,7 +11,7 @@
 // 常量与装配函数），把名册放在独立叶子模块能让测试与宿主只依赖名册、不拉起整条
 // 注入链。全模块仍是叶子：不 import 任何 ui / coding-agent / shared 运行时模块。
 //
-// 加内核的验收：在本文件登记 + 写 `kernels/<id>.ts` 与 `.md`（源句表逐字同文）
+// 加内核的验收：在本文件登记 + 写 `kernels/<id>.ts` 与 SOUL.md 的对应块（源句表逐字同文）
 // + `characterKernels.test.ts` 的公共断言自动覆盖它 + 跑 `bun run eval:character`。
 
 import type { CharacterProfile } from './types';

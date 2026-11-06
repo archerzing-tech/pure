@@ -11,7 +11,7 @@
 //   · 计划 6 步 / 子步骤 5 → 步子更小
 //   · 默认 confirm 且读写跑全不自动批准 → 每一步都过用户的手
 //   · 逐阶段交代 / 并行上限降到 2 / 插话置信门抬到 0.85 → 少并行、多问
-// 每个值的内核出处见 kernels/craftsman-slow.md §三（铁律 1）。
+// 每个值的内核出处见项目根 SOUL.md 的 soul:kernel:craftsman-slow 块（铁律 1）。
 //
 // 值的语义边界（别误读成「不改用法就生效」）：
 //   · Planner 的三个上限（步子/验证条数）与 mode 阈值、并行角色上限、插话置信门
@@ -69,7 +69,7 @@ export const CRAFTSMAN_SLOW_PROFILE: CharacterProfile = {
       spike: { maxVerificationItems: 2, maxPlanSteps: 5, maxPlanSubsteps: 4 },
     },
   },
-  // 铁律 1：每个旋钮的内核源句。理由与推导链见 kernels/craftsman-slow.md §三。
+  // 铁律 1：每个旋钮的内核源句。理由与推导链见项目根 SOUL.md 的 soul:kernel:craftsman-slow 块。
   decisionDerivation: {
     modeThreshold: ['C2'],
     verifyDensity: ['C3', 'C4'],
@@ -80,7 +80,7 @@ export const CRAFTSMAN_SLOW_PROFILE: CharacterProfile = {
     insertionThreshold: ['C5'],
     registerTendency: ['C11', 'C3'],
   },
-  // 表达面（投影 B）：五场景的义务 / 禁止 / 源句，见 kernels/craftsman-slow-expression.md。
+  // 表达面（投影 B）：五场景的义务 / 禁止 / 源句，见项目根 SOUL.md 的 soul:expression:craftsman-slow 块。
   expression: {
     scenarios: CRAFTSMAN_SLOW_SCENARIOS,
   },

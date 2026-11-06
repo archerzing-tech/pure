@@ -19,7 +19,7 @@
 //   confidenceGate ← src/coding-agent/inputDecision.ts INPUT_DEFAULT_CONFIDENCE
 //
 // 刀 3 起 `expression.scenarios` 不再是空壳：五个场景的表达投影落在
-// kernels/veteranFastExpression.ts（义务 / 禁止进 prompt，例句只进 .md 人读账），
+// kernels/veteranFastExpression.ts（义务 / 禁止进 prompt，例句只进 SOUL.md 人读账），
 // 由 buildCharacterExpressionPrompt 装配成 fragment `character_expression`。
 
 import type { CharacterProfile } from './types';
@@ -76,7 +76,7 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
       spike: { maxVerificationItems: 2, maxPlanSteps: 5, maxPlanSubsteps: 4 },
     },
   },
-  // 铁律 1：每个旋钮的内核源句。理由与推导链见 kernels/veteran-fast.md §三。
+  // 铁律 1：每个旋钮的内核源句。理由与推导链见项目根 SOUL.md 的 soul:kernel:veteran-fast 块。
   decisionDerivation: {
     modeThreshold: ['K2'],
     verifyDensity: ['K5', 'K2'],
@@ -87,7 +87,7 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
     insertionThreshold: ['K2', 'K3'],
     registerTendency: ['K11', 'K2'],
   },
-  // 表达面（投影 B，刀 3）：五场景的义务 / 禁止 / 源句，见 kernels/veteran-fast-expression.md。
+  // 表达面（投影 B，刀 3）：五场景的义务 / 禁止 / 源句，见项目根 SOUL.md 的 soul:expression:veteran-fast 块。
   expression: {
     scenarios: VETERAN_FAST_SCENARIOS,
   },

@@ -31,7 +31,7 @@ export type CharacterKernelLines = Readonly<Record<string, string>>;
  * 的清单），以及钉住优先级——协议是物理定律、性格是人品，冲突时协议赢（蓝图
  * §4 红线 3）。逐条源句不带上 K 编号：编号是给推导表与测试用的，对模型是噪声。
  *
- * 精炼版而非全文：全文（kernels/<id>.md）是人读源（含推导表与红线对齐），
+ * 精炼版而非全文：全文（项目根 SOUL.md 的 soul:* 块）是人读源（含推导表与红线对齐），
  * prompt 里只放行为面。
  */
 export function buildCharacterCorePrompt(lines: CharacterKernelLines): string {

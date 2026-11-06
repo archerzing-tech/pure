@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import {
   buildCharacterExpressionPrompt,
   CHARACTER_PROFILES,
@@ -8,27 +7,23 @@ import {
   type CharacterDecisionProfile,
   type CharacterScenarioId,
 } from '../index';
+import { soulSection } from './soulMirror';
 
 // 人格轨道 刀 5 的公共断言集：**对名册里的每个内核**逐条跑，而不是给每个内核抄
-// 一份测试。加内核的验收因此只剩「登记 + 落两个 .md + 跑本文件」。
+// 一份测试。加内核的验收因此只剩「登记 + 在 SOUL.md 落两个块 + 跑本文件」。
+// （2026-11-06 人读面归一：断言面从四份分散镜像改锚项目根 SOUL.md 的 soul:* 块，
+// 断言语义不变。）
 //
 // 守的六件事（前四条来自刀 2/刀 3，后两条是刀 5 多内核才成立的）：
-//   ① 三方版本一致（源句表 / profile / .md 镜像头行）；
-//   ② .md 人读镜像与注入面**逐字同文**——改一边不改另一边即红；
+//   ① 三方版本一致（源句表 / profile / SOUL.md 块头行）；
+//   ② SOUL.md 人读块与注入面**逐字同文**——改一边不改另一边即红；
 //   ③ 铁律 1：决策面每个旋钮都有出处，出处 id 真存在；
 //   ④ 本刀纪律：表达面例句只进人读账，一句也不许进注入文本；
 //   ⑤ 源句编号前缀不串读（老手快线 K / 工匠慢线 C）；
 //   ⑥ 两个内核的决策面**必须真的不同**——否则第二个内核是个同义词。
 
-const KERNELS_DIR = new URL('../kernels/', import.meta.url);
-
-function kernelMirror(id: string): string {
-  return readFileSync(new URL(`${id}.md`, KERNELS_DIR), 'utf8');
-}
-
-function expressionMirror(id: string): string {
-  return readFileSync(new URL(`${id}-expression.md`, KERNELS_DIR), 'utf8');
-}
+const kernelMirror = (id: string): string => soulSection('kernel', id);
+const expressionMirror = (id: string): string => soulSection('expression', id);
 
 /** 人读账里的例句块：`<!-- examples:<id> -->` … `<!-- /examples:<id> -->`。 */
 function extractExampleBlocks(markdown: string): Map<string, string[]> {
@@ -82,7 +77,7 @@ describe('性格内核名册的公共断言（刀 5：对每个内核逐条跑�
       const expression = profile.expression.scenarios;
       const scenarioIds = Object.keys(expression) as CharacterScenarioId[];
 
-      it('三方版本一致：源句表 / profile / .md 镜像头行', () => {
+      it('三方版本一致：源句表 / profile / SOUL.md 块头行', () => {
         expect(profile.version).toBe(profile.version.trim());
         expect(mirror).toContain(profile.id);
         expect(mirror).toContain(profile.version);
@@ -97,7 +92,7 @@ describe('性格内核名册的公共断言（刀 5：对每个内核逐条跑�
         }
       });
 
-      it('.md 人读镜像与源句表逐字同文（含 id）', () => {
+      it('SOUL.md 人读块与源句表逐字同文（含 id）', () => {
         for (const [id, text] of Object.entries(profile.kernelLines)) {
           expect(mirror).toContain(`\`${id}\``);
           expect(mirror).toContain(text);

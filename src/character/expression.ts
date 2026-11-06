@@ -12,7 +12,7 @@
 // src/shared/promptLayers.ts:245 的既有立场一致）：
 // 写进 prompt 的「好例句」会被模型逐字复用，成为下一代机器腔——`HUMAN_TONE_PROMPT`
 // 与 `COMPLEX_TASK_PROTOCOL_PROMPT` 都因此只写原则。所以：**义务与禁止进 prompt，
-// 例句只进人读账**（kernels/<id>-expression.md），供刀 4 的判例集与人工抽查取用。
+// 例句只进人读账**（项目根 SOUL.md 的 soul:expression:<id> 块），供刀 4 的判例集与人工抽查取用。
 // 由 `__tests__/characterExpression.test.ts` 守：人读账里的例句一旦出现在注入文本里即红。
 //
 // 铁律 1（投影必须标注来源）的机制面：

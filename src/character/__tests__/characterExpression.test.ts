@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import {
   activeCharacterExpression,
   DEFAULT_CHARACTER_PROFILE,
@@ -11,16 +10,18 @@ import {
   VETERAN_FAST_SCENARIO_IDS,
   type CharacterScenarioId,
 } from '../index';
+import { soulSection } from './soulMirror';
 
 // 人格轨道 刀 3 的机制面（docs/persona-core-upgrade.md §3 刀 3、铁律 1）：
 //   ① 人读账与注入面**逐字同文**——label / 义务 / 禁止 / 源句 / 红线改一边不改另一边即红；
-//   ② 铁律 1：每个场景的源句 id 都真存在（内核源句表 + 内核 .md 双重确认）；
+//   ② 铁律 1：每个场景的源句 id 都真存在（内核源句表 + SOUL.md 内核块双重确认）；
 //   ③ 本刀的核心纪律：**例句只进人读账，绝不进注入文本**（逐字复用会变成机器腔）；
-//   ④ 每场景 3–5 条例句（人读账是刀 4 判例集的素材面，不能是空壳）；
+//   ④ 每场景 3–5 条例句（人读账是判例集的素材面，不能是空壳）；
 //   ⑤ 红线负向锁：注入文本里不许出现谄媚 / 陪伴话术；
 //   ⑥ 体积上限：表达投影每回合都付 token。
-const LEDGER = readFileSync(new URL('../kernels/veteran-fast-expression.md', import.meta.url), 'utf8');
-const KERNEL_MIRROR = readFileSync(new URL('../kernels/veteran-fast.md', import.meta.url), 'utf8');
+// 2026-11-06 人读面归一：读取面从两份分散镜像改锚 SOUL.md 的对应 soul:* 块。
+const LEDGER = soulSection('expression', 'veteran-fast');
+const KERNEL_MIRROR = soulSection('kernel', 'veteran-fast');
 const PROMPT = VETERAN_FAST_EXPRESSION_PROMPT;
 
 /** 人读账里的例句块：`<!-- examples:<id> -->` … `<!-- /examples:<id> -->`。 */
@@ -70,7 +71,7 @@ describe('性格内核「老手快线」表达投影 v0（刀 3）', () => {
     }
   });
 
-  it('铁律 1：每个场景的源句 id 在内核源句表与内核 .md 里都真存在', () => {
+  it('铁律 1：每个场景的源句 id 在内核源句表与 SOUL.md 内核块里都真存在', () => {
     for (const id of VETERAN_FAST_SCENARIO_IDS) {
       for (const lineId of VETERAN_FAST_SCENARIOS[id].derivedFrom) {
         expect(VETERAN_FAST_LINES[lineId]).toBeDefined();

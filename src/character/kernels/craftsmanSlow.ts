@@ -1,7 +1,7 @@
 // src/character/kernels/craftsmanSlow.ts
 // 性格内核「工匠慢线」的运行时源句表（人格轨道 刀 5，2026-10-12）。
 //
-// 人读源是同目录的 craftsman-slow.md（明文叙事 + 红线对齐 + 推导表）；本文件是
+// 人读源是项目根 SOUL.md 的 soul:kernel:craftsman-slow 块（明文叙事 + 红线对齐 + 推导表）；本文件是
 // **注入面**：源句表 C1–C10 与 .md 逐字同文（快照测试守），注入文本由
 // buildCharacterCorePrompt 装配成 fragment `character_core`（priority 119）。
 //
@@ -17,7 +17,7 @@
 
 import { buildCharacterCorePrompt, type CharacterKernelLines } from '../core';
 
-/** 内核叙事版本号（与 craftsman-slow.md 的头行、CharacterProfile.version 三处一致）。 */
+/** 内核叙事版本号（与 SOUL.md 该块头行、CharacterProfile.version 三处一致）。 */
 export const CRAFTSMAN_SLOW_KERNEL_VERSION = 'v1';
 
 /**

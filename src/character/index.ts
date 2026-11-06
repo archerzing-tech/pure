@@ -63,7 +63,7 @@ export {
   resolveCharacterProfile,
 } from './registry';
 
-// 内核与表达面的运行时源（人读镜像在各自的 kernels/<id>.md）。
+// 内核与表达面的运行时源（人读镜像归一在项目根 SOUL.md 的 soul:* 块）。
 export {
   VETERAN_FAST_CORE_PROMPT,
   VETERAN_FAST_KERNEL_VERSION,

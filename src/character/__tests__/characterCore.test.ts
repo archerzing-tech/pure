@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import {
   DEFAULT_CHARACTER_PROFILE,
   VETERAN_FAST_CORE_PROMPT,
@@ -7,18 +6,21 @@ import {
   VETERAN_FAST_LINES,
   type CharacterDecisionProfile,
 } from '../index';
+import { soulSection } from './soulMirror';
 
 // 人格轨道 刀 2 的机制面（docs/persona-core-upgrade.md §1、铁律 1）：
-//   ① 内核叙事三方版本一致（源句表 / profile / .md 镜像头行）；
-//   ② .md 人读镜像与源句表**逐字同文**——改一边不改另一边即红；
+//   ① 内核叙事三方版本一致（源句表 / profile / SOUL.md 块头行）；
+//   ② SOUL.md 人读块与源句表**逐字同文**——改一边不改另一边即红；
 //   ③ 注入文本真的带上每条源句（否则内核通道是空的）；
 //   ④ 铁律 1：决策面每个旋钮的每个源句 id 都真存在；
 //   ⑤ 红线 1/2 的负向锁：注入文本里不许出现谄媚 / 陪伴话术。
-const MIRROR = readFileSync(new URL('../kernels/veteran-fast.md', import.meta.url), 'utf8');
+// 2026-11-06 人读面归一：MIRROR 从 kernels/veteran-fast.md 改锚 SOUL.md 的
+// soul:kernel:veteran-fast 块，断言语义不变。
+const MIRROR = soulSection('kernel', 'veteran-fast');
 const CORE = DEFAULT_CHARACTER_PROFILE.core;
 
 describe('性格内核「老手快线」v0（刀 2）', () => {
-  it('三方版本一致：源句表 / profile / .md 镜像', () => {
+  it('三方版本一致：源句表 / profile / SOUL.md 块', () => {
     expect(VETERAN_FAST_KERNEL_VERSION).toBe('v1');
     expect(DEFAULT_CHARACTER_PROFILE.version).toBe(VETERAN_FAST_KERNEL_VERSION);
     expect(MIRROR).toContain('veteran-fast');
@@ -34,7 +36,7 @@ describe('性格内核「老手快线」v0（刀 2）', () => {
     }
   });
 
-  it('.md 人读镜像与源句表逐字同文（含 id）', () => {
+  it('SOUL.md 人读块与源句表逐字同文（含 id）', () => {
     for (const [id, text] of Object.entries(VETERAN_FAST_LINES)) {
       expect(MIRROR).toContain(`\`${id}\``);
       expect(MIRROR).toContain(text);
