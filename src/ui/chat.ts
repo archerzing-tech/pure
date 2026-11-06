@@ -4711,8 +4711,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const pendingRows = new Map<string, ToolRowEntry>();
     // Last COMPLETED row per stable call key (tool + sorted args). When the
     // model repeats an identical call (continuation rounds love re-listing /
-    // re-reading), the engine reuses the result and the UI re-points at this
-    // card instead of appending a second identical one.
+    // re-reading), the UI re-points at this card instead of appending a second
+    // identical one. NOTE (2026-11-06): the engine's replay reuse only covers
+    // the STRICTLY adjacent same-args case (AgentLoopEngine's lastExecuted
+    // check) — a steer-induced re-issue farther back REALLY re-executes, and
+    // its live output lands on this same card. That repetition is the model's
+    // own decision (kept visible, stoppable), not a UI dedup promise.
     const completedToolRowKeys = new Map<string, ToolRowEntry>();
     const pendingByName = new Map<string, ToolRowEntry>();
     // Per-call throttle for tool-call JSON re-parses (keyed by toolCallId or
@@ -6902,9 +6906,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   let entry = pendingRows.get(toolCallId);
                   if (!entry) {
                     // A repeated identical call collapses onto the completed
-                    // card that already shows it — the engine reuses that
-                    // result instead of executing again, so a second card
-                    // would only ever duplicate the first.
+                    // card that already shows it. The engine's replay reuse
+                    // only guarantees this for the strictly adjacent case; a
+                    // steer-induced re-issue really re-executes and its live
+                    // output lands on this same card (visible by design —
+                    // see completedToolRowKeys).
                     const collapse = tryCollapseDuplicateRow(toolName, args);
                     const staged = pendingByName.get(toolName);
                     if (collapse && staged) {
@@ -7108,6 +7114,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             subagentTraceByCall.set(activity.callId, trace);
             const line = formatSubagentTraceLine(activity);
             if (line === null) break;
+            // 相邻同文去重（2026-11-06 插话死循环刀的展示层半边）：stall tick
+            // 每 30s 发一条恒定 waiting 文案，卡限流几分钟就是同一行堆 N 条，
+            // 读起来像工具在反复输出。连续同文折叠为一条（中间隔了别的行再
+            // 出现不折叠——那是真实的新事件）；账与卡同源，回放一致。
+            if (trace[trace.length - 1] === line) break;
             trace.push(line);
             if (trace.length > MAX_LIVE_STREAM_LINES) trace.splice(0, trace.length - MAX_LIVE_STREAM_LINES);
             const agentRow = pendingRows.get(activity.callId);
@@ -8355,7 +8366,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 里也会再取消一次，这里提前取消只是让「继续」条不闪现。
         if (ownsTurn) {
           if (pausedThisTurn && this.roundClose.hasHeldInsert()) this.autoContinue.cancel();
-          if (interjectReenter && this.steerBus.entries().some((e) => !!e.displayText.trim())) {
+          if (this.roundClose.isUserStopArmed()) {
+            // 用户显式停止：插话掐流重入也让路（send('继续') 会无视停止把
+            // 回合拉起来）。残留账由这拍收尾派发清（拦截态：只清不复活）。
+            this.roundClose.scheduleDispatch();
+          } else if (interjectReenter && this.steerBus.entries().some((e) => !!e.displayText.trim())) {
             // 掐流重入（2026-10-28 嘴/手分开）：并线插话的 abortReenter 掐断
             // 思考流，原话已在 steerBus——立即带队列重开思考，不经收尾派发
             // （那条路是慢路：先收尾再残留重入）。'继续' 是 isAuto→internal
@@ -8478,6 +8493,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // Stop / Escape take the human back: kill any pending auto-continue too.
     this.autoContinue.cancel();
     this.activePlanCardHandle?.clearAutoContinue();
+    // 停止即终局（2026-11-06 插话死循环刀）：武装收尾派发的拦截态——残留
+    // steer 不重入、插话掐流重入让路。没有这拍，工具执行中的插话会随收尾
+    // 派发原话重入成新回合，用户按停又被拉起来循环。
+    this.roundClose.onUserStop();
   }
 
   /** 阶段 12 — pause, not stop: aborts the turn with the pause reason so the

@@ -80,6 +80,8 @@ export interface RoundCloseDeps {
 export class RoundClosePlane {
   private queue: QueuedTask[] = [];
   private heldInsert: QueuedTask | null = null;
+  /** 用户显式停止武装的拦截态（见 onUserStop / dispatch 顶部）。 */
+  private userStopArmed = false;
 
   constructor(private readonly deps: RoundCloseDeps) {}
 
@@ -115,6 +117,26 @@ export class RoundClosePlane {
     this.deps.timer(() => this.dispatch(), 40);
   }
 
+  /** 用户显式停止（cancel/硬停）武装的拦截态：下一拍收尾派发只清账不复活。
+   *
+   *  为什么必须存在（2026-11-06 Windows 真机「插话后工具无限重复、停不下来」）：
+   *  插话落在工具执行中时尚未被 THINK 边界取走、一直留在 steer 账上；用户随后
+   *  按停止 → 本回合 abort → 收尾派发照常跑 → leftoverSteers 分支把残留插话
+   *  **原话重入成新回合** → 模型再次执行同一工具 → 用户再按停止 → 再复活……
+   *  唯一断链手段是开新会话（settleRound 取空即弃），与「只能手动打断整个会话」
+   *  的主诉精确吻合。停止是用户的最高优先级意图：按停止 = 连没送到的插话一起
+   *  不要了，真想继续会再发一句话。 */
+  onUserStop(): void {
+    this.userStopArmed = true;
+  }
+
+  /** 只读探针（不清位）：宿主收尾路径用它判断「这次收尾来自用户停止」，插话
+   *  掐流重入也让路。清位权在 dispatch 拦截态——探针若消费，dispatch 就拦
+   *  不住了。 */
+  isUserStopArmed(): boolean {
+    return this.userStopArmed;
+  }
+
   /** After the current turn is over:
    *  - a goal-change insert → immediately re-enter the same task with it (fold in).
    *  - else, steers that never reached a THINK boundary (queued in the turn's
@@ -127,6 +149,21 @@ export class RoundClosePlane {
    * of starting a second concurrent turn. */
   dispatch(): void {
     if (this.deps.isStreaming()) return;
+    // 用户停止的终局拍（onUserStop 武装）：残留账只清不复活。steer 原话弃、
+    // 起飞闸挂号清；折入残账与分支兜底转账进队列但**不派发**——用户下一句
+    // 话的收尾扫除自会接手（与 restore 的「被记得 ≠ 此刻抢跑」同一语义）。
+    // heldInsert / 队列原样保留，等下一个自然派发点。
+    if (this.userStopArmed) {
+      this.userStopArmed = false;
+      this.deps.settleReceipts();
+      for (const task of this.deps.foldSettle(this.deps.activityCount())) this.queueTask(task);
+      const fallback = this.deps.resumeFallback();
+      if (fallback) this.queueTask(fallback);
+      this.deps.steerSettleRound(); // 取空即弃：被停回合的残留插话不重入
+      this.deps.delegationSettleRound();
+      this.deps.onDispatchIdle?.();
+      return;
+    }
     // 本趟是否重入了新回合：重入的 dispatch 不是收尾边界（streaming 马上会
     // 亮起来），只有空手而归才轮到 onDispatchIdle 说话。
     let reentered = false;

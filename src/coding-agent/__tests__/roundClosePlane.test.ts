@@ -324,3 +324,54 @@ describe('RoundClosePlane snapshot/restore（E6 持久化）', () => {
     expect(r.calls).toContain('narrate:0');
   });
 });
+
+describe('RoundClosePlane 停止即终局（2026-11-06 插话死循环刀）', () => {
+  it('onUserStop 后这一拍只清账不复活：残留 steer 弃、队列/押账不派发', () => {
+    const r = rig({
+      foldSettle: () => { r.calls.push('foldSettle'); return [task('没被照办的追加')]; },
+      resumeFallback: () => { r.calls.push('resumeFallback'); return task('【分支级继续】同参重派'); },
+      steerSettleRound: () => { r.calls.push('steerSettle'); return [steer('工具执行中的插话', '工具执行中的插话')]; },
+    });
+    r.plane.queueTask(task('排队的活'));
+    r.plane.holdInsert(task('押账插话'));
+    r.plane.onUserStop();
+    r.plane.dispatch();
+    // 终局拍的账面：回执结算、折入核验、兜底结算、steer 取空、起飞闸清空、
+    // 空收尾钩子都在——但没有任何 reenter / narrate（不复活任何东西）。
+    expect(r.calls).toEqual(['settleReceipts', 'foldSettle', 'resumeFallback', 'steerSettle', 'delegationSettle']);
+    expect(r.reentered).toEqual([]);
+    // 残账保留（被记得 ≠ 此刻抢跑）：折入残账与兜底转进队列（同级 FIFO，
+    // 排队的活先入队在前），押账插话留着，等用户下一句话的自然派发点接手。
+    expect(r.plane.queueView().map((t) => t.text)).toEqual(['排队的活', '没被照办的追加', '【分支级继续】同参重派']);
+    expect(r.plane.hasHeldInsert()).toBe(true);
+  });
+
+  it('拦截只拦一拍：下一拍（无武装）恢复正常重入', () => {
+    const r = rig({
+      steerSettleRound: () => { r.calls.push('steerSettle'); return [steer('残留插话', '残留插话')]; },
+    });
+    r.plane.onUserStop();
+    r.plane.dispatch();
+    expect(r.reentered).toEqual([]); // 终局拍：弃
+    r.plane.dispatch();
+    // 下一拍是新回合的自然收尾：残留 steer 照常原话重入。
+    expect(r.reentered.map((t) => t.text)).toEqual(['残留插话']);
+  });
+
+  it('isUserStopArmed 是只读探针：dispatch 之前不清位，dispatch 消费后归 false', () => {
+    const r = rig({ steerSettleRound: () => [] });
+    r.plane.onUserStop();
+    expect(r.plane.isUserStopArmed()).toBe(true);
+    expect(r.plane.isUserStopArmed()).toBe(true); // 探针不清位（否则 dispatch 拦不住）
+    r.plane.dispatch(); // 拦截态消费武装
+    expect(r.plane.isUserStopArmed()).toBe(false);
+  });
+
+  it('停止拍同样是收尾边界：onDispatchIdle 照跑（侧栏/通知把会话记成收尾）', () => {
+    let idle = 0;
+    const r = rig({ onDispatchIdle: () => { idle++; } });
+    r.plane.onUserStop();
+    r.plane.dispatch();
+    expect(idle).toBe(1);
+  });
+});
