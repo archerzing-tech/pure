@@ -1696,6 +1696,11 @@ export interface ChatControllerOptions {
    * hidden session keeps running — only its shared shell surfaces (activity
    * rail, plan narration) are unmounted until the session becomes visible again. */
   viewActive?: boolean;
+  /** 窗口级模型覆盖的读取口（SessionChatManager 注入 getter，2026-11-06 多窗
+   *  口各自选模型）：send 链的 adapter 构建 / model_identity / 预算全部以覆
+   *  盖值优先，config.json 仍是全局默认（新窗口初值）。getter 形状让覆盖变
+   *  更对已活 controller 立即可见，不必逐个通知。null = 未覆盖，回退全局。 */
+  readWindowModelOverride?: () => { provider: string; model: string } | null;
 }
 
 // ── Agent activity host layout ──
@@ -1769,6 +1774,8 @@ export class ChatController {
   private readonly transcriptHost: HTMLElement | null;
   /** Whether this session is currently the visible conversation. */
   private viewActive: boolean;
+  /** 窗口级模型覆盖读取口（manager 注入）：null = 未覆盖，回退全局 config。 */
+  private readonly readWindowModelOverride: () => { provider: string; model: string } | null;
   private messages: Message[] = [];
   private hasHistory = false;
   // Cross-turn complex-task workflow state. The plan and cursor survive the
@@ -2254,6 +2261,7 @@ export class ChatController {
     this.sessionStats = loadSessionStats(this.sessionId);
     this.transcriptHost = options.host ?? null;
     this.viewActive = options.viewActive ?? true;
+    this.readWindowModelOverride = options.readWindowModelOverride ?? (() => null);
     this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
     this.wireFollowupChips();
     // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
@@ -2261,6 +2269,15 @@ export class ChatController {
     // LLM 预热循环（期3）：启动 + 每 30s 暖直连/代理两条路的 TCP+TLS，
     // 回合首字不再付握手钱。幂等，多会话共享。
     startLlmWarmLoop();
+  }
+
+  /** 窗口覆盖优先的生效配置：多窗口各自选模型后（2026-11-06），send 链所有
+   *  模型相关消费（adapter 构建 / model_identity / 预算）都走这里，不再直接
+   *  读全局值——config.json 的 model 只是默认与新窗口初值。 */
+  private resolvedGuiConfig(base: PureConfig | null): PureConfig | null {
+    const override = this.readWindowModelOverride();
+    if (!base || !override) return base;
+    return { ...base, provider: override.provider as PureConfig['provider'], model: override.model };
   }
 
   /** Suggested-followup chips (rendered by markdown.ts) dispatch a bubbling
@@ -2634,7 +2651,7 @@ export class ChatController {
         fail(t('skill.distill.noSource'));
         return;
       }
-      const config = loadConfig();
+      const config = this.resolvedGuiConfig(loadConfig());
       if (!config || !hasConfiguredKey(config)) {
         fail(t('skill.distill.failed'));
         return;
@@ -2719,7 +2736,7 @@ export class ChatController {
       return { messages, compacted: false, summarized: false, summaryUnavailable: false, evictedMessages: 0, estimatedTokens: 0, overBudget: false, oversizedNewestGroup: false, microcompactedToolResults: 0, reclaimedTokens: 0, rehydratedFiles: 0, restoredPlan: false };
     }
     this.cancelBackgroundPreCompaction();
-    const config = loadConfig();
+    const config = this.resolvedGuiConfig(loadConfig());
     const contextEngine = this.contextEngine ?? new ContextEngine({
       maxMessages: 20,
       maxTokens: resolvePromptBudget(promptBudgetForProvider(config?.customProviders, config?.provider, config?.model, config?.providerOverrides, config?.capabilityProbes)).availableInputTokens,
@@ -4284,7 +4301,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     await refreshConfigFromFile();
     // 刀 3：自定义表现形式卡随活检热生效（同配置短路，无热路径代价）。
     syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
-    const config = loadConfig();
+    // 窗口模型覆盖优先（多窗口各自选模型）：send 链的 config 快照从这里开始
+    // 全部带覆盖——adapter / model_identity / 预算下游七处一并生效。
+    const config = this.resolvedGuiConfig(loadConfig());
     if (!hasConfiguredKey(config)) return;
     // A fresh turn's signals supersede any that were never consumed (defensive;
     // the finally of a completed turn always consumes them).
@@ -8871,7 +8890,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     private preCompactAfterLoad(): void {
       if (this.streaming || this.messages.length === 0) return;
       const transcriptMessages = this.messages;
-      const cfg = loadConfig();
+      const cfg = this.resolvedGuiConfig(loadConfig());
       const maxTokens = resolvePromptBudget(promptBudgetForProvider(cfg?.customProviders, cfg?.provider, cfg?.model, cfg?.providerOverrides, cfg?.capabilityProbes)).availableInputTokens;
       const placeholderSystem = BASE_SYSTEM_PROMPT(!!(this.effectiveWorkspace || this.workspace));
       const priorSummaries = transcriptMessages.filter((message) => message.role === 'system' && message.content.startsWith('Earlier conversation summary:'));
@@ -9284,6 +9303,20 @@ export class SessionChatManager {
   private current: ChatController | null = null;
   private currentHost: HTMLElement | null = null;
   private nextSessionSeq = 1;
+  /** 窗口级模型覆盖（2026-11-06 多窗口各自选模型）：每窗口一个实例对应一份
+   *  用户选择。config.json 的 model 仍是全局默认（新窗口初值 / agent 可改）；
+   *  覆盖只改本窗口的生效模型，别的窗口不受影响。 */
+  private windowModelOverride: { provider: string; model: string } | null = null;
+
+  /** 选模型时由选择器调用：本窗口后续回合以该 provider/model 生效。 */
+  setModelOverride(provider: string, model: string): void {
+    this.windowModelOverride = { provider, model };
+  }
+
+  /** 当前窗口覆盖（main.ts 显示链读）：null = 未覆盖，显示全局默认。 */
+  windowModelOverrideValue(): { provider: string; model: string } | null {
+    return this.windowModelOverride;
+  }
   /** 冷会话回收的否决钩子（main 注册）：返回 true = 队列仍在此会话上有
    *  在册/在跑任务，逐出会搁浅它们（controllerFor 返 null 即挂起）。 */
   private reapGuard: ((sessionId: string) => boolean) | null = null;
@@ -9450,7 +9483,7 @@ export class SessionChatManager {
     const warm = controller !== null;
     if (!controller) {
       host = this.createSessionHost(sessionId);
-      controller = new ChatController({ host, viewActive: false });
+      controller = new ChatController({ host, viewActive: false, readWindowModelOverride: () => this.windowModelOverride });
       // Bind the fresh controller to the REAL session id (the constructor only
       // mints a placeholder) before it goes live, so persistence, stats and
       // MCP ownership all key on the actual session.

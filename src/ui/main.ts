@@ -795,6 +795,9 @@ function ensureComposerSelects(): void {
       const model = value.split('::')[1];
       cfg.provider = providerId as ProviderId;
       cfg.model = model !== undefined ? (modelListForProvider(cfg, providerId)[Number(model)] ?? defaultModelFor(providerId)) : defaultModelFor(providerId);
+      // 窗口级覆盖先行（多窗口各自选模型）：本窗口立即以此生效；写盘只是
+      // 更新全局默认（新窗口初值），不动别的窗口。
+      chat.setModelOverride(providerId, cfg.model);
       persistConfig(cfg);
       invalidateConfigCache();
       // updateSidebarModel() cascades into the status footer + context panel.
@@ -849,7 +852,7 @@ function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
 
 function populateComposerSelects(): void {
   ensureComposerSelects();
-  const cfg = loadConfig() ?? defaults();
+  const cfg = effectiveModelConfig() ?? defaults();
   for (const cs of modeSelects.values()) {
     cs.setTriggerTitle(t('composer.mode.title'));
     populateModeSelect(cs, cfg);
@@ -866,6 +869,16 @@ function wireComposerSelects(): void {
 
 // ── Context panel display ──
 
+/** 本窗口生效的模型配置：窗口覆盖（chat.setModelOverride，2026-11-06 多窗口
+ *  各自选模型）优先于全局 config。所有「当前用的是哪个模型」的显示与下拉回
+ *  填都读这里；config.json 的 model 只是默认与新窗口初值。 */
+function effectiveModelConfig(): PureConfig | null {
+  const base = loadConfig();
+  const override = chat.windowModelOverrideValue();
+  if (!base || !override) return base;
+  return { ...base, provider: override.provider as ProviderId, model: override.model };
+}
+
 /** Provider display label, resolving custom providers by their saved name and
  *  built-in providers by their per-provider override (Settings → LLM). */
 function providerDisplayLabel(cfg: PureConfig | null): string {
@@ -874,7 +887,7 @@ function providerDisplayLabel(cfg: PureConfig | null): string {
 }
 
 function updateContextPanelModel() {
-  const cfg = loadConfig();
+  const cfg = effectiveModelConfig();
   const model = document.getElementById('context-model');
   if (!model) return;
   model.textContent = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : t('context.model.notConfigured'));
@@ -882,7 +895,7 @@ function updateContextPanelModel() {
 
 /** Persistent status footer: workspace · model · live state · version. */
 function updateStatusBar() {
-  const cfg = loadConfig();
+  const cfg = effectiveModelConfig();
   const ws = chat.getWorkspace();
 
   // Workspace shortcut (left) — same ghost-button language as the sidebar.
@@ -1152,7 +1165,7 @@ function enterChatMode() {
 
 /** Update sidebar model badge from config */
 function updateSidebarModel() {
-  const cfg = loadConfig();
+  const cfg = effectiveModelConfig();
   const el = document.getElementById('sidebar-model');
   if (!el) return;
   el.textContent = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : '');
@@ -1913,6 +1926,8 @@ function applyModelChoice(entry: ModelEntry): void {
   const cfg = loadConfig() ?? defaults();
   cfg.provider = entry.provider as ProviderId;
   cfg.model = entry.model;
+  // 与下拉同一语义：本窗口立即生效，写盘只更新全局默认。
+  chat.setModelOverride(entry.provider, entry.model);
   persistConfig(cfg);
   invalidateConfigCache();
   // Same cascade as the dropdown's onSelect: the composer selects re-mirror
