@@ -9750,8 +9750,13 @@ fn append_observation_to(dir: &std::path::Path, record_json: &str, rotate_bytes:
 }
 
 #[tauri::command]
-fn append_observation(record_json: String) -> Result<(), String> {
-    append_observation_to(&observations_dir(), &record_json, OBSERVATION_ROTATE_BYTES, OBSERVATION_KEEP_RECORDS)
+async fn append_observation(record_json: String) -> Result<(), String> {
+    // 与 append_session_event 同批：任务期高频写盘 + 64MB 轮换重命名，
+    // 主线程上任何一次轮换都是秒级冻结。
+    run_blocking(move || {
+        append_observation_to(&observations_dir(), &record_json, OBSERVATION_ROTATE_BYTES, OBSERVATION_KEEP_RECORDS)
+    })
+    .await
 }
 
 /// Default read budget for the dashboard: 16MB of JSONL is tens of thousands of
@@ -13326,14 +13331,21 @@ fn load_stored_session_revision(session_id: &str) -> Result<u64, String> {
 // 在 src/shared/sessionEventLog.ts），这里只管原子落行；坏 JSON 不在这层拦
 // ——读取侧按行容错（parseSessionEvents 跳过坏行）。
 #[tauri::command]
-fn append_session_event(session_id: String, event: String) -> Result<(), String> {
+async fn append_session_event(session_id: String, event: String) -> Result<(), String> {
+    // 任务运行期每个事件行 invoke 一次，两窗口并发时频率翻倍——sync 版跑主
+    // 线程，Windows 上每次开文件都过 Defender 过滤驱动，消息泵被高频小写饿
+    // 死=整窗冻结（0f476c6 写系三刀的漏网命令，2026-11-06 多窗口卡死真机）。
+    run_blocking(move || append_session_event_impl(&session_id, &event)).await
+}
+
+fn append_session_event_impl(session_id: &str, event: &str) -> Result<(), String> {
     use std::io::Write as _;
-    validate_session_id(&session_id)?;
+    validate_session_id(session_id)?;
     let line = event.trim_end();
     if line.is_empty() || line.contains('\n') {
         return Err("event must be a single non-empty line".to_string());
     }
-    let dir = sessions_dir().join(&session_id);
+    let dir = sessions_dir().join(session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -13348,9 +13360,15 @@ fn append_session_event(session_id: String, event: String) -> Result<(), String>
 const SESSION_EVENT_TAIL_BYTES: u64 = 16 * 1024 * 1024;
 
 #[tauri::command]
-fn read_session_events(session_id: String, tail_bytes: Option<u64>) -> Result<String, String> {
-    validate_session_id(&session_id)?;
-    let path = sessions_dir().join(&session_id).join("events.jsonl");
+async fn read_session_events(session_id: String, tail_bytes: Option<u64>) -> Result<String, String> {
+    // 16MB 尾读不该发生在主线程（NTFS 读 + Defender 全文扫描一次几百 ms，
+    // 读期间整窗无响应）——与 append 同批挪进阻塞池。
+    run_blocking(move || read_session_events_impl(&session_id, tail_bytes)).await
+}
+
+fn read_session_events_impl(session_id: &str, tail_bytes: Option<u64>) -> Result<String, String> {
+    validate_session_id(session_id)?;
+    let path = sessions_dir().join(session_id).join("events.jsonl");
     if !path.exists() {
         return Ok(String::new());
     }
@@ -13403,8 +13421,8 @@ mod session_event_log_tests {
     fn appends_single_lines_and_creates_the_file() {
         with_temp_home(|| {
             let sid = format!("events{}", std::process::id());
-            append_session_event(sid.clone(), r#"{"kind":"user_input"}"#.into()).unwrap();
-            append_session_event(sid.clone(), r#"{"kind":"turn_settled"}"#.into()).unwrap();
+            append_session_event_impl(&sid, r#"{"kind":"user_input"}"#).unwrap();
+            append_session_event_impl(&sid, r#"{"kind":"turn_settled"}"#).unwrap();
             let raw = fs::read_to_string(sessions_dir().join(&sid).join("events.jsonl")).unwrap();
             let lines: Vec<&str> = raw.trim_end().lines().collect();
             assert_eq!(lines, vec![r#"{"kind":"user_input"}"#, r#"{"kind":"turn_settled"}"#]);
@@ -13414,9 +13432,9 @@ mod session_event_log_tests {
     #[test]
     fn rejects_multiline_events_and_bad_session_ids() {
         with_temp_home(|| {
-            assert!(append_session_event("s1".into(), "a\nb".into()).is_err());
-            assert!(append_session_event("".into(), "{}".into()).is_err());
-            assert!(append_session_event("bad/../id".into(), "{}".into()).is_err());
+            assert!(append_session_event_impl("s1", "a\nb").is_err());
+            assert!(append_session_event_impl("", "{}").is_err());
+            assert!(append_session_event_impl("bad/../id", "{}").is_err());
         });
     }
 
@@ -13425,24 +13443,24 @@ mod session_event_log_tests {
         with_temp_home(|| {
             let sid = format!("events{}", std::process::id());
             for i in 0..5 {
-                append_session_event(sid.clone(), format!(r#"{{"n":{}}}"#, i)).unwrap();
+                append_session_event_impl(&sid, &format!(r#"{{"n":{}}}"#, i)).unwrap();
             }
             // 全量读：五行都在。
-            let full = read_session_events(sid.clone(), None).unwrap();
+            let full = read_session_events_impl(&sid, None).unwrap();
             assert_eq!(full.trim_end().lines().count(), 5);
 
             // 尾读预算 1 字节：只有半行 ⇒ 清空（不吐半行）。预算含余量
             //（start>0 时首行无条件丢弃——无法区分整行与半行，标准 tail 语义：
             // 预算 = 目标行数 + 起行余量）。
-            let tiny = read_session_events(sid.clone(), Some(1)).unwrap();
+            let tiny = read_session_events_impl(&sid, Some(1)).unwrap();
             assert_eq!(tiny, "");
             let last_line_len = full.trim_end().lines().last().unwrap().len() as u64;
-            let tail = read_session_events(sid.clone(), Some(last_line_len + 4)).unwrap();
+            let tail = read_session_events_impl(&sid, Some(last_line_len + 4)).unwrap();
             assert_eq!(tail.trim_end().lines().count(), 1);
             assert!(tail.contains(r#""n":4"#));
 
             // 没有日志的会话：空串（没有事件是正常态，不是错误）。
-            assert_eq!(read_session_events("absent_session".into(), None).unwrap(), "");
+            assert_eq!(read_session_events_impl("absent_session", None).unwrap(), "");
         });
     }
 }
