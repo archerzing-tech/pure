@@ -2894,3 +2894,24 @@ describe('事件循环 per-event 隔离(单事件异常不杀回合)', () => {
     expect(catchHead).toContain('console.error(');
   });
 });
+
+// 会话切换必须同步模型显示链（2026-11-06 真机判例）：每个会话有自己的模型
+// （多窗口隔离），切回旧会话时 composer 下拉/侧栏徽章若不重读当前会话的实
+// 际模型，显示的就是上个会话或全局默认的选择——用户拿着 A 会话的 poolside
+// 以为在测 B 会话选的 xingchen，「答非所问」的真凶是显示与实跑脱节。
+describe('会话切换同步模型显示链(main.ts onSessionIdChanged)', () => {
+  const mainSrc = readSource(new URL('../main.ts', import.meta.url));
+
+  it('onSessionIdChanged 回调重填模型下拉与侧栏徽章', () => {
+    const head = mainSrc.indexOf('chat.onSessionIdChanged');
+    expect(head).toBeGreaterThan(-1);
+    const cb = mainSrc.slice(head, head + 700);
+    expect(cb).toContain('populateComposerSelects()');
+    expect(cb).toContain('updateSidebarModel()');
+  });
+
+  it('显示链读数以会话级覆盖优先(effectiveModelConfig)', () => {
+    expect(mainSrc).toContain('const override = chat.activeSessionModel();');
+    expect(mainSrc).toContain('if (!base || !override) return base;');
+  });
+});

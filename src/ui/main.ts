@@ -463,6 +463,12 @@ chat.onSessionIdChanged = (sessionId) => {
   void promptHistory.onSessionChanged(sessionId);
   landingHistory?.onSessionChanged(sessionId);
   composerDrafts.onSessionChanged(sessionId);
+  // 会话各自的模型（多窗口隔离）此刻已生效——选择器/侧栏徽章/上下文面板
+  // 必须跟着读当前会话的实际模型。不刷的话显示的是上个会话或全局默认的
+  // 选择：用户拿着 A 会话的 poolside 以为在测 B 会话选的 xingchen（2026-11-06
+  // 真机判例：选择器显示 xingchen、实跑 poolside，「答非所问」的真凶）。
+  populateComposerSelects();
+  updateSidebarModel();
 };
 
 // ── 回复版本条（重新生成 + ‹n/m› 切换，最后一轮）────────────────────────
