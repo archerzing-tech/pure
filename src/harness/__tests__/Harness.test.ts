@@ -603,6 +603,57 @@ describe('Harness system-prompt cache freeze (E0.2 §2.1)', () => {
     expect(laterUser).toBe('one more typescript question');
   });
 
+  it('does not re-inject when a rebuilt Harness sees the injection already in history (GUI per-turn agent)', async () => {
+    // 真机判例（2026-11-06）：GUI 的 CodingAgent 在 send() 里每回合重建，
+    // Harness 冻结域只有一回合宽——「实例未冻结」不能推出「会话未注入」。
+    // 历史里已带 <session_memory> 时，跨实例也不得重注入、不得重检索。
+    const memStore = new FakeMemoryStore();
+    await memStore.add({
+      type: 'user_preference',
+      content: 'User prefers the TypeScript language',
+      timestamp: Date.now(),
+      sessionId: 'old-session',
+      projectPath: '/ws',
+    });
+    const llm = recordingLLM('answer');
+    const makeHarness = () =>
+      new Harness({
+        sessionId: 'sess-rebuilt-per-turn',
+        llm,
+        toolsDefs: [],
+        budget: STD_BUDGET,
+        memory: memStore,
+        projectPath: '/ws',
+      });
+
+    // 回合1：恢复轮（老格式历史，无注入标记）→ 完整 compose + 注入。
+    const first: Message[] = [
+      { role: 'system', content: 'BASE SYSTEM' },
+      { role: 'user', content: 'write the module in typescript' },
+    ];
+    await collect(makeHarness().continueTurn('BASE SYSTEM', first, 'question one'));
+    expect(memStore.searchCalls).toBe(1);
+    const injectedUser = llm.received[0][llm.received[0].length - 1].content;
+    expect(injectedUser).toContain('<session_memory>');
+
+    // 回合2：GUI 每回合 new CodingAgent → 全新 Harness 实例。历史首轮 user
+    // 已带注入块 → 跨实例判据命中：不再检索、不再注入，user 消息保持裸形。
+    const second: Message[] = [
+      { role: 'system', content: 'BASE SYSTEM' },
+      { role: 'user', content: injectedUser },
+      { role: 'assistant', content: 'answer' },
+    ];
+    await collect(makeHarness().continueTurn('BASE SYSTEM', second, 'question two'));
+    expect(memStore.searchCalls).toBe(1);
+    const rebuiltUser = llm.received[1][llm.received[1].length - 1].content;
+    expect(rebuiltUser).toBe('question two');
+    // system 冻结的是当轮传入的纯静态面（不含记忆块）；语言标记随回合输入
+    // 幂等重挂是 engine 既定行为，不在此断言（判定输入被注入块污染是另一
+    // 个已挂账缺口，见蓝图 P3「语言对齐链」）。
+    expect(llm.received[1][0].content).toContain('BASE SYSTEM');
+    expect(llm.received[1][0].content).not.toContain('<session_memory>');
+  });
+
   it('throttles memory decay to once per interval even across turns (v0.13)', async () => {
     const memStore = new FakeMemoryStore();
     const llm = recordingLLM('answer');

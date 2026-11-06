@@ -736,10 +736,25 @@ export class Harness {
     // the session's memory block already lives in the first user message.
     let turnUserPrompt = newUserPrompt;
     if (this.sessionSystemPrompt === undefined) {
-      const composed = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
-      this.sessionSystemPrompt = composed.systemPrompt;
-      this.sessionMemoryInjection = composed.injection || undefined;
-      if (composed.injection) turnUserPrompt = `${composed.injection}\n\n${newUserPrompt}`;
+      // 真机判例（2026-11-06）：GUI 的 CodingAgent 在 send() 里每回合重建，
+      // Harness 实例的冻结域只有一回合宽——「本实例未冻结」不代表「会话未
+      // 注入」。注入已随首轮 user 消息活在历史里（P1 契约），历史里已带着
+      // <session_memory> 就不再 compose、不再重注入：这是跨实例仍成立的事
+      // 实判据，GUI/CLI 两面同时生效。老格式存档（首轮 user 无标记）与压
+      // 缩后丢历史的会话仍走完整 compose，行为不变。
+      const alreadyInjected = messages.some(
+        (m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('<session_memory>'),
+      );
+      if (alreadyInjected) {
+        // system 面是纯静态（P1 后），直接冻结当轮传入值——换模型回合它
+        // 正确反映新 model_identity；同模型回合与历史前缀逐字节相同。
+        this.sessionSystemPrompt = systemPrompt;
+      } else {
+        const composed = await this.composeMemoryPrompt(systemPrompt, newUserPrompt, semantic);
+        this.sessionSystemPrompt = composed.systemPrompt;
+        this.sessionMemoryInjection = composed.injection || undefined;
+        if (composed.injection) turnUserPrompt = `${composed.injection}\n\n${newUserPrompt}`;
+      }
     }
     const effectiveSystemPrompt = this.sessionSystemPrompt;
 
