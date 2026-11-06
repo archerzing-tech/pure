@@ -197,8 +197,7 @@ export const ROUTING_ESSENTIALS = `This request names a destination for the visu
 - Which fenced form: edges carry the meaning (who-calls-whom topology) -> mermaid; layout carries the meaning (layers, poster flow, non-technical reader) -> paint/svg; destined for the repo and evolving with the code -> mermaid (source-diffable, layout-free edits). Full decision path: presentation_guide form:"routing".`;
 
 /** 请求是否会用到可视化细则——闸门（召回优先，误判只多花 token）。 */
-export interface VisualRequestParts {
-  /** 手绘图片/图标/插画（→ SVG 或 generate_image 契约）。静态几何示意词
+export interface VisualRequestParts {  /** 手绘图片/图标/插画（→ SVG 或 generate_image 契约）。静态几何示意词
    *  （架构示意/流程示意等）命中时本闸门让位为 false——SVG 细则不随附，
    *  避免两条细则同装时模型偏向 SVG（真机判例 2026-10-17）。 */
   picture: boolean;
@@ -241,6 +240,23 @@ export function detectVisualRequest(prompt: string): VisualRequestParts {
   const destination = /(?:放进|放入|放到|存到|存进|保存到|归档|加到|加进|收进).{0,12}(?:docs|文档|README|仓库|repo|工程|项目)|\b(?:docs|README)\b|跟随?代码.{0,8}(?:演进|更新|维护)|长期(?:维护|演进|更新)|evolv(?:e|ing) with (?:the )?code|keep(?:ed)? in (?:the )?repo|long-lived/i.test(text);
   return { picture, chart, map, paint, destination };
 }
+
+// ── 服务/预览协议的按需装配（缓存地基 P2 刀4,2026-11-06）──────────────────
+// 「启动服务打开页面」方法论此前常驻在 execute_command 的 description 里
+// （~700 字符），可绝大多数回合根本不涉及起服务。这里按请求闸门装配完整
+// 协议（召回优先：误判只多注入 ~500 字符，漏判还有 description 的一行守门线
+// ——file:// vs http://localhost 的分叉不会翻车），description 回到
+// 「是什么+何时用+守门线」。
+
+/** 请求涉及启动服务/本地预览——闸门。 */
+export function detectServingPreview(prompt: string): boolean {
+  const text = prompt ?? '';
+  return /(?:启动.{0,8}(?:服务|服务端|应用|项目)|(?:起|开)个?服务|跑起来|本地(?:运行|预览|服务)|部署到本地|后台运行|打开页面|浏览器打开|dev server|localhost|127\.0\.0\.1|vite|next dev|flask|uvicorn|npm run (?:dev|start)|bun run (?:dev|start)|yarn (?:dev|start)|\bpreview\b|\bserve\b|start the server|launch the (?:app|server)|run the (?:app|server)|web ?server|http-server)/i.test(text);
+}
+
+export const SERVING_PREVIEW_PROMPT = `Serving/preview protocol for this request:
+- Pick the vehicle FIRST: single self-contained .html → open directly via file://. Anything with a dev-server script (vite/next/flask…), fetch(), ES modules, or CORS-sensitive assets → http://localhost: install deps, start the server with background:true, then poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers — then open the page and report the URL + how to stop it (kill <pid>).
+- Never leave a foreground server running; never fake a preview with file:// for something that needs a server.`;
 
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
  * renders fenced ```svg blocks inline as the PICTURE (single images full
@@ -338,10 +354,13 @@ export const HUMAN_TONE_PROMPT = `Communication tone:
 - You are the senior engineer sitting next to the user, pairing on their problem — not a support desk, not a document generator. Talk the way a trusted colleague talks from that seat: lead with the conclusion or verdict first, then the reason, then the next step.
 - Have a spine: when there is a trade-off, say in your own words which option you would pick, why, and what would change your mind. When something in the user's code or plan looks wrong, say it plainly and kindly instead of hedging around it.
 - Plain human register, in the user's language: short sentences, everyday words, no corporate smoothing. Never open with canned filler (好的，以下是 / 我来分析一下 / 我将按照以下步骤执行 / Here is a step-by-step breakdown), never close with canned politeness (希望对你有帮助 / 如有疑问随时问我 / Hope this helps), and never scaffold an answer with 首先/其次/最后/总之 chains. Do not invent new ritual phrases to replace the banned ones — find fresh words for each reply.
-- Narrate real work, not process: one short line when a decision is non-obvious or a result is surprising; silence is fine while tools simply run. Ask questions the way a colleague would — one specific question, not a numbered questionnaire.
+- Narrate real work, not process: one short line when a decision is non-obvious or a result is surprising. Ask questions the way a colleague would — one specific question, not a numbered questionnaire.
 - When the user leaves key choices unstated, pick the sensible default, say it in one line, and keep going — the answer arrives with the assumption attached, not gated on a question. When what you hand over is a plan or anything with open dependencies, close by naming what is still unconfirmed and what you will do the moment it is settled — one natural sentence, and only when something real is actually open; a simple answer carries no tail.
-- Finished work is handed over the way a colleague hands over a keyboard: a few flowing sentences on what changed, what you verified, and what to watch — never a changelog-style list or a labeled checklist.
 - The plan/stage control lines the UI protocol requires are for the interface, not for the user: emit them exactly as specified, and keep every sentence you write around them natural.`;
+// 刀3(2026-11-06):交付语气("像同事交键盘,flowing sentences,不是 changelog")
+// 与"等待时保持沉默"两句不再在此重复——前者由 character_expression 五场景之
+// 「Work is handed back」唯一承载(SOUL.md 覆盖层按块替换它),后者由场景
+// 「Long work is simply running」承载。同一判据只出现一次。
 
 /**
  * Mid-run insertion protocol (L1 application layer, required). 2026-10-28

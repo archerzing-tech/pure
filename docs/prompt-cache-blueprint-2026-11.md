@@ -83,20 +83,31 @@ system 消息（不回写旧前缀）、指令序按缓存稳定排序；Claude 
   是 provider 物理,不可作为缓存验收面。
 - 余项（挂 P2）：GUI 预算行三态加「缓存命中」位（校验真话回流判例）。
 
-### 刀3 人格三件套整并（治「重」的主体）
+### 刀3 人格三件套整并（治「重」的主体）【施工翻案:三合一不可行,改精准去重 2026-11-06】
 
-character_expression（3k）+ human_tone（2k）+ output_style（2.9k）→ 一份
-「怎么说」判据 ≤3k 字符。三份都在回答「怎么说」，判据互相覆盖；整并按判据
-去重，红线条目（谄媚/陪伴话术负向清单、拟人语气、人类观感第一）一条不砍。
-character_core（1.5k，「怎么做事」立场）保留不动。省 ≈2-3k tok。
+**施工前取证翻案**：蓝图写作时的体量数字（3k+2k+2.9k）与实测不符——
+expression 1981 + tone 2030 + output_style ~2600 = 6.6k 字符 ≈2.6k tok，
+「省 2-3k tok」算术不可达；且 SOUL.md 覆盖层（65bb177）已把 expression 面
+变成从源句表派生的结构化契约（五场景形状/2000 上限/派生完整性三重锁定），
+「整并成一份」= 改写派生文本 = 破坏用户可编辑人格的覆盖语义。裁定：只收
+tone 侧与 expression 真正重复的两句（交付语气/等待沉默），expression 五场景
+是唯一家（SOUL.md 按块替换它），output_style 是交付形态契约非语气，保持
+独立。省 ~250 字符。
 
-### 刀4 core12 复核 + 工具 description 方法论搬家
+### 刀4 core12 复核 + 工具 description 方法论搬家【施工翻案+闸门化 2026-11-06】
 
-- switch_package_source（1475）/ diagnose_network（1116）/ sys_info（989）退
-  deferred（非每回合必需；discover_tools 已有激活通道）。省 ≈1-2k tok。
-- execute_command 等塞在 description 里的方法论长文（「vehicle FIRST…token
-  discipline」）移到执行层机械注入（检查器/注入件）——description 回到
-  「是什么+何时用」1-3 句纪律（对齐两家实践）。
+**施工前取证翻案**：蓝图点名的三个工具（switch_package_source/diagnose_
+network/sys_info）框架改革三期已退 deferred，core 表实测 7017 字符（非
+7631）。剩余可收的三式已落：
+- execute_command 的「启动服务打开页面」完整协议（~700 字符）摘出为
+  SERVING_PREVIEW_PROMPT，按请求闸门随附（detectServingPreview 词表,
+  recall 优先）；description 留一行守门线（file:// vs http://localhost
+  分叉不翻车）。普通回合省 ~430，完整协议只对服务请求付 ~520。
+- discover_tools 长尾工具名列举改族名自举（新工具入目录不用同步改描述）。
+  省 ~140。
+- token discipline 回流化（输出截断时执行层反馈）需动 Rust,挂账。
+- GUI 缓存命中观测翻案：统计面板 cache rate/hit/miss/bar 四件套早已存在
+  （main.ts renderSessionStats）,预算行不加（预算行讲水位,面板讲命中）。
 
 ### 刀5 记忆进出分面
 
@@ -116,9 +127,9 @@ insertion_protocol（482）+ ledger_protocol（726）常驻改按需（插话发
 
 | 期 | 刀 | 验收判据 |
 |---|---|---|
-| P1 治慢【已落地】 | 刀1+刀2 | 双门禁绿（tsc + 5135 测试）；契约断言：system 不含时间/熔断/记忆锚、同会话两回合 system 逐字节同、注入块只在首轮 user 消息出现。**缓存命中验收换面：GLM/DeepSeek 付费端点同会话第 2 回合 cacheHitTokens>0（有 cacheHitPerM 价目的端），free 池只作尽力而为档不验收** |
-| P2 治重 | 刀3+刀4+观测行 | 静态面 promptTokens（hello 首回合）≤14k；人格红线用例全绿；GUI 预算行三态加缓存命中位 |
-| P3 收尾 | 刀5 余项+刀6 | 逐回合记忆重检索（需先裁定 P0 棘轮归因语义）;插话行为真机复验不回归 |
+| P1 治慢【已落地 ae71abb】 | 刀1+刀2 | 双门禁绿；契约断言：system 不含时间/熔断/记忆锚、同会话两回合 system 逐字节同、注入块只在首轮 user 消息出现。**缓存命中验收换面：GLM/DeepSeek 付费端点同会话第 2 回合 cacheHitTokens>0（有 cacheHitPerM 价目的端），free 池只作尽力而为档不验收** |
+| P2 治重【已落地 79268d3】 | 刀3 精准去重+刀4 闸门化+观测翻案 | 双门禁绿；常驻省 ~770 字符（tone -247/execute_command -385/discover_tools -138）；真机口径：普通回合「启动服务」类请求完整协议在场、其余回合不在场、守门线常驻 |
+| P3 收尾 | 刀5 余项+刀6 | 逐回合记忆重检索（需先裁定 P0 棘轮归因语义）;插话行为真机复验不回归；token discipline 回流化（动 Rust） |
 
 判例对齐：
 - 测试形态=全量 bun test + tsc 双门禁；消息形状属发送链契约，契约测试同步改。

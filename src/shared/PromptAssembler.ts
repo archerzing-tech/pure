@@ -27,7 +27,9 @@ import {
   VISUAL_BLOCK_POINTER,
   WORKFLOW_PROMPT,
   composeUserTurn,
+  detectServingPreview,
   detectVisualRequest,
+  SERVING_PREVIEW_PROMPT,
   wantsCapabilityLadder,
   wantsDelegationMechanics,
   wantsHandsOnWorkflow,
@@ -324,6 +326,13 @@ function buildRequestDetailFragments(
       'multi_agent_mechanics',
       context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS_PROMPT : '',
       58,
+    ),
+    // 服务/预览协议随请求（刀4,2026-11-06）：完整方法论不再常驻 execute_command
+    // description（那里只留一行守门线），闸门命中才随附。
+    fragment(
+      'serving_preview',
+      detectServingPreview(text) ? SERVING_PREVIEW_PROMPT : '',
+      57,
     ),
   ].filter((item): item is PromptFragment => item !== null);
 }

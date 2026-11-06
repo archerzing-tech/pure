@@ -31,6 +31,7 @@ import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
 import { PRESENTATION_CARDS } from '../presentationLibrary';
 import { INCREMENTAL_BUILD_PROMPT, INFORMATION_VALUE_PRINCIPLE } from '../agentBehavior';
 import { PromptAssembler, buildGuiCapabilities } from '../PromptAssembler';
+import { activeCharacterExpression } from '../../character';
 import { estimatePromptTokens } from '../providers';
 
 describe('SYSTEM_CORE_PROMPT (L0)', () => {
@@ -399,9 +400,12 @@ describe('L1 behavior contracts', () => {
     expect(HUMAN_TONE_PROMPT).toContain('control lines');
   });
 
-  it('reports finished work like a colleague, not a changelog', () => {
-    expect(HUMAN_TONE_PROMPT).toContain('flowing sentences');
-    expect(HUMAN_TONE_PROMPT).toContain('changelog-style list');
+  it('reports finished work like a colleague, not a changelog (judgment lives in the expression face)', () => {
+    // 刀3(2026-11-06):交付语气不再在 tone 重复——五场景之「Work is handed
+    // back」是唯一家(SOUL.md 覆盖层按块替换它),tone 侧只留独有判据。
+    expect(activeCharacterExpression()).toContain('a changelog or a labeled checklist');
+    expect(HUMAN_TONE_PROMPT).not.toContain('changelog');
+    expect(HUMAN_TONE_PROMPT).not.toContain('silence is fine');
   });
 
   it('keeps the capability ladder as an on-demand slice and the delegation mechanics on their gate', () => {
