@@ -520,6 +520,12 @@ describe('classifyInsertion — 三值 verdict 契约（并线/另线）', () =>
     expect(prompt).toContain('the WHOLE tree to stop');
     expect(prompt).toContain('"action":"stop"');
     expect(prompt).toContain('the one mechanical action left to it');
+    // 2026-11-07 回放量化收窄：24% 非整停句被折叠成 stop（「先停再改向」
+    // 形状），判据从「听着像停」改成「执行后什么还活着」；收执一致性锚拦
+    // 「这就加进来」标 stop 的自相矛盾。
+    expect(prompt).toContain('The test is what SURVIVES');
+    expect(prompt).toContain('Redirects that merely OPEN like a stop');
+    expect(prompt).toContain("a stop's words describe only what ended");
     // 旧口径不得回流：宿主不再有任何字面停快路径。
     expect(src.slice(promptStart)).not.toContain("the host's literal-stop fast path");
   });
