@@ -59,6 +59,19 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: 'configure_channel',
+    description: 'Configure a chat channel (Feishu / DingTalk / QQ) so the user can chat with this agent from that messaging app. Pass the credentials EXACTLY as the user pasted or typed them — the tool parses AppID/AppSecret forms (JSON, key:value lines, or bare values) itself. The tool verifies the credentials against the platform token endpoint BEFORE saving (rejected vs network failure are reported differently), writes the config, and the running gateway hot-reloads it within seconds — no restart needed. First-time DM peers still go through pairing: tell the user to message the bot once and report back the pairing code if asked. Use this whenever the user wants to connect/set up/enable a channel, replace its credentials, or asks what is needed for it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string', enum: ['feishu', 'dingtalk', 'qq'], description: 'Which channel to configure' },
+        credentials: { type: 'string', description: 'The credentials text exactly as the user provided it (a paste from the platform console is fine). For feishu: App ID + App Secret; dingtalk: Client ID/AppKey + Client Secret; qq: AppID + AppSecret' },
+        enable: { type: 'boolean', description: 'Enable the channel after saving (default true). Pass false only to disable an already-configured channel' },
+      },
+      required: ['channel', 'credentials'],
+    },
+  },
+  {
     name: 'register_mcp_server',
     description: 'Register a custom MCP server by name and connection details (a user-named repo, a command, or a URL), persist it to configuration, and connect it in the same step — its tools become available immediately. Use this when the user names a specific MCP project that search_mcp_servers does not return (new or niche projects are often absent from the directories; a search hit is NOT required): web_fetch that project\'s docs for its documented launch command instead of guessing one. This launches a third-party process or opens a remote service; the user must approve before it runs.',
     input_schema: {

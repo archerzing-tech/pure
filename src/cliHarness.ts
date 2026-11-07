@@ -436,7 +436,9 @@ async function createTools(
   // tags 决定权限门（连接/注册会启动第三方进程或连远程服务，与 GUI 同为
   // DESTRUCTIVE/high 弹确认）。
   for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
-    const risky = tool.name === 'connect_mcp_server' || tool.name === 'register_mcp_server';
+    // configure_channel 与 MCP 连接同档：改盘上凭据配置（探活后落盘），
+    // 用户确认后才执行。
+    const risky = tool.name === 'connect_mcp_server' || tool.name === 'register_mcp_server' || tool.name === 'configure_channel';
     registry.register({
       ...tool,
       tags: risky ? [Tags.DESTRUCTIVE] : [Tags.READ],

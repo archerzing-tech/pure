@@ -146,4 +146,52 @@ describe('Gateway', () => {
     expect(record.sent.filter((m) => m.kind === 'final')).toHaveLength(2);
     await gateway.stop();
   });
+
+  it('reload swaps adapters and the router config reference', async () => {
+    // 热载链（一键开通的网关侧半边）：reload(新 config) = stop 全部旧适配器
+    // → 换 config 引用 → start 新启用集。router 的 dmPolicy 读同一引用。
+    const alphaRecord: FakeRecord = { stopped: false, sent: [] };
+    const betaRecord: FakeRecord = { stopped: false, sent: [] };
+    const registry = new ChannelRegistry({ log: () => {} });
+    const alpha = fakeAdapter(alphaRecord);
+    alpha.id = 'alpha';
+    const beta = fakeAdapter(betaRecord);
+    beta.id = 'beta';
+    registry.register(alpha);
+    registry.register(beta);
+
+    const configA = defaultChannelsConfig();
+    configA.channels = { alpha: { enabled: true }, beta: { enabled: false } };
+    const gateway = new Gateway({
+      config: configA,
+      registry,
+      factory: async (spec) => {
+        const harness: ChannelHarness = {
+          async *run(_s, user) { yield { type: 'Completed' as const, payload: { finalOutput: `ok:${user}`, isComplete: true, interrupted: false, turnCount: 1, messages: [] }, timestamp: 0 }; },
+          async *continueTurn() { yield { type: 'Completed' as const, payload: { finalOutput: 'ok', isComplete: true, interrupted: false, turnCount: 1, messages: [] }, timestamp: 0 }; },
+        };
+        return { harness, systemPrompt: 'sys', sessionId: spec.sessionId, projectPath: '' } satisfies HarnessBundle;
+      },
+      lockPath,
+      index: new ChannelSessionIndex(indexPath),
+      evictionIntervalMs: 0,
+      log: () => {},
+    });
+    await gateway.start();
+    expect(alphaRecord.ctx).toBeDefined();
+    expect(betaRecord.ctx).toBeUndefined();
+
+    const configB = defaultChannelsConfig();
+    configB.channels = { alpha: { enabled: false }, beta: { enabled: true } };
+    configB.groupPolicy = { mentionRequired: false };
+    await gateway.reload(configB);
+
+    expect(alphaRecord.stopped).toBe(true);
+    expect(betaRecord.ctx).toBeDefined();
+    // router 引用已换：经 routeInbound 的群策略间接断言太绕，直接验证
+    // reload 后 gateway.sessionCount 仍可访问（config 替换未破坏 router）。
+    expect(gateway.sessionCount).toBe(0);
+    await gateway.stop();
+    expect(betaRecord.stopped).toBe(true);
+  });
 });

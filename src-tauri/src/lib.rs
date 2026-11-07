@@ -11201,6 +11201,78 @@ fn secret_list() -> Result<Vec<String>, String> {
         .unwrap_or_default())
 }
 
+// ── 通道凭据探活（一键开通的地基）─────────────────────────────────────
+// WebView 里 fetch 平台 API 会被 CORS/ATS 拦（gatewaySettings 的 runTest 已
+// 踩过：tauri:// 源跨域一律 Load failed），探测必须住在 Rust。判定语义与
+// src/shared/channelCredentials.ts 同源（那半边给 Bun 侧 configure_channel
+// 工具用）：凭据被拒与网络不通分两族，文案据此分流。secret 只进请求体，
+// 不落盘、不回传。
+
+#[derive(serde::Serialize)]
+struct ChannelVerifyOutcome {
+    ok: bool,
+    /// "rejected"（凭据被平台拒）| "network"（本机网络问题）。
+    kind: String,
+    detail: String,
+}
+
+#[tauri::command]
+async fn channel_verify(platform: String, app_id: String, app_secret: String) -> Result<ChannelVerifyOutcome, String> {
+    let (url, body): (&str, serde_json::Value) = match platform.as_str() {
+        "feishu" => (
+            "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+            serde_json::json!({ "app_id": app_id, "app_secret": app_secret }),
+        ),
+        "dingtalk" => (
+            "https://api.dingtalk.com/v1.0/oauth2/accessToken",
+            serde_json::json!({ "appKey": app_id, "appSecret": app_secret }),
+        ),
+        "qq" => (
+            "https://bots.qq.com/app/getAppAccessToken",
+            serde_json::json!({ "appId": app_id, "clientSecret": app_secret }),
+        ),
+        other => return Err(format!("unknown channel: {}", other)),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(15_000))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = match client.post(url).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ChannelVerifyOutcome {
+                ok: false,
+                kind: "network".into(),
+                detail: e.to_string(),
+            });
+        }
+    };
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    let data: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let ok = match platform.as_str() {
+        // 与正式适配器同一判据：QQ 惯用 HTTP 200 包错误，真实原因在 body；
+        // 飞书 code=0 且发下 app_access_token；钉钉发下 accessToken。
+        "feishu" => data.get("code").and_then(|v| v.as_i64()) == Some(0)
+            && data.get("app_access_token").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+        "dingtalk" => data.get("accessToken").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+        _ => data.get("access_token").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+    };
+    if ok {
+        return Ok(ChannelVerifyOutcome { ok: true, kind: String::new(), detail: String::new() });
+    }
+    let detail = if status >= 300 {
+        format!("HTTP {} {}", status, &text.chars().take(200).collect::<String>())
+    } else {
+        data.get("message")
+            .or_else(|| data.get("msg"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| text.chars().take(200).collect())
+    };
+    Ok(ChannelVerifyOutcome { ok: false, kind: "rejected".into(), detail })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  App config file (~/.pure/config.json) — GUI + hand-editing share one source.
 //  The WebView mirrors the file into localStorage at startup and writes it back
@@ -16964,6 +17036,7 @@ pub fn run() {
             gateway_stop,
             secret_delete,
             secret_list,
+            channel_verify,
             // App config file (~/.pure/config.json)
             load_config,
             save_config,

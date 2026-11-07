@@ -54,6 +54,15 @@ export class SessionRouter {
     this.now = deps.now ?? (() => Date.now());
   }
 
+  /**
+   * 热载缝：gateway 的 watch 重读配置后从这里换 config 引用。路由每次决策
+   * 都读 this.deps.config（dmPolicy/mention/binding/streaming），换引用即
+   * 全部生效；已建会话不受影响（它们的 harness/工作区在创建时已定）。
+   */
+  updateConfig(config: ChannelsConfig): void {
+    this.deps.config = config;
+  }
+
   get sessionCount(): number {
     return this.sessions.size;
   }

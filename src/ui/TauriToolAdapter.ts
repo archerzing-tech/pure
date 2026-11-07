@@ -4,6 +4,8 @@
 // Built-in schemas stay shared with the CLI; researcher tools wrap the Rust web/file primitives while legacy names remain execution-compatible but hidden from new model tool lists.
 
 import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition, GeneratedImage } from '../shared/types';
+import { homeDir, join as joinPath } from '@tauri-apps/api/path';
+import { parseCredentialPaste, type OnboardChannelId } from '../shared/channelCredentials';
 import type { Channel } from '@tauri-apps/api/core';
 import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/toolDefs';
 import { runGitTool, type GitToolName } from '../tools/impl/git';
@@ -1104,7 +1106,7 @@ export class TauriToolAdapter implements ToolAdapter {
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
-    if (toolName === 'connect_mcp_server' || toolName === 'register_mcp_server' || toolName === 'install_agent_skill') return { sideEffects: true, isWrite: true };
+    if (toolName === 'connect_mcp_server' || toolName === 'register_mcp_server' || toolName === 'install_agent_skill' || toolName === 'configure_channel') return { sideEffects: true, isWrite: true };
     return TOOL_METADATA[toolName];
   }
 
@@ -1425,6 +1427,66 @@ export class TauriToolAdapter implements ToolAdapter {
           if (!this.capabilityHooks) return { id: toolCall.id, toolName: name, error: 'Dynamic MCP connection is not available in this runtime.', success: false, duration: Date.now() - start };
           const registered = await this.capabilityHooks.connectMcpServer(serverConfig, signal);
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ name: serverName, transport, persisted: registered.persisted, tools: registered.tools.map((tool) => tool.name) }), success: true, duration: Date.now() - start };
+        }
+        case 'configure_channel': {
+          // GUI 侧与 CLI 的 cliCapabilityTools.configureChannel 同语义：粘贴原文
+          // → 共享解析 → Rust channel_verify 探活（WebView 直 fetch 平台会被
+          // CORS 拦，探测必须住 Rust）→ secret_set + channels.json 保真直改。
+          // 探活不过一个字节都不落盘。
+          const channel = String(args.channel ?? '').trim();
+          const meta = ({ feishu: { secretsKey: 'feishu.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: '飞书' }, dingtalk: { secretsKey: 'dingtalk.clientSecret', primaryField: 'clientId', secondaryRefField: 'clientSecretRef', label: '钉钉' }, qq: { secretsKey: 'qq.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: 'QQ' } } as Record<string, { secretsKey: string; primaryField: string; secondaryRefField: string; label: string }>)[channel];
+          if (!meta) return { id: toolCall.id, toolName: name, error: `configure_channel: channel 必须是 feishu / dingtalk / qq 之一（收到 "${channel}"）`, success: false, duration: Date.now() - start };
+          const credentialsText = String(args.credentials ?? '').trim();
+          if (!credentialsText) return { id: toolCall.id, toolName: name, error: 'configure_channel 需要 credentials——把用户提供的凭据文本原样传入（不要自己拆字段）', success: false, duration: Date.now() - start };
+          const parsed = parseCredentialPaste(credentialsText, channel as OnboardChannelId);
+          const appId = parsed?.primary ?? '';
+          const secret = parsed?.secondary ?? '';
+          if (!appId || !secret) {
+            const missing = [!appId ? meta.primaryField : '', !secret ? '密钥' : ''].filter(Boolean).join('、');
+            return { id: toolCall.id, toolName: name, error: `凭据解析不完整（缺 ${missing}）。请用户对照平台控制台补齐两段值。`, success: false, duration: Date.now() - start };
+          }
+          const verdict = await this.call('channel_verify', { platform: channel, appId, appSecret: secret }) as { ok: boolean; kind: string; detail: string };
+          if (!verdict?.ok) {
+            const message = verdict?.kind === 'network'
+              ? `${meta.label}平台探活失败（网络不通）：${verdict?.detail}。配置未写入——请检查本机网络/代理后再试。`
+              : `${meta.label}凭据被平台拒绝：${verdict?.detail ?? '未知原因'}。请回平台控制台核对凭据是否配对后再发我一次。没有写入任何配置。`;
+            return { id: toolCall.id, toolName: name, error: message, success: false, duration: Date.now() - start };
+          }
+          try {
+            await this.call('secret_set', { key: meta.secretsKey, value: secret });
+            const home = await homeDir();
+            const pureHome = await joinPath(home, '.pure');
+            let cfg: Record<string, unknown> = { enabled: true, channels: {} };
+            try {
+              const raw = await this.call('read_file', { workspace: pureHome, path: 'channels.json' }) as string;
+              cfg = JSON.parse(raw) as Record<string, unknown>;
+            } catch { /* 首次配置——从骨架开始 */ }
+            if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) cfg = { channels: {} };
+            const channels = (cfg.channels && typeof cfg.channels === 'object' && !Array.isArray(cfg.channels) ? cfg.channels : {}) as Record<string, Record<string, unknown>>;
+            const entry = (channels[channel] && typeof channels[channel] === 'object' ? channels[channel] : {}) as Record<string, unknown>;
+            const accounts = (entry.accounts && typeof entry.accounts === 'object' && !Array.isArray(entry.accounts) ? entry.accounts : {}) as Record<string, Record<string, unknown>>;
+            const first = Object.values(accounts)[0] ?? {};
+            accounts.main = { ...first, [meta.primaryField]: appId, [meta.secondaryRefField]: meta.secretsKey };
+            entry.enabled = args.enable === false ? false : true;
+            entry.accounts = accounts;
+            channels[channel] = entry;
+            cfg.channels = channels;
+            cfg.enabled = Object.values(channels).some((e) => e && typeof e === 'object' && (e as Record<string, unknown>).enabled === true);
+            await this.call('write_file', { workspace: pureHome, path: 'channels.json', content: JSON.stringify(cfg, null, 2) + '\n' });
+          } catch (err) {
+            return { id: toolCall.id, toolName: name, error: `凭据有效但写盘失败：${err instanceof Error ? err.message : String(err)}`, success: false, duration: Date.now() - start };
+          }
+          let afterLine: string;
+          try {
+            const status = await this.call('gateway_status') as { running?: boolean; pid_alive?: boolean };
+            afterLine = status?.running || status?.pid_alive
+              ? '网关正在运行，几秒内自动热载生效（无需重启）。'
+              : '网关当前未运行——配置已保存，下次启动网关（设置页「启动」）即生效。';
+          } catch {
+            afterLine = '配置已保存；若网关正在运行，稍候自动热载生效。';
+          }
+          const pairingLine = '首次在平台里给机器人发消息会收到一个配对码，把配对码告诉我即可完成绑定（频道设置页也能一键批准）。';
+          return { id: toolCall.id, toolName: name, result: `✅ ${meta.label}通道已开通（凭据已通过平台验证）\n${afterLine}\n${pairingLine}`, success: true, duration: Date.now() - start };
         }
         case 'read_file': {
           // 刀 D1（2026-10-10）：行范围在 Rust 侧切（IPC 之前），大文件不再

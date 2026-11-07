@@ -14907,6 +14907,62 @@ button svg,
 .channel-field-input {
   flex: 1;
 }
+/* ── 一键开通（粘贴框形态）────────────────────────────────────── */
+.channel-onboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
+}
+.channel-onboard-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.channel-paste-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.channel-onboard-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.channel-onboard-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  min-width: 0;
+}
+.channel-onboard-ok {
+  color: var(--accent);
+}
+.channel-onboard-err {
+  color: #e5484d;
+}
+.channel-onboard-next {
+  color: var(--accent);
+}
+/* ── 待批准配对（一键批准）────────────────────────────────────── */
+.channel-pairing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.channel-pairing-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.channel-pairing-btn {
+  padding: 2px 12px;
+  font-size: 12px;
+}
 .channel-card-footer {
   display: flex;
   justify-content: flex-end;

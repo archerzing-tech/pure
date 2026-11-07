@@ -5,11 +5,17 @@
 // 走 Rust secret_set/secret_get 落在 ~/.pure/secrets.json（0600）——
 // 与 CLI/gateway 的 appSecretRef/clientSecretRef 约定同源，零翻译层。
 //
-// 交互：每个频道一张卡，头部一行 = 图标 + 名称 + 状态徽标 + 启用开关；
-// 默认全部收起，点头部展开（同时只展开一个），表单改动即改即存，
-// 「完成」收起。收起时也能从徽标一眼看出「已启用/未启用 + 凭据是否已设」。
+// 一键开通（2026-11-07）：凭据表单收敛成一个粘贴框——用户从平台控制台整段
+// 复制（两行/JSON/裸值都认，解析与 CLI configure_channel 共享同一纯函数），
+// 提交前先经 Rust channel_verify 向平台 token 端点真实探活（WebView 直 fetch
+// 平台会被 CORS 拦，探测必须住 Rust；同款判例见 gatewaySettings 的 runTest）。
+// 探活不过一个字节都不落盘；通过了才写盘，gateway 侧的 watch 在几秒内热载，
+// 不再需要「改完配置手动重启网关」。展开体还带本通道的待批准配对列表——
+// 批准直接改盘上 pending/peers 文件，PairingGate 按 mtime 跨进程增量重读，
+// gateway 无需重启即生效（零命令行）。
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
+import { parseCredentialPaste } from '../shared/channelCredentials';
 import { t } from '../shared/i18n';
 
 export interface ChannelAccountDraft {
@@ -30,6 +36,13 @@ interface ChannelSpec {
   fields: { key: keyof ChannelAccountDraft; label: string; placeholder: string; secret?: boolean }[];
   guide: string[];
   status: 'implemented' | 'planned';
+  /** 一键开通形态的元数据（fields 为空的通道必带）。 */
+  onboarding?: {
+    /** 平台控制台里这对凭据的名字（教用户去哪里复制）。 */
+    fieldsLabel: string;
+    /** 开通后用户下一步做什么（首次私信配对）。 */
+    nextStep: string;
+  };
 }
 
 const SECRETS_KEY: Partial<Record<ChannelSpec['id'], string>> = {
@@ -43,10 +56,7 @@ const SPECS: ChannelSpec[] = [
     id: 'feishu',
     name: '飞书 / Lark',
     icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h6l10 10v6h-6L4 10z"/></svg>',
-    fields: [
-      { key: 'appId', label: 'App ID', placeholder: 'cli_xxx' },
-      { key: 'appSecret', label: 'App Secret', placeholder: '••••••••', secret: true },
-    ],
+    fields: [],
     guide: [
       '开放平台 → 创建企业自建应用 → 添加「机器人」能力',
       '事件与回调 → 订阅方式选「长连接」→ 添加事件 im.message.receive_v1',
@@ -54,38 +64,44 @@ const SPECS: ChannelSpec[] = [
       '版本管理 → 创建版本并发布（未发布事件不会推送）',
     ],
     status: 'implemented',
+    onboarding: {
+      fieldsLabel: 'App ID + App Secret',
+      nextStep: '在飞书里给机器人发条消息，首次会收到配对码——在下方批准即可开始对话',
+    },
   },
   {
     id: 'dingtalk',
     name: '钉钉',
     icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>',
     fields: [
-      { key: 'clientId', label: 'Client ID (AppKey)', placeholder: 'ding_xxx' },
-      { key: 'clientSecret', label: 'Client Secret (AppSecret)', placeholder: '••••••••', secret: true },
       { key: 'robotCode', label: 'Robot Code（可选，发图片需要）', placeholder: 'ding_xxx' },
       { key: 'cardTemplateId', label: '卡片模板 ID（可选，缺省只发最终结果）', placeholder: '' },
     ],
     guide: [
       '开放平台 → 创建企业内部应用 → 开启「机器人」',
       'Stream 模式推送（无需公网 IP）',
-      '企业内部应用的凭据即 Client ID / Client Secret',
     ],
     status: 'implemented',
+    onboarding: {
+      fieldsLabel: 'Client ID (AppKey) + Client Secret (AppSecret)',
+      nextStep: '在钉钉里给机器人发条消息，首次会收到配对码——在下方批准即可开始对话',
+    },
   },
   {
     id: 'qq',
     name: 'QQ',
     icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8.5 14.5a5 5 0 0 0 7 0"/></svg>',
-    fields: [
-      { key: 'appId', label: 'AppID', placeholder: '10xxxxxx' },
-      { key: 'appSecret', label: 'AppSecret', placeholder: '••••••••', secret: true },
-    ],
+    fields: [],
     guide: [
-      'QQ 开放平台 → 创建机器人 → 拿 AppID / AppSecret',
+      'QQ 开放平台 → 创建机器人 → 复制 AppID / AppSecret（整段复制即可）',
       ' websocket 长连接接入（无需公网 IP），群聊默认仅 @ 触发',
       '沙箱环境先试单聊（C2C），群消息需上线审核后全量可用',
     ],
     status: 'implemented',
+    onboarding: {
+      fieldsLabel: 'AppID + AppSecret',
+      nextStep: '在 QQ 里加机器人为好友并发条消息，首次会收到配对码——在下方批准即可开始对话',
+    },
   },
   {
     id: 'webchat',
@@ -200,7 +216,13 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
       : enabled ? t('channel.badgeOn') : t('channel.badgeOff');
     if (spec.status !== 'planned' && secretKey) {
       void secretGet(secretKey).then((v) => {
-        if (v && !badge.textContent?.includes('·')) badge.textContent += ` · ${t('channel.badgeSecretSet')}`;
+        // 已启用 + 密钥在位 = 开通完成态（一键开通只产生这种组合——凭据
+        // 探活通过才落盘）。仅「凭据已设」的旧态保持原样不动。
+        if (enabled && v) {
+          badge.textContent = t('channel.badgeActive');
+        } else if (v && !badge.textContent?.includes('·')) {
+          badge.textContent += ` · ${t('channel.badgeSecretSet')}`;
+        }
       });
     }
 
@@ -236,7 +258,7 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
     });
     card.appendChild(head);
 
-    // ── 展开体：开通步骤 + 凭据表单 + 完成 ──
+    // ── 展开体：开通步骤 + 一键开通粘贴框 + 可选字段 + 待批准配对 + 完成 ──
     if (expanded) {
       const body = document.createElement('div');
       body.className = 'channel-card-body';
@@ -250,6 +272,112 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
         guide.appendChild(line);
       }
       body.appendChild(guide);
+
+      // ── 一键开通（粘贴框形态）：解析共享纯函数 → Rust 探活 → 写盘。
+      // 探活不过不写盘；写完网关 watch 自动热载，全程无手动重启。 ──
+      const onboarding = spec.onboarding;
+      if (onboarding && secretKey && spec.status === 'implemented') {
+        const onboard = document.createElement('div');
+        onboard.className = 'channel-onboard';
+
+        const title = document.createElement('div');
+        title.className = 'channel-onboard-title';
+        title.textContent = t('channel.pasteTitle');
+        onboard.appendChild(title);
+
+        const pasteInput = document.createElement('textarea');
+        pasteInput.className = 'setting-input channel-paste-input';
+        pasteInput.rows = 3;
+        pasteInput.placeholder = t('channel.pastePlaceholder');
+        pasteInput.autocomplete = 'off';
+        pasteInput.spellcheck = false;
+        onboard.appendChild(pasteInput);
+
+        const hint = document.createElement('div');
+        hint.className = 'channel-guide-line';
+        hint.textContent = `${onboarding.fieldsLabel} · ${t('channel.pasteHint')}`;
+        onboard.appendChild(hint);
+
+        const row = document.createElement('div');
+        row.className = 'channel-onboard-row';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'setting-btn primary';
+        btn.textContent = t('channel.onboardBtn');
+        const statusLine = document.createElement('span');
+        statusLine.className = 'channel-onboard-status';
+        row.append(btn, statusLine);
+        onboard.appendChild(row);
+
+        const setLine = (text: string, tone: 'ok' | 'err' | 'busy' | 'idle'): void => {
+          statusLine.textContent = text;
+          statusLine.className = `channel-onboard-status${tone === 'ok' ? ' channel-onboard-ok' : tone === 'err' ? ' channel-onboard-err' : ''}`;
+        };
+
+        onboard.appendChild(row);
+        btn.addEventListener('click', () => {
+          void (async () => {
+            const core = await loadTauriCore();
+            if (!core || !isTauriRuntime()) {
+              setLine(`${t('channel.saveFailed')}: Tauri runtime required`, 'err');
+              return;
+            }
+            const parsed = parseCredentialPaste(pasteInput.value, spec.id as 'feishu' | 'dingtalk' | 'qq');
+            if (!parsed?.primary || !parsed?.secondary) {
+              setLine(t('channel.onboardParseFail'), 'err');
+              return;
+            }
+            btn.disabled = true;
+            setLine(t('channel.onboarding'), 'busy');
+            try {
+              // 探活先行：凭据被拒/网络不通都不写盘，结果行明说原因。
+              const verdict = await core.invoke<{ ok: boolean; kind: string; detail: string }>('channel_verify', {
+                platform: spec.id,
+                appId: parsed.primary,
+                appSecret: parsed.secondary,
+              });
+              if (!verdict?.ok) {
+                if (verdict?.kind === 'network') {
+                  setLine(`${t('channel.onboardNetwork')}（${verdict.detail}）`, 'err');
+                } else {
+                  setLine(`${t('channel.onboardRejected')}：${verdict?.detail ?? ''}。${t('channel.onboardCheckHint')}`, 'err');
+                }
+                btn.disabled = false;
+                return;
+              }
+              // 凭据有效 → 落盘（secret 0600 + channels.json 保真直改 +
+              // 启用开关 + 顶层 enabled 同步）。
+              await secretSet(secretKey, parsed.secondary);
+              await updateChannelEntry(cfg, spec.id, (entry) => {
+                entry.enabled = true;
+                entry.accounts = entry.accounts ?? {};
+                const acc = Object.values(entry.accounts)[0] ?? {};
+                acc[spec.id === 'dingtalk' ? 'clientId' : 'appId'] = parsed.primary;
+                acc[spec.id === 'dingtalk' ? 'clientSecretRef' : 'appSecretRef'] = secretKey;
+                entry.accounts.main = acc;
+              });
+              let okLine = t('channel.onboardOk');
+              try {
+                const status = await core.invoke<{ running: boolean; pid_alive: boolean }>('gateway_status');
+                if (!status.running && !status.pid_alive) okLine = t('channel.onboardOkStopped');
+              } catch { /* 状态读不到按「已保存」口径说话，不假装 */ }
+              setLine(okLine, 'ok');
+              badge.className = 'channel-badge channel-badge-on';
+              badge.textContent = t('channel.badgeActive');
+              pasteInput.value = '';
+              const next = document.createElement('div');
+              next.className = 'channel-guide-line channel-onboard-next';
+              next.textContent = `→ ${onboarding.nextStep}`;
+              row.after(next);
+            } catch (err) {
+              setLine(`${t('channel.saveFailed')}: ${err instanceof Error ? err.message : String(err)}`, 'err');
+            } finally {
+              btn.disabled = false;
+            }
+          })();
+        });
+        body.appendChild(onboard);
+      }
 
       for (const field of spec.fields) {
         const row = document.createElement('div');
@@ -299,6 +427,22 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
         body.appendChild(row);
       }
 
+      // ── 待批准配对（一键批准）：读盘上 pending 文件按通道过滤，批准 =
+      // pending 删条目 + peers 加条目。PairingGate 按 mtime 跨进程增量重读
+      // （approve 命令同款通路），gateway 无需重启。 ──
+      if (secretKey && spec.status === 'implemented') {
+        const pairingBox = document.createElement('div');
+        pairingBox.className = 'channel-pairing';
+        const pairingTitle = document.createElement('div');
+        pairingTitle.className = 'channel-onboard-title';
+        pairingTitle.textContent = t('channel.pairingPending');
+        pairingBox.appendChild(pairingTitle);
+        const pairingList = document.createElement('div');
+        pairingBox.appendChild(pairingList);
+        body.appendChild(pairingBox);
+        void renderPairingList(pairingList, spec.id);
+      }
+
       const footer = document.createElement('div');
       footer.className = 'channel-card-footer';
       const doneBtn = document.createElement('button');
@@ -314,6 +458,91 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
   }
 
   void renderAll();
+}
+
+// ── 待批准配对（GUI 侧零命令行批准）────────────────────────────────────
+
+interface PendingPairingEntry {
+  code: string;
+  channelId: string;
+  peerId: string;
+  name?: string;
+  createdAt: number;
+}
+
+async function readJsonViaTauri(path: string): Promise<Record<string, unknown> | null> {
+  const core = await loadTauriCore();
+  if (!core || !isTauriRuntime()) return null;
+  try {
+    const pureHome = await pureHomeDir();
+    const raw = await core.invoke<string>('read_file', { workspace: pureHome, path });
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null; // 不存在/损坏 = 空表（PairingGate 同款容错）
+  }
+}
+
+async function writeJsonViaTauri(path: string, data: unknown): Promise<void> {
+  const core = await loadTauriCore();
+  if (!core || !isTauriRuntime()) throw new Error('write requires the Tauri runtime');
+  const pureHome = await pureHomeDir();
+  await core.invoke('write_file', { workspace: pureHome, path, content: `${JSON.stringify(data, null, 2)}\n` });
+}
+
+async function renderPairingList(host: HTMLElement, channelId: string): Promise<void> {
+  const pending = await readJsonViaTauri('channels/pending-pairings.json');
+  const rows = Object.entries(pending ?? {})
+    .map(([key, value]) => ({ key, value: value as PendingPairingEntry }))
+    .filter((row) => row.value && typeof row.value.code === 'string' && row.value.channelId === channelId)
+    .sort((a, b) => (a.value.createdAt ?? 0) - (b.value.createdAt ?? 0));
+  host.replaceChildren();
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'channel-guide-line';
+    empty.textContent = t('channel.pairingNone');
+    host.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const line = document.createElement('div');
+    line.className = 'channel-pairing-row';
+    const label = document.createElement('span');
+    label.className = 'channel-guide-line';
+    label.textContent = `${row.value.code}${row.value.name ? ` · ${row.value.name}` : ''}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'setting-btn secondary channel-pairing-btn';
+    btn.textContent = t('channel.pairingApprove');
+    btn.addEventListener('click', () => {
+      void (async () => {
+        btn.disabled = true;
+        btn.textContent = t('channel.pairingApproving');
+        try {
+          const pend = (await readJsonViaTauri('channels/pending-pairings.json')) ?? {};
+          const peers = (await readJsonViaTauri('channels/peers.json')) ?? {};
+          const entry = pend[row.key] as PendingPairingEntry | undefined;
+          if (!entry) throw new Error('pairing request no longer exists');
+          delete pend[row.key];
+          peers[row.key] = {
+            channelId: entry.channelId,
+            peerId: entry.peerId,
+            ...(entry.name ? { name: entry.name } : {}),
+            approvedAt: Date.now(),
+          };
+          await writeJsonViaTauri('channels/pending-pairings.json', pend);
+          await writeJsonViaTauri('channels/peers.json', peers);
+          label.textContent = t('channel.pairingApproved');
+          btn.remove();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = t('channel.pairingApprove');
+          label.textContent = `${t('channel.saveFailed')}: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })();
+    });
+    line.append(label, btn);
+    host.appendChild(line);
+  }
 }
 
 /**

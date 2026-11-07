@@ -131,6 +131,22 @@ export class Gateway {
       });
     });
 
+    await this.startAdapters();
+
+    const interval = this.options.evictionIntervalMs ?? 60_000;
+    if (interval > 0) {
+      this.evictTimer = setInterval(() => {
+        void this.router.evictIdle(this.now(), this.options.sessionTtlMs ?? 30 * 60_000);
+      }, interval);
+      if (typeof this.evictTimer.unref === 'function') this.evictTimer.unref();
+    }
+    this.log(`gateway started: ${this.started.map((a) => a.id).join(', ') || '(no channels)'}`);
+    // 适配器就绪后重放上次进程遗留的可靠帧（审批/最终结果）。
+    if (this.outbox.pendingCount > 0) void this.outbox.drain();
+  }
+
+  /** 适配器启动段（start 与 reload 共用）：单通道起不来不影响其它通道。 */
+  private async startAdapters(): Promise<void> {
     for (const adapter of this.enabledAdapters()) {
       const accountId = this.firstAccountId(adapter.id);
       const ctx: ChannelRuntimeContext = {
@@ -146,16 +162,29 @@ export class Gateway {
         this.log(`adapter ${adapter.id} failed to start: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
 
-    const interval = this.options.evictionIntervalMs ?? 60_000;
-    if (interval > 0) {
-      this.evictTimer = setInterval(() => {
-        void this.router.evictIdle(this.now(), this.options.sessionTtlMs ?? 30 * 60_000);
-      }, interval);
-      if (typeof this.evictTimer.unref === 'function') this.evictTimer.unref();
+  /**
+   * 热载：配置文件变化后整体重启适配器（stop 全部 → 换 config → start）。
+   * 一键开通/凭据更换的用户不再需要「改配置→手动重启网关」——GUI 或
+   * configure_channel 工具写完盘，这里的调用方（cliChannels 的 watch）在
+   * 几秒内把新配置拉起来。router 的 config 引用同步换（dmPolicy/binding/
+   * streaming 立即生效）；已建会话不中断（它们的 harness 不经适配器）。
+   *
+   * 不热载的面（如实）：gateway.host/port（health 端点与 webchat 服务器绑
+   * 死在旧端口上，端口迁移仍需手动重启）、limits（limiter/budget 构造时
+   * 定额）。前者会 log 提醒。
+   */
+  async reload(config: ChannelsConfig): Promise<void> {
+    if (config.gateway.host !== this.options.config.gateway.host || config.gateway.port !== this.options.config.gateway.port) {
+      this.log(`gateway host/port changed (${this.options.config.gateway.host}:${this.options.config.gateway.port} → ${config.gateway.host}:${config.gateway.port}) — 端口迁移不支持热载，仍用旧端口；需要生效请重启网关`);
     }
-    this.log(`gateway started: ${this.started.map((a) => a.id).join(', ') || '(no channels)'}`);
-    // 适配器就绪后重放上次进程遗留的可靠帧（审批/最终结果）。
+    await Promise.all(this.started.map((a) => a.stop().catch((err) => this.log(`adapter ${a.id} stop failed: ${String(err)}`))));
+    this.started = [];
+    this.options.config = config;
+    this.router.updateConfig(config);
+    await this.startAdapters();
+    this.log(`gateway reloaded: ${this.started.map((a) => a.id).join(', ') || '(no channels)'}`);
     if (this.outbox.pendingCount > 0) void this.outbox.drain();
   }
 
