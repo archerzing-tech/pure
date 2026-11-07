@@ -1483,13 +1483,14 @@ export class NodeToolAdapter implements ToolAdapter {
   private async fetchPageWithFallbacks(
     url: string,
     opts: { selector?: string; signal?: AbortSignal },
-  ): Promise<{ text: string; via: string } | { hijack: string } | null> {
+  ): Promise<{ text: string; via: string } | { hijack: string } | { httpStatus: number } | null> {
     // P0b 账本：链上每一层是一条 transport（direct / reader / mirror:*），
     // 各自留 Attempt 样本——层的产出与否、耗时多长，是 P1 兜底链证据化的地基。
     const dest = destFromUrl(url, 'web-page', 'html');
     // 1) Direct fetch. 早期 return 多，用 settle 防双记：任何一条出路只入一次账。
     const t0 = Date.now();
     let directSettled = false;
+    let directHttpStatus: number | undefined;
     const settleDirect = (ok: boolean, hijack?: boolean): void => {
       if (directSettled) return;
       directSettled = true;
@@ -1499,10 +1500,12 @@ export class NodeToolAdapter implements ToolAdapter {
         ms: Date.now() - t0,
         msScope: 'total',
         ...(hijack ? { failure: 'hijack' as const } : {}),
+        ...(!ok && directHttpStatus !== undefined ? { status: directHttpStatus } : {}),
       });
     };
     try {
       const resp = await fetchWithRetry(url, { signal: opts.signal });
+      if (!resp.ok && resp.status >= 400 && resp.status < 500) directHttpStatus = resp.status;
       if (resp.ok) {
         const contentType = resp.headers.get('content-type') || '';
         if (/pdf/i.test(contentType) || /\.pdf($|\?)/i.test(url)) {
@@ -1572,6 +1575,9 @@ export class NodeToolAdapter implements ToolAdapter {
     recordAttempt(dest, { transport: 'mirror:firecrawl', ok: !!firecrawl && firecrawl.trim().length > 0, ms: Date.now() - firecrawlT0, msScope: 'total' });
     if (firecrawl) return { text: firecrawl.trim(), via: 'firecrawl' };
 
+    // direct 层亲见的内容性 4xx 必须带出去：404 是「资源不存在」的回答，
+    // 上层不该把它当「路挂了」喂熔断器（recordNetFailure 会翻直连记忆）。
+    if (directHttpStatus !== undefined) return { httpStatus: directHttpStatus };
     return null;
   }
 
@@ -1620,6 +1626,10 @@ export class NodeToolAdapter implements ToolAdapter {
 
     try {
       const outcome = await this.fetchPageWithFallbacks(url, { signal: abort.signal });
+      if (outcome && 'httpStatus' in outcome) {
+        // 内容性 4xx：主机可达、资源不存在——不喂熔断器，如实告诉模型状态码。
+        return this.fail(null, start, `HTTP ${outcome.httpStatus} — the page does not exist (or is permanently gone). The host itself is reachable; do NOT retry web_fetch on this URL; use researcher_web to find a mirror or a different source.`, 'web_fetch');
+      }
       if (!outcome) {
         // The chain failed everywhere: feed the breaker so a repeat visit to
         // this host fails instantly next time.
@@ -2432,6 +2442,10 @@ export class NodeToolAdapter implements ToolAdapter {
       if (outcome && 'hijack' in outcome) {
         recordNetFailure(url);
         return this.fail(null, start, outcome.hijack, 'web_scrape');
+      }
+      if (outcome && 'httpStatus' in outcome) {
+        // 内容性 4xx：主机可达、资源不存在——不喂熔断器，如实告诉模型状态码。
+        return this.fail(null, start, `HTTP ${outcome.httpStatus} — no readable content could be obtained from ${url}; the page does not exist (or is permanently gone). The host itself is reachable; do NOT retry web_scrape on this URL; use researcher_web to find a different page.`, 'web_scrape');
       }
       if (!outcome) {
         return this.fail(null, start, `No readable content could be obtained from ${url} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use researcher_web to find a mirror or a different page.`, 'web_scrape');

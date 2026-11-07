@@ -81,6 +81,20 @@ export function isNetworkError(message: string): boolean {
   return /error sending request|connection|unable to connect|unable to resolve|timed?[\s-]?out|unreachable|\bdns\b|econn|reset by peer|socket|certificate|tls|fetch failed|network|代理|连接|超时/i.test(message);
 }
 
+/** 内容性 HTTP 状态失败：从执行器文案提取 `HTTP nnn`（Rust 侧 fetch_page_with_follow
+ *  的失败文案带状态码前缀）。404/410 是「资源不存在」——内容层的回答，主机明明
+ *  可达，换出口/翻路由记忆都无意义；403（IP 信誉，换路可能有用）与 429（限速，
+ *  重试语义）不算内容性。返回 undefined = 非状态类失败。
+ *  与 isNetworkError 的关系：本判定**优先**——「HTTP 404 — fetch failed on all
+ *  tiers」这类综合文案会被上面的 `fetch failed` 误吞，先在这里摘出状态码。 */
+export function contentStatusFromMessage(message: string): number | undefined {
+  const m = /\bHTTP (\d{3})\b/.exec(message);
+  if (!m) return undefined;
+  const status = Number(m[1]);
+  if (status === 403 || status === 429) return undefined;
+  return status >= 400 && status < 500 ? status : undefined;
+}
+
 // ── 应答劫持检测 ────────────────────────────────────────────────────────────
 //
 // 大陆网络的 DNS 污染 / 中间设备劫持会把请求改写成 200 广告页或 403 挡板，

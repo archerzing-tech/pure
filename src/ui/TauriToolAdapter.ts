@@ -23,7 +23,7 @@ import { loadConfig } from './config';
 import { promptBudgetLiveLine } from '../shared/providers';
 import { cacheQualityLiveLine } from '../shared/endpointCacheQuality';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
-import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
+import { blockedHostMessage, contentStatusFromMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
 import { githubAutoMirrorFirst, githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, githubMirrorLadderPrefixes, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, normalizeGithubMirrorKey, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
@@ -918,7 +918,7 @@ export class TauriToolAdapter implements ToolAdapter {
     // 劫持页是一个「成功但不可信」的结局：HTTP 200，内容不是用户要的东西。
     // 它必须走网络失败那条路（兜底重试 + unlearn 这条错路），但不靠错误文本
     // 传递——那是隐式契约，改一个词就静默失效。
-    type Attempt = { ok: true; value: T; ms: number } | { ok: false; network: boolean; hijack: boolean; msg: string; ms: number };
+    type Attempt = { ok: true; value: T; ms: number } | { ok: false; network: boolean; hijack: boolean; contentStatus?: number; msg: string; ms: number };
     const attempt = async (proxyUrl: string): Promise<Attempt> => {
       const t0 = Date.now();
       try {
@@ -928,7 +928,10 @@ export class TauriToolAdapter implements ToolAdapter {
         return { ok: false, network: true, hijack: true, ms: Date.now() - t0, msg: `${hijackReason({ hijacked: true, signal: hijack })}（${hijack}）` };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        return { ok: false, network: isNetworkError(msg), hijack: false, ms: Date.now() - t0, msg };
+        // 内容性 4xx 优先于词表判定：404 的综合文案含「fetch failed」，直接问
+        // isNetworkError 会被误吞成网络类 → 白白换路重试 + 把直连翻面。
+        const contentStatus = contentStatusFromMessage(msg);
+        return { ok: false, network: contentStatus === undefined && isNetworkError(msg), hijack: false, contentStatus, ms: Date.now() - t0, msg };
       }
     };
     const learn = (proxyUrl: string, res: Attempt): void => {
@@ -942,6 +945,7 @@ export class TauriToolAdapter implements ToolAdapter {
           ms: res.ms,
           msScope: 'total',
           ...(res.ok ? {} : res.hijack ? { failure: 'hijack' as const } : {}),
+          ...(!res.ok && res.contentStatus !== undefined ? { status: res.contentStatus } : {}),
         });
       }
     };
@@ -961,7 +965,11 @@ export class TauriToolAdapter implements ToolAdapter {
       }
       lastMsg = res.msg;
       // 没有 host、或非网络类失败（内容不对等）——换出口没有意义，原样上报。
-      if (!host || !res.network) throw new Error(res.msg);
+      // 内容性 4xx（404/410）仍入账（状态码是 P1 的证据）但不换路不翻面。
+      if (!host || !res.network) {
+        if (res.contentStatus !== undefined) learn(seq[i]!, res);
+        throw new Error(res.msg);
+      }
       learn(seq[i]!, res);
     }
     // 有反向兜底（配了代理）且预算用尽仍失败：记熔断；没配代理则原样上报。

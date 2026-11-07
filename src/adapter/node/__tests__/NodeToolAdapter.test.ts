@@ -698,8 +698,10 @@ describe('NodeToolAdapter web_fetch netLedger 接线（P0b）', () => {
   it('404 全链：direct/reader/mirror:wayback/mirror:firecrawl 各一条失败样本', async () => {
     mockFetch(() => new Response('nope', { status: 404 }));
     try {
-      const r = await adapter2.execute(fetchCall(`https://ledger-404.example.com/missing-${Date.now()}`));
+      const url = `https://ledger-404.example.com/missing-${Date.now()}`;
+      const r = await adapter2.execute(fetchCall(url));
       expect(r.success).toBe(false);
+      expect(r.error).toContain('HTTP 404'); // 状态码随行：模型看得到「页面不存在」
       const snap = ledger.ledgerSnapshot();
       const host = snap.host['ledger-404.example.com']!;
       expect(host.direct?.n).toBe(1);
@@ -709,6 +711,9 @@ describe('NodeToolAdapter web_fetch netLedger 接线（P0b）', () => {
       expect(host['mirror:firecrawl']?.n).toBe(1);
       // 全失败：lastOkAt 缺席 → 读侧 TTL 判无效行。
       expect(ledger.hostStat(snap, 'ledger-404.example.com', 'direct')).toBeUndefined();
+      // 2026-11-07 真机判例：内容性 404 不喂熔断器（主机可达，资源不存在）。
+      const { hostBlocked } = await import('../../../shared/netGuard');
+      expect(hostBlocked(url)).toBe(false);
     } finally {
       restoreFetch();
     }

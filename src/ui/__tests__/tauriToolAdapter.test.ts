@@ -1606,6 +1606,25 @@ describe('netLedger 接线（P0b runRouted 入账）', () => {
     expect(snap.host['ledger-fb.example.com']?.['app-proxy']?.n).toBe(1);
   });
 
+  it('内容性 404：入账带 status、不换路重试、不喂熔断器（2026-11-07 真机误翻面判例）', async () => {
+    let calls = 0;
+    const invoke = async (command: string) => {
+      if (command !== 'web_fetch') return '';
+      calls += 1;
+      return Promise.reject('HTTP 404 — fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl); the page is blocked, removed, or requires interactive rendering.');
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
+    const url = 'https://ledger-404.example.com/gone';
+    const result = await adapter.execute(toolCall('web_fetch', { url }));
+    expect(result.success).toBe(false);
+    expect(calls).toBe(1); // 不换路重试：404 是回答不是路挂
+    const snap = ledgerSnapshot();
+    expect(snap.host['ledger-404.example.com']?.direct?.ok).toBe(0);
+    expect(snap.host['ledger-404.example.com']?.direct?.n).toBe(1);
+    const { hostBlocked } = await import('../../shared/netGuard');
+    expect(hostBlocked(url)).toBe(false); // 不喂熔断器
+  });
+
   it('完整性锁：每个 runRouted 调用点都声明 Destination（P1 名单化的地基）', () => {
     const src = readFileSync(new URL('../TauriToolAdapter.ts', import.meta.url), 'utf8');
     const calls = src.match(/this\.runRouted\(/g)?.length ?? 0;

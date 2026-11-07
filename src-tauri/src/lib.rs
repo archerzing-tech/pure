@@ -8622,6 +8622,9 @@ pub struct FetchedPage {
     pub final_url: String,
     /// 最后一跳是否为 2xx。
     pub ok: bool,
+    /// 最后一跳的 HTTP 状态码。错误文案带上它：404 是「页面不存在」（内容层
+    /// 的回答），不该被上层当成「路挂了」去翻路由记忆。
+    pub status: u16,
     /// 命中劫持判定时的裁决；None 表示未命中。
     pub hijack: Option<HijackVerdict>,
 }
@@ -8689,6 +8692,7 @@ async fn fetch_page_with_follow(
                     content_type,
                     final_url,
                     ok: false,
+                    status: status.as_u16(),
                     hijack: Some(hijack),
                 });
             }
@@ -8698,6 +8702,7 @@ async fn fetch_page_with_follow(
             content_type,
             final_url,
             ok: status.is_success(),
+            status: status.as_u16(),
             hijack: None,
         });
     }
@@ -8742,6 +8747,7 @@ async fn web_scrape(
         content_type,
         final_url: _,
         ok,
+        status,
         hijack: _,
     } = fetched;
 
@@ -8752,8 +8758,9 @@ async fn web_scrape(
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
             return Ok(page);
         }
+        // 状态码随行（同 web_fetch）：上层靠它区分「页面不存在」与「路不对」。
         return Err(format!(
-            "No readable content could be obtained from {} on any tier (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use web_search to find a mirror or a different page.",
+            "HTTP {status} — no readable content could be obtained from {} on any tier (direct / Jina Reader / Wayback / Firecrawl); the page is blocked, removed, or requires interactive rendering. Do NOT retry web_scrape on this URL; use web_search to find a mirror or a different page.",
             url
         ));
     }
@@ -9008,6 +9015,7 @@ async fn web_fetch(
         content_type,
         final_url: _,
         ok,
+        status,
         hijack: _,
     } = fetched;
 
@@ -9018,8 +9026,10 @@ async fn web_fetch(
             web_cache().lock().unwrap().set(&page_key, &page, PAGE_TTL_MS);
             return Ok(page);
         }
+        // 状态码必须随行：404 是「页面不存在」的回答（内容层），403/503 才是
+        // 「换条路可能有用」。上层 runRouted 靠 `HTTP nnn` 前缀区分这两族。
         return Err(format!(
-            "Fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl) — the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use web_search to find a mirror or a different source."
+            "HTTP {status} — fetch failed on all tiers (direct / Jina Reader / Wayback / Firecrawl); the page is blocked, removed, or requires interactive rendering. Do NOT retry web_fetch on this URL; use web_search to find a mirror or a different source."
         ));
     }
 
