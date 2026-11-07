@@ -2357,10 +2357,17 @@ export class NodeToolAdapter implements ToolAdapter {
     }
     // Auto-escalation (L2 → L1): the direct tier had nothing for this query,
     // so fall through to web search instead of forcing a second model
-    // round-trip. Opt out with searchOnMiss:false.
+    // round-trip. Opt out with searchOnMiss:false. The result is head-marked
+    // so the model knows this output came from search, not a structured
+    // source — the tool name alone would mislabel it.
     if (args.searchOnMiss !== false) {
       const search = await this.runSearchTool(query, 8, 'web_public_api', start);
-      if (search.success) return search;
+      if (search.success) {
+        return {
+          ...search,
+          result: `[auto-fallback: no structured-data source matched "${query}", served by web search]\n${search.result}`,
+        };
+      }
     }
     return this.fail(
       null,

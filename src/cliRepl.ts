@@ -11,6 +11,7 @@ import { StreamManager } from './harness/StreamManager';
 import { CliWireframeStream } from './shared/cliDiagram';
 import { takeFormValidationFeedback } from './shared/formValidationFeedback';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from './shared/providerSelfHeal';
+import { takeSchemaQuarantineFacts } from './shared/schemaQuarantineHeal';
 import { recordEndpointCacheOutcome } from './shared/endpointCacheQuality';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
@@ -390,6 +391,10 @@ function buildCliEnvFacts(conventions?: string): string {
   // 下回合送达，裁决权归模型。
   const healFacts = takeProviderHealFacts();
   if (healFacts) parts.push(healFacts);
+  // schema 隔离摘除披露（2026-11-07 决策边界）：二振被摘的工具亮灯下送，
+  // 模型不再对着已消失的工具空耗轮次。
+  const quarantineFacts = takeSchemaQuarantineFacts();
+  if (quarantineFacts) parts.push(quarantineFacts);
   return parts.join('\n\n');
 }
 

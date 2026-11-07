@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { AgentLoopEngine } from '../AgentLoopEngine';
+import { takeSchemaQuarantineFacts, resetSchemaQuarantineForTests } from '../../shared/schemaQuarantineHeal';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
 import { EventFanout } from '../../shared/asyncQueue';
@@ -552,7 +553,8 @@ describe('AgentLoopEngine', () => {
     const messages = completed.payload.messages as Message[];
     const wrapUp = messages.find((m) => m.role === 'user' && m.content.includes('consecutive web research rounds'));
     expect(wrapUp).toBeDefined();
-    expect(wrapUp!.content).toContain('Stop issuing more searches');
+    expect(wrapUp!.content).toContain('the research budget line');
+    expect(wrapUp!.content).toContain('is your call');
   });
 
   // 审计批 5⑧：失败的检索轮同样是检索轮。此前失败策略分支的 continue 跳过
@@ -600,7 +602,8 @@ describe('AgentLoopEngine', () => {
     const messages = completed.payload.messages as Message[];
     const wrapUp = messages.find((m) => m.role === 'user' && m.content.includes('consecutive web research rounds'));
     expect(wrapUp).toBeDefined();
-    expect(wrapUp!.content).toContain('Stop issuing more searches');
+    expect(wrapUp!.content).toContain('the research budget line');
+    expect(wrapUp!.content).toContain('is your call');
   });
 
   // 审计批 5③：验证失败的恢复提示是给模型的机制指令。漏标 internal 会渲染
@@ -1562,6 +1565,8 @@ describe('AgentLoopEngine', () => {
       ],
     });
 
+    // 模块级事件器是进程全局：先清场再断言「一振零披露」，防跨文件顺序地雷。
+    resetSchemaQuarantineForTests();
     const events = await collect(engine.run(
       { sessionId: 's-schema-selfheal', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
       ctx,
@@ -1577,6 +1582,8 @@ describe('AgentLoopEngine', () => {
     expect(schemaOf(seenTools[1], 'clean_tool').p!.pattern).toBe('^[^\\x00]*$');
     expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
     expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
+    // 一振只剥 pattern（对模型行为零影响）——不亮灯是设计内的。
+    expect(takeSchemaQuarantineFacts()).toBe('');
   });
 
   it('drops the named tool on strike 2, gives up only when the tool-less request still 400s', async () => {
@@ -1618,6 +1625,11 @@ describe('AgentLoopEngine', () => {
     expect(interrupted).toBeDefined();
     expect(interrupted!.payload.reason).toContain('TOOL PARAMETER SCHEMA');
     expect(interrupted!.payload.reason).toContain(SCHEMA_400);
+    // 摘除必须亮灯（决策边界 2026-11）：宿主动了模型的手脚，模型与装配面
+    // 都要知道哪个工具没了、为什么。读即清——这条断言也消费掉事件。
+    const dropFacts = takeSchemaQuarantineFacts();
+    expect(dropFacts).toContain('"rea__x" was dropped');
+    expect(dropFacts).toContain('enum entries are invalid');
   });
 
   it('recovers fully when dropping the offending tool lets the round complete', async () => {
@@ -1657,6 +1669,8 @@ describe('AgentLoopEngine', () => {
     expect(seenToolLists[2]).toContain('healthy_tool'); // drop is per-tool, not scorched-earth
     expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
     expect(events.find(e => e.type === 'Interrupted')).toBeUndefined();
+    // 摘除亮灯对恢复路径同样成立（模型下一回合看到工具为何消失）。
+    expect(takeSchemaQuarantineFacts()).toContain('"rea__x" was dropped');
   });
 
   it('salvages the transcript before a policy stop so the next turn inherits a lean payload', async () => {

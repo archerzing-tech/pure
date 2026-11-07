@@ -110,6 +110,9 @@ describe('CLI Tier-2/3 web tool wiring', () => {
     expect(result.success).toBe(true);
     expect(result.toolName).toBe('web_public_api');
     expect(String(result.result)).toContain('No results found');
+    // 换层必须让模型知道：工具名仍是 web_public_api，结果头不标注来源就冒充了结构化源。
+    expect(String(result.result)).toContain('[auto-fallback');
+    expect(String(result.result)).toContain('served by web search');
   });
 
   it('web_public_api respects searchOnMiss:false and fails with recovery guidance', async () => {

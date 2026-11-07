@@ -4,6 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
+import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
@@ -998,7 +999,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
  * 缓存地基刀A（2026-11-06）吞并两件回合级事实：时间基准行（每回合现算现注入,
  * timeContext 设计意图在此真正落地——冻进 system 时首回合日期会被用到会话结束）
  * 与本会话网络熔断注（随熔断发生逐轮出现,不再让跨会话前缀互不一致）。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻：时间是每回合都要校准的参考点（timeContext.ts 顶部定调）。
   const time = formatTimeContextLine(currentTimeContext()).trim();
@@ -1027,6 +1028,10 @@ function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFa
   // 下回合在这里送达模型——裁决权归模型（5856e63 同构）。无事件零注入。
   const heal = providerHealFacts?.trim();
   if (heal) parts.push(heal);
+  // schema 隔离摘除披露（2026-11-07 决策边界）：二振被摘的工具亮灯下送，
+  // 与 CLI 面同构。无事件零注入。
+  const quarantine = schemaQuarantineFacts?.trim();
+  if (quarantine) parts.push(quarantine);
   return parts.join('\n\n');
 }
 
@@ -6761,7 +6766,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts()),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts()),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,

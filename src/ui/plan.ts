@@ -44,7 +44,7 @@ export function evaluatePlanContinuation(args: {
   const todosDone = snapshot.currentTodo >= stageTodoCount;
   if (lastStage && todosDone) return false;
   const progress = `stage ${snapshot.currentPlan}/${plan.steps.length}` + (stageTodoCount > 0 ? `, todo ${snapshot.currentTodo}/${stageTodoCount}` : '');
-  return `Handover check: the approved plan is NOT finished (${progress} done). Continue executing the remaining plan stages with tools right now — re-read where you stopped, make the next tool call, and keep going until every stage is complete and verified. Do NOT end the turn with a progress report.`;
+  return `Handover check: the approved plan is NOT finished (${progress} done). The remaining stages still need tool work — re-read where you stopped, make the next tool call, and keep going until every stage is complete and verified. If the plan's premise has changed, say so plainly before ending the turn; a bare progress report is not a handover.`;
 }
 
 export interface PlanReviewOptions {

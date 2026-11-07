@@ -8,6 +8,7 @@ import { mergeTokenUsage } from '../shared/usage';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
 import { stripAllPatterns } from '../shared/schemaSanitize';
+import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/schemaQuarantineHeal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
@@ -590,16 +591,20 @@ export class AgentLoopEngine {
         // ── Schema-rejection self-heal: strip patterns, THEN drop the tool ──
         // Runs before the deterministic-rejection split: unlike a context
         // overflow, this 400 has a concrete per-tool fix. Strike 1 quarantines
-        // the named tool (or the whole list when the validator didn't name
-        // one) — the assembly above swaps in a pattern-free schema on the
-        // resend. Strike 2 DROPS the tool from the list (the filter above):
-        // even a pattern-free schema still rejected means the validator
-        // objects to something no stripping fixes, and "one tool fewer"
-        // beats a dead session. No-name strike 2 means the whole list is
-        // dropped and the request ships tool-less — a 400 after THAT is not
-        // a schema problem anymore, so it falls through to the deterministic
-        // stop. Falls through at strikes >= 3 (unreachable for a named tool
-        // once dropped; the no-name path lands here with an empty map).
+        // the named tool — the assembly above swaps in a pattern-free schema
+        // on the resend (a no-name strike 1 bumps the whole list the same
+        // way). Strike 2 DROPS the named tool from the list (the filter
+        // above): even a pattern-free schema still rejected means the
+        // validator objects to something no stripping fixes, and "one tool
+        // fewer" beats a dead session. A no-name strike 2 doesn't resend at
+        // all: with the whole list bumped there is nothing safe to drop
+        // selectively, so it falls straight through to the deterministic
+        // stop, whose stop reason explains the schema rejection. Falls
+        // through at strikes >= 3 (unreachable for a named tool once
+        // dropped; the no-name path never gets here — it stops at strike 2).
+        // 摘除必须亮灯（2026-11-07 决策边界）：宿主动了模型的手脚，静默摘除
+        // 会让模型反复调用已消失的工具空耗轮次——record 后下回合 envFacts
+        // 送达（schemaQuarantineHeal.ts）。一振剥 pattern 不披露（行为零影响）。
         if (errClass === 'schema') {
           const named = errMessage.match(/Invalid schema for (?:function|tool) '([^']+)'/i)?.[1];
           const bump = (n: string) => schemaQuarantineStrikes.set(n, (schemaQuarantineStrikes.get(n) ?? 0) + 1);
@@ -609,6 +614,9 @@ export class AgentLoopEngine {
             ? schemaQuarantineStrikes.get(named)!
             : Math.max(0, ...[...schemaQuarantineStrikes.values()]);
           if (strikes === 1 || (strikes === 2 && !!named)) {
+            if (strikes === 2 && named) {
+              recordSchemaQuarantineEvent({ tool: named, detail: schemaQuarantineDetail(errMessage) });
+            }
             turnCount++; budget.incrementTurn();
             yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
             continue;
@@ -1424,7 +1432,7 @@ export class AgentLoopEngine {
     if (next < RESEARCH_ROUND_LIMIT) return { streak: next, wrapUp: null };
     return {
       streak: 0,
-      wrapUp: `You have made ${RESEARCH_ROUND_LIMIT} consecutive web research rounds for this request. Stop issuing more searches and deliver a complete, well-organized answer now from the evidence you have already gathered. If a specific fact is still missing, state the assumption or the gap plainly instead of searching again.`,
+      wrapUp: `You have spent ${RESEARCH_ROUND_LIMIT} consecutive web research rounds on this request — that is the research budget line, raised by the host, not a claim that your evidence is complete. Whether the evidence is enough is your call: if the answer is within reach of what you have already gathered, deliver it now in a complete, well-organized form; if a specific fact is still missing, state the assumption or the gap plainly rather than drifting into more open-ended searching.`,
     };
   }
 

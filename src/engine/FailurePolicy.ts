@@ -123,12 +123,12 @@ export class DefaultFailurePolicy implements FailurePolicy {
       if (repeats === 1) {
         return {
           kind: 'reflect',
-          hint: `${seen} Do not walk the same path again — skip the naive retry and change approach now (different tool, route, or premise).${webHint}${TRAP_ESCAPE_HINT}`,
+          hint: `${seen} Do not walk the same path again — skip the naive retry and change approach now (different tool, route, or premise). This history is prior experience, not a verdict: if the condition that broke it has verifiably changed, retrying is legitimate.${webHint}${TRAP_ESCAPE_HINT}`,
         };
       }
       return {
         kind: 'degrade',
-        reason: `${seen} This is a repeat — SKIP the failing call now. Do not retry it with the same or trivially-different arguments: take a workable alternative that still serves the user's goal and CONTINUE the task.${webHint}`,
+        reason: `${seen} This is a repeat — SKIP the failing call now. Do not retry it with the same or trivially-different arguments: take a workable alternative that still serves the user's goal and CONTINUE the task. The history is a strong prior, not a verdict — retrying is legitimate only once the changed condition has been verified.${webHint}`,
       };
     }
 

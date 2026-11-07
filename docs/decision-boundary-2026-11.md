@@ -81,3 +81,18 @@ A 档（越位候选）9 项裁定：**落刀 4**——A1 模型失效自愈闭�
 - **CAPABILITY_GAP_PROMPT 前半段死文本**（先在，非本刀引入）：CORE 半段全 src 无装配点，只 LADDER 切片进 prompt；本刀清了其中指向已删内容的两句，前半段存废（整体退役 or 恢复装配）待用户点名。
 
 **验证（补刀后）**：tsc 零错 + 相关测试文件全绿 + 全量复跑。
+
+## 七、A 档挂账收尾（2026-11-07，六项全清）
+
+挂账池（第四节 A5-A9 + B 档两处）逐项裁定落刀，现场取证 + 判据适用后六项全收口：
+
+1. **A6 偏好收割——收窄落刀**：memory.ts 的正则把「提及」直接断言成「偏好」（"I want a React app using TypeScript and pnpm" → "User frequently uses the pnpm framework"），一次性任务描述固化为跨项目常驻 prompt 行=毒药形状；「是不是偏好」是语义判断，归模型（反思器 lesson 已是模型侧通道）。刀=删 LANGUAGE/FRAMEWORK/TOOL 三组提及推断表 + pushStyle；**保留 REMEMBER_TOOL_PATTERNS**（「记住用 X」是用户明确指令=用户意志固化=契约正当，正则只是送达通道）。测试推断类锚退役、指令类锚保留并加负锚（提及→零条目）。
+2. **A7 研究收束令——措辞刀**：原措辞「Stop issuing more searches…deliver now」是禁令腔，但机制只是软 nudge（注入后 streak 归零，模型继续搜还会再触发）——措辞假装硬闸。刀=改「预算线亮出（research budget line, raised by the host）+ 证据够没够 is your call + 防漂移原则句保留」；测试锚同步为 `the research budget line` / `is your call`。
+3. **A8 continueGuard——措辞刀**：机制正当（双开关同闸+每回合 3 次硬上限+六类合法收尾放行=软 A 可容忍），措辞「Do NOT end the turn」绝对禁令缺出口。刀=删绝对禁令，留「plan's premise has changed, say so plainly before ending」口子；「bare progress report is not a handover」产出形状原则保留。
+4. **A9 滑搜索——判 D + 透明度小补**：复核确认 description 与失败文案已双重声明 fallback 契约 + searchOnMiss 单次 opt-out 在场=契约成立不越位。但换层结果以 web_public_api 名义回给模型=来源冒充。刀=fallback 返回体头部加 `[auto-fallback: … served by web search]` 标注，测试断言标注在场。
+5. **二振摘工具披露——亮灯落刀（最大一刀）**：摘除此前三重静默（模型/用户/error_pattern 账本全盲），违 watchdog 亮灯判例与现状可见三件套。刀=新增 `src/shared/schemaQuarantineHeal.ts` 处方器（record/take 读即清，providerSelfHeal 刀一同构）；engine 二振摘除分支 record（一振剥 pattern 不披露——行为零影响）；envFacts 双面接线（GUI buildEnvFacts 第五参 / CLI buildCliEnvFacts take）；**注释失真修正**——旧注释称「无名二振=整表摘除、tool-less 重发」，实际门控 `(strikes===2 && !!named)` 对无名二振直接滑落确定性停止（无重发），行为正确注释错，已如实化。新增处方器单测 5 例 + engine 三锚补披露断言（一振零披露负断言带跨文件清场防御）。
+6. **E1.2 跨会话加速——措辞刀**：机制=失败阶梯前移（4a 既定裁决不动），账目句是事实陈述正当；缺的是「历史教训=先验非判决」口子（上次失败≠本次必然失败，环境变了路就通了）。刀=reflect 档补宽口（"retrying is legitimate if the condition has verifiably changed"）、degrade 档补窄口（"only once the changed condition has been verified"）；测试锚追加不破。
+
+**新挂账（本节产生）**：schema 摘除的用户侧事件卡（现仅 envFacts 模型侧亮灯，GUI 观察面不可见，需新事件类型跨 Rust 接线）；schema 400 入 error_pattern 跨会话账目（现 failures.push 在 continue 后不可达，写入口在 Harness 失败策略路径，跨层接线成本高挂账）；A5 workShapedFallback 维持原挂账条件（真机证伪直投 TTFT 成本后再议）。
+
+**验证**：bun test 全量 5124 例零 fail + tsc 零错 + lint:conventions 过。
