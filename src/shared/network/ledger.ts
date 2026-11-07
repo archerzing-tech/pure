@@ -78,17 +78,26 @@ function sanitizeLedger(raw: unknown): LedgerData {
 // ── 单写者：进程内唯一的内存表 + 原子替换落盘 ────────────────────────────
 
 let ledger: LedgerData | null = null;
+// 测试清场标志：resetNetLedgerForTests 之后关死 localStorage 重灌通道。
+// flaky-quartet 同款判例（netRoute 学习表先踩过）：removeItem 的可靠性不
+// 敢赌——bun test 单进程跨文件共享 localStorage，更早文件的残留账本会在
+// 下一用例 ensureLedger 时整表灌回（CI 实证：class 层收到 15，host 层
+// 是干净的 1——灌回只富集 class 桶，host 键是全新的）。reset 改置空账
+// + 关闸，重灌只剩一条路：显式 reload 入口。
+let skipStorageReload = false;
 
 function ensureLedger(): LedgerData {
   if (ledger) return ledger;
   ledger = emptyLedger();
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem(NET_LEDGER_STORE_KEY);
-      if (raw) ledger = sanitizeLedger(JSON.parse(raw));
+  if (!skipStorageReload) {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem(NET_LEDGER_STORE_KEY);
+        if (raw) ledger = sanitizeLedger(JSON.parse(raw));
+      }
+    } catch {
+      ledger = emptyLedger(); // 存档损坏——从空账本开始
     }
-  } catch {
-    ledger = emptyLedger(); // 存档损坏——从空账本开始
   }
   return ledger!;
 }
@@ -194,13 +203,16 @@ export function failureFromNetGuardClass(cls: string): AttemptFailure | undefine
   }
 }
 
-/** 测试与跨面清场用（进程级单例，flaky-quartet 判例）。 */
+/** 测试与跨面清场用（进程级单例，flaky-quartet 判例）。置空账 + 关死
+ *  localStorage 重灌通道——removeItem 不可靠（CI 二平台实证），残留账本
+ *  曾在下一用例 ensureLedger 时整表灌回。 */
 export function resetNetLedgerForTests(): void {
-  ledger = null;
+  ledger = emptyLedger();
+  skipStorageReload = true;
   try {
     if (typeof localStorage !== 'undefined') localStorage.removeItem(NET_LEDGER_STORE_KEY);
   } catch {
-    // 内存清空即已足够
+    // 内存清空 + 关闸即已足够
   }
 }
 
