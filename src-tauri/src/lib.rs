@@ -5059,6 +5059,24 @@ mod web_search_tests {
     use super::*;
 
     #[test]
+    fn web_cache_flag_matches_the_node_semantics() {
+        // 与 Node webCacheEnabled（webCache.ts）逐值同语义：unset=开、显式
+        // 空串=关（`PURE_WEB_CACHE=` 是用户主动关，与 unset 是两个值）、
+        // off/0/false=关（大小写与首尾空白不敏感）、其余=开。
+        assert!(web_cache_enabled_with(None));
+        assert!(!web_cache_enabled_with(Some("")));
+        assert!(!web_cache_enabled_with(Some("  ")));
+        assert!(!web_cache_enabled_with(Some("off")));
+        assert!(!web_cache_enabled_with(Some("OFF")));
+        assert!(!web_cache_enabled_with(Some("0")));
+        assert!(!web_cache_enabled_with(Some("false")));
+        assert!(web_cache_enabled_with(Some("on")));
+        assert!(web_cache_enabled_with(Some("1")));
+        assert!(web_cache_enabled_with(Some("yes")));
+    }
+
+
+    #[test]
     fn chinese_query_detection_mirrors_node() {
         // The CJK detection that routes Chinese queries to cn.bing.com FIRST.
         // NodeToolAdapter.ts `containsCJK` must agree on every case.
@@ -5937,13 +5955,24 @@ fn web_cache_file() -> PathBuf {
 }
 
 fn web_cache_enabled() -> bool {
-    // Enabled by default; only explicit off/0/false disables. (Unset == "" is
-    // NOT a disable — matches the Node webCacheEnabled.)
-    let f = std::env::var("PURE_WEB_CACHE")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    f != "off" && f != "0" && f != "false"
+    web_cache_enabled_with(std::env::var("PURE_WEB_CACHE").ok().as_deref())
+}
+
+/** The flag semantics, pure so tests can pin it without touching process env
+ *  (env is process-global; parallel tests must not race on it). Enabled by
+ *  default; an EXPLICIT empty string disables — `PURE_WEB_CACHE=` is the user
+ *  turning it off on purpose, which is a different value from unset. This
+ *  matches the Node webCacheEnabled (`flag !== ''` guard); the previous
+ *  `unwrap_or_default` flattened unset and empty into one value and silently
+ *  diverged from Node on the empty case (2026-11-08 两端分叉盘点刀 ⑧). */
+fn web_cache_enabled_with(flag: Option<&str>) -> bool {
+    match flag {
+        None => true,
+        Some(f) => {
+            let f = f.trim().to_ascii_lowercase();
+            !f.is_empty() && f != "off" && f != "0" && f != "false"
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

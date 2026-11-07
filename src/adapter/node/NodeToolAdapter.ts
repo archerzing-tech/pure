@@ -2685,11 +2685,20 @@ export class NodeToolAdapter implements ToolAdapter {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || process.env.TZ || 'unknown';
     const lang = Intl.DateTimeFormat().resolvedOptions().locale || process.env.LANG || process.env.LC_ALL || process.env.LC_CTYPE || 'unknown';
     const encoding = detectLocaleEncoding(lang);
-    const time = new Date().toString();
+    // time/os 行与 Rust sys_info 同形（detect_current_time / detect_os_version
+    // 是权威侧，2026-11-08 分叉盘点刀 ⑥ 对齐）：时间 "YYYY-MM-DD HH:MM:SS TZ"
+    // （此前 toString 的长英文格式与 GUI 同屏两个形状）；macOS 走 sw_vers 出
+    // "macOS <ver> (<arch>)"，Linux/其余保持 uname/平台行。
+    const time = detectLocalTimeLine(new Date(), tz);
     let osVersion = `${process.platform} ${process.arch}`;
     try {
-      const uname = Bun.spawnSync({ cmd: ['uname', '-srm'], stdout: 'pipe', stderr: 'pipe' });
-      if (uname.exitCode === 0) osVersion = new TextDecoder().decode(uname.stdout).trim();
+      if (process.platform === 'darwin') {
+        const swVers = Bun.spawnSync({ cmd: ['sw_vers', '-productVersion'], stdout: 'pipe', stderr: 'pipe' });
+        if (swVers.exitCode === 0) osVersion = `macOS ${new TextDecoder().decode(swVers.stdout).trim()} (${process.arch})`;
+      } else {
+        const uname = Bun.spawnSync({ cmd: ['uname', '-srm'], stdout: 'pipe', stderr: 'pipe' });
+        if (uname.exitCode === 0) osVersion = new TextDecoder().decode(uname.stdout).trim();
+      }
     } catch {}
     // Mirrors the Rust sys_info output shape (timezone/language/time/os
     // aligned under the same 10-char label column) plus the user-configured
@@ -3166,6 +3175,16 @@ async function detectReachability(): Promise<string> {
 
 let cachedReach: { at: number; value: string } | null = null;
 const REACH_TTL_MS = 300_000;
+
+/** Local time as "YYYY-MM-DD HH:MM:SS TZ" — the Rust sys_info shape
+ *  (detect_current_time, `date +%Y-%m-%d %H:%M:%S %Z`), via Intl so no
+ *  subprocess is needed. Pure on `now` for the format lock. */
+export function detectLocalTimeLine(now: Date, tz: string): string {
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const tzAbbr = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' })
+    .formatToParts(now).find((part) => part.type === 'timeZoneName')?.value ?? tz;
+  return `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}:${p2(now.getSeconds())} ${tzAbbr}`;
+}
 
 /** Character encoding implied by the locale (en_US.UTF-8 → UTF-8). Modern
  * macOS/Linux default to UTF-8; Windows ANSI code pages are not probed. */

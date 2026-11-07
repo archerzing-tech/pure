@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectLocalTimeLine, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -624,5 +624,22 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     expect(text).toContain('f2-aaa');
     expect(text).not.toContain('f3-aaa');
     expect(text).toContain('[read_file：以上是前 3 行，文件共 10 行。继续读用 startLine=4');
+  });
+});
+
+describe('detectLocalTimeLine — sys_info time 行与 Rust 同形（2026-11-08 分叉盘点刀 ⑥）', () => {
+  it('formats as YYYY-MM-DD HH:MM:SS TZ, never the long English toString shape', () => {
+    // GUI 侧（Rust detect_current_time）是权威形状：date +%Y-%m-%d %H:%M:%S %Z。
+    // 此前 CLI 用 new Date().toString()（"Fri Nov 07 2026 …"），同一字段两端
+    // 两个形状。锁格式本体 + 禁旧形状。
+    const line = detectLocalTimeLine(new Date(2026, 10, 7, 9, 41, 5), 'Asia/Shanghai');
+    expect(line).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+$/);
+    expect(line).not.toMatch(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/);
+    expect(line.startsWith('2026-11-07 09:41:05')).toBe(true);
+  });
+
+  it('falls back to the tz name when no short zone abbrevation exists', () => {
+    const line = detectLocalTimeLine(new Date(2026, 0, 2, 3, 4, 5), 'Etc/GMT-14');
+    expect(line).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+$/);
   });
 });

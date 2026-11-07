@@ -120,6 +120,28 @@ describe('webCache controls + keys', () => {
     expect(webCache().get('k2')).toBeUndefined();
   });
 
+  it('flag semantics are the Rust side’s contract: empty string disables, unset enables (2026-11-08 分叉盘点刀 ⑧)', () => {
+    // 两端同语义锁：`PURE_WEB_CACHE=`（显式空串）是用户主动关——此前 Rust
+    // 侧 unwrap_or_default 把 unset 与空串压成同一个值，空串在 GUI 侧错判
+    // 为开。Rust web_cache_flag_matches_the_node_semantics 逐值同表。
+    const unset = process.env.PURE_WEB_CACHE;
+    try {
+      delete process.env.PURE_WEB_CACHE;
+      expect(webCacheEnabled()).toBe(true);
+      process.env.PURE_WEB_CACHE = '';
+      expect(webCacheEnabled()).toBe(false);
+      process.env.PURE_WEB_CACHE = '  ';
+      expect(webCacheEnabled()).toBe(false);
+      process.env.PURE_WEB_CACHE = 'OFF';
+      expect(webCacheEnabled()).toBe(false);
+      process.env.PURE_WEB_CACHE = '1';
+      expect(webCacheEnabled()).toBe(true);
+    } finally {
+      if (unset === undefined) delete process.env.PURE_WEB_CACHE;
+      else process.env.PURE_WEB_CACHE = unset;
+    }
+  });
+
   it('normalizes search keys (case + whitespace + result count)', () => {
     expect(searchCacheKey('React  Hooks', 10)).toBe(searchCacheKey('react hooks', 10));
     expect(searchCacheKey('react hooks', 10)).not.toBe(searchCacheKey('react hooks', 5));
