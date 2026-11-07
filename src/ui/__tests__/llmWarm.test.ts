@@ -43,6 +43,14 @@ describe('llmWarm 预热调度纪律', () => {
     expect(src).not.toContain('thinkingCard');
   });
 
+  it('耗时留痕：成功样本写 warmPrior（P0 前移刀），skipped 轮与失败样本不写', () => {
+    // 与上一条互补：GET 失败不证路由死（零学习），但成功轮的毫秒是冷启动
+    // 选路的第一份证据——不写等于路由脑永远拿不到第一批数据。
+    expect(src).toContain('recordWarmPrior(baseUrl,');
+    expect(src).toContain("if (!r?.skipped) recordWarmPrior(baseUrl,");
+    expect(src).toContain("import { recordWarmPrior } from '../shared/netRoute';");
+  });
+
   it('busy 让路交给 Rust 在飞计数，TS 侧不自己判流式状态', () => {
     const rust = readSource(new URL('../../../src-tauri/src/lib.rs', import.meta.url));
     // busy 判定纯函数 + chat_stream 的 RAII 计数守卫。

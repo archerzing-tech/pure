@@ -11,6 +11,7 @@ import { loadConfig, type PureConfig } from './config';
 import { effectiveProxyUrl } from '../shared/proxy';
 import { customBaseURL } from '../shared/providers';
 import { loadTauriCore } from '../shared/tauri';
+import { recordWarmPrior } from '../shared/netRoute';
 
 const WARM_INTERVAL_MS = 30_000;
 
@@ -63,8 +64,11 @@ export async function warmLlmRoutesNow(): Promise<void> {
     const r = (await core.invoke('warm_llm_routes', {
       baseUrl,
       proxyUrl: proxyUrl || undefined,
-    })) as { direct?: boolean; proxy?: boolean | null };
-    lastWarm = { baseUrl, proxied: r?.proxy !== null && r?.proxy !== undefined };
+    })) as { skipped?: string; direct?: { ok: boolean; ms: number } | null; proxy?: { ok: boolean; ms: number } | null };
+    lastWarm = { baseUrl, proxied: r?.proxy != null };
+    // P0 前移刀（2026-11-07）：耗时留痕——两路毫秒写进 warmPrior，冷启动
+    // 选路按它定首选（网络层蓝图）。skipped 轮（busy/无端点）无样本可写。
+    if (!r?.skipped) recordWarmPrior(baseUrl, { direct: r?.direct ?? undefined, proxy: r?.proxy ?? undefined });
   } catch {
     // 命令不可用（旧后端）或网络失败：静默。下一个 tick 自然重试。
   } finally {

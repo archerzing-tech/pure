@@ -872,3 +872,83 @@ describe('死路指数退避（2026-11-01 真机判例：固定 5min 让真死�
     expect(netRoute.directRouteDead(host, t0 + 15 * 60_000)).toBe(false);
   });
 });
+
+describe('warmPrior（网络层蓝图 P0 前移刀）', () => {
+  // proxy-first host：分类面冷启动猜代理；warm 双路样本证明直连显著更快时按证据翻。
+  const proxiedHost = 'api.openai.com';
+  const t0 = 1_700_000_000_000;
+
+  it('cold start flips to the measurably faster route when both warm samples agree', () => {
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    // 快 1 倍以上且省 ≥500ms：分类面的「proxy 优先」被 warm 证据压过。
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('direct');
+  });
+
+  it('keeps the classification guess when the warm gap is under the threshold', () => {
+    // 直连只快 300ms（<500ms 门槛）：翻路不值当，维持分类面。
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 1200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+
+  it('keeps the classification guess when only one route has a warm sample', () => {
+    // GET 失败不证路由死：失败样本不入表，单路数据不足以裁定。
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: false, ms: 0 },
+    }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+
+  it('expired warm samples fall back to classification', () => {
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 31 * 60_000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+
+  it('a real request memory row takes precedence over warmPrior', () => {
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    // 真实请求样本（双路 EMA 差距不足 → 按钉住的路走）压过 warm 采样。
+    netRoute.recordNetOutcome(proxiedHost, 'proxy', true, t0 + 500);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+
+  it('survives a persist/reload round-trip (archive serialization)', () => {
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    // 模拟重启：reload 丢内存保留存档（reset 连盘一起清，不是重启语义）。
+    netRoute.reloadLearnedRoutesForTests();
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('direct');
+  });
+
+  it('a host warm never sampled stays on classification', () => {
+    netRoute.recordWarmPrior('https://other-endpoint.example/v1', {
+      direct: { ok: true, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+
+  it('ignores malformed samples entirely', () => {
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, {
+      direct: { ok: false, ms: 200 },
+      proxy: { ok: true, ms: 1500 },
+    }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+    // 全失败样本 = 什么都不写。
+    netRoute.recordWarmPrior(`https://${proxiedHost}/v1`, { direct: { ok: false, ms: 1 } }, t0);
+    expect(netRoute.resolveNetRoute(proxiedHost, true, t0 + 1000, 'http://127.0.0.1:9090')).toBe('proxy');
+  });
+});

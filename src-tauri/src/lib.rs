@@ -483,19 +483,28 @@ async fn probe_proxy(proxy_url: String) -> Result<ProxyProbe, String> {
 /// client 的池——下一个真实请求复用同 origin 的热连接，省掉整段
 /// DNS+TCP+TLS 握手。零 token 零计费，只有传输层被暖到。尽力而为：失败只
 /// 返回 false，不进学习表（GET / 的失败不证路由死，判定权留给真实请求）。
-async fn warm_llm_route(proxy_spec: Option<&str>, base_url: &str) -> bool {
+async fn warm_llm_route(proxy_spec: Option<&str>, base_url: &str) -> Option<u128> {
     let client = match cached_llm_stream_client(proxy_spec) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let url = base_url.trim().trim_end_matches('/');
     if url.is_empty() {
-        return false;
+        return None;
     }
-    matches!(
-        client.get(url).timeout(std::time::Duration::from_secs(5)).send().await,
-        Ok(_)
-    )
+    // 耗时留痕（网络层蓝图 P0 前移刀）：warm 采样从纯探活升级为证据——
+    // TS 侧把两路毫秒写进 warmPrior，冷启动选路按它定首选。GET 失败仍
+    // 不证路由死：只丢样本，不产死期，判定权留给真实请求。
+    let started = std::time::Instant::now();
+    match client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(_) => Some(started.elapsed().as_millis()),
+        Err(_) => None,
+    }
 }
 
 /// 在飞的 LLM 流式请求计数：预热循环跳过在飞 tick——真实请求本来就在锻炼
@@ -530,6 +539,7 @@ fn warm_skip_reason(inflight: usize, base_url: &str) -> Option<&'static str> {
 
 /// 后台预热两条物理路（直连 + 当前配置的代理）：TS 侧预热循环每 30s 调一次。
 /// 池 idle 90s > 周期，热连接永不过期。流式中跳过（busy guard）。
+/// 返回两路各自的毫秒耗时（失败为 null）——供 TS 侧 warmPrior 采样本。
 #[tauri::command]
 async fn warm_llm_routes(
     base_url: String,
@@ -538,12 +548,15 @@ async fn warm_llm_routes(
     if let Some(reason) = warm_skip_reason(llm_inflight(), &base_url) {
         return Ok(serde_json::json!({ "skipped": reason }));
     }
-    let direct_ok = warm_llm_route(None, &base_url).await;
-    let proxy_ok = match proxy_url.as_deref().map(str::trim) {
-        Some(spec) if !spec.is_empty() => Some(warm_llm_route(Some(spec), &base_url).await),
+    let direct_ms = warm_llm_route(None, &base_url).await;
+    let proxy_ms = match proxy_url.as_deref().map(str::trim) {
+        Some(spec) if !spec.is_empty() => warm_llm_route(Some(spec), &base_url).await,
         _ => None,
     };
-    Ok(serde_json::json!({ "direct": direct_ok, "proxy": proxy_ok }))
+    Ok(serde_json::json!({
+        "direct": direct_ms.map(|ms| serde_json::json!({ "ok": true, "ms": ms })),
+        "proxy": proxy_ms.map(|ms| serde_json::json!({ "ok": true, "ms": ms })),
+    }))
 }
 
 #[cfg(test)]
@@ -557,10 +570,11 @@ mod llm_retry_tests {
     }
 
     #[tokio::test]
-    async fn warm_llm_routes_reports_unreachable_routes_as_false() {
-        // 不可达端点：预热是尽力而为，false 而不是 Err——循环不该被单次失败打断。
+    async fn warm_llm_routes_reports_unreachable_routes_as_null() {
+        // 不可达端点：预热是尽力而为，耗时样本为 null 而不是 Err——循环不该被
+        // 单次失败打断。GET 失败不证路由死，TS 侧不为此写任何学习行。
         let r = warm_llm_routes("http://127.0.0.1:1".into(), None).await.unwrap();
-        assert_eq!(r["direct"], false);
+        assert!(r["direct"].is_null());
         assert!(r["proxy"].is_null());
     }
 

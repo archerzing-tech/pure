@@ -282,10 +282,48 @@ interface ProxyHealthEntry {
   failStreak?: number;
 }
 
-type HealthEntry = RouteEntry | ProxyHealthEntry;
+type HealthEntry = RouteEntry | ProxyHealthEntry | WarmPriorEntry;
 
 const isProxyEntry = (e: HealthEntry): e is ProxyHealthEntry => 'proxy' in e && (e as ProxyHealthEntry).proxy === true;
 const isRouteEntry = (e: HealthEntry): e is RouteEntry => 'route' in e;
+const isWarmEntry = (e: HealthEntry): e is WarmPriorEntry => 'warm' in e && (e as WarmPriorEntry).warm === true;
+
+// ── warmPrior（网络层蓝图 P0 前移刀，2026-11-07）──────────────────────────
+// LLM 预热循环（GUI 每 30s 双路 GET base_url 根路径）现在只探活不留耗时——
+// warmPrior 把两路各自的毫秒存进学习表，供冷启动选路做第一份证据。与真实
+// POST /chat/completions 是两种分布，刻意独立成行、不混进 RouteEntry 的
+// 双路 EMA（混账会让 LLM 决策被更乐观的分布带偏）。语义边界：
+// - 只在「双路 warm 都通且差距超阈值」时按证据定首选（复用 fasterRouteOf），
+//   缺一路或差距不大 = 维持分类面猜测，不折腾；
+// - warm 失败不证路由死（GET 失败 ≠ POST 死，llmWarm 头注释既有语义）——
+//   失败样本不入表，也不产生 deadUntil；判定权留给真实请求。
+// - 行只覆盖 warm 打过的 host（LLM base_url），其他 host 天然查不到此行。
+interface WarmPriorEntry {
+  warm: true;
+  at: number;
+  direct?: { ok: boolean; ms: number };
+  proxy?: { ok: boolean; ms: number };
+}
+
+const WARM_KEY_PREFIX = 'warm:';
+
+/** 记录一轮预热双路采样的毫秒耗时（host 从 URL 归一；只收成功样本）。 */
+export function recordWarmPrior(
+  baseUrl: string,
+  sample: { direct?: { ok: boolean; ms: number }; proxy?: { ok: boolean; ms: number } },
+  now = Date.now(),
+): void {
+  const host = normalizeRouteHost(baseUrl);
+  if (!host) return;
+  const clean = (s?: { ok: boolean; ms: number }) =>
+    s && s.ok === true && typeof s.ms === 'number' && s.ms >= 0 ? { ok: true, ms: s.ms } : undefined;
+  const direct = clean(sample.direct);
+  const proxy = clean(sample.proxy);
+  if (!direct && !proxy) return;
+  ensureLoaded();
+  learned.set(`${WARM_KEY_PREFIX}${host}`, { warm: true, at: now, ...(direct ? { direct } : {}), ...(proxy ? { proxy } : {}) });
+  persist();
+}
 
 export type ProxyHealthState = 'unknown' | 'alive' | 'dead';
 
@@ -420,6 +458,15 @@ function ensureLoaded(): void {
         }
         continue;
       }
+      if (isWarmEntry(entry)) {
+        // warmPrior 行：只收结构完整的成功样本（v1 存档无此行，读端校验自然丢弃）。
+        const directOk = entry.direct?.ok === true && typeof entry.direct?.ms === 'number';
+        const proxyOk = entry.proxy?.ok === true && typeof entry.proxy?.ms === 'number';
+        if (typeof entry.at === 'number' && (directOk || proxyOk)) {
+          learned.set(host, entry);
+        }
+        continue;
+      }
       // 读取时顺手丢弃过期条目：跨天启动时不必先做一次网络请求才知道记忆
       // 已经作废。
       if (isRouteEntry(entry)
@@ -454,6 +501,10 @@ function persist(): void {
     const now = Date.now();
     for (const [host, entry] of learned) {
       if (isProxyEntry(entry)) {
+        obj[host] = entry;
+        continue;
+      }
+      if (isWarmEntry(entry)) {
         obj[host] = entry;
         continue;
       }
@@ -511,6 +562,17 @@ function routeForKey(key: string, hasProxy: boolean, now: number, fallback: NetR
     learned.delete(key);
     persist();
     return fasterRouteOf(samples.direct, samples.proxy) ?? fallback;
+  }
+  // 冷启动（无记忆行）：分类面只负责「第一条路猜谁」，warm 双路采样若
+  // 已证明某路显著更快，按证据定首选——这是路由脑接管顺序的第一份数据
+  // （网络层蓝图 P0 前移刀）。缺一路或差距不足 → 维持分类面猜测。
+  const warm = learned.get(`${WARM_KEY_PREFIX}${key}`);
+  if (warm && isWarmEntry(warm) && now - warm.at <= LEARNED_ROUTE_TTL_MS) {
+    const warmPick = fasterRouteOf(
+      warm.direct?.ok ? warm.direct.ms : undefined,
+      warm.proxy?.ok ? warm.proxy.ms : undefined,
+    );
+    if (warmPick) return warmPick;
   }
   return fallback;
 }
