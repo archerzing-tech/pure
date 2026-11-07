@@ -1,19 +1,18 @@
-// 插话决策回放：用一批真实插话原文验证「决策不看关键词」这条定调，量化残留
-// 机械路径的截胡面，并在 --llm 时真跑裁决器量**契约遵守率**（stop 档 /
-// cancels_part / adds_along）。
+// 插话决策回放：用一批真实插话原文验证「决策不看关键词」这条定调，并在
+// --llm 时真跑裁决器量**契约遵守率**（折算表判对率 + stop 档 + chatter
+// 保守放行）。
 //
 // 语料与机械路径判定住在 `src/coding-agent/insertionCorpus.ts`，与离线回归
 // 测试（`insertionCorpus.test.ts`）共用同一份——回放看到的和回归断言的必须是
 // 同一批句子。
 //
 // 三条通道的代价完全不同，所以分开报：
-//   main：仍在主路上的机械快路径（整停 / 点名停支 / 点名续支）——会真正抢在
-//         裁决器前面，代价是「判错就反向执行」
-//   net ：已降级为安全网的字段族（推翻 / 收活 / 加活）——只在裁决器不可用时
-//         生效，日常不参与
+//   main：机械快路径（整停 / 点名停支 / 点名续支）——已随 2026-10-28 框架
+//         改革刀 1 整体退役（见下方离线通道注释）
+//   net ：字段族安全网（推翻 / 收活 / 加活）——字段族已随裁决器 v3 三值契约
+//         退役，安全网收窄为 fallbackUsed 原话直投
 //
-// （宿主粗筛 CANCELISH_RE 与停支闸 SCOPE_ADD_RE 已于 2026-09-28 移除，改由
-//   裁决器的 cancels_part / adds_along 驱动，所以这里不再有 host 通道。）
+// 现在唯一的活通道是 --llm：真跑裁决器，量折算表判对率与兜底率。
 //
 // 用法：
 //   bun scripts/replay-insertion-decisor.ts            离线：机械路径截胡面
@@ -35,7 +34,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ALL_CASES, DEFAULT_SCENARIO, SCENARIOS, scenarioFor, type Case } from '../src/coding-agent/insertionCorpus';
-import { classifyInsertion, type InsertionKind } from '../src/coding-agent/Planner';
+import { classifyInsertion, type InsertionClassification } from '../src/coding-agent/Planner';
 import { DeepSeekAnthropicAdapter } from '../src/adapter/deepseek/DeepSeekAnthropicAdapter';
 import type { LLMAdapter } from '../src/shared/types';
 
@@ -111,19 +110,37 @@ function contextsFor(c: Case, withTiming: boolean): Array<{ id: string; text: st
  *  PURE_REPLAY_TIMEOUT 可覆盖。 */
 const LLM_TIMEOUT_MS = Number(process.env.PURE_REPLAY_TIMEOUT ?? '') || 15_000;
 
+/** 判定形状（三值契约 + 机械停动作 + 点名 id；插话架构 v2/v3 后的权威输出）：
+ *  stop=整树停（"action":"stop"）；stop_branch/resumes_branch=点名支带确切
+ *  id；其余就是 verdict 本身。旧九类 kind 已随裁决器 v3 退役——回放的
+ *  「判对」走下面的折算表，不再直接比 kind。 */
+type VerdictShape = 'stop' | 'stop_branch' | 'resumes_branch' | 'inline' | 'sideline' | 'new_task';
+
+/** 折算表：语料期望（人工核对的旧词表，语料本体按原样留档）在新契约下的
+ *  合法判定集合。inline 是宽桶+兜底位（「宁可打扰，不丢话」契约）——主线
+ *  类（steer/goal-change/premise-change/question/task）判成 inline 一律算对；
+ *  点名停/续支（花名册场景下）也是 steer 的合法子形。chatter 判 inline 不算
+ *  错但单独记「保守放行」（sideline 高门槛漏判率要可见）。语料场景不带
+ *  <live_branches> 花名册，点名支点不出 id 判 inline 正是契约要求的行为。 */
+const ACCEPTED_SHAPES: Record<Exclude<Case['kind'], 'scheduled'>, VerdictShape[]> = {
+  stop: ['stop'],
+  steer: ['inline', 'stop_branch', 'resumes_branch'],
+  'goal-change': ['inline'],
+  'premise-change': ['inline'],
+  question: ['inline'],
+  task: ['inline'],
+  chatter: ['sideline'],
+};
+
 interface Verdict {
-  kind: InsertionKind | null;
+  shape: VerdictShape | null;
   label: string;
-  cancelsPart: boolean;
-  addsAlong: boolean;
 }
 
 interface LlmRow {
   c: Case;
   verdicts: string[];
-  kinds: Array<InsertionKind | null>;
-  cancels: boolean[];
-  addsAlong: boolean[];
+  shapes: Array<VerdictShape | null>;
 }
 
 /** 一次裁决 + 限流退避。bigmodel 对连续请求限得很紧，而回放是压测（生产里
@@ -131,13 +148,19 @@ interface LlmRow {
 async function judgeOnce(llm: LLMAdapter, ctx: string, text: string): Promise<Verdict> {
   for (let attempt = 0; attempt <= 1; attempt++) {
     try {
-      const v = await classifyInsertion(llm, ctx, text, undefined, undefined, LLM_TIMEOUT_MS);
+      const v: InsertionClassification = await classifyInsertion(llm, ctx, text, undefined, undefined, LLM_TIMEOUT_MS);
       if (!v.fallbackUsed) {
+        const named = v.stopBranch?.callId ?? v.resumesBranch?.callId ?? v.branchCallId;
+        const shape: VerdictShape = v.action === 'stop'
+          ? 'stop'
+          : v.stopBranch?.callId
+            ? 'stop_branch'
+            : v.resumesBranch?.callId
+              ? 'resumes_branch'
+              : v.verdict;
         return {
-          kind: v.kind,
-          label: `${v.kind}(${v.confidence.toFixed(2)})${v.cancelsPart ? ' +cancels_part' : ''}${v.addsAlong ? ' +adds_along' : ''}${v.when ? ` when=${v.when}` : ''}`,
-          cancelsPart: v.cancelsPart === true,
-          addsAlong: v.addsAlong === true,
+          shape,
+          label: `${shape}(${v.confidence.toFixed(2)})${named ? ` 点名=${named}` : ''}${v.receipt ? ` 「${v.receipt}」` : ''}`,
         };
       }
     } catch {
@@ -145,7 +168,7 @@ async function judgeOnce(llm: LLMAdapter, ctx: string, text: string): Promise<Ve
     }
     if (attempt < 1) await new Promise((r) => setTimeout(r, 1500));
   }
-  return { kind: null, label: '兜底（裁决超时/限流/解析失败）', cancelsPart: false, addsAlong: false };
+  return { shape: null, label: '兜底（裁决超时/限流/解析失败）' };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -157,21 +180,20 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
   const thinkingOff = !process.argv.includes('--thinking-on');
   console.log(`═══ 真跑裁决器（GLM${thinkingOff ? '，暗推理已关' : '，暗推理开着'}，第 ${from + 1}–${from + pool.length} 句 · `
     + `每句自带场景${withTiming ? ' + 默认场景对照' : ''} · 句间 ${pauseMs}ms）═══\n`);
-  const rows: LlmRow[] = pool.map((c) => ({ c, verdicts: [], kinds: [], cancels: [], addsAlong: [] }));
+  const rows: LlmRow[] = pool.map((c) => ({ c, verdicts: [], shapes: [] }));
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     for (const ctx of contextsFor(row.c, withTiming)) {
       const v = await judgeOnce(llm, ctx.text, row.c.text);
       row.verdicts.push(`${ctx.id}: ${v.label}`);
-      row.kinds.push(v.kind);
-      row.cancels.push(v.cancelsPart);
-      row.addsAlong.push(v.addsAlong);
+      row.shapes.push(v.shape);
     }
     // 即时打印：分片跑的目的就是「超时也只丢最后一句」——把结果缓到最后
     // 统一输出，一次限流退避超时就把已经拿到的判定全赔进去（踩过）。
     const gradable = row.c.kind !== 'scheduled';
-    const first = row.kinds[0];
-    const mark = !gradable ? '·' : first === null ? '⚠' : first === row.c.kind ? '✓' : '✗';
+    const first = row.shapes[0];
+    const accepted = first !== null && row.c.kind !== 'scheduled' && ACCEPTED_SHAPES[row.c.kind].includes(first);
+    const mark = !gradable ? '·' : first === null ? '⚠' : accepted ? '✓' : '✗';
     console.log(`${mark} 「${row.c.text}」  期望 ${row.c.kind}`);
     row.verdicts.forEach((v) => console.log(`    ${v}`));
     if (pauseMs > 0 && i < rows.length - 1) await sleep(pauseMs);
@@ -185,7 +207,7 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
   // 期望是从疑点原因反推的，审计网的假阳性可直接算到裁决器头上——混在一起
   // 会把“审计太宽”读成“裁决器判错”。
   const asserted = rows.filter((r) => r.c.expectation !== 'suspected');
-  const judged = asserted.filter((r) => r.kinds[0] !== null);
+  const judged = asserted.filter((r) => r.shapes[0] !== null);
   const fell = asserted.length - judged.length;
   const graded = judged.filter((r) => r.c.kind !== 'scheduled');
   const misses: string[] = [];
@@ -193,70 +215,57 @@ async function llmReport(llm: LLMAdapter, limit: number | null, withTiming: bool
 
   for (const row of asserted) {
     const gradable = row.c.kind !== 'scheduled';
-    const first = row.kinds[0];
-    if (gradable && first !== null && first !== row.c.kind) {
+    const first = row.shapes[0];
+    if (gradable && first !== null && !ACCEPTED_SHAPES[row.c.kind].includes(first)) {
       misses.push(`「${row.c.text}」 期望 ${row.c.kind} → ${row.verdicts.join(' | ')}\n      出处：${row.c.source}`);
     }
-    // 同一句在「思考中」与「执行中」判出不同 kind：时机真的进了判定，而这
+    // 同一句在「思考中」与「执行中」判出不同形状：时机真的进了判定，而这
     // 正是正则结构上做不到的事。
-    const [a, b] = row.kinds;
+    const [a, b] = row.shapes;
     if (a && b && a !== b) timingSensitive.push(`「${row.c.text}」  ${a} ↔ ${b}`);
   }
 
-  // ── 契约遵守率：漏报与误报分开算（漏报 = 反向执行，误报 = 少排一个队）──
-  // 机械快路径退役后全部句子都是裁决器主战场，不再剔除「命令族」。
-  const judicable = judged;
-  // 收割段单独看契约字段：这正是它们被收进来的原因（当初就是这里漏报）。
-  const harvested = rows.filter((r) => r.c.expectation === 'suspected');
-  const harvestedJudged = harvested.filter((r) => r.kinds[0] !== null);
-  const rate = (expect: (c: Case) => boolean, got: (r: LlmRow) => boolean) => {
-    const targeted = judicable.filter((r) => expect(r.c));
-    const missed = targeted.filter((r) => !got(r));
-    const spurious = judicable.filter((r) => !expect(r.c) && got(r));
-    return { targeted, missed, spurious };
-  };
-  const cancels = rate((c) => c.cancels === true, (r) => r.cancels[0]);
-  const adds = rate((c) => c.addsAlong === true, (r) => r.addsAlong[0]);
+  // ── 契约遵守率：stop 档与折算表分开看。cancels_part / adds_along 字段族已
+  // 随裁决器 v3 三值契约退役（收执 receipt 取代九类账面），那两段 rate 统计
+  // 一并退役——判对/判错全部走上面的折算表。机械快路径退役后全部句子都是
+  // 裁决器主战场，不再剔除「命令族」。
   const soft = judged.filter((r) => r.c.kind === 'stop');
-  const softHit = soft.filter((r) => r.kinds[0] === 'stop');
-  const stopSpurious = graded.filter((r) => r.c.kind !== 'stop' && r.kinds[0] === 'stop');
-
-  const contractLine = (label: string, t: ReturnType<typeof rate>) =>
-    `${label}  该报 ${t.targeted.length} 句，报出 ${t.targeted.length - t.missed.length}，漏报 ${t.missed.length}；误报 ${t.spurious.length} 句`;
-
-  console.log('\n─── 契约遵守率（只算有有效裁决的 %d 句）───'.replace('%d', String(judged.length)));
-  console.log(`  ${contractLine('cancels_part  ', cancels)}`);
-  console.log(`  ${contractLine('adds_along    ', adds)}`);
-  console.log(`  stop 档        软停 ${soft.length} 句判对 ${softHit.length}；非软停句误判成 stop ${stopSpurious.length} 句`);
+  const softHit = soft.filter((r) => r.shapes[0] === 'stop');
+  const stopSpurious = graded.filter((r) => r.c.kind !== 'stop' && r.shapes[0] === 'stop');
+  const chatter = judged.filter((r) => r.c.kind === 'chatter');
+  const chatterConservative = chatter.filter((r) => r.shapes[0] === 'inline');
   const detail = (title: string, rows2: LlmRow[], render: (r: LlmRow) => string) => {
     if (rows2.length === 0) return;
     console.log(`\n  ${title}：`);
     rows2.forEach((r) => console.log(`    ${render(r)}`));
   };
-  detail('cancels_part 漏报（这句会反向执行）', cancels.missed, (r) => `「${r.c.text}」 → ${r.verdicts[0]}`);
-  detail('cancels_part 误报（少排一个队）', cancels.spurious, (r) => `「${r.c.text}」 期望 ${r.c.kind}`);
-  detail('adds_along 漏报（会把要加的活停掉）', adds.missed, (r) => `「${r.c.text}」 → ${r.verdicts[0]}`);
-  detail('adds_along 误报', adds.spurious, (r) => `「${r.c.text}」 期望 ${r.c.kind}`);
-  detail('stop 档漏判', soft.filter((r) => r.kinds[0] !== 'stop'), (r) => `「${r.c.text}」 → ${r.verdicts[0]}`);
+
+  console.log('\n─── 契约遵守率（只算有有效裁决的 %d 句）───'.replace('%d', String(judged.length)));
+  console.log(`  stop 档        整停 ${soft.length} 句判对 ${softHit.length}；非整停句误判成 stop ${stopSpurious.length} 句`);
+  console.log(`  chatter 档     期望 sideline ${chatter.length} 句，判 inline（保守放行，不丢话但打扰可见）${chatterConservative.length} 句`);
+  detail('stop 档漏判', soft.filter((r) => r.shapes[0] !== 'stop'), (r) => `「${r.c.text}」 → ${r.verdicts[0]}`);
   detail('stop 档误报', stopSpurious, (r) => `「${r.c.text}」 期望 ${r.c.kind}`);
 
-  console.log(`\nkind 准确率：可比对 ${graded.length} 句，判对 ${graded.length - misses.length}`
+  console.log(`\n折算表准确率：可比对 ${graded.length} 句，判对 ${graded.length - misses.length}`
     + `（${graded.length > 0 ? Math.round(((graded.length - misses.length) / graded.length) * 100) : 0}%）`);
-  if (fell > 0)  if (fell > 0) console.log(`⚠ ${fell} 句走了兜底（裁决超时/解析失败/限流）——不是判错，是没判出来。`);
+  if (fell > 0) console.log(`⚠ ${fell} 句走了兜底（裁决超时/解析失败/限流）——不是判错，是没判出来。`);
+  // 收割段单独展示裁决：这正是它们被收进来的原因（当初的疑点句），期望待
+  // 人工复核，不进折算表评分。
+  const harvested = rows.filter((r) => r.c.expectation === 'suspected');
+  const harvestedJudged = harvested.filter((r) => r.shapes[0] !== null);
   if (harvested.length > 0) {
-    const held = harvestedJudged.filter((r) => (r.c.cancels ? r.cancels[0] : true) && (r.c.addsAlong ? r.addsAlong[0] : true));
-    console.log(`\n非断言段（审计收割 + 复核降级的双读句，期望待复核）${harvested.length} 句，有效裁决 ${harvestedJudged.length}，契约字段现在报对 ${held.length}：`);
+    console.log(`\n非断言段（审计收割 + 复核降级的双读句，期望待复核）${harvested.length} 句，有效裁决 ${harvestedJudged.length}：`);
     harvested.forEach((r) => console.log(`  「${r.c.text}」  ${r.verdicts[0]}`));
   }
   if (timingSensitive.length > 0) {
-    console.log(`\n同一句在两个阶段判出不同 kind（${timingSensitive.length} 句，时机进了判定）：`);
+    console.log(`\n同一句在两个阶段判出不同形状（${timingSensitive.length} 句，时机进了判定）：`);
     timingSensitive.forEach((m) => console.log(`  ${m}`));
   }
   if (misses.length > 0) {
-    console.log('\nkind 误判清单：');
+    console.log('\n折算表误判清单：');
     misses.forEach((m) => console.log(`  ${m}\n`));
   } else {
-    console.log('\nkind 无误判。');
+    console.log('\n折算表无误判。');
   }
 }
 
