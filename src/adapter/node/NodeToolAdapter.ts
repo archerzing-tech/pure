@@ -51,6 +51,8 @@ import { isThirdPartyPath, THIRD_PARTY_DIR_NAMES } from '../../shared/thirdParty
 import { ProbeGuardError, diagnoseNetwork, renderProbeReport, renderProbeReportForHuman } from '../../shared/node/netProbe';
 import { switchPackageSource } from '../../shared/node/sourceSwitcher';
 import type { TrustTier } from '../../shared/mirrorSources';
+import { destFromUrl } from '../../shared/network/dest';
+import { recordAttempt } from '../../shared/network/ledger';
 
 /** Windows has no POSIX shell (`sh`) or `diff` binary — PowerShell / Git for
  * Windows provide the equivalents. Module-level so every handler branches
@@ -1482,7 +1484,23 @@ export class NodeToolAdapter implements ToolAdapter {
     url: string,
     opts: { selector?: string; signal?: AbortSignal },
   ): Promise<{ text: string; via: string } | { hijack: string } | null> {
-    // 1) Direct fetch.
+    // P0b 账本：链上每一层是一条 transport（direct / reader / mirror:*），
+    // 各自留 Attempt 样本——层的产出与否、耗时多长，是 P1 兜底链证据化的地基。
+    const dest = destFromUrl(url, 'web-page', 'html');
+    // 1) Direct fetch. 早期 return 多，用 settle 防双记：任何一条出路只入一次账。
+    const t0 = Date.now();
+    let directSettled = false;
+    const settleDirect = (ok: boolean, hijack?: boolean): void => {
+      if (directSettled) return;
+      directSettled = true;
+      recordAttempt(dest, {
+        transport: 'direct',
+        ok,
+        ms: Date.now() - t0,
+        msScope: 'total',
+        ...(hijack ? { failure: 'hijack' as const } : {}),
+      });
+    };
     try {
       const resp = await fetchWithRetry(url, { signal: opts.signal });
       if (resp.ok) {
@@ -1492,7 +1510,10 @@ export class NodeToolAdapter implements ToolAdapter {
           // rendering tiers (which can also read PDFs but cost rate-limited
           // free quota).
           const pdfText = await this.extractPdfDirect(await resp.arrayBuffer());
-          if (pdfText) return { text: pdfText, via: 'pdf' };
+          if (pdfText) {
+            settleDirect(true);
+            return { text: pdfText, via: 'pdf' };
+          }
         } else if (isTextualContentType(contentType)) {
           let html = await readResponseText(resp);
           // Landing pages that JS-redirect via <meta http-equiv="refresh"> extract
@@ -1513,29 +1534,42 @@ export class NodeToolAdapter implements ToolAdapter {
           // 把 direct 路由钉死。Rust 侧同样在 fetch_page_with_follow 里拒绝继续试兜底渲染层。
           const hijack = detectResponseHijack({ requestUrl: url, finalUrl, contentType, body: html });
           if (hijack) {
+            settleDirect(false, true);
             return { hijack: hijackErrorMessage(hijack, { requestUrl: url, finalUrl, contentType, body: html }) };
           }
           const text = formatPageBody(html, contentType, opts.selector);
-          if (text.trim()) return { text: text.trim(), via: 'direct' };
+          if (text.trim()) {
+            settleDirect(true);
+            return { text: text.trim(), via: 'direct' };
+          }
         }
       }
     } catch {
       /* fall through to the next tier */
     }
+    settleDirect(false); // 404 / 网络异常 / 正文为空——direct 这条路没产出
 
     // 2) Jina Reader renders blocked / JS-heavy / binary pages as text.
+    const jinaT0 = Date.now();
     const jina = await scrapeViaJina(url, process.env.PURE_JINA_API_KEY);
+    recordAttempt(dest, { transport: 'reader', ok: !!jina && jina.trim().length > 0, ms: Date.now() - jinaT0, msScope: 'total' });
     if (jina) return { text: jina.trim(), via: 'jina' };
 
     // 3) Wayback Machine: the closest archived snapshot of a dead/blocked page.
+    const waybackT0 = Date.now();
     const wayback = await scrapeViaWayback(url);
+    let waybackText: string | null = null;
     if (wayback) {
       const text = formatPageBody(wayback, '', opts.selector);
-      if (text.trim()) return { text: text.trim(), via: 'wayback' };
+      if (text.trim()) waybackText = text.trim();
     }
+    recordAttempt(dest, { transport: 'mirror:wayback', ok: waybackText !== null, ms: Date.now() - waybackT0, msScope: 'total' });
+    if (waybackText) return { text: waybackText, via: 'wayback' };
 
     // 4) Firecrawl (opt-in key): server-side rendering for the hardest pages.
+    const firecrawlT0 = Date.now();
     const firecrawl = await scrapeViaFirecrawl(url, process.env.FIRECRAWL_API_KEY);
+    recordAttempt(dest, { transport: 'mirror:firecrawl', ok: !!firecrawl && firecrawl.trim().length > 0, ms: Date.now() - firecrawlT0, msScope: 'total' });
     if (firecrawl) return { text: firecrawl.trim(), via: 'firecrawl' };
 
     return null;

@@ -1,6 +1,6 @@
 // src/adapter/node/__tests__/NodeToolAdapter.test.ts
 
-import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
+import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -641,5 +641,76 @@ describe('detectLocalTimeLine — sys_info time 行与 Rust 同形（2026-11-08 
   it('falls back to the tz name when no short zone abbrevation exists', () => {
     const line = detectLocalTimeLine(new Date(2026, 0, 2, 3, 4, 5), 'Etc/GMT-14');
     expect(line).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+$/);
+  });
+});
+
+describe('NodeToolAdapter web_fetch netLedger 接线（P0b）', () => {
+  let ledger: typeof import('../../../shared/network/ledger');
+  let workspace2: string;
+  let adapter2: NodeToolAdapter;
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeAll(async () => {
+    ledger = await import('../../../shared/network/ledger');
+    workspace2 = mkdtempSync(join(tmpdir(), 'pure-node-ledger-'));
+    // 页面缓存落盘 ~/.pure/cache（跨进程共享）：不隔离的话，任何一次先跑的
+    // 真实 fetch 都会把本 describe 的 URL 灌进用户真缓存，后续跑全部命中
+    // 缓存短路、链路代码零执行（flaky-quartet 同族判例的 persist 型单例）。
+    process.env.PURE_CACHE_DIR = workspace2;
+    adapter2 = new NodeToolAdapter({ workspace: workspace2, commandTimeout: 10000 });
+  });
+  afterAll(() => {
+    delete process.env.PURE_CACHE_DIR;
+    safeRm(workspace2);
+  });
+  beforeEach(() => ledger.resetNetLedgerForTests());
+
+  const mockFetch = (impl: () => Response): void => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => impl()) as unknown as typeof fetch;
+  };
+  const restoreFetch = (): void => { globalThis.fetch = originalFetch; };
+
+  const fetchCall = (url: string): ToolCall => ({
+    id: `ledger_${Date.now()}`,
+    index: 0,
+    function: { name: 'web_fetch', arguments: JSON.stringify({ url, maxChars: 5000 }) },
+  });
+
+  it('direct 成功样本入账；cache 命中不再产 Attempt（n 不变）', async () => {
+    mockFetch(() => new Response('<html><body>ledger cli direct sample</body></html>', { status: 200, headers: { 'content-type': 'text/html' } }));
+    try {
+      const r = await adapter2.execute(fetchCall('https://ledger-cli.example.com/page'));
+      expect(r.success).toBe(true);
+      let snap = ledger.ledgerSnapshot();
+      expect(snap.host['ledger-cli.example.com']?.direct?.n).toBe(1);
+      expect(snap.host['ledger-cli.example.com']?.direct?.ok).toBe(1);
+      expect(snap.class['web-page']?.direct?.n).toBe(1);
+      // 同 URL 二调走页面缓存：账本不涨（cache 永不产证据，不变量 2 的行为面）。
+      await adapter2.execute(fetchCall('https://ledger-cli.example.com/page'));
+      snap = ledger.ledgerSnapshot();
+      expect(snap.host['ledger-cli.example.com']?.direct?.n).toBe(1);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  it('404 全链：direct/reader/mirror:wayback/mirror:firecrawl 各一条失败样本', async () => {
+    mockFetch(() => new Response('nope', { status: 404 }));
+    try {
+      const r = await adapter2.execute(fetchCall(`https://ledger-404.example.com/missing-${Date.now()}`));
+      expect(r.success).toBe(false);
+      const snap = ledger.ledgerSnapshot();
+      const host = snap.host['ledger-404.example.com']!;
+      expect(host.direct?.n).toBe(1);
+      expect(host.direct?.ok).toBe(0);
+      expect(host.reader?.n).toBe(1);
+      expect(host['mirror:wayback']?.n).toBe(1);
+      expect(host['mirror:firecrawl']?.n).toBe(1);
+      // 全失败：lastOkAt 缺席 → 读侧 TTL 判无效行。
+      expect(ledger.hostStat(snap, 'ledger-404.example.com', 'direct')).toBeUndefined();
+    } finally {
+      restoreFetch();
+    }
   });
 });

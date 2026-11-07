@@ -27,6 +27,8 @@ import { blockedHostMessage, detectHijack, hijackReason, hostBlocked, isNetworkE
 import { primaryRewrite } from '../shared/sourceRewrite';
 import { githubAutoMirrorFirst, githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, githubMirrorLadderPrefixes, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, normalizeGithubMirrorKey, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
 import { netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome, unblockAttemptsBeforeMirror, type NetRoutePair } from '../shared/netRoute';
+import { destFromUrl } from '../shared/network/dest';
+import { recordAttempt, type Destination } from '../shared/network/ledger';
 // 换源工具的 GUI 侧接线。mirrorSources 是纯数据 + 纯函数，没有 node:* 依赖，
 // 是这条链上唯一能安全进 WebView 包的共享模块（sourceSwitcher 不行，见下）。
 import {
@@ -910,25 +912,38 @@ export class TauriToolAdapter implements ToolAdapter {
     route: NetRoutePair,
     run: (proxyUrl: string) => Promise<T>,
     inspect?: (value: T) => string | null,
+    dest?: Destination,
   ): Promise<T> {
     const host = route.host ?? '';
     // 劫持页是一个「成功但不可信」的结局：HTTP 200，内容不是用户要的东西。
     // 它必须走网络失败那条路（兜底重试 + unlearn 这条错路），但不靠错误文本
     // 传递——那是隐式契约，改一个词就静默失效。
-    type Attempt = { ok: true; value: T } | { ok: false; network: boolean; msg: string };
+    type Attempt = { ok: true; value: T; ms: number } | { ok: false; network: boolean; hijack: boolean; msg: string; ms: number };
     const attempt = async (proxyUrl: string): Promise<Attempt> => {
+      const t0 = Date.now();
       try {
         const value = await run(proxyUrl);
         const hijack = inspect?.(value) ?? null;
-        if (!hijack) return { ok: true, value };
-        return { ok: false, network: true, msg: `${hijackReason({ hijacked: true, signal: hijack })}（${hijack}）` };
+        if (!hijack) return { ok: true, value, ms: Date.now() - t0 };
+        return { ok: false, network: true, hijack: true, ms: Date.now() - t0, msg: `${hijackReason({ hijacked: true, signal: hijack })}（${hijack}）` };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        return { ok: false, network: isNetworkError(msg), msg };
+        return { ok: false, network: isNetworkError(msg), hijack: false, ms: Date.now() - t0, msg };
       }
     };
-    const learn = (proxyUrl: string, ok: boolean): void => {
-      if (host) recordNetOutcome(host, proxyUrl ? 'proxy' : 'direct', ok);
+    const learn = (proxyUrl: string, res: Attempt): void => {
+      if (host) recordNetOutcome(host, proxyUrl ? 'proxy' : 'direct', res.ok);
+      // P0b 账本入账：每步出口尝试留样本（工具出口读完整 body = total 口径）。
+      // 失败族只标亲见的（劫持），网络错误文本不猜分类——那是 P1 的活。
+      if (dest) {
+        recordAttempt(dest, {
+          transport: proxyUrl ? 'app-proxy' : 'direct',
+          ok: res.ok,
+          ms: res.ms,
+          msScope: 'total',
+          ...(res.ok ? {} : res.hijack ? { failure: 'hijack' as const } : {}),
+        });
+      }
     };
 
     // 打通路径的 75% 预算：首选 → 反向 → 首选·退避重试（未配代理时只有直连）。
@@ -941,13 +956,13 @@ export class TauriToolAdapter implements ToolAdapter {
       const res = await attempt(seq[i]!);
       if (res.ok) {
         if (host) recordNetSuccess(host);
-        learn(seq[i]!, true);
+        learn(seq[i]!, res);
         return res.value;
       }
       lastMsg = res.msg;
       // 没有 host、或非网络类失败（内容不对等）——换出口没有意义，原样上报。
       if (!host || !res.network) throw new Error(res.msg);
-      learn(seq[i]!, false);
+      learn(seq[i]!, res);
     }
     // 有反向兜底（配了代理）且预算用尽仍失败：记熔断；没配代理则原样上报。
     if (route.fallbackProxyUrl === null) throw new Error(lastMsg);
@@ -1272,6 +1287,7 @@ export class TauriToolAdapter implements ToolAdapter {
             (proxyUrl) => searchHubSkills(query, maxResults, undefined, proxyUrl),
             // 空结果不是劫持（skill 搜索无命中是常态），只看内容是否像挡板页。
             () => null,
+            destFromUrl('https://raw.githubusercontent.com/', 'vcs', 'json'),
           );
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, candidates }, null, 2), success: true, duration: Date.now() - start };
         }
@@ -1289,6 +1305,7 @@ export class TauriToolAdapter implements ToolAdapter {
             hubRoute,
             (proxyUrl) => fetchSkillBody(repo, nameArg, proxyUrl, githubMirrorLadderPrefixes('https://raw.githubusercontent.com/', this.githubMirror, this.githubCustomMirror)),
             (text) => detectHijack(text, { url: 'https://raw.githubusercontent.com/', expectContent: true }).signal,
+            destFromUrl('https://raw.githubusercontent.com/', 'vcs', 'html'),
           );
           // Route learning: runRouted 已经按真实结局记过学习；这里额外把
           // 「三条路全灭」也记一次失败，免得一条死记忆长期钉住 raw CDN。
@@ -1345,6 +1362,7 @@ export class TauriToolAdapter implements ToolAdapter {
               proxyUrl,
             }) as Promise<string>,
             (text) => detectHijack(text, { url: registryUrl, expectContent: true }).signal,
+            destFromUrl(registryUrl, 'public-api-intl', 'json'),
           );
           const official = parseMcpRegistryPayload(officialRaw, maxResults);
           let community = [] as McpCandidate[];
@@ -1985,6 +2003,7 @@ export class TauriToolAdapter implements ToolAdapter {
                   netRouteProxyPair(source.url, this.proxyUrl),
                   (proxyUrl) => this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl }) as Promise<string>,
                   (text) => detectHijack(text, { url: source.url, expectContent: true }).signal,
+                  destFromUrl(source.url, 'web-page', 'html'),
                 );
                 return { ...source, content };
               } catch (error) {
@@ -2030,6 +2049,7 @@ export class TauriToolAdapter implements ToolAdapter {
                   netRouteProxyPair(source.url, this.proxyUrl),
                   (proxyUrl) => this.call('web_fetch', { workspace: ws, url: source.url, maxChars: limits.maxCharsPerSource, proxyUrl }) as Promise<string>,
                   (text) => detectHijack(text, { url: source.url, expectContent: true }).signal,
+                  destFromUrl(source.url, 'web-page', 'html'),
                 );
                 return { ...source, content };
               } catch (error) {
@@ -2107,6 +2127,7 @@ export class TauriToolAdapter implements ToolAdapter {
                 proxyUrl,
               }) as Promise<string>,
               (text) => detectHijack(text, { url: fetchUrl, expectContent: true }).signal,
+              destFromUrl(fetchUrl, 'web-page', 'html'),
             );
             const served = await this.maybeExtract(fetchUrl, args, pageText);
             return { id: toolCall.id, toolName: name, result: served, success: true, duration: Date.now() - start };
@@ -2149,6 +2170,7 @@ export class TauriToolAdapter implements ToolAdapter {
               proxyUrl: proxyUrl || null,
             }) as Promise<string>,
             (text) => detectHijack(text, { url: scrapeUrl, expectContent: true }).signal,
+            destFromUrl(scrapeUrl, 'web-page', 'html'),
           );
           const served = await this.maybeExtract(scrapeUrl, args, data);
           return { id: toolCall.id, toolName: name, result: served, success: true, duration: Date.now() - start };

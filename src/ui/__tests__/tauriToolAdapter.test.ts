@@ -17,6 +17,7 @@ import {
 // 一份 report 类型与渲染器，那正是本轮收口删掉的重复。
 import { renderProbeReport, renderProbeReportForHuman, type NetProbeReport } from '../../shared/netProbeCore';
 import { recordNetOutcome, resetLearnedRoutes } from '../../shared/netRoute';
+import { resetNetLedgerForTests, ledgerSnapshot } from '../../shared/network/ledger';
 import { beforeEach } from 'bun:test';
 import { resetNetGuardForTests } from '../../shared/netGuard';
 import { resetMirrorHealth } from '../../shared/githubAccel';
@@ -1567,5 +1568,49 @@ describe('install_agent_skill version stamping (GUI tool path)', () => {
     } finally {
       restoreFetch();
     }
+  });
+});
+
+describe('netLedger 接线（P0b runRouted 入账）', () => {
+  beforeEach(() => resetNetLedgerForTests());
+
+  it('web_fetch 成功样本入账：host 层 direct 计数 + class 层 web-page + total 口径', async () => {
+    const invoke = async (command: string) =>
+      command === 'web_fetch' ? '<html><body>plain page body</body></html>' : '';
+    const result = await new TauriToolAdapter('/ws', '', '', '', invoke).execute(
+      toolCall('web_fetch', { url: 'https://ledger-gui.example.com/page' }),
+    );
+    expect(result.success).toBe(true);
+    const snap = ledgerSnapshot();
+    expect(snap.host['ledger-gui.example.com']?.direct?.n).toBe(1);
+    expect(snap.host['ledger-gui.example.com']?.direct?.ok).toBe(1);
+    expect(snap.host['ledger-gui.example.com']?.direct?.lastOkAt).toBeDefined();
+    expect(snap.class['web-page']?.direct?.n).toBe(1);
+  });
+
+  it('每步出口尝试各一条样本：直连失败换反向兜底 = 两条 transport 各一笔', async () => {
+    // 直连步抛网络错、代理步给真页面——runRouted 按步结局各记一笔账。
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command !== 'web_fetch') return '';
+      if (!args?.proxyUrl) throw new Error('ECONNRESET: connection reset by peer');
+      return '<html><body>via fallback proxy</body></html>';
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, '', 'http://fallback-proxy.test:8080');
+    const result = await adapter.execute(
+      toolCall('web_fetch', { url: 'https://ledger-fb.example.com/page' }),
+    );
+    expect(result.success).toBe(true);
+    const snap = ledgerSnapshot();
+    expect(snap.host['ledger-fb.example.com']?.direct?.ok).toBe(0);
+    expect(snap.host['ledger-fb.example.com']?.['app-proxy']?.ok).toBe(1);
+    expect(snap.host['ledger-fb.example.com']?.['app-proxy']?.n).toBe(1);
+  });
+
+  it('完整性锁：每个 runRouted 调用点都声明 Destination（P1 名单化的地基）', () => {
+    const src = readFileSync(new URL('../TauriToolAdapter.ts', import.meta.url), 'utf8');
+    const calls = src.match(/this\.runRouted\(/g)?.length ?? 0;
+    const dests = src.match(/destFromUrl\(/g)?.length ?? 0;
+    expect(calls).toBeGreaterThan(0);
+    expect(dests).toBe(calls);
   });
 });
