@@ -124,6 +124,11 @@ export function recordAttempt(dest: Destination, attempt: Attempt, now = Date.no
         : prev?.headersEwma !== undefined ? { headersEwma: prev.headersEwma } : {}),
       ...(prev?.deadUntil !== undefined ? { deadUntil: prev.deadUntil } : {}),
       ...(attempt.ok ? { lastOkAt: now } : prev?.lastOkAt !== undefined ? { lastOkAt: prev.lastOkAt } : {}),
+      // 失败样本随行留痕（诊断观测面，不参与选路）。Attempt 契约里一直有
+      // status/failure 字段，但 apply 构造 Stat 时从来没写过——「404 入账
+      // 带 status」在账本层落空（GUI 真机三案例实证）。
+      ...(attempt.ok ? {} : attempt.status !== undefined ? { lastStatus: attempt.status } : {}),
+      ...(attempt.ok ? {} : attempt.failure ? { lastFailure: attempt.failure } : {}),
     };
   };
   apply(bucket);
@@ -168,6 +173,9 @@ export function mergeStat(local: Stat | undefined, remote: Stat | undefined): St
       return Math.max(a, b) > 0 ? Math.max(a, b) : undefined;
     })(),
     lastOkAt: Math.max(local.lastOkAt ?? 0, remote.lastOkAt ?? 0) || undefined,
+    // last-writer-wins 同族：远程快照带失败痕迹就用远程的，否则保留本地。
+    lastStatus: remote.lastStatus ?? local.lastStatus,
+    lastFailure: remote.lastFailure ?? local.lastFailure,
   };
 }
 

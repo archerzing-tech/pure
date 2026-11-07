@@ -74,6 +74,10 @@ export interface Stat {
   /** 独立于证据 TTL（蓝图 §2.1：deadUntil 解耦在 P1 兑现，字段先立）。 */
   deadUntil?: number;
   lastOkAt?: number;
+  /** 最近一次失败的 HTTP 状态码与失败族——纯诊断观测面（「404 入账带
+   *  status」），不参与选路：读侧仍只认成功样本续命，失败行照旧无效。 */
+  lastStatus?: number;
+  lastFailure?: AttemptFailure;
 }
 
 /** 双层作用域账本：host 用于同站复用，class 用于冷启动与跨站迁移。 */

@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.3.3
+
+**工具失败通知三层塌陷根治 + 网络兜底链不再拖死状态码**
+
+主刀起于 404 修复刀的真机复验：GUI 三轮发同一 404 案例，模型三轮只看到 "Error: undefined"，宿主通知降级成 "unknown error"，失败策略拿到 "Unknown" 无法分类——三层通知塌进同一个空缺。根因是引擎契约错位：CLI 适配器把失败文案放 ToolResult.error 字段，GUI 适配器把人类可读的失败提示（状态码、重试指引）放在 result 字段而 error 缺位，引擎四处消费点却只认 error。修法是引擎侧统一回退——error 缺位时取 result 里的文本形态，适配器两侧不动契约。
+
+其二是兜底链两刀：GUI 真机 404 案例里 direct 明明亲见了 404 状态码，最终报错却是代理连接失败——因为 Jina 兜底层一旦网络失败（超时/拒绝），`?` 把它透传成整个 web_fetch 的错误，direct 的状态码永远走不到「全灭后报 HTTP 404」那一行，前端把综合错误吞成网络类，白白换路重试、把直连正常的站点翻去走代理。修法：兜底层各自失败只结束那一层，全灭才给上层综合错误。顺带修 Jina 对目标 4xx 返回 200+警告文本被当可读内容采纳——那是「页面不存在」的回答，采纳它会让上层把 404 误判成劫持页，只认 Jina 自己的警告前缀且只看开头一段。
+
+其三是账本字段落地：Attempt 契约里一直有 status/failure 字段，但入账构造 Stat 时从来没写过，「404 入账带 status」在账本层落空。现在失败样本随行留痕（lastStatus/lastFailure），纯诊断观测面不参与选路——读侧仍只认成功样本续命。
+
+验证：bun test 5148 例全过、tsc 零错、cargo check 零警告。
+
 ## v4.3.2
 
 **回合预判层退役 + 缓存地基收口**

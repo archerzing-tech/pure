@@ -8098,6 +8098,14 @@ async fn scrape_via_jina(url: &str, proxy_url: Option<&str>) -> Result<Option<St
         return Ok(None);
     }
     let text = resp.text().await.map_err(|e| format!("read: {}", e))?;
+    // Jina 对目标 4xx 返回 200 + 警告文本（"Warning: Target URL returned error
+    // code 404"）。那是「页面不存在」的回答，不是可读内容——采纳它会让上层把
+    // 404 误判成劫持页（内容不匹配 → 网络类 → 换路翻面，GUI 真机三案例实证）。
+    // 只认 Jina 自己的警告前缀且只看开头一段，避免误伤正文里讨论 404 的正常页面。
+    let head: String = text.chars().take(400).collect();
+    if head.contains("Target URL returned error code") {
+        return Ok(None);
+    }
     Ok((!text.trim().is_empty()).then_some(text))
 }
 
@@ -8195,10 +8203,14 @@ async fn scrape_via_firecrawl(url: &str, proxy_url: Option<&str>) -> Result<Opti
 /// Jina Reader (r.jina.ai) → Wayback Machine → Firecrawl (opt-in key). Returns
 /// the first tier that yields content, or None when all fail.
 async fn scrape_fallback(url: &str, proxy_url: Option<&str>) -> Result<Option<String>, String> {
-    if let Some(text) = scrape_via_jina(url, proxy_url).await? {
+    // 兜底层各自的网络失败只结束那一层，不结束整个请求：Jina 超时曾经 `?`
+    // 直接把 web_fetch 拖死成 Err("request: ... timed out")——direct 亲见的
+    // 404 状态码反而没机会走到下面 Err(HTTP 404) 那一行，前端词表把综合
+    // 错误吞成网络类 → 白换路重试 → 把直连正常的 host 翻去走代理。
+    if let Ok(Some(text)) = scrape_via_jina(url, proxy_url).await {
         return Ok(Some(text));
     }
-    if let Some(text) = scrape_via_wayback(url, proxy_url).await? {
+    if let Ok(Some(text)) = scrape_via_wayback(url, proxy_url).await {
         return Ok(Some(text));
     }
     scrape_via_firecrawl(url, proxy_url).await
@@ -12257,7 +12269,7 @@ async fn send_chat_request(
             // generic `error decoding response body` from its decompressor.
             .header("Accept-Encoding", "identity")
             .json(body);
-        let mut request = apply_auth_headers(base_request, anthropic, api_key);
+        let request = apply_auth_headers(base_request, anthropic, api_key);
         let send_result = tokio::time::timeout(
             std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
             request.send(),

@@ -99,6 +99,17 @@ function capToolResult(text: string, toolName: string): string {
     : `\n\n« Tool result too large — ${omitted.toLocaleString()} chars omitted. Fetch it in pages/ranges if you need the rest. »`;
   return text.slice(0, TOOL_RESULT_MAX_CHARS) + notice;
 }
+// 失败结果的文本形态。error 字段是权威（CLI 适配器放这里），但 GUI 适配器的
+// 失败族把人类可读文案（netFailureHint / blockedHostMessage 组装的状态码、
+// 重试指引）放在 result——error 缺位时必须回退取它，否则文案在最后一米丢失：
+// 模型只见 "Error: undefined"、失败策略拿到 "Unknown" 无法分类、宿主通知降级
+// 成 "unknown error"——三层通知塌成同一个空缺（GUI 真机三案例实证）。
+function failedResultBareText(r: ToolResult): string {
+  return r.error || (typeof r.result === 'string' ? r.result : '') || '';
+}
+function failedResultText(r: ToolResult): string {
+  return `Error: ${failedResultBareText(r) || 'unknown error'}`;
+}
 
 /**
  * E0.3 — resolve the adapter for an engine phase. The single-model contract:
@@ -982,7 +993,7 @@ export class AgentLoopEngine {
         }
         const textOfResult = (tr: ExecutedToolResult): string => tr.result.success
           ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
-          : `Error: ${tr.result.error}`;
+          : failedResultText(tr.result);
         // Second pass: repeats of a FAILED anchor execute for real. (A missing
         // anchor result counts as failed — never fabricate a reuse.)
         if (sameRoundDups.length > 0) {
@@ -1078,7 +1089,7 @@ export class AgentLoopEngine {
         for (const tr of toolResults) {
           const rawText = tr.result.success
             ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
-            : `Error: ${tr.result.error}`;
+            : failedResultText(tr.result);
           const resultText = capToolResult(rawText, tr.toolName);
           // W4-2: tool screenshots fold into the tool message as images — the
           // model sees the page it just captured (visual loop 改→截→判→修).
@@ -1116,7 +1127,7 @@ export class AgentLoopEngine {
         for (const te of toolErrors) {
           failures.push({
             type: 'tool_error',
-            message: te.result.error ?? 'Unknown',
+            message: failedResultBareText(te.result) || 'Unknown',
             turnNumber: turnCount,
             toolName: te.toolName,
             callArgs: callsById.get(te.toolCallId)?.function.arguments,
@@ -1414,7 +1425,7 @@ export class AgentLoopEngine {
    * the exact same call; adapt or switch; prefer what already worked.
    */
   private degradationNote(te: { toolName: string; result: ToolResult }): string {
-    return `Tool call ${te.toolName} failed: ${te.result.error ?? 'unknown error'}. Degrade this approach — do NOT repeat the exact same call: either adapt it (different arguments) or use a different tool or strategy. Prefer approaches that have already proven successful this session.`;
+    return `Tool call ${te.toolName} failed: ${failedResultBareText(te.result) || 'unknown error'}. Degrade this approach — do NOT repeat the exact same call: either adapt it (different arguments) or use a different tool or strategy. Prefer approaches that have already proven successful this session.`;
   }
 
   /**
