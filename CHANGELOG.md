@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.4.0
+
+**通道接入收敛为一键开通**
+
+主刀起于一个用户视角的定调：接入一个新通道，应该「1 步配置，点击提交就开通」，能全自动更好。此前接飞书/钉钉/QQ 要在配置文件里手写凭据、重启、自己试错，每一步都在劝退。物理边界是各平台建机器人、拿凭据 pure 代劳不了；这一刀把凭据之后的一切收敛成一条链：粘贴凭据 → 解析 → 平台探活 → 落盘生效 → 网关热载，全程不碰命令行。
+
+工程上五件事。粘贴解析做成纯函数（GUI 与模型工具同源：两行 key:value、JSON、代码围栏、裸两值启发式全认）；平台探活住 Rust 侧（WebView 发平台 API 被 CORS/ATS 拦，同款判例再次实证）——且探活通过才落盘，「已开通」从此永远意味着「凭据已被平台验证过」，被拒时一个字节都不写；网关 watch 配置文件热载（改动即生效无需重启，reload=整体重启适配器+换路由引用；端口迁移与 limits 不热载）；配对从复制粘贴命令行改成卡内一键批准；新增 configure_channel 动态能力工具，模型在对话里被问到通道配置时自决调用——被平台拒绝时回讲人话、给具体动作指引、不盲目重试。另有 `pure channels verify <通道>` 诊断命令。
+
+UI 按真机反馈收敛：粘贴框钉 60px 两行高带内间距——真凶判例是全局 setting-input 归一化的 flex-basis 220px 落进纵向 flex 容器变成高 220px，且 flex-basis 优先于 height 属性，只写 height 恒不生效；「去平台拿凭据 ↗」直达各平台控制台。
+
+能力验证走了完整闭环：探活双绿 → GUI 启动网关 → 飞书长连接+QQ websocket 就绪 → QQ 真机入站路由 → agent 回合完成 → QQ 收到回复。其二是 CI 测试基建清场：persist 型单例经 localStorage 重灌通道在二平台同红，reset 关死重灌通道根治。
+
+验证：bun test 5173 例全过、tsc 零错。
+
 ## v4.3.3
 
 **工具失败通知三层塌陷根治 + 网络兜底链不再拖死状态码**
