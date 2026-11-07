@@ -298,13 +298,14 @@ describe('规划叙述时序（2026-09-27 用户报「切历史会话 pure 先�
     expect(healed.events.map(e => e.type)).toEqual(['user', 'status', 'assistant']);
   });
 
-  it('源头修复：chat.ts 押账叙述、两个合并点与暂停提交各消费一次', () => {
+  it('源头修复：chat.ts 押账叙述、两个合并点与两处暂停提交各消费一次', () => {
     const chatSource = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     // 叙述不再直接 push 进 canonical（push 就是「思考抢在请求前」的病根）。
     expect(chatSource).not.toContain("this.messages.push({ role: 'assistant', content: thought.narration })");
     expect(chatSource).toContain('this.pendingPlanNarration = thought.narration;');
-    // 两个合并点 + 暂停提交都经 takePendingPlanNarration 消费（各恰好一次）。
-    expect(chatSource.split('this.takePendingPlanNarration()').length - 1).toBe(3);
+    // 两个合并点 + 插话暂停提交 + 计划暂停快照都经 takePendingPlanNarration
+    // 消费（各恰好一次；2026-11-07 补计划暂停分支——此前暂停快照漏叙述）。
+    expect(chatSource.split('this.takePendingPlanNarration()').length - 1).toBe(4);
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, completionMessages, userText, this.takePendingPlanNarration())');
     expect(chatSource).toContain('mergeTranscriptWithTurn(this.messages, event.payload.messages, userText, this.takePendingPlanNarration())');
   });

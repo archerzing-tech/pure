@@ -5669,9 +5669,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // run and injected into the system prompt so the model verifies the
       // premise instead of following it into a failure loop. The same analysis
       // also drives the plan review below.
-      // P0: 评估卡最终由「模型的分析判断 + 规则层保守兜底」合并落定（effectiveIntent）。
-      // 规则启发式先支撑 prompt 注入与只读探针；LLM 三段式思考完成后，用它的语义判断
-      // 校准风险/意图/可逆性——规则层只会抬高安全要求，永远不会把模型判断压得更低。
+      // P0→退役后的现状（2026-11-06 路由退役）：LLM 三段式分析层已不存在，
+      // effectiveIntent 恒为规则词表 assessIntent 的结果——评估卡/风险闸只由
+      // 词表安全闸落定（只在毁灭性操作上抬，规则只升不降）。
       // The shared compiler keeps this preflight identical between GUI and CLI.
       // （forcedMode / activePlanFinished / continuingPlan / planPauseRequested
       //  已在回合开头提前算好——本函数 try 的第一段注释；这里直接用。）
@@ -5763,8 +5763,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       };
       const maybeShowAssessment = (): void => {
         if (assessmentFlow) return;
-        // 是否展示评估卡由合并后的判断（effectiveIntent）决定：LLM 分析把风险抬高到
-        // 中/高时评估卡随之出现——规则层已不单独决定这件事，但永远不会压低模型判断。
+        // 是否展示评估卡由词表安全闸（effectiveIntent = assessIntent）决定：
+        // 毁灭性操作词命中抬 requiresConfirmation 时评估卡出现（LLM 校准层已
+        // 随 2026-11-06 路由退役，不存在「模型把风险抬高」的来源）。
         // The normal build path already has a live reasoning trace and a
         // task-specific plan. Reserve a separate assessment surface for a
         // real safety boundary (or a concrete trap), rather than showing a
@@ -6536,9 +6537,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         const pauseMessage = confirmationPause
           ? formatConfirmationPauseMessage(this.activeComplexPlan)
           : formatPlanPauseMessage(this.activeComplexPlan);
+        // 押账的规划叙述跟在请求后面入账（与 commitPausedUserTurn 同契约）：
+        // 暂停前当着用户流过的思考必须进 canonical/持久化，否则恢复会话后
+        // 「当时为什么这么规划」只剩 DOM 记忆，下一 send 开头还会作废押账。
+        // takePendingPlanNarration 取走即清，只能调一次。
+        const pendingNarration = this.takePendingPlanNarration();
         const pauseSnapshot: Message[] = [
           ...this.messages,
           { role: 'user', content: userText, images: userImages, attachments: userMessageAttachments, internal: isAuto || undefined },
+          ...(pendingNarration ? [pendingNarration] : []),
           { role: 'assistant', content: pauseMessage },
         ];
         this.messages = pauseSnapshot;

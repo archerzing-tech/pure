@@ -2388,6 +2388,10 @@ describe('plan-by-thinking flow', () => {
     // 落账时插到它后面；直接 push 会让回放里思考抢在用户请求前面。
     expect(src).toContain('this.pendingPlanNarration = thought.narration;');
     expect(src).not.toContain("this.messages.push({ role: 'assistant', content: thought.narration })");
+    // 计划暂停分支同样消费押账（2026-11-07 判例）：暂停快照缺叙述=当着用户
+    // 流过的思考只活在 DOM，恢复会话后「为什么这么规划」无从考据，下一 send
+    // 开头还会把押账作废。
+    expect(src).toContain('const pendingNarration = this.takePendingPlanNarration();\n        const pauseSnapshot: Message[] = [');
     expect(src).toContain('userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, register: workOrderRegister });');
     // 刀 1.1：有卡路径带着定稿计划的验证清单进执行语境（迭代环最小集）。
     // 刀 6：两条路径都带分量档位（执行语境的诚实义务与交付标记教学挂在档位上）。
