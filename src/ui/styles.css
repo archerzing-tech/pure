@@ -14917,13 +14917,30 @@ button svg,
   background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
 }
 .channel-onboard-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   font-size: 13px;
   font-weight: 600;
 }
 .channel-paste-input {
   width: 100%;
   resize: vertical;
-  min-height: 64px;
+  /* 全局 .setting-input 是横向 setting-row 设计（flex: 0 0 220px，basis 钉
+     220px）。粘贴框住在纵向 flex 的 .channel-onboard 里，basis 220px 落在
+     纵轴上就是高 220px，且 flex-basis 优先于 height——height 写多少都没用。
+     这里把 flex 收回，高度才回到 height:58px（.llm-phase-input 同坑判例）。
+     max-height 给 resize:vertical 留手动拉大的余地。 */
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 60px;
+  min-height: 60px;
+  max-height: 220px;
+  /* 全局 .setting-input 为 38px 单行设置行做了 padding-top/bottom: 0（文字
+     垂直居中），两行高的粘贴框会上下贴边——这里恢复内间距。 */
+  padding: 10px 14px;
+  line-height: 1.45;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
 }
@@ -14932,6 +14949,22 @@ button svg,
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+.channel-console-btn {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.channel-console-btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  text-decoration: underline;
 }
 .channel-onboard-status {
   font-size: 12px;

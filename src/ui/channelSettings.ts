@@ -42,6 +42,8 @@ interface ChannelSpec {
     fieldsLabel: string;
     /** 开通后用户下一步做什么（首次私信配对）。 */
     nextStep: string;
+    /** 平台控制台直达链接——「去哪拿凭据」的快捷按钮指到这。 */
+    consoleUrl: string;
   };
 }
 
@@ -67,6 +69,7 @@ const SPECS: ChannelSpec[] = [
     onboarding: {
       fieldsLabel: 'App ID + App Secret',
       nextStep: '在飞书里给机器人发条消息，首次会收到配对码——在下方批准即可开始对话',
+      consoleUrl: 'https://open.feishu.cn/app',
     },
   },
   {
@@ -85,6 +88,7 @@ const SPECS: ChannelSpec[] = [
     onboarding: {
       fieldsLabel: 'Client ID (AppKey) + Client Secret (AppSecret)',
       nextStep: '在钉钉里给机器人发条消息，首次会收到配对码——在下方批准即可开始对话',
+      consoleUrl: 'https://open-dev.dingtalk.com/',
     },
   },
   {
@@ -101,6 +105,7 @@ const SPECS: ChannelSpec[] = [
     onboarding: {
       fieldsLabel: 'AppID + AppSecret',
       nextStep: '在 QQ 里加机器人为好友并发条消息，首次会收到配对码——在下方批准即可开始对话',
+      consoleUrl: 'https://q.qq.com/',
     },
   },
   {
@@ -280,14 +285,33 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
         const onboard = document.createElement('div');
         onboard.className = 'channel-onboard';
 
-        const title = document.createElement('div');
-        title.className = 'channel-onboard-title';
+        const titleRow = document.createElement('div');
+        titleRow.className = 'channel-onboard-title';
+        const title = document.createElement('span');
         title.textContent = t('channel.pasteTitle');
-        onboard.appendChild(title);
+        // 「去哪拿凭据」快捷按钮：直达平台控制台（open_path 开系统浏览器，
+        // mcpOAuthFlow 同款通道）。
+        const consoleBtn = document.createElement('button');
+        consoleBtn.type = 'button';
+        consoleBtn.className = 'channel-console-btn';
+        consoleBtn.textContent = t('channel.consoleBtn');
+        consoleBtn.addEventListener('click', () => {
+          void (async () => {
+            const core = await loadTauriCore();
+            if (!core || !isTauriRuntime()) return;
+            try {
+              await core.invoke('open_path', { path: onboarding.consoleUrl });
+            } catch (err) {
+              console.error('[pure] open console failed:', err);
+            }
+          })();
+        });
+        titleRow.append(title, consoleBtn);
+        onboard.appendChild(titleRow);
 
         const pasteInput = document.createElement('textarea');
         pasteInput.className = 'setting-input channel-paste-input';
-        pasteInput.rows = 3;
+        pasteInput.rows = 2;
         pasteInput.placeholder = t('channel.pastePlaceholder');
         pasteInput.autocomplete = 'off';
         pasteInput.spellcheck = false;

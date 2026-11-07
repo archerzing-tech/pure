@@ -153,10 +153,8 @@ describe('Gateway', () => {
     const alphaRecord: FakeRecord = { stopped: false, sent: [] };
     const betaRecord: FakeRecord = { stopped: false, sent: [] };
     const registry = new ChannelRegistry({ log: () => {} });
-    const alpha = fakeAdapter(alphaRecord);
-    alpha.id = 'alpha';
-    const beta = fakeAdapter(betaRecord);
-    beta.id = 'beta';
+    const alpha = { ...fakeAdapter(alphaRecord), id: 'alpha' };
+    const beta = { ...fakeAdapter(betaRecord), id: 'beta' };
     registry.register(alpha);
     registry.register(beta);
 

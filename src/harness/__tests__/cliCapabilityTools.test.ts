@@ -52,7 +52,7 @@ describe('configure_channel (CLI adapter)', () => {
   });
 
   it('网络不通归为网络族文案，不落盘', async () => {
-    const fail = (async () => { throw new Error('connect timeout'); }) as typeof fetch;
+    const fail = (async () => { throw new Error('connect timeout'); }) as unknown as typeof fetch;
     const adapter = new CliCapabilityToolAdapter(innerStub, hostStub, dir, fail);
     const res = await adapter.execute(call({ channel: 'qq', credentials: '1903065122 sec999' }));
     expect(res.success).toBe(false);

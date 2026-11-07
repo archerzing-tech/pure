@@ -114,7 +114,7 @@ describe('verifyChannelCredentials', () => {
   });
 
   it('网络失败 = network 族（与凭据被拒分开）', async () => {
-    const fail = (async () => { throw new Error('connect ECONNREFUSED'); }) as typeof fetch;
+    const fail = (async () => { throw new Error('connect ECONNREFUSED'); }) as unknown as typeof fetch;
     const out = await verifyChannelCredentials('qq', '1', '2', fail);
     expect(out).toEqual({ ok: false, kind: 'network', detail: 'connect ECONNREFUSED' });
   });
