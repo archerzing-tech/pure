@@ -27,6 +27,7 @@ import { mergeConventions } from '../shared/conventions';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
+import { REQUEST_PLAN_TOOL_DEF, REQUEST_PLAN_TOOL_NAME } from '../coding-agent/planControlTool';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
@@ -1474,22 +1475,6 @@ function riskLabelOf(risk: IntentAssessment['riskLevel']): string {
     case 'medium': return '中风险';
     default: return '低风险';
   }
-}
-
-/** Keep safety review independent from the current plan cursor. A new
- * high-risk request must reopen review even during a paused or active plan. */
-export function shouldEnterPlanReview(
-  continuingPlan: boolean,
-  planPauseRequested: boolean,
-  planningEnabled: boolean,
-  needsDeliveryGate: boolean,
-  requiresConfirmation: boolean,
-  workflowRequiresPlanReview = true,
-): boolean {
-  return requiresConfirmation || (workflowRequiresPlanReview
-    && (!continuingPlan || requiresConfirmation)
-    && (!planPauseRequested || requiresConfirmation)
-    && (planningEnabled || needsDeliveryGate));
 }
 
 /**
@@ -5415,6 +5400,118 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // when false (DeepSeek/Qwen/GLM default) SVG remains the output path.
       const imageGen = imageGenEnabled(config.customProviders, config.provider, config.model);
 
+      // ── request_plan 桥（决策边界刀 2，2026-11-07）──
+      // 「何时规划」归模型：引擎首回合清单里有 request_plan 工具，模型流内
+      // 自决调用后，这里桥接 send() 机械路径同源的规划编排（planByThinking
+      // + 思考窗吸收 + 出卡 + 直批）。桥面比机械路径窄：引擎已在跑（无思考
+      // 卡可揭、无评估卡阶段可落定、无模式气泡），批准语义恒为自动（2026-09-17
+      // 产品决策），计划产物随工具结果回填——回合组装已发生，引擎语境不走
+      // renderTurn 的 plan 分区。defs() 按回合状态判在场：首回合、无既存
+      // 计划、无显式模式（那些走机械路径）；一回合一调（调过即收）。
+      let bridgePlanRequested = false;
+      const planControlDefs = (): ToolDefinition[] => {
+        if (bridgePlanRequested) return [];
+        if (forcedMode) return [];
+        if (continuingPlan || planPauseRequested) return [];
+        if (this.hasHistory || this.activeComplexPlan) return [];
+        return [REQUEST_PLAN_TOOL_DEF];
+      };
+      const runBridgePlanning = async (toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> => {
+        const started = Date.now();
+        bridgePlanRequested = true;
+        const base = { id: toolCall.id, toolName: REQUEST_PLAN_TOOL_NAME };
+        // focus：模型给的规划侧重点（可选），并进思考请求正文——它想先弄清
+        // 什么，规划就先想什么。
+        let focus = '';
+        try {
+          focus = ((JSON.parse(toolCall.function.arguments || '{}') as { focus?: string }).focus ?? '').trim();
+        } catch { /* 无参调用合法 */ }
+        let bridgeUserText = focus ? `${userText}\n\n【规划时请先弄清楚】${focus}` : userText;
+        const bridgeUserImages = [...userImages];
+        this.interjectOrchestrator.openPreflightWindow();
+        let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
+        try {
+          for (;;) {
+            thought = await this.planByThinking(chatEl, bridgeUserText, bridgeUserImages, needsDeliveryGate, undefined, workOrderRegister);
+            if (signal?.aborted || this.abortController?.signal.aborted) break;
+            if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
+              bridgeUserText = this.applyPreflightSupplements(bridgeUserText, bridgeUserImages);
+              this.interjectOrchestrator.markPreflightRethink();
+              this.addStatusBubble('已并入补充，重新规划…', false, false, 'info');
+              continue;
+            }
+            break;
+          }
+        } finally {
+          this.interjectOrchestrator.closePreflightWindow();
+        }
+        bridgeUserText = this.applyPreflightSupplements(bridgeUserText, bridgeUserImages);
+        // 押账：叙述插在用户请求后面（canonical 时序契约与机械路径同款）；
+        // 桥在回合内，合并点（完成/中断/暂停提交）照常消费。
+        if (thought?.narration) this.pendingPlanNarration = thought.narration;
+        const bridgePlan = thought?.plan ?? null;
+        if (!bridgePlan) {
+          if (thought?.narration) {
+            // 有思考、没解析出结构化步骤：不放假卡（与机械路径同契约）。
+            this.addStatusBubble(t('plan.narrationNoPlan', '思路讲完了，结构化步骤没能从里面解析出来——不硬凑卡片了，我按刚才的思路直接开工。'), false, false, 'info');
+            return {
+              ...base,
+              success: true,
+              result: `规划思考已完成（叙述已当着用户展示），但没有解析出结构化步骤——按下面这段思路直接推进，不要硬凑步骤：\n\n${thought.narration}`,
+              duration: Date.now() - started,
+            };
+          }
+          return {
+            ...base,
+            success: true,
+            result: '规划没有落地（超时或没有产出有效内容）。按你自己的判断直接推进任务。',
+            duration: Date.now() - started,
+          };
+        }
+        // 并行角色标注与收尾闸清单（与机械路径同款）：推荐里可并行的角色域
+        // 对到独立只读步骤；验证清单过桥到闸门口。
+        const planStrategy = adaptiveControlPlane.select({
+          prompt: bridgeUserText,
+          environment: {
+            now: Date.now(),
+            projectPath: sendWorkspace || undefined,
+            hasWorkspace: Boolean(sendWorkspace),
+            toolCount: effectiveWorkspace ? 1 : 0,
+            verifierAvailable: true,
+            memoryAvailable: true,
+          },
+        });
+        const finalPlan = markParallelPlanSteps(bridgePlan, planStrategy.parallelRoles);
+        gatePlanVerification = finalPlan.verification;
+        // 出卡（新卡精简版：桥一回合一卡，无 update 分支）+ 直批（自动语义）。
+        const planSeq = ++this.planSeqCounter;
+        this.activePlanSeq = planSeq;
+        const bridgeProgress = new PlanProgressModel(finalPlan, 'active', 1, 1, needsDeliveryGate, planSeq, bridgeUserText);
+        this.activeTaskScript = createTaskScript(finalPlan);
+        this.sessionLedger = recordPlan(this.sessionLedger, {
+          ts: Date.now(),
+          planText: JSON.stringify(finalPlan),
+          planSeq,
+          reason: bridgeUserText,
+        });
+        const bridgeCard = createPlanCard(finalPlan, false, bridgeProgress, () => this.activeTaskScript);
+        this.appendToTranscript(bridgeCard.el);
+        this.activePlanCardHandle = bridgeCard;
+        this.bindActivePlanProgress(bridgeProgress, sendSessionId, sendWorkspace);
+        this.scrollUi(chatEl);
+        this.activeComplexPlan = finalPlan;
+        this.activePlanNumber = 1;
+        this.activeTodoNumber = 1;
+        this.activePlanStarted = false;
+        bridgeCard.setActivity('方案已经整理好，马上从第一项开始验证。');
+        return {
+          ...base,
+          success: true,
+          result: `规划已完成，步骤卡已出（${finalPlan.steps.length} 步）。按下面这份已批准的计划立即开工，不要再等待确认：\n\n${formatPlanForPrompt(finalPlan, needsDeliveryGate, true)}`,
+          duration: Date.now() - started,
+        };
+      };
+
       const codingAgent = new CodingAgent({
         sessionId: this.sessionId,
         llm,
@@ -5481,6 +5578,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 都住在 plane 里（语义与原闭包逐条一致，见 delegationControl.ts
         // 的方法级注释与测试）。
         gateDelegations: async (calls) => this.delegationControl.gate(calls, subagentNames),
+        // request_plan 规划控制面（决策边界刀 2）：清单面 planControlDefs
+        // 每 THINK 轮重算（首回合且无既存计划才在场），执行面 runBridgePlanning
+        // 桥接机械路径同源的规划编排。CLI 不注入（无 UI 编排面，维持现状）。
+        planControl: { defs: planControlDefs, execute: runBridgePlanning },
         toolAdapter,
         subagents,
         personaOverlays,
@@ -5877,11 +5978,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // Approval is a separate safety decision, not a consequence of the word
       // “project” or the number of files involved.
       if (shouldRunTaskAnalysis) {
-        // Plan review runs when: auto-detected complex task (has a heuristic
-        // plan), OR the user forced plan/build mode from the composer. A forced
-        // YOLO suppresses review even for complex tasks.
+        // 规划评审的机械路径（决策边界刀 2，2026-11-07）：只剩用户显式模式
+        // （forced plan/build）与安全闸（毁灭性词表 requiresConfirmation）。
+        // 形态判据（长文/代码块/工程创作）不再替模型决定「这轮要规划」——
+        // 引擎首回合清单里有 request_plan 工具，模型流内自决（见 planControl）。
+        // needsDeliveryGate 同时撤出：交付闸（探针/落盘协议/收尾闸）保留机械，
+        // 但不再强制「先想一遍」。
         const riskReview = effectiveIntent.requiresConfirmation;
-        const wantsPlan = workflow.requiresPlanReview || needsDeliveryGate || riskReview || Boolean(
+        const wantsPlan = workflow.requiresPlanReview || riskReview || Boolean(
           forcedMode === 'plan' || forcedMode === 'build',
         );
         if (wantsPlan) {

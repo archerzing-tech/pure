@@ -45,6 +45,9 @@ export interface CompiledRequestWorkflow {
 //      continuingProjectBuild（用户显式或已批准流程的接续）；
 //   2. 形态判据（turnShape）+ 词表安全闸（assessIntent 只在毁灭性操作上抬
 //      requiresProbe/requiresConfirmation，规则只会抬高安全要求）。
+// 决策边界刀 2（2026-11-07）：requiresPlanReview 进一步收窄为纯机械事实
+// ——形态判据不再抬规划，「何时规划」归模型（request_plan 工具）；形态
+// 只继续服务交付闸 / 落盘协议 / build 注入这些流程手脚。
 // 2026-11-05 判例既定纪律在这里常态化：词表猜测只服务内部判定（stage / 探针 /
 // 交付闸 / build 注入），绝不塑形主请求——assessment 不再注入 user turn。
 export function compileRequestWorkflow(
@@ -71,23 +74,16 @@ export function compileRequestWorkflow(
   const probeRequired = assessment.requiresProbe || needsDeliveryGate;
   const probeAvailable = options.hasTools !== false;
   const needsProbe = probeRequired && probeAvailable;
+  // 规划评审只由机械事实抬（决策边界刀 2，2026-11-07）：用户显式模式、
+  // 已批准流程的接续、毁灭性词表安全闸。形态判据（codeShaped/longForm/
+  // buildShaped/complex+plan）的抬升权退役——「何时规划」归模型（引擎首
+  // 回合清单里的 request_plan 工具），宿主只保留用户显式意图与安全闸。
   const requiresPlanReview = Boolean(
     options.continuingPlan
     || options.planPauseRequested
     || assessment.requiresConfirmation
     || options.forcedMode === 'plan'
     || options.forcedMode === 'build'
-    // 形态判据：带代码块、长文或工程创作形态 → 走规划流程。它不回答「这轮
-    // 是什么」，只决定「要不要过一遍当着用户的思考」（planByThinking 想完
-    // 自己决定出不出卡，「宁可不卡」契约不变），判错代价是多付一次可见思考，
-    // 不是 2026-09 词表 floor 那种「判闲聊→打发」。buildShaped 在这里保持
-    // 与退役前的行为等价：语义路由判 build 时会把 forcedMode 抬成 'build'
-    // → 同样进规划流程。
-    || shape.codeShaped
-    || shape.longForm
-    || shape.buildShaped
-    // 词表认出的复杂任务（plan 已生成）保守走规划；寒暄猜不出 plan，自然不触发。
-    || (analysis.complexity === 'complex' && analysis.plan),
   );
   // 落盘协议跟闸走：工程创作形态（buildShaped）开着交付闸，协议就必须在场
   // ——退役前由语义路由抬 forcedMode='build' 到这里，现在由形态事实直接抬。

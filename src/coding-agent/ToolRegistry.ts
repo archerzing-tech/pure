@@ -10,6 +10,7 @@ import type { ToolAdapter, ToolCall, ToolResult, ToolDefinition } from '../share
 import type { TaggedTool, PermissionContext } from './types';
 import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
+import { REQUEST_PLAN_TOOL_NAME, REQUEST_PLAN_TIMEOUT_MS, type PlanControl } from './planControlTool';
 import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared/toolDefs';
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
@@ -126,6 +127,9 @@ export class ToolRegistry implements ToolAdapter {
   // 模型不必每次用前重搜。
   private activatedDeferred = new Set<string>();
   private subagentExecutor?: ToolAdapter;
+  // request_plan 规划控制面（决策边界刀 2，2026-11-07）：清单面在 CodingAgent
+  // 装配点，执行面在此按名转发（known 检查前）。宿主（GUI）注入；CLI 不注入。
+  private planControl?: PlanControl;
   private mcpExecutor?: ToolAdapter;
   private externalToolsExecutor?: ToolAdapter;
   private permissionManager?: PermissionManager;
@@ -152,6 +156,11 @@ export class ToolRegistry implements ToolAdapter {
   /** Set the executor for subagent (Tags.AGENT) tools. */
   setSubagentExecutor(executor: ToolAdapter): void {
     this.subagentExecutor = executor;
+  }
+
+  /** Set the request_plan planning control plane (host bridge). */
+  setPlanControl(control: PlanControl): void {
+    this.planControl = control;
   }
 
   /** Set the executor for MCP (Tags.MCP) tools. */
@@ -357,6 +366,11 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number } | undefined {
+    // request_plan 不在 tools 名单（按名转发面）：声明独立超时（规划自身
+    // 180s + 出卡收尾），不被通用工具闸（180s）贴线掐断。只读思考面。
+    if (toolName === REQUEST_PLAN_TOOL_NAME && this.planControl) {
+      return { sideEffects: false, isWrite: false, timeoutMs: REQUEST_PLAN_TIMEOUT_MS };
+    }
     const tool = this.tools.find(t => t.name === toolName);
     if (!tool) return this.delegate.getMetadata(toolName);
     const meta = {
@@ -389,6 +403,13 @@ export class ToolRegistry implements ToolAdapter {
     // 宿主缝 stopBranchByCallId 同为直接执行。
     if (toolCall.function.name === 'stop_branch' && this.subagentExecutor) {
       return this.subagentExecutor.execute(toolCall, signal);
+    }
+    // request_plan（决策边界刀 2，2026-11-07）同构转发：宿主 PlanControl
+    // 桥接规划编排（planByThinking + 出卡），规划产物随工具结果回填。同样
+    // 放在 known 检查之前——它天然不在公共/委派 defs 里。不设权限卡（规划
+    // 是只读思考面，非破坏）。
+    if (toolCall.function.name === REQUEST_PLAN_TOOL_NAME && this.planControl) {
+      return this.planControl.execute(toolCall, signal);
     }
 
     const known = this.tools.find(t => t.name === toolCall.function.name);

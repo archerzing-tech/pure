@@ -96,17 +96,20 @@ describe('compileTurnRoute (mechanical workflow)', () => {
     expect(performance.now() - started).toBeLessThan(50);
   });
 
-  it('walks the plan pipeline for code-shaped and long-form turns', () => {
+  it('records code/long-form shape signals without forcing the plan pipeline (model owns planning, 2026-11-07)', () => {
+    // 决策边界刀 2：形态判据不再抬规划评审——「何时规划」归模型（引擎首
+    // 回合清单里的 request_plan 工具）。形态只继续作为观测信号（signals）
+    // 与交付闸/落盘协议的判据。
     const codeTurn = compileTurnRoute(prefetchTurnRoute('修这个：\n```ts\nconst a: number = "x";\n```'), { hasTools: true });
-    expect(codeTurn.workflow.requiresPlanReview).toBe(true);
-    expect(codeTurn.stage).toBe('plan');
+    expect(codeTurn.workflow.requiresPlanReview).toBe(false);
+    expect(codeTurn.stage).toBe('direct');
     expect(codeTurn.signals.codeShaped).toBe(true);
 
     const longTurn = compileTurnRoute(
       prefetchTurnRoute('请帮我把这个项目重构成插件架构。'.repeat(13)),
       { hasTools: true },
     );
-    expect(longTurn.workflow.requiresPlanReview).toBe(true);
+    expect(longTurn.workflow.requiresPlanReview).toBe(false);
     expect(longTurn.signals.longForm).toBe(true);
   });
 

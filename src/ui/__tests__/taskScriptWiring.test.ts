@@ -118,10 +118,11 @@ describe('chat.ts · TaskScript 信号接线', () => {
 
   it('剧本只经 recordTaskScript / 建本 / 恢复写入，不存在第二处直接改账', () => {
     const assignments = src.split('this.activeTaskScript =').length - 1;
-    // 1 处追加（recordTaskScript）+ 2 处建本（新计划 / 续跑重开）
-    // + 1 处恢复（loadFromStorage，期 4）+ 6 处归零。
-    expect(assignments).toBe(10);
-    expect(src.split('this.activeTaskScript = createTaskScript(').length - 1).toBe(2);
+    // 1 处追加（recordTaskScript）+ 3 处建本（机械新计划 / 续跑重开 /
+    // request_plan 桥，决策边界刀 2）+ 1 处恢复（loadFromStorage，期 4）
+    // + 6 处归零。
+    expect(assignments).toBe(11);
+    expect(src.split('this.activeTaskScript = createTaskScript(').length - 1).toBe(3);
     expect(src.split('this.activeTaskScript = applyTaskScriptSignal(').length - 1).toBe(1);
     expect(src.split('this.activeTaskScript = null;').length - 1).toBe(6);
   });

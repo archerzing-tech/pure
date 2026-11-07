@@ -11,6 +11,7 @@ import { PermissionManager } from './PermissionManager';
 import { Verifier } from './Verifier';
 import { createDefaultHarnessConfig } from './defaultHarnessConfig';
 import { ToolRegistry } from './ToolRegistry';
+import type { PlanControl } from './planControlTool';
 import { SubagentOrchestrator, BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, type SubagentActivity, type SubagentOrchestratorConfig, type SubagentProgress } from './SubagentOrchestrator';
 import { MCPClient, type MCPClientConfig } from '../harness/mcp/MCPClient';
 import { substituteExec, type ExternalToolExec } from '../harness/externalTools';
@@ -112,6 +113,12 @@ export interface CodingAgentConfig {
   /** 委派起飞闸（2026-09-26）：宿主在每批工具调用起飞前拦下被用户取消的
    *  委派。只接父引擎；子代理引擎不传（取消是用户对父任务批次说的话）。 */
   gateDelegations?: EngineContext['gateDelegations'];
+  /** request_plan 规划控制面（决策边界刀 2，2026-11-07）：宿主桥接既有规
+   *  划编排（planByThinking + 出卡），模型流内自决「何时规划」。defs() 每
+   *  THINK 轮重算（首回合才在场），execute 经 ToolRegistry 按名转发（known
+   *  检查前）。只接父引擎；子代理引擎不传（规划是父任务的决策），CLI 不
+   *  传（无 UI 编排面，维持现状）。 */
+  planControl?: PlanControl;
   /** Live subagent activity feed (parallel multi-agent): a fanout owned by
    * the host. CodingAgent publishes every orchestrator progress callback onto
    * it, and the Harness hands it to the engine context, which subscribes a
@@ -243,6 +250,10 @@ export class CodingAgent {
     // Wire orchestrator as the executor for AGENT-tagged tools
     this.toolRegistry.setSubagentExecutor(this.subagentOrchestrator);
 
+    // request_plan 规划控制面（决策边界刀 2）：清单面与执行面分别缝在
+    // modelToolsDefs 装配点与 ToolRegistry 按名转发点（stop_branch 同构）。
+    if (config.planControl) this.toolRegistry.setPlanControl(config.planControl);
+
     // Register subagents in all three registries
     // Include both original BUILT_IN_SUBAGENTS and the new CODING_AGENT_ROLES
     const allSubagents = [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES];
@@ -314,6 +325,9 @@ export class CodingAgent {
       ...this.toolRegistry.getSubagentTools(),
       // 分支控制工具（stop_branch）条件追加：有在飞委派支时才可见。
       ...this.subagentOrchestrator.branchControlToolDefs(),
+      // 规划工具（request_plan）条件追加：宿主 PlanControl.defs() 按回合
+      // 状态判（首回合且无既存计划才在场），每 THINK 轮随清单重算。
+      ...(config.planControl?.defs() ?? []),
     ]);
     this.harness = new Harness({
       sessionId: config.sessionId,

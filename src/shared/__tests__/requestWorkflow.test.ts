@@ -32,8 +32,10 @@ describe('compileRequestWorkflow', () => {
     // 陈述式创作（创建×项目同现）走 build 形态是判据的预期行为；问法被
     // HOW_ASKING 排除，procedure 问题不吃交付管线。
     const build = compileRequestWorkflow('帮我创建一个项目', { hasTools: true });
+    // 工程创作保住交付闸（探针+落盘协议），但不再强制规划评审（刀 2）：
+    // stage 落 probe，规划由模型自决。
     expect(build.needsDeliveryGate).toBe(true);
-    expect(build.stage).toBe('plan');
+    expect(build.stage).toBe('probe');
 
     const asking = compileRequestWorkflow('怎么创建一个项目？', { hasTools: true });
     expect(asking.needsDeliveryGate).toBe(false);
@@ -44,7 +46,9 @@ describe('compileRequestWorkflow', () => {
     const prompt = '创建一个HKT vip干扰保障agent应用，这个应用可以保障vip用户进入到保障区域后能，agent自动启动监控，保障流程。按照一个流程处理保障任务。你帮我创建一个项目原型，数据用mock';
     const workflow = compileRequestWorkflow(prompt, { hasTools: true });
 
-    expect(workflow.stage).toBe('plan');
+    // 交付闸/探针/落盘协议全保（工程创作的流程手脚），stage 落 probe——
+    // 规划评审不再由形态抬（刀 2，模型自决）。
+    expect(workflow.stage).toBe('probe');
     expect(workflow.needsDeliveryGate).toBe(true);
     expect(workflow.needsProbe).toBe(true);
     expect(workflow.userContext.buildProtocol).toContain('Incremental build protocol');
@@ -67,7 +71,8 @@ describe('compileRequestWorkflow', () => {
     const cli = compileRequestWorkflow(prompt, { hasTools: true });
 
     expect(gui).toEqual(cli);
-    expect(gui.stage).toBe('plan');
+    // 工程创作形态走交付闸（stage=probe），规划评审不再由形态抬（刀 2）。
+    expect(gui.stage).toBe('probe');
     expect(gui.probeRequired).toBe(true);
     expect(gui.probeAvailable).toBe(true);
     expect(gui.needsProbe).toBe(true);
@@ -105,10 +110,12 @@ describe('compileRequestWorkflow', () => {
     expect(workflow.userContext.buildProtocol).toBeUndefined();
   });
 
-  it('walks the plan pipeline for code-shaped turns even in plain-chat tooling', () => {
+  it('does not force the plan pipeline for code-shaped turns (model owns planning, 2026-11-07)', () => {
+    // 决策边界刀 2：形态判据不再抬规划评审。带代码块的普通求助走直答/探针，
+    // 规划由模型流内自决（request_plan 工具）。
     const workflow = compileRequestWorkflow('这个类型不对：\n```ts\nconst a: number = "x";\n```', { hasTools: false });
-    expect(workflow.requiresPlanReview).toBe(true);
-    expect(workflow.stage).toBe('plan');
+    expect(workflow.requiresPlanReview).toBe(false);
+    expect(workflow.stage).toBe('direct');
   });
 
   it('does not require a workspace probe when tools are unavailable', () => {

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, shouldEnterPlanReview, sanitizeInterruptedReason, isConfirmationReply, isLightShapedTurn } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, sanitizeInterruptedReason, isConfirmationReply, isLightShapedTurn } from '../chat';
 import { turnShape } from '../../coding-agent/turnRoute';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
@@ -343,31 +343,34 @@ describe('plan pre-flight keeps its honest shape', () => {
     // 模型计划优先；规则计划只活在确认对话的兜底支里，自动路径宁可无卡。
     expect(src).toContain('let planForReview: Plan | null = thought?.plan ?? null;');
   });
-});
 
-describe('proactive safety review gate', () => {
-  it('keeps normal continuation on the existing plan path', () => {
-    expect(shouldEnterPlanReview(true, false, true, false, false)).toBe(false);
-    expect(shouldEnterPlanReview(false, false, true, false, false)).toBe(true);
-  });
-
-  it('reopens review for high-risk requests in active and paused plan states', () => {
-    expect(shouldEnterPlanReview(true, false, true, false, true)).toBe(true);
-    expect(shouldEnterPlanReview(false, true, true, false, true)).toBe(true);
-    expect(shouldEnterPlanReview(true, true, false, false, true)).toBe(true);
-  });
-
-  it('does not force review for a low-risk turn when planning is disabled', () => {
-    expect(shouldEnterPlanReview(false, false, false, false, false)).toBe(false);
-  });
-
-  it('honors the shared workflow compiler without reopening ordinary plan continuations', () => {
-    expect(shouldEnterPlanReview(true, false, true, false, false, true)).toBe(false);
-    expect(shouldEnterPlanReview(false, false, true, false, false, true)).toBe(true);
-    expect(shouldEnterPlanReview(false, false, false, false, false, false)).toBe(false);
-    expect(shouldEnterPlanReview(true, false, false, false, true, false)).toBe(true);
+  it('planning is model-owned: request_plan bridge wired, mechanical path reduced to explicit modes + safety gate', () => {
+    // 决策边界刀 2（2026-11-07）：形态判据不再替模型决定「这轮要规划」——
+    // 引擎首回合清单里有 request_plan 工具（PlanControl 缝），宿主只保留
+    // 用户显式模式与安全闸的机械路径。
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // wantsPlan 机械式不再含 needsDeliveryGate（交付闸保留，但不再强制规划）。
+    const wantsPlanIdx = src.indexOf('const wantsPlan = workflow.requiresPlanReview || riskReview || Boolean(');
+    expect(wantsPlanIdx).toBeGreaterThan(-1);
+    expect(src.slice(wantsPlanIdx, wantsPlanIdx + 200)).not.toContain('needsDeliveryGate');
+    // PlanControl 缝注入 + 桥实现存在：清单面按回合状态判，执行面桥接规划编排。
+    expect(src).toContain('planControl: { defs: planControlDefs, execute: runBridgePlanning }');
+    expect(src).toContain('const planControlDefs = (): ToolDefinition[] => {');
+    expect(src).toContain('REQUEST_PLAN_TOOL_DEF');
+    // 桥内思考窗闭环（插话吸收契约与机械路径同款）。
+    expect(src).toContain('this.interjectOrchestrator.openPreflightWindow();');
+    expect(src).toContain('this.interjectOrchestrator.closePreflightWindow();');
+    // 桥直批语义恒为自动（2026-09-17 产品决策），产物随工具结果回填。
+    expect(src).toContain('按下面这份已批准的计划立即开工，不要再等待确认');
+    // 机械路径的强制规划只剩显式模式与安全闸（workflow 层收窄在 requestWorkflow.test 锁）。
+    expect(src).toContain("forcedMode === 'plan' || forcedMode === 'build',\n        );");
   });
 });
+
+// shouldEnterPlanReview 随决策边界刀 2 退役（2026-11-07）：它与活的 wantsPlan
+// 机械式是两套并存判据，生产代码零消费（只有本测试在锁它的语义）。规划评审
+// 的机械路径收窄后，语义真相源只剩 compileRequestWorkflow.requiresPlanReview
+// （纯机械事实）+ send() 的 wantsPlan 行内式。
 
 describe('rules-layer risk calibration settles the safety card', () => {
   it('derives the safety gate purely from Planner heuristics', () => {
