@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.6.1
+
+**输入体验三笔：启动即聚焦、底栏融入正文、流式输出给打字让路**
+
+三笔都从一个观察长出来：真机测试发现 agent 流式回复期间打字一卡一顿。根因是流式重渲染（每 100ms 一 tick 的全文 lexer + 逐块 diff + 重排）与打字共享同一条主线程。修法是「打字优先」的退避策略：composer 收到键入后 900ms 窗口内，流式重渲染窗口从 100ms 拉宽到 300ms——渲染永远带最新文本，停手一个窗口内立即追平，不打字时零影响。数据零丢失是底线：退避只改「什么时候渲染」，不改「渲染什么」。
+
+另两笔是观感收口（用户定调）：底部状态栏去掉分割线、背景与聊天区同色，footer 与 body 融为一体；侧栏分割线弱化一档（--border → --border-light），分隔感交给背景色差本身。启动后焦点自动落进输入框——打开 pure 就能直接打字，boot splash 只是视觉覆盖层，焦点早已落好。
+
+验证：bun test 定向 150 例（流式渲染四 suite）全过、typecheck 零错、真机部署复验（打字流畅度、footer 无线视觉、启动聚焦）。
+
 ## v4.6.0
 
 **电脑端操作能力增强：图片视觉内化进 read_file，鼠标键盘走插件形态**

@@ -227,7 +227,9 @@ body.window-maximized #boot-splash {
   display: flex;
   flex-direction: column;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
+  /* 2026-11-08 用户定调：侧栏分割线弱化一档（--border → --border-light），
+     分隔感主要交给背景色差本身。 */
+  border-right: 1px solid var(--border-light);
   overflow: hidden;
   -webkit-app-region: drag;
   user-select: none;
@@ -4195,13 +4197,13 @@ body.window-maximized #boot-splash {
      the bottom edge (in chat mode #chat's flex:1 already absorbs the space,
      so the margin resolves to 0 there). */
   margin-top: auto;
-  /* Same height as #sidebar-bottom so the two top borders meet on one line
-     (the sidebar's divider and this one are neighbours on screen). The 20px
-     new-window button clears this bar's 2×4px padding with 1px to spare. */
+  /* Same height as #sidebar-bottom so the two bottom rows align on one line.
+     No top border and chat background (2026-11-08 用户定调)：footer 与 body
+     融为一体，无分割线视觉。The 20px new-window button clears this bar's
+     2×4px padding with 1px to spare. */
   min-height: var(--bottom-bar-h);
   padding: 4px 20px;
-  border-top: 1px solid var(--border-light);
-  background: var(--bg-header);
+  background: var(--bg-chat);
   font-size: 11px;
   color: var(--text-tertiary);
   user-select: none;

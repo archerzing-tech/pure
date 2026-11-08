@@ -10,7 +10,7 @@ import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, r
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
-import { syncPresentationCardsFromConfig } from './markdown';
+import { syncPresentationCardsFromConfig, markComposerTyping } from './markdown';
 import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
 import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character';
@@ -1020,6 +1020,10 @@ function deferToIdle(fn: () => void): void {
   wireComposerSelects();
   checkLandingState();
   enableInputIfReady();
+  // 启动即聚焦输入框（2026-11-08 用户定调：pure 默认打开就能直接打字）。
+  // boot splash 只是视觉覆盖层，DOM focus 立即生效，reveal 后光标已在框内。
+  // 启动无会话恢复路径，落地页 landing 输入框就是唯一入口。
+  landingPrompt.focus();
   // Corner chrome reveal (CSS): the top-left sidebar toggle and top-right
   // settings button are hidden while the pointer is outside the app window
   // and fade in when it enters. `mousemove` inside the window shows them;
@@ -1686,6 +1690,8 @@ profileGlobal.__pureInputProfile = dumpInputProfiles;
 landingPrompt.addEventListener('input', () => {
   // Typing = human takeover: stop any pending auto-continue chain.
   chat.cancelAutoContinue();
+  // 流式重渲染退避信号（打字优先）：见 markdown.ts markComposerTyping。
+  markComposerTyping();
   profileInput('landing', () => {
     // Only write when the height actually changed — see autoResizePrompt() for
     // why per-keystroke forced layout stalls sidebar animations.
@@ -1720,6 +1726,8 @@ landingPrompt.addEventListener('keydown', (e) => {
 promptEl.addEventListener('input', () => {
   // Typing = human takeover: stop any pending auto-continue chain.
   chat.cancelAutoContinue();
+  // 流式重渲染退避信号（打字优先）：见 markdown.ts markComposerTyping。
+  markComposerTyping();
   profileInput('chat', () => {
     autoResizePrompt();
     if (!chat.isStreaming()) {

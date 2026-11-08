@@ -3398,6 +3398,22 @@ export async function renderMarkdown(
 const STREAM_THROTTLE_MS = 100;
 const STREAM_LONG_TEXT_MS = 160;
 const STREAM_VERY_LONG_TEXT_MS = 220;
+// 打字退避（2026-11-08 用户报告：流式输出期间打字一卡一顿）。流式渲染的
+// 每 tick 全文 lexer + 增量 diff + 重排与打字共享主线程；composer 正在
+// 收键时把重渲染窗口拉宽到 300ms（latestText 照收，合并渲染零丢失，停手
+// 一个窗口内追平）。不打字时零影响。
+const STREAM_TYPING_BACKOFF_MS = 300;
+const TYPING_BACKOFF_WINDOW_MS = 900;
+
+let composerTypingUntil = 0;
+/** Composer input 事件注入口（main.ts 两个输入框的 input handler 调用）。 */
+export function markComposerTyping(): void {
+  composerTypingUntil = Date.now() + TYPING_BACKOFF_WINDOW_MS;
+}
+
+function typingBackoffActive(): boolean {
+  return Date.now() < composerTypingUntil;
+}
 // Streaming renders re-highlight a still-growing code block every tick; past
 // this size hljs becomes the dominant cost and saturates the main thread
 // ("app froze / unresponsive"). Above it we skip streaming hljs — the final
@@ -3432,7 +3448,8 @@ export function streamRenderThrottleMs(textLength: number, renderCostMs = 0): nu
     : textLength >= 24_000
       ? STREAM_LONG_TEXT_MS
       : STREAM_THROTTLE_MS;
-  return Math.min(STREAM_VERY_LONG_TEXT_MS, Math.max(sizeDelay, renderCostMs >= 18 ? STREAM_LONG_TEXT_MS : sizeDelay));
+  const base = Math.min(STREAM_VERY_LONG_TEXT_MS, Math.max(sizeDelay, renderCostMs >= 18 ? STREAM_LONG_TEXT_MS : sizeDelay));
+  return typingBackoffActive() ? Math.max(base, STREAM_TYPING_BACKOFF_MS) : base;
 }
 
 const streamRenderer = new Renderer();
