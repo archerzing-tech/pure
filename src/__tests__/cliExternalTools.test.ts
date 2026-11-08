@@ -134,17 +134,17 @@ describe('createExternalToolsCommandExecutor（执行翻译）', () => {
     ['raw_tool', { name: 'raw_tool', exec: '{cmd} --quiet', timeoutMs: 60_000, rawParams: ['cmd'] }],
   ]);
 
-  it('翻译成 execute_command：模板替换 + timeout_ms 透传 + 结果原样返回', async () => {
+  it('翻译成 execute_command：模板替换 + timeoutMs 透传 + 结果原样返回', async () => {
     const delegate = stubDelegate();
     const executor = createExternalToolsCommandExecutor(execs, delegate);
     const result = await executor.execute(toolCall('hello_tool', { name: 'world' }));
     expect(delegate.calls).toHaveLength(1);
     const routed = delegate.calls[0];
     expect(routed.function.name).toBe('execute_command');
-    const args = JSON.parse(routed.function.arguments) as { command: string; timeout_ms: number };
+    const args = JSON.parse(routed.function.arguments) as { command: string; timeoutMs: number };
     // 模板自带引号包住占位符 = 作者按值逐字写的形态，二次引号反而改行为。
     expect(args.command).toBe('echo "hello world"');
-    expect(args.timeout_ms).toBe(120_000);
+    expect(args.timeoutMs).toBe(120_000);
     expect(result.success).toBe(true);
     expect(result.id).toBe('test_hello_tool'); // toolCallId 一路透传
   });
