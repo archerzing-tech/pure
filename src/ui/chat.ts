@@ -5723,6 +5723,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // MCP/子代理/动态工具不受影响）——「关掉=从清单消失」对模型清单
       // 同样成立，不再「看得见调不动」。
       codingAgent.toolRegistry.setVisibilityGate((name) => isToolEnabled(name, config));
+      // 错误台账（shared/errorLog.ts）：WebView 无直写盘面，经 Rust
+      // gui_error_log 命令 append 进同一份 JSONL；桥不可用即丢（isTauri
+      // 之外的 web 预览态 invoke 会炸，catch 兜住）。
+      codingAgent.toolRegistry.setErrorLogSink((line) => {
+        void invoke('gui_error_log', { entries: [line] }).catch(() => {});
+      });
       for (const tool of DYNAMIC_CAPABILITY_TOOL_DEFS) {
         codingAgent.toolRegistry.register({
           ...tool,

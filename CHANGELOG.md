@@ -14,6 +14,8 @@ execute_command 从「参数薄」补成可依赖的地基：cwd 与 timeoutMs �
 
 鼠标键盘走 install_desktop_control 动态工具：一键往 ~/.pure/tools/ 落三个外部工具 manifest（desktop_click / desktop_type / desktop_key，cliclick 驱动），复用既有 externalTools 与 MCP 两条接缝、不新建插件系统；cliclick 探测与辅助功能授权前置如实写进返回体，Windows 无预置方案时指路 register_mcp_server。manifest 模板以编译契约测试上锁——装了过不了编译器等于白装。顺手修掉 externalTools 执行器的存量 bug：manifest 超时以 snake_case 下发、适配器读 camelCase，超时从未生效过。
 
+错误台账从单源扩成四源：~/.pure/gui_errors.log 原本只收 WebView 的未捕获异常，现在 webview / rust（panic 钩子）/ tool（工具调用失败）/ cli 四路同落一个 JSONL 文件，一行一条、1MB 整文件让位 .old 保一代。设计上克制：工具失败只记工具名+错误文本+耗时，**绝不记参数值**——configure_channel 的参数里就是凭据明文，台账落盘即泄漏；权限拒绝不过账（用户说不，是预期交互流，记账即噪音）；台账自身永不成为故障源，写入失败静默。读取入口是 `pure errors [N] [--json|--clear]`——人读模式带总数头、detail 缩进次行，旧格式行标 legacy 不丢。
+
 施工判例两枚。其一，伪绿二连：`gh run watch --exit-status` 的退出码被管道尾的 tail 吞掉报了假绿，靠 gh run list 交叉核对才翻案；同一段里全量测试的 mid-stream fail 行被 tail 窗口截掉，汇总 3 fail 只看见 2 条就误归属环境 flake，第三条实为新契约下没同步的旧断言——计数对不上必须核到底。其二，改字段名必须 grep 断言面：修 snake/camel 错位时，锁着旧字段形状的测试没同步，CI 两平台齐红才暴露。真机依赖测试（headless Chrome）全量并发下的冷启动超时用三步定案放行：干净树复现同样红、改动树单跑全绿、失败集中在真机依赖文件。
 
 验证：bun test 全量 5231 例（唯真机 Chrome 环境性超时，定案放行）、typecheck 零错、cargo test --lib 278 例全过、vite 生产构建过、CI 两平台绿、macOS 真机部署复验（截屏→看图→安装→落盘全链通过）。

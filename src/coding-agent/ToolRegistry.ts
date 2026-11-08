@@ -14,6 +14,7 @@ import { REQUEST_PLAN_TOOL_NAME, REQUEST_PLAN_TIMEOUT_MS, type PlanControl } fro
 import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared/toolDefs';
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
+import { formatErrorLine, buildToolErrorEntry } from '../shared/errorLog';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { matchPresentationCards, registerCustomCards, renderPresentationCard, renderPresentationCatalog, type CustomCardInput } from '../shared/presentationLibrary';
 
@@ -139,6 +140,7 @@ export class ToolRegistry implements ToolAdapter {
   private externalToolsExecutor?: ToolAdapter;
   private permissionManager?: PermissionManager;
   private commandGuard?: (command: string) => string | null;
+  private errorLogSink?: (line: string) => void;
   // 模型可见清单的设置闸（宿主接线 isToolEnabled）：注册表种子是全量
   // BUILT_IN_TOOLS，不经过 delegate 的过滤面——此前「关掉开关工具立刻从
   // 清单消失」的承诺只对设置页 inventory 成立，模型清单里 execute_command
@@ -174,6 +176,11 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   /** Set the executor for external script tools (Tags.EXTERNAL). */
+  /** 错误台账 sink（JSONL 行进、宿主自选写入通道）。缺席即不记账。 */
+  setErrorLogSink(sink: (line: string) => void): void {
+    this.errorLogSink = sink;
+  }
+
   setExternalToolsExecutor(executor: ToolAdapter): void {
     this.externalToolsExecutor = executor;
   }
@@ -401,6 +408,26 @@ export class ToolRegistry implements ToolAdapter {
   }
 
   async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+    const startedAt = Date.now();
+    const result = await this.executeRouted(toolCall, signal);
+    const errorText = typeof result.error === 'string' ? result.error : '';
+    // 失败记账闸口（错误台账四源之一，见 shared/errorLog.ts）：所有真失败
+    // 都在此处过账——未知工具、守卫拦截、MCP/外部/子代理/内建执行器的失败
+    // 一网打尽。权限拒绝不算（用户说不，是预期交互流，记账即噪音）；「无
+    // 匹配 exit 1」这类良性语义在适配器里已是 success，天然不进账。台账
+    // 自身永不成为故障源：sink 抛错按没有记账处理。
+    const failed = result.success === false || errorText.length > 0;
+    if (failed && this.errorLogSink && !errorText.startsWith('Permission denied')) {
+      try {
+        this.errorLogSink(formatErrorLine(buildToolErrorEntry(Date.now(), toolCall.function.name, errorText, Date.now() - startedAt)));
+      } catch {
+        // 记账失败静默丢弃。
+      }
+    }
+    return result;
+  }
+
+  private async executeRouted(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
     // stop_branch（分支控制工具，2026-11-05）不走 defs 名单：编排器在飞时
     // 才出现在模型清单（branchControlToolDefs），执行转发编排器（其 execute
     // 顶部按名短路）。放在 known 检查之前——它天然不在公共/委派 defs 里。

@@ -18,6 +18,7 @@ import { compileExternalTools, createExternalToolsCommandExecutor, type External
 import { QUARANTINE_MARKER_FILE } from './harness/toolQuarantine';
 import type { TaggedTool } from './coding-agent/types';
 import { loadConfig, saveConfig, type PureConfig } from './cliConfig';
+import { createCliErrorLogSink } from './cliErrorLog';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type SubagentProgress } from './coding-agent/SubagentOrchestrator';
 import { SteerBus } from './coding-agent/steerBus';
 import { DelegationControlPlane } from './coding-agent/delegationControl';
@@ -404,6 +405,8 @@ async function createTools(
     },
   });
   registry = new ToolRegistry(capAdapter);
+  // 错误台账（shared/errorLog.ts）：CLI 有 node:fs，直写同一份 JSONL。
+  registry.setErrorLogSink(createCliErrorLogSink());
   // 刀 3：自定义表现形式卡的盘上加载经注入口进来（ToolRegistry 不能静态
   // import cliConfig——它同时活在 GUI 浏览器 bundle 里）。
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);

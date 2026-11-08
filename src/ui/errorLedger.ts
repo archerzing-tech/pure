@@ -76,6 +76,7 @@ export function createErrorLedger(deps: ErrorLedgerDeps): ErrorLedger {
     record(entry: GuiErrorInput): void {
       const line = JSON.stringify({
         ts: now(),
+        source: 'webview',
         kind: entry.kind,
         message: asString(entry.message) ?? '',
         ...(asString(entry.source) !== undefined ? { source: asString(entry.source) } : {}),

@@ -20,9 +20,10 @@ import { mergePhaseModelConfig } from './shared/phaseModels';
 import { PROVIDER_ENV_HINT, PROVIDER_LABELS } from './cliAdapter';
 import { renderLogo, runOneShot, runRepl } from './cliRepl';
 import { runGateway, runChannelsCommand } from './cliChannels';
+import { runErrorLogCommand } from './cliErrorLog';
 import { reapCliMcp } from './cliHarness';
 
-type SubCommand = 'config' | 'gateway' | 'channels' | '';
+type SubCommand = 'config' | 'gateway' | 'channels' | 'errors' | '';
 
 // ── Arg parsing ──
 // Precedence for provider/apiKey/model: --flag > env var > ~/.pure/config.json > defaults.
@@ -82,6 +83,9 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
     promptParts = positional.slice(1);
   } else if (positional[0] === 'channels') {
     command = 'channels';
+    promptParts = positional.slice(1);
+  } else if (positional[0] === 'errors') {
+    command = 'errors';
     promptParts = positional.slice(1);
   }
 
@@ -401,6 +405,11 @@ async function main() {
   if (command === 'channels') {
     await runChannelsCommand(args);
     return;
+  }
+
+  if (command === 'errors') {
+    // 错误台账调测入口（~/.pure/gui_errors.log 四源 JSONL）：pure errors [N] [--json|--clear]
+    process.exit(runErrorLogCommand((args.prompt ?? '').split(/\s+/).filter(Boolean)));
   }
 
   if (args.prompt) {

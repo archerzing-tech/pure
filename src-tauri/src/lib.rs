@@ -11581,6 +11581,50 @@ mod read_image_file_tests {
     }
 }
 
+#[cfg(test)]
+mod error_log_tests {
+    use super::*;
+
+    #[test]
+    fn appends_lines_and_rotates_oversized_log_to_old() {
+        let dir = std::env::temp_dir().join(format!("pure-errlog-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("errors.log");
+        let path_str = path.to_string_lossy().into_owned();
+        // 阈值参数化:用小阈值验证「超限→整文件让位 .old、新行进新文件」。
+        append_error_log_line_at("first line", &path_str, 16);
+        append_error_log_line_at("second line", &path_str, 16);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first line\nsecond line\n");
+        // 23 字节 > 16:整文件让位,新文件只有新行。
+        append_error_log_line_at("overflow", &path_str, 16);
+        let old = dir.join("errors.log.old");
+        assert_eq!(fs::read_to_string(&old).unwrap(), "first line\nsecond line\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "overflow\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn appends_into_missing_dir_without_panicking() {
+        let dir = std::env::temp_dir().join(format!("pure-errlog2-{}", std::process::id()));
+        let path = dir.join("errors.log");
+        let path_str = path.to_string_lossy().into_owned();
+        // 目录不存在时 append 自建(create(true)),不 panic 不报错。
+        append_error_log_line_at("bootstrapped", &path_str, 1_000_000);
+        assert!(path.exists());
+        assert!(!dir.join("errors.log.old").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncates_error_fields_by_chars_not_bytes() {
+        // 4000 个 CJK 字符 = 12000 字节:按字节截会切出坏 UTF-8,按字符截保留完整。
+        let long = "界".repeat(5000);
+        let clipped = truncate_error_field(&long);
+        assert_eq!(clipped.chars().count(), ERROR_LOG_FIELD_CAP_CHARS);
+        assert_eq!(clipped, "界".repeat(ERROR_LOG_FIELD_CAP_CHARS));
+    }
+}
+
 /// `~/…` 前缀展开到用户 home（cwd 参数用）。无 HOME 环境变量时原样返回。
 fn expand_home_dir(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
@@ -16785,19 +16829,97 @@ fn format_audit_line(ts_ms: u128, reason: &str) -> String {
 /// 只有页面内能接住——WebContent 进程活着时外面读不到它的 console,「快速
 /// 甩动后按钮全死、窗口空白」这类僵尸态事故就靠这份落盘对账。批量 append,
 /// 永不 panic;行内容由 TS 侧 errorLedger 序列化,Rust 不解析。
+///
+/// v4.6.0 起该文件扩成四源运行时错误台账(见 shared/errorLog.ts):webview
+/// (本命令)/ rust(panic 钩子)/ tool(TS 执行闸口记账)/ cli(node:fs 直写),
+/// 调测入口 `pure errors`。
 #[tauri::command]
 fn gui_error_log(entries: Vec<String>) {
     if entries.is_empty() {
         return;
     }
     let path = format!("{}/.pure/gui_errors.log", pure_home_dir());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        for line in entries {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.write_all(b"\n");
-        }
+    for line in entries {
+        append_error_log_line(&line, &path);
     }
+}
+
+/// 台账轮转阈值——与 TS 侧 shared/errorLog.ts 的 ERROR_LOG_ROTATE_BYTES 同值。
+/// 跨语言共享一个常量的机制成本大于收益,两侧各自实现同一数字(1MB)。
+const ERROR_LOG_ROTATE_BYTES: u64 = 1_000_000;
+/// 字段截断上限——与 TS 侧 ERROR_LOG_FIELD_CAP 同值(4000)。
+const ERROR_LOG_FIELD_CAP_CHARS: usize = 4000;
+
+/// 超限整文件让位给 .old(同名 .old 直接覆盖,只保一代)。失败静默——轮转
+/// 永远不能阻断写入主路径。
+fn rotate_error_log_if_needed_max(path: &str, max_bytes: u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= max_bytes {
+        return;
+    }
+    let old = format!("{path}.old");
+    let _ = std::fs::remove_file(&old);
+    let _ = std::fs::rename(path, &old);
+}
+
+/// 台账单行 append(命令与 panic 钩子共用):先轮转再追加,永不 panic。
+fn append_error_log_line(line: &str, path: &str) {
+    append_error_log_line_at(line, path, ERROR_LOG_ROTATE_BYTES);
+}
+
+/// 测试可见的参数化变体:轮转阈值注入,小阈值即可验证轮转路径。
+fn append_error_log_line_at(line: &str, path: &str, max_bytes: u64) {
+    rotate_error_log_if_needed_max(path, max_bytes);
+    // create(true) 只建文件不建父目录;~/.pure 未建时(panic 钩子可能跑在
+    // 极早期)先补建,失败则 open 自然失败,同样静默。
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.write_all(b"\n");
+    }
+}
+
+/// 按字符数截断(非字节):JSON 序列化前把超长 panic 消息压到台账字段上限。
+fn truncate_error_field(s: &str) -> String {
+    s.chars().take(ERROR_LOG_FIELD_CAP_CHARS).collect()
+}
+
+/// 错误台账四源之一:Rust panic 落同一份 JSONL(source:"rust")。GUI 进程里
+/// Rust 侧的崩溃此前只有 console/系统日志,调测时与页面错误对不上账;钩子
+/// 在 setup 里进程级安装一次。台账自身永不 panic:全 best-effort,序列化
+/// 失败退化成固定占位行。
+fn install_panic_error_hook() {
+    let path = format!("{}/.pure/gui_errors.log", pure_home_dir());
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let line = serde_json::json!({
+            "ts": ts,
+            "source": "rust",
+            "kind": "panic",
+            "message": truncate_error_field(&message),
+            "stack": truncate_error_field(&location),
+        })
+        .to_string();
+        append_error_log_line(&line, &path);
+    }));
 }
 
 fn close_disposition(running_sessions: usize, open_windows: usize) -> CloseDisposition {
@@ -16923,6 +17045,10 @@ pub fn run() {
         .manage(TraySessions::default())
         .manage(NapGuard::default())
         .setup(|_app| {
+            // 错误台账 panic 钩子(四源之一,shared/errorLog.ts)尽量早装:
+            // setup 里后续代码的 panic 也要接得住。
+            install_panic_error_hook();
+
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full
             // (runtime subprocesses + network reachability) probe on first
