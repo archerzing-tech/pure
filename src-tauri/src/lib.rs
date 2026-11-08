@@ -13691,6 +13691,20 @@ fn sessions_dir() -> PathBuf {
     PathBuf::from(pure_home_dir()).join(".pure").join("sessions")
 }
 
+/// 遥控桥端口发现（docs/remote-session-control-2026-11.md）：网关 start 时把
+/// 实际监听端口写进 ~/.pure/channels/bridge.json，GUI 靠它连 localhost WS。
+/// 没有网关在跑 / 文件损坏 → None，GUI 如实知道遥控投影不可用，不重试猜端口。
+#[tauri::command]
+fn bridge_port() -> Option<u64> {
+    let path = PathBuf::from(pure_home_dir())
+        .join(".pure")
+        .join("channels")
+        .join("bridge.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get("port").and_then(|port| port.as_u64())
+}
+
 fn validate_session_id(session_id: &str) -> Result<(), String> {
     if session_id.is_empty()
         || session_id.len() > 128
@@ -17267,6 +17281,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // GUI diagnostics: uncaught JS error ledger (~/.pure/gui_errors.log)
             gui_error_log,
+            // Remote control bridge port discovery (gateway bridge.json)
+            bridge_port,
             // File tools
             read_file,
             path_info,

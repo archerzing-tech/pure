@@ -64,6 +64,7 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES, SubagentOrchestrator, type Suba
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from '../harness/overlayGuard';
 import { requestPermission } from './permission';
+import { remoteBridgeTap } from './remoteBridgeClient';
 import { TauriCheckpointStore } from '../adapter/storage/TauriCheckpointStore';
 import {
   requestPlanReview,
@@ -6829,6 +6830,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // cancel() (main.ts loadAndDisplaySession), so no events remain — this
         // guard also covers slow-abort cases where a straggler still yields.
         if (gen !== this.generation) break;
+        // 遥控投影缝（手机附着观察）：每事件 tap 一下，内部全 try 包裹，
+        // 任何异常都不会进这里的渲染路径。sendSessionId 固定本轮身份，
+        // 中途 setSessionId 不改写本轮归属。
+        remoteBridgeTap(sendSessionId, event);
         // Per-event isolation: one event handler throwing used to unwind the
         // whole for-await and land the turn in the error catch — a rendering
         // hiccup on one delta killed a streaming reply mid-sentence ("偶发中

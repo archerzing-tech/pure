@@ -18,6 +18,9 @@ import { createAnswerProjection, type AnswerProjection } from './projection/proj
 import type { HarnessFactory } from './agentSession';
 import { ChannelApprovalBroker } from './approvals';
 import { ChannelSessionIndex } from './sessionIndex';
+import { RemoteControl } from './remoteControl';
+import { createRemoteBridge, bridgeDiscoverPath, type RemoteBridge } from './remoteBridgeServer';
+import { frameToOutboundKind, targetFromChatKey, type BridgeFrame } from '../shared/remoteBridge';
 import type { ChannelAdapter, ChannelRuntimeContext, ChannelTarget, InboundEvent, OutboundMessage } from './types';
 
 export interface GatewayOptions {
@@ -45,6 +48,11 @@ export interface GatewayOptions {
   projection?: AnswerProjection | null;
   /** A1 事件日志 sink（透传给 AgentSession；缺省不记账）。 */
   eventSinkFor?: (sessionKey: string, sessionId: string) => import('../shared/sessionEventLog').SessionEventSink;
+  /**
+   * ~/.pure 根目录。给了才启用手机遥控控制词（/sessions /attach /detach
+   * /status /stop——列表与附着登记读盘，指挥落点待 GUI 桥接通）。
+   */
+  pureDir?: string;
   /** 空闲驱逐周期（默认 60s），测试可注入小值或关闭。 */
   evictionIntervalMs?: number;
   sessionTtlMs?: number;
@@ -65,6 +73,8 @@ export class Gateway {
   private readonly richRenderers: GatewayRichRenderers;
   private readonly projection?: AnswerProjection;
   private readonly projectionPage?: ProjectionPage;
+  private readonly bridge?: RemoteBridge;
+  private readonly remoteControl?: RemoteControl;
   private lock?: GatewayLockHandle;
   private started: ChannelAdapter[] = [];
   private seen = new Map<string, number>();
@@ -85,6 +95,35 @@ export class Gateway {
       this.projection = page ? createAnswerProjection({ renderRichBlock: (markdown) => page.render(markdown) }) : undefined;
     }
     this.outbox = new MemoryOutbox((id) => options.registry.get(id), { log: this.log, path: options.outboxPath });
+    // 遥控桥（GUI↔网关 localhost WS）：pureDir 给了才启用。投影帧在这里
+    // 查附着表分发到通道；/stop 与 inject 走 publish 送达 GUI。
+    this.bridge = options.pureDir
+      ? createRemoteBridge({
+          host: options.config.gateway.host,
+          port: options.config.gateway.port,
+          discoverPath: bridgeDiscoverPath(options.pureDir),
+          log: this.log,
+          now: this.now,
+          onProjection: (sessionId, frame) => void this.deliverProjection(sessionId, frame),
+        })
+      : undefined;
+    this.remoteControl = options.pureDir
+      ? new RemoteControl({
+          pureDir: options.pureDir,
+          log: this.log,
+          now: this.now,
+          stop: async (sessionId) => {
+            // 桌面离线时如实失败——RemoteControl 会把这句转成「发送失败」回执。
+            if (!this.bridge || !this.bridge.hasGui()) throw new Error('desktop offline');
+            this.bridge.stopSession(sessionId);
+          },
+          inject: async (sessionId, text) => {
+            if (!this.bridge || !this.bridge.hasGui()) throw new Error('desktop offline');
+            this.bridge.publish({ type: 'inject', msgId: `inj_${this.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, sessionId, text });
+          },
+          guiLive: () => this.bridge?.liveSessions() ?? [],
+        })
+      : undefined;
     this.broker = new ChannelApprovalBroker(
       async (target, message) => {
         await this.deliverEnvelope('', target, message, true);
@@ -115,6 +154,7 @@ export class Gateway {
       richOutput: (text, capabilities) => renderRichOutput(text, capabilities, this.richRenderers),
       projection: this.projection,
       eventSinkFor: options.eventSinkFor,
+      remoteControl: this.remoteControl ? { handle: (i, k) => this.remoteControl!.handle(i, k) } : undefined,
     });
   }
 
@@ -125,6 +165,7 @@ export class Gateway {
   async start(): Promise<void> {
     // 先抢锁再绑端口：两个实例同时起时，第二个必须在产生任何平台连接前退出。
     this.lock = acquireGatewayLock(this.options.lockPath, { channels: this.enabledAdapters().map((a) => a.id) });
+    if (this.bridge) await this.bridge.start();
     this.bus.onInbound((event) => {
       void this.routeInbound(event).catch((err) => {
         this.log(`turn failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -191,6 +232,7 @@ export class Gateway {
   async stop(): Promise<void> {
     if (this.evictTimer) clearInterval(this.evictTimer);
     this.evictTimer = undefined;
+    this.bridge?.stop();
     await Promise.all(this.started.map((a) => a.stop().catch((err) => this.log(`adapter ${a.id} stop failed: ${String(err)}`))));
     this.started = [];
     await this.router.stopAll();
@@ -236,6 +278,29 @@ export class Gateway {
 
     audit?.record({ channelId: event.channelId, peerId: event.peer.id, sessionKey: key, decision: 'routed', textLength: event.text.length, text: event.text });
     await this.router.handle(event);
+  }
+
+  /**
+   * 投影帧分发：GUI 只报 sessionId+帧，谁附着了这个会话由注册表说了算。
+   * turn/error 走可靠队列，status/tool 可丢（IM 刷屏防线 + 失败不重试）。
+   */
+  private async deliverProjection(sessionId: string, frame: BridgeFrame): Promise<void> {
+    const chats = this.remoteControl?.registry.chatsFor(sessionId) ?? [];
+    if (chats.length === 0) return;
+    const kind = frameToOutboundKind(frame);
+    for (const chatKey of chats) {
+      const target = targetFromChatKey(chatKey);
+      if (!target) {
+        this.log(`projection: cannot split chatKey ${chatKey}, dropped`);
+        continue;
+      }
+      await this.deliverEnvelope(
+        target.channelId,
+        { accountId: target.accountId, peerId: target.peerId, peerKind: target.peerKind, ...(target.threadId ? { threadId: target.threadId } : {}) },
+        { kind, text: frame.text },
+        kind === 'progress',
+      );
+    }
   }
 
   private enabledAdapters(): ChannelAdapter[] {

@@ -25,6 +25,12 @@ export interface SessionRouterDeps {
   projection?: import('./projection/projection').AnswerProjection;
   /** A1 事件日志 sink（透传给 AgentSession，user_input/turn_settled 落盘）。 */
   eventSinkFor?: (sessionKey: string, sessionId: string) => import('../shared/sessionEventLog').SessionEventSink;
+  /**
+   * 手机遥控控制词（/sessions /attach /detach /status /stop）。返回消息=已
+   * 受理直接投递；返回 null=不是控制词，走原路由。挂在审批双轨之后：
+   * y/a/n 永远优先结算悬着的审批卡。
+   */
+  remoteControl?: { handle(inbound: InboundEvent, sessionKey: string): Promise<OutboundMessage | null> };
 }
 
 export function buildSessionKey(inbound: InboundEvent): string {
@@ -78,6 +84,15 @@ export class SessionRouter {
 
     // 审批回复优先：兼容文字双轨（y/a/n）。
     if (this.deps.broker.handleReply(sessionKey, inbound.text)) return;
+
+    // 手机遥控控制词：已受理的（/sessions 等）直接回，不进 agent 会话。
+    if (this.deps.remoteControl) {
+      const reply = await this.deps.remoteControl.handle(inbound, sessionKey);
+      if (reply) {
+        await this.deps.deliver(inbound.channelId, targetFor(inbound), reply);
+        return;
+      }
+    }
 
     const caps = this.deps.capabilitiesFor(inbound.channelId);
     if (inbound.peer.kind === 'group') {

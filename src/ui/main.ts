@@ -2317,6 +2317,9 @@ function revealSession(sessionId: string): void {
 
 // Native macOS menu bar actions (Rust emits these): 新建对话 / 设置…
 if (isTauriRuntime()) {
+  // 遥控桥（手机经通道遥控桌面会话）：连网关 /internal/bridge，投影出站+
+  // 指挥注入。内部自带重连与幂等，装配失败不拖累主界面。
+  void import('./remoteBridgeClient').then(({ startRemoteBridge }) => startRemoteBridge(chat));
   void (async () => {
     try {
       await loadTauriCore();

@@ -153,6 +153,8 @@ export async function runGateway(args: CliArgs): Promise<void> {
     budget: new DailyTokenBudget({ dailyTokens: config.limits.dailyTokens }),
     // A1 事件账本落盘（手机端总览/时间线的事实源；写失败由 sink 内部降级）。
     eventSinkFor: (_sessionKey, sessionId) => createFileSessionEventSink(PURE_DIR, sessionId),
+    // 手机遥控控制词（/sessions /attach /detach /status /stop）。
+    pureDir: PURE_DIR,
     log: channelsLog,
   });
 
