@@ -11540,6 +11540,47 @@ mod command_timeout_tests {
     }
 }
 
+#[cfg(test)]
+mod read_image_file_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_small_png_as_base64() {
+        let dir = std::env::temp_dir().join(format!("pure-readimg-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // 1x1 透明 PNG 的最小字节序列
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let file = dir.join("pixel.png");
+        fs::write(&file, png).unwrap();
+        let out = read_image_file(dir.to_string_lossy().into_owned(), "pixel.png".into()).unwrap();
+        assert_eq!(out["mimeType"], "image/png");
+        assert_eq!(out["sizeBytes"], png.len() as u64);
+        let b64 = out["base64"].as_str().unwrap();
+        use base64::Engine as _;
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(b64).unwrap(), png);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unsupported_extensions_and_oversize_files() {
+        let err = read_image_file(".".into(), "notes.txt".into()).unwrap_err();
+        assert!(err.contains("unsupported image extension"));
+        let dir = std::env::temp_dir().join(format!("pure-readimg-big-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("huge.png");
+        fs::write(&big, vec![0u8; 5 * 1024 * 1024 + 1]).unwrap();
+        let err = read_image_file(dir.to_string_lossy().into_owned(), "huge.png".into()).unwrap_err();
+        assert!(err.contains("5MB"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 /// `~/…` 前缀展开到用户 home（cwd 参数用）。无 HOME 环境变量时原样返回。
 fn expand_home_dir(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
@@ -11584,6 +11625,40 @@ fn write_temp_file(name: String, content: String) -> Result<String, String> {
     let path = std::env::temp_dir().join(name);
     fs::write(&path, content.as_bytes()).map_err(|e| format!("write_temp_file: {}", e))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// 读一张本机图片为 base64（read_file 图片视觉输入的 GUI 通道——WebView 没
+/// 有 node:fs）。扩展名→MIME 表与 shared/imageFiles.ts 单源对齐，改要同步。
+/// 视觉输入直接进模型上下文（base64 膨胀 4/3），上限 5MB 比文本的 64MB 严。
+#[tauri::command]
+fn read_image_file(workspace: String, path: String) -> Result<serde_json::Value, String> {
+    const IMAGE_READ_MAX_BYTES: u64 = 5 * 1024 * 1024;
+    let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        _ => return Err("read_image_file: unsupported image extension".into()),
+    };
+    let full = resolve(&workspace, &path)?;
+    let meta = fs::metadata(&full).map_err(|e| format!("read_image_file: {}", e))?;
+    if !meta.is_file() {
+        return Err(format!("read_image_file: not a file: {}", path));
+    }
+    if meta.len() > IMAGE_READ_MAX_BYTES {
+        return Err(format!(
+            "read_image_file: 图片 {}MB 超过视觉读取上限 5MB。先用 execute_command 压缩再读（macOS sips -Z 1600）。", meta.len() / 1024 / 1024
+        ));
+    }
+    let bytes = fs::read(&full).map_err(|e| format!("read_image_file: {}", e))?;
+    use base64::Engine as _;
+    Ok(serde_json::json!({
+        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "mimeType": mime,
+        "sizeBytes": meta.len(),
+        "path": full.to_string_lossy(),
+    }))
 }
 const COMMAND_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const COMMAND_PIPE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -17124,7 +17199,8 @@ pub fn run() {
             execute_command_stream,
             process_alive,
             kill_process,
-            write_temp_file,            download_file_stream,
+            write_temp_file,
+            read_image_file,            download_file_stream,
             kill_command,
             // W3/D1=A process primitive for the TS single-executor tool layer
             run_argv,

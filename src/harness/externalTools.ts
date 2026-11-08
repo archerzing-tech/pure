@@ -237,7 +237,10 @@ export function createExternalToolsCommandExecutor(
         index: toolCall.index,
         function: {
           name: 'execute_command',
-          arguments: JSON.stringify({ command, timeout_ms: entry.timeoutMs }),
+          // timeoutMs（camel）：适配器参数面是 args.timeoutMs——早先发的是
+          // timeout_ms（snake），适配器读不到，manifest 的 timeoutMs 从未
+          // 生效、全部落 120s 默认。
+          arguments: JSON.stringify({ command, timeoutMs: entry.timeoutMs }),
         },
       }, signal);
     },

@@ -16,6 +16,7 @@ import type { DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTool
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import { mcpRegistrySearchUrl, parseMcpRegistryPayload } from '../shared/mcpRegistry';
 import { parseCredentialPaste, verifyChannelCredentials, type OnboardChannelId } from '../shared/channelCredentials';
+import { installDesktopControl, type DesktopToolkitDeps } from '../shared/desktopToolkit';
 import { fetchSkillBody, searchHubSkills, splitSkillMarkdown, sanitizeSkillName, normalizeHubRepo, skillContentHash } from '../ui/skillHub';
 import { skillsRootDir, readSkillSidecar, writeSkillSidecar } from '../cliSkillStore';
 import { PURE_DIR } from '../cliConfig';
@@ -83,6 +84,7 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
         case 'connect_mcp_server': return await this.connectMcp(toolCall, args, start, signal);
         case 'register_mcp_server': return await this.registerMcp(toolCall, args, start, signal);
         case 'configure_channel': return await this.configureChannel(toolCall, args, start);
+        case 'install_desktop_control': return await this.installDesktopControl(toolCall, start);
         default:
           return { id: toolCall.id, toolName: name, error: `Unknown dynamic capability tool: ${name}`, success: false, duration: Date.now() - start };
       }
@@ -344,6 +346,34 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
       return false;
     }
   }
+
+  /** 桌面控制工具包安装（CLI 壳）：node:fs 原语注入 shared/desktopToolkit。 */
+  private async installDesktopControl(toolCall: ToolCall, start: number): Promise<ToolResult> {
+    const deps: DesktopToolkitDeps = {
+      platform: process.platform,
+      cliclickFound: cliclickInPath(),
+      ensureDir: (dir) => {
+        mkdirSync(dir, { recursive: true });
+      },
+      writeFile: (file, content) => writeFileSync(file, content),
+    };
+    const result = await installDesktopControl(deps, this.pureDir);
+    return {
+      id: toolCall.id,
+      toolName: toolCall.function.name,
+      result: result.message,
+      success: result.ok,
+      duration: Date.now() - start,
+    };
+  }
+}
+
+/** cliclick 探活：绝对路径候选 + PATH 扫描（GUI-spawned 进程 PATH 可能瘦）。 */
+function cliclickInPath(): boolean {
+  const candidates = ['/usr/local/bin/cliclick', '/opt/homebrew/bin/cliclick'];
+  if (candidates.some((p) => existsSync(p))) return true;
+  const pathDirs = (process.env.PATH ?? '').split(':').filter(Boolean);
+  return pathDirs.some((dir) => existsSync(`${dir}/cliclick`));
 }
 
 export { withConnectTimeout };

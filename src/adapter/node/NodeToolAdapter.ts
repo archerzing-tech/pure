@@ -31,6 +31,7 @@ import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { BACKGROUND_LOG_MISS_HINT, buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript, isBackgroundLogPath } from '../../shared/backgroundCommand';
 import { listTasks, registerTask, unregisterTask } from '../../shared/taskRegistry';
+import { IMAGE_READ_MAX_BYTES, imageMimeForPath } from '../../shared/imageFiles';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
@@ -381,6 +382,28 @@ export class NodeToolAdapter implements ToolAdapter {
       // 报「是目录，请用 list_files」等于整轮白跑 + 一次空转往返。这里
       // 直接以 list_files 同款非递归格式给出目录内容，一次往返就能继续。
       return this.readDirectoryListing(path, String(args.path), start);
+    }
+
+    // 图片视觉输入（电脑端操作能力 P2）：read_file 读本机图片直接走
+    // ToolResult.images 通道（screenshot 的 W4-2 回路同款），模型亲眼看到
+    // 图，不经过文本抽取。startLine/endLine 对图片无意义，忽略。
+    const imageMime = imageMimeForPath(path);
+    if (imageMime) {
+      if (meta.size > IMAGE_READ_MAX_BYTES) {
+        return this.fail(null, start, `read_file: 图片 ${(meta.size / 1024 / 1024).toFixed(1)}MB 超过视觉读取上限 ${Math.round(IMAGE_READ_MAX_BYTES / 1024 / 1024)}MB。先用 execute_command 压缩再读：macOS 'sips -Z 1600 <path> --out <smaller.png>'，Windows PowerShell 用 System.Drawing 缩放。`);
+      }
+      const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      const dataUrl = `data:${imageMime};base64,${btoa(binary)}`;
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'read_file',
+        result: `[image: ${String(args.path)} — ${imageMime}, ${(meta.size / 1024).toFixed(0)}KB — returned as a visible image attachment]`,
+        success: true,
+        duration: Date.now() - start,
+        images: [{ dataUrl, mimeType: imageMime, path, sizeBytes: meta.size }],
+      };
     }
 
     if (meta.size > this.maxFileSize) {

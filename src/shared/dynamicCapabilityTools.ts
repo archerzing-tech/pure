@@ -1,5 +1,6 @@
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
 import type { ToolDefinition } from './types';
+import { INSTALL_DESKTOP_CONTROL_DEF } from './desktopToolkit';
 
 export interface DynamicMcpConnectionResult {
   tools: ToolDefinition[];
@@ -87,6 +88,7 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
       required: ['name', 'transport'],
     },
   },
+  INSTALL_DESKTOP_CONTROL_DEF,
 ] as const;
 
 export const DYNAMIC_CAPABILITY_NAMES = new Set(

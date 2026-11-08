@@ -27,6 +27,8 @@ import { cacheQualityLiveLine } from '../shared/endpointCacheQuality';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
 import { listTasks, registerTask, unregisterTask } from '../shared/taskRegistry';
 import { isBenignNoMatchExit } from '../shared/format';
+import { imageMimeForPath } from '../shared/imageFiles';
+import { installDesktopControl } from '../shared/desktopToolkit';
 import { blockedHostMessage, contentStatusFromMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
 import { githubAutoMirrorFirst, githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, githubMirrorLadderPrefixes, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, normalizeGithubMirrorKey, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
@@ -1122,7 +1124,7 @@ export class TauriToolAdapter implements ToolAdapter {
   }
 
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean } | undefined {
-    if (toolName === 'connect_mcp_server' || toolName === 'register_mcp_server' || toolName === 'install_agent_skill' || toolName === 'configure_channel') return { sideEffects: true, isWrite: true };
+    if (toolName === 'connect_mcp_server' || toolName === 'register_mcp_server' || toolName === 'install_agent_skill' || toolName === 'configure_channel' || toolName === 'install_desktop_control') return { sideEffects: true, isWrite: true };
     return TOOL_METADATA[toolName];
   }
 
@@ -1404,6 +1406,30 @@ export class TauriToolAdapter implements ToolAdapter {
           candidates.forEach((candidate) => this.mcpCandidates.set(candidate.id, candidate));
           return { id: toolCall.id, toolName: name, result: JSON.stringify({ query, directories: ['official-registry', 'community-search'], candidates }, null, 2), success: true, duration: Date.now() - start };
         }
+        case 'install_desktop_control': {
+          // 桌面控制工具包安装（GUI 壳）：Rust 原语注入 shared/desktopToolkit
+          // （落盘 ~/.pure/tools/<name>/TOOL.json，下一轮外部工具扫描收编）。
+          const home = await homeDir();
+          const pureHome = await joinPath(home, '.pure');
+          let cliclickFound = false;
+          try {
+            const probe = await this.call('execute_command', { workspace: pureHome, command: 'command -v cliclick' }) as { exitCode: number };
+            cliclickFound = probe.exitCode === 0;
+          } catch { /* 探测失败按未装处理，返回体给 brew 指引 */ }
+          const result = await installDesktopControl({
+            platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'other',
+            cliclickFound,
+            ensureDir: async (dir) => {
+              const rel = dir.startsWith(pureHome) ? dir.slice(pureHome.length + 1) : dir;
+              await this.call('create_directory', { workspace: pureHome, path: rel });
+            },
+            writeFile: async (file, content) => {
+              const rel = file.startsWith(pureHome) ? file.slice(pureHome.length + 1) : file;
+              await this.call('write_file', { workspace: pureHome, path: rel, content });
+            },
+          }, pureHome);
+          return { id: toolCall.id, toolName: name, result: result.message, success: result.ok, duration: Date.now() - start };
+        }
         case 'connect_mcp_server': {
           const candidateId = String(args.candidateId ?? '').trim();
           const candidate = this.mcpCandidates.get(candidateId);
@@ -1513,6 +1539,26 @@ export class TauriToolAdapter implements ToolAdapter {
           return { id: toolCall.id, toolName: name, result: `✅ ${meta.label}通道已开通（凭据已通过平台验证）\n${afterLine}\n${pairingLine}`, success: true, duration: Date.now() - start };
         }
         case 'read_file': {
+          // 图片视觉输入（电脑端操作能力 P2）：扩展名判图片→read_image_file
+          // 取 base64→ToolResult.images 通道（CLI 侧同款 W4-2 回路），模型
+          // 亲眼看到图。范围参数对图片无意义，忽略。
+          const rawPath = String(args.path ?? '');
+          const imgMime = imageMimeForPath(rawPath);
+          if (imgMime) {
+            try {
+              const img = await this.call('read_image_file', { workspace: ws, path: rawPath }) as { base64: string; mimeType: string; sizeBytes: number; path: string };
+              return {
+                id: toolCall.id,
+                toolName: name,
+                result: `[image: ${rawPath} — ${img.mimeType}, ${(img.sizeBytes / 1024).toFixed(0)}KB — returned as a visible image attachment]`,
+                success: true,
+                duration: Date.now() - start,
+                images: [{ dataUrl: `data:${img.mimeType};base64,${img.base64}`, mimeType: img.mimeType, path: img.path, sizeBytes: img.sizeBytes }],
+              };
+            } catch (err: any) {
+              return { id: toolCall.id, toolName: name, result: null, error: String(err?.message ?? err), success: false, duration: Date.now() - start };
+            }
+          }
           // 刀 D1（2026-10-10）：行范围在 Rust 侧切（IPC 之前），大文件不再
           // 整份过桥。显式范围原样给、不加脚注；默认（未给范围）传 headLines
           // ——Rust 只回头部切片 + 总行数 + 建议范围脚注（真杠杆：小文件零

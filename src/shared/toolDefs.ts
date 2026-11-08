@@ -21,7 +21,7 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file.',
+    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; images (png/jpg/gif/webp/bmp, up to 5MB) come back as a visible image attachment so you can actually see them — screenshots, photos, charts; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file.',
     input_schema: {
       type: 'object',
       properties: {

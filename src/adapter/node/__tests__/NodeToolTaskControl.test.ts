@@ -132,4 +132,29 @@ describe('execute_command cwd / timeoutMs / benign exit / spill + task tools', (
     expect(r.success).toBe(false);
     expect(String(r.error)).toContain('positive integer pid');
   });
+
+  // ── read_file 图片视觉输入（电脑端操作能力 P2）──
+
+  it('read_file returns an image attachment for png paths', async () => {
+    // 标准 1x1 透明 PNG
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+    const f = join(workspace, 'pixel.png');
+    writeFileSync(f, png);
+    const r = await call('read_file', { path: f });
+    expect(r.success).toBe(true);
+    const images = (r as any).images as Array<{ dataUrl: string; mimeType: string }>;
+    expect(images).toHaveLength(1);
+    expect(images[0]!.mimeType).toBe('image/png');
+    expect(images[0]!.dataUrl.startsWith('data:image/png;base64,')).toBe(true);
+    expect(String(r.result)).toContain('visible image attachment');
+  });
+
+  it('read_file rejects oversize images with a compression hint', async () => {
+    const big = join(workspace, 'huge.png');
+    writeFileSync(big, Buffer.alloc(5 * 1024 * 1024 + 1, 0x89));
+    const r = await call('read_file', { path: big });
+    expect(r.success).toBe(false);
+    expect(String(r.error)).toContain('视觉读取上限');
+    expect(String(r.error)).toContain('sips');
+  });
 });
