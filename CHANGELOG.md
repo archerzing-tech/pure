@@ -4,7 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
-## v4.4.0
+## v4.5.0
+
+**新增 Telegram 通道：单 token 长轮询，零公网依赖**
+
+通道族第五个成员。Telegram 的接入形态与现有四通道都不同：@BotFather 只发一个 bot token（本身即密钥），getUpdates 长轮询出站连接无需公网 IP 与 TLS 回调。凭据三面（GUI 开通卡 / configure_channel 工具 / `channels verify`）为此走 secretOnly 分支——token 只进 secrets.json，channels.json 落 tokenRef 指针，明文不进通道配置；粘贴解析用 token 形状正则先行（裸 token 里的冒号会被通用 key:value 行解析劈成两半）；探活用 getMe 的 ok 判据，TS 与 Rust 两侧同源，「已开通」照旧永远意味着「凭据已被平台验证过」。传输层纯 REST：启动先 deleteWebhook 清积压防老消息重灌，getMe 捕获 bot 用户名供群聊 @ 判定，offset 确认消费、网络错误指数退避；群聊默认仅 @ 触发（BotFather privacy mode 保持默认即可），审批卡沿用文字双轨词表。通道硬编码的五个面全部收齐——含此前未收编进共享凭据表的 WebView 侧 configure_channel 镜像实现。
+
+施工判例三枚。其一：类型验证跑了裸 `tsc`（按 tsconfig outDir 把整棵测试树 emit 进 dist），bun test 全量扫到 dist 里的旧测试读源码路径 ENOENT，铸出 180+ 假红横跨几十个存量 suite——大面积 ENOENT 假红先清 dist 再归因，类型验证只用 `bun run typecheck`（--noEmit 纪律版）。其二：长轮询循环在 mock 回包（同步 resolve）下所有 await 都是 microtask，循环退化成纯 microtask 链把 event loop 饿死、进程假死——循环每轮让出一帧 macrotask，真网请求自带 I/O 延迟不踩。其三：写盘函数里旧的无条件 writeFileSync 残留在分支逻辑之前，secretOnly 分支改了内存不再重写，盘上停在空值——流程 success 而盘上值空，读盘断言当场抓出。
+
+验证：bun test 5202 例全过、typecheck 零错、cargo check 零警告、vite 生产构建过。
+
 
 **通道接入收敛为一键开通**
 
