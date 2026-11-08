@@ -16,12 +16,13 @@ export type ControlCommand =
   | { kind: 'attach'; target: string }
   | { kind: 'detach' }
   | { kind: 'status'; target?: string }
-  | { kind: 'stop' };
+  | { kind: 'stop' }
+  | { kind: 'help' };
 
-const COMMAND_RE = /^\/(sessions|attach|detach|status|stop)(?:\s+(.*))?$/i;
+const COMMAND_RE = /^\/(sessions|attach|detach|status|stop|help)(?:\s+(.*))?$/i;
 
 /**
- * 只认这五个词；其余 / 开头的文本（未知命令）原样放行给会话，
+ * 只认这六个词；其余 / 开头的文本（未知命令）原样放行给会话，
  * 不吞不答——网关没有资格替 agent 决定「/xxx 不是给我的」。
  */
 export function parseControlCommand(text: string): ControlCommand | null {
@@ -31,6 +32,8 @@ export function parseControlCommand(text: string): ControlCommand | null {
   switch (m[1].toLowerCase()) {
     case 'sessions':
       return { kind: 'sessions' };
+    case 'help':
+      return { kind: 'help' };
     case 'attach':
       return { kind: 'attach', target: arg };
     case 'detach':
@@ -210,8 +213,23 @@ export function formatSessionList(rows: SessionListRow[], now: number): string {
     `pure 会话（共 ${rows.length} 个 · ${running} 个跑动中）\n` +
     lines.join('\n') +
     more +
-    '\n/attach <编号> 盯住看 · /status <编号> 看进度'
+    '\n/attach <编号> 盯住看 · /status <编号> 看进度 · /help 全部命令'
   );
+}
+
+/** 手机端命令总览（冷启动入口：不知道有遥控时，发 /help 即全部可见）。 */
+export function renderHelp(): string {
+  return [
+    'pure 手机遥控——桌面端跑会话，这里看进度、发指挥：',
+    '· /sessions　列出桌面端全部会话（▶=跑动中）',
+    '· /attach <编号>　盯住一个会话，动态推到这里',
+    '· /status <编号>　看它跑到哪一步',
+    '· /stop　让附着的会话停下（第一段=暂停，再发一次=硬停）',
+    '· /detach　不盯了',
+    '· /help　本清单',
+    '· 直接发消息　已附着时=指挥那个会话（跑动中=插话，空闲=新回合）',
+    '上手三步：/sessions → /attach <编号> → 直接发消息。',
+  ].join('\n');
 }
 
 /** 单会话状态摘要（磁盘事实：events.jsonl 时间线；没有日志的旧会话如实说没有）。 */
@@ -300,6 +318,8 @@ export class RemoteControl {
         return { kind: 'notice', text: await this.status(chatKey, cmd.target), final: true };
       case 'stop':
         return { kind: 'notice', text: await this.stop(chatKey), final: true };
+      case 'help':
+        return { kind: 'notice', text: renderHelp(), final: true };
       default:
         return null;
     }

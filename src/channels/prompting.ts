@@ -29,6 +29,7 @@ export function buildChannelCapabilities(caps: ChannelCapabilities): string {
     `This channel accepts: ${media}. Streaming mode: ${caps.streaming}.`,
     'Long deliverables (files, images, generated artifacts) are delivered as attachments — state the artifact and let the host attach it; do not paste huge blobs into the message body.',
     'Prefer short, self-contained answers: the user reads them on a phone, often in a group chat, and cannot scroll back easily.',
+    'Remote control: messages starting with /sessions /attach /detach /status /stop /help are intercepted by the gateway and never reach you. They let the user watch and steer desktop sessions from this chat — if asked how, tell the user to send /help here.',
   ].join('\n');
 }
 

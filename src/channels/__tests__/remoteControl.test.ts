@@ -38,6 +38,7 @@ describe('parseControlCommand', () => {
     expect(parseControlCommand('/Detach')).toEqual({ kind: 'detach' });
     expect(parseControlCommand('/stop')).toEqual({ kind: 'stop' });
     expect(parseControlCommand('/status')).toEqual({ kind: 'status' });
+    expect(parseControlCommand('/Help')).toEqual({ kind: 'help' });
   });
 
   it('returns null for non-commands and unknown slash words', () => {
@@ -184,6 +185,16 @@ describe('RemoteControl', () => {
 
   it('/stop without attach points at /attach first', async () => {
     expect((await control.handle(inbound('/stop'), 'qq:default:dm:p1'))?.text).toContain('/attach');
+  });
+
+  it('/help lists every control word as the cold-start entry', async () => {
+    const reply = await control.handle(inbound('/help'), 'qq:default:dm:p1');
+    expect(reply?.text).toContain('/sessions');
+    expect(reply?.text).toContain('/attach <编号>');
+    expect(reply?.text).toContain('/status');
+    expect(reply?.text).toContain('/stop');
+    expect(reply?.text).toContain('/detach');
+    expect(reply?.text).toContain('/sessions → /attach');
   });
 
   it('attached chat plain messages reroute to inject, not the channel session', async () => {
