@@ -60,12 +60,12 @@ export const DYNAMIC_CAPABILITY_TOOL_DEFS: readonly ToolDefinition[] = [
   },
   {
     name: 'configure_channel',
-    description: 'Configure a chat channel (Feishu / DingTalk / QQ) so the user can chat with this agent from that messaging app. Pass the credentials EXACTLY as the user pasted or typed them — the tool parses AppID/AppSecret forms (JSON, key:value lines, or bare values) itself. The tool verifies the credentials against the platform token endpoint BEFORE saving (rejected vs network failure are reported differently), writes the config, and the running gateway hot-reloads it within seconds — no restart needed. First-time DM peers still go through pairing: tell the user to message the bot once and report back the pairing code if asked. Use this whenever the user wants to connect/set up/enable a channel, replace its credentials, or asks what is needed for it.',
+    description: 'Configure a chat channel (Feishu / DingTalk / QQ / Telegram) so the user can chat with this agent from that messaging app. Pass the credentials EXACTLY as the user pasted or typed them — the tool parses AppID/AppSecret forms (JSON, key:value lines, or bare values) itself, and Telegram bot tokens (from @BotFather, a single value containing a colon). The tool verifies the credentials against the platform BEFORE saving (rejected vs network failure are reported differently), writes the config, and the running gateway hot-reloads it within seconds — no restart needed. First-time DM peers still go through pairing: tell the user to message the bot once and report back the pairing code if asked. Use this whenever the user wants to connect/set up/enable a channel, replace its credentials, or asks what is needed for it.',
     input_schema: {
       type: 'object',
       properties: {
-        channel: { type: 'string', enum: ['feishu', 'dingtalk', 'qq'], description: 'Which channel to configure' },
-        credentials: { type: 'string', description: 'The credentials text exactly as the user provided it (a paste from the platform console is fine). For feishu: App ID + App Secret; dingtalk: Client ID/AppKey + Client Secret; qq: AppID + AppSecret' },
+        channel: { type: 'string', enum: ['feishu', 'dingtalk', 'qq', 'telegram'], description: 'Which channel to configure' },
+        credentials: { type: 'string', description: 'The credentials text exactly as the user provided it (a paste from the platform console is fine). For feishu: App ID + App Secret; dingtalk: Client ID/AppKey + Client Secret; qq: AppID + AppSecret; telegram: the bot token from @BotFather (single value, e.g. 123456:ABC-DEF1234…)' },
         enable: { type: 'boolean', description: 'Enable the channel after saving (default true). Pass false only to disable an already-configured channel' },
       },
       required: ['channel', 'credentials'],

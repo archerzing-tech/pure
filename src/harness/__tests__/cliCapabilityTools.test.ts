@@ -11,10 +11,11 @@ import { CliCapabilityToolAdapter } from '../cliCapabilityTools';
 import type { ToolAdapter, ToolCall } from '../../shared/types';
 
 const QQ_URL = 'https://bots.qq.com/app/getAppAccessToken';
+const TG_URL = 'https://api.telegram.org/bot111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK/getMe';
 
-function fetchStub(status: number, text: string): typeof fetch {
+function fetchStub(status: number, text: string, match: (url: string) => boolean = (u) => u === QQ_URL): typeof fetch {
   return (async (url: string) => {
-    if (url !== QQ_URL) throw new Error(`fetchStub: no route for ${url}`);
+    if (!match(url)) throw new Error(`fetchStub: no route for ${url}`);
     return new Response(text, { status });
   }) as typeof fetch;
 }
@@ -115,8 +116,59 @@ describe('configure_channel (CLI adapter)', () => {
 
   it('未知通道名直接拒绝', async () => {
     const adapter = new CliCapabilityToolAdapter(innerStub, hostStub, dir, fetchStub(200, '{}'));
-    const res = await adapter.execute(call({ channel: 'telegram', credentials: 'x y' }));
+    const res = await adapter.execute(call({ channel: 'unknownchat', credentials: 'x y' }));
     expect(res.success).toBe(false);
     expect(res.error).toContain('feishu');
+  });
+
+  it('telegram：解析不完整（无 token 形状）报错不落盘，提示指 @BotFather', async () => {
+    const adapter = new CliCapabilityToolAdapter(innerStub, hostStub, dir, fetchStub(200, '{"ok":true}'));
+    const res = await adapter.execute(call({ channel: 'telegram', credentials: '一段没有 token 的话' }));
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('BotFather');
+    expect(existsSync(join(dir, 'secrets.json'))).toBe(false);
+    expect(existsSync(join(dir, 'channels.json'))).toBe(false);
+  });
+
+  it('telegram：探活通过后 token 进 secrets、channels.json 只落 tokenRef 不落明文', async () => {
+    const adapter = new CliCapabilityToolAdapter(
+      innerStub, hostStub, dir,
+      fetchStub(200, '{"ok":true,"result":{"id":111222333}}', (u) => u === TG_URL),
+    );
+    const res = await adapter.execute(call({
+      channel: 'telegram',
+      credentials: 'Use this token:\n111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK\nKeep it safe.',
+    }));
+    expect(res.success).toBe(true);
+    // 安全约束：断言只看键存在与长度为正，不回显值。
+    const secrets = JSON.parse(readFileSync(join(dir, 'secrets.json'), 'utf8')) as Record<string, unknown>;
+    expect(typeof secrets['telegram.botToken']).toBe('string');
+    expect((secrets['telegram.botToken'] as string).length).toBeGreaterThan(0);
+    const cfg = JSON.parse(readFileSync(join(dir, 'channels.json'), 'utf8')) as Record<string, unknown>;
+    expect(cfg.enabled).toBe(true);
+    const tg = (cfg.channels as Record<string, Record<string, unknown>>).telegram;
+    expect(tg.enabled).toBe(true);
+    const acc = (tg.accounts as Record<string, Record<string, unknown>>).main;
+    expect(acc.tokenRef).toBe('telegram.botToken');
+    // 明文 token 不进通道配置：account 上没有任何值为完整 token 形状（含冒号串）的键。
+    expect(acc.token).toBeUndefined();
+    for (const value of Object.values(acc)) {
+      if (typeof value === 'string') expect(value.includes(':')).toBe(false);
+    }
+  });
+
+  it('telegram：平台拒绝时不落盘，文案指 @BotFather', async () => {
+    const adapter = new CliCapabilityToolAdapter(
+      innerStub, hostStub, dir,
+      fetchStub(200, '{"ok":false,"description":"Unauthorized"}', (u) => u === TG_URL),
+    );
+    const res = await adapter.execute(call({
+      channel: 'telegram',
+      credentials: '111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK',
+    }));
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('被平台拒绝');
+    expect(res.error).toContain('BotFather');
+    expect(existsSync(join(dir, 'secrets.json'))).toBe(false);
   });
 });

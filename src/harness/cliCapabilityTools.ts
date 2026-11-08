@@ -220,6 +220,9 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
     feishu: { secretsKey: 'feishu.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: '飞书' },
     dingtalk: { secretsKey: 'dingtalk.clientSecret', primaryField: 'clientId', secondaryRefField: 'clientSecretRef', label: '钉钉' },
     qq: { secretsKey: 'qq.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: 'QQ' },
+    // telegram 单 token（token 本身即密钥）：secretsKey 存的是 token 本身，
+    // channels.json 只落 tokenRef 指针，明文不进通道配置。
+    telegram: { secretsKey: 'telegram.botToken', primaryField: 'token', secondaryRefField: 'tokenRef', label: 'Telegram' },
   };
 
   /**
@@ -233,20 +236,25 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
     const channel = String(args.channel ?? '').trim() as OnboardChannelId;
     const meta = CliCapabilityToolAdapter.CHANNEL_SECRETS[channel];
     if (!meta) {
-      return { id: toolCall.id, toolName: 'configure_channel', error: `configure_channel: channel 必须是 feishu / dingtalk / qq 之一（收到 "${channel}"）`, success: false, duration: Date.now() - start };
+      return { id: toolCall.id, toolName: 'configure_channel', error: `configure_channel: channel 必须是 feishu / dingtalk / qq / telegram 之一（收到 "${channel}"）`, success: false, duration: Date.now() - start };
     }
     const credentialsText = String(args.credentials ?? '').trim();
     if (!credentialsText) {
       return { id: toolCall.id, toolName: 'configure_channel', error: `configure_channel 需要 credentials——把用户提供的凭据文本原样传入（不要自己拆字段）`, success: false, duration: Date.now() - start };
     }
+    // telegram 单 token（secretOnly）：token 即全部凭据，完整性只查 primary。
+    const secretOnly = channel === 'telegram';
     const parsed = parseCredentialPaste(credentialsText, channel);
     const primary = parsed?.primary ?? '';
     const secondary = parsed?.secondary ?? '';
-    if (!primary || !secondary) {
+    if (!primary || (!secretOnly && !secondary)) {
+      const missingHint = secretOnly
+        ? '请用户从 @BotFather 复制 bot token（形如 123456:ABC-DEF… 的一段值）。'
+        : `请用户对照平台控制台补齐两段值：${channel === 'dingtalk' ? 'Client ID + Client Secret' : 'AppID + AppSecret'}。`;
       return {
         id: toolCall.id,
         toolName: 'configure_channel',
-        error: `凭据解析不完整（${!primary ? `缺 ${meta.primaryField}` : ''}${!primary && !secondary ? '、' : ''}${!secondary ? '缺密钥' : ''}）。请用户对照平台控制台补齐两段值：${channel === 'dingtalk' ? 'Client ID + Client Secret' : 'AppID + AppSecret'}。`,
+        error: `凭据解析不完整（${!primary ? `缺 ${meta.primaryField}` : ''}${!primary && !secondary ? '、' : ''}${!secretOnly && !secondary ? '缺密钥' : ''}）。${missingHint}`,
         success: false,
         duration: Date.now() - start,
       };
@@ -255,10 +263,12 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
     // 探活先行：拒绝/网络不通都不写盘。
     const verdict = await verifyChannelCredentials(channel, primary, secondary, this.verifyFetch);
     if (!verdict.ok) {
-      const message = verdict.kind === 'rejected'
-        ? `${meta.label}凭据被平台拒绝：${verdict.detail}。请回平台控制台核对 ${channel === 'dingtalk' ? 'Client ID/Client Secret' : 'AppID/AppSecret'} 是否配对（secret 重置过旧值即失效），核对后再发我一次。没有写入任何配置。`
+      const rejectedHint = verdict.kind === 'rejected'
+        ? (secretOnly
+          ? `${meta.label}凭据被平台拒绝：${verdict.detail}。请在 Telegram 里找 @BotFather /mybots 核对 token（revoke 过旧 token 即失效），核对后再发我一次。没有写入任何配置。`
+          : `${meta.label}凭据被平台拒绝：${verdict.detail}。请回平台控制台核对 ${channel === 'dingtalk' ? 'Client ID/Client Secret' : 'AppID/AppSecret'} 是否配对（secret 重置过旧值即失效），核对后再发我一次。没有写入任何配置。`)
         : `${meta.label}平台探活失败（网络不通）：${verdict.detail}。配置未写入——请检查本机网络/代理后再试。`;
-      return { id: toolCall.id, toolName: 'configure_channel', error: message, success: false, duration: Date.now() - start };
+      return { id: toolCall.id, toolName: 'configure_channel', error: rejectedHint, success: false, duration: Date.now() - start };
     }
 
     // secrets.json（0600）+ channels.json 保真直改（与 GUI 同构：raw JSON
@@ -269,10 +279,6 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
       try {
         secrets = JSON.parse(readFileSync(secretsPath, 'utf8')) as Record<string, unknown>;
       } catch { /* 不存在或损坏——从空表开始 */ }
-      secrets[meta.secretsKey] = secondary;
-      mkdirSync(this.pureDir, { recursive: true });
-      writeFileSync(secretsPath, JSON.stringify(secrets, null, 2), 'utf8');
-      try { chmodSync(secretsPath, 0o600); } catch { /* 权限收紧失败不回滚写入 */ }
 
       const channelsPath = join(this.pureDir, 'channels.json');
       let cfg: Record<string, unknown> = { enabled: true, channels: {} };
@@ -284,11 +290,22 @@ export class CliCapabilityToolAdapter implements ToolAdapter {
       const entry = (channels[channel] && typeof channels[channel] === 'object' ? channels[channel] : {}) as Record<string, unknown>;
       const accounts = (entry.accounts && typeof entry.accounts === 'object' && !Array.isArray(entry.accounts) ? entry.accounts : {}) as Record<string, Record<string, unknown>>;
       const first = Object.values(accounts)[0] ?? {};
-      accounts.main = {
-        ...first,
-        [meta.primaryField]: primary,
-        [meta.secondaryRefField]: meta.secretsKey,
-      };
+      // telegram（secretOnly）：token 本身进 secrets.json，channels.json 只落
+      // tokenRef 指针——明文不进通道配置；其余通道照旧 primary 明文 + secret 指针。
+      if (secretOnly) {
+        secrets[meta.secretsKey] = primary;
+        accounts.main = { ...first, [meta.secondaryRefField]: meta.secretsKey };
+      } else {
+        secrets[meta.secretsKey] = secondary;
+        accounts.main = {
+          ...first,
+          [meta.primaryField]: primary,
+          [meta.secondaryRefField]: meta.secretsKey,
+        };
+      }
+      mkdirSync(this.pureDir, { recursive: true });
+      writeFileSync(secretsPath, JSON.stringify(secrets, null, 2), 'utf8');
+      try { chmodSync(secretsPath, 0o600); } catch { /* 权限收紧失败不回滚写入 */ }
       entry.enabled = args.enable === false ? false : true;
       entry.accounts = accounts;
       channels[channel] = entry;

@@ -1434,26 +1434,31 @@ export class TauriToolAdapter implements ToolAdapter {
           // CORS 拦，探测必须住 Rust）→ secret_set + channels.json 保真直改。
           // 探活不过一个字节都不落盘。
           const channel = String(args.channel ?? '').trim();
-          const meta = ({ feishu: { secretsKey: 'feishu.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: '飞书' }, dingtalk: { secretsKey: 'dingtalk.clientSecret', primaryField: 'clientId', secondaryRefField: 'clientSecretRef', label: '钉钉' }, qq: { secretsKey: 'qq.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: 'QQ' } } as Record<string, { secretsKey: string; primaryField: string; secondaryRefField: string; label: string }>)[channel];
-          if (!meta) return { id: toolCall.id, toolName: name, error: `configure_channel: channel 必须是 feishu / dingtalk / qq 之一（收到 "${channel}"）`, success: false, duration: Date.now() - start };
+          const meta = ({ feishu: { secretsKey: 'feishu.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: '飞书' }, dingtalk: { secretsKey: 'dingtalk.clientSecret', primaryField: 'clientId', secondaryRefField: 'clientSecretRef', label: '钉钉' }, qq: { secretsKey: 'qq.appSecret', primaryField: 'appId', secondaryRefField: 'appSecretRef', label: 'QQ' }, telegram: { secretsKey: 'telegram.botToken', primaryField: 'token', secondaryRefField: 'tokenRef', label: 'Telegram' } } as Record<string, { secretsKey: string; primaryField: string; secondaryRefField: string; label: string }>)[channel];
+          if (!meta) return { id: toolCall.id, toolName: name, error: `configure_channel: channel 必须是 feishu / dingtalk / qq / telegram 之一（收到 "${channel}"）`, success: false, duration: Date.now() - start };
           const credentialsText = String(args.credentials ?? '').trim();
           if (!credentialsText) return { id: toolCall.id, toolName: name, error: 'configure_channel 需要 credentials——把用户提供的凭据文本原样传入（不要自己拆字段）', success: false, duration: Date.now() - start };
+          // telegram 单 token（secretOnly）：token 即全部凭据，完整性只查 primary。
+          const secretOnly = channel === 'telegram';
           const parsed = parseCredentialPaste(credentialsText, channel as OnboardChannelId);
           const appId = parsed?.primary ?? '';
           const secret = parsed?.secondary ?? '';
-          if (!appId || !secret) {
-            const missing = [!appId ? meta.primaryField : '', !secret ? '密钥' : ''].filter(Boolean).join('、');
-            return { id: toolCall.id, toolName: name, error: `凭据解析不完整（缺 ${missing}）。请用户对照平台控制台补齐两段值。`, success: false, duration: Date.now() - start };
+          if (!appId || (!secretOnly && !secret)) {
+            const missing = [!appId ? meta.primaryField : '', !secretOnly && !secret ? '密钥' : ''].filter(Boolean).join('、');
+            const hint = secretOnly ? '请用户从 @BotFather 复制 bot token。' : '请用户对照平台控制台补齐两段值。';
+            return { id: toolCall.id, toolName: name, error: `凭据解析不完整（缺 ${missing}）。${hint}`, success: false, duration: Date.now() - start };
           }
-          const verdict = await this.call('channel_verify', { platform: channel, appId, appSecret: secret }) as { ok: boolean; kind: string; detail: string };
+          const verdict = await this.call('channel_verify', { platform: channel, appId, appSecret: secretOnly ? '' : secret }) as { ok: boolean; kind: string; detail: string };
           if (!verdict?.ok) {
             const message = verdict?.kind === 'network'
               ? `${meta.label}平台探活失败（网络不通）：${verdict?.detail}。配置未写入——请检查本机网络/代理后再试。`
-              : `${meta.label}凭据被平台拒绝：${verdict?.detail ?? '未知原因'}。请回平台控制台核对凭据是否配对后再发我一次。没有写入任何配置。`;
+              : secretOnly
+                ? `${meta.label}凭据被平台拒绝：${verdict?.detail ?? '未知原因'}。请在 Telegram 里找 @BotFather /mybots 核对 token（revoke 过旧 token 即失效），核对后再发我一次。没有写入任何配置。`
+                : `${meta.label}凭据被平台拒绝：${verdict?.detail ?? '未知原因'}。请回平台控制台核对凭据是否配对后再发我一次。没有写入任何配置。`;
             return { id: toolCall.id, toolName: name, error: message, success: false, duration: Date.now() - start };
           }
           try {
-            await this.call('secret_set', { key: meta.secretsKey, value: secret });
+            await this.call('secret_set', { key: meta.secretsKey, value: secretOnly ? appId : secret });
             const home = await homeDir();
             const pureHome = await joinPath(home, '.pure');
             let cfg: Record<string, unknown> = { enabled: true, channels: {} };
@@ -1466,7 +1471,10 @@ export class TauriToolAdapter implements ToolAdapter {
             const entry = (channels[channel] && typeof channels[channel] === 'object' ? channels[channel] : {}) as Record<string, unknown>;
             const accounts = (entry.accounts && typeof entry.accounts === 'object' && !Array.isArray(entry.accounts) ? entry.accounts : {}) as Record<string, Record<string, unknown>>;
             const first = Object.values(accounts)[0] ?? {};
-            accounts.main = { ...first, [meta.primaryField]: appId, [meta.secondaryRefField]: meta.secretsKey };
+            // telegram（secretOnly）：token 进 secrets.json，channels.json 只落 tokenRef——明文不进通道配置。
+            accounts.main = secretOnly
+              ? { ...first, [meta.secondaryRefField]: meta.secretsKey }
+              : { ...first, [meta.primaryField]: appId, [meta.secondaryRefField]: meta.secretsKey };
             entry.enabled = args.enable === false ? false : true;
             entry.accounts = accounts;
             channels[channel] = entry;

@@ -10,9 +10,10 @@
 // wsTransport 的 QQTokenKeeper 逐字对齐）。凭据被拒与网络不通必须分开报——
 // 前者该回平台核对，后者是本机网络问题，文案与动作完全不同。
 
-export type OnboardChannelId = 'feishu' | 'dingtalk' | 'qq';
+export type OnboardChannelId = 'feishu' | 'dingtalk' | 'qq' | 'telegram';
 
-/** 各通道的凭据对：primary = 明文标识（appId / clientId），secondary = 密钥。 */
+/** 各通道的凭据对：primary = 明文标识（appId / clientId / telegram 全量 token），secondary = 密钥。
+ *  telegram 例外：BotFather 只发一个 token（本身就是密钥），secondary 恒缺。 */
 export interface ParsedCredentials {
   primary?: string;
   secondary?: string;
@@ -22,6 +23,7 @@ const FIELD_ALIASES: Record<OnboardChannelId, { primary: string[]; secondary: st
   feishu: { primary: ['appid', 'app_id', 'app id'], secondary: ['appsecret', 'app_secret', 'app secret', 'secret'] },
   dingtalk: { primary: ['clientid', 'client_id', 'client id', 'appkey', 'app_key'], secondary: ['clientsecret', 'client_secret', 'client secret', 'appsecret'] },
   qq: { primary: ['appid', 'app_id', 'app id'], secondary: ['appsecret', 'app_secret', 'app secret', 'clientsecret', 'secret'] },
+  telegram: { primary: ['token', 'bot token', 'bottoken'], secondary: [] },
 };
 
 function normalizeKey(key: string): string {
@@ -73,11 +75,21 @@ function fromBareValues(text: string, channel: OnboardChannelId): ParsedCredenti
   return { primary: first, secondary: second };
 }
 
+/** Telegram bot token 的形状：<bot_id>:<35 位随机串>。裸 token 里的冒号会让
+ *  通用 key:value 行解析把它劈成两半，所以 telegram 走专用形状扫描。 */
+const TELEGRAM_TOKEN_RE = /\b(\d{5,}:[A-Za-z0-9_-]{30,})\b/;
+
 /** 从整段粘贴文本解析凭据。返回的字段可以只有一半（另一半缺失时调用方
  *  单独提示，不用整体失败）。完全无法识别返回 null。 */
 export function parseCredentialPaste(text: string, channel: OnboardChannelId): ParsedCredentials | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
+  // Telegram：token 形状扫描优先——整段 BotFather 说明文、JSON、key:value、
+  // 裸 token 四种形态一枚正则全覆盖，且不会被行解析把冒号劈开。
+  if (channel === 'telegram') {
+    const m = trimmed.match(TELEGRAM_TOKEN_RE);
+    if (m) return { primary: m[1] };
+  }
   // JSON 形态（含 ```json 围栏内的）：先剥围栏再试解析。
   const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
   for (const candidate of [jsonMatch?.[1] ?? trimmed]) {
@@ -104,8 +116,10 @@ export type VerifyOutcome =
 const VERIFY_TIMEOUT_MS = 15_000;
 
 interface VerifySpec {
-  url: string;
-  body: (primary: string, secondary: string) => unknown;
+  url: (primary: string, secondary: string) => string;
+  method: 'GET' | 'POST';
+  /** POST 请求体；GET 端点（telegram）缺省。 */
+  body?: (primary: string, secondary: string) => unknown;
   /** 200 响应里判断「凭据有效」；返回 false 时给 detailExtractor 出平台原话。 */
   okCheck: (data: Record<string, unknown>) => boolean;
   detail: (data: Record<string, unknown>) => string;
@@ -113,25 +127,35 @@ interface VerifySpec {
 
 /** 端点与请求体与正式适配器同源：QQ 逐字对齐 wsTransport 的 QQTokenKeeper
  *  （QQ 惯用 HTTP 200 包错误，真实原因只在 body 的 code/message 里）；飞书
- *  internal token 端点 code=0 即有效；钉钉 oauth2 端点给 accessToken 即有效。 */
+ *  internal token 端点 code=0 即有效；钉钉 oauth2 端点给 accessToken 即有效；
+ *  telegram getMe 端点 ok=true 即有效（token 即鉴权，无第二段凭据）。 */
 const VERIFY_SPECS: Record<OnboardChannelId, VerifySpec> = {
   feishu: {
-    url: 'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
+    url: () => 'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
+    method: 'POST',
     body: (primary, secondary) => ({ app_id: primary, app_secret: secondary }),
     okCheck: (d) => d.code === 0 && typeof d.app_access_token === 'string' && d.app_access_token !== '',
     detail: (d) => `code=${String(d.code)} ${String(d.msg ?? '')}`.trim(),
   },
   dingtalk: {
-    url: 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+    url: () => 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+    method: 'POST',
     body: (primary, secondary) => ({ appKey: primary, appSecret: secondary }),
     okCheck: (d) => typeof d.accessToken === 'string' && d.accessToken !== '',
     detail: (d) => String(d.message ?? JSON.stringify(d).slice(0, 200)),
   },
   qq: {
-    url: 'https://bots.qq.com/app/getAppAccessToken',
+    url: () => 'https://bots.qq.com/app/getAppAccessToken',
+    method: 'POST',
     body: (primary, secondary) => ({ appId: primary, clientSecret: secondary }),
     okCheck: (d) => typeof d.access_token === 'string' && d.access_token !== '',
     detail: (d) => String(d.message ?? JSON.stringify(d).slice(0, 200)),
+  },
+  telegram: {
+    url: (primary) => `https://api.telegram.org/bot${primary}/getMe`,
+    method: 'GET',
+    okCheck: (d) => d.ok === true,
+    detail: (d) => String(d.description ?? JSON.stringify(d).slice(0, 200)),
   },
 };
 
@@ -147,10 +171,11 @@ export async function verifyChannelCredentials(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
   try {
-    const res = await fetchImpl(spec.url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(spec.body(primary, secondary)),
+    const res = await fetchImpl(spec.url(primary, secondary), {
+      method: spec.method,
+      ...(spec.body
+        ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(spec.body(primary, secondary)) }
+        : {}),
       signal: controller.signal,
     });
     const text = await res.text();

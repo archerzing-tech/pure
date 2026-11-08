@@ -71,6 +71,30 @@ describe('parseCredentialPaste', () => {
       secondary: 'sec9',
     });
   });
+
+  it('telegram：裸 token（含冒号）整段识别，不被行解析劈成两半', () => {
+    expect(parseCredentialPaste('123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234', 'telegram')).toEqual({
+      primary: '123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234',
+    });
+  });
+
+  it('telegram：BotFather 说明文里捞 token', () => {
+    const paste = 'Done! Congratulations on your new bot.\nUse this token to access the HTTP API:\n9876543210:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw\nKeep your token safe.';
+    expect(parseCredentialPaste(paste, 'telegram')).toEqual({
+      primary: '9876543210:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw',
+    });
+  });
+
+  it('telegram：key:value 行形态也认', () => {
+    expect(parseCredentialPaste('token: 111111111:BBBxxxYYYzzzWWWvvvvUUUUtttt1111', 'telegram')).toEqual({
+      primary: '111111111:BBBxxxYYYzzzWWWvvvvUUUUtttt1111',
+    });
+  });
+
+  it('telegram：无 token 形状返回 null', () => {
+    expect(parseCredentialPaste('今天天气不错', 'telegram')).toBeNull();
+    expect(parseCredentialPaste('', 'telegram')).toBeNull();
+  });
 });
 
 // fetch 桩：只认构造时登记的 URL，未知 URL 抛错（假 invoke 自愈判例）。
@@ -124,5 +148,18 @@ describe('verifyChannelCredentials', () => {
     const out = await verifyChannelCredentials('qq', '1', '2', fetchStub(routes));
     expect(out.ok).toBe(false);
     if (!out.ok && out.kind === 'rejected') expect(out.detail).toContain('HTTP 502');
+  });
+
+  it('telegram：getMe ok=true = 有效（GET，无请求体）', async () => {
+    const TG_URL = 'https://api.telegram.org/bot111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK/getMe';
+    const routes = new Map([[TG_URL, () => ({ status: 200, text: '{"ok":true,"result":{"id":111222333,"username":"pure_bot"}}' })]]);
+    expect(await verifyChannelCredentials('telegram', '111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK', '', fetchStub(routes))).toEqual({ ok: true });
+  });
+
+  it('telegram：ok=false 带平台 description = rejected', async () => {
+    const TG_URL = 'https://api.telegram.org/bot111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK/getMe';
+    const routes = new Map([[TG_URL, () => ({ status: 200, text: '{"ok":false,"error_code":401,"description":"Unauthorized"}' })]]);
+    const out = await verifyChannelCredentials('telegram', '111222333:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKK', '', fetchStub(routes));
+    expect(out).toEqual({ ok: false, kind: 'rejected', detail: 'Unauthorized' });
   });
 });

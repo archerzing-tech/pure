@@ -11218,26 +11218,31 @@ struct ChannelVerifyOutcome {
 
 #[tauri::command]
 async fn channel_verify(platform: String, app_id: String, app_secret: String) -> Result<ChannelVerifyOutcome, String> {
-    let (url, body): (&str, serde_json::Value) = match platform.as_str() {
-        "feishu" => (
-            "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
-            serde_json::json!({ "app_id": app_id, "app_secret": app_secret }),
-        ),
-        "dingtalk" => (
-            "https://api.dingtalk.com/v1.0/oauth2/accessToken",
-            serde_json::json!({ "appKey": app_id, "appSecret": app_secret }),
-        ),
-        "qq" => (
-            "https://bots.qq.com/app/getAppAccessToken",
-            serde_json::json!({ "appId": app_id, "clientSecret": app_secret }),
-        ),
-        other => return Err(format!("unknown channel: {}", other)),
+    // telegram 例外：单 bot token，token 走 URL 路径段、GET getMe（无请求体）；
+    // 其余通道 POST JSON 凭据对（token 进 app_id 槽仅是参数形状复用）。
+    let telegram = platform == "telegram";
+    let url: String = if telegram {
+        format!("https://api.telegram.org/bot{}/getMe", app_id)
+    } else {
+        match platform.as_str() {
+            "feishu" => "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal".to_string(),
+            "dingtalk" => "https://api.dingtalk.com/v1.0/oauth2/accessToken".to_string(),
+            "qq" => "https://bots.qq.com/app/getAppAccessToken".to_string(),
+            other => return Err(format!("unknown channel: {}", other)),
+        }
+    };
+    let body: serde_json::Value = match platform.as_str() {
+        "feishu" => serde_json::json!({ "app_id": app_id, "app_secret": app_secret }),
+        "dingtalk" => serde_json::json!({ "appKey": app_id, "appSecret": app_secret }),
+        "qq" => serde_json::json!({ "appId": app_id, "clientSecret": app_secret }),
+        _ => serde_json::Value::Null,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(15_000))
         .build()
         .map_err(|e| format!("http client: {}", e))?;
-    let resp = match client.post(url).json(&body).send().await {
+    let request = if telegram { client.get(&url) } else { client.post(&url).json(&body) };
+    let resp = match request.send().await {
         Ok(r) => r,
         Err(e) => {
             return Ok(ChannelVerifyOutcome {
@@ -11252,10 +11257,12 @@ async fn channel_verify(platform: String, app_id: String, app_secret: String) ->
     let data: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     let ok = match platform.as_str() {
         // 与正式适配器同一判据：QQ 惯用 HTTP 200 包错误，真实原因在 body；
-        // 飞书 code=0 且发下 app_access_token；钉钉发下 accessToken。
+        // 飞书 code=0 且发下 app_access_token；钉钉发下 accessToken；
+        // telegram getMe 应答 envelope 的 ok=true 即 token 有效。
         "feishu" => data.get("code").and_then(|v| v.as_i64()) == Some(0)
             && data.get("app_access_token").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
         "dingtalk" => data.get("accessToken").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+        "telegram" => data.get("ok").and_then(|v| v.as_bool()) == Some(true),
         _ => data.get("access_token").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
     };
     if ok {
@@ -11266,6 +11273,7 @@ async fn channel_verify(platform: String, app_id: String, app_secret: String) ->
     } else {
         data.get("message")
             .or_else(|| data.get("msg"))
+            .or_else(|| data.get("description"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| text.chars().take(200).collect())

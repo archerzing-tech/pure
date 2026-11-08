@@ -97,6 +97,7 @@ export async function runGateway(args: CliArgs): Promise<void> {
   await registerConfiguredFeishu(registry, config);
   await registerConfiguredDingTalk(registry, config);
   await registerConfiguredQQ(registry, config);
+  await registerConfiguredTelegram(registry, config);
 
   // 2026-10-01 真机：探活打 gateway.host:port，而端口唯一的绑定者是 webchat
   // 适配器——webchat 禁用时网关本身健康（飞书长连接已建立）但探针无门可敲，
@@ -301,6 +302,29 @@ async function registerConfiguredDingTalk(registry: ChannelRegistry, config: Ret
   }
 }
 
+/** 按配置注册 Telegram：纯 REST 长轮询 transport（无 SDK 依赖），缺 token 只 warn 跳过。
+ *  telegram 的 token 本身就是密钥，明文不进 channels.json——只认 account.tokenRef。 */
+async function registerConfiguredTelegram(registry: ChannelRegistry, config: ReturnType<typeof loadChannelsConfig>['config']): Promise<void> {
+  const entry = config.channels.telegram;
+  if (!entry || entry.enabled === false) return;
+  const first = Object.entries(entry.accounts ?? {})[0];
+  const accountId = first?.[0] ?? 'main';
+  const account = (first?.[1] ?? {}) as Record<string, unknown>;
+  const token = typeof account.token === 'string' ? account.token : resolveChannelSecret(account.tokenRef);
+  if (!token) {
+    channelsLog('telegram 已启用但缺少 token（或 tokenRef），已跳过该通道');
+    return;
+  }
+  try {
+    const { createTelegramHttpTransport } = await import('./adapter/channels/telegram/httpTransport');
+    const { createTelegramAdapter } = await import('./adapter/channels/telegram');
+    const transport = createTelegramHttpTransport({ botToken: token });
+    registry.register(createTelegramAdapter({ accountId, transport }));
+  } catch (err) {
+    channelsLog(`telegram 通道不可用：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function printChannels(args: CliArgs): void {
   const loaded = loadChannelsConfig(CHANNELS_CONFIG_PATH);
   if (loaded.errors.length > 0) {
@@ -359,30 +383,40 @@ export async function runChannelsCommand(args: CliArgs): Promise<void> {
     // 诊断命令：向平台 token 端点发真实请求验凭据（与一键开通/configure_channel
     // 同一探活函数）。凭据被拒与网络不通分开报——前者回平台核对，后者查本机网络。
     const target = sub.split(/\s+/)[1]?.trim() ?? '';
-    if (!['feishu', 'dingtalk', 'qq'].includes(target)) {
-      process.stdout.write(`  ${dim('用法:')} pure channels verify <feishu|dingtalk|qq>\n`);
+    if (!['feishu', 'dingtalk', 'qq', 'telegram'].includes(target)) {
+      process.stdout.write(`  ${dim('用法:')} pure channels verify <feishu|dingtalk|qq|telegram>\n`);
       return;
     }
     const loaded = loadChannelsConfig(CHANNELS_CONFIG_PATH);
-    const entry = loaded.config.channels[target as 'feishu' | 'dingtalk' | 'qq'];
+    const entry = loaded.config.channels[target as 'feishu' | 'dingtalk' | 'qq' | 'telegram'];
     const account = Object.values(entry?.accounts ?? {})[0] ?? {} as Record<string, unknown>;
-    const primaryField = target === 'dingtalk' ? 'clientId' : 'appId';
-    const refField = target === 'dingtalk' ? 'clientSecretRef' : 'appSecretRef';
-    const primary = typeof account[primaryField] === 'string' ? (account[primaryField] as string) : '';
-    const secret = typeof account[target === 'dingtalk' ? 'clientSecret' : 'appSecret'] === 'string'
-      ? (account[target === 'dingtalk' ? 'clientSecret' : 'appSecret'] as string)
-      : resolveChannelSecret(account[refField]);
+    let primary: string;
+    let secret: string;
+    if (target === 'telegram') {
+      // telegram 单 token：token 即全部凭据，只认 tokenRef 槽位（不落明文）。
+      primary = typeof account.token === 'string' ? (account.token as string) : resolveChannelSecret(account.tokenRef);
+      secret = primary;
+    } else {
+      const primaryField = target === 'dingtalk' ? 'clientId' : 'appId';
+      const refField = target === 'dingtalk' ? 'clientSecretRef' : 'appSecretRef';
+      primary = typeof account[primaryField] === 'string' ? (account[primaryField] as string) : '';
+      secret = typeof account[target === 'dingtalk' ? 'clientSecret' : 'appSecret'] === 'string'
+        ? (account[target === 'dingtalk' ? 'clientSecret' : 'appSecret'] as string)
+        : resolveChannelSecret(account[refField]);
+    }
     if (!primary || !secret) {
-      process.stdout.write(`  ${red('❌')} ${target} 未配置完整凭据（缺 ${!primary ? primaryField : ''}${!primary && !secret ? '、' : ''}${!secret ? '密钥' : ''}）。\n`);
+      process.stdout.write(`  ${red('❌')} ${target} 未配置完整凭据（缺 ${!primary ? primaryFieldLabel(target) : ''}${!primary && !secret ? '、' : ''}${!secret ? '密钥' : ''}）。\n`);
       return;
     }
     process.stdout.write(`  ${dim(`正在向平台验证 ${target} 凭据…`)}\n`);
-    const verdict = await verifyChannelCredentials(target as 'feishu' | 'dingtalk' | 'qq', primary, secret);
+    const verdict = await verifyChannelCredentials(target as 'feishu' | 'dingtalk' | 'qq' | 'telegram', primary, secret);
     if (verdict.ok) {
-      process.stdout.write(`  ${green('✅')} 凭据有效（平台 token 端点验证通过）\n`);
+      process.stdout.write(`  ${green('✅')} 凭据有效（平台验证通过）\n`);
     } else if (verdict.kind === 'rejected') {
       process.stdout.write(`  ${red('❌')} 凭据被平台拒绝：${verdict.detail}\n`);
-      process.stdout.write(`  ${dim('回平台控制台核对两段值是否配对（secret 重置过旧值即失效）。')}\n`);
+      process.stdout.write(target === 'telegram'
+        ? `  ${dim('回 @BotFather /mybots 核对 token（在 BotFather 里 revoke 过旧 token 即失效）。')}\n`
+        : `  ${dim('回平台控制台核对两段值是否配对（secret 重置过旧值即失效）。')}\n`);
     } else {
       process.stdout.write(`  ${yellow('⚠')} 平台不可达（网络问题，非凭据问题）：${verdict.detail}\n`);
       process.stdout.write(`  ${dim('检查本机网络/代理后重试。')}\n`);
@@ -415,5 +449,10 @@ export async function runChannelsCommand(args: CliArgs): Promise<void> {
     process.stdout.write(`  ${green('✅')} 已批准 ${peer.channelId}:${peer.peerId}${peer.name ? dim(`（${peer.name}）`) : ''}\n`);
     return;
   }
-  process.stdout.write(`  ${dim('用法:')} pure channels [list|test|verify <feishu|dingtalk|qq>|pending|approve <code>]\n`);
+  process.stdout.write(`  ${dim('用法:')} pure channels [list|test|verify <feishu|dingtalk|qq|telegram>|pending|approve <code>]\n`);
+}
+
+/** verify 报错里「缺什么」的字段名：telegram 单 token 报 token，其余报各自 primary 字段。 */
+function primaryFieldLabel(target: string): string {
+  return target === 'telegram' ? 'token' : target === 'dingtalk' ? 'clientId' : 'appId';
 }

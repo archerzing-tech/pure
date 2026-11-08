@@ -15,7 +15,7 @@
 // gateway 无需重启即生效（零命令行）。
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { homeDir, join } from '@tauri-apps/api/path';
-import { parseCredentialPaste } from '../shared/channelCredentials';
+import { parseCredentialPaste, type OnboardChannelId } from '../shared/channelCredentials';
 import { t } from '../shared/i18n';
 
 export interface ChannelAccountDraft {
@@ -30,7 +30,7 @@ export interface ChannelAccountDraft {
 type Draft = Partial<ChannelAccountDraft>;
 
 interface ChannelSpec {
-  id: 'feishu' | 'dingtalk' | 'qq' | 'webchat';
+  id: 'feishu' | 'dingtalk' | 'qq' | 'telegram' | 'webchat';
   name: string;
   icon: string;
   fields: { key: keyof ChannelAccountDraft; label: string; placeholder: string; secret?: boolean }[];
@@ -51,6 +51,7 @@ const SECRETS_KEY: Partial<Record<ChannelSpec['id'], string>> = {
   feishu: 'feishu.appSecret',
   dingtalk: 'dingtalk.clientSecret',
   qq: 'qq.appSecret',
+  telegram: 'telegram.botToken',
 };
 
 const SPECS: ChannelSpec[] = [
@@ -106,6 +107,23 @@ const SPECS: ChannelSpec[] = [
       fieldsLabel: 'AppID + AppSecret',
       nextStep: '在 QQ 里加机器人为好友并发条消息，首次会收到配对码——在下方批准即可开始对话',
       consoleUrl: 'https://q.qq.com/',
+    },
+  },
+  {
+    id: 'telegram',
+    name: 'Telegram',
+    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>',
+    fields: [],
+    guide: [
+      '在 Telegram 里找 @BotFather → /newbot 建机器人 → 复制 token（整段粘贴即可）',
+      '长轮询接入（无需公网 IP）；本机需可达 api.telegram.org（代理环境自动走系统代理）',
+      '群聊默认仅 @ 触发（BotFather 的 privacy mode 保持默认即可）',
+    ],
+    status: 'implemented',
+    onboarding: {
+      fieldsLabel: 'Bot Token',
+      nextStep: '在 Telegram 里给机器人发条消息，首次会收到配对码——在下方批准即可开始对话',
+      consoleUrl: 'https://t.me/BotFather',
     },
   },
   {
@@ -346,11 +364,16 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
               setLine(`${t('channel.saveFailed')}: Tauri runtime required`, 'err');
               return;
             }
-            const parsed = parseCredentialPaste(pasteInput.value, spec.id as 'feishu' | 'dingtalk' | 'qq');
-            if (!parsed?.primary || !parsed?.secondary) {
+            // telegram 单 token（secretOnly）：完整性只查 primary，token 既当
+            // 探活凭据也进 secrets.json（channels.json 只落 tokenRef 指针）。
+            const secretOnly = spec.id === 'telegram';
+            // 走到这里必带 onboarding（webchat 无 onboarding 不进本分支）。
+            const parsed = parseCredentialPaste(pasteInput.value, spec.id as OnboardChannelId);
+            if (!parsed?.primary || (!secretOnly && !parsed.secondary)) {
               setLine(t('channel.onboardParseFail'), 'err');
               return;
             }
+            const credentialForPlatform = secretOnly ? parsed.primary : parsed.secondary ?? '';
             btn.disabled = true;
             setLine(t('channel.onboarding'), 'busy');
             try {
@@ -358,7 +381,7 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
               const verdict = await core.invoke<{ ok: boolean; kind: string; detail: string }>('channel_verify', {
                 platform: spec.id,
                 appId: parsed.primary,
-                appSecret: parsed.secondary,
+                appSecret: credentialForPlatform,
               });
               if (!verdict?.ok) {
                 if (verdict?.kind === 'network') {
@@ -371,13 +394,18 @@ export function renderChannelSettings(host: HTMLElement, onChange: () => void): 
               }
               // 凭据有效 → 落盘（secret 0600 + channels.json 保真直改 +
               // 启用开关 + 顶层 enabled 同步）。
-              await secretSet(secretKey, parsed.secondary);
+              await secretSet(secretKey, credentialForPlatform);
               await updateChannelEntry(cfg, spec.id, (entry) => {
                 entry.enabled = true;
                 entry.accounts = entry.accounts ?? {};
                 const acc = Object.values(entry.accounts)[0] ?? {};
-                acc[spec.id === 'dingtalk' ? 'clientId' : 'appId'] = parsed.primary;
-                acc[spec.id === 'dingtalk' ? 'clientSecretRef' : 'appSecretRef'] = secretKey;
+                if (secretOnly) {
+                  // token 即密钥：明文只进 secrets.json，通道配置只落指针。
+                  acc.tokenRef = secretKey;
+                } else {
+                  acc[spec.id === 'dingtalk' ? 'clientId' : 'appId'] = parsed.primary;
+                  acc[spec.id === 'dingtalk' ? 'clientSecretRef' : 'appSecretRef'] = secretKey;
+                }
                 entry.accounts.main = acc;
               });
               let okLine = t('channel.onboardOk');
