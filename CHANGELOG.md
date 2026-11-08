@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.0
+
+**手机遥控 MVP：手机端盯着桌面跑会话，也能随时插手**
+
+定调一句话：桌面跑业务，手机当遥控器——不新做 app，已接入的通道就是客户端。附着（attach）模型三层访问：/sessions 瞄一眼（磁盘总览+编号锁快照，10 分钟 TTL 防动态排序下编号漂移）；/attach 盯住看（订阅+附着即回填最近动态，GUI 离线也成立）；发消息指挥（跑动中=插话、空闲=新回合；/stop 与桌面按钮同款两段式——第一段暂停，再发一次硬停）。控制词五个：/sessions /attach /detach /status /stop，附着注册表落盘 attach.json 重启恢复。
+
+架构关键事实：通道网关是独立 Bun 守护进程，GUI（WebView）与网关此前零 IPC、只共享 ~/.pure 磁盘。MVP 的新缝是一条 localhost WebSocket（网关 /internal/bridge）：GUI 作为 WS client 连入，引擎事件流在 chat.ts 循环里单行 tap 挂缝组帧——status/tool 帧可丢（IM 刷屏防线），turn/error 帧走可靠队列重试；投影复用 richOutput 纯文本降级链（chart/map/paint 围栏转 ASCII+「完整源码见桌面端」注脚）。凭据类工具（configure_channel/set_secret/update_config）参数在投影层只出工具名——「不记参数值」纪律在投影面同锁死。Rust 壳只加一个 bridge_port 端口发现命令，网关实际端口写 ~/.pure/channels/bridge.json（Bun.serve 两档退让，port:0 的 server.port 返回 0 不可靠，随机档不做）。多窗口都连桥时 inject 用 localStorage 幂等集去重（同源共享天然跨窗口）。
+
+指挥注入零新机制：落点就是 ChatController.interject 内部的空闲/跑动分流；桌面离线时 /stop 如实回「尚未接通」、附着指令如实回「未执行」——状态真话红线贯穿整条链（参照 Claude Code Remote Control 三教训：状态必须真话、指挥链路独立可用、不做隐式远程）。
+
+验证：bun test 全量 5268 例 0 fail、cargo test --lib 281 例全过、typecheck/lint 零错、vite 构建过；真机验收四条（列表/投影推送/插话改向/远程停止）待跑。
+
 ## v4.6.1
 
 **输入体验三笔：启动即聚焦、底栏融入正文、流式输出给打字让路**
