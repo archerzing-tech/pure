@@ -143,7 +143,11 @@ fn write_profile_file(workspace: &Path) -> Result<std::path::PathBuf, std::io::E
         Err(_) => std::env::temp_dir(),
     };
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("sbconf-profile.sb");
+    // Per-process name: a fixed filename races between concurrent pure
+    // processes (app windows / sidecars) — one process's rewrite can land
+    // under another's exec, and one failed write silently degrades
+    // wrap_command/wrap_argv to the unwrapped argv.
+    let path = dir.join(format!("sbconf-profile-{}.sb", std::process::id()));
     std::fs::write(&path, seatbelt_profile(workspace))?;
     Ok(path)
 }

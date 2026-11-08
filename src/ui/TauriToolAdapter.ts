@@ -25,6 +25,8 @@ import { loadConfig } from './config';
 import { promptBudgetLiveLine } from '../shared/providers';
 import { cacheQualityLiveLine } from '../shared/endpointCacheQuality';
 import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } from '../shared/backgroundCommand';
+import { listTasks, registerTask, unregisterTask } from '../shared/taskRegistry';
+import { isBenignNoMatchExit } from '../shared/format';
 import { blockedHostMessage, contentStatusFromMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
 import { githubAutoMirrorFirst, githubDownloadAttempts, githubFallbackPrefixes, githubAllPathsDeadNotice, githubMirrorLadderPrefixes, isAlreadyMirrored, isGithubDownloadUrl, mirrorIsDead, normalizeGithubMirrorKey, recordMirrorOutcome, unwrapGithubMirrorUrl } from '../shared/githubAccel';
@@ -606,6 +608,20 @@ export class TauriToolAdapter implements ToolAdapter {
    */
   private shellProxy(): string {
     return netRouteSurfacePair('command', this.proxyUrl).proxyUrl;
+  }
+
+  /** 超量输出落盘不硬截（GUI 版）：>30k 的最终 result 全文经 Rust 写进系统
+   * 临时目录，返回体只带头尾预览+路径（模型要全文用 read_file）。CLI 侧
+   * NodeToolAdapter.spillOversizeOutput 同形态同阈值。 */
+  private async spillOversizeOutput(text: string): Promise<string> {
+    if (text.length <= OUTPUT_SPILL_LIMIT) return text;
+    const name = `pure-tool-output-${Date.now()}.log`;
+    try {
+      const path = await this.call('write_temp_file', { name, content: text }) as string;
+      return `${text.slice(0, OUTPUT_SPILL_PREVIEW)}\n...[snip]...\n${text.slice(-OUTPUT_SPILL_PREVIEW)}\n[output truncated: ${text.length} chars total — full output saved to ${path} (read_file to see all)]`;
+    } catch {
+      return `${text.slice(0, OUTPUT_SPILL_PREVIEW)}\n...[snip]...\n${text.slice(-OUTPUT_SPILL_PREVIEW)}\n[output truncated: ${text.length} chars total (spill failed)]`;
+    }
   }
 
   /**
@@ -1611,8 +1627,17 @@ export class TauriToolAdapter implements ToolAdapter {
           // holds the tool call's pipes open.
           if (args.background === true) {
             const plan = buildBackgroundLaunchPlan(String(args.command ?? ''));
-            const launch = await this.call('execute_command', { workspace: ws, command: plan.detachCommand, proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+            // cwd 透传：wrapper 在目标目录起，脱离后的子进程继承它（CLI 侧对称）。
+            const launch = await this.call('execute_command', {
+              workspace: ws,
+              command: plan.detachCommand,
+              proxyUrl: this.shellProxy(),
+              sandbox: this.sandbox,
+              cwd: typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd.trim() : undefined,
+            }) as { exitCode: number; stdout: string; stderr: string };
             const pid = parseBackgroundPid(launch.stdout ?? '');
+            // 会话任务登记：task_list/task_kill 的数据源（CLI 侧同表结构）。
+            if (pid !== null) registerTask(pid, String(args.command ?? ''), plan.logFile);
             return {
               id: toolCall.id,
               toolName: name,
@@ -1662,6 +1687,7 @@ export class TauriToolAdapter implements ToolAdapter {
                 command: String(args.command ?? ''),
                 proxyUrl: this.shellProxy(),
                 sandbox: this.sandbox,
+                timeoutMs: typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0 ? Math.round(args.timeoutMs) : undefined,
                 onOutput: channel,
               }) as number;
               if (cancelled) {
@@ -1674,7 +1700,9 @@ export class TauriToolAdapter implements ToolAdapter {
                   duration: Date.now() - start,
                 };
               }
-              return { id: toolCall.id, toolName: name, ...buildCommandResult(code, collected), duration: Date.now() - start };
+              const built = buildCommandResult(code, collected, String(args.command ?? ''));
+              const spilled = await this.spillOversizeOutput(String(built.result ?? ''));
+              return { id: toolCall.id, toolName: name, ...built, result: spilled, duration: Date.now() - start };
             } finally {
               // { once: true } already removed it if it fired; this covers the
               // normal-completion case so a reused signal can't fire a stale
@@ -1682,12 +1710,45 @@ export class TauriToolAdapter implements ToolAdapter {
               signal?.removeEventListener('abort', onAbort);
             }
           }
-          const exec = await this.call('execute_command', { workspace: ws, command: String(args.command ?? ''), proxyUrl: this.shellProxy(), sandbox: this.sandbox }) as { exitCode: number; stdout: string; stderr: string };
+          const exec = await this.call('execute_command', {
+            workspace: ws,
+            command: String(args.command ?? ''),
+            proxyUrl: this.shellProxy(),
+            sandbox: this.sandbox,
+            cwd: typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd.trim() : undefined,
+            timeoutMs: typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0 ? Math.round(args.timeoutMs) : undefined,
+          }) as { exitCode: number; stdout: string; stderr: string };
           const execLines: Array<{ kind: 'stdout' | 'stderr'; line: string }> = [
             ...(exec.stdout ? [{ kind: 'stdout' as const, line: exec.stdout }] : []),
             ...(exec.stderr ? [{ kind: 'stderr' as const, line: exec.stderr }] : []),
           ];
-          return { id: toolCall.id, toolName: name, ...buildCommandResult(exec.exitCode, execLines), duration: Date.now() - start };
+          const built = buildCommandResult(exec.exitCode, execLines, String(args.command ?? ''));
+          const spilled = await this.spillOversizeOutput(String(built.result ?? ''));
+          return { id: toolCall.id, toolName: name, ...built, result: spilled, duration: Date.now() - start };
+        }
+        case 'task_list': {
+          // 探活走 Rust（WebView 无 process 对象）；死任务由 listTasks 顺手清账。
+          const tasks = await listTasks((pid) => this.call('process_alive', { pid }) as Promise<boolean>);
+          return { id: toolCall.id, toolName: name, result: { tasks, count: tasks.length }, success: true, duration: Date.now() - start };
+        }
+        case 'task_kill': {
+          const pid = Number(args.pid);
+          if (!Number.isInteger(pid) || pid <= 0) {
+            return { id: toolCall.id, toolName: name, result: null, error: 'task_kill requires a positive integer pid — call task_list first', success: false, duration: Date.now() - start };
+          }
+          try {
+            const killed = await this.call('kill_process', { pid }) as boolean;
+            unregisterTask(pid);
+            return {
+              id: toolCall.id,
+              toolName: name,
+              result: { pid, killed, note: killed ? 'kill signal sent' : 'process not running (removed from task list)' },
+              success: true,
+              duration: Date.now() - start,
+            };
+          } catch (err: any) {
+            return { id: toolCall.id, toolName: name, result: null, error: err?.message ?? 'task_kill failed', success: false, duration: Date.now() - start };
+          }
         }
         case 'download_file': {
           const url = String(args.url ?? '').trim();
@@ -2589,12 +2650,20 @@ function researchFailure(id: string, toolName: string, start: number, error: str
  * output, and a non-zero exit produces an error naming the code + output.
  * Pure so the exit-code → success mapping is unit-testable without a Tauri
  * runtime. */
+/** 超量输出落盘不硬截（GUI 版）：>30k 的最终 result 全文经 Rust 写进系统
+ * 临时目录，返回体只带头尾预览+路径（模型要全文用 read_file）。CLI 侧
+ * NodeToolAdapter.spillOversizeOutput 同形态同阈值。 */
+const OUTPUT_SPILL_LIMIT = 30_000;
+const OUTPUT_SPILL_PREVIEW = 2_000;
+
 export function buildCommandResult(
   exitCode: number,
   lines: Array<{ kind: 'stdout' | 'stderr'; line: string }>,
+  command = '',
 ): Pick<ToolResult, 'result' | 'error' | 'success'> {
   const output = formatCommandOutput(lines);
-  if (exitCode !== 0) {
+  // 良性 exit 1（无匹配/差异语义）不报失败——单源判定 shared/format，CLI 侧同规则。
+  if (exitCode !== 0 && !isBenignNoMatchExit(command, exitCode)) {
     return { result: output, error: formatCommandError(exitCode, output), success: false };
   }
   return { result: output, success: true };

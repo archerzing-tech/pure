@@ -69,7 +69,7 @@ describe('buildBackgroundResult', () => {
     expect(r.kind).toBe('background');
     expect(r.started).toBe(true);
     expect(r.pid).toBe(1234);
-    expect(r.hint).toContain('kill <pid>');
+    expect(r.hint).toContain('task_list / task_kill');
     const failed = JSON.parse(buildBackgroundResult(null, '/tmp/l.log'));
     expect(failed.started).toBe(false);
     expect(failed.note).toBeTruthy();

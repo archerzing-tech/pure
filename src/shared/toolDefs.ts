@@ -104,14 +104,36 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'execute_command',
-    description: 'Execute a shell command in the workspace. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite; background:true starts a long-lived process (dev/static server, watcher) detached and returns {pid, logFile} immediately. Guard: a single self-contained .html opens via its file:// path; anything needing a server (dev-server script, fetch(), ES modules, CORS) MUST go through http://localhost — never fake a preview with file://. Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to verify — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.',
+    description: 'Execute a shell command in the workspace. Returns stdout, stderr, and exit code. Plain calls must be non-interactive and finite; background:true starts a long-lived process (dev/static server, watcher) detached and returns {pid, logFile} immediately — registered tasks are listed/stopped with the task_list/task_kill tools (activate via discover_tools). Guard: a single self-contained .html opens via its file:// path; anything needing a server (dev-server script, fetch(), ES modules, CORS) MUST go through http://localhost — never fake a preview with file://. Token discipline: prefer quiet flags (-q, --oneline, head/tail); when a command prints a lot, redirect to a temp file and grep the relevant part. After write_file/edit_file do NOT re-read the whole file to verify — the tool result is authoritative; use diff_files or a ranged read when a targeted check is genuinely needed.',
     input_schema: {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'Shell command to execute' },
+        cwd: { type: 'string', description: 'Working directory (absolute path, or relative to workspace). Default: workspace root' },
+        timeoutMs: { type: 'number', description: 'Kill the command after this many ms (default 120000, max 600000)' },
         background: { type: 'boolean', description: 'Run detached without waiting for exit — required for dev/static servers, watchers, and any command that never exits. Verify afterwards with a bounded probe (curl the port), then report the URL.' },
       },
       required: ['command'],
+    },
+  },
+  {
+    name: 'task_list',
+    description: 'List background commands started via execute_command background:true in this session, each with pid, command, logFile, start time, and alive status (dead ones are pruned automatically). Use this to check on dev servers, watchers, or any detached process before killing or reusing it.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'task_kill',
+    description: 'Stop a background command started via execute_command background:true, by pid (see task_list). Sends SIGTERM on macOS/Linux; a clean stop for dev servers and watchers. Returns whether the process was killed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pid: { type: 'number', description: 'Process id from task_list (or from the background execute_command result)' },
+      },
+      required: ['pid'],
     },
   },
   {
@@ -452,6 +474,10 @@ export const PUBLIC_TOOL_NAMES = new Set([
   // W4 视觉闭环（2026-11-04）：browser/screenshot 走 deferred 目录（不进
   // CORE 常驻），模型判断要看渲染结果时经 discover_tools 激活。
   'browser', 'screenshot',
+  // 后台任务闭环（2026-11-08）：execute_command background:true 的登记表
+  // 管理（列表/停止）。同为 deferred——只有真的起过后台任务的回合才需要
+  // 见到它们，execute_command 的返回体与 schema 已带指引。
+  'task_list', 'task_kill',
   // 工具 deferred 化（框架改革三期）：discover_tools 是常驻的目录索引工具，
   // 长尾内置工具与 MCP 工具经它搜索并激活后才进模型可见清单。
   'discover_tools',
@@ -557,6 +583,10 @@ const TOOL_METADATA_TABLE = {
   // workspace; screenshot is a pure observation.
   browser: { sideEffects: true, isWrite: false },
   screenshot: { sideEffects: false, isWrite: false },
+  // Background task registry: list is a pure observation; kill stops a
+  // process the session itself started (external state, not workspace).
+  task_list: { sideEffects: false, isWrite: false },
+  task_kill: { sideEffects: true, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },
   // diagnose_network only observes the network, so it stays a pure read.
   //

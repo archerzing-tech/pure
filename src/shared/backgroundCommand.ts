@@ -168,6 +168,6 @@ export function buildBackgroundResult(pid: number | null, logFile: string): stri
     logFile,
     started: pid !== null,
     ...(pid === null ? { note: 'detached launch did not report a PID; check the log file' } : {}),
-    hint: 'Process started detached — it keeps running after this call returns. Verify with a bounded probe (e.g. curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>) or read the log with read_file. Stop it later with kill <pid> (PowerShell: Stop-Process -Id <pid>).',
+    hint: 'Process started detached — it keeps running after this call returns. Verify with a bounded probe (e.g. curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>) or read the log with read_file. List/stop registered background tasks with task_list / task_kill (activate via discover_tools if not visible).',
   });
 }

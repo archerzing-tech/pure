@@ -21,7 +21,7 @@ import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
 import { generateDocument } from '../../shared/docGen';
-import { formatCommandError, safeParseArgs } from '../../shared/format';
+import { formatCommandError, isBenignNoMatchExit, safeParseArgs } from '../../shared/format';
 import { cacheQualityLiveLine } from '../../shared/endpointCacheQuality';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
@@ -30,6 +30,7 @@ import { recordNetOutcome, unblockAttemptsBeforeMirror } from '../../shared/netR
 import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { BACKGROUND_LOG_MISS_HINT, buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript, isBackgroundLogPath } from '../../shared/backgroundCommand';
+import { listTasks, registerTask, unregisterTask } from '../../shared/taskRegistry';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
@@ -297,6 +298,8 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'find_files': return await this.handleFindFiles(args, start);
         case 'list_files': return await this.handleListFiles(args, start);
         case 'execute_command': return await this.handleExecuteCommand(args, signal, start);
+        case 'task_list': return await this.handleTaskList(start);
+        case 'task_kill': return await this.handleTaskKill(args, start);
         case 'create_directory': return await this.handleCreateDirectory(args, start);
         case 'create_document': return await this.handleCreateDocument(args, start);
         case 'diff_files': return await this.handleDiffFiles(args, signal, start);
@@ -845,13 +848,18 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleExecuteCommand(args: Record<string, unknown>, signal: AbortSignal | undefined, start: number): Promise<ToolResult> {
     const command = String(args.command);
+    // Per-call cwd (absolute, or relative to the workspace) and timeout —
+    // both default to the resident behavior (workspace / commandTimeout).
+    const cwd = resolveCommandCwd(args.cwd, this.workspace);
+    if (typeof cwd === 'string') return this.fail(null, start, cwd); // validation error message
+    const timeoutMs = clampCommandTimeoutMs(args.timeoutMs);
     // background:true → long-lived process (dev/static server, watcher).
     // Spawns detached and returns immediately with the PID + log file instead
-    // of blocking until commandTimeout kills the server.
+    // of blocking until the timeout kills the server.
     if (args.background === true) {
-      return this.handleBackgroundCommand(command, start);
+      return this.handleBackgroundCommand(command, cwd.value, start);
     }
-    const abort = createAbortController(signal, this.commandTimeout);
+    const abort = createAbortController(signal, timeoutMs);
 
     try {
       // Windows commands run through powershell.exe -EncodedCommand: the
@@ -876,7 +884,7 @@ export class NodeToolAdapter implements ToolAdapter {
       // stdin 不喂（PowerShell -NonInteractive / sh -c 都不读），stdout/
       // stderr 全量收管，abort.signal 保留超时取消。
       const proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
-        cwd: this.workspace,
+        cwd: cwd.value,
         env: spawnEnv ?? undefined,
         signal: abort.signal,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -895,22 +903,38 @@ export class NodeToolAdapter implements ToolAdapter {
       // output render as plain text instead of mojibake.
       const stdout = stripAnsi(stdoutRaw.trim());
       const stderr = stripAnsi(stripPowerShellStartupProgress(stderrRaw.trim()));
+      // 超量输出落盘不硬截：>30k 的 stdout/stderr 全文进 tmp 文件，返回体只
+      // 带头尾预览+文件路径（模型要全文用 read_file）。烧穿上下文的命令输出
+      // 不该让模型看不见全貌——CC 同款形态。
+      const stdoutView = spillOversizeOutput(stdout, 'stdout');
+      const stderrView = spillOversizeOutput(stderr, 'stderr');
 
-      const result = { stdout, stderr, exitCode };
+      const result: Record<string, unknown> = { stdout: stdoutView.text, stderr: stderrView.text, exitCode };
+      if (stdoutView.spillFile || stderrView.spillFile) {
+        result.outputFiles = [stdoutView.spillFile, stderrView.spillFile].filter(Boolean);
+      }
+
       // Exit code is the single source of truth for success: a command that
       // printed output but exited non-zero FAILED (a failed `npm install` or
       // `cargo build`). Report it as such so the LLM and the failure policy
       // can react instead of treating the run as successful. stderr stays in
       // the result (and the error message) so the model sees what went wrong.
-      if (exitCode !== 0) {
+      //
+      // 良性例外（CC 同款白名单）：grep/rg/find/diff/test/[ 与 `git diff|grep`
+      // 的 exit 1 语义是「无匹配/有差异」，不是执行失败——按失败报会把
+      // 「没找到」烧进失败策略。只有 exit 1 豁免，exit ≥2 仍是真失败。
+      if (exitCode !== 0 && !isBenignNoMatchExit(command, exitCode)) {
         return {
           id: `tool_${Date.now()}`,
           toolName: 'execute_command',
           result,
-          error: formatCommandError(exitCode, [stdout, stderr ? `[stderr]\n${stderr}` : ''].filter(Boolean).join('\n')),
+          error: formatCommandError(exitCode, [stdoutView.text, stderrView.text ? `[stderr]\n${stderrView.text}` : ''].filter(Boolean).join('\n')),
           success: false,
           duration: Date.now() - start,
         };
+      }
+      if (exitCode !== 0) {
+        result.note = `exit ${exitCode} treated as success (no-match / difference semantics for this command family)`;
       }
       return {
         id: `tool_${Date.now()}`,
@@ -921,7 +945,7 @@ export class NodeToolAdapter implements ToolAdapter {
       };
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        return this.fail(null, start, `Command timed out after ${this.commandTimeout}ms`);
+        return this.fail(null, start, `Command timed out after ${timeoutMs}ms`);
       }
       return this.fail(null, start, err?.message ?? 'Command execution failed');
     } finally {
@@ -936,7 +960,7 @@ export class NodeToolAdapter implements ToolAdapter {
    * AND survives turn aborts (a server must keep serving after the task ends).
    * Deliberately NOT wired to `signal` for the same reason.
    */
-  private async handleBackgroundCommand(command: string, start: number): Promise<ToolResult> {
+  private async handleBackgroundCommand(command: string, cwd: string, start: number): Promise<ToolResult> {
     const plan = buildBackgroundLaunchPlan(command, { isWindows: IS_WINDOWS });
     // The plan's Windows paths are %TEMP% literals — placeholders for the
     // Tauri/PowerShell channel where $env:TEMP resolves ON the target machine
@@ -960,22 +984,102 @@ export class NodeToolAdapter implements ToolAdapter {
     // （detached + stdio ignore + unref，子进程脱离本进程存活，语义不变）。
     try {
       const child = spawn(shellArgs[0]!, shellArgs.slice(1), {
-        cwd: this.workspace,
+        cwd,
         env: IS_WINDOWS ? undefined : { ...process.env, PATH: extendedProbePath() },
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
       });
       child.unref();
+      // 会话任务登记：pid 入表（task_list/task_kill 的数据源）。指引已由
+      // buildBackgroundResult 的 hint 单源携带（两侧适配器同文）。
+      const pid = child.pid ?? null;
+      if (pid !== null) registerTask(pid, command, logFile);
       return {
         id: `tool_${Date.now()}`,
         toolName: 'execute_command',
-        result: buildBackgroundResult(child.pid ?? null, logFile),
+        result: buildBackgroundResult(pid, logFile),
         success: true,
         duration: Date.now() - start,
       };
     } catch (err: any) {
       return this.fail(null, start, `background launch failed: ${err?.message ?? err}`, 'execute_command');
+    }
+  }
+
+  /** 会话后台任务列表（task_list）：registry 逐 pid 探活，死任务顺手清账。 */
+  private async handleTaskList(start: number): Promise<ToolResult> {
+    const tasks = await listTasks((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err: any) {
+        return err?.code === 'EPERM'; // EPERM=进程在但无权信号，也算活着
+      }
+    });
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'task_list',
+      result: { tasks, count: tasks.length },
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  /** 停掉一个本会话起的后台任务（task_kill）。Unix 优先杀进程组（负 pid——
+   * detached spawn 自成组，wrapper 里的 dev server 是孙进程，单杀 wrapper 会
+   * 留孤儿），失败退化为单进程；Windows 走 taskkill /T /F（tree kill，等价
+   * 组杀）。进程已不在时不算失败：清理掉登记项即达成目的。 */
+  private async handleTaskKill(args: Record<string, unknown>, start: number): Promise<ToolResult> {
+    const pid = Number(args.pid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return this.fail(null, start, 'task_kill requires a positive integer pid — call task_list first');
+    }
+    try {
+      if (IS_WINDOWS) {
+        const code = await new Promise<number>((resolve) => {
+          const tk = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+          tk.on('exit', (c) => resolve(c ?? -1));
+          tk.on('error', () => resolve(-1));
+        });
+        if (code !== 0) {
+          // taskkill 找不到进程时 exit 128——同样按「已不在」收账。
+          unregisterTask(pid);
+          return {
+            id: `tool_${Date.now()}`,
+            toolName: 'task_kill',
+            result: { pid, killed: false, note: 'process not running (removed from task list)' },
+            success: true,
+            duration: Date.now() - start,
+          };
+        }
+      } else {
+        try {
+          process.kill(-pid, 'SIGTERM');
+        } catch {
+          process.kill(pid, 'SIGTERM');
+        }
+      }
+      unregisterTask(pid);
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'task_kill',
+        result: { pid, killed: true, note: 'SIGTERM sent' },
+        success: true,
+        duration: Date.now() - start,
+      };
+    } catch (err: any) {
+      if (err?.code === 'ESRCH') {
+        unregisterTask(pid);
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'task_kill',
+          result: { pid, killed: false, note: 'process not running (removed from task list)' },
+          success: true,
+          duration: Date.now() - start,
+        };
+      }
+      return this.fail(null, start, `task_kill failed: ${err?.message ?? err}`);
     }
   }
 
@@ -3347,6 +3451,50 @@ function hasSymlinkComponent(base: string, filePath: string): boolean {
     return lstatSync(existing).isSymbolicLink();
   } catch {
     return false;
+  }
+}
+
+// ── execute_command 强化（2026-11-08 电脑端操作能力 P1）──
+
+const COMMAND_TIMEOUT_DEFAULT_MS = 120_000;
+const COMMAND_TIMEOUT_MAX_MS = 600_000;
+/** >30k 的 stdout/stderr 全文落盘，返回体只带头尾预览+路径（CC 同款形态）。 */
+const OUTPUT_INLINE_LIMIT = 30_000;
+const OUTPUT_PREVIEW_CHARS = 2_000;
+
+function clampCommandTimeoutMs(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return COMMAND_TIMEOUT_DEFAULT_MS;
+  return Math.min(Math.max(Math.round(raw), 1000), COMMAND_TIMEOUT_MAX_MS);
+}
+
+/** cwd 解析：绝对路径直接用（绝对性判 isAbsolute——startsWith('/') 在
+ * Windows 把 C:\ 误判为相对，bun-windows 判例）；相对路径拼 workspace。
+ * 返回 string=校验错误文案，返回对象=可用 cwd。 */
+function resolveCommandCwd(raw: unknown, workspace: string): { value: string } | string {
+  const arg = typeof raw === 'string' ? raw.trim() : '';
+  if (!arg) return { value: workspace };
+  const expanded = expandTilde(arg);
+  const cwd = isAbsolute(expanded) ? pathResolve(expanded) : pathResolve(workspace, expanded);
+  try {
+    if (!statSync(cwd).isDirectory()) return `cwd is not a directory: ${cwd}`;
+  } catch {
+    return `cwd does not exist: ${cwd}`;
+  }
+  return { value: cwd };
+}
+
+function spillOversizeOutput(text: string, label: string): { text: string; spillFile?: string } {
+  if (text.length <= OUTPUT_INLINE_LIMIT) return { text };
+  const spillFile = join(tmpdir(), `pure-tool-output-${Date.now()}-${label}.log`);
+  try {
+    writeFileSync(spillFile, text);
+    return {
+      text: `${text.slice(0, OUTPUT_PREVIEW_CHARS)}\n...[snip]...\n${text.slice(-OUTPUT_PREVIEW_CHARS)}\n[${label} truncated: ${text.length} chars total — full output saved to ${spillFile} (read_file to see all)]`,
+      spillFile,
+    };
+  } catch {
+    // 落盘失败退化为头尾预览：可用性优先，不让 spill 失败丢掉整段输出。
+    return { text: `${text.slice(0, OUTPUT_PREVIEW_CHARS)}\n...[snip]...\n${text.slice(-OUTPUT_PREVIEW_CHARS)}\n[${label} truncated: ${text.length} chars total (spill failed)]` };
   }
 }
 

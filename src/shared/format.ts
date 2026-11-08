@@ -24,6 +24,19 @@ export function formatCommandError(exitCode: number, output: string): string {
   return `Command failed with exit code ${exitCode}${tail}`;
 }
 
+// ── 良性 exit 1 白名单（电脑端操作能力 P1，2026-11-08；CLI/GUI 两侧同源）──
+// grep/rg/find/diff/test/[ 与 `git diff|git grep` 的 exit 1 语义是「无匹配/
+// 有差异」，不是执行失败——按失败报会把「没找到」烧进失败策略。只有
+// exit 1 豁免，exit ≥2 仍是真失败。
+const BENIGN_EXIT_ONE_FIRST_WORDS = new Set(['grep', 'rg', 'find', 'diff', 'test', '[']);
+
+export function isBenignNoMatchExit(command: string, exitCode: number): boolean {
+  if (exitCode !== 1) return false;
+  const trimmed = command.trim();
+  const first = trimmed.split(/\s+/)[0] ?? '';
+  return BENIGN_EXIT_ONE_FIRST_WORDS.has(first) || /^git\s+(?:diff|grep)\b/.test(trimmed);
+}
+
 /** Human-readable byte size ("512 B", "12.3 KB", "1.5 MB") — used by the
  * write_file progress lines and the tool row's pending label. */
 export function formatBytes(n: number): string {

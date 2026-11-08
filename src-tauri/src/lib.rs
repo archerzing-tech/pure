@@ -3652,11 +3652,39 @@ fn sandbox_arg_enabled(workspace: &str, sandbox: Option<bool>) -> bool {
 /// a failed command (non-zero exit) apart from a successful one instead of
 /// squashing everything into a `success: true` string.
 #[tauri::command]
-async fn execute_command(workspace: String, command: String, proxy_url: Option<String>, sandbox: Option<bool>) -> Result<serde_json::Value, String> {
+async fn execute_command(
+    workspace: String,
+    command: String,
+    proxy_url: Option<String>,
+    sandbox: Option<bool>,
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    // Per-call cwd (电脑端操作能力 P1，2026-11-08)：absolute path used as-is
+    // (~ expanded), relative joined against the workspace. Validated here so
+    // the WebView side needs no path logic — the command is the single source.
+    let work_dir = match cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => {
+            let expanded = expand_home_dir(c);
+            let p = std::path::Path::new(&expanded);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(&workspace).join(p)
+            };
+            if !abs.is_dir() {
+                return Err(format!("cwd does not exist or is not a directory: {}", abs.display()));
+            }
+            abs
+        }
+        None => std::path::PathBuf::from(&workspace),
+    };
     // Unix shells run `sh -c`, Windows runs PowerShell (whose directory/file
     // commands and quoting rules are the ones the model is instructed to use).
     // When `sandbox` is requested and Seatbelt is available the whole argv is
     // replaced by a sandbox-exec invocation; otherwise run exactly as before.
+    // The Seatbelt profile stays workspace-scoped even when cwd overrides the
+    // working directory (cwd is a convenience, not an escape hatch).
     let output = {
         #[cfg(unix)]
         let mut cmd = if sandbox_arg_enabled(&workspace, sandbox) {
@@ -3686,7 +3714,7 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
         // actually resolve (see probe_extra_path_dirs).
         #[cfg(unix)]
         cmd.env("PATH", probe_path());
-        cmd.current_dir(&workspace);
+        cmd.current_dir(&work_dir);
         if let Some(resolved) = effective_proxy_url(proxy_url.as_deref().unwrap_or("")) {
             if !valid_proxy_url(&resolved) {
                 return Err("proxy: URL must start with http://, https://, socks5://, or socks5h://".to_string());
@@ -3710,7 +3738,7 @@ async fn execute_command(workspace: String, command: String, proxy_url: Option<S
         cmd.stderr(std::process::Stdio::piped());
         let child = cmd.spawn().map_err(|e| format!("execute_command: {}", e))?;
         let pid = child.id();
-        match tokio::time::timeout(COMMAND_STREAM_TIMEOUT, child.wait_with_output()).await {
+        match tokio::time::timeout(command_timeout(timeout_ms), child.wait_with_output()).await {
             Ok(result) => result.map_err(|e| format!("execute_command: {}", e))?,
             Err(_) => {
                 if let Some(pid) = pid {
@@ -4372,6 +4400,7 @@ async fn execute_command_stream_inner(
     on_output: &Channel<String>,
     proxy_url: Option<&str>,
     sandbox: Option<bool>,
+    timeout_ms: Option<u64>,
 ) -> Result<i32, String> {
     let mut child = spawn_shell_command(workspace, command, proxy_url, sandbox).map_err(|e| format!("spawn: {}", e))?;
 
@@ -4407,7 +4436,7 @@ async fn execute_command_stream_inner(
     // Wait for the shell first. A background server may keep inherited pipes
     // open after the shell exits, so waiting for EOF before waiting for the
     // child would deadlock the tool forever.
-    let wait_result = tokio::time::timeout(COMMAND_STREAM_TIMEOUT, child.wait()).await;
+    let wait_result = tokio::time::timeout(command_timeout(timeout_ms), child.wait()).await;
     let timed_out = wait_result.is_err();
     if timed_out && pid != 0 {
         let _ = kill_process_group(pid as i32);
@@ -4440,7 +4469,7 @@ async fn execute_command_stream_inner(
     if timed_out {
         let timeout_line = serde_json::json!({
             "type": "stderr",
-            "content": format!("Command timed out after {}s and was terminated.", COMMAND_STREAM_TIMEOUT.as_secs()),
+            "content": format!("Command timed out after {}s and was terminated.", command_timeout(timeout_ms).as_secs()),
         });
         let _ = on_output.send(timeout_line.to_string());
     }
@@ -4473,8 +4502,9 @@ async fn execute_command_stream(
     on_output: Channel<String>,
     proxy_url: Option<String>,
     sandbox: Option<bool>,
+    timeout_ms: Option<u64>,
 ) -> Result<i32, String> {
-    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref(), sandbox).await
+    execute_command_stream_inner(&state, &id, &workspace, &command, &on_output, proxy_url.as_deref(), sandbox, timeout_ms).await
 }
 
 /// Expand the downloader's path spec into a concrete absolute file path.
@@ -5734,7 +5764,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn reports_success_with_zero_exit() {
-        let out = execute_command(".".to_string(), "echo hello".to_string(), None, None)
+        let out = execute_command(".".to_string(), "echo hello".to_string(), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 0);
@@ -5744,7 +5774,7 @@ mod execute_command_tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn reports_failure_with_nonzero_exit_and_stderr() {
-        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None, None)
+        let out = execute_command(".".to_string(), "echo boom >&2; exit 3".to_string(), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 3);
@@ -5753,7 +5783,7 @@ mod execute_command_tests {
 
     #[tokio::test]
     async fn keeps_stdout_even_when_command_fails() {
-        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string(), None, None)
+        let out = execute_command(".".to_string(), "echo partial; exit 2".to_string(), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(out["exitCode"], 2);
@@ -5802,6 +5832,7 @@ mod command_cancel_tests {
             &ch,
             None,
             None,
+            None,
         )
         .await
             .unwrap();
@@ -5825,7 +5856,7 @@ mod command_cancel_tests {
         let started = std::time::Instant::now();
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            execute_command_stream_inner(&registry, "background-pipe", ".", &command, &ch, None, None),
+            execute_command_stream_inner(&registry, "background-pipe", ".", &command, &ch, None, None, None),
         )
         .await
         .expect("a shell that exits must not be held open by a background child")
@@ -5849,7 +5880,7 @@ mod command_cancel_tests {
         let ch_for_task = ch.clone();
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
-            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task, None, None)
+            execute_command_stream_inner(&reg_for_task, &id_for_task, ".", "sleep 30", &ch_for_task, None, None, None)
                 .await
                 .unwrap_or(-1)
         });
@@ -11464,6 +11495,96 @@ fn forward_tool_call_delta(
 }
 
 const COMMAND_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+// ── execute_command 超时参数化（电脑端操作能力 P1，2026-11-08）──
+// 默认 120s（对齐 CC 的 Bash 默认），模型可传 timeout_ms 放宽到 600s 上限；
+// COMMAND_STREAM_TIMEOUT（30s）保留给 run_argv 等内部原语不动。
+const COMMAND_TIMEOUT_DEFAULT_MS: u64 = 120_000;
+const COMMAND_TIMEOUT_MAX_MS: u64 = 600_000;
+
+fn command_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
+    let ms = timeout_ms.unwrap_or(COMMAND_TIMEOUT_DEFAULT_MS).clamp(1_000, COMMAND_TIMEOUT_MAX_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+#[cfg(test)]
+mod command_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_120s() {
+        assert_eq!(command_timeout(None), std::time::Duration::from_millis(120_000));
+    }
+
+    #[test]
+    fn clamps_to_bounds() {
+        assert_eq!(command_timeout(Some(0)), std::time::Duration::from_millis(1_000));
+        assert_eq!(command_timeout(Some(500)), std::time::Duration::from_millis(1_000));
+        assert_eq!(command_timeout(Some(999_999_999)), std::time::Duration::from_millis(600_000));
+        assert_eq!(command_timeout(Some(45_000)), std::time::Duration::from_millis(45_000));
+    }
+
+    #[test]
+    fn expands_home_prefix_or_passes_through() {
+        // HOME is process-global: save/restore or concurrent test threads
+        // (sandbox's write_profile_file reads HOME) see our fake value.
+        let saved = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/Users/tester");
+        assert_eq!(expand_home_dir("~/work"), "/Users/tester/work");
+        assert_eq!(expand_home_dir("/abs/path"), "/abs/path");
+        assert_eq!(expand_home_dir("rel"), "rel");
+        match saved {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// `~/…` 前缀展开到用户 home（cwd 参数用）。无 HOME 环境变量时原样返回。
+fn expand_home_dir(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return std::path::Path::new(&home).join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
+/// 通用进程探活的 command 薄壳（task_list 配套：GUI WebView 里没有 process
+/// 对象，逐 pid 探活经此）。语义与 gateway_pid_alive 同源（unix kill(0)+
+/// EPERM 算活 / windows tasklist）。
+#[tauri::command]
+fn process_alive(pid: i64) -> bool {
+    gateway_pid_alive(pid)
+}
+
+/// 停掉一个进程（task_kill 配套）。组杀（kill_process_group：unix 负 pgid /
+/// windows taskkill /T /F）——background 的 wrapper 里可能带孙进程（dev
+/// server），单杀 wrapper 会留孤儿。进程本来就不在时两边内部都按成功收账
+/// （kill_process_group 的 ESRCH / code-128 分支）——「确保它死」语义达成。
+#[tauri::command]
+fn kill_process(pid: i64) -> Result<bool, String> {
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return Ok(false);
+    }
+    kill_process_group(pid as i32).map(|_| true).map_err(|e| format!("kill_process: {}", e))
+}
+
+/// 把工具输出超量的全文落进系统临时目录（GUI 侧 spill 通道——WebView 没有
+/// node:fs；CLI 侧直接 writeFileSync）。name 限定安全字符防路径穿越，返回
+/// 落盘绝对路径。
+#[tauri::command]
+fn write_temp_file(name: String, content: String) -> Result<String, String> {
+    if name.is_empty()
+        || name.len() > 120
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err("write_temp_file: name must be 1-120 chars of [A-Za-z0-9._-]".into());
+    }
+    let path = std::env::temp_dir().join(name);
+    fs::write(&path, content.as_bytes()).map_err(|e| format!("write_temp_file: {}", e))?;
+    Ok(path.to_string_lossy().into_owned())
+}
 const COMMAND_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const COMMAND_PIPE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -17001,7 +17122,9 @@ pub fn run() {
             // Command execution
             execute_command,
             execute_command_stream,
-            download_file_stream,
+            process_alive,
+            kill_process,
+            write_temp_file,            download_file_stream,
             kill_command,
             // W3/D1=A process primitive for the TS single-executor tool layer
             run_argv,

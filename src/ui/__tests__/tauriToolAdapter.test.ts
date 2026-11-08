@@ -88,6 +88,24 @@ describe('buildCommandResult', () => {
     expect(r.error).toContain('partial');
     expect(r.result).toBe('partial');
   });
+
+  // 良性 exit 1（电脑端操作能力 P1，与 CLI 侧 shared/format 单源同规则）：
+  // grep/rg/find/diff/test/[ 与 git diff|grep 的 exit 1 = 无匹配/差异语义。
+  it('treats exit 1 from a whitelisted command family as success', () => {
+    const r = buildCommandResult(1, [{ kind: 'stdout', line: '' }], 'rg zzz_missing src/');
+    expect(r.success).toBe(true);
+    expect(r.error).toBeUndefined();
+  });
+
+  it('still fails on exit >= 2 even for whitelisted families', () => {
+    const r = buildCommandResult(2, [{ kind: 'stderr', line: 'no such file' }], 'rg zzz src/');
+    expect(r.success).toBe(false);
+  });
+
+  it('fails on exit 1 when no command context is given (legacy shape)', () => {
+    const r = buildCommandResult(1, [{ kind: 'stderr', line: 'boom' }]);
+    expect(r.success).toBe(false);
+  });
 });
 
 describe('formatBytes', () => {

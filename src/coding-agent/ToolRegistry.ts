@@ -107,6 +107,11 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   // 点击/输入是外部可见动作（EXTERNAL），非文件写；screenshot 纯只读。
   browser: { tags: [Tags.EXTERNAL], riskLevel: 'low' },
   screenshot: { tags: [Tags.READ], riskLevel: 'low' },
+  // 后台任务闭环：task_list 纯只读；task_kill 停的是本会话 background:true
+  // 自己起的进程（EXTERNAL 外部状态，非文件写）——放行等级对齐 git_commit
+  // 的低摩擦纪律（杀自己起的 dev server 比每回确认卡更贵）。
+  task_list: { tags: [Tags.READ], riskLevel: 'low' },
+  task_kill: { tags: [Tags.EXTERNAL], riskLevel: 'low' },
 };
 
 export const BUILT_IN_TOOLS: readonly TaggedTool[] = Object.freeze(
