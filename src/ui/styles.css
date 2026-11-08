@@ -4224,7 +4224,8 @@ body.window-maximized #boot-splash {
   min-width: 0;
 }
 
-/* New-window "+" (bottom-left): spawns another full pure app window. */
+/* New-window "+" (bottom-left): spawns another full pure app window.
+   2026-11-08 用户定调：默认带浅底（--bg-input），不再纯 ghost。 */
 .status-bar-new-window {
   display: inline-flex;
   align-items: center;
@@ -4235,7 +4236,7 @@ body.window-maximized #boot-splash {
   padding: 0;
   border: none;
   border-radius: 5px;
-  background: transparent;
+  background: var(--bg-input);
   color: var(--text-tertiary);
   cursor: pointer;
   transition: color var(--transition), background var(--transition);
