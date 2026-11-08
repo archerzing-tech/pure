@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.6.0
+
+**电脑端操作能力增强：图片视觉内化进 read_file，鼠标键盘走插件形态**
+
+本期定调一句话：内化最基础、最关键的部分，其余能力以插件形态提供、可集成第三方。三笔施工都从这条线长出来。
+
+execute_command 从「参数薄」补成可依赖的地基：cwd 与 timeoutMs 参数化（默认 120s，钳制 1–600s）；良性 exit 1 白名单——grep/find/diff 这类「无匹配即 1」的命令不再被当成失败，命中时加注说明语义；输出超 30k 自动全文落盘、头尾 2000 预览带回路径；后台任务登记表落地，task_list 探活列任务、task_kill unix 组杀/Windows taskkill /T，停止指引同步指向新工具。read_file 学会看图：png/jpg/gif/webp/bmp 经 ToolResult.images 通道以视觉附件进上下文，5MB 上限防 base64 膨胀，超限报错直接给出 sips 压缩出路——真机验证模型会照着提示自愈（9MB 截屏→缩图→读入→描述与真实屏幕逐项吻合）。桌面截屏不做专工具，shell screencapture + read_file 即闭环。
+
+鼠标键盘走 install_desktop_control 动态工具：一键往 ~/.pure/tools/ 落三个外部工具 manifest（desktop_click / desktop_type / desktop_key，cliclick 驱动），复用既有 externalTools 与 MCP 两条接缝、不新建插件系统；cliclick 探测与辅助功能授权前置如实写进返回体，Windows 无预置方案时指路 register_mcp_server。manifest 模板以编译契约测试上锁——装了过不了编译器等于白装。顺手修掉 externalTools 执行器的存量 bug：manifest 超时以 snake_case 下发、适配器读 camelCase，超时从未生效过。
+
+施工判例两枚。其一，伪绿二连：`gh run watch --exit-status` 的退出码被管道尾的 tail 吞掉报了假绿，靠 gh run list 交叉核对才翻案；同一段里全量测试的 mid-stream fail 行被 tail 窗口截掉，汇总 3 fail 只看见 2 条就误归属环境 flake，第三条实为新契约下没同步的旧断言——计数对不上必须核到底。其二，改字段名必须 grep 断言面：修 snake/camel 错位时，锁着旧字段形状的测试没同步，CI 两平台齐红才暴露。真机依赖测试（headless Chrome）全量并发下的冷启动超时用三步定案放行：干净树复现同样红、改动树单跑全绿、失败集中在真机依赖文件。
+
+验证：bun test 全量 5231 例（唯真机 Chrome 环境性超时，定案放行）、typecheck 零错、cargo test --lib 278 例全过、vite 生产构建过、CI 两平台绿、macOS 真机部署复验（截屏→看图→安装→落盘全链通过）。
+
 ## v4.5.0
 
 **新增 Telegram 通道：单 token 长轮询，零公网依赖**
