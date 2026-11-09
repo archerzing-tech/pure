@@ -4773,10 +4773,13 @@ async fn kill_command(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tauri::command]
-fn create_directory(workspace: String, path: String) -> Result<String, String> {
-    let full = resolve(&workspace, &path)?;
-    fs::create_dir_all(&full).map_err(|e| format!("mkdir: {}", e))?;
-    Ok(format!("Created directory: {}", path))
+async fn create_directory(workspace: String, path: String) -> Result<String, String> {
+    run_blocking(move || {
+        let full = resolve(&workspace, &path)?;
+        fs::create_dir_all(&full).map_err(|e| format!("mkdir: {}", e))?;
+        Ok(format!("Created directory: {}", path))
+    })
+    .await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -6955,51 +6958,54 @@ fn read_skill_sidecar_hash(dir: &std::path::Path) -> Option<String> {
 /// report old → new". The hash covers the instruction body only, so a
 /// description-only difference is not treated as a new version.
 #[tauri::command]
-fn write_app_skill(name: String, description: String, body: String, source: Option<String>) -> Result<AppSkillWriteOutcome, String> {
-    let name = name.trim();
-    if name.is_empty()
-        || name.len() > 120
-        || name == "."
-        || name == ".."
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
-        return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
-    }
-    if body.trim().is_empty() || body.len() > 2 * 1024 * 1024 {
-        return Err("skill body is empty or exceeds the 2MB limit".to_string());
-    }
-    let hash = skill_content_hash(&body);
-    let dir = app_skills_dir().join(name);
-    let previous_hash = read_skill_sidecar_hash(&dir);
-    if previous_hash.as_deref() == Some(hash.as_str()) {
-        // Same content as the recorded install — rewrite nothing (the sidecar's
-        // installedAt staying put is the observable proof the write was
-        // skipped), the caller relays "already at this version".
-        return Ok(AppSkillWriteOutcome {
+async fn write_app_skill(name: String, description: String, body: String, source: Option<String>) -> Result<AppSkillWriteOutcome, String> {
+    run_blocking(move || {
+        let name_trim = name.trim();
+        if name_trim.is_empty()
+            || name_trim.len() > 120
+            || name_trim == "."
+            || name_trim == ".."
+            || !name_trim.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
+        }
+        if body.trim().is_empty() || body.len() > 2 * 1024 * 1024 {
+            return Err("skill body is empty or exceeds the 2MB limit".to_string());
+        }
+        let hash = skill_content_hash(&body);
+        let dir = app_skills_dir().join(name_trim);
+        let previous_hash = read_skill_sidecar_hash(&dir);
+        if previous_hash.as_deref() == Some(hash.as_str()) {
+            // Same content as the recorded install — rewrite nothing (the sidecar's
+            // installedAt staying put is the observable proof the write was
+            // skipped), the caller relays "already at this version".
+            return Ok(AppSkillWriteOutcome {
+                path: dir.to_string_lossy().into_owned(),
+                hash,
+                previous_hash: previous_hash.clone(),
+                updated: false,
+            });
+        }
+        fs::create_dir_all(&dir).map_err(|e| format!("create skill directory: {}", e))?;
+        let description_clean = description.trim().replace('\r', " ").replace('\n', " ");
+        let markdown = format!("---\nname: {}\ndescription: {}\n---\n\n{}\n", name_trim, description_clean, body.trim());
+        fs::write(dir.join("SKILL.md"), markdown).map_err(|e| format!("write SKILL.md: {}", e))?;
+        let sidecar = serde_json::json!({
+            "source": source.filter(|s| !s.trim().is_empty()),
+            "hash": hash,
+            "installedAt": rfc3339_utc(unix_secs_now()),
+        });
+        let sidecar_text = serde_json::to_string_pretty(&sidecar).unwrap_or_default();
+        fs::write(dir.join(SKILL_SIDECAR_FILE), format!("{sidecar_text}\n"))
+            .map_err(|e| format!("write {} : {}", SKILL_SIDECAR_FILE, e))?;
+        Ok(AppSkillWriteOutcome {
             path: dir.to_string_lossy().into_owned(),
             hash,
-            previous_hash: previous_hash.clone(),
-            updated: false,
-        });
-    }
-    fs::create_dir_all(&dir).map_err(|e| format!("create skill directory: {}", e))?;
-    let description = description.trim().replace('\r', " ").replace('\n', " ");
-    let markdown = format!("---\nname: {}\ndescription: {}\n---\n\n{}\n", name, description, body.trim());
-    fs::write(dir.join("SKILL.md"), markdown).map_err(|e| format!("write SKILL.md: {}", e))?;
-    let sidecar = serde_json::json!({
-        "source": source.filter(|s| !s.trim().is_empty()),
-        "hash": hash,
-        "installedAt": rfc3339_utc(unix_secs_now()),
-    });
-    let sidecar_text = serde_json::to_string_pretty(&sidecar).unwrap_or_default();
-    fs::write(dir.join(SKILL_SIDECAR_FILE), format!("{sidecar_text}\n"))
-        .map_err(|e| format!("write {} : {}", SKILL_SIDECAR_FILE, e))?;
-    Ok(AppSkillWriteOutcome {
-        path: dir.to_string_lossy().into_owned(),
-        hash,
-        previous_hash,
-        updated: true,
+            previous_hash,
+            updated: true,
+        })
     })
+    .await
 }
 
 /// Remove a skill directory from the app-owned skills directory. Same
@@ -7008,22 +7014,25 @@ fn write_app_skill(name: String, description: String, body: String, source: Opti
 /// button in Settings → Skills; only `auto-` prefixed ones show it in the UI,
 /// but the command itself accepts any valid name so future callers decide.
 #[tauri::command]
-fn delete_app_skill(name: String) -> Result<String, String> {
-    let name = name.trim();
-    if name.is_empty()
-        || name.len() > 120
-        || name == "."
-        || name == ".."
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
-        return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
-    }
-    let dir = app_skills_dir().join(name);
-    if !dir.is_dir() {
-        return Err(format!("skill directory not found: {}", dir.display()));
-    }
-    fs::remove_dir_all(&dir).map_err(|e| format!("remove skill directory: {}", e))?;
-    Ok(dir.to_string_lossy().into_owned())
+async fn delete_app_skill(name: String) -> Result<String, String> {
+    run_blocking(move || {
+        let name_trim = name.trim();
+        if name_trim.is_empty()
+            || name_trim.len() > 120
+            || name_trim == "."
+            || name_trim == ".."
+            || !name_trim.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err("skill name must contain only letters, numbers, '-', '_' or '.'".to_string());
+        }
+        let dir = app_skills_dir().join(name_trim);
+        if !dir.is_dir() {
+            return Err(format!("skill directory not found: {}", dir.display()));
+        }
+        fs::remove_dir_all(&dir).map_err(|e| format!("remove skill directory: {}", e))?;
+        Ok(dir.to_string_lossy().into_owned())
+    })
+    .await
 }
 
 /// A SKILL.md fetched from a GitHub repo, plus the route that actually
