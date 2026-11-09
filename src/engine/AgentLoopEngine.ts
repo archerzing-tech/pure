@@ -1101,6 +1101,11 @@ export class AgentLoopEngine {
           });
           budget.addTokens(resultText);
         }
+        // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果刚配平进消息
+        // 账，这是本轮唯一「配对完整」的稳定点。GUI 据此节流落盘中间态——
+        // 此前整回合只活在渲染进程内存，回合收尾才落盘，强杀=产物全灭、盘上
+        // 只剩用户输入。浅拷贝数组（消息对象共享）：下游 persist 只读不改。
+        yield { type: 'TurnCheckpoint', payload: { messages: [...messages] }, timestamp: Date.now() };
 
         // 拒绝兜底（4a）：累计 3 次重发被隔离调用——明确指令装听不见、机械
         // 拒绝也没能改变行为，剩余阶梯全失去意义，真话交还。放在 transcript

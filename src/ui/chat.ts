@@ -174,6 +174,10 @@ function versionedCopyPath(path: string, version: number): string {
 // and rebuilding the Input panel on every token is O(n²) and freezes the UI.
 // Mirrors the 100ms streaming-render throttle (markdown.ts).
 const TOOL_CALL_REFRESH_MS = 120;
+// 回合中途检查点落盘的最小间隔（2026-11-09 强杀丢会话判例）：TurnCheckpoint
+// 随每个工具批到达，长回合工具批可以很密；全量快照+写盘不便宜，3s 一拍足够
+// ——强杀最多丢最后 3s 的进度，不再丢整回合产物。
+const TURN_CHECKPOINT_PERSIST_MS = 3000;
 /** 9.1 — cap on a rehydrated file read; the ContextEngine truncates what
  *  enters the prompt, this just keeps the bridge payload bounded. */
 const REHYDRATION_READ_CAP = 20_000;
@@ -4869,6 +4873,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // toolCallId → outcome, replayed as status rows (StoredMessage.toolExec)
     // when the session is restored from storage.
     const toolResults = new Map<string, ToolExecMeta>();
+    // 回合中途检查点的上次落盘时刻（TurnCheckpoint 节流，见 TURN_CHECKPOINT_PERSIST_MS）。
+    let lastCheckpointPersistAt = 0;
     // Subagent interior activity, round-tripped through the engine: CodingAgent
     // publishes orchestrator progress onto this fanout, the engine re-emits it
     // as SubagentActivity events (namespaced by the delegation toolCallId), and
@@ -7280,6 +7286,36 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             break;
           }
 
+          case 'TurnCheckpoint': {
+            // 回合中途落盘（2026-11-09 强杀丢会话判例）：引擎在工具结果配平
+            // 进消息账后发检查点，这里节流落盘中间态。此前整回合产物只活在
+            // 渲染进程内存、回合收尾才落盘，强杀=盘上只剩用户最初输入。fire-
+            // and-forget 即可：saveSession 按会话串行链保证先到先写，回合收
+            // 尾的终态写永远排在最后。checkpoint=true 跳过变体账同步——中间
+            // 态内容不该作为「一个回复版本」入册（重新生成场景会推垃圾变体）。
+            if (gen !== this.generation) break;
+            const checkpointNow = Date.now();
+            if (checkpointNow - lastCheckpointPersistAt < TURN_CHECKPOINT_PERSIST_MS) break;
+            lastCheckpointPersistAt = checkpointNow;
+            const checkpointMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText);
+            void this.persistSession(
+              checkpointMessages,
+              toolResults,
+              thinkingPhases,
+              sendSessionId,
+              sendWorkspace,
+              false,
+              undefined,
+              taskAnalysisText,
+              [],
+              [],
+              displayUserText,
+              userPathRepairs,
+              false,
+              true,
+            );
+            break;
+          }
           case 'ToolResult': {
             if (event.payload.result.success) hasToolSuccess = true;
             // 代执行回合的兑现回写（2026-09-22 重设计）：foldin_* 调用成功
@@ -8795,10 +8831,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     visibleUserText = '',
     pathRepairs: PathRepair[] = [],
     artifactsDelivered = false,
+    /** 回合中途检查点（TurnCheckpoint）标记：跳过变体账同步——中间态不是
+     * 一个完整的回复版本，重新生成场景下入册只会推垃圾变体。 */
+    checkpoint = false,
   ): Promise<void> {
     this.persistDepth += 1;
     try {
-      await this.doPersistSession(messages, toolResults, thinkingPhases, sessionId, workspace, planPause, pauseAssessment, taskAnalysisText, renderedAssistantTexts, artifacts, visibleUserText, pathRepairs, artifactsDelivered);
+      await this.doPersistSession(messages, toolResults, thinkingPhases, sessionId, workspace, planPause, pauseAssessment, taskAnalysisText, renderedAssistantTexts, artifacts, visibleUserText, pathRepairs, artifactsDelivered, checkpoint);
     } finally {
       this.persistDepth -= 1;
       if (this.persistDepth === 0) this.persistSettledCb?.();
@@ -8826,13 +8865,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
      * turn writes its artifacts into the transcript and the directory/file
      * card wrongly reappears when the history session is replayed. */
     artifactsDelivered = false,
+    /** 回合中途检查点（TurnCheckpoint）：跳过变体账同步——中间态不是完整
+     * 的回复版本，重新生成场景下入册只会推垃圾变体。 */
+    checkpoint = false,
   ) {
     if (messages.length <= 0) return;
     // 回复版本账随落盘同步（幂等）：重生成落定的新回复 / 暂停提交的中间态
     // 在这里追加入册，快照带走的账永远与将要写的消息一致。追加了新变体就
     // 喊宿主刷切换条（流式结束点 persist 还在飞，宿主不能只盯 streaming
-    // 边沿）。
-    if (this.syncTurnVariantsWithMessages(messages)) {
+    // 边沿）。检查点落盘（checkpoint）不入册。
+    if (!checkpoint && this.syncTurnVariantsWithMessages(messages)) {
       this.onTurnVariantsChanged?.('regenerated');
     }
     await this.activePlanProgressPersistence?.flush();

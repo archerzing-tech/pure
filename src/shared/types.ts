@@ -667,6 +667,11 @@ export type EngineEvent =
   | { type: 'ReasoningDelta'; payload: { content: string; stateId: string }; timestamp: number }
   | { type: 'StateChange'; payload: { from: AgentStateType; to: AgentStateType; stateId: string; reason?: string }; timestamp: number }
   | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string }; timestamp: number }
+  // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果配平进消息账后
+  // 发出，payload 是引擎侧此刻的完整会话消息（浅拷贝，含本轮已配对的
+  // assistant/tool 行）。GUI 据此节流落盘中间态——强杀最多丢最后一个工具
+  // 结果之后的进度，不再丢整回合的产物。
+  | { type: 'TurnCheckpoint'; payload: { messages: Message[] }; timestamp: number }
   | { type: 'YieldControl'; payload: { turnNumber: number; budget: BudgetSnapshot }; timestamp: number }
   // v0.10 §12.3 — surfaced so the Harness can persist error_pattern memories:
   // the engine calls FailurePolicy.decide() at every failure point and yields
