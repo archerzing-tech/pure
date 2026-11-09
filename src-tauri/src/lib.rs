@@ -17256,15 +17256,35 @@ pub fn run() {
                 match close_disposition(running, app.webview_windows().len()) {
                     CloseDisposition::BackgroundAndHint => {
                         api.prevent_close();
-                        audit_exit(&format!("close-requested hide (tasks running: {running})"));
-                        let _ = window.hide();
-                        // Best effort — a failed hint must never block hiding.
+                        // macOS: hide to tray — Dock reopen (RunEvent::Reopen) and the
+                        // tray icon/menu both restore via show_all_windows.
+                        // Windows/Linux: minimize instead of hide. A hidden decorations-
+                        // false window is not reliably restorable from the taskbar on
+                        // Windows (RunEvent::Reopen is macOS-only), which left users
+                        // stuck when tasks were running ("taskbar click falls back,
+                        // window won't come out"). Minimizing keeps native taskbar
+                        // restore working; the tray icon/menu still restores too.
+                        #[cfg(target_os = "macos")]
+                        {
+                            audit_exit(&format!("close-requested hide (tasks running: {running})"));
+                            let _ = window.hide();
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            audit_exit(&format!("close-requested minimize (tasks running: {running})"));
+                            let _ = window.minimize();
+                        }
+                        // Best effort — never block the event handler. notify_rust::show()
+                        // is synchronous and, on Windows, can involve COM; run it off-thread.
                         let body = format!("还有 {running} 个任务在跑，窗口关了它们也继续；进度和取消都在托盘菜单里。");
-                        let _ = notify_rust::Notification::new()
-                            .summary("pure")
-                            .body(&body)
-                            .show();
-                        // 藏窗且有任务在跑：持 App Nap 断言，别让节流掐死 webview。
+                        std::thread::spawn(move || {
+                            let _ = notify_rust::Notification::new()
+                                .summary("pure")
+                                .body(&body)
+                                .show();
+                        });
+                        // macOS: hold the App Nap assertion while hidden with work running.
+                        // No-op on other platforms.
                         update_nap_guard(app);
                     }
                     CloseDisposition::Quit => {
