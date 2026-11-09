@@ -3,7 +3,6 @@
 // / verification / delegation / recovery / complexity）和子代理角色切片，回答
 // "哪档策略真的跑得更稳"。只读纯函数，输入是 PromptObservability.records() 的
 // 任意子集；E4.2 仪表盘直接消费，E1.4 的 per-role 自校正建议也从这里起步。
-//
 // 切分的前提是记录里就带着策略：Harness 在 startRun 时把 observeStrategy() 的
 // 结果挂上同一条 agent_run 记录，toolCalls / verification / outcome 同记录共
 // 存 —— 聚合端零 join。没有 strategy 的旧记录/辅助 run 直接跳过。

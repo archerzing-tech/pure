@@ -1,7 +1,6 @@
 // src/shared/schemaSanitize.ts
 // Wire-side JSON Schema sanitizer: strips `pattern` constructs the endpoint's
 // regex dialect rejects before the tool list ships with a request.
-//
 // 为什么存在（2026-11-01 判例）：一个 MCP server 上报的工具 schema 带了
 // `"pattern": "^[^=\0]+$"`，端点的严格 schema 校验不认 `\0`（NUL 转义不在其
 // 正则方言里），整个请求 400 Invalid schema for function。工具清单随每个请求

@@ -1,17 +1,14 @@
 // src/channels/projection/browserProjection.ts
 // 「通道里看到的样子 = 桌面端的样子」的执行体。
-//
 // 做法是把**桌面端自己的渲染管线**搬进一个 headless 页面：同一份
 // `src/ui/markdown.ts`（marked + hljs + DOMPurify + mermaid + echarts + plantuml）
 // 打包成浏览器 bundle，同一份 `src/ui/styles.css`，同一个 DOM 层级
 // （#app-shell → #main → #view-container → #chat-view → main#chat → .bubble-row
 // .assistant > .bubble），再按桌面端聊天列的同一宽度（1120 − 2×48 = 1024 CSS px）
 // 出图。所以这里没有「把样式翻译成另一套」的部分 —— 图就是那块 DOM 的截图。
-//
 // 与桌面端的两处**有意差异**（用户明确要求「表现一样、但去掉交互」）：
 //  1. 固定浅色（`data-theme="light"`）：IM 聊天背景普遍是浅色，深色卡片很突兀；
 //  2. 截图前拆掉所有交互件（复制/保存按钮、图表控制条），只留视觉。
-//
 // 截图受 Chromium 的一条硬限制约束：超过 8192px 的输出会损坏（issue 40724721），
 // 所以先按 2× 出图，太高就退回 1×，仍然过高则拒绝并让调用方降级。
 import { readFileSync } from 'node:fs';

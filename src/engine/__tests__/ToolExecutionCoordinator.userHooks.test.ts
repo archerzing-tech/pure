@@ -2,7 +2,6 @@
 // veto a call (exit 2) before it touches locks or the adapter, on_post_tool
 // stdout lands in the model-visible string result, and everything degrades to
 // "no hooks" when no runner is wired.
-//
 // Timing: every test here spawns a real shell. On a cold Windows runner the
 // first powershell.exe launches cost seconds each (module warm-up plus initial
 // AV scanning — measured >5s on CI), and the hook budget itself is 10s, so

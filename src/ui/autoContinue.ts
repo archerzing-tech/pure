@@ -1,11 +1,9 @@
 // Long-task auto-continue (设计文档: docs/auto-continue-design.md).
-//
 // Removes the structural breakpoint where every plan-stage boundary waits for
 // a manual "继续". After a turn that ends cleanly with real progress, the
 // scheduler fires one more round with a "继续" injection — until the plan
 // reaches a terminal state, the round budget is exhausted, the turn stalls,
 // or the user takes over (typing / Stop / session switch all cancel the chain).
-//
 // This module is deliberately DOM-free and framework-free so it is unit
 // testable on its own; chat.ts owns the timing (schedule from send()'s
 // finally) and the actual send('继续') re-entry.

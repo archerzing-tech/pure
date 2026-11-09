@@ -1,10 +1,8 @@
 // src/harness/overlayGuard.ts
 // P1-2 — overlay 落盘后的回退护栏（2026-10-01）。
-//
 // 洞（S1 之后才有真实对象）：13.3 的 overlay 是「起草 → A/B 一次 → allow 即
 // 落盘」的单候选爬坡；落盘后若该角色持续回归，只有人工删文件。对照 MemSkill
 // 的「保留最优快照、退化即回滚」：准入后这条腿是缺的。
-//
 // 设计（有意避开文件删除）：
 //   - **落盘时快照**：写 overlay 的同一时刻把「落盘前状态」存进
 //     `<role>.overlay.md.bak`（前版 overlay 文本；首次落盘则无 bak），并在
@@ -18,7 +16,6 @@
 //   - **判定口径**（shouldRevertOverlay）：落盘后该角色派发 ≥8 次，失败率较
 //     落盘基线恶化 ≥0.2 绝对值且 ≥1.5 倍（基线为 0 时只看绝对值）。只判卷
 //     不诊断——回退记录带 reason，人来看。
-//
 // 本模块纯逻辑（IO 全注入）：GUI 经 Tauri read_file/write_file/
 // list_persona_overlays，CLI 经 node:fs，测试经内存桩。
 

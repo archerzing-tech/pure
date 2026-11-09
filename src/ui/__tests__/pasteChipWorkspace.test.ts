@@ -2,7 +2,6 @@
 // Long-text overflow saves route into the user-selected session workspace when
 // one was chosen BEFORE the overflow; otherwise the backend falls back to the
 // application tmp workspace on an empty workspaceDir.
-//
 // These tests stay hermetic on purpose: bun test shares one process across
 // files, so faking window.__TAURI_INTERNALS__ here would poison the module
 // cache inside shared/tauri.ts for every later file. Wiring is asserted via

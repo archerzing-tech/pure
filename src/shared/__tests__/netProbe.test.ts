@@ -430,7 +430,6 @@ describe('netProbe 报告渲染', () => {
   });
 });
 // ── 结构约束：GUI 永远拖不进 node:* ──────────────────────────────────
-//
 // 为什么这段值得单独成测试：node:net / node:tls 在 Vite 的浏览器构建里是
 // __vite-browser-external 空壳，而 netProbe 只差一个 **导出的命名导入**（例如
 // `import { connect } from 'node:net'`）就让 rollup 在解析期报 "connect is not exported"，整个 WebView

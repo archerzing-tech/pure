@@ -175,7 +175,6 @@ export function loadCliExternalTools(evolutionEnabled = true): CliExternalTools 
 // replacing the old single ~/.pure/memory.json UserProfile. The Harness
 // searches it at session start (PromptComposer injects the top memories into
 // the system prompt) and writes a successful_pattern when a session completes.
-//
 // WASM (v2.1): the store is wrapped in WASMEmbeddingStore — the same
 // transformers.js-WASM semantic retrieval the GUI uses — so recall is
 // vector-similarity based instead of literal keyword matching. The WASM model
@@ -184,7 +183,6 @@ export function loadCliExternalTools(evolutionEnabled = true): CliExternalTools 
 // model / WASM unavailable) falls back to keyword search, so the CLI keeps
 // working exactly as before in every environment. Scripts/CI that don't want
 // the first-search download can force keyword mode with PURE_MEMORY_KEYWORD=1.
-//
 // E0.4 — released single-file binaries can't load transformers.js (its static
 // onnxruntime-node import can't be bundled), so the compiled build injects the
 // OrtWebEmbedder (embedded ort-wasm runtime + q8 MiniLM) through the wrapper's
@@ -366,7 +364,6 @@ async function createTools(
   // toolsDefs are the composite adapter's own (the CLI-available built-ins
   // plus the five dynamic capability tools) so the LLM never sees
   // registry-only git_* tools it cannot actually call.
-  //
   // `autoApprove` (driven by --auto-approve) flips that gate to fully open:
   // every tool call is allowed without prompting. Useful for piped / scripted
   // invocations where no human is at the keyboard to answer y/n/a.

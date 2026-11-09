@@ -2,7 +2,6 @@
 // Telegram Bot API 传输层接缝。适配器只依赖这个接口；真实运行用 httpTransport
 // （纯 REST：getUpdates 长轮询收、sendMessage 发——出站连接、无需公网回调，
 // 与钉钉 Stream / QQ websocket 同型的「零公网依赖」接入方式），单测用 mock。
-//
 // 协议要点（2026-11 快照，https://core.telegram.org/bots/api）：
 //   - 鉴权：单一 bot token（@BotFather 发放），所有端点形如
 //     /bot<token>/<method>；token 即全部凭据。

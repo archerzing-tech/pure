@@ -1,12 +1,10 @@
 // src/harness/personaOverlays.ts
 // 阶段 13.3 — 存量子 Agent prompt 自改进的装载半边。
-//
 // persona 拆两层：代码里的 base（不动）+ 进化 overlay（`~/.pure/personas/<role>.overlay.md`，
 // 只增补约束/技巧，不重写 base）。本模块是 pure compiler：把宿主（GUI 走 Tauri invoke、
 // CLI 走 node:fs）收集来的 `{ file, text }` 源编译成 role → overlay 文本映射。
 // 它对文件系统一无所知——宿主用自己现成的 IO 收集源（同 13.2 externalSubagents 的分界），
 // Bun 测试因此可以覆盖整条编译管线而无需 mock IO。
-//
 // 回滚契约：删掉 overlay 文件即回原样（注册表启动时扫描，运行中不热删——
 // 下个会话自然消失，见 capability-self-extension-design.md 边界情况表）。
 

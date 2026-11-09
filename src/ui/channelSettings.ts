@@ -4,7 +4,6 @@
 // read_file/write_file 直接编辑该文件；密钥不进 localStorage/channels.json，
 // 走 Rust secret_set/secret_get 落在 ~/.pure/secrets.json（0600）——
 // 与 CLI/gateway 的 appSecretRef/clientSecretRef 约定同源，零翻译层。
-//
 // 一键开通（2026-11-07）：凭据表单收敛成一个粘贴框——用户从平台控制台整段
 // 复制（两行/JSON/裸值都认，解析与 CLI configure_channel 共享同一纯函数），
 // 提交前先经 Rust channel_verify 向平台 token 端点真实探活（WebView 直 fetch

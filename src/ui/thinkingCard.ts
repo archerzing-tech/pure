@@ -3,7 +3,6 @@
 // the reasoning stream is visible live, and the native details control lets the
 // user collapse and reopen it. Completed thinking remains in the transcript so
 // it can be reviewed after the assistant answer or a tool call appears.
-//
 // Shared structure with toolRow.ts: `.bubble-row` wrapper + `<details>`, so
 // live streaming (chat.ts) and any future replay render identically.
 

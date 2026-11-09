@@ -1,6 +1,5 @@
 // src/harness/externalSubagents.ts
 // 阶段 13.2 (loading half) — external subagent roles as declarative JSON.
-//
 // 北极星原则一 (multi-agent-self-evolving-architecture.md): evolution
 // artifacts are versioned manifest FILES that enter through exactly ONE
 // existing register seam. This module is that seam's compiler: it turns

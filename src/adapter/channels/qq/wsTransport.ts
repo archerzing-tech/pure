@@ -4,7 +4,6 @@
 // 出站长连接到平台（wss://api.sgroup.qq.com/websocket），不需要公网回调地址；
 // 出站消息走 REST（被动回复：引用入站 msg_id + 递增 msg_seq，同一条入站最多
 // 引用 5 次 —— 通道投影的分帧收敛在 chunk 数 ≤5 内由 chunkText 的长度上限保证）。
-//
 // 断线重连走全量 Identify（不实现 RESUME）：入站幂等由 gateway 的 messageId
 // 去重兜底，出站走 REST 不经 WS，重连不丢语义。协议常量集中在顶部，实测
 // 校准点见 cn-im-channels.md §7。

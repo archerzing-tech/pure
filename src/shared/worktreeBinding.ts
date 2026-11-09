@@ -3,7 +3,6 @@
 // same git repository, it does not share the directory — it automatically
 // gets its own linked worktree (`git worktree add`) so both sessions can edit
 // the same files without stepping on each other.
-//
 // For the future reader, the two naming conventions this module owns:
 // - The worktree directory lives under `<pureHome>/worktrees/<repo-slug>-<hash>/<sessionId>`
 //   — deliberately NOT inside the repo (the primary checkout's `git status`
@@ -11,12 +10,10 @@
 //   uncommitted session work; a reboot must not be able to destroy it).
 // - The branch prefix `pure/session-` marks auto-created bindings, so the
 //   merge-back / cleanup flow (roadmap 4.4) can recognize its own worktrees.
-//
 // The session↔worktree mapping is recorded WITHOUT a new store:
 // SessionMeta.workspace points at the worktree path (so a restored session
 // reopens inside its worktree), and git itself keeps the reverse mapping
 // (worktree → main repo + branch) — `describeWorktree` reads it back.
-//
 // This module is runtime-agnostic and dependency-free (the GUI bundle runs
 // it in the browser, so no node:path): all git access goes through an
 // injected GitRunner and all paths are plain strings.

@@ -2,11 +2,9 @@
 // P0a 账本：Attempt 样本的入账与读侧。存储=P0 临时态（localStorage + CLI fs
 // 同 schema 双落点，蓝图 §2.1 明写「GUI localStorage 只作 P0 临时态」）；
 // 终态=WebCache 形态共盘单文件，P0b 接线时随 Rust 回传通道一并落。
-//
 // 写入纪律（蓝图 §2.1）：单写者——本模块是进程内唯一写入点，写即整表原子
 // 替换；跨进程 last-writer-walls + 字段级合并（deadUntil 取 max，防旧快照
 // 复活死路）在共盘终态落地时由存储层承担，本层先把合并语义做成纯函数钉住。
-//
 // cache 不产 Attempt（不变量 2）：recordAttempt 不做运行时拦截（调用方是
 // P0b 的出口代码，接线评审把 cache 命中挡在 plan 层），但读侧的 argmax 消费
 // 永远不会看到 'cache' 的 Stat——本模块对 cache transport 的样本直接拒绝，

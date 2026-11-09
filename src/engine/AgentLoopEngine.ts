@@ -586,7 +586,6 @@ export class AgentLoopEngine {
         // limit long before the advertised window, the 400 body matched no
         // context phrase, and the ladder ground 5-8 full-size retries before
         // stopping — every later turn re-ran the same doom.
-        //
         // Recover instead: learn the real window from the body when the
         // provider names one, recompact HARDER than the budget (aggressive
         // mode clears old tool results and targets a safety margin) and

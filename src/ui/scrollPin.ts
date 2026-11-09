@@ -3,7 +3,6 @@
 // restore (main.ts). All scroll-to-bottom writes go through ONE rAF-coalesced
 // path so a burst of content changes (tokens, streamed command lines, reasoning
 // deltas, restored bubbles) never triggers a forced layout per event.
-//
 // Pinned = the user hasn't manually scrolled away from the bottom. While
 // pinned, every content change scrolls to the absolute bottom; once the user
 // scrolls up, auto-scroll stops until they return to the bottom.

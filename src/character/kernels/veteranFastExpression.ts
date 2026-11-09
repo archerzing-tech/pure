@@ -1,16 +1,13 @@
 // src/character/kernels/veteranFastExpression.ts
 // 性格内核「老手快线」的表达面场景账（人格轨道 刀 3，2026-10-11）。
-//
 // 人读源是项目根 SOUL.md 的 soul:expression:veteran-fast 块（每场景的义务 / 禁止 / 源句 +
 // 3–5 条 few-shot 例句 + 红线清单）；本文件是**注入面**：每个场景的
 // label / obligation / forbidden / derivedFrom 与 .md 逐字同文（快照测试守），
 // 注入文本由 buildCharacterExpressionPrompt 装配成 fragment
 // `character_expression`（priority 107）。
-//
 // 例句**不在这里**——它们只进 .md：写进 prompt 的例句会被逐字复用成新一代机器腔
 // （src/shared/promptLayers.ts:245 的既有立场），而例句对刀 4 的判例集与人工抽查
 // 仍然有用，所以放人读账、不进注入面。characterExpression.test.ts 反向锁死这一点。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 import {

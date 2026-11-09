@@ -1,12 +1,10 @@
 // src/ui/errorLedger.ts
 // GUI 未捕获异常台账。
-//
 // 「快速甩动后按钮全死、聊天窗口空白」这类僵尸态事故,WebContent 进程活着
 // (采样空闲、RSS 三百多兆)但页面已经聋了——它的 console 外面读不到,
 // 事后没有任何第一手证据。这里在页面内拦 window error /
 // unhandledrejection,攒批落盘到 ~/.pure/gui_errors.log(Rust gui_error_log
 // 命令只管 append),下次再聋,精确异常栈就在文件里。
-//
 // 台账自身必须比页面更皮实:落盘失败静默丢弃,绝不再抛;同一次异常级联里
 // 保前 50 条(最早的往往是根因),超长字段截断。
 

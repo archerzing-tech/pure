@@ -1,8 +1,6 @@
 // 插话语料回归（2026-09-28）：把回放脚本用的那批真实插话原文接进常规回归。
-//
 // 这里锁的是**语料本身的行为边界**，不是模型判定质量——所以不需要 API key，
 // 每次 `bun test` 都能跑。
-//
 // 2026-10-28 框架改革刀 1：七条机械快路径正则整族删除（STOP_RE/
 // BRANCH_STOP_RE/RESUME_BRANCH_RE/GOAL_CHANGE_RE/CANCEL_PART_RE/URGENT_RE/
 // SCOPE_ADD_RE 及 netVerdict 字面网），主路只剩裁决器 judge 与原话直投
@@ -12,9 +10,7 @@
 //   2. 收割段与人工段的边界（suspected 不冒充断言）
 //   3. 场景跟句走（回放按句取场景，不回到全场一个上下文）
 //   4. 机械路径不回潮（导出面锁死）
-//
 // 语料本体在 ../insertionCorpus.ts，与 scripts/replay-insertion-decisor.ts 共用。
-//
 // 语料分两段（2026-09-28）：人工核对的 CASES（可断言 kind），与诊断区审计自动
 // 收割的 HARVESTED_CASES（期望由疑点原因反推，标 suspected）。
 

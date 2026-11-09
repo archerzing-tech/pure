@@ -1,13 +1,11 @@
 // src/coding-agent/delegationControl.ts
 // S2 第二刀（P3-2 控制面抽出）— 委派控制面的宿主无关状态机：起飞闸挂号簿
 // （出生前取消）、委派原始参数捕获（分支级续跑的凭据）。
-//
 // 此前三本账散在 chat.ts 的字段里（pendingCancels / delegationArgs / 操作
 // 闭包），CLI/通道宿主没有等价物。本模块把状态与匹配原样抽出：匹配口径的
 // 单一真相在 steerTargeting（matchInFlightBranch / planTakeoffGate），这里
 // 只是有状态容器 + 派发缝，不发明第二种语义。收执渲染、折入、steer 路由
 // 留在宿主。
-//
 // 点名停支（2026-10-10 重构）：曾经住在这里的 stopNamed（区分词匹配 + 单支
 // 兜底）整刀拆除——「停哪支」是理解，归裁决器从花名册里指认确切 callId
 // （模型判断、宿主执行），宿主不再做任何文本匹配。

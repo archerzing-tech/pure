@@ -1,11 +1,9 @@
 // src/harness/externalTools.ts
 // 阶段 13.4 (loading half) — external script tools as declarative manifests.
-//
 // 北极星原则一：进化产物 = 版本化 manifest 文件，经唯一既有注册接缝进入。
 // 本模块是接缝的编译器：`~/.pure/tools/<name>/TOOL.json` → TaggedTool，宿主
 // (GUI / CLI) 扫描后注册进 ToolRegistry（MCP 同款通路）。零 IO——测试整条
 // 覆盖无需 mock 文件系统。
-//
 // 执行模型（设计文档 capability-self-extension-design.md §13.4）：exec 是一
 // 条命令模板，`{param}` 占位符替换为 tool-call 输入参数后经既有
 // execute_command 信任模型跑（权限门/超时/取消全部同一套，不新建安全面）。

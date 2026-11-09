@@ -1,10 +1,8 @@
 // src/channels/rasterize/browserBundle.ts
 // 把 mermaid / @plantuml/core 按需打成一个自包含的浏览器 IIFE，好让 headless
 // Chrome 直接 `Runtime.evaluate` 执行 —— 不写文件、不起 HTTP 服务、不碰 CDN。
-//
 // 打包用 Bun.build（内置，零新增依赖）。入口写成绝对路径 import，所以临时入口
 // 文件放系统临时目录也能从项目的 node_modules 里解析依赖。
-//
 // 只有真的要渲染 mermaid/puml 时才会走到这里：一次打包 + 一次注入，之后按
 // 进程缓存复用。没装 Chrome、打包失败都只是让调用方返回 null（降级为文本）。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

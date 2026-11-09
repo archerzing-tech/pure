@@ -1,18 +1,14 @@
 // src/adapter/memory/evolution.ts
 // v1.5 智能进化记忆系统（Adapter Layer 设计文档 §12.8）——把旧的"单一时间轴减半
 // 衰减"升级为多维健康分 + 生命周期 + 策略进化：
-//
 //   健康分 = 时间维度(recency) × 可信度维度(credibility) × 使用频率维度(usage)
 //            × 进化状态维度(superseded)
-//
 // 生命周期按健康分推进：active（活跃）→ degraded（降级）→ dormant（休眠，
 // 不再进检索）→ 删除（跌破删除线，或休眠超过宽限期仍未再被使用）。
-//
 // 进化：当一条"新"记忆（procedure / successful_pattern / user_preference /
 // project_convention）与同类型旧记忆针对同一情境（内容定向覆盖率高）时，新条目
 // 取代旧条目 —— 旧条目打 supersededBy 标记并立即降级，之后以 0.4 的惩罚因子
 // 更快地走完 降级 → 休眠 → 删除，实现"不合时宜的策略慢慢进化成最新最好用的"。
-//
 // 全部为纯规则、确定性计算：不依赖 LLM / 网络，评分在任何环境行为一致、可单测。
 
 import type { MemoryEntry, MemoryType } from './IMemoryStore';

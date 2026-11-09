@@ -2,7 +2,6 @@
 // 插话文本的单一事实来源。框架改革一期刀 A2（docs/framework-reform-2026-11.md）
 // 收口：本模块只剩**框架文本**——面向模型的机制指令，只描述机制事实，不示范
 // 措辞，更不冒充模型的口吻对用户说话。
-//
 //   收执 = 承接插话的模型现场写的 receipt，唯一来源；引擎在模型缺席时沉默
 //   （宁可无话，不出机械腔——机制状态由 UI 呈现）。回应性固定话术（branchStop
 //   / cancelBeforeDispatch / foldIn / foldInEarly / queued / queuedUrgent /
@@ -11,10 +10,8 @@
 //   branchResume / treeResume 及 covered「不重复派」字面量，本刀）已全部退役：
 //   暂停、续跑、去重这些宿主动作由活动面板与生命周期卡呈现，模型的下一动作
 //   被框架告知机制事实后自然带出叙述。
-//
 // 纪律：这里只放文本，不放判定逻辑。判定（谁停、停哪支、何时停）归
 // DynamicInsertionCoordinator / chat.ts / DelegationControlPlane。
-//
 // 核心口径不变：停/暂停一支是**宿主的动作**，模型永不亲自动手停；模型
 // 负责叙述、排除产出（不进最终汇总）、合并幸存者。
 

@@ -1,11 +1,9 @@
 // src/ui/overlayRevertHost.ts
 // P1-2 — 已回退 overlay 的 GUI 宿主缝（判定/恢复纯逻辑在 harness/overlayGuard.ts，
 // 这里只做 Tauri IO 与数据源装配——与 toolQuarantineHost 同构）。
-//
 // 为什么单独一个模块：回退护栏有两个人用——装载面经 loadOverlayText 决定装哪段
 // 文本，设置页要列出已回退的、给恢复入口。两处各读各的 meta 会漂移成两个真相
 // （「装载面认为它回退了、面板认为它没有」）。这里一个 owner。
-//
 // 红线（与 toolQuarantineHost 同一条）：`skills.evolution === false` 时返回
 // 「什么都没有」——总开关关掉的会话不装载进化层，也不该看到回退卡或恢复动作。
 

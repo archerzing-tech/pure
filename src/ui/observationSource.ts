@@ -2,7 +2,6 @@
 // E4.2 — 进化仪表盘的数据入口（GUI 侧）。观测记录长期落在
 // ~/.pure/observations/app.jsonl（E0.1），WebView 没有 node:fs，所以走 Rust 的
 // read_observations 尾巴读：只取文件末尾一段，避免 64MB 的字符串跨 IPC。
-//
 // 浏览器模式 / 读失败都返回 available:false —— 仪表盘据此显示"桌面版才有
 // 观测数据"，而不是把空数据当成"你从没跑过任务"。
 

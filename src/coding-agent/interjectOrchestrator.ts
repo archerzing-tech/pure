@@ -10,18 +10,15 @@
 //   - new_task 臂：排队（收尾后自动开新轮），撞车先过复核。
 // 嘴/手分开（细化 1）：思考流在吐字 → abortReenter 掐流，插话入 steerBus，
 // 新回合第一个 THINK 边界自然注入；工具/支在飞 → 不打断。
-//
 // holdGate 软暂停闸 / 真暂停押账重入（roundClose.holdInsert）/ 任务状态投影
 // （change 臂③）/ selfCheckDrift 自查 / 九类处置表（change/correction/
 // misunderstanding/mixed/newTaskArm/旧 steerArm/handleCancelFold）随本刀退役
 // ——并线路流已断无闸可扣，取消的消化归主线模型。
-//
 // 此前这一整套焊死在 chat.ts（GUI 控制器）。S3 的前置硬约束：判定只有一
 // 份、控制面是无宿主状态依赖的决策核——本模块把决策核搬出来，DOM（ack 行/
 // 回显/收执/事件日志/控制台诊断）、LLM 产出（旁答/追问）、铺排（折入框架/
 // 转向框架/队列卡）与引擎把手（abort/真停支）经依赖缝留给宿主。宿主读数
 // （流态/在飞/分支视图）全部注入，决策核不猜宿主状态。
-//
 // ack 句柄不透明（InterjectAck = unknown）：宿主给什么还什么——GUI 是
 // HTMLElement，通道宿主可以是任何东西。收执话术的单一事实来源仍在
 // insertionMessaging（本模块只引用，不内联第二份）。

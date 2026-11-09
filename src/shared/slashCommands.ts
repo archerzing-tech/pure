@@ -4,7 +4,6 @@
 // mcpPrompt.ts) so the GUI composer — and any future CLI port — share one
 // syntax. A parsed command NEVER reaches the engine: the host executes it and
 // clears the draft.
-//
 // /clear 历史注:2026-09-24 曾裁定「不加 /clear,侧栏新对话已拥有会话切换」;
 // 2026-10-30 用户改裁定——输入栏直接敲 /clear 要能用,侧栏按钮与命令并存,
 // 同一套清场行为。

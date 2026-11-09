@@ -2,7 +2,6 @@
 // v0.6 — Tauri-first session persistence with localStorage fallback.
 // Stores sessions to ~/.pure/sessions/ (FSStore-compatible) when running in Tauri,
 // falls back to browser localStorage for plain Vite dev.
-//
 // Per-session usage stats (token totals, cost, tool activity) are FILE-BACKED
 // in Tauri: ~/.pure/sessions/<id>/stats.json via the save_session_stats /
 // load_session_stats commands, so they live and die with the session. An

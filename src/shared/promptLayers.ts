@@ -1,7 +1,6 @@
 // src/shared/promptLayers.ts
 // Layered prompt fragments (system / application / user), compiled by the
 // shared PromptAssembler for GUI, CLI, and Harness so the surfaces do not drift.
-//
 //   L0 SYSTEM   — immutable core: identity, safety, permission modes, runtime,
 //                 response format. Changes only when the product's contract
 //                 changes.
@@ -14,7 +13,6 @@
 //                 message (composeUserTurn), never the system prompt, so the
 //                 system message stays stable across a session and each
 //                 request's task context rides next to the request itself.
-//
 // Rule of thumb for where a fragment lives:
 //   - immutable product contract        → L0 (this file)
 //   - depends on app state, not request → L1 (tools, env, skills, mode)
@@ -26,7 +24,6 @@ import { PROACTIVE_WORKFLOW_PROMPT, COMPLETION_LESSON_PROMPT, INFORMATION_VALUE_
 // The agent's stable identity + global operating contract. Kept deliberately
 // lean: every token here is paid on EVERY turn of every session, so it holds
 // only what is true regardless of workspace, tools, or request.
-//
 // This constant is the RUNTIME single source of truth — there is no doc
 // mirror anymore (the old system-prompt.md mirror is a frozen 2026-09 snapshot
 // in docs/archive/ and is no longer maintained). Detailed

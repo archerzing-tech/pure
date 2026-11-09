@@ -1,5 +1,4 @@
 // Baked-in baseline default AGENTS.md for the standalone CLI.
-//
 // Pure seeds `~/.pure/AGENTS.md` from this constant on first run so the global
 // install works even when launched from a directory that ships no AGENTS.md.
 // Keep it in sync with the project-root AGENTS.md — `bun test` asserts parity.

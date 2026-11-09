@@ -1,6 +1,5 @@
 // src/coding-agent/inputDecision.ts
 // ONE vocabulary for "what do we do with this user input?".
-//
 // The route decision used to be re-derived in six places — the synchronous
 // Planner verdict, `shouldBypassSemanticRoute` / `isPlainConversational`, the
 // hidden semantic route, `compileRequestWorkflow`, the mid-run insertion
@@ -10,7 +9,6 @@
 // question (so the router never ran and the turn was treated as chit-chat), and
 // a scope addition classified as `steer` whose promise could not be cashed (the
 // words were silently dropped).
-//
 // This module does not take over the decisions. It gives them a common SHAPE
 // (`InputDecision`), a common GATE (confidence below the threshold asks instead
 // of guessing) and a common LOG (a replayable trace of what was decided and
@@ -340,17 +338,13 @@ function clockText(source: string): string {
 // held until later — misreading a request as "later" is far more expensive than
 // missing a schedule, so a bare time is NOT enough: it has to sit inside a
 // deferral frame.
-//
 //   "再过 10 分钟再跑一遍测试"        → at(now + 10min)
 //   "下午三点再跑一遍"                → at(today/tomorrow 15:00)
 //   "等到明天早上九点"                → at(tomorrow 09:00)
-//
 // but a time that is merely the OBJECT of the request never counts:
-//
 //   "把 15:30 这个时间戳改成 UTC"      → not a schedule
 //   "15:30 之后的日志都删掉"          → not a schedule (the `(?!的)` below)
 //   "为什么下午三点再跑就报错？"        → not a schedule (question intonation)
-//
 // Only a resolvable MOMENT counts: a bare "明天" is day-granularity talk
 // ("明天再说"), not a schedulable input, so it never comes back as `at`.
 

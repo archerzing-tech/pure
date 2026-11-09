@@ -1,6 +1,5 @@
 // src/coding-agent/__tests__/externalToolQuarantine.test.ts
 // 阶段 13.4 停用门的**接线**测试：执行面计数 + 停用后拒绝 + 计数跨回合持久化。
-//
 // 判据本身在 harness/toolQuarantine.test.ts（纯函数）。这里锁的是「判据有没有真
 // 被接上」——上一版正是判据写对了、接线是死的：宿主 seed 不读盘、每回合新建
 // executor、`quarantinedToolResult` 全仓库只有测试引用，而这一切都不会让任何单测

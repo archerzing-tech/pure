@@ -1,13 +1,11 @@
 // src/adapter/mcp/oauth.ts
 // 6.4 — OAuth 2.0 (Authorization Code + PKCE) for HTTP MCP servers.
-//
 // pure is a public client: no client secret is required — servers either
 // publish a dynamic-registration endpoint (RFC 7591) and we register on first
 // login, or the user pastes a static client_id into the server config.
 // Discovery follows the MCP authorization spec chain: a 401 WWW-Authenticate
 // challenge may point at RFC 9728 protected-resource metadata, which names the
 // authorization server(s); otherwise the well-known URLs are probed directly.
-//
 // All HTTP goes through an injected `OAuthHttp` so the core is testable and
 // runtime-agnostic (WebView relays via `mcp_http_request`, CLI can use fetch).
 

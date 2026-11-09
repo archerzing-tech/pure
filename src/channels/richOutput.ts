@@ -1,11 +1,9 @@
 // src/channels/richOutput.ts
 // 富输出的降级矩阵（设计文档 §7）：把回答里的 ```chart / ```svg / ```mermaid /
 // ```puml 块光栅化成 PNG 附件；通道能力不足或没有对应渲染器时诚实降级为文本。
-//
 // 渲染器是注入的接缝：gateway 注入本地渲染器（charts/svg 真跑），单测注入替身。
 // mermaid / puml 需要 DOM/headless 渲染器 —— 没注入时**不假装成功**，只回一条
 // 说明并把源码留给用户。
-//
 // 刀 4（formProjections）：chart / map / paint 三形式在 text 降级分支不再裸
 // JSON/源码直出——先试文本投影（条形图/标记清单/形状清单），成功就把正文里的
 // 该围栏块替换成投影（projectedText），失败保持源码（绝不产出错误的图）。

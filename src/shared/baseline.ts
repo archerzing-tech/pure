@@ -1,6 +1,5 @@
 // src/shared/baseline.ts
 // 评测基线的共享口径：套件版本常量 + 快照结构。
-//
 // 放在 shared 下是因为两边都要用：评测侧（src/evaluation）产出报告，进化仪表盘
 // （src/ui）把发布口径的成绩显示出来。仪表盘不能 import 评测侧的模块——那边
 // 依赖 node:fs / node:path，会把设置页的懒加载 chunk 拖成 node 代码。

@@ -1,12 +1,10 @@
 // src/coding-agent/foldInLedger.ts
 // S2 第四刀（P3-2 控制面抽出）— 折入账本：折入的「闸 · 账 · 核验」宿主无关化。
-//
 // 此前 pendingFoldIns 的三条裁决散在 chat.ts 的 deliverDueFoldIns /
 // takeSyntheticToolCalls / settleFoldIns：委派在飞时不可交付（闸）、投递时记
 // 活动水位（账）、收尾核验「没被照办就转排队」（核验）。CLI/通道宿主没有等
 // 价物——远端「追加一件事」无从记账。本模块把这三条原样抽出，不发明第二种
 // 语义。
-//
 // 分家判据与 SteerBus 同款：决策核不猜宿主状态——在飞与否、活动水位、末位
 // 活动角色全部由宿主在调用点注入；宿主投影不藏裁决——指令框架/取消框架/
 // 合并口径文案与代执行任务书构造留在宿主（foldInInstruction 系文案在

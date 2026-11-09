@@ -2,15 +2,12 @@
 // Platform-appropriate browser User-Agent for all outbound web requests.
 // Search engines and many sites block the bare "Pure/1.0" string; a real
 // browser UA keeps both search backends and web_fetch targets responsive.
-//
 // The UA is chosen per-platform so that the OS token in the string matches
 // the actual runtime — a Windows IP sending a macOS UA is a contradiction
 // signal that advanced bot detection (Cloudflare, etc.) flags.
-//
 // Chrome version tracks the current stable channel (verified via the
 // Google versionhistory API). Both platforms share the same Chrome major
 // version; only the OS token differs.
-//
 // Windows 10/11  → "Windows NT 10.0; Win64; x64"
 // macOS 13+      → "Macintosh; Intel Mac OS X 10_15_7"
 

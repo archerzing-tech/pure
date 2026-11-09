@@ -8,7 +8,6 @@ import { probedCapabilityKey } from './capabilityProbe';
 // Declarative registry of supported LLM providers — the single source of
 // truth for provider ids, display labels and default models, shared by the
 // GUI (settings panel, sidebar, chat) and the CLI so the values never drift.
-//
 // Adding a new provider is a one-file change: add an entry here, its i18n
 // labels in shared/i18n.ts and — if it should appear in the GUI dropdown — a
 // matching <option> in index.html.

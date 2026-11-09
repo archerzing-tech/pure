@@ -1,10 +1,8 @@
 // src/cliErrorLog.ts
 // 错误台账的 CLI 面：写入（append + 轮转）与读取（pure errors）。
-//
 // CLI 宿主有 node:fs，直写 ~/.pure/gui_errors.log——与 GUI WebView（Rust
 // gui_error_log 命令）、Rust panic 钩子共认同一份 JSONL。轮转阈值与 TS/Rust
 // 两侧同值（shared/errorLog.ts 的 ERROR_LOG_ROTATE_BYTES）。
-//
 // `pure errors [N] [--json] [--clear]` 是调测入口：tail 最近 N 条（默认
 // 20）人读格式；--json 原样吐行；--clear 清空重开（调测会话常用的隔离
 // 动作，显式 flag 才删数据）。

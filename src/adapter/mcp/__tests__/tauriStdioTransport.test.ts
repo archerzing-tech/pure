@@ -2,11 +2,9 @@
 // 审计批 4⑥：ensureSpawned 的单飞闸。没有它，并发首调各自看到
 // spawned=false 就各 invoke 一遍 spawn_mcp，Rust 侧同键注册表覆盖旧
 // handle——旧子进程从此没人杀，每个重复 spawn 泄漏一个进程。
-//
 // 懒重生：Rust 侧判死丢句柄后给错误打「MCP server process gone」前缀，
 // TS 侧据此摘 spawned 闩，下一次 send/notify 经 ensureSpawned 懒重生——
 // GUI 版的 CLI StdioTransport「exit→teardown→下次 send 重生」。
-//
 // 走法：直接驱动私有 ensureSpawned、用实例级覆写替掉 doSpawn（仓库既有
 // 的 (x as unknown as {...}) 私有访问惯例）。不碰模块级 mock——mock.module
 // 是全进程注册，全量跑时会与别的测试文件互踩。

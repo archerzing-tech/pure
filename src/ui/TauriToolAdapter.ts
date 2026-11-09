@@ -377,19 +377,16 @@ import {
 } from '../shared/netProbeCore';
 
 // ── diagnose_network 的 GUI 侧接线 ─────────────────────────────────────────
-//
 // 判定核心（护栏 / DoH 判定 / 归因合并 / 置信度 / 报告渲染）直接用
 // shared/netProbeCore.ts，与 CLI 同源；本文件只提供 WebView 拿得到的那两个
 // 原语：DoH（WebView fetch）与 HTTP（Rust 的 web_fetch_probe，它有代理与
 // 劫持判定）。TCP / TLS 两步在浏览器里**真的做不了**（没有套接字、不给读对端
 // 证书），如实标 skipped 并自陈，置信度由核心统一降档。
-//
 // 为什么核心与 node 适配层要分开：shared/node/netProbe.ts 在模块作用域
 // import node:net / node:tls，Vite 会把 node:* 变成 __vite-browser-external
 // 空壳，rollup 在**解析期**就报 "connect is not exported"，整个 WebView 构建
 // 失败（不是运行期降级，已用最小 vite 工程复现）。所以拨号原语住在
 // src/shared/node/（路径本身说明「仅 node 宿主」），GUI 永远只碰 core。
-//
 // 被放弃的方案：让 core 动态 import('node:net') —— Vite 仍会把同样的 external
 // 桩打进 chunk，解析期报错不变。
 

@@ -6,7 +6,6 @@
 // triggered repeated searches while CLI rolled over). Behavior caliber is the
 // CLI (Node) form — the fuller one: CJK bigram relevance gate, per-backend
 // quota cooldowns, shared cookie jar, one normalized retry, Jina last resort.
-//
 // Like the other impl modules this file is pure logic over injected
 // primitives — no node APIs, no global fetch, no process.env — so the SAME
 // module runs in Bun (CLI) and the WebView (GUI). Each adapter supplies:
@@ -21,7 +20,6 @@
 //   - cacheGet/cacheSet: the shared ~/.pure/cache/web-cache.json TTL cache
 //     (Node reads the file directly; the GUI goes through the Rust WebCache
 //     commands) — optional; without it searches just never cache.
-//
 // The Tier-2 structured fast path (weather/geo/news/wiki/IP/FX/stock/GitHub)
 // is NOT part of this module: it is caller-side on both hosts (Node's
 // cachedDirectPublicApi, the GUI's web_public_api command) and converges in

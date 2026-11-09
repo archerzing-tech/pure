@@ -3,7 +3,6 @@
 // Ctrl+Space) a popup suggests recent session titles, past commands, and
 // recently written file paths — real context from the local store, no fake
 // slash macros. Insert replaces the current word; Tab/Enter accept, Esc closes.
-//
 // DOM is kept in this module (positioning mirrors composerSelect: fixed coords
 // below the input, outside-mousedown/resize/scroll dismiss, arrow-key nav) so
 // main.ts only constructs the class. The pure filter + candidate builder are

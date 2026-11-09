@@ -1,11 +1,9 @@
 // src/character/core.ts
 // 性格内核（Character Core）的装配面：源句类型 + 注入文本装配（人格轨道 刀 2）。
-//
 // 内核是第 0 层，decision（怎么做）与 expression（怎么说）都是从它派生的投影
 // （docs/persona-core-upgrade.md §1）。本模块只做两件事：
 //   1. 定义源句表与 id 的类型（`CharacterKernelLineId` / `CharacterKernelLines`）；
 //   2. 把源句装配成注入 system prompt 的精炼版（fragment `character_core`）。
-//
 // 铁律 1（投影必须标注推导来源）的机制面在两处：
 //   · TS 侧：`CharacterProfile.decisionDerivation` 是
 //     `Record<keyof CharacterDecisionProfile, readonly CharacterKernelLineId[]>`，
@@ -14,7 +12,6 @@
 //     人读镜像逐字同文（见 __tests__/characterCore.test.ts）。
 //   · 反过来不要求：不被任何旋钮引用的源句是**内核通道**的长尾素材（强模型在
 //     参数没盖住的情境里按性格外推，蓝图铁律 2），不强制有投影。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 /**

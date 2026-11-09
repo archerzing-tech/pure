@@ -4,7 +4,6 @@
 // through EngineContext/HarnessConfig. The CLI passes
 // createNodeUserHookRunner(); a future GUI passes a Tauri-IPC runner — OS
 // capability stays on the host side of the adapter boundary.
-//
 // Contract (v1):
 //  - the payload reaches the hook as one JSON line on stdin;
 //  - on_pre_tool exit code 2 blocks the tool call (deterministic gate); any

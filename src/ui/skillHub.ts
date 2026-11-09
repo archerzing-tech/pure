@@ -1,6 +1,5 @@
 // src/ui/skillHub.ts
 // Third-party skill hub integration (Settings → Skills → Skill Hub).
-//
 // Hubs follow the open `skills` ecosystem (the `npx skills` CLI / skills.sh):
 //   - Index (two formats, probed in order):
 //       * `skills.sh.json` at the repo root — Vercel-style grouped catalog
@@ -11,7 +10,6 @@
 //   - Skill content: `<repo>/skills/<name>/SKILL.md` with YAML frontmatter
 //     (name, description, optional metadata), exactly what the `npx skills`
 //     CLI installs into .agents/skills/.
-//
 // Installed skills are stored in the PureConfig `hubSkills` array (name +
 // description + source + the SKILL.md body) and surface as toggle cards next
 // to the built-in skills. When enabled, the body is injected into the system

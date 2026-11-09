@@ -1,7 +1,6 @@
 // src/channels/renderer.ts
 // EngineEvent → OutboundMessage 的能力驱动降级（设计文档 §7）。
 // 所有通道共享这一份渲染器；差异只在 capabilities 声明里。
-//
 // 两条硬约束：
 // 1) 流式帧在规范层是「累积快照的全量替换」，不是 delta —— 适配器只负责把
 //    快照写到平台，累积与节流由这里统一处理；

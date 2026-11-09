@@ -1,11 +1,9 @@
 // src/shared/mirrorSources.ts
 // 国内可用的包管理器 / 代码托管镜像源清单 + 信任分层。
-//
 // 数据合规：chsrc 的「生态 → 源候选」表硬编码在 GPL-3.0 的 .c 文件里，抄它的
 // 编排是有法律风险的。本清单是**独立维护的事实数据**：域名与 URL 本身是事实、
 // 不受版权保护，表达方式（字段结构、顺序、注释）全部自研。可对照的 MIT 许可
 // 数据源是 MirrorZ 的 mirrorz.json（https://github.com/mirrorz-org/mirrorz）。
-//
 // 信任分层（产品边界，不可越界）：
 //   t0 官方同源 —— 零信任成本，自动可用。例：codeload.github.com。
 //   t1 机构 CDN  —— 高校/云厂商运营，自动可用但必须记事件可查。例：npmmirror。
@@ -260,7 +258,6 @@ export const MIRROR_SOURCES: Record<Ecosystem, EcosystemMirrors> = {
 };
 
 // ── 测速（纯函数，CLI 与 GUI 共用同一份）────────────────────────────────
-//
 // 为什么放在这里而不是 sourceSwitcher：GUI（WebView）不能 import 那个模块
 // （它在模块作用域 import node:fs）。清单 + 测速判据本来就是同一件事的两面，
 // 拆开放着就等于邀请两端各写一份拼接逻辑——那正是本轮要消灭的漂移。

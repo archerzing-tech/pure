@@ -2,14 +2,11 @@
 // 给通道富输出用的一次性 headless Chrome：只做「把图源码渲成 SVG」这件事，
 // 渲染能力来自真实 Chromium —— mermaid 依赖真实的 SVG 测量 API（happy-dom 下
 // render() 只会返回空字符串），PlantUML 的 TeaVM 引擎在 happy-dom 下直接挂死。
-//
 // 不引入 puppeteer/playwright：仓库里已有多个脚本用「系统 Chrome + --headless=new
 // + CDP over WebSocket」的裸协议模式（verify-plan-restore / repro-expand …），
 // 这里沿用同一套，零新增依赖，也避免为了几张图下载一份 170MB 的 Chromium。
-//
 // Chrome 缺失不是错误：findChromePath 返回 null，调用方据此不提供 mermaid/puml
 // 渲染器，富输出回到「诚实降级为文本」的老路（见 richOutput.ts 的降级矩阵）。
-//
 // 本文件带着 node:fs/os import，只能活在宿主端（Bun/CLI）；browser 工具
 // （tools/impl/browser.ts）会进 WebView bundle，它需要的零依赖部分拆在
 // cdpSession.ts（CDP 会话）与 chromeCandidates.ts（平台候选表），这里

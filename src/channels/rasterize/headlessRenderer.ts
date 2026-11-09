@@ -1,11 +1,9 @@
 // src/channels/rasterize/headlessRenderer.ts
 // 富输出降级矩阵里最难的一格：```mermaid / ```puml 光栅化成 PNG。
-//
 // 两者都必须在真实浏览器里跑 —— mermaid 依赖真实 SVG 测量（happy-dom 下
 // `render()` 只返回空字符串），PlantUML 的 TeaVM 引擎在 happy-dom 下直接挂死。
 // 所以这里的路线是：headless Chrome 渲出 SVG（复用 UI 同一批引擎与同一份
 // 离线语义）→ `@resvg/resvg-js` 光栅化成 PNG → 交给通道适配器的 `sendImage`。
-//
 // 能力是「可选的」：找不到 Chrome 时**不返回** mermaidToPng / pumlToPng，让
 // richOutput 走「没有可用的 headless 渲染器」的降级分支。渲染中途失败则返回
 // null，走「渲染失败」分支。两条路都不让附件生成拖垮回复本身。

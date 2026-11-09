@@ -3,7 +3,6 @@
 // MCPClient connects, lists tools, and is always torn down — nothing here is
 // auto-triggered (probing spawns a third-party subprocess; a cold `npx` can
 // even download packages), and results are cached by the caller per server.
-//
 // INVARIANT (do not bypass): the probe MUST use a throwaway sessionId, never a
 // real chat session's. The Rust subprocess registry (spawn_mcp) keys by
 // `sessionId:name` and OVERWRITES an existing entry, so reusing a live

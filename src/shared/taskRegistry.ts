@@ -1,6 +1,5 @@
 // src/shared/taskRegistry.ts
 // 后台任务登记表（execute_command background:true 的会话级账本）。
-//
 // 模块级单例——GUI 每回合重建 agent（冻结链判例），登记必须住在模块层才
 // 跨回合存活；CLI 单进程同理。只登记、不托管：进程是脱离式启动的，这里
 // 不持有句柄，kill 走各侧原语（CLI=process.kill，GUI=Rust kill_process）。

@@ -1,7 +1,6 @@
 // src/ui/turnVariants.ts
 // Reply variants (regenerate + edit-resend + version switching), pure logic —
 // no DOM, no chat imports, directly testable under bun.
-//
 // One variant group lives on the LAST user turn only: a variant is produced
 // while its turn is the last one (regenerate, edit-resend), and switching
 // rewrites the tail of the linear `messages` array (context stays the selected

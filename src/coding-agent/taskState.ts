@@ -1,6 +1,5 @@
 // src/coding-agent/taskState.ts
 // 插话架构 v2 地基：任务状态结构化（docs/insertion-redesign-v2.md §三）。
-//
 // 为什么要有这一层：插话判定从「模型读上下文现判」升级为「查结构化状态定位影
 // 响」。同一句「预算改成 50 万」在「还没用到预算」和「已基于旧预算产出」两种
 // 情况下处置完全不同——没有结构化状态就无从区分（用户插入会话的处理逻辑与流程
@@ -8,11 +7,9 @@
 //   - Plan/PlanStep（types.ts，本版补 dependsOn 数据依赖边），
 //   - TaskScript signals（shared/taskScript.ts，只追加事实账），
 //   - BranchState 七态（branchLifecycle.ts，委派支生命周期）。
-//
 // 分层纪律：foldTaskState 是纯折算（全部输入显式，同一输入同一快照）；
 // TaskStateStore 是薄壳（持约束登记 + 副作用账本两份可变账，每次查询现折）。
 // 处置管线只许走这里的查询 API 定位影响，禁止自己扫上下文（蓝图 §三）。
-//
 // 节点状态语义（一期锁死）：
 //   pending   — 计划里有、还没动；
 //   running   — 已开工未收束。已暂停未落定的委派支也算在飞：活没交回来，

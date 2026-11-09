@@ -3,7 +3,6 @@
 // 定调以插件形态提供。载体=pure 现成的外部脚本工具接缝（~/.pure/tools/
 // <name>/TOOL.json，执行=execute_command 既有体系，零新安全面）：install
 // 工具把预置 manifest 落盘，注册表扫描到即在下一轮生效（外部工具常驻可见）。
-//
 // 模板在此单源：CLI 壳（node:fs 原语）与 GUI 壳（Rust write_file command）
 // 共用同一份 manifest 数据，改文案/坐标语义两边同步。
 

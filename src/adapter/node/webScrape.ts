@@ -3,7 +3,6 @@
 // Pure parsing/extraction utilities only — the fetch wiring lives in
 // NodeToolAdapter.handleWebScrape (which owns charset decoding, content-type
 // gating, and timeouts), so this module never imports from the adapter.
-//
 // Extraction pipeline, in order:
 //   1. HTML → noise-tag stripping (nav/header/footer/aside/form/…), optional
 //      selector scoping (#id / .class / tag), then tag-strip + entity-decode.

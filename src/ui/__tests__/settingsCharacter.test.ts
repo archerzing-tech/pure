@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { listCharacterProfiles } from '../../character';
 
 // 人格轨道 刀 5 的设置页接线锁。
-//
 // 为什么用静态断言而不是渲染测试：设置面板是一个 4600 行的 DOM 类（静态标记在
 // index.html、读写散在 loadToForm / gatherConfig / autoSave 三处），仓库对它的
 // 既有纪律是「不靠单元测试、靠源码断言锁接线」（同 cli-intent.test.ts 的写法）。

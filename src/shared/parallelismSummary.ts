@@ -1,15 +1,12 @@
 // src/shared/parallelismSummary.ts
 // B5 ——「并行机会」读数：一轮里派了几支、实际同时跑了几支。
-//
 // 起因（2026-10-16 整体审计）：多 agent 的并行是**模型自决 + 提示词软约束**，代码
 // 里没有任何一处数过「本可并行却串了」。这条读数不改行为，只把已经落盘的委派记录
 // （AgentRunObservation.delegations，带 startedAt / durationMs）折成两件事实：
 //   - 一轮里 ≥2 支委派、时间上却从不重叠 → **串行扇出**（本可并行而没并行的候选）；
 //   - 一轮扇出数超过并发上限 → 多出来的支只能排队（名义扇出被上限截断）。
-//
 // 诚实边界：这只能测「重叠与否」。「拆得太碎」（过拆）测不出来——那要看依赖关系与
 // 参数相似度，本刀不做，也不拿一个替代指标冒充它。
-//
 // 分层：本模块在 shared，不允许反向 import engine，所以并发上限在这里镜像一份常量
 // （engine/ToolExecutionCoordinator.ts 的 DEFAULT_MAX_READ_CONCURRENCY）。调用方
 // 可以传真实 cap 覆盖；两边漂移时以调用方为准。

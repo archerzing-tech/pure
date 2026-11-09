@@ -1,11 +1,9 @@
 // src/character/register.ts
 // 分量判读（人格轨道 刀 6，2026-10-12）：用意 → 档位 → 做法的那层前置判断。
-//
 // 病根（docs/persona-core-upgrade.md §3 刀 6 的动机）：决策面旋钮全是全局静态，
 // pure 有「怎么把一件事做好」、没有「这件事该用多重的做法」——「快速出几个设计
 // 稿」被全套验证伺候、「原型穿刺」被全量工程。本模块给每个任务判一个
 // WorkOrderRegister，并把档位缩放成结构上限（registerScaledDecision）。
-//
 // 三条纪律（蓝图刀 6 节钉死）：
 //   1. production = 现行为：判不出明显信号就落 production，不问不猜；档位只下调
 //      不上调。误判代价不对称（往重判损失时间，往轻判损失信任），词表偏保守——
@@ -14,10 +12,8 @@
 //      降档，一句话可纠正）。
 //   3. 档位是任务属性：判定发生在任务下发时，档位随计划/委派传播——本模块不含
 //      任何可变状态（那是宿主回合上下文的事）。
-//
 // 与内核的关系：档位表的值住在 CharacterProfile.decision.registerTendency（每内
 // 核一张、逐值标注源句），本模块只做「判定 + 读表缩放」两件事，自己不藏数值。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 import type { CharacterProfile, RegisterScaledCaps, WorkOrderRegister } from './types';
@@ -131,13 +127,11 @@ export function detectWorkOrderRegister(input: string): WorkOrderVerdict {
 }
 
 // ── 刀 7：反问-答复断点的会话级档位携带 ──
-//
 // 真机判例（2026-10-12 GUI 验收，draft/spike 两案各自然复现一次）：轻档任务
 // 模型先反问澄清 → 用户的答复没有档位信号 → 每回合重判回落 production——
 // spike 案实际按全量分量跑（headless 真浏览器 9 项验证，档位表只允许 1–2 项）。
 // activePlanRegister 的既有接续通道（continuingPlan/planPauseRequested）盖不住
 // 这个断点：反问回合没产计划，答复回合不构成 plan 接续。
-//
 // 修法不加新状态：档位仍住 activePlanRegister（生命周期沿用五处清理点——
 // 新会话/切会话/恢复快照/计划交付都收回 production，继承自动失效），只把
 // 「答复回合该继承」的形状判出来——上一条 assistant 终稿以问句收尾 = 球在

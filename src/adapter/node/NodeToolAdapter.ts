@@ -942,7 +942,6 @@ export class NodeToolAdapter implements ToolAdapter {
       // `cargo build`). Report it as such so the LLM and the failure policy
       // can react instead of treating the run as successful. stderr stays in
       // the result (and the error message) so the model sees what went wrong.
-      //
       // 良性例外（CC 同款白名单）：grep/rg/find/diff/test/[ 与 `git diff|grep`
       // 的 exit 1 语义是「无匹配/有差异」，不是执行失败——按失败报会把
       // 「没找到」烧进失败策略。只有 exit 1 豁免，exit ≥2 仍是真失败。

@@ -1,13 +1,11 @@
 // src/shared/scheduling.ts
 // 第 5 期「调度」的单一事实来源：把插话的五分类 kind 显式化成「处理级」，
 // 再折成待办队列的**数值优先级**——轻重缓急、能并则并、当分则分。
-//
 // 此前这条策略活在分发序里（DynamicInsertionCoordinator.decideInner 的 switch
 // 顺序），读得出来、写不下来：队列纯 FIFO，插话产生的 task 一律排到队尾，用
 // 户口头说「这个急」也无处安放。本模块只做**纯映射**，不碰任何宿主状态——
 // 判定（谁打断、谁排队）仍归 DynamicInsertionCoordinator / interjectOrchestrator，
 // 这里只回答「这个 kind 该按多急处理」。
-//
 // 与第 6 期（播报粒度/口吻）的分界：这里只产出**事实性**的级别与数，口吻
 // 与详略不在这里。
 

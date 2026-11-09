@@ -3,7 +3,6 @@
 //   1. 容量封顶（per-type / per-project / 机器级全局域）
 //   2. 按实测贡献淘汰（retention = 0.5×health + 0.3×contribution + 0.2×recency）
 //   3. 漂移报警盯贡献统计（某条目在场的 run 失败率显著高于基线 → 报警卡，绝不自动删）
-//
 // 只增不减的现状到此终结，但定位是防御性边界：默认容量对现有任何用户都应是
 // "从不触发"的界。全部纯规则、确定性计算（与 evolution.ts 同一纪律）——
 // planEviction 只决定不动 store，执行走 IMemoryStore.prune?()。

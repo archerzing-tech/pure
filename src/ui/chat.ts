@@ -649,7 +649,6 @@ export function parseToolCallBuffer(buf: string | undefined): { name?: string; a
 }
 
 // ── Scroll & status-bubble helpers ──
-//
 // Pinned-to-bottom tracking and rAF-coalesced auto-scroll live in scrollPin.ts
 // (shared with main.ts session restore). The reason it is coalesced: tokens /
 // streamed command lines / reasoning deltas can arrive many times per frame,
@@ -657,7 +656,6 @@ export function parseToolCallBuffer(buf: string | undefined): { name?: string; a
 // WHOLE transcript — all bubbles, code blocks, SVGs), so per-event scrolling
 // is the classic long-transcript stutter. One rAF-scheduled scroll per frame
 // caps the cost at the display refresh rate.
-//
 // Why not a px threshold for pinning? The old approach (scroll only when
 // scrollHeight - scrollTop - clientHeight < 120) broke the moment a single
 // markdown render grew the transcript by more than the threshold in one step
@@ -857,7 +855,6 @@ const loadGuiGeneratedRoles = loadGeneratedRoles;
 // Same shape as the 13.2 scan: Rust does the IO, the shared compiler validates;
 // scanned once per app run. Delete the directory and the tool is gone at the
 // next app start. Master switch off = don't load (Principle 1).
-//
 // A tool quarantined by the runtime failure gate (§13.4 验收口径 4) is dropped
 // HERE, not just refused at execution: a tool the model cannot see is one fewer
 // wasted turn than a tool it keeps calling into a wall. Its exec template goes
@@ -1235,7 +1232,6 @@ function toolCategory(tool: string): 'read' | 'write' | 'cmd' | 'git' | 'other' 
   // same autoPermRead toggle (default true in settings.ts) silently approve
   // web calls just like local file reads — plain-chat users aren't prompted
   // before every web_search / web_fetch.
-  //
   // NB: by short-circuiting here, this branch never reaches PermissionManager,
   // so the "Allow always for this session" option (remember:true) is moot for
   // web reads — auto-approve already covers them per session.
@@ -4381,7 +4377,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // expanded to the server's template BEFORE the turn is committed, so
     // history, intent analysis, and the engine all see the template itself
     // while the transcript keeps showing the command the user typed.
-    //
     // Skipped when the caller already passed a distinct display text: the
     // composer expands the draft itself (so a failed expansion keeps the text
     // in the box) and hands the template over as userText.
@@ -5967,7 +5962,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // phase-progress card in the transcript (planCard below) and the
       // model is told to emit `## 阶段 n/m` markers so the card can track
       // which phase is running.
-      //
       // 计划来自本地规则分析（Planner.analyzeTask）。曾经的 LLM 实时预分析环节
       // 已整体移除：它从未稳定成功（超时/空输出），每次都把失败提示与通用步骤
       // 兜底的噪音留给用户，还拖慢启动。项目级构建和高风险请求
@@ -8201,7 +8195,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // separate status row instead of flattening a bubble to text.
               // Runtime interrupt notices follow the UI language (were hard-
               // coded English) — see chat.* keys in i18n.ts.
-              //
               // 模型失效处方（2026-11-02 判例；2026-11-04 决策边界改革刀一
               // 反转）：provider 明确说「这个模型没了」时，宿主不再静默剔除/
               // 切换——persistConfig 自动闭环是 5856e63 被否的形状（自愈裁决
@@ -9317,7 +9310,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 // state keeps persisting under its own session id, and switching back
 // re-attaches exactly the live state it was left in — mid-search, mid-plan,
 // or already finished with results — instead of rebuilding from disk.
-//
 // The facade below forwards the app-shell calls to the CURRENT (visible)
 // controller, so main.ts / sessionSidebar.ts keep their existing call shapes.
 

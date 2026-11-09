@@ -4,7 +4,6 @@
 // doc's "WASMEmbeddingStore 负责语义检索，FSStore 负责持久化" — and replaces
 // keyword matching with local vector similarity behind the SAME interface
 // (IMemoryStore is unchanged; the wrapper satisfies it).
-//
 // Design decisions:
 // - The transformers.js pipeline is lazy: it is only imported + the model only
 //   downloaded (~80MB, cached after first use) on the first search() that
@@ -20,7 +19,6 @@
 //   re-embed the whole corpus. The cache is bounded: it is pruned to the
 //   current corpus on each search (so decayed/deleted entries release their
 //   vectors + duplicated content instead of lingering) and capped by size.
-//
 // NOTE: the official successor of the doc's `@xenova/transformers` is
 // `@huggingface/transformers` (same API: pipeline('feature-extraction', …)).
 

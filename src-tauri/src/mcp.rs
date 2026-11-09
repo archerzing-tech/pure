@@ -161,7 +161,6 @@ pub async fn mcp_http_request(
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MCP OAuth (6.4): loopback redirect receiver + token store.
-//
 //  The login flow itself runs in TypeScript (src/adapter/mcp/oauth.ts); Rust
 //  owns the two pieces TypeScript cannot do on its own: a 127.0.0.1 loopback
 //  listener that catches the provider's redirect, and

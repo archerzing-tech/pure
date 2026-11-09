@@ -1,20 +1,16 @@
 // 插话语料资产（2026-09-28）：真实插话原句 + 每句的正确处置 + 契约字段期望。
-//
 // 两个消费者共用这一份，避免"回放看到的语料"和"回归断言的语料"分家：
 //   - `src/coding-agent/__tests__/insertionCorpus.test.ts`：离线回归（无需 key），
 //     断言机械路径的截胡面与语料自洽
 //   - `scripts/replay-insertion-decisor.ts`：离线对照 + 真跑裁决器（--llm）
-//
 // 每句都标 `source`（出处：测试、事故记录或已定稿口径），保证句子不是编的。
 // `cancels` / `addsAlong` 是契约字段期望：该报没报 = 漏报，不该报报了 = 误报，
 // 两者代价不对称，所以分开计数。
-//
 // 语料有两段来源（2026-09-28）：上面 `CASES` 是人工核对过的（每句的 kind 与
 // 契约期望都可断言）；`HARVESTED_CASES` 是**诊断区审计自动收割**的疑点句——
 // 那句期望只由「它当初为什么被标疑点」推出来（取消味没报 cancels_part ⇒
 // 该报 cancels_part），未经人工复核，所以标 `expectation: 'suspected'`，
 // 统计时与断言段分开计。收割脚本：`scripts/harvest-insertion-corpus.ts`。
-//
 // 2026-10-28 框架改革刀 1：机械快路径正则族（STOP_RE/BRANCH_STOP_RE/
 // RESUME_BRANCH_RE/GOAL_CHANGE_RE/CANCEL_PART_RE/SCOPE_ADD_RE）已从协调器
 // 整体删除——判定全归裁决器，原话直投是唯一兜底。本模块随之撤掉机械命中的

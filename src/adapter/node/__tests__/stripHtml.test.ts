@@ -5,7 +5,6 @@
 // line breaks, and whitespace collapsed to trimmed non-empty lines. These
 // tests lock the shared behavior so either side drifting is caught by its
 // own suite.
-//
 // KNOWN INTENTIONAL DIVERGENCES (pinned separately below — do NOT "unify"
 // blindly):
 // 1. Entities — the shared stripHtml helper keeps raw entities (&amp; stays

@@ -1,6 +1,5 @@
 // src/ui/pathRepairNote.ts
 // Roadmap 阶段 11.2 (P1) — the visible half of path repair.
-//
 // A corrected path is a silent rewrite of the user's own words, so it must never
 // be silent in the transcript (iron law #4: visible + undoable). This renders a
 // small note under the user bubble naming the correction, next to the one action

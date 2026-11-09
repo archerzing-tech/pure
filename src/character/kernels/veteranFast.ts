@@ -1,15 +1,12 @@
 // src/character/kernels/veteranFast.ts
 // 性格内核「老手快线」的运行时源句表（人格轨道 刀 2，2026-10-11）。
-//
 // 人读源是项目根 SOUL.md 的 soul:kernel:veteran-fast 块（明文叙事 + 红线对齐 + 推导表）；本文件是
 // **注入面**：源句表 K1–K10 与 .md 逐字同文（快照测试守），注入文本由
 // buildCharacterCorePrompt 装配成 fragment `character_core`（priority 119）。
-//
 // 为什么两份：L0 骨架的文件做法就是「运行时常量是唯一事实来源，.md 是人读
 // 镜像」（见 src/shared/promptLayers.ts 头注释）。内核沿用同一契约，只是镜像
 // 改为**内核文件自镜像 + 独立快照测试**，不再写进 system-prompt.md——否则每换
 // 一次内核都要改人读契约与 L0 硬断言（蓝图 §1）。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 import { buildCharacterCorePrompt, type CharacterKernelLines } from '../core';

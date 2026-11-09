@@ -1,12 +1,10 @@
 // src/cli-thinking.ts
 // Terminal "thinking" card for the CLI (see src/cli.ts consumeTurn).
-//
 // Presents the live reasoning stream as a FLAT, BORDERLESS block:
 //   💭 thinking
 //     … 12 more lines
 //     The user is asking for a travel plan
 //     from Xi'an to Shanghai…
-//
 // Constraints from the product requirement:
 //  - A quiet flat form (header line + indented plain rows) instead of a boxed
 //    frame — box borders made the card look cluttered, and its width/height
@@ -18,7 +16,6 @@
 //  - Card height is capped (header + maxRows content rows).
 //  - The thinking TEXT is rendered PLAIN — no bold, no color, no emphasis
 //    (a thought trace must never look like highlighted output).
-//
 // Redraws happen in place with ANSI cursor-up + erase-line sequences. Unlike
 // the old single-line `\r\x1b[2K` indicator, the card tracks its own drawn
 // height and clears every stale row, so a height change (2 → 6 rows) can never

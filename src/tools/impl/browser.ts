@@ -3,7 +3,6 @@
 // loop): drive one shared headless Chrome — navigate, click, type, evaluate,
 // screenshot — over bare CDP, the same zero-dependency pattern as
 // channels/rasterize (system Chrome + WebSocket, no puppeteer/playwright).
-//
 // This module imports NOTHING from node — fetch/WebSocket/JSON-logic only —
 // so it runs identically in Bun (CLI) and the WebView (GUI); the shipped CSP
 // already allows loopback http/ws in connect-src. Everything that touches
@@ -11,7 +10,6 @@
 // profile dir, artifact persistence) lives behind ToolRuntime primitives.
 // No external debugging port is ever bound: Chrome gets
 // --remote-debugging-port=0 and the kernel picks a loopback port.
-//
 // Session model: one Chrome instance per process, kept warm between tool
 // calls (navigation state is the point), closed after 5 idle minutes. A
 // dead CDP connection (Chrome crashed or was killed) is rebuilt on the next
@@ -19,7 +17,6 @@
 // session down. A WebView refresh dropping module state can orphan a Chrome
 // — the leftover process idles on a host-managed throwaway profile and is
 // harmless; the accepted leak window is in the blueprint.
-//
 // 安全面裁定（蓝图 W4）：不做 SSRF/私网拒绝——与文件工具「绝对路径全盘可
 // 达」同一契约，localhost/file:// 恰是「改→截→判→修」的核心场景。唯一的
 // 纪律是不绑定外部调试端口（port=0）。

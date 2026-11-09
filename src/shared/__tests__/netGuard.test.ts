@@ -395,7 +395,6 @@ describe('detectHijack', () => {
 });
 
 // ── 与 Rust 侧 detect_response_hijack 的对齐 ─────────────────────────────────
-//
 // Rust（src-tauri/src/lib.rs）在 fetch_page_with_follow 里对每个 2xx 应答跑这套
 // 四信号判定；JS 侧此前完全没有，于是 CLI 的 web_fetch 对「被改写的 200 广告页」
 // 完全不设防。下面每条判例都对着 Rust 的同名测试写，阈值也直接引常量，

@@ -2,11 +2,9 @@
 // E1.4 → 13.2 生成半边（MVP）。E1.4 建议卡说"这个角色在反复掉链子"，本模块把那条
 // 建议升级成一键动作：按失败画像生成一个**收窄范围的变体角色** manifest 草稿
 // （~/.pure/subagents/<role>_focused.json），用户改完重启即被 13.2 加载半边接收。
-//
 // 设计口径（capability-self-extension-design.md §13.2）：模型起草是完整版；MVP 先做
 // 确定性草稿——不依赖 provider、瞬间完成、绝不静默落盘（调用方必须先过
 // compileExternalSubagents 校验，再让用户确认）。试用制准入留给完整版。
-//
 // 2026-10-06 完整版加厚：确定性草稿**不改**（它是零 provider 依赖的快路径，也是模型
 // 起草失败时的退路），另加一条模型起草路径——纪律与 13.4（P2-2 `toolSolidification`）
 // 逐字同款：草稿必须过加载半边**同一个** `compileExternalSubagents`、模型有拒绝权

@@ -1,6 +1,5 @@
 // src/ui/delegableRoles.ts
 // The delegable role surface, in one place.
-//
 // Why this module exists: `~/.pure/subagents/` roles are registered and
 // delegable, but every observation slice used to read a hardcoded set of eight
 // built-ins (`KNOWN_SUBAGENT_ROLES`). A generated role's delegations therefore
@@ -9,7 +8,6 @@
 // judge it on outcomes") had nothing to read. The fix is to let the host say
 // what it actually registered; the single scan that knows that lives here, so
 // the chat session and the settings dashboard cannot drift into two truths.
-//
 // Role lifecycle lives here too (13.2's second half): the trial sidecar records
 // `trial` / `promoted` / `archived`, and archiving is isolation — the role drops
 // off the delegable surface while its manifest stays put, restorable from the
@@ -233,7 +231,6 @@ export function buildTrialBadges(
   // the named `delegations` array. Using it here made the trial verdict read
   // zero delegations on real data — the badge would sit at "0/5" forever and the
   // promotion path would be unreachable in production.
-  //
   // `roleSince` bounds each trial role's window at its own registration moment,
   // so a restored role starts a genuinely new trial instead of re-reading the
   // delegations that archived it.

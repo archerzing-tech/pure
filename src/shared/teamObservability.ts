@@ -1,10 +1,8 @@
 // src/shared/teamObservability.ts
 // 团队可观测 T3（北极星第 6 步）—— 角色阵容表的只读聚合器。
-//
 // 输入 = E4.1 观测记录（T1 起带 delegations[]）+ 每角色已收割的 case 数
 // （宿主从 ~/.pure/roles/<role>/ 数出来传进来，本模块不做任何 IO）。
 // 输出 = 渲染层直接消费的切片。
-//
 // 口径纪律（13.3 part 2 的同一把尺子）：旧记录没有 delegations 字段时该维度
 // 显示「无数据」而不是 0——0 是缺口不是零。计数优先用 delegations（有身份的
 // 委派），整条记录缺 delegations 时退回 toolCalls 的匿名计数（E4.1 口径），
@@ -145,12 +143,10 @@ export function summarizeTeamRoster(records: readonly PromptObservation[], optio
 }
 
 // ── T4 成本视图 ──
-//
 // 「这支团队贵在哪」：按 角色 × provider × model 聚合 T1 的委派 usage。
 // provider/model 取自委派所属的 agent_run 记录（子代理跑在父轮的同一 adapter
 // 上，所以同一 run 内的委派共享这一对）——记录本身没带 provider 时该行照实
 // 显示「无数据」，不拿别的字段冒充。
-//
 // 两把尺子（与评测基线卡同款，13.3 part 2 的教训）：
 //   1. 没有 usage 的委派**不计价**（unmetered）——不是 0 元；
 //   2. provider 没有价目表的委派**不冒充 0**（unpriced）——显示「未定价」，

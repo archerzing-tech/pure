@@ -3,7 +3,6 @@
 // 聚簇，N 天内同类失败 ≥ 阈值 → 产出工具使用注意（note）建议。建议给用户，
 // 点头才落库（设置页工具卡「采纳」/后续 CLI 命令）——绝不自动写：聚类只能
 // 说明"这个工具在这台机器上常这么坏"，不说明怎么改才对，措辞交给用户把关。
-//
 // 采纳后的 note 复用 tool_preference 类型落到机器级全局作用域（platform 标注
 // + dedupeKey 防重），注入端（Harness.composeMemoryPrompt 的机器级常驻注入）
 // 原样携带进 <session_memory> 的 tools 段——零新类型、零新注入通道。

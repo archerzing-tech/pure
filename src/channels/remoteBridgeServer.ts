@@ -1,7 +1,6 @@
 // src/channels/remoteBridgeServer.ts
 // 遥控桥网关侧：独立 localhost WS 端点（/internal/bridge），GUI WebView 作为
 // client 连入（docs/remote-session-control-2026-11.md 架构决策 2）。
-//
 // 不挂在 webchat 的 Bun.serve 上——遥控面不得依赖任何通道开关；也不复用
 // health server——那条命只在 webchat 关闭时存在。独立 serve，端口三档退让
 // （port → port+1 → 0 随机），实际端口写发现文件 bridge.json，GUI 靠它连接。

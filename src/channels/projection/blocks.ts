@@ -1,11 +1,9 @@
 // src/channels/projection/blocks.ts
 // 把一条回答拆成「文本块 / 富块」。这是通道投影的第一个决策点：
-//
 //  - 文本块（段落、列表、引用、标题）→ 保持平台原生 markdown：可复制、可搜索、
 //    链接可点，IM 客户端自己的排版也比一张图好读。
 //  - 富块（代码块、GFM 表格、```chart/```svg/```mermaid/```puml）→ 交给桌面端
 //    同一套渲染管线出图，因为这些正是平台 markdown 表达不了的东西。
-//
 // 纯字符串处理，不依赖 DOM —— 分块规则可以单测，渲染是后面的事。
 export type AnswerBlockKind = 'text' | 'rich';
 

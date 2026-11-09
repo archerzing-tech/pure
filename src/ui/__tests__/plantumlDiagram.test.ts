@@ -3,7 +3,6 @@
 // proof: the real engine (@plantuml/core, TeaVM) runs against a happy-dom
 // document with the Graphviz layout loaded as a classic script, exactly like
 // the browser does it, and the SVG comes back out.
-//
 // normalizePlantumlSource is pure and covered first; the render tests then
 // exercise the engine end to end (they are the only slow tests in this file —
 // engine start-up is a one-time cost per process).

@@ -1,22 +1,18 @@
 // src/ui/pathIndex.ts
 // Roadmap 阶段 11.2 (P1) — workspace path repair for the GUI composer.
-//
 // A slipped character in a path ("src/ui/mian.ts") used to send the agent
 // hunting for a file that does not exist; models do not stop and ask, they pick
 // the closest-looking file and edit it. This module can rewrite such a token
 // into a path that really exists in the workspace — and nothing else.
-//
 // Two halves, deliberately split so the composer never pays for the I/O:
 //   warmPathIndex()          async (glob IPC + recent writes), fire-and-forget;
 //                            the send path only ever reads a warm index
 //   correctWorkspacePaths()  pure + synchronous, unit-tested without a harness
-//
 // Iron laws (roadmap 阶段 11): only a UNIQUE candidate within a small edit
 // distance is applied — two candidates mean we cannot know which file the user
 // meant, so the draft goes out untouched. Absolute paths, URLs, globs, fenced
 // code and bare filenames are never touched either: this repairs a path the
 // user typed, it does not guess which file they meant.
-//
 // 阶段 11.3 (P2) reuses the same matcher for the OTHER half of that refusal:
 // when two or more candidates are within range, the composer shows them as a
 // hint (findAmbiguousPaths) instead of rewriting. Still no guessing, still the

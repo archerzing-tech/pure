@@ -1,6 +1,5 @@
 // src/evaluation/characterProbe.ts
 // 人格轨道 刀 4（2026-10-12）— 性格内核的行为判例集判卷核。
-//
 // 蓝图（docs/persona-core-upgrade.md §3 刀 4）要求：固定探针集（拿不准的任务 /
 // 失败的交付 / 模糊指令 / 中途打断 / 用户情绪化催促），pass/fail 走**固定断言 +
 // 人工抽查**，禁止 LLM-as-judge 单裁。审计 P1-3 进一步钉死形态：「固定断言」
@@ -8,16 +7,13 @@
 // 是否拒绝谄媚 / 罐头收尾是否存在 / 控制行是否原样保留），判的是**结构与位置**，
 // 不是金句逐字比对。每条判例自带一批 expectation，grader 对每个 expectation 给出
 // 一条人类可读的失败原因。
-//
 // 为什么与 roleRegression.ts 的 must/mustNot 分家而不是复用它：那套是角色层 A/B
 // 的内容断言（一段子代理产出要么含某证据要么不含），语义是单轮 substring；人格
 // 探针判的是表达姿态，词表只属于判定函数的**内部实现**，判例里写词面就等于把
 // 词表复制进每份 JSON——模型背下词面绕过去即可，行为判定失效。故本模块只共享
 // normalizeGraderText 归一化语义，不复用 must/mustNot 的形状。
-//
 // 本模块是纯函数，无 IO：判例加载与 runner 编排在
 // scripts/run-character-probes.ts，replay 语料在 evals/character/samples/。
-//
 // 诚实边界（verify-delegation-accounting.ts 的纪律）：这里的判定是启发式词面 +
 // 位置分析，它能稳定抓住「明显越线」（谄媚开场、罐头收尾、失败埋在日常后），
 // 抓不住微妙变体；它证明判例集可跑、断言可控，不证明模型人格已达标——模型侧

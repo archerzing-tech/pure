@@ -4,7 +4,6 @@
 // pure JS; transformers.js itself cannot be bundled — it statically imports
 // the onnxruntime-node native binding, which bun cannot embed in a single
 // file).
-//
 // This module is ONLY loaded inside compiled binaries: cliHarness.ts reaches
 // it through a dynamic import gated on PURE_CLI_VERSION (the build's
 // --define). Its static `with { type: 'file' }` imports embed the ort-wasm
@@ -13,7 +12,6 @@
 // ~23MB — a quarter of the fp32 the GUI path downloads) and tokenizer are
 // fetched on first use into the same cache, huggingface.co first with
 // hf-mirror.com as the fallback endpoint (HF_ENDPOINT overrides).
-//
 // Every failure (offline, extraction, session) throws — WASMEmbeddingStore
 // catches injected-embedder rejections and falls back to keyword search, and
 // its retry cooldown paces re-attempts. In dev (`bun run cli`) this module

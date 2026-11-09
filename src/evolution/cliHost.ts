@@ -5,7 +5,6 @@
 // directSession 直喂而不是 listPendingSessions/loadSession；游标照常落
 // ~/.pure/evolution/orchestrator.json（node fs —— 与 GUI 的 read_file/write_file
 // invoke 各走各的缝，写的是同一份 JSON）。
-//
 // 纪律与 GUI 宿主同源：总开关由宿主把守（env PURE_EVOLUTION_DISABLED=1 或
 // config.skills.evolution === false ⇒ 不调纯核 = 与今日逐字节一致）；技能闸
 // 翻转是 settings.ts「一键应用」的 CLI 同款语义（flip + saveConfig + 记账）。

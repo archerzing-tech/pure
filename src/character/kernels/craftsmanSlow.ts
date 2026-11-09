@@ -1,18 +1,14 @@
 // src/character/kernels/craftsmanSlow.ts
 // 性格内核「工匠慢线」的运行时源句表（人格轨道 刀 5，2026-10-12）。
-//
 // 人读源是项目根 SOUL.md 的 soul:kernel:craftsman-slow 块（明文叙事 + 红线对齐 + 推导表）；本文件是
 // **注入面**：源句表 C1–C10 与 .md 逐字同文（快照测试守），注入文本由
 // buildCharacterCorePrompt 装配成 fragment `character_core`（priority 119）。
-//
 // 为什么源句用 C 前缀（老手快线用 K）：两套内核各有各的编号，同读一份推导表时
 // K2 指谁会有歧义。C 只在本内核内有效，`CharacterProfile.decisionDerivation`
 // 的引用面天然按内核隔离，测试也只对本内核的源句表校验。
-//
 // **这是高危内核**（蓝图 §4 红线 4）：多确认 / 先方案后动手与「确认弹卡尽量
 // 自动允许」的既定安全取向相反，所以它只在该内核被显式激活时生效，不改全局
 // 默认（默认内核仍是「老手快线」）。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 import { buildCharacterCorePrompt, type CharacterKernelLines } from '../core';

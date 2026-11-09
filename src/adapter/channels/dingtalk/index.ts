@@ -1,7 +1,6 @@
 // src/adapter/channels/dingtalk/index.ts
 // 钉钉适配器（设计文档 cn-im-channels.md §4）。能力声明按 §4.3：卡片流式、markdown、
 // 无 typing、群聊默认仅 @ 回复。接入成本最低（内置公共 AI 卡片模板，无需先建模板）。
-//
 // 如果 transport 不支持卡片实例更新，能力里的 streaming 自动降为 'none'：不推进度帧，
 // 只把最终结果发一条 —— 这是降级矩阵在适配器层的诚实表达，而不是假装能流式。
 import type {

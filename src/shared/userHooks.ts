@@ -1,18 +1,15 @@
 // src/shared/userHooks.ts
 // User-configurable lifecycle hooks (`hooks.json`), the user-facing sibling of
 // the engine's internal HookRouter.
-//
 // Three layers, same roots as AGENTS.md (see conventions.ts):
 //   - app space root: hooks shipped with Pure (none by default);
 //   - global user root (`~/.pure`): the user's personal hooks;
 //   - workspace root: hooks scoped to the project.
-//
 // Merge rule differs from AGENTS.md text: commands are not "overridden" by a
 // more specific layer — every layer's hooks RUN, in order app → global →
 // workspace, so the most specific hooks fire last, closest to the action.
 // Identical (command + matcher) pairs are deduplicated so a seeded default and
 // a hand-copied entry never double-run.
-//
 // File I/O is kept behind dynamic imports so this module can be imported by the
 // renderer (the loader is never invoked there), mirroring conventions.ts.
 

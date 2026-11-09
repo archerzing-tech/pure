@@ -6,7 +6,6 @@
 // one module). Behavior caliber is the CLI form, which was already the more
 // careful one: every argument travels in argv, never through a shell, so
 // quoting and escaping stop existing as a failure mode.
-//
 // Error material order is also inherited from the CLI form: some git
 // failures explain themselves on stdout ("nothing to commit, working tree
 // clean"), not stderr — stderr first, but fall back to stdout before the

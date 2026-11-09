@@ -2,7 +2,6 @@
 // Collapsible <details> blocks: models fold long reference material (full
 // logs, long quotes) into <details><summary>…</summary>…</details>. The pure
 // side of that promise is marked's HTML passthrough — pinned here.
-//
 // Deliberately DOM-free: "DOMPurify keeps details/input in its default
 // allow-list" is the library's own behavior, not pure's — and pinning it here
 // means importing dompurify in a test file, which detonates the known

@@ -3,13 +3,11 @@
 // OUR auto-created worktrees (4.1) and holds unmerged work, this card sits
 // between the transcript and the composer with a diff preview and the two
 // exits — merge back into the main workspace, or discard the worktree.
-//
 // Lifecycle, deliberately event-driven (no ticker, unlike 4.3's dock): the
 // app shell calls refresh() on session activation, on running-state changes
 // (the "session finished" moment) and after the queue drains; the card also
 // refreshes itself after its own merge/discard actions. It never shows while
 // the session is streaming — half-done work is not reviewable work.
-//
 // Exit semantics (shared/worktreeFinish.ts): merge auto-commits leftover
 // edits and rolls back on conflict; discard is the confirmed destructive
 // path. Either way, once the worktree is gone the session is released back

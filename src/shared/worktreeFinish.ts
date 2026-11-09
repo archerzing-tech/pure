@@ -2,7 +2,6 @@
 // Roadmap 4.4 — the wrap-up/merge flow for session worktrees. 4.1 gave every
 // colliding session its own linked worktree (branch `pure/session-*`, dir
 // under ~/.pure/worktrees); this module is its exit door:
-//
 //   inspectWorktreeFinish → what would merging bring? (commits, diff stat,
 //                            uncommitted files) — the card's preview data
 //   mergeWorktreeBack     → ONE click: auto-commit leftover edits, merge the
@@ -10,7 +9,6 @@
 //                            the worktree, delete the (now merged) branch
 //   discardWorktree       → the explicit destructive twin: worktree + branch
 //                            gone, unmerged work included
-//
 // Contract details worth remembering:
 // - A dirty worktree is auto-committed before merging ("one click" must not
 //   silently drop uncommitted edits, and must not turn into a two-step
@@ -23,7 +21,6 @@
 //   worktree only demotes the result to "merged, cleanup pending" — it never
 //   fails the click. Retention is the default everywhere: nothing here ever
 //   destroys work except discardWorktree, which the UI confirms.
-//
 // Runtime-agnostic like worktreeBinding.ts: all git goes through an injected
 // GitRunner, all paths are plain strings, no node imports.
 

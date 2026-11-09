@@ -9,7 +9,6 @@
 // The wrapper is written in two pieces — the header goes out as soon as the
 // stream is redirected, the document when the record is serialized — so either
 // piece can be captured alone and each is handled on its own.
-//
 // Shared because two surfaces capture PowerShell output for the same reasons:
 // the Node tool adapter (execute_command) and the user-hook runner
 // (hooks.json). The GUI bundle must not reach into adapter/node for it, hence

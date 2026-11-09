@@ -2,7 +2,6 @@
 // QQ 官方机器人（QQ 开放平台）传输层接缝。适配器只依赖这个接口；真实运行用
 // wsTransport（原生 WebSocket + REST，无 SDK 依赖——QQ 侧没有可维护的官方
 // npm SDK，裸协议反而更可控），单测用 mock transport。
-//
 // 协议要点（2026-10 快照，实测项见 cn-im-channels.md §7）：
 //   - 鉴权：POST bots.qq.com/app/getAppAccessToken {appId, clientSecret} →
 //     access_token（约 7200s，提前刷新）；REST 带 `Authorization: QQBot <token>`。

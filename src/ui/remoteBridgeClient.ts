@@ -5,7 +5,6 @@
 // ② 指挥注入：网关 inject/stop 落 ChatController（interject 内部自带
 //    空闲=新回合/跑动=插话分流；stop 与桌面按钮同款 escapeWhileStreaming）；
 // ③ live 状态上报：hello 批量 + state 增量（/sessions 列表的「正在跑什么」）。
-//
 // 纪律：这条链上任何异常都不许影响桌面主渲染——tap 与消息处理全部 try 包裹；
 // 多窗口都连着桥时 inject 用 localStorage 幂等集去重（同源共享，天然跨窗口）。
 import { isTauriRuntime, tauriInvoke } from '../shared/tauri';

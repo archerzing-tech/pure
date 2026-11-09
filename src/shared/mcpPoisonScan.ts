@@ -4,7 +4,6 @@
 // the model verbatim on every turn — so this scans both for the known attack
 // signatures: instruction injection hidden in descriptions, invisible
 // characters, identifier lookalikes, and names that shadow trusted tools.
-//
 // POLICY (2026-09-17 user directive): informational only. Findings are shown
 // on the server card; nothing here blocks a connection, filters a tool, or
 // waits for anyone. Pure functions, no I/O — the callers decide where the

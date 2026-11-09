@@ -1,6 +1,5 @@
 // src/shared/downloadHub.ts
 // Live progress + pause/resume/cancel control for the `download_file` tool.
-//
 // The engine yields a ToolResult only at completion, so a long download needs a
 // side-channel to surface a progress bar and to let the UI pause/resume. The
 // Node adapter emits progress here and reads a per-download controller; the GUI

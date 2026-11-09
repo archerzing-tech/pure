@@ -4,7 +4,6 @@
 // bubble as clickable cards. The governing rule is the one a human colleague
 // follows: whenever the user would need to ask "改好的文件在哪?", the answer
 // must already be on screen —
-//
 //   * A file the agent EDITED in place (the file the user handed over) is
 //     always shown, whatever its extension.
 //   * The single file a build/persist/modify request asked for ("写一个脚本",
@@ -17,7 +16,6 @@
 //     link, so a generated project never floods the transcript with cards.
 //   * Intermediate byproducts (raw data dumps, scratch files) and folders are
 //     deliberately omitted — nobody needs to be told where the temp files went.
-//
 // Artifacts are collected from successful write_file / edit_file /
 // replace_files tool results during one send() turn — see chat.ts's ToolResult
 // handler. Rendering is deliberately declarative (the

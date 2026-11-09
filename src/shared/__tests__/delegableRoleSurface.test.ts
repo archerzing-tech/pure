@@ -1,6 +1,5 @@
 // src/shared/__tests__/delegableRoleSurface.test.ts
 // 13.2 试用制的前置：观测切片必须看得见 `~/.pure/subagents/` 里的生成角色。
-//
 // 这条测试是照着一个**已经存在的错误**写的：生成角色被 register 了、能被委派，
 // 但 `scanSubagentAdvice` / `summarizeTeamRoster` / `summarizeByRole` 三处都用
 // 硬编码的 8 个内建角色过滤，于是一条委派都没落进它的画像。账上曾把这一条写成

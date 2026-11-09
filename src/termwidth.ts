@@ -1,6 +1,5 @@
 // src/termwidth.ts
 // Terminal display-width helpers + model-text sanitizer.
-//
 // Why width matters: a terminal line's physical length is measured in DISPLAY
 // COLUMNS, not JS string length. East Asian Wide / Fullwidth characters
 // (CJK, fullwidth punctuation, emoji, …) occupy 2 columns each, so a preview
@@ -9,7 +8,6 @@
 // only clears the current row — the wrapped remnant rows stay on screen and
 // pile up as garbled fragments (the CLI thinking-preview bug: 66 UTF-16 chars
 // of mixed Chinese/English measured up to 102 columns on an 80-col terminal).
-//
 // The ranges below are the standard East Asian Wide/FULLWIDTH (W/F) set from
 // wcwidth (Unicode EastAsianWidth.txt), which is what terminals use to decide
 // whether a character advances the cursor by 1 or 2 columns.

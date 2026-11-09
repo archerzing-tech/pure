@@ -1,6 +1,5 @@
 // src/ui/composerSelect.ts
 // Custom dropdown for the composer's mode/model pickers.
-//
 // WHY NOT A NATIVE <select>: on macOS, WKWebView renders <select> popups as
 // native NSMenu panels, and under Tauri's drag-drop handler
 // (dragDropEnabled:true — required for OS file drops) those panels flash open

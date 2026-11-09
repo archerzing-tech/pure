@@ -3,7 +3,6 @@
 // N minutes and enqueue their text into the TaskQueue. Frontend-only — nothing
 // survives the app being closed; while running, a due task that the user is
 // mid-turn over is skipped for that cycle (never hijacks the chat).
-//
 // Design:
 //   • nextFireMs / nextFireTime are pure time math (unit-testable).
 //   • The Scheduler keeps an absolute next-fire timestamp per schedule id, so

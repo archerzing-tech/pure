@@ -4,7 +4,6 @@
 // →重开→续」中间任何一步重启断点就没了）；现在落盘 ~/.pure/checkpoints/
 // （Rust 三命令，目录布局与 CLI 的 FSStore 同构），WebView 没有 node:fs，
 // 盘 IO 只能走 Tauri 命令（src-tauri lib.rs save/load/delete_session_checkpoints）。
-//
 // 结的扣：IStateStore.loadSession 是同步签名，invoke 是异步的。解法是
 // openSession 预热——一次把本会话名下（本名 + sub_ 前缀支）的断点拉进内
 // 存镜像，同步读全走镜像；没预热到的键诚实 miss（续跑收执明说「没找到存

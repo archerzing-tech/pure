@@ -1,13 +1,11 @@
 // src/character/soulOverride.ts
 // SOUL.md 运行时覆盖层（2026-11-06）：人格用户可编辑。
-//
 // 内置人格是编译期 TS 源句表（L0 契约，发布物零依赖盘上文件）；本模块让用户
 // 可以用一份 SOUL.md 覆盖它：块标记 `<!-- soul:kernel:<id> -->` /
 // `<!-- soul:expression:<id> -->` 与仓库版同构，id 必须已在名册（veteran-fast /
 // craftsman-slow）。读取时机 = 宿主启动一次（CLI 直读盘、GUI 经 Tauri invoke），
 // 会话中途不重读——与「会话内 system prompt 冻结」的既有惯例一致，改人格下一
 // 次启动生效。
-//
 // 覆盖语义（机械、可测）：
 //   - 两层：globalUserRoot（~/.pure/SOUL.md）先铺，workspaceRoot/SOUL.md 同块
 //     覆盖——与 AGENTS.md 的 conventions 同优先级。但**不拼接**：人格按块整份
@@ -24,11 +22,9 @@
 //   - 红线负向锁：覆盖文本过一遍 CHARACTER_BANNED_PHRASES（谄媚 / 陪伴话术）。
 //     红线是产品物理定律（蓝图 §4），用户覆盖不得越过。
 //   - 生效注入文本与内置同上限（< 2000 字符）：每回合都要付 token。
-//
 // 生效点只有一个：active.ts 的 activeCharacterProfile() 读 soulOverrideOf()。
 // PromptAssembler（character_core / character_expression）与子代理继承
 // （SubagentOrchestrator → activeCharacterCore）都从它派生，一处生效三路全通。
-//
 // 本模块是叶子：不 import ui / coding-agent；evolution/trace 自身是动态 import
 // 的 bundle 安全模块，静态引它不成环。
 

@@ -1,6 +1,5 @@
 // src/shared/sha256.ts
 // 同步、纯 TypeScript 的 SHA-256 —— GUI（WebView）与 CLI 共用。
-//
 // 为什么不用 node:crypto：Vite 的浏览器打包解析不了 node 内置模块。E1.1 的
 // LessonReflector 直接 `import { createHash } from 'node:crypto'`，而 Harness
 // 在 GUI 路径上是**静态导入**的 —— 结果不是"少个功能"，是整个 GUI 构建直接
@@ -8,7 +7,6 @@
 // "同文本 → 同短 id"的稳定性（反思证据引用 / 纠正草稿去重键），但已经有落库
 // 数据（sha256 前 12 位）与设计文档都写着 sha256，所以这里保留同一算法而不是
 // 换成弱哈希 —— 换算法会让旧的 dedupeKey 对不上新写入，同一句纠正会重复冒卡。
-//
 // 用法：`sha256Hex(text).slice(0, 12)`。实现是教科书版 FIPS 180-4，配 NIST
 // 测试向量（空串/abc/跨块边界字符串）单测。
 

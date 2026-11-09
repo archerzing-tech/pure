@@ -2635,7 +2635,6 @@ describe('plan-by-thinking flow', () => {
 });
 
 // 委派记账的接线守卫（2026-10-07 审计取证）。
-//
 // T1 的 `delegations[]` 只在观测层知道「哪些工具名是角色」时才写，而那个判断由
 // CodingAgent 构造函数从 `config.observability` 装上去。GUI 一直没传这个键，
 // `config.observability?.setDelegationRolePredicate(...)` 于是整体静默 no-op——

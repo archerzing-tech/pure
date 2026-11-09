@@ -2,7 +2,6 @@
 // P0-1 sleep-time 进化编排器 —— 把 观测→反思→建议→起草→门禁→落盘 串成一次
 // 可预算、可续跑的后台循环（Letta sleep-time 同款路线，但只走 pure 既有的
 // 声明式落盘缝：memory.add / overlay 写盘 / 技能开关翻转，不新增加载路径）。
-//
 // 纪律（与 Harness 反思层同一套）：
 //   • 全 DI 纯核 —— 零 DOM、零 Tauri、零 node fs；宿主注入 cursor 存储、
 //     会话枚举/读取、观测来源、LLM、overlay 流。Bun 全 fake 测试驱动。

@@ -589,7 +589,6 @@ const TOOL_METADATA_TABLE = {
   task_kill: { sideEffects: true, isWrite: false },
   download_file: { sideEffects: true, isWrite: true },
   // diagnose_network only observes the network, so it stays a pure read.
-  //
   // switch_package_source can rewrite the user's ~/.npmrc / pip.conf /
   // config.toml at scope=file, so it is declared a write. The scope-sensitive
   // split lives in ToolRegistry's tags + riskLevel (see the note there): this

@@ -2,13 +2,11 @@
 // E1.4 —— 子代理角色自校正建议。E4.1 把每次派发的结局记进了观测记录（子代理工具
 // 就是按角色命名的，toolCalls 里 toolName 即角色），这里把它读成"哪个角色在反复
 // 掉链子"的结论：窗口内某个角色派发够多、失败够密 → 出一条建议卡。
-//
 // 第一版只建议，pure 绝不自动改配置（设计原话）：卡片告诉用户**哪个闸能拉**
 //   - 有技能开关的角色（researcher / code_reviewer / project_auditor /
 //     task_planner）→ 设置 → Skills 里关掉对应技能即可停止派发；
 //   - 其余角色（code_editor / deep_thinker / ui_designer）今天没有开关 →
 //     只能靠把任务描述写小、把步骤拆窄，卡片如实这么说，不假称有开关。
-//
 // 只读纯函数：输入观测记录 + 时间窗口，输出建议列表；不碰存储、不碰 DOM。
 
 import { KNOWN_SUBAGENT_ROLES } from './adaptiveControl';

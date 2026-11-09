@@ -8,7 +8,6 @@
 // transport (GET /sse + POST /message, ≤2025-03-26) are detected when the
 // streamable POST fails with 404/405 and the connection switches to legacy
 // mode for its lifetime.
-//
 // In the desktop WebView requests are relayed through the Rust
 // `mcp_http_request` command (proxy support + response headers); in the CLI /
 // plain browser it uses fetch with a lightweight SSE line reader.

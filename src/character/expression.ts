@@ -1,25 +1,21 @@
 // src/character/expression.ts
 // 性格内核的表达面（投影 B）——「怎么说」的装配面（人格轨道 刀 3，2026-10-11）。
-//
 // 内核是第 0 层，表达面与决策面都是它的投影（docs/persona-core-upgrade.md §1）。
 // 本模块只做三件事：
 //   1. 定场景表结构：`CharacterScenarioId`（五个高权重场景）与每个场景的
 //      义务（obligation）/ 禁止（forbidden）/ 内核源句（derivedFrom）；
 //   2. 把场景表装配成注入 system prompt 的精炼版（fragment `character_expression`）；
 //   3. 钉死表达面红线（蓝图 §4 红线 1/2/3 在「怎么说」上的落点）。
-//
 // **为什么 prompt 里是义务而不是例句**（2026-10-11 用户定案；与
 // src/shared/promptLayers.ts:245 的既有立场一致）：
 // 写进 prompt 的「好例句」会被模型逐字复用，成为下一代机器腔——`HUMAN_TONE_PROMPT`
 // 与 `COMPLEX_TASK_PROTOCOL_PROMPT` 都因此只写原则。所以：**义务与禁止进 prompt，
 // 例句只进人读账**（项目根 SOUL.md 的 soul:expression:<id> 块），供刀 4 的判例集与人工抽查取用。
 // 由 `__tests__/characterExpression.test.ts` 守：人读账里的例句一旦出现在注入文本里即红。
-//
 // 铁律 1（投影必须标注来源）的机制面：
 //   · TS 侧：`CharacterScenarioLedger` 是 `Record<CharacterScenarioId, …>`，
 //     少写一个场景编译不过；每个场景的 `derivedFrom` 必须非空（测试守 id 真存在）。
 //   · 镜像侧：义务 / 禁止 / 源句 / 红线清单必须与 .md 人读账逐字同文。
-//
 // 本模块是叶子：只从 ./core 取源句 id 的类型，不 import 任何 ui / coding-agent /
 // shared 运行时模块，避免环。
 

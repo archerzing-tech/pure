@@ -1,16 +1,13 @@
 // src/character/active.ts
 // 活跃性格内核的**唯一可变状态**（人格轨道 刀 5，2026-10-12）。
-//
 // 为什么单独一个模块，而不是把它写在 index.ts 里：漂移探针（./drift.ts）要记账
 // 「这一轮是谁在台上」，它需要读活跃内核；而 index.ts 是对外入口，要 re-export
 // 漂移探针。两边直接互相 import 就成环了（本仓库的模块图有明确的无环纪律）。
 // 抽到本模块后方向是单向的：registry（名册）← active（台上是谁）← drift / 调用方。
-//
 // 状态本身刻意做成模块级可变变量而不是逐层传参：Planner / adaptiveControl /
 // inputDecision / PromptAssembler / SubagentOrchestrator 分散在五个模块里读它，
 // 逐层传参会把「性格」变成一条贯穿所有签名的参数——而它本来就是全局唯一的一份
 // 背景事实。宿主在启动时（读完配置后）注入一次，见 src/ui/main.ts 与 src/cli.ts。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环。
 
 import type { CharacterProfile, WorkOrderRegister } from './types';

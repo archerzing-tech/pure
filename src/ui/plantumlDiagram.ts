@@ -1,18 +1,15 @@
 // src/ui/plantumlDiagram.ts
 // Offline PlantUML renderer for ```puml / ```plantuml blocks.
-//
 // The engine is the official PlantUML build compiled to JavaScript with TeaVM
 // (@plantuml/core) plus its Graphviz layout (Viz.js). Both run inside the
 // WebView: no plantuml.com request, no Java, no CDN — which is the whole point,
 // because the previous online route (an <img> pointing at the public PlantUML
 // server) renders a blank card the moment the machine has no usable network,
 // sits behind a proxy, or plantuml.com is unreachable.
-//
 // This module is the ONLY place the engine is imported, and it is loaded
 // lazily (dynamic import from markdown.ts) so its ~6MB of engine + layout
 // chunks never touch startup — the cost is paid once, on the first ```puml
 // block of the session.
-//
 // Two engine constraints shape this module:
 //  1. viz-global.js publishes the global `Viz` and must be present as a
 //     CLASSIC script before the engine runs, so it is served from the app

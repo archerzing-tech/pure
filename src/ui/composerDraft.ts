@@ -4,7 +4,6 @@
 // pure additionally multiplies the loss across session switches (the composer
 // is a single shared #prompt element, so before this module the outgoing
 // session's half-typed text simply became the incoming session's text).
-//
 // Keyed per session in localStorage; every access is try/caught because a
 // draft is a convenience, never a contract (private mode / quota must degrade
 // to "no draft", not break the composer). Debounced at 400ms — keystroke-rate

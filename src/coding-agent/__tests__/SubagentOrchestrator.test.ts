@@ -679,7 +679,6 @@ describe('SubagentOrchestrator segment continuation + liveness watchdog', () => 
     // card turned done — the "done card above, blank tool-row Output below"
     // desync. The orchestrator must fall back to the closest preceding
     // assistant text.
-    //
     // The default verifier would FAIL an empty output and push the engine
     // back into THINK (the normal self-correction path), so this test injects
     // a permissive verifier to reach the empty-Completed directly — the same

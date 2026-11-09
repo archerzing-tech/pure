@@ -6,7 +6,6 @@
 // 每轮结束 dispatch 'pure:evolution-cycle'（子系统间事件说话，仿
 // pure:memory-decay-run 先例）。骨架照 memoryDecayTimer：递归 setTimeout、
 // 降级不阻塞、防忙循环保底重排（失败也记 lastCycleAt，间隔照走）。
-//
 // 会话档案走既有 Rust 缝（load_session_list / load_session），overlay 走
 // overlayFlowHost 共用装配（confirm 自动允许 —— 到 confirm 即 A/B 门禁
 // verdict==='allow'），技能闸翻转照 settings 建议卡「一键应用」同一语义。

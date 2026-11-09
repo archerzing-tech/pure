@@ -1,6 +1,5 @@
 // src/ui/transcriptHistory.ts
 // ONE folding model for the whole transcript.
-//
 // The transcript has two producers — the live session (turns stream into the
 // DOM as they happen) and the disk restore (a snapshot is projected into
 // blocks). They used to fold history with two separate implementations, two
@@ -11,7 +10,6 @@
 //               `conversation-segment` <details> (the user also had to click).
 // A reopened conversation therefore "lost" its history, and the same session
 // changed its folding style depending on how you got there.
-//
 // This module is the single implementation both paths now share:
 //   • Groups are EXPANDED by default — history is never hidden behind a click.
 //   • The viewport drives materialization: a group builds its content the first
@@ -20,7 +18,6 @@
 //     costing layout without disappearing.
 //   • One class vocabulary in CSS (`.transcript-history-group`) and one summary
 //     format for both producers.
-//
 // FLING POLICY (2026-10-19). mount/park are whole-group DOM detach/reattach and
 // materialization is a whole-group markdown render — all priced per GROUP. The
 // original wiring ("enter the 900px band → mount, leave it → park") had zero

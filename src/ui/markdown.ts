@@ -4,7 +4,6 @@
 // src/ui/plantumlDiagram.ts — no plantuml.com request, works offline). Called
 // once per assistant bubble on stream completion (see src/ui/chat.ts:Completed)
 // and on session restore (src/ui/main.ts).
-//
 // Streaming UX: keep raw textContent during token-by-token streaming; only
 // parse + render when the assistant message is fully complete. This avoids
 // partial-code-block flicker and mermaid.parse errors on incomplete input.
@@ -520,7 +519,6 @@ export const mathExtBlock = {
 // back as escaped literal text (throwOnError:false colors unknown TeX red —
 // worse than leaving prose alone). output:'html' skips the MathML tree: DOMPurify
 // keeps it, but it doubles the markup for no reader in a WebView context.
-//
 // Results are memoized: streaming re-renders the ACTIVE top-level block every
 // throttled tick, and a formula-dense block (math answers) re-ran every already-
 // closed KaTeX conversion per tick — hundreds of ms of main-thread work that
@@ -3382,7 +3380,6 @@ export async function renderMarkdown(
 // ═══════════════════════════════════════════════════════════════════════
 // Streaming-time renderer
 // ═══════════════════════════════════════════════════════════════════════
-//
 // The streaming renderer is kept as close to the final one as possible so the
 // message the user watches grow is the message they end up with — no layout
 // "reset" at completion. Every block (including the still-growing last one) is
@@ -4009,7 +4006,6 @@ export function cancelStreamingRender(container: HTMLElement): void {
 }
 
 // ── Theme coupling ──
-//
 // settings.ts toggles `[data-theme]` on <html>. hljs colors are CSS-overridden
 // in styles.css via [data-theme="dark"] rules — no re-render needed there.
 // Mermaid SVG colors are baked in at render time, so we re-render every

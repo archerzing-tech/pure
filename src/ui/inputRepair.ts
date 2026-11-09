@@ -1,16 +1,13 @@
 // src/ui/inputRepair.ts
 // Lossless normalization for the GUI composer draft (roadmap 阶段 11.1). A
 // pure, synchronous, zero-model-call cleanup that runs before every send.
-//
 //   normalizeDraft()      lossless cleanup of the draft that IS sent
-//
 // The typo-tolerant risk expansion (expandRiskSynonyms + RISK_ALIASES) that
 // used to live here was removed on 2026-11-01 together with its only caller
 // (preflight.ts, itself offline since 2026-10-14): the submit-time hard gate
 // is gone for good (2026-09-17/2026-11-01 定调——确认卡只留操作级毁灭，任务级
 // 破坏词探查后直接动手), so a shadow-text table whose sole purpose was feeding
 // that gate's floor has no consumer left.
-//
 // Iron laws (改进路线图「阶段 11」): semantic text is never silently rewritten.
 // This module has no authority over what the user said — it only makes matching
 // stable against IME artifacts.

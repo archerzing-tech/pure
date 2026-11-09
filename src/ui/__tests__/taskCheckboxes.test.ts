@@ -3,7 +3,6 @@
 // not a dead disabled control. The behavior under test is bindTaskCheckboxes
 // (exported from markdown.ts for this file): strip disabled, tag the <li>,
 // toggle a done class on click.
-//
 // Deliberately does NOT import dompurify: streaming test files
 // mock.module('dompurify') as an identity OBJECT, bun test is single-process,
 // and a later-loading file that calls createDOMPurify(window) dies on the mock

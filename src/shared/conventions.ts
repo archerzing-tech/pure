@@ -1,16 +1,13 @@
 // src/shared/conventions.ts
 // Two-layer AGENTS.md loading for Pure.
-//
 //   - Application-level AGENTS.md: ships with the Pure app at the application
 //     space root; it is the default convention baseline.
 //   - User-level AGENTS.md: lives in the user's workspace; OPTIONAL (may not
 //     exist).
-//
 // Merge rule (override + inherit): for the SAME constraint (a section sharing
 // the same heading) the USER level OVERRIDES the app level ("black over white");
 // constraints present in only one layer are inherited as-is. Sections unique to
 // either layer are kept.
-//
 // File I/O is kept out of the pure surface so this module can be imported by the
 // renderer. The node loader uses a dynamic import, so the module is safe to
 // bundle for the browser (and is never invoked there).

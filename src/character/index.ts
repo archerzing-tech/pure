@@ -1,17 +1,14 @@
 // src/character/index.ts
 // 性格内核（Character Core）的公开入口。
-//
 // 刀 1 立了决策面结构（值 = 现行为原样）；刀 2 补内核叙事与注入文本
 // （kernels/veteranFast.ts）与投影推导标注（decisionDerivation），并由
 // PromptAssembler 以 required fragment `character_core` 注入 system prompt；
 // 刀 3 补表达面投影（kernels/veteranFastExpression.ts），同样经 PromptAssembler
 // 注入（fragment `character_expression`）；刀 4 立了变更闸门（eval:character）。
-//
 // 刀 5 起有第二个内核（工匠慢线）与选择器：名册在 ./registry.ts，活跃状态在
 // ./active.ts（宿主启动时读配置注入），漂移探针在 ./drift.ts。三条装配路径
 // （GUI / CLI / 通道）与子代理继承都只读本入口导出的函数，所以「换内核」只需要
 // 改一处状态（见 active.ts 的分工说明）。
-//
 // 本文件只是转发面：不含状态、不含逻辑，所以它 re-export 谁都不会成环。
 
 import { activeCharacterProfile } from './active';

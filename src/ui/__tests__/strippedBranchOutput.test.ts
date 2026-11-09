@@ -3,7 +3,6 @@
 // 每一次请求**的装配源里整体离场（四通道），渲染通道保持原样。
 // 第 0 步先立两条判例证实/证伪开工前的两处推断（同回合空转、渲染通道被墓碑
 // 顶替），再在其上锁四通道离场与持久化往返。
-//
 // 四通道 = ① this.messages（历史 → 下一轮装配）、② preCompactedMessages、
 // ③ sessionLedger.done（delegate:<agent> 摘要）、④ activeTaskScript 委派摘要。
 // 渲染通道 = toolExec.resultText / 委派卡 agentActivities.output / 事件日志。

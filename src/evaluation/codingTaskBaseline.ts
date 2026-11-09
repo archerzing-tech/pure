@@ -694,7 +694,6 @@ console.log('report ok');
   // observable only through behavior — pattern-matching the source cannot
   // satisfy it. Determinism is unchanged: control still fails from seed and
   // the golden solution still passes.
-  //
   // Bugfix, hard: the concurrency limit is off by one AND a rejecting job
   // never releases its slot. Fixing only the visible symptom still fails.
   {

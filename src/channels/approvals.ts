@@ -2,7 +2,6 @@
 // 渠道版 PermissionRequestHandler（设计文档 §6.3）。复用 PermissionManager 的
 // 接口，不改 PermissionManager —— GUI 弹窗 / CLI 终端 / IM 卡片是同一个接口
 // 的三个表面，语义统一为 y / a / n。
-//
 // 双轨（必做）：卡片按钮有失效场景（模板未发布、旧卡片回调不支持长连接、
 // 群里点不了按钮），所以审批永远同时给出文字指令；卡片下发失败自动降级为纯文字。
 import type { PermissionDecision, PermissionRequestHandler, PermissionRequestInfo } from '../coding-agent/types';

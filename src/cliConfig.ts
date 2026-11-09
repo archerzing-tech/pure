@@ -305,7 +305,6 @@ export const DEFAULT_BUDGET: BudgetConfig = {
 // 着突然没权限」）：高风险轮照常自动放行、风险提示行照打；唯一的交互门是
 // dangerLevel==='danger' 的操作本身（createCliPermissionHandler 的 carve-out）
 // ——对破坏性操作的护栏是操作分级，不是模型的每轮判词。
-//
 // 刀 5（人格轨道）：这个默认值现在由**当前活跃性格内核**给出。默认内核
 // （老手快线）的确认倾向是 auto，所以上面的立场逐字不变；把「工匠慢线」放在
 // 台上时它的确认倾向是 confirm，终端默认就该逐步问——那是那个内核的定义，

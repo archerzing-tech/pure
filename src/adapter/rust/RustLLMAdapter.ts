@@ -1,11 +1,9 @@
 // src/adapter/rust/RustLLMAdapter.ts
 // v0.1 — LLM transport through the Tauri Rust backend.
-//
 // Security model (per design doc §2.1): the API key never enters the
 // WebView. It lives in ~/.pure/secrets.json (0600) and is resolved inside
 // the Rust `chat_stream` command. The WebView only sends provider/baseUrl/
 // model + messages, and receives SSE deltas over a Channel.
-//
 // The adapter is also injectable (constructor deps) so unit tests can mock
 // invoke + Channel without a live Tauri runtime.
 

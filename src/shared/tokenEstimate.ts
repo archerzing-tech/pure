@@ -3,7 +3,6 @@
 // engine/BudgetManager, harness/ContextEngine, PromptAssembler (via
 // providers.estimatePromptTokens). One formula so
 // every surface reads and budgets in the same units.
-//
 // CJK characters are dense: most tokenizers spend ~1 token per CJK char while
 // Latin text averages ~4 chars/token. A flat length/4 estimate undercounts CJK
 // by ~4×, so long Chinese or symbol-heavy content silently blows past the

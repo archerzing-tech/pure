@@ -163,7 +163,6 @@ describe('writeAutoSkillDir (CLI 落盘闭环)', () => {
   // 审计批 5⑤：根目录口径必须与 cliRepl 的读取面同源（cliConfig 的
   // HOME || os.homedir()）。旧口径 HOME || '' 在无 HOME 的环境落到
   // /.pure/skills——写「成功」却永远没人读。
-  //
   // 判别性说明（评审批 5 P2-2）：本进程里 HOME 恒有值，进程内断言
   // `skillsRootDir() === join(PURE_DIR, 'skills')` 对新旧代码同样成立，咬不动
   // 这条回归。基座口径在模块加载期定格，无法进程内模拟「无 HOME」——用子

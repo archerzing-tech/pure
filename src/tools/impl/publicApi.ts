@@ -4,7 +4,6 @@
 // 股价/GitHub/世界银行）。此前 CLI（src/adapter/node/publicApis.ts）与 GUI
 // （src-tauri/src/web_public_api.rs，1318 行）各养一份、行为漂移不可控；
 // 本刀绞杀归一到 TS，Rust 模块随刀退役。
-//
 // 零 node 依赖：网络走注入的 fetchPage 原语（CLI=cliFetch 包装，GUI=Rust
 // fetch_page command + 学习到的 proxyUrl），缓存走 cacheGet/cacheSet 原语
 // （CLI=webCache() 直读，GUI=web_cache_get/set IPC，同键同盘）。公共 API

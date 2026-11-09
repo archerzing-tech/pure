@@ -5,7 +5,6 @@
 // 此前三重静默——模型发现工具没了不知为什么（反复调用已消失的工具空耗轮
 // 次）、用户无感、error_pattern 账目不可见。watchdog 判例（亮灯不静默）+
 // 现状可见三件套：摘除必须披露。
-//
 // 引擎摘除时 record；各面 user-turn 装配（GUI buildEnvFacts / CLI
 // buildCliEnvFacts）读走注入——模型看到「哪个工具因 schema 被摘、为什么、
 // 现在调它会怎样」，自己决定换路或转告用户。读即清，无事件零注入。

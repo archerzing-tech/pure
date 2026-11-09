@@ -1,11 +1,9 @@
 // src/ui/mcpOAuthFlow.ts
 // 6.4 — user-triggered OAuth login for HTTP MCP servers.
-//
 // The flow: bind a 127.0.0.1 loopback receiver (Rust) → resolve metadata and
 // build the authorize URL (oauth.ts core) → open the browser via open_path →
 // wait for the provider's single redirect on the loopback port → exchange the
 // code → tokens land in ~/.pure/mcp/oauth/<server>.json (0600).
-//
 // INVARIANT: login is user-triggered only (Settings → MCP). Nothing here ever
 // runs mid-task or opens a browser on its own — a delegation must never pop a
 // window over the user's head.

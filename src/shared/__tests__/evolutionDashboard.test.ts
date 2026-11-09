@@ -1,7 +1,6 @@
 // src/shared/__tests__/evolutionDashboard.test.ts
 // E4.2 — 进化仪表盘的数据口径：窗口按本地日历日切、空桶是 null 而不是 0、
 // 干预去重、错误簇按 工具 × 错误类 聚簇、策略切片只喂窗口内的记录。
-//
 // 断言全部相对"本地日"（用模块自己的 startOfLocalDay / localDayKey 算期望），
 // 不写死日期字符串 —— 时区不同不该让测试红。
 

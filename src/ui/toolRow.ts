@@ -1234,7 +1234,6 @@ export function formatSubagentTraceLine(e: SubagentActivityEvent): string | null
 // lines: percentages / step counters / progress bars / error-warn-success
 // tokens, plus whole-line tinting for build-step headers. Newlines stay as
 // text nodes so the <pre> wraps exactly like the plain-text path.
-//
 // The output is capped at MAX_LIVE_STREAM_LINES — the same bound as the live
 // preview (and the same lines the user watched stream in) — so a 5000-line
 // build log can't balloon the DOM; the cut tail becomes a single dimmed

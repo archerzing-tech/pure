@@ -1,7 +1,6 @@
 // src/shared/netGuard.ts
 // Host-level circuit breaker + network-failure classification, shared by the
 // GUI (TauriToolAdapter) and CLI (NodeToolAdapter) tool adapters.
-//
 // Why: a dead host used to cost the agent a full network timeout on EVERY
 // retry — the failure policy saw 3 identical failures only after the model
 // had burned 1-2 minutes hammering the same wall. The breaker trips after 2
@@ -96,19 +95,16 @@ export function contentStatusFromMessage(message: string): number | undefined {
 }
 
 // ── 应答劫持检测 ────────────────────────────────────────────────────────────
-//
 // 大陆网络的 DNS 污染 / 中间设备劫持会把请求改写成 200 广告页或 403 挡板，
 // 而两侧历史实现都只判 `status.is_success()`，于是这类响应被当成成功：内容
 // 进了模型的上下文（比失败更糟——模型会把广告当事实），同时把错误的路由永久
 // 钉进 netRoute 的学习表。
-//
 // 判定规则与 src-tauri/src/lib.rs 的 detect_response_hijack **逐条对齐**
 // （阈值、组合式、可注册域表都取同一份语义）。两份实现此前是不一致的：
 // Rust 侧有完整的四信号判定而 CLI 完全不生效，JS 侧只有三条更宽松的启发式。
 // 现在 JS fetch 也能拿到 Rust 当年独占的三样东西——`Response.url`（follow 之后
 // 的最终 URL）、原始 `content-type`、以及**抽文本之前**的完整 `response.text()`
 // ——所以两边可以真正同源，而不是「JS 侧双保险，抓不到就放过」。
-//
 // 取向仍是宁可漏判不可误判：误判的代价是让本来成功的抓取变成网络失败（触发
 // 兜底重试并 unlearn 一条其实没问题的路由）。每条判据都要多条信号叠加。
 
@@ -277,7 +273,6 @@ export function visibleTextLength(html: string): number {
   // 手工扫而不是用正则：Rust 侧 strip_html_full 在标签**内部**的字符一个都不留，
   // 只在每个标签边界断行。用「把 < 换成换行」的正则会漏下标签名本身
   // （`<p>Clean</p>` 会算成 "p\nClean\np"），两侧口径就漂了。
-  //
   // 逐字符扫（而不是 replace(/</g, '\n') 反复重扫）还有一个更实际的理由：这条函数
   // 跑在每个 2xx 应答上，body 可能是几百 KB 的整页。
   let raw = '';

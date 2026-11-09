@@ -1,11 +1,9 @@
 // src/channels/projection/projection.ts
 // 把「桌面端的一条回答」投影成「通道里的一串消息」。
-//
 // 契约（与产品选择一致）：
 //   文本块 → 平台原生 markdown（可复制、可搜索、链接可点）；
 //   富块   → 桌面端同一渲染管线的截图（代码块、表格、chart/svg/mermaid/puml）。
 // 富块渲染不出来时**把源码退回文本**，而不是丢掉内容 —— 降级永远不丢东西。
-//
 // 返回 null 表示「这次不该走投影」（没有富块 / 通道发不了图 / 渲染页不可用），
 // 调用方据此走原来的纯文本路径。
 import type { ChannelCapabilities, OutboundMessage } from '../types';

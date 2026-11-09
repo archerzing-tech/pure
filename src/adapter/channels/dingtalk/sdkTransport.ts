@@ -1,7 +1,6 @@
 // src/adapter/channels/dingtalk/sdkTransport.ts
 // 官方 dingtalk-stream SDK 上的钉钉 transport。**动态 import** —— 未启用 dingtalk
 // 通道时这个模块一行都不加载。
-//
 // 与飞书不同，钉钉的 Stream 通道回复走消息自带的 `sessionWebhook`（POST + access
 // token），所以不需要公网回调地址。卡片流式（AI 卡片）需要卡片实例 OpenAPI +
 // 模板 id，本实现把 `cardTemplateId` 作为显式配置：给了才开启卡片流式，否则

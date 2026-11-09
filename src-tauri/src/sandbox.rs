@@ -4,7 +4,6 @@
 // kernel-level backstop for high-autonomy runs (YOLO / unattended-local),
 // where every command is auto-approved and a single successful prompt
 // injection would otherwise have the whole user account as its blast radius.
-//
 // Design:
 // - Opt-in per command: `wrap_command(workspace, command)` returns either the
 //   original argv (sandboxing unavailable) or a `/usr/bin/sandbox-exec -f

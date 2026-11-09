@@ -1,7 +1,6 @@
 // src/ui/memoryTransfer.ts
 // 记忆库导出/导入（Settings → Memory → 导出 / 导入，§12.9）。
 // 纯函数模块：不触碰 DOM / store —— build/parse 逻辑可 headless 单测。
-//
 // 导出格式（JSON，迁移到新机器用）：
 //   { app: 'pure', kind: 'memory-library', version: 1, exportedAt: ISO,
 //     entries: [ { ...MemoryEntry, healthScore: 0.82, liveLifecycle: 'active' } ] }

@@ -1,11 +1,9 @@
 // src/shared/cliDiagram.ts
 // Terminal wireframe rendering for mermaid / PlantUML diagram blocks.
-//
 // The GUI renders ```mermaid / ```puml blocks as real graphics; the CLI has no
 // browser, so the same blocks are converted into a box-drawing wireframe
 // (rectangles + connecting lines + ▶ arrows). Pure (no DOM / no TTY) so the
 // renderer and the streaming converter are unit-testable headless.
-//
 // Two entry points:
 //   - renderWireframe(source, lang)  — one-shot conversion of a complete block
 //   - CliWireframeStream             — feed TokenDelta content through it; the

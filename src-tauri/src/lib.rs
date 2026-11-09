@@ -1523,13 +1523,16 @@ async fn write_file_stream(
     append: Option<bool>,
     on_progress: Channel<String>,
 ) -> Result<String, String> {
-    write_file_stream_inner(&workspace, &path, &content, append.unwrap_or(false), &on_progress).await
+    run_blocking(move || {
+        write_file_stream_inner_blocking(&workspace, &path, &content, append.unwrap_or(false), &on_progress)
+    })
+    .await
 }
 
 /// Core of write_file_stream, split out for unit testing (a Tauri Channel
 /// built via Channel::new works in a plain test, but keeping the command
 /// wrapper tiny mirrors the execute_command_stream_inner convention).
-async fn write_file_stream_inner(
+fn write_file_stream_inner_blocking(
     workspace: &str,
     path: &str,
     content: &str,
@@ -4829,7 +4832,6 @@ fn diff_files_impl(workspace: String, path_a: String, path_b: String) -> Result<
 // agent then saw a wall of identical failures with no way out. The search now
 // tries backends in order and stops at the first one that yields results, so
 // a dead backend degrades to a working one instead of a hard failure.
-//
 // CJK queries get a Chinese-priority order: international Bing frequently
 // serves a block page and DuckDuckGo returns IRRELEVANT results for Chinese
 // (tested: "西安到重庆 机票" → unrelated education/tax sites), which pushed
@@ -8327,18 +8329,15 @@ fn resolve_redirect_target(base: &str, target: &str) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  应答劫持判定：DNS 污染 / 中间设备把请求改写成 200 广告页或 403 挡板页
 // ═══════════════════════════════════════════════════════════════════════════════
-//
 // 为什么必须在这一层判：只有 Rust 能同时拿到「follow 之后的 final_url」「原始
 // Content-Type」和**未经抽取的原始 body**。JS 侧拿到的已经是抽好的纯文本，meta
 // refresh 与 title 全被丢掉了，只能靠残留的 HTML 特征做双保险（src/shared/
 // netGuard.ts 的 detectHijack，抓不到就放过）。
-//
 // 为什么这一类失败最毒：这里历史上只判 status.is_success()，于是被改写的 200 广告
 // 页被当成真内容交给模型（模型会把广告当事实写进答案），更糟的是上层 JS 看到这个
 // 「成功」就 recordNetOutcome(direct, true) 把 direct 路由钉死——proxy 那条能救的
 // 路再也翻不回来，至少污染一个 TTL 窗口。其他网络失败至少会报错，只有这种失败
 // **伪装成成功**。
-//
 // 取向：宁可漏判不可误判。误判的代价是让本来能成功的抓取变成网络失败——触发兜底
 // 重试（多烧一个超时）并 unlearn 一条其实没问题的路由，正常的镜像/代理路径被无故
 // 跳过；漏判的代价只是这一次没抓到。所以每条判据都是多条信号叠加，单条弱信号绝不
@@ -11659,50 +11658,56 @@ fn kill_process(pid: i64) -> Result<bool, String> {
 /// node:fs；CLI 侧直接 writeFileSync）。name 限定安全字符防路径穿越，返回
 /// 落盘绝对路径。
 #[tauri::command]
-fn write_temp_file(name: String, content: String) -> Result<String, String> {
-    if name.is_empty()
-        || name.len() > 120
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-    {
-        return Err("write_temp_file: name must be 1-120 chars of [A-Za-z0-9._-]".into());
-    }
-    let path = std::env::temp_dir().join(name);
-    fs::write(&path, content.as_bytes()).map_err(|e| format!("write_temp_file: {}", e))?;
-    Ok(path.to_string_lossy().into_owned())
+async fn write_temp_file(name: String, content: String) -> Result<String, String> {
+    run_blocking(move || {
+        if name.is_empty()
+            || name.len() > 120
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Err("write_temp_file: name must be 1-120 chars of [A-Za-z0-9._-]".into());
+        }
+        let path = std::env::temp_dir().join(name);
+        fs::write(&path, content.as_bytes()).map_err(|e| format!("write_temp_file: {}", e))?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
 }
 
 /// 读一张本机图片为 base64（read_file 图片视觉输入的 GUI 通道——WebView 没
 /// 有 node:fs）。扩展名→MIME 表与 shared/imageFiles.ts 单源对齐，改要同步。
 /// 视觉输入直接进模型上下文（base64 膨胀 4/3），上限 5MB 比文本的 64MB 严。
 #[tauri::command]
-fn read_image_file(workspace: String, path: String) -> Result<serde_json::Value, String> {
-    const IMAGE_READ_MAX_BYTES: u64 = 5 * 1024 * 1024;
-    let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        _ => return Err("read_image_file: unsupported image extension".into()),
-    };
-    let full = resolve(&workspace, &path)?;
-    let meta = fs::metadata(&full).map_err(|e| format!("read_image_file: {}", e))?;
-    if !meta.is_file() {
-        return Err(format!("read_image_file: not a file: {}", path));
-    }
-    if meta.len() > IMAGE_READ_MAX_BYTES {
-        return Err(format!(
-            "read_image_file: 图片 {}MB 超过视觉读取上限 5MB。先用 execute_command 压缩再读（macOS sips -Z 1600）。", meta.len() / 1024 / 1024
-        ));
-    }
-    let bytes = fs::read(&full).map_err(|e| format!("read_image_file: {}", e))?;
-    use base64::Engine as _;
-    Ok(serde_json::json!({
-        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-        "mimeType": mime,
-        "sizeBytes": meta.len(),
-        "path": full.to_string_lossy(),
-    }))
+async fn read_image_file(workspace: String, path: String) -> Result<serde_json::Value, String> {
+    run_blocking(move || {
+        const IMAGE_READ_MAX_BYTES: u64 = 5 * 1024 * 1024;
+        let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("bmp") => "image/bmp",
+            _ => return Err("read_image_file: unsupported image extension".into()),
+        };
+        let full = resolve(&workspace, &path)?;
+        let meta = fs::metadata(&full).map_err(|e| format!("read_image_file: {}", e))?;
+        if !meta.is_file() {
+            return Err(format!("read_image_file: not a file: {}", path));
+        }
+        if meta.len() > IMAGE_READ_MAX_BYTES {
+            return Err(format!(
+                "read_image_file: 图片 {}MB 超过视觉读取上限 5MB。先用 execute_command 压缩再读（macOS sips -Z 1600）。", meta.len() / 1024 / 1024
+            ));
+        }
+        let bytes = fs::read(&full).map_err(|e| format!("read_image_file: {}", e))?;
+        use base64::Engine as _;
+        Ok(serde_json::json!({
+            "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "mimeType": mime,
+            "sizeBytes": meta.len(),
+            "path": full.to_string_lossy(),
+        }))
+    })
+    .await
 }
 const COMMAND_TERMINATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const COMMAND_PIPE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);

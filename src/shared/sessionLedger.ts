@@ -3,7 +3,6 @@
 // —— asked（澄清指纹 → 回答）、done（动作指纹 → 结果摘要）、plans（计划指纹
 // 与状态链）。宿主在记账点写入，注入层把账排成给模型看的素材；模型在协议层
 // 被教会在提问/动手前先翻账（命中只「提示 + 确认」，不静默跳过）。
-//
 // 形态对齐 TaskScript：version 显式、append-only、状态现推；指纹同
 // SubagentOrchestrator.stableHash 的 FNV-1a 64-bit 同式。纯模块无 IO——
 // 持久化由宿主快照（SessionUiState 可选字段）负责。

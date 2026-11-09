@@ -1,6 +1,5 @@
 // src/shared/parseRepair.ts
 // Smart fault tolerance for model-generated / user-supplied structured content.
-//
 // LLM output and hand-edited documents frequently carry small syntax errors:
 // trailing commas, single quotes, unquoted keys, markdown code fences, prose
 // wrappers, full-width punctuation, JS-style constants, stray backticks. Each
@@ -8,7 +7,6 @@
 // is only ever returned as `repaired: true` when it actually parses (JSON), or
 // when it is a structurally safe rewrite the caller retries once (mermaid/svg,
 // where the caller re-renders and keeps the original error on failure).
-//
 // When nothing helps, the original source is returned untouched
 // (`repaired: false`) and the caller falls back to its existing error path —
 // error state + retry + hand-off to the user. A successful repair therefore

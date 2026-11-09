@@ -1,15 +1,12 @@
 // src/evaluation/heldOutSets.ts
 // P1-3 — held-out 题目装载（纯 IO 边界，无 LLM、无网络）。
-//
 // 为什么需要它：仓库里 v5 全套 15 个 fixture 连 golden 解都公开，角色 A/B 门
 // 用的也是同一批 case。overlay 是在这批样本上起草、在这批样本上判 ALLOW 的——
 // 「进化有效」这个结论没有任何样本外证据。held-out 就是留一批**从未参与起草
 // 也从未参与判卷**的题目，只观测、不阻断，等数据攒够再议是否硬化成第二道门。
-//
 // 目录约定（本地、不进仓库 —— 题目本身是评测资产，公开即失去 held-out 性质）：
 //   ~/.pure/evals-heldout/coding/*.json   CodingTaskFixture 形状（命令验证）
 //   ~/.pure/evals-heldout/roles/<role>/*.json  RoleCaseFixture 形状（内容断言）
-//
 // **缺席不是错误**：目录不存在、没有 json、role 目录不存在——一律返回空数组。
 // 仓库零新增文件依赖，CI 的 eval:sanity 完全不受影响（它连本模块都不 import）。
 

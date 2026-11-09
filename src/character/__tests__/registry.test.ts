@@ -21,7 +21,6 @@ import { promptAssembler } from '../../shared/PromptAssembler';
 import { defaults } from '../../ui/config';
 
 // 人格轨道 刀 5 的选择器与「决策面真从活跃内核读」的行为面。
-//
 // 活跃内核是**模块级状态**，而 bun 的测试文件共享同一份模块注册表，所以每个用例
 // 之后必须复位——否则本文件会把别的测试文件（PromptAssembler / chat / Planner）
 // 拉到「工匠慢线」上，红得莫名其妙（这是本刀最容易埋的坑，故显式写在文件头）。

@@ -3,7 +3,6 @@
 // adapter）把本轮经过提炼成结构化 lesson（symptom / rootCause / prevention /
 // evidence / scope），替代 writeSessionMemory 的模板拼接；模板版保留为反思
 // 失败时的兜底（见 Harness.writeSessionLesson）。
-//
 // 防幻觉纪律：模型只能引用我们提供的证据目录里的调用哈希（id），引用不出的
 // 根因猜测一律压成 confidence:'low'，注入端（Harness.composeMemoryPrompt）
 // 默认跳过 low 条目。成本护栏：每日反思次数上限、触发条件门控、可整体关闭

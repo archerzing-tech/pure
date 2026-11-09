@@ -1,6 +1,5 @@
 // src/ui/personaOverlayFlow.ts
 // 北极星第 6 步 13.3（part 3）— overlay 起草流的编排核心（无 Tauri / 无 DOM）。
-//
 // 设计口径（capability-self-extension-design.md §13.3）：overlay 只在跑通该角色的
 // 回归 A/B 后落盘（写盘前强跑；样本不足一律 DENY）。Settings 处理器只负责把
 // Tauri IO、provider adapter、确认弹窗接进来；判卷/裁决与这里的分支只有一份定义，

@@ -3,7 +3,6 @@
 // process must start detached, return immediately with a PID + log file, keep
 // running after the tool call returns, and be stoppable by that PID. This is
 // the regression for "启动一个服务" dying at the 30s command timeout.
-//
 // Runs on ALL platforms (the release pipeline executes bun test on
 // windows-latest too). The payload commands are written to temp .js files and
 // launched via `<bun> <script>` — inline `bun -e '...'` snippets would break on

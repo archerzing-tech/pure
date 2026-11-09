@@ -1,6 +1,5 @@
 // src/shared/__tests__/insertionMessaging.test.ts
 // 插话文本的单一事实来源（insertionMessaging.ts）的一致性契约。
-//
 // 收执纪律收口（2026-10-28 刀 2 → 框架改革一期刀 A2）：收执 = 承接插话的
 // 模型现场写的 receipt，唯一来源；模型缺席时引擎沉默（宁可无话，不出机械
 // 腔）。回应性固定话术一族（branchStopReceipt / cancelBeforeDispatchReceipt /
@@ -14,7 +13,6 @@
 //   ① 锁存留文本的方向——框架文本只描述机制事实不示范措辞；
 //   ② 锁删除不回潮——已删的固定句按构就是机械腔（独立于语境的「收执」
 //     是编造），宿主接线里不得再出现。
-//
 // 判定逻辑归 DynamicInsertionCoordinator / chat.ts / steerTargeting.ts，
 // 各有自己的测试；这里只锁「同一规则的多处措辞必须同向」。
 

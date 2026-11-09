@@ -1,6 +1,5 @@
 // src/shared/usage.ts
 // Per-request token usage normalization + session cost estimation.
-//
 // Providers report usage in different shapes (OpenAI-style `usage.prompt_tokens`,
 // DeepSeek `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`), so the
 // adapters pass the raw object through and normalize here. Cost uses the

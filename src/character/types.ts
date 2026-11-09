@@ -1,14 +1,11 @@
 // src/character/types.ts
 // 人格轨道 刀 1（2026-10-11）— 性格内核（Character Core）的结构定义。
-//
 // 命名裁定（见 docs/persona-core-upgrade.md §1）：「persona」专指子代理角色层
 // （src/harness/personaOverlays.ts），本模块是**智能体自身**的性格内核，叫
 // Character Core，目录 src/character/。
-//
 // 设计：性格内核是第 0 层，decision（怎么做）与 expression（怎么说）都是从它
 // 派生的投影。刀 1 只立结构、值全部等于现行为原样（零行为变更）；刀 2 起才从
 // 内核叙事推导这些值。铁律 1：每个值都要能标注「从内核哪一句推导」。
-//
 // 本模块是叶子：不 import 任何 ui / coding-agent / shared 运行时模块，避免环；
 // 只从 ./core 取源句的类型（core 也是叶子）。
 

@@ -5,7 +5,6 @@
 // path + content preview) and reads y / a / n from stdin. Non-TTY runs
 // (piped input, CI) auto-allow safe reads and deny writes — a write can never
 // slip through without an explicit interactive confirmation.
-//
 // Kept out of src/cli.ts so tests can import these pure helpers without
 // triggering the CLI's module-level `main()` side effect.
 

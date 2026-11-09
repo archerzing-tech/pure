@@ -1,6 +1,5 @@
 // src/tools/impl/pathPolicy.ts
 // 路径解析链 TS 单源（P2-5 第三子刀：path_policy 注入点上移）。
-//
 // 此前文件类工具的路径策略只有一份权威实现（src-tauri/src/path_policy.rs，
 // GUI 文件命令在 Rust 侧入口 resolve），NodeToolAdapter.resolve 是一份近乎
 // 同构的手工镜像——`..` 越过文件系统根时 Rust 报错、Node 的 pathResolve
@@ -9,13 +8,11 @@
 // 路径。本文件把这条链收进零 node 依赖的单源（WebView 可 import），fs 能
 // 力经 PathPolicyFs 原语注入（CLI 侧注 node:fs 同步函数；GUI 若将来要在
 // 调用前预解析，注入同一接口的 IPC 版即可，签名零改动）。
-//
 // Rust 不能 import TS、WebView 不能 import Rust——resolve 的实现仍是两份
 // （Rust 份是 GUI 的 fs 执行者，随模块保留），但行为由行为锁钉住：
 // expandTilde/normalizeLexical 的输入输出表在
 // src/shared/__fixtures__/pathPolicyFixtures.json，两侧测试同源消费
 // （劫持双锁的「真单源不可达，机械锁可达」形态）。
-//
 // 契约（与 Rust path_policy.rs 逐条对齐）：workspace 只是相对路径的锚，
 // 绝对路径指向盘上任意位置——workspace 边界已移除（用户明确选择全盘可达），
 // 剩下的是路径有效性守卫：词法归一（`..` 不得越过文件系统根）+ 拒绝经由

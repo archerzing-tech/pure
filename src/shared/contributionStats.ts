@@ -3,7 +3,6 @@
 // id / `skill:` 前缀的技能名）切片，回答"这条记忆/技能在场时 run 跑得怎么样"。
 // 只读纯函数，输入是 PromptObservability.records() 的任意子集；棘轮淘汰公式
 // 与漂移报警都从这里拿数字。
-//
 // 切分的前提是记录里就带着名单：Harness 在 startRun 时把 composeMemoryPrompt
 // 选定的 entryIds/skills 挂上同一条 agent_run 记录（与 E4.1 的 strategy 同一
 // 缝），toolCalls/verification/outcome 同记录共存 —— 聚合端零 join。

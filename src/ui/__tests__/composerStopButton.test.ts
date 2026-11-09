@@ -1,7 +1,6 @@
 // src/ui/__tests__/composerStopButton.test.ts
 // 输入框旁 ⏹ 暂停按钮的语义锚定（2026-09-27 用户反馈：「点击暂停按钮不起作用，
 // 需要点击 ESC 键才管用」+「暂停相关提示不必居中，靠一侧简约即可」）。
-//
 // 病根：按钮的流式分支只走 chat.pause()——第一击开始优雅收尾（几秒到几十秒），
 // 收尾期里再点 = pause() 早退、无声 no-op，没有升级通道；而 Esc 经输入框→
 // document 双层触发，第二层 escapeWhileStreaming() 看到已 pausing 就立即硬停。

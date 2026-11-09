@@ -40,7 +40,6 @@ export interface BottleneckOptions {
 }
 
 // 阈值。
-//
 // 已知设计问题（未改；测试里「failureRate 30–50% currently classifies as ok」
 // 那条正钉着这个口径）：`warning`
 // 档在当前阈值下几乎不可达。失败率 ≥ 50% 被 critical 先吃掉；剩下要进 warning 得

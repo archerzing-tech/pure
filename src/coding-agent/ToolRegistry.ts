@@ -88,7 +88,6 @@ const TOOL_TAGS: Record<BuiltinToolName, { tags: string[]; riskLevel?: 'low' | '
   glob_files: { tags: [Tags.FS, Tags.READ, Tags.SEARCH], riskLevel: 'low' },
   replace_files: { tags: [Tags.FS, Tags.WRITE, Tags.DESTRUCTIVE], riskLevel: 'medium' },
   // diagnose_network 只观测网络，纯只读，永远自动放行。
-  //
   // switch_package_source 的风险随 scope 变：session 档不落盘，file 档会改用户
   // 的 ~/.npmrc / pip.conf。原先把它标成 READ + low 是错的——low 会被
   // PermissionManager 直接自动放行，于是「file 级必须显式批准」这道产品决定

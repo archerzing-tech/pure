@@ -3,13 +3,11 @@
 // web_scrape / web_fetch). Search backends have free-tier quota (Serper,
 // Tavily, Exa) and repeated identical queries are common inside agent loops,
 // so fresh results are served from disk instead of burning quota or latency.
-//
 // Storage: ~/.pure/cache/web-cache.json — the SAME file the Rust GUI mirror
 // (src-tauri/src/lib.rs WebCache) uses, with the same key scheme, so CLI and
 // GUI share a warm cache. The file is bounded (MAX_ENTRIES with oldest-first
 // eviction, per-value size cap) and tolerates corruption (a bad file is
 // treated as empty, never an error).
-//
 // Controls:
 //   PURE_WEB_CACHE=off|0|false  → cache disabled (get misses, set no-ops)
 //   PURE_CACHE_DIR=<dir>        → override the base dir (default ~/.pure)

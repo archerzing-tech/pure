@@ -2,7 +2,6 @@
 // gateway 进程里的本地光栅化：SVG → PNG 用 @resvg/resvg-js；```chart 走
 // echarts 的无 DOM SSR（`init(null, null, { ssr: true, renderer: 'svg' })`），
 // 复用 GUI 同一份 `parseChartSource` + `buildChartOption`，两表面同一张图。
-//
 // 全部 **动态 import**：没有富输出块时一行都不加载。这一层只处理「已经拿到 SVG
 // 之后」的事（含 echarts 的 SSR，它不需要 DOM）；```mermaid / ```puml 要真浏览器，
 // 走 headlessRenderer.ts 的 headless Chrome —— 那部分是可选的，没装 Chrome 时

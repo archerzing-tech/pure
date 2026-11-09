@@ -4,7 +4,6 @@
 // hidden in the tray (5.1) while sessions keep working; without this, the
 // only trace of a finished background turn was the parallel-task card
 // silently disappearing.
-//
 // The detection edge is the running-set transition (chat's
 // onRunningSessionsChanged): a session LEAVING the set = its turn settled.
 // What it settled INTO is read off the transcript tail — the transcript is
@@ -13,7 +12,6 @@
 // the noise down: the visible session in a visible window never notifies
 // (the user is already watching it), and a session whose controller is gone
 // (deleted/forgotten mid-run) stays silent.
-//
 // The click → jump half lives in Rust (send_turn_notification emits
 // `notification-clicked` with the session id — notify-rust's body-click
 // callback is the only reliable click signal on macOS) and in main.ts

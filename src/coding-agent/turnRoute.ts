@@ -2,7 +2,6 @@
 // ONE producer for the turn-level workflow, after the pre-turn LLM router
 // retired (2026-11-06, docs: three-way comparison Claude Code / opencode /
 // Codebuff). What remains is mechanical and synchronous:
-//
 //   1. prefetchTurnRoute — scheduled-timing facts read off the user's own
 //      words (detectScheduledInput). Nothing here claims to know what the
 //      turn is.
@@ -11,7 +10,6 @@
 //      turn walks, never what the turn means.
 //   3. compileTurnRoute — compiles the request workflow (plan / probe /
 //      delivery / confirm gates) from those facts and records the decision.
-//
 // 历史注：这里曾有两层关键词 floor（寒暄直通/同步复刻裁决）加两个单向
 // veto——「路由一次 6-12s 死延迟」年代的产物，2026-09「改代码请求被判成
 // 闲聊」事故后退役，换 LLM 语义路由（inferSemanticRoute）。语义路由本身在
@@ -20,7 +18,6 @@
 // 不做回合前预判——模式显式切换或模型流内自决。退役不回词表 floor 的老路：
 // floor 替模型下「这轮是什么」的结论（判闲聊→打发），shape 只决定「走哪个
 // 流程」——判错代价是多付或省下一次可见思考，不再有「答非所问」形状。
-//
 // 「这轮是什么」的裁决权归还模型：主请求零预判秒发，思考档位由形态判据
 // 决定（chat.ts isLightShapedTurn），规划流程由 planByThinking 当着用户
 // 想出来（想完自己决定出不出卡）。

@@ -2,7 +2,6 @@
 // Settings → MCP server card, resources row: count + chips after a probe, a
 // distinct line when the server offers/publishes none, and nothing at all
 // before a probe (resources are only discoverable by connecting).
-//
 // source 无默认值（2026-10-01 footgun 收口）：它是数据来源场景开关，默认
 // 'probe' 会让忘传的 live 调用点把「当前会话能看到的」当成已验证清单展示。
 

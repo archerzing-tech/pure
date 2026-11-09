@@ -3,7 +3,6 @@
 // 用户不发起聊天时旧记忆永远不会被降级/删除。本模块让 app 空闲时也在节流
 // 窗过后自动执行 decay()：一条记忆从创建起就会按遗忘速度随时间走完
 // active → degraded → dormant → 删除 的生命周期，即使没有任何新会话。
-//
 // 语义与 Harness 完全一致（见 src/harness/Harness.ts）：
 //   • MEMORY_DECAY_INTERVAL_MS    — 节流窗：decay 至少间隔 1 小时
 //   • MEMORY_DECAY_OLDER_THAN_MS  — 只处理闲置超过 14 天的记忆

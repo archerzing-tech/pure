@@ -1,7 +1,6 @@
 // src/adapter/channels/feishu/sdkTransport.ts
 // 官方 SDK（@larksuiteoapi/node-sdk ≥1.24.0）上的飞书 transport。**动态 import**
 // —— 未启用 feishu 通道时这个模块一行都不加载，SDK 不进 CLI/GUI 的其它路径。
-//
 // 长连接注意事项（README + 设计文档 §2.2）：
 // 1) 建连时鉴权，后续事件明文，无需解密/验签；
 // 2) 收到事件必须 3 秒内处理完，否则平台重推 → 宿主必须先 ack 再跑 agent（已由

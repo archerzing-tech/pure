@@ -1,13 +1,11 @@
 // src/evaluation/roleRegressionRun.ts
 // 北极星第 6 步 13.3（part 3）— A/B 编排核心（无 node/tauri 依赖，runCase 注入）。
-//
 // part 2 把 A/B 跑在 CLI 脚本里（SubagentOrchestrator + NodeToolAdapter）。part 3
 // 的落盘门槛要在 GUI 里也跑同一套 A/B，所以把"两侧 × N 例 → 判卷 → 裁决"的编排
 // 抽到这里，只依赖纯函数（roleRegression.ts），把"怎么跑一例"注入进来：
 //   - CLI 注入 NodeToolAdapter + SubagentOrchestrator；
 //   - GUI 注入 TauriToolAdapter + SubagentOrchestrator。
 // 宿主差异止于 runCase，判卷与裁决只有一份定义。
-//
 // 三条护栏（2026-09-22 审查补）：① 样本数**硬上限** MAX_AB_CASES（一次点击最多
 // 2×N 次真实子 agent 运行）；② `signal` 在每例前后检查，可取消（抛 AbortError）；
 // ③ 运行失败（崩溃/超时/空产出）**重试**，不混同于断言失败——否则一次 provider

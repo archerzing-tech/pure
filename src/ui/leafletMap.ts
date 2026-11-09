@@ -3,7 +3,6 @@
 // imported, and it is loaded lazily (dynamic import from markdown.ts) so the
 // ~150KB leaflet chunk never touches startup. Leaflet itself is bundled by Vite
 // from node_modules — the library is local, never fetched from a CDN.
-//
 // parseMapSource() is pure (no DOM, no leaflet instance) so it is unit-testable
 // in bun; renderMapInto() owns the map instance lifecycle (dispose on re-render,
 // ResizeObserver so sidebar toggles / window resizes re-fit the map). Tiles come

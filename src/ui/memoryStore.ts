@@ -8,7 +8,6 @@
 // Semantic search is lazy (transformers.js model loads on first search and
 // falls back to keyword matching when unavailable), so plain-chat users pay
 // no cost until memory is actually retrieved.
-//
 // Own module (not chat.ts) so the settings panel can import the same instance
 // for its memory dashboard without dragging the whole chat pipeline (adapters,
 // CodingAgent, WASM, …) into the lazily-loaded settings chunk.

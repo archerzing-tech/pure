@@ -7,7 +7,6 @@
 // (it routes through the Rust command channel), so it wraps the user command in
 // a self-detaching launcher script that exits immediately after printing the
 // child PID.
-//
 // BROWSER-SAFE BY CONTRACT: TauriToolAdapter runs inside the WebView, and Vite
 // externalizes node:* imports into stubs that THROW on access — a top-level
 // `import { tmpdir } from 'node:os'` here once killed the whole settings panel

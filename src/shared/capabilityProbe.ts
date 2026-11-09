@@ -6,17 +6,14 @@
 // （context_length / top_provider.context_length）。本模块在 manifest 未
 // 声明时向端点要这个读数，结果由调用方写进 config.json 的 capabilityProbes
 // 缓存（键 provider::model，含 endpoint——换端点即失效）。
-//
 // 边界（与蓝图口径一致）：探测是**填空档**不是推翻族知识——消费层把探得值
 // 插在 manifest 之后、保守回落之前，manifest 有档（deepseek/glm/…）的模型
 // 根本不会触发探测。官方 API 的 /models 多数不返回窗口，此时如实报告
 // modelFound 但不带预算，调用方走「明确告警」而不是编一个数。
-//
 // 蓝图原写「/models + 一次极小请求」；落地裁定砍掉极小请求（2026-11-04）：
 // 探测挂点之前已有连通性 probe 兜底可用性，而窗口元数据是聚合商特权、官方
 // 端点的极小请求同样拿不到窗口——多一次真实调用只买一个薄读数。等真机
 // 复验后按 /models 缺失率决定要不要补。
-//
 // 本模块与 llmProbe.ts 同款形状（fetchImpl/signalFactory 注入、有界超时），
 // 但职责不同：llmProbe 判连通，本模块读元数据。
 

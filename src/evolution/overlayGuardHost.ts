@@ -1,7 +1,6 @@
 // src/evolution/overlayGuardHost.ts
 // P1-2 — overlay 回退护栏的 CLI 宿主缝（判定纯核在 src/harness/overlayGuard.ts，
 // 这里只做 node:fs IO 与数据源装配——与 memoryDecayTimer 的 GUI 缝同构）。
-//
 // GUI 把判定挂在与 decay 同一节流窗；CLI 没有常驻定时器，挂点由调用方选
 // （runCliSleepCycle 末尾同窗追加）。角色清单自扫 personas/*.overlay.md；
 // records 默认与技能闸同源（cli.jsonl）。总开关不在这里判——挂点所属的宿主

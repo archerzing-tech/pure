@@ -1,6 +1,5 @@
 // src/evaluation/__tests__/heldOutSets.test.ts
 // P1-3 — held-out 装载测试。核心契约只有一条：**缺席不是错误**。
-//
 // 这条契约是 CI 安全性的全部依据——held-out 目录是用户本地的，仓库里没有、
 // 也不该有。所以任何"目录不存在就抛错/退出非零"的写法都会把 CI 门禁
 // （bun test + eval:sanity）打红，而 CI 根本不需要 held-out。

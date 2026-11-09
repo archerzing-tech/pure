@@ -1,20 +1,17 @@
 // src/ui/ambiguityHint.ts
 // Roadmap 阶段 11.3 (P2) — the "we cannot know which file" half of path repair.
-//
 // 11.2 rewrites a path only when exactly one workspace file is close enough. The
 // remaining case — two or more files fit equally well — is where guessing is
 // most expensive and least defensible, so this module does the opposite of a
 // rewrite: it says what the candidates are and leaves the draft alone. The
 // clarification then happens on the model side, as an annotation carried with
 // the message, instead of the app editing the user's words (iron law #1).
-//
 // Three keystrokes, three outcomes:
 //   Tab    adopt — record the candidates for the send path; the textarea is NOT
 //          touched (the note rides along with the message, not in the draft)
 //   Esc    ignore — drop the candidates and close
 //   Enter  send as written — never preventDefault, so the composer's own handler
 //          still runs; with no Tab there is no annotation
-//
 // The popup positioning and the IME / defaultPrevented guards mirror
 // InlineAutocomplete on purpose (this is the same composer corner), but this
 // file is independent: 11.2/11.3 must not move a component with locked tests.

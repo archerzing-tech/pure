@@ -1,6 +1,5 @@
 // src/ui/__tests__/delegableRoles.test.ts
 // The single scan that decides "which roles can this host delegate to".
-//
 // Three claims are load-bearing and none of them is obvious from the call site,
 // so they are pinned here: the scan happens **once** (two private scans of one
 // directory is how the session and the dashboard would drift into disagreeing

@@ -3,7 +3,6 @@
 // templates (roadmap 6.2). Prompts are USER-invoked templates, not model
 // tools — the user picks one in the composer and fills its arguments, and the
 // server returns the messages to send.
-//
 // Kept pure and surface-free so the GUI composer, the CLI REPL, and the
 // command palettes all share one syntax and one rendering rule.
 

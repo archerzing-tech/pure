@@ -1,6 +1,5 @@
 // src/evaluation/roleSampleHarvest.ts
 // 北极星第 6 步 13.3（part 3）/ 13.1 — 真实派发样本收割（纯函数，无 IO）。
-//
 // 为什么从会话存档而不是观测记录：E4.1 的 AgentRunObservation.toolCalls 只记
 // toolName / success / durationMs / result(哈希) / error —— 不存 args 也不存
 // 产出文本（E0.1 的设计原则就是"不存任何 prompt 文本"）。真实样本只能从会话

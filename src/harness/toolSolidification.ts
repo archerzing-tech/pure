@@ -1,17 +1,14 @@
 // src/harness/toolSolidification.ts
 // 阶段 13.4 part 2 — procedure → 工具固化流（生成半边）。
-//
 // 设计文档 capability-self-extension-design.md §13.4：
 //   procedure 复用 ≥ 2 次 → 建议卡「固化成工具？」（用户点头才动手）→
 //   模型起草 TOOL.json + 脚本 → **试跑**（按 input_schema 造样例参数跑一遍，
 //   成功才算起草完成）→ 注册（下一会话生效）。
-//
 // 纪律（与 13.2 生成半边同款）：
 //   - 草稿必须过 P2-1 的同一编译器（compileExternalTools）
 //   - 试跑成功才算起草完成（失败退回重写，最多 2 次）
 //   - 绝不静默落盘：确认弹窗（或 sleep-time 同意缝）
 //   - 执行复用 execute_command 信任模型（不新建安全面）
-//
 // 本模块纯逻辑（LLM / IO / execute 全注入）——宿主绑定 adapter 和工具面，
 // 测试全 fake。写盘缝（Rust write_file / node:fs）与宿主确认缝由调用方注入。
 

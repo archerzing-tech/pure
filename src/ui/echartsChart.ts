@@ -4,7 +4,6 @@
 // so the ~400KB tree-shaken echarts chunk never touches startup. We register
 // just the chart types / components / renderer we use (SVG renderer keeps the
 // existing PNG-export + viewer pipeline working — the chart's DOM is an <svg>).
-//
 // buildChartOption() is pure (no DOM, no echarts instance) so it is unit-testable
 // in bun; renderEchartInto() owns the instance lifecycle (dispose on re-render,
 // ResizeObserver so sidebar toggles / window resizes re-fit the chart).

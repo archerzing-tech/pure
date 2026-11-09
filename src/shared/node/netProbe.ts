@@ -1,13 +1,11 @@
 // src/shared/node/netProbe.ts
 // CLI 宿主的网络探测适配层：**只**提供 node 原语（TCP connect / TLS 握手与
 // 证书读取），判定与归因全部委托给 src/shared/netProbeCore.ts。
-//
 // 为什么核心与本层分开：`src/shared/` 的模块会被 Vite 打进 WebView 包，而
 // node:net / node:tls 在浏览器构建里是 __vite-browser-external 空壳，rollup 在
 // 解析期就报 `"connect" is not exported by ...`，整个 WebView 构建失败——不是
 // 运行期降级。把拨号能力放在 `src/shared/node/` 这一个目录里，「哪些模块会
 // 拖 node 进 bundle」就从靠人记住变成看路径。
-//
 // 被放弃的方案：(a) 让核心自己动态 import node:net —— Vite 仍会把
 // `import('node:net')` 打进 chunk 并留下同样的 external 桩；(b) 下沉 Rust 做
 // 四步探测 —— Rust 侧只有 test_proxy / web_fetch_probe 这类「一次性 HTTP 请求」
