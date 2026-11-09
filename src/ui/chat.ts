@@ -9,7 +9,7 @@ import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSig
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { recordEndpointCacheOutcome } from '../shared/endpointCacheQuality';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
@@ -178,6 +178,12 @@ const TOOL_CALL_REFRESH_MS = 120;
 // 随每个工具批到达，长回合工具批可以很密；全量快照+写盘不便宜，3s 一拍足够
 // ——强杀最多丢最后 3s 的进度，不再丢整回合产物。
 const TURN_CHECKPOINT_PERSIST_MS = 3000;
+// 大快照降频（2026-11-09 Windows 主线程洪水刀4）：检查点 invoke 的请求体是
+// 全量消息账，工程生成场景单回合可滚到数 MB，而 WebView2 上 invoke 请求的
+// JSON 解析发生在主线程（WebMessageReceived/WebResourceRequested 都在 UI
+// 线程触发）。体量超阈后降一档——强杀保护仍在，窗口期从 3s 放宽到 12s。
+const TURN_CHECKPOINT_PERSIST_MS_HEAVY = 12000;
+const TURN_CHECKPOINT_HEAVY_BYTES = 512 * 1024;
 /** 9.1 — cap on a rehydrated file read; the ContextEngine truncates what
  *  enters the prompt, this just keeps the bridge payload bounded. */
 const REHYDRATION_READ_CAP = 20_000;
@@ -4875,6 +4881,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const toolResults = new Map<string, ToolExecMeta>();
     // 回合中途检查点的上次落盘时刻（TurnCheckpoint 节流，见 TURN_CHECKPOINT_PERSIST_MS）。
     let lastCheckpointPersistAt = 0;
+    // 检查点体量累计账：逐次累加最新一条消息的 JSON 量（全量 stringify 本身
+    // 就是 O(N) 渲染进程税，不做），落盘一次清零。超阈即切慢档（见
+    // TURN_CHECKPOINT_HEAVY_BYTES）。
+    let checkpointEstBytes = 0;
     // Subagent interior activity, round-tripped through the engine: CodingAgent
     // publishes orchestrator progress onto this fanout, the engine re-emits it
     // as SubagentActivity events (namespaced by the delegation toolCallId), and
@@ -7295,8 +7305,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 态内容不该作为「一个回复版本」入册（重新生成场景会推垃圾变体）。
             if (gen !== this.generation) break;
             const checkpointNow = Date.now();
-            if (checkpointNow - lastCheckpointPersistAt < TURN_CHECKPOINT_PERSIST_MS) break;
+            // 体量账：只估算最新一条消息（工具批场景一次配平会新增多条，取
+            // 尾条是下界估计——低估最多停留在快档，不会错杀保护）。超阈切
+            // 慢档（Windows 主线程洪水刀4：全量快照的 invoke 解析在主线程）。
+            const cpArr = event.payload.messages;
+            const cpLast = cpArr[cpArr.length - 1];
+            if (cpLast) checkpointEstBytes += JSON.stringify(cpLast).length;
+            const checkpointGate = turnCheckpointGateMs(checkpointEstBytes);
+            if (checkpointNow - lastCheckpointPersistAt < checkpointGate) break;
             lastCheckpointPersistAt = checkpointNow;
+            checkpointEstBytes = 0;
             const checkpointMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText);
             void this.persistSession(
               checkpointMessages,

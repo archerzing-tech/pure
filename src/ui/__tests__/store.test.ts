@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
@@ -677,5 +677,24 @@ describe('session paused state persistence (第 3 期刀 2)', () => {
     } finally {
       (globalThis as any).localStorage = previousStorage;
     }
+  });
+});
+
+// TurnCheckpoint 落盘节流档位（2026-11-09 Windows 主线程洪水刀4）：检查点
+// invoke 的全量消息账在 WebView2 上由主线程解析，大快照降频换主线程呼吸空间。
+describe('turnCheckpointGateMs', () => {
+  it('small accumulations stay on the fast 3s tier', () => {
+    expect(turnCheckpointGateMs(0)).toBe(3000);
+    expect(turnCheckpointGateMs(512 * 1024 - 1)).toBe(3000);
+  });
+
+  it('heavy accumulations drop to the 12s tier', () => {
+    expect(turnCheckpointGateMs(512 * 1024)).toBe(12000);
+    expect(turnCheckpointGateMs(8 * 1024 * 1024)).toBe(12000);
+  });
+
+  it('thresholds are injectable (contract lock)', () => {
+    expect(turnCheckpointGateMs(100, 1000, 5000, 100)).toBe(5000);
+    expect(turnCheckpointGateMs(99, 1000, 5000, 100)).toBe(1000);
   });
 });

@@ -1551,6 +1551,19 @@ export async function deleteAllSessions(): Promise<void> {
  * in the sidebar that persistence will give them — and so 提交即落盘 makes that
  * title appear the moment the user hits send (2026-09-26 用户定调：标题取输入
  * 前 5-6 个字，太长省略；TS/Rust 两侧同规则，Rust 侧见 lib.rs extract_title). */
+/** TurnCheckpoint 落盘节流档位（2026-11-09 Windows 主线程洪水刀4）：检查点
+ *  invoke 的请求体是全量消息账，WebView2 上 invoke 请求的 JSON 解析发生在主
+ *  线程。体量累计 <512KB 用 3s 快档（强杀最多丢 3s），≥512KB 用 12s 慢档
+ *  （保护仍在，窗口期放宽）。纯函数，chat.ts 的 TurnCheckpoint 案调用。 */
+export function turnCheckpointGateMs(
+  accumulatedBytes: number,
+  baseMs = 3000,
+  heavyMs = 12000,
+  heavyBytes = 512 * 1024,
+): number {
+  return accumulatedBytes >= heavyBytes ? heavyMs : baseMs;
+}
+
 export function extractTitle(messages: Message[]): string {
   // 标题必须是用户的话。两类「第一句不是用户输入」的脏形状都不配当标题：
   // 引擎注入的 internal 消息（失败重试注、接续指令——2026-09-29 用户报

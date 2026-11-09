@@ -4257,27 +4257,96 @@ impl StreamLineSplitter {
     }
 }
 
-/// Drain one command pipe through StreamLineSplitter, pushing each chunk to the
-/// Channel as `{ "type": <kind>, "content": ..., "progress": bool }` JSON.
+/// Time/size batching for streamed command lines. Every Channel message costs
+/// one main-thread ExecuteScript on WebView2 (wry must hop to the UI/STA
+/// thread); a build command (npm/cargo/pip) emits hundreds of lines per second
+/// and project builds run several tools in parallel, so per-line forwarding
+/// saturated the Windows UI thread into the 2026-11-09 freeze class (busy
+/// cursor, input dead, progressive hang). Consecutive non-progress lines ride
+/// out together joined by '\n'; the WebView splits them back into one event
+/// per line (TauriToolAdapter onmessage), so downstream — collected result,
+/// live preview — still sees exactly one event per line. Progress (\r
+/// in-place redraw) lines must stay lone (each replaces the previous progress
+/// line on the GUI): a pending batch is flushed before one, and a progress
+/// line never joins a batch.
+const COMMAND_LINE_FLUSH_MS: u128 = 100;
+const COMMAND_LINE_FLUSH_BYTES: usize = 8 * 1024;
+
+struct LineBatch {
+    buf: String,
+    last_flush: Instant,
+}
+
+impl LineBatch {
+    fn new() -> Self {
+        Self { buf: String::new(), last_flush: Instant::now() }
+    }
+
+    /// Append one line; returns the joined batch when it is due for the wire
+    /// (size cap or time gate). The separator goes BETWEEN lines, never
+    /// trailing, so the WebView's split('\n') reproduces the exact line list
+    /// (empty lines included).
+    fn push(&mut self, line: &str) -> Option<String> {
+        if !self.buf.is_empty() {
+            self.buf.push('\n');
+        }
+        self.buf.push_str(line);
+        if self.buf.len() >= COMMAND_LINE_FLUSH_BYTES
+            || self.last_flush.elapsed().as_millis() >= COMMAND_LINE_FLUSH_MS
+        {
+            return Some(self.take());
+        }
+        None
+    }
+
+    fn take(&mut self) -> String {
+        self.last_flush = Instant::now();
+        std::mem::take(&mut self.buf)
+    }
+}
+
+/// Send one (possibly multi-line) batch or a lone progress line in the
+/// execute_command_stream envelope. `progress` is omitted (JS defaults it to
+/// false) — only genuine in-place redraw lines carry it.
+fn send_line_batch(ch: &Channel<String>, kind: &str, content: &str, progress: bool) -> bool {
+    let msg = if progress {
+        serde_json::json!({ "type": kind, "content": content, "progress": true })
+    } else {
+        serde_json::json!({ "type": kind, "content": content })
+    };
+    ch.send(msg.to_string()).is_ok()
+}
+
+/// Drain one command pipe through StreamLineSplitter, pushing lines to the
+/// Channel batched (see LineBatch) as `{ "type": <kind>, "content": ... }`.
 async fn stream_pipe_lines<R>(raw: R, ch: Channel<String>, kind: &'static str)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut reader = BufReader::new(raw);
     let mut splitter = StreamLineSplitter::new();
+    let mut batch = LineBatch::new();
     let mut buf = vec![0u8; 4096];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
                 for chunk in splitter.push(&buf[..n]) {
-                    let msg = serde_json::json!({
-                        "type": kind,
-                        "content": chunk.line,
-                        "progress": chunk.progress,
-                    });
-                    if ch.send(msg.to_string()).is_err() {
-                        return;
+                    if chunk.progress {
+                        // In-place redraw: flush any pending batch first so
+                        // wire order matches pipe order, then send lone.
+                        if !batch.buf.is_empty()
+                            && !send_line_batch(&ch, kind, &batch.take(), false)
+                        {
+                            return;
+                        }
+                        if !send_line_batch(&ch, kind, &chunk.line, true) {
+                            return;
+                        }
+                    } else if let Some(joined) = batch.push(&chunk.line) {
+                        if !send_line_batch(&ch, kind, &joined, false) {
+                            return;
+                        }
                     }
                 }
             }
@@ -4285,14 +4354,23 @@ where
         }
     }
     for chunk in splitter.finish() {
-        let msg = serde_json::json!({
-            "type": kind,
-            "content": chunk.line,
-            "progress": chunk.progress,
-        });
-        if ch.send(msg.to_string()).is_err() {
-            break;
+        let progress = chunk.progress;
+        if progress {
+            if !batch.buf.is_empty() && !send_line_batch(&ch, kind, &batch.take(), false) {
+                break;
+            }
+            if !send_line_batch(&ch, kind, &chunk.line, true) {
+                break;
+            }
+        } else if let Some(joined) = batch.push(&chunk.line) {
+            if !send_line_batch(&ch, kind, &joined, false) {
+                break;
+            }
         }
+    }
+    if !batch.buf.is_empty() {
+        let joined = batch.take();
+        let _ = send_line_batch(&ch, kind, &joined, false);
     }
 }
 
@@ -4405,6 +4483,106 @@ mod stream_line_splitter_tests {
         let mut splitter = StreamLineSplitter::new();
         assert!(splitter.push(b"\r\r\n  \r").is_empty());
         assert!(splitter.finish().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stream_line_batch_tests {
+    use super::*;
+
+    #[test]
+    fn batch_joins_with_separator_never_trailing() {
+        let mut batch = LineBatch::new();
+        assert!(batch.push("line1").is_none());
+        assert!(batch.push("line2").is_none());
+        // An empty line is a real line: separator before it, nothing after.
+        assert!(batch.push("").is_none());
+        assert!(batch.push("line4").is_none());
+        let joined = batch.take();
+        assert_eq!(joined, "line1\nline2\n\nline4");
+    }
+
+    #[test]
+    fn split_round_trip_reproduces_the_line_list() {
+        // The WebView splits batched content with split('\n'); this is the
+        // round-trip contract with TauriToolAdapter's onmessage handler.
+        let mut batch = LineBatch::new();
+        for line in ["a", "", "b"] {
+            let _ = batch.push(line);
+        }
+        let joined = batch.take();
+        assert_eq!(joined.split('\n').collect::<Vec<_>>(), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn size_gate_flushes_the_whole_batch() {
+        let mut batch = LineBatch::new();
+        assert!(batch.push(&"x".repeat(100)).is_none());
+        // Cross COMMAND_LINE_FLUSH_BYTES: everything so far rides out at once.
+        let joined = batch
+            .push(&"y".repeat(COMMAND_LINE_FLUSH_BYTES))
+            .expect("size cap must flush");
+        assert_eq!(joined.len(), 100 + 1 + COMMAND_LINE_FLUSH_BYTES);
+        assert!(joined.starts_with("xxxx"));
+        assert!(joined.ends_with(&"y".repeat(8)));
+        // After the flush the batch restarts empty.
+        assert!(batch.push("next").is_none());
+        assert_eq!(batch.buf, "next");
+    }
+
+    #[test]
+    fn progress_lines_stay_out_of_batches_contract() {
+        // stream_pipe_lines flushes the batch before a progress line and sends
+        // the progress line lone — this test locks the shape of both messages
+        // (progress flag only on the lone line, batched messages omit it).
+        let batched = serde_json::json!({ "type": "stdout", "content": "a\nb" });
+        assert_eq!(batched["progress"], serde_json::Value::Null);
+        let lone = serde_json::json!({ "type": "stdout", "content": "10%", "progress": true });
+        assert_eq!(lone["progress"], serde_json::Value::Bool(true));
+    }
+}
+
+#[cfg(test)]
+mod delta_batch_tests {
+    use super::*;
+
+    #[test]
+    fn delta_batch_message_shape_by_kind() {
+        let answer = delta_batch_message(1, "hello");
+        assert_eq!(answer["type"], "delta");
+        assert_eq!(answer["content"], "hello");
+        let thinking = delta_batch_message(2, "hmm");
+        assert_eq!(thinking["type"], "reasoning");
+        assert_eq!(thinking["content"], "hmm");
+        // kind 0 must never reach the wire with content — flush_delta_batch
+        // guards on an empty buffer; shape-fallback is "delta" regardless.
+        assert_eq!(delta_batch_message(0, "x")["type"], "delta");
+    }
+
+    #[test]
+    fn delta_batch_size_gate_thresholds() {
+        // Below cap: not due on size alone... but due on time is faked via a
+        // stale Instant; here lock the size leg only.
+        let small = "a".repeat(DELTA_FLUSH_BYTES - 1);
+        let stale = Instant::now() - std::time::Duration::from_secs(3600);
+        assert!(delta_batch_due(&small, &stale)); // time leg
+        let fresh = Instant::now();
+        assert!(!delta_batch_due(&small, &fresh)); // neither leg
+        let big = "a".repeat(DELTA_FLUSH_BYTES);
+        assert!(delta_batch_due(&big, &fresh)); // size leg
+        assert!(!delta_batch_due("", &stale)); // empty never flushes
+    }
+
+    #[test]
+    fn char_boundary_truncate_cuts_on_codepoint_edges() {
+        let s = "西安天气很好";
+        // Exact byte cut inside a 3-byte CJK char backs up to the boundary.
+        let cut = char_boundary_truncate(s, 4);
+        assert_eq!(cut, "西"); // 3 bytes for 西, 4th byte is mid-安
+        assert_eq!(char_boundary_truncate(s, 3), "西");
+        assert_eq!(char_boundary_truncate(s, 6), "西安");
+        assert_eq!(char_boundary_truncate(s, 0), "");
+        assert_eq!(char_boundary_truncate("abc", 100), "abc");
     }
 }
 
@@ -11469,25 +11647,89 @@ fn route_of(proxy_spec: Option<&str>) -> &'static str {
 const TOOL_CALL_EMIT_MS: u128 = 100;
 
 // Past this many accumulated argument bytes the preview switches to the slow
-// lane: 1 emit/s and a char-boundary-truncated payload (see
-// forward_tool_call_delta for why the full buffer must never go out at the
-// fast cadence).
+// lane: 1 emit/s (see forward_tool_call_delta).
 const TOOL_CALL_EMIT_CAP_BYTES: usize = 64 * 1024;
 const TOOL_CALL_EMIT_MS_SLOW: u128 = 1000;
+
+// The preview payload cap in BOTH lanes (char-boundary-safe head cut). The
+// tool row only shows name + a partial-content probe, so 8KB of head is
+// plenty; the fast lane previously forwarded the FULL accumulated buffer (up
+// to 64KB) ten times a second — 640KB/s of main-thread ExecuteScript volume
+// during a giant-argument generation, a real contributor to the 2026-11-09
+// Windows UI-thread saturation.
+const TOOL_CALL_EMIT_PREVIEW_BYTES: usize = 8 * 1024;
+
+/// Char-boundary-safe head truncation (locked by a unit test with multi-byte
+/// UTF-8: a cut mid-character would corrupt the JSON string).
+fn char_boundary_truncate(s: &str, cap: usize) -> &str {
+    let mut end = cap.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Batch window for streamed answer/reasoning tokens (see the chat_stream
+/// loop): one message per ~50ms or 16KB instead of one message PER TOKEN.
+/// Every Channel message is a main-thread ExecuteScript on WebView2; a giant
+/// write_file `content` streams hundreds of tokens per second for minutes,
+/// and per-token forwarding stacked on top of parallel command-output floods
+/// saturated the Windows UI thread into the 2026-11-09 freeze class.
+const DELTA_FLUSH_MS: u128 = 50;
+const DELTA_FLUSH_BYTES: usize = 16 * 1024;
+
+/// Delta batch message shape (locked by a unit test): type is "delta" for
+/// answer text (kind 1) and "reasoning" for thinking text (kind 2).
+fn delta_batch_message(kind: u8, buf: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": if kind == 2 { "reasoning" } else { "delta" },
+        "content": buf,
+    })
+}
+
+/// Flush a pending delta batch (if any). Returns Ok(true) when a message went
+/// out, Err("cancelled") when the WebView is gone. `kind`/`buf`/`flushed_at`
+/// are the loop-local batch state.
+fn flush_delta_batch(
+    on_chunk: &Channel<String>,
+    kind: &mut u8,
+    buf: &mut String,
+    flushed_at: &mut Instant,
+) -> Result<bool, String> {
+    if buf.is_empty() {
+        return Ok(false);
+    }
+    let msg = delta_batch_message(*kind, buf);
+    *kind = 0;
+    buf.clear();
+    *flushed_at = Instant::now();
+    on_chunk
+        .send(msg.to_string())
+        .map(|_| true)
+        .map_err(|_| "cancelled".to_string())
+}
+
+/// True when a pending delta batch is due for the wire (size cap or time
+/// gate). Checked where tokens arrive; between chunks the batch just waits —
+/// flush happens at the next arrival, the next non-delta send, or stream exit.
+fn delta_batch_due(buf: &str, flushed_at: &Instant) -> bool {
+    !buf.is_empty()
+        && (buf.len() >= DELTA_FLUSH_BYTES || flushed_at.elapsed().as_millis() >= DELTA_FLUSH_MS)
+}
 
 /// Forward the accumulated tool-call arguments buffer to the GUI as a
 /// `tool_call_delta` preview. Returns Ok(true) when an event went out, Ok(false)
 /// when the throttle gate skipped it, Err("cancelled") when the WebView is gone.
 ///
-/// Why the truncation exists: a multi-MB write_file `content` previously went
-/// out IN FULL every TOOL_CALL_EMIT_MS — O(n²) over an IPC channel whose
-/// WebView2 end (per tauri's own ipc/channel.rs) is the slowest in the fleet —
-/// and on Windows that flood saturated the renderer and the main thread into a
-/// full window freeze: no input, and the CloseRequested handler never ran, so
-/// the window could not even be closed. The GUI's tool row only needs a live
-/// preview: its strict parse fails on the cut JSON and its fault-tolerant probe
-/// shows path + partial content instead; the engine's real tool calls arrive
-/// via the `done` event, never through this preview.
+/// Why throttled + truncated: a multi-MB write_file `content` previously went
+/// out IN FULL on every token — O(n²) over an IPC channel whose WebView2 end
+/// (per tauri's own ipc/channel.rs) is the slowest in the fleet — and on
+/// Windows that flood saturated the renderer and the main thread into a full
+/// window freeze: no input, and the CloseRequested handler never ran, so the
+/// window could not even be closed. The GUI's tool row only needs a live
+/// preview: its strict parse fails on the cut JSON and its fault-tolerant
+/// probe shows path + partial content instead; the engine's real tool calls
+/// arrive via the command's return value, never through this preview.
 fn forward_tool_call_delta(
     on_chunk: &Channel<String>,
     index: u32,
@@ -11501,16 +11743,11 @@ fn forward_tool_call_delta(
         return Ok(false);
     }
     *last_emit = Instant::now();
-    let mut end = TOOL_CALL_EMIT_CAP_BYTES.min(arguments.len());
-    while end > 0 && !arguments.is_char_boundary(end) {
-        end -= 1;
-    }
-    let payload = if slow { &arguments[..end] } else { arguments };
     let chunk = serde_json::json!({
         "type": "tool_call_delta",
         "index": index,
         "name": name,
-        "arguments": payload,
+        "arguments": char_boundary_truncate(arguments, TOOL_CALL_EMIT_PREVIEW_BYTES),
     });
     on_chunk
         .send(chunk.to_string())
@@ -12933,6 +13170,12 @@ async fn chat_stream(
     // HTML file) grows the accumulated buffer to tens of KB; forwarding it on
     // every token is O(n²) over the channel.
     let mut last_tool_emit = Instant::now();
+    // Answer/reasoning token batch state (see DELTA_FLUSH_MS): kind 0=empty,
+    // 1=answer text pending, 2=reasoning pending. A type switch flushes the
+    // pending batch first so wire order always matches generation order.
+    let mut delta_kind: u8 = 0;
+    let mut delta_buf = String::new();
+    let mut delta_flushed_at = Instant::now();
 
         // SSE read loop with a labeled break: the idle timeout (every chunk
         // resets the clock) fails only on genuinely dead connections, and the
@@ -12980,7 +13223,17 @@ async fn chat_stream(
 
             let json = match classify_sse_line(&line) {
                 SseLine::NotData => continue,
-                SseLine::Done => break 'stream,
+                SseLine::Done => {
+                    // Terminal frame: flush any pending token batch so the
+                    // last <50ms of text reaches the UI before the stream ends.
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
+                    break 'stream;
+                }
                 SseLine::Data(v) => v,
             };
 
@@ -12994,6 +13247,14 @@ async fn chat_stream(
             if let Some(u) = json.get("usage") {
                 if u.is_object() {
                     usage = Some(u.clone());
+                    // Keep wire order strict: answer tokens buffered so far go
+                    // out before this non-delta event.
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
                     let chunk = serde_json::json!({ "type": "usage", "usage": u });
                     if on_chunk.send(chunk.to_string()).is_err() {
                         return Err("cancelled".into());
@@ -13047,6 +13308,12 @@ async fn chat_stream(
                                 }
                                 let mapped = anthropic_usage_to_openai(&merged);
                                 usage = Some(mapped.clone());
+                                stream_emitted |= flush_delta_batch(
+                                    &on_chunk,
+                                    &mut delta_kind,
+                                    &mut delta_buf,
+                                    &mut delta_flushed_at,
+                                )?;
                                 let chunk = serde_json::json!({ "type": "usage", "usage": mapped });
                                 if on_chunk.send(chunk.to_string()).is_err() {
                                     return Err("cancelled".into());
@@ -13060,14 +13327,52 @@ async fn chat_stream(
                             "text_delta" => {
                                 if let Some(content) = delta.get("text").and_then(|v| v.as_str()) {
                                     text.push_str(content);
-                                    stream_emitted = true;
-                                    if on_chunk.send(serde_json::json!({ "type": "delta", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
+                                    // Batch instead of per-token send (see
+                                    // DELTA_FLUSH_MS). A pending batch of the
+                                    // other type flushes first so wire order
+                                    // matches generation order. stream_emitted
+                                    // only on a real flush: the retry gate must
+                                    // reflect what the UI actually saw.
+                                    if delta_kind != 1 && !delta_buf.is_empty() {
+                                        stream_emitted |= flush_delta_batch(
+                                            &on_chunk,
+                                            &mut delta_kind,
+                                            &mut delta_buf,
+                                            &mut delta_flushed_at,
+                                        )?;
+                                    }
+                                    delta_kind = 1;
+                                    delta_buf.push_str(content);
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                                        stream_emitted |= flush_delta_batch(
+                                            &on_chunk,
+                                            &mut delta_kind,
+                                            &mut delta_buf,
+                                            &mut delta_flushed_at,
+                                        )?;
+                                    }
                                 }
                             }
                             "thinking_delta" => {
                                 if let Some(content) = delta.get("thinking").and_then(|v| v.as_str()) {
-                                    stream_emitted = true;
-                                    if on_chunk.send(serde_json::json!({ "type": "reasoning", "content": content }).to_string()).is_err() { return Err("cancelled".into()); }
+                                    if delta_kind != 2 && !delta_buf.is_empty() {
+                                        stream_emitted |= flush_delta_batch(
+                                            &on_chunk,
+                                            &mut delta_kind,
+                                            &mut delta_buf,
+                                            &mut delta_flushed_at,
+                                        )?;
+                                    }
+                                    delta_kind = 2;
+                                    delta_buf.push_str(content);
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                                        stream_emitted |= flush_delta_batch(
+                                            &on_chunk,
+                                            &mut delta_kind,
+                                            &mut delta_buf,
+                                            &mut delta_flushed_at,
+                                        )?;
+                                    }
                                 }
                             }
                             "input_json_delta" => {
@@ -13088,6 +13393,14 @@ async fn chat_stream(
                                 if !partial.is_empty()
                                     && !cur["name"].as_str().map_or(true, |n| n.is_empty())
                                 {
+                                    // Buffered answer tokens go out before the
+                                    // tool preview so the wire stays ordered.
+                                    stream_emitted |= flush_delta_batch(
+                                        &on_chunk,
+                                        &mut delta_kind,
+                                        &mut delta_buf,
+                                        &mut delta_flushed_at,
+                                    )?;
                                     if forward_tool_call_delta(
                                         &on_chunk,
                                         index,
@@ -13116,6 +13429,12 @@ async fn chat_stream(
                             // first partial_json lands. Same throttle, same
                             // message shape as the input_json_delta forward.
                             if !block["name"].as_str().map_or(true, |n| n.is_empty()) {
+                                stream_emitted |= flush_delta_batch(
+                                    &on_chunk,
+                                    &mut delta_kind,
+                                    &mut delta_buf,
+                                    &mut delta_flushed_at,
+                                )?;
                                 if forward_tool_call_delta(
                                     &on_chunk,
                                     index,
@@ -13144,13 +13463,28 @@ async fn chat_stream(
                 None => continue,
             };
 
-            // Emit content delta
+            // Emit content delta — batched (see DELTA_FLUSH_MS; type switch
+            // flushes a pending reasoning batch first; stream_emitted only on
+            // a real flush so the retry gate reflects what the UI saw).
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 text.push_str(content);
-                let chunk = serde_json::json!({ "type": "delta", "content": content });
-                stream_emitted = true;
-                if on_chunk.send(chunk.to_string()).is_err() {
-                    return Err("cancelled".into());
+                if delta_kind != 1 && !delta_buf.is_empty() {
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
+                }
+                delta_kind = 1;
+                delta_buf.push_str(content);
+                if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
                 }
             }
 
@@ -13187,10 +13521,23 @@ async fn chat_stream(
                     None => None,
                 });
             if let Some(rc) = reasoning {
-                let chunk = serde_json::json!({ "type": "reasoning", "content": rc });
-                stream_emitted = true;
-                if on_chunk.send(chunk.to_string()).is_err() {
-                    return Err("cancelled".into());
+                if delta_kind != 2 && !delta_buf.is_empty() {
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
+                }
+                delta_kind = 2;
+                delta_buf.push_str(&rc);
+                if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                    stream_emitted |= flush_delta_batch(
+                        &on_chunk,
+                        &mut delta_kind,
+                        &mut delta_buf,
+                        &mut delta_flushed_at,
+                    )?;
                 }
             }
 
@@ -13227,6 +13574,14 @@ async fn chat_stream(
                         updated = true;
                     }
                     if updated && !cur["name"].as_str().map_or(true, |n| n.is_empty()) {
+                        // Buffered answer tokens go out before the tool
+                        // preview so the wire stays ordered.
+                        stream_emitted |= flush_delta_batch(
+                            &on_chunk,
+                            &mut delta_kind,
+                            &mut delta_buf,
+                            &mut delta_flushed_at,
+                        )?;
                         if forward_tool_call_delta(
                             &on_chunk,
                             idx,
@@ -13263,6 +13618,12 @@ async fn chat_stream(
                 },
             ));
         }
+        // Stream complete: flush any pending token batch — the last <50ms of
+        // text must reach the UI before the final result swaps in. The
+        // emitted flag is dead here (the loop exits either way), only the
+        // flush (and its cancel propagation) matters.
+        let _ =
+            flush_delta_batch(&on_chunk, &mut delta_kind, &mut delta_buf, &mut delta_flushed_at)?;
         break (text, usage, tc_map, truncated);
     };
 

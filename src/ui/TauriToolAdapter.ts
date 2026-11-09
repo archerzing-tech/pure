@@ -1703,8 +1703,18 @@ export class TauriToolAdapter implements ToolAdapter {
               const chunk = parseCommandStreamChunk(raw);
               if (!chunk) return;
               if (chunk.type === 'stdout' || chunk.type === 'stderr') {
-                collected.push({ kind: chunk.type, line: chunk.line });
-                dispatchToolOutput(toolCall.id, chunk.type, chunk.line, chunk.progress);
+                // The Rust side batches consecutive non-progress lines into
+                // one message joined by '\n' (COMMAND_LINE_FLUSH — every
+                // Channel message is a main-thread ExecuteScript on WebView2).
+                // Split them back apart so everything downstream — the
+                // collected final result and the live preview — still sees
+                // exactly one event per line. Progress (\r in-place) lines
+                // never arrive batched (Rust contract), so the flag passes
+                // through unchanged.
+                for (const line of chunk.line.split('\n')) {
+                  collected.push({ kind: chunk.type, line });
+                  dispatchToolOutput(toolCall.id, chunk.type, line, chunk.progress);
+                }
               }
             };
             // Cancel wiring: when the engine aborts this tool call (user
@@ -2006,23 +2016,28 @@ export class TauriToolAdapter implements ToolAdapter {
               let parsed: { type?: string; content?: unknown } | null = null;
               try { parsed = JSON.parse(raw); } catch { parsed = null; }
               if (!parsed || parsed.type !== 'stdout') return;
-              const line = String(parsed.content ?? '');
-              let ev: { type?: string; downloaded?: number; total?: number; filename?: string; via?: string } | null = null;
-              try { ev = JSON.parse(line); } catch { ev = null; }
-              if (!ev) return;
-              if (ev.type === 'dl') {
-                const total = Number(ev.total ?? -1);
-                emit({
-                  downloaded: Number(ev.downloaded ?? 0),
-                  total,
-                  percent: total > 0 ? Math.min(100, Math.floor((Number(ev.downloaded ?? 0) / total) * 100)) : -1,
-                  speed: 0,
-                  state: 'downloading',
-                  filename: ev.filename,
-                  via: ev.via,
-                });
-              } else if (ev.type === 'done') {
-                doneHolder.value = ev as { code: number; path?: string; size?: number; filename?: string; via?: string };
+              const content = String(parsed.content ?? '');
+              // The Rust side batches consecutive lines into one '\n'-joined
+              // message (COMMAND_LINE_FLUSH); each part is its own JSON
+              // progress line — parse them separately.
+              for (const line of content.split('\n')) {
+                let ev: { type?: string; downloaded?: number; total?: number; filename?: string; via?: string } | null = null;
+                try { ev = JSON.parse(line); } catch { ev = null; }
+                if (!ev) continue;
+                if (ev.type === 'dl') {
+                  const total = Number(ev.total ?? -1);
+                  emit({
+                    downloaded: Number(ev.downloaded ?? 0),
+                    total,
+                    percent: total > 0 ? Math.min(100, Math.floor((Number(ev.downloaded ?? 0) / total) * 100)) : -1,
+                    speed: 0,
+                    state: 'downloading',
+                    filename: ev.filename,
+                    via: ev.via,
+                  });
+                } else if (ev.type === 'done') {
+                  doneHolder.value = ev as { code: number; path?: string; size?: number; filename?: string; via?: string };
+                }
               }
             };
             let cancelled = false;

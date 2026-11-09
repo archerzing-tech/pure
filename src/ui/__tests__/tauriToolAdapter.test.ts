@@ -484,6 +484,31 @@ describe('parseCommandStreamChunk (execute_command_stream protocol lock)', () =>
   });
 });
 
+// Rust 侧 stream_pipe_lines 会把连续非 progress 行合批成一条 '\n' 连接的
+// 消息（COMMAND_LINE_FLUSH——每条 Channel 消息在 WebView2 上都是一次主线程
+// ExecuteScript，逐行转发曾把 UI 线程灌到卡死，2026-11-09 定案）。这里锁
+// onmessage 的拆行契约：拆回单行、空行保留、无尾部分隔符。
+describe('command stream line batching (wire contract with Rust LineBatch)', () => {
+  const splitBatched = (content: string): string[] => {
+    const chunk = parseCommandStreamChunk(JSON.stringify({ type: 'stdout', content }));
+    return chunk && chunk.type === 'stdout' ? chunk.line.split('\n') : [];
+  };
+
+  it('splits a batched message back into one event per line', () => {
+    expect(splitBatched('line1\nline2\nline3')).toEqual(['line1', 'line2', 'line3']);
+  });
+
+  it('keeps empty lines and never yields a trailing phantom line', () => {
+    // Rust 的分隔符只在行间、绝不在尾部：'\n' 收尾意味着最后一行是真空行。
+    expect(splitBatched('a\n\nb')).toEqual(['a', '', 'b']);
+    expect(splitBatched('a\n')).toEqual(['a', '']);
+  });
+
+  it('a lone line (progress or not) splits to itself', () => {
+    expect(splitBatched('Downloading 45%')).toEqual(['Downloading 45%']);
+  });
+});
+
 // The native download_file_stream path must carry the same cancel wiring as
 // the shell path: a Stop (engine aborts the tool signal) asks the Rust backend
 // to kill the transfer — download_file_stream registers a cancel channel under
