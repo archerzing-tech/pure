@@ -219,6 +219,27 @@ body.window-maximized #boot-splash {
 /* 浏览器预览 / 窗口 API 不可用：没有窗口可管，整组隐藏。 */
 #window-titlebar.browser-preview .titlebar-controls { display: none; }
 
+/* ── 自绘边缘 resize 热区（4 边 + 4 角）── */
+/* 原生热区已由 Rust 侧 WM_NCHITTEST=HTCLIENT 灭活（hotzone.rs，2026-11-09
+   卡死判例：系统热区把连点拖进模态 sizing 循环），边缘 resize 改由这里
+   接手：mousedown → startResizeDragging，与原生同一条消息链。层级 900：
+   高于标题栏（600）与全部应用内容，低于模态/弹层（1000+）——弹层边缘的
+   点击保持自然，不留 6px 死条。最大化时整组隐藏（resize 无意义，且会白
+   白挡住标题栏顶部 6px 的拖拽）。 */
+.win-resize-zone {
+  position: fixed;
+  z-index: 900;
+}
+.rz-n { top: 0; left: 6px; right: 6px; height: 6px; cursor: n-resize; }
+.rz-s { bottom: 0; left: 6px; right: 6px; height: 6px; cursor: s-resize; }
+.rz-w { top: 6px; bottom: 6px; left: 0; width: 6px; cursor: w-resize; }
+.rz-e { top: 6px; bottom: 6px; right: 0; width: 6px; cursor: e-resize; }
+.rz-nw { top: 0; left: 0; width: 6px; height: 6px; cursor: nw-resize; }
+.rz-ne { top: 0; right: 0; width: 6px; height: 6px; cursor: ne-resize; }
+.rz-sw { bottom: 0; left: 0; width: 6px; height: 6px; cursor: sw-resize; }
+.rz-se { bottom: 0; right: 0; width: 6px; height: 6px; cursor: se-resize; }
+body.window-maximized .win-resize-zone { display: none; }
+
 /* ── Sidebar ── */
 
 #sidebar {

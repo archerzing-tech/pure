@@ -47,6 +47,7 @@ import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { setupWindowChrome } from './windowChrome';
+import { setupResizeZones } from './resizeZones';
 import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
@@ -1073,6 +1074,8 @@ function deferToIdle(fn: () => void): void {
     if (document.visibilityState === 'hidden') void flushSessionSaves();
   });
   setupWindowChrome();
+  // 无边框窗口边缘 resize 热区(4 边+4 角)+ 原生热区灭活(2026-11-09 卡死判例)
+  setupResizeZones();
   dismissBootSplash();
   // Preload the memory embedder (WASM + model) so the first message of a new
   // chat never blocks on the one-time load. Deferred to an idle slot (NOT run

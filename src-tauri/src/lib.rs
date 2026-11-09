@@ -12,6 +12,9 @@ use std::time::Instant;
 
 mod path_policy;
 mod sandbox;
+// Windows 专属:无边框窗口顶边系统 resize 热区灭活(2026-11-09 卡死判例)。
+#[cfg(target_os = "windows")]
+mod hotzone;
 /// Compile-once regex helpers (the regex crate has no lookahead, so the few
 /// lookahead-based JS patterns are implemented structurally instead).
 macro_rules! static_regex {
@@ -3982,6 +3985,18 @@ async fn save_artifact(kind: String, basename: String, data_base64: String) -> R
         Ok(path.to_string_lossy().into_owned())
     })
     .await
+}
+
+/// 灭掉调用方窗口的原生 resize 热区(Windows 专属,其他平台 no-op)。
+/// 前端每个窗口 boot 时调一次(sessionSidebar 新建窗走同一份 index.html boot,
+/// 天然覆盖),主窗另有 setup 时机兜底。
+#[tauri::command]
+async fn disable_resize_hotzones(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    hotzone::disable_native_resize_hotzones(&window);
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+    Ok(())
 }
 
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
@@ -17095,6 +17110,14 @@ pub fn run() {
             // the sidebar must only ever list conversations that exist.
             prune_empty_sessions();
 
+            // ── Windows:无边框窗口顶边系统热区灭活(2026-11-09 卡死判例)──
+            // 主窗等启动即存窗口全部 subclass;之后前端新建的窗口由各自 boot
+            // 里的 disable_resize_hotzones 调用覆盖。
+            #[cfg(target_os = "windows")]
+            for window in _app.webview_windows().values() {
+                hotzone::disable_native_resize_hotzones(window);
+            }
+
             // ── Native menu bar (macOS ONLY) ──
             // The system menu is the natural home for window/app-level
             // actions (新建窗口 ⌘⇧N, 新对话 ⌘N) plus the standard Edit roles
@@ -17385,6 +17408,8 @@ pub fn run() {
             find_chrome,
             launch_chrome,
             save_artifact,
+            // Windows 无边框窗口 resize 热区灭活(hotzone.rs)
+            disable_resize_hotzones,
             // MCP subprocess
             spawn_mcp,
             mcp_request,
