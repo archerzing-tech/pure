@@ -68,6 +68,24 @@ describe('correctWorkspacePaths (pure)', () => {
     expect(correct(draft).text).toBe(draft);
   });
 
+  it('skips Windows absolute paths (drive letter and UNC)', () => {
+    // On Windows these point outside the workspace exactly like `/etc/hosts.ts`
+    // does on POSIX — a slip in them must never be "repaired" into a local file.
+    const draft = String.raw`看 D:\work\src\ui\mian.ts 和 C:/work/src/ui/mian.ts`;
+    expect(correct(draft).text).toBe(draft);
+    const unc = String.raw`\\nas\share\src\ui\mian.ts`;
+    expect(correct(unc).text).toBe(unc);
+  });
+
+  it('keeps a file:line reference intact', () => {
+    // `src/ui/main.ts:42` must not be rewritten to `src/ui/main.ts` — the line
+    // number is the user's, and dropping it changes what they asked for.
+    const draft = '看 src/ui/mian.ts:42 那行';
+    expect(correct(draft).text).toBe('看 src/ui/main.ts:42 那行');
+    const exact = '看 src/ui/main.ts:42 那行';
+    expect(correct(exact).text).toBe(exact);
+  });
+
   it('still repairs a path the user quoted', () => {
     // Quoting is how users point AT a path, not a reason to leave a slip in it.
     expect(correct('打开 "src/ui/mian.ts"').text).toBe('打开 "src/ui/main.ts"');

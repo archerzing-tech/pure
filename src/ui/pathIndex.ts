@@ -150,8 +150,14 @@ async function globWorkspaceFiles(workspace: string): Promise<string[]> {
 // ── Matcher (pure side) ──
 
 /** Path-ish runs of text. CJK is included: this project (and many of its
- *  users') files carry Chinese names, e.g. 改进进度记录.md. */
-const TOKEN_RE = /[\w./@\-\u4e00-\u9fff]+/g;
+ *  users') files carry Chinese names, e.g. 改进进度记录.md.
+ *
+ *  `:` and `\` are in the class so a Windows path survives as ONE token. Without
+ *  them `D:\work\src\ui\mian.ts` split into `D`, `work`, …, `mian.ts`, and that
+ *  bare `mian.ts` could be "repaired" into a workspace file — rewriting an
+ *  absolute path this module promises never to touch (it also split `https://`
+ *  into two tokens). */
+const TOKEN_RE = /[\w./@:\\\u4e00-\u9fff-]+/g;
 
 /** Fenced code is quoted material, not an instruction. Rewriting a path inside
  *  it would edit the snippet the user is asking about. */
@@ -159,6 +165,15 @@ const FENCE_RE = /```[\s\S]*?```/g;
 
 /** Sentence punctuation that HAPPENS to be in the token character class. */
 const TRAILING_PUNCT = /[.:]+$/;
+
+/** `path:line` / `path:line:col` — only the path half is repairable; the suffix
+ *  is the user's own precision and must survive the rewrite. Splitting it also
+ *  keeps a bare `src/ui/main.ts` exact-match check working on such tokens (the
+ *  tokenizer keeps `:` inside a token so Windows drive letters stay whole). */
+function splitLineSuffix(token: string): { path: string; suffix: string } {
+  const match = /^(.*?)(:\d+(?::\d+)?)$/.exec(token);
+  return match ? { path: match[1], suffix: match[2] } : { path: token, suffix: '' };
+}
 
 /**
  * "Create a new file at this path" intent. A path the user is about to CREATE
@@ -186,6 +201,13 @@ function looksLikePath(token: string): boolean {
   // Absolute paths, URLs, globs and package scopes are out of scope: we cannot
   // tell a typo from a path that lives outside the workspace.
   if (token.includes('://') || token.startsWith('/') || token.startsWith('~') || token.startsWith('@')) return false;
+  // Windows forms the POSIX checks above cannot see:
+  //   • a drive-letter path (`D:\src\main.ts`, `C:/src/main.ts`) — absolute,
+  //     exactly like `/etc/hosts.ts` on POSIX;
+  //   • a UNC share (`\\host\share\x.ts`) — absolute without a colon.
+  // (`path:line` never reaches here: splitLineSuffix() strips the suffix first,
+  // so the remaining path still gets repaired.)
+  if (token.includes(':') || token.startsWith('\\\\')) return false;
   if (/[*?[\]{}<>|"']/.test(token)) return false;
   if (/\.[A-Za-z0-9]{1,8}$/.test(token)) return true;
   return token.includes('/') && /[A-Za-z0-9\u4e00-\u9fff]/.test(token);
@@ -272,13 +294,16 @@ export function correctWorkspacePaths(text: string, paths: readonly string[]): P
     const start = match.index ?? 0;
     const token = match[0].replace(TRAILING_PUNCT, '');
     if (!token || insideSpan(start, fences)) continue;
-    if (exact.has(token)) continue;
-    if (!looksLikePath(token)) continue;
+    // Repair the path half only: `end` stops before any `:line` suffix, so the
+    // suffix is left exactly as the user wrote it.
+    const tokenPath = splitLineSuffix(token).path;
+    if (exact.has(tokenPath)) continue;
+    if (!looksLikePath(tokenPath)) continue;
     if (CREATION_INTENT_RE.test(enclosingClause(text, start))) continue;
-    if (!memo.has(token)) memo.set(token, nearestPath(token, paths));
-    const target = memo.get(token);
+    if (!memo.has(tokenPath)) memo.set(tokenPath, nearestPath(tokenPath, paths));
+    const target = memo.get(tokenPath);
     if (!target) continue;
-    edits.push({ start, end: start + token.length, from: token, to: target });
+    edits.push({ start, end: start + tokenPath.length, from: tokenPath, to: target });
   }
   if (edits.length === 0) return { text, repairs: [] };
   let out = text;
@@ -317,15 +342,16 @@ export function findAmbiguousPaths(text: string, paths: readonly string[]): Ambi
     const start = match.index ?? 0;
     const token = match[0].replace(TRAILING_PUNCT, '');
     if (!token || insideSpan(start, fences)) continue;
-    if (exact.has(token)) continue;
-    if (!looksLikePath(token)) continue;
+    const tokenPath = splitLineSuffix(token).path;
+    if (exact.has(tokenPath)) continue;
+    if (!looksLikePath(tokenPath)) continue;
     if (CREATION_INTENT_RE.test(enclosingClause(text, start))) continue;
-    if (seen.has(token)) continue;
-    if (!memo.has(token)) memo.set(token, nearPathCandidates(token, paths));
-    const candidates = memo.get(token) ?? [];
+    if (seen.has(tokenPath)) continue;
+    if (!memo.has(tokenPath)) memo.set(tokenPath, nearPathCandidates(tokenPath, paths));
+    const candidates = memo.get(tokenPath) ?? [];
     if (candidates.length < 2) continue;
-    seen.add(token);
-    hints.push({ token, candidates });
+    seen.add(tokenPath);
+    hints.push({ token: tokenPath, candidates });
   }
   return hints;
 }

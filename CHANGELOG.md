@@ -4,6 +4,22 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.2
+
+**Windows 专项：主线程阻塞清零、命令输出乱码与 CLIXML 噪音根治、路径修复器不再误伤 Windows 绝对路径**
+
+起因是同一条判据被逐条对照：Tauri v2 的非 async command 在窗口消息循环里内联执行，所以任何同步命令里的一次子进程等待、一次 fsync、一次大 JSON 解析，都会原样变成「窗口点不动、拖不动、关不掉」。
+
+一、主线程上的子进程。进程探活的 Windows 分支原来 spawn `tasklist` 并等它退出（100–400ms，杀软 hook 下更久），而 `process_alive` 是同步命令、`task_list` 工具逐 pid 轮询——每个 pid 冻一次消息泵。改用 `OpenProcess` + `GetExitCodeProcess`（内核调用、不开子进程、不闪控制台窗），`ACCESS_DENIED` 按「活着」处理以对齐 Unix 的 EPERM 语义；`process_alive` 转 async。`kill_process` 的 `taskkill /T /F` 在深进程树上要等几秒，移入 `run_blocking`。通知的 `notify_rust::show()` 在 Windows 走 WinRT/COM、每个后台 settle 一次，同样移入阻塞池——`on_window_event` 里对同一个调用早就这么做了并写明了理由，这条命令此前没照做。
+
+二、每回合重复的主线程 IO。每回合组装 system prompt 都会调 `list_app_skills`（逐个读 SKILL.md），连同 `list_external_subagents` / `list_external_tools` / `list_persona_overlays` / `list_role_cases` 一起转 `spawn_blocking`。`load_last_session`（启动解析最新 session.json，长会话数 MB）、`load_session_list`、`summarize_session_delegations`（打开删除确认卡时解析整个 session.json）、`save_session_stats`（每回合写 + `sync_all` + rename，Windows fsync 受杀软影响可到数百 ms）、`load_session_stats`、`web_cache_get/set`（首次解析、每次全量重写，上限 200×180KB≈36MB）、粘贴落盘（≤10MB base64 解码）、地图瓦片缓存统计与清理、tmp 粘贴统计与清理，一并转 async + `run_blocking`。`setup()` 里的 `refresh_system_proxy_cache()` 在 Windows spawn `reg query` 并等待，而 `setup()` 跑在消息循环上——正好卡在建窗与首帧之间——改到后台线程。
+
+三、命令输出乱码与 CLIXML。PowerShell 5.1 重定向输出用控制台 OEM 代码页（简中为 GBK），代码却用 `from_utf8_lossy` 解码，于是每条中文报错都成 `����`（gui_errors.log 里成片的 `<S S="Error">����λ�� ��:1`）。新增 `decode_process_output()`：Windows 走仓库既有的文件解码链（UTF-8 严格 → GB18030 → Big5 → lossy），接入 `execute_command`、`run_argv` 与流式输出的行解码器；新增 `unwrap_clixml()` 把 `<S S="…">` 里的文本取出来并解 `_xHHHH_` 转义，模型不再看到 `RefId` 信封；`strip_powershell_startup_progress` 原来只认英文「Preparing modules for first use.」，简中的「正在准备首次使用模块。」永远清不掉——改为「信封里没有 `<S>` 记录就清空」。
+
+四、前端路径修复器。`pathIndex.ts` 的分词正则不含 `:` 与 `\`，`D:\work\src\ui\mian.ts` 被拆成 `D` / `work` / … / `mian.ts`，破坏了该模块「绝对路径永不改写」的契约（`https://` 也被拆成两半）。分词类补上 `:` 与 `\` 让 Windows 路径保持单 token，`looksLikePath` 排除盘符路径与 UNC；新增 `splitLineSuffix()` 保证 `src/ui/mian.ts:42` 只修路径段、行号原样保留。
+
+验证：`bun test src/ui/__tests__/pathIndex.test.ts` 22 例 0 fail（新增 Windows 绝对路径、`file:line` 两例）；rustfmt 解析全文件通过。cargo check / cargo test 与两平台构建交由 CI 执行。
+
 ## v4.7.1
 
 **Windows 流畅度四刀 + 稳定度三刀 + 主线程洪水四刀：通知不再卡死、关窗可从任务栏唤回、阻塞 I/O 清零、大文件流式写入不卡界面、窗口连点卡死根治、强杀不丢会话、HTML 卡补齐呈现层、项目工程生成卡死根治**
