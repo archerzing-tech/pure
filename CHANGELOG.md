@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.1
+
+**Windows 流畅度四刀：通知不再卡死、关窗可从任务栏唤回、阻塞 I/O 清零、大文件流式写入不卡界面**
+
+四刀同一根因家族——主线程被同步工作占住，界面跟着冻结；现象各不相同，修法各按现场落点。
+
+通知与窗口两刀（真机报障）：任务运行中关闭窗口后无法从任务栏恢复，根因是通知回调阻塞主线程；修为通知发送走后台，窗口隐藏/恢复链路不再被通知卡住。阻塞 I/O 一刀：create_directory、write_file_stream、write_temp_file、read_image_file、write_app_skill、delete_app_skill 等文件类 Tauri 命令整体迁入 run_blocking 后台线程池，主线程不再碰磁盘。
+
+第四刀是本期主修：Windows 上让 agent 写 5000+ 行大文件，流式生成期间界面周期性卡顿（卡一会→好→反复）。定案：卡顿不在写入那一秒（写入已是后台线程+节流进度，150KB 不足一秒写完），而在模型流式生成 content 参数的一两分钟里——工具参数流的行头反馈链有四层 O(N) 全量重复工作（找不到 name 键的探测正则每个增量对累积 buffer 全量扫描到尾、半截 JSON 每轮白付一次必然失败的严格解析、容错探针全量扫描+解码、字节数文案每轮全量 UTF-8 编码），成本随 buffer 线性变贵，后半段每秒吃掉上百毫秒主线程；模型生成是脉冲式的，吐的时段卡、间歇的时段恢复，正是「反复」的节奏来源。三笔修：探测正则切片锚定头部（O(N)→O(1)）；末尾快判——未闭合的 buffer 直接走容错探针，省掉白付的严格解析，可能闭合时才先严格后探针，行为逐分支等价；大 buffer（>64KB）行头反馈降为约 1 秒一跳，人眼无感，扫描解码总量砍 8 倍。
+
+验证：bun test 相关 suite 297 例全过、typecheck 零错、vite 构建过；Windows 真机复验（大文件流式期间打字/滚动流畅度、行头字节数文案、写后 diff 与撤销快照）。
+
 ## v4.7.0
 
 **手机遥控 MVP：手机端盯着桌面跑会话，也能随时插手**
