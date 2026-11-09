@@ -87,6 +87,31 @@ describe('html escape-hatch card (W4-3)', () => {
     expect(src).toContain('adoptPreservedHtmlSlots');
   });
 
+  it('ships the presentation layer: state gating, styled toggle, source reveal', () => {
+    // 2026-11-09 真机判例：特性上线时只有 TS 管线、呈现层零条 CSS——转圈
+    // 永挂（无 ready 隐藏规则）、按钮裸原生样式、源码切换只翻文案。这里把
+    // 呈现层契约钉死，样式缺失回归直接红。
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    // 状态门控：非 loading 态转圈必须藏（此前无规则，成功也永挂）。
+    expect(css).toContain('.bubble .html-slot .map-loading { display: none; }');
+    expect(css).toContain('.bubble .html-slot[data-html-state="loading"] .map-loading {');
+    // 卡体几何：480px 卡内滚动；loading 预留高度不跳版（STABLE GEOMETRY）。
+    expect(css).toContain('.bubble .html-slot .html-frame-wrap {\n  height: 480px;\n}');
+    expect(css).toContain('.bubble .html-slot[data-html-state="loading"] .html-frame-wrap {\n  visibility: hidden;\n}');
+    // 错误态：错误行显、空卡体藏。
+    expect(css).toContain('.bubble .html-slot[data-html-state="error"] .html-error { display: block; }');
+    expect(css).toContain('.bubble .html-slot[data-html-state="error"] .html-frame-wrap { display: none; }');
+    // 源码切换：默认藏、.show-source 显——按钮翻类必须有 CSS 响应它。
+    expect(css).toContain('.bubble .html-slot .html-source {');
+    expect(css).toContain('.bubble .html-slot.show-source .html-source { display: block; }');
+    // 按钮并入工具条按钮组（裸原生按钮判例）。
+    expect(css).toContain('.html-source-toggle {');
+    expect(css).toContain('.html-source-toggle:hover');
+    // 静默空白兜底：load 超时转 error，不再无限转圈、不再无声空白。
+    expect(src).toContain('asset 加载超时');
+  });
+
   it('treats other languages as plain code blocks (html tag not over-eager)', () => {
     const html = renderer.code({ text: 'const a = 1;', lang: 'javascript', type: 'code', raw: 'x' } as never);
     expect(html).toContain('<pre><code');

@@ -2610,6 +2610,17 @@ async function hydrateHtmlCard(slot: HTMLElement): Promise<void> {
     wrap.innerHTML = '';
     wrap.appendChild(frame);
     setHtmlState(slot, 'ready');
+    // 静默空白兜底（2026-11-09）：ready 置位不依赖 frame 真加载——asset 协议
+    // 作用域/路径转换在哪一环断掉，界面上都只剩一张 0 内容的 iframe。10s 无
+    // load 即转 error 态（呈现层藏掉空卡体、亮出错误行，源码仍可切），不再
+    // 无限转圈、不再无声空白。
+    let loaded = false;
+    frame.addEventListener('load', () => { loaded = true; });
+    window.setTimeout(() => {
+      if (!loaded && slot.getAttribute('data-html-state') === 'ready') {
+        setHtmlState(slot, 'error', `${t('htmlCard.failed')}：asset 加载超时（协议或路径被拦）`);
+      }
+    }, 10_000);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     setHtmlState(slot, 'error', `${t('htmlCard.failed')}：${detail}`);

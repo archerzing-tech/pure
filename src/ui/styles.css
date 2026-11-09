@@ -9396,7 +9396,8 @@ button svg,
 }
 .map-refresh,
 .map-source-toggle,
-.map-expand {
+.map-expand,
+.html-source-toggle {
   font: 600 12px var(--font-sans);
   color: var(--accent);
   background: transparent;
@@ -9407,7 +9408,8 @@ button svg,
 }
 .map-refresh:hover,
 .map-source-toggle:hover,
-.map-expand:hover {
+.map-expand:hover,
+.html-source-toggle:hover {
   background: color-mix(in srgb, var(--accent-soft) 40%, transparent);
 }
 .map-canvas-wrap {
@@ -9530,6 +9532,68 @@ button svg,
 .map-slot[data-map-state="error"] .map-expand-hint {
   display: none;
 }
+
+/* ── HTML 卡（```html 逃生舱，W4-3）── */
+/* 与 map-slot 同一容器皮肤与状态机语言：loading（转圈叠在预留卡体上）→
+   ready（asset:// iframe 480px 卡内滚动）→ error（错误行，源码仍可切）。
+   2026-11-09 真机判例：特性上线时只交付了 TS 管线，本段呈现层整体缺失——
+   转圈永挂（无 ready 隐藏规则）、按钮裸原生样式、源码切换只翻文案，三个
+   症状同源。loading 态预留 480px 卡体（同 map-slot 的 STABLE GEOMETRY 判
+   例：状态切换不得抖动整个会话布局）。 */
+.bubble .html-slot {
+  position: relative;
+  width: 100%;
+  margin: 12px 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.bubble .html-slot .map-loading { display: none; }
+.bubble .html-slot[data-html-state="loading"] .map-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  animation: mapLoadingFade 1.8s ease-in-out infinite;
+}
+.bubble .html-slot .html-frame-wrap {
+  height: 480px;
+}
+.bubble .html-slot[data-html-state="loading"] .html-frame-wrap {
+  visibility: hidden;
+}
+.bubble .html-slot .html-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.bubble .html-slot .html-error {
+  display: none;
+  padding: 12px;
+  font: 13px/1.5 var(--font-sans);
+  color: var(--danger);
+}
+.bubble .html-slot[data-html-state="error"] .html-error { display: block; }
+.bubble .html-slot[data-html-state="error"] .html-frame-wrap { display: none; }
+/* 源码视图：默认藏，.show-source 显——切换按钮的唯一职责就是翻这个类。 */
+.bubble .html-slot .html-source {
+  display: none;
+  margin: 0;
+  max-height: 480px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-light);
+  font: 12px/1.6 var(--font-mono);
+}
+.bubble .html-slot.show-source .html-source { display: block; }
+/* 卡内 iframe 撑开时源码行跟在卡体后；错误态下源码切换仍可用。 */
 .map-slot .map-error strong {
   font-weight: 600;
 }
