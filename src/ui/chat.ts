@@ -7023,8 +7023,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // catch up instead of waiting forever for the missing
               // completion line (see planTrack.unblockDeferredOnWork).
               planTrack.unblockDeferredOnWork?.();
+              // "name" 只会出现在 buffer 开头；不切片时，裸参数形态（write_file
+              // 的 {"path":…,"content":…}）没有 name 键，这个正则每个 delta 都
+              // 对累积到几百 KB 的 buffer 全量扫描到尾才宣告失败（2026-11-09
+              // Windows 写大文件周期性卡顿判例）。
               const toolName = event.payload.toolCallName ||
-                (event.payload.toolCallBuffer || '').match(/"name"\s*:\s*"([^"]+)"/)?.[1];
+                (event.payload.toolCallBuffer || '').slice(0, 256).match(/"name"\s*:\s*"([^"]+)"/)?.[1];
               const toolCallId = event.payload.toolCallId;
               if (toolName) {
                 const now = Date.now();
@@ -7080,20 +7084,31 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                   // refresh the compact one-line summary while streaming; the
                   // Input body is filled on row creation and the id chunk.
                   const key = toolName;
+                  const buf = event.payload.toolCallBuffer;
+                  // 巨型 buffer（write_file 的 content 流到后半段，几百 KB）时
+                  // 120ms 一轮的「全量扫描+解码」会把主线程周期性占满——行头
+                  // 字节数降为 ~1s 一跳，人眼阅读节奏不变（2026-11-09 Windows
+                  // 写大文件周期性卡顿判例）。
+                  const refreshMs = (buf ?? '').length > 65536 ? 1000 : TOOL_CALL_REFRESH_MS;
                   const lastRefresh = toolCallRefresh.get(key) ?? 0;
-                  const due = now - lastRefresh >= TOOL_CALL_REFRESH_MS;
+                  const due = now - lastRefresh >= refreshMs;
                   if (due) toolCallRefresh.set(key, now);
-                  const args = due
-                    ? (parseToolCallBuffer(event.payload.toolCallBuffer).args || {})
-                    : undefined;
-                  // 容错兜底（2026-10-20 长文档读写零反馈缺陷）：巨型 content
-                  // 没写完时严格解析整段失败，上面恒为 {}——生成全程行头停在
-                  // 「正在写入文件…」。此时从容错探针抠出已到达的 path / 部分
-                  // content，行头摘要与等待文案（含实时字节数）就地长出来；
-                  // 严格解析成功后仍走完整 args，行为不变。
-                  const displayArgs = due && args && Object.keys(args).length === 0
-                    ? extractPartialToolArgs(event.payload.toolCallBuffer)
-                    : undefined;
+                  let args: Record<string, unknown> | undefined;
+                  let displayArgs: Record<string, unknown> | undefined;
+                  if (due) {
+                    // 容错兜底（2026-10-20 长文档读写零反馈缺陷）：巨型 content
+                    // 没写完时严格解析整段失败——而未闭合的 buffer（trim 后末
+                    // 尾不是裸 }）连 parse 都不必试，直接走探针，省掉白付的全
+                    // 量 JSON.parse；可能闭合时才先严格解析、空了再探针，与原
+                    // 逐分支行为一致。
+                    if ((buf ?? '').trim().endsWith('}')) {
+                      args = parseToolCallBuffer(buf).args || {};
+                      if (Object.keys(args).length === 0) displayArgs = extractPartialToolArgs(buf);
+                    } else {
+                      args = {};
+                      displayArgs = extractPartialToolArgs(buf);
+                    }
+                  }
                   const existing = pendingByName.get(toolName);
                   if (!existing) {
                     // Repeated identical call mid-stream: stage VIRTUALLY on
