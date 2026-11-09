@@ -5659,8 +5659,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "sub/dir/app.js", &content, false, &ch)
-            .await
+        let msg = write_file_stream_inner_blocking(&workspace, "sub/dir/app.js", &content, false, &ch)
             .unwrap();
         assert!(msg.contains("131073 bytes"), "msg: {}", msg);
         assert!(msg.contains("sub/dir/app.js"));
@@ -5694,8 +5693,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "hi.txt", "hello", false, &ch)
-            .await
+        let msg = write_file_stream_inner_blocking(&workspace, "hi.txt", "hello", false, &ch)
             .unwrap();
         assert_eq!(msg, "Wrote 5 bytes to hi.txt");
 
@@ -5712,8 +5710,7 @@ mod write_file_stream_tests {
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let ch = capturing_channel(&events);
 
-        let msg = write_file_stream_inner(&workspace, "empty.txt", "", false, &ch)
-            .await
+        let msg = write_file_stream_inner_blocking(&workspace, "empty.txt", "", false, &ch)
             .unwrap();
         assert_eq!(msg, "Wrote 0 bytes to empty.txt");
         assert_eq!(
@@ -5735,19 +5732,16 @@ mod write_file_stream_tests {
         let dir = PathBuf::from(&workspace);
 
         // 第一段正常写。
-        write_file_stream_inner(&workspace, "big.txt", "part-1", false, &ch)
-            .await
+        write_file_stream_inner_blocking(&workspace, "big.txt", "part-1", false, &ch)
             .unwrap();
         // 追加第二段：原文保留 + Appended 口径文案。
-        let msg = write_file_stream_inner(&workspace, "big.txt", "part-2", true, &ch)
-            .await
+        let msg = write_file_stream_inner_blocking(&workspace, "big.txt", "part-2", true, &ch)
             .unwrap();
         assert_eq!(msg, "Appended 6 bytes to big.txt");
         assert_eq!(fs::read_to_string(dir.join("big.txt")).unwrap(), "part-1part-2");
 
         // 追加到不存在的文件 = 新建（分段写的第一段用 append 起笔也合法）。
-        let msg = write_file_stream_inner(&workspace, "fresh/nested.txt", "seed", true, &ch)
-            .await
+        let msg = write_file_stream_inner_blocking(&workspace, "fresh/nested.txt", "seed", true, &ch)
             .unwrap();
         assert_eq!(msg, "Appended 4 bytes to fresh/nested.txt");
         assert_eq!(fs::read_to_string(dir.join("fresh/nested.txt")).unwrap(), "seed");
@@ -7250,8 +7244,8 @@ mod app_skills_tests {
         assert!(parse_skill_markdown("---\ndescription: no name\n---\nbody").is_none());
     }
 
-    #[test]
-    fn write_app_skill_rejects_path_traversal_names() {
+    #[tokio::test]
+    async fn write_app_skill_rejects_path_traversal_names() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-write-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7259,12 +7253,12 @@ mod app_skills_tests {
         std::env::set_var("PURE_SKILLS_DIR", &base);
 
         // `..` and `.` would escape the skills directory via PathBuf::join.
-        assert!(write_app_skill("..".to_string(), "d".to_string(), "body".to_string(), None).is_err());
-        assert!(write_app_skill(".".to_string(), "d".to_string(), "body".to_string(), None).is_err());
+        assert!(write_app_skill("..".to_string(), "d".to_string(), "body".to_string(), None).await.is_err());
+        assert!(write_app_skill(".".to_string(), "d".to_string(), "body".to_string(), None).await.is_err());
         // Slashes are rejected (single safe directory component only).
-        assert!(write_app_skill("a/b".to_string(), "d".to_string(), "body".to_string(), None).is_err());
+        assert!(write_app_skill("a/b".to_string(), "d".to_string(), "body".to_string(), None).await.is_err());
         // A normal name still installs.
-        assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string(), None).is_ok());
+        assert!(write_app_skill("vision-ocr".to_string(), "d".to_string(), "body".to_string(), None).await.is_ok());
         let installed = app_skills_dir().join("vision-ocr").join("SKILL.md");
         assert!(installed.exists());
 
@@ -7275,8 +7269,8 @@ mod app_skills_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn delete_app_skill_removes_only_valid_installed_dirs() {
+    #[tokio::test]
+    async fn delete_app_skill_removes_only_valid_installed_dirs() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-delete-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7284,14 +7278,14 @@ mod app_skills_tests {
         std::env::set_var("PURE_SKILLS_DIR", &base);
 
         // Traversal names are rejected before any filesystem access.
-        assert!(delete_app_skill("..".to_string()).is_err());
-        assert!(delete_app_skill("a/b".to_string()).is_err());
+        assert!(delete_app_skill("..".to_string()).await.is_err());
+        assert!(delete_app_skill("a/b".to_string()).await.is_err());
         // A missing but well-formed name is an honest error, not a panic.
-        assert!(delete_app_skill("auto-nope".to_string()).is_err());
+        assert!(delete_app_skill("auto-nope".to_string()).await.is_err());
         // Install → delete round trip removes the whole directory.
-        assert!(write_app_skill("auto-demo".to_string(), "d".to_string(), "body".to_string(), None).is_ok());
+        assert!(write_app_skill("auto-demo".to_string(), "d".to_string(), "body".to_string(), None).await.is_ok());
         assert!(app_skills_dir().join("auto-demo").join("SKILL.md").exists());
-        let removed = delete_app_skill("auto-demo".to_string()).expect("deletes");
+        let removed = delete_app_skill("auto-demo".to_string()).await.expect("deletes");
         assert!(removed.ends_with("auto-demo"));
         assert!(!app_skills_dir().join("auto-demo").exists());
 
@@ -7440,8 +7434,8 @@ mod app_skills_tests {
         assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
     }
 
-    #[test]
-    fn write_app_skill_stamps_sidecar_and_reports_fresh_install() {
+    #[tokio::test]
+    async fn write_app_skill_stamps_sidecar_and_reports_fresh_install() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-stamp-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7454,6 +7448,7 @@ mod app_skills_tests {
             "Do OCR on images.".to_string(),
             Some("vercel-labs/agent-skills".to_string()),
         )
+        .await
         .expect("installs");
         assert!(outcome.updated);
         assert_eq!(outcome.previous_hash, None);
@@ -7477,8 +7472,8 @@ mod app_skills_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn write_app_skill_same_content_is_a_noop() {
+    #[tokio::test]
+    async fn write_app_skill_same_content_is_a_noop() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-noop-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7491,6 +7486,7 @@ mod app_skills_tests {
             "stable body".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("first install");
         // Hand-mangle SKILL.md under the recorded hash: a real rewrite would
         // heal it, the no-op path must leave it exactly as-is.
@@ -7503,6 +7499,7 @@ mod app_skills_tests {
             "stable body".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("second install");
         assert!(!second.updated, "identical content must not rewrite");
         assert_eq!(second.previous_hash.as_deref(), Some(first.hash.as_str()));
@@ -7515,8 +7512,8 @@ mod app_skills_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn write_app_skill_changed_content_reports_previous_hash() {
+    #[tokio::test]
+    async fn write_app_skill_changed_content_reports_previous_hash() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-update-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7529,6 +7526,7 @@ mod app_skills_tests {
             "version one body".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("first install");
         let second = write_app_skill(
             "growing-skill".to_string(),
@@ -7536,6 +7534,7 @@ mod app_skills_tests {
             "version two body".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("second install");
         assert!(second.updated);
         assert_eq!(second.previous_hash.as_deref(), Some(first.hash.as_str()));
@@ -7549,6 +7548,7 @@ mod app_skills_tests {
             "version two body".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("third install");
         assert!(third.updated);
         assert_eq!(third.previous_hash, None);
@@ -7560,8 +7560,8 @@ mod app_skills_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn list_app_skills_ignores_the_install_sidecar() {
+    #[tokio::test]
+    async fn list_app_skills_ignores_the_install_sidecar() {
         let _guard = ENV_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!("pure-skills-sidecar-load-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7574,6 +7574,7 @@ mod app_skills_tests {
             "Body for the sidecar tolerance check.".to_string(),
             Some("owner/repo".to_string()),
         )
+        .await
         .expect("installs");
         assert!(app_skills_dir().join("sidecar-skill").join(SKILL_SIDECAR_FILE).is_file());
 
@@ -11552,8 +11553,8 @@ mod command_timeout_tests {
 mod read_image_file_tests {
     use super::*;
 
-    #[test]
-    fn reads_a_small_png_as_base64() {
+    #[tokio::test]
+    async fn reads_a_small_png_as_base64() {
         let dir = std::env::temp_dir().join(format!("pure-readimg-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // 1x1 透明 PNG 的最小字节序列
@@ -11566,7 +11567,7 @@ mod read_image_file_tests {
         ];
         let file = dir.join("pixel.png");
         fs::write(&file, png).unwrap();
-        let out = read_image_file(dir.to_string_lossy().into_owned(), "pixel.png".into()).unwrap();
+        let out = read_image_file(dir.to_string_lossy().into_owned(), "pixel.png".into()).await.unwrap();
         assert_eq!(out["mimeType"], "image/png");
         assert_eq!(out["sizeBytes"], png.len() as u64);
         let b64 = out["base64"].as_str().unwrap();
@@ -11575,15 +11576,15 @@ mod read_image_file_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn rejects_unsupported_extensions_and_oversize_files() {
-        let err = read_image_file(".".into(), "notes.txt".into()).unwrap_err();
+    #[tokio::test]
+    async fn rejects_unsupported_extensions_and_oversize_files() {
+        let err = read_image_file(".".into(), "notes.txt".into()).await.unwrap_err();
         assert!(err.contains("unsupported image extension"));
         let dir = std::env::temp_dir().join(format!("pure-readimg-big-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let big = dir.join("huge.png");
         fs::write(&big, vec![0u8; 5 * 1024 * 1024 + 1]).unwrap();
-        let err = read_image_file(dir.to_string_lossy().into_owned(), "huge.png".into()).unwrap_err();
+        let err = read_image_file(dir.to_string_lossy().into_owned(), "huge.png".into()).await.unwrap_err();
         assert!(err.contains("5MB"));
         let _ = fs::remove_dir_all(&dir);
     }
