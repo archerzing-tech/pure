@@ -1248,6 +1248,7 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.checkSettings': '在设置中检查 LLM',
     'composer.model.checking': '正在检查模型可访问性…',
     'status.modelUnavailable': '当前模型不可访问——在模型列表选其他模型，或到设置检查该服务的连接',
+    'stream.elideHead': '前 {n} KB 已省略——流式期间只渲染末尾，完成后展示全文',
 
     // ── Composer slash commands (/model /compact /clear /help) ──
     'slash.model.desc': '切换模型，如 /model glm-4.6',
@@ -2610,6 +2611,7 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.checkSettings': 'Check LLM in Settings',
     'composer.model.checking': 'Checking model availability…',
     'status.modelUnavailable': 'Current model is unreachable — pick another in the model list, or check its connection in Settings',
+    'stream.elideHead': 'First {n} KB omitted while streaming — only the tail renders; full text shown on completion',
 
     // ── Composer slash commands (/model /compact /clear /help) ──
     'slash.model.desc': 'Switch model, e.g. /model glm-4.6',

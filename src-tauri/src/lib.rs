@@ -17974,6 +17974,11 @@ pub fn run() {
                         // 主窗两副面孔。transparent 供 macOS 侧圆角。
                         .decorations(false)
                         .transparent(true)
+                        // Windows WebView2 宿主刀（2026-11-10 活锁判例）：关
+                        // Chromium 原生窗口遮挡计算，宿主侧窗口操作风暴的
+                        // 候选来源。设置后 wry 默认三件会丢，四件必须带全
+                        // （tauri.conf.json 主窗与 sessionSidebar.ts 新窗同值）。
+                        .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion")
                         .build();
                         if let Err(e) = window {
                             eprintln!("[pure] menu new-window failed: {e}");

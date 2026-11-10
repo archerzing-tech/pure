@@ -6609,6 +6609,16 @@ body.window-maximized .win-resize-zone { display: none; }
 .bubble p.stream-raw {
   white-space: pre-wrap;
 }
+/* 尾部窗口省略条（streamingViewSlice 判例）：超大流式消息只在末尾窗口里
+   渲染，切掉的开头用这一行提示交代去向——人类观感优先，不能让用户以为
+   内容丢了。 */
+.bubble .stream-elide-head {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 2px 0 6px;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 8px;
+}
 
 /* Blockquotes */
 .bubble blockquote {

@@ -13,9 +13,9 @@ import DOMPurify from 'dompurify';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { t } from '../shared/i18n';
 import { stripAnsi } from '../shared/ansi';
 import { showToast } from '../shared/toast';
-import { t } from '../shared/i18n';
 import { linkifyPaths } from './pathLink';
 import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../shared/parseRepair';
 import hljs from 'highlight.js/lib/core';
@@ -3720,6 +3720,63 @@ export function streamingImageGate(el: HTMLElement): boolean {
   return true;
 }
 
+// ── 流式尾部窗口（2026-11-10 Windows 活锁判例）──
+// 现场证据（pure.exe 4.7.2）：66KB（v4.7.1）/107KB（v4.7.2）大消息流式期间，
+// 渲染进程每拍 lexer 全文 + 生长中末块全量重渲染 + 全块重排版而饱和；
+// WebView2 宿主主线程同时在 20 个透明辅助窗口上做 show/hide 同步消息循环
+//（NtUserSetWindowPos/ShowWindow/WM_NCPAINT 紧循环，61% 单核、消息泵停摆、
+// 全窗 Hung 70 分钟）。两把火的共同燃料是「巨型流式 DOM 反复变异」——
+// 既有节流（100/160/220ms）只降频不降复杂度。治本：给流式 DOM 封顶，
+// 超过 STREAM_TAIL_LIMIT 只渲染末尾窗口（在块边界切），完成渲染照常走
+// 全文管线。常规尺寸消息（<32KB）零行为变化。
+export const STREAM_TAIL_LIMIT = 32_000;
+
+export interface StreamingViewSlice {
+  /** 实际交给 lexer/渲染的文本（尾部窗口）。 */
+  view: string;
+  /** 被窗口切掉的开头字符数。 */
+  elidedChars: number;
+}
+
+/** 超大流式文本的尾部视图切片：null = 全文照常渲染。切点取窗口起点之前
+ *  最近的双换行块边界，保证视图以干净块开头；若按围栏标记奇偶判定视图
+ *  开头落在代码围栏体内，补一行合成 ``` 使词法器看到完整块（lang 丢失只
+ *  影响流式期间该块高亮，完成渲染走全文管线恢复）。 */
+export function streamingViewSlice(text: string): StreamingViewSlice | null {
+  if (text.length <= STREAM_TAIL_LIMIT) return null;
+  const from = text.length - STREAM_TAIL_LIMIT;
+  const cut = text.lastIndexOf('\n\n', from);
+  const start = cut === -1 ? from : cut + 2;
+  const fenceLinesBefore = text.slice(0, start).match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0;
+  const view = text.slice(start);
+  return {
+    view: fenceLinesBefore % 2 === 1 ? '```\n' + view : view,
+    elidedChars: start,
+  };
+}
+
+/** 尾部窗口的省略提示条：占据 bubble 的 children[0]（无 data-md-raw），
+ *  词法块配对从它之后开始。slice 为 null（小文本/完成态）即移除。
+ *  查找走 children[0] 而非 querySelector(':scope > …')——happy-dom 对
+ *  :scope 支持不稳，这里 chip 恒为首位，结构性检查即可靠。 */
+function syncStreamElideChip(container: HTMLElement, slice: StreamingViewSlice | null): void {
+  const first = container.children[0] as HTMLElement | undefined;
+  const existing = first?.hasAttribute('data-stream-head') ? first : null;
+  if (!slice) {
+    existing?.remove();
+    return;
+  }
+  let chip = existing;
+  if (!chip) {
+    chip = document.createElement('div');
+    chip.className = 'stream-elide-head';
+    chip.setAttribute('data-stream-head', '');
+    container.insertBefore(chip, container.firstChild);
+  }
+  const kb = Math.max(1, Math.round(slice.elidedChars / 1024));
+  chip.textContent = t('stream.elideHead').replace('{n}', String(kb));
+}
+
 function diffStreaming(container: HTMLElement, text: string): void {
   ungroupStreamingSvgGalleries(container);
   // During streaming, chat.ts sets `bubble.textContent = …` for instant raw
@@ -3739,11 +3796,15 @@ function diffStreaming(container: HTMLElement, text: string): void {
   // Applying the class here keeps streaming layout identical to the final one.
   container.classList.add('md-rendered');
 
+  // 尾部窗口：超大流式文本只 lex + 渲染末尾（判例注释见 streamingViewSlice）。
+  const slice = streamingViewSlice(text);
+  syncStreamElideChip(container, slice);
+
   type Token = { type: string; raw: string; [k: string]: unknown };
   let tokens: Token[];
   try {
     // marked 18: lexer is on the Marked instance, returns top-level block tokens.
-    tokens = mdStream.lexer(normalizeMapFence(text)) as unknown as Token[];
+    tokens = mdStream.lexer(normalizeMapFence(slice ? slice.view : text)) as unknown as Token[];
   } catch (err) {
     // Partial markdown can occasionally trip the lexer. The old behavior kept
     // the last-frame DOM — but the SAME partial input trips the lexer again on
@@ -3759,7 +3820,9 @@ function diffStreaming(container: HTMLElement, text: string): void {
     container.replaceChildren();
     const raw = document.createElement('p');
     raw.className = 'stream-raw';
-    raw.textContent = text;
+    // 降级路径同样受尾部窗口约束：巨型文本全量塞 textContent 每拍 O(N)，
+    // 正是本次活锁的燃料形状。
+    raw.textContent = slice ? slice.view : text;
     container.appendChild(raw);
     return;
   }
@@ -3768,7 +3831,8 @@ function diffStreaming(container: HTMLElement, text: string): void {
   // token types — `space`, `def` — render no element (renderBlockToken returns
   // '' and we `continue`). Indexing children by token position would drift and
   // append duplicate blocks whenever blank lines split paragraphs.
-  let childIdx = 0;
+  // 尾部窗口的省略条占 children[0]（无 data-md-raw），配对从它之后开始。
+  let childIdx = (container.children[0] as HTMLElement | undefined)?.hasAttribute('data-stream-head') ? 1 : 0;
   for (let ti = 0; ti < tokens.length; ti++) {
     const tk = tokens[ti];
     const oldEl = container.children[childIdx] as HTMLElement | undefined;

@@ -1265,7 +1265,9 @@ describe('流式渲染韧性(lexer 降级 / 渲染自愈 / KaTeX memo)', () => {
     const body = src.slice(catchAt, catchAt + 400);
     expect(body).toContain('container.replaceChildren()');
     expect(body).toContain("raw.className = 'stream-raw'");
-    expect(body).toContain('raw.textContent = text');
+    // 降级路径同样受尾部窗口约束（2026-11-10 活锁判例）：巨型文本全量塞
+    // textContent 每拍 O(N)，slice ? slice.view : text 是契约不是实现细节。
+    expect(body).toContain('raw.textContent = slice ? slice.view : text');
   });
 
   it('单拍渲染失败保留 lastRenderedText,下一帧带新文本重试', () => {

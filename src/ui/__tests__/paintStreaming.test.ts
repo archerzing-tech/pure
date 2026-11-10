@@ -10,7 +10,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 // Same pass-through rationale as mapStreaming.test.ts: trusted fixtures.
 mock.module('dompurify', () => ({ default: { sanitize: (html: string) => html } }));
 
-const { flushStreamingRender, renderMarkdown, scheduleStreamingRender } = await import('../markdown');
+const { flushStreamingRender, renderMarkdown, scheduleStreamingRender, streamingViewSlice } = await import('../markdown');
 
 let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
 
@@ -182,6 +182,80 @@ describe('streaming paint gate (diffStreaming)', () => {
       const finalSlot = container.querySelector<HTMLElement>('.paint-slot');
       expect(finalSlot).toBe(streamedSlot);
       expect(finalSlot!.getAttribute('data-processed')).toBe('true');
+    } finally {
+      container.remove();
+    }
+  });
+});
+
+// ── 流式尾部窗口（2026-11-10 Windows 活锁判例）──
+// 66KB/107KB 大消息流式期间每拍 lexer 全文 + 末块全量重渲染，是 WebView2
+// 宿主活锁的燃料。封顶判据：超 32KB 只渲染末尾 + chip 交代去向；小文本
+// 全文照旧；跨拍配对稳定（cut 不前移时头块不重建）。
+
+describe('streaming tail window (streamingViewSlice)', () => {
+  it('limit 以内返回 null（常规消息零行为变化）', () => {
+    expect(streamingViewSlice('短文本')).toBeNull();
+    expect(streamingViewSlice('a'.repeat(32_000))).toBeNull();
+  });
+
+  it('切点取双换行块边界，elidedChars 指向切点', () => {
+    const text = 'a'.repeat(31_000) + '\n\n' + 'b'.repeat(32_500);
+    const slice = streamingViewSlice(text)!;
+    expect(slice).not.toBeNull();
+    expect(text.slice(slice.elidedChars - 2, slice.elidedChars)).toBe('\n\n');
+    expect(slice.view).toBe('b'.repeat(32_500));
+    // 视图长度必须被压回窗口量级（lexer/渲染的每拍成本封顶）。
+    expect(slice.view.length).toBeLessThanOrEqual(32_501);
+  });
+
+  it('视图开头落在未闭合围栏体内时补合成 ```（奇偶判定）', () => {
+    // 围栏在切点之前打开且未闭合 → 前缀围栏标记 1 条（奇）→ 补。
+    const openFence = '```js\ncode\n\n' + 'x'.repeat(33_000);
+    expect(streamingViewSlice(openFence)!.view.startsWith('```\n')).toBe(true);
+    // 前缀围栏已闭合 → 2 条（偶）→ 不补。
+    const closedFence = '```js\nA\n```\n\n' + 'y'.repeat(33_000);
+    expect(streamingViewSlice(closedFence)!.view.startsWith('```\n')).toBe(false);
+  });
+});
+
+describe('streaming tail window (diffStreaming integration)', () => {
+  it('超限文本：chip 占 children[0]、正文块从其后配对；小文本 chip 移除', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      // ~40KB（> 32KB 窗口），开头必须是干净段落块。
+      const big = Array.from({ length: 2400 }, (_, i) => `段落${i}：内容行，填充体积。\n\n`).join('');
+      scheduleStreamingRender(big, container);
+      const chip = container.children[0] as HTMLElement;
+      expect(chip.hasAttribute('data-stream-head')).toBe(true);
+      expect(chip.textContent).toContain('KB');
+      const firstBlock = container.children[1] as HTMLElement;
+      // 尾窗切掉了开头（2400 段只留末尾窗口），首块不再是段落0——
+      // 「开头不在 DOM 里」正是封顶的目的。
+      expect(firstBlock.getAttribute('data-md-raw')).toContain('段落');
+      expect(firstBlock.getAttribute('data-md-raw')).not.toContain('段落0：');
+      expect(container.children.length).toBeGreaterThan(10);
+
+      // 回到小文本：chip 移除，全文正常渲染。
+      scheduleStreamingRender('一小段话', container);
+      flushStreamingRender(container);
+      expect((container.children[0] as HTMLElement).hasAttribute('data-stream-head')).toBe(false);
+    } finally {
+      container.remove();
+    }
+  });
+
+  it('cut 不前移的跨拍生长：头块 data-md-raw 不变（配对稳定，不整帧重建）', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      const head = Array.from({ length: 2400 }, (_, i) => `段落${i}：内容行，填充体积。\n\n`).join('');
+      scheduleStreamingRender(head, container);
+      const firstRaw = (container.children[1] as HTMLElement).getAttribute('data-md-raw');
+      scheduleStreamingRender(head + '（末段追加，不新增块边界）', container);
+      flushStreamingRender(container);
+      expect((container.children[1] as HTMLElement).getAttribute('data-md-raw')).toBe(firstRaw);
     } finally {
       container.remove();
     }

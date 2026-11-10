@@ -140,7 +140,16 @@ export async function openPureWindow(sessionId?: string): Promise<void> {
       // 是这么配的，三条创建路径不许漂移。
       decorations: false,
       transparent: true,
-    });
+      // Windows WebView2 宿主刀（2026-11-10 活锁判例）：关掉 Chromium 的
+      // 原生窗口遮挡计算——它对宿主窗口做枚举/位置同步，是宿主侧窗口操作
+      // 风暴的候选来源。设置后会丢 wry 默认三件，必须带上（四件不许漂移，
+      // tauri.conf.json 主窗与 lib.rs 菜单新窗同值）。
+      // additionalBrowserArgs 运行时真生效（JS create_webview_window 直接反
+      // 序列化成 Rust WindowConfig，字段在其上），但 @tauri-apps/api 2.x 的
+      // TS 类型镜像漏了它，故 cast。
+      additionalBrowserArgs:
+        '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion',
+    } as ConstructorParameters<typeof WebviewWindow>[1]);
   } catch (err) {
     console.error('[pure] open window failed:', err);
     showToast(t('toast.deleteFailed'));
