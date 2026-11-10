@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, deliveryVerificationSummary, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -382,5 +382,23 @@ describe('parseDeliveryMarkers（刀 6b 产物标记协议）', () => {
 
   it('允许标记行内多一个空格（模型排版的抖动不炸解析）', () => {
     expect(parseDeliveryMarkers('##  产物已就绪：  x.html')).toEqual(['x.html']);
+  });
+});
+
+describe('收尾呈现函数的输入防御（2026-11-10 真机 unhandledrejection 判例）', () => {
+  // 真机 gui_errors.log：收尾瞬间 formatDeliveryFixPrompt 收到 undefined，
+  // t.steps 炸出 unhandledrejection。呈现函数是收尾链叶子，坏账退化成
+  // 安全文案，不许炸掉收尾渲染。
+  it('summary 对 undefined / null / 缺 steps 的输入返回安全文案不抛', () => {
+    expect(() => deliveryVerificationSummary(undefined as never)).not.toThrow();
+    expect(() => deliveryVerificationSummary(null as never)).not.toThrow();
+    expect(deliveryVerificationSummary({ passed: false } as never)).toContain('没有标准机械验证入口');
+  });
+
+  it('fixPrompt 对 undefined / null / 缺 steps 的输入返回可发送文本不抛', () => {
+    for (const bad of [undefined, null, { passed: false }]) {
+      expect(() => formatDeliveryFixPrompt(bad as never)).not.toThrow();
+      expect(formatDeliveryFixPrompt(bad as never)).toContain('交付验证未通过');
+    }
   });
 });

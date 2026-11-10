@@ -737,10 +737,19 @@ export function resolveGateSpecs(
   };
 }
 
+/** 真机判例（2026-11-10，gui_errors.log unhandledrejection）：收尾瞬间
+ *  formatDeliveryFixPrompt/Summary 收到 undefined（t.steps 炸）。两个呈现
+ *  函数是回合收尾链的叶子，输入防御在这里兜底——坏账不能炸掉收尾渲染，
+ *  最多退化成一句安全文案进状态卡。 */
+function safeDeliverySteps(result: DeliveryVerificationResult | null | undefined): DeliveryStepResult[] {
+  return Array.isArray(result?.steps) ? result!.steps : [];
+}
+
 /** Compact human-readable summary of a backstop run for status bubbles. */
 export function deliveryVerificationSummary(result: DeliveryVerificationResult): string {
-  if (result.steps.length === 0) return '本工作区没有标准机械验证入口（静态页面或空工作区）';
-  return result.steps
+  const steps = safeDeliverySteps(result);
+  if (steps.length === 0) return '本工作区没有标准机械验证入口（静态页面或空工作区）';
+  return steps
     .map((s) => `${s.status === 'passed' ? '✅' : s.status === 'skipped' ? '⏭️' : '❌'} ${s.label}（${s.command}）`)
     .join('；');
 }
@@ -749,7 +758,7 @@ export function deliveryVerificationSummary(result: DeliveryVerificationResult):
  * backstop fails. Carries the REAL failing output so the model fixes root
  * causes instead of guessing. */
 export function formatDeliveryFixPrompt(result: DeliveryVerificationResult): string {
-  const failures = result.steps.filter((s) => s.status === 'failed');
+  const failures = safeDeliverySteps(result).filter((s) => s.status === 'failed');
   const lines = failures.map((s) => `### ${s.label} 失败（${s.command}）\n\`\`\`\n${s.output || '(无输出)'}\n\`\`\``).join('\n\n');
   return `交付验证未通过，以下是真实失败输出：\n\n${lines}\n\n请修复根因（不要掩盖或跳过失败），然后重新运行失败的检查以及它之后的所有检查，直到交付验证管线全部通过。注意：这还是当前同一个计划内的修复轮，不要重复输出「## 计划 n：…」等阶段宣布行——只在真正进入一个全新计划时才需要宣布。`;
 }
