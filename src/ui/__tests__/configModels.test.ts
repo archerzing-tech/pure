@@ -123,10 +123,35 @@ describe('hasConfiguredKey', () => {
     const cfg = { ...defaults(), provider: 'glm', apiKey: '', hasApiKey: false };
     expect(hasConfiguredKey(cfg)).toBe(false);
   });
+
+  it('accepts a provider whose key is marked 非必须 (keyRequired=false toggle, 2026-11-10)', () => {
+    // Custom provider：无 key 但 toggle 打了非必须 → send-ready。
+    const customOptional = {
+      ...defaults(),
+      customProviders: [{
+        id: 'relay', name: 'Relay', baseURL: 'https://relay.example.com/v1',
+        models: ['m1'], defaultModel: 'm1',
+        apiKey: '', hasApiKey: false, keyRequired: false,
+      }] as never,
+      provider: 'relay',
+    };
+    expect(hasConfiguredKey(customOptional)).toBe(true);
+    // Built-in：override 打了非必须 → send-ready（即使无任何 key）。
+    const builtinOptional = {
+      ...defaults(),
+      provider: 'glm',
+      apiKey: '',
+      hasApiKey: false,
+      providerOverrides: { glm: { keyRequired: false } } as never,
+    };
+    expect(hasConfiguredKey(builtinOptional)).toBe(true);
+    // 缺省（无 toggle、非本地端点）→ 仍需要 key。
+    expect(hasConfiguredKey({ ...defaults(), provider: 'glm', apiKey: '', hasApiKey: false })).toBe(false);
+  });
 });
 
 describe('providerHasKey', () => {
-  const customProvider = (over: Partial<{ apiKey: string; hasApiKey: boolean; local: boolean; baseURL: string }> = {}) => ({
+  const customProvider = (over: Partial<{ apiKey: string; hasApiKey: boolean; local: boolean; keyRequired: boolean; baseURL: string }> = {}) => ({
     id: 'local', name: 'Local', baseURL: 'http://localhost:11434/v1',
     models: ['qwen2.5-coder:7b'], defaultModel: 'qwen2.5-coder:7b',
     apiKey: '', hasApiKey: false, ...over,
@@ -150,6 +175,17 @@ describe('providerHasKey', () => {
   });
 
   it('rejects a built-in without any key', () => {
+    expect(providerHasKey(defaults(), 'glm')).toBe(false);
+  });
+
+  it('accepts a provider whose key is 非必须 (keyRequired=false toggle, 2026-11-10)', () => {
+    // Custom：无 key 但 toggle 非必须 → 已配置（有 Base URL 即可）。
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ keyRequired: false, baseURL: 'https://relay.example.com/v1' })] }, 'local')).toBe(true);
+    // 非必须但没有 Base URL → 仍不算已配置（端点是硬前提）。
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ keyRequired: false, baseURL: '' })] }, 'local')).toBe(false);
+    // Built-in：override 非必须 → 已配置。
+    expect(providerHasKey({ ...defaults(), providerOverrides: { glm: { keyRequired: false } } }, 'glm')).toBe(true);
+    // 缺省（无 toggle、云端端点）→ 仍需要 key。
     expect(providerHasKey(defaults(), 'glm')).toBe(false);
   });
 

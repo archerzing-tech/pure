@@ -185,6 +185,12 @@ export interface CustomProvider {
   /** True for local endpoints (Ollama / LM Studio) that need no API key. */
   local?: boolean;
   /**
+   * API Key 是否必须（设置面板 apiKey 旁的 toggle）。false = 非必须：没有
+   * key 也算已配置（进模型列表、可发起回合），请求不带鉴权头。缺省 = 必须
+   * （local 预设与 loopback 端点本来就按非必须处理，无需写此字段）。
+   */
+  keyRequired?: boolean;
+  /**
    * True when this provider exposes an OpenAI-compatible text-to-image API
    * (`/images/generations`). When enabled, the GUI registers a generate_image
    * tool and tells the model to use it for image requests instead of ```svg
@@ -235,6 +241,11 @@ export interface ProviderOverride {
   apiKey?: string;
   /** True when the key lives in Rust secrets under `llm.apiKey.<id>`. */
   hasApiKey?: boolean;
+  /**
+   * API Key 是否必须（同 CustomProvider.keyRequired：false = 非必须，无 key
+   * 也算已配置）。缺省 = 必须；override 指向 loopback 端点时同按非必须处理。
+   */
+  keyRequired?: boolean;
 }
 
 /**
@@ -383,11 +394,14 @@ export function providerOverrideFor(
   const override = overrides[id];
   if (!override) return undefined;
   // An all-empty override is a stale tombstone — treat it as absent.
+  // keyRequired 例外（2026-11-10）：false 是用户的「非必须」决策，单独存在
+  // 时是真配置不是墓碑，绝不能折叠掉。
   if (!override.protocol && !override.name && !override.baseURL
     && override.contextWindowTokens === undefined
     && override.outputReserveTokens === undefined
     && override.safetyMarginTokens === undefined
     && !override.modelBudgets
+    && override.keyRequired === undefined
     && !override.apiKey && !override.hasApiKey) {
     return undefined;
   }

@@ -504,6 +504,9 @@ export function modelListForProvider(cfg: PureConfig, provider: string): string[
 export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
   if (!cfg) return false;
   if (cfg.apiKey || cfg.hasApiKey) return true;
+  // Key 非必须的供应商（toggle=false / 本地预设 / loopback 端点）没有 key
+  // 也 send-ready——请求不带鉴权头（与 providerHasKey 同判据，2026-11-10）。
+  if (providerKeyOptional(cfg, cfg.provider)) return true;
   // A custom provider is always send-ready: keyed ones carry their own key
   // (entry, or Rust secrets via hasApiKey), keyless locals (Ollama / LM
   // Studio) need none — the transport omits the Authorization header.
@@ -520,13 +523,40 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
 }
 
 /**
+ * 该供应商的 API Key 是否「非必须」（2026-11-10 定案：opencode/claude-code 式
+ * 配置即列表——是否需要 key 由用户在设置面板 apiKey 旁的 toggle 直接定夺，
+ * 不做可用性探测判断）。非必须 = 没有 key 也算已配置：进模型列表、可发起
+ * 回合，请求不带鉴权头。判据：显式 keyRequired===false，或本地预设/loopback
+ * 端点（这两类天生免 key）。
+ */
+export function providerKeyOptional(cfg: PureConfig, id: string): boolean {
+  const custom = customProviderFor(cfg.customProviders ?? [], id);
+  if (custom) {
+    return custom.keyRequired === false || custom.local === true || isLocalEndpoint(custom.baseURL);
+  }
+  const override = providerOverrideFor(cfg.providerOverrides, id);
+  if (override?.keyRequired === false) return true;
+  const baseURL = override?.baseURL ?? providerDef(id)?.baseURL ?? '';
+  return !!baseURL && isLocalEndpoint(baseURL);
+}
+
+/**
  * True when one provider is usable from the model dropdown and shows 已配置 on
  * the Settings → LLM card: it must have a Base URL plus either an API key
- * (keyed built-in or custom provider) or be a keyless local endpoint
- * (Ollama / LM Studio need no key). A provider missing its endpoint or its
- * key is 未配置 — a key without a Base URL is unusable, and vice versa.
+ * (keyed built-in or custom provider) or a key that is not required
+ * (keyRequired=false toggle, keyless local endpoints, loopback override).
+ * A provider missing its endpoint or its key is 未配置 — a key without a
+ * Base URL is unusable, and vice versa.
  */
 export function providerHasKey(cfg: PureConfig, id: string): boolean {
+  if (providerKeyOptional(cfg, id)) {
+    // 非必须 key：有 Base URL 即算已配置（custom 的 baseURL 在下面分支兜底）。
+    const custom = customProviderFor(cfg.customProviders ?? [], id);
+    if (custom) return !!custom.baseURL;
+    const override = providerOverrideFor(cfg.providerOverrides, id);
+    const baseURL = override?.baseURL ?? providerDef(id)?.baseURL ?? '';
+    return !!baseURL;
+  }
   const custom = customProviderFor(cfg.customProviders ?? [], id);
   if (custom) {
     if (!custom.baseURL) return false;

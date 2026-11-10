@@ -12,7 +12,6 @@ import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } f
 import { approveToolCorrection, buildToolNoteAppliedRecord, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
-import { llmRelevantConfigChanged, probeAllConfiguredProviders, recordLlmProbeOutcome } from './llmModelAvailability';
 import { probeProxyNow, proxyHealthSnapshot, reprobeProxyAfterConfigChange, isProbeInFlight } from './proxyProbe';
 import { join, homeDir } from '@tauri-apps/api/path';
 import { formatBytes, relativeTime } from '../shared/format';
@@ -852,6 +851,13 @@ export class SettingsPanel {
     llmGrid?.addEventListener('change', (event) => {
       const el = event.target as HTMLInputElement;
       if (el.id === 'cfg-imagegen') this.autoSave();
+      // API Key 必须/非必须 toggle：翻转标签文案 + 走保存（非必须状态影响
+      // 模型列表装配，保存后下拉即时即真）。
+      if (el.id === 'cfg-key-optional') {
+        const label = document.getElementById('cfg-keyreq-label');
+        if (label) label.textContent = t(el.checked ? 'llm.apiKey.optional' : 'llm.apiKey.required');
+        this.autoSave();
+      }
       // Default-model radio inside a row → commit the selection.
       if (el.classList.contains('llm-model-row-radio')) this.commitModelRows();
       // Reasoning-effort select on a model row → immediate save (discrete
@@ -1764,10 +1770,16 @@ export class SettingsPanel {
     const savedKey = isTauriRuntime() && (customEntry?.hasApiKey === true || override?.hasApiKey === true || (id === cfg.provider && cfg.hasApiKey === true));
     const imageGen = customEntry?.imageGen === true;
     const imageGenModel = customEntry?.imageGenModel ?? '';
+    // API Key 必须/非必须（2026-11-10）：显式 keyRequired=false，或本地预设/
+    // loopback 端点（天生免 key）→ 非必须。非必须 = 无 key 也进模型列表、
+    // 可发起回合（请求不带鉴权头）——判据与 providerKeyOptional 同源。
+    const keyOptional = customEntry
+      ? (customEntry.keyRequired === false || customEntry.local === true || isLocalEndpoint(customEntry.baseURL))
+      : (override?.keyRequired === false || isLocalEndpoint(baseURL) || isLocalEndpoint(def?.baseURL ?? ''));
     const keyPlaceholder = savedKey
       ? t('llm.apiKey.savedPlaceholder')
-      // local 标记（Ollama 预设）或 loopback URL 都算本地服务——key 可留空。
-      : ((customEntry?.local || isLocalEndpoint(customEntry?.baseURL ?? override?.baseURL))
+      // 非必须（toggle / local 标记 / loopback URL）→ key 可留空。
+      : (keyOptional
         ? t('llm.custom.apiKeyOptional.hint')
         : t('llm.apiKey.placeholder'));
     const urlPlaceholder = custom
@@ -1818,6 +1830,10 @@ export class SettingsPanel {
           <div class="llm-form-input-group">
             <input id="cfg-apikey" class="setting-input llm-form-input" type="password" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" />
             <button id="cfg-toggle-key" class="setting-icon-btn" type="button" data-i18n-title="llm.apiKey.toggle" title="Toggle visibility"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <span class="llm-keyreq" data-i18n-title="llm.apiKey.keyReq.hint" title="关闭 = 必须（没配 key 不进模型列表）；打开 = 非必须（没有 key 也能用，请求不带鉴权头）">
+              <span class="setting-hint llm-keyreq-label" id="cfg-keyreq-label">${t(keyOptional ? 'llm.apiKey.optional' : 'llm.apiKey.required')}</span>
+              <label class="toggle"><input type="checkbox" id="cfg-key-optional" ${keyOptional ? 'checked' : ''} aria-label="${t('llm.apiKey.keyReq.hint')}" /><span class="toggle-slider"></span></label>
+            </span>
             <button id="cfg-test-conn-btn" class="setting-btn llm-test-conn-btn" type="button" data-i18n="llm.connection.verify">连通性验证</button>
           </div>
         </div>
@@ -1932,9 +1948,6 @@ export class SettingsPanel {
     const elapsed = Math.max(0, Math.round(performance.now() - started));
     btn.disabled = false;
     btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
-    // 台账过账（成败都记）：按钮自己已发过探测，直接记结论进可用性台账，
-    // 不再重复发一次探测（此前只记成功，且绕道重发）。
-    recordLlmProbeOutcome(provider, probe);
     if (probe.ok) {
       btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
@@ -4087,6 +4100,11 @@ export class SettingsPanel {
     else delete entry.protocol;
     // Raw key from the field; autoSave() scrubs/redirects it per platform.
     entry.apiKey = (document.getElementById('cfg-apikey') as HTMLInputElement | null)?.value.trim() ?? '';
+    // API Key 必须/非必须：勾选 = 非必须（keyRequired=false）；不勾 = 必须
+    // （缺省，本地预设/loopback 天生非必须，无需写字段）。
+    const keyOptionalToggle = document.getElementById('cfg-key-optional') as HTMLInputElement | null;
+    if (keyOptionalToggle?.checked === true) entry.keyRequired = false;
+    else delete entry.keyRequired;
     list[idx] = entry;
     return list;
   }
@@ -4116,6 +4134,10 @@ export class SettingsPanel {
     if (baseURL) next.baseURL = baseURL; else delete next.baseURL;
     // Wire protocol: 'auto' clears the override so URL detection takes over.
     if (protocol && protocol !== 'auto') next.protocol = protocol; else delete next.protocol;
+    // API Key 必须/非必须（与 custom 表单同款 toggle）：勾选 = 非必须。
+    const keyOptionalToggle = document.getElementById('cfg-key-optional') as HTMLInputElement | null;
+    if (keyOptionalToggle?.checked === true) next.keyRequired = false;
+    else delete next.keyRequired;
     out[editing] = next;
     return out;
   }
@@ -4755,11 +4777,6 @@ export class SettingsPanel {
     persistConfig(cfg);
     // Drop the cached config so the next loadConfig() re-reads the saved state.
     invalidateConfigCache();
-    // 只在 LLM 相关字段真变了才全量重探（改主题/字号不该清模型列表）；
-    // 台账原位更新，不先失效后探测——失效会在重探落地前留下全灭窗。
-    if (llmRelevantConfigChanged(prev, cfg)) {
-      void probeAllConfiguredProviders('config-change');
-    }
 
     // 代理配置变了：旧的健康结论作废，立即按新地址重探（不受节流约束），
     // 完成后重绘徽标——用户保存完代理就该看到新地址的真实状态。

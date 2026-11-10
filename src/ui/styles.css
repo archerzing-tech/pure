@@ -13803,6 +13803,17 @@ button svg,
   height: 40px;
   width: 40px;
 }
+/* API Key 必须/非必须 toggle（面板 apiKey 行内，紧挨可见性按钮） */
+.llm-keyreq {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.llm-keyreq .llm-keyreq-label {
+  white-space: nowrap;
+}
 .llm-test-conn-btn {
   flex: 0 0 auto;
   height: 40px;
