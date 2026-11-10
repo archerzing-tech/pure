@@ -145,10 +145,13 @@ export class ComposerSelect {
   private readonly onWindowDismiss = () => this.close();
 
   /** Programmatic open — the /model command surfaces the picker this way.
-   *  Same guards as a click (empty / disabled / already open are no-ops), and
-   *  the trigger takes focus so arrow keys work without a second click. */
+   *  Same guards as a click (disabled / already open / nothing to show are
+   *  no-ops — "nothing to show" = no options AND no emptyAction, the same
+   *  rule openPopup applies), and the trigger takes focus so arrow keys
+   *  work without a second click. */
   showPicker(): void {
-    if (this.open || this.options.length === 0 || this.trigger.disabled) return;
+    if (this.open || this.trigger.disabled) return;
+    if (this.options.length === 0 && !this.emptyAction) return;
     this.openPopup();
     this.trigger.focus();
   }

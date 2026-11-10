@@ -182,4 +182,20 @@ describe('ComposerSelect', () => {
     expect(picked).toBe(2);
     expect(document.querySelector('.cs-popup')).toBeNull();
   });
+
+  it('showPicker (programmatic) honors the same empty-state rule as openPopup', () => {
+    const host = makeHost();
+    let picked = 0;
+    const cs = new ComposerSelect(host, () => {});
+    cs.setOptions([], undefined, {
+      strictSelection: true,
+      emptyAction: { label: '在设置中检查 LLM', onPick: () => { picked++; } },
+    });
+    cs.showPicker();
+    const items = document.querySelectorAll<HTMLElement>('.cs-item');
+    expect(items.length).toBe(1);
+    items[0].click();
+    expect(picked).toBe(1);
+    expect(document.querySelector('.cs-popup')).toBeNull();
+  });
 });
