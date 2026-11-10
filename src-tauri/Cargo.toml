@@ -51,6 +51,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
+    # OpenProcess/GetExitCodeProcess：进程探活走内核句柄，不再 spawn tasklist
+    # （后者每条 100-400ms，旧实现还在 UI 主线程上跑，见 gateway_pid_alive）。
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

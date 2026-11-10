@@ -3444,16 +3444,132 @@ fn strip_powershell_startup_progress(stderr: String) -> String {
     if !trimmed.starts_with("#< CLIXML") || trimmed.contains("<S S=\"Error\">") {
         return stderr;
     }
-    if trimmed.contains("<AV>Preparing modules for first use.</AV>") {
-        String::new()
-    } else {
-        stderr
-    }
+    // Reaching here means the envelope carried no <S> record at all: it is pure
+    // progress/verbose noise from PowerShell's first run. The old code only
+    // recognized the English sentence "<AV>Preparing modules for first use.</AV>",
+    // so on a zh-CN Windows ("正在准备首次使用模块。") every single command's
+    // stderr got a CLIXML blob attached for no reason.
+    String::new()
 }
 
 #[cfg(windows)]
 fn powershell_encoded_command(command: &str) -> String {
     utf16le_base64(&powershell_command_wrapped(command))
+}
+
+/// Decode a child process's captured stdout/stderr into text.
+///
+/// On Windows, PowerShell 5.1 writes redirected output in the console's OEM code
+/// page (CP936/GBK on zh-CN), not UTF-8. `String::from_utf8_lossy` therefore
+/// turned every Chinese message into `����` — exactly what the tool-error ledger
+/// shows (`#< CLIXML … ����λ�� ��:1 …`). Windows reuses the file-read chain
+/// (UTF-8 strict → GB18030 → Big5 → lossy); other platforms keep lossy UTF-8,
+/// which is correct there because their tooling emits UTF-8.
+fn decode_process_output(bytes: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        decode_text_bytes(bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// PowerShell 5.1 serializes its non-success streams as CLIXML whenever stderr is
+/// redirected (`#< CLIXML\n<Objs …>`), so the one line explaining a failure used
+/// to reach the model wrapped in a serialization envelope full of `RefId`s. Pull
+/// the text back out of the `<S S="…">…</S>` nodes; anything we cannot parse is
+/// passed through untouched rather than dropped.
+#[cfg(windows)]
+fn unwrap_clixml(stderr: String) -> String {
+    if !stderr.trim_start().starts_with("#< CLIXML") {
+        return stderr;
+    }
+    let mut out = String::new();
+    let mut rest = stderr.as_str();
+    while let Some(start) = rest.find("<S ") {
+        let after = &rest[start..];
+        let (Some(gt), Some(end)) = (after.find('>'), after.find("</S>")) else {
+            break;
+        };
+        if end <= gt {
+            break;
+        }
+        let text = decode_clixml_escapes(after[gt + 1..end].trim());
+        if !text.trim().is_empty() {
+            out.push_str(text.trim());
+            out.push('\n');
+        }
+        rest = &after[end + "</S>".len()..];
+    }
+    if out.trim().is_empty() {
+        return stderr;
+    }
+    out.trim_end().to_string()
+}
+
+/// CLIXML escapes what XML cannot carry: `_xHHHH_` for control characters
+/// (notably `_x000D__x000A_` for CRLF) plus the five XML entities.
+#[cfg(windows)]
+fn decode_clixml_escapes(text: &str) -> String {
+    static_regex! { clixml_escape_re, r"_x([0-9A-Fa-f]{4})_" }
+    let unescaped = clixml_escape_re().replace_all(text, |caps: &regex::Captures| {
+        u32::from_str_radix(&caps[1], 16)
+            .ok()
+            .and_then(char::from_u32)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
+    });
+    unescaped
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Windows stderr pipeline: OEM bytes → text → CLIXML envelope removed → the
+/// known startup-progress noise removed.
+#[cfg(windows)]
+fn normalize_powershell_stderr(bytes: &[u8]) -> String {
+    strip_powershell_startup_progress(unwrap_clixml(decode_process_output(bytes)))
+}
+
+#[cfg(all(test, windows))]
+mod clixml_tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_error_nodes_and_decodes_escapes() {
+        let raw = concat!(
+            "#< CLIXML\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<S S=\"Error\">所在位置 行:1 字符: 1_x000D__x000A_+ &lt;bad&gt;</S>",
+            "<S S=\"Info\">info line</S>",
+            "</Objs>"
+        )
+        .to_string();
+        let out = unwrap_clixml(raw);
+        assert!(out.contains("所在位置 行:1 字符: 1"), "{}", out);
+        assert!(out.contains("<bad>"), "{}", out);
+        assert!(out.contains("info line"), "{}", out);
+        assert!(!out.contains("CLIXML"), "{}", out);
+        assert!(!out.contains("Objs"), "{}", out);
+    }
+
+    #[test]
+    fn leaves_plain_stderr_alone() {
+        let raw = "Command failed with exit code 1".to_string();
+        assert_eq!(unwrap_clixml(raw.clone()), raw);
+    }
+
+    #[test]
+    fn decodes_oem_bytes_instead_of_replacement_chars() {
+        // "你好" as GBK bytes: invalid UTF-8, valid GB18030.
+        let bytes = [0xC4, 0xE3, 0xBA, 0xC3];
+        assert_eq!(decode_process_output(&bytes), "你好");
+    }
 }
 
 #[cfg(test)]
@@ -3760,13 +3876,13 @@ async fn execute_command(
     };
 
     #[cfg(windows)]
-    let stderr = strip_ansi(&strip_powershell_startup_progress(String::from_utf8_lossy(&output.stderr).to_string()));
+    let stderr = strip_ansi(&normalize_powershell_stderr(&output.stderr));
     #[cfg(not(windows))]
-    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr).to_string());
+    let stderr = strip_ansi(&decode_process_output(&output.stderr));
 
     Ok(serde_json::json!({
         "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": strip_ansi(&String::from_utf8_lossy(&output.stdout).to_string()),
+        "stdout": strip_ansi(&decode_process_output(&output.stdout)),
         "stderr": stderr,
     }))
 }
@@ -3826,8 +3942,8 @@ async fn run_argv(workspace: String, argv: Vec<String>, sandbox: Option<bool>) -
 
     Ok(serde_json::json!({
         "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": strip_ansi(&String::from_utf8_lossy(&output.stdout).to_string()),
-        "stderr": strip_ansi(&String::from_utf8_lossy(&output.stderr).to_string()),
+        "stdout": strip_ansi(&decode_process_output(&output.stdout)),
+        "stderr": strip_ansi(&decode_process_output(&output.stderr)),
     }))
 }
 
@@ -4202,7 +4318,7 @@ impl StreamLineSplitter {
                     let trimmed = trim_trailing_ws(&self.pending[scan..r]);
                     if !trimmed.is_empty() {
                         out.push(StreamLine {
-                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            line: decode_process_output(trimmed),
                             progress: false,
                         });
                     }
@@ -4213,7 +4329,7 @@ impl StreamLineSplitter {
                     let trimmed = trim_trailing_ws(&self.pending[scan..r]);
                     if !trimmed.is_empty() {
                         out.push(StreamLine {
-                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            line: decode_process_output(trimmed),
                             progress: true,
                         });
                     }
@@ -4223,7 +4339,7 @@ impl StreamLineSplitter {
                     let trimmed = trim_trailing_ws(&self.pending[scan..n]);
                     if !trimmed.is_empty() {
                         out.push(StreamLine {
-                            line: String::from_utf8_lossy(trimmed).into_owned(),
+                            line: decode_process_output(trimmed),
                             progress: false,
                         });
                     }
@@ -4253,7 +4369,7 @@ impl StreamLineSplitter {
             Vec::new()
         } else {
             vec![StreamLine {
-                line: String::from_utf8_lossy(&trimmed).into_owned(),
+                line: decode_process_output(&trimmed),
                 progress: false,
             }]
         }
@@ -5228,14 +5344,25 @@ async fn fetch_page(
 
 /// 共享盘上 web-cache（~/.pure/cache/web-cache.json，与 CLI 同 key 方案）的
 /// 读写原语：缓存的 key 归一/TTL 语义在 TS 单源，这里只管存取。
+/// The first get parses the whole cache file (up to 200 entries × 180 KB), and
+/// every set re-serializes and rewrites all of it. Both used to run on the UI
+/// thread as sync commands — during a web-heavy turn that is a multi-megabyte
+/// read/write per tool call at the message loop's expense.
 #[tauri::command]
-fn web_cache_get(key: String) -> Option<String> {
-    web_cache().lock().unwrap().get(&key)
+async fn web_cache_get(key: String) -> Option<String> {
+    run_blocking(move || Ok(web_cache().lock().unwrap().get(&key)))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
-fn web_cache_set(key: String, value: String, ttl_ms: u64) {
-    web_cache().lock().unwrap().set(&key, &value, ttl_ms);
+async fn web_cache_set(key: String, value: String, ttl_ms: u64) {
+    let _ = run_blocking(move || {
+        web_cache().lock().unwrap().set(&key, &value, ttl_ms);
+        Ok::<(), String>(())
+    })
+    .await;
 }
 
 /// Minimal percent-encoding for URL path/query components (RFC 3986 unreserved
@@ -6428,7 +6555,11 @@ fn map_tile_debug_log(url: &str, proxy_url: Option<&str>, outcome: &str, ms: u64
 /// returns the on-disk directory so the panel can show it and open it in the
 /// file manager.
 #[tauri::command]
-fn map_tile_cache_usage() -> Result<serde_json::Value, String> {
+async fn map_tile_cache_usage() -> Result<serde_json::Value, String> {
+    run_blocking(map_tile_cache_usage_impl).await
+}
+
+fn map_tile_cache_usage_impl() -> Result<serde_json::Value, String> {
     let dir = map_tile_cache_dir();
     let mut files: u64 = 0;
     let mut bytes: u64 = 0;
@@ -6446,7 +6577,11 @@ fn map_tile_cache_usage() -> Result<serde_json::Value, String> {
 
 /// Settings → General: clear the offline basemap tile cache.
 #[tauri::command]
-fn clear_map_tile_cache() -> Result<serde_json::Value, String> {
+async fn clear_map_tile_cache() -> Result<serde_json::Value, String> {
+    run_blocking(clear_map_tile_cache_impl).await
+}
+
+fn clear_map_tile_cache_impl() -> Result<serde_json::Value, String> {
     let dir = map_tile_cache_dir();
     let mut deleted: u64 = 0;
     let mut freed_bytes: u64 = 0;
@@ -6592,7 +6727,7 @@ mod map_tile_cache_tests {
         std::fs::write(cache.join("a.png"), vec![0u8; 3]).unwrap();
         std::fs::write(cache.join("b.png"), vec![0u8; 5]).unwrap();
         std::fs::write(cache.join("ignored.txt"), vec![0u8; 7]).unwrap();
-        let v = map_tile_cache_usage().unwrap();
+        let v = map_tile_cache_usage_impl().unwrap();
         assert_eq!(v["files"], 3);
         assert_eq!(v["bytes"], 15);
         assert_eq!(v["dir"], cache.to_string_lossy().as_ref());
@@ -6609,7 +6744,7 @@ mod map_tile_cache_tests {
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("a.png"), vec![0u8; 4]).unwrap();
         std::fs::write(cache.join("b.png"), vec![0u8; 6]).unwrap();
-        let res = clear_map_tile_cache().unwrap();
+        let res = clear_map_tile_cache_impl().unwrap();
         assert_eq!(res["deleted"], 2);
         assert_eq!(res["freedBytes"], 10);
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
@@ -6661,8 +6796,19 @@ fn parse_skill_markdown(text: &str) -> Option<(String, String, String)> {
 /// Settings → Skills inventory can tell the two directories apart. Mirrors the
 /// CLI's loadAppSkills directory order (user skills first, project skills
 /// second). Never fails: a missing or unreadable directory yields nothing.
+///
+/// This runs on EVERY turn (system-prompt assembly), reads one SKILL.md per
+/// skill and stats both directories — as a sync command that directory walk was
+/// paid by the UI thread. `_impl` keeps the synchronous body for tests; the
+/// command hops to the blocking pool.
 #[tauri::command]
-fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
+async fn list_app_skills(workspace: String) -> Vec<serde_json::Value> {
+    tokio::task::spawn_blocking(move || list_app_skills_impl(workspace))
+        .await
+        .unwrap_or_default()
+}
+
+fn list_app_skills_impl(workspace: String) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut dirs: Vec<(PathBuf, &str)> = vec![(app_skills_dir(), "user")];
     let project = workspace.trim();
@@ -6709,7 +6855,13 @@ fn external_subagents_dir() -> PathBuf {
 pub const TRIAL_MARKER_SUFFIX: &str = "trial.json";
 
 #[tauri::command]
-fn list_external_subagents() -> Vec<serde_json::Value> {
+async fn list_external_subagents() -> Vec<serde_json::Value> {
+    tokio::task::spawn_blocking(list_external_subagents_impl)
+        .await
+        .unwrap_or_default()
+}
+
+fn list_external_subagents_impl() -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let dir = external_subagents_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -6767,7 +6919,13 @@ fn persona_overlays_dir() -> PathBuf {
 pub const QUARANTINE_MARKER_FILE: &str = "QUARANTINED.json";
 
 #[tauri::command]
-fn list_external_tools() -> Vec<serde_json::Value> {
+async fn list_external_tools() -> Vec<serde_json::Value> {
+    tokio::task::spawn_blocking(list_external_tools_impl)
+        .await
+        .unwrap_or_default()
+}
+
+fn list_external_tools_impl() -> Vec<serde_json::Value> {
     let dir = std::env::var("PURE_TOOLS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(pure_home_dir()).join(".pure").join("tools"));
@@ -6914,7 +7072,13 @@ fn set_tool_quarantined_in(
 }
 
 #[tauri::command]
-fn list_persona_overlays() -> Vec<serde_json::Value> {
+async fn list_persona_overlays() -> Vec<serde_json::Value> {
+    tokio::task::spawn_blocking(list_persona_overlays_impl)
+        .await
+        .unwrap_or_default()
+}
+
+fn list_persona_overlays_impl() -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let dir = persona_overlays_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -6957,7 +7121,13 @@ fn role_cases_dir(role: &str) -> Option<PathBuf> {
 }
 
 #[tauri::command]
-fn list_role_cases(role: String) -> Vec<serde_json::Value> {
+async fn list_role_cases(role: String) -> Vec<serde_json::Value> {
+    tokio::task::spawn_blocking(move || list_role_cases_impl(role))
+        .await
+        .unwrap_or_default()
+}
+
+fn list_role_cases_impl(role: String) -> Vec<serde_json::Value> {
     let Some(dir) = role_cases_dir(&role) else {
         return Vec::new();
     };
@@ -7527,7 +7697,7 @@ mod app_skills_tests {
 
         let prev = std::env::var("PURE_SKILLS_DIR").ok();
         std::env::set_var("PURE_SKILLS_DIR", &base);
-        let list = list_app_skills(String::new());
+        let list = list_app_skills_impl(String::new());
         match prev {
             Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
             None => std::env::remove_var("PURE_SKILLS_DIR"),
@@ -7555,7 +7725,7 @@ mod app_skills_tests {
         let prev = std::env::var("PURE_SKILLS_DIR").ok();
         std::env::set_var("PURE_SKILLS_DIR", &empty_home);
 
-        let list = list_app_skills(base.to_string_lossy().into_owned());
+        let list = list_app_skills_impl(base.to_string_lossy().into_owned());
 
         match prev {
             Some(v) => std::env::set_var("PURE_SKILLS_DIR", v),
@@ -7776,7 +7946,7 @@ mod app_skills_tests {
 
         // The loader must keep seeing exactly one valid skill: the sidecar is
         // a plain file inside the skill directory and SKILL.md still parses.
-        let list = list_app_skills(String::new());
+        let list = list_app_skills_impl(String::new());
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["name"], "sidecar-skill");
         assert_eq!(list[0]["description"], "Sidecar tolerance");
@@ -10296,35 +10466,43 @@ fn paste_save_dir(session_id: &str, workspace_dir: Option<&str>) -> PathBuf {
 /// before the overflow, otherwise under ~/.pure/workspace/<session-id>/; the
 /// chip double-click viewer reads it back from memory (path kept for reference).
 #[tauri::command]
-fn save_paste_file(
+async fn save_paste_file(
     session_id: String,
     name: String,
     content: String,
     workspace_dir: Option<String>,
 ) -> Result<String, String> {
-    if session_id.trim().is_empty() {
-        return Err("session id is required".to_string());
-    }
-    let dir = paste_save_dir(&session_id, workspace_dir.as_deref());
-    fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
-    write_paste_file(&dir, &name, &content)
+    run_blocking(move || {
+        if session_id.trim().is_empty() {
+            return Err("session id is required".to_string());
+        }
+        let dir = paste_save_dir(&session_id, workspace_dir.as_deref());
+        fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
+        write_paste_file(&dir, &name, &content)
+    })
+    .await
 }
 
 /// The GUI turns pasted screenshots/images (see pasteChip.ts) into a thumbnail
 /// chip and persists the raw bytes here under ~/.pure/workspace/<session-id>/.
+/// Up to 10 MB of base64 arrive here per pasted screenshot: decoding that plus
+/// the write is a visible hitch if it runs on the message loop.
 #[tauri::command]
-fn save_paste_image(
+async fn save_paste_image(
     session_id: String,
     name: String,
     data_base64: String,
 ) -> Result<String, String> {
-    if session_id.trim().is_empty() {
-        return Err("session id is required".to_string());
-    }
-    let bytes = decode_paste_image(&data_base64)?;
-    let dir = application_tmp_dir().join(safe_session_component(&session_id));
-    fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
-    write_paste_bytes(&dir, &name, &bytes)
+    run_blocking(move || {
+        if session_id.trim().is_empty() {
+            return Err("session id is required".to_string());
+        }
+        let bytes = decode_paste_image(&data_base64)?;
+        let dir = application_tmp_dir().join(safe_session_component(&session_id));
+        fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
+        write_paste_bytes(&dir, &name, &bytes)
+    })
+    .await
 }
 
 // Upload limits: only text / images / document files may be imported (a
@@ -10638,18 +10816,24 @@ fn cleanup_paste_files_in(dir: &std::path::Path, days: u64) -> Result<(u64, u64)
 
 /// Settings → General: current paste-file footprint (files + bytes).
 #[tauri::command]
-fn tmp_paste_usage() -> Result<serde_json::Value, String> {
-    let files = scan_all_paste_files(&application_tmp_dir());
-    let bytes: u64 = files.iter().map(|f| f.size).sum();
-    Ok(serde_json::json!({ "files": files.len(), "bytes": bytes }))
+async fn tmp_paste_usage() -> Result<serde_json::Value, String> {
+    run_blocking(|| {
+        let files = scan_all_paste_files(&application_tmp_dir());
+        let bytes: u64 = files.iter().map(|f| f.size).sum();
+        Ok(serde_json::json!({ "files": files.len(), "bytes": bytes }))
+    })
+    .await
 }
 
 /// Settings → General: delete paste files older than `days` days.
 #[tauri::command]
-fn cleanup_tmp_pastes(days: u64) -> Result<serde_json::Value, String> {
-    let days = days.clamp(1, 365);
-    let (deleted, freed_bytes) = cleanup_paste_files_in(&application_tmp_dir(), days)?;
-    Ok(serde_json::json!({ "deleted": deleted, "freedBytes": freed_bytes }))
+async fn cleanup_tmp_pastes(days: u64) -> Result<serde_json::Value, String> {
+    run_blocking(move || {
+        let days = days.clamp(1, 365);
+        let (deleted, freed_bytes) = cleanup_paste_files_in(&application_tmp_dir(), days)?;
+        Ok(serde_json::json!({ "deleted": deleted, "freedBytes": freed_bytes }))
+    })
+    .await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -10705,19 +10889,35 @@ fn gateway_pid_alive(pid: i64) -> bool {
     }
     #[cfg(windows)]
     {
-        // Windows 没有 kill(pid, 0)；用 tasklist 按 PID 精确探活（输出含该
-        // PID 号 = 进程存在）。这是 2026-10-01 发现的根本 bug：此前 Windows
-        // 恒返回 false，导致 stop 认为没在跑不发 kill、start 重复启动。
-        // 走 silent_child：GUI 每 5 秒轮询一次状态，不静音就是每 5 秒闪一次窗。
-        let output = silent_child(std::process::Command::new("tasklist"))
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output();
-        match output {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout);
-                text.contains(&pid.to_string())
+        // Windows 没有 kill(pid, 0)。2026-11 起改用 OpenProcess +
+        // GetExitCodeProcess 这对内核调用探活：不开子进程、不开控制台窗口、
+        // 微秒级返回。替换掉的 tasklist 方案有两个硬伤——每次 spawn 要
+        // 100-400ms（杀软 hook 下更久），而 `process_alive` 是同步 command
+        // （主线程执行），task_list 每轮询一个 pid 就冻一次 UI 消息泵。
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+        };
+        // PROCESS_QUERY_LIMITED_INFORMATION 在 windows-sys 0.59 里归 Threading,
+        // 不在 Foundation(放在 Foundation 下是 Windows 上编不过的 E0432——
+        // 2026-11-09 的 v4.7.2 提交正是这么红在 rust-warm(windows) 上)。
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let Ok(target) = u32::try_from(pid) else {
+            return false;
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, target);
+            if handle.is_null() {
+                // 打不开 ≠ 不存在：受保护/提权进程会回 ACCESS_DENIED，语义与
+                // Unix 分支的 EPERM 一致——探活失败但进程确实活着。
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
-            Err(_) => false,
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            let _ = CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE as u32
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -11900,23 +12100,31 @@ fn expand_home_dir(path: &str) -> String {
 }
 
 /// 通用进程探活的 command 薄壳（task_list 配套：GUI WebView 里没有 process
-/// 对象，逐 pid 探活经此）。语义与 gateway_pid_alive 同源（unix kill(0)+
-/// EPERM 算活 / windows tasklist）。
+/// 对象，逐 pid 探活经此）。语义与 gateway_pid_alive 同源（unix kill(0)+EPERM
+/// 算活 / windows OpenProcess+GetExitCodeProcess）。async 只是为了让 IPC 不必
+/// 占主线程——探活本身在两个平台都是系统调用级开销。
 #[tauri::command]
-fn process_alive(pid: i64) -> bool {
-    gateway_pid_alive(pid)
+async fn process_alive(pid: i64) -> bool {
+    pid > 0 && gateway_pid_alive(pid)
 }
 
 /// 停掉一个进程（task_kill 配套）。组杀（kill_process_group：unix 负 pgid /
 /// windows taskkill /T /F）——background 的 wrapper 里可能带孙进程（dev
 /// server），单杀 wrapper 会留孤儿。进程本来就不在时两边内部都按成功收账
 /// （kill_process_group 的 ESRCH / code-128 分支）——「确保它死」语义达成。
+/// 必须 async + run_blocking：taskkill 在深进程树上要等几秒，同步 command
+/// 会把这几秒原样算在 UI 主线程头上（关窗口/拖窗口全部排队）。
 #[tauri::command]
-fn kill_process(pid: i64) -> Result<bool, String> {
+async fn kill_process(pid: i64) -> Result<bool, String> {
     if pid <= 0 || pid > i32::MAX as i64 {
         return Ok(false);
     }
-    kill_process_group(pid as i32).map(|_| true).map_err(|e| format!("kill_process: {}", e))
+    run_blocking(move || {
+        kill_process_group(pid as i32)
+            .map(|_| true)
+            .map_err(|e| format!("kill_process: {}", e))
+    })
+    .await
 }
 
 /// 把工具输出超量的全文落进系统临时目录（GUI 侧 spill 通道——WebView 没有
@@ -14431,15 +14639,23 @@ fn load_session_workspace(session_id: &str) -> Result<String, String> {
 // are the durable backing store (the browser-localStorage path is only used in
 // plain Vite dev where there is no filesystem).
 
+/// Written every turn from the right panel. The body does write + `sync_all()`
+/// + rename; on Windows that fsync (and the antivirus hook on it) is tens to
+/// hundreds of ms, which as a sync command was billed to the UI thread each
+/// turn. `_impl` stays synchronous for the tests.
 #[tauri::command]
-fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<(), String> {
-    validate_session_id(&session_id)?;
+async fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<(), String> {
+    run_blocking(move || save_session_stats_impl(&session_id, &stats)).await
+}
+
+fn save_session_stats_impl(session_id: &str, stats: &serde_json::Value) -> Result<(), String> {
+    validate_session_id(session_id)?;
     let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
-    let dir = sessions_dir().join(&session_id);
+    let dir = sessions_dir().join(session_id);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = dir.join("stats.json");
     let temp = dir.join("stats.json.tmp");
-    let serialized = serde_json::to_string_pretty(&stats).map_err(|e| format!("serialize: {}", e))?;
+    let serialized = serde_json::to_string_pretty(stats).map_err(|e| format!("serialize: {}", e))?;
     fs::write(&temp, serialized).map_err(|e| format!("write temp: {}", e))?;
     let file = fs::OpenOptions::new().read(true).write(true).open(&temp)
         .map_err(|e| format!("open temp: {}", e))?;
@@ -14448,9 +14664,13 @@ fn save_session_stats(session_id: String, stats: serde_json::Value) -> Result<()
 }
 
 #[tauri::command]
-fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, String> {
-    validate_session_id(&session_id)?;
-    let path = sessions_dir().join(&session_id).join("stats.json");
+async fn load_session_stats(session_id: String) -> Result<Option<serde_json::Value>, String> {
+    run_blocking(move || load_session_stats_impl(&session_id)).await
+}
+
+fn load_session_stats_impl(session_id: &str) -> Result<Option<serde_json::Value>, String> {
+    validate_session_id(session_id)?;
+    let path = sessions_dir().join(session_id).join("stats.json");
     if !path.exists() {
         return Ok(None);
     }
@@ -14517,23 +14737,33 @@ fn load_all_session_stats_impl(session_ids: Option<Vec<String>>) -> Result<serde
     Ok(serde_json::Value::Object(out))
 }
 
+/// Startup path: reads the index, then parses the newest session.json — several
+/// megabytes for a long conversation. As a sync command that parse ran on the
+/// message loop while the window was still painting, i.e. a visible launch stall.
 #[tauri::command]
-fn load_last_session() -> Result<Option<serde_json::Value>, String> {
-    let index_path = sessions_dir().join("index.json");
-    if !index_path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&index_path).map_err(|e| format!("read: {}", e))?;
-    let list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
-    let latest = list.iter().max_by_key(|s| s.updated_at);
-    match latest {
-        Some(s) => load_session_impl(s.id.clone()),
-        None => Ok(None),
-    }
+async fn load_last_session() -> Result<Option<serde_json::Value>, String> {
+    run_blocking(|| {
+        let index_path = sessions_dir().join("index.json");
+        if !index_path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&index_path).map_err(|e| format!("read: {}", e))?;
+        let list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
+        let latest = list.iter().max_by_key(|s| s.updated_at);
+        match latest {
+            Some(s) => load_session_impl(s.id.clone()),
+            None => Ok(None),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
+async fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
+    run_blocking(|| load_session_list_impl()).await
+}
+
+fn load_session_list_impl() -> Result<Vec<serde_json::Value>, String> {
     let index_path = sessions_dir().join("index.json");
     if !index_path.exists() {
         return Ok(vec![]);
@@ -14603,13 +14833,23 @@ fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), 
 /// samples; surfacing the count lets the user decide with eyes open. Reads
 /// the session.json messages and counts assistant toolCalls whose function
 /// name is a registered role (single pass, no schema parsing beyond that).
+/// Runs when the delete-confirmation card opens. It parses the WHOLE
+/// session.json — a long session's archive is several megabytes — so as a sync
+/// command it stalled the UI thread for the duration of that parse.
 #[tauri::command]
-fn summarize_session_delegations(
+async fn summarize_session_delegations(
     session_id: String,
     roles: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
-    validate_session_id(&session_id)?;
-    let path = sessions_dir().join(&session_id).join("session.json");
+    run_blocking(move || summarize_session_delegations_impl(&session_id, roles)).await
+}
+
+fn summarize_session_delegations_impl(
+    session_id: &str,
+    roles: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    validate_session_id(session_id)?;
+    let path = sessions_dir().join(session_id).join("session.json");
     let Ok(raw) = fs::read_to_string(&path) else {
         // No archive (live-only session) — nothing to lose, no warning.
         return Ok(serde_json::json!({ "delegationCount": 0, "byRole": {} }));
@@ -16229,12 +16469,19 @@ async fn probe_sys_info_static() -> SysInfoStatic {
             }
         }
     }
+    // Five `--version` subprocesses, each spawned and waited for serially: that
+    // is hundreds of ms of blocking work hiding inside an async fn, i.e. on a
+    // tokio worker that other commands share. Push it to the blocking pool.
+    let runtimes = tokio::task::spawn_blocking(detect_runtime_versions)
+        .await
+        .unwrap_or_default()
+        .join("  ");
     SysInfoStatic {
         lang,
         encoding,
         tz,
         os_version: detect_os_version(),
-        runtimes: detect_runtime_versions().join("  "),
+        runtimes,
     }
 }
 
@@ -17075,34 +17322,39 @@ struct TurnNotification {
     session_id: String,
 }
 
-// 同步命令跑在 WebView 的 IPC 回调线程(= Windows/Linux 的主线程)上,所以
-// `show()` 本身也必须离开这条线程:notify-rust 在 Windows 上是同步 WinRT +
-// shell 调用(注册 AUMID → ToastNotifier::Show,整段是跨进程 RPC),主线程在
-// 这里等一次,就是一帧消息泵的空转;shell 忙或 COM 卡住时会变成可观测的停顿
-// (与 2026-09-17 关窗提示同一条判例:那段 `show()` 早已挪进线程,这里当时漏了)。
-// `wait_for_action` 更狠,它**阻塞**到用户点掉通知,所以 show + wait 整段进
-// 同一条线程:句柄在哪个线程创建就在哪个线程等待,跨线程 Send 问题也不存在。
-// 失败不再回给 JS:命令已是即发即忘,报错改落四源台账(source:"rust" /
-// kind:"notification_error")——静默吞掉才是真丢信息。
+// 通知的 `show()` 在 Windows 上是同步 WinRT/COM(shell 跨进程 RPC),而同步命令
+// 跑在 WebView 的 IPC 回调线程(= 主线程)上——2026-09-17 关窗提示那条判例只把
+// `wait_for_action` 挪进了线程,`show()` 漏在主线程。现在两段都离开主线程:
+// `show()` 走阻塞池(async 命令本身也不占主线程),`wait_for_action`(会阻塞到
+// 用户点掉通知)独占一条线程——句柄在哪个线程创建就在哪里等待,跨线程 Send 问题
+// 也不存在。失败既回给 JS,也落四源台账(kind:"notification_error"):
+// 「没通知我」这种报障得有行可查,静默吞掉才是真丢信息。
 #[tauri::command]
-fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification) -> Result<(), String> {
+async fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification) -> Result<(), String> {
+    let (title, body, session_id) = (notification.title, notification.body, notification.session_id);
+    let shown = tokio::task::spawn_blocking(move || {
+        notify_rust::Notification::new()
+            .summary(&title)
+            .body(&body)
+            .show()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("notification task failed: {e}"))?;
+    let handle = match shown {
+        Ok(handle) => handle,
+        Err(e) => {
+            record_notification_error(&format!("show: {e}"));
+            return Err(e);
+        }
+    };
+    // wait_for_action consumes the handle and BLOCKS the calling thread until
+    // the user interacts with the notification — so it runs on a thread of
+    // its own, never inside this command. The thread is the click callback's
+    // lease: only a real body click ("default"; dismissal is "__closed")
+    // means "take me there", and the frontend does the session switch.
     std::thread::spawn(move || {
         use tauri::Emitter;
-        let session_id = notification.session_id.clone();
-        let handle = match notify_rust::Notification::new()
-            .summary(&notification.title)
-            .body(&notification.body)
-            .show()
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                record_notification_error(&format!("show: {e}"));
-                return;
-            }
-        };
-        // The thread is the click callback's lease: only a real body click
-        // ("default"; dismissal is "__closed") means "take me there", and the
-        // frontend does the session switch.
         handle.wait_for_action(move |action| {
             if action == "default" {
                 let _ = app.emit("notification-clicked", session_id.clone());
@@ -17499,8 +17751,11 @@ pub fn run() {
 
             // Fetch the OS system proxy once at startup so 系统代理 mode has a
             // warm cache (and the request path never needs a detection of its
-            // own until the 5s TTL lapses).
-            refresh_system_proxy_cache();
+            // own until the 5s TTL lapses). On Windows the detection spawns
+            // `reg query` and waits for it; setup() runs on the message loop, so
+            // that wait used to land between window creation and first paint.
+            // The cache warms on first use anyway — do it off-thread.
+            std::thread::spawn(refresh_system_proxy_cache);
 
             // Drop legacy zero-message sessions (see prune_empty_sessions):
             // the sidebar must only ever list conversations that exist.
@@ -18501,11 +18756,11 @@ mod session_stats_tests {
 
         with_temp_home(&home, || {
             // 1) Missing file → None.
-            assert!(load_session_stats("sess-1".to_string()).unwrap().is_none());
+            assert!(load_session_stats_impl("sess-1").unwrap().is_none());
 
             // 2) Save then load round-trips verbatim, as a real file in the session dir.
-            save_session_stats("sess-1".to_string(), stats.clone()).unwrap();
-            let loaded = load_session_stats("sess-1".to_string()).unwrap().unwrap();
+            save_session_stats_impl("sess-1", &stats).unwrap();
+            let loaded = load_session_stats_impl("sess-1").unwrap().unwrap();
             assert_eq!(loaded, stats);
             assert!(sessions_dir().join("sess-1").join("stats.json").exists());
 
@@ -18513,13 +18768,13 @@ mod session_stats_tests {
             // The heavy cleanup is backgrounded, so assert the synchronous helper
             // directly (delete_session itself only drops the index synchronously).
             cleanup_session_files("sess-1").unwrap();
-            assert!(load_session_stats("sess-1".to_string()).unwrap().is_none());
+            assert!(load_session_stats_impl("sess-1").unwrap().is_none());
 
             // 4) Bulk load collects every session into a map keyed by id.
             let stats_a = serde_json::json!({ "usage": { "promptTokens": 10 }, "searches": [] });
             let stats_b = serde_json::json!({ "usage": { "promptTokens": 20 }, "commands": [] });
-            save_session_stats("sess-a".to_string(), stats_a.clone()).unwrap();
-            save_session_stats("sess-b".to_string(), stats_b.clone()).unwrap();
+            save_session_stats_impl("sess-a", &stats_a).unwrap();
+            save_session_stats_impl("sess-b", &stats_b).unwrap();
             // A session dir WITHOUT stats.json must be skipped, not fatal.
             let dir = sessions_dir().join("sess-no-stats");
             fs::create_dir_all(&dir).unwrap();

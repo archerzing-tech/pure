@@ -6,19 +6,25 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 ## v4.7.2
 
-**Windows 无边框窗口卡死第二轮定案：原生 resize 子窗灭活、边缘 resize 加真拖拽闸门、通知不再占主线程、发版带 PDB 符号**
+**Windows 专项 + 无边框窗口卡死二轮定案：主线程阻塞清零、命令输出乱码与 CLIXML 噪音根治、路径修复器不再误伤 Windows 绝对路径、原生 resize 子窗灭活、边缘 resize 真拖拽闸门、发版带 PDB 符号**
 
-四笔同一现场——11-10 真机复现（主线程 `Running`、指令指针在 win32u 的 `NtUserSetWindowPos`/`NtUserMessageCall`/`NtUserShowWindow` 三点往复、`RSP` 同深度、内存与句柄全程平稳），复盘 11-09 那轮为何没拦住。
+起因是同一条判据被逐条对照：Tauri v2 的非 async command 在窗口消息循环里内联执行，所以任何同步命令里的一次子进程等待、一次 fsync、一次大 JSON 解析，都会原样变成「窗口点不动、拖不动、关不掉」。同一台真机 11-10 又一次卡死（主线程 `Running`、指令指针在 win32u 的 `NtUserSetWindowPos`/`NtUserMessageCall`/`NtUserShowWindow` 三点往复、`RSP` 同深度、内存与句柄全程平稳），复盘 11-09 那轮为何没拦住，于是后三笔把窗口消息链路本身也收干净。
 
-其一，热区修在了错的对象上（复盘 11-09）。顶边那条原生 resize 热区不是顶层窗口答的，而是 `decorations: false` 时 tauri-runtime-wry 塞进来的 `TAURI_DRAG_RESIZE_BORDERS` 子窗——它铺满客户区、区域挖掉中间只留边条，由自己的 `WM_NCHITTEST` 答 `HTTOP`，顶层窗口过程的 `WM_NCHITTEST` 根本收不到。所以 11-09 那一刀（顶层一律答 `HTCLIENT`）从未命中热区，11-10 原样复发。修法：`hotzone.rs` 把该子窗整个隐藏——隐藏窗不参与命中测试，`HTTOP` 无从产生；它同时是每个 `WM_SIZE` 上 `SetWindowPos` + `CreateRectRgn/CombineRgn/SetWindowRgn` 的落点（tauri#15569 记的正是这段的 `WM_SIZE` 吞吐逐帧退化，上游 #15614 才把 `SetWindowRgn` 降频），隐藏后这段重修落在一个不可见窗上，重绘与区域失效一并消失，主线程窗口链路只剩顶层 subclass 的一次判断。不销毁：tauri 的 subclass 数据里存着这个子窗句柄，销毁后每帧仍会拿死句柄调 `SetWindowPos`/`SetWindowRgn`，句柄被 WebView2 新建窗复用时就会误改别人的窗，而那条 subclass 无法从外部摘除。灭活落空（上游改类名/标题）或隐藏失败，写一行 `kind:"resize_hotzone"` 进四源台账，不让「已灭活」变成无头案。
+一、主线程上的子进程。进程探活的 Windows 分支原来 spawn `tasklist` 并等它退出（100–400ms，杀软 hook 下更久），而 `process_alive` 是同步命令、`task_list` 工具逐 pid 轮询——每个 pid 冻一次消息泵。改用 `OpenProcess` + `GetExitCodeProcess`（内核调用、不开子进程、不闪控制台窗），`ACCESS_DENIED` 按「活着」处理以对齐 Unix 的 EPERM 语义；`process_alive` 转 async。`kill_process` 的 `taskkill /T /F` 在深进程树上要等几秒，移入 `run_blocking`。通知的 `notify_rust::show()` 在 Windows 走 WinRT/COM、每个后台 settle 一次，同样移入阻塞池——`on_window_event` 里对同一个调用早就这么做了并写明了理由，这条命令此前没照做。
 
-其二，边缘 resize 加了「真拖拽」闸门。自绘热区原先按下即 `startResizeDragging`，而 tao 的 `begin_resize_drag` 是 `PostMessageW(WM_NCLBUTTONDOWN, HT方向, 光标点)` 异步投递——连点时上一次投递还没被分发、鼠标已抬起，模态循环拿到的是一次「按着却永远等不到抬起」的 sizing，窗口就此钉死在 `WM_ENTERSIZEMOVE` 里（「只有 pure 死、其他应用正常」）。现在按下只登记起点，位移超过 3px 才进模态循环，纯点击/连点/手抖永远不进；一次拖拽只发起一次，松手/左键已抬即拆监听。阈值与闸门有 8 例单测钉住（点击、抖动、迟到 move、非左键、方向透传、boot 调灭活命令）。
+二、每回合重复的主线程 IO。每回合组装 system prompt 都会调 `list_app_skills`（逐个读 SKILL.md），连同 `list_external_subagents` / `list_external_tools` / `list_persona_overlays` / `list_role_cases` 一起转 `spawn_blocking`。`load_last_session`（启动解析最新 session.json，长会话数 MB）、`load_session_list`、`summarize_session_delegations`（打开删除确认卡时解析整个 session.json）、`save_session_stats`（每回合写 + `sync_all` + rename，Windows fsync 受杀软影响可到数百 ms）、`load_session_stats`、`web_cache_get/set`（首次解析、每次全量重写，上限 200×180KB≈36MB）、粘贴落盘（≤10MB base64 解码）、地图瓦片缓存统计与清理、tmp 粘贴统计与清理，一并转 async + `run_blocking`。`setup()` 里的 `refresh_system_proxy_cache()` 在 Windows spawn `reg query` 并等待，而 `setup()` 跑在消息循环上——正好卡在建窗与首帧之间——改到后台线程。
 
-其三，通知离开主线程。`send_turn_notification` 是同步命令（跑在 WebView 的 IPC 回调线程，Windows 上就是主线程），而 notify-rust 的 `show()` 在 Windows 上是同步 WinRT + shell 调用（注册 AUMID → `ToastNotifier::Show`，整段跨进程 RPC）。2026-09-17 那条判例只把 `wait_for_action` 挪进了线程，`show()` 漏在主线程上；现在 `show + wait` 整段进同一条线程（句柄在哪个线程创建就在哪个线程等待），命令即发即忘，失败落台账 `kind:"notification_error"`，不静默。
+三、命令输出乱码与 CLIXML。PowerShell 5.1 重定向输出用控制台 OEM 代码页（简中为 GBK），代码却用 `from_utf8_lossy` 解码，于是每条中文报错都成 `����`（gui_errors.log 里成片的 `<S S="Error">����λ�� ��:1`）。新增 `decode_process_output()`：Windows 走仓库既有的文件解码链（UTF-8 严格 → GB18030 → Big5 → lossy），接入 `execute_command`、`run_argv` 与流式输出的行解码器；新增 `unwrap_clixml()` 把 `<S S="…">` 里的文本取出来并解 `_xHHHH_` 转义，模型不再看到 `RefId` 信封；`strip_powershell_startup_progress` 原来只认英文「Preparing modules for first use.」，简中的「正在准备首次使用模块。」永远清不掉——改为「信封里没有 `<S>` 记录就清空」。
 
-其四，发版带符号。卡死取证里 `pure.exe+0x406F80` 这类偏移此前无从解析——没有同版 PDB，「落在 tao/wry 窗口过程还是某个 tauri 命令里」就永远定不下来，而这正是下一刀往哪切的唯一分岔口。Windows job 现在上传 `gui-windows-pdb`（`src-tauri/target/release/pure.pdb`，只作 workflow artifact，不进公开 Release）。判例文档同步补齐解析命令与取证步骤（`docs/windows-undecorated-freeze-2026-11.md`）。
+四、前端路径修复器。`pathIndex.ts` 的分词正则不含 `:` 与 `\`，`D:\work\src\ui\mian.ts` 被拆成 `D` / `work` / … / `mian.ts`，破坏了该模块「绝对路径永不改写」的契约（`https://` 也被拆成两半）。分词类补上 `:` 与 `\` 让 Windows 路径保持单 token，`looksLikePath` 排除盘符路径与 UNC；新增 `splitLineSuffix()` 保证 `src/ui/mian.ts:42` 只修路径段、行号原样保留。
 
-验证：bun test 全量 5284 例 0 fail（4 例真机环境跳过）、cargo test --lib 288 例 0 fail、macOS host 与 x86_64-pc-windows-gnu 交叉 check 双绿、typecheck 与 conventions lint 过；Windows 真机复验（副屏顶边连点 20 次、四边八角拖动、Aero snap、最大化/还原、透明圆角外观、长回复流式期间打字/滚动、`pure errors` 无 `resize_hotzone` 行）待跑。
+五、无边框窗口 resize 热区：11-09 那刀修在了错的对象上。顶边那条原生 resize 热区不是顶层窗口答的，而是 `decorations: false` 时 tauri-runtime-wry 塞进来的 `TAURI_DRAG_RESIZE_BORDERS` 子窗——它铺满客户区、区域挖掉中间只留边条，由自己的 `WM_NCHITTEST` 答 `HTTOP`，顶层窗口过程的 `WM_NCHITTEST` 根本收不到，所以 11-09 的「顶层一律答 `HTCLIENT`」从未命中热区，11-10 原样复发。修法：`hotzone.rs` 把该子窗整个隐藏——隐藏窗不参与命中测试，`HTTOP` 无从产生；它同时是每个 `WM_SIZE` 上 `SetWindowPos` + `CreateRectRgn/CombineRgn/SetWindowRgn` 的落点（tauri#15569 记的正是这段的 `WM_SIZE` 吞吐逐帧退化，上游 #15614 才把 `SetWindowRgn` 降频），隐藏后这段重修落在一个不可见窗上，重绘与区域失效一并消失。不销毁：tauri 的 subclass 数据里存着这个子窗句柄，销毁后每帧仍会拿死句柄调 `SetWindowPos`/`SetWindowRgn`，句柄被 WebView2 新建窗复用时就会误改别人的窗，而那条 subclass 无法从外部摘除。灭活落空（上游改类名/标题）或隐藏失败，写一行 `kind:"resize_hotzone"` 进四源台账，不让「已灭活」变成无头案。
+
+六、边缘 resize 加了「真拖拽」闸门。自绘热区原先按下即 `startResizeDragging`，而 tao 的 `begin_resize_drag` 是 `PostMessageW(WM_NCLBUTTONDOWN, HT方向, 光标点)` 异步投递——连点时上一次投递还没被分发、鼠标已抬起，模态循环拿到的是一次「按着却永远等不到抬起」的 sizing，窗口就此钉死在 `WM_ENTERSIZEMOVE` 里（「只有 pure 死、其他应用正常」）。现在按下只登记起点，位移超过 3px 才进模态循环，纯点击/连点/手抖永远不进；一次拖拽只发起一次，松手/左键已抬即拆监听。阈值与闸门有 8 例单测钉住（点击、抖动、迟到 move、非左键、方向透传、boot 调灭活命令）。
+
+七、两笔可查性。通知：`show()` 离开主线程之外，失败也落一行台账（`kind:"notification_error"`）——「没通知我」这种报障原先只有控制台一句 Err，离线现场谁也看不到。符号：卡死取证里 `pure.exe+0x406F80` 这类偏移此前无从解析，没有同版 PDB「落在 tao/wry 窗口过程还是某个 tauri 命令里」就永远定不下来，而这正是下一刀往哪切的唯一分岔口；Windows job 现在上传 `gui-windows-pdb`（`src-tauri/target/release/pure.pdb`，只作 workflow artifact，不进公开 Release），判例文档同步补齐解析命令与取证步骤（`docs/windows-undecorated-freeze-2026-11.md`）。顺带修掉一个 Windows 编译红：`PROCESS_QUERY_LIMITED_INFORMATION` 在 windows-sys 0.59 归 `Win32::System::Threading`（远端 v4.7.2 提交正是红在 rust-warm(windows) 的 E0432），进程探活那条新路径此前的 MSVC/gnu 编译都没过。
+
+验证：bun test 全量 5286 例 0 fail（4 例真机环境跳过）、cargo test --lib 288 例 0 fail、macOS host 与 x86_64-pc-windows-gnu 交叉 check 双绿（Windows 侧含新进程探活路径）、typecheck 与 conventions lint 过；Windows 真机复验（副屏顶边连点 20 次、四边八角拖动、Aero snap、最大化/还原、透明圆角外观、长回复流式期间打字/滚动、`pure errors` 无 `resize_hotzone` 行）待跑。
 
 ## v4.7.1
 
