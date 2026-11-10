@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.4
+
+**模型列表拆探测门禁改「配置即列表」（opencode/claude-code 式）+ API Key 必须/非必须 toggle**
+
+一、拆可用性探测门禁。真机定案（2026-11-10）：v4.7.3 的可用性门禁让模型列表出现探测等待空窗——启动探测潮未落地时列表空挂「检查中」，端点慢时模型迟迟不出现，「等待时间太长」方案不可行。改为**配置即列表**：providerHasKey 一条缝（已配置 apiKey ∪ 本地免 key 供应商 ∪ 勾了「非必须」的供应商）全量直显，零等待零判断。`llmModelAvailability` 整模块退役（净删 626 行）：启动/周期/退避探测潮、预热与回合失败信号接线、「检查中」空态、侧栏 ⚠ 横幅全部拆除；设置页「连通性验证」按钮保留（手动、用户发起）。诚实边界：列表不再替用户把关连通性——选了打不通的模型回合内报错，判断权交还用户，这是 opencode/claude-code 方式的固有取舍。
+
+二、API Key 必须/非必须 toggle。设置面板 API Key 行内新增开关（「必须/非必须」文案随勾选翻转），落盘 `keyRequired:false`（自定义供应商与内置 override 都支持）；**非必须 = 没有 key 也进模型列表、可发起回合，请求不带鉴权头**；必须（缺省）= 没配 key 不进列表。`providerHasKey` / `hasConfiguredKey` 全部接新判据，发送就绪与列表口径一致。附带修复一个真 bug：`providerOverrideFor` 的空 override 墓碑折叠名单漏了 `keyRequired`——「只勾非必须、其余全空」的 override 被当墓碑丢弃、toggle 静默失效；false 是用户决策不是墓碑，已修 + 契约测试锁定。
+
+验证：bun test 全量 5303 例 0 fail（含墓碑折叠与 keyRequired 契约新用例）、typecheck 与 build:vite 绿。
+
 ## v4.7.3
 
 **Windows 流式活锁第三轮定案（流式 DOM 封顶 + 关 Chromium 遮挡计算）、GUI 主二进制改名根治 ms-gamingoverlay 弹窗、模型列表可用性门禁、冷启动「检查中」空态**
