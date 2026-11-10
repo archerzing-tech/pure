@@ -4,6 +4,22 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.2
+
+**Windows 无边框窗口卡死第二轮定案：原生 resize 子窗灭活、边缘 resize 加真拖拽闸门、通知不再占主线程、发版带 PDB 符号**
+
+四笔同一现场——11-10 真机复现（主线程 `Running`、指令指针在 win32u 的 `NtUserSetWindowPos`/`NtUserMessageCall`/`NtUserShowWindow` 三点往复、`RSP` 同深度、内存与句柄全程平稳），复盘 11-09 那轮为何没拦住。
+
+其一，热区修在了错的对象上（复盘 11-09）。顶边那条原生 resize 热区不是顶层窗口答的，而是 `decorations: false` 时 tauri-runtime-wry 塞进来的 `TAURI_DRAG_RESIZE_BORDERS` 子窗——它铺满客户区、区域挖掉中间只留边条，由自己的 `WM_NCHITTEST` 答 `HTTOP`，顶层窗口过程的 `WM_NCHITTEST` 根本收不到。所以 11-09 那一刀（顶层一律答 `HTCLIENT`）从未命中热区，11-10 原样复发。修法：`hotzone.rs` 把该子窗整个隐藏——隐藏窗不参与命中测试，`HTTOP` 无从产生；它同时是每个 `WM_SIZE` 上 `SetWindowPos` + `CreateRectRgn/CombineRgn/SetWindowRgn` 的落点（tauri#15569 记的正是这段的 `WM_SIZE` 吞吐逐帧退化，上游 #15614 才把 `SetWindowRgn` 降频），隐藏后这段重修落在一个不可见窗上，重绘与区域失效一并消失，主线程窗口链路只剩顶层 subclass 的一次判断。不销毁：tauri 的 subclass 数据里存着这个子窗句柄，销毁后每帧仍会拿死句柄调 `SetWindowPos`/`SetWindowRgn`，句柄被 WebView2 新建窗复用时就会误改别人的窗，而那条 subclass 无法从外部摘除。灭活落空（上游改类名/标题）或隐藏失败，写一行 `kind:"resize_hotzone"` 进四源台账，不让「已灭活」变成无头案。
+
+其二，边缘 resize 加了「真拖拽」闸门。自绘热区原先按下即 `startResizeDragging`，而 tao 的 `begin_resize_drag` 是 `PostMessageW(WM_NCLBUTTONDOWN, HT方向, 光标点)` 异步投递——连点时上一次投递还没被分发、鼠标已抬起，模态循环拿到的是一次「按着却永远等不到抬起」的 sizing，窗口就此钉死在 `WM_ENTERSIZEMOVE` 里（「只有 pure 死、其他应用正常」）。现在按下只登记起点，位移超过 3px 才进模态循环，纯点击/连点/手抖永远不进；一次拖拽只发起一次，松手/左键已抬即拆监听。阈值与闸门有 8 例单测钉住（点击、抖动、迟到 move、非左键、方向透传、boot 调灭活命令）。
+
+其三，通知离开主线程。`send_turn_notification` 是同步命令（跑在 WebView 的 IPC 回调线程，Windows 上就是主线程），而 notify-rust 的 `show()` 在 Windows 上是同步 WinRT + shell 调用（注册 AUMID → `ToastNotifier::Show`，整段跨进程 RPC）。2026-09-17 那条判例只把 `wait_for_action` 挪进了线程，`show()` 漏在主线程上；现在 `show + wait` 整段进同一条线程（句柄在哪个线程创建就在哪个线程等待），命令即发即忘，失败落台账 `kind:"notification_error"`，不静默。
+
+其四，发版带符号。卡死取证里 `pure.exe+0x406F80` 这类偏移此前无从解析——没有同版 PDB，「落在 tao/wry 窗口过程还是某个 tauri 命令里」就永远定不下来，而这正是下一刀往哪切的唯一分岔口。Windows job 现在上传 `gui-windows-pdb`（`src-tauri/target/release/pure.pdb`，只作 workflow artifact，不进公开 Release）。判例文档同步补齐解析命令与取证步骤（`docs/windows-undecorated-freeze-2026-11.md`）。
+
+验证：bun test 全量 5284 例 0 fail（4 例真机环境跳过）、cargo test --lib 288 例 0 fail、macOS host 与 x86_64-pc-windows-gnu 交叉 check 双绿、typecheck 与 conventions lint 过；Windows 真机复验（副屏顶边连点 20 次、四边八角拖动、Aero snap、最大化/还原、透明圆角外观、长回复流式期间打字/滚动、`pure errors` 无 `resize_hotzone` 行）待跑。
+
 ## v4.7.1
 
 **Windows 流畅度四刀 + 稳定度三刀 + 主线程洪水四刀：通知不再卡死、关窗可从任务栏唤回、阻塞 I/O 清零、大文件流式写入不卡界面、窗口连点卡死根治、强杀不丢会话、HTML 卡补齐呈现层、项目工程生成卡死根治**

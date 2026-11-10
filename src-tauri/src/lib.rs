@@ -3988,8 +3988,11 @@ async fn save_artifact(kind: String, basename: String, data_base64: String) -> R
 }
 
 /// 灭掉调用方窗口的原生 resize 热区(Windows 专属,其他平台 no-op)。
-/// 前端每个窗口 boot 时调一次(sessionSidebar 新建窗走同一份 index.html boot,
-/// 天然覆盖),主窗另有 setup 时机兜底。
+/// 两层:顶层窗口过程答 HTCLIENT,并把 tauri-runtime-wry 那个铺满客户区的
+/// resize 子窗隐藏(顶边 HTTOP 的真实来源,且是每个 WM_SIZE 上
+/// SetWindowPos+SetWindowRgn 的落点)。前端每个窗口 boot 时调一次
+/// (sessionSidebar 新建窗走同一份 index.html boot,天然覆盖),主窗另有
+/// setup 时机兜底。
 #[tauri::command]
 async fn disable_resize_hotzones(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -17072,21 +17075,34 @@ struct TurnNotification {
     session_id: String,
 }
 
+// 同步命令跑在 WebView 的 IPC 回调线程(= Windows/Linux 的主线程)上,所以
+// `show()` 本身也必须离开这条线程:notify-rust 在 Windows 上是同步 WinRT +
+// shell 调用(注册 AUMID → ToastNotifier::Show,整段是跨进程 RPC),主线程在
+// 这里等一次,就是一帧消息泵的空转;shell 忙或 COM 卡住时会变成可观测的停顿
+// (与 2026-09-17 关窗提示同一条判例:那段 `show()` 早已挪进线程,这里当时漏了)。
+// `wait_for_action` 更狠,它**阻塞**到用户点掉通知,所以 show + wait 整段进
+// 同一条线程:句柄在哪个线程创建就在哪个线程等待,跨线程 Send 问题也不存在。
+// 失败不再回给 JS:命令已是即发即忘,报错改落四源台账(source:"rust" /
+// kind:"notification_error")——静默吞掉才是真丢信息。
 #[tauri::command]
 fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification) -> Result<(), String> {
-    use tauri::Emitter;
-    let session_id = notification.session_id.clone();
-    let handle = notify_rust::Notification::new()
-        .summary(&notification.title)
-        .body(&notification.body)
-        .show()
-        .map_err(|e| e.to_string())?;
-    // wait_for_action consumes the handle and BLOCKS the calling thread until
-    // the user interacts with the notification — so it runs on a thread of
-    // its own, never inside this command. The thread is the click callback's
-    // lease: only a real body click ("default"; dismissal is "__closed")
-    // means "take me there", and the frontend does the session switch.
     std::thread::spawn(move || {
+        use tauri::Emitter;
+        let session_id = notification.session_id.clone();
+        let handle = match notify_rust::Notification::new()
+            .summary(&notification.title)
+            .body(&notification.body)
+            .show()
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                record_notification_error(&format!("show: {e}"));
+                return;
+            }
+        };
+        // The thread is the click callback's lease: only a real body click
+        // ("default"; dismissal is "__closed") means "take me there", and the
+        // frontend does the session switch.
         handle.wait_for_action(move |action| {
             if action == "default" {
                 let _ = app.emit("notification-clicked", session_id.clone());
@@ -17094,6 +17110,25 @@ fn send_turn_notification(app: tauri::AppHandle, notification: TurnNotification)
         });
     });
     Ok(())
+}
+
+/// 通知失败的落账口(四源台账,source:"rust"):通知是最容易「静默失踪」的
+/// 一环——用户没看到提示只会说「没通知我」,没有行可查就成了无头案。
+/// 永不 panic,写入失败也静默(台账自身不得成为故障源)。
+fn record_notification_error(message: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let line = serde_json::json!({
+        "ts": ts,
+        "source": "rust",
+        "kind": "notification_error",
+        "message": truncate_error_field(message),
+    })
+    .to_string();
+    let path = format!("{}/.pure/gui_errors.log", pure_home_dir());
+    append_error_log_line(&line, &path);
 }
 
 // ═══ Dock badge (2026-10-27 后台异步三小片) ═══
@@ -17471,9 +17506,11 @@ pub fn run() {
             // the sidebar must only ever list conversations that exist.
             prune_empty_sessions();
 
-            // ── Windows:无边框窗口顶边系统热区灭活(2026-11-09 卡死判例)──
-            // 主窗等启动即存窗口全部 subclass;之后前端新建的窗口由各自 boot
-            // 里的 disable_resize_hotzones 调用覆盖。
+            // ── Windows:无边框窗口系统 resize 热区灭活(2026-11-09/11-10 卡死判例)──
+            // 主窗等启动即存窗口全部处理:顶层 subclass 答 HTCLIENT,并隐藏
+            // 上游铺满客户区的 resize 子窗(它才是顶边 HTTOP 的真正来源,也是
+            // 每个 WM_SIZE 上 SetWindowPos+SetWindowRgn 的所在地)。之后前端
+            // 新建的窗口由各自 boot 里的 disable_resize_hotzones 调用覆盖。
             #[cfg(target_os = "windows")]
             for window in _app.webview_windows().values() {
                 hotzone::disable_native_resize_hotzones(window);

@@ -141,6 +141,17 @@ jobs:
           path: pure.exe
           if-no-files-found: error
 
+      # 卡死/崩溃取证要符号才解析得开(2026-11-10 判例:主线程栈里
+      # `pure.exe+0x406F80` 没有 PDB 就只能停在偏移)。只作为 workflow
+      # artifact 交接给调测,不进公开 Release(几十 MB,没人日常要)。
+      # 缺文件只 warn:符号是取证资产,不该挡住安装包发布。
+      - name: Upload Windows symbols (PDB for dump resolution)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-pdb
+          path: src-tauri/target/release/pure.pdb
+          if-no-files-found: warn
+
   # ── macOS Intel (x86_64) GUI build ──
   # GitHub removed the Intel-hosted `macos-13` runner, so we build on the
   # available Apple Silicon runner (`macos-latest`) and CROSS-COMPILE to
