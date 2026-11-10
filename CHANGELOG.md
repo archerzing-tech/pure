@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.3
+
+**Windows 流式活锁第三轮定案（流式 DOM 封顶 + 关 Chromium 遮挡计算）、GUI 主二进制改名根治 ms-gamingoverlay 弹窗、模型列表可用性门禁、冷启动「检查中」空态**
+
+一、流式活锁两刀（37b648d）。v4.7.2 真机取证（107KB 消息流式卡死 70 分钟）：渲染进程每拍对全文跑 lexer + 生长中末块全量重渲染而饱和，WebView2 宿主主线程同时对 20 个透明辅助窗口做 show/hide 同步消息循环——两把火的共同燃料是「巨型流式 DOM 反复变异」，而既有节流（100/160/220ms）只降频不降复杂度。刀一：流式 DOM 封顶——超过 32K 字符只渲染末尾窗口（双换行块边界切 + 围栏奇偶判定补合成围栏），切掉的开头用省略条交代去向（「前 N KB 已省略——流式期间只渲染末尾，完成后展示全文」），完成渲染照常走全文管线；32K 以内的常规消息零行为变化，lexer 降级路径同受窗口约束。刀二：`CalculateNativeWinOcclusion` 进 `additionalBrowserArgs` 关闭名单（宿主侧窗口操作风暴的候选来源，诚实标注为排除刀）；设置后 wry 默认三件会丢，四件必须带全，主窗配置、菜单新窗、侧栏新窗三条建窗路径同值。诚实边界：宿主侧活锁无法从 mac 断点，若 renderer 降温后宿主循环仍自持（真机复验可知），下一候选刀是关 `transparent` 的合成路径。附带判例：`additionalBrowserArgs` 在 @tauri-apps/api 的 TS 类型镜像缺失，但运行时经 Rust `WindowConfig` 反序列化真实生效，TS 侧 cast 即可。
+
+二、GUI 主二进制改名 pure-app.exe（d01675d）。Windows「ms-gamingoverlay」空白弹窗根因：微软 `KnownGameList.bin` 内置游戏 PURE 与 `pure.exe` 文件名撞名，GameDVR 按名单对匹配进程发启动提示，卸掉 Xbox Game Bar 的机器没有协议处理程序，ShellExecute 落空出空窗。匹配键就是 exe 文件名，改 Windows GUI 主二进制名即根治（CLI 身份与 Rust 代码零改动）；NSIS POSTINSTALL 钩子清孤儿旧 exe，PDB 上传 glob 兜两种改名行为。
+
+三、模型列表可用性门禁（ccadc2a + 5c3a92b + f0f70b3）。模型列表只显示「已配置 ∧ 可访问」的服务与模型：探测走 Rust `test_llm_connection`（GET models，协议分流），快照 localStorage 只持久化 ok:true，失败模型不再占列表坑位；模型选择器 showPicker 加空态守卫（全被门禁挡下时不再弹空面板）；冷启动探测窗口给「检查中」空态——区分「没结论」与「检查过全灭」，不再把首启的几秒空列表误读成「服务全下线」。附带真机判例：探测通过≠对话可用（glm key 能列模型、对话 401），门禁只保证列表可信，不替代回合内止损。
+
 ## v4.7.2
 
 **Windows 专项 + 无边框窗口卡死二轮定案：主线程阻塞清零、命令输出乱码与 CLIXML 噪音根治、路径修复器不再误伤 Windows 绝对路径、原生 resize 子窗灭活、边缘 resize 真拖拽闸门、发版带 PDB 符号**
