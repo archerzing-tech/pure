@@ -149,7 +149,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gui-windows-pdb
-          path: src-tauri/target/release/pure.pdb
+          path: src-tauri/target/release/pure*.pdb
           if-no-files-found: warn
 
   # ── macOS Intel (x86_64) GUI build ──

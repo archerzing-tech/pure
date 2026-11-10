@@ -1,0 +1,10 @@
+{
+  "mainBinaryName": "pure-app",
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows-installer-hooks.nsh"
+      }
+    }
+  }
+}
