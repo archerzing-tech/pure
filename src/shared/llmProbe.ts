@@ -15,11 +15,24 @@ export interface LlmProbeResult {
 
 export interface LlmProbeOptions {
   timeoutMs?: number;
+  /** Wire protocol: anthropic endpoints take x-api-key + anthropic-version
+   * (never Bearer) and a /v1/models URL shape — mirrors the Rust
+   * apply_auth_headers / models_url_for split. Default openai. */
+  anthropic?: boolean;
   /** Injectable for tests; defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch;
   /** AbortSignal factory; defaults to AbortSignal.timeout with an
    * AbortController fallback for older WKWebView. */
   signalFactory?: (ms: number) => AbortSignal;
+}
+
+/// Models-list URL by protocol — TS mirror of Rust `models_url_for`.
+export function modelsUrlFor(baseURL: string, anthropic: boolean): string {
+  const base = baseURL.trim().replace(/\/+$/, '');
+  if (anthropic) {
+    return base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
+  }
+  return `${base}/models`;
 }
 
 export async function probeLlmEndpoint(
@@ -30,9 +43,17 @@ export async function probeLlmEndpoint(
   const timeoutMs = opts.timeoutMs ?? 8000;
   const fetchImpl = opts.fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   const signalFactory = opts.signalFactory ?? abortSignal;
-  const url = `${baseURL.replace(/\/+$/, '')}/models`;
+  const anthropic = opts.anthropic === true;
+  const url = modelsUrlFor(baseURL, anthropic);
   const headers: Record<string, string> = { Accept: 'application/json' };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  // Empty-valued auth headers are worse than none (strict servers reject the
+  // empty string) — mirror apply_auth_headers: no key → no header at all.
+  if (anthropic) {
+    headers['anthropic-version'] = '2023-06-01';
+    if (apiKey) headers['x-api-key'] = apiKey;
+  } else if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
   const started = performance.now();
   let response: Response;
   try {

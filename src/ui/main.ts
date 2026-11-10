@@ -10,6 +10,7 @@ import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, r
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
+import { filterModelOptionsByAvailability, isLlmProviderAccessible, setModelAvailabilityRefreshHook } from './llmModelAvailability';
 import { syncPresentationCardsFromConfig, markComposerTyping } from './markdown';
 import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
@@ -828,10 +829,12 @@ function populateModeSelect(cs: ComposerSelect, cfg: PureConfig): void {
   cs.setOptions(modes.map(([value, label]) => ({ value, label })), cfg.taskMode ?? 'auto');
 }
 
-/** Every selectable model for the providers whose key is configured — the one
- *  source both the dropdown (populateModelSelect) and the /model command read,
- *  so the two can never disagree on what is selectable. Order follows the
- *  registry (keyed providers, then customs). */
+/** Every selectable model for the providers whose key is configured AND
+ *  whose endpoint the availability ledger judges reachable — the one source
+ *  both the dropdown (populateModelSelect) and the /model command read, so
+ *  the two can never disagree on what is selectable. Order follows the
+ *  registry (keyed providers, then customs); the accessibility gate is the
+ *  pure single seam (filterModelOptionsByAvailability). */
 function modelOptionsForConfig(cfg: PureConfig): Array<ModelEntry & { value: string }> {
   const out: Array<ModelEntry & { value: string }> = [];
   const appendProvider = (provider: string, providerLabel: string): void => {
@@ -847,7 +850,7 @@ function modelOptionsForConfig(cfg: PureConfig): Array<ModelEntry & { value: str
     if (!providerHasKey(cfg, c.id)) continue;
     appendProvider(c.id, c.name);
   }
-  return out;
+  return filterModelOptionsByAvailability(out, isLlmProviderAccessible);
 }
 
 function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
@@ -858,7 +861,16 @@ function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
     if (entry.provider === cfg.provider && entry.model === currentModel) selectedValue = entry.value;
     return { value: entry.value, label: entry.model, hint: entry.providerLabel };
   });
-  cs.setOptions(options, selectedValue || undefined);
+  // 诚实显示：config 指着一个不在可用列表里的模型时，trigger 显示「—」，
+  // 不认领第一个可用模型——那会让用户以为自己在用它。修法由状态栏 ⚠ 与
+  // 空态条目给，绝不静默改配置（自动改配置是被否的闭环形状）。
+  const strict = Boolean(cfg.provider && currentModel);
+  cs.setOptions(options, selectedValue || undefined, {
+    strictSelection: strict,
+    emptyAction: options.length === 0
+      ? { label: t('composer.model.checkSettings'), onPick: () => { void openSettings(); } }
+      : undefined,
+  });
 }
 
 function populateComposerSelects(): void {
@@ -873,6 +885,9 @@ function populateComposerSelects(): void {
     populateModelSelect(cs, cfg);
   }
 }
+
+// 可用性台账的刷新钩子（注入缝，不用 window 全局）：探测完成 → 重填下拉。
+setModelAvailabilityRefreshHook(populateComposerSelects);
 
 function wireComposerSelects(): void {
   populateComposerSelects();
@@ -1189,7 +1204,12 @@ function updateSidebarModel() {
   const cfg = effectiveModelConfig();
   const el = document.getElementById('sidebar-model');
   if (!el) return;
-  el.textContent = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : '');
+  const base = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : '');
+  // 可访问性警示（诚实显示）：当前生效模型被台账判不可访问时加 ⚠ 标记，
+  // 悬停给一句人话。不静默换模型——修法在下拉（选别的）或设置。
+  const unavailable = cfg ? !isLlmProviderAccessible(cfg.provider) : false;
+  el.textContent = base + (unavailable ? ' ⚠' : '');
+  el.title = unavailable ? t('status.modelUnavailable') : '';
   updateContextPanelModel();
   // updateContextPanelStage() already refreshes the status footer.
   updateContextPanelStage();

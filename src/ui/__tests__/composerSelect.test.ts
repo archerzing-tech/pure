@@ -129,4 +129,57 @@ describe('ComposerSelect', () => {
     document.querySelectorAll<HTMLElement>('.cs-item')[1].click();
     expect(calls).toBe(1);
   });
+
+  // ── 诚实显示（可用性门禁 v2）：当前模型失配时 trigger 不得认领第一个选项 ──
+
+  it('strictSelection shows an empty trigger instead of claiming the first option', () => {
+    const host = makeHost();
+    const cs = new ComposerSelect(host, () => {});
+    cs.setOptions([
+      { value: 'a::0', label: 'model-a' },
+      { value: 'b::0', label: 'model-b' },
+    ], undefined, { strictSelection: true });
+    expect(cs.getValue()).toBe('');
+    expect(host.querySelector('.cs-trigger-label')?.textContent).toBe('—');
+  });
+
+  it('strictSelection keeps a matching selection', () => {
+    const host = makeHost();
+    const cs = new ComposerSelect(host, () => {});
+    cs.setOptions([{ value: 'a::0', label: 'model-a' }], 'a::0', { strictSelection: true });
+    expect(cs.getValue()).toBe('a::0');
+    expect(host.querySelector('.cs-trigger-label')?.textContent).toBe('model-a');
+  });
+
+  it('empty options open nothing without an emptyAction', () => {
+    const host = makeHost();
+    const cs = new ComposerSelect(host, () => {});
+    cs.setOptions([], undefined, { strictSelection: true });
+    host.querySelector<HTMLButtonElement>('.cs-trigger')!.click();
+    expect(document.querySelector('.cs-popup')).toBeNull();
+  });
+
+  it('emptyAction renders a single action row and fires onPick (click + Enter)', () => {
+    const host = makeHost();
+    let picked = 0;
+    const cs = new ComposerSelect(host, () => {});
+    cs.setOptions([], undefined, {
+      strictSelection: true,
+      emptyAction: { label: '在设置中检查 LLM', onPick: () => { picked++; } },
+    });
+    const trigger = host.querySelector<HTMLButtonElement>('.cs-trigger')!;
+    trigger.click();
+    expect(document.querySelector('.cs-popup')).not.toBeNull();
+    const items = document.querySelectorAll<HTMLElement>('.cs-item');
+    expect(items.length).toBe(1);
+    expect(items[0].textContent).toContain('在设置中检查 LLM');
+    items[0].click();
+    expect(picked).toBe(1);
+    expect(document.querySelector('.cs-popup')).toBeNull();
+    // 键盘同路：Enter 触发同一动作。
+    trigger.click();
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(picked).toBe(2);
+    expect(document.querySelector('.cs-popup')).toBeNull();
+  });
 });

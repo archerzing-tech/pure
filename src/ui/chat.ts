@@ -18,6 +18,7 @@ import { WorldStateRenderer } from '../shared/worldStateRender';
 import { blockedHosts, isGatewayBlockedText } from '../shared/netGuard';
 import { hostOf, netRouteProxyPair, netRouteSurfacePair, recordNetOutcome, recordNetSurfaceOutcome } from '../shared/netRoute';
 import { notifyProxyFailure, startProxyProbeLoop } from './proxyProbe';
+import { startLlmAvailabilityProbeLoop, isConnectionLayerTurnError, notifyLlmTurnFailure } from './llmModelAvailability';
 import { startLlmWarmLoop } from './llmWarm';
 import { memoryStore } from './memoryStore';
 import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '../shared/skillDistill';
@@ -2296,6 +2297,8 @@ export class ChatController {
     this.wireFollowupChips();
     // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
     startProxyProbeLoop();
+    // LLM 可用性探测：只在模型选择列表中显示可访问的模型。
+    startLlmAvailabilityProbeLoop();
     // LLM 预热循环（期3）：启动 + 每 30s 暖直连/代理两条路的 TCP+TLS，
     // 回合首字不再付握手钱。幂等，多会话共享。
     startLlmWarmLoop();
@@ -8290,6 +8293,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     .replace('{next}', heal.nextModel ?? '');
                 }
               }
+              // 回合连接层失败 → 台账失效 + 即时重探（可用性台账 v2 P1）：
+              // 真实失败是最新的信号，判据最真、零额外请求。只认连接层
+              // （DNS/TLS/拒绝/超时/401/403/网关拦截）；429 与业务错误不碰
+              // 台账——链路是通的，降架只会误伤。
+              try {
+                const failedProvider = config?.provider;
+                if (failedProvider && isConnectionLayerTurnError(event.payload.reason || '')) {
+                  notifyLlmTurnFailure(failedProvider);
+                }
+              } catch {}
               const interrupted = t('chat.interrupted', '⏹ Interrupted: {reason}').replace('{reason}', sanitizeInterruptedReason(event.payload.reason, event.payload.reasonCode)) + healingNote;
               if (hasContent) {
                 this.addStatusBubble(interrupted);

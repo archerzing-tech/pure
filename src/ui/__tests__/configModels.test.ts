@@ -158,8 +158,8 @@ describe('providerHasKey', () => {
     expect(providerHasKey({ ...defaults(), customProviders: [customProvider({ local: true })] }, 'local')).toBe(true);
   });
 
-  it('rejects a key-required custom provider without a key', () => {
-    expect(providerHasKey({ ...defaults(), customProviders: [customProvider()] }, 'local')).toBe(false);
+  it('accepts a local custom provider without a key (auto-detected)', () => {
+    expect(providerHasKey({ ...defaults(), customProviders: [customProvider()] }, 'local')).toBe(true);
   });
 
   it('rejects a custom provider with a key but no Base URL', () => {

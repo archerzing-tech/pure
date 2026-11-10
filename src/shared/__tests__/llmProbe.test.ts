@@ -29,6 +29,32 @@ describe('probeLlmEndpoint (browser mirror of Rust probe_llm_endpoint)', () => {
     expect(calls[0].headers.Authorization).toBe('Bearer sk-abc');
   });
 
+  // ── 协议分流（可用性门禁 v2）：anthropic 端点探测必须与真实对话同款 ──
+
+  it('anthropic protocol sends x-api-key + anthropic-version, never Bearer', async () => {
+    const { fetchImpl, calls } = fakeFetch(200);
+    const result = await probeLlmEndpoint('https://api.anthropic.com/v1', 'sk-anthropic', { fetchImpl, anthropic: true });
+    expect(result.ok).toBe(true);
+    expect(calls[0].url).toBe('https://api.anthropic.com/v1/models');
+    expect(calls[0].headers['x-api-key']).toBe('sk-anthropic');
+    expect(calls[0].headers['anthropic-version']).toBe('2023-06-01');
+    expect(calls[0].headers.Authorization).toBeUndefined();
+  });
+
+  it('anthropic protocol builds /v1/models for a bare anthropic-compat base', async () => {
+    const { fetchImpl, calls } = fakeFetch(200);
+    await probeLlmEndpoint('https://api.minimaxi.com/anthropic', 'sk', { fetchImpl, anthropic: true });
+    expect(calls[0].url).toBe('https://api.minimaxi.com/anthropic/v1/models');
+  });
+
+  it('anthropic protocol with an empty key sends no auth header at all', async () => {
+    const { fetchImpl, calls } = fakeFetch(200);
+    await probeLlmEndpoint('https://api.minimaxi.com/anthropic', '', { fetchImpl, anthropic: true });
+    expect(calls[0].headers['x-api-key']).toBeUndefined();
+    expect(calls[0].headers.Authorization).toBeUndefined();
+    expect(calls[0].headers['anthropic-version']).toBe('2023-06-01');
+  });
+
   it('omits the Authorization header when no key is given (keyless endpoints)', async () => {
     const { fetchImpl, calls } = fakeFetch(200);
     await probeLlmEndpoint('http://localhost:11434/v1', '', { fetchImpl });

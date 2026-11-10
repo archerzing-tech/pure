@@ -13,6 +13,22 @@ export interface ComposerSelectOption {
   hint?: string;
 }
 
+/** 空态动作条目（如「在设置中检查 LLM」）：选项全灭时弹层里唯一可点的行。 */
+export interface ComposerSelectEmptyAction {
+  label: string;
+  onPick: () => void;
+}
+
+export interface ComposerSelectSetOptionsOpts {
+  /** 诚实显示：当前值不在选项中时 trigger 显示「—」，不认领第一个选项。
+   *  默认（false）保留原行为——选中的值失配就回退第一个选项，mode 选择
+   *  等消费者依赖它。模型选择列表用 true：显示撒谎会让用户以为自己在用
+   *  另一个模型。 */
+  strictSelection?: boolean;
+  /** 选项为空时的空态动作；没有它，空选项的弹层根本打不开。 */
+  emptyAction?: ComposerSelectEmptyAction;
+}
+
 const CHEVRON_SVG =
   '<svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>';
 
@@ -24,6 +40,7 @@ export class ComposerSelect {
   private labelEl: HTMLSpanElement;
   private popup: HTMLDivElement | null = null;
   private options: ComposerSelectOption[] = [];
+  private emptyAction: ComposerSelectEmptyAction | null = null;
   private value = '';
   private activeIndex = -1;
   private open = false;
@@ -53,7 +70,9 @@ export class ComposerSelect {
       this.highlightActive();
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      if (this.activeIndex >= 0 && this.options[this.activeIndex]) {
+      // 空态（emptyAction 唯一行）也接受 Enter/Space：options 为空时
+      // activeIndex 指向动作行，choose 内部走 onPick 分支。
+      if (this.activeIndex >= 0 && (this.options.length > 0 || this.emptyAction)) {
         this.choose(this.activeIndex);
       }
     }
@@ -81,14 +100,17 @@ export class ComposerSelect {
     host.appendChild(this.trigger);
   }
 
-  /** Replace the option list and mark `selectedValue` as current. When it
-   * does not match any option the FIRST option becomes current (mirrors the
-   * previous native-select fallback so the config always has a valid pair). */
-  setOptions(options: ComposerSelectOption[], selectedValue?: string): void {
+  /** Replace the option list and mark `selectedValue` as current. Without
+   * `opts.strictSelection`, a value that matches nothing falls back to the
+   * FIRST option (native-select legacy behavior). With it, the trigger shows
+   * "—" instead — the dropdown must never claim a model the session isn't
+   * using. */
+  setOptions(options: ComposerSelectOption[], selectedValue?: string, opts?: ComposerSelectSetOptionsOpts): void {
     this.options = [...options];
+    this.emptyAction = opts?.emptyAction ?? null;
     let next = selectedValue ?? '';
     if (!next || !this.options.some((o) => o.value === next)) {
-      next = this.options[0]?.value ?? '';
+      next = opts?.strictSelection ? '' : (this.options[0]?.value ?? '');
     }
     this.value = next;
     this.syncTrigger();
@@ -132,7 +154,8 @@ export class ComposerSelect {
   }
 
   private openPopup(): void {
-    if (this.open || this.options.length === 0 || this.trigger.disabled) return;
+    if (this.open || this.trigger.disabled) return;
+    if (this.options.length === 0 && !this.emptyAction) return;
     this.popup = document.createElement('div');
     this.popup.className = 'cs-popup';
     this.popup.setAttribute('role', 'listbox');
@@ -159,6 +182,24 @@ export class ComposerSelect {
   private renderPopupItems(): void {
     if (!this.popup) return;
     this.popup.replaceChildren();
+    // 空态：唯一一行是引导动作（去设置检查），不可选中、点了就跳。
+    if (this.options.length === 0 && this.emptyAction) {
+      const action = this.emptyAction;
+      const item = document.createElement('div');
+      item.className = 'cs-item cs-item-action';
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', 'false');
+      const text = document.createElement('span');
+      text.className = 'cs-item-text';
+      text.textContent = action.label;
+      item.appendChild(text);
+      item.addEventListener('click', () => {
+        this.close();
+        action.onPick();
+      });
+      this.popup.appendChild(item);
+      return;
+    }
     this.options.forEach((option, index) => {
       const item = document.createElement('div');
       item.className = 'cs-item';
@@ -198,8 +239,16 @@ export class ComposerSelect {
 
   private choose(index: number): void {
     const option = this.options[index];
+    if (!option) {
+      // 空态唯一行（emptyAction）走这里：键盘 Enter 与点击同路。
+      if (this.options.length === 0 && this.emptyAction) {
+        const action = this.emptyAction;
+        this.close();
+        action.onPick();
+      }
+      return;
+    }
     this.close();
-    if (!option) return;
     const changed = option.value !== this.value;
     this.value = option.value;
     this.syncTrigger();

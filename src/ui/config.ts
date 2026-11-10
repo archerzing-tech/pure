@@ -7,7 +7,7 @@
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { SECRET_KEY } from '../adapter/rust/RustLLMAdapter';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
-import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
+import { customProviderFor, defaultModelFor, isProviderId, providerDef, providerOverrideFor, PROVIDERS, isLocalEndpoint, type CustomProvider, type ProviderId, type ProviderOverride } from '../shared/providers';
 import type { ProbedCapability } from '../shared/capabilityProbe';
 import type { EvolutionConfig } from '../adapter/memory/evolution';
 import type { HubSkill } from './skillHub';
@@ -508,7 +508,11 @@ export function hasConfiguredKey(cfg: PureConfig | null): cfg is PureConfig {
   // (entry, or Rust secrets via hasApiKey), keyless locals (Ollama / LM
   // Studio) need none — the transport omits the Authorization header.
   const custom = (cfg.customProviders ?? []).find((p) => p.id === cfg.provider);
-  if (custom) return true;
+  if (custom) {
+    if (custom.apiKey || custom.hasApiKey || custom.local) return true;
+    if (custom.baseURL && isLocalEndpoint(custom.baseURL)) return true;
+    return false;
+  }
   // A built-in provider may carry its own per-provider key (override).
   const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
   if (override?.apiKey || override?.hasApiKey) return true;
@@ -526,7 +530,9 @@ export function providerHasKey(cfg: PureConfig, id: string): boolean {
   const custom = customProviderFor(cfg.customProviders ?? [], id);
   if (custom) {
     if (!custom.baseURL) return false;
-    return !!custom.apiKey || custom.hasApiKey === true || custom.local === true;
+    if (custom.apiKey || custom.hasApiKey === true || custom.local === true) return true;
+    if (isLocalEndpoint(custom.baseURL)) return true;
+    return false;
   }
   const override = providerOverrideFor(cfg.providerOverrides, id);
   // Built-ins always carry a default endpoint; an override may blank it.

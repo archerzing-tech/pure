@@ -12,6 +12,7 @@ import { t, updateLanguage, applyTranslations, type Language as I18nLanguage } f
 import { approveToolCorrection, buildToolNoteAppliedRecord, scanToolCorrections } from '../adapter/memory/toolCorrections';
 import { confirmedDraftEntry, isDraftEntry } from '../adapter/memory/correctionDrafts';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
+import { llmRelevantConfigChanged, probeAllConfiguredProviders, recordLlmProbeOutcome } from './llmModelAvailability';
 import { probeProxyNow, proxyHealthSnapshot, reprobeProxyAfterConfigChange, isProbeInFlight } from './proxyProbe';
 import { join, homeDir } from '@tauri-apps/api/path';
 import { formatBytes, relativeTime } from '../shared/format';
@@ -85,6 +86,7 @@ import {
   protocolForURL,
   providerDef,
   providerOverrideFor,
+  resolveProviderProtocol,
   type CustomProvider,
   type LLMProtocol,
   type ReasoningEffortSetting,
@@ -1882,6 +1884,16 @@ export class SettingsPanel {
     const started = performance.now();
     let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
     let routeLabel = '';
+    // 协议 PARITY（两种运行时同款）：探测头按协议分流（anthropic 走
+    // x-api-key，openai 走 Bearer），与 createLLMAdapter 同一套解析——
+    // 此前恒发 Bearer，anthropic/minimax 端点连表单里的测试都恒 401。
+    const formOverride = providerOverrideFor(cfg.providerOverrides, provider);
+    const wireProtocol = resolveProviderProtocol(
+      def?.protocol,
+      baseURL,
+      Boolean(custom?.baseURL) || Boolean(formOverride?.baseURL),
+      custom?.protocol ?? formOverride?.protocol,
+    );
     if (isTauriRuntime()) {
       const proxy = normalizeProxyConfig(cfg.proxy);
       // Route PARITY with real chats: the probe takes the same netRoute
@@ -1902,22 +1914,27 @@ export class SettingsPanel {
           baseUrl: baseURL,
           apiKey,
           secretKey: providerSecretKeyFor(provider, cfg.customProviders ?? []),
+          allowLegacyKeyFallback: !custom,
           proxyUrl: pair.proxyUrl,
           // Absent (not empty) when there is no fallback: '' means DIRECT.
           ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),
           proxyBypassProviders: proxy?.bypassProviders ?? [],
           provider,
+          protocol: wireProtocol,
         });
         routeLabel = servedRoute;
       } catch (err) {
         probe = { ok: false, error: (err as Error)?.message || String(err) };
       }
     } else {
-      probe = await probeLlmEndpoint(baseURL, apiKey);
+      probe = await probeLlmEndpoint(baseURL, apiKey, { anthropic: wireProtocol === 'anthropic' });
     }
     const elapsed = Math.max(0, Math.round(performance.now() - started));
     btn.disabled = false;
     btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
+    // 台账过账（成败都记）：按钮自己已发过探测，直接记结论进可用性台账，
+    // 不再重复发一次探测（此前只记成功，且绕道重发）。
+    recordLlmProbeOutcome(provider, probe);
     if (probe.ok) {
       btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
@@ -4738,6 +4755,11 @@ export class SettingsPanel {
     persistConfig(cfg);
     // Drop the cached config so the next loadConfig() re-reads the saved state.
     invalidateConfigCache();
+    // 只在 LLM 相关字段真变了才全量重探（改主题/字号不该清模型列表）；
+    // 台账原位更新，不先失效后探测——失效会在重探落地前留下全灭窗。
+    if (llmRelevantConfigChanged(prev, cfg)) {
+      void probeAllConfiguredProviders('config-change');
+    }
 
     // 代理配置变了：旧的健康结论作废，立即按新地址重探（不受节流约束），
     // 完成后重绘徽标——用户保存完代理就该看到新地址的真实状态。

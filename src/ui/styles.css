@@ -11104,6 +11104,17 @@ button svg,
   font-weight: 600;
 }
 
+/* 空态动作行（模型列表全灭 → 「在设置中检查 LLM」）：链接感，弱化选中态。 */
+.cs-item.cs-item-action {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.cs-item.cs-item-action.active {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
 .cs-item-check-slot {
   display: grid;
   place-items: center;

@@ -359,14 +359,40 @@ struct LlmConnectionProbe {
     error: String,
 }
 
-/// GET {base}/models with the resolved key; 2xx is the only success. Split out
-/// of the command so tests can drive it against a local mock server.
-async fn probe_llm_endpoint(client: reqwest::Client, url: &str, api_key: &str) -> LlmConnectionProbe {
-    let started = std::time::Instant::now();
-    let mut request = client.get(url).header("User-Agent", BROWSER_UA);
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", api_key));
+/// Models-list URL for one endpoint, by wire protocol. OpenAI-compatible
+/// endpoints expose `{base}/models`; Anthropic-protocol paths put it under
+/// `/v1/models` — a base already ending in /v1 (api.anthropic.com/v1) takes
+/// the shortcut, a bare anthropic-compat base (minimaxi.com/anthropic) gets
+/// /v1/models appended. 探测 URL 必须按协议构造：anthropic 端点上 /models
+/// 可能根本不存在（404 会被误判成端点死）。
+fn models_url_for(base_url: &str, anthropic: bool) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if anthropic {
+        if base.ends_with("/v1") {
+            format!("{}/models", base)
+        } else {
+            format!("{}/v1/models", base)
+        }
+    } else {
+        format!("{}/models", base)
     }
+}
+
+/// GET {models URL} with the resolved key; 2xx is the only success. Split out
+/// of the command so tests can drive it against a local mock server. Auth
+/// headers go through apply_auth_headers — the SAME per-protocol split real
+/// chats use (anthropic: x-api-key + anthropic-version; openai: Bearer). A
+/// probe that only ever sent Bearer judged every anthropic/minimax endpoint
+/// 401-dead while real chats worked — the capabilityProbe 前科, again.
+async fn probe_llm_endpoint(
+    client: reqwest::Client,
+    url: &str,
+    api_key: &str,
+    anthropic: bool,
+) -> LlmConnectionProbe {
+    let started = std::time::Instant::now();
+    let request = apply_auth_headers(client.get(url), anthropic, api_key)
+        .header("User-Agent", BROWSER_UA);
     let response = match request.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -396,7 +422,9 @@ async fn probe_llm_endpoint(client: reqwest::Client, url: &str, api_key: &str) -
 
 /// Test an LLM endpoint exactly like chat_stream would use it: same client
 /// builder (timeout + proxy), same key resolution (explicit key wins, else the
-/// named secret), same proxy bypass rules. The GUI shows the probe result.
+/// named secret, legacy shared slot per allow_legacy_key_fallback), same
+/// per-protocol auth headers, same proxy bypass rules. The GUI shows the probe
+/// result and the model-availability ledger records it.
 #[tauri::command]
 async fn test_llm_connection(
     base_url: String,
@@ -406,14 +434,18 @@ async fn test_llm_connection(
     fallback_proxy_url: Option<String>,
     proxy_bypass_providers: Option<Vec<String>>,
     provider: Option<String>,
+    protocol: Option<String>,
+    allow_legacy_key_fallback: Option<bool>,
 ) -> Result<LlmConnectionProbe, String> {
     let api_key = api_key.unwrap_or_default();
     let secret_key = secret_key.unwrap_or_default();
     let proxy_url = proxy_url.unwrap_or_default();
     let proxy_bypass_providers = proxy_bypass_providers.unwrap_or_default();
     let provider = provider.unwrap_or_default();
+    let anthropic = protocol.unwrap_or_default().eq_ignore_ascii_case("anthropic");
     let secrets = load_secrets()?;
-    let resolved_key = resolve_api_key(&secrets, &api_key, &secret_key, true);
+    let resolved_key =
+        resolve_api_key(&secrets, &api_key, &secret_key, allow_legacy_key_fallback.unwrap_or(true));
     let effective_proxy = if proxy_url.trim().is_empty()
         || proxy_matches(&provider, &proxy_bypass_providers)
     {
@@ -422,8 +454,8 @@ async fn test_llm_connection(
         Some(proxy_url.trim())
     };
     let client = build_http_client(std::time::Duration::from_secs(8), effective_proxy)?;
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let probe = probe_llm_endpoint(client, &url, &resolved_key).await;
+    let url = models_url_for(&base_url, anthropic);
+    let probe = probe_llm_endpoint(client, &url, &resolved_key, anthropic).await;
     // One-shot opposite-route fallback, mirroring chat_stream: a probe that
     // failed on the primary route gets exactly one attempt on the alternate
     // route before the result is reported. Without this the button measures
@@ -442,7 +474,7 @@ async fn test_llm_connection(
         return Ok(probe);
     }
     let fallback_client = build_http_client(std::time::Duration::from_secs(8), alternate)?;
-    Ok(probe_llm_endpoint(fallback_client, &url, &resolved_key).await)
+    Ok(probe_llm_endpoint(fallback_client, &url, &resolved_key, anthropic).await)
 }
 
 /// 代理 endpoint 健康探测（期2 路由脑，2026-10-30）：经代理请求一个轻量
@@ -790,6 +822,19 @@ mod llm_probe_tests {
 
     /// Minimal one-shot HTTP server serving a canned status line + JSON body.
     fn spawn_mock_server(status_line: &'static str, body: &'static str) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        let (addr, handle) = spawn_mock_server_capture(status_line, body);
+        // Discard the captured request — callers that don't assert on it still
+        // get the same serve-then-close behavior.
+        let handle = std::thread::spawn(move || {
+            let _ = handle.join();
+        });
+        (addr, handle)
+    }
+
+    /// Same as spawn_mock_server, but the thread RETURNS the raw request bytes
+    /// so tests can assert on the headers the probe actually sent (auth-header
+    /// parity with chat_stream is the whole point of the split).
+    fn spawn_mock_server_capture(status_line: &'static str, body: &'static str) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let handle = std::thread::spawn(move || {
@@ -797,8 +842,9 @@ mod llm_probe_tests {
                 if let Ok(mut s) = stream {
                     // Read the request first (the client waits for its bytes to
                     // be consumed before trusting the response), then reply.
-                    let mut buf = [0u8; 4096];
-                    let _ = s.read(&mut buf);
+                    let mut buf = [0u8; 8192];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
                     let resp = format!(
                         "{}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
                         status_line,
@@ -807,8 +853,10 @@ mod llm_probe_tests {
                     );
                     let _ = s.write_all(resp.as_bytes());
                     let _ = s.shutdown(std::net::Shutdown::Write);
+                    return request;
                 }
             }
+            String::new()
         });
         (addr, handle)
     }
@@ -817,7 +865,7 @@ mod llm_probe_tests {
     async fn reports_2xx_as_ok_with_latency() {
         let (addr, handle) = spawn_mock_server("HTTP/1.1 200 OK", "{\"data\":[]}");
         let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
-        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test").await;
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test", false).await;
         handle.join().unwrap();
         assert!(probe.ok, "probe error: {}", probe.error);
         assert_eq!(probe.status, Some(200));
@@ -828,7 +876,7 @@ mod llm_probe_tests {
     async fn reports_401_as_key_rejected() {
         let (addr, handle) = spawn_mock_server("HTTP/1.1 401 Unauthorized", "{}");
         let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
-        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-bad").await;
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-bad", false).await;
         handle.join().unwrap();
         assert!(!probe.ok, "probe error: {}", probe.error);
         assert_eq!(probe.status, Some(401));
@@ -839,14 +887,14 @@ mod llm_probe_tests {
     async fn reports_5xx_and_network_errors_as_failures() {
         let (addr, handle) = spawn_mock_server("HTTP/1.1 500 Internal Server Error", "{}");
         let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
-        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test").await;
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test", false).await;
         handle.join().unwrap();
         assert!(!probe.ok);
         assert_eq!(probe.status, Some(500));
 
         // Connection refused → network error, no status.
         let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
-        let probe = probe_llm_endpoint(client, "http://127.0.0.1:1/models", "sk-test").await;
+        let probe = probe_llm_endpoint(client, "http://127.0.0.1:1/models", "sk-test", false).await;
         assert!(!probe.ok);
         assert_eq!(probe.status, None);
         assert!(probe.error.contains("network error"));
@@ -862,6 +910,86 @@ mod llm_probe_tests {
         assert_eq!(resolve_api_key(&secrets, "", "llm.apiKey.custom", false), "");
         let secrets2 = serde_json::json!({ "llm.apiKey.custom": "custom-key" });
         assert_eq!(resolve_api_key(&secrets2, "", "llm.apiKey.custom", true), "custom-key");
+    }
+
+    /// 协议分流（v2 阻塞项回归锁）：anthropic 协议探测必须发 x-api-key +
+    /// anthropic-version、不发 Bearer——此前恒发 Bearer，anthropic/minimax
+    /// 端点被探成 401-dead 而真实对话全通。
+    #[tokio::test]
+    async fn anthropic_probe_sends_x_api_key_not_bearer() {
+        let (addr, handle) =
+            spawn_mock_server_capture("HTTP/1.1 200 OK", "{\"data\":[]}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(
+            client,
+            &format!("http://{}/v1/models", addr),
+            "sk-anthropic",
+            true,
+        )
+        .await;
+        let request = handle.join().unwrap();
+        assert!(probe.ok, "probe error: {}", probe.error);
+        let lower = request.to_lowercase();
+        assert!(lower.contains("x-api-key: sk-anthropic"), "request: {}", request);
+        assert!(lower.contains("anthropic-version"), "request: {}", request);
+        assert!(!lower.contains("authorization: bearer"), "request: {}", request);
+    }
+
+    /// openai 协议保持 Bearer；空 key 两种协议都不带头（与 apply_auth_headers
+    /// 一致：空值头比缺头更糟）。
+    #[tokio::test]
+    async fn openai_probe_sends_bearer_and_empty_key_sends_none() {
+        let (addr, handle) =
+            spawn_mock_server_capture("HTTP/1.1 200 OK", "{\"data\":[]}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(
+            client,
+            &format!("http://{}/v1/models", addr),
+            "sk-test",
+            false,
+        )
+        .await;
+        let request = handle.join().unwrap();
+        assert!(probe.ok, "probe error: {}", probe.error);
+        let lower = request.to_lowercase();
+        assert!(lower.contains("authorization: bearer sk-test"), "request: {}", request);
+
+        let (addr, handle) =
+            spawn_mock_server_capture("HTTP/1.1 200 OK", "{\"data\":[]}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "", true).await;
+        let request = handle.join().unwrap();
+        assert!(probe.ok, "probe error: {}", probe.error);
+        let lower = request.to_lowercase();
+        assert!(!lower.contains("x-api-key:"), "request: {}", request);
+        assert!(!lower.contains("authorization:"), "request: {}", request);
+        assert!(lower.contains("anthropic-version"), "request: {}", request);
+    }
+
+    /// models URL 按协议构造：/v1 结尾走捷径，裸 anthropic 路径补 /v1/models，
+    /// openai 沿用 {base}/models。
+    #[test]
+    fn models_url_follows_protocol() {
+        assert_eq!(
+            models_url_for("https://api.anthropic.com/v1", true),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            models_url_for("https://api.minimaxi.com/anthropic", true),
+            "https://api.minimaxi.com/anthropic/v1/models"
+        );
+        assert_eq!(
+            models_url_for("https://api.anthropic.com/v1/", true),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            models_url_for("https://api.deepseek.com", false),
+            "https://api.deepseek.com/models"
+        );
+        assert_eq!(
+            models_url_for("https://api.moonshot.cn/v1", false),
+            "https://api.moonshot.cn/v1/models"
+        );
     }
 }
 

@@ -12,6 +12,7 @@ import { effectiveProxyUrl } from '../shared/proxy';
 import { customBaseURL } from '../shared/providers';
 import { loadTauriCore } from '../shared/tauri';
 import { recordWarmPrior } from '../shared/netRoute';
+import { notifyLlmWarmFailure, notifyLlmWarmSuccess } from './llmModelAvailability';
 
 const WARM_INTERVAL_MS = 30_000;
 
@@ -69,6 +70,15 @@ export async function warmLlmRoutesNow(): Promise<void> {
     // P0 前移刀（2026-11-07）：耗时留痕——两路毫秒写进 warmPrior，冷启动
     // 选路按它定首选（网络层蓝图）。skipped 轮（busy/无端点）无样本可写。
     if (!r?.skipped) recordWarmPrior(baseUrl, { direct: r?.direct ?? undefined, proxy: r?.proxy ?? undefined });
+    // 可用性台账信号（v2 P1）：预热本就每 30s 在打当前端点，全路失败是
+    // 端点死亡的最便宜前兆——连败计数喂给台账，台账攒够 3 轮自己发正式
+    // 重探。弱证据不直接下架（预热 GET 失败不证端点死，判定权在正式探测）。
+    const warmProvider = override?.provider ?? cfg?.provider;
+    if (warmProvider) {
+      const anyRouteOk = r?.direct?.ok === true || r?.proxy?.ok === true;
+      if (anyRouteOk) notifyLlmWarmSuccess(warmProvider);
+      else if (r?.direct?.ok === false || r?.proxy?.ok === false) notifyLlmWarmFailure(warmProvider);
+    }
   } catch {
     // 命令不可用（旧后端）或网络失败：静默。下一个 tick 自然重试。
   } finally {
