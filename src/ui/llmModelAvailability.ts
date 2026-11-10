@@ -458,6 +458,14 @@ export function isLlmProviderAccessible(provider: string): boolean {
   return availability.get(endpointKey(endpoint.provider, endpoint.baseURL))?.ok === true;
 }
 
+/** 冷启动空窗信号：已配置端点存在、台账却还没有任何结论（探测潮未落地）。
+ *  呈现层用它区分「检查中」（没结论）与「检查过了、全灭」（去设置）——
+ *  2026-11-10 真机判例：首启窗口全空列表 + ⚠ 被读成「模型无法访问」。 */
+export function llmGateWarmingUp(): boolean {
+  if (availability.size > 0) return false;
+  return configuredEndpoints(loadConfig()).length > 0;
+}
+
 // ── 生命周期 ──
 
 /** 启动：恢复快照（列表立即有内容）→ 后台探测潮纠偏；30min 周期全量 +

@@ -10,7 +10,7 @@ import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, r
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
-import { filterModelOptionsByAvailability, isLlmProviderAccessible, setModelAvailabilityRefreshHook } from './llmModelAvailability';
+import { filterModelOptionsByAvailability, isLlmProviderAccessible, llmGateWarmingUp, setModelAvailabilityRefreshHook } from './llmModelAvailability';
 import { syncPresentationCardsFromConfig, markComposerTyping } from './markdown';
 import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
@@ -868,7 +868,11 @@ function populateModelSelect(cs: ComposerSelect, cfg: PureConfig): void {
   cs.setOptions(options, selectedValue || undefined, {
     strictSelection: strict,
     emptyAction: options.length === 0
-      ? { label: t('composer.model.checkSettings'), onPick: () => { void openSettings(); } }
+      ? {
+          // 探测潮未落地 →「检查中」；有结论且全灭 →「去设置」。
+          label: t(llmGateWarmingUp() ? 'composer.model.checking' : 'composer.model.checkSettings'),
+          onPick: () => { void openSettings(); },
+        }
       : undefined,
   });
 }
@@ -1207,7 +1211,8 @@ function updateSidebarModel() {
   const base = cfg?.model ? `${providerDisplayLabel(cfg)} · ${cfg.model}` : (cfg?.provider ? providerDisplayLabel(cfg) : '');
   // 可访问性警示（诚实显示）：当前生效模型被台账判不可访问时加 ⚠ 标记，
   // 悬停给一句人话。不静默换模型——修法在下拉（选别的）或设置。
-  const unavailable = cfg ? !isLlmProviderAccessible(cfg.provider) : false;
+  // 探测潮未落地（warming）不亮 ⚠：没结论不是坏结论。
+  const unavailable = cfg ? !isLlmProviderAccessible(cfg.provider) && !llmGateWarmingUp() : false;
   el.textContent = base + (unavailable ? ' ⚠' : '');
   el.title = unavailable ? t('status.modelUnavailable') : '';
   updateContextPanelModel();

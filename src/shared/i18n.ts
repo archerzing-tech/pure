@@ -1246,6 +1246,7 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': '模型',
     'composer.modelSaved': '模型已切换',
     'composer.model.checkSettings': '在设置中检查 LLM',
+    'composer.model.checking': '正在检查模型可访问性…',
     'status.modelUnavailable': '当前模型不可访问——在模型列表选其他模型，或到设置检查该服务的连接',
 
     // ── Composer slash commands (/model /compact /clear /help) ──
@@ -2607,6 +2608,7 @@ const translations: Record<Language, Record<string, string>> = {
     'composer.model.title': 'Model',
     'composer.modelSaved': 'Model switched',
     'composer.model.checkSettings': 'Check LLM in Settings',
+    'composer.model.checking': 'Checking model availability…',
     'status.modelUnavailable': 'Current model is unreachable — pick another in the model list, or check its connection in Settings',
 
     // ── Composer slash commands (/model /compact /clear /help) ──
