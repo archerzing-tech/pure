@@ -6,11 +6,12 @@
 //   • ./settings.ts       — settings panel (lazy-loaded on first open)
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
-import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, buildStatusRow, type TimedInputRequest } from './chat';
+import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, buildStatusRow, applyAgentRailSpaceGate, type TimedInputRequest } from './chat';
+import { initAgentWorkbench, agentWorkbench, attachWorkbenchEntry } from './agentWorkbench';
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
-import { syncPresentationCardsFromConfig, markComposerTyping } from './markdown';
+import { syncPresentationCardsFromConfig, markComposerTyping, setStreamingRenderGate } from './markdown';
 import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
 import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character';
@@ -237,6 +238,20 @@ if (typeof requestIdleCallback === 'function') {
   setTimeout(() => { void import('./settings').catch(() => {}); }, 3000);
 }
 
+// ── Agent 工作台（2026-11-12）：整页视图单例 + 流式渲染闸注册。──
+// 互斥双向：工作台打开先收设置页（此处）；设置页 onOpen 回调里收工作台。
+// 渲染闸（工作台设计 §3.5）：工作台全开（chat 挤到 0 宽不可见）时挂起
+// chat 流式 DOM 渲染，数据照收，关闭后下一拍追平——推迟不丢弃。
+initAgentWorkbench({
+  requestCloseSettings: () => {
+    if (settingsPanelPromise) closeSettings().catch(() => {});
+  },
+  // 委派产出全文（2026-11-12 用户定案：工作台=详情页显示全部）：活会话
+  // 转写按 callId 取委派 tool result 原文，历史会话返回 null 走存档镜像。
+  getFullOutput: (callId) => chat.getDelegationFullOutput(callId),
+});
+setStreamingRenderGate(() => agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false);
+
 function getSettingsPanel(): Promise<SettingsPanel> {
   if (!settingsPanelPromise) {
     settingsPanelPromise = import('./settings')
@@ -248,6 +263,9 @@ function getSettingsPanel(): Promise<SettingsPanel> {
             setContextPanelCollapsed(true);
             document.getElementById('main')?.classList.add('settings-mode');
             if (contextPanelReopen) contextPanelReopen.hidden = true;
+            // 双整页互斥：设置页占 view-container 的 squeeze 位，工作台必须
+            // 先收（否则两个 100% 同排，flex 布局分赃）。
+            agentWorkbench()?.close();
           },
           () => {
             document.getElementById('main')?.classList.remove('settings-mode');
@@ -1427,6 +1445,9 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
         grid.className = toolGridClass(toolCardKind(run[0].exec.toolName));
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
+          // 工作台跨链（2026-11-12）：恢复的委派卡按持久化的 callId 重建
+          // 「工作台 ↗」入口。老快照无 callId 字段 = 无入口（优雅降级）。
+          if (item.exec.callId) attachWorkbenchEntry(row.el, item.exec.callId);
           if (item.stopped) {
             // Restored orphan. Two species now: (a) a subagent delegation the
             // activity ledger marks paused/cancelled — rebuild the user's
@@ -2412,6 +2433,9 @@ function setContextPanelCollapsed(collapsed: boolean) {
   contextCollapsed = collapsed;
   contextPanel.classList.toggle('collapsed', collapsed);
   document.getElementById('main')?.classList.toggle('context-collapsed', collapsed);
+  // 空间门联动（工作台设计 §2）：context panel 展开 = 右侧被占 → rail 让位。
+  // 这里是展开/收起的权威时刻，补一拍判定（resize 路径在 chat.ts 闸门监听里）。
+  applyAgentRailSpaceGate();
   // The edge toggle stays visible in both states — only its arrow flips:
   // pointing right while the panel is open (collapse), left while collapsed
   // (expand). The hidden attribute is reserved for settings mode (see the
@@ -3151,6 +3175,10 @@ document.addEventListener('keydown', (e) => {
     void (async () => {
       if (await settingsVisible()) {
         await closeSettings();
+      } else if (agentWorkbench()?.isVisible()) {
+        // 工作台 Esc（设计 §3.1）：只在 agent view 展开时劫持，不越权；
+        // 与设置页互斥（open 互收），else-if 天然无双重命中。
+        agentWorkbench()!.close();
       }
       if (!document.getElementById('workspace-picker-popover')!.classList.contains('hidden')) {
         workspace.closePopover();

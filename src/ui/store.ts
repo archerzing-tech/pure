@@ -311,6 +311,13 @@ export interface ToolExecMeta {
    * restores the same run narrative the live card showed.
    */
   subagentTrace?: string[];
+  /**
+   * The delegation's toolCallId (subagent tools only; 2026-11-12 workbench).
+   * Session replay re-attaches the「工作台 ↗」entry from it — Agent 工作台
+   * 与委派卡共用 callId 寻址。Optional: old snapshots lack it and simply
+   * render without the entry (graceful degradation).
+   */
+  callId?: string;
 }
 
 export interface StoredMessage {

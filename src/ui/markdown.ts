@@ -3994,6 +3994,21 @@ function renderBlockToken(token: { type: string; raw: string; [k: string]: unkno
  * re-sync scroll position, since diffStreaming mutates content up to 100ms
  * after the token that triggered it.
  */
+
+// ── 工作台渲染闸（2026-11-12 Agent 工作台设计 §3.5）──
+// 工作台全开时 chat 被挤到 0 宽不可见——此时流式 DOM 渲染挂起：token 照收
+// （latestText 已更新、节流账不动），DOM 不画；关闭后的下一拍一次追平。
+// 推迟不丢弃（打字优先退避同款哲学）；不然流式回合 + 工作台双开 = 两份
+// 活跃 DOM 同步重排，正是第三轮 Windows 活锁的形状。
+// gate 由 main.ts 注入（markdown.ts 不反向依赖 UI 模块）。半开过渡期
+// （width 动画中 chat 还看得见）gate 为 false，照常渲染。
+const RENDER_GATE_RETRY_MS = 250;
+let streamingRenderGate: (() => boolean) | null = null;
+
+export function setStreamingRenderGate(gate: (() => boolean) | null): void {
+  streamingRenderGate = gate;
+}
+
 export function scheduleStreamingRender(
   text: string,
   container: HTMLElement,
@@ -4005,6 +4020,12 @@ export function scheduleStreamingRender(
 
   const doRender = () => {
     state.timer = undefined;
+    // 闸下空转一拍：工作台还开着就继续推迟（数据已在 latestText 里），
+    // 关闭工作台后这一拍自然追平——无需任何显式 resume 调用。
+    if (streamingRenderGate?.()) {
+      state.timer = window.setTimeout(doRender, RENDER_GATE_RETRY_MS);
+      return;
+    }
     // Render the newest text the throttle window has seen, not the snapshot
     // from when the timer was scheduled (tokens keep arriving meanwhile).
     const latest = state.latestText;
@@ -4029,6 +4050,13 @@ export function scheduleStreamingRender(
 
   const elapsed = Date.now() - state.lastRenderTime;
   const throttleMs = streamRenderThrottleMs(state.latestText.length, state.renderCostMs);
+  // 闸挂起：只保一个 250ms 重试拍在队列里（4 次/秒的空转 gate 检查，
+  // Windows 活锁判例意下高频预算是重活不是 no-op），token 之间的节流账
+  // 照旧——关闭后的首拍按 elapsed>=throttleMs 直接走 leading edge。
+  if (streamingRenderGate?.()) {
+    if (state.timer == null) state.timer = window.setTimeout(doRender, RENDER_GATE_RETRY_MS);
+    return;
+  }
   if (elapsed >= throttleMs) {
     // Leading edge (or first token): render immediately.
     if (state.timer != null) {

@@ -71,30 +71,18 @@ describe('agent activity panel', () => {
     panel.el.remove();
   });
 
-  it('carries the SESSION id on the rail, and follows a session switch', () => {
-    // 2026-09-23 user request: the floating rail must show the conversation's
-    // own id so a card can be quoted together with its session.
+  it('retires the SESSION id chip (2026-11-12 reversal): rail carries cards only', () => {
+    // 2026-09-23 的会话 id 行被 2026-11-12 用户反转：主对话右上角不再显示
+    // session id。rail 只剩卡片列表，任何会话切换路径都不得再长出 id 行。
     const panel = createAgentActivityPanel('session_1758624000000');
     document.body.appendChild(panel.el);
     panel.update([activity()], { sessionId: 'session_1758624000000' });
-    const chip = panel.el.querySelector<HTMLElement>('.agent-activity-session');
-    expect(chip?.textContent).toBe('session_1758624000000');
+    expect(panel.el.querySelector('.agent-activity-session')).toBeNull();
 
-    // Switching sessions swaps the id in place (and drops the old cards —
-    // covered by the leak test below).
+    // 会话切换重置后依旧没有 id 行（换人换会话都不复活）
     panel.update([activity({ callId: 'w', agentName: 'deep_thinker' })], { sessionId: 'session_999' });
-    expect(panel.el.querySelector<HTMLElement>('.agent-activity-session')?.textContent).toBe('session_999');
-    panel.el.remove();
-  });
-
-  it('hides the session chip while the panel has no session id yet', () => {
-    const panel = createAgentActivityPanel('');
-    document.body.appendChild(panel.el);
-    panel.update([activity()]);
-    const chip = panel.el.querySelector<HTMLElement>('.agent-activity-session');
-    expect(chip).toBeTruthy();
-    expect(chip?.textContent).toBe('');
-    expect(chip?.style.display).toBe('none');
+    expect(panel.el.querySelector('.agent-activity-session')).toBeNull();
+    expect(panel.el.querySelector('.agent-activity-list')).toBeTruthy();
     panel.el.remove();
   });
 
@@ -255,6 +243,22 @@ describe('agent activity panel', () => {
     expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(2);
     expect(panel.el.querySelectorAll('.agent-activity-parallel')).toHaveLength(0);
     expect(panel.el.querySelector('[data-call-id="a"]')?.className).toContain('agent-worker--active');
+  });
+
+  it('keeps the clickable affordance across updates (hover cursor survives the className rewrite)', () => {
+    // 2026-11-12 真机反馈回归锁：--clickable 只在首次创建时挂，update 的
+    // 整串 className 重写曾把它抹掉——卡能点但 hover 没有手型。
+    const panel = createAgentActivityPanel('s1', { onOpenAgent: () => {} });
+    document.body.appendChild(panel.el);
+    panel.update([activity()]);
+    expect(panel.el.querySelector('[data-call-id="call-1"]')?.className).toContain('agent-worker--clickable');
+    panel.update([activity({ status: 'done', state: 'TERMINATE', output: '结论', durationMs: 4200 })]);
+    expect(panel.el.querySelector('[data-call-id="call-1"]')?.className).toContain('agent-worker--clickable');
+    // 无 hooks 时永不亮可点（没有点击行为却给手型是撒谎）。
+    const plain = createAgentActivityPanel();
+    document.body.appendChild(plain.el);
+    plain.update([activity()]);
+    expect(plain.el.querySelector('[data-call-id="call-1"]')?.className).not.toContain('agent-worker--clickable');
   });
 
   it('does not create extra markup for agents started at different times', () => {

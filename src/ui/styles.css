@@ -176,6 +176,10 @@ body.window-maximized #boot-splash {
   margin-top: -40px;
   padding-top: 40px;
 }
+#agent-view {
+  margin-top: -40px;
+  padding-top: 40px;
+}
 .titlebar-brand {
   display: flex;
   align-items: center;
@@ -880,6 +884,338 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 
 /* ════════════════════════════════════════
+   AGENT WORKBENCH（Agent 工作台，2026-11-12）
+   ════════════════════════════════════════
+   与 #settings-view 同一套页面切换机制：flex 同排 width:0 → .expanded
+   100%，chat DOM 不卸载（#chat-view.squeezed 见 critical.css:238）。
+   零新视觉语汇（设计 §3.4）：状态色沿用 rail 的 --success/--danger/
+   --accent，段落标签复用 .agent-activity-section-label，返回按钮与设置页
+   同款，chip 走 999px pill，字号走 9/10/11/12/14 阶，间距 4px 栅格。 */
+
+/* 工作台打开期间的 chrome 隐藏（agentWorkbench.setChromeHidden）：角钮与
+   rail 让位，避免叠在工作台头部上。与 rail 另两口正交：hidden attr
+   （挂载权）、gate-hidden（空间门）。 */
+.wb-chrome-hidden {
+  display: none !important;
+}
+
+#agent-view {
+  width: 0%;
+  flex-shrink: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.4s var(--ease-out);
+}
+
+#agent-view.expanded {
+  width: 100%;
+}
+
+.agent-wb-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px 12px;
+  /* 头部用面板底色与内容体分层（2026-11-12 真机反馈：header 和身体
+     颜色区分出来）——#agent-view 整体是 --bg，头部浮一档 --bg-card。 */
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+
+.agent-wb-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-wb-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-wb-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-wb-status {
+  flex-shrink: 0;
+  font: 700 10px var(--font-mono);
+  letter-spacing: .05em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.agent-wb-status.st-active { color: var(--accent); border-color: var(--accent); }
+.agent-wb-status.st-done { color: var(--success); border-color: var(--success); }
+.agent-wb-status.st-failed,
+.agent-wb-status.st-timed-out { color: var(--danger); border-color: var(--danger); }
+.agent-wb-status.st-cancelled,
+.agent-wb-status.st-paused { color: var(--text-tertiary); }
+
+.agent-wb-historical {
+  flex-shrink: 0;
+  font: 700 10px var(--font-mono);
+  letter-spacing: .05em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--bg-assistant);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-light);
+}
+
+.agent-wb-idchip {
+  flex-shrink: 0;
+  font: 11px var(--font-mono);
+  color: var(--text-tertiary);
+  cursor: copy;
+  user-select: none;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.agent-wb-idchip:hover { color: var(--accent); background: var(--bg-assistant); }
+.agent-wb-idchip.copied { color: var(--accent); }
+
+/* chip 切换条：同任务全部 agent 横跳（设计 §3.2），999px pill 语法。 */
+.agent-wb-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  /* 与 header 同一面板层（颜色分层到 chip 条为止，body 保持主底色）。 */
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-light);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.agent-wb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .15s var(--ease-out), border-color .15s var(--ease-out), background .15s var(--ease-out);
+}
+.agent-wb-chip:hover { color: var(--text); border-color: var(--text-tertiary); }
+.agent-wb-chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-assistant);
+}
+
+.agent-wb-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+/* 状态点色 = rail 卡 badge 同色源（§3.4：不引入新色）。 */
+.agent-wb-chip-dot.state-active { background: var(--accent); }
+.agent-wb-chip-dot.state-done { background: var(--success); }
+.agent-wb-chip-dot.state-failed,
+.agent-wb-chip-dot.state-timed-out { background: var(--danger); }
+.agent-wb-chip-dot.state-cancelled,
+.agent-wb-chip-dot.state-paused { background: var(--text-tertiary); }
+
+.agent-wb-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 2026-11-12 真机反馈两拍：两侧留白加大（24 → 48）；上下留白随后跟进
+     到同一量级（20/24 → 32/36），四边节奏一致。 */
+  padding: 32px 48px 36px;
+}
+
+.agent-wb-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.agent-wb-content[hidden] + .agent-wb-empty { display: flex; }
+.agent-wb-empty[hidden] { display: none; }
+
+.agent-wb-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 860px;
+}
+
+.agent-wb-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 概要段：assistant 气泡同款皮（--bg-assistant + --border-light，§3.4）。 */
+.agent-wb-taskcard {
+  background: var(--bg-assistant);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-wb-tasktext {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-wb-flags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-wb-flag {
+  font: 700 10px var(--font-mono);
+  letter-spacing: .05em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  color: var(--text-tertiary);
+}
+.agent-wb-flag.flag-resumed { color: var(--accent); border-color: var(--accent); }
+.agent-wb-flag.flag-retry { color: var(--danger); border-color: var(--danger); }
+
+.agent-wb-error {
+  width: 100%;
+  font: 11px var(--font-mono);
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 工作流段：tool-row 的状态语汇（✓/●/✗ + mono 参数提示，§3.4）。 */
+.agent-wb-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font: 11px var(--font-mono);
+  color: var(--text);
+}
+
+.agent-wb-trace.agent-wb-placeholder {
+  color: var(--text-tertiary);
+}
+
+.agent-wb-trace-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.agent-wb-trace-glyph { flex-shrink: 0; }
+.agent-wb-trace-glyph.ts-completed { color: var(--success); }
+.agent-wb-trace-glyph.ts-failed { color: var(--danger); }
+.agent-wb-trace-glyph.ts-running { color: var(--accent); }
+
+/* 产出段：tool 面板的终端皮（--bg-input + mono，§3.4）。显示与存储同界
+   （2000 字符），尾随滚动走 scrollPin。 */
+.agent-wb-output {
+  background: var(--bg-input);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  font: 11px/1.6 var(--font-mono);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 340px;
+  overflow-y: auto;
+  min-height: 44px;
+}
+
+/* 流式中的活性提示：末尾一闪一闪的 caret（rail 的 retrying 脉冲同语感）。 */
+.agent-wb-output.streaming::after {
+  content: '▍';
+  color: var(--accent);
+  animation: agentWbCaret 1s steps(2) infinite;
+}
+@keyframes agentWbCaret { 50% { opacity: 0; } }
+
+.agent-wb-output-note {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── 刀 3：卡片可点 + 委派卡跨链 ──
+   可点性走视觉（§3.3：三行卡片契约不动），hover 抬升复用卡片的既有阴影阶。
+   卡是纵向三行 flex，› 绝对定位到右上角（列布局里文档流追加会掉到 time 行
+   下方，读起来像第四行）。 */
+.agent-worker--clickable { position: relative; cursor: pointer; transition: transform .15s var(--ease-out), box-shadow .15s var(--ease-out); }
+.agent-worker--clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+.agent-worker--clickable::after {
+  content: '›';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  opacity: .7;
+}
+
+/* 转写委派卡头部的「工作台 ↗」小 chip：与 .agent-worker-id 同语感
+   （mono 小字 + accent），summary 内 stopPropagation 不触发展开。 */
+.tool-row-workbench-link {
+  flex-shrink: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: 700 10px var(--font-mono);
+  letter-spacing: .04em;
+  padding: 1px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s var(--ease-out), border-color .15s var(--ease-out);
+}
+.tool-row-workbench-link:hover { background: var(--bg-assistant); border-color: var(--accent); }
+
+/* 「在对话中查看 ↗」定位后的短暂高亮（不引入新色：accent 描边渐隐）。 */
+.agent-card-flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  transition: outline-color 1.2s var(--ease-out);
+  outline-color: transparent;
+}
+
+/* ════════════════════════════════════════
    CHAT VIEW
    ════════════════════════════════════════ */
 
@@ -923,16 +1259,12 @@ body.window-maximized .win-resize-zone { display: none; }
   margin-top: -64px;
 }
 
-/* Landing brand — same gem app-icon as the sidebar, so every logo in the GUI
-   uses the unified icon look (the generated PNGs + favicon are the same gem). */
+/* Landing brand（2026-11-12 用户定案）：图标退役，只留「pure」文字——
+   输入框上方中央不再放钻石 icon。 */
 #landing-logo {
   display: flex;
   align-items: center;
-  gap: 16px;
-}
-
-#landing-logo .app-icon {
-  flex-shrink: 0;
+  justify-content: center;
 }
 
 .landing-logo-text {
@@ -1187,7 +1519,9 @@ body.window-maximized .win-resize-zone { display: none; }
 #agent-activity-host[hidden] { display: none !important; }
 #agent-activity-host {
   position: absolute;
-  top: 0;
+  /* 2026-11-12 用户反馈：rail 从右上设置按钮行下方开始（按钮占 top 44-80），
+     不再叠进按钮热区——卡片与按钮互不相碰。 */
+  top: 84px;
   right: 0;
   /* Ends ABOVE the composer, not over it (2026-09-23 user report: completed
      cards piled up over the input box). The composer's height is dynamic
@@ -1199,8 +1533,10 @@ body.window-maximized .win-resize-zone { display: none; }
   z-index: 18; /* below the floating settings button (20) & context panel (30) */
   /* Shrinks with the window: on narrow viewports the rail takes less of the
      conversation. Cards stay opaque — the floating surface must not read as
-     a gray film over the chat (see the media queries below). */
-  width: clamp(140px, 10.5vw, 168px);
+     a gray film over the chat (see the media queries below).
+     2026-11-12 用户反馈：整体再窄一点，给主对话让位——card 内文字显示
+     不下交给省略号（.agent-worker-name/-time），不再换行撑高卡片。 */
+  width: clamp(120px, 9.2vw, 148px);
   max-width: 100%;
   min-width: 0;
   min-height: 0;
@@ -1237,26 +1573,9 @@ body.window-maximized .win-resize-zone { display: none; }
 .agent-activity-rail > * {
   pointer-events: auto;
 }
-/* The session id line: quiet, mono, one line — click copies the full id. */
-.agent-activity-session {
-  flex: 0 0 auto;
-  padding: 0 2px;
-  color: var(--text-tertiary);
-  font: 10px var(--font-mono);
-  letter-spacing: .02em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: copy;
-  user-select: none;
-}
-.agent-activity-session.copied { color: var(--accent); }
-/* Narrow windows dock the rail as a bottom sheet (critical.css carries the
-   rule); this restates bottom: 0 so the later-loaded base rule's custom
-   property can never lift the sheet off the window's bottom edge. */
-@media (max-width: 720px) {
-  #agent-activity-host { bottom: 0; }
-}
+/* （2026-11-12 空间刀）≤720px 的底部抽屉（bottom sheet）随空间门退役：
+   空间门阈值 1080 > 720，窄窗先走 gate-hidden 整条让位，抽屉成了走不到
+   的死代码——留着会骗人（设计 §2 退役项）。 */
 .agent-activity-live {
   display: flex;
   flex-direction: column;
@@ -1342,8 +1661,11 @@ body.window-maximized .win-resize-zone { display: none; }
   font-size: 10.5px;
   font-weight: 600;
   line-height: 1.3;
-  /* Show the FULL machine id — wrap instead of ellipsizing. */
-  word-break: break-all;
+  /* 2026-11-12 用户反馈：rail 收窄后文字显示不下用省略号——旧契约
+     「id 全显换行」废除（换行把窄卡撑太高，省略号保卡片三行紧凑）。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-align: center;
 }
 /* Divider between the name row and the start-time row. */
@@ -1353,6 +1675,8 @@ body.window-maximized .win-resize-zone { display: none; }
   font-size: 9.5px;
   text-align: center;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-top: 1px solid color-mix(in srgb, var(--border-light) 85%, transparent);
   margin-top: 1px;
   padding-top: 3px;
@@ -1483,7 +1807,7 @@ body.window-maximized .win-resize-zone { display: none; }
   .agent-worker-time { font-size: 9px; padding-top: 2px; }
 }
 @media (max-width: 1280px) {
-  #agent-activity-host { width: 128px; }
+  #agent-activity-host { width: 112px; }
   .agent-activity-rail { padding: 46px 4px 12px; gap: 5px; }
   .agent-worker {
     padding: 4px 5px;
@@ -7416,13 +7740,6 @@ select:focus-visible,
 
 #landing-logo {
   gap: 14px;
-}
-
-#landing-logo .app-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .landing-logo-text {

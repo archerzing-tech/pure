@@ -158,7 +158,6 @@
           <div id="landing">
             <div id="landing-content">
               <div id="landing-logo">
-                <svg class="app-icon" viewBox="0 0 1024 1024" width="64" height="64" aria-hidden="true"><use href="#icon-gem"/></svg>
                 <span class="landing-logo-text">pure</span>
                 <span id="landing-version" class="landing-version"></span>
               </div>
@@ -1063,6 +1062,10 @@
             </div>
           </div>
         </div>
+        <!-- Agent 工作台：多 agent 协作的整页视图（settings 同款 squeeze 机制，
+             width:0 → .expanded 100%；DOM 由 agentWorkbench.ts 构建）。
+             入口 = 右侧悬浮卡 / 转写委派卡「工作台 ↗」；退出 = 页头返回或 Esc。 -->
+        <div id="agent-view"></div>
       </div>
     </div>
   </div>

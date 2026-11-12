@@ -89,7 +89,8 @@ import { TauriToolAdapter, getWebToolDefs, getSysInfoToolDefs, registerToolOutpu
 import { buildExtractPrompt } from '../shared/webExtract';
 import { buildDiffRows, type ToolDiffData } from './toolDiff';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
-import { createAgentActivityPanel, mergeAgentActivity, type AgentActivityPanelHandle } from './agentActivityPanel';
+import { createAgentActivityPanel, mergeAgentActivity, agentRailSpaceGateHit, type AgentActivityPanelHandle } from './agentActivityPanel';
+import { agentWorkbench, attachWorkbenchEntry } from './agentWorkbench';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from '../adapter/deepseek/DeepSeekAnthropicAdapter';
@@ -1738,9 +1739,7 @@ export interface ChatControllerOptions {
 // up on top of the input box). The composer's height is dynamic (multiline
 // input, attachment previews), so no fixed CSS offset can be right; instead a
 // ResizeObserver on #input-bar keeps the host's --agent-host-bottom custom
-// property equal to the composer height plus a small gap. The ≤720px
-// bottom-sheet rules in the stylesheets set bottom: 0 directly, so narrow
-// windows keep their docked-sheet behavior regardless of this property.
+// property equal to the composer height plus a small gap.
 let agentActivityHostLayoutInstalled = false;
 function installAgentActivityHostLayout(): void {
   if (agentActivityHostLayoutInstalled) return;
@@ -1753,8 +1752,25 @@ function installAgentActivityHostLayout(): void {
     host.style.setProperty('--agent-host-bottom', `${h > 0 ? h + 12 : 0}px`);
   };
   if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(inputBar);
+  // 空间门（工作台设计 §2）：宽度判定挂进既有的 resize 监听，不新增监听器
+  // 家族；context-panel 展开态由 main.ts 的 setContextPanelCollapsed 调
+  // applyAgentRailSpaceGate 补一拍。
+  window.addEventListener('resize', applyAgentRailSpaceGate);
   window.addEventListener('resize', sync);
   sync();
+  applyAgentRailSpaceGate();
+}
+
+/** 空间门判定+落点：一次 innerWidth 读取 + 一次谓词判定。gate-hidden 与
+ *  hidden attr 分属两口——hidden 归「本会话无活动/挂载权」管（mount/
+ *  hideAgentActivitySurface），gate class 归「空间不够」管；互不覆盖，
+ *  两个开关都放行 rail 才可见。只藏不卸：隐藏期间数据照常进账。 */
+export function applyAgentRailSpaceGate(): void {
+  const host = document.getElementById('agent-activity-host');
+  if (!host) return;
+  const contextPanel = document.getElementById('context-panel');
+  const contextExpanded = !!contextPanel && !contextPanel.classList.contains('collapsed');
+  host.classList.toggle('gate-hidden', agentRailSpaceGateHit(window.innerWidth, contextExpanded));
 }
 
 /**
@@ -2899,11 +2915,18 @@ export class ChatController {
       // SAME panel (its per-agent animation state is still current).
       host.replaceChildren(this.agentActivityPanel.el);
     } else if (!this.agentActivityPanel) {
-      this.agentActivityPanel = createAgentActivityPanel(this.sessionId);
+      this.agentActivityPanel = createAgentActivityPanel(this.sessionId, {
+        // 刀 3：卡片点击 → Agent 工作台（callId 寻址）。
+        onOpenAgent: (callId) => agentWorkbench()?.open(callId),
+      });
       host.replaceChildren(this.agentActivityPanel.el);
     }
     host.hidden = false;
+    applyAgentRailSpaceGate();
     this.agentActivityPanel.update(this.agentActivities, { historical: this.agentActivityHistorical, sessionId: this.sessionId });
+    // 工作台第二消费者（§3.5）：同一条 funnel 喂两处。会话恢复/切换也走
+    // 这里（sessionId 变化时工作台自动关闭重建）。
+    agentWorkbench()?.sync(this.agentActivities, { historical: this.agentActivityHistorical, sessionId: this.sessionId });
   }
 
   /** Hide the shared rail only when THIS session's panel is mounted on it (a
@@ -2954,8 +2977,20 @@ export class ChatController {
     if (this.viewActive) {
       this.mountAgentActivityPanel();
       this.agentActivityPanel?.update(this.agentActivities);
+      // 工作台第二消费者（§3.5）：打开时外科手术式 patch 当前 agent 段块，
+      // 关闭时只养快照（打开瞬间用的就是它），零 DOM。
+      agentWorkbench()?.sync(this.agentActivities, { sessionId: this.sessionId });
     }
     this.scheduleAgentActivityPersistence();
+  }
+
+  /** 委派产出全文（2026-11-12 工作台全文刀）：活转写里 role:'tool' 且
+   *  toolCallId 匹配的消息就是这次委派的 tool result 原文（引擎把子 agent
+   *  最终产出全文折进 content）。找不到 → null（历史会话/老快照）。 */
+  getDelegationFullOutput(callId: string): string | null {
+    const hit = this.messages.find((m) => m.role === 'tool' && m.toolCallId === callId);
+    const text = hit?.content;
+    return typeof text === 'string' && text.length > 0 ? text : null;
   }
 
   private scheduleAgentActivityPersistence(): void {
@@ -7078,13 +7113,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     } else if (staged) {
                       pendingByName.delete(toolName);
                       entry = { ...staged, toolCallId };
+                      // 委派行是 mid-stream 先按 name 暂存的（id 未知），id 到
+                      // 手的此刻补挂工作台入口（幂等，附带 dataset.agentCallId）。
+                      if (subagentNames.has(toolName)) attachWorkbenchEntry(entry.row.el, toolCallId);
                       pendingRows.set(toolCallId, entry);
                     } else {
                       endThinking();
                       const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
                       toolRowSinceSegment = true;
                       entry = { row, toolName, args, toolCallId };
-                      if (subagentNames.has(toolName)) row.el.dataset.agentCallId = toolCallId;
+                      if (subagentNames.has(toolName)) attachWorkbenchEntry(row.el, toolCallId);
                       pendingRows.set(toolCallId, entry);
                     }
                   }
@@ -7178,7 +7216,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             endThinking();
             const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
             toolRowSinceSegment = true;
-            if (subagentNames.has(toolName)) row.el.dataset.agentCallId = callId;
+            if (subagentNames.has(toolName)) attachWorkbenchEntry(row.el, callId);
             pendingRows.set(callId, { row, toolName, args, toolCallId: callId });
             this.scrollUi(chatEl);
             break;
@@ -7495,6 +7533,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               resultDiff,
               resultText: resultPreview,
               subagentTrace: subagentTraceByCall.get(event.payload.toolCallId),
+              // 工作台跨链：恢复重放据此重建「工作台 ↗」入口（仅委派工具；
+              // 旧快照无此字段=无入口，优雅降级）。
+              ...(subagentNames.has(toolName) ? { callId: event.payload.toolCallId } : {}),
             });
             // Feed the session's activity history (search / file / command records).
             const resultArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
@@ -7599,7 +7640,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // Remember the completed card so a repeated identical call
               // collapses onto it instead of rendering twice.
               if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
-              if (pending.toolCallId && subagentNames.has(pending.toolName)) pending.row.el.dataset.agentCallId = pending.toolCallId;
+              if (pending.toolCallId && subagentNames.has(pending.toolName)) attachWorkbenchEntry(pending.row.el, pending.toolCallId);
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 outcome: branchOutcome,
@@ -9948,6 +9989,13 @@ export class SessionChatManager {
 
   getEffectiveWorkspace(): string {
     return this.activeNow().getEffectiveWorkspace();
+  }
+
+  /** 委派产出全文（2026-11-12 工作台全文刀）：按 callId 从可见会话的
+   *  活转写取委派 tool result 原文。历史会话转写不进内存 → null（工作台
+   *  回退 2000 字符存档镜像）。 */
+  getDelegationFullOutput(callId: string): string | null {
+    return this.activeNow().getDelegationFullOutput(callId);
   }
 
   async syncEffectiveWorkspace(): Promise<void> {

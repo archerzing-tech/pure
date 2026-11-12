@@ -1,0 +1,702 @@
+<title>Agent 工作台原型</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* ── 主题 token：与 pure 现役设计系统一致（Notion 风格，亮暗双主题）──
+   布局概念：外层是安静的评审台（标题+控制+试玩清单），中央一扇可变宽的
+   pure 窗口 mock，右侧浮动卡 rail 与工作台页都在窗内按真实机制运转。 */
+:root {
+  --bg: #FFFFFF; --bg-sidebar: #F7F6F3; --bg-input: #F6F5F3;
+  --bg-user: #F2F0F0; --bg-assistant: #F6F5F3; --bg-hover: #EFEEEC;
+  --bg-card: #FBFAF9;
+  --text: #37352F; --text-secondary: #6B6965; --text-tertiary: #9B9995;
+  --border: #E8E6E1; --border-light: #EDEBE7;
+  --accent: #7B6FF0; --accent-hover: #6A5DE0; --accent-soft: #F1EFFC;
+  --danger: #E03E3E; --danger-soft: #FDF2F2; --success: #0F7B4E;
+  --stage: #EBE9E4;
+  --shadow-win: 0 8px 30px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06);
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Consolas", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #191919; --bg-sidebar: #202020; --bg-input: #252525;
+    --bg-user: #2A2435; --bg-assistant: #252525; --bg-hover: #2A2A2A;
+    --bg-card: #222222;
+    --text: #E5E3DF; --text-secondary: #9B9995; --text-tertiary: #6B6965;
+    --border: #333333; --border-light: #2A2A2A;
+    --accent: #A89BFF; --accent-hover: #BFB5FF; --accent-soft: #2A2440;
+    --danger: #FF6B6B; --danger-soft: #3A2020; --success: #4EC98A;
+    --stage: #101010;
+    --shadow-win: 0 8px 30px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4);
+    --shadow-card: 0 1px 3px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.3);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #191919; --bg-sidebar: #202020; --bg-input: #252525;
+  --bg-user: #2A2435; --bg-assistant: #252525; --bg-hover: #2A2A2A;
+  --bg-card: #222222;
+  --text: #E5E3DF; --text-secondary: #9B9995; --text-tertiary: #6B6965;
+  --border: #333333; --border-light: #2A2A2A;
+  --accent: #A89BFF; --accent-hover: #BFB5FF; --accent-soft: #2A2440;
+  --danger: #FF6B6B; --danger-soft: #3A2020; --success: #4EC98A;
+  --stage: #101010;
+  --shadow-win: 0 8px 30px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.3);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { height: 100%; }
+body {
+  min-height: 100%;
+  background: var(--stage);
+  color: var(--text);
+  font: 14px/1.55 var(--font-sans);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 28px;
+}
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* ── 评审台外框 ── */
+.topbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; max-width: 1240px; margin: 0 auto 14px; }
+.topbar h1 { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+.topbar .proto-tag {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
+}
+.topbar .spacer { flex: 1; min-width: 0; }
+.ctl-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-label { font-size: 12px; color: var(--text-tertiary); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-card); }
+.seg button { padding: 4px 12px; font-size: 12px; color: var(--text-secondary); border-right: 1px solid var(--border-light); }
+.seg button:last-child { border-right: none; }
+.seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.ctl-btn {
+  padding: 4px 12px; font-size: 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg-card); color: var(--text-secondary);
+}
+.ctl-btn.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+/* ── pure 窗口 mock ── */
+.stage { max-width: 1240px; margin: 0 auto; }
+.win {
+  width: var(--win-w, 100%); max-width: 100%;
+  height: 600px; margin: 0 auto;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+  box-shadow: var(--shadow-win);
+  transition: width .45s var(--ease-out);
+  position: relative;
+}
+.win-titlebar {
+  height: 36px; display: flex; align-items: center; padding: 0 12px;
+  background: var(--bg-sidebar); border-bottom: 1px solid var(--border-light);
+  position: relative; z-index: 9;
+}
+.lights { display: flex; gap: 7px; }
+.lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.lights i:nth-child(1) { background: #FF5F57; } .lights i:nth-child(2) { background: #FEBC2E; } .lights i:nth-child(3) { background: #28C840; }
+.win-titlebar .win-name {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+}
+.win-body { display: flex; height: calc(100% - 36px); position: relative; overflow: hidden; background: var(--bg); }
+
+/* 侧栏 */
+.pure-side { flex: 0 0 178px; background: var(--bg-sidebar); border-right: 1px solid var(--border-light); padding: 10px 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow: hidden; }
+.pure-side .logo { font-weight: 700; font-size: 13px; padding: 2px 8px 10px; }
+.side-item { font-size: 12px; color: var(--text-secondary); padding: 5px 8px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-item.on { background: var(--bg-hover); color: var(--text); }
+.side-new { margin-top: auto; font-size: 12px; color: var(--accent); padding: 6px 8px; }
+
+/* 聊天区 */
+.chat { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.chat-scroll { flex: 1; overflow-y: auto; padding: 18px 20px 12px; display: flex; flex-direction: column; gap: 12px; }
+.bubble { max-width: 76%; padding: 8px 12px; border-radius: 10px; font-size: 13px; }
+.bubble.user { align-self: flex-end; background: var(--bg-user); }
+.bubble.assistant { align-self: flex-start; background: var(--bg-assistant); width: 86%; max-width: none; }
+.bubble .ph-line { height: 8px; border-radius: 4px; background: var(--border); opacity: .55; margin-top: 6px; }
+.bubble .ph-line:first-child { margin-top: 0; }
+.bubble .ph-line.w60 { width: 60%; } .bubble .ph-line.w85 { width: 85%; } .bubble .ph-line.w40 { width: 40%; }
+.bubble p { font-size: 13px; color: var(--text); }
+
+/* 委派卡（转写内） */
+.deleg {
+  align-self: flex-start; width: 86%; max-width: none;
+  border: 1px solid var(--border); background: var(--bg-card); border-radius: 10px;
+  padding: 8px 10px; font-size: 12px; transition: box-shadow .3s;
+}
+.deleg.flash { box-shadow: 0 0 0 2px var(--accent); }
+.deleg-head { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
+.deleg-head b { color: var(--text); font-weight: 600; }
+.deleg-open { margin-left: auto; color: var(--accent); font-size: 12px; padding: 2px 6px; border-radius: 6px; }
+.deleg-open:hover { background: var(--accent-soft); }
+.deleg-agents { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.deleg-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-light); background: var(--bg); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
+.deleg-chip:hover { border-color: var(--accent); color: var(--accent); }
+.dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.dot.run { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.dot.done { background: var(--success); }
+.dot.fail { background: var(--danger); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* composer */
+.composer { flex: 0 0 auto; padding: 10px 16px 12px; }
+.composer .input-mock {
+  height: 38px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-input); display: flex; align-items: center;
+  padding: 0 12px; font-size: 12px; color: var(--text-tertiary); gap: 8px;
+}
+.composer .send { margin-left: auto; width: 22px; height: 22px; border-radius: 6px; background: var(--accent); opacity: .85; }
+
+/* ── 右侧：agent 浮动卡 rail ── */
+.rail {
+  position: absolute; top: 0; right: 0; bottom: 92px; width: 168px;
+  z-index: 7; pointer-events: none;
+  transition: opacity .3s var(--ease-out), transform .3s var(--ease-out);
+}
+.rail.hidden-by-gate { opacity: 0; transform: translateX(14px); pointer-events: none !important; }
+.rail-inner { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 44px 8px 10px; gap: 8px; overflow-y: auto; }
+.rail .gear {
+  position: absolute; top: 6px; right: 8px; width: 26px; height: 26px;
+  border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; font-size: 12px;
+  color: var(--text-secondary); pointer-events: auto; box-shadow: var(--shadow-card);
+}
+.sess-chip {
+  font: 10px var(--font-mono); color: var(--text-tertiary); padding: 0 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto;
+}
+.acard {
+  pointer-events: auto; flex: 0 0 auto;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 9px; box-shadow: var(--shadow-card); cursor: pointer;
+  transition: transform .18s var(--ease-out), border-color .18s;
+  position: relative;
+}
+.acard:hover { transform: translateY(-1px); border-color: var(--accent); }
+.acard:hover .acard-go { opacity: 1; }
+.acard-go { position: absolute; right: 8px; top: 8px; color: var(--text-tertiary); font-size: 11px; opacity: 0; transition: opacity .15s; }
+.acard.running { border-left: 2px solid var(--accent); }
+.acard.done { border-left: 2px solid var(--success); }
+.acard.failed { border-left: 2px solid var(--danger); }
+.acard .badge { font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.acard.running .badge { color: var(--accent); }
+.acard.done .badge { color: var(--success); }
+.acard.failed .badge { color: var(--danger); }
+.acard .name { font-size: 12px; font-weight: 600; margin-top: 3px; word-break: break-all; padding-right: 10px; }
+.acard .meta { font: 10px var(--font-mono); color: var(--text-tertiary); margin-top: 2px; display: flex; gap: 6px; align-items: center; }
+.acard .live-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.acard .retry-tag { font: 9px var(--font-sans); color: var(--danger); border: 1px solid var(--danger); border-radius: 4px; padding: 0 4px; }
+
+/* ── 上下文面板（空间门条件 ②）── */
+.ctx {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(240px, 42%);
+  background: var(--bg-card); border-left: 1px solid var(--border); z-index: 6;
+  transform: translateX(102%); transition: transform .35s var(--ease-out);
+  padding: 14px; display: flex; flex-direction: column; gap: 8px;
+}
+.ctx.open { transform: translateX(0); }
+.ctx h3 { font-size: 12px; font-weight: 650; color: var(--text-secondary); }
+.ctx .ph-block { border: 1px dashed var(--border); border-radius: 8px; height: 64px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text-tertiary); }
+
+/* ── 工作台页（settings 同款：宽度 0→100% 挤压切换）── */
+.wb {
+  width: 0; flex: 0 0 auto; overflow: hidden; z-index: 4;
+  background: var(--bg); border-left: 1px solid var(--border);
+  transition: width .4s var(--ease-out);
+  display: flex; flex-direction: column;
+}
+.wb.open { width: 100%; }
+.wb-inner { width: 100%; min-width: 560px; height: 100%; display: flex; flex-direction: column; }
+.wb-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border-light); background: var(--bg-card);
+}
+.wb-back { font-size: 12px; color: var(--text-secondary); padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.wb-back:hover { color: var(--accent); border-color: var(--accent); }
+.wb-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.wb-title .n { font-size: 14px; font-weight: 650; }
+.wb-title .r { font-size: 11px; color: var(--text-tertiary); }
+.wb-state { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.state-pill { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 2px 10px; display: inline-flex; align-items: center; gap: 5px; }
+.state-pill.run { color: var(--accent); background: var(--accent-soft); }
+.state-pill.done { color: var(--success); background: transparent; border: 1px solid var(--success); }
+.state-pill.fail { color: var(--danger); background: var(--danger-soft); }
+.wb-elapsed { font: 11px var(--font-mono); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.wb-agid { font: 10px var(--font-mono); color: var(--text-tertiary); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; cursor: copy; }
+.wb-agid.copied { color: var(--accent); border-color: var(--accent); }
+.wb-chips { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border-light); overflow-x: auto; }
+.wb-chip { font-size: 11px; color: var(--text-secondary); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+.wb-chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.wb-body { flex: 1; overflow-y: auto; padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.wb-sec h4 { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--text-tertiary); margin-bottom: 6px; }
+.wb-snip { font-size: 12px; color: var(--text); background: var(--bg-assistant); border: 1px solid var(--border-light); border-radius: 8px; padding: 8px 10px; }
+.wb-flags { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.wb-flag { font-size: 10px; border-radius: 4px; padding: 1px 7px; border: 1px solid var(--border); color: var(--text-secondary); }
+.wb-flag.warn { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+.wb-flag.info { color: var(--accent); border-color: var(--accent); }
+.wb-err { font-size: 12px; color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 8px; padding: 8px 10px; }
+.trace { display: flex; flex-direction: column; gap: 4px; }
+.trow { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px; border-radius: 6px; background: var(--bg-card); border: 1px solid var(--border-light); }
+.trow .tname { font-weight: 600; }
+.trow .targ { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.trow .tst { font-size: 10px; flex: 0 0 auto; }
+.trow .tst.ok { color: var(--success); } .trow .tst.run { color: var(--accent); } .trow .tst.bad { color: var(--danger); }
+.wb-out {
+  font-size: 12px; line-height: 1.6; background: var(--bg-input);
+  border: 1px solid var(--border-light); border-radius: 8px; padding: 10px 12px;
+  max-height: 240px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+.wb-out .caret { display: inline-block; width: 7px; height: 13px; background: var(--accent); vertical-align: -2px; animation: pulse 1s steps(2) infinite; }
+.wb-trunc { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+.wb-jump { color: var(--accent); font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid transparent; }
+.wb-jump:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ── toast（空间门提示，窗内）── */
+.win-toast {
+  position: absolute; left: 50%; bottom: 18px; transform: translate(-50%, 8px);
+  background: var(--text); color: var(--bg); font-size: 12px;
+  border-radius: 8px; padding: 6px 14px; opacity: 0; pointer-events: none;
+  transition: opacity .3s, transform .3s; z-index: 20; max-width: 82%; text-align: center;
+}
+.win-toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ── 底部：状态行 + 试玩清单 ── */
+.legend { max-width: 1240px; margin: 14px auto 0; display: flex; flex-direction: column; gap: 8px; }
+.gate-line { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gate-pill { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 2px 10px; }
+.gate-pill.show { color: var(--success); border: 1px solid var(--success); }
+.gate-pill.hide { color: var(--danger); border: 1px solid var(--danger); background: var(--danger-soft); }
+.gate-reason { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+.try-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.try-row .try-label { font-size: 12px; color: var(--text-secondary); align-self: center; }
+.try {
+  font-size: 12px; color: var(--text-secondary); border: 1px dashed var(--border);
+  border-radius: 8px; padding: 4px 10px; background: var(--bg-card); text-align: left;
+}
+.try:hover { border-color: var(--accent); color: var(--accent); border-style: solid; }
+.try b { color: var(--text); font-weight: 600; }
+
+@media (max-width: 720px) {
+  body { padding-block: 12px 20px; }
+  .win { height: 520px; }
+  .pure-side { flex-basis: 120px; }
+  .wb-inner { min-width: 0; }
+  .bubble.assistant, .deleg { width: 94%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .win, .rail, .ctx, .wb, .acard { transition: none !important; }
+  .dot.run, .acard .live-dot, .wb-out .caret { animation: none !important; }
+}
+</style>
+
+<header class="topbar">
+  <h1>Agent 工作台</h1>
+  <span class="proto-tag">UI 原型 · 示例数据</span>
+  <span class="spacer"></span>
+  <div class="ctl-group">
+    <span class="ctl-label">mock 窗宽</span>
+    <div class="seg" id="widthSeg">
+      <button data-w="1400" class="on">1400</button>
+      <button data-w="1080">1080</button>
+      <button data-w="900">900</button>
+      <button data-w="0">撑满</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <button class="ctl-btn" id="ctxToggle">上下文面板</button>
+    <button class="ctl-btn" id="themeToggle">亮 / 暗</button>
+  </div>
+</header>
+
+<div class="stage">
+  <div class="win" id="win">
+    <div class="win-titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="win-name">pure</span>
+    </div>
+    <div class="win-body">
+      <aside class="pure-side">
+        <div class="logo">pure</div>
+        <div class="side-item on">窗口卡死排查</div>
+        <div class="side-item">模型列表重构</div>
+        <div class="side-item">发布 4.7.5</div>
+        <div class="side-new">+ 新对话</div>
+      </aside>
+
+      <main class="chat">
+        <div class="chat-scroll">
+          <div class="bubble user">这轮把三个方向并行查一下，汇总结论给我。</div>
+          <div class="bubble assistant">
+            <p>好，我派三支同时开工，谁先回来先说谁。</p>
+            <div class="ph-line w85"></div>
+            <div class="ph-line w60"></div>
+          </div>
+          <div class="deleg" id="delegCard">
+            <div class="deleg-head"><b>🤖 并行委派</b><span>3 支 · 本轮任务</span>
+              <button class="deleg-open" id="delegOpen">查看工作台 ↗</button>
+            </div>
+            <div class="deleg-agents">
+              <button class="deleg-chip" data-call="researcher"><i class="dot run"></i>researcher</button>
+              <button class="deleg-chip" data-call="reviewer"><i class="dot done"></i>code_reviewer</button>
+              <button class="deleg-chip" data-call="designer"><i class="dot fail"></i>ui_designer</button>
+            </div>
+          </div>
+          <div class="bubble assistant">
+            <p>code_reviewer 已经回来了：改动面收敛，结论贴在下面。</p>
+            <div class="ph-line w85"></div>
+            <div class="ph-line w40"></div>
+          </div>
+        </div>
+        <div class="composer"><div class="input-mock"><span>继续对话…</span><span class="send"></span></div></div>
+      </main>
+
+      <div class="ctx" id="ctxPanel">
+        <h3>项目上下文</h3>
+        <div class="ph-block">上下文占用示意</div>
+        <div class="ph-block">关键文件示意</div>
+        <div class="ph-block">近期改动示意</div>
+      </div>
+
+      <div class="wb" id="wb">
+        <div class="wb-inner">
+          <div class="wb-head">
+            <button class="wb-back" id="wbBack">← 返回对话</button>
+            <div class="wb-title"><span class="n" id="wbName">researcher</span><span class="r" id="wbRole">资料调研</span></div>
+            <div class="wb-state">
+              <span class="wb-elapsed" id="wbElapsed">03:32</span>
+              <span class="state-pill run" id="wbPill"><i class="dot run"></i><span id="wbPillText">运行中</span></span>
+              <button class="wb-agid" id="wbAgid" title="点击复制运行 ID">ag-1a2b3c4d</button>
+            </div>
+          </div>
+          <div class="wb-chips" id="wbChips"></div>
+          <div class="wb-body">
+            <div class="wb-sec"><h4>这支队被派了什么活</h4>
+              <div class="wb-snip" id="wbSnip"></div>
+              <div class="wb-flags" id="wbFlags"></div>
+            </div>
+            <div class="wb-sec"><h4>工作流 · 工具轨迹</h4>
+              <div class="trace" id="wbTrace"></div>
+            </div>
+            <div class="wb-sec"><h4>产出</h4>
+              <div class="wb-out" id="wbOut"></div>
+              <div class="wb-trunc">已按存储边界截断展示（2000 字符 / 20 条轨迹）
+                <button class="wb-jump" id="wbJump">在对话中查看委派卡 ↗</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rail" id="rail">
+        <div class="rail-inner">
+          <button class="gear" title="设置">⚙</button>
+          <div class="sess-chip" title="会话 ID（点击复制）">session_1794304570336_1</div>
+          <div id="cardHost" style="display:flex;flex-direction:column;gap:8px;"></div>
+        </div>
+      </div>
+
+      <div class="win-toast" id="winToast"></div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="gate-line">
+    <span class="gate-pill show" id="gatePill">rail 显示中</span>
+    <span class="gate-reason" id="gateReason"></span>
+  </div>
+  <div class="try-row" id="tryRow">
+    <span class="try-label">试一下：</span>
+    <button class="try"><b>点右侧悬浮卡</b> → 打开工作台</button>
+    <button class="try"><b>工作台内点 chip</b> → 三支之间横跳</button>
+    <button class="try"><b>Esc / ← 返回对话</b> → 切回聊天</button>
+    <button class="try"><b>窗宽切 900</b> → 空间门藏卡，委派卡 ↗ 顶上</button>
+    <button class="try"><b>开上下文面板</b> → rail 让位</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var now = Date.now();
+  var AGENTS = [
+    {
+      callId: 'researcher', name: 'researcher', role: '资料调研', state: 'running',
+      agentId: 'ag-1a2b3c4d', startedAt: now - 212000,
+      snip: '并行收集右侧浮动卡与 WebView2 宿主窗口行为的相关资料，汇总结论与风险点。',
+      flags: [],
+      trace: [
+        { name: 'web_search', arg: '"窗口布局同步消息风暴"', st: 'ok' },
+        { name: 'web_fetch', arg: 'learn.microsoft.com/windows/win32/api/winuser/', st: 'ok' },
+        { name: 'web_search', arg: '"WS_EX_TRANSPARENT 命中测试"', st: 'run' }
+      ],
+      out: [
+        '已定位 3 篇直接相关资料：',
+        '· 宿主 DLL 在主线程对辅助窗逐个同步 SetWindowPos —— 官方文档确认该调用带同步语义；',
+        '· WM_NCPAINT 经 SendMessage 派发时阻塞到重绘完成；',
+        '· WS_EX_TRANSPARENT 窗口参与命中测试穿透，但布局仍由宿主驱动。',
+        '正在提取第三篇的关键段落…'
+      ],
+      livePool: [
+        '第三篇结论拿到：透明区域的命中测试不经过宿主，布局消息才会。',
+        '补充一篇 2019 年的 Chromium issue，症状一致，官方标记为 wontfix。',
+        '资料齐了，正在汇总成对比表…'
+      ]
+    },
+    {
+      callId: 'reviewer', name: 'code_reviewer', role: '代码评审', state: 'done',
+      agentId: 'ag-9f8e7d6c', startedAt: now - 271000, durationSec: 243,
+      snip: '评审本刀涉及的三个改动面：平台配置、建窗路径、CSS 方角适配。',
+      flags: [{ t: '命中存档断点 · 续跑', c: 'info' }],
+      trace: [
+        { name: 'read_file', arg: 'src/ui/sessionSidebar.ts', st: 'ok' },
+        { name: 'search_files', arg: '"transparent"', st: 'ok' },
+        { name: 'diff_files', arg: 'tauri.conf.json ↔ tauri.windows.conf.json', st: 'ok' }
+      ],
+      out: [
+        '结论：改动面收敛，两处建议——',
+        '· 平台文件的镜像字段已有契约测试锁定，无需追加；',
+        '· critical.css 的方角规则与 window-maximized 归零规则并存，建议合并为单一选择器组，降低未来漂移面。',
+        '整体判定：可合入。'
+      ]
+    },
+    {
+      callId: 'designer', name: 'ui_designer', role: '界面设计', state: 'failed',
+      agentId: 'ag-5c4b3a21', startedAt: now - 188000, durationSec: 96,
+      snip: '为窄窗场景出浮动卡隐藏态的过渡方案草图。',
+      flags: [{ t: '自愈重试 ×2 后失败', c: 'warn' }],
+      trace: [
+        { name: 'read_file', arg: 'src/ui/critical.css', st: 'ok' },
+        { name: 'search_files', arg: '"agent-worker"', st: 'bad' }
+      ],
+      out: ['中断前已产出的部分：确定隐藏动画走 200ms 位移 + 淡出，方向向右。后续因检索超时中断。'],
+      error: 'search_files 连续两次超时（90s），自愈重试仍未恢复，本次委派按失败结算。'
+    }
+  ];
+
+  var $ = function (id) { return document.getElementById(id); };
+  var winEl = $('win'), railEl = $('rail'), cardHost = $('cardHost');
+  var wbEl = $('wb'), ctxEl = $('ctxPanel'), toastEl = $('winToast');
+  var current = AGENTS[0], gateWasHidden = false, toastTimer = null, liveTimer = null, tickTimer = null;
+
+  /* ── rail 卡片 ── */
+  function stateText(s) { return s === 'running' ? '运行中' : s === 'done' ? '已完成' : '失败'; }
+  function clock(ts) { var d = new Date(ts), p = function (n) { return (n < 10 ? '0' : '') + n; }; return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()); }
+  function elapsedSec(a) { var end = a.state === 'done' || a.state === 'failed' ? a.startedAt + a.durationSec * 1000 : Date.now(); return Math.max(0, Math.round((end - a.startedAt) / 1000)); }
+  function mmss(s) { var m = Math.floor(s / 60), r = s % 60; return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r; }
+
+  function renderRail() {
+    cardHost.textContent = '';
+    AGENTS.forEach(function (a) {
+      var card = document.createElement('button');
+      card.className = 'acard ' + a.state;
+      card.setAttribute('aria-label', '打开 ' + a.name + ' 工作台');
+      var badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'AGENT';
+      var go = document.createElement('span'); go.className = 'acard-go'; go.textContent = '›';
+      var name = document.createElement('div'); name.className = 'name'; name.textContent = a.name;
+      var meta = document.createElement('div'); meta.className = 'meta';
+      if (a.state === 'running') {
+        var dot = document.createElement('i'); dot.className = 'live-dot';
+        meta.appendChild(dot);
+      }
+      var time = document.createElement('span'); time.textContent = clock(a.startedAt);
+      meta.appendChild(time);
+      if (a.flags.length && a.flags[0].c === 'warn') {
+        var rt = document.createElement('span'); rt.className = 'retry-tag'; rt.textContent = '重试×2';
+        meta.appendChild(rt);
+      }
+      card.appendChild(badge); card.appendChild(go); card.appendChild(name); card.appendChild(meta);
+      card.addEventListener('click', function () { openWb(a.callId); });
+      cardHost.appendChild(card);
+    });
+  }
+
+  /* ── 工作台 ── */
+  function renderChips() {
+    var host = $('wbChips'); host.textContent = '';
+    AGENTS.forEach(function (a) {
+      var chip = document.createElement('button');
+      chip.className = 'wb-chip' + (a.callId === current.callId ? ' on' : '');
+      var dot = document.createElement('i'); dot.className = 'dot ' + (a.state === 'running' ? 'run' : a.state === 'done' ? 'done' : 'fail');
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(a.name + (a.state === 'running' ? '' : ' · ' + stateText(a.state))));
+      chip.addEventListener('click', function () { switchAgent(a.callId); });
+      host.appendChild(chip);
+    });
+  }
+
+  function renderWb() {
+    $('wbName').textContent = current.name;
+    $('wbRole').textContent = current.role;
+    $('wbAgid').textContent = current.agentId;
+    $('wbAgid').classList.remove('copied');
+    var pill = $('wbPill');
+    pill.className = 'state-pill ' + (current.state === 'running' ? 'run' : current.state === 'done' ? 'done' : 'fail');
+    $('wbPillText').textContent = stateText(current.state);
+    $('wbElapsed').textContent = mmss(elapsedSec(current));
+
+    $('wbSnip').textContent = current.snip;
+    var flags = $('wbFlags'); flags.textContent = '';
+    (current.flags || []).forEach(function (f) {
+      var el = document.createElement('span'); el.className = 'wb-flag ' + (f.c || ''); el.textContent = f.t; flags.appendChild(el);
+    });
+
+    var errBox = $('wbSnip').parentElement.querySelector('.wb-err');
+    if (errBox) errBox.remove();
+    if (current.error) {
+      var e = document.createElement('div'); e.className = 'wb-err'; e.textContent = '失败原因：' + current.error;
+      $('wbSnip').parentElement.appendChild(e);
+    }
+
+    var trace = $('wbTrace'); trace.textContent = '';
+    current.trace.forEach(function (t) {
+      var row = document.createElement('div'); row.className = 'trow';
+      var icon = document.createElement('i'); icon.className = 'dot ' + (t.st === 'ok' ? 'done' : t.st === 'run' ? 'run' : 'fail');
+      var nm = document.createElement('span'); nm.className = 'tname'; nm.textContent = t.name;
+      var arg = document.createElement('span'); arg.className = 'targ'; arg.textContent = t.arg;
+      var st = document.createElement('span'); st.className = 'tst ' + (t.st === 'ok' ? 'ok' : t.st === 'run' ? 'run' : 'bad');
+      st.textContent = t.st === 'ok' ? '✓ 完成' : t.st === 'run' ? '● 运行中' : '✗ 失败';
+      row.appendChild(icon); row.appendChild(nm); row.appendChild(arg); row.appendChild(st);
+      trace.appendChild(row);
+    });
+
+    var out = $('wbOut'); out.textContent = '';
+    var lines = current.out.slice(-6);
+    lines.forEach(function (l, i) {
+      out.appendChild(document.createTextNode(l));
+      if (i < lines.length - 1) out.appendChild(document.createTextNode('\n'));
+    });
+    if (current.state === 'running') {
+      out.appendChild(document.createTextNode('\n'));
+      var caret = document.createElement('i'); caret.className = 'caret'; out.appendChild(caret);
+    }
+    renderChips();
+  }
+
+  function openWb(callId) {
+    var a = AGENTS.find(function (x) { return x.callId === callId; });
+    if (!a) return;
+    current = a;
+    renderWb();
+    wbEl.classList.add('open');
+  }
+  function switchAgent(callId) {
+    var a = AGENTS.find(function (x) { return x.callId === callId; });
+    if (!a) return;
+    current = a; renderWb();
+  }
+  function closeWb() { wbEl.classList.remove('open'); }
+
+  $('wbBack').addEventListener('click', closeWb);
+  $('wbJump').addEventListener('click', function () {
+    closeWb();
+    var d = $('delegCard');
+    d.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    d.classList.add('flash');
+    setTimeout(function () { d.classList.remove('flash'); }, 1400);
+  });
+  $('delegOpen').addEventListener('click', function () { openWb(current.callId); });
+  $('wbAgid').addEventListener('click', function () {
+    try { void navigator.clipboard.writeText(current.agentId); } catch (e) { /* 无剪贴板就只亮提示 */ }
+    $('wbAgid').classList.add('copied');
+    setTimeout(function () { $('wbAgid').classList.remove('copied'); }, 1200);
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && wbEl.classList.contains('open')) closeWb();
+  });
+
+  /* ── 空间门：< 1080px 或上下文面板展开 → rail 隐藏 ── */
+  var GATE_W = 1080;
+  function gateCheck(fromUser) {
+    var w = winEl.clientWidth;
+    var ctxOpen = ctxEl.classList.contains('open');
+    var hide = w < GATE_W || ctxOpen;
+    railEl.classList.toggle('hidden-by-gate', hide);
+    var pill = $('gatePill');
+    pill.className = 'gate-pill ' + (hide ? 'hide' : 'show');
+    pill.textContent = hide ? 'rail 已隐藏（空间门）' : 'rail 显示中';
+    var reasons = [];
+    if (w < GATE_W) reasons.push('窗宽 ' + w + 'px < 1080px');
+    if (ctxOpen) reasons.push('上下文面板展开，rail 让位');
+    $('gateReason').textContent = 'mock 实测 ' + w + 'px · ' + (hide ? '命中：' + reasons.join('；') : '未命中');
+    if (hide && !gateWasHidden) toast('空间不足：悬浮卡已隐藏 —— 工作台入口在对话的委派卡 ↗');
+    gateWasHidden = hide;
+  }
+  function toast(msg) {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600);
+  }
+
+  /* 窗宽预设 */
+  var seg = $('widthSeg');
+  seg.addEventListener('click', function (ev) {
+    var b = ev.target.closest('button'); if (!b) return;
+    Array.prototype.forEach.call(seg.children, function (x) { x.classList.remove('on'); });
+    b.classList.add('on');
+    var w = parseInt(b.dataset.w, 10);
+    winEl.style.setProperty('--win-w', w === 0 ? '100%' : 'min(100%, ' + w + 'px)');
+  });
+  $('ctxToggle').addEventListener('click', function () {
+    var on = ctxEl.classList.toggle('open');
+    this.classList.toggle('on', on);
+  });
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    /* 直接跳变，不做过渡监听 */
+  }
+  winEl.addEventListener('transitionend', function (ev) { if (ev.target === winEl) gateCheck(false); });
+  window.addEventListener('resize', function () { gateCheck(false); });
+
+  /* 主题 */
+  var root = document.documentElement;
+  var themeBtn = $('themeToggle');
+  themeBtn.addEventListener('click', function () {
+    var dark = root.getAttribute('data-theme') === 'dark' ||
+      (!root.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    root.setAttribute('data-theme', dark ? 'light' : 'dark');
+  });
+
+  /* 运行中 agent 的活性：产出缓慢追加 + 计时 */
+  var poolIdx = 0;
+  liveTimer = setInterval(function () {
+    var a = AGENTS[0];
+    if (a.state !== 'running' || poolIdx >= a.livePool.length) { clearInterval(liveTimer); return; }
+    a.out.push(a.livePool[poolIdx++]);
+    if (current.callId === a.callId && wbEl.classList.contains('open')) renderWb();
+  }, 3400);
+  tickTimer = setInterval(function () {
+    if (current.state === 'running' && wbEl.classList.contains('open')) {
+      $('wbElapsed').textContent = mmss(elapsedSec(current));
+    }
+  }, 1000);
+
+  /* 试玩清单（第二组按钮真正驱动 demo） */
+  var tryRow = document.querySelectorAll('.legend .try');
+  tryRow[0].addEventListener('click', function () { openWb('researcher'); });
+  tryRow[1].addEventListener('click', function () {
+    if (!wbEl.classList.contains('open')) openWb('researcher');
+    switchAgent(current.callId === 'researcher' ? 'designer' : 'researcher');
+  });
+  tryRow[2].addEventListener('click', function () {
+    if (wbEl.classList.contains('open')) closeWb(); else toast('工作台没开——先点右侧卡片或委派卡 ↗');
+  });
+  tryRow[3].addEventListener('click', function () {
+    seg.children[2].click();
+    if (wbEl.classList.contains('open')) closeWb();
+  });
+  tryRow[4].addEventListener('click', function () { $('ctxToggle').click(); });
+
+  /* 启动 */
+  renderRail();
+  renderWb();
+  gateCheck(false);
+})();
+</script>

@@ -5,6 +5,18 @@ export interface AgentActivityPanelHandle {
   update(activities: SessionAgentActivity[], options?: { historical?: boolean; sessionId?: string }): void;
 }
 
+/** 空间门阈值（工作台设计 §2，2026-11-12 定案）：窗口 minWidth 1000，
+ *  1000–1080 区间 rail 要占掉转写 ~11% 的宽度——藏优于挤。 */
+export const AGENT_RAIL_MIN_VIEWPORT = 1080;
+
+/** 空间门谓词（纯函数，测试不碰 DOM）：任一条件命中即整条 rail 让位——
+ *  ① 视口宽度不足；② #context-panel 展开（右侧被上下文面板占据，
+ *  z 30 > rail z 18，现状是叠压，改让位）。只藏不卸：隐藏期间 rail 照常
+ *  收事件、照常更新数据，只是不画。 */
+export function agentRailSpaceGateHit(innerWidth: number, contextPanelExpanded: boolean): boolean {
+  return innerWidth < AGENT_RAIL_MIN_VIEWPORT || contextPanelExpanded;
+}
+
 /** The rail renders the badge / name / start time only — `output` and
  *  `toolTrace` ride along for the session snapshot and are never displayed.
  *  Bound them at the single funnel that writes into the host's activity list:
@@ -12,8 +24,9 @@ export interface AgentActivityPanelHandle {
  *  per tool call made the persisted payload grow with how much a delegation
  *  produced instead of how many delegations ran, and the whole list is cloned
  *  and re-serialized into storage on every save. */
-const MAX_ACTIVITY_OUTPUT_CHARS = 2_000;
-const MAX_ACTIVITY_TRACE_ENTRIES = 20;
+// 同界导出给工作台（显示边界 = 存储边界，工作台设计 §3.5）。
+export const MAX_ACTIVITY_OUTPUT_CHARS = 2_000;
+export const MAX_ACTIVITY_TRACE_ENTRIES = 20;
 
 function boundActivityPayload(activity: SessionAgentActivity): SessionAgentActivity {
   const { output, toolTrace } = activity;
@@ -57,7 +70,9 @@ export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
     || (!activity.lifecycle && (!activity.status || activity.status === 'running'));
 }
 
-function stateClass(activity: SessionAgentActivity, historical: boolean): string {
+/** 状态类名判定（rail 卡与工作台共用同一状态语汇——零新视觉语汇，
+ *  工作台设计 §3.4）。historical 会话里仍亮着的卡归为 paused（快照不再动）。 */
+export function stateClass(activity: SessionAgentActivity, historical: boolean): string {
   if (historical && isAgentActivityActive(activity)) return 'paused';
   // 阶段 12: an explicit pause is its own state — visually distinct from a
   // failure, and (unlike historical) resumable.
@@ -79,6 +94,10 @@ function startedClock(ts: number | undefined): string {
 
 export function createAgentActivityPanel(
   initialSessionId = '',
+  /** 刀 3（工作台设计 §3.3）：卡片可点——运行中/完成/失败卡都开放，
+   *  点击进 Agent 工作台（callId 寻址）。三行卡片契约不动：不加状态文字，
+   *  可点性走视觉（cursor + hover 抬升 + 尾部 ›，见 styles.css）。 */
+  hooks?: { onOpenAgent?: (callId: string) => void },
 ): AgentActivityPanelHandle {
   const el = document.createElement('aside');
   el.className = 'agent-activity-rail';
@@ -87,37 +106,11 @@ export function createAgentActivityPanel(
 
   // No rail header (the "本轮协作 / 协作现场" block): the cards themselves are
   // the entire UI — a header only added a second surface covering the chat.
-  // The one exception (2026-09-23 user request): the rail must carry the
-  // SESSION id, so a card can be quoted together with its conversation
-  // ("session_… 的 web_searcher 报错了"). One quiet mono line above the cards —
-  // click copies the full id; not a titled section, no second surface.
-  const sessionChip = document.createElement('div');
-  sessionChip.className = 'agent-activity-session';
-  sessionChip.title = '会话 ID（点击复制）';
-  sessionChip.addEventListener('click', () => {
-    const id = sessionChip.textContent ?? '';
-    if (!id) return;
-    try {
-      void navigator.clipboard?.writeText(id);
-    } catch { /* clipboard unavailable — the full id is still in the tooltip */ }
-    sessionChip.classList.add('copied');
-    sessionChip.title = '已复制会话 ID';
-    window.setTimeout(() => {
-      sessionChip.classList.remove('copied');
-      sessionChip.title = '会话 ID（点击复制）';
-    }, 1200);
-  });
-
+  // The session id chip (2026-09-23) is retired (2026-11-12 user request):
+  // the id has no business on the main window's top-right corner.
   const list = document.createElement('div');
   list.className = 'agent-activity-list';
-  el.append(sessionChip, list);
-
-  const setSessionId = (id: string): void => {
-    sessionChip.textContent = id;
-    // No id (brand-new session before its first save) → no empty chip line.
-    sessionChip.style.display = id ? '' : 'none';
-  };
-  setSessionId(initialSessionId);
+  el.append(list);
 
   const rows = new Map<string, {
     row: HTMLElement;
@@ -134,7 +127,6 @@ export function createAgentActivityPanel(
       rows.clear();
       activeCallIds.clear();
       list.replaceChildren();
-      setSessionId(sessionId);
     }
     const historical = options.historical === true;
     // Live entry animation is strictly session-local: restored sessions render
@@ -173,6 +165,13 @@ export function createAgentActivityPanel(
         const row = document.createElement('article');
         row.className = 'agent-worker';
         row.dataset.callId = activity.callId;
+        // 刀 3：整卡可点进工作台。click 只挂一次（卡 DOM 常驻复用），
+        // callId 从 dataset 读——卡的 callId 永不变化。
+        if (hooks?.onOpenAgent) {
+          row.classList.add('agent-worker--clickable');
+          const callId = activity.callId;
+          row.addEventListener('click', () => hooks.onOpenAgent?.(callId));
+        }
         // Three rows only, per the card contract: the "Agent" badge (cyan =
         // an active worker), the machine name (+ instance number when the
         // same agent was delegated more than once), and the start time.
@@ -192,7 +191,11 @@ export function createAgentActivityPanel(
       // 第 2 期第四刀：分支事件在轨道卡上亮灯——续跑带一个安静的强调色，
       // 自愈重试带一个脉冲（活性不靠文字，守住三行的卡片契约）。
       const retrying = activeNow && (activity.attempt ?? 0) > 0;
+      // 整串重写必须带 --clickable（2026-11-12 真机反馈：hover 没有手型）——
+      // 它只在首次创建时挂（170 行），这里的每次刷新若不补回，第一拍 update
+      // 就把手型抹掉；click 监听还在，卡成了「能点但不像能点」。
       entry.row.className = `agent-worker agent-worker--${state}`
+        + (hooks?.onOpenAgent ? ' agent-worker--clickable' : '')
         + (entering ? ' agent-worker--entering' : '')
         + (retrying ? ' agent-worker--retrying' : '')
         + (activity.resumed ? ' agent-worker--resumed' : '');

@@ -303,6 +303,11 @@ body {
 #chat-view.landing #chat, #chat-view.landing #input-bar { display: none; }
 #chat-view:not(.landing) #chat { display: flex; }
 #agent-activity-host[hidden] { display: none !important; }
+/* 空间门（工作台设计 §2，2026-11-12）：空间不够时整条 rail 让位。独立
+   class 而非 hidden 属性——hidden 归「本会话无活动/挂载权」管（chat.ts
+   mount/hideAgentActivitySurface），gate 归「空间不够」管（chat.ts
+   applyAgentRailSpaceGate），两口互不覆盖，都放行 rail 才可见。 */
+#agent-activity-host.gate-hidden { display: none !important; }
 /* Floating overlay (see the full rule + rationale in styles.css): absolutely
  * positioned over the chat's right side, transparent host, sub-agent cards
  * as the only surface — the conversation is never squeezed by a 200px rail.
@@ -406,18 +411,9 @@ body {
 .boot-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 @media (max-width: 720px) {
-  /* Narrow windows: the floating rail docks to the bottom edge as a sheet
-     instead of covering the chat's right column. */
-  #agent-activity-host {
-    top: auto;
-    bottom: 0;
-    left: 0;
-    width: 100%;
-    max-width: none;
-    max-height: 40vh;
-    border-top: 1px solid var(--border-light);
-  }
-  .agent-activity-rail { padding: 14px 16px 16px; }
+  /* Narrow-window layout. The agent rail is deliberately ABSENT here: the
+     ≤720px bottom sheet was retired with the space gate (2026-11-12) — the
+     gate's 1080px threshold fires first and hides the rail entirely. */
   #chat { padding: 40px 16px 16px; }
   #input-bar { padding: 0 16px 16px; }
   #landing-content { gap: 28px; }
