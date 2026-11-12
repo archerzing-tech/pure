@@ -182,11 +182,29 @@ export class SessionSidebar {
    */
   private loadSequence = 0;
 
+  /**
+   * Monotonic visible-session switch counter. setActive is the single funnel
+   * every conversation switch goes through (new chat, send-to-first-session,
+   * sidebar click, resetToLanding, dock/tray navigation). A slow load() in
+   * flight must not present its session after an UNRELATED switch happened
+   * mid-await: 2026-11-12 真机定案的 workspace 错位正是这个窗口——大会话
+   * 的 loadSession 读盘数秒，期间用户点了「新对话」并发出第一问，慢 load
+   * 随后返回，presentSession 把旧卡的 workspace 灌给了彼时的新会话（任务
+   * 跑在错误工作区，落盘也是错的）。isLoadStale 因此要求点击代与更替代
+   * 双双未变；loadSequence 只拦「更新的点击」，拦不住这类非点击更替。
+   */
+  private sessionSwitchSeq = 0;
+
   constructor(deps: SessionSidebarDeps) {
     this.deps = deps;
   }
 
   setActive(id: string | null): void {
+    // 只在可见会话「真的换了」时换代：load 流程自己（openSession 的
+    // activeSessionCb 链、presentSession 收尾）会用目标 id 回调进来，同 id
+    // 不得把在飞的 load 误杀成 stale。
+    if (this.currentActiveId === id) return;
+    this.sessionSwitchSeq += 1;
     this.currentActiveId = id;
     document.querySelectorAll('.sidebar-session-item').forEach(el => {
       el.classList.toggle('active', el.getAttribute('data-sid') === id);
@@ -270,6 +288,12 @@ export class SessionSidebar {
    * rebuilt from its stored snapshot. */
   async load(id: string): Promise<void> {
     const seq = ++this.loadSequence;
+    const switchSeq = this.sessionSwitchSeq;
+    // 点击即预登记目标会话：此后本 load 自己的 openSession→activeSessionCb
+    // 链会用同一 id 回调 setActive，预登记让那次回调识别为同会话（不换代、
+    // 不误杀在飞的校验）；真正的更替（点新对话/发首问/点别的卡）必然带着
+    // 不同的 id 进 setActive，换代即作废本 load（见 sessionSwitchSeq 注释）。
+    this.currentActiveId = id;
     // 点击即反馈：加载中状态挂上，再开始真正的读盘（2026-09-29 用户反馈）。
     this.markSwitching(id);
     const loaded = await this.deps.loadSession(id);
@@ -277,9 +301,9 @@ export class SessionSidebar {
     // (first turn still running). The controller owns the whole transcript in
     // memory — re-show it warm instead of silently dropping the click.
     if (!loaded && this.deps.chat.hasOpenSession(id)) {
-      if (this.isLoadStale(seq)) return;
+      if (this.isLoadStale(seq, switchSeq)) return;
       const opened = this.deps.chat.openSession(id);
-      if (this.isLoadStale(seq)) return;
+      if (this.isLoadStale(seq, switchSeq)) return;
       this.clearSwitching();
       this.presentSession(opened, id);
       return;
@@ -287,7 +311,7 @@ export class SessionSidebar {
     // A newer load request superseded this one (rapid session clicking): the
     // latest click owns the transcript — drop this stale result entirely,
     // including its tail effects (render / focus).
-    if (this.isLoadStale(seq)) return;
+    if (this.isLoadStale(seq, switchSeq)) return;
     // 会话级模型覆盖（2026-11-06）：存档里的模型随恢复固化进会话表——重启后
     // 模型跟会话回来（A deepseek / B glm 各自保持），不是都回全局默认。
     if (loaded) this.deps.chat.adoptSessionModel(id, loaded.provider ?? '', loaded.model ?? '');
@@ -307,13 +331,13 @@ export class SessionSidebar {
       // transcript was the one already on screen, so "nothing to load" was
       // true; now it reads as a dead card (2026-09-26 用户反馈).
       const opened = this.deps.chat.openSession(id);
-      if (this.isLoadStale(seq)) return;
+      if (this.isLoadStale(seq, switchSeq)) return;
       this.clearSwitching();
       this.presentSession(opened, id, loaded.workspace || '');
       return;
     }
     const opened = this.deps.chat.openSession(id);
-    if (this.isLoadStale(seq)) return;
+    if (this.isLoadStale(seq, switchSeq)) return;
     this.deps.pasteChips.clear();
     if (opened.warm) {
       // The session's own live controller is still running exactly as the user
@@ -325,7 +349,7 @@ export class SessionSidebar {
       if (opened.host.dataset.restored === 'pending') {
         // fall through to the cold rebuild path below
       } else {
-        if (this.isLoadStale(seq)) return;
+        if (this.isLoadStale(seq, switchSeq)) return;
         this.clearSwitching();
         this.setActive(id);
         this.deps.onSessionActivated();
@@ -344,9 +368,9 @@ export class SessionSidebar {
     await this.deps.chat.syncEffectiveWorkspace();
     // A newer click may have landed while we resolved the workspace — its
     // load owns the transcript from here on.
-    if (this.isLoadStale(seq)) return;
+    if (this.isLoadStale(seq, switchSeq)) return;
     await this.deps.renderMessages(loaded.snapshot, opened.host);
-    if (this.isLoadStale(seq)) return;
+    if (this.isLoadStale(seq, switchSeq)) return;
     // 冷加载完成：切换中的态摘掉（setActive 的 active 高亮接过视觉棒）。
     this.clearSwitching();
     this.setActive(id);
@@ -354,9 +378,10 @@ export class SessionSidebar {
     this.deps.focusPrompt();
   }
 
-  /** True when a load captured at `seq` has been superseded by a newer click. */
-  private isLoadStale(seq: number): boolean {
-    return seq !== this.loadSequence;
+  /** True when a load captured at `seq`/`switchSeq` was superseded by a newer
+   *  click OR by any unrelated visible-session switch (see sessionSwitchSeq). */
+  private isLoadStale(seq: number, switchSeq: number): boolean {
+    return seq !== this.loadSequence || switchSeq !== this.sessionSwitchSeq;
   }
 
   /** Make an opened session the visible one and PRESENT it. An empty

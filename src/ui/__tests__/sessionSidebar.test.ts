@@ -185,6 +185,75 @@ describe('SessionSidebar load() 进入契约', () => {
     expect(events).toContain('focusPrompt');
     expect(events).not.toContain('landing');
   });
+
+  it('慢读盘期间发生会话更替（点新对话/发首问）：load 整体作废，绝不把旧卡 workspace 灌给新会话（2026-11-12 真机错位定案）', async () => {
+    // 真机事故链：大会话 loadSession 读盘数秒，期间用户点「+」开了新对话
+    // 并发出首问；慢 load 随后返回，presentSession 把旧卡的 workspace 灌进
+    // 彼时的 current——任务跑在错误工作区，落盘也是错的。守卫 = 更替代：
+    // setActive 到不同 id（null=点新对话、新会话 id=发首问）即作废在飞 load。
+    const setWorkspaceCalls: string[] = [];
+    let releaseDisk: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { releaseDisk = resolve; });
+    const { sidebar, state, events } = makeSidebar({
+      // 读盘停在半途：大会话的秒级磁盘读，由 releaseDisk 放行。
+      disk: (id) => id === 'session_slow_1'
+        ? gate.then(() => ({
+            snapshot: { modelContext: { messages: [{ role: 'user', content: '旧卡内容' }] } },
+            workspace: '/ws/stale', updatedAt: 1, messageCount: 1, sessionId: id,
+          })) as never
+        : null,
+      chat: { setWorkspace: (path: string) => { setWorkspaceCalls.push(path); } },
+    });
+
+    const pending = sidebar.load('session_slow_1');
+    // 让 load 真正挂进 await（微任务推进到 loadSession 的 gate 上）。
+    await Promise.resolve();
+    await Promise.resolve();
+    // await 窗口内的会话更替：用户点了「+」（newChatSession → setActive(null)）。
+    sidebar.setActive(null);
+    releaseDisk!();
+    await pending;
+
+    expect(state.opened).toEqual([]); // 不 openSession、不渲染、不抢焦点
+    expect(events).not.toContain('rendered');
+    expect(events).not.toContain('focusPrompt');
+    expect(events).not.toContain('landing');
+    expect(setWorkspaceCalls).toEqual([]); // 旧卡的 /ws/stale 绝不出手
+  });
+
+  it('load 流程自身的 openSession→setActive(同 id) 回调不作废自己：预登记只拦真更替', async () => {
+    // 真实链路里 openSession→makeActive→activeSessionCb→main.ts→setActive(id)
+    // 与 load 目标同 id；守卫若无条件换代会把每个冷加载误杀成 stale。
+    const { sidebar, state, events } = makeSidebar({
+      disk: (id) => id === 'session_self_1'
+        ? {
+            snapshot: { modelContext: { messages: [{ role: 'user', content: '正常卡' }] } },
+            workspace: '/ws/self', updatedAt: 1, messageCount: 1, sessionId: id,
+          }
+        : null,
+      chat: {
+        openSession: (sessionId) => {
+          state.opened.push(sessionId);
+          // 模拟真实回填链：openSession 让可见会话变化，宿主把高亮打回来。
+          sidebar.setActive(sessionId);
+          return {
+            controller: {
+              getMessages: () => state.messagesOf(sessionId),
+              isStreaming: () => state.streamingOf(sessionId),
+            } as never,
+            host: document.createElement('div'),
+            warm: state.live.has(sessionId),
+          };
+        },
+      },
+    });
+
+    await sidebar.load('session_self_1');
+
+    expect(state.opened).toEqual(['session_self_1']);
+    expect(events).toContain('rendered');
+    expect(events).toContain('focusPrompt');
+  });
 });
 
 // 列表形态（2026-09-27 用户定调）：「会话就是会话，跟放在哪个工作空间无关」
