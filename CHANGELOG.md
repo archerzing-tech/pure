@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.5
+
+**Windows 第四轮卡死定案：Windows 全线关透明，断 WebView2 宿主透明辅助窗消息风暴的存在理由（mac 侧零变化）**
+
+一、根因（4.7.4 真机取证，RIP 采样定案）。`transparent:true` 窗使 WebView2 宿主（EmbeddedBrowserWebView.dll，微软闭源，pure 无修改权）常驻 16 个 `Chrome_WidgetWin_0` 透明辅助窗（WS_EX_TRANSPARENT），宿主在主线程对它们逐个同步 `SetWindowPos` + `SendMessage(WM_NCPAINT)` + `ShowWindow(SW_SHOWNOACTIVATE)`；流式重排喂料→循环再触发重排，自激不收敛→消息泵停转 hung——这就是「窗口操作即卡死」的机理。窗口矩形恒定排除尺寸震荡，栈 20+ 帧全在宿主 DLL；公开 issue 库无同款签名，属未上报死角。
+
+二、修复：Windows 一律不透明方角，mac 保留透明圆角。主窗走 `tauri.windows.conf.json` 平台覆盖（`transparent:false`；RFC 7396 数组整体替换语义，平台文件带完整窗定义，base 保持 mac 语义）；侧栏「+」新窗 `transparent:!isWindows`；critical.css 给 win 下 body 铺底 + `#window-root`/`#boot-splash` 方角（不透明窗口下圆角四角会垫白）；菜单「新建窗口」整段 `#[cfg(target_os = "macos")]` Windows 不编译，实证无需改动。契约测试 ×5 锁漂移：平台文件镜像主窗全部字段（transparent 除外）、四件 browser args 三建窗路径同值、平台文件不得丢 v4.7.3 的 `mainBinaryName:"pure-app"`（ms-gamingoverlay 根治）与 NSIS 安装器钩子、lib.rs 不得出现第二个 `.transparent(`。诚实边界与代价：Windows 版窗口从 6px 圆角变方角（不透明窗口的固有代价）；喂料源侧现成应急开关为设置内「流式渲染」关闭（纯文本流 + 完成整段渲染）。
+
+验证：bun test 全量 5307 例 0 fail（含平台配置契约新用例）、typecheck 与 build:vite 绿、x86_64-pc-windows-gnu 交叉 check 绿 + 破坏性探针实证平台配置真被编译期消费（坏 JSON 在 `generate_context!` 处报 unable to parse）。
+
 ## v4.7.4
 
 **模型列表拆探测门禁改「配置即列表」（opencode/claude-code 式）+ API Key 必须/非必须 toggle**
