@@ -45,7 +45,8 @@ import { distillSkill, pickDistillSource } from './shared/skillDistill';
 import { writeAutoSkillDir } from './cliSkillStore';
 import { promptBudgetForProvider, promptBudgetLiveLine } from './shared/providers';
 import { buildExtractPrompt, type SummarizeForExtract } from './shared/webExtract';
-import { promptAssembler } from './shared/PromptAssembler';
+import { promptAssembler, type PromptSkill } from './shared/PromptAssembler';
+import { loadAppSkills } from './cliRepl';
 import { promptObservability } from './shared/promptObservability';
 import { FilePromptObservationStore } from './shared/FilePromptObservationStore';
 import { failureHistoryFromMemories } from './engine/FailurePolicy';
@@ -732,6 +733,13 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
       memory: memoryStore,
       memoryProjectPath: projectPath,
       evolutionEnabled,
+      // Skill 索引进子 agent（2026-11-12）：与 assembleCliPrompt 的 skills
+      // 同源（hub 收窄三字段 + CLI app skills，path 恒携带），spawn 时实时
+      // 解析，buildSkills 单一出典。
+      skillsProvider: (): PromptSkill[] => [
+        ...(loadConfig()?.hubSkills ?? []).map(({ name, body, enabled }) => ({ name, body, enabled })),
+        ...loadAppSkills(),
+      ],
     });
     for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);

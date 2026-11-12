@@ -1525,6 +1525,99 @@ describe('SubagentOrchestrator 继承性格内核（铁律 4）', () => {
   });
 });
 
+// Skill 索引进子 agent（2026-11-12，渐进披露对齐 Anthropic Agent Skills）：
+// skillsProvider 与主对话 assemble 同源，buildSkills 单一出典生成索引段；
+// spawn 时实时解析；失败降级不注入；缺席 = 委派 prompt 逐字节不变。
+describe('SubagentOrchestrator skill index injection (skillsProvider)', () => {
+  const SKILLS = [
+    { name: 'pdf', path: '/home/x/.pure/skills/pdf/SKILL.md', description: 'Process PDF documents', enabled: true },
+    { name: 'hub-inline', body: 'Inline hub skill instructions.', enabled: true },
+  ];
+
+  it('spawn 的 systemPrompt 带渐进披露索引段，且排在角色 prompt 之前（内核之后）', async () => {
+    const llm = new SystemPromptCapturingLLM();
+    const orch = new SubagentOrchestrator({
+      llm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+      skillsProvider: () => SKILLS,
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    const spawned = llm.systemPrompts[0]!;
+    // 单一出典：与主对话同一函数生成的头部指令
+    expect(spawned).toContain('Installed skills (progressive disclosure)');
+    // path 型索引行 + hub 全文内联型都在
+    expect(spawned).toContain('<skill name="pdf" path="/home/x/.pure/skills/pdf/SKILL.md">');
+    expect(spawned).toContain('<skill name="hub-inline">');
+    // 位置：内核 → skill 索引 → 角色 prompt（共享缓存前缀最大化）
+    expect(spawned.indexOf('<character_core>')).toBeLessThan(spawned.indexOf('Installed skills'));
+    expect(spawned.indexOf('Installed skills')).toBeLessThan(spawned.indexOf('You are test_researcher'));
+  });
+
+  it('skillsProvider 抛错降级为不注入，委派照飞（P0-3 同款纪律）', async () => {
+    const llm = new SystemPromptCapturingLLM();
+    const orch = new SubagentOrchestrator({
+      llm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+      skillsProvider: () => { throw new Error('skill scan down'); },
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    const result = await orch.execute(toolCall('test_researcher', { prompt: 'research X' }));
+    expect(result.success).toBe(true);
+    expect(llm.systemPrompts[0]).not.toContain('Installed skills');
+  });
+
+  it('缺席（不传 skillsProvider）= 委派 prompt 与旧逐字节一致', async () => {
+    const baselineLlm = new SystemPromptCapturingLLM();
+    const baseline = new SubagentOrchestrator({
+      llm: baselineLlm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+    });
+    baseline.register(subagentDef('test_researcher'));
+    await baseline.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    const nowLlm = new SystemPromptCapturingLLM();
+    const now = new SubagentOrchestrator({
+      llm: nowLlm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+    });
+    now.register(subagentDef('test_researcher'));
+    await now.execute(toolCall('test_researcher', { prompt: 'research X' }));
+
+    expect(nowLlm.systemPrompts[0]).toBe(baselineLlm.systemPrompts[0]); // 逐字节一致
+  });
+
+  it('实时解析：每次 spawn 重新调 provider（同回合新装 skill 即见）', async () => {
+    const llm = new SystemPromptCapturingLLM();
+    let installed = false;
+    const orch = new SubagentOrchestrator({
+      llm, parentTools: stubAdapter, parentToolsDefs: [], defaultBudget: BUDGET,
+      skillsProvider: () => (installed ? SKILLS : []),
+    });
+    orch.register(subagentDef('test_researcher'));
+
+    await orch.execute(toolCall('test_researcher', { prompt: 'first run' }));
+    expect(llm.systemPrompts[0]).not.toContain('Installed skills');
+    installed = true;
+    await orch.execute(toolCall('test_researcher', { prompt: 'second run after install' }));
+    expect(llm.systemPrompts[1]).toContain('Installed skills (progressive disclosure)');
+  });
+
+  it('宿主接线在位（源级锁）：GUI 与 CLI 的 provider 都与各自主对话 skills 同源', () => {
+    const chat = readFileSync(join(import.meta.dir, '../../ui/chat.ts'), 'utf8');
+    // GUI：hub 全文内联型 + app skills，与 assemble 的 skills 字段同源。
+    expect(chat).toContain('subagentSkillsProvider: async () => [');
+    expect(chat).toContain('...(config.hubSkills ?? []),');
+    expect(chat.split('subagentSkillsProvider').length - 1).toBe(1); // CodingAgent 透传只有一处
+    const cli = readFileSync(join(import.meta.dir, '../../cliHarness.ts'), 'utf8');
+    // CLI：hub 收窄三字段 + loadAppSkills，与 assembleCliPrompt 同源。
+    expect(cli).toContain('skillsProvider: (): PromptSkill[] => [');
+    expect(cli).toContain('...loadAppSkills()');
+    // 单一出典：orchestrator 不手拼索引文本，只调 buildSkills。
+    const src = readFileSync(join(import.meta.dir, '../SubagentOrchestrator.ts'), 'utf8');
+    expect(src).toContain('buildSkills(await this.config.skillsProvider())');
+    expect(src).not.toContain('Installed skills (progressive disclosure)');
+  });
+});
+
 describe('SubagentOrchestrator probeResumeCheckpoint (第 2 期第三刀)', () => {
   it('misses on an empty store, hits with the archived turn count after a pause', async () => {
     const store = new MemoryStateStore();

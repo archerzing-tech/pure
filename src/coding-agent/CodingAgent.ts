@@ -25,7 +25,7 @@ import {
   type ToolQuarantineCard,
   type ToolQuarantineState,
 } from '../harness/toolQuarantine';
-import { PromptAssembler, type PromptBudgetConfig } from '../shared/PromptAssembler';
+import { PromptAssembler, type PromptBudgetConfig, type PromptSkill } from '../shared/PromptAssembler';
 import { sanitizeToolDefs } from '../shared/schemaSanitize';
 import type { PromptObservability } from '../shared/promptObservability';
 import type { MCPServerConfig } from '../adapter/mcp/MCPTransport';
@@ -138,6 +138,11 @@ export interface CodingAgentConfig {
   evolutionEnabled?: boolean;
   /** P0 棘轮 — 本次会话注入的技能名单，进 memoryInjection 观测供贡献切片。 */
   injectedSkills?: string[];
+  /** Skill 索引注入（2026-11-12）——宿主提供与主对话 assemble 同源的
+   *  skills 列表闭包（hub + app skills），子 agent spawn 时实时解析一次，
+   *  与主对话走同一个 buildSkills 出典（渐进披露）。缺席 = 子 agent 不带
+   *  索引（现状逐字节不变）。 */
+  subagentSkillsProvider?: () => PromptSkill[] | Promise<PromptSkill[]>;
   subagents?: SubagentDefinition[];
   /** 阶段 13.3 — role → 进化 overlay（宿主从 ~/.pure/personas/ 装载后传入）；
    * 命中角色的 system prompt 在 base 之后追加 overlay。 */
@@ -244,6 +249,9 @@ export class CodingAgent {
       memory: config.memory,
       memoryProjectPath: config.projectPath,
       evolutionEnabled: config.evolutionEnabled,
+      // Skill 索引（2026-11-12）：宿主的 skills 解析闭包透传，spawn 时实时
+      // 解析（同回合安装的 skill 即见），buildSkills 单一出典生成索引段。
+      skillsProvider: config.subagentSkillsProvider,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 

@@ -400,7 +400,13 @@ function usableSkillDescription(skill: PromptSkill): string {
   return raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw) ? raw : '';
 }
 
-function buildSkills(skills?: PromptSkill[]): string {
+/** Skill 索引段的单一出典：主对话走 fragment 管道（assemble → skills），
+ *  子 agent（SubagentOrchestrator spawn）直接拼本函数——同一段文本、同一套
+ *  三档条目语义（path 索引行 / hub 全文内联 / 知晓行）、同一份头部指令
+ *  （read_file 按需加载 + 本回合安装即用），对子 agent 全部成立：子 agent
+ *  工具面 = 父工具面（read_file / install_agent_skill 都在）。空列表返回
+ *  空串，拼接零痕迹。 */
+export function buildSkills(skills?: PromptSkill[]): string {
   const enabled = (skills ?? []).filter(
     (skill) => skill.enabled !== false && (skill.body || usableSkillDescription(skill)),
   );

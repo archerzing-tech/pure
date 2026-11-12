@@ -5689,6 +5689,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           ...(config.hubSkills ?? []).filter((s) => s.enabled).map((s) => s.name),
           ...(await loadAppSkills(effectiveWorkspace)).map((s) => s.name),
         ],
+        // Skill 索引进子 agent（2026-11-12，渐进披露对齐）：闭包与上方
+        // assemble 的 skills 同源（hub 全文内联型 + app skills；子 agent 恒
+        // 有文件系统，path 型索引不剥——委派只在 workspace 模式可发）。
+        // spawn 时实时解析：同回合安装的 skill 在 loadAppSkills 的 30s TTL
+        // 窗口内即见。
+        subagentSkillsProvider: async () => [
+          ...(config.hubSkills ?? []),
+          ...(await loadAppSkills(effectiveWorkspace)),
+        ],
         // E1.2 — cross-session failure history: traps past sessions recorded
         // in error_pattern memories escalate the failure ladder immediately.
         failureHistory: memoryEnabled

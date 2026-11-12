@@ -27,6 +27,7 @@ import { trimUnresolvedToolCalls } from '../harness/Harness';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
 import { activeCharacterCore, activeWorkOrderNote } from '../character';
 import { retrieveDelegationMemory } from './subagentMemory';
+import { buildSkills, type PromptSkill } from '../shared/PromptAssembler';
 import { THIRD_PARTY_SCOPE_NOTE_EN, THIRD_PARTY_SCOPE_NOTE_ZH } from '../shared/thirdPartyScope';
 import { currentTimeContext, formatResearchTimeBaseline } from '../shared/timeContext';
 import type { SubagentDefinition, SubagentResult } from './types';
@@ -250,6 +251,15 @@ export interface SubagentOrchestratorConfig {
    *  总开关关闭即整条自进化弧（含抵达子代理的部分）缺席，委派 prompt 与
    *  本焊点诞生前逐字节一致。 */
   evolutionEnabled?: boolean;
+  /** Skill 索引注入（2026-11-12，对齐 Anthropic Agent Skills 渐进披露）——
+   *  宿主提供与主对话 assemble 同源的 skills 列表（app skills + hub skills），
+   *  spawn 时实时解析一次：同回合刚装的 skill（loadAppSkills 的 30s TTL 窗口
+   *  内）即见。列表交给 PromptAssembler.buildSkills 生成「Installed skills
+   *  (progressive disclosure)」段——单一出典，子 agent 与主对话逐字节同段。
+   *  检索失败/抛错降级为不注入（P0-3 同款纪律）；缺席 = 现状（委派 prompt
+   *  逐字节不变）。子 agent 恒有文件系统（无 workspace 时委派工具不在模型
+   *  可见面），path 型索引行不开空头支票。 */
+  skillsProvider?: () => PromptSkill[] | Promise<PromptSkill[]>;
 }
 
 export class SubagentOrchestrator implements ToolAdapter {
@@ -635,11 +645,26 @@ export class SubagentOrchestrator implements ToolAdapter {
       // 汇报格式说明 +（P0-3）委派记忆块。删 overlay 文件即回滚——下一个会话
       // 自然回原样。
       const overlay = this.config.personaOverlays?.get(def.name);
+      // Skill 索引（2026-11-12）：spawn 时实时解析一次，buildSkills 生成与
+      // 主对话逐字节同段的渐进披露索引。位置钉在内核之后、角色 prompt 之前
+      // ——三支并行委派的 systemPrompt 共享前缀 = 内核 + 索引（全支同），
+      // 角色层才分叉，provider 隐式 context cache 的前缀命中最大化（主对话
+      // fragment 排序 stable-zone 纪律的自然延伸）；语义分层同样是
+      // 「你是谁 → 通用能力目录 → 你的分工」。provider 抛错降级为不注入，
+      // 委派照飞（P0-3 同款纪律）。
+      let skillBlock = '';
+      if (this.config.skillsProvider) {
+        try {
+          skillBlock = buildSkills(await this.config.skillsProvider());
+        } catch {
+          skillBlock = '';
+        }
+      }
       // 铁律 4（人格轨道刀 2）：支线继承主线**性格内核**，不自带人格——否则各干
       // 各的，用户感知就是精神分裂。内核垫在角色 prompt 之前：同一性格、不同
       // 分工（角色层 personaOverlays 只补能力，不改人格；见蓝图 §1 命名裁定）。
       // 与主对话（PromptAssembler）读的是同一个解析点，换内核时两处同源。
-      const systemPrompt = `${activeCharacterCore()}\n\n${applyPersonaOverlay(def.createSystemPrompt(args), overlay)}${subagentReportNote(def.name)}${memoryBlock}${activeWorkOrderNote()}`;
+      const systemPrompt = `${activeCharacterCore()}${skillBlock ? `\n\n${skillBlock}` : ''}\n\n${applyPersonaOverlay(def.createSystemPrompt(args), overlay)}${subagentReportNote(def.name)}${memoryBlock}${activeWorkOrderNote()}`;
       const userPrompt = typeof args.prompt === 'string'
         ? args.prompt
         : JSON.stringify(args);

@@ -260,7 +260,7 @@ function buildShellContextLine(): string {
  * and return the bodies for system-prompt injection — the same directory the
  * capability-gap protocol tells the agent to install community skills into.
  * Unreadable entries are skipped; a missing directory is an empty list. */
-function loadAppSkills(): PromptSkill[] {
+export function loadAppSkills(): PromptSkill[] {
   const home = process.env.HOME || os.homedir();
   const base = process.env.PURE_SKILLS_DIR?.trim() || `${home}/.pure`;
   const dirs = [`${base}/skills`, `${process.cwd()}/.agents/skills`];
