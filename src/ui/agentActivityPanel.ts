@@ -95,7 +95,7 @@ function startedClock(ts: number | undefined): string {
 export function createAgentActivityPanel(
   initialSessionId = '',
   /** 刀 3（工作台设计 §3.3）：卡片可点——运行中/完成/失败卡都开放，
-   *  点击进 Agent 工作台（callId 寻址）。三行卡片契约不动：不加状态文字，
+   *  点击进 Agent 工作台（callId 寻址）。四行卡片契约不动（2026-11-12 id 拆独立行）：不加状态文字，
    *  可点性走视觉（cursor + hover 抬升 + 尾部 ›，见 styles.css）。 */
   hooks?: { onOpenAgent?: (callId: string) => void },
 ): AgentActivityPanelHandle {
@@ -116,6 +116,7 @@ export function createAgentActivityPanel(
     row: HTMLElement;
     badge: HTMLElement;
     name: HTMLElement;
+    idline: HTMLElement;
     time: HTMLElement;
   }>();
   const activeCallIds = new Set<string>();
@@ -172,24 +173,27 @@ export function createAgentActivityPanel(
           const callId = activity.callId;
           row.addEventListener('click', () => hooks.onOpenAgent?.(callId));
         }
-        // Three rows only, per the card contract: the "Agent" badge (cyan =
-        // an active worker), the machine name (+ instance number when the
-        // same agent was delegated more than once), and the start time.
-        // No status text, no action lines — state is conveyed by the badge
-        // color and the card's state class.
+        // Four rows, per the card contract: the "Agent" badge (cyan = an
+        // active worker), the machine name (+ instance number when the same
+        // agent was delegated more than once), the run id on its own line,
+        // and the start time. No status text, no action lines — state is
+        // conveyed by the badge color and the card's state class.
         const badge = document.createElement('span');
         badge.className = 'agent-worker-badge';
         badge.textContent = 'Agent';
         const name = document.createElement('div');
         name.className = 'agent-worker-name';
+        const idline = document.createElement('div');
+        idline.className = 'agent-worker-idline';
+        idline.hidden = true;
         const time = document.createElement('div');
         time.className = 'agent-worker-time';
-        row.append(badge, name, time);
-        entry = { row, badge, name, time };
+        row.append(badge, name, idline, time);
+        entry = { row, badge, name, idline, time };
         rows.set(activity.callId, entry);
       }
       // 第 2 期第四刀：分支事件在轨道卡上亮灯——续跑带一个安静的强调色，
-      // 自愈重试带一个脉冲（活性不靠文字，守住三行的卡片契约）。
+      // 自愈重试带一个脉冲（活性不靠文字，守住四行的卡片契约（名字、id 各占一行））。
       const retrying = activeNow && (activity.attempt ?? 0) > 0;
       // 整串重写必须带 --clickable（2026-11-12 真机反馈：hover 没有手型）——
       // 它只在首次创建时挂（170 行），这里的每次刷新若不补回，第一拍 update
@@ -200,17 +204,24 @@ export function createAgentActivityPanel(
         + (retrying ? ' agent-worker--retrying' : '')
         + (activity.resumed ? ' agent-worker--resumed' : '');
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
-      // wraps instead of ellipsizing so the exact agent is always readable.
+      // ellipsized since the 2026-11-12 rail narrowing (wrap would blow the
+      // narrow card's height budget; the exact agent still shows in the
+      // workbench and the row title).
       entry.name.replaceChildren();
       entry.name.append(document.createTextNode(activity.agentName));
-      // The run id rides the name row as a quiet chip: every agent is
-      // individually quotable when something goes wrong ("ag-1a2b3c4d 报错了").
+      // Row 3: the run id on its OWN line (2026-11-12 用户反馈：收窄后名字行
+      // 放不下 id chip，被省略号截掉半个) — every agent stays individually
+      // quotable when something goes wrong ("ag-1a2b3c4d 报错了").
+      entry.idline.replaceChildren();
       if (activity.agentId) {
         const idChip = document.createElement('span');
         idChip.className = 'agent-worker-id';
         idChip.textContent = activity.agentId;
         idChip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
-        entry.name.append(idChip);
+        entry.idline.append(idChip);
+        entry.idline.hidden = false;
+      } else {
+        entry.idline.hidden = true;
       }
       entry.row.title = [
         activity.agentRole || activity.agentName,

@@ -129,7 +129,10 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
 
   const header = document.createElement('div');
   header.className = 'agent-wb-header';
-  header.append(backBtn, heading, histEl, statusEl, idChip);
+  // id chip 不进 header 行（2026-11-12 用户反馈：Windows 下把标题行行高撑高），
+  // 落到任务卡底部独立一行（见 taskCard.append）——header 行只剩纯文本与
+  // 状态 pill，任何平台的行高都稳定。
+  header.append(backBtn, heading, histEl, statusEl);
 
   const chips = document.createElement('div');
   chips.className = 'agent-wb-chips';
@@ -154,7 +157,7 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
   taskText.className = 'agent-wb-tasktext';
   const taskFlags = document.createElement('div');
   taskFlags.className = 'agent-wb-flags';
-  taskCard.append(taskText, taskFlags);
+  taskCard.append(taskText, taskFlags, idChip);
   const taskSection = document.createElement('section');
   taskSection.className = 'agent-wb-section';
   taskSection.append(taskLabel, taskCard);

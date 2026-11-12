@@ -337,7 +337,7 @@ describe('agent activity panel', () => {
     panel.update([activity({ callId: 'r', lifecycle: 'started', status: 'running', resumed: true })]);
     expect(panel.el.querySelector('[data-call-id="r"]')?.className).toContain('agent-worker--resumed');
 
-    // 自愈重试：脉冲类 + 悬停说明第几次——卡片本身不加文字，守住三行契约。
+    // 自愈重试：脉冲类 + 悬停说明第几次——卡片本身不加文字，守住四行契约（id 独占一行）。
     panel.update([activity({ callId: 'r', lifecycle: 'started', status: 'running', resumed: true, attempt: 2 })]);
     const row = panel.el.querySelector('[data-call-id="r"]') as HTMLElement;
     expect(row.className).toContain('agent-worker--retrying');

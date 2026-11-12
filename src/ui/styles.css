@@ -940,8 +940,10 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 
 .agent-wb-sub {
-  font-size: 11px;
-  color: var(--text-tertiary);
+  /* 2026-11-12 Windows 反馈「文字看不清」：字号 11→12、色 tertiary→secondary
+     （职责描述是重要信息，不按角落注释待遇处理）。 */
+  font-size: 12px;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -949,8 +951,9 @@ body.window-maximized .win-resize-zone { display: none; }
 
 .agent-wb-status {
   flex-shrink: 0;
-  font: 700 10px var(--font-mono);
-  letter-spacing: .05em;
+  /* 10px mono 在 Windows ClearType 下发虚，pill 类字号统一提到 10.5px。 */
+  font: 700 10.5px var(--font-mono);
+  letter-spacing: .04em;
   padding: 3px 10px;
   border-radius: 999px;
   border: 1px solid var(--border-light);
@@ -967,8 +970,8 @@ body.window-maximized .win-resize-zone { display: none; }
 
 .agent-wb-historical {
   flex-shrink: 0;
-  font: 700 10px var(--font-mono);
-  letter-spacing: .05em;
+  font: 700 10.5px var(--font-mono);
+  letter-spacing: .04em;
   padding: 3px 10px;
   border-radius: 999px;
   background: var(--bg-assistant);
@@ -976,15 +979,19 @@ body.window-maximized .win-resize-zone { display: none; }
   border: 1px solid var(--border-light);
 }
 
+/* id chip：2026-11-12 从 header 行挪进任务卡底部独立一行（Windows 下原位置
+   把标题行行高撑高）。皮与 .agent-wb-flag 同语感（安静 pill），保留点击复制。 */
 .agent-wb-idchip {
-  flex-shrink: 0;
+  align-self: flex-start;
   font: 11px var(--font-mono);
   color: var(--text-tertiary);
   cursor: copy;
   user-select: none;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
 }
+.agent-wb-idchip[hidden] { display: none; }
 .agent-wb-idchip:hover { color: var(--accent); background: var(--bg-assistant); }
 .agent-wb-idchip.copied { color: var(--accent); }
 
@@ -1010,7 +1017,7 @@ body.window-maximized .win-resize-zone { display: none; }
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
   transition: color .15s var(--ease-out), border-color .15s var(--ease-out), background .15s var(--ease-out);
@@ -1052,7 +1059,7 @@ body.window-maximized .win-resize-zone { display: none; }
   align-items: center;
   justify-content: center;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: 13px;
 }
 .agent-wb-content[hidden] + .agent-wb-empty { display: flex; }
 .agent-wb-empty[hidden] { display: none; }
@@ -1082,8 +1089,9 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 
 .agent-wb-tasktext {
-  font-size: 12px;
-  line-height: 1.55;
+  /* 2026-11-12 Windows 可读性：正文 12→13px。 */
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1097,8 +1105,8 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 
 .agent-wb-flag {
-  font: 700 10px var(--font-mono);
-  letter-spacing: .05em;
+  font: 700 10.5px var(--font-mono);
+  letter-spacing: .04em;
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--border-light);
@@ -1109,7 +1117,7 @@ body.window-maximized .win-resize-zone { display: none; }
 
 .agent-wb-error {
   width: 100%;
-  font: 11px var(--font-mono);
+  font: 12px var(--font-mono);
   color: var(--danger);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1120,7 +1128,7 @@ body.window-maximized .win-resize-zone { display: none; }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font: 11px var(--font-mono);
+  font: 12px var(--font-mono);
   color: var(--text);
 }
 
@@ -1148,7 +1156,8 @@ body.window-maximized .win-resize-zone { display: none; }
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   padding: 12px 14px;
-  font: 11px/1.6 var(--font-mono);
+  /* 2026-11-12 Windows 可读性：产出正文 11→12.5px（ClearType 下小 mono 发虚）。 */
+  font: 12.5px/1.65 var(--font-mono);
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1166,7 +1175,7 @@ body.window-maximized .win-resize-zone { display: none; }
 @keyframes agentWbCaret { 50% { opacity: 0; } }
 
 .agent-wb-output-note {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-tertiary);
   display: flex;
   align-items: center;
@@ -1175,8 +1184,8 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 
 /* ── 刀 3：卡片可点 + 委派卡跨链 ──
-   可点性走视觉（§3.3：三行卡片契约不动），hover 抬升复用卡片的既有阴影阶。
-   卡是纵向三行 flex，› 绝对定位到右上角（列布局里文档流追加会掉到 time 行
+   可点性走视觉（§3.3：四行卡片契约不动），hover 抬升复用卡片的既有阴影阶。
+   卡是纵向四行 flex，› 绝对定位到右上角（列布局里文档流追加会掉到 time 行
    下方，读起来像第四行）。 */
 .agent-worker--clickable { position: relative; cursor: pointer; transition: transform .15s var(--ease-out), box-shadow .15s var(--ease-out); }
 .agent-worker--clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.08); }
@@ -1661,13 +1670,22 @@ body.window-maximized .win-resize-zone { display: none; }
   font-size: 10.5px;
   font-weight: 600;
   line-height: 1.3;
-  /* 2026-11-12 用户反馈：rail 收窄后文字显示不下用省略号——旧契约
-     「id 全显换行」废除（换行把窄卡撑太高，省略号保卡片三行紧凑）。 */
+  /* 2026-11-12 用户反馈两拍：rail 收窄后文字显示不下用省略号；id 不再挤
+     名字行（收窄后 chip 被截掉半个），拆到独立一行（下方 idline）。 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: center;
 }
+/* Row 3: the run id on its own line — quiet centered pill, ellipsis when the
+   narrow rail still can't fit it (short ids ag-xxxxxxxx always fit). */
+.agent-worker-idline {
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-worker-idline[hidden] { display: none; }
 /* Divider between the name row and the start-time row. */
 .agent-worker-time {
   color: var(--text-tertiary);
@@ -1683,20 +1701,29 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 /* Persistent motion for ACTIVE workers: the card's whole job is "something is
    working right now", so it breathes — a soft cyan glow on the border plus a
-   badge opacity pulse. Opacity/border only: compositor-friendly, no layout. */
+   badge opacity pulse.
+   2026-11-12 性能刀：border-color/box-shadow 是 paint 层动画（每帧重绘边框，
+   WebView2 下活跃卡多时开销成倍），全部挪进 ::before 叠层只动 opacity ——
+   合成器直跑，主线程/paint 零帧；本体只有静态边框与底色 tint。 */
+.agent-worker {
+  position: relative;
+}
 .agent-worker--active {
   border-color: color-mix(in srgb, #22d3ee 45%, var(--border-light));
+}
+.agent-worker--active::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, #22d3ee 70%, var(--border-light));
+  box-shadow: 0 0 14px 0 rgba(34, 211, 238, 0.28);
+  pointer-events: none;
   animation: agentWorkerBreath 2s ease-in-out infinite;
 }
 @keyframes agentWorkerBreath {
-  0%, 100% {
-    border-color: color-mix(in srgb, #22d3ee 30%, var(--border-light));
-    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0), var(--shadow-md);
-  }
-  50% {
-    border-color: color-mix(in srgb, #22d3ee 70%, var(--border-light));
-    box-shadow: 0 0 14px 0 rgba(34, 211, 238, 0.28), var(--shadow-md);
-  }
+  0%, 100% { opacity: .3; }
+  50% { opacity: 1; }
 }
 .agent-worker--active .agent-worker-badge {
   animation: agentBadgeBreath 2s ease-in-out infinite;
@@ -1720,11 +1747,22 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 .agent-worker--retrying {
   border-color: color-mix(in srgb, #f59e0b 65%, var(--border-light));
+}
+/* 琥珀脉冲同款 opacity 化（与 active 呼吸共用 ::before 锚，同一张卡只挂一种
+   state 类，不冲突）。 */
+.agent-worker--retrying::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, #f59e0b 65%, var(--border-light));
+  box-shadow: 0 0 12px 0 rgba(245, 158, 11, 0.34);
+  pointer-events: none;
   animation: agentWorkerRetry 1.2s ease-in-out infinite;
 }
 @keyframes agentWorkerRetry {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0), var(--shadow-md); }
-  50% { box-shadow: 0 0 12px 0 rgba(245, 158, 11, 0.34), var(--shadow-md); }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
 }
 .agent-worker--done { border-color: color-mix(in srgb, var(--success) 30%, var(--border-light)); }
 .agent-worker--failed,
@@ -1791,9 +1829,14 @@ body.window-maximized .win-resize-zone { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-worker--entering { animation: none; }
+  /* 2026-11-12 动效 opacity 化：呼吸/脉冲都住在 ::before 叠层上，关动画
+     要点名它；静止时给静态半亮（活性提示仍在，只是不动）。 */
   .agent-worker--active { animation: none; }
+  .agent-worker--active::before,
   .agent-worker--active .agent-worker-badge { animation: none; }
+  .agent-worker--active::before { opacity: .5; }
   .agent-worker--retrying { animation: none; border-color: color-mix(in srgb, #f59e0b 65%, var(--border-light)); }
+  .agent-worker--retrying::before { animation: none; opacity: 1; }
 }
 
 /* ── Narrow windows: the rail overlays the conversation, so it shrinks —
@@ -14708,14 +14751,17 @@ button svg,
 /* Agent run id（ag-xxxxxxxx）：报错时报得出的定位符。只挂在浮动卡的名字行
    （会话卡按用户要求不带 ID），等宽小字一眼认得出是同一个 ID。 */
 .agent-worker-id {
-  flex: none;
-  margin-left: 5px;
-  padding: 1px 6px;
+  /* 2026-11-12：从名字行内联 chip 改为独占一行居中（rail 收窄后内联放不下）。 */
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 1px 7px;
   border-radius: 5px;
   font: 500 9.5px var(--font-mono, ui-monospace, monospace);
   letter-spacing: .02em;
   background: var(--bg-tertiary, rgba(128, 128, 128, .14));
-  color: var(--text-tertiary, #8a8f98);
+  color: var(--text-secondary, #6b6f76);
   white-space: nowrap;
   user-select: all;
 }
