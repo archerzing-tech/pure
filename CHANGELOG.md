@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.6
+
+**Agent 工作台（子 agent 详情页）落地 + 会话切换竞态根治（workspace 错位）+ rail 收窄让位主对话**
+
+一、Agent 工作台。2026-11-12 设计定稿（`docs/agent-workbench-2026-11.md`）把子 agent 呈现定成两层：对话委派卡=主要内容摘要，工作台=详情页显示全部。新增 `#agent-view` 整页工作台（与 settings 同款挤压机制）：头部（agent 名/职责/短 id chip/状态徽标——自愈重试次数与已用时长在场）+ chip 切换条横跳换人 + 任务描述 + 工具轨迹（≤20 条界内全量小重建）+ 产出段增量追加。产出全文：运行期钩子命中时工作台直显全文（突破 2000 字存档镜像），「完整产出见对话委派卡，跳过去 ↗」退役（详情页不踢皮球）；钩子未命中（历史回放）如实显示 2000 字存档镜像并注明。空间门（纯函数谓词）：视口宽 <1080 或 context panel 展开时 rail 整条让位；工作台打开期间 chrome 隐藏（角钮×2 + 侧栏把手 + rail），关闭恢复、Esc 先关工作台再关设置（双整页互斥）；全开时 chat 流式渲染挂起（transitionend 判定半开期不挂起），关闭解除，markdown 重试拍兜底追平。委派卡三落点挂 `↗` 入口（纯图标、语义走 title），点击按 callId 寻址进工作台。rail 收窄（2026-11-12 用户反馈）：`clamp(120px, 9.2vw, 148px)`（原 140/10.5vw/168）、≤1280px 段 128→112，给主对话让位；卡内 agent 名/时间戳显示不下改单行省略号（旧「id 全显换行」契约废除，窄卡不再被撑高）。附带同批 UI 反馈：委派卡间距统一、rail 卡 hover 手型（--clickable）、委派卡 header 与 body 颜色分层（--bg-card）。
+
+二、会话切换竞态根治（workspace 错位）。真机定案（2026-11-12）：大会话 `loadSession` 读盘的秒级窗口内点「+ 新对话」并发出首问，慢 load 返回后 `presentSession` 无条件把旧卡 workspace 灌给彼时的 current 新会话——任务跑在错误工作区、落盘也错。修复=单调会话更替代（`sessionSwitchSeq`）：`setActive` 是所有可见会话更替的必经点（点卡/点新对话/发首问懒创建/回 landing/托盘导航），id 变化才 bump 换代；`load()` 进入即预登记目标 id（自身 `openSession→activeSessionCb` 同 id 回调不误杀在飞校验），`isLoadStale` 双代校验（点击代 ∧ 更替代），慢返回撞上任何真更替即整体作废——不 openSession、不渲染、不抢焦点、不灌 workspace。真机复验：复刻同序列（点 1.7M tok 大卡 → 点 + → 发首问），新会话落盘 workspace 干净（修复前落成旧卡的 usetest）。附回归用例 ×2（真更替作废 / 自身回填链不自杀）。
+
+验证：bun test 全量 5337 例 5332 pass（1 fail 为 markdown 流式时序用例全量负载超时抖动，单跑 129 pass 全绿定案）、typecheck 绿、build:vite 绿（新模块 agentWorkbench 进 WebView）。
+
 ## v4.7.5
 
 **Windows 第四轮卡死定案：Windows 全线关透明，断 WebView2 宿主透明辅助窗消息风暴的存在理由（mac 侧零变化）**
