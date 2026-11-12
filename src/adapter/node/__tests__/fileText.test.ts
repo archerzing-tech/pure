@@ -101,6 +101,48 @@ describe('fileText extractFileText', () => {
     expect(note).toContain('soffice');
   });
 
+  it('extracts inlineStr + numeric cells from an xlsx (SheetJS default layout)', async () => {
+    // 旧实现只读 xl/sharedStrings.xml：SheetJS 默认写 inlineStr，整张表
+    // 返回空文本，read_file 侧再把它当 "(empty file)"——静默丢数据。
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([['名称', '金额'], ['北极星科技', 1234]]),
+      '报表',
+    );
+    const bytes = new Uint8Array(XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+    const { text, note } = await extractFileText(bytes, '报表.xlsx');
+    expect(note).toBe('');
+    expect(text).toContain('[工作表: 报表]');
+    expect(text).toContain('北极星科技');
+    expect(text).toContain('1234');
+  });
+
+  it('extracts an xlsx written with a shared-string table', async () => {
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['共享文本', 42]]), 'Sheet1');
+    const bytes = new Uint8Array(
+      XLSX.write(workbook, { type: 'array', bookType: 'xlsx', bookSST: true }) as ArrayBuffer,
+    );
+    const { text, note } = await extractFileText(bytes, 'shared.xlsx');
+    expect(note).toBe('');
+    expect(text).toContain('共享文本');
+    expect(text).toContain('42');
+  });
+
+  it('does not report a workbook without text as a silent empty file', async () => {
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['']]), 'Empty');
+    const bytes = new Uint8Array(XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+    const { text, note } = await extractFileText(bytes, 'empty.xlsx');
+    expect(text).toBe('');
+    expect(note).toContain('XLSX');
+    expect(note).not.toBe('');
+  });
+
   it('notes scanned PDFs as image-only', async () => {
     const pdf = '%PDF-1.4\n1 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n%%EOF';
     const { text, note } = pdfExtractText(new TextEncoder().encode(pdf));
@@ -141,6 +183,17 @@ describe('NodeToolAdapter read/search over documents', () => {
     const r = await adapter.execute(toolCall('read_file', { path: 'gbk.txt' }));
     expect(r.success).toBe(true);
     expect(String(r.result)).toContain('你好');
+  });
+
+  it('read_file returns content for an overlong single-line file', async () => {
+    // 单行 JSON / minified JS：旧实现返回 0 字符 + "以上是前 0 行"。
+    writeFileSync(join(workspace, 'data.json'), '[' + '1,'.repeat(20_000) + '1]');
+    const r = await adapter.execute(toolCall('read_file', { path: 'data.json' }));
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text.length).toBeGreaterThan(1000);
+    expect(text).toContain('首行过长');
+    expect(text).not.toContain('以上是前 0 行');
   });
 
   it('read_file extracts a real docx built in memory', async () => {

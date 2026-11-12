@@ -445,10 +445,12 @@ export class NodeToolAdapter implements ToolAdapter {
     // capToolResult 的 40k chars 留足余量，脚注在引擎截断下也能存活。
     const head = readFileHeadSlice(lines);
     if (head.count < lines.length) {
+      // 首行超长（单行 JSON / minified JS）时 count=0 但 text 非空：脚注换成
+      // "行号续读不可用"的出路文案，别再报"以上是前 0 行"把正文吞掉。
       return {
         id: `tool_${Date.now()}`,
         toolName: 'read_file',
-        result: `${head.text}\n\n${readFileHeadFooter(head.count, lines.length)}`,
+        result: `${head.text}\n\n${readFileHeadFooter(head.count, lines.length, head.partialFirstLine)}`,
         success: true,
         duration: Date.now() - start,
       };

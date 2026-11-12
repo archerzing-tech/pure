@@ -1407,6 +1407,9 @@ fn read_file_impl(
 ///  - head_lines：默认读（模型未给范围）只回头部切片 + 总行数 + 建议范围
 ///    脚注，不做硬截断。不给 head_lines 时全文返回——撤销快照 / artifact
 ///    预览 / overlay 守卫等内部调用方走这条路，语义与旧版完全一致。
+///  - 首行本身超预算（单行 JSON / minified JS / 单行 CSV）：返回首行前缀，
+///    不再出现"以上是前 0 行"、正文全丢的旧行为。行号范围表达不了"第 1 行
+///    的剩余部分"（startLine=2 会整行跳过），脚注改走字节/字符分段提取。
 fn slice_read_file_text(
     text: String,
     start_line: Option<usize>,
@@ -1427,17 +1430,34 @@ fn slice_read_file_text(
         return Ok(lines[s - 1..e].join("\n"));
     }
     let head = head_lines.unwrap_or(READ_FILE_HEAD_LINES);
+    // 预算按字符计（TS 侧同款）：中文行若按字节计，同样 32KB 只能给出约
+    // 1/3 的正文，GUI 侧的大文件读取会凭空多出两倍往返。
     let mut take = 0usize;
     let mut chars = 0usize;
     for line in lines.iter().take(head) {
-        if chars + line.len() + 1 > READ_FILE_HEAD_MAX_CHARS {
+        let len = line.chars().count();
+        if chars + len + 1 > READ_FILE_HEAD_MAX_CHARS {
             break;
         }
-        chars += line.len() + 1;
+        chars += len + 1;
         take += 1;
     }
     if take >= total {
         return Ok(text);
+    }
+    if take == 0 && head > 0 && !lines.is_empty() {
+        // 首行单独超预算：给前缀 + 专门的出路文案（脚注与 TS 侧逐字一致）。
+        let first = lines[0];
+        let shown: String = first
+            .chars()
+            .take(READ_FILE_HEAD_MAX_CHARS.saturating_sub(1))
+            .collect();
+        return Ok(format!(
+            "{}\n\n[read_file：首行过长（共 {} 字符），以上只显示该行前 {} 字符——按行号无法续读这一行的剩余部分。剩余内容请用 execute_command 按字节/字符分段提取（如 tail -c +N），或用 code_searcher 定位。]",
+            shown,
+            first.chars().count(),
+            shown.chars().count()
+        ));
     }
     // 脚注格式与 src/shared/readFileHead.ts 的 readFileHeadFooter 保持一致。
     Ok(format!(
@@ -1512,6 +1532,35 @@ mod read_file_slice_tests {
         assert!(out.contains("f2-aaa"));
         assert!(!out.contains("f3-aaa"));
         assert!(out.contains("以上是前 3 行，文件共 10 行。继续读用 startLine=4"));
+    }
+
+    #[test]
+    fn single_overlong_line_returns_a_prefix_instead_of_nothing() {
+        // 单行 JSON / minified JS：旧实现 count=0，正文全丢，模型只看到
+        // "以上是前 0 行"。现在给首行前缀 + 行号无法续读的出路文案。
+        let content = "x".repeat(40_000);
+        let ws = write_fixture("one-line", &content);
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        assert!(out.starts_with("xxxx"), "prefix present: {}", &out[..16.min(out.len())]);
+        assert!(out.contains("首行过长"), "partial notice: {}", out);
+        assert!(out.contains("无法续读"), "actionable continuation: {}", out);
+        assert!(!out.contains("以上是前 0 行"), "old zero-line footer is gone");
+        assert!(out.len() < 40_000, "prefix is bounded by the head budget");
+    }
+
+    #[test]
+    fn head_budget_counts_characters_not_bytes() {
+        // 中文行按字节计会让 32KB 预算只给出约 1/3 的正文；TS 侧按字符计，
+        // Rust 镜像必须同口径。每行 3000 个汉字 → 旧口径(char 4 字节)只能取
+        // 2 行，新口径能取 10 行。
+        let content = (1..=20)
+            .map(|i| format!("第{}行{}", i, "汉".repeat(2990)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ws = write_fixture("head-cjk", &content);
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        assert!(out.contains("第10行"), "10 lines fit in 32k chars: {}", &out[..40.min(out.len())]);
+        assert!(!out.contains("第11行"));
     }
 
     #[test]
@@ -3043,6 +3092,283 @@ fn zip_entries_xml_text(bytes: &[u8], predicate: impl Fn(&str) -> bool, tag: &st
     }
 }
 
+/// Read one ZIP entry as UTF-8 text (xlsx workbook / sheet / sharedStrings).
+fn zip_read_text<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    entry: &str,
+) -> Option<String> {
+    use std::io::Read as _;
+    let mut file = archive.by_name(entry).ok()?;
+    let mut xml = String::new();
+    file.read_to_string(&mut xml).ok()?;
+    Some(xml)
+}
+
+/// quick-xml 0.38+ delivers entities as their own event; re-serialize as
+/// `&name;` so a single unescape at cell/string close decodes them.
+fn push_xml_ref(bytes: &[u8], out: &mut String) {
+    let mut name = String::from_utf8_lossy(bytes).into_owned();
+    if name.starts_with('&') {
+        name.remove(0);
+    }
+    if name.ends_with(';') {
+        name.pop();
+    }
+    out.push('&');
+    out.push_str(&name);
+    out.push(';');
+}
+
+fn unescape_xml(raw: &str) -> String {
+    quick_xml::escape::unescape(raw)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// `<si>` entries of sharedStrings.xml, rich-text runs joined.
+fn xlsx_shared_strings(xml: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_si = false;
+    let mut in_t = false;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"si" => {
+                    in_si = true;
+                    current.clear();
+                }
+                b"t" if in_si => in_t = true,
+                _ => {}
+            },
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"si" => {
+                    out.push(unescape_xml(current.trim()));
+                    current.clear();
+                    in_si = false;
+                }
+                b"t" => in_t = false,
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                if in_t {
+                    if let Ok(text) = t.decode() {
+                        current.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if in_t {
+                    push_xml_ref(&r, &mut current);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// Sheet names in workbook order (`<sheet name="…" .../>`).
+fn xlsx_sheet_names(xml: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"sheet" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"name" {
+                        if let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
+                            names.push(value.into_owned());
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    names
+}
+
+/// One worksheet → one line per row, cells tab-separated. Covers shared
+/// strings (`t="s"`), inline strings (`t="inlineStr"`, SheetJS's default),
+/// numeric cells and cached formula values.
+fn xlsx_sheet_text(xml: &str, shared: &[String]) -> String {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut rows: Vec<String> = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut cell_type = String::new();
+    let mut value = String::new();
+    let mut in_value = false;
+    let mut in_text = false;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"c" => {
+                    cell_type.clear();
+                    value.clear();
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"t" {
+                            cell_type = String::from_utf8_lossy(&attr.value).into_owned();
+                        }
+                    }
+                }
+                b"v" => in_value = true,
+                b"t" => in_text = true,
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                if in_value || in_text {
+                    if let Ok(text) = t.decode() {
+                        value.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if in_value || in_text {
+                    push_xml_ref(&r, &mut value);
+                }
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"v" => in_value = false,
+                b"t" => in_text = false,
+                b"c" => {
+                    let raw = unescape_xml(value.trim());
+                    let text = if cell_type == "s" {
+                        raw.parse::<usize>()
+                            .ok()
+                            .and_then(|index| shared.get(index))
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        raw
+                    };
+                    if !text.is_empty() {
+                        row.push(text);
+                    }
+                    value.clear();
+                    cell_type.clear();
+                }
+                b"row" => {
+                    if !row.is_empty() {
+                        rows.push(std::mem::take(&mut row).join("\t"));
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    if !row.is_empty() {
+        rows.push(row.join("\t"));
+    }
+    rows.join("\n")
+}
+
+/// `xl/worksheets/sheet<N>.xml` → N (workbook order = sheet order in practice).
+fn worksheet_entry_index(name: &str) -> Option<usize> {
+    name.strip_prefix("xl/worksheets/sheet")?
+        .strip_suffix(".xml")?
+        .parse()
+        .ok()
+}
+
+/// Extract text from an xlsx/xlsm workbook. The old sharedStrings-only path
+/// missed inline strings (SheetJS writes those by default) and numeric cells,
+/// so those workbooks came back as an empty file. Reads every worksheet and
+/// keeps the sheet name ahead of its rows.
+fn xlsx_extract_text(bytes: &[u8]) -> (String, String) {
+    const MAX_TEXT_CHARS: usize = 4_000_000;
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(archive) => archive,
+        Err(_) => {
+            return (
+                String::new(),
+                "XLSX 解析失败：不是有效的 ZIP/XLSX 文件。".to_string(),
+            )
+        }
+    };
+    let shared = zip_read_text(&mut archive, "xl/sharedStrings.xml")
+        .map(|xml| xlsx_shared_strings(&xml))
+        .unwrap_or_default();
+    let names = zip_read_text(&mut archive, "xl/workbook.xml")
+        .map(|xml| xlsx_sheet_names(&xml))
+        .unwrap_or_default();
+    let mut entries: Vec<(usize, String)> = (0..archive.len())
+        .filter_map(|index| archive.by_index(index).ok().map(|file| file.name().to_string()))
+        .filter_map(|name| worksheet_entry_index(&name).map(|index| (index, name)))
+        .collect();
+    entries.sort_by_key(|(index, _)| *index);
+    if entries.is_empty() {
+        // 非标准/部分损坏的容器：至少把 sharedStrings 里的文本交出去，
+        // 不让旧版能读到的东西在改造后变成硬失败。
+        let shared_text = shared
+            .iter()
+            .filter(|item| !item.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !shared_text.trim().is_empty() {
+            return (shared_text, String::new());
+        }
+        return (
+            String::new(),
+            "XLSX 未提取到文本内容：找不到工作表（文件可能损坏，或不是有效的 Excel 文件）。"
+                .to_string(),
+        );
+    }
+    let mut out = String::new();
+    for (position, (_, entry)) in entries.iter().enumerate() {
+        let Some(xml) = zip_read_text(&mut archive, entry) else {
+            continue;
+        };
+        let text = xlsx_sheet_text(&xml, &shared);
+        if text.trim().is_empty() {
+            continue;
+        }
+        if let Some(sheet_name) = names.get(position) {
+            if !sheet_name.is_empty() {
+                out.push_str(&format!("[工作表: {}]\n", sheet_name));
+            }
+        }
+        out.push_str(&text);
+        out.push('\n');
+        if out.chars().count() >= MAX_TEXT_CHARS {
+            out.push_str(&format!(
+                "[... 表格内容超过 {} 字符，仅提取到这里]\n",
+                MAX_TEXT_CHARS
+            ));
+            break;
+        }
+    }
+    let text = out.trim().to_string();
+    if text.is_empty() {
+        (
+            String::new(),
+            "XLSX 未提取到文本内容（工作表可能只含图片/图表，或数据在图片里）。可用 execute_command 转换后读取，或截图后按图片读取。"
+                .to_string(),
+        )
+    } else {
+        (text, String::new())
+    }
+}
+
 /// Locate every `stream … endstream` body in a PDF byte buffer (raw scan —
 /// the lossy-string conversion would corrupt binary stream data).
 fn pdf_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -3497,9 +3823,11 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
         .unwrap_or_default();
     // ZIP-based office formats (docx / xlsx / pptx / odt…)
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        if matches!(ext.as_str(), "xlsx" | "xlsm") {
+            return xlsx_extract_text(bytes);
+        }
         let (text, note): (Option<String>, String) = match ext.as_str() {
             "docx" | "docm" => (zip_entry_xml_text(bytes, "word/document.xml", "w:t"), String::new()),
-            "xlsx" | "xlsm" => (zip_entry_xml_text(bytes, "xl/sharedStrings.xml", "t"), String::new()),
             "pptx" | "pptm" => (zip_entries_xml_text(bytes, |name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"), "a:t"), String::new()),
             "odt" | "ods" | "odp" => (zip_entries_xml_text(bytes, |name| name == "content.xml", "text:p"), String::new()),
             _ => (None, format!("文件扩展名 .{} 不是支持的文档格式（支持 docx/xlsx/pptx/odt/ods/odp）。", ext)),
@@ -5968,6 +6296,60 @@ mod file_text_extraction_tests {
         let bytes = make_docx_bytes();
         let text = zip_entry_xml_text(&bytes, "word/document.xml", "w:t").unwrap();
         assert!(text.contains("北极星科技有限公司"));
+    }
+
+    fn make_xlsx_bytes() -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let mut put = |name: &str, body: &str| {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        };
+        put(
+            "xl/workbook.xml",
+            "<?xml version=\"1.0\"?><workbook><sheets><sheet name=\"报表\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>",
+        );
+        put(
+            "xl/sharedStrings.xml",
+            "<?xml version=\"1.0\"?><sst><si><t>共享文本</t></si></sst>",
+        );
+        put(
+            "xl/worksheets/sheet1.xml",
+            "<?xml version=\"1.0\"?><worksheet><sheetData>\
+             <row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>北极星科技</t></is></c><c r=\"B1\"><v>1234</v></c></row>\
+             <row r=\"2\"><c r=\"A2\" t=\"s\"><v>0</v></c><c r=\"B2\" t=\"inlineStr\"><is><t>研发&amp;产品</t></is></c></row>\
+             </sheetData></worksheet>",
+        );
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn xlsx_extracts_inline_strings_numbers_and_shared_strings() {
+        // 旧实现只读 xl/sharedStrings.xml：SheetJS 默认写 inlineStr，整个表格
+        // 返回空文本（read_file 侧当成 "(empty file)"），数字也不进上下文。
+        let (text, note) = xlsx_extract_text(&make_xlsx_bytes());
+        assert!(note.is_empty(), "note should be empty: {}", note);
+        assert!(text.contains("[工作表: 报表]"), "sheet name kept: {}", text);
+        assert!(text.contains("北极星科技"), "inlineStr extracted: {}", text);
+        assert!(text.contains("1234"), "numeric cell extracted: {}", text);
+        assert!(text.contains("共享文本"), "shared string extracted: {}", text);
+        assert!(text.contains("研发&产品"), "XML entity decoded: {}", text);
+    }
+
+    #[test]
+    fn xlsx_without_sheets_returns_an_actionable_note() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("docProps/app.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"<Properties/>").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let (text, note) = xlsx_extract_text(&bytes);
+        assert!(text.is_empty());
+        assert!(note.contains("没有工作表") || note.contains("找不到工作表"), "{}", note);
     }
 
     #[test]

@@ -147,6 +147,87 @@ export async function zipEntriesXmlText(
   }
 }
 
+/** Cap on extracted spreadsheet text: read_file only ever shows a 32KB head,
+ *  but extraction runs before slicing — a pathological sheet must not
+ *  materialize unbounded strings. */
+const MAX_XLSX_TEXT_CHARS = 4_000_000;
+
+/** Last-resort fallback for workbooks SheetJS rejects (hand-built or
+ *  non-standard OOXML): sweep every `xl/**.xml` entry for `<t>` text, which
+ *  covers shared strings and inline strings alike. Keeps the old
+ *  sharedStrings-only capability from disappearing behind a hard failure. */
+async function xlsxFallbackText(bytes: Uint8Array): Promise<string> {
+  try {
+    const { default: JSZip } = await import('jszip');
+    const zip = await JSZip.loadAsync(bytes);
+    const parts: string[] = [];
+    for (const name of Object.keys(zip.files).sort()) {
+      if (!name.startsWith('xl/') || !name.endsWith('.xml')) continue;
+      const file = zip.files[name];
+      if (!file || file.dir) continue;
+      const xml = await file.async('string');
+      const text = xmlTextInTag(xml, 't');
+      if (text.trim()) parts.push(text);
+    }
+    return parts.join('\n');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Extract text from an xlsx/xlsm workbook via SheetJS. The old
+ * sharedStrings-only regex missed every workbook that writes inline strings
+ * (SheetJS itself does by default) and every numeric cell — those files were
+ * returned as "(empty file)" with an empty note, i.e. silent data loss.
+ * sheet_to_csv covers shared strings, inline strings, numbers and cached
+ * formula values, and the sheet name is kept so the model knows where a row
+ * came from. Falls back to an XML sweep when SheetJS rejects the container.
+ */
+export async function xlsxExtractText(bytes: Uint8Array): Promise<ExtractedText> {
+  const viaSheetJs = await xlsxViaSheetJs(bytes);
+  if (viaSheetJs.text.trim()) return viaSheetJs;
+  const fallback = await xlsxFallbackText(bytes);
+  if (fallback.trim()) return { text: fallback, note: '' };
+  return viaSheetJs;
+}
+
+async function xlsxViaSheetJs(bytes: Uint8Array): Promise<ExtractedText> {
+  try {
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.read(bytes, { type: 'array' });
+    const names: string[] = workbook.SheetNames ?? [];
+    if (names.length === 0) {
+      return { text: '', note: 'XLSX 解析后没有工作表（文件可能损坏，或不是有效的 Excel 文件）。' };
+    }
+    const parts: string[] = [];
+    let chars = 0;
+    for (const name of names) {
+      const sheet = workbook.Sheets[name];
+      if (!sheet) continue;
+      const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
+      if (!csv.trim()) continue;
+      const block = `[工作表: ${name}]\n${csv}`;
+      parts.push(block);
+      chars += block.length;
+      if (chars >= MAX_XLSX_TEXT_CHARS) {
+        parts.push(`[... 表格内容超过 ${MAX_XLSX_TEXT_CHARS} 字符，仅提取到这里]`);
+        break;
+      }
+    }
+    const text = parts.join('\n\n').trim();
+    if (!text) {
+      return {
+        text: '',
+        note: 'XLSX 未提取到文本内容（工作表可能只含图片/图表，或数据在图片里）。可用 execute_command 转换后读取，或截图后按图片读取。',
+      };
+    }
+    return { text, note: '' };
+  } catch (error) {
+    return { text: '', note: `XLSX 解析失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 // ── PDF ────────────────────────────────────────────────────────────────────
 
 /** Locate every `stream … endstream` body in a PDF byte buffer (raw scan). */
@@ -594,12 +675,13 @@ export async function extractFileText(bytes: Uint8Array, path: string): Promise<
   const ext = (path.split('.').pop() ?? '').toLowerCase();
   // ZIP-based office formats (docx / xlsx / pptx / odt…)
   if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]) || startsWith(bytes, [0x50, 0x4b, 0x05, 0x06])) {
+    if (ext === 'xlsx' || ext === 'xlsm') {
+      return xlsxExtractText(bytes);
+    }
     let text: string | null = null;
     let note = '';
     if (ext === 'docx' || ext === 'docm') {
       text = await zipEntryXmlText(bytes, 'word/document.xml', 'w:t');
-    } else if (ext === 'xlsx' || ext === 'xlsm') {
-      text = await zipEntryXmlText(bytes, 'xl/sharedStrings.xml', 't');
     } else if (ext === 'pptx' || ext === 'pptm') {
       text = await zipEntriesXmlText(bytes, (name) => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'), 'a:t');
     } else if (ext === 'odt' || ext === 'ods' || ext === 'odp') {

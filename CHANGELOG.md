@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.7
+
+**大文件读取修复：单行文件不再读空、表格不再静默为空**
+
+一、单行超长文件读成空（P0-1）。真机判例：0.89MB 的单行 JSON / minified JS，`read_file` 返回 0 字符正文，模型只看到「以上是前 0 行，文件共 1 行」——压缩数据、单行 CSV 一律不可读。根因是头部切片按整行累加，首行本身超 32k 预算时 `count=0` 且正文为空。修复：首行超预算改为返回首行前缀（按码点边界截断，不切 surrogate pair）+ 专用脚注——行号范围表达不了「第 1 行的剩余部分」，改指 `execute_command` 按字节/字符分段提取或 `code_searcher`。Rust 侧同款，同时把头部预算从字节改为字符：中文文件此前在 GUI 只能拿到约 1/3 的正文。
+
+二、xlsx 静默空文件（P0-2）。旧实现只读 `xl/sharedStrings.xml`，SheetJS 默认写 inlineStr、数字单元格也不在 sharedStrings 里，于是一张有内容的表被提取成 0 字符，`read_file` 再把它当 `(empty file)`——不报错、数据全丢。TS 侧改走 SheetJS（`sheet_to_csv`，覆盖 sharedStrings / inlineStr / 数字 / 公式缓存值，保留工作表名），SheetJS 拒绝的容器回退到 `xl/**.xml` 文本扫描；Rust 侧新增原生抽取器（sharedStrings + 每张 worksheet 的 `t="s"` / `inlineStr` / 数字 / 实体解码），旧 sharedStrings 路径保留为兜底。无文本时返回明确 note，不再静默成空文件。
+
+验证：bun test 全量 5346 pass（1 fail 为 `paintStreaming` 全量负载下的 5s 时序抖动，单跑 10 pass）、`cargo test --lib` 295 pass、typecheck 绿；新增单行超长（TS/Rust）、中文头部预算、inlineStr / sharedStrings xlsx 用例。
+
 ## v4.7.6
 
 **Agent 工作台（子 agent 详情页）落地 + 会话切换竞态根治（workspace 错位）+ rail 收窄让位主对话**
