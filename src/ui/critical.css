@@ -113,6 +113,18 @@ body {
   -webkit-font-smoothing: auto;
 }
 
+/* Windows 宿主窗不透明（2026-11-12 活锁定案：透明窗 = WebView2 宿主同步
+   消息风暴的存在理由，tauri.windows.conf.json 关 transparent 配套）：方角
+   全铺底。透明 body + 6px 圆角会把 WebView 白底从四角垫出来；boot-splash
+   与 window-root 同刀同值。mac 侧不受影响（属性只在 win 打上）。 */
+[data-platform="win"] body {
+  background: var(--bg);
+}
+[data-platform="win"] #window-root,
+[data-platform="win"] #boot-splash {
+  border-radius: 0;
+}
+
 #app-shell {
   display: flex;
   width: 100vw;

@@ -254,9 +254,11 @@ describe('SessionSidebar 列表不按工作区分组', () => {
 
 // 「+」新窗口必须与主窗同皮（2026-10-16 用户反馈：点 + 新开的独立窗口还带着
 // 系统原生 header）。WebviewWindow 的创建参数只有 Tauri 运行时才生效，单测
-// 造不出真窗口，这里用源级锁：参数表必须同时含 decorations:false 与
-// transparent:true——菜单「新建窗口」（lib.rs）与 tauri.conf.json 的主窗都是
-// 这么配的，三条创建路径的窗口壳不许漂移。
+// 造不出真窗口，这里用源级锁：参数表必须含 decorations:false——菜单「新建
+// 窗口」（lib.rs）与主窗（tauri.conf.json / tauri.windows.conf.json）都是
+// 这么配的，创建路径的窗口壳不许漂移。transparent 自 2026-11-12 起
+// 分平台：Windows 一律不透明（透明窗 = WebView2 宿主辅助窗消息风暴的存在
+// 理由，见 winWindowConfig.test.ts），mac 保留透明出圆角。
 describe('openPureWindow 与主窗同皮（源级锁）', () => {
   const src = readFileSync(new URL('../sessionSidebar.ts', import.meta.url), 'utf8');
   const start = src.indexOf('new WebviewWindow(');
@@ -267,7 +269,11 @@ describe('openPureWindow 与主窗同皮（源级锁）', () => {
     expect(opts).toContain('decorations: false');
   });
 
-  it('新窗开透明——自绘标题栏与 macOS 圆角的前提：transparent:true', () => {
-    expect(opts).toContain('transparent: true');
+  it('transparent 分平台：Windows 不透明，mac 保留（transparent: !isWindows）', () => {
+    expect(opts).toContain('transparent: !isWindows');
+    // 条件变量必须真的在创建参数前定义过，不是悬浮引用。
+    const probe = src.indexOf('const isWindows');
+    expect(probe).toBeGreaterThan(-1);
+    expect(probe).toBeLessThan(start);
   });
 });

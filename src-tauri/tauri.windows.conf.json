@@ -1,4 +1,5 @@
 {
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "mainBinaryName": "pure-app",
   "bundle": {
     "windows": {
@@ -6,5 +7,21 @@
         "installerHooks": "./windows-installer-hooks.nsh"
       }
     }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "pure",
+        "width": 1400,
+        "height": 850,
+        "minWidth": 1000,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "transparent": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
+      }
+    ]
   }
 }

@@ -129,17 +129,27 @@ export async function openPureWindow(sessionId?: string): Promise<void> {
   try {
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     const label = `pure_${sessionId ?? 'app'}_${Date.now().toString(36)}`.replace(/[^A-Za-z0-9_-]/g, '_');
+    // Windows 关透明（2026-11-12 活锁定案）：透明窗 = WebView2 宿主 16 个
+    // WS_EX_TRANSPARENT 辅助窗的存在理由，宿主 DLL（EmbeddedBrowserWebView，
+    // 微软代码）在主线程对它们逐个同步 SetWindowPos + WM_NCPAINT +
+    // ShowWindow，流式重排喂料后自激成消息风暴 → 主线程 hung。Windows 侧
+    // 一律不透明方角（critical.css [data-platform="win"] 配套），mac 保留
+    // 透明出圆角。主窗走 tauri.windows.conf.json 平台覆盖（tauri.conf.json
+    // 保持 mac 语义）；lib.rs 菜单新窗整段 cfg(target_os = "macos") 只在
+    // mac 编译，天然不受影响。
+    const isWindows =
+      /Windows/i.test(navigator.userAgent) || navigator.platform?.startsWith('Win') || false;
     new WebviewWindow(label, {
       url: `index.html${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`,
       title: 'pure',
       width: 1280,
       height: 860,
-      // 与主窗同皮：关掉原生边框、开透明，新窗走 index.html 的自绘标题栏
-      // （window-titlebar）与 macOS 侧圆角。少了这两个，新窗会带着系统原生
-      // header，和主窗两副面孔——菜单「新建窗口」与 tauri.conf.json 主窗都
-      // 是这么配的，三条创建路径不许漂移。
+      // 与主窗同皮：关掉原生边框，新窗走 index.html 的自绘标题栏
+      // （window-titlebar）。少了它，新窗会带着系统原生 header，和主窗两副
+      // 面孔——菜单「新建窗口」与 tauri.conf.json 主窗都是这么配的，创建
+      // 路径不许漂移。transparent 按 Windows 分平台（见上）。
       decorations: false,
-      transparent: true,
+      transparent: !isWindows,
       // Windows WebView2 宿主刀（2026-11-10 活锁判例）：关掉 Chromium 的
       // 原生窗口遮挡计算——它对宿主窗口做枚举/位置同步，是宿主侧窗口操作
       // 风暴的候选来源。设置后会丢 wry 默认三件，必须带上（四件不许漂移，
