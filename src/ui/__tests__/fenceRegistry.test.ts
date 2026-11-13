@@ -6,7 +6,7 @@
 // math 围栏按普通代码渲染（无 slot 栏、无 hydration），完成渲染才转 KaTeX。
 
 import { afterEach, describe, expect, it } from 'bun:test';
-import { FENCE_ROUTES, routeOf, renderer, normalizeMapFence, registerCustomFenceRoutes, resetCustomFenceRoutes, syncPresentationCardsFromConfig } from '../markdown';
+import { FENCE_ROUTES, routeOf, renderer, normalizeMapFence, registerCustomFenceRoutes, resetCustomFenceRoutes, syncPresentationCardsFromConfig, ensureKatex } from '../markdown';
 import { PRESENTATION_CARDS, resetCustomCards } from '../../shared/presentationLibrary';
 
 describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
@@ -77,7 +77,13 @@ describe('fence route registry <-> presentation cards (刀 2 同源)', () => {
     }
   });
 
-  it('completed render still routes each tag to its slot (behavioral pin)', () => {
+  it('completed render still routes each tag to its slot (behavioral pin)', async () => {
+    // katex 懒加载后（C1 性能审计刀），math 渲染的前置是 ensureKatex——
+    // 生产链 renderMarkdownInner 对含公式的文本必 await 它再 parse。本测试
+    // 直连 renderer.code，必须自备同一前置：之前靠别的测试文件先跑先加载
+    // 的隐式顺序在 readdir 序不同的 runner 上（Windows CI 实证）拿到的是
+    // 字面量回退，假红。
+    await ensureKatex();
     expect(
       renderer.code({ text: 'graph TD; A-->B', lang: 'mermaid', type: 'code', raw: 'x' } as never),
     ).toContain('data-diagram-kind="mermaid"');
