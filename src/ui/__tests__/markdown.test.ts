@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -1409,5 +1409,39 @@ describe('diagram-first timing (hold-to-settle gates)', () => {
     // 唯一症状）：console + 校验事件 + 重试链都要接住。
     expect(s).toContain("console.error('[pure] map render failed:', detail)");
     expect(s).toContain("recordFormValidation('map', 'failed', `render: ${detail}`)");
+  });
+});
+
+// ── hljs 高亮预算（P2-1，2026-11-13 性能审计）────────────────────────────
+// 整条消息的同步高亮总预算：预算内块同步高亮，超预算块懒高亮（进视口才
+// 跑），超单块闸的巨块保持纯文本。partitionHljsBudget 是 highlightAll 的
+// 可测内核（索引语义，同长度块无歧义）。
+describe('partitionHljsBudget', () => {
+  const SKIP = 30_000;
+  const BUDGET = 100_000;
+
+  it('budget 内全部同步，超预算块进懒组，巨块出局', () => {
+    // 所有 sync/lazy 候选都必须 ≤ 单块闸（30k），超闸是 skip 语义。
+    const lengths = [30_000, 30_000, 30_000, 20_000, 29_000];
+    const plan = partitionHljsBudget(lengths, BUDGET, SKIP);
+    expect(plan).toEqual(['sync', 'sync', 'sync', 'sync', 'lazy']);
+  });
+
+  it('预算用尽后后续块转懒（先到先得）', () => {
+    expect(partitionHljsBudget([30_000, 30_000, 30_000, 10_000, 1], BUDGET, SKIP))
+      .toEqual(['sync', 'sync', 'sync', 'sync', 'lazy']);
+    // 预算还剩 1 时下一小块仍能搭上同步车（remaining>0 即 sync）。
+    expect(partitionHljsBudget([30_000, 30_000, 30_000, 9_999, 1], BUDGET, SKIP))
+      .toEqual(['sync', 'sync', 'sync', 'sync', 'sync']);
+  });
+
+  it('单块超闸直接 skip，不消耗预算', () => {
+    const plan = partitionHljsBudget([31_000, 30_000, 30_000], BUDGET, SKIP);
+    expect(plan).toEqual(['skip', 'sync', 'sync']);
+  });
+
+  it('全空与全巨块边界', () => {
+    expect(partitionHljsBudget([], BUDGET, SKIP)).toEqual([]);
+    expect(partitionHljsBudget([99_999, 31_000], BUDGET, SKIP)).toEqual(['skip', 'skip']);
   });
 });

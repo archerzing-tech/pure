@@ -3265,31 +3265,55 @@ function bindMapControls(container: HTMLElement): void {
  *  （STREAM_HLJS_SKIP_ABOVE）只防单个巨块，一条消息带多个 20-30k 代码块
  *  时叠加仍是一帧长任务——预算封顶后超出部分懒高亮（进入视口才跑，滚到
  *  哪亮到哪），markdown 形态与代码可读性不降级。 */
-const HLJS_BUDGET_CHARS = 100_000;
+export const HLJS_BUDGET_CHARS = 100_000;
+
+/**
+ * 按预算给出每个代码块的归属（按块序）：'sync'=预算内同步高亮，'lazy'=
+ * 超预算懒高亮（进视口才跑），'skip'=超单块闸保持纯文本（永不高亮）。
+ * 预算按块序消耗——先到先得。导出供测试锁预算语义，highlightAll 消费。
+ */
+export type HljsPartition = Array<'sync' | 'lazy' | 'skip'>;
+
+export function partitionHljsBudget(
+  lengths: number[],
+  budget: number = HLJS_BUDGET_CHARS,
+  skipAbove: number = STREAM_HLJS_SKIP_ABOVE,
+): HljsPartition {
+  const plan: HljsPartition = [];
+  let remaining = budget;
+  for (const length of lengths) {
+    if (length > skipAbove) {
+      plan.push('skip');
+    } else if (remaining <= 0) {
+      plan.push('lazy');
+    } else {
+      remaining -= length;
+      plan.push('sync');
+    }
+  }
+  return plan;
+}
 
 function highlightAll(container: HTMLElement): void {
-  const els = container.querySelectorAll<HTMLElement>(
-    'pre code.hljs, pre code[class*="language-"]',
+  const els = Array.from(
+    container.querySelectorAll<HTMLElement>('pre code.hljs, pre code[class*="language-"]'),
   );
-  let budget = HLJS_BUDGET_CHARS;
+  const plan = partitionHljsBudget(els.map((el) => el.textContent?.length ?? 0));
   const lazy: HTMLElement[] = [];
-  for (const el of Array.from(els)) {
-    // Same freeze guard as streaming: hljs on a giant single block (a whole
-    // HTML file as one fence) can block the main thread for seconds. Keep it
-    // as readable plain text instead of freezing the app.
-    const length = el.textContent?.length ?? 0;
-    if (length > STREAM_HLJS_SKIP_ABOVE) continue;
-    if (budget <= 0) {
-      lazy.push(el);
-      continue;
+  els.forEach((el, i) => {
+    // Same freeze guard as streaming (plan 'skip'): hljs on a giant single
+    // block (a whole HTML file as one fence) can block the main thread for
+    // seconds. Keep it as readable plain text instead of freezing the app.
+    if (plan[i] !== 'sync') {
+      if (plan[i] === 'lazy') lazy.push(el);
+      return;
     }
-    budget -= length;
     try {
       hljs.highlightElement(el);
     } catch {
       /* keep raw text on parse failure */
     }
-  }
+  });
   if (lazy.length === 0) return;
   if (typeof IntersectionObserver !== 'function') return; // 老环境：保持纯文本可读
   const observer = new IntersectionObserver((entries) => {
