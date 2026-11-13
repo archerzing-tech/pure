@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.8
+
+**GUI 两次卡死定案根治：消息形状崩溃防御 + 流式渲染活锁三刀**
+
+一、消息形状崩溃（界面聋死假流式）。引擎偶发送出非数组 `messages` 坏值穿透消费点触发 spread 崩溃，`unhandledrejection` 后界面看似存活实际不再处理任何事件——「界面上依然显示但无法操作」。修复三层封堵：五处消费点 `Array.isArray` 收紧（非数组一律回退 `this.messages` / 空数组 / 跳过，堵死 `continueTurn` spread 崩链）→ Harness `guardMessagesShape` 守卫降级 → `unhandledrejection` 250ms 后自动 cancel 翻面。四处 `[ctx-shape]` 诊断打点留证——坏值动态来源未点名，打点触发即进错误台账，下一轮按现场追。
+
+二、流式渲染活锁（点击/输入/拖窗全饿死）。真机取证（webview sample 358/2033 样本在 `DOMTimer→JSC`，15 样本在 Yarr 正则回溯）定案：长流式（81k 字符）期间 `diffStreaming` 每拍三件 O(N) 重活（`normalizeMapFence` 每 tick `new RegExp` + 32K 全文 replace、fence 计数正则扫 49K、lexer 全量重 lex），叠加节流自适应被 `min(220,…)` 封死——单拍实测 500ms 下一拍仍 220ms 就跑，timer 队列无限堆积、占空比饱和、主线程无喘息。修复三刀：①`normalizeMapFence` pattern 模块级缓存（mapTags 变化才重建）+ 无 `:::` 直接短路，普通流式输出正则成本归零；②`streamingViewSlice` fence 计数换单遍手写扫描，不再把 49K 前缀喂给 Yarr（与旧正则 1000 组随机对拍全一致，含切点落行中截断的 edge 对齐）；③`streamRenderThrottleMs` 成本感知——上一拍实测成本直接抬高下一拍节流窗口（cap 1s 防摆尾），队列不再堆积，与「打字优先退避」同思路（实测值参与，不封死自适应）。真机复验两轮：145,813 字符长流式期间打字实时上屏、拖窗正常，收尾全文落盘 fence 220 条全配平；流式高峰主线程 89% mach_msg 空闲等待（修复前活锁现场同类操作全部无响应）。lexer 每拍全量重 lex 是残留成本大头（重而不死），增量化留作下一刀。
+
+**渲染性能埋点（gui_perf.log）**
+
+三、新增 `~/.pure/gui_perf.log` 性能台账（Rust `gui_perf_log` 命令，与错误台账同机制、文件分开——错误语义不污染 `pure errors` 对账）。两个观察点：`stream`=流式每拍渲染实测成本+文本长度分位（p50/p90/max，100 拍或 60s 聚合一行）——lexer 增量化刀的前后对比基线；`settle`=`renderMarkdown` 全文管线单次成本（完成态/恢复态共用，20 条聚合）——145k 收尾一次性停顿的量化。写盘频率与热路径拍数解耦，桥不可用静默丢——埋点永远不能成为新的性能问题（写盘根治判例的逆向应用）。
+
+验证：bun test 全量 5359 pass 0 fail（含 perfLog 聚合器/分位/静默契约用例 ×5、throttle 成本感知契约用例、手写 fence 扫描 1000 组随机对拍）、`cargo test --lib` 298 pass（新增 perf 台账 append/空批用例）、typecheck 绿；活锁修复装机后 GUI 压测两轮全过（145,813 / 49,414 字符，交互全活、结构零截断）。
+
 ## v4.7.7
 
 **大文件读取修复：单行文件不再读空、表格不再静默为空**

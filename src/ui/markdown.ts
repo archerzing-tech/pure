@@ -17,6 +17,7 @@ import { t } from '../shared/i18n';
 import { stripAnsi } from '../shared/ansi';
 import { showToast } from '../shared/toast';
 import { linkifyPaths } from './pathLink';
+import { createPerfAggregator } from './perfLog';
 import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../shared/parseRepair';
 import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
@@ -3360,7 +3361,23 @@ function highlightAll(container: HTMLElement): void {
  * Parse `text` as Markdown and render into `container` with syntax highlighting
  * (hljs), inline mermaid diagrams, and locally rendered PlantUML diagrams.
  */
+/** 完成态/恢复态全文管线（marked+hljs+DOM 一次建）的性能埋点包装：
+ *  lenMax 自区分场景（145k=完成态收尾，小值=历史加载块）。耗时进
+ *  ~/.pure/gui_perf.log 的 settle 行——145k 收尾一次性停顿的量化基线。 */
 export async function renderMarkdown(
+  text: string,
+  container: HTMLElement,
+  options: { yieldBeforeParse?: boolean; visualTiming?: 'serial' | 'parallel' } = {},
+): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    await renderMarkdownInner(text, container, options);
+  } finally {
+    settlePerfAgg.record(Date.now() - startedAt, text.length);
+  }
+}
+
+async function renderMarkdownInner(
   text: string,
   container: HTMLElement,
   options: { yieldBeforeParse?: boolean; visualTiming?: 'serial' | 'parallel' } = {},
@@ -4132,6 +4149,15 @@ export function setStreamingRenderGate(gate: (() => boolean) | null): void {
   streamingRenderGate = gate;
 }
 
+// ── 性能埋点（2026-11-13 活锁三刀后的量化收尾）──
+// stream：每拍渲染实测成本 + 文本长度——lexer 增量化刀的前后对比基线
+// （活锁现场单拍 500ms、修复后高峰 timer 45%/89% 空闲，都是 sample 侧的
+// 快照；这里补上渲染侧自己的连续分布）。100 拍或 60s 落一行，写盘频率与
+// 流式拍频解耦。settle：renderMarkdown 全文管线单次成本（完成态/恢复态
+// 共用，lenMax 自区分场景）——145k 收尾一次性停顿的量化。
+const streamPerfAgg = createPerfAggregator('stream', 100, 60_000);
+const settlePerfAgg = createPerfAggregator('settle', 20, 120_000);
+
 export function scheduleStreamingRender(
   text: string,
   container: HTMLElement,
@@ -4159,6 +4185,8 @@ export function scheduleStreamingRender(
       // A failed frame must not poison the schedule loop: lastRenderedText
       // stays behind, so the next token retries this frame with newer text.
       state.renderCostMs = Date.now() - startedAt;
+      // 失败帧也计入埋点（成本异常本身就是要抓的信号）。
+      streamPerfAgg.record(state.renderCostMs, latest.length);
       if (typeof console !== 'undefined') {
         const msg = err instanceof Error ? err.message : String(err);
         console.debug(`[markdown-ts] streaming render failed; keeping last frame: ${msg}`);
@@ -4166,6 +4194,7 @@ export function scheduleStreamingRender(
       return;
     }
     state.renderCostMs = Date.now() - startedAt;
+    streamPerfAgg.record(state.renderCostMs, latest.length);
     state.lastRenderedText = latest;
     state.lastRenderTime = Date.now();
     onRendered?.();

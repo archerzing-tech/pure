@@ -12638,6 +12638,26 @@ mod error_log_tests {
     }
 
     #[test]
+    fn perf_log_appends_jsonl_lines_and_ignores_empty_batch() {
+        let dir = std::env::temp_dir().join(format!("pure-perflog-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("perf.log");
+        let path_str = path.to_string_lossy().into_owned();
+        // 空批次是常态（flush 被并发 flush 位拦下后也会进来）：no-op 不落空行。
+        gui_perf_log_at(vec![], &path_str);
+        assert!(!path.exists());
+        let line1 = r#"{"ts":1,"kind":"stream","beats":100,"p50":12,"p90":40,"max":80,"lenMax":32000}"#;
+        let line2 = r#"{"ts":2,"kind":"settle","beats":1,"p50":350,"p90":350,"max":350,"lenMax":145000}"#;
+        gui_perf_log_at(vec![line1.to_string(), line2.to_string()], &path_str);
+        let got = fs::read_to_string(&path).unwrap();
+        let mut it = got.lines();
+        assert_eq!(it.next().unwrap(), line1);
+        assert_eq!(it.next().unwrap(), line2);
+        assert_eq!(it.next(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn truncates_error_fields_by_chars_not_bytes() {
         // 4000 个 CJK 字符 = 12000 字节:按字节截会切出坏 UTF-8,按字符截保留完整。
         let long = "界".repeat(5000);
@@ -18285,6 +18305,27 @@ fn gui_error_log(entries: Vec<String>) {
     }
 }
 
+/// 性能埋点台账（~/.pure/gui_perf.log）：JSONL append + 轮转，与
+/// gui_error_log 同机制、文件分开——错误台账语义是「错误」，性能样本混入
+/// 会污染 `pure errors` 的对账语义。行内容由 TS 侧 perfLog 聚合后才写
+/// （流式每 100 拍 / 完成态每 20 条一行，写盘频率与热路径解耦），Rust 不
+/// 解析。失败静默——埋点永远不能成为新的性能问题。
+#[tauri::command]
+fn gui_perf_log(lines: Vec<String>) {
+    if lines.is_empty() {
+        return;
+    }
+    let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
+    gui_perf_log_at(lines, &path);
+}
+
+/// 测试可见的参数化变体：路径注入，测试不写真实 HOME。
+fn gui_perf_log_at(lines: Vec<String>, path: &str) {
+    for line in lines {
+        append_error_log_line(&line, path);
+    }
+}
+
 /// 台账轮转阈值——与 TS 侧 shared/errorLog.ts 的 ERROR_LOG_ROTATE_BYTES 同值。
 /// 跨语言共享一个常量的机制成本大于收益,两侧各自实现同一数字(1MB)。
 const ERROR_LOG_ROTATE_BYTES: u64 = 1_000_000;
@@ -18746,6 +18787,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // GUI diagnostics: uncaught JS error ledger (~/.pure/gui_errors.log)
             gui_error_log,
+            // GUI perf telemetry: aggregated render-cost samples (~/.pure/gui_perf.log)
+            gui_perf_log,
             // Remote control bridge port discovery (gateway bridge.json)
             bridge_port,
             // File tools
