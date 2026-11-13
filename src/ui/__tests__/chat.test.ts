@@ -552,6 +552,20 @@ describe('pickHistoryMessages (background pre-compaction reuse)', () => {
     expect(pickHistoryMessages(window, 's1', 2, 's1', current, original)).toBe(current);
     expect(pickHistoryMessages(window, 's1', 2, 's1', original, original)).toBe(window);
   });
+
+  // [2026-11-13 崩轮判例] 旧判据 `preCompacted !== null` 放 undefined 穿过：
+  // fresh 会话其余条件全可满足（sessionId 相同、length 0===0、source undefined），
+  // 坏值直接递进 continueTurn → spread 抛 unhandledrejection → UI 聋死假流式。
+  // 消费点契约：任何非数组一律回退全量历史。
+  it('falls back when pre-compaction cache is undefined (never feed non-array into continueTurn)', () => {
+    const messages: Message[] = [];
+    expect(pickHistoryMessages(undefined as unknown as Message[] | null, 's1', 0, 's1', messages)).toBe(messages);
+  });
+
+  it('falls back when pre-compaction cache is a non-array object', () => {
+    const poison = { 0: { role: 'user', content: 'x' } } as unknown as Message[] | null;
+    expect(pickHistoryMessages(poison, 's1', 2, 's1', full)).toBe(full);
+  });
 });
 
 // Plan-gate timing contract (user-facing): on a detected complex task, a
@@ -729,7 +743,9 @@ describe('plan-gate timing (thinking card before preflight work)', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // 模型提问/确认轮（无 tool 消息）不是交付完成：不触发回合末交付验证，
     // 评估卡保持执行等待而不是跳到验证结果。
-    expect(src).toContain("const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');");
+    // [2026-11-13 崩轮判例] 判据随契约收紧演进：非 null 非数组形态会炸 .some，
+    // 消费点先 Array.isArray 收紧再判 tool 消息。
+    expect(src).toContain("const hasToolWork = (Array.isArray(event.payload.messages) ? event.payload.messages : []).some((m) => m.role === 'tool');");
     expect(src).toContain('if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {');
     expect(src).toContain("(!needsDeliveryGate || (hasToolWork && deliveryResult?.passed === true))");
     expect(src).toContain("assessmentFlow.setPhase('execute', '本轮没有产生文件改动（如需确认细节，模型会直接提问），等待你的回复后继续。'");

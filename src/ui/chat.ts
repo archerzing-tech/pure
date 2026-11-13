@@ -472,7 +472,14 @@ export function pickHistoryMessages(
   messages: Message[],
   preCompactSource?: Message[] | null,
 ): Message[] {
-  return preCompacted !== null &&
+  // [2026-11-13 崩轮判例] 崩栈指向 harness.continueTurn 对 messages 的 spread，
+  // 现场是非数组对象。这里的第一条件原是 `preCompacted !== null`：undefined
+  // （及任何运行时坏值——TS 类型拦不住）会穿过它，在 fresh 会话其余条件全可
+  // 满足（sessionId 相同、length 0===0、source===undefined）时把坏值直接递进
+  // continueTurn → spread 抛 unhandledrejection → webview UI 聋死假流式。
+  // 消费点契约收紧：非数组一律回退全量历史，坏值形态同时留在调用方的
+  // [ctx-shape] 打点里供溯源。
+  return Array.isArray(preCompacted) &&
     preCompactSessionId === sessionId &&
     messages.length === preCompactMessageCount &&
     (preCompactSource === undefined || preCompactSource === messages)
@@ -6662,7 +6669,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             this.addStatusBubble(`修复工具 ${fixEvent.payload.toolName}：${ok ? '已完成' : fixEvent.payload.result.error ?? '失败'}`, !ok, !ok, ok ? 'success' : undefined);
             this.scrollUi(chatEl);
           } else if (fixEvent.type === 'Completed') {
-            latestMessages = fixEvent.payload.messages ?? latestMessages;
+            // [2026-11-13 崩轮判例] 契约收紧：非数组回退，坏形态不再沿
+            // fix.messages → completionMessages 传染进下一道收尾。
+            latestMessages = Array.isArray(fixEvent.payload.messages) ? fixEvent.payload.messages : latestMessages;
             if (!output && fixEvent.payload.finalOutput) {
               output = fixEvent.payload.finalOutput;
               fixSegment.text = output;
@@ -7395,7 +7404,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 尾条是下界估计——低估最多停留在快档，不会错杀保护）。超阈切
             // 慢档（Windows 主线程洪水刀4：全量快照的 invoke 解析在主线程）。
             const cpArr = event.payload.messages;
-            const cpLast = cpArr[cpArr.length - 1];
+            // [2026-11-13 崩轮判例] 契约收紧：undefined 会在 [length-1] 与
+            // mergeTranscriptWithTurn(.length) 两处炸出 unhandledrejection。
+            const cpLast = Array.isArray(cpArr) ? cpArr[cpArr.length - 1] : undefined;
             if (cpLast) checkpointEstBytes += JSON.stringify(cpLast).length;
             // P0-2（2026-11-13 性能审计）：闸门度量对象换成「上一份已落盘
             // 快照的真实字节 ∨ 回合内增量」——旧口径只看增量，11MB 会话每回合
@@ -7405,7 +7416,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (checkpointNow - lastCheckpointPersistAt < checkpointGate) break;
             lastCheckpointPersistAt = checkpointNow;
             checkpointEstBytes = 0;
-            const checkpointMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText);
+            const checkpointMessages = mergeTranscriptWithTurn(this.messages, Array.isArray(event.payload.messages) ? event.payload.messages : [], userText);
             void this.persistSession(
               checkpointMessages,
               toolResults,
@@ -7748,7 +7759,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             this.settleInterjectEchoPending(); // U3：回合终态兜底摘点
             // 本轮是否真的执行过工具（写文件/跑命令）：模型提问/确认轮没有 tool 消息，
             // 那不是交付完成而是“等待用户回答”——不触发交付验证卡，评估卡保持执行等待。
-            const hasToolWork = (event.payload.messages ?? []).some((m) => m.role === 'tool');
+            // [2026-11-13 崩轮判例] 非 null 非数组（undefined/对象）会在这里
+            // 先炸 .some——收紧先于一切消费。
+            const hasToolWork = (Array.isArray(event.payload.messages) ? event.payload.messages : []).some((m) => m.role === 'tool');
             if (hasToolWork) {
               assessmentFlow?.setPhase('verify', event.payload.interrupted ? '运行被中断，正在整理已完成部分…' : '执行阶段完成，正在验证最终结果…');
             } else {
@@ -7758,6 +7771,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             endThinking();
             let completionMessages = event.payload.messages ?? this.messages;
+            // [2026-11-13 崩轮判例] fix 轮把这份 messages 直接递进
+            // continueTurn（崩栈七参调用点）。引擎 payload 侧静态穷尽均为数组，
+            // 崩现场却是非数组对象——消费点契约收紧：坏形态一律回退当前转录，
+            // 现场由下方 [ctx-shape] 门禁打点留证。
+            if (!Array.isArray(completionMessages)) {
+              completionMessages = this.messages;
+            }
             // Deterministic delivery backstop (end of turn): re-run the
             // workspace's mechanical verification specs for real — no model
             // claims involved. On failure, bounded agent-driven fix rounds get
@@ -8288,7 +8308,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (!interjectReenter) assessmentFlow?.cancel(`运行已中断：${event.payload.reason}`);
             endThinking();
             this.settleInterjectEchoPending(); // U3：中断终态兜底摘点（reenter 重开后由 THINK 边界再结算）
-            if (event.payload.messages) {
+            // [2026-11-13 崩轮判例] 契约收紧：非 null 非数组形态曾穿过这里
+            // 进 mergeTranscriptWithTurn / applyStrippedBranches / 后台预压
+            // （compact 内 .filter 在后台炸 = unhandledrejection）。非数组
+            // 视同无消息，中断回合不写坏形态进历史。
+            if (Array.isArray(event.payload.messages)) {
               // 押账的规划叙述插在本回合用户消息后面（2026-09-27 时序修正）：
               // 中断回合同样先请求后思考，别让思考在回放里跑到提问前面。
               interruptedMessages = mergeTranscriptWithTurn(this.messages, event.payload.messages, userText, this.takePendingPlanNarration());
