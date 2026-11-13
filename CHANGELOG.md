@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.7.9
+
+**GUI 第三种「卡死」定案根治：最小化→Dock 唤回键盘焦点死锁**
+
+真机取证（双进程 sample 主线程全空闲、AX 焦点链检查、键盘注入探针）定案：窗口点「—」最小化后从 Dock 唤回，窗口回来了但打字/快捷键全部无响应，且点击窗口、Cmd+Tab 切换、再 reopen 都救不回来——与流式活锁（v4.7.8 刀②）、消息形状崩溃（v4.7.8 刀①）并列为第三种「界面看似正常实际不可操作」。根因是确定性拦截不是概率竞态：`deminiaturize` 是异步动画，动画期间 `NSWindow.isMiniaturized` 恒为 true，而 tao 的 `set_focus` 带 guard（`!is_minimized && is_visible` 才 makeKey），`show_all_windows` 里紧跟 `unminimize()` 的那刀 `set_focus` 在这条路径上 100% 被拦成 no-op——窗口没有 key 状态，WebView 拿不到 first responder，键盘无处路由。雷埋数月才爆的原因：关窗（×）走 hide 路径同步无动画不受影响，只有「—」最小化再从 Dock 唤回必炸。
+
+修复两刀：①Rust `show_all_windows` 轮询等动画落地（`is_minimized` 翻 false，50ms×20 上限 1s）再补 `set_focus`，不赌动画时长；②前端 `window focus` 事件兜底——焦点恢复后若 DOM 焦点不在可见输入框（最小化前没点过输入框的边角）则主动聚焦。
+
+验证：复现路径全过（「—」最小化→reopen→打字上屏；Finder 前台只发 reopen 的严格场景同样过）；三场景矩阵全 PASS——最小化→唤回、二次启动单例回调、流式期间最小化→后台流式持续出数（p50 19→107ms@27k，远低于活锁期 500ms/拍）→唤回→打字+拖窗跟手→28,334 字符全文落盘；bun test 全量 5363 pass 0 fail、`cargo test --lib` 298 pass、typecheck 绿。取证判例一条：WKWebView 下 AX 焦点标记不可靠（AXFocused=false 但键盘实际已通），行为判据（打字上屏）才是金标准。
+
 ## v4.7.8
 
 **GUI 两次卡死定案根治：消息形状崩溃防御 + 流式渲染活锁三刀**

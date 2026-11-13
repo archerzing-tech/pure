@@ -1098,6 +1098,18 @@ function deferToIdle(fn: () => void): void {
     // 以及窗口重新获得焦点，都算「人在窗口前」，补上这两个信号。
     document.addEventListener('mouseenter', revealChrome, { passive: true });
     window.addEventListener('focus', revealChrome);
+    // 最小化→Dock 唤回后窗口恢复 key（Rust show_all_windows 补刀），但 DOM
+    // 焦点可能停在 body（最小化前没点过输入框），打字落空（2026-11-13 焦点
+    // 死锁案的边角）。窗口重新获得焦点时，若焦点不在可见的输入框上，补给它。
+    window.addEventListener('focus', () => {
+      const ae = document.activeElement;
+      if (ae instanceof HTMLTextAreaElement) return;
+      const onLanding = document.getElementById('chat-view')?.classList.contains('landing') ?? false;
+      const target = (onLanding
+        ? document.getElementById('landing-prompt')
+        : document.getElementById('prompt')) as HTMLTextAreaElement | null;
+      if (target && !target.disabled) target.focus();
+    });
     document.documentElement.addEventListener('mouseleave', () => {
       if (!hideChromeTimer) {
         hideChromeTimer = setTimeout(() => {

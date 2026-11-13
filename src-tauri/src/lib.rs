@@ -18496,12 +18496,35 @@ fn update_tray_sessions(
 // streaming sessions, queue lanes and worktree work live in its WebView, so
 // showing them again is all it takes — nothing needs restarting.
 fn show_all_windows(app: &tauri::AppHandle) {
+    let mut restored_from_dock = false;
     for (_, window) in app.webview_windows() {
         let _ = window.show();
-        let _ = window.unminimize();
+        if window.is_minimized().unwrap_or(false) {
+            restored_from_dock = true;
+            let _ = window.unminimize();
+        }
     }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.set_focus();
+        if restored_from_dock {
+            // 最小化→Dock 唤回的键盘焦点修复（2026-11-13「又卡死」定案）：
+            // deminiaturize 是异步动画，动画期间 NSWindow.isMiniaturized 恒为
+            // true，而 tao 的 set_focus 带 guard（isMiniaturized 为 true 时整
+            // 个 makeKey 跳过）——上面那刀 set_focus 在这条路径上必然被拦成
+            // no-op：窗口回来但没有 key 状态，WebView 拿不到 first responder，
+            // 打字/快捷键全部无响应（点击、activate、再 reopen 也救不回）。
+            // 轮询等动画落地（is_minimized 翻 false）再补焦点，不赌动画时长。
+            let w = main.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if !w.is_minimized().unwrap_or(true) {
+                        break;
+                    }
+                }
+                let _ = w.set_focus();
+            });
+        }
     }
     // 回到前台，App Nap 断言不再需要。
     update_nap_guard(app);
