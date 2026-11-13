@@ -28,6 +28,34 @@ import type {
   VerificationSummary,
 } from '../shared/types';
 import { GLOBAL_MEMORY_SCOPE } from '../shared/types';
+
+/**
+ * [2026-11-13 真机判例] continueTurn/run 的 messages 形状守卫。
+ * 真机出现过 messages 以非数组对象形态抵达 spread 点（`...messages` 抛
+ * 「Spread syntax requires ...iterable」→ unhandledrejection → webview 聋死、
+ * UI 假流式）。守卫做两件事：把现场写进错误台账（errorLedger 挂 window
+ * error / unhandledrejection，dispatch 一条 ErrorEvent 即落
+ * ~/.pure/gui_errors.log），然后降级空历史让回合继续——比整条调用链抛死好。
+ * CLI 环境（无 window）静默降级。
+ */
+export function guardMessagesShape(messages: Message[] | unknown, site: string): Message[] {
+  if (Array.isArray(messages)) return messages;
+  let preview = '';
+  try {
+    preview = JSON.stringify(messages)?.slice(0, 400) ?? '';
+  } catch {
+    preview = '(unserializable)';
+  }
+  const detail = `[ctx-shape] ${site} 收到非数组 messages: ${Object.prototype.toString.call(messages)} keys=${messages && typeof messages === 'object' ? Object.keys(messages as Record<string, unknown>).slice(0, 12).join(',') : String(messages)} preview=${preview}`;
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new ErrorEvent('error', { message: detail, error: new Error(detail) }));
+    }
+  } catch {
+    // 台账不可用不追击：降级继续。
+  }
+  return [];
+}
 import {
   REFLECT_DEDUPE_PREFIX,
   REFLECTION_DEFAULTS,
@@ -560,6 +588,7 @@ export class Harness {
     // histories the same way continueTurn does.
     let msgs = runningMessages;
     if (resumed) {
+      runningMessages = guardMessagesShape(runningMessages, 'Harness.run.resume');
       msgs = runningMessages[0]?.role === 'system'
         ? [{ role: 'system', content: effectiveSystemPrompt }, ...runningMessages.slice(1)]
         : [{ role: 'system', content: effectiveSystemPrompt }, ...runningMessages];
@@ -754,9 +783,10 @@ export class Harness {
     }
     const effectiveSystemPrompt = this.sessionSystemPrompt;
 
-    let msgs = messages[0]?.role === 'system'
-      ? [{ role: 'system' as const, content: effectiveSystemPrompt }, ...messages.slice(1)]
-      : [{ role: 'system' as const, content: effectiveSystemPrompt }, ...messages];
+    let msgs = guardMessagesShape(messages, 'Harness.continueTurn');
+    msgs = msgs[0]?.role === 'system'
+      ? [{ role: 'system' as const, content: effectiveSystemPrompt }, ...msgs.slice(1)]
+      : [{ role: 'system' as const, content: effectiveSystemPrompt }, ...msgs];
 
     // Context compression before continuing
     if (this.config.contextEngine) {

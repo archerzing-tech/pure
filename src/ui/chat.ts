@@ -6606,11 +6606,30 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         messages: Message[],
         failed: DeliveryVerificationResult,
       ): Promise<{ completed: boolean; messages: Message[]; output: string }> => {
+        // [ctx-shape 诊断] fix 轮启动现场（罕见事件；2026-11-13 崩轮栈帧指向
+        // 本函数链，真跑没跑过以此为准）。
+        try {
+          window.dispatchEvent(new ErrorEvent('error', {
+            message: `[ctx-shape] 修复轮启动: messages=${Object.prototype.toString.call(messages)} len=${Array.isArray(messages) ? messages.length : '?'} steps=${failed.steps?.length ?? '?'}`,
+            error: new Error(`[ctx-shape] 修复轮启动: messages=${Object.prototype.toString.call(messages)} len=${Array.isArray(messages) ? messages.length : '?'} steps=${failed.steps?.length ?? '?'}`),
+          }));
+        } catch { /* 台账不可用不追击 */ }
         const fixPrompt = formatDeliveryFixPrompt(failed);
         const fixCommandGuard = (command: string): string | null => isGitMutationCommand(command)
           ? '修复阶段禁止修改 Git 仓库状态（包括 git -C、shell 包装形式）；请只修复交付验证报告的代码问题。'
           : null;
         this.addStatusBubble('修复阶段：正在根据真实失败输出修复并重新验证…', true);
+        // [ctx-shape 诊断] 真机判例（2026-11-13）：fix 轮 messages 曾以非数组
+        // 形态抵达 harness spread 点。守卫在 Harness 内兜底，这里负责留下
+        // 「值进门时就坏」的现场（含上游引用链），落到 gui_errors.log。
+        if (!Array.isArray(messages)) {
+          try {
+            window.dispatchEvent(new ErrorEvent('error', {
+              message: `[ctx-shape] runDeliveryFixRound 调 continueTurn 前发现非数组 messages: ${Object.prototype.toString.call(messages)} preview=${JSON.stringify(messages)?.slice(0, 300) ?? '(unserializable)'}`,
+              error: new Error(`[ctx-shape] runDeliveryFixRound 调 continueTurn 前发现非数组 messages: ${Object.prototype.toString.call(messages)} preview=${JSON.stringify(messages)?.slice(0, 300) ?? '(unserializable)'}`),
+            }));
+          } catch { /* 台账不可用不追击 */ }
+        }
         const fixSegment = createSegment();
         const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
@@ -6875,6 +6894,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // When the turn has NO plan card (simple task, forced mode abandoning
       // the plan, or a follow-up after the previous plan finished), do not
       // attach any stale plan presentation to the new turn.
+      // [ctx-shape 诊断] 真机判例（2026-11-13）：主回合 historyMessages 曾以
+      // 非数组形态抵达 harness spread 点。Harness 守卫兜底，这里留调用方现场。
+      if (!Array.isArray(historyMessages)) {
+        try {
+          window.dispatchEvent(new ErrorEvent('error', {
+            message: `[ctx-shape] send 主回合调 continueTurn 前发现非数组 historyMessages: ${Object.prototype.toString.call(historyMessages)} preCompacted=${Object.prototype.toString.call(this.preCompactedMessages)} thisMessages=${Object.prototype.toString.call(this.messages)} preview=${JSON.stringify(historyMessages)?.slice(0, 300) ?? '(unserializable)'}`,
+            error: new Error(`[ctx-shape] send 主回合调 continueTurn 前发现非数组 historyMessages: ${Object.prototype.toString.call(historyMessages)} preCompacted=${Object.prototype.toString.call(this.preCompactedMessages)} thisMessages=${Object.prototype.toString.call(this.messages)} preview=${JSON.stringify(historyMessages)?.slice(0, 300) ?? '(unserializable)'}`),
+          }));
+        } catch { /* 台账不可用不追击 */ }
+      }
       const events = this.hasHistory
         ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, turnHardStop.signal, isAuto)
         : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, turnHardStop.signal);
@@ -7768,6 +7797,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 宿主：清单只是参数，每条命令、每个退出码都在这里机械发生。
             const gateSpecs = resolveGateSpecs(gatePlanVerification, workspaceProfile);
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
+              // [ctx-shape 诊断] 门禁进入现场（2026-11-13 崩轮取证：崩栈指向
+              // fix 轮链路，但 fresh 会话 hasToolWork=false 与之矛盾——落一条
+              // 进门现场，谁真谁假一次说清）。罕见事件，不灌台账。
+              try {
+                window.dispatchEvent(new ErrorEvent('error', {
+                  message: `[ctx-shape] 交付门禁进入: needsDeliveryGate=${needsDeliveryGate} hasToolWork=${hasToolWork} interrupted=${event.payload.interrupted} payloadMessages=${Object.prototype.toString.call(event.payload.messages)} len=${Array.isArray(event.payload.messages) ? event.payload.messages.length : '?'}`,
+                  error: new Error(`[ctx-shape] 交付门禁进入: needsDeliveryGate=${needsDeliveryGate} hasToolWork=${hasToolWork} interrupted=${event.payload.interrupted} payloadMessages=${Object.prototype.toString.call(event.payload.messages)} len=${Array.isArray(event.payload.messages) ? event.payload.messages.length : '?'}`),
+                }));
+              } catch { /* 台账不可用不追击 */ }
               addDeliveryBubble(gateSpecs.source === 'plan'
                 ? `🧪 交付验证：按计划声明的清单机械重跑（${gateSpecs.specs.map((s) => s.command).join('、')}）…`
                 : '🧪 交付验证：正在重跑机械检查（typecheck / 测试 / 构建）…', true);

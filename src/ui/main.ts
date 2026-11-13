@@ -97,6 +97,16 @@ window.addEventListener('error', e => {
 window.addEventListener('unhandledrejection', e => {
   const reason = e.reason as { stack?: string; message?: string } | undefined;
   guiErrorLedger.record({ kind: 'unhandledrejection', message: reason?.message ?? String(reason), stack: reason?.stack });
+  // [2026-11-13 假流式判例] 流式中的未捕获异常会让引擎侧状态与 UI 呈现脱钩：
+  // 回合其实已经结束，停止按钮却常红、「正在生成」不消失，页面聋死 22 分钟。
+  // 台账历史（2026-11-08 起）里流式外的 unhandledrejection 从未出现过——
+  // 它本身就是致命信号。延迟一拍走 cancel 的完整收尾链（abort + UI 翻面），
+  // 宁可结束这一回合，也不留一个不响应的界面。
+  setTimeout(() => {
+    try {
+      if (chat.isStreaming()) chat.cancel();
+    } catch { /* 收尾失败不追击 */ }
+  }, 250);
 });
 window.addEventListener('pagehide', () => {
   void guiErrorLedger.flush();
