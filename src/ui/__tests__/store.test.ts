@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
@@ -682,6 +682,61 @@ describe('session paused state persistence (第 3 期刀 2)', () => {
 
 // TurnCheckpoint 落盘节流档位（2026-11-09 Windows 主线程洪水刀4）：检查点
 // invoke 的全量消息账在 WebView2 上由主线程解析，大快照降频换主线程呼吸空间。
+// A2（2026-11-13 性能审计）：转写条目 id 复用——同位置 + 同内容沿用旧 id，
+// 只有新增条目才重新哈希。旧行为是每次保存对每条消息 stringify 两次再逐字符
+// FNV（单张 3.74MB 截图实测 ≈9.8ms/次）。
+describe('snapshot transcript id reuse (A2)', () => {
+  it('reuses ids for unchanged entries and only mints ids for appended messages', () => {
+    const first: Message[] = [
+      { role: 'user', content: '你好' },
+      { role: 'assistant', content: '第一轮回复' },
+    ];
+    const base = createSessionSnapshot(first, [
+      { message: first[0], modelMessageIndex: 0 },
+      { message: first[1], modelMessageIndex: 1 },
+    ]);
+
+    const next: Message[] = [...first, { role: 'user', content: '第二轮' }];
+    const grown = createSessionSnapshot(next, [
+      { message: next[0], modelMessageIndex: 0 },
+      { message: next[1], modelMessageIndex: 1 },
+      { message: next[2], modelMessageIndex: 2 },
+    ], {}, [], base.transcript);
+
+    expect(grown.transcript.slice(0, 2).map(entry => entry.id)).toEqual(base.transcript.map(entry => entry.id));
+    expect(base.transcript.map(entry => entry.id)).not.toContain(grown.transcript[2].id);
+  });
+
+  it('keeps identical messages on distinct ids, before and after reuse', () => {
+    const message: Message = { role: 'user', content: '同样的提问' };
+    const drafts: TranscriptDraft[] = [0, 1].map(index => ({ message, modelMessageIndex: index }));
+    const first = createSessionSnapshot([message, message], drafts);
+    expect(first.transcript[0].id).not.toBe(first.transcript[1].id);
+
+    const again = createSessionSnapshot([message, message], drafts, {}, [], first.transcript);
+    expect(again.transcript.map(entry => entry.id)).toEqual(first.transcript.map(entry => entry.id));
+  });
+
+  it('remembers the last saved transcript so the next build can reuse it', async () => {
+    const previousStorage = (globalThis as any).localStorage;
+    const values = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    try {
+      const message: Message = { role: 'user', content: '记住我' };
+      const sessionId = `id-reuse-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const snapshot = createSessionSnapshot([message], [{ message, modelMessageIndex: 0 }]);
+      await saveSession(sessionId, snapshot);
+      expect(lastSavedTranscript(sessionId).map(entry => entry.id)).toEqual(snapshot.transcript.map(entry => entry.id));
+    } finally {
+      (globalThis as any).localStorage = previousStorage;
+    }
+  });
+});
+
 describe('turnCheckpointGateMs', () => {
   it('small accumulations stay on the fast 3s tier', () => {
     expect(turnCheckpointGateMs(0)).toBe(3000);

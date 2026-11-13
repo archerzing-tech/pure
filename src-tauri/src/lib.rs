@@ -1388,6 +1388,14 @@ fn read_file_impl(
             meta.len() / 1024 / 1024
         ));
     }
+    // A3（2026-11-13 性能审计）：显式行范围（start+end）走流式首窗读取——
+    // 40MB 日志只取 1000–1200 行时不必整份读/解码。容器格式（pdf/docx/xlsx…）
+    // 与二进制仍走整份提取，输出一字不变（见 read_text_range_prefix）。
+    if start_line.is_some() && end_line.is_some() {
+        if let Ok(Some(windowed)) = read_text_range_prefix(&full, start_line, end_line) {
+            return Ok(windowed);
+        }
+    }
     let bytes = fs::read(&full).map_err(|e| format!("read_file: {}", e))?;
     let (text, note) = extract_file_text(&bytes, &full);
     let text = text.trim().to_string();
@@ -1419,9 +1427,9 @@ fn slice_read_file_text(
     if start_line.is_none() && end_line.is_none() && head_lines.is_none() {
         return Ok(text);
     }
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
     if start_line.is_some() || end_line.is_some() {
+        let lines: Vec<&str> = text.lines().collect();
+        let total = lines.len();
         let s = start_line.unwrap_or(1).max(1);
         let e = end_line.unwrap_or(total).min(total);
         if s > e {
@@ -1429,25 +1437,36 @@ fn slice_read_file_text(
         }
         return Ok(lines[s - 1..e].join("\n"));
     }
+    let total = text.lines().count();
     let head = head_lines.unwrap_or(READ_FILE_HEAD_LINES);
     // 预算按字符计（TS 侧同款）：中文行若按字节计，同样 32KB 只能给出约
     // 1/3 的正文，GUI 侧的大文件读取会凭空多出两倍往返。
+    // A3（2026-11-13 性能审计）：行数与头部槽位一次扫描算完——旧实现先把整份
+    // 文本 collect 成 Vec<&str>（4M 行日志约 32MB 额外内存），现在只留要在正文
+    // 里输出的那几行，输出逐字不变。
     let mut take = 0usize;
     let mut chars = 0usize;
-    for line in lines.iter().take(head) {
+    let mut budget_spent = false;
+    let mut kept: Vec<&str> = Vec::with_capacity(head.min(READ_FILE_HEAD_LINES));
+    for line in text.lines() {
+        if take >= head || budget_spent {
+            continue;
+        }
         let len = line.chars().count();
         if chars + len + 1 > READ_FILE_HEAD_MAX_CHARS {
-            break;
+            budget_spent = true;
+            continue;
         }
         chars += len + 1;
         take += 1;
+        kept.push(line);
     }
     if take >= total {
         return Ok(text);
     }
-    if take == 0 && head > 0 && !lines.is_empty() {
+    if take == 0 && head > 0 {
         // 首行单独超预算：给前缀 + 专门的出路文案（脚注与 TS 侧逐字一致）。
-        let first = lines[0];
+        let first = text.lines().next().unwrap_or("");
         let shown: String = first
             .chars()
             .take(READ_FILE_HEAD_MAX_CHARS.saturating_sub(1))
@@ -1462,11 +1481,127 @@ fn slice_read_file_text(
     // 脚注格式与 src/shared/readFileHead.ts 的 readFileHeadFooter 保持一致。
     Ok(format!(
         "{}\n\n[read_file：以上是前 {} 行，文件共 {} 行。继续读用 startLine={}（可配 endLine）；定位内容用 code_searcher。]",
-        lines[..take].join("\n"),
+        kept.join("\n"),
         take,
         total,
         take + 1
     ))
+}
+
+/// A3（2026-11-13 性能审计）：显式行范围的流式首窗读取。
+///
+/// 语义与 `slice_read_file_text` 的行范围分支逐字一致（`text.trim()` 后的 1 基
+/// 行号、含端点、起点越界返回空串）。为了在不读完整份文件的前提下保持这个
+/// 语义，只在「窗口完全落在 2MB 前缀内，且不碰到首尾 trim 边界」时返回
+/// `Some`；任何拿不准的情况（容器格式、二进制、窗口跨出前缀、从第 1 行开始、
+/// 前缀全是空白）返回 `None`，调用方回退到原来的整份读取。
+const READ_FILE_MAGIC_PROBE_BYTES: usize = 8 * 1024;
+
+/// 这些格式的正文必须整份参与解析（zip 目录 / pdf 流 / rtf / OLE），不能按
+/// 行切窗；二进制（含 NUL 的字节）连「按 0x0A 分行」都不成立——包括 UTF-16
+/// 文本，它的编码判定依赖整份字节。
+fn needs_full_extraction(head: &[u8], ext: &str) -> bool {
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") {
+        return true;
+    }
+    if head.starts_with(b"%PDF") || head.starts_with(b"{\\rtf") {
+        return true;
+    }
+    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return true;
+    }
+    if head.contains(&0) {
+        return true;
+    }
+    matches!(
+        ext,
+        "pdf" | "rtf" | "docx" | "docm" | "xlsx" | "xlsm" | "pptx" | "pptm" | "odt"
+            | "ods" | "odp" | "doc" | "xls" | "ppt"
+    )
+}
+
+fn read_text_range_prefix(
+    full: &std::path::Path,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> std::io::Result<Option<String>> {
+    use std::io::{BufRead, Read};
+    let (Some(start), Some(end)) = (start_line, end_line) else {
+        return Ok(None);
+    };
+    let ext = full
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // 探测用独立句柄：探测读掉的字节不能算进下面的行号（用同一个句柄会在
+    // 探测处重新开始计行，窗口整体前移）。
+    let mut probe = vec![0u8; READ_FILE_MAGIC_PROBE_BYTES];
+    let probed = {
+        let mut probe_file = fs::File::open(full)?;
+        probe_file.read(&mut probe)?
+    };
+    if needs_full_extraction(&probe[..probed], &ext) {
+        return Ok(None);
+    }
+    let mut file = std::io::BufReader::new(fs::File::open(full)?);
+    // ── 开头 trim 的行号偏移：整份文本的 trim() 只可能吃掉开头的空白（含
+    // 换行），行号整体前移 dropped 行。用解码后的探测窗口算，Unicode 空白也准。
+    let decoded_probe = decode_text_bytes(&probe[..probed]);
+    let trimmed_probe = decoded_probe.trim_start();
+    let dropped = decoded_probe[..decoded_probe.len() - trimmed_probe.len()]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count();
+    if trimmed_probe.is_empty() && probed >= READ_FILE_MAGIC_PROBE_BYTES {
+        // 前 8KB 全是空白：后续行号无从推断。
+        return Ok(None);
+    }
+    let s = start.max(1);
+    if s > end {
+        return Ok(Some(String::new()));
+    }
+    // 窗口碰到首行：首行内容可能被 trim() 掉前导空白，逐字比对拿不准。
+    if s <= dropped + 1 {
+        return Ok(None);
+    }
+    let from = s - 1 + dropped;
+    let to = end + dropped;
+
+    // ── 跳过前 from 行（不保留、不解码），只把窗口内那几行拿出来。
+    let mut buf: Vec<u8> = Vec::new();
+    let mut line_no = 0usize;
+    let mut kept: Vec<String> = Vec::with_capacity((to - from).min(4096));
+    loop {
+        buf.clear();
+        let read = file.read_until(b'\n', &mut buf)?;
+        if read == 0 {
+            // EOF 在窗口结束之前：尾部的行会被全文路径的 trim() 吃掉，
+            // 这里也拿不准 → 回退。
+            return Ok(None);
+        }
+        line_no += 1;
+        if line_no <= from {
+            continue;
+        }
+        let line = strip_line_terminator(&buf);
+        kept.push(decode_text_bytes(line));
+        if line_no >= to {
+            break;
+        }
+    }
+    Ok(Some(kept.join("\n")))
+}
+
+/// `str::lines()` 的字节版：去掉行尾 `\n`，再去掉一个 `\r`。
+fn strip_line_terminator(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    if end > 0 && line[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
+    }
+    &line[..end]
 }
 
 #[cfg(test)]
@@ -1561,6 +1696,60 @@ mod read_file_slice_tests {
         let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
         assert!(out.contains("第10行"), "10 lines fit in 32k chars: {}", &out[..40.min(out.len())]);
         assert!(!out.contains("第11行"));
+    }
+
+    #[test]
+    fn streamed_range_matches_the_full_read_slice() {
+        // A3（2026-11-13 性能审计）：显式行范围走首窗读取，输出必须与「整份
+        // 读取后切片」逐字一致。
+        let content = (1..=5000).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("stream-range", &content);
+        let expected = slice_read_file_text(content.trim().to_string(), Some(2400), Some(2402), None).unwrap();
+        let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(2400), Some(2402), None).unwrap();
+        assert_eq!(actual, expected);
+        let path = std::path::Path::new(&ws).join("f.txt");
+        assert!(
+            read_text_range_prefix(&path, Some(2400), Some(2402)).unwrap().is_some(),
+            "window inside the prefix must take the streamed path"
+        );
+    }
+
+    #[test]
+    fn streamed_range_keeps_trim_and_crlf_semantics() {
+        let mut content = String::from("\n\n  first\nsecond\r\nthird\r\nfourth\r\n");
+        content.push_str(&(1..=3000).map(|i| format!("row-{i}\r\n")).collect::<String>());
+        let ws = write_fixture("stream-trim", &content);
+        for (start, end) in [(1usize, 2usize), (2, 3), (4, 6), (100, 120), (2999, 3002)] {
+            let expected = slice_read_file_text(content.trim().to_string(), Some(start), Some(end), None).unwrap();
+            let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(start), Some(end), None).unwrap();
+            assert_eq!(actual, expected, "range {start}..{end}");
+        }
+    }
+
+    #[test]
+    fn streamed_range_skips_past_the_probe_window() {
+        // 深位窗口（超过 8KB 探测窗口）必须仍与全文切片一致：跳过段不解码、不保留。
+        let content = (1..=20_000).map(|i| format!("row-{i}-{}", "x".repeat(12))).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("stream-deep", &content);
+        let expected = slice_read_file_text(content.trim().to_string(), Some(19_000), Some(19_010), None).unwrap();
+        let actual = read_file_impl(ws, "f.txt".into(), Some(19_000), Some(19_010), None).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn streamed_range_refuses_containers_and_binary() {
+        let dir = std::env::temp_dir().join(format!("pure-readfile-{}-pk", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut bytes = b"PK\x03\x04".to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        fs::write(dir.join("book.xlsx"), &bytes).unwrap();
+        assert!(read_text_range_prefix(&dir.join("book.xlsx"), Some(2), Some(3)).unwrap().is_none());
+
+        let mut binary = vec![0x89, b'P', b'N', b'G'];
+        binary.extend_from_slice(&[0u8; 64]);
+        fs::write(dir.join("shot.png"), &binary).unwrap();
+        assert!(read_text_range_prefix(&dir.join("shot.png"), Some(2), Some(3)).unwrap().is_none());
     }
 
     #[test]
@@ -14820,6 +15009,127 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn save_session_reads_meta_sidecar_instead_of_parsing_the_whole_file() {
+        // A1（2026-11-13 性能审计）：revision/model/provider 从 meta.json 读，
+        // 保存不再解析整份 session.json。反证：磁盘上的 session.json 自称
+        // revision 99，若保存仍整份解析，本次保存会被 stale revision 拒绝。
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-session-meta-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let _ = fs::remove_file(sessions_dir().join("index.json"));
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let snapshot = |revision: u64| {
+            serde_json::json!({
+                "version": 3,
+                "revision": revision,
+                "modelContext": { "messages": [{ "role": "user", "content": "meta" }] },
+                "events": [],
+                "transcript": [],
+                "uiState": {}
+            })
+        };
+
+        let session_id = format!("metatest{}", stamp);
+        let session_dir = sessions_dir().join(&session_id);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("session.json"),
+            serde_json::json!({
+                "messageCount": 1,
+                "updatedAt": 1u64,
+                "workspace": "",
+                "model": "disk-model",
+                "provider": "",
+                "snapshot": snapshot(99),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        write_session_meta(
+            &session_id,
+            &SessionMetaSidecar { revision: 3, model: "meta-model".to_string(), provider: "meta-provider".to_string() },
+        )
+        .unwrap();
+
+        // revision 5 > meta 的 3：允许保存；model=None 时保留 meta 里的覆盖。
+        save_session_impl(session_id.clone(), snapshot(5), Some(String::new()), None, None).unwrap();
+        let meta = read_session_meta(&session_id).unwrap();
+        assert_eq!(meta.revision, 5);
+        assert_eq!(meta.model, "meta-model");
+        assert_eq!(meta.provider, "meta-provider");
+
+        // 旧档（无 meta）：仍走一次整份解析，stale 判定照旧；合法保存后补写 meta。
+        let legacy_id = format!("metatestlegacy{}", stamp);
+        let legacy_dir = sessions_dir().join(&legacy_id);
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("session.json"),
+            serde_json::json!({
+                "messageCount": 1,
+                "updatedAt": 1u64,
+                "workspace": "",
+                "model": "legacy-model",
+                "provider": "",
+                "snapshot": snapshot(7),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stale = save_session_impl(legacy_id.clone(), snapshot(6), Some(String::new()), None, None).unwrap_err();
+        assert_eq!(stale, "stale session revision");
+        save_session_impl(legacy_id.clone(), snapshot(8), Some(String::new()), None, None).unwrap();
+        let legacy_meta = read_session_meta(&legacy_id).unwrap();
+        assert_eq!(legacy_meta.revision, 8);
+        assert_eq!(legacy_meta.model, "legacy-model", "旧档的模型覆盖必须被带进 meta");
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn deleting_a_session_removes_only_its_attachments_directory() {
+        // A4（2026-11-13 性能审计）：图片附件目录在 sessions 之外，必须随会话
+        // 一起删除，否则每删一个会话就留一份孤儿原图。
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-session-attach-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let session_id = format!("attachtest{stamp}");
+        let other_id = format!("attachtestother{stamp}");
+        fs::create_dir_all(sessions_dir().join(&session_id)).unwrap();
+        fs::create_dir_all(sessions_dir().join(&other_id)).unwrap();
+        let dir = attachments_dir().join(safe_session_component(&session_id));
+        let other_dir = attachments_dir().join(safe_session_component(&other_id));
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&other_dir).unwrap();
+        fs::write(dir.join("shot.png"), b"x").unwrap();
+
+        cleanup_session_files(&session_id).unwrap();
+        assert!(!dir.exists(), "被删会话的附件目录必须一起走");
+        assert!(other_dir.exists(), "别的会话的附件不能被误删");
+
+        // delete_all 那一路：附件根整根清空。
+        cleanup_all_session_files(&sessions_dir(), &[other_id]).unwrap();
+        assert!(!attachments_dir().exists());
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn checkpoint_save_load_cleanup_roundtrip() {
         let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
@@ -15045,6 +15355,47 @@ fn load_stored_session_model_provider(session_id: &str) -> (Option<String>, Opti
     )
 }
 
+// ── 性能审计 A1（2026-11-13）：会话级小 sidecar（revision / model / provider）──
+// 保存链路过去为了读这三样，会把整份 session.json 读+解析两遍（11MB 会话
+// ≈16ms CPU + 22MB 磁盘读/次，且在全局保存锁里串行）。meta.json 只有几十
+// 字节，保存只读它；旧档没有 meta 时沿用旧解析一次并补写——语义与旧档兼容
+// 矩阵见 docs/perf-remediation-plan-2026-11-13.md §8。
+const SESSION_META_FILE: &str = "meta.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SessionMetaSidecar {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    provider: String,
+}
+
+fn session_meta_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(session_id).join(SESSION_META_FILE)
+}
+
+/// 读 meta sidecar。文件缺失/损坏一律 None —— 调用方回退到一次旧解析，绝不
+/// 把「读不到」当成「revision 为 0」以外的任何语义。
+fn read_session_meta(session_id: &str) -> Option<SessionMetaSidecar> {
+    let raw = fs::read_to_string(session_meta_path(session_id)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// 写 meta sidecar（tmp + rename）。刻意不 fsync：这个小文件丢了只会退化成
+/// 一次旧解析，不影响任何用户可见语义。
+fn write_session_meta(session_id: &str, meta: &SessionMetaSidecar) -> Result<(), String> {
+    let path = session_meta_path(session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir meta: {}", e))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string(meta).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(&tmp, body).map_err(|e| format!("write meta: {}", e))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("replace meta: {}", e))
+}
+
 // ── 架构评审 v2 A1：会话事件日志（events.jsonl，只追加）──
 // 每会话一行一事件的唯一事实源（快照降为压缩视图，见
 // docs/remote-office-bridge-design.md §2）。O_APPEND 单行写是日志原语的安全
@@ -15235,8 +15586,14 @@ fn save_session_impl(
         None => load_session_workspace(&session_id).unwrap_or_default(),
     };
 
+    // A1（性能审计）：三样元数据先读小 sidecar；旧档没有 meta 才回退到整份
+    // 解析（仅首次，写入成功后立刻补上 meta）。
+    let stored_meta = read_session_meta(&session_id);
     let revision = snapshot.get("revision").and_then(|value| value.as_u64()).unwrap_or(0);
-    let existing_revision = load_stored_session_revision(&session_id).unwrap_or(0);
+    let existing_revision = match &stored_meta {
+        Some(meta) => meta.revision,
+        None => load_stored_session_revision(&session_id).unwrap_or(0),
+    };
     if revision < existing_revision {
         return Err("stale session revision".to_string());
     }
@@ -15249,13 +15606,21 @@ fn save_session_impl(
         .unwrap_or_default();
     // 会话级模型覆盖：None = 调用方不关心（read-modify-write 的旁路保存），
     // 保留旧档值，别让旁路保存把用户选的模型洗掉。
-    let existing = load_stored_session_model_provider(&session_id);
+    let existing = match &stored_meta {
+        Some(meta) => (
+            (!meta.model.is_empty()).then(|| meta.model.clone()),
+            (!meta.provider.is_empty()).then(|| meta.provider.clone()),
+        ),
+        None => load_stored_session_model_provider(&session_id),
+    };
+    let resolved_model = model.or_else(|| existing.0.clone()).unwrap_or_default();
+    let resolved_provider = provider.or_else(|| existing.1.clone()).unwrap_or_default();
     let data = SessionData {
         message_count: messages.len(),
         updated_at: now,
         workspace: workspace.clone(),
-        model: model.or_else(|| existing.0.clone()).unwrap_or_default(),
-        provider: provider.or_else(|| existing.1.clone()).unwrap_or_default(),
+        model: resolved_model.clone(),
+        provider: resolved_provider.clone(),
         // P0-3：顶层副本不再落盘（skip_serializing_if 整个跳过）——快照里
         // 的 modelContext.messages 是唯一消息账。title/message_count 用上面
         // 提取的数组（同一数据），旧档顶层副本仅在读取侧兼容。
@@ -15289,6 +15654,17 @@ fn save_session_impl(
     // P0-3：title 从 snapshot 提取的消息数组取（data.messages 新档恒空）。
     let title = extract_title(&messages);
     update_sessions_index(&session_id, &title, data.message_count, now, effective_workspace)?;
+
+    // A1：session.json 已落盘之后才写 meta。写失败只让下一次保存退化到旧解析，
+    // 不改变保存语义，也不报错。
+    let _ = write_session_meta(
+        &session_id,
+        &SessionMetaSidecar {
+            revision,
+            model: resolved_model,
+            provider: resolved_provider,
+        },
+    );
 
     Ok(serialized.len())
 }
@@ -15788,6 +16164,13 @@ fn cleanup_session_files(session_id: &str) -> Result<(), String> {
     if tmp_dir.exists() {
         fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove tmp workspace: {}", e))?;
     }
+    // A4（性能审计）：图片原图/缩略图的附件目录在 sessions 以外（~/.pure/
+    // attachments/<hex(id)>）——不随会话目录删除就会永远留成孤儿。只删应用
+    // 自己维护的目录，用户原始文件不在里面。
+    let attachments = attachments_dir().join(safe_session_component(session_id));
+    if attachments.exists() {
+        let _ = fs::remove_dir_all(&attachments);
+    }
     // 子代理/父回合的 checkpoint 不住在 sessions 目录（独立根，见下方
     // checkpoints_dir），会话删除时一并扫走——不留盘上幽灵断点。
     let _ = cleanup_session_checkpoints(session_id);
@@ -15969,6 +16352,11 @@ fn cleanup_all_session_files(dir: &std::path::Path, session_ids: &[String]) -> R
         if tmp_dir.exists() {
             let _ = fs::remove_dir_all(&tmp_dir);
         }
+    }
+    // A4（性能审计）：附件根整根清空（与上面 session 目录一起走）。
+    let attachments_root = attachments_dir();
+    if attachments_root.exists() {
+        let _ = fs::remove_dir_all(&attachments_root);
     }
     // 断点整根清空（checkpoint 键与快照目录解耦，不在上面被扫到的集合里）。
     let cp_root = checkpoints_dir();
@@ -19163,6 +19551,11 @@ done"#,
     async fn spawn_mcp_augments_path_and_forwards_env() {
         // Can't invoke the Tauri command (needs State), so exercise the shared
         // path helper + env forwarding against a real child process.
+        //
+        // 全局 HOME/PATH 快照：其他测试会在 test_home_lock 下临时改 HOME，本测试
+        // 既读 HOME 又构造 PATH，不持锁就会跟它们撞车（断言里的 home 与子进程
+        // 实际拿到的 PATH 来自不同次快照——曾经偶发「PATH augmentation missing」）。
+        let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::var("HOME").unwrap_or_default();
         let path = augmented_mcp_path(Some("/custom/bin"));
         assert!(
@@ -20086,3 +20479,4 @@ mod gateway_launch_candidates {
         assert_eq!(from_launch.first().map(|p| p.to_path_buf()), Some(exe.parent().unwrap().join(if cfg!(windows) { "pure-cli.exe" } else { "pure-cli" })));
     }
 }
+

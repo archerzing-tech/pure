@@ -399,8 +399,18 @@ function modelMessageFromStored(message: StoredMessage): Message {
   };
 }
 
-function stableMessageId(message: Message, occurrence: number): string {
-  const source = `${JSON.stringify(message)}:${occurrence}`;
+/** A2（2026-11-13 性能审计）：转写条目的身份指纹——role + 内容长度 + 首尾 64
+ *  字符 + toolCallId。图片消息的内容是 MB 级 base64，旧实现逐条
+ *  JSON.stringify 两次再做逐字符 FNV（实测单张 3.74MB 截图 ≈9.8ms/次），指纹
+ *  把它压成常数级。指纹变粗之后两次「看起来一样」的消息会共用 occurrence
+ *  计数，id 依旧互不相同（occurrence 不同），不会合并条目。 */
+function transcriptFingerprint(role: string, content: string | null | undefined, toolCallId?: string): string {
+  const text = content ?? '';
+  return `${role}\u0000${text.length}\u0000${text.slice(0, 64)}\u0000${text.slice(-64)}\u0000${toolCallId ?? ''}`;
+}
+
+function stableMessageId(key: string, occurrence: number): string {
+  const source = `${key}:${occurrence}`;
   let hash = 2166136261;
   for (let index = 0; index < source.length; index++) {
     hash ^= source.charCodeAt(index);
@@ -465,19 +475,32 @@ export function createSessionSnapshot(
   source: TranscriptDraft[] | StoredMessage[],
   uiState: Partial<SessionUiState> = {},
   statusLines: StatusLineRecord[] = [],
+  /** A2（2026-11-13 性能审计）：上一份快照的 transcript。同位置、同内容的
+   *  条目直接沿用旧 id，只有新增条目才计算哈希——既有条目的 id 一个都不变，
+   *  事件日志按 id 的关联继续保持。不传 = 旧行为。 */
+  priorTranscript: readonly TranscriptEntry[] = [],
 ): SessionSnapshotV3 {
   const drafts = source.length > 0 && 'message' in source[0]
     ? source as TranscriptDraft[]
     : legacyToTranscriptDrafts(source as StoredMessage[]);
+  const priorByIndex = new Map<number, TranscriptEntry>();
+  for (const entry of priorTranscript) priorByIndex.set(entry.modelMessageIndex, entry);
   const occurrences = new Map<string, number>();
   const transcript = drafts.map((draft): TranscriptEntry => {
     const message = draft.message;
-    const occurrenceKey = JSON.stringify(message);
+    const content = draft.content ?? message.content;
+    const occurrenceKey = transcriptFingerprint(message.role, content, message.toolCallId);
     const occurrence = occurrences.get(occurrenceKey) ?? 0;
     occurrences.set(occurrenceKey, occurrence + 1);
+    const prior = priorByIndex.get(draft.modelMessageIndex);
+    const reuseId = prior
+      && prior.role === message.role
+      && transcriptFingerprint(prior.role, prior.content, prior.toolCallId) === occurrenceKey
+      ? prior.id
+      : undefined;
     const calls = messageToolCallInfos(message);
     return {
-      id: stableMessageId(message, occurrence),
+      id: reuseId ?? stableMessageId(occurrenceKey, occurrence),
       modelMessageIndex: draft.modelMessageIndex,
       role: message.role as TranscriptEntry['role'],
       content: draft.content ?? message.content,
@@ -1098,6 +1121,29 @@ export function lastPersistedSnapshotBytes(sessionId: string): number {
 
 const sessionSnapshotBytes = new Map<string, number>();
 
+// A2（2026-11-13 性能审计）：最近一份 transcript，供 createSessionSnapshot 复用
+// 已有条目的 id（同位置 + 同指纹 → 不重算哈希）。只缓存最近几个会话，避免切换
+// 会话时把每份 transcript 常驻内存；超过上限按插入顺序淘汰最旧的。
+const TRANSCRIPT_CACHE_SESSIONS = 4;
+const sessionTranscripts = new Map<string, readonly TranscriptEntry[]>();
+
+function rememberTranscript(sessionId: string, transcript: readonly TranscriptEntry[] | undefined): void {
+  if (!sessionId || !transcript) return;
+  sessionTranscripts.delete(sessionId);
+  sessionTranscripts.set(sessionId, transcript);
+  while (sessionTranscripts.size > TRANSCRIPT_CACHE_SESSIONS) {
+    const oldest = sessionTranscripts.keys().next().value;
+    if (oldest === undefined) break;
+    sessionTranscripts.delete(oldest);
+  }
+}
+
+/** 上一份落盘/载入快照的 transcript（A2）：没有记录时返回空数组，调用方自然
+ *  回退到「每个条目重算 id」的旧行为。 */
+export function lastSavedTranscript(sessionId: string): readonly TranscriptEntry[] {
+  return sessionTranscripts.get(sessionId) ?? [];
+}
+
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
   await withTauriTimeout(tauriInvoke('save_session_workspace', { sessionId, workspace }), 'save_session_workspace');
 }
@@ -1476,6 +1522,7 @@ export async function saveSession(
   // A conversation the user has not talked to is not a session: persisting it
   // would put a "New chat" row in the sidebar that restores to nothing.
   if (boundedSnapshot.modelContext.messages.length === 0) return;
+  rememberTranscript(sessionId, boundedSnapshot.transcript);
   const revision = Math.max(
     sessionSaveRevisions.get(sessionId) ?? 0,
     sessionLoadedRevisions.get(sessionId) ?? 0,
@@ -1529,10 +1576,11 @@ export async function saveSessionWorkspace(sessionId: string, workspace: string)
 }
 
 export async function loadLastSession(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
-  if (tauriAvailable) {
-    try { return await tauriLoadLast(); } catch {}
-  }
-  return lsLoadLast();
+  const loaded = tauriAvailable
+    ? await tauriLoadLast().catch(() => null)
+    : lsLoadLast();
+  if (loaded) rememberTranscript(loaded.sessionId, loaded.snapshot.transcript);
+  return loaded;
 }
 
 export async function loadSession(sessionId: string): Promise<LoadedSession | null> {
@@ -1542,7 +1590,11 @@ export async function loadSession(sessionId: string): Promise<LoadedSession | nu
   } else {
     loaded = lsLoad(sessionId);
   }
-  if (loaded) sessionLoadedRevisions.set(sessionId, loaded.snapshot.revision ?? 0);
+  if (loaded) {
+    sessionLoadedRevisions.set(sessionId, loaded.snapshot.revision ?? 0);
+    // A2：恢复出来的 transcript 就是下一次保存的 id 复用源。
+    rememberTranscript(sessionId, loaded.snapshot.transcript);
+  }
   return loaded;
 }
 

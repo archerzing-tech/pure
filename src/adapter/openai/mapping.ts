@@ -5,6 +5,7 @@
 // request payloads stay identical regardless of transport.
 
 import type { Message, ToolDefinition } from '../../shared/types';
+import { trimHistoricalImages } from '../../shared/imageContext';
 
 export type OpenAIWireContent = string | Array<
   | { type: 'text'; text: string }
@@ -24,7 +25,10 @@ export interface OpenAIWireMessage {
 }
 
 export function mapMessages(messages: Message[]): OpenAIWireMessage[] {
-  return messages.map((m): OpenAIWireMessage => {
+  // P1-2（2026-11-13 性能审计）：较早的截图降级为缩略图，避免每轮重传 MB 级
+  // base64；当前轮的图与快照/磁盘均不变。
+  const requestMessages = trimHistoricalImages(messages);
+  return requestMessages.map((m): OpenAIWireMessage => {
     switch (m.role) {
       case 'system':
         return { role: 'system', content: m.content };

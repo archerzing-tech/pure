@@ -45,4 +45,27 @@ describe('OpenAI message mapping with image attachments', () => {
     expect(mapMessages([{ role: 'tool', content: 'ok', toolCallId: 'c2', toolName: 'x' }]))
       .toEqual([{ role: 'tool', tool_call_id: 'c2', content: 'ok' }]);
   });
+
+  it('sends thumbnails for older screenshots and full bytes for the newest turns (P1-2)', () => {
+    const image = (name: string) => ({
+      dataUrl: `data:image/png;base64,FULL-${name}`,
+      thumbDataUrl: `data:image/png;base64,THUMB-${name}`,
+      mimeType: 'image/png',
+    });
+    const wire = mapMessages([
+      { role: 'user', content: 'old shot', images: [image('one')] },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'middle shot', images: [image('two')] },
+      { role: 'user', content: 'newest shot', images: [image('three')] },
+    ]);
+
+    const urls = wire.map((message) => Array.isArray(message.content)
+      ? message.content
+        .filter((part) => part.type === 'image_url')
+        .map((part) => (part.type === 'image_url' ? part.image_url.url : ''))
+      : []);
+    expect(urls[0]).toEqual(['data:image/png;base64,THUMB-one']);
+    expect(urls[2]).toEqual(['data:image/png;base64,FULL-two']);
+    expect(urls[3]).toEqual(['data:image/png;base64,FULL-three']);
+  });
 });

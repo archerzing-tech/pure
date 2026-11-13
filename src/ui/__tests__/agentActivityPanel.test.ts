@@ -416,3 +416,56 @@ describe('activity rail hit surface', () => {
     expect(main).toContain("document.addEventListener('mouseenter', revealChrome");
   });
 });
+
+// A5（2026-11-13 性能审计）：活动轨每拍不再整表 replaceChildren + appendChild。
+// 顺序/成员没变时零结构变更（动画不重启），变了才最小移动。
+describe('agent activity panel structure (A5)', () => {
+  it('leaves the list untouched when the roster and order are unchanged', async () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    const roster = () => [activity(), activity({ callId: 'call-2', agentName: 'code_reviewer' })];
+    panel.update(roster());
+
+    const list = panel.el.querySelector('.agent-activity-list')!;
+    let mutations = 0;
+    const observer = new MutationObserver((records) => { mutations += records.length; });
+    observer.observe(list, { childList: true });
+
+    // 同一批活动再刷两拍（事件流的常态：状态/名字/时间都没变）。
+    panel.update(roster());
+    panel.update(roster());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+
+    expect(mutations).toBe(0);
+    expect(list.querySelectorAll('.agent-worker')).toHaveLength(2);
+  });
+
+  it('keeps the same card nodes when a new agent is prepended', async () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity()]);
+    const existing = panel.el.querySelector('[data-call-id="call-1"]');
+
+    panel.update([
+      activity(),
+      activity({ callId: 'call-2', agentName: 'code_reviewer', startedAt: 10 }),
+      activity({ callId: 'call-3', agentName: 'ui_designer', startedAt: 20 }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 同一个 DOM 节点（没有重建 / 摘挂 → 呼吸与重试脉冲不会从头开始）。
+    expect(panel.el.querySelector('[data-call-id="call-1"]')).toBe(existing);
+    const order = [...panel.el.querySelectorAll('.agent-worker')].map((el) => (el as HTMLElement).dataset.callId);
+    expect(order).toEqual(['call-3', 'call-2', 'call-1']);
+  });
+
+  it('drops cards that left the roster', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity(), activity({ callId: 'call-2', agentName: 'code_reviewer' })]);
+    panel.update([activity({ callId: 'call-2', agentName: 'code_reviewer' })]);
+    expect(panel.el.querySelector('[data-call-id="call-1"]')).toBeNull();
+    expect(panel.el.querySelectorAll('.agent-worker')).toHaveLength(1);
+  });
+});

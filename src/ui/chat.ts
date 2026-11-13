@@ -9,7 +9,7 @@ import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSig
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, lastPersistedSnapshotBytes, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, lastPersistedSnapshotBytes, lastSavedTranscript, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { recordEndpointCacheOutcome } from '../shared/endpointCacheQuality';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
@@ -9142,7 +9142,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const nextSnapshotV2 = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
       planProgress: progressSnapshot,
       planState: turnPlanState,
-    }, this.statusLines);
+    }, this.statusLines, lastSavedTranscript(sessionId));
     const events = nextSnapshotV2.events;
     const nextSnapshot: SessionSnapshot = {
       version: 3,

@@ -14,6 +14,7 @@ import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConf
 import { syncPresentationCardsFromConfig, markComposerTyping, setStreamingRenderGate } from './markdown';
 import { setWindowModelOverrideGetter } from './llmWarm';
 import { setCustomPresentationCardsLoader } from '../coding-agent/ToolRegistry';
+import { setHistoricalImagePolicy } from '../shared/imageContext';
 import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character';
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
@@ -1052,6 +1053,9 @@ function deferToIdle(fn: () => void): void {
   // 浏览器 bundle）。
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   syncPresentationCardsFromConfig(loadConfig()?.presentationCards);
+  // P1-2（2026-11-13 性能审计）：历史截图降级开关跟配置走（默认开；关掉即
+  // 回到「每轮重传全部历史原图」的旧行为）。
+  setHistoricalImagePolicy({ enabled: loadConfig()?.trimHistoricalImages !== false });
   // LLM 预热目标跟本会话覆盖走（多窗口各自选模型）：不注入的话预热循环
   // 永远打全局 config 的端点，被覆盖选中的模型端点零预热、每回合付全款握手。
   setWindowModelOverrideGetter(() => chat.activeSessionModel());

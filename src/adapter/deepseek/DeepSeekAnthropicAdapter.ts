@@ -11,6 +11,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
 import { safeParseArgs } from '../../shared/format';
 import { normalizeTokenUsage } from '../../shared/usage';
+import { trimHistoricalImages } from '../../shared/imageContext';
 
 export interface DeepSeekAnthropicConfig {
   /** Optional: keyless local endpoints (anthropic 兼容路由器) legitimately
@@ -306,6 +307,9 @@ function parseAnthropicImageSource(dataUrl: string, mimeType: string): { type: '
 export function mapAnthropicMessages(
   messages: Message[],
 ): { system: string; conversationMessages: Anthropic.MessageParam[] } {
+  // P1-2（2026-11-13 性能审计）：较早的截图降级为缩略图，避免每轮重传 MB 级
+  // base64；当前轮的图与快照/磁盘均不变。
+  messages = trimHistoricalImages(messages);
   const systemParts: string[] = [];
   const convMessages: Anthropic.MessageParam[] = [];
 

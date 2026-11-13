@@ -149,13 +149,16 @@ export function createAgentActivityPanel(
     const active = visible.filter(isAgentActivityActive).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const completed = visible.filter((activity) => !isAgentActivityActive(activity)).sort((a, b) => (b.startedAt ?? b.lastUpdatedAt ?? 0) - (a.startedAt ?? a.lastUpdatedAt ?? 0));
     const ordered = [...active, ...completed];
+    const wanted = new Set(ordered.map((activity) => activity.callId));
     // Same agent delegated N times used to render numbered instances
     // (ui_designer（1）（2）…) — the user found the suffixes noise, so cards
     // show the bare name again; instanceNo stays in the stored activity for
     // dispatch-order bookkeeping only.
 
-    list.replaceChildren();
-
+    // A5（2026-11-13 性能审计）：结构只在「成员或顺序真的变了」时才动。子 agent
+    // 事件 5–20Hz，旧实现每拍先 list.replaceChildren() 再逐卡 appendChild——
+    // 每拍 O(N) 摘挂一遍，还会把正在跑的呼吸/重试脉冲动画从头重启（观感上的
+    // 「闪一下」）。下面只 patch 内容，位置统一交给末尾的最小移动。
     for (const activity of ordered) {
       const activeNow = isAgentActivityActive(activity);
       const state = stateClass(activity, historical);
@@ -237,7 +240,24 @@ export function createAgentActivityPanel(
       if (entry.row.title !== wantTitle) entry.row.title = wantTitle;
       const wantClock = startedClock(activity.startedAt);
       if (entry.time.textContent !== wantClock) entry.time.textContent = wantClock;
-      list.appendChild(entry.row);
+    }
+
+    // 清掉本轮名单里已经没有的卡（会话切换已在上面整表重置，这里只管成员
+    // 收缩：bash_executor 过滤、任务范围收窄）。
+    for (const [callId, entry] of rows) {
+      if (wanted.has(callId)) continue;
+      entry.row.remove();
+      rows.delete(callId);
+    }
+
+    // 最小移动：已就位的节点原地不动（不摘不挂 → 动画不重启），只有错位的
+    // 才 insertBefore；新卡在插入时才开始播 --entering。
+    let cursor: ChildNode | null = list.firstChild;
+    for (const activity of ordered) {
+      const node = rows.get(activity.callId)?.row;
+      if (!node) continue;
+      if (node === cursor) cursor = cursor.nextSibling;
+      else list.insertBefore(node, cursor);
     }
   };
 

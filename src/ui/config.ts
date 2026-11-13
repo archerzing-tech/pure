@@ -43,10 +43,15 @@ export interface PureConfig {
   /** W1b-1 自探测的缓存（shared/capabilityProbe 产出，键 provider::model，
    * 条目含端点快照——换端点即失效）。manifest 没档的模型组合从这里拿
    * 端点自述的窗口；设置面连通性测试顺延写入，agent 可按键删改。 */
-  capabilityProbes?: Record<string, ProbedCapability>;
-  /** 自探测开关（默认开）：false 时连通性测试不再顺延探测、缓存值也不
-   * 再生效——窗口全部回落保守档 + 现状行告警。 */
+  capabilityProbes?: Record<string, ProbedCapability>;  /** 自探测开关（默认开）：false 时连通性测试不再顺延探测、缓存值也不
+   *  再生效——窗口全部回落保守档 + 现状行告警。 */
   probeCapabilities?: boolean;
+  /**
+   * P1-2（2026-11-13 性能审计）：历史截图降级开关（默认开）。开时只有最近
+   * 两条带图用户消息原图上传，更早的换缩略图，省掉每轮 MB 级的重复上传；
+   * 关掉即完全回到旧行为（所有历史图全量重传）。
+   */
+  trimHistoricalImages?: boolean;
   apiKey: string;
   /**
    * True when an API key is stored outside the WebView (Rust secrets in the
@@ -354,6 +359,7 @@ export function defaults(): PureConfig {
     fontSize: 'medium',
     density: 'comfortable',
     toolCardsExpanded: true,
+    trimHistoricalImages: true,
     // 性格内核（刀 1 收拢，刀 5 改活读）：这五个默认值 = **当前活跃内核**的确认倾向。
     // 「工匠慢线」在台上时，新装的默认就是逐步确认——但用户自己存过的值仍然优先
     // （defaults() 只在没有存储、或字段缺失时管用），内核不覆盖人的决定。
