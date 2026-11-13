@@ -1900,6 +1900,11 @@ export class ChatController {
   private agentActivityPanel: AgentActivityPanelHandle | null = null;
   private agentActivityHistorical = false;
   private agentActivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** P0-1（2026-11-13 性能审计）dirty 检查：上次成功写盘的 agentActivities
+   *  序列化值。activities 是小对象数组（几 KB 级），stringify 微秒级——用它在
+   *  尾沿回调里拦掉「事件很多但聚合状态没变」的拍，整条
+   *  flushSessionSaves→loadSession→saveSession 读-改-写回路直接跳过。 */
+  private lastPersistedAgentActivitiesJson = '';
   /** Per-session count of how many times each generated/modified file has been
    * written (write_file / edit_file / replace_files) this session. Drives the
    * "v1 / v2 / …" version badge on artifact cards so the user can see which
@@ -2975,11 +2980,11 @@ export class ChatController {
       this.agentActivities.push(next);
     }
     if (this.viewActive) {
+      // P1-2a（2026-11-13 性能审计）：mount 内部已带全参数（historical/
+      // sessionId）各跑一遍 panel.update 与 workbench.sync——这里的显式第二遍
+      // 让每个子 agent 事件都双跑一次 DOM 全量刷新，且它不带选项，会以 live
+      // 态覆盖 mount 刚设好的 historical 标记。删掉，mount 一处 speaks。
       this.mountAgentActivityPanel();
-      this.agentActivityPanel?.update(this.agentActivities);
-      // 工作台第二消费者（§3.5）：打开时外科手术式 patch 当前 agent 段块，
-      // 关闭时只养快照（打开瞬间用的就是它），零 DOM。
-      agentWorkbench()?.sync(this.agentActivities, { sessionId: this.sessionId });
     }
     this.scheduleAgentActivityPersistence();
   }
@@ -2999,6 +3004,15 @@ export class ChatController {
     const generation = this.generation;
     this.agentActivityPersistTimer = setTimeout(() => {
       this.agentActivityPersistTimer = null;
+      // P0-1（2026-11-13 性能审计）两刀：
+      // ①尾沿 250ms→1s——子 agent 事件 5–20Hz，250ms 尾沿在 4 路并发下实际
+      //   落盘 2–5 次/秒，每次都是整份快照的读-改-写（11MB 会话 ≈74ms 主线程
+      //   + 18ms 磁盘）。agentActivities 持久化只服务崩溃恢复，1s 粒度足够。
+      // ②dirty 检查——聚合状态与上次写盘相同（乱序守卫拦掉的过期拍、重复
+      //   状态拍）时整条回路跳过，连 flushSessionSaves 都不等。根治刀
+      //   （Rust 切片落盘 sidecar，永不 read-modify-write 整份快照）挂账审计。
+      const serialized = JSON.stringify(this.agentActivities);
+      if (serialized === this.lastPersistedAgentActivitiesJson) return;
       void flushSessionSaves().then(() => loadSession(sessionId)).then((loaded) => {
         if (!loaded || this.sessionId !== sessionId || this.generation !== generation) return;
         const snapshot: SessionSnapshot = {
@@ -3008,9 +3022,12 @@ export class ChatController {
             agentActivities: this.agentActivities.map((item) => ({ ...item })),
           },
         };
-        return saveSession(sessionId, snapshot, loaded.workspace);
+        return saveSession(sessionId, snapshot, loaded.workspace).then(() => {
+          // 写成功才记账——失败的拍下个尾沿重试。
+          this.lastPersistedAgentActivitiesJson = serialized;
+        });
       }).catch(() => {});
-    }, 250);
+    }, 1000);
   }
 
   private clearAgentActivityPersistence(): void {

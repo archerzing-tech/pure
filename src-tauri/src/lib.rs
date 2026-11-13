@@ -14637,6 +14637,73 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn save_session_drops_top_level_messages_but_keeps_title_and_legacy_readback() {
+        // P0-3（2026-11-13 性能审计）：新档不再把 snapshot.modelContext.messages
+        // 复制进顶层 messages——文件里只留快照一份；索引 title/message_count
+        // 改从 snapshot 取；旧档（顶层 messages + 无 snapshot）的回退读取不受影响。
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-session-p03-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let _ = fs::remove_file(sessions_dir().join("index.json"));
+        let session_id = format!("p03test{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let session_dir = sessions_dir().join(&session_id);
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let snapshot = serde_json::json!({
+            "version": 3,
+            "revision": 1,
+            "modelContext": { "messages": [
+                { "role": "user", "content": "纪要标题测试" },
+                { "role": "assistant", "content": "好的" }
+            ] },
+            "events": [],
+            "transcript": [],
+            "uiState": {}
+        });
+        save_session_impl(session_id.clone(), snapshot, Some(String::new()), None, None).unwrap();
+
+        // 新档：顶层 messages 整个缺席（skip），快照内消息完好。
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(session_dir.join("session.json")).unwrap()).unwrap();
+        assert!(raw.get("messages").is_none(), "top-level messages must be skipped, got {:?}", raw.get("messages"));
+        assert_eq!(raw["snapshot"]["modelContext"]["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(raw["messageCount"], 2);
+
+        // 索引 title 从 snapshot 提取（首条用户消息裁剪）。
+        let stored = load_session_impl(session_id.clone()).unwrap().unwrap();
+        let index_raw = fs::read_to_string(sessions_dir().join("index.json")).unwrap();
+        let index: serde_json::Value = serde_json::from_str(&index_raw).unwrap();
+        let entry = index.as_array().unwrap().iter().find(|item| item["id"] == session_id.as_str()).unwrap();
+        assert!(entry["title"].as_str().unwrap_or_default().contains("纪要标题"));
+        assert_eq!(entry["messageCount"], 2);
+        assert_eq!(stored["snapshot"]["modelContext"]["messages"][0]["content"], "纪要标题测试");
+
+        // 旧档回退：顶层 messages + 无 snapshot 的旧 session.json 仍可读——
+        // fallback 把顶层副本拼进 v1 形状的 snapshot 返回。
+        let legacy = serde_json::json!({
+            "messages": [ { "role": "user", "content": "旧档消息" } ],
+            "updatedAt": 1_700_000_000_000u64,
+            "messageCount": 1,
+            "workspace": "",
+            "model": "",
+            "provider": ""
+        });
+        fs::write(session_dir.join("session.json"), serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        let legacy_loaded = load_session_impl(session_id).unwrap().unwrap();
+        assert_eq!(legacy_loaded["snapshot"]["messages"][0]["content"], "旧档消息");
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn checkpoint_save_load_cleanup_roundtrip() {
         let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
@@ -14757,7 +14824,12 @@ mod generate_image_tests {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct SessionData {
-    #[serde(default)]
+    // 顶层 messages 不再写入（2026-11-13 性能审计 P0-3）：它与
+    // snapshot.modelContext.messages 逐字节重复，11MB 会话白占 ~33% 文件/
+    // IPC/fsync。只保留字段做旧档兼容（serde default 读旧档的顶层副本，
+    // load_session_impl 的无 snapshot 回退仍消费它）；新档序列化时整个跳过，
+    // title/message_count 直接从 snapshot 取（save_session_impl）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     messages: Vec<serde_json::Value>,
     #[serde(default)]
     snapshot: Option<serde_json::Value>,
@@ -15064,7 +15136,10 @@ fn save_session_impl(
         workspace: workspace.clone(),
         model: model.or_else(|| existing.0.clone()).unwrap_or_default(),
         provider: provider.or_else(|| existing.1.clone()).unwrap_or_default(),
-        messages,
+        // P0-3：顶层副本不再落盘（skip_serializing_if 整个跳过）——快照里
+        // 的 modelContext.messages 是唯一消息账。title/message_count 用上面
+        // 提取的数组（同一数据），旧档顶层副本仅在读取侧兼容。
+        messages: Vec::new(),
         snapshot: Some(snapshot),
     };
 
@@ -15091,7 +15166,8 @@ fn save_session_impl(
     }
     let effective_workspace = load_session_workspace(&session_id).unwrap_or(workspace);
 
-    let title = extract_title(&data.messages);
+    // P0-3：title 从 snapshot 提取的消息数组取（data.messages 新档恒空）。
+    let title = extract_title(&messages);
     update_sessions_index(&session_id, &title, data.message_count, now, effective_workspace)?;
 
     Ok(())

@@ -287,9 +287,14 @@ describe('源码锁（接线与退役断言）', () => {
     expect(settingsClose).toBeGreaterThan(0);
   });
 
-  it('chat.ts：funnel 第二消费者挂满两处 + 门禁接线 + 跨链三落点', () => {
+  it('chat.ts：funnel 第二消费者单点接线 + 门禁接线 + 跨链三落点', () => {
     const src = read('chat.ts');
-    expect(src.split('agentWorkbench()?.sync(').length - 1).toBe(2); // mount + updateAgentActivity
+    // 2026-11-13 P1-2a 去重：updateAgentActivity 的显式第二遍 update+sync
+    // 删除（每事件双跑 DOM 全量刷新），funnel 的 workbench.sync 由
+    // mountAgentActivityPanel 一处承载（带全参数 historical/sessionId）。
+    expect(src.split('agentWorkbench()?.sync(').length - 1).toBe(1);
+    // updateAgentActivity 必须经 mount 间接喂 workbench（第二消费者不得漏接）。
+    expect(src).toMatch(/if \(this\.viewActive\) \{\s*[^}]*this\.mountAgentActivityPanel\(\);\s*\}\s*this\.scheduleAgentActivityPersistence/);
     expect(src.split('attachWorkbenchEntry(').length - 1).toBeGreaterThanOrEqual(4); // import + 3 落点
     expect(src).toContain("window.addEventListener('resize', applyAgentRailSpaceGate)");
     expect(src).toContain('onOpenAgent: (callId) => agentWorkbench()?.open(callId)');

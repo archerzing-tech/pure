@@ -198,37 +198,45 @@ export function createAgentActivityPanel(
       // 整串重写必须带 --clickable（2026-11-12 真机反馈：hover 没有手型）——
       // 它只在首次创建时挂（170 行），这里的每次刷新若不补回，第一拍 update
       // 就把手型抹掉；click 监听还在，卡成了「能点但不像能点」。
-      entry.row.className = `agent-worker agent-worker--${state}`
+      // P1-2b（2026-11-13 性能审计）：以下全部先比较再写——子 agent 事件
+      // 5–20Hz，绝大多数拍的状态/名字/id/时间都没变，无差别重写文本节点
+      // 与 className 让每拍都白付一次样式失效与布局。
+      const wantClass = `agent-worker agent-worker--${state}`
         + (hooks?.onOpenAgent ? ' agent-worker--clickable' : '')
         + (entering ? ' agent-worker--entering' : '')
         + (retrying ? ' agent-worker--retrying' : '')
         + (activity.resumed ? ' agent-worker--resumed' : '');
+      if (entry.row.className !== wantClass) entry.row.className = wantClass;
       // Row 2: the machine id in FULL (web_searcher / code_reviewer / …) —
       // ellipsized since the 2026-11-12 rail narrowing (wrap would blow the
       // narrow card's height budget; the exact agent still shows in the
       // workbench and the row title).
-      entry.name.replaceChildren();
-      entry.name.append(document.createTextNode(activity.agentName));
+      if (entry.name.textContent !== activity.agentName) entry.name.textContent = activity.agentName;
       // Row 3: the run id on its OWN line (2026-11-12 用户反馈：收窄后名字行
       // 放不下 id chip，被省略号截掉半个) — every agent stays individually
       // quotable when something goes wrong ("ag-1a2b3c4d 报错了").
-      entry.idline.replaceChildren();
-      if (activity.agentId) {
-        const idChip = document.createElement('span');
-        idChip.className = 'agent-worker-id';
-        idChip.textContent = activity.agentId;
-        idChip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
-        entry.idline.append(idChip);
-        entry.idline.hidden = false;
-      } else {
-        entry.idline.hidden = true;
+      const wantIdHidden = !activity.agentId;
+      if (entry.idline.hidden !== wantIdHidden || (!wantIdHidden && entry.idline.textContent !== activity.agentId)) {
+        entry.idline.replaceChildren();
+        if (activity.agentId) {
+          const idChip = document.createElement('span');
+          idChip.className = 'agent-worker-id';
+          idChip.textContent = activity.agentId;
+          idChip.title = 'Agent 运行 ID：报错或异常时引用它定位这个 agent';
+          entry.idline.append(idChip);
+          entry.idline.hidden = false;
+        } else {
+          entry.idline.hidden = true;
+        }
       }
-      entry.row.title = [
+      const wantTitle = [
         activity.agentRole || activity.agentName,
         activity.resumed ? '续跑（命中存档断点）' : '',
         retrying ? `自愈重试第 ${activity.attempt} 次` : '',
       ].filter(Boolean).join(' · ');
-      entry.time.textContent = startedClock(activity.startedAt);
+      if (entry.row.title !== wantTitle) entry.row.title = wantTitle;
+      const wantClock = startedClock(activity.startedAt);
+      if (entry.time.textContent !== wantClock) entry.time.textContent = wantClock;
       list.appendChild(entry.row);
     }
   };
