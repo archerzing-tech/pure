@@ -443,6 +443,23 @@ function legacyToTranscriptDrafts(messages: StoredMessage[]): TranscriptDraft[] 
   });
 }
 
+/**
+ * P0-4（2026-11-13 性能审计）：转写/回放条目只存展示缩略图——MB 级原图
+ * dataUrl 只留在 modelContext.messages（vision 请求的真输入，语义不动）。
+ * 一张 2.94MB 截图 = 3.92MB base64，旧快照 modelContext + transcript 各存
+ * 一份；transcript 侧换 ≤~0.5MP 缩略图后单图省 ~85%，回放气泡（宽几百 px）
+ * 视觉无感。原图始终可从 path（~/.pure/attachments/ 稳定目录）取回。
+ * events/回放合并链消费的是这里的产物，自动继承缩略图。
+ */
+function compactTranscriptImages(images?: MessageImage[]): MessageImage[] | undefined {
+  if (!images?.length) return images;
+  return images.map((image) =>
+    image.thumbDataUrl && image.thumbDataUrl !== image.dataUrl
+      ? { ...image, dataUrl: image.thumbDataUrl }
+      : image,
+  );
+}
+
 export function createSessionSnapshot(
   modelMessages: Message[],
   source: TranscriptDraft[] | StoredMessage[],
@@ -465,7 +482,7 @@ export function createSessionSnapshot(
       role: message.role as TranscriptEntry['role'],
       content: draft.content ?? message.content,
       internal: message.role === 'user' && message.internal ? true : undefined,
-      images: draft.images ?? message.images,
+      images: compactTranscriptImages(draft.images ?? message.images),
       attachments: draft.attachments ?? message.attachments,
       pathRepairs: draft.pathRepairs,
       displayOverride: draft.displayOverride,
@@ -1065,8 +1082,21 @@ interface RawSessionMeta {
 async function tauriSave(sessionId: string, snapshot: SessionSnapshotV2, workspace: string, model?: string, provider?: string): Promise<void> {
   // 会话级模型覆盖（2026-11-06）：随 save_session 落 session.json；undefined
   // 时 Rust 侧保留旧档值（read-modify-write 的旁路保存不洗掉用户选择）。
-  await withTauriTimeout(tauriInvoke('save_session', { sessionId, snapshot, workspace, model: model || undefined, provider: provider || undefined }), 'save_session');
+  // P0-2（2026-11-13 性能审计）：Rust 返回落盘字节数，checkpoint 节流闸拿
+  // 它当「上一份快照的真实体量」——JS 侧拿不到 IPC 序列化字节。
+  const bytes = await withTauriTimeout(tauriInvoke<number>('save_session', { sessionId, snapshot, workspace, model: model || undefined, provider: provider || undefined }), 'save_session');
+  if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
+    sessionSnapshotBytes.set(sessionId, bytes);
+  }
 }
+
+/** 上一份成功落盘快照的真实字节（P0-2）：无记录（新会话/纯 localStorage
+ *  dev 路径）返回 0，闸门自然回退到增量口径，小会话行为不变。 */
+export function lastPersistedSnapshotBytes(sessionId: string): number {
+  return sessionSnapshotBytes.get(sessionId) ?? 0;
+}
+
+const sessionSnapshotBytes = new Map<string, number>();
 
 async function tauriSaveWorkspace(sessionId: string, workspace: string): Promise<void> {
   await withTauriTimeout(tauriInvoke('save_session_workspace', { sessionId, workspace }), 'save_session_workspace');

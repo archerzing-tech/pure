@@ -49,7 +49,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from '
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { setupWindowChrome } from './windowChrome';
 import { setupResizeZones } from './resizeZones';
-import { PasteChipManager, PASTE_FILE_THRESHOLD, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard } from './pasteChip';
+import { PasteChipManager, PASTE_FILE_THRESHOLD, THUMB_IMAGE_PIXELS, attachmentToMessageImage, composeMessageWithAttachments, downscaleImageDataUrl, renderAttachmentCard } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
 import { maybeOfferProxyOnboarding } from './proxyOnboarding';
@@ -2185,6 +2185,17 @@ async function doSend(text: string, displayOverride?: string, pathRepairs: impor
   const outgoingAttachments = longTextAttachment ? await pasteChips.prepareForSend() : attachments;
   const fullText = composeMessageWithAttachments(longTextAttachment || hasSameTextAttachment ? '' : text, outgoingAttachments);
   const images = outgoingAttachments.map(attachmentToMessageImage).filter((image): image is NonNullable<typeof image> => image !== null);
+  // P0-4（2026-11-13 性能审计）：发送时生成展示缩略图（≤~0.5MP）。快照的
+  // transcript/events 侧只落缩略图，原图 base64 只留在 modelContext（vision
+  // 真输入）。downscale 对小图原样返回 → 不设 thumb（避免同字节白存一份）。
+  const imagesWithThumbs = await Promise.all(images.map(async (image) => {
+    try {
+      const thumb = await downscaleImageDataUrl(image.dataUrl, THUMB_IMAGE_PIXELS);
+      return thumb !== image.dataUrl ? { ...image, thumbDataUrl: thumb } : image;
+    } catch {
+      return image;
+    }
+  }));
   const displayText = displayOverride ?? (longTextAttachment || hasSameTextAttachment ? `已附加长文本文件：${outgoingAttachments.find((a) => a.kind === 'text' && a.content === text)?.name ?? '文本文件'}` : text);
   const attachmentMetadata = outgoingAttachments.map((a) => ({ id: a.id, name: a.name, path: a.path, size: a.size, kind: a.kind, truncated: a.truncated }));
   const openAttachment = (attachment: import('../shared/types').MessageAttachment) => pasteChips.openStoredAttachment(attachment);
@@ -2194,8 +2205,8 @@ async function doSend(text: string, displayOverride?: string, pathRepairs: impor
     // 输入级时间语义：草稿自己报了执行时刻就不发出去，交给能等的队列（见
     // holdIfScheduled）。放在 enterChatMode 之后，因为"已排期"的状态行要落在
     // 真实会话的转录里，而不是 landing 视图上。
-    if (holdIfScheduled(fullText, displayText, images)) return;
-    await chat.send(fullText, images, displayText, false, attachmentMetadata, openAttachment, pathRepairs);
+    if (holdIfScheduled(fullText, displayText, imagesWithThumbs)) return;
+    await chat.send(fullText, imagesWithThumbs, displayText, false, attachmentMetadata, openAttachment, pathRepairs);
   } catch (err: any) {
     showToast(`${t('toast.sendFailed')}: ${err?.message || err}`);
     console.error('[pure] sendMessage failed:', err);

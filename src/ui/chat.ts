@@ -9,7 +9,7 @@ import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSig
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
 import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
-import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
+import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, lastPersistedSnapshotBytes, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { recordEndpointCacheOutcome } from '../shared/endpointCacheQuality';
 import { applyTaskScriptSignal, createTaskScript, formatTaskScriptFacts, taskScriptHandOver, type TaskScript, type TaskScriptHandOver, type TaskScriptSignal } from '../shared/taskScript';
@@ -3001,31 +3001,24 @@ export class ChatController {
   private scheduleAgentActivityPersistence(): void {
     if (this.agentActivityPersistTimer !== null) clearTimeout(this.agentActivityPersistTimer);
     const sessionId = this.sessionId;
-    const generation = this.generation;
     this.agentActivityPersistTimer = setTimeout(() => {
       this.agentActivityPersistTimer = null;
-      // P0-1（2026-11-13 性能审计）两刀：
-      // ①尾沿 250ms→1s——子 agent 事件 5–20Hz，250ms 尾沿在 4 路并发下实际
-      //   落盘 2–5 次/秒，每次都是整份快照的读-改-写（11MB 会话 ≈74ms 主线程
-      //   + 18ms 磁盘）。agentActivities 持久化只服务崩溃恢复，1s 粒度足够。
-      // ②dirty 检查——聚合状态与上次写盘相同（乱序守卫拦掉的过期拍、重复
-      //   状态拍）时整条回路跳过，连 flushSessionSaves 都不等。根治刀
-      //   （Rust 切片落盘 sidecar，永不 read-modify-write 整份快照）挂账审计。
+      // P0-1 根治刀（2026-11-13 性能审计）三件套：
+      // ①切片落盘——子 agent 活动写独立 sidecar（save_session_agent_activities），
+      //   永不 read-modify-write 整份快照；旧链路（flushSessionSaves→loadSession
+      //   →saveSession 整份循环，11MB 会话每次 ≈74ms 主线程+18ms 磁盘）退役。
+      //   读路径由 Rust 在 load_session 里用 sidecar 覆盖快照内嵌值。
+      // ②尾沿 250ms→1s——agentActivities 持久化只服务崩溃恢复，1s 粒度足够。
+      // ③dirty 检查——聚合状态与上次写盘相同（乱序守卫拦掉的过期拍、重复
+      //   状态拍）时连 IPC 都不发。
       const serialized = JSON.stringify(this.agentActivities);
       if (serialized === this.lastPersistedAgentActivitiesJson) return;
-      void flushSessionSaves().then(() => loadSession(sessionId)).then((loaded) => {
-        if (!loaded || this.sessionId !== sessionId || this.generation !== generation) return;
-        const snapshot: SessionSnapshot = {
-          ...loaded.snapshot,
-          uiState: {
-            ...loaded.snapshot.uiState,
-            agentActivities: this.agentActivities.map((item) => ({ ...item })),
-          },
-        };
-        return saveSession(sessionId, snapshot, loaded.workspace).then(() => {
-          // 写成功才记账——失败的拍下个尾沿重试。
-          this.lastPersistedAgentActivitiesJson = serialized;
-        });
+      void tauriInvoke('save_session_agent_activities', {
+        sessionId,
+        activities: this.agentActivities.map((item) => ({ ...item })),
+      }).then(() => {
+        // 写成功才记账——失败的拍下个尾沿重试。
+        this.lastPersistedAgentActivitiesJson = serialized;
       }).catch(() => {});
     }, 1000);
   }
@@ -7375,7 +7368,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             const cpArr = event.payload.messages;
             const cpLast = cpArr[cpArr.length - 1];
             if (cpLast) checkpointEstBytes += JSON.stringify(cpLast).length;
-            const checkpointGate = turnCheckpointGateMs(checkpointEstBytes);
+            // P0-2（2026-11-13 性能审计）：闸门度量对象换成「上一份已落盘
+            // 快照的真实字节 ∨ 回合内增量」——旧口径只看增量，11MB 会话每回合
+            // 新消息小，永远错走 3s 快档全量重写。无记录（新会话）时回退增量
+            // 口径，小会话行为不变（仍 3s）。
+            const checkpointGate = turnCheckpointGateMs(Math.max(checkpointEstBytes, lastPersistedSnapshotBytes(this.sessionId)));
             if (checkpointNow - lastCheckpointPersistAt < checkpointGate) break;
             lastCheckpointPersistAt = checkpointNow;
             checkpointEstBytes = 0;
@@ -8921,8 +8918,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     checkpoint = false,
   ): Promise<void> {
     this.persistDepth += 1;
+    // P1-1（2026-11-13 性能审计）埋点：快照重建+IPC 是 O(全部消息) 主线程活，
+    // 大会话单次几十 ms——先量出真实分布再决定要不要 Worker 化（生产可关：
+    // 该日志只在 DevTools 打开时可见，无性能影响面）。
+    const persistStarted = performance.now();
     try {
       await this.doPersistSession(messages, toolResults, thinkingPhases, sessionId, workspace, planPause, pauseAssessment, taskAnalysisText, renderedAssistantTexts, artifacts, visibleUserText, pathRepairs, artifactsDelivered, checkpoint);
+      if (import.meta.env.DEV) {
+        const bytes = lastPersistedSnapshotBytes(sessionId);
+        const elapsed = performance.now() - persistStarted;
+        if (elapsed > 16) console.debug(`[perf] persistSession ${Math.round(elapsed)}ms snapshot≈${Math.round(bytes / 1024)}KB checkpoint=${checkpoint}`);
+      }
     } finally {
       this.persistDepth -= 1;
       if (this.persistDepth === 0) this.persistSettledCb?.();

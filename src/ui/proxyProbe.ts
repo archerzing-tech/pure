@@ -58,7 +58,12 @@ export function startProxyProbeLoop(): void {
   if (loopStarted) return;
   loopStarted = true;
   void probeProxyNow('startup');
-  loopTimer = window.setInterval(() => void probeProxyNow('periodic'), PROXY_PROBE_INTERVAL_MS);
+  // P2-5（2026-11-13 性能审计）：后台窗口跳过常态探测；失败驱动的
+  // notifyProxyFailure 不受影响（真撞墙时窗口必然在前台）。
+  loopTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    void probeProxyNow('periodic');
+  }, PROXY_PROBE_INTERVAL_MS);
 }
 
 /** 真实请求撞墙后的及时重探（节流内跳过）。 */

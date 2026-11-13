@@ -7,6 +7,7 @@
 // live streaming (chat.ts) and any future replay render identically.
 
 import { t } from '../shared/i18n';
+import { startHeartbeat } from './heartbeat';
 
 /** Collapse verbatim-repeated reasoning blocks into one occurrence.
  * Reasoning models occasionally loop internally and emit the same sentence or
@@ -171,7 +172,8 @@ function netDiagnosisFor(handle: ThinkingCardHandle): string {
   return netDiagnoses.get(handle) ?? '';
 }
 
-const timerIntervals = new WeakMap<ThinkingCardHandle, number>();
+// P2-4（2026-11-13 性能审计）：原存独立 interval id，改存共享心跳的 cancel。
+const timerIntervals = new WeakMap<ThinkingCardHandle, () => void>();
 
 // Fade timers for scheduled dismissThinkingHint(delayMs > 0) calls, tracked
 // per-handle so stopThinkingTimer can cancel a pending fade when the card is
@@ -201,7 +203,7 @@ export function startThinkingTimer(
   // 升级线不早于首级 hint：escalateAfterMs 被调用方配小时仍保证首级文案
   // 至少能活过一个 interval（评审 latent 边界）。
   const escalateAt = Math.max(escalateAfterMs, hintAfterMs);
-  const iv = window.setInterval(() => {
+  const tick = (): void => {
     // Self-cleanup for cards removed without stopThinkingTimer (abort paths).
     if (!handle.card.isConnected) {
       stopThinkingTimer(handle);
@@ -230,8 +232,10 @@ export function startThinkingTimer(
         }
       }
     }
-  }, intervalMs);
-  timerIntervals.set(handle, iv);
+  };
+  // P2-4（2026-11-13 性能审计）：并入共享心跳，N 张思考卡不再各自排队一个
+  // interval。
+  timerIntervals.set(handle, startHeartbeat(intervalMs, tick));
 }
 
 /** Remove the timer chip and cancel its interval (idempotent). Also cancels
@@ -241,7 +245,7 @@ export function startThinkingTimer(
 export function stopThinkingTimer(handle: ThinkingCardHandle): void {
   const iv = timerIntervals.get(handle);
   if (iv !== undefined) {
-    clearInterval(iv);
+    iv();
     timerIntervals.delete(handle);
   }
   const hint = handle.card.querySelector<HTMLElement>('.thinking-hint');

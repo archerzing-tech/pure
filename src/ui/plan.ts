@@ -11,6 +11,7 @@ import { REVERSIBILITY_LABELS } from './assessmentFlow';
 import { showInlineCard } from './inlineCard';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 import { deriveTaskScript, formatTaskStepEvidence, type TaskScript } from '../shared/taskScript';
+import { startHeartbeat } from './heartbeat';
 
 export type PlanReviewDecision = 'approve' | 'skip' | 'cancel';
 
@@ -202,7 +203,8 @@ export interface PlanCardHandle {
 // cycle is stopped explicitly when plan generation falls back to the scaffold
 // (clearPlanCardRefining); the interval ALSO self-clears once the badge leaves
 // the DOM (card upgraded / discarded), so a timer can never outlive its badge.
-const refiningTimers = new WeakMap<HTMLElement, number>();
+// P2-4（2026-11-13 性能审计）：原存独立 interval id，改存共享心跳的 cancel。
+const refiningTimers = new WeakMap<HTMLElement, () => void>();
 
 const planCardSubscriptions = new WeakMap<PlanCardHandle, () => void>();
 
@@ -274,9 +276,9 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
       '正在把事情理顺…',
     ];
     let hintIndex = 0;
-    const timer = window.setInterval(() => {
+    const tick = (): void => {
       if (!badge.isConnected) {
-        window.clearInterval(timer);
+        cancel();
         return;
       }
       label.textContent = hints[hintIndex % hints.length];
@@ -286,8 +288,10 @@ export function createPlanCard(plan: Plan, refining: boolean, source: PlanProgre
       label.classList.remove('plan-refining-label-swap');
       void label.offsetWidth;
       label.classList.add('plan-refining-label-swap');
-    }, 3000);
-    refiningTimers.set(badge, timer);
+    };
+    // P2-4（2026-11-13 性能审计）：并入共享心跳。
+    const cancel = startHeartbeat(3000, tick);
+    refiningTimers.set(badge, cancel);
   }
   headParts.push(count);
   headParts.push(autoBadge);
@@ -537,8 +541,8 @@ function applyTaskScriptEvidence(h: PlanCardHandle): void {
  * never keeps claiming the steps are still being refined during execution. */
 export function clearPlanCardRefining(h: PlanCardHandle): void {
   if (!h.refiningEl) return;
-  const timer = refiningTimers.get(h.refiningEl);
-  if (timer !== undefined) window.clearInterval(timer);
+  const cancel = refiningTimers.get(h.refiningEl);
+  if (cancel !== undefined) cancel();
   refiningTimers.delete(h.refiningEl);
   h.refiningEl.remove();
   h.refiningEl = null;

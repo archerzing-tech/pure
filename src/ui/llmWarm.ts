@@ -81,5 +81,10 @@ export function startLlmWarmLoop(): void {
   if (loopStarted) return;
   loopStarted = true;
   void warmLlmRoutesNow();
-  loopTimer = window.setInterval(() => void warmLlmRoutesNow(), WARM_INTERVAL_MS);
+  // P2-5（2026-11-13 性能审计）：后台窗口无人对话，预热是白烧——跳过这一
+  // 拍；回前台下一拍自然恢复（预热无滞后语义）。
+  loopTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    void warmLlmRoutesNow();
+  }, WARM_INTERVAL_MS);
 }

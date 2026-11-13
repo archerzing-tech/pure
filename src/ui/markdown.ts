@@ -3261,20 +3261,53 @@ function bindMapControls(container: HTMLElement): void {
 
 // ── hljs: synchronous per-bubble ──
 
+/** P2-1（2026-11-13 性能审计）：整条消息的同步高亮总预算。单块 30k 闸
+ *  （STREAM_HLJS_SKIP_ABOVE）只防单个巨块，一条消息带多个 20-30k 代码块
+ *  时叠加仍是一帧长任务——预算封顶后超出部分懒高亮（进入视口才跑，滚到
+ *  哪亮到哪），markdown 形态与代码可读性不降级。 */
+const HLJS_BUDGET_CHARS = 100_000;
+
 function highlightAll(container: HTMLElement): void {
   const els = container.querySelectorAll<HTMLElement>(
     'pre code.hljs, pre code[class*="language-"]',
   );
+  let budget = HLJS_BUDGET_CHARS;
+  const lazy: HTMLElement[] = [];
   for (const el of Array.from(els)) {
     // Same freeze guard as streaming: hljs on a giant single block (a whole
     // HTML file as one fence) can block the main thread for seconds. Keep it
     // as readable plain text instead of freezing the app.
-    if (el.textContent && el.textContent.length > STREAM_HLJS_SKIP_ABOVE) continue;
+    const length = el.textContent?.length ?? 0;
+    if (length > STREAM_HLJS_SKIP_ABOVE) continue;
+    if (budget <= 0) {
+      lazy.push(el);
+      continue;
+    }
+    budget -= length;
     try {
       hljs.highlightElement(el);
     } catch {
       /* keep raw text on parse failure */
     }
+  }
+  if (lazy.length === 0) return;
+  if (typeof IntersectionObserver !== 'function') return; // 老环境：保持纯文本可读
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const el = entry.target as HTMLElement;
+      observer.unobserve(el);
+      el.dataset.hljsLazy = undefined;
+      try {
+        hljs.highlightElement(el);
+      } catch {
+        /* keep raw text on parse failure */
+      }
+    }
+  }, { rootMargin: '200px' });
+  for (const el of lazy) {
+    el.dataset.hljsLazy = 'pending';
+    observer.observe(el);
   }
 }
 

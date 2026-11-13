@@ -686,10 +686,11 @@ describe('createRestoredPlanCard (session restore)', () => {
 describe('plan refining badge (3s hint rotation)', () => {
   it('rotates the hint every 3 seconds and self-cleans when the badge leaves the DOM', () => {
     const src = readFileSync(new URL('../plan.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/setInterval\(\(\) =>/);
-    expect(src).toMatch(/3000\)/);
+    // P2-4 后轮换跑在共享心跳上（startHeartbeat），不再有独立 setInterval；
+    // 锁改为：3s 周期 + isConnected 自清理 + cancel 进 refiningTimers。
+    expect(src).toMatch(/startHeartbeat\(3000, tick\)/);
     expect(src).toMatch(/!badge\.isConnected/);
-    expect(src).toMatch(/clearInterval\(timer\)/);
+    expect(src).toMatch(/refiningTimers\.set\(badge, cancel\)/);
   });
 
   it('provides localized rotating hints', () => {

@@ -15,6 +15,7 @@ import { isTauriRuntime } from '../shared/tauri';
 import { loadConfig } from './config';
 import type { GeneratedImage, SubagentActivityEvent } from '../shared/types';
 import { renderToolDiff, type ToolDiffData } from './toolDiff';
+import { startHeartbeat } from './heartbeat';
 // Structured (JSON/YAML) highlighting reuses the same tree-shaken hljs core
 // as markdown.ts — re-registering the grammars here is idempotent and keeps
 // toolRow.ts self-contained (it is imported by chat.ts, main.ts and tests).
@@ -251,7 +252,7 @@ export interface ToolRowHandle {
   scrollEl: HTMLElement;
   // Browser interval id for the elapsed-seconds pending heartbeat (see
   // startElapsedTicker); undefined when no window (DOM tests) or after stop.
-  elapsedTimer?: number;
+  elapsedTimer?: () => void;
 }
 
 // Every tool row is a live execution trace. Open it initially so the user can
@@ -867,8 +868,8 @@ function formatElapsedSince(startedAt: number): string {
 }
 
 function stopElapsedTicker(row: ToolRowHandle): void {
-  if (row.elapsedTimer !== undefined && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
-    window.clearInterval(row.elapsedTimer);
+  if (row.elapsedTimer !== undefined) {
+    row.elapsedTimer();
     row.elapsedTimer = undefined;
   }
 }
@@ -889,7 +890,9 @@ function startElapsedTicker(handle: ToolRowHandle): void {
     elapsed.textContent = formatElapsedSince(startedAt);
   };
   tick();
-  handle.elapsedTimer = window.setInterval(tick, 1000);
+  // P2-4（2026-11-13 性能审计）：并入共享心跳，N 个并发子 agent 不再是 N 个
+  // 独立 interval。
+  handle.elapsedTimer = startHeartbeat(1000, tick);
 }
 
 function setToolRowExpandedLabel(button: HTMLButtonElement, expanded: boolean): void {

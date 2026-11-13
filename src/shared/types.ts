@@ -26,6 +26,11 @@ export interface MessageImage {
   /** Absolute path in the application temporary space. */
   path?: string;
   sizeBytes?: number;
+  /** P0-4（2026-11-13 性能审计）：≤~0.5MP 的展示用缩略图。快照的
+   *  transcript/events 侧只存它（dataUrl 换成 thumb），MB 级原图 base64
+   *  只留在 modelContext.messages——那里才是 vision 请求的真输入。
+   *  原图可从 path（~/.pure/attachments/ 稳定目录）取回。 */
+  thumbDataUrl?: string;
 }
 
 export interface Message {

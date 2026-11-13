@@ -10815,9 +10815,15 @@ fn read_observation_tail(dir: &std::path::Path, tail_bytes: u64) -> Result<Obser
     })
 }
 
+// P2-3（2026-11-13 性能审计）：16MB 尾读是本命令最重的一笔磁盘 IO，不能
+// 占主线程。纯读无竞态，spawn_blocking 即可；read_observation_tail 保持
+// 同步纯函数签名，测试直接打它。
 #[tauri::command]
-fn read_observations(tail_bytes: Option<u64>) -> Result<ObservationDump, String> {
-    read_observation_tail(&observations_dir(), tail_bytes.unwrap_or(OBSERVATION_DUMP_TAIL_BYTES))
+async fn read_observations(tail_bytes: Option<u64>) -> Result<ObservationDump, String> {
+    let tail = tail_bytes.unwrap_or(OBSERVATION_DUMP_TAIL_BYTES);
+    tokio::task::spawn_blocking(move || read_observation_tail(&observations_dir(), tail))
+        .await
+        .map_err(|e| format!("observations read task failed: {}", e))?
 }
 
 #[cfg(test)]
@@ -10903,7 +10909,9 @@ mod observation_tests {
         append_observation_to(&observations_dir(), first, u64::MAX, 10).unwrap();
         append_observation_to(&observations_dir(), second, u64::MAX, 10).unwrap();
 
-        let dump = read_observations(None).unwrap();
+        // 命令本体已 async+spawn_blocking（P2-3），单测打同步纯函数——async
+        // 壳只包 spawn_blocking，无独立逻辑可测。
+        let dump = read_observation_tail(&observations_dir(), OBSERVATION_DUMP_TAIL_BYTES).unwrap();
         assert!(dump.text.contains("agent_run"));
         assert!(dump.text.contains("prompt_assembly"));
         assert_eq!(dump.total_bytes, dump.read_bytes);
@@ -11008,11 +11016,19 @@ async fn save_paste_image(
             return Err("session id is required".to_string());
         }
         let bytes = decode_paste_image(&data_base64)?;
-        let dir = application_tmp_dir().join(safe_session_component(&session_id));
+        // P0-4（2026-11-13 性能审计）：从应用临时目录改到 ~/.pure/attachments/
+        // <session-id>/ 稳定目录——临时目录会被系统清理（/private/tmp 定期
+        // 清扫），图片原图必须活过快照里留的 path。历史会话的旧 tmp path
+        // 不迁移：回放显示走快照内的 dataUrl/缩略图，不依赖 path 存在。
+        let dir = attachments_dir().join(safe_session_component(&session_id));
         fs::create_dir_all(&dir).map_err(|e| format!("create paste dir: {}", e))?;
         write_paste_bytes(&dir, &name, &bytes)
     })
     .await
+}
+
+fn attachments_dir() -> PathBuf {
+    PathBuf::from(pure_home_dir()).join(".pure").join("attachments")
 }
 
 // Upload limits: only text / images / document files may be imported (a
@@ -12111,40 +12127,72 @@ fn save_secrets(secrets: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn secret_get(key: String) -> Result<Option<String>, String> {
-    let secrets = load_secrets()?;
-    Ok(secrets
-        .get(&key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
+// ── P2-3（2026-11-13 性能审计）────────────────────────────────────────────
+// secret_* 与 read_observations 原是同步命令：fs 调用直接占主线程。改走
+// spawn_blocking。secret 的 load-改-写 三段在同步命令里天然串行，异步化后
+// 两个并发 set 会互相覆盖（都读旧值、后写者胜）——补一把进程内互斥锁保住
+// 原语义。Rust 内部同步读（load_secrets 的 4 处生产调用方）不经过命令，
+// 不受影响。
+static SECRETS_LOCK: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
+
+fn secrets_lock() -> &'static StdMutex<()> {
+    SECRETS_LOCK.get_or_init(|| StdMutex::new(()))
 }
 
 #[tauri::command]
-fn secret_set(key: String, value: String) -> Result<(), String> {
-    let mut secrets = load_secrets()?;
-    if let Some(obj) = secrets.as_object_mut() {
-        obj.insert(key, serde_json::Value::String(value));
-    }
-    save_secrets(&secrets)
+async fn secret_get(key: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = secrets_lock().lock().map_err(|_| "secrets lock poisoned")?;
+        let secrets = load_secrets()?;
+        Ok(secrets
+            .get(&key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    })
+    .await
+    .map_err(|e| format!("secret read task failed: {}", e))?
 }
 
 #[tauri::command]
-fn secret_delete(key: String) -> Result<(), String> {
-    let mut secrets = load_secrets()?;
-    if let Some(obj) = secrets.as_object_mut() {
-        obj.remove(&key);
-    }
-    save_secrets(&secrets)
+async fn secret_set(key: String, value: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = secrets_lock().lock().map_err(|_| "secrets lock poisoned")?;
+        let mut secrets = load_secrets()?;
+        if let Some(obj) = secrets.as_object_mut() {
+            obj.insert(key, serde_json::Value::String(value));
+        }
+        save_secrets(&secrets)
+    })
+    .await
+    .map_err(|e| format!("secret write task failed: {}", e))?
 }
 
 #[tauri::command]
-fn secret_list() -> Result<Vec<String>, String> {
-    let secrets = load_secrets()?;
-    Ok(secrets
-        .as_object()
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default())
+async fn secret_delete(key: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = secrets_lock().lock().map_err(|_| "secrets lock poisoned")?;
+        let mut secrets = load_secrets()?;
+        if let Some(obj) = secrets.as_object_mut() {
+            obj.remove(&key);
+        }
+        save_secrets(&secrets)
+    })
+    .await
+    .map_err(|e| format!("secret write task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn secret_list() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = secrets_lock().lock().map_err(|_| "secrets lock poisoned")?;
+        let secrets = load_secrets()?;
+        Ok(secrets
+            .as_object()
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default())
+    })
+    .await
+    .map_err(|e| format!("secret list task failed: {}", e))?
 }
 
 // ── 通道凭据探活（一键开通的地基）─────────────────────────────────────
@@ -14704,6 +14752,54 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn agent_activities_sidecar_roundtrip_overrides_snapshot_and_survives_corruption() {
+        // P0-1 根治刀（2026-11-13 性能审计）：活动流写独立 sidecar，读路径
+        // 用它覆盖快照内嵌值；缺失回退内嵌、损坏降级内嵌、会话已删不复活。
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-session-p01-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let _ = fs::remove_file(sessions_dir().join("index.json"));
+        let session_id = format!("p01test{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let session_dir = sessions_dir().join(&session_id);
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let snapshot = serde_json::json!({
+            "version": 3, "revision": 1,
+            "modelContext": { "messages": [{ "role": "user", "content": "hi" }] },
+            "events": [], "transcript": [],
+            "uiState": { "agentActivities": [{ "callId": "old", "agentName": "researcher" }] }
+        });
+        save_session_impl(session_id.clone(), snapshot, Some(String::new()), None, None).unwrap();
+
+        // 会话未删时：sidecar 值覆盖快照内嵌值。
+        let fresh = serde_json::json!([{ "callId": "new", "agentName": "ui_designer", "state": "active" }]);
+        save_session_agent_activities_sync(&session_id, fresh.clone()).unwrap();
+        assert!(agent_activities_path(&session_id).exists());
+        let loaded = load_session_impl(session_id.clone()).unwrap().unwrap();
+        assert_eq!(loaded["snapshot"]["uiState"]["agentActivities"][0]["callId"], "new");
+
+        // 损坏 sidecar：静默回退快照内嵌值，不报错不丢会话。
+        fs::write(agent_activities_path(&session_id), "{broken").unwrap();
+        let loaded_degraded = load_session_impl(session_id.clone()).unwrap().unwrap();
+        assert_eq!(loaded_degraded["snapshot"]["uiState"]["agentActivities"][0]["callId"], "old");
+
+        // 会话已删：sidecar 写入不再复活目录。
+        fs::remove_dir_all(&session_dir).unwrap();
+        assert!(save_session_agent_activities_sync(&session_id, fresh).is_ok());
+        assert!(!agent_activities_path(&session_id).exists());
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn checkpoint_save_load_cleanup_roundtrip() {
         let _home_guard = super::test_home_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
@@ -15087,7 +15183,7 @@ async fn save_session(
     workspace: Option<String>,
     model: Option<String>,
     provider: Option<String>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     run_blocking(move || save_session_impl(session_id, snapshot, workspace, model, provider)).await
 }
 
@@ -15097,7 +15193,11 @@ fn save_session_impl(
     workspace: Option<String>,
     model: Option<String>,
     provider: Option<String>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    // P0-2（2026-11-13 性能审计）：返回落盘字节数——前端 checkpoint 节流闸
+    // 的度量对象从「回合内新增增量」（下界估计，大会话永远走 3s 快档）换成
+    // 「上一份已落盘快照的真实字节」。JS 侧拿不到 IPC 序列化字节，Rust 顺手给。
+
     validate_session_id(&session_id)?;
     let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
     let dir = sessions_dir().join(&session_id);
@@ -15146,7 +15246,7 @@ fn save_session_impl(
     let data_path = dir.join("session.json");
     let temp_path = dir.join("session.json.tmp");
     let serialized = serde_json::to_string_pretty(&data).map_err(|e| format!("serialize: {}", e))?;
-    fs::write(&temp_path, serialized).map_err(|e| format!("write temp: {}", e))?;
+    fs::write(&temp_path, &serialized).map_err(|e| format!("write temp: {}", e))?;
     let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)
         .map_err(|e| format!("open temp: {}", e))?;
     file.sync_all().map_err(|e| format!("sync temp: {}", e))?;
@@ -15170,7 +15270,7 @@ fn save_session_impl(
     let title = extract_title(&messages);
     update_sessions_index(&session_id, &title, data.message_count, now, effective_workspace)?;
 
-    Ok(())
+    Ok(serialized.len())
 }
 
 #[tauri::command]
@@ -15186,10 +15286,20 @@ fn load_session_impl(session_id: String) -> Result<Option<serde_json::Value>, St
     }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
     let data: SessionData = serde_json::from_str(&raw).map_err(|e| format!("parse: {}", e))?;
-    let snapshot = data.snapshot.unwrap_or_else(|| serde_json::json!({
+    let mut snapshot = data.snapshot.unwrap_or_else(|| serde_json::json!({
         "version": 1,
         "messages": data.messages,
     }));
+    // P0-1 根治刀：活动 sidecar 比快照内嵌的 uiState.agentActivities 新
+    // （活动流只写 sidecar，快照只在回合边界写）。存在且合法时覆盖，缺失/
+    // 损坏时回退内嵌值（旧档、sidecar 写失败的会话）。
+    if let Some(activities) = load_agent_activities_override(&session_id) {
+        let ui_state = snapshot.as_object_mut()
+            .map(|object| object.entry("uiState").or_insert_with(|| serde_json::json!({})));
+        if let Some(ui_object) = ui_state.and_then(|value| value.as_object_mut()) {
+            ui_object.insert("agentActivities".to_string(), activities);
+        }
+    }
     let workspace = load_session_workspace(&session_id).unwrap_or_else(|_| data.workspace.clone());
     Ok(Some(serde_json::json!({
         "sessionId": session_id,
@@ -15383,6 +15493,59 @@ async fn save_session_workspace(session_id: String, workspace: String) -> Result
         .await
         .map_err(|e| format!("workspace save task failed: {}", e))??;
     Ok(())
+}
+
+// ── 子 agent 活动 sidecar（2026-11-13 性能审计 P0-1 根治刀）─────────────────
+// 子 agent 事件 5–20Hz，旧链路每次尾沿都 loadSession→saveSession 整份快照
+// 读-改-写（11MB 会话 ≈74ms 主线程 + 18ms 磁盘 + Rust 重序列化），只为更新
+// uiState.agentActivities 这几 KB。改走独立 sidecar：写路径永不碰 session.json，
+// 读路径（load_session_impl）在 sidecar 存在且合法时用它覆盖快照内嵌值，
+// 旧档/未写过 sidecar 的会话自然回退快照内嵌。
+
+fn agent_activities_path(session_id: &str) -> std::path::PathBuf {
+    sessions_dir().join(session_id).join("agent_activities.json")
+}
+
+#[tauri::command]
+async fn save_session_agent_activities(session_id: String, activities: serde_json::Value) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    tokio::task::spawn_blocking(move || save_session_agent_activities_sync(&session_id, activities))
+        .await
+        .map_err(|e| format!("agent activities save task failed: {}", e))??;
+    Ok(())
+}
+
+fn save_session_agent_activities_sync(session_id: &str, activities: serde_json::Value) -> Result<(), String> {
+    validate_session_id(session_id)?;
+    let _guard = session_persistence_lock().lock().map_err(|_| "session persistence lock poisoned".to_string())?;
+    let dir = sessions_dir().join(session_id);
+    // 与 workspace sidecar 同款守卫：会话文件已被删（清空全部会话等）时不再
+    // 凭空复活一个只有活动的会话目录。
+    if !dir.join("session.json").exists() {
+        return Ok(());
+    }
+    let serialized = serde_json::to_string(&activities).map_err(|e| format!("serialize: {}", e))?;
+    let data_path = agent_activities_path(session_id);
+    let temp_path = dir.join("agent_activities.json.tmp");
+    fs::write(&temp_path, serialized).map_err(|e| format!("write temp: {}", e))?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)
+        .map_err(|e| format!("open temp: {}", e))?;
+    file.sync_all().map_err(|e| format!("sync temp: {}", e))?;
+    fs::rename(&temp_path, &data_path).map_err(|e| format!("replace agent activities: {}", e))?;
+    Ok(())
+}
+
+/// 读回子 agent 活动 sidecar：合法数组才采纳；缺失/损坏一律 None（调用方
+/// 回退快照内嵌值）。sidecar 写失败不该拖垮整个会话读取。
+fn load_agent_activities_override(session_id: &str) -> Option<serde_json::Value> {
+    let path = agent_activities_path(session_id);
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if value.is_array() {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn save_session_workspace_sync(session_id: &str, workspace: &str) -> Result<(), String> {
@@ -18714,6 +18877,7 @@ pub fn run() {
             load_last_session,
             load_session_list,
             save_session_workspace,
+            save_session_agent_activities,
             delete_session,
             delete_all_sessions,
             // Subagent/parent-turn checkpoint persistence (~/.pure/checkpoints)

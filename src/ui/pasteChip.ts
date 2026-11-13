@@ -61,6 +61,11 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
  * The on-disk tmp copy (Tauri) keeps the original bytes untouched. */
 export const MAX_IMAGE_PIXELS = 2 * 1024 * 1024;
 
+/** P0-4（2026-11-13 性能审计）：快照 transcript/events 侧缩略图预算（~0.5MP，
+ *  约 800×600）。回放气泡宽几百 px，这个分辨率视觉无感；modelContext 里的
+ *  原图 dataUrl（vision 真输入）不在此预算内，仍走 MAX_IMAGE_PIXELS。 */
+export const THUMB_IMAGE_PIXELS = 512 * 1024;
+
 /** Raster formats we can downscale losslessly-ish; SVG stays vector, GIF keeps
  * its animation, BMP is too rare to bother re-encoding. */
 const RASTER_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp)(?:;|,)/i;
