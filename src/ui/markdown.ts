@@ -312,15 +312,33 @@ renderer.code = (token: { text: string; lang?: string }): string => {
  * blocks as maps — renders it identically. Unclosed streaming fragments are
  * left untouched until the closing `:::` arrives, matching ``` fence behavior.
  */
-export function normalizeMapFence(src: string): string {
-  // 容器 tag 与 map 路由同源（静态表 + 运行时自定义的 map 变体）——map 路由
-  // 加别名或自定义卡挂到 map 通道时这里自动跟上。
+// [活锁刀 A · 2026-11-13] 压测现场：81k 流式期间 webview sample 15/2033 样本
+// 在 Yarr::Interpreter 回溯——normalizeMapFence 流式每 tick 被 diffStreaming
+// 调（3864），旧实现每次调用 new RegExp + 对 32K 视图全文 replace（无 ':::'
+// 也扫到尾，惰性 [\s\S]*? 配合 backtracking 构成回溯燃料）。两刀：
+// ① pattern 模块级缓存，mapTags 集合变化才重建（FENCE_ROUTES 静态 +
+// customFenceRoutes 运行时增删，用 join 串做指纹）；② 无 ':::' 直接短路。
+// replace 与 g 标志正则配合时 lastIndex 每次被重置为 0，缓存对象可安全复用。
+let mapFencePattern: RegExp | null = null;
+let mapFencePatternKey = '';
+
+function getMapFencePattern(): RegExp {
   const mapTags = [...FENCE_ROUTES, ...customFenceRoutes]
     .filter((route) => route.kind === 'map')
     .flatMap((route) => route.tags);
-  const pattern = new RegExp(`(^|\\n)([ \\t]*):::[ \\t]*(${mapTags.join('|')})\\b[^\\n]*\\n([\\s\\S]*?)\\n[ \\t]*:::[ \\t]*(?=\\n|$)`, 'gi');
+  const key = mapTags.join('|');
+  if (!mapFencePattern || mapFencePatternKey !== key) {
+    mapFencePatternKey = key;
+    mapFencePattern = new RegExp(`(^|\\n)([ \\t]*):::[ \\t]*(${key})\\b[^\\n]*\\n([\\s\\S]*?)\\n[ \\t]*:::[ \\t]*(?=\\n|$)`, 'gi');
+  }
+  return mapFencePattern;
+}
+
+export function normalizeMapFence(src: string): string {
+  // 压测场景（无容器 fence 的普通流式输出）成本归零：一次 includes 了事。
+  if (!src.includes(':::')) return src;
   return src.replace(
-    pattern,
+    getMapFencePattern(),
     (_match, lead: string, indent: string, lang: string, body: string) =>
       `${lead}${indent}\`\`\`${lang.toLowerCase()}\n${body}\n${indent}\`\`\``,
   );
@@ -3507,13 +3525,23 @@ function yieldFrame(): Promise<void> {
   });
 }
 
+// [活锁刀 D · 2026-11-13 mac 压测现场] 单拍渲染实测 500ms 时旧逻辑
+// min(STREAM_VERY_LONG_TEXT_MS, …) 把自适应封死在 220ms——下一拍仍 220ms 就跑，
+// 占空比 >70%，主线程无喘息，点击/输入/拖窗全饿死（timer 活锁：webview
+// sample 358/2033 样本在 DOMTimer→JSC，二次采样间歇复现）。治法与「打字
+// 优先退避」同思路：上一拍实测成本直接抬高下一拍节流窗口（renderCostMs 是
+// 实测值不是估计值），cap 1s 防极端摆尾。占空比机械压住 = 交互必有余粮。
+// 旧的小成本升级语义保留：renderCostMs ≥18 时至少升到 LONG 档。
+const STREAM_ADAPTIVE_THROTTLE_CAP_MS = 1000;
+
 export function streamRenderThrottleMs(textLength: number, renderCostMs = 0): number {
   const sizeDelay = textLength >= 80_000
     ? STREAM_VERY_LONG_TEXT_MS
     : textLength >= 24_000
       ? STREAM_LONG_TEXT_MS
       : STREAM_THROTTLE_MS;
-  const base = Math.min(STREAM_VERY_LONG_TEXT_MS, Math.max(sizeDelay, renderCostMs >= 18 ? STREAM_LONG_TEXT_MS : sizeDelay));
+  const legacy = Math.max(sizeDelay, renderCostMs >= 18 ? STREAM_LONG_TEXT_MS : sizeDelay);
+  const base = Math.max(legacy, Math.min(renderCostMs, STREAM_ADAPTIVE_THROTTLE_CAP_MS));
   return typingBackoffActive() ? Math.max(base, STREAM_TYPING_BACKOFF_MS) : base;
 }
 
@@ -3799,12 +3827,50 @@ export interface StreamingViewSlice {
  *  最近的双换行块边界，保证视图以干净块开头；若按围栏标记奇偶判定视图
  *  开头落在代码围栏体内，补一行合成 ``` 使词法器看到完整块（lang 丢失只
  *  影响流式期间该块高亮，完成渲染走全文管线恢复）。 */
+// [活锁刀 B · 2026-11-13] fence 行计数：旧实现 slice(0, start)（≈49K）喂
+// /^[ \t]*(?:```|~~~)/gm，每 tick 一次全文 Yarr 扫描（sample 燃料之一）。
+// 手写单遍行扫描等价替代：行首跳过空白后，前三个字符是 ``` (0x60) 或
+// ~~~ (0x7e) 即计数。与原正则同语义——只看开头三个字符，行尾内容不限；
+// 纯空白行不计数；末行无换行也结算（原 ^ 带 m 标志同样命中末行）。
+function countFenceLines(text: string, end: number): number {
+  let count = 0;
+  let runStart = -1;
+  let atLineStart = true;
+  const settle = (): void => {
+    if (runStart < 0) return;
+    // 行内 3 个字符必须完整落在 end 之前才计数——start 可能截在行中间
+    //（cut===-1 时 start=from），旧实现 slice(0, start) 天然截断，这里
+    // charCodeAt 若越过 end 就会把只露出 2 个字符的行误判成 fence。
+    if (runStart + 2 < end) {
+      const c1 = text.charCodeAt(runStart);
+      const c2 = text.charCodeAt(runStart + 1);
+      const c3 = text.charCodeAt(runStart + 2);
+      const fence = (c1 === 96 && c2 === 96 && c3 === 96) || (c1 === 126 && c2 === 126 && c3 === 126);
+      if (fence) count++;
+    }
+    runStart = -1;
+  };
+  for (let i = 0; i < end; i++) {
+    const ch = text.charCodeAt(i);
+    if (atLineStart && ch !== 32 && ch !== 9) {
+      runStart = i;
+      atLineStart = false;
+    }
+    if (ch === 10) {
+      settle();
+      atLineStart = true;
+    }
+  }
+  settle();
+  return count;
+}
+
 export function streamingViewSlice(text: string): StreamingViewSlice | null {
   if (text.length <= STREAM_TAIL_LIMIT) return null;
   const from = text.length - STREAM_TAIL_LIMIT;
   const cut = text.lastIndexOf('\n\n', from);
   const start = cut === -1 ? from : cut + 2;
-  const fenceLinesBefore = text.slice(0, start).match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0;
+  const fenceLinesBefore = countFenceLines(text, start);
   const view = text.slice(start);
   return {
     view: fenceLinesBefore % 2 === 1 ? '```\n' + view : view,

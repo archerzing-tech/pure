@@ -162,6 +162,18 @@ describe('streaming render scheduling', () => {
     expect(streamRenderThrottleMs(80_000)).toBe(220);
     expect(streamRenderThrottleMs(1000, 18)).toBe(160);
   });
+
+  it('成本感知退避：上一拍实测成本直接抬高节流窗口（活锁刀 D，2026-11-13）', () => {
+    // 旧实现 min(220, …) 把自适应封死：单拍 500ms 时下一拍仍 220ms 就跑，
+    // 占空比 >70% 饱和主线程 → 点击/输入/拖窗全饿死。成本必须参与。
+    expect(streamRenderThrottleMs(80_000, 500)).toBe(500);
+    expect(streamRenderThrottleMs(1000, 300)).toBe(300);
+    // 极端摆尾封顶 1s。
+    expect(streamRenderThrottleMs(80_000, 5000)).toBe(1000);
+    // 零成本/低成本不回退旧语义。
+    expect(streamRenderThrottleMs(1000, 0)).toBe(100);
+    expect(streamRenderThrottleMs(1000, 18)).toBe(160);
+  });
 });
 
 describe('highlightExt (==text== → <mark>)', () => {
