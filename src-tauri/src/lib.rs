@@ -19088,6 +19088,20 @@ pub fn run() {
             // setup 里后续代码的 panic 也要接得住。
             install_panic_error_hook();
 
+            // asset protocol 运行时放行 ~/.pure(2026-11-13 破图根治刀):
+            // 配置 scope ["**"] 在 tauri 的 fs scope 匹配下永远碰不到点开头
+            // 组件——unix 上 require_literal_leading_dot 被强制为 true(点文
+            // 件按 unix 惯例不默认暴露),glob 的 ** 因此匹配不了 ~/.pure 下
+            // 任何路径,asset handler 对 markdown 内联本地图一律 403,
+            // WKWebView 画破图图标(glob 0.3 实测:** 对 .pure 路径 false)。
+            // read_file 工具卡走 base64 data: 通道所以从未暴露;只有
+            // renderer 的 asset:// 直连中招。allow_directory 以字面前缀
+            // ~/.pure + /** 追加,字面点组件不受 leading_dot 限制。恢复/
+            // 流式都可能先渲染,放行放在 setup 最前;Windows 上无害冗余。
+            let _ = _app
+                .asset_protocol_scope()
+                .allow_directory(PathBuf::from(pure_home_dir()).join(".pure"), true);
+
             // Warm the sys_info caches at startup so the first tool call /
             // prompt probe returns instantly instead of paying the full
             // (runtime subprocesses + network reachability) probe on first
@@ -20626,3 +20640,57 @@ mod gateway_launch_candidates {
     }
 }
 
+
+#[cfg(test)]
+mod asset_scope_dotdir_contract {
+    use super::*;
+
+    /// asset protocol 的 scope 契约（2026-11-13 破图根治刀的锁）：
+    /// tauri 的 fs scope 在 unix 上强制 require_literal_leading_dot=true，
+    /// glob 的 `**` 因此匹配不了任何含点开头组件的路径——而 pure 的生成图
+    /// 全部住在 ~/.pure/...（`.pure` 是点目录）。配置 scope ["**"] 形同虚设，
+    /// markdown 内联本地图被 asset handler 一律 403。修法 = setup 里
+    /// allow_directory(~/.pure, recursive) 追加字面前缀 + /** 模式。
+    /// 这组断言用与 tauri 2.12 完全相同的 MatchOptions 钉死 glob 语义：
+    /// 通配碰不了点组件、字面点组件 + /** 放行全量。tauri 升级若改了
+    /// leading_dot 或匹配语义，这里先红。
+    #[test]
+    fn wildcard_scope_never_matches_dotdirs_but_literal_grant_does() {
+        let dot_path = PathBuf::from(pure_home_dir())
+            .join(".pure")
+            .join("workspace")
+            .join("73657373696f6e5f313739343537343739303539335f31")
+            .join("valley_dusk.png");
+        let canonical: PathBuf = dot_path.components().collect();
+        let plain_path: PathBuf = PathBuf::from("/Users/someone/work/pic.png").components().collect();
+
+        let opts = glob::MatchOptions {
+            require_literal_separator: true,
+            require_literal_leading_dot: cfg!(unix),
+            case_sensitive: true,
+        };
+
+        // 配置形态 ["**"]：unix 上对点目录路径永远 false（403 的直接原因）。
+        let wildcard = glob::Pattern::new("**").unwrap();
+        assert!(
+            !wildcard.matches_path_with(&canonical, opts),
+            "** 不得匹配点目录路径（否则本测试前提失效，修复可退役）"
+        );
+        assert!(wildcard.matches_path_with(&plain_path, opts));
+
+        // 修复形态：allow_directory(~/.pure) 推入的字面前缀 + /** 模式。
+        let grant = glob::Pattern::new(&format!(
+            "{}/**",
+            glob::Pattern::escape(PathBuf::from(pure_home_dir()).join(".pure").to_string_lossy().as_ref())
+        ))
+        .unwrap();
+        assert!(
+            grant.matches_path_with(&canonical, opts),
+            "allow_directory 的字面放行必须覆盖 ~/.pure 下的生成图路径"
+        );
+        assert!(
+            !grant.matches_path_with(&plain_path, opts),
+            "字面放行不得越界到 ~/.pure 之外"
+        );
+    }
+}

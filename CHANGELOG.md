@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.0
+
+**markdown 内联本地图破图根治：asset protocol 放行点目录（~/.pure）**
+
+模型回复里的 `![alt](/Users/…/.pure/workspace/…/valley_dusk.png)` 内联本地图全部渲染成破图图标，而同回合 read_file 工具卡里的同一张图显示正常——差异在加载通道：工具卡走 `read_image_file` base64 `data:` 通道从不落 asset 协议，markdown 渲染器则把本机绝对路径经 `convertFileSrc` 转成 `asset://localhost/%2FUsers%2F…` 直连。取证的怪处在于静态链路全绿：DOMPurify 配置带 `ADD_URI_SAFE_ATTR: ['src']`（src 保住了）、CSP img-src 放行 `asset:`、装包二进制里 CSP 逐字在、tauri asset handler 对两种 URL 形态都能解码、wry 的 `absoluteString` 保真 `%2F`——用独立 WKWebView 程序完整复刻（custom-scheme 主帧 + CSP + lazy）图片加载成功。最后在 tauri 的 fs scope 匹配里找到根因：unix 上 `require_literal_leading_dot` 被强制为 true（点文件按惯例不默认暴露），glob 语义下 `**` 通配因此匹配不了任何含点开头组件的路径——而 pure 的生成图全住在 `~/.pure/...`，配置 scope `["**"]` 对它们形同虚设，asset handler 一律 403，WKWebView 画破图图标（glob 0.3 实测：`**` 对 `.pure` 路径 false、对普通路径 true）。
+
+修复一刀：setup 里 `asset_protocol_scope().allow_directory(~/.pure, recursive)` 运行时追加字面前缀 + `/**` 模式——字面点组件不受 leading_dot 限制，放行精确覆盖 pure 数据目录且不越界（Windows 上无害冗余）。新增契约单测钉死 glob 语义（通配碰不了点组件、字面放行覆盖 `~/.pure` 且不越界），tauri/glob 升级若改语义此处先红。
+
+验证：`cargo test --lib` 306 pass（含新契约用例）；装机实测「渲染正常」会话恢复后内联破图转正常显示（asset:// 加载链路端到端走通）。
+
 ## v4.7.9
 
 **GUI 第三种「卡死」定案根治：最小化→Dock 唤回键盘焦点死锁**
