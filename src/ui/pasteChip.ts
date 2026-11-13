@@ -33,6 +33,9 @@ export interface PasteAttachment {
   truncated?: boolean;
   /** Dropped files open with one click; pasted chips keep their double-click behavior. */
   openOnClick?: boolean;
+  /** P2-3：图像本身（dataUrl 那一份）的固有像素尺寸；未知时缺省。 */
+  width?: number;
+  height?: number;
 }
 
 export interface DroppedFileRecord {
@@ -232,17 +235,31 @@ export function downscaleDimensions(
   };
 }
 
+/** Result of one image decode: the (possibly downscaled) data URL plus the
+ * INPUT image's intrinsic pixel size, which the caller records so the bubble
+ * can reserve the right box before the thumbnail decodes. */
+export interface ScaledImage {
+  dataUrl: string;
+  /** Intrinsic size of the input; 0 when the image could not be decoded. */
+  width: number;
+  height: number;
+}
+
 /**
  * Downscale a raster image data URL to at most ~MAX_IMAGE_PIXELS before it
  * rides into the model context / session snapshot. PNG and WebP keep their
  * (lossless) format so text screenshots stay crisp; photos are re-encoded as
  * JPEG (quality 0.85) which shrinks them dramatically. Fails OPEN: any decode
  * or canvas problem returns the original URL unchanged.
+ *
+ * P2-3: the decode already happens here, so the intrinsic size comes back with
+ * it — measuring separately would decode every multi-MB screenshot twice.
  */
-export async function downscaleImageDataUrl(dataUrl: string, maxPixels = MAX_IMAGE_PIXELS): Promise<string> {
-  if (!RASTER_IMAGE_DATA_URL.test(dataUrl)) return dataUrl;
+export async function scaleImageDataUrl(dataUrl: string, maxPixels = MAX_IMAGE_PIXELS): Promise<ScaledImage> {
+  const unchanged: ScaledImage = { dataUrl, width: 0, height: 0 };
+  if (!RASTER_IMAGE_DATA_URL.test(dataUrl)) return unchanged;
   try {
-    if (typeof Image === 'undefined' || typeof document === 'undefined') return dataUrl;
+    if (typeof Image === 'undefined' || typeof document === 'undefined') return unchanged;
     const image = new Image();
     const loaded = new Promise<HTMLImageElement>((resolve, reject) => {
       image.onload = () => resolve(image);
@@ -251,21 +268,41 @@ export async function downscaleImageDataUrl(dataUrl: string, maxPixels = MAX_IMA
     });
     const img = await loaded;
     const natural = { width: img.naturalWidth || img.width, height: img.naturalHeight || img.height };
+    const measured = {
+      width: Number.isFinite(natural.width) ? Math.round(natural.width) : 0,
+      height: Number.isFinite(natural.height) ? Math.round(natural.height) : 0,
+    };
     const target = downscaleDimensions(natural.width, natural.height, maxPixels);
-    if (target.width >= natural.width && target.height >= natural.height) return dataUrl;
+    if (target.width >= natural.width && target.height >= natural.height) {
+      return { dataUrl, ...measured };
+    }
     const canvas = document.createElement('canvas');
     canvas.width = target.width;
     canvas.height = target.height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return dataUrl;
+    if (!ctx) return unchanged;
     ctx.drawImage(img, 0, 0, target.width, target.height);
     const mime = dataUrl.match(/^data:([^;,]+)/i)?.[1] ?? 'image/jpeg';
     const outMime = mime === 'image/png' || mime === 'image/webp' ? mime : 'image/jpeg';
     const out = canvas.toDataURL(outMime, 0.85);
     // `data:,` (empty) or an unsupported webp encode must not replace the URL.
-    return out && out.startsWith('data:image/') ? out : dataUrl;
+    return out && out.startsWith('data:image/') ? { dataUrl: out, ...measured } : unchanged;
   } catch {
-    return dataUrl;
+    return unchanged;
+  }
+}
+
+export async function downscaleImageDataUrl(dataUrl: string, maxPixels = MAX_IMAGE_PIXELS): Promise<string> {
+  return (await scaleImageDataUrl(dataUrl, maxPixels)).dataUrl;
+}
+
+/** Keep the chip's measured size on the attachment when the decode produced one.
+ *  A failed decode leaves the fields absent, which the bubble treats as
+ *  "unknown size" rather than a zero-height box. */
+function applyMeasuredSize(attachment: PasteAttachment, scaled: ScaledImage): void {
+  if (scaled.width > 0 && scaled.height > 0) {
+    attachment.width = scaled.width;
+    attachment.height = scaled.height;
   }
 }
 
@@ -283,6 +320,9 @@ export function attachmentToMessageImage(attachment: PasteAttachment): MessageIm
     name: attachment.name,
     path: attachment.path || undefined,
     sizeBytes: attachment.size,
+    ...(attachment.width && attachment.height
+      ? { width: attachment.width, height: attachment.height }
+      : {}),
   };
 }
 
@@ -491,7 +531,9 @@ export class PasteChipManager {
           if (kind === 'image') {
             // Downscale before the payload rides into the model context / session
             // snapshot; the browser File itself is the user's original copy.
-            att.dataUrl = await downscaleImageDataUrl(await readFileAsDataUrl(file));
+            const scaled = await scaleImageDataUrl(await readFileAsDataUrl(file));
+            att.dataUrl = scaled.dataUrl;
+            applyMeasuredSize(att, scaled);
           } else if (kind === 'text') {
             const raw = await file.slice(0, VIEWER_MAX_CHARS + 1).text();
             att.content = raw.slice(0, VIEWER_MAX_CHARS);
@@ -541,11 +583,12 @@ export class PasteChipManager {
     // carries a full-resolution base64). The thumbnail renders immediately;
     // the scaled version replaces it before the send path reads attachments.
     if (record.kind === 'image' && record.dataUrl) {
-      const pending = downscaleImageDataUrl(record.dataUrl).then((scaled) => {
-        if (scaled && scaled !== att.dataUrl) {
-          att.dataUrl = scaled;
+      const pending = scaleImageDataUrl(record.dataUrl).then((scaled) => {
+        if (scaled.dataUrl && scaled.dataUrl !== att.dataUrl) {
+          att.dataUrl = scaled.dataUrl;
           this.render();
         }
+        applyMeasuredSize(att, scaled);
       });
       this.pendingReads.add(pending);
       void pending.finally(() => this.pendingReads.delete(pending)).catch(() => {});
@@ -576,7 +619,9 @@ export class PasteChipManager {
           // request. Downscale it so a multi-megapixel screenshot/photo does not
           // blow up the LLM context or the persisted session snapshot.
           const rawDataUrl = await readFileAsDataUrl(file);
-          att.dataUrl = await downscaleImageDataUrl(rawDataUrl);
+          const scaled = await scaleImageDataUrl(rawDataUrl);
+          att.dataUrl = scaled.dataUrl;
+          applyMeasuredSize(att, scaled);
           this.render();
           // 2) Persist the ORIGINAL raw bytes (base64 over IPC) in Tauri mode —
           // the on-disk copy stays the user's exact image; only the in-context

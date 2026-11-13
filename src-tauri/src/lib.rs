@@ -14680,6 +14680,95 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// P2-3（2026-11-13 性能审计）：从图片字节头读固有尺寸，不解码像素。
+/// 生成图卡片在 asset:// 图片下载完成前按这个比例占位；旧快照 / 远程 URL
+/// 载荷读不到尺寸时字段缺省，UI 退回原来的「加载后才知道多大」。
+fn sniff_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let dims = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if bytes.get(12..16)? != b"IHDR" {
+            return None;
+        }
+        let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        Some((w, h))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        let w = u16::from_le_bytes(bytes.get(6..8)?.try_into().ok()?) as u32;
+        let h = u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?) as u32;
+        Some((w, h))
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        webp_dimensions(bytes)
+    } else if bytes.starts_with(b"\xff\xd8") {
+        jpeg_dimensions(bytes)
+    } else {
+        None
+    };
+    dims.filter(|(w, h)| *w > 0 && *h > 0)
+}
+
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match bytes.get(12..16)? {
+        b"VP8 " => {
+            // Lossy: 3-byte frame tag, 3-byte start code, then 14-bit width/height.
+            if bytes.get(23..26)? != b"\x9d\x01\x2a" {
+                return None;
+            }
+            let w = u16::from_le_bytes(bytes.get(26..28)?.try_into().ok()?) as u32 & 0x3fff;
+            let h = u16::from_le_bytes(bytes.get(28..30)?.try_into().ok()?) as u32 & 0x3fff;
+            Some((w, h))
+        }
+        b"VP8L" => {
+            // Lossless: signature byte, then 14+14 bits of (size - 1).
+            if *bytes.get(20)? != 0x2f {
+                return None;
+            }
+            let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+            Some((1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff)))
+        }
+        b"VP8X" => {
+            // Extended: flags/reserved, then two 24-bit (canvas size - 1) fields.
+            let le24 = |at: usize| -> Option<u32> {
+                let b = bytes.get(at..at + 3)?;
+                Some(b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16)
+            };
+            Some((1 + le24(24)?, 1 + le24(27)?))
+        }
+        _ => None,
+    }
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        let mut marker_at = i + 1;
+        while bytes.get(marker_at) == Some(&0xff) {
+            marker_at += 1;
+        }
+        let marker = *bytes.get(marker_at)?;
+        // Standalone markers (RSTn / SOI / EOI / TEM) carry no length field.
+        if (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
+            i = marker_at + 1;
+            continue;
+        }
+        let len_at = marker_at + 1;
+        let len = u16::from_be_bytes(bytes.get(len_at..len_at + 2)?.try_into().ok()?) as usize;
+        if len < 2 {
+            return None;
+        }
+        // SOF0-15 carry the frame size; C4/C8/CC are DHT/JPG/DAC, not frames.
+        if (0xc0..=0xcf).contains(&marker) && marker != 0xc4 && marker != 0xc8 && marker != 0xcc {
+            let h = u16::from_be_bytes(bytes.get(len_at + 3..len_at + 5)?.try_into().ok()?) as u32;
+            let w = u16::from_be_bytes(bytes.get(len_at + 5..len_at + 7)?.try_into().ok()?) as u32;
+            return Some((w, h));
+        }
+        i = len_at + len;
+    }
+    None
+}
+
 /// Generated-image disk cache (~/.pure/cache/generated-images). Content-
 /// addressed (sha256 prefix): the same bytes never write twice, and the file
 /// outlives the session so replay renders from disk. MB-scale base64 used to
@@ -14802,10 +14891,11 @@ async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, St
                 Err(_) => continue,
             };
             let mime = mime_hint.unwrap_or_else(|| sniff_image_mime(&bytes).to_string());
+            let dims = sniff_image_dimensions(&bytes);
             // 落盘 + 回绝对路径:MB 级 base64 不再走 IPC、会话快照、重放三条
             // 链(前端经 asset:// 渲染磁盘文件)。写盘失败才降级回内联 dataUrl,
             // 工具不因 cache 目录不可写而废。
-            let image = match store_generated_image(&bytes, &mime) {
+            let mut image = match store_generated_image(&bytes, &mime) {
                 Some(path) => serde_json::json!({
                     "path": path.to_string_lossy(),
                     "mimeType": mime,
@@ -14817,6 +14907,10 @@ async fn generate_image(args: GenerateImageArgs) -> Result<serde_json::Value, St
                     "sizeBytes": bytes.len(),
                 }),
             };
+            if let (Some((w, h)), Some(object)) = (dims, image.as_object_mut()) {
+                object.insert("width".to_string(), serde_json::json!(w));
+                object.insert("height".to_string(), serde_json::json!(h));
+            }
             images.push(image);
         } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
             let mime = mime_hint.unwrap_or_else(|| "image/png".to_string());
@@ -15222,6 +15316,58 @@ mod generate_image_tests {
         assert_eq!(sniff_image_mime(b"GIF89a...."), "image/gif");
         assert_eq!(sniff_image_mime(b"RIFF....WEBP...."), "image/webp");
         assert_eq!(sniff_image_mime(b"not an image"), "image/png");
+    }
+
+    #[test]
+    fn sniff_dimensions_reads_png_gif_webp_and_jpeg() {
+        // PNG: signature, chunk length, "IHDR", then width/height (big-endian).
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        png.extend_from_slice(&768u32.to_be_bytes());
+        assert_eq!(sniff_image_dimensions(&png), Some((1024, 768)));
+
+        // GIF: 16-bit little-endian logical screen size.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[4, 0, 5, 0, 0, 0, 0]);
+        assert_eq!(sniff_image_dimensions(&gif), Some((4, 5)));
+
+        // WebP VP8X: 24-bit little-endian (canvas size - 1) fields.
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBPVP8X");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(&[0xff, 0x03, 0x00]);
+        webp.extend_from_slice(&[0xff, 0x02, 0x00]);
+        assert_eq!(sniff_image_dimensions(&webp), Some((1024, 768)));
+
+        // WebP VP8L: signature byte + 14-bit (size - 1) pairs.
+        let mut lossless = b"RIFF".to_vec();
+        lossless.extend_from_slice(&[0, 0, 0, 0]);
+        lossless.extend_from_slice(b"WEBPVP8L");
+        lossless.extend_from_slice(&[0, 0, 0, 0]);
+        lossless.push(0x2f);
+        let w = 320u32 - 1;
+        let h = 200u32 - 1;
+        lossless.extend_from_slice(&(w | (h << 14)).to_le_bytes());
+        assert_eq!(sniff_image_dimensions(&lossless), Some((320, 200)));
+
+        // JPEG: skip APP0, then read the SOF0 frame header.
+        let mut jpeg = b"\xff\xd8".to_vec();
+        jpeg.extend_from_slice(&[0xff, 0xe0, 0x00, 0x10]);
+        jpeg.extend_from_slice(&[0u8; 14]);
+        jpeg.extend_from_slice(&[0xff, 0xc0, 0x00, 0x11, 0x08]);
+        jpeg.extend_from_slice(&480u16.to_be_bytes());
+        jpeg.extend_from_slice(&640u16.to_be_bytes());
+        jpeg.push(0x03);
+        assert_eq!(sniff_image_dimensions(&jpeg), Some((640, 480)));
+
+        // Unknown containers and truncated bytes must not invent a size.
+        assert_eq!(sniff_image_dimensions(b"not an image"), None);
+        assert_eq!(sniff_image_dimensions(b"\x89PNG\r\n\x1a\n"), None);
+        assert_eq!(sniff_image_dimensions(b"\xff\xd8\xff\xe0"), None);
     }
 
     #[test]

@@ -10,8 +10,6 @@
 
 import { Marked, Renderer } from 'marked';
 import DOMPurify from 'dompurify';
-import katex from 'katex';
-import 'katex/dist/katex.min.css';
 import { isTauriRuntime, loadTauriCore } from '../shared/tauri';
 import { t } from '../shared/i18n';
 import { stripAnsi } from '../shared/ansi';
@@ -546,6 +544,46 @@ export const mathExtBlock = {
 // math answers can churn thousands of distinct snippets.
 const KATEX_MEMO_CAP = 512;
 const katexMemo = new Map<string, string>();
+
+// C1（2026-11-13 性能审计）：katex 从首屏链上拿下来。它自己是 512KB（占首屏
+// JS 的 ~20%），而绝大多数会话根本不写公式——改成「文本里真的出现 $ 或 \ 才
+// 拉这个 chunk」。marked 的扩展是同步的，所以必须在 parse 之前 await 完成
+// 加载（见 renderMarkdownInner 入口）；没加载成功时公式退回字面文本，不会
+// 报错、不会吞正文。
+//
+// CSS 也必须一起懒加载：静态的 `import 'katex/dist/katex.min.css'` 会让
+// Rollup 在入口 chunk 里留一条 `import "./katex-<hash>.js"` 的副作用边
+// （manualChunks 把 katex 包的所有 id 都归进同一个 chunk），于是 index.html
+// 给这个 524KB chunk 挂了 modulepreload —— 体积一点没省，只是把执行推迟了。
+// 两样都在 ensureKatex 里等，所以公式第一次上屏前样式已经就位，不会闪版。
+type KatexModule = { renderToString: (tex: string, options?: Record<string, unknown>) => string };
+let katexModule: KatexModule | null = null;
+let katexLoading: Promise<void> | null = null;
+
+/** 按需加载 KaTeX（JS + 样式）；重复调用共享同一个 promise。导出给测试与
+ *  预加载方。样式失败不阻断公式渲染（退回浏览器默认排版），JS 失败则公式
+ *  保持字面文本。 */
+export async function ensureKatex(): Promise<void> {
+  if (katexModule) return;
+  katexLoading ??= Promise.all([
+    import('katex'),
+    import('katex/dist/katex.min.css').catch(() => undefined),
+  ])
+    .then(([mod]) => {
+      katexModule = ((mod as { default?: KatexModule }).default ?? mod) as KatexModule;
+    })
+    .catch(() => {
+      // 加载失败：公式位置保持字面文本，渲染链继续。
+      katexLoading = null;
+    });
+  await katexLoading;
+}
+
+/** 文本里可能含公式的保守判定：$…$ / $$…$$ / \[ … \]。 */
+function mayContainMath(text: string): boolean {
+  return text.includes('$') || text.includes('\\[');
+}
+
 function renderKatex(tex: string, displayMode: boolean): string {
   const trimmed = tex.trim();
   if (!trimmed || /[一-鿿぀-ヿ가-힯]/.test(trimmed)) {
@@ -554,9 +592,12 @@ function renderKatex(tex: string, displayMode: boolean): string {
   const key = `${displayMode ? 'B' : 'I'}\u0000${trimmed}`;
   const hit = katexMemo.get(key);
   if (hit !== undefined) return hit;
+  // 模块还没加载（或加载失败）：退回字面文本，且不入缓存——否则后面同一个
+  // 公式即使 katex 已就绪也永远拿到字面值。
+  if (!katexModule) return esc(tex);
   let out: string;
   try {
-    out = katex.renderToString(trimmed, {
+    out = katexModule.renderToString(trimmed, {
       displayMode,
       throwOnError: false,
       strict: false,
@@ -3398,6 +3439,8 @@ async function renderMarkdownInner(
   // as plain text rather than mojibake. Suggested-followups comments come out
   // before parsing — they never render as prose, only as chips at the end.
   const { text: stripped, questions: suggestedQuestions } = extractSuggestedFollowups(stripAnsi(text));
+  // C1：公式存在才加载 katex（扩展是同步的，必须先 await 完再进 parse）。
+  if (mayContainMath(stripped)) await ensureKatex();
   // 中断回合可能停在 slot 围栏中途——半截数据不进渲染管线(见函数注释)。
   const settled = stripUnterminatedSlotFences(stripped);
   const html = (md.parse(normalizeMapFence(settled), { async: false }) as string).replace(/\n+$/, '');

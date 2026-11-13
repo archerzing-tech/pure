@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, sanitizeInterruptedReason, isConfirmationReply, isLightShapedTurn } from '../chat';
+import { parseToolCallBuffer, shouldCopyAssistantBubbleTarget, copyAssistantBubbleText, bindUserBubbleSelectAll, renderUserImageAttachments, pickHistoryMessages, mergeTranscriptWithTurn, BASE_SYSTEM_PROMPT, shouldCancelForEscape, sanitizeInterruptedReason, isConfirmationReply, isLightShapedTurn } from '../chat';
 import { turnShape } from '../../coding-agent/turnRoute';
 import { limitStoredMessages, MAX_PERSISTED_MESSAGES } from '../store';
 import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
@@ -950,6 +950,44 @@ describe('user bubble double-click select-all', () => {
     expect(chatSrc).toContain('export function bindUserBubbleSelectAll(bubble: HTMLElement): void {');
     expect(chatSrc).toContain('bindUserBubbleSelectAll(bubble);');
     expect(mainSrc).toContain('bindUserBubbleSelectAll(bubble);');
+  });
+});
+
+describe('user bubble image attachments', () => {
+  function fakeEl(tag: string): any {
+    const el: any = {
+      tagName: tag.toUpperCase(),
+      children: [] as any[],
+      className: '',
+      dataset: {},
+      style: {},
+      addEventListener: () => {},
+      appendChild: (child: any) => { el.children.push(child); return child; },
+    };
+    return el;
+  }
+
+  it('writes the recorded intrinsic size, and nothing for images restored without one', () => {
+    const prevDocument = (globalThis as any).document;
+    (globalThis as any).document = { createElement: (tag: string) => fakeEl(tag) };
+    try {
+      const bubble = fakeEl('div');
+      renderUserImageAttachments(bubble, [
+        { dataUrl: 'data:image/png;base64,SIZED', mimeType: 'image/png', width: 1280, height: 960 },
+        { dataUrl: 'data:image/png;base64,LEGACY', mimeType: 'image/png' },
+        // A zero size means "not measured"; it must never reserve a 0×0 box.
+        { dataUrl: 'data:image/png;base64,EMPTY', mimeType: 'image/png', width: 0, height: 0 },
+      ]);
+      const gallery = bubble.children[0];
+      expect(gallery.className).toBe('user-image-attachments');
+      expect(gallery.children.length).toBe(3);
+      expect(gallery.children[0].width).toBe(1280);
+      expect(gallery.children[0].height).toBe(960);
+      expect(gallery.children[1].width).toBeUndefined();
+      expect(gallery.children[2].width).toBeUndefined();
+    } finally {
+      (globalThis as any).document = prevDocument;
+    }
   });
 });
 

@@ -4,10 +4,10 @@
 //  • highlightExt   — the `==text==` → <mark> inline highlight extension
 //    (marked parses headlessly; no document/window required)
 
-import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, ensureKatex, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -214,6 +214,25 @@ describe('highlightExt (==text== → <mark>)', () => {
 describe('mathExt ($…$ / $$…$$ → KaTeX)', () => {
   const mdm = new Marked({ gfm: true, breaks: true });
   mdm.use({ extensions: [mathExtInline, mathExtBlock] });
+
+  // C1（2026-11-13 性能审计）：katex 改成按需加载，直连扩展的测试也要先把它
+  // 拉起来（真实链路由 renderMarkdownInner 在 parse 前 await）。
+  beforeAll(async () => { await ensureKatex(); });
+  afterAll(() => { /* 模块级缓存留着，后续用例不必重拉 */ });
+
+  it('katex stays off the cold-start path: dynamic import behind a $ guard', () => {
+    const src = readFileSync(new URL('../markdown.ts', import.meta.url), 'utf8');
+    // 一个静态 import 就会把 512KB 重新拉回首屏，这是懒加载的全部意义所在。
+    expect(src).not.toMatch(/^\s*import\s+\w+\s+from\s+'katex'/m);
+    // 静态的 CSS import 同样致命：它给入口 chunk 留一条到 katex chunk 的副作用边，
+    // Vite 会给那个 chunk 挂 modulepreload（实测 index.html 预加载过 524KB）。
+    expect(src).not.toMatch(/^\s*import\s+'katex\//m);
+    expect(src.split("import('katex')").length - 1).toBe(1);
+    expect(src).toContain("import('katex/dist/katex.min.css')");
+    // 唯一的加载点必须被入口的公式闸拦住：普通文本（无 $ / \[）不得触发加载。
+    expect(src).toContain('if (mayContainMath(stripped)) await ensureKatex();');
+    expect(src).toContain("return text.includes('$') || text.includes('\\\\[');");
+  });
 
   it('renders inline $…$ as a KaTeX span', () => {
     const html = mdm.parse('能量 $E=mc^2$ 与动量') as string;

@@ -31,6 +31,11 @@ export interface MessageImage {
    *  只留在 modelContext.messages——那里才是 vision 请求的真输入。
    *  原图可从 path（~/.pure/attachments/ 稳定目录）取回。 */
   thumbDataUrl?: string;
+  /** P2-3（2026-11-13 性能审计）：原图固有像素尺寸。气泡在解码前就能按这个
+   *  比例占位（宽高属性 → CSS aspect-ratio），恢复带图会话时不再先塌成 0 高
+   *  再撑开。老快照没有这两个字段，按「未知尺寸」正常加载。 */
+  width?: number;
+  height?: number;
 }
 
 export interface Message {
@@ -94,6 +99,11 @@ export interface GeneratedImage {
   path?: string;
   mimeType: string;
   sizeBytes: number;
+  /** P2-3（2026-11-13 性能审计）：固有像素尺寸，由 Rust 从字节头读出（不解码
+   *  像素）。卡片在图片下载完成前按它占位，避免生成图把下方内容推下去。
+   *  远程 URL 载荷读不到字节，字段缺省。 */
+  width?: number;
+  height?: number;
 }
 
 export type LLMChunk =

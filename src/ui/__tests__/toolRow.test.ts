@@ -752,6 +752,33 @@ describe('tool row renders generated images as <img> cards', () => {
     }
   });
 
+  it('reserves the card box from the sniffed intrinsic size, and omits it when unknown', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('generate_image', { prompt: 'puppy' });
+      finalizeToolRow(row, {
+        success: true,
+        duration: 800,
+        resultKind: 'image',
+        resultImages: [
+          { ...image('data:image/png;base64,SIZED'), width: 1024, height: 768 },
+          image('data:image/png;base64,LEGACY'),
+        ],
+        resultText: 'ok',
+      });
+      const gallery = Array.from(row.resultEl.children).find((c: any) => c.className.includes('image-gallery')) as any;
+      const sized = gallery.children[0].children[0];
+      expect(sized.width).toBe(1024);
+      expect(sized.height).toBe(768);
+      // Old snapshots carry no size: no attributes at all (not a 0x0 box).
+      const legacy = gallery.children[1].children[0];
+      expect(legacy.width).toBeUndefined();
+      expect(legacy.height).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
   it('a single image renders in the single-card geometry', () => {
     const restore = installFakeDocument();
     try {

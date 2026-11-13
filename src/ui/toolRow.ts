@@ -1574,6 +1574,14 @@ function renderImageGallery(images: GeneratedImage[], prompt?: string): HTMLElem
     const src = generatedImageSrc(image);
     const img = document.createElement('img');
     img.className = 'generated-image';
+    // P2-3：尺寸来自 Rust 的字节头嗅探。写宽高属性后浏览器在图片下载完成
+    // 之前就按同一比例算出 height:auto 的高度（CSS width:100%），恢复带生成
+    // 图的长会话时不再先把下方内容顶上去又拉回来。旧快照没有尺寸 → 属性不写，
+    // 退回原来的「加载后才知道多大」。
+    if (image.width && image.height) {
+      img.width = image.width;
+      img.height = image.height;
+    }
     img.src = src;
     img.alt = prompt ? `${prompt}（图 ${index + 1}）` : `生成图片 ${index + 1}`;
     img.loading = 'lazy';

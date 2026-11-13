@@ -277,8 +277,8 @@ let katexModule: { renderToString: typeof import('katex').default.renderToString
 async function ensureKatex(): Promise<void> { katexModule ??= (await import('katex')).default; }
 ```
 - `renderMarkdown`（已是 async）在进入解析前：`if (/[\\$]/.test(text)) await ensureKatex();`
-- 扩展内部把 `katex.renderToString` 换成 `katexModule!.renderToString`；
-- 静态 CSS 保留（29KB，样式不能延迟，否则公式会闪版）。
+- 扩展内部把 `katex.renderToString` 换成 `katexModule!.renderToString`。
+- **CSS 也必须一起懒加载**（落地时才发现的坑）：静态 `import 'katex/dist/katex.min.css'` 会在入口 chunk 里留一条 `import "./katex-<hash>.js"` 的副作用边（manualChunks 把 katex 包所有 id 归进同一 chunk），Vite 于是给这个 524KB chunk 挂 `modulepreload`——体积一点没省。实测构建产物：改前 `index.html` 预加载 katex，改后 0 条引用，CSS 也变成按需 asset。
 
 **为什么 UX 不变**：没有公式的内容零变化；有公式时首次渲染多一次模块加载（本地包，几十 ms），且发生在这条消息第一次上屏时——与现在「整包预加载但公式仍要渲染」的用户感知一致。
 
@@ -286,8 +286,16 @@ async function ensureKatex(): Promise<void> { katexModule ??= (await import('kat
 
 ### C3 图片固有尺寸（`types.ts` + `pasteChip.ts`）
 
-- `MessageImage` 增加 `width?: number; height?: number`，缩略图生成时一并记录；
-- 气泡/工具结果里的 `<img>` 写 `width`/`height` 或 `style.aspectRatio`，并加 `loading="lazy" decoding="async"`。
+落地时先核对了「跳动」在哪：
+
+- **用户附件气泡没有跳动**：`.user-image-thumb` 是固定 96×96（`object-fit: cover`），元素一插入就占好格子，解码前后高度相同。这条按原文做只能得到一份「永不生效」的元数据，所以只做记录 + 写属性（比例信息交给浏览器，未来改样式或放大层不必等解码），不声称消除了不存在的跳动。
+- **真正会跳的是生成图卡片**：`.generated-image` 是 `width:100%; height:auto`，加载前高 0、加载后最高 360px——恢复带生成图的长会话时下方内容会被顶开。这些图由 Rust 落盘、尺寸只有字节里有，所以新增 `sniff_image_dimensions`（PNG / JPEG / GIF / WebP 四种头部，**不解码像素、不加依赖**），随 `generate_image` 一起返回。
+
+实现要点：
+
+- `MessageImage.width/height`（原图固有尺寸）+ `GeneratedImage.width/height`；老快照缺字段 → 不写属性，退回原行为（不会占成 0×0）；
+- `scaleImageDataUrl` 把「缩略图 + 固有尺寸」合并到同一次 decode（分开测量等于把每张多 MB 截图解两遍）；`downscaleImageDataUrl` 保留为薄包装；
+- `<img width height>` 而不是 `style.aspectRatio`：一个维度是 auto（`height:auto`）时浏览器直接按属性算比例，`max-height` 照常夹紧。
 
 **为什么 UX 不变**：尺寸一致时不产生任何视觉差异，只是「先占位再加载」，消除恢复会话时的跳动（属改善）。
 
@@ -356,8 +364,8 @@ cargo test --lib              # 247 个既有用例，新增项见各节验收
 | P1-2 B1 历史图片降级 | ✅ 已合入 | 新 `src/shared/imageContext.ts`；`openai/mapping.ts`、`DeepSeekAnthropicAdapter.ts` 各一行接入；`config.trimHistoricalImages` 开关；`main.ts` 接线 | 新增 `imageContext.test.ts` 6 条 + `mapping.test.ts` 1 条线格式断言 |
 | P2-1 B2 IPC 直通 | ⏳ 未做 | — | — |
 | P2-2 B3 events 轮转 | ⏳ 未做 | — | — |
-| P2-3 C1 katex 懒加载 | ⏳ 未做 | — | — |
-| P2-4 C3 图片固有尺寸 | ⏳ 未做 | — | — |
+| P2-3 C1 katex 懒加载 | ✅ 已合入 | `markdown.ts` `ensureKatex()` + 公式路径按需 import（JS 与 CSS 一起） | 源码守卫断言 + **构建产物实证**：`index.html` 不再预加载 katex；全量 `bun test` 5378 通过 |
+| P2-4 C3 图片固有尺寸 | ✅ 已合入（**范围调整，见下**） | `types.ts` 宽高字段；`pasteChip.ts` `scaleImageDataUrl` 复用同一次解码；`lib.rs` `sniff_image_dimensions`；`chat.ts` / `toolRow.ts` 写宽高属性 | 新增 Rust 1 条（含真实 PNG / sips JPEG 跑过一次）、TS 5 条；`cargo test --lib` 305 通过 |
 | C2 超长文本闸门 | ⏸ 待确认（会改可见界面） | — | — |
 
 ### A3 的范围调整（为什么没按原文做 512KB 首窗）

@@ -50,7 +50,7 @@ import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from '
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { setupWindowChrome } from './windowChrome';
 import { setupResizeZones } from './resizeZones';
-import { PasteChipManager, PASTE_FILE_THRESHOLD, THUMB_IMAGE_PIXELS, attachmentToMessageImage, composeMessageWithAttachments, downscaleImageDataUrl, renderAttachmentCard } from './pasteChip';
+import { PasteChipManager, PASTE_FILE_THRESHOLD, THUMB_IMAGE_PIXELS, attachmentToMessageImage, composeMessageWithAttachments, renderAttachmentCard, scaleImageDataUrl } from './pasteChip';
 import { startMemoryDecayTimer } from './memoryDecayTimer';
 import { startEvolutionOrchestratorTimer } from './evolutionOrchestratorTimer';
 import { maybeOfferProxyOnboarding } from './proxyOnboarding';
@@ -2214,10 +2214,18 @@ async function doSend(text: string, displayOverride?: string, pathRepairs: impor
   // P0-4（2026-11-13 性能审计）：发送时生成展示缩略图（≤~0.5MP）。快照的
   // transcript/events 侧只落缩略图，原图 base64 只留在 modelContext（vision
   // 真输入）。downscale 对小图原样返回 → 不设 thumb（避免同字节白存一份）。
+  // P2-3（2026-11-13 性能审计）：同一次解码顺带记下原图固有尺寸，气泡在
+  // 缩略图解码前就能按比例占位。
   const imagesWithThumbs = await Promise.all(images.map(async (image) => {
     try {
-      const thumb = await downscaleImageDataUrl(image.dataUrl, THUMB_IMAGE_PIXELS);
-      return thumb !== image.dataUrl ? { ...image, thumbDataUrl: thumb } : image;
+      const scaled = await scaleImageDataUrl(image.dataUrl, THUMB_IMAGE_PIXELS);
+      const measured = scaled.width > 0 && scaled.height > 0
+        ? { width: scaled.width, height: scaled.height }
+        : {};
+      const thumb = scaled.dataUrl !== image.dataUrl ? { thumbDataUrl: scaled.dataUrl } : {};
+      return Object.keys(measured).length || Object.keys(thumb).length
+        ? { ...image, ...measured, ...thumb }
+        : image;
     } catch {
       return image;
     }

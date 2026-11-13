@@ -632,6 +632,13 @@ export function renderUserImageAttachments(bubble: HTMLElement, images: MessageI
     if (!image.dataUrl) continue;
     const img = document.createElement('img');
     img.className = 'user-image-thumb';
+    // P2-3：固有尺寸现在记在消息里。缩略图格子本身是固定 96px，属性不改变
+    // 当前布局，但把比例信息交给浏览器——字号/样式改动、以及双击放大那一层
+    // 都不必等解码才知道图有多大。
+    if (image.width && image.height) {
+      img.width = image.width;
+      img.height = image.height;
+    }
     img.src = image.dataUrl;
     img.alt = image.name || '上传图片';
     img.decoding = 'async';
