@@ -12,7 +12,13 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 二、xlsx 静默空文件（P0-2）。旧实现只读 `xl/sharedStrings.xml`，SheetJS 默认写 inlineStr、数字单元格也不在 sharedStrings 里，于是一张有内容的表被提取成 0 字符，`read_file` 再把它当 `(empty file)`——不报错、数据全丢。TS 侧改走 SheetJS（`sheet_to_csv`，覆盖 sharedStrings / inlineStr / 数字 / 公式缓存值，保留工作表名），SheetJS 拒绝的容器回退到 `xl/**.xml` 文本扫描；Rust 侧新增原生抽取器（sharedStrings + 每张 worksheet 的 `t="s"` / `inlineStr` / 数字 / 实体解码），旧 sharedStrings 路径保留为兜底。无文本时返回明确 note，不再静默成空文件。
 
-验证：bun test 全量 5346 pass（1 fail 为 `paintStreaming` 全量负载下的 5s 时序抖动，单跑 10 pass）、`cargo test --lib` 295 pass、typecheck 绿；新增单行超长（TS/Rust）、中文头部预算、inlineStr / sharedStrings xlsx 用例。
+**子 agent skill 索引注入（渐进披露）+ rail/工作台 UI 四刀**
+
+三、子 agent skill 索引注入。此前子 agent 只有工具面（read_file / search_agent_skills 在继承 registry 里）没有 skill 索引——模型不知道有哪些 skill 可用，工具形同虚设。注入段由 `PromptAssembler.buildSkills` 单一出典导出：主对话走 fragment 管道，子 agent spawn 时直接拼同一函数，三档条目语义（path 索引行 / hub 全文内联 / 知晓行）与头部指令同主对话逐字节一致（对齐 Anthropic Agent Skills 渐进披露三层模型）。skillsProvider 由宿主在 spawn 时实时解析（GUI=hubSkills+app skills(workspace)，CLI=hub 收窄三字段+app skills），同回合安装的 skill 在 30s TTL 内即见；检索抛错降级为不注入，委派 prompt 回到逐字节不变的现状。注入位置=人格内核之后、角色 prompt 之前：三支并行 spawn 共享「内核+索引」缓存前缀，provider 隐式 context cache 前缀命中最大化。A/B 评测流刻意不接，评测基线不动。
+
+四、rail/工作台 UI 四刀（2026-11-12 真机反馈）。①rail 卡 id 独占一行：收窄后内联在名字行的 id chip 被省略号截掉半个——拆到独立一行居中 pill（卡契约三行改四行，无 id 时整行隐藏）；②工作台 Windows 可读性：正文大量 10-11px mono 在 ClearType 下发虚——产出段 11→12.5px、任务正文 12→13px、轨迹/错误 11→12px、pill 类统一 10.5px、职责描述色 tertiary→secondary；③idchip 挪位：与标题同行在 Windows 下把行高撑高——挪进任务卡底部独立一行（flag 同款安静 pill，点击复制保留），header 行只剩纯文本与状态 pill，行高任何平台稳定；④rail 动效 opacity 化：active 青色呼吸与 retrying 琥珀脉冲从 border-color/box-shadow（paint 层动画，每帧重绘边框，活跃卡多时开销成倍）挪进 `::before` 叠层只动 opacity——合成器直跑、主线程零帧（拉长动画周期省不了：浏览器仍按显示刷新率逐帧重绘）；reduced-motion 下静止给静态半亮。
+
+验证：大文件读取——bun test 全量 5346 pass（1 fail 为 `paintStreaming` 全量负载下的 5s 时序抖动，单跑 10 pass）、`cargo test --lib` 295 pass、typecheck 绿，新增单行超长（TS/Rust）、中文头部预算、inlineStr / sharedStrings xlsx 用例；skill 注入 + UI 四刀——bun test 全量 5342 例（1 fail 为 markdown 流式时序用例全量负载超时抖动，单跑 129 pass 全绿定案）、typecheck 与 build:vite 绿，新增子 agent skill 注入用例 ×5（含注入位置/抛错降级/缺席逐字节一致/实时解析/三宿主接线源级锁）。
 
 ## v4.7.6
 
