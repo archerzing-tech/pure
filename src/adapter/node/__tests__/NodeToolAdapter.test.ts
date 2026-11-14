@@ -4,7 +4,7 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeToolAdapter, detectLocalTimeLine, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, tokenizeFindQuery } from '../NodeToolAdapter';
+import { NodeToolAdapter, detectLocalTimeLine, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, powershellFileLaunchArgs, powershellNeedsFileLaunch, powershellWrappedCommand, tokenizeFindQuery } from '../NodeToolAdapter';
 import type { ToolCall, ToolResult } from '../../../shared/types';
 
 function makeCall(command: string): ToolCall {
@@ -163,6 +163,36 @@ describe('encodePowerShellCommand', () => {
     const lines = decoded.split('\n');
     expect(lines[2]).toBe('cmd /c exit 3 # trailing comment');
     expect(lines[3]).toContain('exit $LASTEXITCODE');
+  });
+});
+
+describe('powershell -File launch (32K 命令行上限守卫)', () => {
+  it('routes a short command through -EncodedCommand', () => {
+    expect(powershellNeedsFileLaunch('Get-ChildItem')).toBe(false);
+  });
+
+  it('routes an oversized command through -File (base64 would blow the 32K line)', () => {
+    // ASCII 下膨胀 ≈ 2.67×（UTF-16LE ×2 再 base64 ×4/3），撞线点 ~12k 字符
+    // （中文每字 UTF-8 3 字节 → 8×，撞线更早——判据测编码产物长度，与输入
+    // 字符集无关，这里用明显越线/明显安全的两侧输入）。
+    expect(powershellNeedsFileLaunch('echo ' + 'x'.repeat(13000))).toBe(true);
+    expect(powershellNeedsFileLaunch('echo ' + 'x'.repeat(11000))).toBe(false);
+  });
+
+  it('launch args carry -ExecutionPolicy Bypass and the -File path', () => {
+    // -File 受 ExecutionPolicy 管辖（-EncodedCommand 不受），默认 Restricted
+    // 会直接拒绝运行落盘脚本。
+    const args = powershellFileLaunchArgs('C:\\Temp\\pure-cmd-x.ps1');
+    expect(args[args.length - 1]).toBe('C:\\Temp\\pure-cmd-x.ps1');
+    expect(args).toContain('-ExecutionPolicy');
+    expect(args).toContain('Bypass');
+    expect(args).toContain('-File');
+    expect(args[0]!.endsWith('powershell.exe')).toBe(true);
+  });
+
+  it('wrapper plaintext is shared verbatim between both paths', () => {
+    const decoded = Buffer.from(encodePowerShellCommand('Get-Date'), 'base64').toString('utf16le');
+    expect(powershellWrappedCommand('Get-Date')).toBe(decoded);
   });
 });
 

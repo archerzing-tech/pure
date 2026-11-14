@@ -93,8 +93,30 @@ function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
  * exit-1 白名单（grep/git diff 无匹配）叠加后 128 类真失败被标 success；
  * PS 5.1 在 `2>&1` 下把 stderr 非空的成功 native 命令的 `$?` 打成 false，
  * 成功被报失败——真实码透传双双修复。 */
+export function powershellWrappedCommand(command: string): string {
+  return `$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n${command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`;
+}
+
 export function encodePowerShellCommand(command: string): string {
-  return Buffer.from(`$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n${command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`, 'utf16le').toString('base64');
+  return Buffer.from(powershellWrappedCommand(command), 'utf16le').toString('base64');
+}
+
+/** Windows CreateProcess 命令行硬上限 32767 字符：-EncodedCommand 的参数长
+ *  度 ≈ 5.34×命令字符数（UTF-16LE ×2 再 base64 ×4/3），超限即 spawn 失败，
+ *  模型面对一个 ENOENT/ENAMETOOLONG 无路可走。判据直接测编码产物长度——
+ *  编码是权威长度，无需自己推导膨胀系数（与 Rust powershell_needs_file_launch
+ *  同刀，阈值两侧一致）。 */
+const POWERSHELL_CMDLINE_MAX = 32000;
+
+export function powershellNeedsFileLaunch(command: string): boolean {
+  return encodePowerShellCommand(command).length > POWERSHELL_CMDLINE_MAX;
+}
+
+/** 超长命令的 -File 启动参数。-File 受 ExecutionPolicy 管辖（-EncodedCommand
+ *  不受），Windows 客户端默认 Restricted 必须显式 Bypass（backgroundCommand
+ *  的 detach 同款）。 */
+export function powershellFileLaunchArgs(scriptFile: string): string[] {
+  return [windowsSystemShell('powershell.exe'), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile];
 }
 
 /** Drain a child-process stream to a string (node:child_process shape,
@@ -913,9 +935,21 @@ export class NodeToolAdapter implements ToolAdapter {
       // unless the script calls `exit` itself, and `$?` is false for both a
       // failing native command and a failing cmdlet, so either reports as
       // non-zero (mirrors Rust powershell_encoded_command).
-      const shellArgs = IS_WINDOWS
+      let shellArgs = IS_WINDOWS
         ? [windowsSystemShell('powershell.exe'), '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShellCommand(command)]
         : ['sh', '-c', command];
+      // 超长命令（base64 后撞 Windows 32K 命令行上限）落盘 .ps1 走 -File：
+      // wrapper 明文与 -EncodedCommand 路径同一份（powershellWrappedCommand），
+      // 写盘带 BOM 的 UTF-8（PS 5.1 对无 BOM 文件按 ANSI 解码——中文命令
+      // 整段乱码，backgroundCommand 同判例），尾部自删失败无害。
+      let scriptFile: string | null = null;
+      if (IS_WINDOWS && powershellNeedsFileLaunch(command)) {
+        scriptFile = join(tmpdir(), `pure-cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.ps1`);
+        // 显式 BOM（U+FEFF，PS 5.1 对无 BOM 的 .ps1 按 ANSI 解码）——不用
+        // 字面 BOM 字符，避免转义层吃掉后静默变成无 BOM 写盘。
+        writeFileSync(scriptFile, String.fromCharCode(0xfeff) + powershellWrappedCommand(command), 'utf8');
+        shellArgs = powershellFileLaunchArgs(scriptFile);
+      }
       // Inject the extended probe PATH on Unix so `node` / `bun` / nvm /
       // Homebrew commands resolve even when this process inherited a minimal
       // PATH (IDE integrated terminal, GUI-spawned launcher) — mirrors Rust
@@ -927,21 +961,30 @@ export class NodeToolAdapter implements ToolAdapter {
       // 先例（tauriToolAdapter.test.ts 的 sh 展开探针）。语义对齐旧形态：
       // stdin 不喂（PowerShell -NonInteractive / sh -c 都不读），stdout/
       // stderr 全量收管，abort.signal 保留超时取消。
-      const proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
-        cwd: cwd.value,
-        env: spawnEnv ?? undefined,
-        signal: abort.signal,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-      const [stdoutRaw, stderrRaw, exitCode] = await Promise.all([
-        collectStreamText(proc.stdout),
-        collectStreamText(proc.stderr),
-        new Promise<number>((resolve, reject) => {
-          proc.on('error', reject);
-          proc.on('exit', (code) => resolve(code ?? -1));
-        }),
-      ]);
+      let stdoutRaw: string;
+      let stderrRaw: string;
+      let exitCode: number;
+      try {
+        const proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
+          cwd: cwd.value,
+          env: spawnEnv ?? undefined,
+          signal: abort.signal,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        [stdoutRaw, stderrRaw, exitCode] = await Promise.all([
+          collectStreamText(proc.stdout),
+          collectStreamText(proc.stderr),
+          new Promise<number>((resolve, reject) => {
+            proc.on('error', reject);
+            proc.on('exit', (code) => resolve(code ?? -1));
+          }),
+        ]);
+      } finally {
+        if (scriptFile) {
+          try { rmSync(scriptFile, { force: true }); } catch { /* best effort */ }
+        }
+      }
 
       // Strip ANSI color codes from captured output so logs / colored command
       // output render as plain text instead of mojibake.

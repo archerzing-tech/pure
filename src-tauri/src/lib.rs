@@ -4159,6 +4159,31 @@ fn powershell_encoded_command(command: &str) -> String {
     utf16le_base64(&powershell_command_wrapped(command))
 }
 
+/// Windows CreateProcess 命令行硬上限 32767 字符：-EncodedCommand 的参数
+/// （≈5.34×命令字符数）撞线即 spawn 失败。阈值直接测编码产物长度（编码是
+/// 权威长度，无需推导膨胀系数），留出程序路径 + flags 余量。与 TS
+/// powershellNeedsFileLaunch 同刀，两侧必须一致。
+#[cfg(any(windows, test))]
+const POWERSHELL_CMDLINE_MAX: usize = 32000;
+
+/// 超长命令落盘 .ps1（-File 路径）。带 BOM 的 UTF-8（PS 5.1 对无 BOM 文件
+/// 按 ANSI 解码，中文命令整段乱码——backgroundCommand 同判例）；wrapper
+/// 明文与 EncodedCommand 路径同一份；尾部自删（$PSCommandPath，PS 3.0+），
+/// 删不掉也只是 TEMP 残留，SilentlyContinue 兜底。
+#[cfg(windows)]
+fn write_powershell_script_file(command: &str) -> std::io::Result<std::path::PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("pure-cmd-{}-{}.ps1", nanos, std::process::id()));
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(powershell_command_wrapped(command).as_bytes());
+    bytes.extend_from_slice(b"\nRemove-Item -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue\n");
+    std::fs::write(&path, &bytes)?;
+    Ok(path)
+}
+
 /// Decode a child process's captured stdout/stderr into text.
 ///
 /// On Windows, PowerShell 5.1 writes redirected output in the console's OEM code
@@ -4441,6 +4466,20 @@ mod clixml_tests {
         let mut f = StreamClixmlFilter::new(false);
         let out = f.feed(vec![sl("<Objs><S S=\"Error\">just printed text</S></Objs>")]);
         assert_eq!(lines_text(out), "<Objs><S S=\"Error\">just printed text</S></Objs>");
+    }
+
+    #[test]
+    fn oversized_command_script_file_has_bom_wrapper_and_selfdelete() {
+        // -File 落盘三要素：BOM（PS 5.1 无 BOM 按 ANSI 解码，中文必乱）、
+        // wrapper 明文与 EncodedCommand 同一份、尾部自删兜底。
+        let path = write_powershell_script_file("echo 长命令判例").expect("write");
+        let bytes = std::fs::read(&path).expect("read back");
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "missing UTF-8 BOM");
+        let text = String::from_utf8_lossy(&bytes[3..]).into_owned();
+        assert!(text.starts_with("$ProgressPreference='SilentlyContinue'\n"), "{}", text);
+        assert!(text.contains("echo 长命令判例"), "{}", text);
+        assert!(text.contains("Remove-Item -LiteralPath $PSCommandPath"), "{}", text);
+        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -5044,16 +5083,27 @@ fn spawn_shell_command(workspace: &str, command: &str, proxy_url: Option<&str>, 
     };
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = silent_child_tokio(TokioCommand::new("powershell"));
-        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
-        c
+        // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
+        // quoting mangling; the encoding also carries the exit-code wrapper.
+        // 超长命令的 base64 会撞 CreateProcess 32K 命令行硬上限（spawn 直接
+        // 失败，模型无路可走）——落盘 .ps1（带 BOM UTF-8，PS 5.1 无 BOM 按
+        // ANSI 解码）走 -File + Bypass，wrapper 明文与 EncodedCommand 同一份
+        // （与 TS powershellNeedsFileLaunch 同刀，阈值两侧一致）。
+        let encoded_command = powershell_encoded_command(command);
+        if encoded_command.len() > POWERSHELL_CMDLINE_MAX {
+            let script = write_powershell_script_file(command)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("script file: {}", e)))?;
+            let mut c = silent_child_tokio(TokioCommand::new("powershell"));
+            c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
+            c.arg(&script);
+            c
+        } else {
+            let mut c = silent_child_tokio(TokioCommand::new("powershell"));
+            c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+            c.arg(&encoded_command);
+            c
+        }
     };
-    // -EncodedCommand (base64 UTF-16LE) bypasses the Windows command-line
-    // quoting mangling; the encoding also carries the exit-code wrapper.
-    #[cfg(windows)]
-    let encoded_command = powershell_encoded_command(command);
-    #[cfg(windows)]
-    cmd.arg(&encoded_command);
     #[cfg(not(windows))]
     cmd.arg(command);
     // A Finder-launched app inherits a minimal PATH; inject the extended
