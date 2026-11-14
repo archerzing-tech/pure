@@ -5,8 +5,27 @@
 // ToUnicode CMap), RTF, and binary detection with actionable notes.
 // Returns (text, note) — note is ONLY set when nothing usable was extracted.
 
-import { inflateRawSync, inflateSync } from 'node:zlib';
 import { stripAnsi } from '../../shared/ansi';
+
+// node:zlib 惰性加载（browser-safe 契约，backgroundCommand 的 tempBase 同款
+// 模式）：GUI bundle（WebView）没有 zlib——模块级 import 会把 fileText 拉成
+// __vite-browser-external stub 且 rollup 严格校验直接炸 build（v4.8.3 编译
+// 判例：userHookRunner 引 decodeTextBytes 后，fileText 首次进入 GUI 依赖图，
+// `bun run gui:build` 死在 "inflateSync is not exported"）。zlib 只有 PDF 流
+// 解压（CLI/Node 侧 read_file）用得到，用时再取；GUI 侧取不到返回 null，
+// inflatePdfStream 降级为 null，调用方已有 note 兜底。
+type ZlibLike = typeof import('node:zlib');
+let zlibMod: ZlibLike | null | undefined;
+function lazyZlib(): ZlibLike | null {
+  if (zlibMod === undefined) {
+    try {
+      zlibMod = require('node:zlib') as ZlibLike;
+    } catch {
+      zlibMod = null;
+    }
+  }
+  return zlibMod;
+}
 
 export interface ExtractedText {
   text: string;
@@ -269,14 +288,16 @@ function findSequence(haystack: Uint8Array, from: number, needle: Uint8Array): n
 
 /** Inflate a PDF stream: try zlib-wrapped first, then raw deflate. */
 export function inflatePdfStream(stream: Uint8Array): Uint8Array | null {
+  const zlib = lazyZlib();
+  if (!zlib) return null;
   try {
-    const out = inflateSync(stream);
+    const out = zlib.inflateSync(stream);
     if (out.length > 0) return out;
   } catch {
     // fall through
   }
   try {
-    const out = inflateRawSync(stream);
+    const out = zlib.inflateRawSync(stream);
     if (out.length > 0) return out;
   } catch {
     // fall through
