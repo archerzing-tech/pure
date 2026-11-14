@@ -252,7 +252,7 @@ export function detectServingPreview(prompt: string): boolean {
 }
 
 export const SERVING_PREVIEW_PROMPT = `Serving/preview protocol for this request:
-- Pick the vehicle FIRST: single self-contained .html → open directly via file://. Anything with a dev-server script (vite/next/flask…), fetch(), ES modules, or CORS-sensitive assets → http://localhost: install deps, start the server with background:true, then poll with a bounded probe ("curl -s -o /dev/null -w %{http_code} http://localhost:<port>") until it answers — then open the page and report the URL + how to stop it (task_kill <pid>; activate the task tools via discover_tools if they are not in view).
+- Pick the vehicle FIRST: single self-contained .html → open directly via file://. Anything with a dev-server script (vite/next/flask…), fetch(), ES modules, or CORS-sensitive assets → http://localhost: install deps, start the server with background:true, then poll with a bounded probe until it answers — Windows: \`curl.exe -s -o NUL -w "%{http_code}" http://localhost:<port>\`; macOS/Linux: \`curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>\`. (Bare \`curl\` on Windows is a PowerShell alias and rejects these flags; /dev/null does not exist on Windows.) Then open the page and report the URL + how to stop it (task_kill <pid>; activate the task tools via discover_tools if they are not in view).
 - Never leave a foreground server running; never fake a preview with file:// for something that needs a server.`;
 
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI

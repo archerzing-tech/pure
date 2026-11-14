@@ -72,11 +72,6 @@ function tempBase(): string {
   return '/tmp';
 }
 
-/** Single-quote a literal for PowerShell ('' escapes a quote). */
-function psQuote(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`;
-}
-
 /**
  * Plan a background launch. The wrapper script redirects ALL output of the
  * user command into logFile, so the caller never needs to quote the command —
@@ -121,14 +116,23 @@ export function buildBackgroundLaunchPlan(command: string, opts: { isWindows?: b
     // The generated wrapper redirects every stream into the log so the hidden
     // child holds no handles back to the tool call's pipes.
     const wrapper =
-      `& {\r\n${command}\r\n} *>> ${psQuote(winLogPs)}\r\nexit 0\r\n`;
+      `& {\r\n${command}\r\n} *>> "${winLogPs}"\r\nexit 0\r\n`;
     const b64 = typeof Buffer !== 'undefined'
       ? Buffer.from(wrapper, 'utf8').toString('base64')
       : btoa(String.fromCharCode(...new TextEncoder().encode(wrapper)));
     detachCommand = [
-      `$__f=${winScriptPs}`,
-      `[IO.File]::WriteAllText($__f, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}')))`,
-      `$__p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$__f -WindowStyle Hidden -PassThru`,
+      // 双引号内 $env:TEMP 才展开：裸赋值 `$__f=$env:TEMP\...` 在 PS 里是
+      // ParserError（变量后跟 `\裸词`，意外 token）——真机判例 2026-11-14
+      // 证实 GUI 后台通道此前从未真正启动过（第一步赋值就炸）。
+      `$__f="${winScriptPs}"`,
+      // WriteAllText 带 BOM 的 UTF-8（[Text.UTF8Encoding]::new($true)）：PS 5.1
+      // 对无 BOM 的 .ps1 按 ANSI(GBK) 解码，中文后台命令整段乱码（Windows 判例
+      // 2026-11-14）；带 BOM 才按 UTF-8 读。日志路径用双引号：单引号里
+      // $env:TEMP 不展开，重定向会砸出字面 '$env:TEMP' 目录（同判例）。
+      `[IO.File]::WriteAllText($__f, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}')), [Text.UTF8Encoding]::new($true))`,
+      // -ArgumentList 的元素 PS 5.1 不自动加引号——TEMP 路径含空格时 -File
+      // 会被劈开；嵌双引号保证整体一个参数。
+      `$__p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$__f" -WindowStyle Hidden -PassThru`,
       `'PURE_BG_PID=' + $__p.Id`,
     ].join('; ');
   }
@@ -144,8 +148,11 @@ export function buildWrapperScript(command: string, logFile: string, opts: { isW
   if (isWindowsPlatform(opts.isWindows)) {
     // cmd.exe: group the whole command so redirection binds to everything,
     // then always exit 0 — the wrapper's own exit code must not depend on a
-    // long-lived server being Ctrl-C'd.
-    return `@echo off\r\n(\r\n${command}\r\n) >> "${logFile}" 2>&1\r\nexit /b 0\r\n`;
+    // long-lived server being Ctrl-C'd. `chcp 65001` 前置（Windows 判例
+    // 2026-11-14）：cmd 按 OEM 码页逐行读批处理文件，zh-CN 下 UTF-8 写盘的
+    // 中文命令行按 GBK 解码必乱；chcp 65001 之后 cmd 改按 UTF-8 解析后续行
+    // （writeFileSync 落的就是 UTF-8），首行自身保持纯 ASCII 不受影响。
+    return `@echo off\r\nchcp 65001 >nul\r\n(\r\n${command}\r\n) >> "${logFile}" 2>&1\r\nexit /b 0\r\n`;
   }
   const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   return `{\n${command}\n} >> ${shQuote(logFile)} 2>&1\n`;
@@ -167,6 +174,6 @@ export function buildBackgroundResult(pid: number | null, logFile: string): stri
     logFile,
     started: pid !== null,
     ...(pid === null ? { note: 'detached launch did not report a PID; check the log file' } : {}),
-    hint: 'Process started detached — it keeps running after this call returns. Verify with a bounded probe (e.g. curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>) or read the log with read_file. List/stop registered background tasks with task_list / task_kill (activate via discover_tools if not visible).',
+    hint: 'Process started detached — it keeps running after this call returns. Verify with a bounded probe (Windows: curl.exe -s -o NUL -w "%{http_code}" http://localhost:<port>; macOS/Linux: curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>) or read the log with read_file. List/stop registered background tasks with task_list / task_kill (activate via discover_tools if not visible).',
   });
 }

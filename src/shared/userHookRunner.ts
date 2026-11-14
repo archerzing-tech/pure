@@ -15,6 +15,7 @@
 
 import type { UserHook, UserHookEvent, UserHooksConfig } from './userHooks';
 import { stripPowerShellStartupProgress } from './powershellOutput';
+import { decodeTextBytes } from '../adapter/node/fileText';
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 10_000;
 export const MIN_HOOK_TIMEOUT_MS = 1_000;
@@ -83,8 +84,18 @@ const KILL_GRACE_MS = 1_000;
  *  unhandled。 */
 async function drainWithDeadline(stream: ReadableStream<Uint8Array>, deadline: number): Promise<string> {
   const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let out = '';
+  const chunks: Uint8Array[] = [];
+  let joined: Uint8Array | null = null;
+  const joinedBytes = (): Uint8Array => {
+    if (!joined) {
+      const total = chunks.reduce((n, c) => n + c.length, 0);
+      const buf = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      joined = buf;
+    }
+    return joined;
+  };
   for (;;) {
     const remainingMs = deadline - Date.now();
     const tick = new Promise<'deadline'>((resolve) => {
@@ -93,10 +104,11 @@ async function drainWithDeadline(stream: ReadableStream<Uint8Array>, deadline: n
     const raced = await Promise.race([reader.read(), tick]);
     if (raced === 'deadline') {
       try { void reader.cancel().catch(() => undefined); } catch { /* best effort */ }
-      return out;
+      return decodeTextBytes(joinedBytes());
     }
-    if (raced.done) return out;
-    out += decoder.decode(raced.value, { stream: true });
+    if (raced.done) return decodeTextBytes(joinedBytes());
+    chunks.push(raced.value);
+    joined = null;
   }
 }
 

@@ -144,14 +144,25 @@ describe('encodePowerShellCommand', () => {
     const encoded = encodePowerShellCommand('Write-Output "hello world"');
     const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
     // Windows 判例 2026-11-14：进度流源头抑制（$ProgressPreference）前置，
-    // zh-CN 首次模块加载的 CLIXML 进度记录不再粘进 stderr。
-    expect(decoded).toBe(`$ProgressPreference='SilentlyContinue'; Write-Output "hello world"; if ($?) { exit $LASTEXITCODE } else { exit 1 }`);
+    // zh-CN 首次模块加载的 CLIXML 进度记录不再粘进 stderr。换行拼接 +
+    // $__pure_prev 基线透传真实退出码（与 Rust powershell_command_wrapped
+    // 同刀）：压码成 1 会与良性 exit-1 白名单叠加出假成功，2>&1 下的
+    // NativeCommandError 会把成功打成失败。
+    expect(decoded).toBe(`$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\nWrite-Output "hello world"\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`);
   });
 
   it('keeps double quotes and CJK intact (the point of -EncodedCommand)', () => {
     const encoded = encodePowerShellCommand('Get-Content "C:\\数据\\x.txt"');
     const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
     expect(decoded).toContain('"C:\\数据\\x.txt"');
+  });
+
+  it('puts the wrapper on its own lines so a trailing # comment cannot swallow it', () => {
+    // 尾部 `# 注释` 在单行拼接下会吞掉整段 wrapper；换行后注释只管自己那行。
+    const decoded = Buffer.from(encodePowerShellCommand('cmd /c exit 3 # trailing comment'), 'base64').toString('utf16le');
+    const lines = decoded.split('\n');
+    expect(lines[2]).toBe('cmd /c exit 3 # trailing comment');
+    expect(lines[3]).toContain('exit $LASTEXITCODE');
   });
 });
 

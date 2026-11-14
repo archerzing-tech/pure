@@ -47,7 +47,7 @@ import { expandTilde, resolveWorkspacePath, type PathPolicyFs } from '../../tool
 import { extractScrapeText, formatFeedText, formatJsonBody, isFeedBody, scrapeViaJina, truncateText } from './webScrape';
 import { cliFetch, hostMatchesNoProxy, isPrivateHost, parseProxy } from '../../shared/cliFetch';
 import { extractMetaRefreshUrl, extractPdfText, extractPdfViaPdftotext, fetchWithRetry, refererFor, resolveRedirectTarget, scrapeViaFirecrawl, scrapeViaWayback } from './fetchFallback';
-import { extractFileText, MAX_SEARCH_FILE_BYTES } from './fileText';
+import { extractFileText, decodeTextBytes, MAX_SEARCH_FILE_BYTES } from './fileText';
 import { BROWSER_UA } from '../../shared/platformUa';
 import { isThirdPartyPath, THIRD_PARTY_DIR_NAMES } from '../../shared/thirdPartyScope';
 import { ProbeGuardError, diagnoseNetwork, renderProbeReport, renderProbeReportForHuman } from '../../shared/node/netProbe';
@@ -82,21 +82,34 @@ function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
  * powershell_command_wrapped 同刀）：PS 5.1 在 stderr 被重定向时把进度流也
  * 序列化成 CLIXML 粘进 stderr（zh-CN 首次模块加载的「正在准备首次使用模块」
  * 就是这个形态），把真实报错淹没。进度条是交互终端的东西，重定向场景零
- * 价值——源头关掉；不改变 $?/退出码语义。 */
+ * 价值——源头关掉；不改变 $?/退出码语义。
+ *
+ * 换行拼接 + 退出码透传（Windows 判例 2026-11-14，真机判例钉死，与 Rust
+ * 同刀）：①单行 `; ` 拼接下命令尾部 `# 注释` 会把整个 wrapper 吞进注释、
+ * here-string `"@` 收尾炸解析——换行后 wrapper 各自独立成行；②
+ * `$__pure_prev` 记命令前的 $LASTEXITCODE 基线，cmdlet 不动它、native
+ * exe/bat 一定改它——改动即「本条是 native」，透传真实退出码。旧
+ * `if ($?) { exit $LASTEXITCODE } else { exit 1 }` 把一切非零压成 1，与良性
+ * exit-1 白名单（grep/git diff 无匹配）叠加后 128 类真失败被标 success；
+ * PS 5.1 在 `2>&1` 下把 stderr 非空的成功 native 命令的 `$?` 打成 false，
+ * 成功被报失败——真实码透传双双修复。 */
 export function encodePowerShellCommand(command: string): string {
-  return Buffer.from(`$ProgressPreference='SilentlyContinue'; ${command}; if ($?) { exit $LASTEXITCODE } else { exit 1 }`, 'utf16le').toString('base64');
+  return Buffer.from(`$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n${command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`, 'utf16le').toString('base64');
 }
 
-/** Drain a child-process stream to a UTF-8 string (node:child_process shape,
+/** Drain a child-process stream to a string (node:child_process shape,
  * where stdout/stderr are node Readables rather than bun's Response-compatible
- * streams). */
+ * streams). 解码走 decodeTextBytes 的 UTF-8 strict → GB18030 → Big5 链（与
+ * Rust decode_process_output 同刀，Windows 判例 2026-11-14）：zh-CN Windows
+ * 上 PowerShell/cmd 自身输出是 OEM(GBK)，git/pip/node 输出 UTF-8——纯
+ * UTF-8 解码把中文报错整段糊成 U+FFFD。 */
 function collectStreamText(stream: Readable | null): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     if (!stream) return resolvePromise('');
     const chunks: Buffer[] = [];
     stream.on('data', (chunk: Buffer) => chunks.push(chunk));
     stream.on('error', reject);
-    stream.on('end', () => resolvePromise(Buffer.concat(chunks).toString('utf8')));
+    stream.on('end', () => resolvePromise(decodeTextBytes(Buffer.concat(chunks))));
   });
 }
 

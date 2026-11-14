@@ -33,6 +33,28 @@ describe('buildBackgroundLaunchPlan', () => {
     expect(plan.detachCommand).toContain("'PURE_BG_PID=' + $__p.Id");
   });
 
+  it('expands $env:TEMP in double quotes, not single quotes (single quotes keep it literal)', () => {
+    // Windows 判例 2026-11-14：单引号里 $env:TEMP 不展开，`*>> '$env:TEMP\...'`
+    // 会砸出字面 '$env:TEMP' 目录 → 重定向打不开 → 后台启动实质失效但
+    // started:true 照报。双引号内才展开。wrapper 走 base64，双引号形态要
+    // 解码后验证；明文只有 $__f 赋值段。
+    const plan = buildBackgroundLaunchPlan('npm run dev', { isWindows: true });
+    expect(plan.detachCommand).toContain('$__f="$env:TEMP\\pure-bg-');
+    const b64 = plan.detachCommand.match(/FromBase64String\('([^']+)'\)/)?.[1] ?? '';
+    const wrapper = Buffer.from(b64, 'base64').toString('utf8');
+    expect(wrapper).toContain('*>> "$env:TEMP\\pure-bg-');
+    expect(wrapper).not.toContain("*>> '$env:TEMP");
+  });
+
+  it('writes the wrapper .ps1 with a BOM so PS 5.1 reads it as UTF-8, and quotes -File against spaces', () => {
+    // Windows 判例 2026-11-14：PS 5.1 对无 BOM 的 .ps1 按 ANSI(GBK) 解码，
+    // 中文后台命令整段乱码；TEMP 路径含空格时 -ArgumentList 不自动加引号，
+    // -File 会被劈开。
+    const plan = buildBackgroundLaunchPlan('echo 你好', { isWindows: true });
+    expect(plan.detachCommand).toContain('[Text.UTF8Encoding]::new($true)');
+    expect(plan.detachCommand).toContain("'-File',\"$__f\"");
+  });
+
   it('keeps hostile command content verbatim inside the quoted heredoc', () => {
     const nasty = `rm -rf "$HOME/; evil'quote" # comment\necho done`;
     const plan = buildBackgroundLaunchPlan(nasty, { isWindows: false });
@@ -50,6 +72,9 @@ describe('buildWrapperScript (Node adapter path)', () => {
   it('wraps in a cmd group with redirect + unconditional exit on windows', () => {
     const s = buildWrapperScript('npm run dev', 'C:\\Temp\\x.log', { isWindows: true });
     expect(s.startsWith('@echo off')).toBe(true);
+    // chcp 65001 前置（Windows 判例 2026-11-14）：cmd 按 OEM 逐行读批处理，
+    // UTF-8 写盘的中文命令行 zh-CN 下必乱；切 65001 后后续行按 UTF-8 解析。
+    expect(s).toContain('chcp 65001 >nul');
     expect(s).toContain('(\r\nnpm run dev\r\n) >> "C:\\Temp\\x.log" 2>&1');
     expect(s.trimEnd().endsWith('exit /b 0')).toBe(true);
   });

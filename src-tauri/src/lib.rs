@@ -4111,23 +4111,28 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Windows PowerShell 5.1 exits 0 after `-Command` unless the script calls
-/// `exit` itself — a failing command would otherwise report as success. Wrap
-/// every command with an explicit exit: `$?` is false for BOTH a failing
-/// native command ($LASTEXITCODE set) and a failing cmdlet, so the wrapper
-/// reports either as non-zero. The specific code is normalized to 1, which is
-/// all the execute_command contract needs (0 vs non-zero; stderr carries the
-/// details).
+/// Wrap every command with an explicit exit-code resolution. Semantics
+/// (Windows 判例 2026-11-14，真机判例钉死，与 TS encodePowerShellCommand 同刀):
+///
+/// 1. 换行拼接而非 `; ` 单行——单行下命令以 `# 注释` 结尾会把整个 wrapper 吞
+///    进注释（wrapper 永不执行）；here-string `"@` 收尾要求终止符独占行，
+///    同行追加必炸解析。
+/// 2. `$ProgressPreference='SilentlyContinue'`：PS 5.1 在 stderr 被重定向时
+///    把进度流也序列化成 CLIXML 粘进 stderr，一大坨 <Objs…><Obj S="progress">
+///    把真实报错淹没。进度条是交互终端的东西，重定向场景零价值——源头关掉。
+/// 3. 退出码透传：`$__pure_prev` 记命令执行前的 $LASTEXITCODE 基线。cmdlet
+///    不动 $LASTEXITCODE（值 = 基线 → 残留歧义消解），native exe/bat 一定改
+///    它 → 改动即「本条是 native」，透传真实退出码。旧 wrapper
+///    `if ($?) { exit $LASTEXITCODE } else { exit 1 }` 把一切非零压成 1，与
+///    良性 exit-1 白名单（grep/git diff 的「无匹配」豁免）叠加后，128 类真实
+///    失败被标成 success；且 PS 5.1 在 `2>&1` 下把 stderr 非空的成功 native
+///    命令的 `$?` 打成 false（NativeCommandError），成功被报失败——真实码
+///    透传双双修复。无 native 参与时按 `$?` 兜底（cmdlet 失败 exit 1，
+///    成功 exit 0）。
 #[cfg(windows)]
 fn powershell_command_wrapped(command: &str) -> String {
-    // $ProgressPreference='SilentlyContinue'（Windows 判例 2026-11-14）：PS 5.1
-    // 在 stderr 被重定向时把进度流也序列化成 CLIXML 粘进 stderr，一大坨
-    // <Objs…><Obj S="progress"> 把真实报错淹没，模型要多翻半天才找到正文。
-    // 进度条本来就是给交互终端的，重定向场景零价值——源头关掉。它不改变
-    // $?/退出码语义，Write-Progress 只是不再写进度记录。
     format!(
-        "$ProgressPreference='SilentlyContinue'; {}; if ($?) {{ exit $LASTEXITCODE }} else {{ exit 1 }}",
-        command
+        "$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n{command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) {{ exit $LASTEXITCODE }}\nif ($?) {{ exit 0 }}\nexit 1"
     )
 }
 
@@ -4324,10 +4329,28 @@ mod clixml_tests {
     }
 
     #[test]
-    fn progress_preference_prefix_is_part_of_every_wrapped_command() {
-        let wrapped = powershell_command_wrapped("Get-ChildItem");
-        assert!(wrapped.starts_with("$ProgressPreference='SilentlyContinue'; "), "{}", wrapped);
-        assert!(wrapped.contains("if ($?)"), "{}", wrapped);
+    fn wrapper_uses_line_separated_exit_resolution() {
+        // 换行拼接（4.9.0 判例）：单行 `; ` 拼接下命令尾部 `# 注释` 会把整个
+        // wrapper 吞进注释，here-string `"@` 收尾会炸解析。wrapper 必须是
+        // 独立行：# 注释只吞它自己那一行。
+        let wrapped = powershell_command_wrapped("cmd /c exit 3 # trailing comment");
+        let lines: Vec<&str> = wrapped.lines().collect();
+        assert_eq!(lines[0], "$ProgressPreference='SilentlyContinue'", "{}", wrapped);
+        assert_eq!(lines[1], "$__pure_prev = $LASTEXITCODE", "{}", wrapped);
+        assert_eq!(lines[2], "cmd /c exit 3 # trailing comment", "{}", wrapped);
+        assert!(lines[3].starts_with("if (($null -ne $LASTEXITCODE)"), "{}", wrapped);
+        assert_eq!(lines[4], "if ($?) { exit 0 }", "{}", wrapped);
+        assert_eq!(lines[5], "exit 1", "{}", wrapped);
+    }
+
+    #[test]
+    fn wrapper_passes_through_native_exit_code_without_compressing_to_one() {
+        // 真实码透传：native 命令改 $LASTEXITCODE（≠基线），wrapper 必须
+        // exit $LASTEXITCODE 而非压成 1——压码与良性 exit-1 白名单叠加会把
+        // git diff 的 128 类真失败标成 success。
+        let wrapped = powershell_command_wrapped("cmd /c exit 3");
+        assert!(wrapped.contains("{ exit $LASTEXITCODE }"), "{}", wrapped);
+        assert!(!wrapped.contains("else { exit 1 }"), "{}", wrapped);
     }
 
     #[test]
@@ -4635,7 +4658,7 @@ async fn execute_command(
                 return Ok(serde_json::json!({
                     "exitCode": 124,
                     "stdout": "",
-                    "stderr": format!("Command timed out after {}s and was terminated.", COMMAND_STREAM_TIMEOUT.as_secs()),
+                    "stderr": format!("Command timed out after {}s and was terminated.", command_timeout(timeout_ms).as_secs()),
                 }));
             }
         }

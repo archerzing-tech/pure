@@ -1437,8 +1437,10 @@ ${description ? `命令用途：${description}` : ''}
 请注意：
 1. 解释将要执行的命令的作用
 2. 使用 execute_command 工具执行
-3. 分析结果是否成功
+3. 分析结果是否成功（以返回的 exitCode 为准）
 4. 如有错误，提供诊断信息和修复建议
+
+宿主可能是 Windows（命令经 PowerShell 5.1 执行，不是 bash/cmd）：禁用 \`&&\`/\`||\`（写 \`cmd1; if ($?) { cmd2 }\`）；环境变量用 \`$env:NAME\`（不是 \`%VAR%\` 或 \`$VAR\`），赋值 \`$env:X = 'Y'\`（\`set X=Y\` 无效）；本地脚本必须加 \`.\` 前缀（\`.\\build.bat\`）；\`curl\`/\`wget\` 是别名，要写 \`curl.exe\`；\`2>/dev/null\` 写 \`2>$null\`；\`where\` 要写 \`where.exe\`。宿主是 macOS/Linux 时按 sh/bash 语法。
 
 避免执行破坏性命令（如 rm -rf 除非明确要求）。`;
     },
