@@ -4,6 +4,24 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.3
+
+**Windows shell 执行链根治四连：退出码透传、后台链炸点、CLIXML 报错解包补齐、32K 命令行守卫 + 更新端点 GitHub fallback**
+
+一、自动更新端点 GitHub 直连 fallback（update-relay.vercel.app 域名国内被 DNS 污染 + SNI 阻断，2026-11-14 真机实测：relay 服务本身健康、网络层不可达）。updater endpoints 按序 failover（源码核实：失败记 last_error 继续下一个），追加 GitHub releases 直连第二端点，relay 被墙时检查更新自动落第二端点。
+
+二、退出码透传 wrapper 重构（Rust/TS 同刀，六条真机判例钉死）：旧 wrapper `if ($?) { exit $LASTEXITCODE } else { exit 1 }` 把一切非零压成 1——与良性 exit-1 白名单（grep/git diff 的「无匹配」豁免）叠加后，128 类真实失败被标成 success；且 PS 5.1 在 `2>&1` 下把 stderr 非空的成功 native 命令的 `$?` 打成 false（NativeCommandError），成功被报失败。新 wrapper 三刀：换行拼接（单行 `; ` 拼接下命令尾部 `# 注释` 会吞掉整段 wrapper、here-string `"@` 收尾炸解析）；`$ProgressPreference='SilentlyContinue'` 源头关进度流；`$__pure_prev` 记命令前 $LASTEXITCODE 基线——cmdlet 不动它、native exe/bat 一定改它，改动即「本条是 native」，透传真实退出码。真机对拍：native exit 3 透传、`git diff` 128 透传、`2>&1`+stderr 成功归 0、cmdlet 失败归 1。
+
+三、GUI 后台通道 ParserError 根治（Windows 判例：GUI 后台任务此前从未真正启动过）：detach 咒语第一步 `$__f=$env:TEMP\...` 裸赋值在 PS 里就是 ParserError（变量后跟 `\裸词`）；wrapper `*>> '$env:TEMP\...'` 单引号里 `$env:TEMP` 不展开，重定向砸出字面 `'$env:TEMP'` 目录。修复：赋值与日志路径全部双引号；wrapper 落盘带 BOM 的 UTF-8（PS 5.1 对无 BOM .ps1 按 ANSI(GBK) 解码，中文后台命令整段乱码）；`Start-Process -ArgumentList` 嵌引号防 TEMP 空格劈开 `-File`；cmd wrapper（Node 适配器路径）首行前置 `chcp 65001`（cmd 按 OEM 码页逐行读批处理，zh-CN 下 UTF-8 写盘的中文命令行必乱）。端到端真机验证：后台进程启动、PID 回传、日志中文完好。
+
+四、CLIXML Error record 解包补齐（CLI 非流式 + Rust 流式）：PS 5.1 在 stderr 被重定向时把真实报错序列化成 `<Objs>` XML 包裹——CLI 侧 `stripPowerShellStartupProgress` 原来见到 `<S S="Error">` 整段保留原始 XML（模型收到一整段带 `_x000D__x000A_` 转义的标记），改为抽取流记录文本（转义与五个 XML 实体解码，envelope 外输出保留，unknown shape/截断保守透传）；Rust 流式路径（execute_command_stream）原来只有裸解码，新增 `StreamClixmlFilter` 把被切行拆开的头行+文档行攒到 `</Objs>` 落地再整段解包（截断/超 1MB 止损透传），`send_line_batch` 统一 strip_ansi 与非流式对称；`unwrap_clixml` 补无头定位（envelope 占满开头才认，命令中段打印的 XML 不被吃）。真机对拍：同一条 stderr 在 GUI/CLI 呈现一致的干净文本。
+
+五、32K 命令行上限守卫（真机对照判例：14243 字符命令 → base64 37984 > 32767 → spawn 直接 ENAMETOOLONG，进程起不来）：超阈值（编码产物 >32000，直接测权威长度）自动落盘 `pure-cmd-*.ps1` 走 `-File` + ExecutionPolicy Bypass——wrapper 明文两条路径共用一份，写盘带 BOM，尾部自删 + finally 清理双兜底。真机判例：14k ASCII（exit 5 透传）与 16k 中文（BOM 下完好）均经 -File 正常执行，TEMP 无残留；短命令仍走 -EncodedCommand。
+
+六、指令层补课：`shellEnv` 翻译表补 5 类（`where` → `where.exe`、`2>/dev/null` → `2>$null`、`>` 重定向 UTF-16LE 陷阱、`cmd1 && cmd2`、`export`/`set` 环境变量无效需 `$env:NAME`）；SubagentOrchestrator 的 bash_executor 子代理注入 Windows PowerShell 5.1 约定段；SERVING_PREVIEW 探测命令改 `curl.exe -s -o NUL`（Windows）/`curl -s -o /dev/null`（POSIX）双形态。
+
+验证：全量 `bun test`（bun 1.4.3）5398 pass / 3 fail / 2 skip（3 fail 为基线共有环境类，零新增）；`cargo test --lib` 失败名单与基线完全一致（21 个既有 Windows 平台债务，零回归）；`tsc` 绿；真机 2 任务判例（exit 128/7 透传、中文 stderr 完好、stderr 无 XML 残留）、后台链端到端、`-File` 三判例 + ENAMETOOLONG 对照判例全过。
+
 ## v4.8.2
 
 **Windows 4.8.0 自测判例三刀 + 工具链对齐（详见 docs/windows-4.8.0-selfcheck-2026-11-14.md）+ 连通性测试 404 降级**
