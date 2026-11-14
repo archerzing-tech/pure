@@ -762,3 +762,20 @@ export function formatDeliveryFixPrompt(result: DeliveryVerificationResult): str
   const lines = failures.map((s) => `### ${s.label} 失败（${s.command}）\n\`\`\`\n${s.output || '(无输出)'}\n\`\`\``).join('\n\n');
   return `交付验证未通过，以下是真实失败输出：\n\n${lines}\n\n请修复根因（不要掩盖或跳过失败），然后重新运行失败的检查以及它之后的所有检查，直到交付验证管线全部通过。注意：这还是当前同一个计划内的修复轮，不要重复输出「## 计划 n：…」等阶段宣布行——只在真正进入一个全新计划时才需要宣布。`;
 }
+
+/** Build the turn-end closing prompt: the deterministic gate has settled and
+ * the evidence is fed back so the MODEL decides whether the outcome needs
+ * saying, and how. Pure itself renders no verdict labels (2026-11-14
+ * presentation rule: what the user sees is the model's words, never a prefab
+ * chip). Tool-less by contract — the verification already ran; this call only
+ * produces the closing voice. */
+export function formatDeliveryClosingPrompt(result: DeliveryVerificationResult, extraIssues?: string[]): string {
+  const steps = safeDeliverySteps(result);
+  const evidence = steps.length === 0
+    ? '本工作区没有标准机械验证入口（静态页面或空工作区），按通过处理。'
+    : steps
+      .map((s) => `### ${s.label}（${s.command}）→ ${s.status === 'passed' ? '通过' : s.status === 'skipped' ? '跳过' : '失败'}${s.exitCode !== undefined ? `（exit ${s.exitCode}）` : ''}\n\`\`\`\n${s.output || '(无输出)'}\n\`\`\``)
+      .join('\n\n');
+  const issues = extraIssues?.length ? `\n\n修复轮账目：\n${extraIssues.join('\n')}` : '';
+  return `回合末机械验证已完成，结果如下：\n\n${evidence}${issues}\n\n要不要向用户交代、交代什么、怎么措辞，由你决定：全部通过且没有值得展开的就一句带过甚至不提；有失败或需要用户介入的就讲清楚。这是纯收尾，不要调用任何工具。`;
+}

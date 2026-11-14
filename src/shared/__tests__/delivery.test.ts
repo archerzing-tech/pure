@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, deliveryVerificationSummary, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, deliveryVerificationSummary, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -399,6 +399,22 @@ describe('收尾呈现函数的输入防御（2026-11-10 真机 unhandledrejecti
     for (const bad of [undefined, null, { passed: false }]) {
       expect(() => formatDeliveryFixPrompt(bad as never)).not.toThrow();
       expect(formatDeliveryFixPrompt(bad as never)).toContain('交付验证未通过');
+    }
+  });
+
+  // 2026-11-14 呈现铁律：需要显示什么、用什么显示都是模型的事。收尾
+  // prompt 只喂事实（证据+修复账），裁决措辞留给模型，并禁工具。
+  it('closingPrompt 喂证据与修复账、契约禁工具、坏输入不抛', () => {
+    const ok = formatDeliveryClosingPrompt({ passed: true, steps: [{ id: 's1', label: 'typecheck', command: 'bun run typecheck', status: 'passed', output: 'ok', exitCode: 0, durationMs: 12 }] }, ['第 1 轮发现：typecheck 失败']);
+    expect(ok).toContain('typecheck');
+    expect(ok).toContain('通过');
+    expect(ok).toContain('修复轮账目');
+    expect(ok).toContain('不要调用任何工具');
+    // 空步骤 = 没有机械验证入口，也要给模型一句事实而不是空白。
+    expect(formatDeliveryClosingPrompt({ passed: true, steps: [] })).toContain('没有标准机械验证入口');
+    for (const bad of [undefined, null, { passed: false }]) {
+      expect(() => formatDeliveryClosingPrompt(bad as never)).not.toThrow();
+      expect(formatDeliveryClosingPrompt(bad as never)).toContain('回合末机械验证已完成');
     }
   });
 });

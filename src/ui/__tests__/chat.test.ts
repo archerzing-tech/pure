@@ -1092,6 +1092,22 @@ describe('plan overview completion state', () => {
     expect(seg.slice(blocked, completed)).toContain('不把计划标记为完成');
   });
 
+  it('hands the delivery verdict presentation to the model — no prefab labels', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    // 2026-11-14 呈现铁律：需要显示什么、用什么显示都是模型的事。门禁结果
+    // 不渲染预制判定标签；证据经收尾轮（runDeliveryClosingRound）喂回模型，
+    // 模型的收尾输出就是回合呈现。注入文案只允许作为收尾轮失败时的兜底。
+    expect(src).not.toContain('✅ 交付验证通过');
+    expect(src).not.toContain('⛔ 项目暂不交付');
+    const closing = src.indexOf('const runDeliveryClosingRound = async (');
+    expect(closing).toBeGreaterThan(-1);
+    const fallback = src.indexOf('回合末机械检查重跑');
+    expect(fallback).toBeGreaterThan(closing);
+    // 兜底注入必须挂在 closingDone 闸之下（收尾轮成功就不再注入）。
+    const gate = src.lastIndexOf('!closingDone', fallback);
+    expect(gate).toBeGreaterThan(-1);
+  });
+
   it('does not double-advance the plan cursor at turn completion', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
     // finishPlan 收到 `## 计划 n 已完成` 时已经把游标推进到 n+1，并记录到

@@ -109,7 +109,7 @@ import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, 
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, reopenThinkingCard, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
+import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { createDesignPreviewCard } from './designPreviewCard';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
@@ -6693,6 +6693,53 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         }
         return { completed: false, messages: latestMessages, output };
       };
+      // 回合末裁决的呈现交还模型（2026-11-14 呈现铁律：需要显示什么、用什
+      // 么显示都是模型的事）：门禁结果不再渲染预制标签（✅/⛔ chip 与注入
+      // 转写的「交付验证结果」文案一并退役），证据以 internal 用户消息喂回，
+      // 模型自行决定要不要说、怎么说——模型的收尾输出就是回合的最终呈现。
+      // 收尾是纯说话（prompt 契约禁工具）；没跑成（中断/出错/换代）才回退
+      // 注入文案，保证机制事实至少活在下一轮上下文里。
+      const runDeliveryClosingRound = async (
+        messages: Message[],
+        result: DeliveryVerificationResult,
+        issues: string[],
+      ): Promise<{ completed: boolean; messages: Message[]; output: string }> => {
+        const closingPrompt = formatDeliveryClosingPrompt(result, issues);
+        const closingEvents = codingAgent.continueTurn(systemPrompt, messages, closingPrompt, turnSignal, undefined, undefined, true);
+        let closingSegment: AssistantSegment | null = null;
+        let output = '';
+        let latestMessages = messages;
+        try {
+          for await (const closingEvent of closingEvents) {
+            if (gen !== this.generation || turnSignal.aborted) return { completed: false, messages: latestMessages, output };
+            if (closingEvent.type === 'TokenDelta' && !closingEvent.payload.isToolCall && closingEvent.payload.content) {
+              output += closingEvent.payload.content;
+              closingSegment ??= createSegment();
+              closingSegment.text = output;
+              if (streamingRenderEnabled) {
+                scheduleStreamingRender(output, closingSegment.el, () => this.scrollUi(chatEl));
+              } else {
+                closingSegment.el.textContent = output;
+              }
+            } else if (closingEvent.type === 'Completed') {
+              latestMessages = Array.isArray(closingEvent.payload.messages) ? closingEvent.payload.messages : latestMessages;
+              if (!output && closingEvent.payload.finalOutput) {
+                output = closingEvent.payload.finalOutput;
+                closingSegment ??= createSegment();
+                closingSegment.text = output;
+              }
+              return { completed: !closingEvent.payload.interrupted, messages: latestMessages, output };
+            } else if (closingEvent.type === 'Error' || closingEvent.type === 'Interrupted') {
+              return { completed: false, messages: latestMessages, output };
+            }
+          }
+        } finally {
+          // 空收尾（模型选择不提）不落空泡；有字的段交给回合收尾统一的
+          // 终渲染循环（assistantSegments 遍历），这里只摘除空段。
+          if (closingSegment && !closingSegment.text.trim()) closingSegment.el.remove();
+        }
+        return { completed: false, messages: latestMessages, output };
+      };
       // Eager thinking indicator: the user sees the animation while waiting
       // for the first token; reasoning deltas upgrade it with live text. A
       // plain turn (no task analysis) reuses the card opened before the
@@ -7862,7 +7909,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 const round = qualityRepairRounds;
                 const issueSummary = deliveryVerificationSummary(deliveryResult);
                 qualityRepairIssues.push(`第 ${round} 轮发现：${issueSummary}`);
-                this.addStatusBubble(`第 ${round}/${MAX_QUALITY_REPAIR_ROUNDS} 轮交付验证未通过：${issueSummary}`, true, true);
                 const fix = await runDeliveryFixRound(completionMessages, deliveryResult);
                 qualityRepairRan = qualityRepairRan || fix.completed;
                 completionMessages = fix.messages;
@@ -7900,24 +7946,26 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (gen !== this.generation || this.abortController?.signal.aborted) return;
               if (!deliveryResult.passed && qualityRepairRounds >= MAX_QUALITY_REPAIR_ROUNDS) {
                 qualityRepairIssues.push(`第 ${MAX_QUALITY_REPAIR_ROUNDS} 轮后仍未通过：${deliveryVerificationSummary(deliveryResult)}`);
-                this.addStatusBubble(`已自动完成 ${MAX_QUALITY_REPAIR_ROUNDS} 轮修复与复查，仍有明确问题未解决，建议人工介入。\n${qualityRepairIssues.join('\n')}`, false, true);
               }
-              this.addStatusBubble(deliveryResult.passed
-                ? (deliveryResult.steps.length === 0
-                    // No mechanical verification entry in this workspace — skip
-                    // the "没有标准机械验证入口" explanation, just confirm pass.
-                    ? '✅ 交付验证通过'
-                    : `✅ 交付验证通过：${deliveryVerificationSummary(deliveryResult)}`)
-                : `⛔ 项目暂不交付：${deliveryVerificationSummary(deliveryResult)}`,
-              !deliveryResult.passed, !deliveryResult.passed,
-              deliveryResult.passed ? 'success' : undefined);
-              this.scrollUi(chatEl);
-            }
-            if (deliveryResult && completionMessages && gen === this.generation) {
-              const evidence = deliveryResult.steps.length > 0
-                ? deliveryResult.steps.map((s) => `$ ${s.command}\n${s.status === 'passed' ? '通过' : s.status === 'skipped' ? '跳过' : '失败'}${s.exitCode !== undefined ? `（exit ${s.exitCode}）` : ''}\n${s.output || '(无输出)'}`).join('\n\n')
-                : '本工作区没有标准机械验证入口（静态页面或空工作区），按通过处理。';
-              completionMessages = [...completionMessages, { role: 'assistant', content: `交付验证结果（回合末机械检查重跑）：\n${evidence}` }];
+              // 裁决呈现交还模型：收尾轮说不说、说什么，就是用户看到的全部。
+              let closingDone = false;
+              if (deliveryResult && completionMessages && gen === this.generation && !event.payload.interrupted) {
+                const closing = await runDeliveryClosingRound(completionMessages, deliveryResult, qualityRepairIssues);
+                if (gen !== this.generation || this.abortController?.signal.aborted) return;
+                if (closing.completed) {
+                  closingDone = true;
+                  completionMessages = closing.messages;
+                }
+                this.scrollUi(chatEl);
+              }
+              // 收尾轮没跑成（中断/出错/换代）：机制事实至少要活在下一轮
+              // 上下文里——回退注入（常规路径已退役，此为兜底）。
+              if (deliveryResult && completionMessages && gen === this.generation && !closingDone) {
+                const evidence = deliveryResult.steps.length > 0
+                  ? deliveryResult.steps.map((s) => `$ ${s.command}\n${s.status === 'passed' ? '通过' : s.status === 'skipped' ? '跳过' : '失败'}${s.exitCode !== undefined ? `（exit ${s.exitCode}）` : ''}\n${s.output || '(无输出)'}`).join('\n\n')
+                  : '本工作区没有标准机械验证入口（静态页面或空工作区），按通过处理。';
+                completionMessages = [...completionMessages, { role: 'assistant', content: `交付验证结果（回合末机械检查重跑）：\n${evidence}` }];
+              }
             }
             const qualityPassed = !needsDeliveryGate || (deliveryResult?.passed === true && gen === this.generation);
             // 交付验证结果是会话级证据：记下“本会话真实通过过一次机械验证”，供后续
