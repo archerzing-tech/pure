@@ -1898,7 +1898,7 @@ export class SettingsPanel {
     btn.disabled = true;
     btn.textContent = t('llm.connection.testing');
     const started = performance.now();
-    let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string };
+    let probe: { ok: boolean; status?: number; latencyMs?: number; error?: string; degraded?: boolean };
     let routeLabel = '';
     // 协议 PARITY（两种运行时同款）：探测头按协议分流（anthropic 走
     // x-api-key，openai 走 Bearer），与 createLLMAdapter 同一套解析——
@@ -1947,7 +1947,7 @@ export class SettingsPanel {
     }
     const elapsed = Math.max(0, Math.round(performance.now() - started));
     btn.disabled = false;
-    btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
+    btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail', 'llm-model-test-degraded');
     if (probe.ok) {
       btn.textContent = t('llm.connection.testOk').replace('{ms}', String(probe.latencyMs ?? elapsed));
       btn.classList.add('llm-model-test-ok');
@@ -1955,6 +1955,12 @@ export class SettingsPanel {
       // W1b-1 自探测：连通性通过后顺延向端点拉一次 /models 窗口元数据
       //（manifest 无档的模型组合才需要；写缓存不弹卡，详见方法注释）。
       void this.probeCapabilityAfterConn(loadConfig() ?? defaults(), provider, baseURL, apiKey);
+    } else if (probe.degraded) {
+      // 404 降级：端点活着但不暴露 /models（火山 Agent Plan 专属网关），
+      // 显示 ⚠ 而非 ✗；/models 都没有，能力自探测不必跑（必 404）。
+      btn.textContent = t('llm.connection.degraded').replace('{ms}', String(probe.latencyMs ?? elapsed));
+      btn.classList.add('llm-model-test-degraded');
+      btn.title = `${t('llm.connection.degradedHint')} · ${routeLabel}`;
     } else {
       btn.textContent = '✗ ' + t('llm.connection.testFailed');
       btn.classList.add('llm-model-test-fail');
@@ -1962,7 +1968,7 @@ export class SettingsPanel {
     }
     this.testConnResetTimer = setTimeout(() => {
       btn.textContent = t('llm.connection.verify');
-      btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail');
+      btn.classList.remove('llm-model-test-ok', 'llm-model-test-fail', 'llm-model-test-degraded');
     }, 2500);
   }
 

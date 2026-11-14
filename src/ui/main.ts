@@ -77,7 +77,7 @@ import { formatSegmentSummary, groupConversationTurns, segmentConversationTurns 
 import { createHistoryGroup, type HistoryGroupHandle } from './transcriptHistory';
 import { loadDeferredStyles } from './deferredStyles';
 import { invoke } from '@tauri-apps/api/core';
-import { createErrorLedger } from './errorLedger';
+import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
 
 // ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
 // 僵尸态事故(按钮全死/窗口空白)唯一的页面内第一手证据,机制见 errorLedger.ts;
@@ -85,6 +85,9 @@ import { createErrorLedger } from './errorLedger';
 const guiErrorLedger = createErrorLedger({
   sink: lines => (isTauriRuntime() ? invoke('gui_error_log', { entries: lines }) : Promise.resolve()),
 });
+// 设计内正常路径的取证现场（chat.ts 的 ctx-shape 门禁进入等）走这里：
+// kind:"info" 落盘，与真正的 error/panic 分开（Windows 判例 2026-11-14）。
+setGuiDiagnosticSink(message => guiErrorLedger.record({ kind: 'info', message }));
 window.addEventListener('error', e => {
   guiErrorLedger.record({
     kind: 'error',

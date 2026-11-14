@@ -76,9 +76,15 @@ function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
  * with the exit-code wrapper appended so a failing command reports non-zero
  * (mirrors Rust powershell_encoded_command). The encoded form bypasses the
  * Windows command-line quoting mangling (CommandLineToArgvW-style `\"`
- * escaping) a plain -Command argument is subject to. Exported for tests. */
+ * escaping) a plain -Command argument is subject to. Exported for tests.
+ *
+ * `$ProgressPreference='SilentlyContinue'`（Windows 判例 2026-11-14，与 Rust
+ * powershell_command_wrapped 同刀）：PS 5.1 在 stderr 被重定向时把进度流也
+ * 序列化成 CLIXML 粘进 stderr（zh-CN 首次模块加载的「正在准备首次使用模块」
+ * 就是这个形态），把真实报错淹没。进度条是交互终端的东西，重定向场景零
+ * 价值——源头关掉；不改变 $?/退出码语义。 */
 export function encodePowerShellCommand(command: string): string {
-  return Buffer.from(`${command}; if ($?) { exit $LASTEXITCODE } else { exit 1 }`, 'utf16le').toString('base64');
+  return Buffer.from(`$ProgressPreference='SilentlyContinue'; ${command}; if ($?) { exit $LASTEXITCODE } else { exit 1 }`, 'utf16le').toString('base64');
 }
 
 /** Drain a child-process stream to a UTF-8 string (node:child_process shape,

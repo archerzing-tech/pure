@@ -57,6 +57,27 @@ describe('ChannelApprovalBroker', () => {
     expect(decision.reason).toContain('超时');
   });
 
+  it('timeout denial fires with nothing else keeping the process alive (Windows/Bun 判例 2026-11-14)', async () => {
+    // 判例：超时计时器一旦 unref，审批 pending 期网关进程再无其他 ref 句柄，
+    // Bun（1.3.14 / Windows x64）的事件循环不再被唤醒——超时永不触发、await
+    // 永不返回，bun test 整链卡死只能强杀。回归哨兵：若 unref 回归，本用例
+    // 5s 后经 guard 报错，而不是无声挂死测试进程。
+    const broker = new ChannelApprovalBroker(async () => {}, { timeoutMs: 20 });
+    let guardTimer: ReturnType<typeof setTimeout> | undefined;
+    const decision = await Promise.race([
+      broker.request(target, 's1', info),
+      new Promise<never>((_, reject) => {
+        guardTimer = setTimeout(
+          () => reject(new Error('审批超时 5s 未触发：approvals.ts 的超时计时器又被 unref 了吗？（Windows/Bun 判例 2026-11-14）')),
+          5_000,
+        );
+      }),
+    ]);
+    clearTimeout(guardTimer);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain('超时');
+  });
+
   it('still accepts a text reply after the card delivery fails', async () => {
     const errors: string[] = [];
     const broker = new ChannelApprovalBroker(async () => { throw new Error('card unavailable'); }, { log: (m) => errors.push(m) });

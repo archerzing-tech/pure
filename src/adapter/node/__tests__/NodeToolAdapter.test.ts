@@ -143,7 +143,9 @@ describe('encodePowerShellCommand', () => {
   it('round-trips through base64 UTF-16LE with the exit-code wrapper appended', () => {
     const encoded = encodePowerShellCommand('Write-Output "hello world"');
     const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
-    expect(decoded).toBe('Write-Output "hello world"; if ($?) { exit $LASTEXITCODE } else { exit 1 }');
+    // Windows 判例 2026-11-14：进度流源头抑制（$ProgressPreference）前置，
+    // zh-CN 首次模块加载的 CLIXML 进度记录不再粘进 stderr。
+    expect(decoded).toBe(`$ProgressPreference='SilentlyContinue'; Write-Output "hello world"; if ($?) { exit $LASTEXITCODE } else { exit 1 }`);
   });
 
   it('keeps double quotes and CJK intact (the point of -EncodedCommand)', () => {

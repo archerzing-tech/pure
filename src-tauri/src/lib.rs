@@ -357,6 +357,12 @@ struct LlmConnectionProbe {
     status: Option<u16>,
     latency_ms: u64,
     error: String,
+    /// 404 降级：端点拿到了 HTTP 响应（连通层活着），只是不暴露 /models
+    /// 列表——火山 Agent Plan 专属网关（/api/plan/v3）只开放推理端点，
+    /// 实测 404 而 chat/completions 200。ok 保持 false（/models 判活语义
+    /// 不动，下游能力探测不跑），UI 按 degraded 显示 ⚠ 而非 ✗。
+    #[serde(default)]
+    degraded: bool,
 }
 
 /// Models-list URL for one endpoint, by wire protocol. OpenAI-compatible
@@ -401,22 +407,41 @@ async fn probe_llm_endpoint(
                 status: None,
                 latency_ms: started.elapsed().as_millis() as u64,
                 error: format!("network error: {}", e),
+                degraded: false,
             };
         }
     };
     let status = response.status().as_u16();
     let latency_ms = started.elapsed().as_millis() as u64;
     if status >= 200 && status < 300 {
-        LlmConnectionProbe { ok: true, status: Some(status), latency_ms, error: String::new() }
+        LlmConnectionProbe { ok: true, status: Some(status), latency_ms, error: String::new(), degraded: false }
     } else if status == 401 || status == 403 {
         LlmConnectionProbe {
             ok: false,
             status: Some(status),
             latency_ms,
             error: format!("HTTP {} — API key rejected", status),
+            degraded: false,
+        }
+    } else if status == 404 {
+        // 404 ≠ 端点死：拿到响应说明 TCP/TLS/HTTP 全通，只是这个端点不提供
+        // /models（火山 Agent Plan 专属网关实测：/models 404 空 body 而
+        // chat/completions 200）。降级上报，别把能聊天的端点判成连不上。
+        LlmConnectionProbe {
+            ok: false,
+            status: Some(status),
+            latency_ms,
+            error: "HTTP 404 — endpoint does not expose /models (inference may still work)".to_string(),
+            degraded: true,
         }
     } else {
-        LlmConnectionProbe { ok: false, status: Some(status), latency_ms, error: format!("HTTP {}", status) }
+        LlmConnectionProbe {
+            ok: false,
+            status: Some(status),
+            latency_ms,
+            error: format!("HTTP {}", status),
+            degraded: false,
+        }
     }
 }
 
@@ -459,8 +484,10 @@ async fn test_llm_connection(
     // One-shot opposite-route fallback, mirroring chat_stream: a probe that
     // failed on the primary route gets exactly one attempt on the alternate
     // route before the result is reported. Without this the button measures
-    // a dead route while real chats would have self-healed.
-    if probe.ok {
+    // a dead route while real chats would have self-healed. A 404-degraded
+    // result skips the retry — the endpoint's answer is deterministic (no
+    // /models regardless of route), a second request only doubles the wait.
+    if probe.ok || probe.degraded {
         return Ok(probe);
     }
     let fallback_spec = fallback_proxy_url.as_deref().map(str::trim);
@@ -881,6 +908,30 @@ mod llm_probe_tests {
         assert!(!probe.ok, "probe error: {}", probe.error);
         assert_eq!(probe.status, Some(401));
         assert!(probe.error.contains("API key rejected"));
+        assert!(!probe.degraded);
+    }
+
+    /// 404 降级（2026-11-14）：火山 Agent Plan 专属网关 /api/plan/v3 不暴露
+    /// /models（404 空 body）而 chat/completions 200——端点连通层活着，
+    /// 只是没有模型列表。必须报 degraded 而非普通失败，UI 才能显示 ⚠。
+    #[tokio::test]
+    async fn reports_404_as_degraded_not_dead() {
+        // 空 body（火山实测形态）与 JSON body 都按降级算：404 的语义由状态
+        // 码决定，与响应体无关。
+        let (addr, handle) = spawn_mock_server("HTTP/1.1 404 Not Found", "");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test", false).await;
+        handle.join().unwrap();
+        assert!(!probe.ok);
+        assert!(probe.degraded);
+        assert_eq!(probe.status, Some(404));
+        assert!(probe.error.contains("/models"));
+
+        let (addr, handle) = spawn_mock_server("HTTP/1.1 404 Not Found", "{\"error\":\"no route\"}");
+        let client = build_http_client(std::time::Duration::from_secs(5), None).unwrap();
+        let probe = probe_llm_endpoint(client, &format!("http://{}/v1/models", addr), "sk-test", false).await;
+        handle.join().unwrap();
+        assert!(probe.degraded, "probe error: {}", probe.error);
     }
 
     #[tokio::test]
@@ -4044,6 +4095,13 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
         );
     }
     // Everything else: text with encoding detection, or a clear binary note
+    // UTF-16 BOM（FF FE / FE FF）先于二进制判定（Windows 判例 2026-11-14）：
+    // PowerShell `>` 重定向产物是 UTF-16LE，ASCII 段高字节全 0，looks_binary
+    // 按「含 NUL」把它判成二进制，decode_text_bytes 的 BOM 分支永远轮不到。
+    // 带 BOM 的文本先行解码；无 BOM 的 UTF-16 无从可靠识别，维持启发式原样。
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return (strip_ansi(&decode_text_bytes(bytes)), String::new());
+    }
     if looks_binary(bytes) {
         return (String::new(), format!("二进制文件（{}），不是文本文件，无法读取内容。", describe_binary(bytes)));
     }
@@ -4062,7 +4120,15 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
 /// details).
 #[cfg(windows)]
 fn powershell_command_wrapped(command: &str) -> String {
-    format!("{}; if ($?) {{ exit $LASTEXITCODE }} else {{ exit 1 }}", command)
+    // $ProgressPreference='SilentlyContinue'（Windows 判例 2026-11-14）：PS 5.1
+    // 在 stderr 被重定向时把进度流也序列化成 CLIXML 粘进 stderr，一大坨
+    // <Objs…><Obj S="progress"> 把真实报错淹没，模型要多翻半天才找到正文。
+    // 进度条本来就是给交互终端的，重定向场景零价值——源头关掉。它不改变
+    // $?/退出码语义，Write-Progress 只是不再写进度记录。
+    format!(
+        "$ProgressPreference='SilentlyContinue'; {}; if ($?) {{ exit $LASTEXITCODE }} else {{ exit 1 }}",
+        command
+    )
 }
 
 /// Encode text as base64 of its UTF-16LE bytes — the transport PowerShell's
@@ -4083,20 +4149,6 @@ fn utf16le_base64(text: &str) -> String {
 /// which PowerShell re-parses differently — double quotes inside the command
 /// can silently break it. The encoded form carries the raw bytes untouched.
 /// The exit-code wrapper from powershell_command_wrapped rides along.
-#[cfg(windows)]
-fn strip_powershell_startup_progress(stderr: String) -> String {
-    let trimmed = stderr.trim();
-    if !trimmed.starts_with("#< CLIXML") || trimmed.contains("<S S=\"Error\">") {
-        return stderr;
-    }
-    // Reaching here means the envelope carried no <S> record at all: it is pure
-    // progress/verbose noise from PowerShell's first run. The old code only
-    // recognized the English sentence "<AV>Preparing modules for first use.</AV>",
-    // so on a zh-CN Windows ("正在准备首次使用模块。") every single command's
-    // stderr got a CLIXML blob attached for no reason.
-    String::new()
-}
-
 #[cfg(windows)]
 fn powershell_encoded_command(command: &str) -> String {
     utf16le_base64(&powershell_command_wrapped(command))
@@ -4121,19 +4173,31 @@ fn decode_process_output(bytes: &[u8]) -> String {
     }
 }
 
-/// PowerShell 5.1 serializes its non-success streams as CLIXML whenever stderr is
-/// redirected (`#< CLIXML\n<Objs …>`), so the one line explaining a failure used
-/// to reach the model wrapped in a serialization envelope full of `RefId`s. Pull
-/// the text back out of the `<S S="…">…</S>` nodes; anything we cannot parse is
-/// passed through untouched rather than dropped.
+/// PowerShell 5.1 serializes its non-success streams as CLIXML whenever stderr
+/// is redirected (`#< CLIXML\n<Objs …>`). Two shapes reach us (Windows 判例
+/// 2026-11-14): the whole stderr is one envelope (error stream), or a real
+/// error message comes first with an engine progress envelope stuck to the
+/// tail — `<Obj S="progress">` blobs that bury the actual failure. Pull the
+/// text back out of the `<S S="…">…</S>` stream records only (`<S N="…">`
+/// property nodes inside progress objects carry no user-visible text); an
+/// envelope with no stream records at all is pure progress/verbose noise and
+/// is dropped, while any output before it is kept. Anything we cannot
+/// recognize as an envelope is passed through untouched rather than dropped.
 #[cfg(windows)]
 fn unwrap_clixml(stderr: String) -> String {
-    if !stderr.trim_start().starts_with("#< CLIXML") {
+    let Some(pos) = stderr.find("#< CLIXML") else {
         return stderr;
-    }
+    };
+    let (head, blob) = stderr.split_at(pos);
     let mut out = String::new();
-    let mut rest = stderr.as_str();
-    while let Some(start) = rest.find("<S ") {
+    let head_trim = head.trim_end();
+    if !head_trim.is_empty() {
+        out.push_str(head_trim);
+        out.push('\n');
+    }
+    let mut extracted = String::new();
+    let mut rest = blob;
+    while let Some(start) = rest.find("<S S=\"") {
         let after = &rest[start..];
         let (Some(gt), Some(end)) = (after.find('>'), after.find("</S>")) else {
             break;
@@ -4143,15 +4207,22 @@ fn unwrap_clixml(stderr: String) -> String {
         }
         let text = decode_clixml_escapes(after[gt + 1..end].trim());
         if !text.trim().is_empty() {
-            out.push_str(text.trim());
-            out.push('\n');
+            extracted.push_str(text.trim());
+            extracted.push('\n');
         }
         rest = &after[end + "</S>".len()..];
     }
-    if out.trim().is_empty() {
-        return stderr;
+    if extracted.trim().is_empty() {
+        // No stream records: drop the blob only when it really is a CLIXML
+        // envelope (pure progress/verbose noise; the old zh-CN startup case
+        // 「正在准备首次使用模块。」included). Unrecognizable bytes pass through.
+        if !blob.contains("</Objs>") {
+            return stderr;
+        }
+        return out.trim_end().to_string();
     }
-    out.trim_end().to_string()
+    out.push_str(extracted.trim());
+    out
 }
 
 /// CLIXML escapes what XML cannot carry: `_xHHHH_` for control characters
@@ -4174,11 +4245,12 @@ fn decode_clixml_escapes(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Windows stderr pipeline: OEM bytes → text → CLIXML envelope removed → the
-/// known startup-progress noise removed.
+/// Windows stderr pipeline: OEM bytes → text → CLIXML envelope removed
+/// (including the progress-only kind; startup-progress noise is just that
+/// case with an empty payload, see unwrap_clixml).
 #[cfg(windows)]
 fn normalize_powershell_stderr(bytes: &[u8]) -> String {
-    strip_powershell_startup_progress(unwrap_clixml(decode_process_output(bytes)))
+    unwrap_clixml(decode_process_output(bytes))
 }
 
 #[cfg(all(test, windows))]
@@ -4207,6 +4279,55 @@ mod clixml_tests {
     fn leaves_plain_stderr_alone() {
         let raw = "Command failed with exit code 1".to_string();
         assert_eq!(unwrap_clixml(raw.clone()), raw);
+    }
+
+    #[test]
+    fn keeps_real_error_and_drops_trailing_progress_envelope() {
+        // Windows 判例 2026-11-14：真实报错在前，引擎的 progress envelope
+        // 粘在尾部——错误正文被 <Objs…><Obj S="progress"> 淹没，要翻半天。
+        // head 必须保留；progress blob（无 <S S=" 流记录）整体丢弃。
+        let raw = concat!(
+            "verify.ps1 : 脚本输出错误\r\n",
+            "At line:1 char:1\r\n",
+            "#< CLIXML\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><I N=\"Id\">1</I><I N=\"P\">10</I>",
+            "<S N=\"T\">Completed</S><S N=\"S\">Done</S></MS></Obj></Objs>"
+        )
+        .to_string();
+        let out = unwrap_clixml(raw);
+        assert!(out.contains("脚本输出错误"), "{}", out);
+        assert!(out.contains("At line:1"), "{}", out);
+        assert!(!out.contains("CLIXML"), "{}", out);
+        assert!(!out.contains("Objs"), "{}", out);
+        assert!(!out.contains("Completed"), "{}", out);
+    }
+
+    #[test]
+    fn drops_pure_progress_envelope_with_no_head() {
+        // 旧 zh-CN 启动噪声判例（「正在准备首次使用模块。」）的现代表达：
+        // 整条 stderr 就是一个无流记录的 envelope → 丢弃。
+        let raw = concat!(
+            "#< CLIXML\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><S N=\"T\">InProgress</S></MS></Obj></Objs>"
+        )
+        .to_string();
+        assert_eq!(unwrap_clixml(raw), "");
+    }
+
+    #[test]
+    fn passes_through_unrecognizable_clixml_prefixed_bytes() {
+        // 有 #< CLIXML 前缀但识别不出 envelope 结构：透传，不吞任何东西。
+        let raw = "#< CLIXML\ngarbage without any envelope structure".to_string();
+        assert_eq!(unwrap_clixml(raw.clone()), raw);
+    }
+
+    #[test]
+    fn progress_preference_prefix_is_part_of_every_wrapped_command() {
+        let wrapped = powershell_command_wrapped("Get-ChildItem");
+        assert!(wrapped.starts_with("$ProgressPreference='SilentlyContinue'; "), "{}", wrapped);
+        assert!(wrapped.contains("if ($?)"), "{}", wrapped);
     }
 
     #[test]
@@ -6592,6 +6713,28 @@ mod file_text_extraction_tests {
         let (text, note) = extract_file_text(&ole, std::path::Path::new("old.doc"));
         assert!(text.is_empty());
         assert!(note.contains("doc"), "OLE note suggests conversion: {}", note);
+    }
+
+    #[test]
+    fn extract_file_text_decodes_utf16_bom_before_binary_verdict() {
+        // Windows 判例 2026-11-14：PowerShell `>` 重定向产物是 UTF-16LE
+        // （"verify" + CRLF，ASCII 段高字节全 0），looks_binary 按「含 NUL」
+        // 曾把它判成二进制。带 BOM 的文本必须先解码。
+        let mut utf16le: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in "hello 你好\r\n".encode_utf16() {
+            utf16le.extend_from_slice(&unit.to_le_bytes());
+        }
+        let (text, note) = extract_file_text(&utf16le, std::path::Path::new("verify.txt"));
+        assert!(note.is_empty(), "UTF-16 BOM text must not be judged binary: {}", note);
+        assert!(text.contains("hello 你好"), "{}", text);
+        // UTF-16BE BOM 同理。
+        let mut utf16be: Vec<u8> = vec![0xFE, 0xFF];
+        for unit in "big-endian".encode_utf16() {
+            utf16be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let (text, note) = extract_file_text(&utf16be, std::path::Path::new("be.txt"));
+        assert!(note.is_empty(), "UTF-16BE BOM text must not be judged binary: {}", note);
+        assert!(text.contains("big-endian"), "{}", text);
     }
 
     #[test]

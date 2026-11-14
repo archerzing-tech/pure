@@ -3,6 +3,7 @@
 // Iterates over EngineEvents stream to update the UI reactively.
 
 import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
+import { recordGuiDiagnostic } from './errorLedger';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
 import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
@@ -5202,8 +5203,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             ...(pair.fallbackProxyUrl !== null ? { fallbackProxyUrl: pair.fallbackProxyUrl } : {}),
             proxyBypassProviders: config.proxy?.bypassProviders ?? [],
             provider: config.provider,
-          }) as { ok: boolean; status?: number; latencyMs?: number; error?: string };
-          if (probe.ok) return;
+          }) as { ok: boolean; status?: number; latencyMs?: number; error?: string; degraded?: boolean };
+          // degraded（端点不暴露 /models，如火山 Agent Plan 专属网关）不算
+          // 网络困难——此刻聊天流量本身正走同一端点正常返回。
+          if (probe.ok || probe.degraded) return;
           // 真话纪律(2026-10-30):说已试的路与真因,pure 继续换路自救;
           // 不再把「检查网络或代理」的皮球踢回用户。
           const reason = probe.error || `HTTP ${probe.status ?? '?'}`;
@@ -6621,12 +6624,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         failed: DeliveryVerificationResult,
       ): Promise<{ completed: boolean; messages: Message[]; output: string }> => {
         // [ctx-shape 诊断] fix 轮启动现场（罕见事件；2026-11-13 崩轮栈帧指向
-        // 本函数链，真跑没跑过以此为准）。
+        // 本函数链，真跑没跑过以此为准）。fix 轮启动是设计内路径，落 info
+        // 台账（Windows 判例 2026-11-14：正常流程曾以 kind:"error" + stack
+        // 灌进 gui_errors.log，毁掉真故障的可检索性）。
         try {
-          window.dispatchEvent(new ErrorEvent('error', {
-            message: `[ctx-shape] 修复轮启动: messages=${Object.prototype.toString.call(messages)} len=${Array.isArray(messages) ? messages.length : '?'} steps=${failed.steps?.length ?? '?'}`,
-            error: new Error(`[ctx-shape] 修复轮启动: messages=${Object.prototype.toString.call(messages)} len=${Array.isArray(messages) ? messages.length : '?'} steps=${failed.steps?.length ?? '?'}`),
-          }));
+          recordGuiDiagnostic(`[ctx-shape] 修复轮启动: messages=${Object.prototype.toString.call(messages)} len=${Array.isArray(messages) ? messages.length : '?'} steps=${failed.steps?.length ?? '?'}`);
         } catch { /* 台账不可用不追击 */ }
         const fixPrompt = formatDeliveryFixPrompt(failed);
         const fixCommandGuard = (command: string): string | null => isGitMutationCommand(command)
@@ -7873,12 +7875,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (needsDeliveryGate && hasToolWork && !event.payload.interrupted && gen === this.generation) {
               // [ctx-shape 诊断] 门禁进入现场（2026-11-13 崩轮取证：崩栈指向
               // fix 轮链路，但 fresh 会话 hasToolWork=false 与之矛盾——落一条
-              // 进门现场，谁真谁假一次说清）。罕见事件，不灌台账。
+              // 进门现场，谁真谁假一次说清）。进门是设计内路径：落 info 台账
+              // （Windows 判例 2026-11-14：它曾以 kind:"error" + stack 灌进
+              // gui_errors.log，每次有交付门禁的回合都来一条）。非数组守卫
+              // （下方 runDeliveryFixRound / send 两处）才是真异常，保持 error。
               try {
-                window.dispatchEvent(new ErrorEvent('error', {
-                  message: `[ctx-shape] 交付门禁进入: needsDeliveryGate=${needsDeliveryGate} hasToolWork=${hasToolWork} interrupted=${event.payload.interrupted} payloadMessages=${Object.prototype.toString.call(event.payload.messages)} len=${Array.isArray(event.payload.messages) ? event.payload.messages.length : '?'}`,
-                  error: new Error(`[ctx-shape] 交付门禁进入: needsDeliveryGate=${needsDeliveryGate} hasToolWork=${hasToolWork} interrupted=${event.payload.interrupted} payloadMessages=${Object.prototype.toString.call(event.payload.messages)} len=${Array.isArray(event.payload.messages) ? event.payload.messages.length : '?'}`),
-                }));
+                recordGuiDiagnostic(`[ctx-shape] 交付门禁进入: needsDeliveryGate=${needsDeliveryGate} hasToolWork=${hasToolWork} interrupted=${event.payload.interrupted} payloadMessages=${Object.prototype.toString.call(event.payload.messages)} len=${Array.isArray(event.payload.messages) ? event.payload.messages.length : '?'}`);
               } catch { /* 台账不可用不追击 */ }
               addDeliveryBubble(gateSpecs.source === 'plan'
                 ? `🧪 交付验证：按计划声明的清单机械重跑（${gateSpecs.specs.map((s) => s.command).join('、')}）…`

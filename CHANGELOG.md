@@ -4,6 +4,22 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.2
+
+**Windows 4.8.0 自测判例三刀 + 工具链对齐（详见 docs/windows-4.8.0-selfcheck-2026-11-14.md）+ 连通性测试 404 降级**
+
+一、通道审批超时失效根治（Bun/Windows 判例）：审批超时计时器 `unref()` 后，pending 期间网关进程再无其他 ref 句柄，Bun 的事件循环不再被唤醒——超时永不触发、`await` 永不返回，「无人确认自动拒绝」整个失效，`bun test` 也因此整链卡死只能强杀。修复删掉 unref（三个出口都有 clearTimeout，不拖住退出），并留回归哨兵测试（unref 回归时 5s guard 报错而非无声挂死）。
+
+二、`read_file` UTF-16 破图根治：PowerShell `>` 重定向产物是 UTF-16LE，ASCII 段高字节全 0，`looks_binary` 按「含 NUL」把它判成二进制（真机判例：verify.txt 被拒读，模型多跑一轮改写）。修复 `extract_file_text` 在二进制判定前先认 `FF FE`/`FE FF` BOM 解码（LE/BE 契约测试锁定）；无 BOM 的 UTF-16 无从可靠识别，维持启发式。
+
+三、CLIXML 进度对象淹没报错根治（Rust/TS 三入口同刀）：PS 5.1 在 stderr 被重定向时把进度流也序列化成 CLIXML 粘进 stderr，zh-CN 首次模块加载的「正在准备首次使用模块」就是纯进度 envelope——`strip_powershell_startup_progress` 只认英文文案兜不住，真实报错被 `<Objs…>` 淹没（真机 gui_errors.log 判例三条）。修复：`powershell_command_wrapped`（Rust）/ `encodePowerShellCommand`（TS）/ `userHookRunner`（hook veto 链）统一前置 `$ProgressPreference='SilentlyContinue'` 源头关掉进度流；Rust `unwrap_clixml` 重写支持「真实报错在前 + progress envelope 粘尾」形态，无流记录的 envelope 整体丢弃、识别不了的结构透传不吞。集成测试 `runs Windows audit and verification without CLIXML`（zh-CN 场景真跑 PowerShell）从基线必失败转绿。
+
+四、错误台账信噪比：设计内正常路径（`[ctx-shape] 交付门禁进入` / `修复轮启动`）曾以 `kind:"error"` + 完整 stack 灌进 gui_errors.log，与真 panic/tool_error 混排。台账新增 `kind:"info"` + 模块级诊断通道，两处正常路径改走 info（不带 stack）；非数组守卫两处是真异常信号，保持 error。
+
+五、连通性测试 404 降级（火山 Agent Plan 判例）：Agent Plan 专属网关（`/api/plan/v3`）不暴露 `/models`（404 空 body）而 `chat/completions` 200——「连通性验证」判活依据恰是 `GET {base}/models` 2xx，于是测试永远 ✗、聊天完全正常。修复 `probe_llm_endpoint`（Rust）与 browser 镜像同刀：404 单独分支报 `degraded:true`（ok 保持 false，能力自探测不跑），设置页按钮显示 ⚠「端点可达（无 /models）」而非红色 ✗，等待卡网络诊断对 degraded 短路——此刻聊天流量正走同一端点，报「连接有困难」是撒谎；降级结果跳过反向路由重试（404 是确定性回答，重试只是白等）。
+
+验证：全量 `bun test`（bun 1.4.3）5381 pass / 3 fail / 2 skip（3 个 fail 为基线共有的环境类问题，与本轮无关；基线对拍净减 1、零新增）；`cargo test --lib` 与基线失败名单完全一致（21 个既有 Windows 平台测试债务，本轮零回归）；`tsc` 绿；火山 plan 网关真机对拍（/models 404 ↔ chat/completions 200）由连通性降级用例钉死。
+
 ## v4.8.1
 
 **mac 巨会话恢复致死根治 + 交付裁决呈现交还模型（收尾轮）**

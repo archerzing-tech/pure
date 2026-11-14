@@ -69,11 +69,21 @@ describe('probeLlmEndpoint (browser mirror of Rust probe_llm_endpoint)', () => {
     expect(result.error).toContain('API key rejected');
   });
 
-  it('reports other non-2xx statuses with the raw HTTP code', async () => {
+  it('reports 404 as degraded-reachable, not dead (火山 Agent Plan 网关不暴露 /models)', async () => {
     const { fetchImpl } = fakeFetch(404);
+    const result = await probeLlmEndpoint('https://ark.cn-beijing.volces.com/api/plan/v3', 'ark-key', { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.degraded).toBe(true);
+    expect(result.status).toBe(404);
+    expect(result.error).toContain('/models');
+  });
+
+  it('reports other non-2xx statuses with the raw HTTP code', async () => {
+    const { fetchImpl } = fakeFetch(429);
     const result = await probeLlmEndpoint('https://example.com/v1', 'sk', { fetchImpl });
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('HTTP 404');
+    expect(result.degraded).toBeUndefined();
+    expect(result.error).toBe('HTTP 429');
   });
 
   it('reports network failures as network error with the cause', async () => {

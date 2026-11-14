@@ -2917,8 +2917,10 @@ describe('传输层静默自愈（呈现纪律）', () => {
     expect(src).toContain('连接有困难——');
     expect(src).toContain('pure 会继续尝试换路');
     expect(src).not.toContain('检查网络或代理后重试');
-    // 探测通过 = 服务可达，「模型在思考」仍是诚实文案，不改写。
-    expect(src).toContain('if (probe.ok) return;');
+    // 探测通过 = 服务可达，「模型在思考」仍是诚实文案，不改写；404 降级
+    //（端点不暴露 /models，如火山 Agent Plan 专属网关）同样不改写——此刻
+    // 聊天流量正走同一端点正常返回，报「连接有困难」是撒谎。
+    expect(src).toContain('if (probe.ok || probe.degraded) return;');
     // 每轮至多一次；诊断晚到原地改写由 thinkingCard 侧负责。
     expect(src).toContain('let netDiagnosisDone = false;');
   });

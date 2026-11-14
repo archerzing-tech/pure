@@ -9,7 +9,9 @@
 // 保前 50 条(最早的往往是根因),超长字段截断。
 
 export interface GuiErrorInput {
-  kind: 'error' | 'unhandledrejection';
+  /** info = 设计内正常路径的取证现场（如 ctx-shape 门禁进入），不是故障；
+   * 与 panic/error 混排会毁掉台账的信噪比（Windows 判例 2026-11-14）。 */
+  kind: 'error' | 'unhandledrejection' | 'info';
   message?: unknown;
   source?: unknown;
   line?: unknown;
@@ -37,6 +39,26 @@ export interface ErrorLedger {
   /** Flush immediately (used by tests and by pagehide). */
   flush(): Promise<void>;
   pendingCount(): number;
+}
+
+// ── 模块级诊断通道 ──
+// chat.ts 里的设计内取证现场（ctx-shape 门禁进入等）不该走
+// window.dispatchEvent(ErrorEvent)——那会以 kind:"error" + 完整 stack 落进
+// 台账，和真正的 panic / tool_error 混在同一份台账里。这里给一个装配点 +
+// 调用口：装配在 main.ts（chat.ts import main.ts 会成环），chat.ts 只 import
+// 本模块。sink 未装配（测试 / web 模式）时静默丢弃，绝不成为新故障源。
+let diagnosticSink: ((message: string) => void) | null = null;
+
+export function setGuiDiagnosticSink(sink: ((message: string) => void) | null): void {
+  diagnosticSink = sink;
+}
+
+export function recordGuiDiagnostic(message: string): void {
+  try {
+    diagnosticSink?.(message);
+  } catch {
+    /* 台账不可用不追击 */
+  }
 }
 
 export function createErrorLedger(deps: ErrorLedgerDeps): ErrorLedger {

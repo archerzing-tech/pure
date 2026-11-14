@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createErrorLedger } from '../errorLedger';
+import { createErrorLedger, recordGuiDiagnostic, setGuiDiagnosticSink } from '../errorLedger';
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -53,5 +53,21 @@ describe('gui error ledger', () => {
     await sleep(10);
     expect(batches.length).toBe(1);
     expect(JSON.parse(batches[0][0]).message).toBe('second');
+  });
+
+  it('records info-kind diagnostics without stack noise (Windows 判例 2026-11-14)', async () => {
+    // 设计内正常路径（ctx-shape 门禁进入）落 info,与 error/panic 分开检索。
+    const seen: string[][] = [];
+    const ledgerForSink = createErrorLedger({ sink: lines => void seen.push(lines) });
+    setGuiDiagnosticSink(message => ledgerForSink.record({ kind: 'info', message }));
+    recordGuiDiagnostic('[ctx-shape] 交付门禁进入: needsDeliveryGate=true hasToolWork=true');
+    await sleep(10);
+    const parsed = JSON.parse(seen[0][0]);
+    expect(parsed.kind).toBe('info');
+    expect(parsed.message).toContain('交付门禁进入');
+    expect(parsed.stack).toBeUndefined();
+    // sink 未装配（web 模式 / 测试先行）时静默,绝不抛。
+    setGuiDiagnosticSink(null);
+    expect(() => recordGuiDiagnostic('no sink attached')).not.toThrow();
   });
 });

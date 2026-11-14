@@ -102,13 +102,17 @@ async function drainWithDeadline(stream: ReadableStream<Uint8Array>, deadline: n
 
 /** Node-side runner: `bash -c` on POSIX; PowerShell -EncodedCommand on Windows
  * (the same transport the execute_command tool documents, so quoting behaves
- * identically for hooks and for tool commands). */
+ * identically for hooks and for tool commands). Windows 侧同样前置
+ * `$ProgressPreference='SilentlyContinue'`（Windows 判例 2026-11-14）：hook 的
+ * stderr 是 veto reason 的来源，zh-CN 首次模块加载的 CLIXML 进度记录
+ * （stripPowerShellStartupProgress 只认英文文案，兜不住）会把 veto 理由淹没
+ * ——与其他 PowerShell 入口同刀，源头关掉进度流。 */
 export function createNodeUserHookRunner(opts: { cwd?: string } = {}): UserHookRunner {
   return async (hook, payload) => {
     const started = Date.now();
     const isWindows = process.platform === 'win32';
     const argv = isWindows
-      ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(hook.command, 'utf16le').toString('base64')]
+      ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ProgressPreference='SilentlyContinue'; ${hook.command}`, 'utf16le').toString('base64')]
       : ['bash', '-c', hook.command];
     const proc = Bun.spawn(argv, {
       cwd: opts.cwd,

@@ -3,14 +3,18 @@
 // `probe_llm_endpoint` (src-tauri/src/lib.rs). Desktop probing runs in Rust
 // through the same reqwest path as real chats; browser dev mode has no Rust
 // backend, so this fetch-based probe keeps the EXACT same success semantics
-// and result shape: only 2xx is a success, 401/403 is a rejected key, and the
-// first /models probe decides (no bare-baseURL fallback — mirrors Rust).
+// and result shape: only 2xx is a success, 401/403 is a rejected key, 404 is
+// a degraded-but-reachable endpoint, and the first /models probe decides (no
+// bare-baseURL fallback — mirrors Rust).
 
 export interface LlmProbeResult {
   ok: boolean;
   status?: number;
   latencyMs: number;
   error: string;
+  /** 404 降级：端点连通层活着但不暴露 /models（火山 Agent Plan 专属网关
+   * 实测形态）。ok 保持 false，UI 显示 ⚠ 而非 ✗。 */
+  degraded?: boolean;
 }
 
 export interface LlmProbeOptions {
@@ -75,6 +79,17 @@ export async function probeLlmEndpoint(
       status: response.status,
       latencyMs,
       error: `HTTP ${response.status} — API key rejected`,
+    };
+  }
+  if (response.status === 404) {
+    // 404 ≠ 端点死（mirror Rust probe_llm_endpoint）：拿到响应 = 连通层全通，
+    // 只是端点不提供 /models。degraded 上报，UI 显示 ⚠ 而非 ✗。
+    return {
+      ok: false,
+      degraded: true,
+      status: response.status,
+      latencyMs,
+      error: 'HTTP 404 — endpoint does not expose /models (inference may still work)',
     };
   }
   return { ok: false, status: response.status, latencyMs, error: `HTTP ${response.status}` };

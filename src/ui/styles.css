@@ -14202,6 +14202,13 @@ button svg,
   color: var(--danger);
   background: transparent;
 }
+/* 404 降级：端点可达但不暴露 /models（火山 Agent Plan 专属网关形态）——
+ * 警示而非失败，聊天不受影响。 */
+.llm-test-conn-btn.llm-model-test-degraded {
+  border-color: var(--warning, #d97706);
+  color: var(--warning, #d97706);
+  background: transparent;
+}
 
 /* Model-library header actions (＋ 添加模型 / 全部删除): same height, padding
  * and theme-accent treatment as the connectivity-verify button. */

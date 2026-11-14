@@ -86,8 +86,11 @@ export class ChannelApprovalBroker {
         this.emitDecision(id, decision);
         resolve(decision);
       }, this.timeoutMs);
-      // 超时计时器不应阻止进程退出。
-      if (typeof timer.unref === 'function') timer.unref();
+      // 不做 timer.unref()（Windows 判例 2026-11-14）：审批 pending 期间网关
+      // 进程再无其他 ref 句柄，Bun 的事件循环不再被唤醒，unref 定时器永不
+      // 到期——超时默认拒绝整个失效，「无人确认」变成无限等待。pending 的
+      // 三个出口（超时 / handleReply / cancelSession）都 clearTimeout，不 ref
+      // 也不会拖住进程退出；审批等待期进程本就不该退出。
       this.pending.set(id, { id, sessionKey, resolve, timer });
       this.targets.set(id, target);
       this.infos.set(id, info);
