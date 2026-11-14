@@ -1593,7 +1593,16 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
       }
 
       const segment = group.segment;
-      const historyGroup = createHistoryGroup({ scrollRoot: scrollContainer });
+      // parkOffscreen: the restore sweep materializes every group whose
+      // skeleton briefly sits inside the viewport (the transcript is still
+      // short while it renders top-down), so a reopened giant session used to
+      // end up with its WHOLE history mounted — hundreds of MB of DOM that
+      // then killed the WebContent process during the next streaming turn
+      // (2026-11-14 mac freeze repro: settled → dead page 10–50s later, 2/2
+      // on a 3.5M-token clone, small session with the same prompt fine).
+      // Parking only detaches scrolled-away bodies; re-entering the band
+      // re-mounts them instantly (content is kept, never re-rendered).
+      const historyGroup = createHistoryGroup({ scrollRoot: scrollContainer, parkOffscreen: true });
       historyGroup.setSummary(formatSegmentSummary(segment));
       chatEl.appendChild(historyGroup.el);
       historyGroup.setLazyRenderer(() => renderReplayBlocks(group.blocks, historyGroup.body));

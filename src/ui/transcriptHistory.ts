@@ -188,10 +188,12 @@ export interface HistoryGroupOptions {
   /** How far ahead of the viewport a group materializes. */
   rootMargin?: string;
   /**
-   * Park the group's content again once it is scrolled out of view. Live
-   * transcripts turn this on: their nodes already exist, so parking is the only
-   * way to keep hundreds of old turns off the layout. Restores leave it off and
-   * instead build on demand.
+   * Park the group's content again once it is scrolled out of view. Both
+   * producers turn this on: live transcripts need it because their nodes
+   * already exist, and restores need it because their viewport sweep
+   * materializes every group while the page is still short — without parking,
+   * a reopened giant session keeps its whole history mounted (the 2026-11-14
+   * mac WebContent freeze).
    */
   parkOffscreen?: boolean;
 }
