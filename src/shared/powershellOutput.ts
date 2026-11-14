@@ -18,7 +18,6 @@
  *  line, a serialized `<Objs>` document, or both. Used only to decide whether a
  *  stream is worth looking at — every cut below proves itself separately. */
 const CLIXML_HINT = /#<\s*CLIXML|<Objs\b/i;
-const ERROR_RECORD = /<S\s+S="Error">/i;
 /** One warm-up CLIXML document: optional `#< CLIXML` header, the `<Objs>` body
  *  carrying the warm-up record, up to its closing tag. The header is OPTIONAL —
  *  on Windows runners the captured stream often starts straight at `<Objs>`,
@@ -46,15 +45,67 @@ const TRUNCATED_WARMUP_DOCUMENT =
 const STRANDED_CLIXML_HEADER =
   /^[ \t]*#<[ \t]*CLIXML[ \t]*\r?\n(?![ \t]*<Objs)|^[ \t]*#<[ \t]*CLIXML[ \t]*$(?![\s\S])/gim;
 
+/** CLIXML escapes what XML cannot carry: `_xHHHH_` for control characters
+ *  (notably `_x000D__x000A_` for CRLF) plus the five XML entities. Same decode
+ *  as Rust's decode_clixml_escapes — the two must stay in lockstep. */
+function decodeClixmlEscapes(text: string): string {
+  const unescaped = text.replace(/_x([0-9A-Fa-f]{4})_/g, (_m, hex: string) => {
+    const code = Number.parseInt(hex, 16);
+    if (!Number.isFinite(code)) return '';
+    try {
+      return String.fromCodePoint(code);
+    } catch {
+      return ''; // lone surrogate — Rust's char::from_u32 maps it to nothing too
+    }
+  });
+  return unescaped
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/** Pull the text back out of a CLIXML envelope's `<S S="…">…</S>` stream
+ *  records, keeping whatever the command wrote before the envelope. Returns
+ *  null when the stream is not an envelope carrying stream records — the
+ *  caller then falls through to the conservative wrapper-only cuts below (an
+ *  envelope with no stream records may be an unknown shape we must not drop;
+ *  a truncated error record has no `</S>` to close it, so nothing is
+ *  extracted and the raw bytes stay visible). Mirror of Rust unwrap_clixml:
+ *  a real error record serialized as XML (every PS 5.1 stderr write under
+ *  redirection, Windows 判例 2026-11-14 任务 2) reached the model as one
+ *  opaque `<Objs>` blob — the text inside is the actual failure. */
+function unwrapClixmlStreamRecords(text: string): string | null {
+  const m = /#<\s*CLIXML|<Objs\b/i.exec(text);
+  if (!m) return null;
+  const head = text.slice(0, m.index).trimEnd();
+  const records: string[] = [];
+  let rest = text.slice(m.index);
+  for (;;) {
+    const start = rest.indexOf('<S S="');
+    if (start === -1) break;
+    const after = rest.slice(start);
+    const gt = after.indexOf('>');
+    const end = after.indexOf('</S>');
+    if (gt === -1 || end === -1 || end <= gt) break; // truncated/malformed record
+    const decoded = decodeClixmlEscapes(after.slice(gt + 1, end).trim());
+    if (decoded.trim()) records.push(decoded);
+    rest = after.slice(end + '</S>'.length);
+  }
+  if (records.length === 0) return null;
+  return head ? `${head}\n${records.join('\n')}` : records.join('\n');
+}
+
 /**
  * Remove PowerShell's CLIXML wrapper from captured output: the module warm-up
- *  document(s), truncated ones included, and any `#< CLIXML` header left
- *  behind without one.
+ *  document(s), truncated ones included, any `#< CLIXML` header left behind
+ *  without one, and the XML envelope around a real `<S S="Error">` record —
+ *  the record's TEXT is unwrapped and kept, so the failure the caller must
+ *  see survives without the `<Objs>` markup around it.
  *
- * Returns the input unchanged when the stream carries no CLIXML at all, when
- * nothing is attributable to the wrapper, and when it holds a real
- * `<S S="Error">` record — a CLIXML document can carry both records, and
- * cutting it would lose the error the caller must see.
+ * Returns the input unchanged when the stream carries no CLIXML at all and
+ * when nothing is attributable to the wrapper.
  *
  * Only wrapper SEGMENTS are cut out: text the command itself wrote, before or
  * after them, is kept. Blanket-emptying the stream would swallow a hook's own
@@ -64,7 +115,8 @@ const STRANDED_CLIXML_HEADER =
 export function stripPowerShellStartupProgress(output: string): string {
   const text = output.trim();
   if (!CLIXML_HINT.test(text)) return output; // no PowerShell wrapper at all
-  if (ERROR_RECORD.test(text)) return output;
+  const unwrapped = unwrapClixmlStreamRecords(text);
+  if (unwrapped !== null) return unwrapped;
 
   const cleaned = text
     .replace(WARMUP_DOCUMENT, '')

@@ -4190,8 +4190,15 @@ fn decode_process_output(bytes: &[u8]) -> String {
 /// recognize as an envelope is passed through untouched rather than dropped.
 #[cfg(windows)]
 fn unwrap_clixml(stderr: String) -> String {
-    let Some(pos) = stderr.find("#< CLIXML") else {
-        return stderr;
+    let pos = match stderr.find("#< CLIXML") {
+        Some(p) => p,
+        // 无头形态：流式下 `#< CLIXML` 头行与 `<Objs>` 文档行被流式切行拆开，
+        // 文档可能单独送进解包。此时要求 envelope 占满开头（head 全空白）才
+        // 认——命令自己打印的 XML（写在错误中段的）不能被当 envelope 吃掉。
+        None => match stderr.find("<Objs") {
+            Some(p) if stderr[..p].trim().is_empty() => p,
+            _ => return stderr,
+        },
     };
     let (head, blob) = stderr.split_at(pos);
     let mut out = String::new();
@@ -4329,6 +4336,14 @@ mod clixml_tests {
     }
 
     #[test]
+    fn headless_envelope_midstream_is_never_eaten() {
+        // 无头 <Objs> 只在占满开头时才认 envelope——命令自己打印在错误中段
+        // 的 XML 是用户数据，无头定位绝不能把它当 wrapper 吃掉。
+        let raw = "command wrote this\n<Objs><S S=\"Error\">user XML</S></Objs>".to_string();
+        assert_eq!(unwrap_clixml(raw.clone()), raw);
+    }
+
+    #[test]
     fn wrapper_uses_line_separated_exit_resolution() {
         // 换行拼接（4.9.0 判例）：单行 `; ` 拼接下命令尾部 `# 注释` 会把整个
         // wrapper 吞进注释，here-string `"@` 收尾会炸解析。wrapper 必须是
@@ -4358,6 +4373,74 @@ mod clixml_tests {
         // "你好" as GBK bytes: invalid UTF-8, valid GB18030.
         let bytes = [0xC4, 0xE3, 0xBA, 0xC3];
         assert_eq!(decode_process_output(&bytes), "你好");
+    }
+
+    fn sl(line: &str) -> StreamLine {
+        StreamLine { line: line.to_string(), progress: false }
+    }
+
+    fn lines_text(chunks: Vec<StreamLine>) -> String {
+        chunks.iter().map(|c| c.line.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn stream_filter_reassembles_split_error_envelope() {
+        // 真机形态（Windows 判例 2026-11-14 任务 2）：error envelope 以
+        // 「头行 + 文档行」两行抵达流式 stderr——按行清洗会把 XML 切碎；
+        // 过滤器攒行到 </Objs> 落地再整段解包，抽取文本按行还原。
+        let mut f = StreamClixmlFilter::new(true);
+        let out = f.feed(vec![
+            sl("#< CLIXML"),
+            sl("<Objs Version=\"1.1.0.1\"><S S=\"Error\">boom_x000D__x000A_second line</S></Objs>"),
+            sl("plain line"),
+        ]);
+        assert_eq!(lines_text(out), "boom\r\nsecond line\nplain line");
+        assert!(f.flush().is_empty());
+    }
+
+    #[test]
+    fn stream_filter_passes_plain_lines_and_progress_through() {
+        let mut f = StreamClixmlFilter::new(true);
+        let out = f.feed(vec![
+            sl("normal stderr"),
+            StreamLine { line: "33%".to_string(), progress: true },
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(out[1].progress);
+        assert_eq!(lines_text(out), "normal stderr\n33%");
+        assert!(f.flush().is_empty());
+    }
+
+    #[test]
+    fn stream_filter_flushes_truncated_envelope_unchanged() {
+        // 流在 envelope 中途结束（无 </Objs>、无完整 <S> 记录）：flush 走
+        // unwrap_clixml 原样返回，截断字节保持可见。
+        let mut f = StreamClixmlFilter::new(true);
+        f.feed(vec![sl("#< CLIXML"), sl("<Objs><S S=\"Error\">cut off")]);
+        let out = f.flush();
+        assert_eq!(lines_text(out), "#< CLIXML\n<Objs><S S=\"Error\">cut off");
+    }
+
+    #[test]
+    fn stream_filter_unwraps_error_then_drops_trailing_progress_envelope() {
+        // 错误 envelope 在前、引擎 progress envelope 粘尾（两段式判例）：
+        // 错误抽取，progress 包整体丢弃。
+        let mut f = StreamClixmlFilter::new(true);
+        let out = f.feed(vec![
+            sl("<Objs><S S=\"Error\">real failure</S></Objs>"),
+            sl("#< CLIXML"),
+            sl("<Objs><Obj S=\"progress\"><MS><S N=\"T\">InProgress</S></MS></Obj></Objs>"),
+        ]);
+        assert_eq!(lines_text(out), "real failure");
+        assert!(f.flush().is_empty());
+    }
+
+    #[test]
+    fn stream_filter_is_inert_for_stdout() {
+        // stdout 不做 CLIXML 聚合——命令自己打印的 XML 行必须原样流过。
+        let mut f = StreamClixmlFilter::new(false);
+        let out = f.feed(vec![sl("<Objs><S S=\"Error\">just printed text</S></Objs>")]);
+        assert_eq!(lines_text(out), "<Objs><S S=\"Error\">just printed text</S></Objs>");
     }
 }
 
@@ -5215,14 +5298,122 @@ impl LineBatch {
 
 /// Send one (possibly multi-line) batch or a lone progress line in the
 /// execute_command_stream envelope. `progress` is omitted (JS defaults it to
-/// false) — only genuine in-place redraw lines carry it.
+/// false) — only genuine in-place redraw lines carry it. ANSI escapes are
+/// stripped here — the last stop before the wire — so streamed colored output
+/// reads as plain text exactly like the non-streamed path does; a sequence
+/// split across a batch boundary leaves a rare fragment behind, which beats
+/// the old behavior of forwarding every escape verbatim.
 fn send_line_batch(ch: &Channel<String>, kind: &str, content: &str, progress: bool) -> bool {
+    let content = strip_ansi(content);
     let msg = if progress {
         serde_json::json!({ "type": kind, "content": content, "progress": true })
     } else {
         serde_json::json!({ "type": kind, "content": content })
     };
     ch.send(msg.to_string()).is_ok()
+}
+
+/// Non-Windows has no CLIXML at all (a PowerShell-only serialization), so the
+/// streamed filter below needs an identity unwrap there to compile.
+fn unwrap_clixml_if_windows(text: String) -> String {
+    #[cfg(windows)]
+    {
+        unwrap_clixml(text)
+    }
+    #[cfg(not(windows))]
+    {
+        text
+    }
+}
+
+/// Split an unwrapped CLIXML payload back into streamable lines. An empty
+/// payload (a pure progress envelope was dropped) produces no events at all.
+fn clixml_lines(text: String) -> Vec<StreamLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|line| StreamLine { line: line.to_string(), progress: false })
+        .collect()
+}
+
+/// Guard against a document that never closes (a tool that merely prints
+/// lines starting with `<Objs` would otherwise buffer the whole stream).
+const CLIXML_STREAM_BUFFER_CAP: usize = 1024 * 1024;
+
+/// Streamed stderr's CLIXML reassembler. PS 5.1 serializes error records as
+/// `#< CLIXML` header line + `<Objs …>…</Objs>` document — per-line cleanup
+/// would cut the XML to ribbons, so the envelope's lines are gathered until
+/// `</Objs>` lands, then unwrapped whole (unwrap_clixml) and re-split into
+/// clean text lines. Pass-through everywhere else:
+/// - lines outside an envelope stream through untouched;
+/// - a lone-`\r` progress redraw can never be part of an envelope and is
+///   never buffered;
+/// - a stream that ends mid-envelope flushes whatever accumulated through
+///   the unwrap (a truncated document without stream records comes back as
+///   itself, so the raw bytes stay visible);
+/// - over the cap, the buffer is forwarded as-is (stop-loss).
+/// On non-Windows (and on stdout) the filter is inert.
+struct StreamClixmlFilter {
+    stderr: bool,
+    pending: Option<String>,
+}
+
+impl StreamClixmlFilter {
+    fn new(stderr: bool) -> Self {
+        #[cfg(not(windows))]
+        let stderr = false;
+        Self { stderr, pending: None }
+    }
+
+    fn feed(&mut self, chunks: Vec<StreamLine>) -> Vec<StreamLine> {
+        if !self.stderr {
+            return chunks;
+        }
+        let mut out = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            if chunk.progress {
+                out.push(chunk);
+                continue;
+            }
+            let trimmed = chunk.line.trim_start();
+            match self.pending.take() {
+                Some(mut buf) => {
+                    buf.push('\n');
+                    buf.push_str(&chunk.line);
+                    if buf.contains("</Objs>") {
+                        out.extend(clixml_lines(unwrap_clixml_if_windows(buf)));
+                    } else if buf.len() > CLIXML_STREAM_BUFFER_CAP {
+                        out.extend(clixml_lines(buf));
+                    } else {
+                        self.pending = Some(buf);
+                    }
+                }
+                None => {
+                    if trimmed.starts_with("#<") && trimmed.contains("CLIXML")
+                        || trimmed.starts_with("<Objs")
+                    {
+                        let buf = chunk.line;
+                        if buf.contains("</Objs>") {
+                            out.extend(clixml_lines(unwrap_clixml_if_windows(buf)));
+                        } else {
+                            self.pending = Some(buf);
+                        }
+                    } else {
+                        out.push(chunk);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn flush(&mut self) -> Vec<StreamLine> {
+        match self.pending.take() {
+            Some(buf) => clixml_lines(unwrap_clixml_if_windows(buf)),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Drain one command pipe through StreamLineSplitter, pushing lines to the
@@ -5235,11 +5426,12 @@ where
     let mut splitter = StreamLineSplitter::new();
     let mut batch = LineBatch::new();
     let mut buf = vec![0u8; 4096];
+    let mut clixml = StreamClixmlFilter::new(kind == "stderr");
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                for chunk in splitter.push(&buf[..n]) {
+                for chunk in clixml.feed(splitter.push(&buf[..n])) {
                     if chunk.progress {
                         // In-place redraw: flush any pending batch first so
                         // wire order matches pipe order, then send lone.
@@ -5261,7 +5453,9 @@ where
             Err(_) => break,
         }
     }
-    for chunk in splitter.finish() {
+    let mut tail = clixml.feed(splitter.finish());
+    tail.extend(clixml.flush());
+    for chunk in tail {
         let progress = chunk.progress;
         if progress {
             if !batch.buf.is_empty() && !send_line_batch(&ch, kind, &batch.take(), false) {

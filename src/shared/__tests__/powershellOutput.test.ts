@@ -83,8 +83,43 @@ describe('stripPowerShellStartupProgress', () => {
     expect(stripPowerShellStartupProgress(`${unknown}\nhook said: no\n${truncated}`)).toBe(`${unknown}\nhook said: no`);
   });
 
-  it('keeps a CLIXML blob that carries a real error record', () => {
-    expect(stripPowerShellStartupProgress(WARMUP_WITH_ERROR)).toBe(WARMUP_WITH_ERROR);
+  it('unwraps the text of an error record instead of keeping the XML blob', () => {
+    // Windows 判例 2026-11-14 任务 2：PS 5.1 在 stderr 被重定向时把真实报错
+    // 序列化成 CLIXML——模型收到的是一整段 <Objs> 标记。抽取 <S S="…"> 记录
+    // 的文本（与 Rust unwrap_clixml 同刀），错误内容不丢、包裹层不剩。
+    expect(stripPowerShellStartupProgress(WARMUP_WITH_ERROR)).toBe('boom: the hook refused');
+  });
+
+  it('unwraps stream records, decodes _xHHHH_ escapes and XML entities', () => {
+    // 与 Rust clixml_tests::unwraps_error_nodes_and_decodes_escapes 同判例。
+    const envelope = '#< CLIXML\n'
+      + '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+      + '<S S="Error">所在位置 行:1 字符: 1_x000D__x000A_+ &lt;bad&gt;</S>'
+      + '<S S="Info">info line</S>'
+      + '</Objs>';
+    expect(stripPowerShellStartupProgress(envelope))
+      .toBe('所在位置 行:1 字符: 1\r\n+ <bad>\ninfo line');
+  });
+
+  it('keeps the command output ahead of an error envelope', () => {
+    expect(stripPowerShellStartupProgress(`bad\n${WARMUP_WITH_ERROR}`)).toBe('bad\nboom: the hook refused');
+  });
+
+  it('keeps a truncated error record visible as-is (no </S>, nothing to extract)', () => {
+    // 截断的 error envelope 抽不出完整记录 → 保守透传，错误字节至少可见。
+    const truncated = '#< CLIXML\n<Objs><S S="Error">boom: cut off mid-record';
+    expect(stripPowerShellStartupProgress(truncated)).toBe(truncated);
+  });
+
+  it('drops a trailing progress envelope stuck after an error record', () => {
+    // 与 Rust keeps_real_error_and_drops_trailing_progress_envelope 同判例：
+    // 错误在前、引擎 progress envelope 粘尾——错误抽取，progress 包丢弃。
+    const raw = `#< CLIXML\n<Objs><S S="Error">real failure</S></Objs>`
+      + `#< CLIXML\n<Objs><Obj S="progress" RefId="0"><MS><I64 N="SourceId">1</I64>`
+      + `<PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI>`
+      + `<Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD>`
+      + `</PR></MS></Obj></Objs>`;
+    expect(stripPowerShellStartupProgress(raw)).toBe('real failure');
   });
 
   it('keeps CLIXML that is neither warm-up nor an error (unknown shape)', () => {
