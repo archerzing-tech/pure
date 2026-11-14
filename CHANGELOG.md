@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.1
+
+**mac 巨会话恢复致死根治 + 交付裁决呈现交还模型（收尾轮）**
+
+一、巨会话重开致死（mac 真机 2/2 复现）。死亡签名：3.5M tok 巨会话重开后正常收尾，10-50 秒后 WebContent 被 WebKit 静默终止（无崩溃报告/jetsam/RunningBoard 记录），RSS 冻结在峰值 ~498MB，进程变 XPC 空壳，冻结帧=正常收尾终态；引擎无恙、回合全落盘零丢失。根因在恢复路径：历史分组建骨架没带 `parkOffscreen`，恢复自上而下渲染时转写还短，每个分组都路过视口被 IntersectionObserver 物化又不停靠，巨会话全量 DOM 永久挂载（恢复后 RSS 350-400MB，下一个流式回合的渲染压力把 WebKit 推过静默终止线）。修复一行：restore 的 `createHistoryGroup` 补 `parkOffscreen:true`（park 只 detach 滚出视口正文，回入即挂载，与 live 路径同一套机制）。真机同会话同语料第三轮对拍 PASS：恢复 RSS 350→294MB（park 生效静态证据）、收尾后 4 分钟存活、输入探针有效；对照判据同步换血——线程数判活已死，存活三联=输入探针+RSS 微漂+帧对比。
+
+二、交付裁决呈现交还模型（收尾轮，用户定案「需要显示什么、用什么显示都是 LLM 的事情」）。预制裁决 chip（✅ 交付验证通过 / ⛔ 项目暂不交付）退役，门禁机制不变（verify → 修复轮 → 拦截），跑完后把证据作为内部消息喂回模型（收尾轮）：说不说、说什么、怎么措辞由模型自决；证据消息 `internal:true` 落账、转写不渲染；收尾轮跑不成（中断/出错/换代）时回退注入，保证机制事实至少活在下一轮上下文；空收尾不落空泡。真机冒烟 PASS：终态无任何预制标签，模型收尾话即全部呈现；门禁运行记录卡（命令·耗时）保留——它记录「跑了什么」，不是「结论怎么讲」。
+
+三、Windows CI 假红修：fenceRegistry math 钉子自备 `ensureKatex` 前置，测试不再依赖其他用例的预热时序。
+
 ## v4.8.0
 
 **markdown 内联本地图破图根治：asset protocol 放行点目录（~/.pure）**
