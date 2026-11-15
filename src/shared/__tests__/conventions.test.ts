@@ -7,6 +7,11 @@ import {
   loadMergedConventionsWithDiagnostics,
   mergeConventions,
   mergeLayers,
+  defaultVersionOf,
+  stripDefaultMarkers,
+  upgradeSeededAgentsMd,
+  parseSeedState,
+  syncSeededAgentsMd,
   sectionKey,
   splitSections,
 } from '../conventions';
@@ -185,9 +190,92 @@ describe('merge diagnostics', () => {
     const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
       userSpaceRoot: join(tmpdir(), 'pure-nonexistent-ws-xyz'),
     });
-    expect(text).toBe(DEFAULT_AGENTS_MD.trim());
+    // The version marker is seed metadata, never content.
+    expect(text).toBe(stripDefaultMarkers(DEFAULT_AGENTS_MD).trim());
     const app = diagnostics.layers.find((l) => l.name === 'app');
     expect(app?.source).toContain('templates/default-agents.md');
+  });
+});
+
+describe('default upgrade (version marker + seed state)', () => {
+  const V2 = '<!-- pure:default version=2 -->\n## 语言\n\nnew language\n\n## 新节\n\nbrand new';
+
+  it('reads the version marker and strips it from content', () => {
+    expect(defaultVersionOf(V2)).toBe(2);
+    expect(defaultVersionOf('## 语言\n\nno marker')).toBe(0);
+    expect(stripDefaultMarkers(V2)).not.toContain('pure:default');
+    expect(stripDefaultMarkers(V2)).toContain('## 语言');
+  });
+
+  it('adopts untouched sections and appends missing ones', () => {
+    const user = '## 语言\n\nold language';
+    const state = { version: 1, sections: { 语言: '## 语言\n\nold language' } };
+    const result = upgradeSeededAgentsMd(user, V2, state);
+    expect(result.text).toContain('new language');
+    expect(result.text).toContain('brand new');
+    expect(result.adopted).toEqual(['语言']);
+    expect(result.added).toEqual(['新节']);
+    expect(result.version).toBe(2);
+    expect(result.text).not.toContain('pure:default');
+  });
+
+  it('never clobbers a section the user edited', () => {
+    const user = '## 语言\n\n我的规则';
+    const state = { version: 1, sections: { 语言: '## 语言\n\nold language' } };
+    const result = upgradeSeededAgentsMd(user, V2, state);
+    expect(result.text).toContain('我的规则');
+    expect(result.text).not.toContain('new language');
+    expect(result.kept).toEqual(['语言']);
+    // The baseline moves to what the user actually has, so the next bump
+    // cannot mistake their text for ours.
+    expect(result.state.sections['语言']).toBe('## 语言\n\n我的规则');
+  });
+
+  it('with no state yet, keeps existing sections and records them as baseline', () => {
+    const user = '## 语言\n\nlegacy user text';
+    const result = upgradeSeededAgentsMd(user, V2, null);
+    expect(result.text).toContain('legacy user text');
+    expect(result.kept).toEqual(['语言']);
+    expect(result.added).toEqual(['新节']);
+    expect(result.state.sections['语言']).toBe('## 语言\n\nlegacy user text');
+  });
+
+  it('seeds everything into an empty file', () => {
+    const result = upgradeSeededAgentsMd('', V2, null);
+    expect(result.text).toContain('new language');
+    expect(result.text).toContain('brand new');
+    expect(result.text).not.toContain('pure:default');
+  });
+
+  it('parses a corrupt state file as no state', () => {
+    expect(parseSeedState('{not json')).toBeNull();
+    expect(parseSeedState('{"version":"3","sections":{"语言":"x"}}')).toEqual({
+      version: 3,
+      sections: { 语言: 'x' },
+    });
+  });
+
+  it('seeds once, then upgrades on disk without touching user edits', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-seed-'));
+    try {
+      expect(await syncSeededAgentsMd(root, V2)).toContain('已写入默认约定');
+      expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toContain('new language');
+      expect(JSON.parse(readFileSync(join(root, 'AGENTS.default.json'), 'utf8')).version).toBe(2);
+      // Unchanged default → no work, no note.
+      expect(await syncSeededAgentsMd(root, V2)).toBeNull();
+
+      // User edits one section; v3 changes it plus adds one.
+      writeFileSync(join(root, 'AGENTS.md'), '## 语言\n\n我的规则\n');
+      const V3 = '<!-- pure:default version=3 -->\n## 语言\n\nv3 language\n\n## 新节\n\nv3 new';
+      const note = await syncSeededAgentsMd(root, V3);
+      const after = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+      expect(note).toContain('v3');
+      expect(after).toContain('我的规则');
+      expect(after).not.toContain('v3 language');
+      expect(after).toContain('v3 new');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

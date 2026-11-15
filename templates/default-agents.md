@@ -1,3 +1,4 @@
+<!-- pure:default version=2 -->
 # 工作约定（产品默认）
 
 > 这是 pure 自带的行为基线，首次运行时写入 `~/.pure/AGENTS.md` 供你按需修改。

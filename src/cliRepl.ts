@@ -31,7 +31,7 @@ import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, ty
 import {
   loadMergedConventionsWithDiagnostics,
   formatConventionsDiagnostics,
-  ensureAgentsMdAt,
+  syncSeededAgentsMd,
 } from './shared/conventions';
 import { DEFAULT_AGENTS_MD } from './shared/defaultAgentsMd';
 import { buildShellContext } from './shared/shellEnv';
@@ -294,6 +294,8 @@ export function loadAppSkills(): PromptSkill[] {
   return out;
 }
 
+let seedSynced = false;
+
 async function assembleCliPrompt(
   mode: TaskMode,
   args: CliArgs,
@@ -310,7 +312,14 @@ async function assembleCliPrompt(
   // templates/default-agents.md). Reading <cwd>/AGENTS.md here was the double
   // identity bug: in a checkout of this repo the app default *became* this
   // repo's dev conventions, and got seeded into the user's ~/.pure/AGENTS.md.
-  await ensureAgentsMdAt(PURE_DIR, DEFAULT_AGENTS_MD);
+  // Seeding runs once per process: it upgrades the user's global file toward a
+  // newer default (never touching sections they edited), which is not
+  // per-turn work.
+  if (!seedSynced) {
+    seedSynced = true;
+    const seedNote = await syncSeededAgentsMd(PURE_DIR, DEFAULT_AGENTS_MD);
+    if (seedNote) process.stderr.write(`${seedNote}\n`);
+  }
   const merged = await loadMergedConventionsWithDiagnostics({
     appText: DEFAULT_AGENTS_MD,
     globalUserRoot: PURE_DIR,

@@ -25,7 +25,8 @@ import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '.
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { promptObservability } from '../shared/promptObservability';
-import { mergeConventions } from '../shared/conventions';
+import { mergeConventions, parseSeedState, stripDefaultMarkers, upgradeSeededAgentsMd } from '../shared/conventions';
+import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
@@ -798,6 +799,10 @@ function buildModelIdentity(config: PureConfig | null): { provider: string; mode
  * an edit to AGENTS.md still lands without a restart. */
 let guiConventionsCache: { at: number; workspace: string; text: string } | null = null;
 
+/** Sidecar recording what we last wrote into the user's global AGENTS.md, so
+ * an upgrade can tell "our text, untouched" from "the user rewrote it". */
+const SEED_STATE_FILE = 'AGENTS.default.json';
+
 async function loadGuiConventions(userWorkspace?: string): Promise<string> {
   const ws = userWorkspace ?? '';
   if (guiConventionsCache && Date.now() - guiConventionsCache.at < 30_000 && guiConventionsCache.workspace === ws) {
@@ -831,22 +836,44 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
       read(globalRoot),
       userWorkspace ? read(userWorkspace) : Promise.resolve(null),
     ]);
-    // Seed ~/.pure/AGENTS.md from the app default on first run (best-effort),
-    // so a user-editable global conventions file exists after install.
+    // Seed on first run, then move an existing ~/.pure/AGENTS.md toward the
+    // current default without touching sections the user rewrote. Same pure
+    // logic as the CLI's syncSeededAgentsMd; the renderer cannot reach
+    // node:fs, so the I/O goes through invoke. Best-effort throughout: a
+    // read-only home must never break prompt assembly.
+    const appDefault = stripDefaultMarkers(appMd ?? DEFAULT_AGENTS_MD);
     let effectiveGlobal = globalMd;
-    if (!effectiveGlobal && appMd) {
-      try {
+    try {
+      const stateRaw = await invoke<string>('read_file', {
+        workspace: globalRoot,
+        path: SEED_STATE_FILE,
+      }).catch(() => null);
+      const result = upgradeSeededAgentsMd(
+        effectiveGlobal ?? '',
+        appDefault,
+        parseSeedState(stateRaw),
+      );
+      const nextText = result.text.trim();
+      if (effectiveGlobal === null || nextText !== effectiveGlobal.trim()) {
         await invoke<string>('write_file', {
           workspace: globalRoot,
           path: 'AGENTS.md',
-          content: appMd,
+          content: `${nextText}\n`,
         });
-        effectiveGlobal = appMd;
-      } catch {
-        /* ignore seeding failure */
       }
+      const nextState = `${JSON.stringify(result.state, null, 2)}\n`;
+      if (stateRaw !== nextState) {
+        await invoke<string>('write_file', {
+          workspace: globalRoot,
+          path: SEED_STATE_FILE,
+          content: nextState,
+        });
+      }
+      effectiveGlobal = nextText;
+    } catch {
+      /* ignore seeding/upgrade failure */
     }
-    const appPlusGlobal = mergeConventions(appMd, effectiveGlobal);
+    const appPlusGlobal = mergeConventions(appDefault, effectiveGlobal);
     return mergeConventions(appPlusGlobal || null, userMd);
   } catch {
     return '';

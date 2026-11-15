@@ -45,6 +45,29 @@ export interface ConventionsLayerReport {
   chars: number;
 }
 
+/** Version marker in the product default template. Metadata: stripped before
+ * merging and never shown to the model. Bumping it is what tells an existing
+ * `~/.pure/AGENTS.md` that a newer default exists. */
+const DEFAULT_VERSION_MARKER = /^\s*<!--\s*pure:default\s+version=(\d+)\s*-->\s*$/i;
+
+export function defaultVersionOf(text: string | null | undefined): number {
+  if (!text) return 0;
+  for (const line of text.split(/\r?\n/)) {
+    const m = DEFAULT_VERSION_MARKER.exec(line);
+    if (m) return Number(m[1]);
+  }
+  return 0;
+}
+
+/** Drop version-marker lines from a conventions text. */
+export function stripDefaultMarkers(text: string | null | undefined): string {
+  if (!text) return '';
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !DEFAULT_VERSION_MARKER.test(line))
+    .join('\n');
+}
+
 export type SectionMergeMode = 'override' | 'append';
 
 /** Per-section merge directive: a line IMMEDIATELY above the heading makes the
@@ -169,7 +192,7 @@ interface MergeInput {
 }
 
 function layerReport(layer: MergeInput): ConventionsLayerReport {
-  const text = (layer.text ?? '').trim();
+  const text = stripDefaultMarkers(layer.text).trim();
   return {
     name: layer.name,
     source: layer.source,
@@ -190,7 +213,7 @@ export function mergeLayers(layers: MergeInput[]): MergedConventions {
   // "added by a child", so they stay out of the appends report.
   let seenLayer = false;
   for (const layer of layers) {
-    const text = (layer.text ?? '').trim();
+    const text = stripDefaultMarkers(layer.text).trim();
     if (!text) continue;
     const isChild = seenLayer;
     seenLayer = true;
@@ -341,6 +364,153 @@ export async function loadMergedConventionsWithDiagnostics(
 /** Node-only: merged conventions text only (no report). */
 export async function loadMergedConventions(roots: ConventionsRoots = {}): Promise<string> {
   return (await loadMergedConventionsWithDiagnostics(roots)).text;
+}
+
+/** What was last written into the user's global file, per section. Lets an
+ * upgrade tell "this section is still our text" from "the user rewrote it". */
+export interface SeedState {
+  version: number;
+  sections: Record<string, string>;
+}
+
+export interface SeedUpgradeResult {
+  text: string;
+  version: number;
+  /** Sections replaced by the newer default (user had not touched them). */
+  adopted: string[];
+  /** Sections the user file did not have (safe, purely additive). */
+  added: string[];
+  /** Sections left exactly as the user wrote them. */
+  kept: string[];
+  state: SeedState;
+}
+
+export function parseSeedState(raw: string | null | undefined): SeedState | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SeedState>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const sections: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed.sections ?? {})) {
+      if (typeof v === 'string') sections[k] = v;
+    }
+    return { version: Number(parsed.version) || 0, sections };
+  } catch {
+    return null;
+  }
+}
+
+/** Move an existing seeded global file toward a newer product default without
+ * ever clobbering user edits: sections the user rewrote are left alone,
+ * sections still byte-identical to what we last seeded are updated, and
+ * sections the file is missing are appended. Pure — no I/O. */
+export function upgradeSeededAgentsMd(
+  userText: string,
+  defaultsText: string,
+  state: SeedState | null,
+): SeedUpgradeResult {
+  const defaults = splitSections(stripDefaultMarkers(defaultsText));
+  const version = defaultVersionOf(defaultsText);
+  const userSections = splitSections(userText).filter((s) => s.body.length > 0);
+  const byKey = new Map(userSections.map((s, i) => [s.key, i]));
+  const nextState: SeedState = { version, sections: {} };
+  const adopted: string[] = [];
+  const added: string[] = [];
+  const kept: string[] = [];
+  const bodies = userSections.map((s) => s.body);
+
+  for (const def of defaults) {
+    const label = def.key || '(前言)';
+    const at = byKey.get(def.key);
+    if (at === undefined) {
+      // Missing in the user file: appending is safe either way.
+      if (def.body.trim()) {
+        bodies.push(def.body.trim());
+        byKey.set(def.key, bodies.length - 1);
+        added.push(label);
+        nextState.sections[def.key] = def.body.trim();
+      }
+      continue;
+    }
+    const current = bodies[at];
+    const untouched = state ? state.sections[def.key] === current : false;
+    if (untouched) {
+      bodies[at] = def.body.trim();
+      adopted.push(label);
+      nextState.sections[def.key] = def.body.trim();
+    } else {
+      kept.push(label);
+      // Baseline becomes what the user actually has: from now on an upgrade
+      // only fires when the user leaves that text alone.
+      nextState.sections[def.key] = current;
+    }
+  }
+  // Sections the user added that the default does not define: keep their
+  // baseline entries so a later default can note them as user-owned.
+  for (const [key, body] of Object.entries(state?.sections ?? {})) {
+    if (!(key in nextState.sections)) nextState.sections[key] = body;
+  }
+
+  return {
+    text: bodies.filter((b) => b.length > 0).join('\n\n'),
+    version,
+    adopted,
+    added,
+    kept,
+    state: nextState,
+  };
+}
+
+/** Node-only: seed or upgrade <root>/AGENTS.md from the product default,
+ * keeping `<root>/AGENTS.default.json` as the "what we last wrote" baseline.
+ * Returns a one-line summary when anything changed, null otherwise. */
+export async function syncSeededAgentsMd(
+  root: string | null | undefined,
+  defaultsText: string | null | undefined,
+): Promise<string | null> {
+  if (!root || !defaultsText?.trim()) return null;
+  try {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
+    const mdPath = path.join(root, 'AGENTS.md');
+    const statePath = path.join(root, 'AGENTS.default.json');
+    const rawState = fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf8') : null;
+    const state = parseSeedState(rawState);
+    const current = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : null;
+
+    if (current === null) {
+      const seeded = stripDefaultMarkers(defaultsText).trim();
+      const seededState: SeedState = {
+        version: defaultVersionOf(defaultsText),
+        sections: Object.fromEntries(splitSections(seeded).map((s) => [s.key, s.body.trim()])),
+      };
+      fs.writeFileSync(mdPath, `${seeded}\n`, 'utf8');
+      fs.writeFileSync(statePath, `${JSON.stringify(seededState, null, 2)}\n`, 'utf8');
+      return '已写入默认约定 (~/.pure/AGENTS.md)';
+    }
+
+    const result = upgradeSeededAgentsMd(current, defaultsText, state);
+    const nextStateJson = `${JSON.stringify(result.state, null, 2)}\n`;
+    let changed = false;
+    if (result.text.trim() !== current.trim()) {
+      fs.writeFileSync(mdPath, `${result.text.trim()}\n`, 'utf8');
+      changed = true;
+    }
+    if (rawState !== nextStateJson) {
+      fs.writeFileSync(statePath, nextStateJson, 'utf8');
+      changed = true;
+    }
+    if (!changed) return null;
+    const parts = [
+      result.added.length ? `新增 ${result.added.length} 节` : '',
+      result.adopted.length ? `采纳新版 ${result.adopted.length} 节` : '',
+      result.kept.length ? `保留你的改动 ${result.kept.length} 节` : '',
+    ].filter(Boolean);
+    return `默认约定已更新到 v${result.version}：${parts.join('，') || '无变化'}`;
+  } catch {
+    return null;
+  }
 }
 
 /** Human-readable merge report for `bun run agents:show` / in-session debug. */
