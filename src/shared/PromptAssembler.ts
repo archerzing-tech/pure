@@ -21,6 +21,7 @@ import {
   INSERTION_PROTOCOL_PROMPT,
   LEDGER_PROTOCOL_PROMPT,
   MULTI_AGENT_MECHANICS_PROMPT,
+  PARALLEL_FIRST_DIRECTIVE,
   ROUTING_ESSENTIALS,
   SVG_OUTPUT_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -321,6 +322,12 @@ function buildRequestDetailFragments(
   const text = userText ?? '';
   const complexTask = context.mode === 'build' || context.mode === 'plan';
   return [
+    // 并行默认：只要委派工具在场就常驻，不问措辞（见 PARALLEL_FIRST_DIRECTIVE 注释）。
+    fragment(
+      'parallel_first',
+      context.hasSubagents ? PARALLEL_FIRST_DIRECTIVE : '',
+      60,
+    ),
     fragment('capability_gap_ladder', wantsCapabilityLadder(text) ? CAPABILITY_GAP_LADDER : '', 59),
     fragment(
       'multi_agent_mechanics',

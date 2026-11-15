@@ -478,6 +478,19 @@ export interface UserTurnContext {
  * chains, and the orchestrator conduct rules. Injected on demand via
  * wantsDelegationMechanics (mode build/plan or multi-topic signals).
  */
+/**
+ * 并行默认（2026-11-15 用户定调："能并行的就不要串行"）。
+ *
+ * 与 MULTI_AGENT_MECHANICS_PROMPT 的分工：那一段讲"决定要拆之后怎么做"（fan-out
+ * 批量、relay 串接、编排话术），按请求闸门注入；这一句讲**默认倾向**，只要委派
+ * 工具在场就常驻——不做关键词匹配。判例：用户说「从多个平台整理国漫上新」，
+ * 词表没命中、机制段没注入，模型就自己连打 6 个 web_search；并行能力一直在，
+ * 缺的是一条不问措辞的常驻立场。串行必须给出理由（依赖关系），而不是默认。
+ */
+export const PARALLEL_FIRST_DIRECTIVE = `<parallel_first>
+Parallel is the default disposition, not an optimization you opt into. Independent subtasks run at the SAME time; only genuinely dependent steps run one after another, and then you say in one sentence what depends on what. N sources / N subjects / N files / N directions = N delegations issued in ONE batch. Running N independent things yourself in a row is the wrong shape even when you could finish it alone: it is slower, it floods your context with raw material, and it is the first thing a user notices as "this agent works serially".
+</parallel_first>`;
+
 export const MULTI_AGENT_MECHANICS_PROMPT = `<multi_agent_mechanics>
 Artifact fit: the review role (code_reviewer) is for CODE — source, scripts, configs. A non-code deliverable (document, slides, design, data file) needs no review agent: verify it yourself directly (open the document, render the slides, spot-check the data), and delegate only its production (research, drafting) when parallelism or context isolation applies.
 Fan-out rule: when the task names N distinct subtopics ("分别研究 A、B、C"), decomposes into N independent investigations, or the raw material is bulky enough that digesting it all yourself would flood the main session (a pile of documents or files to inventory, read through, or review) — split that material into self-contained read-only chunks and treat each chunk as one investigation. A sources set counts as N investigations: "compare what platform A, B and C shipped", "check several sites/communities/feeds" is one delegation per source, not one sweep of searches from the main thread — parallel read-only research is both faster and less likely to miss a source than doing them one by one yourself. Issue all N delegations as tool calls in the SAME assistant message — one batch, N calls — so they run concurrently. Never fold independent subtopics into a single delegation "to keep it simple", and never run them one-by-one; one agent covering everything is the wrong shape. Merge the results only after every call has returned.

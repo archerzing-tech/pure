@@ -3,6 +3,7 @@
 // contracts / L2 per-request user-turn composer).
 
 import { describe, it, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import {
   CHART_DSL_PROMPT,
   SYSTEM_CORE_PROMPT,
@@ -20,6 +21,7 @@ import {
   CAPABILITY_GAP_PROMPT,
   CAPABILITY_GAP_LADDER,
   MULTI_AGENT_MECHANICS_PROMPT,
+  PARALLEL_FIRST_DIRECTIVE,
   composeUserTurn,
   stripUserTurnContext,
   wantsCapabilityLadder,
@@ -449,6 +451,15 @@ describe('L1 behavior contracts', () => {
     // 单一来源的检索不开闸：别把一次普通搜索也说成多路。
     expect(wantsDelegationMechanics('帮我搜一下国漫上新', false)).toBe(false);
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('A sources set counts as N investigations');
+
+    // 2026-11-15 用户定调「能并行的就不要串行」：并行默认必须常驻，不走关键词
+    // 闸门——判例正是"从多个平台整理"这类没命中词表、于是模型自己串行查的活。
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Parallel is the default disposition');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('N delegations issued in ONE batch');
+    const assemblerSrc = readFileSync(new URL('../PromptAssembler.ts', import.meta.url), 'utf8');
+    expect(assemblerSrc).toContain("context.hasSubagents ? PARALLEL_FIRST_DIRECTIVE : ''");
+    // 它绝不能挂在关键词闸门后面（那是这次的真错）。
+    expect(assemblerSrc).not.toContain('wantsDelegationMechanics(text, complexTask) ? PARALLEL_FIRST_DIRECTIVE');
   });
 
   it('uses dynamic capability tools for skills and MCP services', () => {
