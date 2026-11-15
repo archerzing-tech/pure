@@ -13,6 +13,8 @@ import {
   parseSeedState,
   syncSeededAgentsMd,
   expandImports,
+  scopeMatchesPath,
+  CONVENTIONS_LAYER_BUDGET,
   sectionKey,
   splitSections,
 } from '../conventions';
@@ -382,6 +384,60 @@ describe('imports (@file.md)', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('section scopes (paths) and soft budget', () => {
+  it('labels a scoped section and records it, keeping the directive out of the text', () => {
+    const text = '<!-- paths: src/ui/** -->\n## 界面规矩\n\n用 className\n\n## 通用\n\n都一样';
+    const merged = mergeLayers([{ name: 'workspace', source: 'ws', text }]);
+    expect(merged.text).toContain('生效范围：src/ui/**');
+    expect(merged.text).not.toContain('<!-- paths');
+    expect(merged.diagnostics.scopes).toContainEqual({
+      section: '界面规矩',
+      by: 'workspace',
+      paths: ['src/ui/**'],
+    });
+  });
+
+  it('drops a scoped section when the given paths do not match', () => {
+    const text = '<!-- paths: src/ui/** -->\n## 界面规矩\n\nui only\n\n## 通用\n\nall';
+    const filtered = mergeLayers([{ name: 'workspace', source: 'ws', text }], {
+      paths: ['src/engine/FailurePolicy.ts'],
+    });
+    expect(filtered.text).not.toContain('ui only');
+    expect(filtered.text).toContain('all');
+
+    const kept = mergeLayers([{ name: 'workspace', source: 'ws', text }], {
+      paths: ['src/ui/chat.ts'],
+    });
+    expect(kept.text).toContain('ui only');
+  });
+
+  it('matches glob shapes used in practice', () => {
+    expect(scopeMatchesPath('src/ui/**', 'src/ui/chat.ts')).toBe(true);
+    expect(scopeMatchesPath('src/ui/**', 'src/engine/x.ts')).toBe(false);
+    expect(scopeMatchesPath('src/**/chat.ts', 'src/ui/deep/chat.ts')).toBe(true);
+    expect(scopeMatchesPath('docs/*.md', 'docs/a.md')).toBe(true);
+    expect(scopeMatchesPath('docs/*.md', 'docs/sub/a.md')).toBe(false);
+  });
+
+  it('keeps override semantics: heading still decides, scope only labels', () => {
+    const app = '<!-- paths: src/ui/** -->\n## 界面规矩\n\napp rule';
+    const user = '## 界面规矩\n\nuser rule';
+    const merged = mergeConventions(app, user);
+    expect(merged).toContain('user rule');
+    expect(merged).not.toContain('app rule');
+  });
+
+  it('warns when a layer or the merged text exceeds the soft budget', () => {
+    const big = `## 大节\n\n${'字'.repeat(CONVENTIONS_LAYER_BUDGET + 10)}`;
+    const over = mergeLayers([{ name: 'workspace', source: 'ws', text: big }]);
+    expect(over.diagnostics.warnings.length).toBeGreaterThan(0);
+    expect(over.diagnostics.warnings[0]).toContain('预算');
+
+    const small = mergeLayers([{ name: 'workspace', source: 'ws', text: '## 小\n\nok' }]);
+    expect(small.diagnostics.warnings).toEqual([]);
   });
 });
 

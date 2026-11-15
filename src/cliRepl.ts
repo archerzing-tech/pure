@@ -295,6 +295,7 @@ export function loadAppSkills(): PromptSkill[] {
 }
 
 let seedSynced = false;
+let conventionsWarned = false;
 
 async function assembleCliPrompt(
   mode: TaskMode,
@@ -326,6 +327,14 @@ async function assembleCliPrompt(
     userSpaceRoot: userWorkspace,
   });
   const conventions = merged.text;
+  // Soft-budget warnings print once per process: they are about the file the
+  // user maintains, not about this turn.
+  if (!conventionsWarned && merged.diagnostics.warnings.length > 0) {
+    conventionsWarned = true;
+    for (const warning of merged.diagnostics.warnings) {
+      process.stderr.write(`AGENTS.md: ${warning}\n`);
+    }
+  }
   // PURE_DEBUG_CONVENTIONS=1 prints which layer each section came from and
   // which sections a child layer replaced (same report as `bun run agents:show`).
   if (process.env.PURE_DEBUG_CONVENTIONS === '1') {

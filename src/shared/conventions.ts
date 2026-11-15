@@ -45,6 +45,67 @@ export interface ConventionsLayerReport {
   chars: number;
 }
 
+/** Per-section scope: `<!-- paths: src/ui/**  src/engine/** -->` on the line
+ * above a heading marks the section as applying only to those paths. The
+ * merged text carries a one-line 生效范围 note so the model can tell a
+ * UI-only rule from a repo-wide one; callers that know which files a turn
+ * touches can also filter with mergeLayers(layers, { paths }). */
+const SCOPE_DIRECTIVE = /^<!--\s*paths?\s*:\s*(.+?)\s*-->$/i;
+
+/** Soft budgets. Not hard limits: crossing them prints a warning in
+ * `agents:show` and once per CLI process, because every char here is paid on
+ * every request. */
+export const CONVENTIONS_LAYER_BUDGET = 8_000;
+export const CONVENTIONS_TOTAL_BUDGET = 16_000;
+
+function parseScope(line: string): string[] | null {
+  const m = SCOPE_DIRECTIVE.exec(line.trim());
+  if (!m) return null;
+  const paths = m[1]
+    .split(/[\s,]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return paths.length > 0 ? paths : null;
+}
+
+/** Glob-ish scope match against a repo-relative path: `src/ui/**` matches
+ * everything under a directory, `docs/*.md` stays single-level, and a
+ * mid-pattern double star matches any depth. Deliberately simple: a scope is
+ * a hint, not a sandbox. */
+export function scopeMatchesPath(scope: string, file: string): boolean {
+  const norm = file.replace(/\\/g, '/').replace(/^\.\//, '');
+  const cleaned = scope.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  // Built char by char: the wildcards must survive the literal escaping.
+  let pattern = '';
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (ch === '*') {
+      if (cleaned[i + 1] === '*') {
+        i++;
+        if (cleaned[i + 1] === '/') {
+          i++;
+          pattern += '(?:.*/)?';
+        } else {
+          pattern += '.*';
+        }
+      } else {
+        pattern += '[^/]*';
+      }
+      continue;
+    }
+    pattern += /[.+^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch;
+  }
+  try {
+    return new RegExp(`^${pattern}`).test(norm);
+  } catch {
+    return false;
+  }
+}
+
+function scopeApplies(paths: string[], files: string[]): boolean {
+  return paths.some((scope) => files.some((file) => scopeMatchesPath(scope, file)));
+}
+
 /** Version marker in the product default template. Metadata: stripped before
  * merging and never shown to the model. Bumping it is what tells an existing
  * `~/.pure/AGENTS.md` that a newer default exists. */
@@ -94,6 +155,12 @@ export interface ConventionsAppend {
   by: ConventionsLayerName;
 }
 
+export interface ConventionsScope {
+  section: string;
+  by: ConventionsLayerName;
+  paths: string[];
+}
+
 export interface ConventionsImport {
   /** File whose line pulled the import in. */
   from: string;
@@ -111,6 +178,10 @@ export interface ConventionsDiagnostics {
   appends: ConventionsAppend[];
   /** Files pulled in by `@path/to/file.md` lines. */
   imports: ConventionsImport[];
+  /** Sections declared with a `<!-- paths: ... -->` scope. */
+  scopes: ConventionsScope[];
+  /** Soft-budget warnings (a layer or the merged text got too big). */
+  warnings: string[];
   mergedChars: number;
   mergedSections: number;
 }
@@ -152,35 +223,46 @@ export function sectionKey(heading: string): string {
  * per-section merge mode declared by an `<!-- merge: append -->` directive. */
 export function splitSections(
   text: string,
-): { key: string; body: string; mode: SectionMergeMode }[] {
+): { key: string; body: string; mode: SectionMergeMode; paths: string[] }[] {
   const lines = text.split(/\r?\n/);
-  const out: { key: string; body: string; mode: SectionMergeMode }[] = [];
+  const out: { key: string; body: string; mode: SectionMergeMode; paths: string[] }[] = [];
   let key = '';
   let mode: SectionMergeMode = 'override';
+  let paths: string[] = [];
   let buf: string[] = [];
   const flush = () => {
     if (buf.length > 0) {
-      out.push({ key, body: buf.join('\n').trim(), mode });
+      out.push({ key, body: buf.join('\n').trim(), mode, paths });
       buf = [];
     }
   };
   for (const line of lines) {
     const m = /^#{1,6}\s+(.*\S)\s*$/.exec(line);
     if (m) {
-      // The directive binds to the heading directly below it: scan back past
-      // blank lines, and drop the directive line so it never reaches the model.
+      // Directives bind to the heading directly below them: scan back past
+      // blank lines, and drop each directive line so it never reaches the model.
       let nextMode: SectionMergeMode = 'override';
+      let nextPaths: string[] = [];
       for (let i = buf.length - 1; i >= 0; i--) {
-        if (!buf[i].trim()) continue;
-        if (APPEND_DIRECTIVE.test(buf[i].trim())) {
+        const raw = buf[i].trim();
+        if (!raw) continue;
+        if (APPEND_DIRECTIVE.test(raw)) {
           nextMode = 'append';
           buf.splice(i, 1);
+          continue;
+        }
+        const scope = parseScope(raw);
+        if (scope) {
+          nextPaths = scope;
+          buf.splice(i, 1);
+          continue;
         }
         break;
       }
       flush();
       key = sectionKey(m[1]);
       mode = nextMode;
+      paths = nextPaths;
       buf = [line];
     } else {
       buf.push(line);
@@ -280,9 +362,9 @@ function layerReport(layer: MergeInput): ConventionsLayerReport {
  * happened along the way. Exported for tests and for `agents:show`. */
 export function mergeLayers(
   layers: MergeInput[],
-  extra: { imports?: ConventionsImport[] } = {},
+  extra: { imports?: ConventionsImport[]; paths?: string[] } = {},
 ): MergedConventions {
-  const kept: { key: string; body: string; by: ConventionsLayerName }[] = [];
+  const kept: { key: string; body: string; by: ConventionsLayerName; paths: string[] }[] = [];
   const index = new Map<string, number>();
   const overrides: ConventionsOverride[] = [];
   const appends: ConventionsAppend[] = [];
@@ -295,12 +377,17 @@ export function mergeLayers(
     const isChild = seenLayer;
     seenLayer = true;
     for (const section of splitSections(text)) {
+      // Path-scoped section that does not apply to the files in play: drop it.
+      // Only callers that actually know the file set pass `paths`.
+      if (extra.paths && section.paths.length > 0 && !scopeApplies(section.paths, extra.paths)) {
+        continue;
+      }
       const body = section.body;
       const at = index.get(section.key);
       if (at === undefined) {
         if (isChild && section.key) appends.push({ section: section.key, by: layer.name });
         index.set(section.key, kept.length);
-        kept.push({ key: section.key, body, by: layer.name });
+        kept.push({ key: section.key, body, by: layer.name, paths: section.paths });
         continue;
       }
       const prev = kept[at];
@@ -316,13 +403,31 @@ export function mergeLayers(
         key: section.key,
         body: appending ? `${prev.body}\n\n${bodyWithoutHeading(body)}` : body,
         by: layer.name,
+        paths: section.paths.length > 0 ? section.paths : prev.paths,
       };
     }
   }
+  const renderBody = (s: { body: string; paths: string[] }) => {
+    if (s.paths.length === 0) return s.body;
+    // Make the scope visible: the model must be able to tell a UI-only rule
+    // from a repo-wide one without guessing.
+    const [heading, ...rest] = s.body.split('\n');
+    const note = `> 生效范围：${s.paths.join(' / ')}`;
+    return [heading, '', note, ...rest].join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  };
   const text = kept
-    .map((s) => s.body)
+    .map(renderBody)
     .filter((b) => b.length > 0)
     .join('\n\n');
+  const warnings: string[] = [];
+  for (const report of layers.map(layerReport)) {
+    if (report.present && report.chars > CONVENTIONS_LAYER_BUDGET) {
+      warnings.push(`${report.name} 层 ${report.chars} 字符，超过 ${CONVENTIONS_LAYER_BUDGET} 字符预算`);
+    }
+  }
+  if (text.length > CONVENTIONS_TOTAL_BUDGET) {
+    warnings.push(`合并后 ${text.length} 字符，超过 ${CONVENTIONS_TOTAL_BUDGET} 字符预算`);
+  }
   return {
     text,
     diagnostics: {
@@ -330,6 +435,8 @@ export function mergeLayers(
       overrides,
       appends,
       imports: extra.imports ?? [],
+      scopes: kept.filter((s) => s.paths.length > 0).map((s) => ({ section: s.key || '(前言)', by: s.by, paths: s.paths })),
+      warnings,
       mergedChars: text.length,
       mergedSections: kept.length,
     },
@@ -638,6 +745,14 @@ export function formatConventionsDiagnostics(d: ConventionsDiagnostics): string 
   if (d.appends.length > 0) {
     lines.push('  新增（仅子层定义）：');
     for (const a of d.appends) lines.push(`    「${a.section}」  by ${a.by}`);
+  }
+  if (d.scopes.length > 0) {
+    lines.push('  作用域（仅对匹配路径生效）：');
+    for (const s of d.scopes) lines.push(`    「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}`);
+  }
+  if (d.warnings.length > 0) {
+    lines.push('  预算警告：');
+    for (const w of d.warnings) lines.push(`    ${w}`);
   }
   if (d.imports.length > 0) {
     lines.push('  导入（@file.md 展开）：');
