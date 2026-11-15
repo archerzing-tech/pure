@@ -43,6 +43,7 @@
 ## 其他
 
 - [screenshots/](screenshots/) — README 用图（UI 截图、架构对比 SVG）。
+- [incident-2026-11-15-boot-splash.md](incident-2026-11-15-boot-splash.md) — 已结案复盘：Node 全局 `Buffer` 进 GUI bundle 导致主 chunk 求值期崩溃、应用卡在 boot splash；含兜底为何失效与取证缺口。
 
 ## 仓库根目录
 

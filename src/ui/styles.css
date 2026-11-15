@@ -12399,8 +12399,9 @@ button svg,
    Boot splash — branded startup transition (index.html #boot-splash).
    Rendered by pure CSS from first paint (no JS dependency), then faded out
    by dismissBootSplash() in main.ts once the landing page has painted.
-   Failsafe: if the module never runs, a delayed CSS animation hides it
-   after 6s so the window is never stuck on a blank splash. ═══════════════ */
+   6s 无 JS 兜底在 critical.css：本文件由 JS 动态注入，主模块求值期崩掉时
+   它根本不存在，写在这里等于兜底依赖被兜底的对象（2026-11-15 Buffer 判例）。
+   ═══════════════════════════════════════════════════════════════════════ */
 #boot-splash {
   position: fixed;
   inset: 0;
@@ -12414,10 +12415,8 @@ button svg,
   background: var(--bg);
   pointer-events: none; /* purely visual — never blocks interaction */
   transition: opacity .38s ease, visibility .38s ease;
-  animation: boot-failsafe 0s linear 6s forwards;
 }
 #boot-splash.boot-dismiss { opacity: 0; visibility: hidden; }
-@keyframes boot-failsafe { to { opacity: 0; visibility: hidden; } }
 
 .boot-splash-inner {
   display: flex;

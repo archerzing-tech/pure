@@ -403,8 +403,13 @@ body {
   background: var(--bg);
   opacity: 1;
   transition: opacity .35s var(--ease-out), visibility .35s var(--ease-out);
+  /* 兜底必须在这份文件里：styles.css 是 JS 动态加载的，主模块一挂它就不
+     存在——之前 failsafe 写在 styles.css，模块求值失败时 splash 永远不消失
+     （2026-11-15 Buffer 案：兜底依赖了被兜底的对象）。6s 无 JS 干预强制撤场。 */
+  animation: boot-failsafe 0s linear 6s forwards;
 }
 #boot-splash.boot-dismiss { visibility: hidden; opacity: 0; }
+@keyframes boot-failsafe { to { opacity: 0; visibility: hidden; } }
 .boot-splash-inner { display: flex; align-items: center; gap: 12px; color: var(--text); }
 .boot-wordmark { font-size: 28px; font-weight: 600; }
 .boot-dots { display: flex; gap: 7px; }

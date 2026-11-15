@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.4
+
+**启动卡死在 boot splash 根治：Node 全局 `Buffer` 混进 GUI bundle + 兜底依赖了被兜底的对象**
+
+一、根因（2026-11-15 真机判例，完整复盘见 `docs/incident-2026-11-15-boot-splash.md`）：`9678d43` 把 `src/shared/defaultAgentsMd.ts` 改成 `Buffer.from(B64,"base64")`。该模块被 `src/ui/chat.ts` 直接 import，因而进入 GUI 的 webview bundle——浏览器没有 `Buffer`，模块求值期抛 `ReferenceError`，整个主 chunk 起不来，`main.ts` 一行都没执行，窗口永远停在 splash。修复：内嵌改回纯字符串字面量（`JSON.stringify` 生成，`agents:sync` 可复现、零 diff）。构建期能拦住 `import 'node:*'`，Node 全局溜得过去、只在运行期炸——这是本次最贵的教训。
+
+二、兜底不能依赖被兜底的对象：6s 无 JS failsafe 原来写在 `styles.css`，而它是 JS 动态注入的，主模块挂掉时根本不存在。移到 `critical.css`（`index.html` 静态 `<link>`），并删掉 `styles.css` 里那份重复的 `@keyframes`（两份同名会让后注入的静默覆盖，单源丢失）。
+
+三、启动取证缺口：错误台账在 `main.ts` 里才安装，模块求值期崩溃时它还没上岗，`gui_errors.log` 一条不留。新增 `gui_perf.log` 的 boot 行（`{"kind":"boot","ms":…,"splash":"dismissed"|"forced"}`），写在撤场决策点而非 `requestAnimationFrame`——窗口在后台时 rAF 会被节流，否则"没有这一行"会被误判成崩溃。真机验证：`ms: 969`、`splash: dismissed`。
+
+四、去掉排障期的 `withBootTimeout` 包装：它把"卡住"换成了"静默用错主题/人格"（`applySoulOverrideFromDisk` 超时会违反"覆盖必须在 `applySavedCharacterProfile` 之前落位"的契约），根因既已修掉，收益不成立。10s 强制撤场保留，作为"某个 invoke 永不回包"的最后一道。
+
+验证：`tsc` 绿；生产 bundle 在 Chromium 里进得去主界面、0 console error；真机 `/Applications/pure.app 4.8.4` 启动落 boot 行。
+
 ## v4.8.3
 
 **Windows shell 执行链根治四连：退出码透传、后台链炸点、CLIXML 报错解包补齐、32K 命令行守卫 + 更新端点 GitHub fallback + 思考卡版式修正（重发）**

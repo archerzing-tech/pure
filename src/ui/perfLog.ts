@@ -28,6 +28,19 @@ export function percentileFromSorted(sorted: number[], p: number): number {
   return sorted[idx];
 }
 
+/** 启动完成的取证行（2026-11-15 卡 splash 判例）：模块求值失败时这一行永远
+ *  不会出现，于是「用户说卡在加载页」与「加载完成但白屏」在日志上可区分——
+ *  在此之前两者都只剩一句用户口述。与流式埋点同文件同通道，尽力而为。 */
+export async function logBootSample(ms: number, splash: 'dismissed' | 'forced'): Promise<void> {
+  const line = JSON.stringify({ ts: Date.now(), kind: 'boot', ms: Math.round(ms), splash });
+  try {
+    const core = await loadTauriCore();
+    if (core) await core.invoke('gui_perf_log', { lines: [line] });
+  } catch {
+    // 同上：埋点失败静默，不影响启动。
+  }
+}
+
 /** 聚合器工厂：样本攒到 flushEveryBeats 个或首样本起 flushEveryMs 到期，
  *  落一行 {ts, kind, beats, p50, p90, max, lenMax}。 */
 export function createPerfAggregator(

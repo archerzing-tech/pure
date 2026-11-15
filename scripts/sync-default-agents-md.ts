@@ -17,7 +17,6 @@ const OUT_TAURI = `${ROOT}src-tauri/AGENTS.md`;
 
 // 三侧都 trim：行尾/末尾换行的差异不该被当成内容变更。
 const content = readFileSync(TEMPLATE, 'utf8').trim();
-const b64 = Buffer.from(content, 'utf8').toString('base64');
 
 const file = `// Baked-in baseline default AGENTS.md for the standalone CLI.
 //
@@ -27,12 +26,16 @@ const file = `// Baked-in baseline default AGENTS.md for the standalone CLI.
 // \`bun test\` asserts parity with the template. Do not hand-edit the project
 // root AGENTS.md as a source for this: that file is this repo's own dev
 // conventions, not the product default.
-const B64 = "${b64}";
-export const DEFAULT_AGENTS_MD: string = Buffer.from(B64, "base64").toString("utf8");
+//
+// 内嵌必须是纯字符串字面量，不能走 Buffer/base64：这个模块进 GUI webview
+// bundle（chat.ts 引 DEFAULT_AGENTS_MD），浏览器没有 Buffer，模块求值期直接
+// ReferenceError——整个主 chunk 起不来，GUI 就永远停在 boot splash
+// （2026-11-15 卡 splash 判例，4.8.4-alpha）。
+export const DEFAULT_AGENTS_MD: string = ${JSON.stringify(content)};
 `;
 
 writeFileSync(OUT_TS, file, 'utf8');
 writeFileSync(OUT_TAURI, content + '\n', 'utf8');
 console.log(
-  `Wrote ${OUT_TS} (${content.length} chars → ${b64.length} base64) and ${OUT_TAURI}`,
+  `Wrote ${OUT_TS} (${content.length} chars string literal) and ${OUT_TAURI}`,
 );

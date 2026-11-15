@@ -78,6 +78,7 @@ import { createHistoryGroup, type HistoryGroupHandle } from './transcriptHistory
 import { loadDeferredStyles } from './deferredStyles';
 import { invoke } from '@tauri-apps/api/core';
 import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
+import { logBootSample } from './perfLog';
 
 // ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
 // 僵尸态事故(按钮全死/窗口空白)唯一的页面内第一手证据,机制见 errorLedger.ts;
@@ -1006,13 +1007,20 @@ function updateContextPanelStage(streaming = chat.isStreaming()) {
 // The branded splash (index.html #boot-splash) covers the window from first
 // paint while the app initializes. dismissBootSplash() reveals the landing
 // once it has been painted AND a short minimum display time has passed, so
-// fast machines get a smooth transition instead of a blink. A pure-CSS
-// failsafe hides the splash after 6s even if this module never runs.
+// fast machines get a smooth transition instead of a blink. The 6s no-JS
+// failsafe lives in critical.css (this module can fail to evaluate at all).
 const bootStartedAt = performance.now();
+let bootSplashDismissed = false;
 
 function dismissBootSplash(minVisibleMs = 450): void {
+  if (bootSplashDismissed) return;
   const splash = document.getElementById('boot-splash');
-  if (!splash) return;
+  if (!splash) { bootSplashDismissed = true; return; }
+  bootSplashDismissed = true;
+  // 启动取证落在这里而不是 rAF 里：窗口隐藏/后台启动时 rAF 会被节流甚至不触发，
+  // 那样「没有这一行」既可能是模块求值期崩了、也可能只是窗口在后台，判据就废了。
+  // ms = 从模块开始执行到决定撤场；forced 表示走到 10s 兜底。
+  void logBootSample(performance.now() - bootStartedAt, minVisibleMs === 0 ? 'forced' : 'dismissed');
   const wait = Math.max(0, minVisibleMs - (performance.now() - bootStartedAt));
   setTimeout(() => {
     // Two rAFs guarantee the landing page has actually painted before the
@@ -1026,6 +1034,15 @@ function dismissBootSplash(minVisibleMs = 450): void {
     }));
   }, wait);
 }
+
+// 终极兜底：关键初始化异常或挂起时，最多 10s 强制撤掉 splash，保证用户能进
+// 到界面（可能处于退化状态，但不会永远卡在加载页）。
+setTimeout(() => {
+  if (!bootSplashDismissed) {
+    console.warn('[pure] boot splash force-dismissed after timeout');
+    dismissBootSplash(0);
+  }
+}, 10000);
 
 /** Run non-essential work after the landing is revealed, in idle slots
  * (falls back to a short timeout where requestIdleCallback is missing). */
