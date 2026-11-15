@@ -439,6 +439,16 @@ describe('L1 behavior contracts', () => {
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('flood the main session');
     expect(wantsDelegationMechanics('把这批历史文档盘点一遍', false)).toBe(true);
     expect(wantsDelegationMechanics('通读所有文档写一份摘要', false)).toBe(true);
+    // 2026-11-15 真机判例：用户说"从多个平台帮我快速整理最新国漫上新剧集"，
+    // 模型手里有 researcher 却连打 6 个 web_search——来源集合当时不在词表里，
+    // 编排规则没进提示词，"快速"又把它推向自己串行查。来源集合 = N 路调研。
+    expect(wantsDelegationMechanics('从多个平台帮我快速的整理一下最新的国漫上新剧集', false)).toBe(true);
+    expect(wantsDelegationMechanics('对比 B 站、腾讯、爱奇艺各平台的国漫上新', false)).toBe(true);
+    expect(wantsDelegationMechanics('去各社区看看大家怎么评价这个模型', false)).toBe(true);
+    expect(wantsDelegationMechanics('多渠道确认一下这个价格', false)).toBe(true);
+    // 单一来源的检索不开闸：别把一次普通搜索也说成多路。
+    expect(wantsDelegationMechanics('帮我搜一下国漫上新', false)).toBe(false);
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('A sources set counts as N investigations');
   });
 
   it('uses dynamic capability tools for skills and MCP services', () => {
