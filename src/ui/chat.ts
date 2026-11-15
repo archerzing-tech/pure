@@ -5102,6 +5102,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const endThinking = (mode: 'answer' | 'handoff' = 'handoff') => {
       cancelToolGapCard();
       cancelPreflightCard();
+      // 续写指针的失效规则：工具行/计划卡接管（handoff）一律作废——那是新的
+      // LLM 迭代，旧卡不该被后面的 reasoning 抓回来续写。以前没作废，靠把旧卡
+      // 搬到 transcript 尾部掩盖过期指针，搬运的副作用就是「正文在上、思考卡在
+      // 下」（2026-11-15 真机判例）。
+      if (mode === 'handoff') lastThinkingCard = null;
       if (thinkingFlushTimer !== undefined) {
         clearTimeout(thinkingFlushTimer);
         thinkingFlushTimer = undefined;
@@ -5120,6 +5125,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (!thinkingCard.textEl.textContent) {
         thinkingCard.el.remove();
         thinkingCard = null;
+        lastThinkingCard = null;
         return;
       }
       // 轻轮次不留思考 ghost（发现 #6 割裂感，2026-10-12 用户真机指认——
@@ -5143,6 +5149,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       ) {
         thinkingCard.el.remove();
         thinkingCard = null;
+        lastThinkingCard = null;
         return;
       }
       resetThinkingLabelForOutput(thinkingCard);
@@ -7346,9 +7353,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // EXCEPT when the SAME reasoning stream resumes right after answer
             // text finalized its card (interleaved thinking, or a sliver of
             // prose splitting one thought in half — 真机两形态判例). Reopen
-            // that card and move it to the transcript tail: one continuous
-            // card readable top to bottom, and the persisted phase stays ONE
-            // segment (the push guard below sees a non-empty textEl).
+            // that card IN PLACE: one continuous card, and the persisted phase
+            // stays ONE segment (the push guard below sees a non-empty textEl).
+            // 不搬到尾部(2026-11-15 用户真机判例「总是先显示结果,再显示思考」)：
+            // appendChild 会把这颗卡挪到正文下面,读者先读到答案、再读到思考,
+            // 而思考是答案的前提。原地续写 = 思考在上、正文在下,续写的正文继续
+            // 长在同一个气泡里(ensureSegment 不因卡片让位而新开气泡)。
             // 正文后的静默可能已开出空 waiting 壳(「正在思考下一步…」)——壳
             // 没收到过内容就让位给续写卡,否则壳长出后半、与前卡构成两张。
             const waitingShell = !!thinkingCard
@@ -7364,10 +7374,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (thinkingCard) thinkingCard.el.remove();
               thinkingCard = resumed;
               reopenThinkingCard(resumed);
-              // appendChild on an attached node MOVES it: the card jumps below
-              // the answer prose that finalized it, so the resumed reasoning
-              // reads in order instead of growing inside a card sitting above.
-              this.appendToTranscript(resumed.el);
               reviveThinkingTimer(resumed);
             } else if (!thinkingCard) {
               thinkingCard = openThinkingCard();

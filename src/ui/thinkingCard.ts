@@ -394,8 +394,9 @@ export function finalizeThinkingCard(handle: ThinkingCardHandle): void {
 /** Revive a finalized card: the model went back to reasoning after answer
  *  text — the SAME reasoning stream, not a new phase. Reopening the existing
  *  card (instead of opening a second one) keeps one continuous thinking card
- *  the user can read top to bottom; the caller moves `handle.el` to the
- *  transcript tail and restarts the timer chip. The frozen "思考完成 · Ns"
+ *  the user can read top to bottom; the caller reopens it in place (no DOM
+ *  move — relocating it below the answer prose put the result before the
+ *  thinking on screen) and restarts the timer chip. The frozen "思考完成 · Ns"
  *  label is restored to the live thinking state, dots included. */
 export function reopenThinkingCard(handle: ThinkingCardHandle): void {
   handle.card.classList.remove('complete');
