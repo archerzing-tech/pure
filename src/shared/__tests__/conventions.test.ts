@@ -2,17 +2,34 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadMergedConventions, mergeConventions, splitSections } from '../conventions';
+import {
+  loadMergedConventions,
+  loadMergedConventionsWithDiagnostics,
+  mergeConventions,
+  sectionKey,
+  splitSections,
+} from '../conventions';
 import { DEFAULT_AGENTS_MD } from '../defaultAgentsMd';
 
 describe('DEFAULT_AGENTS_MD parity', () => {
-  it('stays in sync with the project-root AGENTS.md (trimmed)', () => {
-    // Regenerate src/shared/defaultAgentsMd.ts after editing AGENTS.md. The base64
-    // is the trimmed AGENTS.md content (no trailing newline). Both sides are
-    // trimmed so a header/line-ending difference never masquerades as a change.
+  it('stays in sync with templates/default-agents.md (trimmed)', () => {
+    // The product default's single source is templates/default-agents.md —
+    // NOT the project-root AGENTS.md, which is this repo's own dev conventions
+    // and must never ship as the global default (`bun run agents:sync`).
     const root = join(import.meta.dir, '..', '..', '..');
-    const agents = readFileSync(join(root, 'AGENTS.md'), 'utf8').trim();
-    expect(DEFAULT_AGENTS_MD.trim()).toBe(agents);
+    const template = readFileSync(join(root, 'templates', 'default-agents.md'), 'utf8').trim();
+    expect(DEFAULT_AGENTS_MD.trim()).toBe(template);
+  });
+
+  it('derives the packaged copy from the same template (sync script contract)', () => {
+    // src-tauri/AGENTS.md is a gitignored build artifact (tauri resources), so
+    // a fresh clone cannot assert its content — assert the generator instead:
+    // it must read the template and never the project-root AGENTS.md.
+    const root = join(import.meta.dir, '..', '..', '..');
+    const script = readFileSync(join(root, 'scripts', 'sync-default-agents-md.ts'), 'utf8');
+    expect(script).toContain('templates/default-agents.md');
+    expect(script).toContain('src-tauri/AGENTS.md');
+    expect(script).not.toContain('`${ROOT}AGENTS.md`');
   });
 });
 
@@ -58,6 +75,65 @@ describe('conventions merge (two-layer AGENTS.md)', () => {
     const sections = splitSections('# Foo\n\na\n\n# foo\n\nb');
     // headings with the same normalized key collapse to the later body
     expect(sections.filter((s) => s.key === 'foo').length).toBe(2);
+  });
+});
+
+describe('section keys (heading normalization)', () => {
+  it('ignores numbering, case and trailing punctuation', () => {
+    expect(sectionKey('1. 语言')).toBe('语言');
+    expect(sectionKey('## 1.2 语言：')).toBe('语言');
+    expect(sectionKey('Language')).toBe('language');
+    expect(sectionKey('（3）项目事实。')).toBe('项目事实');
+    expect(sectionKey('三、提交信息约定')).toBe('提交信息约定');
+  });
+
+  it('lets a numbered parent section be overridden by an unnumbered child heading', () => {
+    // Migration case: existing ~/.pure/AGENTS.md copies carry `## 1. 语言`.
+    const app = '## 1. 语言\n\nuse the user language';
+    const user = '## 语言\n\n回复用中文';
+    const merged = mergeConventions(app, user);
+    expect(merged).toContain('回复用中文');
+    expect(merged).not.toContain('use the user language');
+    expect(merged.match(/语言/g)?.length).toBe(1);
+  });
+});
+
+describe('merge diagnostics', () => {
+  it('reports layer sources, overrides and child-only sections', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'pure-diag-'));
+    try {
+      writeFileSync(join(rootDir, 'AGENTS.md'), '## 语言\n\nworkspace language\n\n## 仅工作区\n\nwork only');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\napp language',
+        userSpaceRoot: rootDir,
+      });
+      expect(text).toContain('workspace language');
+      expect(diagnostics.layers.map((l) => l.name)).toEqual(['app', 'global', 'workspace']);
+      const workspace = diagnostics.layers.find((l) => l.name === 'workspace');
+      expect(workspace?.present).toBe(true);
+      expect(workspace?.sections).toEqual(['语言', '仅工作区']);
+      // The override names both sides, so a silent takeover can be reported.
+      expect(diagnostics.overrides).toContainEqual({
+        section: '语言',
+        from: 'app',
+        by: 'workspace',
+        replacedChars: '## 语言\n\napp language'.length,
+      });
+      expect(diagnostics.appends).toContainEqual({ section: '仅工作区', by: 'workspace' });
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the baked default for the app layer and never the current directory', async () => {
+    // Guards the double-identity bug: no appSpaceRoot → app layer is the
+    // product template, not <cwd>/AGENTS.md (this repo's dev conventions).
+    const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+      userSpaceRoot: join(tmpdir(), 'pure-nonexistent-ws-xyz'),
+    });
+    expect(text).toBe(DEFAULT_AGENTS_MD.trim());
+    const app = diagnostics.layers.find((l) => l.name === 'app');
+    expect(app?.source).toContain('templates/default-agents.md');
   });
 });
 

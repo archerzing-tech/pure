@@ -28,7 +28,11 @@ import { sanitizeForTerminal } from './termwidth';
 import { ThinkingCard } from './cli-thinking';
 import { formatToolErrorLine, logoRowPlan, LOGO_WORDMARK_W } from './cli_toolrow';
 import { buildCliCapabilities, formatPromptBudgetDiagnostic, promptAssembler, type PromptSkill } from './shared/PromptAssembler';
-import { loadMergedConventions, getAppSpaceRoot, readAgentsMdAt, ensureAgentsMdAt } from './shared/conventions';
+import {
+  loadMergedConventionsWithDiagnostics,
+  formatConventionsDiagnostics,
+  ensureAgentsMdAt,
+} from './shared/conventions';
 import { DEFAULT_AGENTS_MD } from './shared/defaultAgentsMd';
 import { buildShellContext } from './shared/shellEnv';
 import { parseSkillMarkdown } from './shared/skillFiles';
@@ -302,14 +306,22 @@ async function assembleCliPrompt(
   const userWorkspace = args.workspace && args.workspace !== 'true'
     ? args.workspace
     : (loadConfig()?.workspace || process.cwd());
-  const appAgentsRoot = getAppSpaceRoot();
-  const appAgents = (await readAgentsMdAt(appAgentsRoot)) || DEFAULT_AGENTS_MD;
-  await ensureAgentsMdAt(PURE_DIR, appAgents);
-  const conventions = await loadMergedConventions({
-    appSpaceRoot: appAgentsRoot,
+  // App layer is always the baked product default (generated from
+  // templates/default-agents.md). Reading <cwd>/AGENTS.md here was the double
+  // identity bug: in a checkout of this repo the app default *became* this
+  // repo's dev conventions, and got seeded into the user's ~/.pure/AGENTS.md.
+  await ensureAgentsMdAt(PURE_DIR, DEFAULT_AGENTS_MD);
+  const merged = await loadMergedConventionsWithDiagnostics({
+    appText: DEFAULT_AGENTS_MD,
     globalUserRoot: PURE_DIR,
     userSpaceRoot: userWorkspace,
   });
+  const conventions = merged.text;
+  // PURE_DEBUG_CONVENTIONS=1 prints which layer each section came from and
+  // which sections a child layer replaced (same report as `bun run agents:show`).
+  if (process.env.PURE_DEBUG_CONVENTIONS === '1') {
+    process.stderr.write(`${formatConventionsDiagnostics(merged.diagnostics)}\n`);
+  }
   // Only enable the multi_agent protocol when subagent tools are actually in
   // the model-visible list (workspace mode). Plain-chat mode returns an empty
   // toolsDefs and must not be told to delegate.
