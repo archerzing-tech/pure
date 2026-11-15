@@ -6,6 +6,7 @@ import {
   loadMergedConventions,
   loadMergedConventionsWithDiagnostics,
   mergeConventions,
+  mergeLayers,
   sectionKey,
   splitSections,
 } from '../conventions';
@@ -98,6 +99,58 @@ describe('section keys (heading normalization)', () => {
   });
 });
 
+describe('section merge modes', () => {
+  it('appends to the parent section when the directive sits above the heading', () => {
+    const app = '## 语言\n\ndefault line';
+    const user = '<!-- merge: append -->\n## 语言\n\nproject line';
+    const merged = mergeConventions(app, user);
+    // Both bodies survive, the parent comes first, the heading is printed once,
+    // and the directive itself never reaches the model.
+    expect(merged).toContain('default line');
+    expect(merged).toContain('project line');
+    expect(merged.match(/## 语言/g)?.length).toBe(1);
+    expect(merged.indexOf('default line')).toBeLessThan(merged.indexOf('project line'));
+    expect(merged).not.toContain('<!--');
+  });
+
+  it('keeps plain sections overriding — the directive is opt-in', () => {
+    const app = '## 语言\n\ndefault line';
+    const user = '## 语言\n\nproject line';
+    const merged = mergeConventions(app, user);
+    expect(merged).toContain('project line');
+    expect(merged).not.toContain('default line');
+  });
+
+  it('accumulates appends across all three layers', () => {
+    const { text, diagnostics } = mergeLayers([
+      { name: 'app', source: 'app', text: '## 语言\n\napp line' },
+      { name: 'global', source: 'global', text: '<!-- merge: append -->\n## 语言\n\nglobal line' },
+      { name: 'workspace', source: 'ws', text: '<!-- merge: append -->\n## 语言\n\nworkspace line' },
+    ]);
+    expect(text).toContain('app line');
+    expect(text).toContain('global line');
+    expect(text).toContain('workspace line');
+    expect(diagnostics.overrides.map((o) => o.mode)).toEqual(['append', 'append']);
+    expect(text.match(/## 语言/g)?.length).toBe(1);
+  });
+
+  it('applies through the disk loader (workspace appends to the app default)', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'pure-append-'));
+    try {
+      writeFileSync(join(rootDir, 'AGENTS.md'), '<!-- merge: append -->\n## 语言\n\nworkspace extra');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\ndefault rule',
+        userSpaceRoot: rootDir,
+      });
+      expect(text).toContain('default rule');
+      expect(text).toContain('workspace extra');
+      expect(diagnostics.overrides.at(-1)?.mode).toBe('append');
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('merge diagnostics', () => {
   it('reports layer sources, overrides and child-only sections', async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'pure-diag-'));
@@ -117,6 +170,7 @@ describe('merge diagnostics', () => {
         section: '语言',
         from: 'app',
         by: 'workspace',
+        mode: 'override',
         replacedChars: '## 语言\n\napp language'.length,
       });
       expect(diagnostics.appends).toContainEqual({ section: '仅工作区', by: 'workspace' });

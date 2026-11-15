@@ -52,7 +52,7 @@
 
 ### P1
 
-- **合并语义升级**：每节支持 `merge: append | override`，覆盖时输出诊断（哪层覆盖了哪节），让「冲突上报」对 loader 也成立（诊断已在 P0 落地，append 语义待做）。
+- **合并语义升级**：每节支持 `merge: append | override`（✅ 已落地：标题上一行写 `<!-- merge: append -->` 即追加不替换，可跨层叠加），覆盖时输出诊断（哪层覆盖了哪节），让「冲突上报」对 loader 也成立。
 - **支持 `@import`（限跳数）+ 路径作用域（frontmatter `paths:`）+ 按需加载下层 AGENTS.md**。
 - **规则分级**：`[hard]` / `[soft]`，hard 项必须同时落在 permissions / hooks 配置里。
 - **默认可更新**：默认文件带版本标记，升级时只替换用户未改过的节。
@@ -69,3 +69,9 @@
 - 多 agent 编排策略自 `AGENTS.md` 迁入 `MULTI_AGENT_MECHANICS_PROMPT`（选角 / 检验独立 / 并发与回炉上限）。
 - `scripts/sync-default-agents-md.ts` 改为「模板 → `defaultAgentsMd.ts` + `src-tauri/AGENTS.md`」单向生成；parity 测试改锁模板。
 - `conventions.ts` 增加分节 key 归一化（去编号、大小写、空白）与合并诊断（各层来源、被覆盖节、新增节）。
+
+### 落地记录（2026-11-15，P1 第一刀）
+
+- 合并语义支持按节追加：标题上一行 `<!-- merge: append -->`，父层内容保留、子层内文追加在后，三层可叠加；指令行在合并前剥除，不进模型上下文。
+- 诊断区分「覆盖（-N 字符）」与「追加」，`agents:show` 可直接看出某节是被替换还是被补充。
+- 未做：`@import`、`paths:` 路径作用域、按需加载下层 `AGENTS.md`。

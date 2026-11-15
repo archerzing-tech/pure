@@ -45,11 +45,24 @@ export interface ConventionsLayerReport {
   chars: number;
 }
 
+export type SectionMergeMode = 'override' | 'append';
+
+/** Per-section merge directive: a line IMMEDIATELY above the heading makes the
+ * child layer ADD to the parent section instead of replacing it. Written as an
+ * HTML comment so it is invisible in rendered markdown.
+ *    <!-- merge: append -->
+ *    ## 语言
+ * Without it a child section replaces the parent one (the default). */
+const APPEND_DIRECTIVE = /^<!--\s*(?:pure:)?merge:\s*append\s*-->\s*$/i;
+
 export interface ConventionsOverride {
   /** Normalized section key (heading text). */
   section: string;
   from: ConventionsLayerName;
   by: ConventionsLayerName;
+  /** `override` replaced the parent body; `append` kept it and added to it. */
+  mode: SectionMergeMode;
+  /** Chars of the parent body this layer replaced (override only). */
   replacedChars: number;
 }
 
@@ -101,23 +114,39 @@ export function sectionKey(heading: string): string {
 }
 
 /** Split a markdown conventions doc into ordered sections keyed by heading text.
- * A leading block before the first heading uses the empty key. */
-export function splitSections(text: string): { key: string; body: string }[] {
+ * A leading block before the first heading uses the empty key. `mode` is the
+ * per-section merge mode declared by an `<!-- merge: append -->` directive. */
+export function splitSections(
+  text: string,
+): { key: string; body: string; mode: SectionMergeMode }[] {
   const lines = text.split(/\r?\n/);
-  const out: { key: string; body: string }[] = [];
+  const out: { key: string; body: string; mode: SectionMergeMode }[] = [];
   let key = '';
+  let mode: SectionMergeMode = 'override';
   let buf: string[] = [];
   const flush = () => {
     if (buf.length > 0) {
-      out.push({ key, body: buf.join('\n').trim() });
+      out.push({ key, body: buf.join('\n').trim(), mode });
       buf = [];
     }
   };
   for (const line of lines) {
     const m = /^#{1,6}\s+(.*\S)\s*$/.exec(line);
     if (m) {
+      // The directive binds to the heading directly below it: scan back past
+      // blank lines, and drop the directive line so it never reaches the model.
+      let nextMode: SectionMergeMode = 'override';
+      for (let i = buf.length - 1; i >= 0; i--) {
+        if (!buf[i].trim()) continue;
+        if (APPEND_DIRECTIVE.test(buf[i].trim())) {
+          nextMode = 'append';
+          buf.splice(i, 1);
+        }
+        break;
+      }
       flush();
       key = sectionKey(m[1]);
+      mode = nextMode;
       buf = [line];
     } else {
       buf.push(line);
@@ -125,6 +154,12 @@ export function splitSections(text: string): { key: string; body: string }[] {
   }
   flush();
   return out;
+}
+
+/** Drop a body's leading heading line — appended content keeps the parent's
+ * heading, so the child's copy of it would otherwise print twice. */
+function bodyWithoutHeading(body: string): string {
+  return body.replace(/^#{1,6}[^\n]*\n?/, '').trim();
 }
 
 interface MergeInput {
@@ -169,13 +204,19 @@ export function mergeLayers(layers: MergeInput[]): MergedConventions {
         continue;
       }
       const prev = kept[at];
+      const appending = section.mode === 'append';
       overrides.push({
         section: section.key || '(前言)',
         from: prev.by,
         by: layer.name,
-        replacedChars: prev.body.length,
+        mode: appending ? 'append' : 'override',
+        replacedChars: appending ? 0 : prev.body.length,
       });
-      kept[at] = { key: section.key, body, by: layer.name };
+      kept[at] = {
+        key: section.key,
+        body: appending ? `${prev.body}\n\n${bodyWithoutHeading(body)}` : body,
+        by: layer.name,
+      };
     }
   }
   const text = kept
@@ -321,7 +362,8 @@ export function formatConventionsDiagnostics(d: ConventionsDiagnostics): string 
   } else {
     lines.push('  覆盖（子层替换父层同名节）：');
     for (const o of d.overrides) {
-      lines.push(`    「${o.section}」  ${o.from} → ${o.by}  （-${o.replacedChars} 字符）`);
+      const effect = o.mode === 'append' ? '追加' : `-${o.replacedChars} 字符`;
+      lines.push(`    「${o.section}」  ${o.from} → ${o.by}  （${effect}）`);
     }
   }
   if (d.appends.length > 0) {

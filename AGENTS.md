@@ -60,6 +60,12 @@ bun run agents:show                # 看 AGENTS.md 各层来源与被覆盖的�
 - 生成物与孪生文件必须同步：`src/shared/defaultAgentsMd.ts`、`src-tauri/AGENTS.md`、以及测试里锁住的字符串快照（很多测试按源码文本断言装配接线，改调用点要一起改）。
 - 文档纪律：活文档带状态行与 commit 锚；实现与文档冲突以代码为准。
 
+## AGENTS.md 合并语义
+
+- 三层：内置默认（`templates/default-agents.md`）→ `~/.pure/AGENTS.md` → 工作区 `AGENTS.md`；同层 `AGENTS.md` 优先，`CLAUDE.md` 兜底。
+- 子层按**归一化标题**（去编号、大小写、尾标点）整节覆盖父层。要在某一节上追加而不是替换，就在该节标题上一行写 `<!-- merge: append -->`：父层内容保留，子层内文追加在后，可跨层叠加。
+- 看合并结果：`bun run agents:show`（或 `PURE_DEBUG_CONVENTIONS=1` 跑 CLI）；改模板后必须 `bun run agents:sync`。
+
 ## 提交信息约定
 
 - 提交信息不写任何工具署名尾行：不加 `Generated with ...`，不加 `Co-Authored-By:`（Codebuff / Claude / 其他一律不加）。
