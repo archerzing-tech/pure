@@ -53,7 +53,7 @@
 ### P1
 
 - **合并语义升级**：每节支持 `merge: append | override`（✅ 已落地：标题上一行写 `<!-- merge: append -->` 即追加不替换，可跨层叠加），覆盖时输出诊断（哪层覆盖了哪节），让「冲突上报」对 loader 也成立。
-- **支持 `@import`（限跳数）+ 路径作用域 + 按需加载下层 AGENTS.md**（@import ✅；路径作用域 ✅ 标注式：标题上一行 `<!-- paths: … -->`，合并文本带生效范围，`mergeLayers(layers, { paths })` 可过滤；**按需加载下层目录仍未做**）。
+- **支持 `@import`（限跳数）+ 路径作用域 + 按需加载下层 AGENTS.md**（三项均已落地：@import 按层根展开；`<!-- paths: … -->` 标注 + `mergeLayers(layers, { paths })` 过滤；下层目录按**请求提及的路径**加载，越近越优先）。
 - **规则分级**：`[hard]` / `[soft]`，hard 项必须同时落在 permissions / hooks 配置里。
 - **默认可更新**（✅ 已落地）：默认文件带 `<!-- pure:default version=N -->`，基线记在 `~/.pure/AGENTS.default.json`；升级只替换用户未改过的节，缺的节追加，改过的节保留。
 
@@ -97,4 +97,9 @@
 ### 落地记录（2026-11-15，P1 第五刀）
 
 - `@import` 两面同源：路径处理改成纯字符串（`cleanPath` / `joinPath` / `dirnameOf`），渲染进程无需 `node:path`；GUI 传入层根相对路径与 invoke reader，把护栏（≤3 跳、去环、不越层根、代码块不展开）完整复用。
-- 未做：按需加载下层目录（需引擎在读写文件时按目录注入）；GUI 无预算告警展示。
+- 未做：GUI 无预算告警展示。
+
+### 落地记录（2026-11-15，P1 第六刀）
+
+- 下层目录按需加载（两面对称）：`collectNestedConventions` 从请求里提到的路径向上走目录链，加载每一级的 `AGENTS.md`/`CLAUDE.md`，外层先、内层后（内层覆盖外层）。CLI 在装配时传 `nestedFrom`，GUI 用同一个纯函数 + invoke reader，缓存键加入提示文本。
+- 定位说明：这是「按提及路径」的启发式，不是 Claude/opencode 那种「读到文件才注入」。误报只多花几个 token，漏报只是这一回合不带下层规则；真正按读写事件注入需要引擎钩子，仍未做。

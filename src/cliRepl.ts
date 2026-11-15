@@ -325,6 +325,9 @@ async function assembleCliPrompt(
     appText: DEFAULT_AGENTS_MD,
     globalUserRoot: PURE_DIR,
     userSpaceRoot: userWorkspace,
+    // Paths named in this request pull in the AGENTS.md of their directories
+    // (monorepo). Recall-first: a false positive costs a few tokens.
+    nestedFrom: userText,
   });
   const conventions = merged.text;
   // Soft-budget warnings print once per process: they are about the file the

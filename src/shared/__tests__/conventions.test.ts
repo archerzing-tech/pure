@@ -14,6 +14,8 @@ import {
   syncSeededAgentsMd,
   expandImports,
   scopeMatchesPath,
+  mentionedPaths,
+  ancestorDirsOf,
   CONVENTIONS_LAYER_BUDGET,
   sectionKey,
   splitSections,
@@ -458,6 +460,59 @@ describe('section scopes (paths) and soft budget', () => {
 
     const small = mergeLayers([{ name: 'workspace', source: 'ws', text: '## 小\n\nok' }]);
     expect(small.diagnostics.warnings).toEqual([]);
+  });
+});
+
+describe('nested conventions (mentioned paths)', () => {
+  it('walks outermost-first ancestors of a mentioned path', () => {
+    expect(ancestorDirsOf('packages/web/src/app.ts')).toEqual(['packages', 'packages/web', 'packages/web/src']);
+    expect(mentionedPaths('改一下 src/ui/chat.ts 和 docs/README.md')).toEqual([
+      'src/ui/chat.ts',
+      'docs/README.md',
+    ]);
+    expect(mentionedPaths('/etc/hosts.md and ../outside.md')).toEqual([]);
+  });
+
+  it('loads nested AGENTS.md for a mentioned path and lets the nearer one win', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-nested-'));
+    try {
+      mkdirSync(join(root, 'packages', 'web'), { recursive: true });
+      writeFileSync(join(root, 'packages', 'AGENTS.md'), '## 语言\n\n包级规则');
+      writeFileSync(join(root, 'packages', 'web', 'AGENTS.md'), '## 语言\n\nweb 级规则\n\n## WebOnly\n\nweb only');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\n默认',
+        userSpaceRoot: root,
+        nestedFrom: '修一下 packages/web/src/app.ts 的报错',
+      });
+      const nested = diagnostics.layers.filter((l) => l.name === 'nested');
+      expect(nested.map((l) => l.source)).toEqual([
+        'packages/AGENTS.md',
+        'packages/web/AGENTS.md',
+      ]);
+      expect(text).toContain('web only');
+      // Both declare 语言: the nearer (web) layer overrides the package one.
+      expect(text).toContain('web 级规则');
+      expect(text).not.toContain('包级规则');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('loads nothing when the turn names no path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-nonested-'));
+    try {
+      mkdirSync(join(root, 'packages', 'web'), { recursive: true });
+      writeFileSync(join(root, 'packages', 'web', 'AGENTS.md'), '## WebOnly\n\nweb only');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\n默认',
+        userSpaceRoot: root,
+        nestedFrom: '帮我看看这个项目',
+      });
+      expect(diagnostics.layers.some((l) => l.name === 'nested')).toBe(false);
+      expect(text).not.toContain('web only');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

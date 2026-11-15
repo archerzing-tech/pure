@@ -26,6 +26,7 @@ import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { promptObservability } from '../shared/promptObservability';
 import {
+  collectNestedConventions,
   expandImports,
   mergeConventions,
   parseSeedState,
@@ -803,23 +804,31 @@ function buildModelIdentity(config: PureConfig | null): { provider: string; mode
  * TTL-cached: the read is three IPC round trips and it used to run on EVERY
  * turn, all of it before the first token. Same 30s window as app skills, so
  * an edit to AGENTS.md still lands without a restart. */
-let guiConventionsCache: { at: number; workspace: string; text: string } | null = null;
+let guiConventionsCache: { at: number; workspace: string; mention: string; text: string } | null = null;
 
 /** Sidecar recording what we last wrote into the user's global AGENTS.md, so
  * an upgrade can tell "our text, untouched" from "the user rewrote it". */
 const SEED_STATE_FILE = 'AGENTS.default.json';
 
-async function loadGuiConventions(userWorkspace?: string): Promise<string> {
+async function loadGuiConventions(userWorkspace?: string, mentionText?: string): Promise<string> {
   const ws = userWorkspace ?? '';
-  if (guiConventionsCache && Date.now() - guiConventionsCache.at < 30_000 && guiConventionsCache.workspace === ws) {
+  // Nested layers depend on which paths this turn names, so the mention text
+  // is part of the cache key (same 30s window, different turn → different key).
+  const mention = (mentionText ?? '').slice(0, 400);
+  if (
+    guiConventionsCache &&
+    Date.now() - guiConventionsCache.at < 30_000 &&
+    guiConventionsCache.workspace === ws &&
+    guiConventionsCache.mention === mention
+  ) {
     return guiConventionsCache.text;
   }
-  const text = await readGuiConventions(ws);
-  guiConventionsCache = { at: Date.now(), workspace: ws, text };
+  const text = await readGuiConventions(ws, mention);
+  guiConventionsCache = { at: Date.now(), workspace: ws, mention, text };
   return text;
 }
 
-async function readGuiConventions(userWorkspace?: string): Promise<string> {
+async function readGuiConventions(userWorkspace?: string, mentionText?: string): Promise<string> {
   if (!isTauriRuntime()) return '';
   try {
     const appRoot = await resourceDir();
@@ -882,7 +891,11 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
     // `@file.md` imports expand per layer, layer-root-relative. Same pure
     // function the CLI loader uses; only the reader differs (Tauri bridge
     // here, node:fs there), so the two surfaces cannot drift.
-    const expandLayer = async (root: string, text: string | null): Promise<string | null> => {
+    const expandLayer = async (
+      root: string,
+      text: string | null,
+      filePath = 'AGENTS.md',
+    ): Promise<string | null> => {
       if (!text?.trim()) return text;
       const reader = async (rel: string) => {
         try {
@@ -891,7 +904,7 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
           return null;
         }
       };
-      const expanded = await expandImports(text, 'AGENTS.md', reader, { root: '' });
+      const expanded = await expandImports(text, filePath, reader, { root: '' });
       return expanded.text;
     };
     const appPlusGlobal = mergeConventions(
@@ -899,7 +912,26 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
       (await expandLayer(globalRoot, effectiveGlobal)) ?? null,
     );
     const userExpanded = userWorkspace ? await expandLayer(userWorkspace, userMd) : userMd;
-    return mergeConventions(appPlusGlobal || null, userExpanded);
+    let merged = mergeConventions(appPlusGlobal || null, userExpanded);
+    // Nested (monorepo): the AGENTS.md of directories this turn's text names,
+    // nearest last so it overrides farther rules — same order as the CLI.
+    if (userWorkspace && mentionText?.trim()) {
+      const nestedLayers = await collectNestedConventions({
+        mentionText,
+        read: async (rel) => {
+          try {
+            return await invoke<string>('read_file', { workspace: userWorkspace, path: rel });
+          } catch {
+            return null;
+          }
+        },
+      });
+      for (const layer of nestedLayers) {
+        const expanded = await expandLayer(userWorkspace, layer.text, layer.source);
+        merged = mergeConventions(merged || null, expanded);
+      }
+    }
+    return merged;
   } catch {
     return '';
   }
@@ -5914,7 +5946,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             ...DYNAMIC_CAPABILITY_TOOL_DEFS,
             ...(imageGen ? [IMAGE_GEN_TOOL_DEF] : []),
           ];
-      const conventions = await loadGuiConventions(effectiveWorkspace || undefined);
+      const conventions = await loadGuiConventions(effectiveWorkspace || undefined, userText);
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions, (userMessageAttachments?.length ?? 0) > 0);
       this.contextEngine = codingAgent.getHarness().getContextEngine();
 

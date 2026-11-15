@@ -32,9 +32,12 @@ export interface ConventionsRoots {
   globalUserRoot?: string | null;
   /** User workspace root — may or may not contain an AGENTS.md. */
   userSpaceRoot?: string | null;
+  /** This turn's text; paths mentioned in it pull in the AGENTS.md of the
+   * directories they live in (monorepo: `packages/web/AGENTS.md`). */
+  nestedFrom?: string | null;
 }
 
-export type ConventionsLayerName = 'app' | 'global' | 'workspace';
+export type ConventionsLayerName = 'app' | 'global' | 'workspace' | 'nested';
 
 export interface ConventionsLayerReport {
   name: ConventionsLayerName;
@@ -394,6 +397,68 @@ export async function expandImports(
   return { text: out.join('\n'), imports };
 }
 
+const MENTIONED_PATH = /(?:[\w.@+-]+\/)+[\w.@+-]+\.[A-Za-z0-9]+/g;
+
+/** Repo-relative paths mentioned in a turn's text ("改一下 src/ui/chat.ts").
+ * Heuristic by design: a false positive only costs a few tokens of scope, a
+ * miss just means the nested file does not load this turn. */
+export function mentionedPaths(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const out = new Set<string>();
+  for (const match of text.matchAll(MENTIONED_PATH)) {
+    const start = match.index ?? 0;
+    // A leading `/`, `:~` or `.` means the token is part of an absolute or
+    // parent-relative path (`/etc/hosts.md`, `../x/a.ts`) — not a repo path.
+    const before = text.slice(0, start).slice(-1);
+    if (before === '/' || before === '\\' || before === ':' || before === '.' || before === '~') continue;
+    const rel = normSlashes(match[0]).replace(/^\.\//, '');
+    if (!isAbsolutePath(rel) && !rel.startsWith('..')) out.add(rel);
+  }
+  return [...out];
+}
+
+/** Directories between the workspace root and a mentioned path, outermost
+ * first, so a nearer `AGENTS.md` overrides a farther one on merge. */
+export function ancestorDirsOf(relPath: string): string[] {
+  const dirs: string[] = [];
+  let dir = dirnameOf(normSlashes(relPath));
+  while (dir && dir !== '.' && dir !== '/' && !dir.startsWith('..')) {
+    dirs.unshift(dir);
+    dir = dirnameOf(dir);
+  }
+  return dirs;
+}
+
+/** Load the `AGENTS.md`/`CLAUDE.md` of every directory a mentioned path lives
+ * in, outermost first. Workspace-relative on purpose: the renderer can feed
+ * the same directories to an invoke-based reader. */
+export async function collectNestedConventions(opts: {
+  mentionText: string | null | undefined;
+  read: (rel: string) => Promise<string | null>;
+}): Promise<{ dir: string; source: string; text: string }[]> {
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const path of mentionedPaths(opts.mentionText)) {
+    for (const dir of ancestorDirsOf(path)) {
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      dirs.push(dir);
+    }
+  }
+  dirs.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  const out: { dir: string; source: string; text: string }[] = [];
+  for (const dir of dirs) {
+    for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+      const text = await opts.read(`${dir}/${name}`);
+      if (text?.trim()) {
+        out.push({ dir, source: `${dir}/${name}`, text: text.trim() });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 function layerReport(layer: MergeInput): ConventionsLayerReport {
   const text = stripDefaultMarkers(layer.text).trim();
   return {
@@ -585,6 +650,30 @@ export async function loadMergedConventionsWithDiagnostics(
     }
   };
   const imports: ConventionsImport[] = [];
+  // Nested layers (monorepo): directories named in this turn's text pull in
+  // their own AGENTS.md, nearest last so it overrides farther rules.
+  const nested: { source: string; text: string }[] = [];
+  if (roots.nestedFrom && roots.userSpaceRoot) {
+    try {
+      const path = await import('node:path');
+      const nestedFiles = await collectNestedConventions({
+        mentionText: roots.nestedFrom,
+        read: (rel) => readDisk(path.resolve(roots.userSpaceRoot as string, rel)),
+      });
+      for (const file of nestedFiles) {
+        const expanded = await expandImports(
+          file.text,
+          path.resolve(roots.userSpaceRoot, file.source),
+          readDisk,
+          { root: roots.userSpaceRoot },
+        );
+        imports.push(...expanded.imports);
+        nested.push({ source: file.source, text: expanded.text });
+      }
+    } catch {
+      /* nested discovery is best-effort */
+    }
+  }
   const expand = async (file: { text: string; path: string } | null, root: string | null | undefined) => {
     if (!file) return null;
     const expanded = await expandImports(file.text, file.path, readDisk, { root });
@@ -611,6 +700,7 @@ export async function loadMergedConventionsWithDiagnostics(
         : '(未配置)',
       text: userText,
     },
+    ...nested.map((file) => ({ name: 'nested' as const, source: file.source, text: file.text })),
   ], { imports });
 }
 
@@ -772,6 +862,7 @@ export function formatConventionsDiagnostics(d: ConventionsDiagnostics): string 
     app: 'app',
     global: 'global',
     workspace: 'workspace',
+    nested: 'nested',
   };
   const lines: string[] = [
     `AGENTS.md 合并结果：${d.mergedSections} 节 / ${d.mergedChars} 字符`,
