@@ -10,6 +10,7 @@ import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseP
 import { stripAllPatterns } from '../shared/schemaSanitize';
 import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/schemaQuarantineHeal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
+import { filePathsFromToolCalls } from '../shared/conventions';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -242,6 +243,15 @@ export class AgentLoopEngine {
     // 失败账（不是新失败，是旧裁决的执行），累计 3 次拒绝（中间表现良好
     // 也不清零——被拒绝本身就是回路已死的证据）兜底交还用户。
     const turnQuarantined = new Set<string>();
+    // 本回合已注入过规则的下层文件（宿主侧另有一份会话级去重：这里的集合
+    // 只挡住同一回合内重复读同一目录）。装配点已经跟着请求文本带进来的源
+    // 先入账——两条口子撞在同一个文件上时只能付一次。
+    const injectedConventions = new Set<string>();
+    try {
+      for (const source of ctx.conventionsPreloaded?.() ?? []) injectedConventions.add(source);
+    } catch {
+      /* 预加载清单读不到就是空的：最多重复注入一次，不该打断回合 */
+    }
     let quarantinedRefusals = 0;
     // Aggregated billing usage across every LLM call in this turn (each
     // iteration's stream yields a `usage` chunk) — surfaced on Completed so
@@ -1101,6 +1111,30 @@ export class AgentLoopEngine {
           });
           budget.addTokens(resultText);
         }
+        // 下层约定按「真读到文件」注入（2026-11-15）。请求文本里的路径提示
+        // 只是提前量；真正决定某个目录的 AGENTS.md 该生效的，是本轮真的读了
+        // 那里的文件。位置必须在工具结果配平之后：内部 user 消息绝不能插进
+        // assistant.toolCalls 与它的结果之间（400 的经典来路）。失败读不触发
+        // ——目录不一定真在工作范围里，一条失败的 path 只会多花 token。
+        if (ctx.workspaceConventions) {
+          const okIds = new Set(toolResults.filter((tr) => tr.result.success).map((tr) => tr.toolCallId));
+          const touched = filePathsFromToolCalls(toolCalls.filter((c) => okIds.has(c.id)));
+          if (touched.length > 0) {
+            try {
+              for (const layer of await ctx.workspaceConventions(touched)) {
+                const text = layer.text.trim();
+                if (!text || injectedConventions.has(layer.source)) continue;
+                injectedConventions.add(layer.source);
+                const note = `<project_conventions source="${layer.source}">\n${text}\n</project_conventions>\n上面这份规则是刚读到这里文件时才加载的：它只管这个目录，与更外层的约定冲突时以它为准。`;
+                messages.push({ role: 'user' as const, content: note, internal: true });
+                budget.addTokens(note);
+              }
+            } catch {
+              /* 约定加载是增强，读不到就不带——不能因为一个文件坏了整回合 */
+            }
+          }
+        }
+
         // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果刚配平进消息
         // 账，这是本轮唯一「配对完整」的稳定点。GUI 据此节流落盘中间态——
         // 此前整回合只活在渲染进程内存，回合收尾才落盘，强杀=产物全灭、盘上

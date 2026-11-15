@@ -436,27 +436,106 @@ export async function collectNestedConventions(opts: {
   mentionText: string | null | undefined;
   read: (rel: string) => Promise<string | null>;
 }): Promise<{ dir: string; source: string; text: string }[]> {
-  const seen = new Set<string>();
   const dirs: string[] = [];
+  const seenDirs = new Set<string>();
   for (const path of mentionedPaths(opts.mentionText)) {
     for (const dir of ancestorDirsOf(path)) {
-      if (seen.has(dir)) continue;
-      seen.add(dir);
+      if (seenDirs.has(dir)) continue;
+      seenDirs.add(dir);
       dirs.push(dir);
     }
   }
-  dirs.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  return loadDirConventions(dirs, opts.read);
+}
+
+/** Same load, but triggered by files a turn actually opened rather than by
+ * paths guessed from the request text. `seen` (optional, caller-owned) is the
+ * per-session record of sources already injected: a directory's rules are
+ * worth their tokens once, and the engine re-reads on every batch. */
+export async function conventionsForPaths(
+  paths: string[],
+  read: (rel: string) => Promise<string | null>,
+  seen: Set<string> = new Set<string>(),
+): Promise<{ dir: string; source: string; text: string }[]> {
+  const dirs: string[] = [];
+  const seenDirs = new Set<string>();
+  for (const path of paths) {
+    for (const dir of ancestorDirsOf(path)) {
+      if (seenDirs.has(dir)) continue;
+      seenDirs.add(dir);
+      dirs.push(dir);
+    }
+  }
+  const loaded = await loadDirConventions(dirs, read, seen);
+  for (const layer of loaded) seen.add(layer.source);
+  return loaded;
+}
+
+/** Outermost first, so the nearer file overrides the farther one on merge. */
+async function loadDirConventions(
+  dirs: string[],
+  read: (rel: string) => Promise<string | null>,
+  skip: Set<string> = new Set<string>(),
+): Promise<{ dir: string; source: string; text: string }[]> {
+  const sorted = [...dirs].sort(
+    (a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b),
+  );
   const out: { dir: string; source: string; text: string }[] = [];
-  for (const dir of dirs) {
+  for (const dir of sorted) {
+    // AGENTS.md is the open standard; CLAUDE.md is the fallback for projects
+    // written for Claude Code. One source per directory, never both.
     for (const name of ['AGENTS.md', 'CLAUDE.md']) {
-      const text = await opts.read(`${dir}/${name}`);
+      const source = `${dir}/${name}`;
+      if (skip.has(source)) break;
+      const text = await read(source);
       if (text?.trim()) {
-        out.push({ dir, source: `${dir}/${name}`, text: text.trim() });
+        out.push({ dir, source, text: text.trim() });
+        skip.add(source);
         break;
       }
     }
   }
   return out;
+}
+
+/** Tools whose arguments name a file the turn actually looked at. Only reading
+ * counts: a directory's rules exist to shape work there, and the moment work
+ * becomes concrete is when the model opens a file in it. write_file is left
+ * out — a brand-new path in a directory says little about whether the turn is
+ * working in that part of the repo. */
+const FILE_READING_TOOLS = new Set(['read_file', 'edit_file']);
+
+/** Models hand back either a workspace-relative path or an absolute one; the
+ * directory chain only makes sense relative to the workspace root. String-only
+ * so the renderer can normalize the same way. Paths outside the root are left
+ * alone (their ancestor dirs simply won't resolve to a workspace file). */
+export function workspaceRelativePath(path: string, root: string | null | undefined): string {
+  const p = normSlashes(path).replace(/^\.\//, '');
+  if (!root) return p;
+  const r = normSlashes(root).replace(/\/+$/, '');
+  if (!r) return p;
+  if (p === r) return '.';
+  return p.startsWith(`${r}/`) ? p.slice(r.length + 1) : p;
+}
+
+/** File paths touched by a batch's read/edit calls (paths kept as given — the
+ * caller resolves them against its own workspace root). */
+export function filePathsFromToolCalls(
+  calls: { function: { name: string; arguments: string } }[],
+): string[] {
+  const out = new Set<string>();
+  for (const call of calls) {
+    if (!FILE_READING_TOOLS.has(call.function.name)) continue;
+    let args: unknown;
+    try {
+      args = JSON.parse(call.function.arguments || '{}');
+    } catch {
+      continue;
+    }
+    const path = (args as { path?: unknown } | null)?.path;
+    if (typeof path === 'string' && path.trim()) out.add(normSlashes(path.trim()));
+  }
+  return [...out];
 }
 
 function layerReport(layer: MergeInput): ConventionsLayerReport {
@@ -468,6 +547,26 @@ function layerReport(layer: MergeInput): ConventionsLayerReport {
     sections: text ? splitSections(text).map((s) => s.key || '(前言)') : [],
     chars: text.length,
   };
+}
+
+/** Soft-budget warnings for one merged result: a layer over 8k chars or the
+ * merged text over 16k. Extracted so the GUI reports the same numbers as
+ * `agents:show` and the CLI — the point is the cost per turn, and two surfaces
+ * disagreeing about whether a file is "too big" is worse than not warning. */
+export function conventionsBudgetWarnings(
+  text: string,
+  layers: { name: string; present: boolean; chars: number }[],
+): string[] {
+  const warnings: string[] = [];
+  for (const report of layers) {
+    if (report.present && report.chars > CONVENTIONS_LAYER_BUDGET) {
+      warnings.push(`${report.name} 层 ${report.chars} 字符，超过 ${CONVENTIONS_LAYER_BUDGET} 字符预算`);
+    }
+  }
+  if (text.length > CONVENTIONS_TOTAL_BUDGET) {
+    warnings.push(`合并后 ${text.length} 字符，超过 ${CONVENTIONS_TOTAL_BUDGET} 字符预算`);
+  }
+  return warnings;
 }
 
 /** Fold layers parent → child with section-level override, collecting what
@@ -531,15 +630,7 @@ export function mergeLayers(
     .map(renderBody)
     .filter((b) => b.length > 0)
     .join('\n\n');
-  const warnings: string[] = [];
-  for (const report of layers.map(layerReport)) {
-    if (report.present && report.chars > CONVENTIONS_LAYER_BUDGET) {
-      warnings.push(`${report.name} 层 ${report.chars} 字符，超过 ${CONVENTIONS_LAYER_BUDGET} 字符预算`);
-    }
-  }
-  if (text.length > CONVENTIONS_TOTAL_BUDGET) {
-    warnings.push(`合并后 ${text.length} 字符，超过 ${CONVENTIONS_TOTAL_BUDGET} 字符预算`);
-  }
+  const warnings = conventionsBudgetWarnings(text, layers.map(layerReport));
   return {
     text,
     diagnostics: {

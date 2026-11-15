@@ -30,6 +30,7 @@ import { steerFrameText } from './shared/insertionMessaging';
 import { compileExternalSubagents, isExternalSubagentManifest } from './harness/externalSubagents';
 import { compilePersonaOverlays } from './harness/personaOverlays';
 import { loadOverlayText, overlayGuardPaths, parseOverlayGuardMeta } from './harness/overlayGuard';
+import { conventionsForPaths, workspaceRelativePath } from './shared/conventions';
 import { readdirSync, readFileSync } from 'node:fs';
 import { readFile as readFileContent } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -319,6 +320,36 @@ function agentStateToCli(state: string): string {
   }
 }
 
+/** 引擎侧下层约定的 CLI 实现：把本批读到的文件归一成工作区相对路径，再取
+ *  目录链上的 AGENTS.md/CLAUDE.md。seen 每个会话一份——同一份规则只在首次
+ *  读到时付费，长会话不必每轮重复买。 */
+function createCliWorkspaceConventions(
+  projectPath: string,
+): (paths: string[]) => Promise<{ source: string; text: string }[]> {
+  const seen = new Set<string>();
+  return async (paths) => {
+    try {
+      const rel = paths
+        .map((path) => workspaceRelativePath(path, projectPath))
+        .filter((path) => path && !path.startsWith('..'));
+      if (rel.length === 0) return [];
+      return await conventionsForPaths(
+        rel,
+        async (source) => {
+          try {
+            return await readFileContent(resolve(projectPath, source), 'utf8');
+          } catch {
+            return null;
+          }
+        },
+        seen,
+      );
+    } catch {
+      return [];
+    }
+  };
+}
+
 async function createTools(
   workspace: string,
   autoApprove = false,
@@ -494,6 +525,9 @@ export interface HarnessOverrides {
   verifier?: Verifier;
   /** 按最终 LLM adapter 构造验证器（通道档要 GUI 那档的 LLM 复核）。 */
   verifierFactory?: (llm: LLMAdapter) => Verifier;
+  /** 本轮装配已随请求文本并入 system prompt 的下层约定源。引擎侧按真读到
+   *  文件注入时据此跳过：同一份规则一轮只付一次。不接 = 不去重。 */
+  conventionsPreloaded?: () => string[];
 }
 
 /** createHarness 的返回形状（S2 起 steerBus = 转向队列入队口）。 */
@@ -772,6 +806,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   const harness = new Harness({
     sessionId,
     llm: adapter,
+    // 下层 AGENTS.md 的引擎侧通路（2026-11-15）：模型真读了哪个文件，就把
+    // 那个目录的规则带进下一轮。请求文本里的路径提示仍是提前量，两条口子
+    // 共用 conventionsForPaths 一份实现。
+    workspaceConventions: createCliWorkspaceConventions(projectPath),
+    conventionsPreloaded: overrides.conventionsPreloaded,
     llmFor,
     tools,
     toolsDefs,

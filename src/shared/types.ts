@@ -387,6 +387,20 @@ export interface EngineContext {
    * after reads. Injectable so tests can exercise the bound in milliseconds.
    * Absent or <= 0 ⇒ the default. */
   maxReadConcurrency?: number;
+  /** 下层约定按「真读到文件」注入（2026-11-15）：宿主收到本批工具调用读过
+   *  的文件路径（read_file / edit_file 的 path 参数，原样未解析），交回这些
+   *  路径所在目录链上的 AGENTS.md/CLAUDE.md（外层先、内层后）。引擎在工具结
+   *  果配平之后把它们作为内部 user 消息插进转录，模型下一轮就带着该目录的
+   *  规矩。宿主自己管会话级去重（同一个源只值一次 token）。Absent ⇒ 旧行为，
+   *  下层规则只能靠请求文本里的路径提前带进来。 */
+  workspaceConventions?: (
+    paths: string[],
+  ) => Promise<{ source: string; text: string }[]>;
+  /** 本轮装配时已经跟着请求文本并入 system prompt 的下层约定源（与
+   *  workspaceConventions 同一个 source 口径）。引擎把它们从注入里剔掉：
+   *  同一份规则一轮只付一次 token，靠两条口子各说一遍等于白花钱。
+   *  函数而不是数组：一个 agent 实例活过多轮，装配点每轮都在变。 */
+  conventionsPreloaded?: () => string[];
 }
 
 export interface LockManager {

@@ -97,9 +97,25 @@
 ### 落地记录（2026-11-15，P1 第五刀）
 
 - `@import` 两面同源：路径处理改成纯字符串（`cleanPath` / `joinPath` / `dirnameOf`），渲染进程无需 `node:path`；GUI 传入层根相对路径与 invoke reader，把护栏（≤3 跳、去环、不越层根、代码块不展开）完整复用。
-- 未做：GUI 无预算告警展示。
+- 预算告警 GUI 展示见下方 P2 第三刀。
 
 ### 落地记录（2026-11-15，P1 第六刀）
 
 - 下层目录按需加载（两面对称）：`collectNestedConventions` 从请求里提到的路径向上走目录链，加载每一级的 `AGENTS.md`/`CLAUDE.md`，外层先、内层后（内层覆盖外层）。CLI 在装配时传 `nestedFrom`，GUI 用同一个纯函数 + invoke reader，缓存键加入提示文本。
-- 定位说明：这是「按提及路径」的启发式，不是 Claude/opencode 那种「读到文件才注入」。误报只多花几个 token，漏报只是这一回合不带下层规则；真正按读写事件注入需要引擎钩子，仍未做。
+- 定位说明：这一刀是「按提及路径」的提前量，不是「读到文件才注入」——请求里没点名、但模型自己决定去读的子目录，这一轮还带不上规则。误报只多花几个 token，漏报只是这一回合不带下层规则。
+
+### 落地记录（2026-11-15，P2 第二刀）
+
+- 读到文件才注入（引擎钩子）：`EngineContext.workspaceConventions` 让宿主接管读盘——引擎在每批工具结果配平之后，把本批**成功读到**的文件路径（`read_file` / `edit_file` 的 path）交给宿主，宿主用 `conventionsForPaths` 取目录链上的 `AGENTS.md`/`CLAUDE.md`（外层先、内层后），引擎把它们作为内部 user 消息插进转录，下一轮 THINK 就带着该目录的规矩。
+- 触发口径：只有真读到的文件算数——失败的读不触发（目录不在工作范围里，一条失败的 path 只多花 token）；`write_file` 不触发（新路径说明不了这轮是否在那个目录里干活）。
+- 去重：引擎挡住同一回合内重复读同一目录；宿主（`createCliWorkspaceConventions` / `guiWorkspaceConventions`）另有一份会话级账——同一份规则只付一次 token，长会话不会每轮重复买。
+- 位置约束：注入发生在工具结果之后、中途检查点之前。内部 user 消息绝不能插在 `assistant.toolCalls` 与它的结果之间（400 的经典来路），检查点因此拿到的已是配平且带好规则的转录。
+- 与提前量的关系：两条口子并存，共用 `conventionsForPaths` / `loadDirConventions` 一份实现。请求里点名的路径先到，真读到的路径补齐。
+- 两条口子相互知悉：装配点把「本轮已随请求文本并入 system prompt 的下层源」通过 `conventionsPreloaded`（每轮求值的 getter，不是一个 agent 实例只取一次的数组）告诉引擎，引擎在回合开始时先把这些源记入去重账。请求里点名、模型又真读了同一个文件时，那份规则一轮只付一次 token。CLI 的清单来自 `merged.diagnostics.layers`（name === 'nested'），GUI 的来自 `collectNestedConventions` 并随 30s 缓存一并恢复（缓存命中时 prompt 里带的仍是那一份）。
+- 口径限制：这层去重只管「同一轮」——上一轮预加载过、本轮没点名又真读了同一文件时仍会再注入一次；跨轮去重要把已注入源挂在会话状态里，等有人真撞上重复付费再说。
+
+### 落地记录（2026-11-15，P2 第三刀）
+
+- 软预算告警进 GUI：GUI 自己逐层 `mergeConventions`（不走 `mergeLayers`），所以阈值判定抽成 `conventionsBudgetWarnings(text, layers)`，`mergeLayers` 与 GUI 共用一份；两面不会各自一套「算不算太大」。
+- 展示口径：一次一进程（GUI 是模块级 flag，重载即重置），toast 显示 `AGENTS.md: …`，与 CLI 打到 stderr 的那行同文案。它说的是用户维护的文件，不是这一回合的异常，因此不重复弹。
+- 分层计数：app / global / workspace 三层按展开后（含 `@import`）的字符数算，nested 层逐份计入——被 `@import` 撑大的层也在告警范围内。

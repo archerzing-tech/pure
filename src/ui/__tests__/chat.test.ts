@@ -2394,8 +2394,11 @@ describe('first-token preflight budgets', () => {
     expect(src).toContain('collectResourceContext({ waitMs: MCP_RESOURCE_FIRST_TURN_BUDGET_MS })');
     // Three IPC reads for AGENTS.md used to run on every single turn.
     // The cache key gained the turn's mention text (nested AGENTS.md discovery
-    // depends on which paths the request names), so the declaration carries it.
-    expect(src).toContain('let guiConventionsCache: { at: number; workspace: string; mention: string; text: string } | null = null;');
+    // depends on which paths the request names), and the entry now also carries
+    // the nested sources it preloaded — a cache hit must restore them, or the
+    // engine would re-inject rules the cached prompt already contains.
+    expect(src).toContain('let guiConventionsCache: { at: number; workspace: string; mention: string; text: string; nested: string[] } | null = null;');
+    expect(src).toContain('guiPreloadedNestedSources = guiConventionsCache.nested;');
     expect(src).toContain('const text = await readGuiConventions(ws, mention);');
   });
 });

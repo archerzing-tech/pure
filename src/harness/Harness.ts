@@ -161,6 +161,11 @@ export interface HarnessConfig {
   /** P3-3 — cap on concurrently in-flight reads per execution pool
    *  (default DEFAULT_MAX_READ_CONCURRENCY). Omitted = default. */
   maxReadConcurrency?: EngineContext['maxReadConcurrency'];
+  /** 下层 AGENTS.md 按「真读到的文件」注入（见 EngineContext）。宿主实现读
+   *  盘 + 会话级去重；不接 = 只靠请求文本里的路径提示。 */
+  workspaceConventions?: EngineContext['workspaceConventions'];
+  /** 本轮已随请求文本并入 system prompt 的下层源；引擎据此避开重复注入。 */
+  conventionsPreloaded?: EngineContext['conventionsPreloaded'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -493,6 +498,9 @@ export class Harness {
       subagentEvents: this.config.subagentEvents,
       // P3-3 — 同一执行池内在飞读调用上限（缺省走协调器默认值）。
       maxReadConcurrency: this.config.maxReadConcurrency,
+      // 下层约定：引擎把本批读过的文件路径交给宿主，宿主回该目录链的规则。
+      workspaceConventions: this.config.workspaceConventions,
+      conventionsPreloaded: this.config.conventionsPreloaded,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

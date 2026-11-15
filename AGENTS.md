@@ -68,7 +68,7 @@ bun run agents:show                # 看 AGENTS.md 各层来源与被覆盖的�
 - 跨文件复用：单独一行 `@rules/xxx.md` 会把该文件展开进来（相对当前层根目录，最多 3 跳，有环检测；代码块里不展开，越出层根不展开）。
 - 局部规矩：节标题上一行写 `<!-- paths: src/ui/** -->`，合并文本会带一行「生效范围：…」，让只为某个目录写的规矩不自称全局；调用方知道本次涉及哪些文件时可传 `paths` 过滤不相关节。
 - 软预算：单层 > 8000 字符、合并后 > 16000 字符会告警（`agents:show` 与 CLI 每进程一次）。超预算不算错，但每个字符每回合都要付。
-- 下层目录：请求里点到某个路径（如「改 packages/web/app.ts」）时，它所在目录链上的 `AGENTS.md`/`CLAUDE.md` 会作为更近的层参与合并（越近越优先）。这是按提及路径的启发式，不是按实际读文件触发。
+- 下层目录：两条口子。请求里点到某个路径（如「改 packages/web/app.ts」）时，它所在目录链上的 `AGENTS.md`/`CLAUDE.md` 作为更近的层参与合并（越近越优先）；模型运行中真读到某个文件（`read_file`/`edit_file`）时，那个目录的规则也会当场注入下一轮。成功读到才算数，同一个源每个会话只注入一次；已随请求文本进入 system prompt 的源不会再被注入一遍。两条口子共用 `conventionsForPaths`。
 - 看合并结果：`bun run agents:show`（或 `PURE_DEBUG_CONVENTIONS=1` 跑 CLI）；改模板后必须 `bun run agents:sync`。
 
 ## 提交信息约定

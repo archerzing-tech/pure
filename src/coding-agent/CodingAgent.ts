@@ -131,6 +131,11 @@ export interface CodingAgentConfig {
   };
   /** P3-3 — 同一执行池内在飞读调用上限（缺省走协调器默认值）。 */
   maxReadConcurrency?: number;
+  /** 下层 AGENTS.md 按「真读到的文件」注入（见 EngineContext）：宿主给回该
+   *  路径目录链的规则，引擎在工具结果后插进转录。缺席 = 只靠请求文本提示。 */
+  workspaceConventions?: EngineContext['workspaceConventions'];
+  /** 本轮已随请求文本并入 system prompt 的下层约定源（引擎避开重复注入）。 */
+  conventionsPreloaded?: EngineContext['conventionsPreloaded'];
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
@@ -372,6 +377,8 @@ export class CodingAgent {
       gateDelegations: config.gateDelegations,
       subagentEvents: config.subagentEvents,
       maxReadConcurrency: config.maxReadConcurrency,
+      workspaceConventions: config.workspaceConventions,
+      conventionsPreloaded: config.conventionsPreloaded,
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,

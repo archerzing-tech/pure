@@ -16,7 +16,12 @@ import {
   scopeMatchesPath,
   mentionedPaths,
   ancestorDirsOf,
+  conventionsForPaths,
+  filePathsFromToolCalls,
+  workspaceRelativePath,
+  conventionsBudgetWarnings,
   CONVENTIONS_LAYER_BUDGET,
+  CONVENTIONS_TOTAL_BUDGET,
   sectionKey,
   splitSections,
 } from '../conventions';
@@ -461,6 +466,16 @@ describe('section scopes (paths) and soft budget', () => {
     const small = mergeLayers([{ name: 'workspace', source: 'ws', text: '## 小\n\nok' }]);
     expect(small.diagnostics.warnings).toEqual([]);
   });
+
+  // GUI 自己拼层（不走 mergeLayers），软预算告警必须与 CLI 同一口径。
+  it('computes the same budget warnings for callers that merge on their own', () => {
+    expect(
+      conventionsBudgetWarnings('短', [{ name: 'workspace', present: true, chars: CONVENTIONS_LAYER_BUDGET + 1 }]),
+    ).toEqual([`workspace 层 ${CONVENTIONS_LAYER_BUDGET + 1} 字符，超过 ${CONVENTIONS_LAYER_BUDGET} 字符预算`]);
+    expect(conventionsBudgetWarnings('短', [{ name: 'app', present: false, chars: 0 }])).toEqual([]);
+    const long = 'x'.repeat(CONVENTIONS_TOTAL_BUDGET + 1);
+    expect(conventionsBudgetWarnings(long, [])[0]).toContain('合并后');
+  });
 });
 
 describe('nested conventions (mentioned paths)', () => {
@@ -496,6 +511,47 @@ describe('nested conventions (mentioned paths)', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('loads a directory chain for the files a batch actually read, once per session', async () => {
+    const files: Record<string, string> = {
+      'packages/AGENTS.md': '## 语言\n\n包级规则',
+      'packages/web/AGENTS.md': '## WebOnly\n\nweb only',
+    };
+    const read = async (rel: string) => files[rel] ?? null;
+    const seen = new Set<string>();
+
+    const first = await conventionsForPaths(['packages/web/src/app.ts'], read, seen);
+    expect(first.map((l) => l.source)).toEqual(['packages/AGENTS.md', 'packages/web/AGENTS.md']);
+    expect([...seen]).toEqual(['packages/AGENTS.md', 'packages/web/AGENTS.md']);
+
+    // The same directory chain again: already paid for, nothing re-injected.
+    expect(await conventionsForPaths(['packages/web/src/other.ts'], read, seen)).toEqual([]);
+    // A file in a directory nobody has loaded yet still resolves on its own.
+    const b = await conventionsForPaths(['packages/web/app.ts'], read, seen);
+    expect(b).toEqual([]);
+  });
+
+  it('extracts paths from read/edit calls only, and survives malformed args', () => {
+    const calls = [
+      { function: { name: 'read_file', arguments: JSON.stringify({ path: 'packages/web/src/app.ts' }) } },
+      { function: { name: 'edit_file', arguments: JSON.stringify({ path: 'src/ui/chat.ts', old: 'a' }) } },
+      { function: { name: 'write_file', arguments: JSON.stringify({ path: 'packages/new/file.ts' }) } },
+      { function: { name: 'read_file', arguments: 'not json' } },
+      { function: { name: 'read_file', arguments: JSON.stringify({ path: 'packages\\web\\a.ts' }) } },
+    ];
+    expect(filePathsFromToolCalls(calls)).toEqual([
+      'packages/web/src/app.ts',
+      'src/ui/chat.ts',
+      'packages/web/a.ts',
+    ]);
+  });
+
+  it('normalizes absolute paths under the workspace root', () => {
+    expect(workspaceRelativePath('/ws/packages/web/a.ts', '/ws')).toBe('packages/web/a.ts');
+    expect(workspaceRelativePath('./src/a.ts', '/ws')).toBe('src/a.ts');
+    expect(workspaceRelativePath('/other/dir/a.ts', '/ws')).toBe('/other/dir/a.ts');
+    expect(workspaceRelativePath('src/a.ts', null)).toBe('src/a.ts');
   });
 
   it('loads nothing when the turn names no path', async () => {

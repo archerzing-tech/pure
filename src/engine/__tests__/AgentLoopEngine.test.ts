@@ -2685,3 +2685,154 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     expect(gap).toBeLessThan(2000);
   }, 20000);
 });
+
+describe('AgentLoopEngine workspace conventions (read-triggered, 2026-11-15)', () => {
+  /** Records the messages each THINK round was given. */
+  function recordingToolLLM(toolName: string, toolArgs: string, finalText: string) {
+    const rounds: Message[][] = [];
+    let firstCall = true;
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (firstCall) {
+          firstCall = false;
+          const tc: ToolCall = { id: 'call_read', index: 0, function: { name: toolName, arguments: toolArgs } };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'done', content: finalText, toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: finalText, toolCalls: [] }),
+    };
+    return { llm, rounds };
+  }
+
+  function okReadTools(): ToolAdapter {
+    return {
+      execute: async (tc: ToolCall): Promise<ToolResult> => ({
+        id: tc.id,
+        toolName: tc.function.name,
+        result: 'file body',
+        success: true,
+        duration: 1,
+      }),
+      getMetadata: () => ({ isWrite: false }),
+      getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+    };
+  }
+
+  it('injects the directory rules of a file the batch really read', async () => {
+    const { llm, rounds } = recordingToolLLM('read_file', JSON.stringify({ path: 'packages/web/src/app.ts' }), 'done');
+    const asked: string[][] = [];
+    const ctx = baseCtx({
+      llm,
+      tools: okReadTools(),
+      workspaceConventions: async (paths) => {
+        asked.push(paths);
+        return [{ source: 'packages/web/AGENTS.md', text: '## WebOnly\n\nweb only' }];
+      },
+    });
+
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv', systemPrompt: 'sys', userPrompt: '改 packages/web/src/app.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // The engine behind the seam is driven by tool calls, not by the prompt.
+    expect(asked).toEqual([['packages/web/src/app.ts']]);
+    const secondRound = rounds[1]!;
+    const injected = secondRound.filter(m => m.role === 'user' && m.internal);
+    expect(injected).toHaveLength(1);
+    expect(injected[0]!.content).toContain('packages/web/AGENTS.md');
+    expect(injected[0]!.content).toContain('web only');
+    // Ordering contract: the rules land AFTER the tool result they belong to.
+    const toolIdx = secondRound.findIndex(m => m.role === 'tool');
+    const convIdx = secondRound.findIndex(m => m.role === 'user' && m.internal && m.content.includes('web only'));
+    expect(convIdx).toBeGreaterThan(toolIdx);
+
+    const completed = events.find(e => e.type === 'Completed')!;
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
+  it('does not inject twice for the same file re-read in one turn', async () => {
+    const { llm } = recordingToolLLM('read_file', JSON.stringify({ path: 'src/ui/chat.ts' }), 'done');
+    let calls = 0;
+    const ctx = baseCtx({
+      llm,
+      tools: okReadTools(),
+      workspaceConventions: async () => {
+        calls++;
+        return [{ source: 'src/ui/AGENTS.md', text: '## UI\n\nui only' }];
+      },
+    });
+    await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv2', systemPrompt: 'sys', userPrompt: '看 src/ui/chat.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+    expect(calls).toBe(1);
+  });
+
+  it('leaves a failed read out — a path that did not open is not evidence', async () => {
+    const { llm } = recordingToolLLM('read_file', JSON.stringify({ path: 'gone/a.ts' }), 'done');
+    const asked: string[][] = [];
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({
+          id: tc.id,
+          toolName: tc.function.name,
+          error: 'File not found',
+          success: false,
+          duration: 1,
+        }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+      },
+      workspaceConventions: async (paths) => {
+        asked.push(paths);
+        return [];
+      },
+    });
+    await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv3', systemPrompt: 'sys', userPrompt: 'read gone/a.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', () => {
+  it('skips a source the turn already carries in its system prompt', async () => {
+    let first = true;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        const tc: ToolCall = { id: 'call_read', index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path: 'packages/web/src/app.ts' }) } };
+        if (first) {
+          first = false;
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'body', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+      },
+      // The mention-path side already merged this file into the system prompt.
+      conventionsPreloaded: () => ['packages/web/AGENTS.md'],
+      workspaceConventions: async () => [{ source: 'packages/web/AGENTS.md', text: '## WebOnly\n\nweb only' }],
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv4', systemPrompt: 'sys', userPrompt: '改 packages/web/src/app.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    const injected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('web only'));
+    expect(injected).toHaveLength(0);
+  });
+});

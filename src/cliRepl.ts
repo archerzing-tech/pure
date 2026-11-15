@@ -296,6 +296,9 @@ export function loadAppSkills(): PromptSkill[] {
 
 let seedSynced = false;
 let conventionsWarned = false;
+/** 本轮装配跟着请求文本并入 system prompt 的下层约定源。引擎按真读到的
+ *  文件注入时拿它去重——两条口子撞在同一份规则上只该付一次 token。 */
+let preloadedNestedSources: string[] = [];
 
 async function assembleCliPrompt(
   mode: TaskMode,
@@ -330,6 +333,9 @@ async function assembleCliPrompt(
     nestedFrom: userText,
   });
   const conventions = merged.text;
+  preloadedNestedSources = merged.diagnostics.layers
+    .filter((layer) => layer.name === 'nested')
+    .map((layer) => layer.source);
   // Soft-budget warnings print once per process: they are about the file the
   // user maintains, not about this turn.
   if (!conventionsWarned && merged.diagnostics.warnings.length > 0) {
@@ -747,7 +753,9 @@ async function runSkillDistillCli(llm: LLMAdapter, instruction: string): Promise
 
 async function runOneShot(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
+  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args, {
+    conventionsPreloaded: () => preloadedNestedSources,
+  });
   const hasTools = toolsDefs.length > 0;
   await learnFromInput(args.prompt, sessionId, projectPath);
 
@@ -851,7 +859,9 @@ async function runOneShot(args: CliArgs) {
 
 async function runRepl(args: CliArgs) {
   const { adapter, label } = createAdapter(args);
-  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args);
+  const { harness, tools, sessionId, projectPath, toolsDefs, mcpClient } = await createHarness(args, {
+    conventionsPreloaded: () => preloadedNestedSources,
+  });
   const hasTools = toolsDefs.length > 0;
 
   renderLogo();
