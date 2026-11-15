@@ -6,7 +6,7 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 ## v4.8.3
 
-**Windows shell 执行链根治四连：退出码透传、后台链炸点、CLIXML 报错解包补齐、32K 命令行守卫 + 更新端点 GitHub fallback**
+**Windows shell 执行链根治四连：退出码透传、后台链炸点、CLIXML 报错解包补齐、32K 命令行守卫 + 更新端点 GitHub fallback + 思考卡版式修正（重发）**
 
 一、自动更新端点 GitHub 直连 fallback（update-relay.vercel.app 域名国内被 DNS 污染 + SNI 阻断，2026-11-14 真机实测：relay 服务本身健康、网络层不可达）。updater endpoints 按序 failover（源码核实：失败记 last_error 继续下一个），追加 GitHub releases 直连第二端点，relay 被墙时检查更新自动落第二端点。
 
@@ -19,6 +19,8 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 五、32K 命令行上限守卫（真机对照判例：14243 字符命令 → base64 37984 > 32767 → spawn 直接 ENAMETOOLONG，进程起不来）：超阈值（编码产物 >32000，直接测权威长度）自动落盘 `pure-cmd-*.ps1` 走 `-File` + ExecutionPolicy Bypass——wrapper 明文两条路径共用一份，写盘带 BOM，尾部自删 + finally 清理双兜底。真机判例：14k ASCII（exit 5 透传）与 16k 中文（BOM 下完好）均经 -File 正常执行，TEMP 无残留；短命令仍走 -EncodedCommand。
 
 六、指令层补课：`shellEnv` 翻译表补 5 类（`where` → `where.exe`、`2>/dev/null` → `2>$null`、`>` 重定向 UTF-16LE 陷阱、`cmd1 && cmd2`、`export`/`set` 环境变量无效需 `$env:NAME`）；SubagentOrchestrator 的 bash_executor 子代理注入 Windows PowerShell 5.1 约定段；SERVING_PREVIEW 探测命令改 `curl.exe -s -o NUL`（Windows）/`curl -s -o /dev/null`（POSIX）双形态。
+
+七、思考卡版式修正（重发补入，2026-11-15 真机判例）：模型在一条回复里先说一句正文、再继续思考时，续写分支用 `appendChild` 把已收尾的思考卡搬到正文下方，而后续正文仍长在上面同一个气泡里，屏幕上读成「结果都显示完了，再显示思考」。改为原地 reopen（不再搬动节点），并让工具行/计划卡接管（handoff）与撤卡两条分支清空续写指针——此前指针未作废，下一轮迭代的 reasoning 会把旧卡抓回来续写，把两次独立迭代的思考并成一张，而旧的搬家逻辑恰好把这条错误路径掩盖住了。验证：`tsc` 绿；`bun test src/ui` 1827 pass / 0 fail；DOM 级对拍（真实 `thinkingCard` + happy-dom，交错序列 reasoning→content→reasoning）修正后 `THINKING → BUBBLE`、旧行为 `BUBBLE → THINKING`；真机自测通过。
 
 验证：全量 `bun test`（bun 1.4.3）5398 pass / 3 fail / 2 skip（3 fail 为基线共有环境类，零新增）；`cargo test --lib` 失败名单与基线完全一致（21 个既有 Windows 平台债务，零回归）；`tsc` 绿；真机 2 任务判例（exit 128/7 透传、中文 stderr 完好、stderr 无 XML 残留）、后台链端到端、`-File` 三判例 + ENAMETOOLONG 对照判例全过。
 
