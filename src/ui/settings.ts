@@ -3183,8 +3183,43 @@ export class SettingsPanel {
     const at = new Date(snap.at);
     const hhmmss = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}:${String(at.getSeconds()).padStart(2, '0')}`;
     const wsLabel = snap.workspace ? escapeHtml(snap.workspace) : escapeHtml(t('conventions.diag.noWorkspace', '（未打开工作区）'));
-    const report = escapeHtml(formatConventionsDiagnostics(snap.diagnostics));
-    el.innerHTML = `<div class="conventions-diag-meta">${escapeHtml(t('conventions.diag.capturedAt', '快照时间'))} ${hhmmss} · ${escapeHtml(t('conventions.diag.workspace', '工作区'))} ${wsLabel}</div><pre class="conventions-diag-pre">${report}</pre>`;
+    const pre = formatConventionsDiagnostics(snap.diagnostics);
+    const runtime = snap.runtime ?? [];
+    let runtimeBlock = '';
+    if (runtime.length > 0) {
+      const lines: string[] = [];
+      for (const r of runtime) {
+        const rt = new Date(r.at);
+        const rtTime = `${String(rt.getHours()).padStart(2, '0')}:${String(rt.getMinutes()).padStart(2, '0')}:${String(rt.getSeconds()).padStart(2, '0')}`;
+        lines.push(`  ${rtTime}  ${r.source}  —  ${r.chars} 字符`);
+        const ctxPaths = r.pathContext?.paths ?? [];
+        if (ctxPaths.length > 0) {
+          const shown = ctxPaths.length <= 6 ? ctxPaths.join(', ') : `${ctxPaths.slice(0, 6).join(', ')} …(+${ctxPaths.length - 6})`;
+          lines.push(`    触发路径：${shown}`);
+        }
+        const hits = r.scopes ?? [];
+        const misses = r.filteredScopes ?? [];
+        if (ctxPaths.length > 0 || hits.length > 0 || misses.length > 0) {
+          if (hits.length === 0) {
+            lines.push('    作用域命中：无');
+          } else {
+            lines.push('    作用域命中：');
+            for (const s of hits) lines.push(`      「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}`);
+          }
+          if (misses.length === 0) {
+            lines.push('    未命中本次路径的作用域节：无');
+          } else {
+            lines.push('    未命中本次路径的作用域节：');
+            for (const s of misses) lines.push(`      「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}  —  ${s.reason}`);
+          }
+        }
+      }
+      runtimeBlock = `\n\n${t('conventions.diag.runtime.title', '运行中注入（read_file / edit_file 触发，已写入转录）')}：\n${lines.join('\n')}`;
+    } else {
+      runtimeBlock = `\n\n${t('conventions.diag.runtime.title', '运行中注入（read_file / edit_file 触发，已写入转录）')}：\n  ${t('conventions.diag.runtime.empty', '本会话尚未因实际读文件注入新的下层约定。')}`;
+    }
+    const report = escapeHtml(`${pre}${runtimeBlock}`);
+    el.innerHTML = `<div class="conventions-diag-meta">${escapeHtml(t('conventions.diag.capturedAt', '快照时间'))} ${hhmmss} · ${escapeHtml(t('conventions.diag.workspace', '工作区'))} ${wsLabel}</div><div class="conventions-diag-legend">${escapeHtml(t('conventions.diag.legend', '上半部分为预装配（本轮随请求文本并入 prompt 的各层合并结果）；下半部分为运行中按实际读文件补进转录的来源。'))}</div><pre class="conventions-diag-pre">${report}</pre>`;
     applyTranslations();
   }
 

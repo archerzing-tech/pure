@@ -6535,7 +6535,14 @@ body.window-maximized .win-resize-zone { display: none; }
 .conventions-diag-meta {
   font-size: 11.5px;
   color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.conventions-diag-legend {
+  font-size: 11.5px;
+  color: var(--text-secondary);
   margin-bottom: 8px;
+  line-height: 1.4;
 }
 
 .conventions-diag-pre {

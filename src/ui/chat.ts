@@ -29,6 +29,7 @@ import {
   collectNestedConventions,
   conventionsForPaths,
   expandImports,
+  mentionedPaths,
   mergeLayers,
   parseSeedState,
   stripDefaultMarkers,
@@ -819,18 +820,41 @@ let guiPreloadedNestedSources: string[] = [];
 /** 软预算告警一次一个进程：它说的是用户维护的那个文件，不是这一回合。 */
 let guiConventionsWarned = false;
 
+type GuiRuntimeConvention = {
+  source: string;
+  chars: number;
+  at: number;
+  pathContext?: { paths: string[] };
+  scopes?: { section: string; by: string; paths: string[] }[];
+  filteredScopes?: { section: string; by: string; paths: string[]; reason: string }[];
+};
+
+/** 运行中（read_file/edit_file 触发）注入的约定源，按会话累计；与装配快照
+ *  分开记，方便在诊断里区分「预装配进 prompt」和「本会话读文件后补进转录」。 */
+let guiRuntimeConventions: GuiRuntimeConvention[] = [];
+let guiConventionsSessionId = '';
+
+/** 会话切换/新建时清空运行中注入记录：新会话是新历史，旧记录不再对应。 */
+export function resetGuiConventionsSession(sessionId: string): void {
+  if (guiConventionsSessionId !== sessionId) {
+    guiConventionsSessionId = sessionId;
+    guiRuntimeConventions = [];
+  }
+}
+
 /** 最近一次 GUI 装配的诊断快照（各层来源、被覆盖的节、被追加的节、`@import`
- *  展开、作用域、预算）。设置 → 约定 页读它，与 CLI 的 `bun run agents:show`
- *  是同一份报告——两面对「这轮到底注入了什么」只该有一个答案。
- *  只在内存里：它说的是本次会话现在付的是什么，不是磁盘上的历史。 */
+ *  展开、作用域、预算）+ 本会话运行中注入来源。设置 → 约定 页读它，与 CLI
+ *  的 `bun run agents:show` 同源（装配部分）——两面对「这轮到底注入了什么」
+ *  只该有一个答案。只在内存里：它说的是本次会话现在付的是什么。 */
 let guiConventionsDiagnostics: {
   workspace: string;
   at: number;
   diagnostics: ConventionsDiagnostics;
+  runtime: GuiRuntimeConvention[];
 } | null = null;
 
 export function getGuiConventionsDiagnostics(): typeof guiConventionsDiagnostics {
-  return guiConventionsDiagnostics;
+  return guiConventionsDiagnostics ? { ...guiConventionsDiagnostics, runtime: [...guiRuntimeConventions] } : null;
 }
 
 /** Sidecar recording what we last wrote into the user's global AGENTS.md, so
@@ -872,7 +896,7 @@ function guiWorkspaceConventions(
         .map((path) => workspaceRelativePath(path, workspace))
         .filter((path) => path && !path.startsWith('..'));
       if (rel.length === 0) return [];
-      return await conventionsForPaths(
+      const layers = await conventionsForPaths(
         rel,
         async (source) => {
           try {
@@ -883,6 +907,29 @@ function guiWorkspaceConventions(
         },
         delivered,
       );
+      if (layers.length > 0) {
+        const now = Date.now();
+        for (const layer of layers) {
+          // 同一源理论上只会注入一次（delivered 去重）；防御性地不重复记。
+          if (!guiRuntimeConventions.some((r) => r.source === layer.source)) {
+            // 运行中注入当前按整文件送入转录（不裁剪内容）；这里仍按触发路径
+            // 做作用域判定，便于在诊断里看出哪些节命中/未命中本次读取。
+            const analyzed = mergeLayers([{ name: 'nested', source: layer.source, text: layer.text }], { paths: rel });
+            guiRuntimeConventions.push({
+              source: layer.source,
+              chars: layer.text.trim().length,
+              at: now,
+              pathContext: { paths: rel },
+              scopes: analyzed.diagnostics.scopes,
+              filteredScopes: (analyzed.diagnostics.filteredScopes ?? []).map((s) => ({
+                ...s,
+                reason: `${s.reason}（注入时按整文件写入转录，未按路径裁剪）`,
+              })),
+            });
+          }
+        }
+      }
+      return layers;
     } catch {
       return [];
     }
@@ -1004,8 +1051,12 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
       }
       guiPreloadedNestedSources = nestedLayers.map((layer) => layer.source);
     }
-    const merged = mergeLayers(layers, { imports });
-    guiConventionsDiagnostics = { workspace: userWorkspace ?? '', at: Date.now(), diagnostics: merged.diagnostics };
+    const scopePaths = mentionedPaths(mentionText);
+    const merged = mergeLayers(layers, {
+      imports,
+      ...(scopePaths.length > 0 ? { paths: scopePaths } : {}),
+    });
+    guiConventionsDiagnostics = { workspace: userWorkspace ?? '', at: Date.now(), diagnostics: merged.diagnostics, runtime: [...guiRuntimeConventions] };
     // Soft-budget warning, once per session (same口径 as the CLI's
     // once-per-process): it is about the file the user maintains, not this
     // turn. The GUI otherwise has no way to say "these rules cost tokens every
@@ -2492,6 +2543,7 @@ export class ChatController {
   constructor(options: ChatControllerOptions = {}) {
     this.sessionId = `session_${Date.now()}`;
     this.conventionsDelivered = new Set<string>();
+    resetGuiConventionsSession(this.sessionId);
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
     this.transcriptHost = options.host ?? null;
@@ -2756,6 +2808,7 @@ export class ChatController {
     this.pendingClarification = null;
     this.sessionId = id;
     this.conventionsDelivered = new Set<string>();
+    resetGuiConventionsSession(this.sessionId);
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -3445,6 +3498,7 @@ export class ChatController {
     if (!saved) return null;
     this.sessionId = saved.sessionId;
     this.conventionsDelivered = new Set<string>();
+    resetGuiConventionsSession(this.sessionId);
     this.sessionStats = loadSessionStats(saved.sessionId);
     this.generation++;
     // Route through setWorkspace so the clickable-path resolver stays in sync,
@@ -9029,6 +9083,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.preCompactMessageCount = 0;
     this.sessionId = `session_${Date.now()}`;
     this.conventionsDelivered = new Set<string>();
+    resetGuiConventionsSession(this.sessionId);
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
     // Fresh session → fresh stats view.

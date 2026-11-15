@@ -173,6 +173,15 @@ export interface ConventionsImport {
   depth: number;
 }
 
+export interface ConventionsFilteredScope {
+  section: string;
+  by: ConventionsLayerName;
+  /** Declared scope patterns on the section. */
+  paths: string[];
+  /** Why it was excluded from this merge. */
+  reason: string;
+}
+
 export interface ConventionsDiagnostics {
   layers: ConventionsLayerReport[];
   /** Child layers replacing a section an earlier layer already defined. */
@@ -181,8 +190,13 @@ export interface ConventionsDiagnostics {
   appends: ConventionsAppend[];
   /** Files pulled in by `@path/to/file.md` lines. */
   imports: ConventionsImport[];
-  /** Sections declared with a `<!-- paths: ... -->` scope. */
+  /** Scoped sections that remained in the merged result (matched the provided
+   *  paths, or kept because no path filter was applied). */
   scopes: ConventionsScope[];
+  /** Scoped sections excluded by path filtering, with reason. */
+  filteredScopes: ConventionsFilteredScope[];
+  /** Paths used for section-scope filtering, when the caller provided them. */
+  pathContext?: { paths: string[] };
   /** Soft-budget warnings (a layer or the merged text got too big). */
   warnings: string[];
   mergedChars: number;
@@ -582,6 +596,8 @@ export function mergeLayers(
   const index = new Map<string, number>();
   const overrides: ConventionsOverride[] = [];
   const appends: ConventionsAppend[] = [];
+  const filteredScopes: ConventionsFilteredScope[] = [];
+  const filterPaths = extra.paths && extra.paths.length > 0 ? extra.paths : null;
   // The first layer that exists defines the baseline: its sections are not
   // "added by a child", so they stay out of the appends report.
   let seenLayer = false;
@@ -593,7 +609,14 @@ export function mergeLayers(
     for (const section of splitSections(text)) {
       // Path-scoped section that does not apply to the files in play: drop it.
       // Only callers that actually know the file set pass `paths`.
-      if (extra.paths && section.paths.length > 0 && !scopeApplies(section.paths, extra.paths)) {
+      if (filterPaths && section.paths.length > 0 && !scopeApplies(section.paths, filterPaths)) {
+        const shown = filterPaths.length <= 6 ? filterPaths.join(', ') : `${filterPaths.slice(0, 6).join(', ')} …(+${filterPaths.length - 6})`;
+        filteredScopes.push({
+          section: section.key || '(前言)',
+          by: layer.name,
+          paths: section.paths,
+          reason: `作用域 [${section.paths.join(' / ')}] 与本次路径 [${shown}] 不匹配`,
+        });
         continue;
       }
       const body = section.body;
@@ -642,6 +665,8 @@ export function mergeLayers(
       appends,
       imports: extra.imports ?? [],
       scopes: kept.filter((s) => s.paths.length > 0).map((s) => ({ section: s.key || '(前言)', by: s.by, paths: s.paths })),
+      filteredScopes,
+      ...(filterPaths ? { pathContext: { paths: filterPaths } } : {}),
       warnings,
       mergedChars: text.length,
       mergedSections: kept.length,
@@ -978,9 +1003,30 @@ export function formatConventionsDiagnostics(d: ConventionsDiagnostics): string 
     lines.push('  新增（仅子层定义）：');
     for (const a of d.appends) lines.push(`    「${a.section}」  by ${a.by}`);
   }
-  if (d.scopes.length > 0) {
-    lines.push('  作用域（仅对匹配路径生效）：');
+  if (d.pathContext?.paths?.length) {
+    const ctx = d.pathContext.paths.length <= 6
+      ? d.pathContext.paths.join(', ')
+      : `${d.pathContext.paths.slice(0, 6).join(', ')} …(+${d.pathContext.paths.length - 6})`;
+    lines.push(`  作用域判定（本次路径：${ctx}）：`);
+    if (d.scopes.length === 0) {
+      lines.push('    命中：无');
+    } else {
+      lines.push('    命中（已生效）：');
+      for (const s of d.scopes) lines.push(`      「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}`);
+    }
+    if (!d.filteredScopes || d.filteredScopes.length === 0) {
+      lines.push('    未命中（已过滤）：无');
+    } else {
+      lines.push('    未命中（已过滤）：');
+      for (const s of d.filteredScopes) lines.push(`      「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}  —  ${s.reason}`);
+    }
+  } else if (d.scopes.length > 0) {
+    lines.push('  作用域（已声明；本次未按路径过滤，默认保留）：');
     for (const s of d.scopes) lines.push(`    「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}`);
+  }
+  if (!d.pathContext?.paths?.length && d.filteredScopes && d.filteredScopes.length > 0) {
+    lines.push('  作用域未命中（已过滤）：');
+    for (const s of d.filteredScopes) lines.push(`    「${s.section}」  ${s.paths.join(' / ')}  by ${s.by}  —  ${s.reason}`);
   }
   if (d.warnings.length > 0) {
     lines.push('  预算警告：');

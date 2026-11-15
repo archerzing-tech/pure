@@ -434,11 +434,24 @@ describe('section scopes (paths) and soft budget', () => {
     });
     expect(filtered.text).not.toContain('ui only');
     expect(filtered.text).toContain('all');
+    expect(filtered.diagnostics.pathContext).toEqual({ paths: ['src/engine/FailurePolicy.ts'] });
+    expect(filtered.diagnostics.filteredScopes).toEqual([
+      {
+        section: '界面规矩',
+        by: 'workspace',
+        paths: ['src/ui/**'],
+        reason: '作用域 [src/ui/**] 与本次路径 [src/engine/FailurePolicy.ts] 不匹配',
+      },
+    ]);
+    expect(filtered.diagnostics.scopes).toEqual([]);
 
     const kept = mergeLayers([{ name: 'workspace', source: 'ws', text }], {
       paths: ['src/ui/chat.ts'],
     });
     expect(kept.text).toContain('ui only');
+    expect(kept.diagnostics.pathContext).toEqual({ paths: ['src/ui/chat.ts'] });
+    expect(kept.diagnostics.scopes).toContainEqual({ section: '界面规矩', by: 'workspace', paths: ['src/ui/**'] });
+    expect(kept.diagnostics.filteredScopes).toEqual([]);
   });
 
   it('matches glob shapes used in practice', () => {
