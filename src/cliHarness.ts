@@ -804,8 +804,18 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   );
 
   // 会话级「已进转录」的约定源：宿主读盘与引擎注入共用同一份账，跨轮不
-  // 重复注入（长会话同一目录被反复读也只付一次）。
-  const conventionsDelivered = new Set<string>();
+  // 重复注入（长会话同一目录被反复读也只付一次）。恢复/续跑时从已有转录
+  // 回灌，避免历史里已注入的目录约定在续跑后再次写入。
+  const conventionsDelivered = (() => {
+    const out = new Set<string>();
+    const resumed = store?.loadSession(sessionId)?.state?.messages ?? [];
+    for (const m of resumed) {
+      if (m.role !== 'user' || !m.internal || typeof m.content !== 'string') continue;
+      const match = m.content.match(/<project_conventions\s+source="([^"]+)">/);
+      if (match?.[1]) out.add(match[1]);
+    }
+    return out;
+  })();
   const harness = new Harness({
     sessionId,
     llm: adapter,

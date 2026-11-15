@@ -122,4 +122,4 @@
 ### 落地记录（2026-11-15，P2 第四刀）
 
 - paths 作用域诊断：`mergeLayers` 在按 `paths` 过滤 scoped 节时记录命中节（`scopes`）与被过滤节及原因（`filteredScopes`，含判定路径上下文 `pathContext`）；`formatConventionsDiagnostics`/设置页快照据此区分“命中（已生效）”与“未命中（已过滤）及原因”，便于定位局部规矩未生效。GUI 预装配按本次提及路径传入 `paths` 做判定；运行中注入按触发路径给出命中/未匹配分析（注入内容仍按整文件写入转录，诊断中标注未按路径裁剪，以保持既有去重与注入语义）。
-- 长会话去重实测与恢复修复：引擎级多轮模拟确认同一 source 在“已写入转录（`conventionsDelivered`）∪ 本轮预加载（`conventionsPreloaded`）”下跨轮/跨 `continue` 不重复注入（注入开销近似唯一 source 数）；发现会话恢复/加载历史时若仅清空 delivered 集合，会导致历史中已有的 `<project_conventions>` 在后续同目录读取时重复注入。GUI 在从快照恢复消息后从转录回灌 delivered source，使跨恢复去重不断档（压缩若移除注入消息而保留集合仍需单独关注）。
+- 长会话去重实测与恢复修复：引擎级多轮模拟确认同一 source 在“已写入转录（`conventionsDelivered`）∪ 本轮预加载（`conventionsPreloaded`）”下跨轮/跨 `continue` 不重复注入（注入开销近似唯一 source 数）；发现会话恢复/加载历史时若仅清空 delivered 集合，会导致历史中已有的 `<project_conventions>` 在后续同目录读取时重复注入。GUI/CLI 在恢复会话（快照加载或 harness 续跑）时从转录回灌 delivered source，使跨恢复去重不断档（压缩若移除注入消息而保留集合仍需单独关注）。
