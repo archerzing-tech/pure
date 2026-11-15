@@ -94,12 +94,23 @@ export interface ConventionsAppend {
   by: ConventionsLayerName;
 }
 
+export interface ConventionsImport {
+  /** File whose line pulled the import in. */
+  from: string;
+  /** Absolute path of the imported file. */
+  file: string;
+  chars: number;
+  depth: number;
+}
+
 export interface ConventionsDiagnostics {
   layers: ConventionsLayerReport[];
   /** Child layers replacing a section an earlier layer already defined. */
   overrides: ConventionsOverride[];
   /** Sections only a child layer defines. */
   appends: ConventionsAppend[];
+  /** Files pulled in by `@path/to/file.md` lines. */
+  imports: ConventionsImport[];
   mergedChars: number;
   mergedSections: number;
 }
@@ -191,6 +202,69 @@ interface MergeInput {
   text: string | null;
 }
 
+/** `@path/to/file.md` on its own line pulls another conventions file in at
+ * load time — the monorepo case where five packages share one rules file.
+ * Fenced code blocks are ignored, imports are confined to the layer root, and
+ * depth/cycles are bounded so one file cannot pull the whole disk in. */
+const IMPORT_LINE = /^@(\S+\.md)$/i;
+export const MAX_IMPORT_DEPTH = 3;
+
+export type ConventionsFileReader = (file: string) => Promise<string | null>;
+
+/** Expand `@file.md` imports depth-first. A missing / escaping / already-seen
+ * import is left as the plain line it was (visible, harmless) rather than
+ * silently dropped. */
+export async function expandImports(
+  text: string,
+  filePath: string,
+  read: ConventionsFileReader,
+  opts: { root?: string | null; depth?: number; seen?: Set<string> } = {},
+): Promise<{ text: string; imports: ConventionsImport[] }> {
+  const imports: ConventionsImport[] = [];
+  const depth = opts.depth ?? 0;
+  if (depth >= MAX_IMPORT_DEPTH) return { text, imports };
+  const path = await import('node:path');
+  const abs = path.resolve(filePath);
+  const root = opts.root ? path.resolve(opts.root) : path.dirname(abs);
+  const seen = opts.seen ?? new Set<string>([abs]);
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const fenceMark = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fenceMark) {
+      if (!fence) fence = fenceMark[1][0];
+      else if (fenceMark[1][0] === fence) fence = null;
+      out.push(line);
+      continue;
+    }
+    const match = fence ? null : IMPORT_LINE.exec(line.trim());
+    if (!match) {
+      out.push(line);
+      continue;
+    }
+    const target = path.resolve(path.dirname(abs), match[1]);
+    const insideRoot = target === root || target.startsWith(`${root}${path.sep}`);
+    if (!insideRoot || seen.has(target)) {
+      out.push(line);
+      continue;
+    }
+    const body = await read(target);
+    if (body === null) {
+      out.push(line);
+      continue;
+    }
+    seen.add(target);
+    const nested = await expandImports(body.trim(), target, read, {
+      root,
+      depth: depth + 1,
+      seen,
+    });
+    imports.push({ from: abs, file: target, chars: body.length, depth }, ...nested.imports);
+    out.push(nested.text);
+  }
+  return { text: out.join('\n'), imports };
+}
+
 function layerReport(layer: MergeInput): ConventionsLayerReport {
   const text = stripDefaultMarkers(layer.text).trim();
   return {
@@ -204,7 +278,10 @@ function layerReport(layer: MergeInput): ConventionsLayerReport {
 
 /** Fold layers parent → child with section-level override, collecting what
  * happened along the way. Exported for tests and for `agents:show`. */
-export function mergeLayers(layers: MergeInput[]): MergedConventions {
+export function mergeLayers(
+  layers: MergeInput[],
+  extra: { imports?: ConventionsImport[] } = {},
+): MergedConventions {
   const kept: { key: string; body: string; by: ConventionsLayerName }[] = [];
   const index = new Map<string, number>();
   const overrides: ConventionsOverride[] = [];
@@ -252,6 +329,7 @@ export function mergeLayers(layers: MergeInput[]): MergedConventions {
       layers: layers.map(layerReport),
       overrides,
       appends,
+      imports: extra.imports ?? [],
       mergedChars: text.length,
       mergedSections: kept.length,
     },
@@ -342,23 +420,44 @@ export async function loadMergedConventionsWithDiagnostics(
     : '内置默认 (templates/default-agents.md)';
   const globalFile = await readLayerFile(roots.globalUserRoot);
   const userFile = await readLayerFile(roots.userSpaceRoot);
+
+  // `@file.md` imports are expanded per layer, confined to that layer's root.
+  const readDisk: ConventionsFileReader = async (file) => {
+    try {
+      const fs = await import('node:fs');
+      return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : null;
+    } catch {
+      return null;
+    }
+  };
+  const imports: ConventionsImport[] = [];
+  const expand = async (file: { text: string; path: string } | null, root: string | null | undefined) => {
+    if (!file) return null;
+    const expanded = await expandImports(file.text, file.path, readDisk, { root });
+    imports.push(...expanded.imports);
+    return expanded.text;
+  };
+  const appExpanded = await expand(appFile, appFolder);
+  const globalText = (await expand(globalFile, roots.globalUserRoot)) ?? null;
+  const userText = (await expand(userFile, roots.userSpaceRoot)) ?? null;
+
   return mergeLayers([
-    { name: 'app', source: appSource, text: appText },
+    { name: 'app', source: appSource, text: appExpanded ?? appText },
     {
       name: 'global',
       source: roots.globalUserRoot
         ? `${roots.globalUserRoot}${globalFile ? `/${globalFile.file}` : ' (缺失)'}`
         : '(未配置)',
-      text: globalFile?.text ?? null,
+      text: globalText,
     },
     {
       name: 'workspace',
       source: roots.userSpaceRoot
         ? `${roots.userSpaceRoot}${userFile ? `/${userFile.file}` : ' (缺失)'}`
         : '(未配置)',
-      text: userFile?.text ?? null,
+      text: userText,
     },
-  ]);
+  ], { imports });
 }
 
 /** Node-only: merged conventions text only (no report). */
@@ -539,6 +638,12 @@ export function formatConventionsDiagnostics(d: ConventionsDiagnostics): string 
   if (d.appends.length > 0) {
     lines.push('  新增（仅子层定义）：');
     for (const a of d.appends) lines.push(`    「${a.section}」  by ${a.by}`);
+  }
+  if (d.imports.length > 0) {
+    lines.push('  导入（@file.md 展开）：');
+    for (const i of d.imports) {
+      lines.push(`    ${i.from} → ${i.file}  （${i.chars} 字符，depth ${i.depth}）`);
+    }
   }
   return lines.join('\n');
 }

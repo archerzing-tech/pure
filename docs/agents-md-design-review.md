@@ -53,7 +53,7 @@
 ### P1
 
 - **合并语义升级**：每节支持 `merge: append | override`（✅ 已落地：标题上一行写 `<!-- merge: append -->` 即追加不替换，可跨层叠加），覆盖时输出诊断（哪层覆盖了哪节），让「冲突上报」对 loader 也成立。
-- **支持 `@import`（限跳数）+ 路径作用域（frontmatter `paths:`）+ 按需加载下层 AGENTS.md**。
+- **支持 `@import`（限跳数）+ 路径作用域（frontmatter `paths:`）+ 按需加载下层 AGENTS.md**（@import ✅ 已落地：`@rules/x.md` 按层根展开、≤3 跳、环检测、代码块与越层不展开）。
 - **规则分级**：`[hard]` / `[soft]`，hard 项必须同时落在 permissions / hooks 配置里。
 - **默认可更新**（✅ 已落地）：默认文件带 `<!-- pure:default version=N -->`，基线记在 `~/.pure/AGENTS.default.json`；升级只替换用户未改过的节，缺的节追加，改过的节保留。
 
@@ -81,3 +81,10 @@
 - 默认约定可升级：模板头带版本标记，`syncSeededAgentsMd`（CLI）与 GUI 同一个纯函数 `upgradeSeededAgentsMd` 处理升级；基线在 `AGENTS.default.json`。
 - 升级三分类：新增（用户文件没有的节）、采纳（用户未改过的节换成新版）、保留（用户改过的节）。无基线时保守：已存在的节一律不动，只记基线。
 - 版本标记在任何合并前剥除，不进模型上下文；`agents:show` 同时报默认版本与基线版本。
+
+### 落地记录（2026-11-15，P1 第三刀）
+
+- `@file.md` 导入：单独一行即可把另一个约定文件展开进当前层，用于 monorepo 共享规则。
+- 边界：限于当前层根目录内、最多 3 跳、按路径去环；代码块内的 `@...` 不展开；缺失/越界/成环的那一行原样保留（可见且无害）。
+- `agents:show` 列出每个导入的来源与字符数；GUI 侧尚未走 import 展开（渲染进程无 node:fs，待接入 invoke 版 reader）。
+- 未做：`paths:` 作用域、下层目录按需加载。

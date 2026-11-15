@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -12,6 +12,7 @@ import {
   upgradeSeededAgentsMd,
   parseSeedState,
   syncSeededAgentsMd,
+  expandImports,
   sectionKey,
   splitSections,
 } from '../conventions';
@@ -273,6 +274,111 @@ describe('default upgrade (version marker + seed state)', () => {
       expect(after).toContain('我的规则');
       expect(after).not.toContain('v3 language');
       expect(after).toContain('v3 new');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('imports (@file.md)', () => {
+  it('expands a relative import inside the workspace layer', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-import-'));
+    try {
+      mkdirSync(join(root, 'rules'));
+      writeFileSync(join(root, 'AGENTS.md'), '# 主规则\n\n主文\n\n@rules/extra.md');
+      writeFileSync(join(root, 'rules', 'extra.md'), '## 导入节\n\n来自导入');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\nx',
+        userSpaceRoot: root,
+      });
+      expect(text).toContain('来自导入');
+      expect(text).not.toContain('@rules/extra.md');
+      expect(diagnostics.imports.length).toBe(1);
+      expect(diagnostics.imports[0].file.endsWith('rules/extra.md')).toBe(true);
+      expect(diagnostics.imports[0].depth).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('follows nested imports and stops on a cycle', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-cycle-'));
+    try {
+      writeFileSync(join(root, 'AGENTS.md'), '## 主\n\n@b.md');
+      writeFileSync(join(root, 'b.md'), '## B\n\nb content\n\n@AGENTS.md');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\nx',
+        userSpaceRoot: root,
+      });
+      expect(text).toContain('b content');
+      // The back-edge stays a literal line instead of recursing forever.
+      expect(text).toContain('@AGENTS.md');
+      expect(diagnostics.imports.length).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores @lines inside fenced code blocks', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-fence-'));
+    try {
+      writeFileSync(join(root, 'AGENTS.md'), '## 主\n\n```\n@x.md\n```\n');
+      writeFileSync(join(root, 'x.md'), '## X\n\nshould not load');
+      const { text } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\nx',
+        userSpaceRoot: root,
+      });
+      expect(text).not.toContain('should not load');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses imports that escape the layer root', async () => {
+    const outer = mkdtempSync(join(tmpdir(), 'pure-escape-'));
+    try {
+      const root = join(outer, 'workspace');
+      mkdirSync(root);
+      writeFileSync(join(outer, 'outside.md'), '## Outside\n\nsecret');
+      writeFileSync(join(root, 'AGENTS.md'), '## 主\n\n@../outside.md');
+      const { text, diagnostics } = await loadMergedConventionsWithDiagnostics({
+        appText: '## 语言\n\nx',
+        userSpaceRoot: root,
+      });
+      expect(text).not.toContain('secret');
+      expect(diagnostics.imports).toEqual([]);
+    } finally {
+      rmSync(outer, { recursive: true, force: true });
+    }
+  });
+
+  it('stops at the depth cap', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pure-depth-'));
+    try {
+      writeFileSync(join(root, 'AGENTS.md'), '## 主\n\n@a1.md');
+      for (let i = 1; i <= 4; i++) {
+        writeFileSync(join(root, `a${i}.md`), `## L${i}\n\nlevel ${i}\n\n@a${i + 1}.md`);
+      }
+      const read = async (file: string) => {
+        try {
+          return readFileSync(file, 'utf8');
+        } catch {
+          return null;
+        }
+      };
+      const { text, imports } = await expandImports(
+        readFileSync(join(root, 'AGENTS.md'), 'utf8'),
+        join(root, 'AGENTS.md'),
+        read,
+        { root },
+      );
+      expect(text).toContain('level 1');
+      expect(text).toContain('level 2');
+      expect(text).toContain('level 3');
+      // Depth 3 is the cap: level 4 stays an unexpanded import line.
+      expect(text).not.toContain('level 4');
+      expect(text).toContain('@a4.md');
+      expect(imports.every((i) => i.depth < 3)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
