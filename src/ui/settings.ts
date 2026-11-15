@@ -34,7 +34,6 @@ import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from '../coding-agent/Subagent
 import { readGuiObservations } from './observationSource';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { toolDisplayName } from './toolRow';
-import { createLLMAdapter } from './chat';
 import { compilePersonaOverlays } from '../harness/personaOverlays';
 import { runOverlayFlowForAdvice } from './overlayFlowHost';
 import {
@@ -68,6 +67,8 @@ import { BASELINE_SNAPSHOT } from '../shared/baselineSnapshot';
 import { clearInputDecisionLog, decisorOf, describeInsertionScene, describeTiming, formatInputDecisionLog, getInputDecisionLog, type InputDecision } from '../coding-agent/inputDecision';
 import { DEFAULT_AUTO_CONTINUE_MAX_ROUNDS } from './autoContinue';
 import { buildExportSavedToast } from './statsExportToast';
+import { formatConventionsDiagnostics } from '../shared/conventions';
+import { createLLMAdapter, getGuiConventionsDiagnostics } from './chat';
 import {
   customBaseURL,
   customProviderFor,
@@ -359,7 +360,10 @@ export class SettingsPanel {
     // 工具清单与已装技能都是"进页面读最新"的只读区块：开关刚拨过、
     // workspace 刚切换、或助手刚在会话里装了新技能，切过来就能看到。
     if (category === 'tools') this.renderToolInventory();
-    if (category === 'skills') void this.renderAppSkills();
+    if (category === 'skills') {
+      void this.renderAppSkills();
+      this.renderConventionsDiagnostics();
+    }
     // 打开网络代理页：自动探测一次系统代理（静默，≥5s 节流）。
     if (category === 'proxy') {
       void this.autoDetectProxyForPage();
@@ -418,6 +422,7 @@ export class SettingsPanel {
       clearInputDecisionLog();
       this.renderInsertionDecisionLog();
     });
+    document.getElementById('conventions-diag-refresh')?.addEventListener('click', () => this.renderConventionsDiagnostics());
 
     // E1.3 tool-correction approve buttons — event-delegated (the card list
     // re-renders after every approval). The click is the whole approval flow:
@@ -2712,6 +2717,7 @@ export class SettingsPanel {
     // Read-only inventories: effective tool list + skills installed on disk.
     this.renderToolInventory();
     void this.renderAppSkills();
+    this.renderConventionsDiagnostics();
 
     // System permission statuses refresh on every panel open.
     void this.refreshSystemPermissions();
@@ -3160,6 +3166,25 @@ export class SettingsPanel {
         }
       });
     });
+    applyTranslations();
+  }
+
+  // ── Skills page: AGENTS.md conventions diagnostics ──
+
+  private renderConventionsDiagnostics(): void {
+    const el = document.getElementById('conventions-diag');
+    if (!el) return;
+    const snap = getGuiConventionsDiagnostics();
+    if (!snap) {
+      el.innerHTML = `<div class="mcp-server-empty" data-i18n="conventions.diag.empty">${escapeHtml(t('conventions.diag.empty', '还没有诊断快照——发一条消息触发一次装配后，这里会显示本轮实际注入了哪些约定。'))}</div>`;
+      applyTranslations();
+      return;
+    }
+    const at = new Date(snap.at);
+    const hhmmss = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}:${String(at.getSeconds()).padStart(2, '0')}`;
+    const wsLabel = snap.workspace ? escapeHtml(snap.workspace) : escapeHtml(t('conventions.diag.noWorkspace', '（未打开工作区）'));
+    const report = escapeHtml(formatConventionsDiagnostics(snap.diagnostics));
+    el.innerHTML = `<div class="conventions-diag-meta">${escapeHtml(t('conventions.diag.capturedAt', '快照时间'))} ${hhmmss} · ${escapeHtml(t('conventions.diag.workspace', '工作区'))} ${wsLabel}</div><pre class="conventions-diag-pre">${report}</pre>`;
     applyTranslations();
   }
 

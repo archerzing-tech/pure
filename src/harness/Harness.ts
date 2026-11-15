@@ -166,6 +166,8 @@ export interface HarnessConfig {
   workspaceConventions?: EngineContext['workspaceConventions'];
   /** 本轮已随请求文本并入 system prompt 的下层源；引擎据此避开重复注入。 */
   conventionsPreloaded?: EngineContext['conventionsPreloaded'];
+  /** 会话级已注入转录的约定源；跨轮复用，长会话不重复注入同一份规则。 */
+  conventionsDelivered?: EngineContext['conventionsDelivered'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -501,6 +503,7 @@ export class Harness {
       // 下层约定：引擎把本批读过的文件路径交给宿主，宿主回该目录链的规则。
       workspaceConventions: this.config.workspaceConventions,
       conventionsPreloaded: this.config.conventionsPreloaded,
+      conventionsDelivered: this.config.conventionsDelivered,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

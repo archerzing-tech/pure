@@ -243,14 +243,21 @@ export class AgentLoopEngine {
     // 失败账（不是新失败，是旧裁决的执行），累计 3 次拒绝（中间表现良好
     // 也不清零——被拒绝本身就是回路已死的证据）兜底交还用户。
     const turnQuarantined = new Set<string>();
-    // 本回合已注入过规则的下层文件（宿主侧另有一份会话级去重：这里的集合
-    // 只挡住同一回合内重复读同一目录）。装配点已经跟着请求文本带进来的源
-    // 先入账——两条口子撞在同一个文件上时只能付一次。
+    // 本回合/本会话已交付过的下层约定源：预加载进本轮 prompt 的、或之前某轮
+    // 已注入转录的，都不再注入。conventionsDelivered 是宿主持有的会话级集合
+    // （只记「进了转录」的源，消息留在历史里），跨轮复用后同一份规则在长会话
+    // 里不会被重复注入；仅在某轮 prompt 里出现过的预加载源不进它，prompt 每轮
+    // 重建，一旦某轮没再带上、后续又真读到了，仍要把规则补进转录。
     const injectedConventions = new Set<string>();
     try {
       for (const source of ctx.conventionsPreloaded?.() ?? []) injectedConventions.add(source);
     } catch {
       /* 预加载清单读不到就是空的：最多重复注入一次，不该打断回合 */
+    }
+    try {
+      for (const source of ctx.conventionsDelivered ?? []) injectedConventions.add(source);
+    } catch {
+      /* 会话级账坏了就退回到本轮去重，不该打断回合 */
     }
     let quarantinedRefusals = 0;
     // Aggregated billing usage across every LLM call in this turn (each
@@ -1125,6 +1132,7 @@ export class AgentLoopEngine {
                 const text = layer.text.trim();
                 if (!text || injectedConventions.has(layer.source)) continue;
                 injectedConventions.add(layer.source);
+                ctx.conventionsDelivered?.add(layer.source);
                 const note = `<project_conventions source="${layer.source}">\n${text}\n</project_conventions>\n上面这份规则是刚读到这里文件时才加载的：它只管这个目录，与更外层的约定冲突时以它为准。`;
                 messages.push({ role: 'user' as const, content: note, internal: true });
                 budget.addTokens(note);

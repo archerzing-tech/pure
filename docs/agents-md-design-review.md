@@ -108,11 +108,10 @@
 
 - 读到文件才注入（引擎钩子）：`EngineContext.workspaceConventions` 让宿主接管读盘——引擎在每批工具结果配平之后，把本批**成功读到**的文件路径（`read_file` / `edit_file` 的 path）交给宿主，宿主用 `conventionsForPaths` 取目录链上的 `AGENTS.md`/`CLAUDE.md`（外层先、内层后），引擎把它们作为内部 user 消息插进转录，下一轮 THINK 就带着该目录的规矩。
 - 触发口径：只有真读到的文件算数——失败的读不触发（目录不在工作范围里，一条失败的 path 只多花 token）；`write_file` 不触发（新路径说明不了这轮是否在那个目录里干活）。
-- 去重：引擎挡住同一回合内重复读同一目录；宿主（`createCliWorkspaceConventions` / `guiWorkspaceConventions`）另有一份会话级账——同一份规则只付一次 token，长会话不会每轮重复买。
+- 去重：引擎挡住同一回合内重复读同一目录；`conventionsDelivered`（会话级 Set，只记「已写进转录」的源）由宿主持有、跨轮传给引擎，引擎在注入时写入、在回合开始时并入去重账——同一份规则在长会话里只注入一次，消息留在历史中不重复付费。宿主读盘回调也用同一份账过滤结果（CLI 每个 harness 一份，GUI 每个会话一份、切会话重置）。
 - 位置约束：注入发生在工具结果之后、中途检查点之前。内部 user 消息绝不能插在 `assistant.toolCalls` 与它的结果之间（400 的经典来路），检查点因此拿到的已是配平且带好规则的转录。
 - 与提前量的关系：两条口子并存，共用 `conventionsForPaths` / `loadDirConventions` 一份实现。请求里点名的路径先到，真读到的路径补齐。
-- 两条口子相互知悉：装配点把「本轮已随请求文本并入 system prompt 的下层源」通过 `conventionsPreloaded`（每轮求值的 getter，不是一个 agent 实例只取一次的数组）告诉引擎，引擎在回合开始时先把这些源记入去重账。请求里点名、模型又真读了同一个文件时，那份规则一轮只付一次 token。CLI 的清单来自 `merged.diagnostics.layers`（name === 'nested'），GUI 的来自 `collectNestedConventions` 并随 30s 缓存一并恢复（缓存命中时 prompt 里带的仍是那一份）。
-- 口径限制：这层去重只管「同一轮」——上一轮预加载过、本轮没点名又真读了同一文件时仍会再注入一次；跨轮去重要把已注入源挂在会话状态里，等有人真撞上重复付费再说。
+- 两条口子相互知悉：装配点把「本轮已随请求文本并入 system prompt 的下层源」通过 `conventionsPreloaded`（每轮求值的 getter）告诉引擎，引擎在回合开始时把这些源记入本轮去重账，但**不**记入 `conventionsDelivered`——prompt 每轮重建，某一轮没再带上的预加载源若后续真被读到，仍要补进转录一次以保持规则可见；补进后即进入会话账，此后不再重复。CLI 的清单来自 `merged.diagnostics.layers`（name === 'nested'），GUI 的来自 `collectNestedConventions` 并随 30s 缓存一并恢复。
 
 ### 落地记录（2026-11-15，P2 第三刀）
 

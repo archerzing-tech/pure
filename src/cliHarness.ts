@@ -321,12 +321,12 @@ function agentStateToCli(state: string): string {
 }
 
 /** 引擎侧下层约定的 CLI 实现：把本批读到的文件归一成工作区相对路径，再取
- *  目录链上的 AGENTS.md/CLAUDE.md。seen 每个会话一份——同一份规则只在首次
- *  读到时付费，长会话不必每轮重复买。 */
+ *  目录链上的 AGENTS.md/CLAUDE.md。delivered 是会话级账（引擎也拿它做跨轮
+ *  去重），同一份规则只在首次读到时付费，长会话不必每轮重复买。 */
 function createCliWorkspaceConventions(
   projectPath: string,
+  delivered: Set<string> = new Set(),
 ): (paths: string[]) => Promise<{ source: string; text: string }[]> {
-  const seen = new Set<string>();
   return async (paths) => {
     try {
       const rel = paths
@@ -342,7 +342,7 @@ function createCliWorkspaceConventions(
             return null;
           }
         },
-        seen,
+        delivered,
       );
     } catch {
       return [];
@@ -803,14 +803,18 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     (hook, event) => process.stderr.write(`  ${dim('[hooks]')} ${dim(`unapproved ${event} hook skipped: ${hook.command}`)}\n`),
   );
 
+  // 会话级「已进转录」的约定源：宿主读盘与引擎注入共用同一份账，跨轮不
+  // 重复注入（长会话同一目录被反复读也只付一次）。
+  const conventionsDelivered = new Set<string>();
   const harness = new Harness({
     sessionId,
     llm: adapter,
     // 下层 AGENTS.md 的引擎侧通路（2026-11-15）：模型真读了哪个文件，就把
     // 那个目录的规则带进下一轮。请求文本里的路径提示仍是提前量，两条口子
     // 共用 conventionsForPaths 一份实现。
-    workspaceConventions: createCliWorkspaceConventions(projectPath),
+    workspaceConventions: createCliWorkspaceConventions(projectPath, conventionsDelivered),
     conventionsPreloaded: overrides.conventionsPreloaded,
+    conventionsDelivered,
     llmFor,
     tools,
     toolsDefs,

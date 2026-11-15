@@ -401,6 +401,12 @@ export interface EngineContext {
    *  同一份规则一轮只付一次 token，靠两条口子各说一遍等于白花钱。
    *  函数而不是数组：一个 agent 实例活过多轮，装配点每轮都在变。 */
   conventionsPreloaded?: () => string[];
+  /** 会话级「已写进转录」的约定源：引擎曾在某一轮把它作为内部消息注入，
+   *  消息从此留在对话历史里。跨轮复用同一个 Set，这样同一份规则在长会话里
+   *  不会被再次注入。只放“进了转录”的源；仅在某轮 system prompt 里出现过
+   *  的预加载源不在这里——prompt 每轮重建，一旦某轮没再带上，下一轮读到
+   *  文件时仍需要把规则补进转录。 */
+  conventionsDelivered?: Set<string>;
 }
 
 export interface LockManager {

@@ -27,14 +27,16 @@ import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, re
 import { promptObservability } from '../shared/promptObservability';
 import {
   collectNestedConventions,
-  conventionsBudgetWarnings,
   conventionsForPaths,
   expandImports,
-  mergeConventions,
+  mergeLayers,
   parseSeedState,
   stripDefaultMarkers,
   upgradeSeededAgentsMd,
   workspaceRelativePath,
+  type ConventionsDiagnostics,
+  type ConventionsImport,
+  type MergeInput,
 } from '../shared/conventions';
 import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
 import { stripUserTurnContext } from '../shared/promptLayers';
@@ -817,6 +819,20 @@ let guiPreloadedNestedSources: string[] = [];
 /** 软预算告警一次一个进程：它说的是用户维护的那个文件，不是这一回合。 */
 let guiConventionsWarned = false;
 
+/** 最近一次 GUI 装配的诊断快照（各层来源、被覆盖的节、被追加的节、`@import`
+ *  展开、作用域、预算）。设置 → 约定 页读它，与 CLI 的 `bun run agents:show`
+ *  是同一份报告——两面对「这轮到底注入了什么」只该有一个答案。
+ *  只在内存里：它说的是本次会话现在付的是什么，不是磁盘上的历史。 */
+let guiConventionsDiagnostics: {
+  workspace: string;
+  at: number;
+  diagnostics: ConventionsDiagnostics;
+} | null = null;
+
+export function getGuiConventionsDiagnostics(): typeof guiConventionsDiagnostics {
+  return guiConventionsDiagnostics;
+}
+
 /** Sidecar recording what we last wrote into the user's global AGENTS.md, so
  * an upgrade can tell "our text, untouched" from "the user rewrote it". */
 const SEED_STATE_FILE = 'AGENTS.default.json';
@@ -843,26 +859,20 @@ async function loadGuiConventions(userWorkspace?: string, mentionText?: string):
 /** 引擎侧下层约定的 GUI 实现（2026-11-15）：模型读到哪个文件，就把那个
  *  目录的 AGENTS.md 带进下一轮。读盘仍走 invoke（渲染进程没有 node:fs），
  *  与提前量那条口子共用 conventionsForPaths——两面不会各写一套去重与排序。
- *  去重账按工作区分开：切项目后同名文件是另一份规则，该重新付费。 */
-const guiInjectedConventions = new Set<string>();
-
+ *  delivered 是会话级「已进转录」账（宿主与引擎共用），同一份规则长会话里
+ *  不重复注入；新会话新历史，必须换一份账（由 ChatController 持有并在切会话
+ *  时重置）。 */
 function guiWorkspaceConventions(
   workspace: string,
+  delivered: Set<string>,
 ): (paths: string[]) => Promise<{ source: string; text: string }[]> {
-  const seen = new Set<string>();
-  const key = (source: string) => `${workspace}\u0000${source}`;
   return async (paths) => {
     try {
       const rel = paths
         .map((path) => workspaceRelativePath(path, workspace))
         .filter((path) => path && !path.startsWith('..'));
       if (rel.length === 0) return [];
-      // 会话级去重：同一个源只注入一次（先看全局账，再把本次结果记账）。
-      const skip = new Set<string>();
-      for (const source of guiInjectedConventions) {
-        if (source.startsWith(`${workspace}\u0000`)) skip.add(source.slice(workspace.length + 1));
-      }
-      const layers = await conventionsForPaths(
+      return await conventionsForPaths(
         rel,
         async (source) => {
           try {
@@ -871,10 +881,8 @@ function guiWorkspaceConventions(
             return null;
           }
         },
-        skip,
+        delivered,
       );
-      for (const layer of layers) guiInjectedConventions.add(key(layer.source));
-      return layers;
     } catch {
       return [];
     }
@@ -887,13 +895,13 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
   try {
     const appRoot = await resourceDir();
     const globalRoot = await join(await homeDir(), '.pure');
-    const read = async (root: string): Promise<string | null> => {
+    const read = async (root: string): Promise<{ text: string; file: string } | null> => {
       // 与 conventions.ts 同一优先级：AGENTS.md 开放标准优先，CLAUDE.md 是
       // Claude Code 生态项目的 fallback——同层读到一个就停，不双源。
       for (const name of ['AGENTS.md', 'CLAUDE.md']) {
         try {
           const text = await invoke<string>('read_file', { workspace: root, path: name });
-          if (text) return text;
+          if (text) return { text, file: name };
         } catch {
           /* try the next alias */
         }
@@ -910,8 +918,8 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
     // logic as the CLI's syncSeededAgentsMd; the renderer cannot reach
     // node:fs, so the I/O goes through invoke. Best-effort throughout: a
     // read-only home must never break prompt assembly.
-    const appDefault = stripDefaultMarkers(appMd ?? DEFAULT_AGENTS_MD);
-    let effectiveGlobal = globalMd;
+    const appDefault = stripDefaultMarkers(appMd?.text ?? DEFAULT_AGENTS_MD);
+    let effectiveGlobal = globalMd?.text ?? null;
     try {
       const stateRaw = await invoke<string>('read_file', {
         workspace: globalRoot,
@@ -945,6 +953,7 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
     // `@file.md` imports expand per layer, layer-root-relative. Same pure
     // function the CLI loader uses; only the reader differs (Tauri bridge
     // here, node:fs there), so the two surfaces cannot drift.
+    const imports: ConventionsImport[] = [];
     const expandLayer = async (
       root: string,
       text: string | null,
@@ -959,18 +968,23 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
         }
       };
       const expanded = await expandImports(text, filePath, reader, { root: '' });
+      imports.push(...expanded.imports);
       return expanded.text;
     };
+    // One fold for every layer (app → global → workspace → nested), so the
+    // diagnostics the settings page shows are the same object the prompt was
+    // built from. Chained `mergeConventions` calls produced the same text but
+    // threw away who replaced which section — which is exactly what the user
+    // needs in order to see why their rule stopped applying.
+    const layers: MergeInput[] = [];
     const appExpanded = (await expandLayer(appRoot, appDefault)) ?? appDefault;
+    layers.push({ name: 'app', source: appMd ? `${appRoot}/${appMd.file}` : appRoot, text: appExpanded });
     const globalExpanded = await expandLayer(globalRoot, effectiveGlobal);
-    const appPlusGlobal = mergeConventions(appExpanded, globalExpanded ?? null);
-    const userExpanded = userWorkspace ? await expandLayer(userWorkspace, userMd) : userMd;
-    let merged = mergeConventions(appPlusGlobal || null, userExpanded);
-    const layerSizes: { name: string; present: boolean; chars: number }[] = [
-      { name: 'app', present: appExpanded.trim().length > 0, chars: appExpanded.trim().length },
-      { name: 'global', present: (globalExpanded ?? '').trim().length > 0, chars: (globalExpanded ?? '').trim().length },
-      { name: 'workspace', present: (userExpanded ?? '').trim().length > 0, chars: (userExpanded ?? '').trim().length },
-    ];
+    layers.push({ name: 'global', source: globalMd ? `${globalRoot}/${globalMd.file}` : globalRoot, text: globalExpanded });
+    const userExpanded = userWorkspace ? await expandLayer(userWorkspace, userMd?.text ?? null) : null;
+    if (userWorkspace) {
+      layers.push({ name: 'workspace', source: userMd ? `${userWorkspace}/${userMd.file}` : userWorkspace, text: userExpanded });
+    }
     // Nested (monorepo): the AGENTS.md of directories this turn's text names,
     // nearest last so it overrides farther rules — same order as the CLI.
     if (userWorkspace && mentionText?.trim()) {
@@ -986,24 +1000,21 @@ async function readGuiConventions(userWorkspace?: string, mentionText?: string):
       });
       for (const layer of nestedLayers) {
         const expanded = await expandLayer(userWorkspace, layer.text, layer.source);
-        merged = mergeConventions(merged || null, expanded);
-        const size = (expanded ?? layer.text).trim().length;
-        layerSizes.push({ name: 'nested', present: size > 0, chars: size });
+        layers.push({ name: 'nested', source: layer.source, text: expanded ?? layer.text });
       }
       guiPreloadedNestedSources = nestedLayers.map((layer) => layer.source);
     }
+    const merged = mergeLayers(layers, { imports });
+    guiConventionsDiagnostics = { workspace: userWorkspace ?? '', at: Date.now(), diagnostics: merged.diagnostics };
     // Soft-budget warning, once per session (same口径 as the CLI's
     // once-per-process): it is about the file the user maintains, not this
     // turn. The GUI otherwise has no way to say "these rules cost tokens every
     // single turn" — the agent just silently pays it.
-    if (!guiConventionsWarned) {
-      const warnings = conventionsBudgetWarnings(merged, layerSizes);
-      if (warnings.length > 0) {
-        guiConventionsWarned = true;
-        showToast(`AGENTS.md: ${warnings.join('；')}`, 8000);
-      }
+    if (!guiConventionsWarned && merged.diagnostics.warnings.length > 0) {
+      guiConventionsWarned = true;
+      showToast(`AGENTS.md: ${merged.diagnostics.warnings.join('；')}`, 8000);
     }
-    return merged;
+    return merged.text;
   } catch {
     return '';
   }
@@ -1985,6 +1996,8 @@ export class ChatController {
   private workspace: string = '';
   private effectiveWorkspace: string = '';
   private sessionId: string = '';
+  /** 会话级「已进转录」的约定源：跨轮不重复注入同一份规则。新会话 = 新历史，必须重置。 */
+  private conventionsDelivered = new Set<string>();
   /** Session-owned transcript column; null in single-session mode. */
   private readonly transcriptHost: HTMLElement | null;
   /** Whether this session is currently the visible conversation. */
@@ -2478,6 +2491,7 @@ export class ChatController {
 
   constructor(options: ChatControllerOptions = {}) {
     this.sessionId = `session_${Date.now()}`;
+    this.conventionsDelivered = new Set<string>();
     this.permissionManager = new PermissionManager();
     this.sessionStats = loadSessionStats(this.sessionId);
     this.transcriptHost = options.host ?? null;
@@ -2741,6 +2755,7 @@ export class ChatController {
     // 澄清句柄跟旧账一起作废——跨会话回收会把答案记到不相干的问题上。
     this.pendingClarification = null;
     this.sessionId = id;
+    this.conventionsDelivered = new Set<string>();
     this.contextEngine = undefined;
     this.preCompactedMessages = null;
     this.preCompactSourceMessages = null;
@@ -3429,6 +3444,7 @@ export class ChatController {
     const saved = await loadLastSession();
     if (!saved) return null;
     this.sessionId = saved.sessionId;
+    this.conventionsDelivered = new Set<string>();
     this.sessionStats = loadSessionStats(saved.sessionId);
     this.generation++;
     // Route through setWorkspace so the clickable-path resolver stays in sync,
@@ -5868,11 +5884,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 缺省走协调器默认 5；config.maxReadConcurrency 存在时生效）。
         maxReadConcurrency: config.maxReadConcurrency,
         // 下层 AGENTS.md 的引擎侧通路：模型真读了哪个文件，那个目录的规则
-        // 就进下一轮（请求文本里的路径提示仍是提前量）。
+        // 就进下一轮（请求文本里的路径提示仍是提前量）。conventionsDelivered
+        // 是会话级「已进转录」账，跨轮复用后长会话不重复注入同一份规则。
         workspaceConventions: effectiveWorkspace
-          ? guiWorkspaceConventions(effectiveWorkspace)
+          ? guiWorkspaceConventions(effectiveWorkspace, this.conventionsDelivered)
           : undefined,
         conventionsPreloaded: () => guiPreloadedNestedSources,
+        conventionsDelivered: this.conventionsDelivered,
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
@@ -9010,6 +9028,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.preCompactSessionId = '';
     this.preCompactMessageCount = 0;
     this.sessionId = `session_${Date.now()}`;
+    this.conventionsDelivered = new Set<string>();
     // New chat = a fresh session: drop any session-scoped tool approvals.
     this.permissionManager.clearCache();
     // Fresh session → fresh stats view.

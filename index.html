@@ -791,6 +791,19 @@
                   <div id="hub-grouped" class="hub-grouped"></div>
                   <div id="hub-installed" class="hub-installed"></div>
                 </div>
+
+                <!-- ── AGENTS.md conventions diagnostics: what this session actually
+                     injected, with layer sources / overrides / imports. ── -->
+                <div class="settings-section">
+                  <div class="setting-row">
+                    <div class="setting-info">
+                      <span class="setting-label" data-i18n="conventions.diag.title">AGENTS.md 约定诊断</span>
+                      <span class="setting-hint" data-i18n="conventions.diag.hint">本次会话实际装配并注入的约定：各层来源、被覆盖或追加的节、@import 展开与预算告警。快照在每次装配 prompt 时刷新。</span>
+                    </div>
+                    <button id="conventions-diag-refresh" class="setting-btn secondary" data-i18n="conventions.diag.refresh">刷新</button>
+                  </div>
+                  <div id="conventions-diag"></div>
+                </div>
               </div>
               <!-- Memory (智能进化记忆库可视化 + 遗忘速度调节) -->
               <div class="settings-page" data-page="memory">

@@ -281,7 +281,10 @@ function bodyWithoutHeading(body: string): string {
   return body.replace(/^#{1,6}[^\n]*\n?/, '').trim();
 }
 
-interface MergeInput {
+/** One layer handed to `mergeLayers`: who it is, where it came from, and its
+ *  raw text. Exported so renderer-side callers (the GUI assembles its layers
+ *  itself, through the same fold) can build the list without a cast. */
+export interface MergeInput {
   name: ConventionsLayerName;
   source: string;
   text: string | null;

@@ -136,6 +136,8 @@ export interface CodingAgentConfig {
   workspaceConventions?: EngineContext['workspaceConventions'];
   /** 本轮已随请求文本并入 system prompt 的下层约定源（引擎避开重复注入）。 */
   conventionsPreloaded?: EngineContext['conventionsPreloaded'];
+  /** 会话级已注入转录的约定源；跨轮复用，长会话不重复注入同一份规则。 */
+  conventionsDelivered?: EngineContext['conventionsDelivered'];
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
@@ -379,6 +381,7 @@ export class CodingAgent {
       maxReadConcurrency: config.maxReadConcurrency,
       workspaceConventions: config.workspaceConventions,
       conventionsPreloaded: config.conventionsPreloaded,
+      conventionsDelivered: config.conventionsDelivered,
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,

@@ -2835,4 +2835,76 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     const injected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('web only'));
     expect(injected).toHaveLength(0);
   });
+
+  it('does not re-inject a source already delivered in an earlier turn of the session', async () => {
+    let first = true;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        const tc: ToolCall = { id: 'call_read', index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path: 'packages/web/src/app.ts' }) } };
+        if (first) {
+          first = false;
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    // 会话级「已进转录」账：上一轮已经注入过，这一轮 prompt 里没有，但读到
+    // 同一文件时也不能再注入（历史里还在）。宿主把这份 Set 跨轮传进来。
+    const conventionsDelivered = new Set<string>(['packages/web/AGENTS.md']);
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'body', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+      },
+      conventionsDelivered,
+      workspaceConventions: async () => [{ source: 'packages/web/AGENTS.md', text: '## WebOnly\n\nweb only' }],
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv5', systemPrompt: 'sys', userPrompt: '再看一眼 packages/web/src/app.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    const injected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('web only'));
+    expect(injected).toHaveLength(0);
+    expect(conventionsDelivered.has('packages/web/AGENTS.md')).toBe(true);
+  });
+
+  it('records injected sources into the session-delivered set for later turns', async () => {
+    let first = true;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        const tc: ToolCall = { id: 'call_read', index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path: 'packages/web/src/app.ts' }) } };
+        if (first) {
+          first = false;
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const conventionsDelivered = new Set<string>();
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'body', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'read_file', description: 'r', input_schema: {} }],
+      },
+      conventionsDelivered,
+      workspaceConventions: async () => [{ source: 'packages/web/AGENTS.md', text: '## WebOnly\n\nweb only' }],
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-conv6', systemPrompt: 'sys', userPrompt: '改 packages/web/src/app.ts', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    const injected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('web only'));
+    expect(injected).toHaveLength(1);
+    expect(conventionsDelivered.has('packages/web/AGENTS.md')).toBe(true);
+  });
 });
