@@ -2049,6 +2049,18 @@ export class ChatController {
   private sessionId: string = '';
   /** 会话级「已进转录」的约定源：跨轮不重复注入同一份规则。新会话 = 新历史，必须重置。 */
   private conventionsDelivered = new Set<string>();
+
+  /** 从历史消息重建「已进转录」约定源：会话恢复/切换后若只清空集合而历史里已有
+   *  <project_conventions> 注入，后续同目录读文件会再次注入同一份规则（长会话恢复去重漏口）。
+   *  以转录为真相源回灌，保证跨恢复不重复注入。 */
+  private rebuildConventionsDeliveredFromMessages(messages: Message[]): void {
+    this.conventionsDelivered = new Set<string>();
+    for (const m of messages) {
+      if (m.role !== 'user' || !m.internal || typeof m.content !== 'string') continue;
+      const match = m.content.match(/<project_conventions\s+source="([^"]+)">/);
+      if (match?.[1]) this.conventionsDelivered.add(match[1]);
+    }
+  }
   /** Session-owned transcript column; null in single-session mode. */
   private readonly transcriptHost: HTMLElement | null;
   /** Whether this session is currently the visible conversation. */
@@ -3384,6 +3396,9 @@ export class ChatController {
     this.generation++;
     const boundedMessages = limitConversationMessages(snapshot.modelContext.messages);
     this.messages = boundedMessages.map(m => ({ ...m }));
+    // 恢复后的转录里可能已含运行中注入的目录约定：从历史回灌 delivered 集合，
+    // 避免恢复后同目录再读时重复注入（会话级去重跨恢复不断档）。
+    this.rebuildConventionsDeliveredFromMessages(this.messages);
     // A1（S1-4）fold 水位随快照恢复：恢复进来的 messages 已含日志中
     // ts ≤ foldedThrough 的转录，水位续在这里才不会重复计入。
     this.logFoldedThrough = snapshot.foldedThrough;
