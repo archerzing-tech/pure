@@ -291,6 +291,50 @@ interface MergeInput {
 const IMPORT_LINE = /^@(\S+\.md)$/i;
 export const MAX_IMPORT_DEPTH = 3;
 
+const isAbsolutePath = (p: string): boolean => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+
+const normSlashes = (p: string): string => p.replace(/\\/g, '/');
+
+function joinPath(dir: string, rel: string): string {
+  if (isAbsolutePath(rel)) return rel;
+  if (!dir || dir === '.') return rel;
+  return `${dir.replace(/\/+$/, '')}/${rel}`;
+}
+
+/** Collapse `.` / `..` / duplicate slashes, keeping an absolute root intact. */
+function cleanPath(p: string): string {
+  const drive = /^[A-Za-z]:/.exec(p)?.[0] ?? '';
+  const absolute = isAbsolutePath(p);
+  const body = absolute ? p.slice(drive.length || 1) : p;
+  const parts: string[] = [];
+  for (const part of body.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (parts.length > 0) parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  if (!absolute) return parts.join('/') || '.';
+  const joined = `${drive}/${parts.join('/')}`.replace(/\/+$/, '');
+  return joined || '/';
+}
+
+function dirnameOf(p: string): string {
+  const i = p.lastIndexOf('/');
+  if (i < 0) return '.';
+  return i === 0 ? '/' : p.slice(0, i);
+}
+
+/** Confine an import target to the layer root. A relative root ('', '.') means
+ * the caller is working in layer-relative space, so any `..` escape or
+ * absolute path is refused too. */
+function isInsideLayer(target: string, root: string): boolean {
+  const relativeRoot = root === '' || root === '.';
+  if (relativeRoot) return !isAbsolutePath(target) && !target.startsWith('..');
+  return target === root || target.startsWith(`${root}/`);
+}
+
 export type ConventionsFileReader = (file: string) => Promise<string | null>;
 
 /** Expand `@file.md` imports depth-first. A missing / escaping / already-seen
@@ -305,9 +349,13 @@ export async function expandImports(
   const imports: ConventionsImport[] = [];
   const depth = opts.depth ?? 0;
   if (depth >= MAX_IMPORT_DEPTH) return { text, imports };
-  const path = await import('node:path');
-  const abs = path.resolve(filePath);
-  const root = opts.root ? path.resolve(opts.root) : path.dirname(abs);
+  // Path handling is string-only on purpose: the renderer (GUI) has no
+  // node:path, and both surfaces must expand imports identically. Absolute
+  // paths behave as before; when callers pass layer-root-relative paths
+  // (GUI: filePath 'AGENTS.md' + root ''), targets stay relative and are read
+  // through the caller's own reader.
+  const abs = cleanPath(normSlashes(filePath));
+  const root = opts.root ? cleanPath(normSlashes(opts.root)) : dirnameOf(abs);
   const seen = opts.seen ?? new Set<string>([abs]);
   const out: string[] = [];
   let fence: string | null = null;
@@ -324,9 +372,8 @@ export async function expandImports(
       out.push(line);
       continue;
     }
-    const target = path.resolve(path.dirname(abs), match[1]);
-    const insideRoot = target === root || target.startsWith(`${root}${path.sep}`);
-    if (!insideRoot || seen.has(target)) {
+    const target = cleanPath(joinPath(dirnameOf(abs), normSlashes(match[1])));
+    if (!isInsideLayer(target, root) || seen.has(target)) {
       out.push(line);
       continue;
     }

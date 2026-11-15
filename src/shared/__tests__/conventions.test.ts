@@ -354,6 +354,26 @@ describe('imports (@file.md)', () => {
     }
   });
 
+  it('expands in layer-relative mode so the renderer can share the logic', async () => {
+    const files = new Map([
+      ['AGENTS.md', '## 主\n\n@rules/extra.md'],
+      ['rules/extra.md', '## 导入\n\nrelative import body'],
+    ]);
+    const read = async (p: string) => files.get(p) ?? null;
+    const out = await expandImports(files.get('AGENTS.md') as string, 'AGENTS.md', read, {
+      root: '',
+    });
+    expect(out.text).toContain('relative import body');
+    expect(out.imports[0].file).toBe('rules/extra.md');
+  });
+
+  it('refuses .. escapes in layer-relative mode', async () => {
+    const read = async (p: string) => (p === '../secret.md' ? 'TOP_SECRET_BODY' : null);
+    const out = await expandImports('## 主\n\n@../secret.md', 'AGENTS.md', read, { root: '' });
+    expect(out.text).not.toContain('TOP_SECRET_BODY');
+    expect(out.imports).toEqual([]);
+  });
+
   it('stops at the depth cap', async () => {
     const root = mkdtempSync(join(tmpdir(), 'pure-depth-'));
     try {

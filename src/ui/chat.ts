@@ -25,7 +25,13 @@ import { distillSkill, matchSkillDistillInstruction, pickDistillSource } from '.
 import { harvestUserPreferences } from '../shared/memory';
 import { promptAssembler, buildGuiCapabilities, formatPromptBudgetDiagnostic, resolvePromptBudget, type PromptSkill } from '../shared/PromptAssembler';
 import { promptObservability } from '../shared/promptObservability';
-import { mergeConventions, parseSeedState, stripDefaultMarkers, upgradeSeededAgentsMd } from '../shared/conventions';
+import {
+  expandImports,
+  mergeConventions,
+  parseSeedState,
+  stripDefaultMarkers,
+  upgradeSeededAgentsMd,
+} from '../shared/conventions';
 import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
@@ -873,8 +879,27 @@ async function readGuiConventions(userWorkspace?: string): Promise<string> {
     } catch {
       /* ignore seeding/upgrade failure */
     }
-    const appPlusGlobal = mergeConventions(appDefault, effectiveGlobal);
-    return mergeConventions(appPlusGlobal || null, userMd);
+    // `@file.md` imports expand per layer, layer-root-relative. Same pure
+    // function the CLI loader uses; only the reader differs (Tauri bridge
+    // here, node:fs there), so the two surfaces cannot drift.
+    const expandLayer = async (root: string, text: string | null): Promise<string | null> => {
+      if (!text?.trim()) return text;
+      const reader = async (rel: string) => {
+        try {
+          return await invoke<string>('read_file', { workspace: root, path: rel });
+        } catch {
+          return null;
+        }
+      };
+      const expanded = await expandImports(text, 'AGENTS.md', reader, { root: '' });
+      return expanded.text;
+    };
+    const appPlusGlobal = mergeConventions(
+      (await expandLayer(appRoot, appDefault)) ?? appDefault,
+      (await expandLayer(globalRoot, effectiveGlobal)) ?? null,
+    );
+    const userExpanded = userWorkspace ? await expandLayer(userWorkspace, userMd) : userMd;
+    return mergeConventions(appPlusGlobal || null, userExpanded);
   } catch {
     return '';
   }
