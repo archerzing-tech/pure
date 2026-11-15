@@ -20,7 +20,11 @@ Positioning rests on **three layers, not two**. The **capability layer** keeps g
   <img src="docs/screenshots/pure-ui-default.png" alt="Pure GUI default surface (landing view)" width="720" />
   <br />
   <em>Pure GUI — the calm default surface: session rail, hero prompt, and status bar (real screenshot, dark theme)</em>
-  <img src="docs/screenshots/pure-ui-process1.png" alt="Pure GUI at work — parallel research tool cards, live reasoning, and the status bar (real screenshot, dark theme)" width="720" />
+  <img src="docs/screenshots/tu1.png" alt="Pure GUI at work — three parallel tool cards (two Edit, one Bash) beside the reasoning text that explains a verifier bug (real screenshot, dark theme)" width="720" />
+  <br /><br />
+  <img src="docs/screenshots/tu2.png" alt="Pure GUI rendering an eight-day cycling plan — route map with per-day markers above a day-by-day table (real screenshot, dark theme)" width="720" />
+  <br /><br />
+  <img src="docs/screenshots/tu3.png" alt="Pure GUI rendering inline charts — per-day mileage bars above a daily temperature line chart (real screenshot, dark theme)" width="720" />
   <br />
   <br /><br />
   <img src="docs/screenshots/event-loop-agentloop-comparison.svg" alt="Classic JavaScript Event Loop compared with Pure AgentLoop" width="720" />
@@ -31,7 +35,6 @@ Positioning rests on **three layers, not two**. The **capability layer** keeps g
   <br />
   <em>Architecture diagram — GUI and CLI share one control plane and prompt compiler, driving a layered agent core (Coding Agent → Harness → Engine → Adapter) over a Rust/Tauri IPC layer, with project-scoped evolving memory alongside</em>
 </p>
-
 
 The visuals above are intentionally part of the documentation: the UI keeps configuration progressive and predictable; the preflight turns every request into an assessed, probed, and confirmed decision; and the runtime turns every tool result into evidence and every verified outcome into a candidate lesson.
 
