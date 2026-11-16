@@ -230,7 +230,10 @@ describe('mathExt ($…$ / $$…$$ → KaTeX)', () => {
     expect(src.split("import('katex')").length - 1).toBe(1);
     expect(src).toContain("import('katex/dist/katex.min.css')");
     // 唯一的加载点必须被入口的公式闸拦住：普通文本（无 $ / \[）不得触发加载。
-    expect(src).toContain('if (mayContainMath(stripped)) await ensureKatex();');
+    // 2026-11-16 bug2 二刀：加载失败只让公式保持源码（阶段隔离），闸门形状
+    // 因此从单行 await 变成 if { try { await } }——闸本身不变。
+    expect(src).toContain('if (mayContainMath(stripped)) {');
+    expect(src).toContain('await ensureKatex();');
     expect(src).toContain("return text.includes('$') || text.includes('\\\\[');");
   });
 

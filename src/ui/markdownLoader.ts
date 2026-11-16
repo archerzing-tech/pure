@@ -40,7 +40,14 @@ export function renderMarkdown(
       // DOMPurify / 图卡管线）也一并吞掉——整条气泡静默变回 markdown 源码，
       // 无日志、本条不再重试，复现时无法归因。至少留一行错误现场。
       if (typeof console !== 'undefined') {
-        console.error(`[markdown] render failed → raw fallback (len=${text.length})`, error);
+        console.error(`[markdown] render failed → degraded fallback (len=${text.length})`, error);
+      }
+      // 二刀：先试最小渲染（parse + sanitize），保住标题/粗体/代码围栏的
+      // 成形；只有连 parse 都失败（或模块没加载）才退回纯原文。
+      try {
+        if (markdownModule?.renderMarkdownFallback(text, container)) return;
+      } catch {
+        /* fall through to raw text */
       }
       container.textContent = text;
     });

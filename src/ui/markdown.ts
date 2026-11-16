@@ -3491,6 +3491,43 @@ export async function renderMarkdown(
   }
 }
 
+/** 最后兜底（2026-11-16 bug2 二刀）：完整管线在 parse 级失败时，调用方原本
+ *  直接把原文塞回 textContent——用户看到整条消息的 `##`/`**`/``` 全是源码。
+ *  先试一次「只 parse + sanitize」的最小渲染（标题、列表、粗体、代码围栏
+ *  都能成形，只是没有高亮/图卡/链接）；仍失败才由调用方退回原文。
+ *  返回 true = 已经渲染出可用内容。 */
+export function renderMarkdownFallback(text: string, container: HTMLElement): boolean {
+  try {
+    const { text: stripped } = extractSuggestedFollowups(stripAnsi(text));
+    const normalized = normalizeCjkBlockMarkers(stripUnterminatedSlotFences(stripped));
+    const html = (md.parse(normalizeMapFence(normalized), { async: false }) as string).replace(/\n+$/, '');
+    container.innerHTML = DOMPurify.sanitize(html, {
+      ADD_ATTR: ['target', 'loading', 'decoding'],
+      ADD_URI_SAFE_ATTR: ['src'],
+    });
+    container.classList.add('md-rendered');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 管线阶段隔离（2026-11-16 bug2 二刀）：innerHTML 装好之后的任一后处理
+ *  阶段（高亮 / 路径链接 / 图卡 / 控件绑定 / 建议 chips）抛错，都不许把整条
+ *  气泡打回 markdown 源码——那正是「大量 ## ** ``` 不渲染」的现场：一个
+ *  hljs 或图卡异常经 loader 兜底变成 textContent=原文，用户丢的是整条消息。
+ *  失败只留一行带阶段名的日志，其余阶段照常完成；完成态的 HTML 已经是对的。 */
+async function renderStage(name: string, fn: () => void | Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (typeof console !== 'undefined') {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.debug(`[markdown] stage ${name} failed (render kept): ${msg}`);
+    }
+  }
+}
+
 async function renderMarkdownInner(
   text: string,
   container: HTMLElement,
@@ -3513,7 +3550,17 @@ async function renderMarkdownInner(
   // before parsing — they never render as prose, only as chips at the end.
   const { text: stripped, questions: suggestedQuestions } = extractSuggestedFollowups(stripAnsi(text));
   // C1：公式存在才加载 katex（扩展是同步的，必须先 await 完再进 parse）。
-  if (mayContainMath(stripped)) await ensureKatex();
+  // katex 加载失败只让公式保持源码，不许连累整条消息（阶段隔离）。
+  if (mayContainMath(stripped)) {
+    try {
+      await ensureKatex();
+    } catch (err) {
+      if (typeof console !== 'undefined') {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.debug(`[markdown] katex unavailable (math stays source): ${msg}`);
+      }
+    }
+  }
   // 中断回合可能停在 slot 围栏中途——半截数据不进渲染管线(见函数注释)。
   const settled = stripUnterminatedSlotFences(stripped);
   // 显示层归一化：中文模型常输出 `##标题`/`-项目`/`1.项目` 这类无空格块标记，
@@ -3552,10 +3599,12 @@ async function renderMarkdownInner(
   // Bind image viewers immediately after DOM replacement. Waiting until after
   // Mermaid/chart work below leaves an already-visible image with no dblclick
   // handler while another diagram is still loading.
-  bindMdImagePopup(container);
-  // Task-list checkboxes: same early-binding rationale — plain DOM, no engine
-  // dependency, and the control is visible as soon as the bubble paints.
-  bindTaskCheckboxes(container);
+  await renderStage('bind-images', () => {
+    bindMdImagePopup(container);
+    // Task-list checkboxes: same early-binding rationale — plain DOM, no engine
+    // dependency, and the control is visible as soon as the bubble paints.
+    bindTaskCheckboxes(container);
+  });
   // Mark the bubble as fully-rendered markdown so CSS can collapse whitespace
   // (white-space:normal). marked emits newline characters BETWEEN block
   // elements (</p>\n<p>, </li>\n<li>, </pre>\n<ul>…); under the bubble's
@@ -3565,14 +3614,14 @@ async function renderMarkdownInner(
   container.classList.add('md-rendered');
 
   // 2) Synchronous: hljs over all code blocks (idempotent).
-  highlightAll(container);
+  await renderStage('highlight', () => highlightAll(container));
 
   // 2b) Clickable file paths: any path-shaped text (prose, inline code, code
   // blocks) becomes a .path-link that opens the path on click. Runs after hljs
   // so highlighted code spans are walked too. During streaming (diffStreaming)
   // paths stay plain text — only the completed render gets links, avoiding
   // re-linking churn on every token.
-  linkifyPaths(container);
+  await renderStage('linkify', () => linkifyPaths(container));
 
   // 3) All async visual blocks — the six fence kinds (svg/chart/paint/map/
   // puml/mermaid) plus markdown images. serial（活渲染完成面）=文档序逐块，
@@ -3580,24 +3629,28 @@ async function renderMarkdownInner(
   // 冷会话恢复/回放）=旧批处理序——恢复时用户不在观看生成过程，全块一屏
   // 快速出现，严格序等待是纯开销。Group svg slots first so a multi-svg
   // gallery is laid out as a whole while its slots render one by one.
-  groupAdjacentSvgSlots(container);
-  await renderAsyncBlocksInDocumentOrder(container, options.visualTiming ?? 'parallel');
+  await renderStage('diagrams', async () => {
+    groupAdjacentSvgSlots(container);
+    await renderAsyncBlocksInDocumentOrder(container, options.visualTiming ?? 'parallel');
+  });
 
   // 5) Bind the post-render preview/source controls and diagram viewers.
-  bindDiagramControls(container);
-  bindMapControls(container);
-  bindHtmlControls(container);
-  bindMermaidPopup(container);
-  bindVectorPopup(container);
-  bindPaintPopup(container);
-  bindMdImagePopup(container);
+  await renderStage('bind-controls', () => {
+    bindDiagramControls(container);
+    bindMapControls(container);
+    bindHtmlControls(container);
+    bindMermaidPopup(container);
+    bindVectorPopup(container);
+    bindPaintPopup(container);
+    bindMdImagePopup(container);
+  });
 
   // 6) Add copy + save buttons to code blocks.
-  addCodeBlockActions(container);
+  await renderStage('code-actions', () => addCodeBlockActions(container));
 
   // 7) Suggested follow-ups: the chips land after every rendered block so a
   // reply always ends with them, like a colleague's "接下来可以…" aside.
-  appendFollowupChips(container, suggestedQuestions);
+  await renderStage('followups', () => appendFollowupChips(container, suggestedQuestions));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -4152,7 +4205,27 @@ function diffStreaming(container: HTMLElement, text: string): void {
     // markdown during the stream and snapped into a different layout at
     // completion. Inherent streaming latency remains — `**bold` stays literal
     // until the closing `**` arrives, exactly like ChatGPT/Claude.
-    const html = renderBlockToken(tk);
+    // 单块渲染失败只降级这一块（2026-11-16 bug2 二刀）：此前一个块
+    // （畸形围栏 / 图卡数据 / hljs 之外的渲染分支）抛错会让整帧丢弃、后面的
+    // 内容全部停滞在上一帧；用户看到的就是源码与已渲染内容长期混杂。这里
+    // 把该块按原文落成 stream-raw，后续块继续正常渲染，完成态再整体重绘。
+    let html: string;
+    try {
+      html = renderBlockToken(tk);
+    } catch (err) {
+      if (typeof console !== 'undefined') {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.debug(`[markdown-ts] block render failed (raw fallback, len=${tk.raw.length}): ${msg}`);
+      }
+      const rawEl = document.createElement('p');
+      rawEl.className = 'stream-raw';
+      rawEl.textContent = tk.raw;
+      rawEl.setAttribute('data-md-raw', tk.raw);
+      if (oldEl) container.replaceChild(rawEl, oldEl);
+      else container.appendChild(rawEl);
+      childIdx++;
+      continue;
+    }
     if (!html) continue;
     const tmp = document.createElement('div');
     tmp.innerHTML = html;
