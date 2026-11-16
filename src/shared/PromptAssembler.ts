@@ -332,7 +332,10 @@ function buildRequestDetailFragments(
     fragment(
       'multi_agent_mechanics',
       context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS_PROMPT : '',
-      58,
+      // 59（2026-11-16）：58 排在预算裁剪的牺牲区——长任务恰恰是工具表最大、
+      // 最容易把这块挤掉的回合，而它缺席的代价是 fan-out 变逐个串行（真机
+      // bug3）。与 capability_gap_ladder 同档，仅次于常驻的 parallel_first。
+      59,
     ),
     // 服务/预览协议随请求（刀4,2026-11-06）：完整方法论不再常驻 execute_command
     // description（那里只留一行守门线），闸门命中才随附。

@@ -184,6 +184,14 @@ describe('parsePlanJson (LLM plan parsing)', () => {
     expect(plan?.steps[0].substeps).toBeUndefined();
   });
 
+  it('carries the model-declared parallel marks (2026-11-16 bug3) and drops false ones', () => {
+    const plan = parsePlanJson('{"steps":[{"action":"A","description":"d","parallel":true},{"action":"B","description":"e","parallel":false},{"action":"C","description":"f"}]}');
+    expect(plan?.steps[0].parallel).toBe(true);
+    // false 与缺席同形：不占字段，标注只表达「确为并行」。
+    expect(plan?.steps[1].parallel).toBeUndefined();
+    expect(plan?.steps[2].parallel).toBeUndefined();
+  });
+
   it('accepts ```json fences', () => {
     const plan = parsePlanJson('```json\n[{"action":"A","description":"d"}]\n```');
     expect(plan?.steps).toHaveLength(1);

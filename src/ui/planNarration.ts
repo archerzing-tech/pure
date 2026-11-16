@@ -8,7 +8,7 @@
 import type { Plan, PlanVerificationSpec } from '../coding-agent/types';
 import type { WorkOrderRegister } from '../character';
 
-const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}], "verification": [{"command": "the exact command", "reason": "why running this proves the changes", "final": false}]}`;
+const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "parallel": false, "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}], "verification": [{"command": "the exact command", "reason": "why running this proves the changes", "final": false}]}`;
 
 /**
  * 规划思考的提示词。刻意的克制：不规定思考的提纲、顺序、段数——一旦规定，
@@ -43,6 +43,10 @@ export function buildPlanThinkingPrompt(
     'The thinking itself must be plain spoken prose in the user\'s language — never raw JSON, never a bare JSON object; the only JSON allowed in the entire reply is that final ```json fence.',
     PLAN_JSON_SHAPE,
     `${stepAsk} Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.`,
+    // 并行步自declared（2026-11-16 bug3）：互不依赖的步标 parallel:true，执行端
+    // 同批派发。判断权归模型——宿主的域关键词表只认只读研究域，实现/测试/
+    // 多模块这类最典型的可并行步它永远标不出来。依赖早步输出的步绝不能标。
+    'Mark "parallel": true ONLY on steps that are mutually independent — each can start in the same response without input from an earlier step (implementing separate modules, writing tests for code that already exists, researching different sources in parallel). Never mark a step whose input depends on an earlier step\'s output.',
     registerBrief,
     opts.projectBuild
       ? (register === 'production'

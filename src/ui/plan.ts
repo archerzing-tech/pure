@@ -102,7 +102,7 @@ export function formatPlanForPrompt(plan: Plan, projectBuild: boolean, approved:
     .join('\n');
   const hasParallel = plan.steps.some(s => s.parallel);
   const parallelRule = hasParallel
-    ? '\nSteps marked ⫲ are mutually independent read-only work: dispatch their delegations (subagent calls / research lookups) in the SAME response — multiple tool calls in one turn — instead of waiting for each to finish; the runtime executes read-only calls concurrently. Keep emitting the stage markers in numeric order even when several ⫲ steps complete in one response.'
+    ? '\nSteps marked ⫲ are mutually independent work: dispatch their delegations in the SAME response — multiple tool calls in one turn — instead of waiting for each to finish. Delegations always run concurrently at the runtime (including ones that write DIFFERENT files), so a produce step and its sibling test step may share one batch. Keep emitting the stage markers in numeric order even when several ⫲ steps complete in one response.'
     : '';
   // approved=true means the user has already approved the execution direction,
   // so the first response should begin useful work rather than wait for a second

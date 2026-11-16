@@ -29,6 +29,10 @@ describe('buildPlanThinkingPrompt — 不给提纲，只给实质约束', () => 
     expect(system).toContain('"steps"');
     expect(system).toContain('earned by your thinking');
     expect(system).toContain('never generic filler');
+    // 并行步自declared（2026-11-16 bug3）：互不依赖的步标 parallel:true，
+    // 判断权在模型、宿主的域关键词表只是兜底。
+    expect(system).toContain('"parallel": false');
+    expect(system).toContain('Mark "parallel": true ONLY on steps that are mutually independent');
   });
 
   it('项目级构建：最后一步必须是交付验证管线，且按改动面声明验证清单（刀 1.1）', () => {

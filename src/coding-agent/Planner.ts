@@ -755,7 +755,7 @@ function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'producti
 
   const steps: PlanStep[] = [];
   for (const raw of rawSteps) {
-    const step = raw as { action?: unknown; description?: unknown; expectedOutcome?: unknown; todosRequired?: unknown; substeps?: unknown };
+    const step = raw as { action?: unknown; description?: unknown; expectedOutcome?: unknown; todosRequired?: unknown; substeps?: unknown; parallel?: unknown };
     const action = typeof step.action === 'string' ? step.action.trim() : '';
     const description = typeof step.description === 'string' ? step.description.trim() : '';
     if (!action && !description) continue;
@@ -770,6 +770,10 @@ function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'producti
       expectedOutcome: typeof step.expectedOutcome === 'string' ? step.expectedOutcome.trim() : description || action,
       todosRequired,
       substeps: todosRequired ? normalizedSubsteps : undefined,
+      // 模型自declared的并行步如实带出（2026-11-16 bug3）：此前这里的白名单
+      // 没收 parallel——模型对「哪些步互不依赖」的判断被静默丢弃，⫲ 标注只剩
+      // 五个只读角色的域关键词表在猜，实现/测试类步骤永远并行不起来。
+      ...(step.parallel === true ? { parallel: true } : {}),
     });
   }
   if (steps.length === 0) return { plan: null, repaired };

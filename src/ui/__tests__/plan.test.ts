@@ -805,7 +805,10 @@ describe('plan parallel marks (E2.3)', () => {
     const out = formatPlanForPrompt(parallelPlan, false, true);
     expect(out).toContain('2. 调研竞品: 搜集资料 ⫲ ');
     expect(out).toContain('3. 调研技术方案: 搜索现状 ⫲ ');
-    expect(out).toContain('Steps marked ⫲ are mutually independent read-only work');
+    // 2026-11-16 bug3：去掉 read-only 限制——委派永远并发跑，写不同文件的
+    // 委派（实现与测试）共享同批是这次修复要教的核心。
+    expect(out).toContain('Steps marked ⫲ are mutually independent work');
+    expect(out).toContain('Delegations always run concurrently at the runtime');
     expect(out).toContain('Keep emitting the stage markers in numeric order');
   });
 
