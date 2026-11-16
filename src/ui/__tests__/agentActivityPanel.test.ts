@@ -300,11 +300,21 @@ describe('agent activity panel', () => {
     expect(panel.el.querySelector('.agent-activity-history-list')).toBeNull();
 
     panel.update([activity({ lifecycle: 'tool_running', toolName: 'search_files' })], { historical: true });
-    // No rail header anymore — and historical cards are minimal too: who +
-    // start time, no tool-call detail.
+    // No rail header anymore — and historical cards are minimal too: who + run
+    // id, no tool-call detail, no clock (2026-11-16：时间只在工作台显示).
     expect(panel.el.textContent).not.toContain('协作记录');
     expect(panel.el.textContent).not.toContain('上次停留在 search_files');
     expect(panel.el.textContent).not.toContain('search_files');
+    expect(panel.el.querySelector('.agent-worker-time')).toBeNull();
+    expect(panel.el.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
+  });
+
+  it('rail 卡不显示时间（2026-11-16 用户定案：时间只在子 agent 工作台）', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([activity({ lifecycle: 'started', status: 'running', startedAt: Date.now() - 60_000 })]);
+    expect(panel.el.querySelector('.agent-worker-time')).toBeNull();
+    expect(panel.el.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   });
 
   it('keeps the activity rail outside the conversation stream', () => {

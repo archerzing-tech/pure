@@ -1,4 +1,5 @@
 import type { SessionAgentActivity } from './store';
+import { t } from '../shared/i18n';
 
 export interface AgentActivityPanelHandle {
   el: HTMLElement;
@@ -87,24 +88,44 @@ export function stateClass(activity: SessionAgentActivity, historical: boolean):
   return 'active';
 }
 
-/** 介入时间 — the wall-clock moment the agent joined, HH:MM:SS. */
-function startedClock(ts: number | undefined): string {
+/** 起止时间（2026-11-16 用户需求）：rail 不再显示时间——并入工作台任务卡
+ *  显示，rail 卡片收回三行（徽标 / 名字 / run id），信息密度让给主界面。
+ *  HH:MM:SS 本地时钟；老存档没有 startedAt 时返回空串，不造假时刻。 */
+export function clockTime(ts: number | undefined): string {
   if (!ts) return '';
   const d = new Date(ts);
   const pad = (n: number): string => String(n).padStart(2, '0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/** 起止时间（2026-11-16 用户需求）：活跃卡只报介入时刻；已终结的卡把终止
- *  时刻折出来——编排器终态事件只带 durationMs，但它的计时起点就是
- *  startedAt，止 = startedAt + durationMs。老存档没有 durationMs（或为 0）
- *  时退回单起时刻，不造假终点。 */
-function activityClock(activity: SessionAgentActivity): string {
-  const start = startedClock(activity.startedAt);
-  if (!start) return '';
-  if (isAgentActivityActive(activity) || !activity.durationMs || activity.durationMs <= 0) return start;
-  const end = startedClock(activity.startedAt! + activity.durationMs);
-  return end ? `${start} – ${end}` : start;
+/** 起止区间文案（工作台任务卡）：活跃卡只报起点 + 已运行时长；已终结的卡
+ *  把终点折出来——编排器终态事件只带 durationMs，计时起点就是 startedAt，
+ *  止 = startedAt + durationMs。没有终点证据时只报起点。 */
+export function activityTimeRange(activity: SessionAgentActivity): { text: string; running: boolean } {
+  const start = clockTime(activity.startedAt);
+  if (!start) return { text: '', running: false };
+  const labelStart = t('agent.clock.start', '起');
+  const labelEnd = t('agent.clock.end', '止');
+  const labelElapsed = t('agent.clock.elapsed', '用时');
+  const labelRunning = t('agent.clock.running', '已运行');
+  const elapsedText = (ms: number): string => {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  };
+  if (isAgentActivityActive(activity)) {
+    return {
+      text: `${labelStart} ${start} · ${labelRunning} ${elapsedText(Date.now() - (activity.startedAt ?? 0))}`,
+      running: true,
+    };
+  }
+  if (!activity.durationMs || activity.durationMs <= 0) return { text: `${labelStart} ${start}`, running: false };
+  const end = clockTime(activity.startedAt! + activity.durationMs);
+  const elapsed = elapsedText(activity.durationMs);
+  return { text: `${labelStart} ${start} – ${labelEnd} ${end} · ${labelElapsed} ${elapsed}`, running: false };
 }
 
 export function createAgentActivityPanel(
@@ -132,7 +153,6 @@ export function createAgentActivityPanel(
     badge: HTMLElement;
     name: HTMLElement;
     idline: HTMLElement;
-    time: HTMLElement;
   }>();
   const activeCallIds = new Set<string>();
   let sessionId = initialSessionId;
@@ -191,11 +211,12 @@ export function createAgentActivityPanel(
           const callId = activity.callId;
           row.addEventListener('click', () => hooks.onOpenAgent?.(callId));
         }
-        // Four rows, per the card contract: the "Agent" badge (cyan = an
+        // Three rows, per the card contract: the "Agent" badge (cyan = an
         // active worker), the machine name (+ instance number when the same
-        // agent was delegated more than once), the run id on its own line,
-        // and the start time. No status text, no action lines — state is
-        // conveyed by the badge color and the card's state class.
+        // agent was delegated more than once), and the run id on its own
+        // line. No status text, no start/end time (2026-11-16 用户定案：时间
+        // 只在子 agent 工作台显示，rail 保持安静) — state is conveyed by the
+        // badge color and the card's state class.
         const badge = document.createElement('span');
         badge.className = 'agent-worker-badge';
         badge.textContent = 'Agent';
@@ -204,10 +225,8 @@ export function createAgentActivityPanel(
         const idline = document.createElement('div');
         idline.className = 'agent-worker-idline';
         idline.hidden = true;
-        const time = document.createElement('div');
-        time.className = 'agent-worker-time';
-        row.append(badge, name, idline, time);
-        entry = { row, badge, name, idline, time };
+        row.append(badge, name, idline);
+        entry = { row, badge, name, idline };
         rows.set(activity.callId, entry);
       }
       // 第 2 期第四刀：分支事件在轨道卡上亮灯——续跑带一个安静的强调色，
@@ -217,7 +236,7 @@ export function createAgentActivityPanel(
       // 它只在首次创建时挂（170 行），这里的每次刷新若不补回，第一拍 update
       // 就把手型抹掉；click 监听还在，卡成了「能点但不像能点」。
       // P1-2b（2026-11-13 性能审计）：以下全部先比较再写——子 agent 事件
-      // 5–20Hz，绝大多数拍的状态/名字/id/时间都没变，无差别重写文本节点
+      // 5–20Hz，绝大多数拍的状态/名字/id 都没变，无差别重写文本节点
       // 与 className 让每拍都白付一次样式失效与布局。
       const wantClass = `agent-worker agent-worker--${state}`
         + (hooks?.onOpenAgent ? ' agent-worker--clickable' : '')
@@ -253,8 +272,6 @@ export function createAgentActivityPanel(
         retrying ? `自愈重试第 ${activity.attempt} 次` : '',
       ].filter(Boolean).join(' · ');
       if (entry.row.title !== wantTitle) entry.row.title = wantTitle;
-      const wantClock = activityClock(activity);
-      if (entry.time.textContent !== wantClock) entry.time.textContent = wantClock;
     }
 
     // 清掉本轮名单里已经没有的卡（会话切换已在上面整表重置，这里只管成员

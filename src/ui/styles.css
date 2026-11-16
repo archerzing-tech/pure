@@ -1115,6 +1115,17 @@ body.window-maximized .win-resize-zone { display: none; }
 .agent-wb-flag.flag-resumed { color: var(--accent); border-color: var(--accent); }
 .agent-wb-flag.flag-retry { color: var(--danger); border-color: var(--danger); }
 
+/* 起止时间行（2026-11-16 用户定案：时间从 rail 移进工作台）——类比 id chip
+   的清瘦语法，等宽字体让时刻对齐好读。 */
+.agent-wb-timerow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: .01em;
+  font-variant-numeric: tabular-nums;
+}
+.agent-wb-timerow[hidden] { display: none; }
+
 .agent-wb-error {
   width: 100%;
   font: 12px var(--font-mono);
@@ -1670,19 +1681,6 @@ body.window-maximized .win-resize-zone { display: none; }
   white-space: nowrap;
 }
 .agent-worker-idline[hidden] { display: none; }
-/* Divider between the name row and the start-time row. */
-.agent-worker-time {
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-top: 1px solid color-mix(in srgb, var(--border-light) 85%, transparent);
-  margin-top: 1px;
-  padding-top: 3px;
-}
 /* Persistent motion for ACTIVE workers: the card's whole job is "something is
    working right now", so it breathes — a soft cyan glow on the border plus a
    badge opacity pulse.
@@ -1831,7 +1829,6 @@ body.window-maximized .win-resize-zone { display: none; }
     background: var(--bg-card);
   }
   .agent-worker-name { font-size: 10px; }
-  .agent-worker-time { font-size: 9px; padding-top: 2px; }
 }
 @media (max-width: 1280px) {
   #agent-activity-host { width: 112px; }
@@ -1843,7 +1840,6 @@ body.window-maximized .win-resize-zone { display: none; }
   }
   .agent-worker-badge { padding: 1px 8px; font-size: 8.5px; }
   .agent-worker-name { font-size: 9.5px; }
-  .agent-worker-time { font-size: 8.5px; padding-top: 2px; }
 }
 
 /* ── Per-session transcript hosts ──

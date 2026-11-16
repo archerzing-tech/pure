@@ -1,5 +1,5 @@
 import type { SessionAgentActivity } from './store';
-import { isAgentActivityActive, stateClass, MAX_ACTIVITY_OUTPUT_CHARS } from './agentActivityPanel';
+import { activityTimeRange, isAgentActivityActive, stateClass, MAX_ACTIVITY_OUTPUT_CHARS } from './agentActivityPanel';
 import { wireInnerFollowTail, followInnerTail } from './scrollPin';
 import { t } from '../shared/i18n';
 
@@ -157,7 +157,12 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
   taskText.className = 'agent-wb-tasktext';
   const taskFlags = document.createElement('div');
   taskFlags.className = 'agent-wb-flags';
-  taskCard.append(taskText, taskFlags, idChip);
+  // 起止时间（2026-11-16 用户定案：时间信息从 rail 移到这里——工作台是详情页，
+  // 一轮协作什么时候开始、什么时候结束在这里一眼看到；rail 卡片保持安静）。
+  const timeRow = document.createElement('div');
+  timeRow.className = 'agent-wb-timerow';
+  timeRow.hidden = true;
+  taskCard.append(taskText, taskFlags, timeRow, idChip);
   const taskSection = document.createElement('section');
   taskSection.className = 'agent-wb-section';
   taskSection.append(taskLabel, taskCard);
@@ -215,7 +220,11 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     elapsedTimer = window.setInterval(() => {
       const cur = activities.find((a) => a.callId === currentCallId);
       if (!cur) return;
-      if (isAgentActivityActive(cur)) statusEl.textContent = statusText(cur, true);
+      if (isAgentActivityActive(cur)) {
+        statusEl.textContent = statusText(cur, true);
+        // 活跃支的「已运行」每秒走一格——终态由 sync 的 patchCurrent 收口。
+        renderTimes(cur);
+      }
     }, 1000);
   };
   const stopTimer = (): void => {
@@ -241,6 +250,19 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
       if (e) label += ` · ${e}`;
     }
     return label;
+  }
+
+  /** 任务卡的起止时间行：活跃支只报起点 + 已运行；终态报「起 – 止 · 用时」。
+   *  没有 startedAt 的老存档整行隐藏——不造假时刻。 */
+  function renderTimes(a: SessionAgentActivity): void {
+    const range = activityTimeRange(a);
+    timeRow.hidden = !range.text;
+    if (!range.text) {
+      // 换到无时刻证据的支时清掉上一位的残留文本（隐藏行不该携带旧数据）。
+      if (timeRow.textContent) timeRow.textContent = '';
+      return;
+    }
+    if (timeRow.textContent !== range.text) timeRow.textContent = range.text;
   }
 
   /** 全开判定：width 过渡走完（transitionend）才算——半开期 chat 还看得见，
@@ -307,6 +329,7 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     histEl.hidden = !historical;
     statusEl.textContent = statusText(cur, true);
     statusEl.className = `agent-wb-status st-${stateClass(cur, historical)}`;
+    renderTimes(cur);
     idChip.textContent = cur.agentId ?? '';
     idChip.dataset.id = cur.agentId ?? '';
     idChip.hidden = !cur.agentId;

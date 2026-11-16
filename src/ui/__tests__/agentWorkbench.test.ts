@@ -84,8 +84,42 @@ describe('工作台开/关/寻址（§3）', () => {
     expect(view.querySelector('.agent-wb-chip.active')!.textContent).toContain('code_reviewer');
     // 状态徽标：运行中
     expect(view.querySelector('.agent-wb-status')!.textContent).toContain('运行中');
+    // 起止时间在任务卡上（2026-11-16 用户定案：时间从 rail 移进工作台）：
+    // 活跃支只报起点 + 已运行，不造假终点。
+    const timeRow = view.querySelector<HTMLElement>('.agent-wb-timerow')!;
+    expect(timeRow.hidden).toBe(false);
+    expect(timeRow.textContent).toContain('起 ');
+    expect(timeRow.textContent).toContain('已运行');
+    expect(timeRow.textContent).not.toContain('止');
     // chat 被挤压（settings 同款机制）
     expect(document.getElementById('chat-view')!.classList.contains('squeezed')).toBe(true);
+  });
+
+  it('终态把起止时刻都报出来（止 = 起点 + 时长，用时同源折算）', () => {
+    const wb = agentWorkbench()!;
+    const start = new Date(2026, 10, 16, 12, 3, 4).getTime();
+    wb.sync([activity({
+      callId: 'call-1',
+      lifecycle: 'done',
+      status: 'done',
+      success: true,
+      startedAt: start,
+      durationMs: 6 * 60_000 + 29_000,
+    })], { sessionId: 's1' });
+    wb.open('call-1');
+    const row = document.getElementById('agent-view')!.querySelector('.agent-wb-timerow')!;
+    expect(row.textContent).toContain('起 12:03:04');
+    expect(row.textContent).toContain('止 12:09:33');
+    expect(row.textContent).toContain('用时 06:29');
+  });
+
+  it('老存档没有 startedAt 时整行隐藏——不造假时刻', () => {
+    const wb = agentWorkbench()!;
+    wb.sync([activity({ callId: 'call-1', startedAt: undefined })], { sessionId: 's1' });
+    wb.open('call-1');
+    const row = document.getElementById('agent-view')!.querySelector<HTMLElement>('.agent-wb-timerow')!;
+    expect(row.hidden).toBe(true);
+    expect(row.textContent).toBe('');
   });
 
   it('close() 收页 + 解除挤压 + 焦点归还', () => {
