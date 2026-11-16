@@ -2953,7 +2953,12 @@ describe('传输层静默自愈（呈现纪律）', () => {
   it('压缩摘要的起点翻牌（start 才翻，done 不需要话）', () => {
     expect(src).toContain("case 'ContextCompactRetry':");
     expect(src).toContain('上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）');
-    expect(src).toContain("if (event.payload.stage === 'start' && thinkingCard) {");
+    expect(src).toContain("if (event.payload.stage === 'start') {");
+    // 主动预压缩（attempt 0）可能在没有任何卡的中途发生——start 必须自己在
+    // 看门狗同款守卫下开卡，否则 60s 摘要静默又被读成卡死。
+    const caseSrc = src.slice(src.indexOf("case 'ContextCompactRetry':"));
+    const block = caseSrc.slice(0, caseSrc.indexOf('break;'));
+    expect(block).toContain('if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {');
   });
 });
 

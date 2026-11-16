@@ -7361,12 +7361,25 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           }
 
           case 'ContextCompactRetry': {
-            // Reactive context compaction hides one NON-streaming summary call
-            // (up to 60s) that from the UI is indistinguishable from a hang.
-            // 'start' flips the card's label the moment compaction begins;
+            // Context compaction hides one NON-streaming summary call (up to
+            // 60s) that from the UI is indistinguishable from a hang. 'start'
+            // flips the card's label the moment compaction begins — including
+            // the engine's PROACTIVE pre-send pass (attempt 0), which can fire
+            // mid-task before the next request exists, so the card must open
+            // here rather than assume one is already showing. Same silence
+            // guard as the wire-status card: never open over a live tool row.
             // 'done' needs no message — the next THINK round speaks for itself.
-            if (event.payload.stage === 'start' && thinkingCard) {
-              setThinkingLabel(thinkingCard, '上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）…');
+            if (event.payload.stage === 'start') {
+              cancelToolGapCard();
+              if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
+                thinkingCard = openThinkingCard();
+                thinkingCard.card.classList.add('waiting');
+              }
+              if (thinkingCard) {
+                setThinkingLabel(thinkingCard, '上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）…');
+                dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
+              }
+              this.scrollUi(chatEl);
             }
             break;
           }

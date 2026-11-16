@@ -124,6 +124,14 @@ const SUMMARY_TIMEOUT_MS = 60_000;
 const USER_SUMMARY_EXCERPT_CHARS = 2_000;
 const TOOL_SUMMARY_EXCERPT_CHARS = 500;
 
+/** Soft thresholds for PROACTIVE compaction. The hosts run this in an idle
+ *  slot between turns; the engine runs the same numbers before every send, so
+ *  a single long turn (dozens of tool rounds) also sheds at 85% instead of
+ *  growing until the provider rejects the request. Kept here rather than in
+ *  each host so the two paths cannot drift to different lines. */
+export const PROACTIVE_COMPACT_TRIGGER = 0.85;
+export const PROACTIVE_COMPACT_TARGET = 0.7;
+
 /** L1 defaults — see ContextMicrocompactionConfig. */
 const MICROCOMPACT_KEEP_RECENT = 8;
 const MICROCOMPACT_MIN_CHARS = 1_000;
@@ -345,8 +353,36 @@ export class ContextEngine {
     return (await this.compact(messages)).messages;
   }
 
+  /** Proactive pre-send compaction: shed to `target` once the window is past
+   *  `trigger`. Soft mode keeps L1 (tool-result clearing) as the first resort,
+   *  so a window that the cheap layer alone can bring back under the trigger
+   *  loses no message at all. */
+  async compactBeforeSend(messages: Message[]): Promise<ContextCompactionResult> {
+    return this.compact(messages, {
+      soft: { trigger: PROACTIVE_COMPACT_TRIGGER, target: PROACTIVE_COMPACT_TARGET },
+    });
+  }
+
   getLastCompactionResult(): ContextCompactionResult | undefined {
     return this.lastCompactionResult;
+  }
+
+  /**
+   * Cheap pre-send pressure check: text estimation only, no LLM call, no
+   * mutation. The engine asks this before every THINK request so the cheap
+   * no-op path (most rounds) costs one transcript scan instead of running a
+   * full compaction that would immediately return unchanged.
+   *
+   * Returns false without a token budget: the count window (`maxMessages`) is
+   * a standalone/test fallback with no notion of headroom, so a proactive
+   * pass there has nothing to size itself against — the per-turn trim still
+   * enforces it.
+   */
+  needsCompaction(messages: Message[], trigger: number = PROACTIVE_COMPACT_TRIGGER): boolean {
+    const max = this.config.maxTokens;
+    if (max === undefined) return false;
+    const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
+    return estimateTokens(messages) + toolTokens > max * softFraction(trigger);
   }
 
   async compact(

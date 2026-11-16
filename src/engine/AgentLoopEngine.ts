@@ -302,6 +302,11 @@ export class AgentLoopEngine {
     // 9.1 reactive compactions this run: provider context-length rejections
     // answered by compacting harder and retrying (see the THINK catch).
     let reactiveCompactions = 0;
+    // Proactive pre-send compaction gave up for this run (nothing shed, still
+    // over the trigger, or the compactor threw). One long turn would otherwise
+    // repeat the check-and-summarize cycle every round for a window that
+    // cannot shrink further — an oversized newest group, typically.
+    let proactiveCompactionDisabled = false;
     // Schema-rejection quarantine (2026-11-01 rea 判例): the endpoint's
     // strict validator rejects a bundled tool schema — the whole request
     // 400s and NO model output can fix it. Instead of stopping (the old
@@ -478,6 +483,55 @@ export class AgentLoopEngine {
 
       try {
         if (!syntheticRound) {
+          // ── Proactive context compaction (before every send) ──
+          // The only in-loop compaction used to be REACTIVE: a provider
+          // rejection had to happen before anything was shed. That left one
+          // long turn (dozens of tool rounds, none of them a new user turn)
+          // free to grow past the window with no compaction at all until the
+          // provider finally refused — the run then stopped mid-task, which
+          // after a long build reads exactly like "never compacted, ran out of
+          // context, build interrupted". The per-turn trim cannot help here:
+          // the turn never ends. So check the cheap estimate before each send
+          // and shed with the same soft thresholds the hosts use in their idle
+          // slots (85% -> 70%). The check is pure estimation on most rounds;
+          // a no-op compaction returns the same array and costs no LLM call.
+          const compactor = ctx.contextEngine;
+          const compactBeforeSend = compactor?.compactBeforeSend;
+          if (!proactiveCompactionDisabled && compactor?.needsCompaction && compactBeforeSend && compactor.needsCompaction(messages)) {
+            // attempt 0 distinguishes this from the reactive retries (1..N).
+            yield { type: 'ContextCompactRetry', payload: { stage: 'start', attempt: 0, evictedMessages: 0, reclaimedTokens: 0, estimatedTokens: 0 }, timestamp: Date.now() };
+            try {
+              const inspected = await compactBeforeSend.call(compactor, messages);
+              const replaced = inspected.messages !== messages;
+              if (replaced) {
+                messages.length = 0;
+                messages.push(...inspected.messages);
+                yield {
+                  type: 'ContextCompactRetry',
+                  payload: {
+                    stage: 'done',
+                    attempt: 0,
+                    evictedMessages: inspected.evictedMessages ?? 0,
+                    reclaimedTokens: inspected.reclaimedTokens ?? 0,
+                    estimatedTokens: inspected.estimatedTokens ?? 0,
+                  },
+                  timestamp: Date.now(),
+                };
+              }
+              // Still over the trigger after shedding means the retained tail
+              // itself is too large (an oversized newest group cannot be
+              // evicted) — stop asking this run instead of paying a summary
+              // call every round.
+              if (!replaced || compactor.needsCompaction?.(messages)) {
+                proactiveCompactionDisabled = true;
+              }
+            } catch {
+              // A failed proactive compaction must not break the round; the
+              // reactive path still answers a provider rejection.
+              proactiveCompactionDisabled = true;
+            }
+          }
+
           const currentToolsDefs = ctx.toolsDefsProvider?.() ?? ctx.toolsDefs;
           const toolsDefs = (ctx.tools && currentToolsDefs.length > 0 ? currentToolsDefs : [])
             .map((d) => schemaQuarantineStrikes.has(d.name)

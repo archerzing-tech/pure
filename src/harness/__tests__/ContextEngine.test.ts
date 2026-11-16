@@ -617,6 +617,35 @@ describe('ContextEngine', () => {
     expect(result.messages.some(m => m.role === 'tool' && m.toolCallId === 'p0')).toBe(false);
   });
 
+  it('needsCompaction is a pure, LLM-free pressure check at the same 85% line', () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000 });
+    const under = Array.from({ length: 4 }, (_, i) => softPair(`u${i}`)).flat(); // ≈424 tokens
+    const over = Array.from({ length: 9 }, (_, i) => softPair(`o${i}`)).flat(); // ≈954 tokens
+
+    expect(engine.needsCompaction(under)).toBe(false);
+    expect(engine.needsCompaction(over)).toBe(true);
+    // The check must not mutate or compact — the engine calls it every round.
+    expect(over).toHaveLength(18);
+  });
+
+  it('needsCompaction stays inert without a token budget (count fallback)', () => {
+    const engine = new ContextEngine({ maxMessages: 2 });
+    const msgs = Array.from({ length: 9 }, (_, i) => softPair(`p${i}`)).flat();
+
+    expect(engine.needsCompaction(msgs)).toBe(false);
+  });
+
+  it('compactBeforeSend sheds to the target before an over-budget send', async () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000 });
+    const msgs = Array.from({ length: 9 }, (_, i) => softPair(`p${i}`)).flat();
+
+    const result = await engine.compactBeforeSend(msgs);
+
+    expect(result.evictedMessages).toBeGreaterThan(0);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(750);
+    expect(engine.needsCompaction(result.messages)).toBe(false);
+  });
+
   it('soft mode no-ops under the trigger line', async () => {
     const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000 });
     const msgs = Array.from({ length: 4 }, (_, i) => softPair(`p${i}`)).flat(); // ≈424 tokens

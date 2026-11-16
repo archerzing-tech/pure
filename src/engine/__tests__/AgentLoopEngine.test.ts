@@ -1368,6 +1368,81 @@ describe('AgentLoopEngine', () => {
     expect(events.some(e => e.type === 'FailurePolicyDecision')).toBe(true);
   });
 
+  // ═══ Proactive pre-send compaction: shed at 85%, not at the provider wall ═══
+
+  it('compacts proactively before the send when the window is near its limit', async () => {
+    const sentLengths: number[] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        sentLengths.push(messages.length);
+        yield { type: 'content', content: 'ok' };
+        yield { type: 'done', content: 'ok', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    let pressureChecks = 0;
+    const compactBeforeSendCalls: number[] = [];
+    const contextEngine = {
+      needsCompaction: (messages: Message[]) => {
+        pressureChecks++;
+        // Only the first check is hot; after shedding, the engine must see the
+        // smaller transcript and leave the gate open for the rest of the run.
+        return pressureChecks === 1 && messages.length > 0;
+      },
+      compactBeforeSend: async (messages: Message[]) => {
+        compactBeforeSendCalls.push(messages.length);
+        const kept = messages.slice(-1);
+        return { messages: kept, evictedMessages: messages.length - kept.length, reclaimedTokens: 900, estimatedTokens: 10 };
+      },
+      compact: async (messages: Message[]) => ({ messages }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, contextEngine });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-proactive', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    expect(compactBeforeSendCalls).toEqual([2]);
+    // The request that actually went out carries the compacted transcript.
+    expect(sentLengths).toEqual([1]);
+    expect(pressureChecks).toBe(2);
+    const notices = events.filter(e => e.type === 'ContextCompactRetry');
+    expect(notices.map(e => e.payload.stage)).toEqual(['start', 'done']);
+    expect(notices[0].payload).toMatchObject({ attempt: 0 });
+    expect(notices[1].payload).toMatchObject({ attempt: 0, reclaimedTokens: 900 });
+    expect(events.find(e => e.type === 'Completed')?.payload.isComplete).toBe(true);
+  });
+
+  it('stops asking for proactive compaction when nothing can be shed', async () => {
+    let calls = 0;
+    const contextEngine = {
+      needsCompaction: () => true,
+      compactBeforeSend: async (messages: Message[]) => {
+        calls++;
+        return { messages, evictedMessages: 0, reclaimedTokens: 0, estimatedTokens: 1 };
+      },
+      compact: async (messages: Message[]) => ({ messages }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({
+      llm: toolThenTextLLM('read_file', '{"path":"a.ts"}', 'done'),
+      tools: echoToolAdapter([READ_FILE_TOOL]),
+      toolsDefs: [READ_FILE_TOOL],
+      contextEngine,
+    });
+
+    await collect(engine.run(
+      { sessionId: 's-proactive-stuck', systemPrompt: 'X', userPrompt: 'Y', budget: STD_BUDGET },
+      ctx,
+    ));
+
+    // Two THINK sends; the second must not pay another (possibly 60s) attempt
+    // for a window the compactor already reported it cannot shrink.
+    expect(calls).toBe(1);
+  });
+
   // ═══ 2026-10-29 会话楔死修复：结构性发送失败压小重试，不再阶梯空转 ═══
 
   // 套餐端点的 400 报文不带英文 context 措辞（1214 参数非法形态）——旧判定

@@ -265,16 +265,29 @@ export interface ReactiveCompactionOutcome {
   estimatedTokens?: number;
 }
 
-/** 9.1 — the minimal surface the engine needs for REACTIVE compaction: a
- *  provider context-length rejection means our pre-flight estimate was wrong,
- *  so the engine asks for an aggressive recompaction and retries the round.
+/** 9.1 — the minimal surface the engine needs for compaction. Two call sites:
+ *  PROACTIVE (before every send: `needsCompaction` is a cheap, LLM-free
+ *  pressure check, then `compact` with `soft` sheds to a target below the
+ *  trigger) and REACTIVE (a provider context-length rejection means our
+ *  pre-flight estimate was wrong, so the engine asks for an aggressive
+ *  recompaction and retries the round).
  *  ContextEngine satisfies this structurally; declared as an interface here so
  *  shared/types never has to import from harness/. */
 export interface ReactiveContextCompactor {
   compact(
     messages: Message[],
-    options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean },
+    options?: { force?: boolean; aggressive?: boolean; skipSummary?: boolean; soft?: { trigger: number; target: number } },
   ): Promise<ReactiveCompactionOutcome>;
+  /** Cheap pre-send pressure check (text estimation only, never an LLM call):
+   *  true when the estimated wire payload is above the compactor's own soft
+   *  trigger. Optional — stubs in tests omit it, and a compactor without it
+   *  simply never runs proactively. */
+  needsCompaction?(messages: Message[]): boolean;
+  /** Proactive soft compaction before a send (shed to the compactor's target
+   *  line). Separate from `compact` so the engine does not need to know the
+   *  trigger/target ratios, and so the host can swap policies without touching
+   *  the engine. Optional alongside `needsCompaction`. */
+  compactBeforeSend?(messages: Message[]): Promise<ReactiveCompactionOutcome>;
   /** Provider-taught budget correction (2026-10-29 会话楔死修复): when a
    *  rejection body names the REAL input limit ("maximum context length is X"),
    *  the engine pushes it into the compactor so every later trim — preflight
@@ -726,7 +739,9 @@ export type EngineEvent =
   // harder and is retrying the round. `stage: 'start'` is emitted BEFORE the
   // compaction begins — the L2 summary is a full non-streaming LLM call
   // (60s cap), and without the start signal that window reads as a stall.
-  // Observability only — the retry itself is transparent to the user.
+  // `attempt: 0` is the engine's PROACTIVE pre-send pass (no provider
+  // rejection involved); 1..N are the reactive retries. Observability only —
+  // the compaction itself is transparent to the user.
   | { type: 'ContextCompactRetry'; payload: { stage?: 'start' | 'done'; attempt: number; evictedMessages: number; reclaimedTokens: number; estimatedTokens: number }; timestamp: number }
   // Wire-layer lifecycle (retries / backoff / route failover) forwarded from
   // the transport so a long silent connect window can be labeled honestly
