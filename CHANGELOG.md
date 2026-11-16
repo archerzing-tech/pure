@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.6
+
+**长任务并行与流超时恢复修复（bug1–4）+ 委派面板完善**
+
+一、并行判断权归还模型（bug3 + bug1，同一根因的观测面与执行面）。计划 JSON 里模型自declared 的 `parallel` 字段被 `parsePlanJsonCore` 的字段白名单静默丢弃，⫲ 标注只剩五个只读角色的域关键词表在猜——实现/测试/多模块这类最典型的可并行步永远标不出来，plan 卡的 stage 协议于是把长任务拖成一步一步派；同时委派卡（rail onStart）压在权限闸之后才出生，同批第二张卡跟着用户审批动作冒出来。真机合起来就是「说好两个 agent 并行，卡片却一张一张出现」。修复分五处：解析层收下 `parallel`；规划提示词教模型给互不依赖的步标 `parallel: true`；`parallelRule` 去掉 read-only 限制（委派工具事实永远在并发池里跑，写不同文件的委派共享同批是安全的，旧文案反而在教模型串行）；`multi_agent_mechanics` 优先级 58→59（58 排在预算裁剪的牺牲区，长任务恰是最容易把它挤掉的回合）；agent 类工具在权限闸前先亮 `lifecycle: 'queued'` 的「已受理、待批准」卡，agentId 同时预分配、`execute()` 复用同一枚 run id，拒绝时以 `cancelled` 结算（只收自己出过的卡，未注册委派不留幽灵行）。`bash_executor` 的 rail 过滤保持既有定案（工具不是 agent）。
+
+二、流超时中途停住（bug4）。「输出中途停了 2m（连续 2 次，每次都是新建连接）」的真实形态是中转/服务端在流中静默或大 JSON 参数攒批：第一次 2m 没渡过，重试仍卡同一个 120s 上限必然重蹈。块间空闲上限参数化并随重试放宽一倍（120s→240s，与既有「重试时首块上限放宽一倍」同一物理校准），首轮保持快速反馈、真死链由总 deadline 兜底。另修致命停路径不 flush 部分正文：UI 已显示的草稿只在 TokenDelta 里出现过，存档和「继续」的下一回合都拿不到它。
+
+三、markdown 源码显示残留（bug2）。`markdownLoader` 的 catch-all 把渲染管线自身异常与模块加载失败一同吞掉（气泡静默变回源码、无日志、不再重试）；异常从事件 handler 浮出落进外层 catch 时 Completed/Interrupted 的终渲染都没跑，气泡停在流式 lexer 降级的 stream-raw 源码帧。两处补齐：兜底留 `console.error` 现场；旁路终态按已积累文本补一次终渲染（终态走默认批序，不占活渲染 serial 契约）。
+
+四、委派面板。rail 完成卡显示 `起 – 止`（编排器终态事件只带 durationMs，计时起点是 startedAt，止 = startedAt + durationMs；活跃卡只报介入时刻，老存档不造假终点）；工作台 chips 的变更键此前不含当前选中项，切换 agent 时 early-return 让 `.active` 停在旧 chip 上——把 `currentCallId` 并进 key。
+
+验证：`tsc` 绿；`lint:conventions` OK；定向测试（coding-agent 全目录 462、Planner/plan/promptLayers/PromptAssembler/streamDeadline/AgentLoopEngine 等 436、UI 全量 1818）全过；全量 `bun test` 5436 pass / 12 fail / 4 skip，12 个失败全部是全量并发下的 5s 超时（逐条隔离重跑通过），另 `paintStreaming`「cut 不前移的跨拍生长」单跑也失败但在干净树上同样复现（既有问题，与本轮无关）。真机以本版重建并替换 `/Applications/pure.app`（4.8.6）。
+
 ## v4.8.5
 
 **会话侧栏选中态回归：`setActive` 的同 id 早退把 `.active` 高亮一起吞掉**
