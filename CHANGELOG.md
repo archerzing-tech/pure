@@ -16,6 +16,8 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 四、委派面板。rail 完成卡显示 `起 – 止`（编排器终态事件只带 durationMs，计时起点是 startedAt，止 = startedAt + durationMs；活跃卡只报介入时刻，老存档不造假终点）；工作台 chips 的变更键此前不含当前选中项，切换 agent 时 early-return 让 `.active` 停在旧 chip 上——把 `currentCallId` 并进 key。
 
+五、生成产物不再自动加 v1/v2 版本副本。此前 GUI 每写一次文件就额外往磁盘复制一份「名字-v1.html」「名字-v2.html」，产物卡再按写入次数打 v1/v2 徽标——版本化是宿主替模型做的决定：项目/页面目录里凭空多出用户没要的文件，模型下一轮还会在目录里看到它们、继续沿用 vN 命名。整条链路移除（磁盘快照、写入计数、卡片徽标与样式）；要不要留历史版本是模型对任务本身的判断，不是界面层的物理副作用。
+
 验证：`tsc` 绿；`lint:conventions` OK；定向测试（coding-agent 全目录 462、Planner/plan/promptLayers/PromptAssembler/streamDeadline/AgentLoopEngine 等 436、UI 全量 1818）全过；全量 `bun test` 5436 pass / 12 fail / 4 skip，12 个失败全部是全量并发下的 5s 超时（逐条隔离重跑通过），另 `paintStreaming`「cut 不前移的跨拍生长」单跑也失败但在干净树上同样复现（既有问题，与本轮无关）。真机以本版重建并替换 `/Applications/pure.app`（4.8.6）。
 
 ## v4.8.5
