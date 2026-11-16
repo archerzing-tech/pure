@@ -12,7 +12,7 @@ import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/s
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { filePathsFromToolCalls } from '../shared/conventions';
 import { estimateTextTokens } from '../shared/tokenEstimate';
-import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT } from './LlmTurnRunner';
+import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
 import { BudgetManager } from './BudgetManager';
 import { ToolExecutionCoordinator, type ExecutedToolResult, type ToolExecutionBudget } from './ToolExecutionCoordinator';
@@ -560,6 +560,12 @@ export class AgentLoopEngine {
             // 反馈；重试已证明不是端点死（死链 120s 块间线会先咬住），放宽
             // 让慢预填充渡过，是物理参数校准不是替模型决策。
             firstTokenTimeoutMs: budget.streamFirstTokenMs() * (streamTimeoutRepeats > 0 ? 2 : 1),
+            // 块间空闲上限随重试放宽一倍（2026-11-16 bug4，与上方首块放宽
+            // 同一物理校准）：第一次 2m 没渡过的中转静默/大参数攒批，第二次
+            // 仍卡 2m 必然重蹈（真机判例「中途停了 2m，连续 2 次，每次都是
+            // 新建连接」）。首轮保持 120s 快速反馈；已证明流活过或攒批真实
+            // 存在时 4m 给慢链路一个真实机会，真死链由总 deadline 兜底。
+            idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS * ((streamTimeoutRepeats > 0 || toolCallResumes > 0) ? 2 : 1),
           })) {
             switch (chunk.type) {
               case 'content':
@@ -862,6 +868,10 @@ export class AgentLoopEngine {
               ? `模型在 ${waitedHuman} 内没有输出第一个内容块（连续 ${streamTimeoutRepeats} 次，每次都是新建连接重发完整请求）——大请求（长文档、大上下文）在服务端预处理慢，或端点当时卡住；不是你的网络问题。已停止；可直接重发（重试时首块等待上限已放宽一倍），或开新会话先摘要/压缩大材料再继续。`
               : `模型的输出中途停了 ${waitedHuman} 没有后续（连续 ${streamTimeoutRepeats} 次，每次都是新建连接）——服务端或中转链路在流中卡住了，不是你的网络问题。已停止；可直接重新发送，或稍后再试。`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
+            // UI 已见到的部分正文先进 transcript（2026-11-16 bug4）：此前这条
+            // 停止路径不 flush，中断前那轮草稿只在 TokenDelta 里出现过——存档
+            // 和「继续」的下一回合都拿不到它，用户看着它凭空消失。
+            flushPartialAssistant();
             const salvaged = await salvageStopMessages(messages);
             messages.length = 0;
             messages.push(...salvaged);

@@ -16,11 +16,15 @@ export interface LlmTurnRunnerOptions {
   /** First-chunk ceiling (see BudgetConfig.firstTokenTimeoutMs); default keeps
    * the historical 5-minute tolerance for parent conversations. */
   firstTokenTimeoutMs?: number;
+  /** Per-chunk idle ceiling after the first chunk (see
+   * STREAM_IDLE_TIMEOUT_MS); callers retrying after a midstream timeout pass a
+   * relaxed value so a slow relay/endpoint gets a real second chance. */
+  idleTimeoutMs?: number;
   onChunk?: (chunk: LLMChunk) => void;
 }
 
 export async function* streamLlmTurn(options: LlmTurnRunnerOptions): AsyncGenerator<LLMChunk, void, void> {
-  yield* streamWithDeadline(options.llm, options.messages, options.tools, options.signal, options.timeoutMs, options.firstTokenTimeoutMs);
+  yield* streamWithDeadline(options.llm, options.messages, options.tools, options.signal, options.timeoutMs, options.firstTokenTimeoutMs, options.idleTimeoutMs);
 }
 
-export { runWithDeadline, streamWithDeadline } from './streamDeadline';
+export { runWithDeadline, streamWithDeadline, STREAM_IDLE_TIMEOUT_MS } from './streamDeadline';

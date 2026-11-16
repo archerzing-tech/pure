@@ -1,6 +1,10 @@
 import type { LLMAdapter, LLMChunk, Message, ToolDefinition } from '../shared/types';
 
 const FIRST_TOKEN_TIMEOUT_MS = 300_000;
+// done 之后块间的空闲上限（2026-11-16 bug4）：中转对大块 JSON 参数的缓冲
+// 攒批、思考型端点的静默间隙，都能超过 2m 而流还活着——被引擎记成
+// 「输出中途停住」。重试时由调用方放宽（引擎侧 ×2）。
+export const STREAM_IDLE_TIMEOUT_MS = 120_000;
 
 function makeLifecycleError(name: 'AbortError' | 'TimeoutError', message: string): Error {
   const error = new Error(message);
@@ -60,6 +64,7 @@ export async function* streamWithDeadline(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   firstTokenTimeoutMs: number = FIRST_TOKEN_TIMEOUT_MS,
+  idleTimeoutMs: number = STREAM_IDLE_TIMEOUT_MS,
 ): AsyncGenerator<LLMChunk, void, void> {
   const linkedController = new AbortController();
   const forwardAbort = (): void => linkedController.abort();
@@ -69,7 +74,7 @@ export async function* streamWithDeadline(
   let firstChunk = true;
   try {
     while (true) {
-      const idleCap = firstChunk ? firstTokenTimeoutMs : 120_000;
+      const idleCap = firstChunk ? firstTokenTimeoutMs : idleTimeoutMs;
       const remaining = Math.min(deadline - Date.now(), idleCap);
       if (remaining <= 0) {
         linkedController.abort();
