@@ -166,6 +166,13 @@ export interface ToolAdapter {
   getMetadata(toolName: string): { sideEffects?: boolean; isWrite?: boolean; timeoutMs?: number; interruptible?: boolean } | undefined;
   getTools(): ToolDefinition[];
   getSnapshotPort?(): WorkspaceSnapshotPort | undefined;
+  /** 权限闸前预出卡（2026-11-16 bug1）：agent 类工具在过权限闸之前先亮
+   *  「已受理、待批准」卡——同批多支委派的卡不再逐张跟着权限审批冒出来。
+   *  可选方法：只有子代理编排器实现它，普通工具适配器不受影响。 */
+  emitQueued?(toolCall: ToolCall): void;
+  /** 预出卡的收口：权限被拒时把闸前卡结算为「用户没批」，不让它永远挂在
+   *  待批准。与 emitQueued 成对出现。 */
+  emitDenied?(toolCall: ToolCall, reason: string): void;
 }
 
 export type AgentStateType = 'THINK' | 'ACT' | 'OBSERVE' | 'VERIFY' | 'TERMINATE';

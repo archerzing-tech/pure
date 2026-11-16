@@ -273,6 +273,12 @@ export class SubagentOrchestrator implements ToolAdapter {
    * 本）。这是「能 abort 的把手」账本，别与宿主 agentActivities（观测投
    * 影）混同。 */
   private readonly branches = new Map<string, { controller: AbortController; machine: BranchLifecycle; inputSnippet?: string; role?: string }>();
+  /** 权限闸前预出卡（2026-11-16 bug1）：callId → 预分配的 agentId。rail 卡的
+   *  出生时刻此前被压在权限批准之后（onStart 在 ToolRegistry 的权限闸之后
+   *  才发），同批多支委派的卡逐张跟着权限审批冒出来，看起来像没并行。闸前
+   *  先亮「待批准」卡时预分配 agentId，execute() 复用同一枚——卡的 run id
+   *  从批准前到结算保持同一个。 */
+  private readonly queuedAgentIds = new Map<string, string>();
 
   constructor(config: SubagentOrchestratorConfig) {
     this.config = config;
@@ -280,6 +286,69 @@ export class SubagentOrchestrator implements ToolAdapter {
 
   register(def: SubagentDefinition): void {
     this.defs.set(def.name, def);
+  }
+
+  /** 权限闸前预出卡（2026-11-16 bug1，宿主在 ToolRegistry 权限闸之前调用）：
+   *  以 lifecycle 'queued' 先亮一张「已受理、待批准」卡——同批多支委派（例
+   *  如一个写代码一个跑测试）此前要逐张等权限审批，第二张卡的出现时刻被用
+   *  户决策时间绑架，看起来像没并行。sequence 取 0：execute() 的首发
+   *  onStart（sequence 1）必须能盖过它。emit 全 swallow——显示故障不阻断
+   *  执行（与 execute() 内的 emit 同纪律）。 */
+  emitQueued(toolCall: ToolCall): void {
+    const def = this.defs.get(toolCall.function.name);
+    if (!def || !this.config.progress?.onStart) return;
+    const agentId = makeAgentId();
+    this.queuedAgentIds.set(toolCall.id, agentId);
+    try {
+      this.config.progress.onStart({
+        callId: toolCall.id,
+        agentId,
+        agentName: def.name,
+        agentRole: def.description,
+        state: 'QUEUED',
+        lifecycle: 'queued',
+        sequence: 0,
+        lastUpdatedAt: Date.now(),
+        inputSnippet: this.inputSnippet(parseToolArguments(toolCall.function.arguments)),
+        timeoutMs: def.defaultTimeoutMs,
+        parentCallId: toolCall.id,
+      });
+    } catch {
+      /* 宿主 UI 失败不追击 */
+    }
+  }
+
+  /** 预出卡的收口（2026-11-16 bug1）：权限被拒时闸前卡不能永远挂在
+   *  「待批准」——以 lifecycle 'cancelled' 结算，宿主的失败线可见「用户没批」，
+   *  卡片离开活跃队列。 */
+  emitDenied(toolCall: ToolCall, reason: string): void {
+    // 只收自己出过的卡：没有预出条目说明这张卡从未存在（未注册的委派名，
+    // 或宿主没有 progress sink），凭空造一张取消卡反而多出幽灵行。
+    if (!this.queuedAgentIds.has(toolCall.id)) return;
+    if (!this.config.progress?.onDone) return;
+    const def = this.defs.get(toolCall.function.name);
+    if (!def) return;
+    try {
+      this.config.progress.onDone({
+        callId: toolCall.id,
+        agentId: this.queuedAgentIds.get(toolCall.id),
+        agentName: def.name,
+        agentRole: def.description,
+        state: 'CANCELLED',
+        lifecycle: 'cancelled',
+        success: false,
+        error: reason,
+        // 必须盖过 emitQueued 的 0——mergeAgentActivity 拒收 <= 前值。
+        sequence: 1,
+        lastUpdatedAt: Date.now(),
+        durationMs: 0,
+        timeoutMs: def.defaultTimeoutMs,
+        parentCallId: toolCall.id,
+      });
+    } catch {
+      /* 宿主 UI 失败不追击 */
+    }
+    this.queuedAgentIds.delete(toolCall.id);
   }
 
   getTools(): ToolDefinition[] {
@@ -489,7 +558,7 @@ export class SubagentOrchestrator implements ToolAdapter {
     // UUID — useless to read aloud or grep casually. The agentId rides EVERY
     // activity emit, the terminal tool result, and the persisted roster, so a
     // card, an error line, and a session.json dump all point at the same run.
-    const agentId = makeAgentId();
+    const agentId = this.queuedAgentIds.get(toolCall.id) ?? makeAgentId();
     const activity = (): SubagentActivity => ({
       callId: toolCall.id,
       agentId,
@@ -542,6 +611,9 @@ export class SubagentOrchestrator implements ToolAdapter {
     const lastCheckpoint = savedSession?.checkpoints.at(-1);
     const runCount = (lastCheckpoint?.runCount ?? (lastCheckpoint ? 1 : 0)) + 1;
     emit(progress?.onStart, { inputSnippet: this.inputSnippet(args), startedAt: startTime, resumed: resumedFromCheckpoint, resumedTurns, runCount, ...machine.describe() });
+    // 闸前预分配的 agentId 已被首发 onStart 消费（卡的 run id 保持同一个），
+    // 预出卡阶段到此收口——残留条目只泄漏内存。
+    this.queuedAgentIds.delete(toolCall.id);
 
     // Liveness watchdog: abort only when NO progress event (token / state /
     // tool) has arrived for a while — a wedged run dies in minutes while

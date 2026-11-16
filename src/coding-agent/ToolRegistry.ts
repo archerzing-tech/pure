@@ -470,6 +470,16 @@ export class ToolRegistry implements ToolAdapter {
     }
 
     // ── Permission gate: consult PermissionManager before executing ──
+    // 闸前预出卡（2026-11-16 bug1）：agent 类委派在问用户之前先亮「已受理、
+    // 待批准」卡——同批多支委派（一写代码一跑测试）的卡不再逐张跟着权限
+    // 审批冒出来，第二张卡的出现时刻不被用户决策时间绑架。
+    if (known.tags.includes(Tags.AGENT) && this.subagentExecutor?.emitQueued) {
+      try {
+        this.subagentExecutor.emitQueued(toolCall);
+      } catch {
+        // 显示故障不阻断执行（与编排器内 emit 同纪律）。
+      }
+    }
     if (this.permissionManager) {
       const args = safeParseArgs(toolCall.function.arguments);
       const isWrite = known.tags.includes(Tags.WRITE) || known.tags.includes(Tags.DESTRUCTIVE);
@@ -496,6 +506,15 @@ export class ToolRegistry implements ToolAdapter {
       };
       const decision = await this.permissionManager.askUser(ctx);
       if (!decision.allowed) {
+        // 闸前卡收口（2026-11-16 bug1）：拒绝时把「待批准」卡结算为
+        // 「用户没批」，不让它永远挂在活跃队列。
+        if (known.tags.includes(Tags.AGENT) && this.subagentExecutor?.emitDenied) {
+          try {
+            this.subagentExecutor.emitDenied(toolCall, `Permission denied${decision.reason ? `: ${decision.reason}` : ''}`);
+          } catch {
+            /* 显示故障不阻断结算 */
+          }
+        }
         return {
           id: toolCall.id,
           toolName: toolCall.function.name,

@@ -117,6 +117,58 @@ describe('SubagentOrchestrator', () => {
     expect(seen.some((a) => a.lifecycle === 'done')).toBe(true);
   });
 
+  // 闸前预出卡（2026-11-16 bug1）：委派卡此前要等权限批准后才亮，同批多支
+  // 委派的第二张卡被用户决策时间绑架——真机看起来「说好并行却一张一张冒」。
+  describe('权限闸前预出卡', () => {
+    it('emitQueued 先亮 queued 卡，agentId 由随后的 execute() 复用', async () => {
+      const starts: SubagentActivity[] = [];
+      const orch = makeOrchestrator({ onStart: (a) => starts.push(a) });
+      const call = toolCall('test_researcher', { prompt: 'research X' });
+      orch.emitQueued(call);
+      expect(starts).toHaveLength(1);
+      expect(starts[0].lifecycle).toBe('queued');
+      // sequence 0：execute() 的首发 onStart（1）必须能盖过它。
+      expect(starts[0].sequence).toBe(0);
+      const queuedAgentId = starts[0].agentId;
+      expect(queuedAgentId).toBeTruthy();
+      await orch.execute(call);
+      const live = starts.find((a) => a.lifecycle === 'started');
+      expect(live?.agentId).toBe(queuedAgentId);
+      expect(live?.sequence ?? 0).toBeGreaterThan(0);
+      // 预分配条目在首发 onStart 之后收口，不随委派生命周期泄漏。
+      expect((orch as unknown as { queuedAgentIds: Map<string, string> }).queuedAgentIds.size).toBe(0);
+    });
+
+    it('emitDenied 把闸前卡结算为 cancelled，且 sequence 能盖过 queued', () => {
+      const done: SubagentActivity[] = [];
+      const orch = makeOrchestrator({ onStart: () => {}, onDone: (a) => done.push(a) });
+      const call = toolCall('test_researcher', { prompt: 'x' });
+      orch.emitQueued(call);
+      orch.emitDenied(call, 'Permission denied: user declined');
+      expect(done).toHaveLength(1);
+      expect(done[0].lifecycle).toBe('cancelled');
+      expect(done[0].success).toBe(false);
+      expect(done[0].error).toContain('Permission denied');
+      // mergeAgentActivity 拒收 <= 前值：0（queued）之后的收口必须是 1。
+      expect(done[0].sequence).toBe(1);
+      expect(done[0].agentId).toBeTruthy();
+    });
+
+    it('未注册的委派名不预出卡（注册表与编排器名单不许分叉时静默）', () => {
+      const starts: SubagentActivity[] = [];
+      const orch = makeOrchestrator({ onStart: (a) => starts.push(a) });
+      orch.emitQueued(toolCall('not_registered', {}));
+      expect(starts).toHaveLength(0);
+    });
+
+    it('没有预出过的卡不存在可收的卡：emitDenied 不凭空造取消行', () => {
+      const done: SubagentActivity[] = [];
+      const orch = makeOrchestrator({ onStart: () => {}, onDone: (a) => done.push(a) });
+      orch.emitDenied(toolCall('test_researcher', { prompt: 'x' }), 'Permission denied');
+      expect(done).toHaveLength(0);
+    });
+  });
+
   it('returns a failure when the subagent engine errors', async () => {
     const failingLLM: LLMAdapter = {
       async *stream(): AsyncGenerator<never> {

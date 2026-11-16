@@ -67,6 +67,9 @@ export function isAgentActivityActive(activity: SessionAgentActivity): boolean {
     // 第 2 期第四刀：自愈重试中的支仍在干活——它只是在自己纠错，不能被
     // 归进已完成队列（那会把亮灯的卡片当死卡）。
     || activity.lifecycle === 'retrying'
+    // 闸前预出卡（2026-11-16 bug1）：'queued' = 已受理、待权限批准——
+    // 待批的支是真实在场的委派，must count as active so the rail shows it.
+    || activity.lifecycle === 'queued'
     || (!activity.lifecycle && (!activity.status || activity.status === 'running'));
 }
 

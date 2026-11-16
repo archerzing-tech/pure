@@ -59,6 +59,22 @@ describe('agent activity panel', () => {
     expect(isAgentActivityActive(activity({ lifecycle: 'cancelled', status: 'cancelled' }))).toBe(false);
     // 第 2 期第四刀：自愈重试中的支仍在干活，不能被归进已完成队列。
     expect(isAgentActivityActive(activity({ lifecycle: 'retrying' }))).toBe(true);
+    // 闸前预出卡（2026-11-16 bug1）：waiting-for-approval 的支是真实在场的
+    // 委派，必须算活跃，否则闸前卡一露头就落进「已完成」组。
+    expect(isAgentActivityActive(activity({ lifecycle: 'queued' }))).toBe(true);
+  });
+
+  it('queued 卡按介入口径排进活跃组顶部（不进已完成组）', () => {
+    const panel = createAgentActivityPanel();
+    document.body.appendChild(panel.el);
+    panel.update([
+      activity({ callId: 'done-1', lifecycle: 'done', status: 'done', startedAt: 1000, durationMs: 5000 }),
+      activity({ callId: 'queued-1', lifecycle: 'queued', status: 'running', lastUpdatedAt: 9000 }),
+    ]);
+    const cards = panel.el.querySelectorAll('.agent-worker');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.getAttribute('data-call-id')).toBe('queued-1');
+    panel.el.remove();
   });
 
   it('keeps the quotable run id as a chip on the floating card (the transcript card carries none)', () => {

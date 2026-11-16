@@ -276,6 +276,61 @@ describe('PermissionManager write preview passthrough', () => {
 // riskLevel 'low' — auto-approved in NORMAL, still blocked by PLAN/DONT_ASK
 // through the WRITE tag. No new command guard; remote/history-rewriting git
 // keeps living on execute_command's existing high-risk path.
+describe('委派卡在权限闸前预出（2026-11-16 bug1）', () => {
+  function editorTool(): TaggedTool {
+    return {
+      name: 'code_editor',
+      description: 'produce code changes',
+      input_schema: { type: 'object' },
+      tags: [Tags.AGENT, Tags.WRITE],
+      riskLevel: 'medium',
+    };
+  }
+
+  function harness(decision: { allowed: boolean; reason?: string }) {
+    const events: string[] = [];
+    let executed = false;
+    const executor: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => ({}),
+      execute: async (): Promise<ToolResult> => {
+        executed = true;
+        return { id: 'c1', toolName: 'code_editor', result: 'ok', success: true, duration: 0 };
+      },
+      emitQueued: () => { events.push('queued'); },
+      emitDenied: (call, reason) => { events.push(`denied:${reason}`); },
+    };
+    const registry = new ToolRegistry(executor);
+    registry.register(editorTool());
+    registry.setSubagentExecutor(executor);
+    registry.setPermissionManager(new PermissionManager('NORMAL', async () => {
+      events.push('ask');
+      return decision;
+    }));
+    const call: ToolCall = { id: 'c1', index: 0, function: { name: 'code_editor', arguments: '{"prompt":"改代码"}' } };
+    return { registry, call, events, ran: () => executed };
+  }
+
+  it('先亮待批准卡再问用户；批准后委派照常执行', async () => {
+    const h = harness({ allowed: true });
+    const result = await h.registry.execute(h.call);
+    expect(result.success).toBe(true);
+    // 卡在用户看到权限卡之前就存在——第二批委派不必再等第一张的审批。
+    expect(h.events).toEqual(['queued', 'ask']);
+    expect(h.ran()).toBe(true);
+  });
+
+  it('用户拒绝时把待批准卡结算为取消，执行器不跑', async () => {
+    const h = harness({ allowed: false, reason: '用户拒绝' });
+    const result = await h.registry.execute(h.call);
+    expect(result.success).toBe(false);
+    expect(h.events.slice(0, 2)).toEqual(['queued', 'ask']);
+    expect(h.events[2]).toContain('denied:Permission denied');
+    expect(h.events[2]).toContain('用户拒绝');
+    expect(h.ran()).toBe(false);
+  });
+});
+
 describe('git write tools permission flow', () => {
   function ctxOf(tool: string): PermissionContext {
     return { tool, isRead: false, riskLevel: 'low' };
