@@ -7,7 +7,7 @@
 //   • ../shared/providers.ts — provider metadata (labels / default models)
 
 import { SessionChatManager, bindAssistantBubbleCopy, bindUserBubbleSelectAll, renderUserImageAttachments, shouldCancelForEscape, ensureRuntimesProbed, onRunningSessionsChanged, runningSessionIdList, setTimedInputSink, buildStatusRow, applyAgentRailSpaceGate, type TimedInputRequest } from './chat';
-import { initAgentWorkbench, agentWorkbench, attachWorkbenchEntry } from './agentWorkbench';
+import { initAgentWorkbench, agentWorkbench } from './agentWorkbench';
 import { prefetchTurnRoute, recordScheduledInput } from '../coding-agent/turnRoute';
 import { describeTiming } from '../coding-agent/inputDecision';
 import { loadConfig, hasConfiguredKey, defaults, invalidateConfigCache, initConfigFile, persistConfig, modelListForProvider, providerHasKey, type PureConfig } from './config';
@@ -1492,8 +1492,8 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
         for (const item of run) {
           const row = createToolRow(item.exec.toolName, item.exec.args ?? {});
           // 工作台跨链（2026-11-12）：恢复的委派卡按持久化的 callId 重建
-          // 「工作台 ↗」入口。老快照无 callId 字段 = 无入口（优雅降级）。
-          if (item.exec.callId) attachWorkbenchEntry(row.el, item.exec.callId);
+          // 工作台入口改由 rail 卡点击进入，委派卡不再挂 ↗ chip；
+          // 老快照无 callId 字段 = 无入口（优雅降级）。
           if (item.stopped) {
             // Restored orphan. Two species now: (a) a subagent delegation the
             // activity ledger marks paused/cancelled — rebuild the user's

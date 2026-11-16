@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>设置页空状态卡片 · 预览（真实 token 取样自 src/ui/styles.css）</title>
+<style>
+  /* tokens 直接取样自 src/ui/styles.css:8-51（light）/ 64-96（dark） */
+  /* 真实主题：styles.css:7422-7505「Glass Thread」是后置覆盖，实际生效的就是这套 */
+  :root{
+    --bg:#eef3fb; --bg-card:#ffffff; --bg-input:#ffffff; --bg-hover:#e3eaf6;
+    --surface:#ffffff; --text:#0f2333; --text-secondary:#55657e; --text-tertiary:#5b6d85;
+    --border:#778ba6; --border-light:#a8bbd6;
+    --accent:#0a6f9e; --accent-hover:#085a80; --accent-soft:#e1f4fd; --accent-contrast:#ffffff;
+    --success:#0b7a6a;
+    --radius-lg:16px; --radius:12px; --radius-sm:9px; --radius-xs:7px;
+    --shadow-sm:0 1px 2px rgba(15,35,51,.06); --shadow-md:0 10px 30px rgba(15,35,51,.10);
+    --font-sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI','PingFang SC','Noto Sans SC',sans-serif;
+    --ease-out:cubic-bezier(.16,1,.3,1); --transition:.2s cubic-bezier(.16,1,.3,1);
+  }
+  html[data-theme="dark"]{
+    --bg:#0b1220; --bg-card:#141d30; --bg-input:#1a2436; --bg-hover:rgba(255,255,255,.07);
+    --surface:#141d30; --text:#eaf2fb; --text-secondary:#8c9bb7; --text-tertiary:#8494ad;
+    --border:rgba(255,255,255,.28); --border-light:rgba(255,255,255,.16);
+    --accent:#71e5ff; --accent-hover:#9df0ff; --accent-soft:#153c56; --accent-contrast:#06202b;
+    --success:#4ade9b;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.2); --shadow-md:0 10px 30px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--font-sans);background:var(--bg);color:var(--text);
+       padding:42px clamp(24px,5vw,72px) 72px;transition:background var(--transition),color var(--transition)}
+  .demo-bar{position:fixed;top:10px;right:12px;display:flex;gap:6px;font-size:12px}
+  .demo-bar button{font:inherit;padding:4px 9px;border-radius:6px;border:1px solid var(--border);
+       background:var(--bg-input);color:var(--text);cursor:pointer}
+
+  /* ── 设置页骨架（与 .settings-page 同宽 900 / 同内距，styles.css:4839）── */
+  .settings-page{width:min(100%,900px)}
+  .settings-page-title{font-size:clamp(21px,2.2vw,27px);font-weight:750;letter-spacing:-.035em;margin-bottom:7px}
+  .settings-page-desc{font-size:13px;line-height:1.55;color:var(--text-secondary);margin-bottom:28px}
+
+  /* ══════════ 空状态卡片 ══════════ */
+  .setup-empty-card{
+    display:flex;gap:16px;align-items:flex-start;
+    padding:20px 20px 16px;
+    border:1px solid var(--border);
+    border-radius:var(--radius-lg);
+    background:var(--bg-card);
+    box-shadow:var(--shadow-sm);
+    max-width:640px;
+  }
+  .setup-empty-icon{
+    flex:0 0 auto;width:38px;height:38px;border-radius:var(--radius-sm);
+    display:grid;place-items:center;
+    background:var(--accent-soft);color:var(--accent);   /* 图标 = 唯一用 accent 的实体，字号不依赖色彩 */
+  }
+  .setup-empty-icon svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;
+    stroke-linecap:round;stroke-linejoin:round}
+  .setup-empty-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:6px}
+  .setup-empty-title{font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--text)}
+  .setup-empty-desc{font-size:12.5px;line-height:1.6;color:var(--text-secondary)} /* 5.25:1 / 5.59:1 */
+  .setup-empty-actions{display:flex;align-items:center;gap:14px;margin-top:10px;flex-wrap:wrap}
+  .setting-btn{padding:7px 16px;border:none;border-radius:var(--radius-xs);font-size:13px;font-weight:600;
+    cursor:pointer;transition:all var(--transition);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .setting-btn:active{transform:scale(.97)}
+  .setting-btn.primary{background:var(--accent);color:var(--accent-contrast,#fff)}
+  .setting-btn.primary:hover{background:var(--accent-hover)}
+  .setup-empty-link{
+    font-size:12.5px;color:var(--text-secondary);text-decoration:underline;
+    text-decoration-color:color-mix(in srgb,var(--text-secondary) 45%,transparent);
+    text-underline-offset:3px;background:none;border:none;font-family:inherit;cursor:pointer;
+    transition:color var(--transition),text-decoration-color var(--transition)
+  }
+  .setup-empty-link:hover{color:var(--text);text-decoration-color:currentColor}
+  .setup-empty-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  .setup-empty-foot{font-size:12px;color:var(--text-tertiary);margin-top:2px} /* 4.9:1 / 深色 5.4:1，别用 opacity 压色——11.5px+0.85 只剩 4.24:1 */
+  .setup-empty-card[hidden]{display:none}
+
+  /* 入场：只播一次，跟随 .settings-page 的 pageIn(0.3s) 之后 80ms，
+     同一时间序里只动一个元素（styles.css:4848 pageIn 已有位移，这里只淡入+4px） */
+  .setup-empty-card{animation:cardIn .32s var(--ease-out) .06s both}
+  @keyframes cardIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.setup-empty-card{animation:none}}
+
+  /* 窄窗（设置页最小可用宽 ~520）：图标退到标题上方，避免正文被压成 4 字一行 */
+  @media (max-width:620px){
+    .setup-empty-card{flex-direction:column;gap:12px}
+  }
+
+  /* 卡片下方的既有分区（供应商网格）——空状态下以分隔线降级为"或从内置开始" */
+  .or-divider{display:flex;align-items:center;gap:10px;max-width:640px;margin:18px 0 12px;
+    font-size:11px;color:var(--text-secondary)}
+  .or-divider::before,.or-divider::after{content:"";flex:1;height:1px;background:var(--border-light)}
+  [hidden]{display:none!important} /* display:flex 会盖掉 UA 的 [hidden]{display:none}，见 styles.css:3622-3625 同款注释 */
+  .llm-default-bar{display:flex;align-items:center;justify-content:space-between;max-width:640px;
+    padding:12px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-card);
+    box-shadow:var(--shadow-sm);font-size:12.5px;color:var(--text-secondary)}
+</style>
+</head>
+<body>
+  <div class="demo-bar">
+    <button data-t="light">浅色</button><button data-t="dark">深色</button>
+  </div>
+
+  <div class="settings-page">
+    <h2 class="settings-page-title">模型与 Key</h2>
+    <p class="settings-page-desc">配置 AI 模型提供商</p>
+
+    <!-- ① 空状态卡片：hasConfiguredKey()===false 时插在 .llm-layout 首位 -->
+    <section class="setup-empty-card" id="setup-empty" role="region" aria-labelledby="setup-empty-title">
+      <span class="setup-empty-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3v2M12 19v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/><circle cx="12" cy="12" r="3.4"/></svg>
+      </span>
+      <div class="setup-empty-body">
+        <h3 class="setup-empty-title" id="setup-empty-title">还差一步：接上一个模型</h3>
+        <p class="setup-empty-desc">填写任意一家供应商的 API Key 即可开始对话。Key 只存在本机配置里，不随会话上传。</p>
+        <div class="setup-empty-actions">
+          <button class="setting-btn primary" type="button">配置 API Key</button>
+          <button class="setup-empty-link" type="button">使用本地模型（Ollama / LM Studio）</button>
+        </div>
+        <p class="setup-empty-foot">没有 Key？网络代理与 TLS 校验在「网络代理」分区，可先在那边把连接打通。</p>
+      </div>
+    </section>
+
+    <div class="or-divider">或从内置供应商开始</div>
+
+    <!-- 空状态下隐藏默认模型条（它只会显示"未选择默认模型"这句重复的话） -->
+    <div class="llm-default-bar" hidden>
+      <span><strong>未选择默认模型</strong></span>
+    </div>
+
+    <!-- ② 配好之后：同一个位置换成状态卡（不用另做一屏） -->
+    <div id="probe" hidden></div>
+  </div>
+
+<script>
+  const q = new URLSearchParams(location.search).get('theme');
+  if (q) document.documentElement.dataset.theme = q;
+  document.querySelectorAll('.demo-bar button').forEach(b=>{
+    b.onclick = () => document.documentElement.dataset.theme = b.dataset.t;
+  });
+</script>
+</body>
+</html>

@@ -343,6 +343,79 @@ export function normalizeMapFence(src: string): string {
   );
 }
 
+// CJK 字符判定：中文/日文/韩文常用字块（含假名与谚文），用于「标记后紧跟
+// CJK 字符才补空格」的闸门——ASCII 标题/列表仍保持原样，避免误伤 `#hashtag`、
+// `1.5`、`*emphasis*` 等合法写法。
+const CJK_CHAR_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+/**
+ * 显示层归一化：把中文模型常写出的无空格块标记（`##标题`、`-项目`、`1.项目`）
+ * 在标记与内容之间补一个空格，使 marked/CommonMark 能识别为标题/列表，而不是
+ * 把 `##`/`-` 原样渲染成普通段落。
+ *
+ * 判据：仅当标记后紧跟 CJK 字符时才补空格（ASCII 后续保持原样）；代码围栏
+ * （``` / ~~~）内部文本原样保留。纯函数、仅作用于显示文本，不改变模型上下文。
+ */
+export function normalizeCjkBlockMarkers(text: string): string {
+  if (!text) return text;
+  // 快速路径：不含 CJK 字符时原样返回，避免逐行 split 的开销。
+  if (!CJK_CHAR_RE.test(text)) return text;
+  const lines = text.split('\n');
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+  const out: string[] = [];
+  for (const line of lines) {
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+      } else if (marker[0] === fenceChar && marker.length >= fenceLen) {
+        inFence = false;
+        fenceChar = '';
+        fenceLen = 0;
+      }
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    let transformed = line;
+    // 标题：#{1,6} 后紧跟非空白非 # 字符
+    const h = /^( {0,3})(#{1,6})([^\s#])/.exec(transformed);
+    if (h && CJK_CHAR_RE.test(h[3])) {
+      transformed = transformed.replace(/^( {0,3})(#{1,6})([^\s#])/, '$1$2 $3');
+    }
+    // 无序列表：- * + 后紧跟非空白字符。'*' 可能是强调定界符：若本行存在
+    // 闭合 '*'，跳过以免把 `*中文*` 这类强调拆成列表。
+    const b = /^( {0,3})([-*+])([^\s])/.exec(transformed);
+    if (b && CJK_CHAR_RE.test(b[3])) {
+      const isEmphasis = b[2] === '*' && transformed.indexOf('*', transformed.indexOf('*') + 1) !== -1;
+      if (!isEmphasis) {
+        transformed = transformed.replace(/^( {0,3})([-*+])([^\s])/, '$1$2 $3');
+      }
+    }
+    // 有序列表：1-9 位数字 + . 或 ) 后紧跟非空白字符
+    const o = /^( {0,3})(\d{1,9})([.)])([^\s])/.exec(transformed);
+    if (o && CJK_CHAR_RE.test(o[4])) {
+      transformed = transformed.replace(/^( {0,3})(\d{1,9})([.)])([^\s])/, '$1$2$3 $4');
+    }
+    out.push(transformed);
+  }
+  return out.join('\n');
+}
+
+// 兼容别名：不同命名习惯的调用方/测试可按任一名取用。
+export const normalizeCjkMarkdown = normalizeCjkBlockMarkers;
+export const normalizeMarkdownCjk = normalizeCjkBlockMarkers;
+export const normalizeCjkMarkdownMarkers = normalizeCjkBlockMarkers;
+export const normalizeMarkdownCjkSpacing = normalizeCjkBlockMarkers;
+
 /**
  * Settled-render tail hygiene. An interrupted turn can stop mid-fence: the
  * model was streaming a ```map payload when an interjection settled the turn,
@@ -3443,7 +3516,11 @@ async function renderMarkdownInner(
   if (mayContainMath(stripped)) await ensureKatex();
   // 中断回合可能停在 slot 围栏中途——半截数据不进渲染管线(见函数注释)。
   const settled = stripUnterminatedSlotFences(stripped);
-  const html = (md.parse(normalizeMapFence(settled), { async: false }) as string).replace(/\n+$/, '');
+  // 显示层归一化：中文模型常输出 `##标题`/`-项目`/`1.项目` 这类无空格块标记，
+  // marked/CommonMark 要求标记后有空格，否则渲染成普通段落、用户看到原始 `##`/`-`。
+  // 仅在标记后紧跟 CJK 字符时补空格；代码围栏内文本不动（见 normalizeCjkBlockMarkers）。
+  const normalized = normalizeCjkBlockMarkers(settled);
+  const html = (md.parse(normalizeMapFence(normalized), { async: false }) as string).replace(/\n+$/, '');
   // Defense-in-depth: the custom renderer already escapes raw HTML and
   // restricts link/image schemes, but sanitize the final HTML anyway so any
   // future renderer gap (or a marked default renderer, e.g. <img>) can never
@@ -3961,6 +4038,9 @@ function syncStreamElideChip(container: HTMLElement, slice: StreamingViewSlice |
 }
 
 function diffStreaming(container: HTMLElement, text: string): void {
+  // 显示层归一化与完成态共用同一规则（见 normalizeCjkBlockMarkers）：流式与完成态
+  // 一致，避免流式期间看到 `##标题`、完成态却渲染成 h2 的跳变。
+  text = normalizeCjkBlockMarkers(text);
   ungroupStreamingSvgGalleries(container);
   // During streaming, chat.ts sets `bubble.textContent = …` for instant raw
   // feedback; that leaves a plain text node that must NOT render next to the

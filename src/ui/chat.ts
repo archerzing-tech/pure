@@ -105,7 +105,7 @@ import { buildExtractPrompt } from '../shared/webExtract';
 import { buildDiffRows, type ToolDiffData } from './toolDiff';
 import { createAssessmentFlowCard, type AssessmentFlowHandle } from './assessmentFlow';
 import { createAgentActivityPanel, mergeAgentActivity, agentRailSpaceGateHit, type AgentActivityPanelHandle } from './agentActivityPanel';
-import { agentWorkbench, attachWorkbenchEntry } from './agentWorkbench';
+import { agentWorkbench } from './agentWorkbench';
 import { attachPlanPauseActions } from './planPauseActions';
 import { OpenAICompatibleAdapter } from '../adapter/openai/OpenAICompatibleAdapter';
 import { DeepSeekAnthropicAdapter } from '../adapter/deepseek/DeepSeekAnthropicAdapter';
@@ -7495,16 +7495,14 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     } else if (staged) {
                       pendingByName.delete(toolName);
                       entry = { ...staged, toolCallId };
-                      // 委派行是 mid-stream 先按 name 暂存的（id 未知），id 到
-                      // 手的此刻补挂工作台入口（幂等，附带 dataset.agentCallId）。
-                      if (subagentNames.has(toolName)) attachWorkbenchEntry(entry.row.el, toolCallId);
+                      // 委派行是 mid-stream 先按 name 暂存的（id 未知），id 到手；
+                      // 工作台入口改由 rail 卡点击进入，此处不再挂 ↗ chip。
                       pendingRows.set(toolCallId, entry);
                     } else {
                       endThinking();
                       const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
                       toolRowSinceSegment = true;
                       entry = { row, toolName, args, toolCallId };
-                      if (subagentNames.has(toolName)) attachWorkbenchEntry(row.el, toolCallId);
                       pendingRows.set(toolCallId, entry);
                     }
                   }
@@ -7598,7 +7596,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             endThinking();
             const row = appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool');
             toolRowSinceSegment = true;
-            if (subagentNames.has(toolName)) attachWorkbenchEntry(row.el, callId);
+
             pendingRows.set(callId, { row, toolName, args, toolCallId: callId });
             this.scrollUi(chatEl);
             break;
@@ -8027,7 +8025,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // Remember the completed card so a repeated identical call
               // collapses onto it instead of rendering twice.
               if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
-              if (pending.toolCallId && subagentNames.has(pending.toolName)) attachWorkbenchEntry(pending.row.el, pending.toolCallId);
+
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 outcome: branchOutcome,

@@ -587,6 +587,10 @@ export class AgentLoopEngine {
                 break;
               case 'usage':
                 turnUsage = mergeTokenUsage(turnUsage, chunk.usage);
+                // Self-calibration: this request's real prompt size against our
+                // estimate. `messages` is the exact array just sent; the
+                // compactor folds the ratio into later pressure checks.
+                ctx.contextEngine?.observePromptUsage?.(chunk.usage.promptTokens, messages);
                 break;
               case 'done':
                 content = chunk.content || content;

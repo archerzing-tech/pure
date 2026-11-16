@@ -6,11 +6,15 @@
 // fit the provider window instead of being cut at the count. maxMessages
 // governs only when no token budget is known (standalone/test use).
 // 9.1 — three more layers, in the order the mainstream agents apply them:
-//   L1 microcompaction: old tool RESULTS are replaced by a placeholder
+//   L1 microcompaction: tool RESULT bodies are replaced by a placeholder
 //      (zero LLM cost) before any message is evicted. Long agent sessions
 //      spend most of their window on tool output; shedding that first keeps
 //      the conversational skeleton (who asked what, what was decided) intact
-//      instead of deleting whole turns.
+//      instead of deleting whole turns. The protected tail is sized by token
+//      budget, not just a result count, and an atomic group that alone cannot
+//      fit (a parallel batch) has its bodies cleared instead of hard-stopping
+//      the run: the assistant toolCalls and toolCallIds stay, so the request
+//      remains valid.
 //   L2 summary: whenever messages ARE evicted and an adapter is available the
 //      eviction is summarized. The old "only past 40 evicted messages" gate
 //      meant a token-driven overflow of 5 messages silently dropped content —
@@ -25,11 +29,17 @@ import { estimateToolDefinitionTokens } from '../shared/providers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { closeDanglingFence } from '../shared/fenceHygiene';
-import type { Message, LLMAdapter, ToolDefinition } from '../shared/types';
+import type { Message, MessageImage, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextMicrocompactionConfig {
-  /** Tool results within the newest N are never cleared (default 8). */
+  /** Count ceiling for the protected tail (default 8). */
   keepRecent?: number;
+  /** Token budget for the protected tail. The newest tool results are kept
+   *  verbatim only while their cumulative size fits BOTH this budget and
+   *  `keepRecent`: eight max-size reads can dwarf a small window, and the old
+   *  count-only rule protected all of them. Defaults to 10% of the configured
+   *  window (clamped 2K–32K); ignored when no budget is configured. */
+  keepRecentTokens?: number;
   /** Results shorter than this many characters are left alone: the
    *  placeholder costs tokens too, and clearing a 40-char `ok` reclaims
    *  nothing while churning the prompt cache (default 1000). */
@@ -135,6 +145,15 @@ export const PROACTIVE_COMPACT_TARGET = 0.7;
 /** L1 defaults — see ContextMicrocompactionConfig. */
 const MICROCOMPACT_KEEP_RECENT = 8;
 const MICROCOMPACT_MIN_CHARS = 1_000;
+/** Protected-tail token budget fallbacks (window-relative in production). */
+const MICROCOMPACT_RECENT_TOKEN_SHARE = 0.1;
+const MICROCOMPACT_RECENT_TOKEN_MIN = 2_000;
+const MICROCOMPACT_RECENT_TOKEN_MAX = 32_000;
+const MICROCOMPACT_KEEP_RECENT_TOKENS = 8_000;
+/** Reactive compaction keeps only the newest two results as a starting point;
+ *  the target-driven second pass may still clear them when the tail alone
+ *  exceeds the provider's real limit. */
+const AGGRESSIVE_KEEP_RECENT_TOKENS = 2_000;
 /** Reactive mode protects fewer results and clears smaller ones so a retry
  *  that overflowed by a little is fixed by the cheap layer alone. */
 const AGGRESSIVE_KEEP_RECENT = 2;
@@ -147,6 +166,41 @@ const AGGRESSIVE_BUDGET_RATIO = 0.7;
  *  keeps a bad config from producing a nonsense retention budget. */
 function softFraction(value: number): number {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+}
+
+/** Vision payload fallback when the snapshot predates width/height. A
+ *  ~1100×1100 image lands near this after provider-side resizing; providers
+ *  bill images by pixels, so treating them as text/base64 is not an option. */
+export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1_600;
+
+/** Anthropic downsizes the long edge to 1568 before tokenizing; using the same
+ *  cap keeps our estimate comparable across providers instead of billing a 4K
+ *  screenshot as 9M pixels. Tokens ≈ width × height / 750. */
+const IMAGE_LONG_EDGE_CAP = 1_568;
+
+/** Below this many tokens a usage report is dominated by chat-template noise
+ *  and one-off overhead, so it must not move the calibration. */
+const MIN_USAGE_CALIBRATION_TOKENS = 1_000;
+/** Keep a single pathological report (provider counting a huge system prompt
+ *  we cannot see, or an error body's usage) from swinging every later trim. */
+const USAGE_SCALE_MIN = 0.5;
+const USAGE_SCALE_MAX = 3;
+/** EMA weight for a new observation: one sample should move the line, a burst
+ *  of cache-hit/cache-miss variance should not make the trigger oscillate. */
+const USAGE_SCALE_SMOOTHING = 0.35;
+
+/** Estimated vision tokens for one inline image. Dimensions win when present;
+ *  old snapshots without them get the constant instead of zero, because zero
+ *  is exactly the blind spot that let image-heavy sessions overflow. */
+export function estimateImageTokens(image: MessageImage): number {
+  const width = image.width ?? 0;
+  const height = image.height ?? 0;
+  if (width > 0 && height > 0) {
+    const longEdge = Math.max(width, height);
+    const scale = longEdge > IMAGE_LONG_EDGE_CAP ? IMAGE_LONG_EDGE_CAP / longEdge : 1;
+    return Math.max(1, Math.ceil((width * scale * height * scale) / 750));
+  }
+  return DEFAULT_IMAGE_TOKEN_ESTIMATE;
 }
 
 /** L3 defaults (files / per-file chars / total chars). */
@@ -184,6 +238,11 @@ export function estimateTokens(messages: Message[]): number {
   let sum = 0;
   for (const message of messages) {
     sum += estimateTextTokens(message.content ?? '');
+    // Vision payloads ride outside `content` (adapters map them to native
+    // image blocks), so the old text-only sum counted a screenshot as zero.
+    if (message.images?.length) {
+      for (const image of message.images) sum += estimateImageTokens(image);
+    }
     // Tool-call arguments ARE wire payload: mapMessages serializes every
     // assistant tool_calls entry (write_file `content` = a whole file) into
     // the request body, yet none of it lives in `content`. Blind to it, the
@@ -211,33 +270,125 @@ function microcompactedPlaceholder(toolName: string | undefined, chars: number):
   return `[old ${toolName ?? 'tool'} result cleared after compaction — ${chars} chars omitted. Re-run the tool if you still need this content.]`;
 }
 
+/** Window-relative protected-tail budget: recent tool context is worth about
+ *  a tenth of the input window, with hard floors/ceilings so a tiny test window
+ *  still protects something and a 1M window does not hoard a whole file. */
+function recentToolResultBudget(maxTokens: number | undefined): number {
+  if (maxTokens === undefined) return MICROCOMPACT_KEEP_RECENT_TOKENS;
+  return Math.max(
+    MICROCOMPACT_RECENT_TOKEN_MIN,
+    Math.min(MICROCOMPACT_RECENT_TOKEN_MAX, Math.floor(maxTokens * MICROCOMPACT_RECENT_TOKEN_SHARE)),
+  );
+}
+
 /**
- * L1 — replace the content of OLD, LARGE tool results with a placeholder.
- * Pure text surgery: no LLM call, no message dropped, no tool pair broken.
- * The newest `keepRecent` results stay verbatim (the model is usually still
- * working from them); only results long enough to be worth the placeholder
- * are touched.
+ * L1 — replace the content of tool results with a placeholder.
+ * Pure text surgery: no LLM call, no message dropped, no tool pair broken — the
+ * assistant's toolCalls and every tool message (with its toolCallId) stay put,
+ * so the wire request remains valid.
+ *
+ * Protection is "newest N results AND a token budget", not count alone: the
+ * model usually still works from the recent results, but eight 32KB reads are
+ * not a working set on a 64K window. When `reclaimTokens` is supplied (the
+ * pressure path) the oldest unprotected results give first. If that is not
+ * enough — e.g. the newest parallel batch alone is larger than the target —
+ * the second pass clears inside the protected tail, oldest first, including
+ * the newest batch's own results. That is deliberately better than evicting a
+ * whole atomic batch or stopping the run: a placeholder says what was dropped
+ * and that the tool can be re-run, while a hard stop loses the task.
  */
 export function microcompactToolResults(
   messages: Message[],
-  options: { keepRecent: number; minChars: number },
+  options: {
+    keepRecent: number;
+    minChars: number;
+    /** Budget for the protected tail; only meaningful with `reclaimTokens`. */
+    keepRecentTokens?: number;
+    /** Reclaim enough tokens to fall to the pressure line. Omit for the legacy
+     *  "clear every unprotected result" behavior (tests / count-only mode). */
+    reclaimTokens?: number;
+    /** Also clear inside the protected tail when the reclaimed amount is not
+     *  enough. Reserved for reactive compaction and the post-eviction
+     *  oversized-group emergency: normal pressure evicts old whole groups
+     *  instead, so the working tail keeps its newest results. */
+    clearProtected?: boolean;
+  },
 ): { messages: Message[]; cleared: number; reclaimedTokens: number } {
   const toolIndices: number[] = [];
   for (let index = 0; index < messages.length; index++) {
     if (messages[index].role === 'tool') toolIndices.push(index);
   }
-  const protectedIndices = new Set(options.keepRecent > 0 ? toolIndices.slice(-options.keepRecent) : []);
+  const protectedIndices = new Set<number>();
+  const tailBudget = options.reclaimTokens === undefined ? undefined : (options.keepRecentTokens ?? Number.POSITIVE_INFINITY);
+  if (tailBudget === undefined) {
+    for (const index of toolIndices.slice(-options.keepRecent)) protectedIndices.add(index);
+  } else {
+    let protectedTokens = 0;
+    for (let cursor = toolIndices.length - 1; cursor >= 0 && protectedIndices.size < options.keepRecent; cursor--) {
+      const index = toolIndices[cursor];
+      const size = estimateTextTokens(messages[index].content ?? '');
+      // Always take the newest result (the model may be holding it); older
+      // ones join only while the tail still fits the budget.
+      if (protectedIndices.size > 0 && protectedTokens + size > tailBudget) break;
+      protectedIndices.add(index);
+      protectedTokens += size;
+    }
+  }
+
+  const reclaimTarget = options.reclaimTokens ?? Number.POSITIVE_INFINITY;
+  const output = messages.slice();
+  const clearedIndices = new Set<number>();
   let cleared = 0;
   let reclaimedTokens = 0;
-  const output = messages.map((message, index) => {
-    if (message.role !== 'tool' || protectedIndices.has(index)) return message;
+  const clear = (index: number, minChars: number = options.minChars): boolean => {
+    const message = output[index];
+    if (message.role !== 'tool') return false;
     const text = message.content ?? '';
-    if (text.length < options.minChars) return message;
+    if (text.length < minChars) return false;
     const placeholder = microcompactedPlaceholder(message.toolName, text.length);
+    const saving = estimateTextTokens(text) - estimateTextTokens(placeholder);
+    if (saving <= 0) return false;
+    output[index] = { ...message, content: placeholder };
+    clearedIndices.add(index);
     cleared++;
-    reclaimedTokens += estimateTextTokens(text) - estimateTextTokens(placeholder);
-    return { ...message, content: placeholder };
-  });
+    reclaimedTokens += saving;
+    return true;
+  };
+
+  // Pass 1 — oldest unprotected results first: the working tail stays intact
+  // as long as shedding the stale ones is enough.
+  for (const index of toolIndices) {
+    if (reclaimedTokens >= reclaimTarget) break;
+    if (!protectedIndices.has(index)) clear(index);
+  }
+  // Pass 2 — pressure still above the line: clear inside the protected tail,
+  // oldest first. The newest result survives whenever the target allows it.
+  if (options.clearProtected === true && reclaimedTokens < reclaimTarget) {
+    for (const index of toolIndices) {
+      if (reclaimedTokens >= reclaimTarget) break;
+      if (protectedIndices.has(index)) clear(index);
+    }
+  }
+  // Pass 3 — emergency floor: the only remaining results are shorter than
+  // `minChars` (a parallel batch of medium reads). Skipping them would trade a
+  // few placeholder tokens for a hard stop. Big net savings first, so the
+  // fewest results leave the transcript; the saving guard still skips any
+  // result the placeholder would not actually shrink.
+  if (options.clearProtected === true && reclaimedTokens < reclaimTarget) {
+    const candidates = toolIndices
+      .filter(index => !clearedIndices.has(index))
+      .map(index => ({
+        index,
+        saving: estimateTextTokens(output[index].content ?? '') -
+          estimateTextTokens(microcompactedPlaceholder(output[index].toolName, (output[index].content ?? '').length)),
+      }))
+      .filter(candidate => candidate.saving > 0)
+      .sort((a, b) => b.saving - a.saving);
+    for (const candidate of candidates) {
+      if (reclaimedTokens >= reclaimTarget) break;
+      clear(candidate.index, 1);
+    }
+  }
   return { messages: output, cleared, reclaimedTokens };
 }
 
@@ -336,6 +487,14 @@ export async function buildRehydrationMessage(
 export class ContextEngine {
   private config: ContextEngineConfig;
   private lastCompactionResult?: ContextCompactionResult;
+  /** Provider-reported prompt tokens ÷ our estimate, learned from usage. The
+   *  estimator is a text heuristic (plus the image formula above); providers
+   *  count chat templates, image blocks and tokenizer differences on their
+   *  side. Without this ratio the 85% line is measured in our units while the
+   *  wall is in theirs — the failure mode is a preflight that believes it fits
+   *  and a provider that rejects it. */
+  private usageScale = 1;
+  private usageSamples = 0;
 
   constructor(config: ContextEngineConfig) {
     this.config = {
@@ -381,8 +540,38 @@ export class ContextEngine {
   needsCompaction(messages: Message[], trigger: number = PROACTIVE_COMPACT_TRIGGER): boolean {
     const max = this.config.maxTokens;
     if (max === undefined) return false;
-    const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
-    return estimateTokens(messages) + toolTokens > max * softFraction(trigger);
+    const toolTokens = this.scaleTokens(estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools));
+    return this.scaledEstimate(messages) + toolTokens > max * softFraction(trigger);
+  }
+
+  /** Feed one provider response's prompt-token count back into the estimator.
+   *  Ignored below {@link MIN_USAGE_CALIBRATION_TOKENS} (noise) and clamped to
+   *  a sane band (a single broken report must not wedge every later trim).
+   *  Purely advisory: a provider that reports no usage leaves the scale at 1
+   *  and behavior is exactly the text/image estimate. */
+  observePromptUsage(promptTokens: number | undefined, messages: Message[]): void {
+    if (promptTokens === undefined || !Number.isFinite(promptTokens) || promptTokens < MIN_USAGE_CALIBRATION_TOKENS) return;
+    const raw = estimateTokens(messages) + estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
+    if (raw < MIN_USAGE_CALIBRATION_TOKENS) return;
+    const observed = Math.min(USAGE_SCALE_MAX, Math.max(USAGE_SCALE_MIN, promptTokens / raw));
+    this.usageScale = this.usageSamples === 0
+      ? observed
+      : this.usageScale * (1 - USAGE_SCALE_SMOOTHING) + observed * USAGE_SCALE_SMOOTHING;
+    this.usageSamples += 1;
+  }
+
+  /** The learned provider/estimate ratio (1 = uncalibrated). Exposed for
+   *  diagnostics and tests; hosts do not need to call it. */
+  getEstimateScale(): number {
+    return this.usageScale;
+  }
+
+  private scaleTokens(tokens: number): number {
+    return this.usageScale === 1 ? tokens : Math.ceil(tokens * this.usageScale);
+  }
+
+  private scaledEstimate(messages: Message[]): number {
+    return this.scaleTokens(estimateTokens(messages));
   }
 
   async compact(
@@ -401,7 +590,7 @@ export class ContextEngine {
       ...(priorSummary ? [priorSummary] : []),
       ...(priorRehydration ? [priorRehydration] : []),
     ];
-    const toolTokens = estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools);
+    const toolTokens = this.scaleTokens(estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools));
     const configuredMax = this.config.maxTokens;
 
     // ── L1: microcompaction ──────────────────────────────────────────────
@@ -414,7 +603,7 @@ export class ContextEngine {
     let microcompactedToolResults = 0;
     let reclaimedTokens = 0;
     const microSetting = this.config.microcompaction === false ? undefined : (this.config.microcompaction ?? {});
-    const preTokens = estimateTokens(messages) + toolTokens;
+    const preTokens = this.scaledEstimate(messages) + toolTokens;
     const underPressure = configuredMax !== undefined && preTokens > configuredMax;
     // Soft mode is pressure too: give L1 the first shot — if the cheap layer
     // alone sheds the window back under the trigger, no message is evicted.
@@ -424,9 +613,37 @@ export class ContextEngine {
     if (microSetting && (underPressure || overCountWindow || softPressure || options.aggressive === true)) {
       const baseKeep = microSetting.keepRecent ?? MICROCOMPACT_KEEP_RECENT;
       const baseMin = microSetting.minChars ?? MICROCOMPACT_MIN_CHARS;
+      // How far L1 must shed: reactive lands on the aggressive target (the
+      // provider already refused once); soft lands just under its trigger; the
+      // hard path only needs to get under the wall (eviction/summary then own
+      // the rest). Measuring the goal itself keeps L1 from over-clearing.
+      const l1Target = configuredMax === undefined
+        ? undefined
+        : options.aggressive
+          ? Math.max(1, Math.floor(configuredMax * AGGRESSIVE_BUDGET_RATIO))
+          : softPressure && options.soft !== undefined
+            ? configuredMax * softFraction(options.soft.trigger)
+            : underPressure
+              ? configuredMax
+              : undefined;
+      // `l1Target` and the pressure figures are provider-token units (maxTokens),
+      // while L1 substantiates its savings in our own estimate. Convert the
+      // target back before subtracting, or a calibrated scale (>1) would ask L1
+      // to shed more than the window actually needs and clear useful results.
+      const l1RawTarget = l1Target === undefined
+        ? undefined
+        : Math.max(0, Math.ceil(estimateTokens(messages) -
+            (l1Target / this.usageScale - estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools))));
       const outcome = microcompactToolResults(messages, {
         keepRecent: options.aggressive ? Math.min(baseKeep, AGGRESSIVE_KEEP_RECENT) : baseKeep,
         minChars: options.aggressive ? Math.min(baseMin, AGGRESSIVE_MIN_CHARS) : baseMin,
+        keepRecentTokens: options.aggressive
+          ? AGGRESSIVE_KEEP_RECENT_TOKENS
+          : (microSetting.keepRecentTokens ?? recentToolResultBudget(configuredMax)),
+        reclaimTokens: l1RawTarget,
+        // Normal pressure leaves the newest results alone and lets eviction
+        // drop old groups; reactive compaction has no such second chance.
+        clearProtected: options.aggressive === true,
       });
       working = outcome.messages;
       microcompactedToolResults = outcome.cleared;
@@ -434,7 +651,7 @@ export class ContextEngine {
     }
 
     const nonSystem = working.filter(message => message.role !== 'system');
-    const currentTokens = estimateTokens([...systemMessages, ...nonSystem]) + toolTokens;
+    const currentTokens = this.scaledEstimate([...systemMessages, ...nonSystem]) + toolTokens;
     // Token budget primary (8.1): with one configured, the count window is not
     // a trigger — a 40-message transcript of short turns is healthy, not over
     // budget. Without a token budget the count window is all we know.
@@ -483,14 +700,14 @@ export class ContextEngine {
     let keptCount = 0;
     let remainingTokens = retentionBudget === undefined
       ? undefined
-      : retentionBudget - estimateTokens(systemMessages) - toolTokens;
+      : retentionBudget - this.scaledEstimate(systemMessages) - toolTokens;
 
     for (let index = groups.length - 1; index >= 0; index--) {
       const group = groups[index];
       if (!group.retainable) continue;
       if (isUserGroup(group)) continue; // pinned below, outside the count budget
 
-      const groupTokens = estimateTokens(group.messages);
+      const groupTokens = this.scaledEstimate(group.messages);
       // The count bound applies only in the no-token-budget fallback; with a
       // token budget the loop stops on tokens alone, keeping as many groups
       // as the provider window actually fits.
@@ -525,7 +742,7 @@ export class ContextEngine {
     // window (oversizedNewestGroup below reports that case).
     if (remainingTokens !== undefined) {
       for (const group of groups) {
-        if (kept.has(group) && isUserGroup(group)) remainingTokens -= estimateTokens(group.messages);
+        if (kept.has(group) && isUserGroup(group)) remainingTokens -= this.scaledEstimate(group.messages);
       }
       const newestKept = [...groups].reverse().find(group => kept.has(group));
       for (const group of groups) {
@@ -533,7 +750,7 @@ export class ContextEngine {
         if (group === newestKept) continue;
         if (!kept.has(group) || !isUserGroup(group)) continue;
         kept.delete(group);
-        remainingTokens += estimateTokens(group.messages);
+        remainingTokens += this.scaledEstimate(group.messages);
       }
     }
 
@@ -550,12 +767,47 @@ export class ContextEngine {
 
     // An interrupted checkpoint may contain an incomplete tool call. Never
     // feed that dangling assistant/tool fragment back to a provider.
-    const systemTokens = estimateTokens(systemMessages) + toolTokens;
+    const systemTokens = this.scaledEstimate(systemMessages) + toolTokens;
     const newestRetained = [...groups].reverse().find(group => kept.has(group));
-    const oversizedNewestGroup = retentionBudget !== undefined &&
+    let oversizedNewestGroup = retentionBudget !== undefined &&
       systemTokens <= retentionBudget &&
       newestRetained !== undefined &&
-      estimateTokens(newestRetained.messages) > retentionBudget - systemTokens;
+      this.scaledEstimate(newestRetained.messages) > retentionBudget - systemTokens;
+
+    // Emergency L1 inside the NEWEST group: a parallel tool batch is atomic,
+    // so if the newest group alone does not fit, eviction has nothing left to
+    // drop (older groups are gone or pinned users). Clear its tool-result
+    // bodies instead — the assistant toolCalls and toolCallIds stay, the
+    // request stays valid, and the model is told each result can be re-run.
+    // Only this group is touched: clearing older results cannot shrink the
+    // actual blocker and would trade useful context for nothing. Without this
+    // the group was reported oversized and the run later hard-stopped.
+    if (oversizedNewestGroup && microSetting && newestRetained!.messages.some(m => m.role === 'tool')) {
+      const groupBudget = retentionBudget! - systemTokens;
+      const groupExcess = this.scaledEstimate(newestRetained!.messages) - groupBudget;
+      if (groupExcess > 0) {
+        const emergency = microcompactToolResults(newestRetained!.messages, {
+          keepRecent: 0,
+          // The normal floor is deliberately conservative; an unshrinkable
+          // newest batch justifies clearing medium results too (the saving
+          // guard below still skips anything the placeholder would not shrink).
+          minChars: Math.min(microSetting.minChars ?? MICROCOMPACT_MIN_CHARS, AGGRESSIVE_MIN_CHARS),
+          reclaimTokens: groupExcess,
+          clearProtected: true,
+        });
+        if (emergency.cleared > 0) {
+          newestRetained!.messages.length = 0;
+          newestRetained!.messages.push(...emergency.messages);
+          // Rebuild the retained tail from the (mutated) group so the caller
+          // persists the cleared bodies instead of the old messages.
+          retained.length = 0;
+          for (const group of groups) if (kept.has(group)) retained.push(...group.messages);
+          microcompactedToolResults += emergency.cleared;
+          reclaimedTokens += emergency.reclaimedTokens;
+          oversizedNewestGroup = this.scaledEstimate(newestRetained!.messages) > groupBudget;
+        }
+      }
+    }
 
     // ── L2: summarize every eviction ─────────────────────────────────────
     // The trigger is "messages were evicted", not "more than N were evicted":
@@ -620,7 +872,7 @@ export class ContextEngine {
 
     // skipSummary is a deliberate skip, not an outage — report it honestly.
     const summaryUnavailable = evictedRetainableMessages > 0 && !summarized && !options.skipSummary;
-    const estimatedTokens = estimateTokens(ordered) + toolTokens;
+    const estimatedTokens = this.scaledEstimate(ordered) + toolTokens;
 
     return this.remember({
       messages: ordered,

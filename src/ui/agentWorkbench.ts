@@ -449,11 +449,6 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
   return api;
 }
 
-// ── 委派卡 ↔ 工作台跨链（刀 3）──────────────────────────
-// 转写委派卡头部挂「工作台 ↗」小 chip（tool-row-summary 内，stopPropagation
-// 不触发展开）。幂等：staged→callId 迁移路径可能重复走到。callId 寻址 =
-// 卡上的 data-agent-call-id（chat.ts 创建时挂）。
-
 // 工作台打开期间的 chrome 隐藏：与 rail 的另外两口（hidden attr=挂载权、
 // gate-hidden=空间门）正交，任意一口命中都藏、互不覆盖。
 // context-panel-reopen 也在列（2026-11-12 用户定案）：右侧侧边栏只属于主
@@ -464,19 +459,3 @@ function setChromeHidden(hidden: boolean): void {
   }
 }
 
-export function attachWorkbenchEntry(rowEl: HTMLElement, callId: string): void {
-  rowEl.dataset.agentCallId = callId;
-  const summary = rowEl.querySelector('.tool-row-summary');
-  if (!summary || summary.querySelector('.tool-row-workbench-link')) return;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'tool-row-workbench-link';
-  btn.textContent = t('agent.workbench.open', '↗');
-  btn.title = t('agent.workbench.open.title', '打开 Agent 工作台');
-  btn.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    singleton?.open(callId);
-  });
-  summary.appendChild(btn);
-}

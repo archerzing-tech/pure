@@ -2982,4 +2982,28 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     expect(injected).toHaveLength(1);
     expect(conventionsDelivered.has('packages/web/AGENTS.md')).toBe(true);
   });
+
+  it('feeds provider usage into the compactor so the estimate can self-calibrate', async () => {
+    const observed: Array<number | undefined> = [];
+    const compactor = {
+      compact: async (msgs: Message[]) => ({ messages: msgs }),
+      observePromptUsage: (promptTokens: number | undefined) => { observed.push(promptTokens); },
+    };
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'usage', usage: { promptTokens: 4321, completionTokens: 12 } };
+        yield { type: 'content', content: 'ok' };
+        yield { type: 'done', content: 'ok', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'ok' }),
+    };
+
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-usage-calibration', systemPrompt: 'sys', userPrompt: 'hi', budget: STD_BUDGET },
+      baseCtx({ llm, contextEngine: compactor }),
+    ));
+
+    expect(observed).toEqual([4321]);
+    expect(events.find(e => e.type === 'Completed')).toBeDefined();
+  });
 });

@@ -1199,22 +1199,6 @@ body.window-maximized .win-resize-zone { display: none; }
   opacity: .7;
 }
 
-/* 转写委派卡头部的「工作台 ↗」小 chip：与 .agent-worker-id 同语感
-   （mono 小字 + accent），summary 内 stopPropagation 不触发展开。 */
-.tool-row-workbench-link {
-  flex-shrink: 0;
-  border: 1px solid var(--border-light);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--accent);
-  font: 700 10px var(--font-mono);
-  letter-spacing: .04em;
-  padding: 1px 8px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background .15s var(--ease-out), border-color .15s var(--ease-out);
-}
-.tool-row-workbench-link:hover { background: var(--bg-assistant); border-color: var(--accent); }
 
 /* 「在对话中查看 ↗」定位后的短暂高亮（不引入新色：accent 描边渐隐）。 */
 .agent-card-flash {

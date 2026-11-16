@@ -288,6 +288,11 @@ export interface ReactiveContextCompactor {
    *  trigger/target ratios, and so the host can swap policies without touching
    *  the engine. Optional alongside `needsCompaction`. */
   compactBeforeSend?(messages: Message[]): Promise<ReactiveCompactionOutcome>;
+  /** Provider usage feedback: the response's own prompt-token count, so the
+   *  compactor can calibrate its text estimate against the provider's
+   *  tokenizer/template instead of trusting the heuristic forever. Optional —
+   *  a compactor without it simply never calibrates. */
+  observePromptUsage?(promptTokens: number | undefined, messages: Message[]): void;
   /** Provider-taught budget correction (2026-10-29 会话楔死修复): when a
    *  rejection body names the REAL input limit ("maximum context length is X"),
    *  the engine pushes it into the compactor so every later trim — preflight

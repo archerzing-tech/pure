@@ -313,8 +313,8 @@ export interface ToolExecMeta {
   subagentTrace?: string[];
   /**
    * The delegation's toolCallId (subagent tools only; 2026-11-12 workbench).
-   * Session replay re-attaches the「工作台 ↗」entry from it — Agent 工作台
-   * 与委派卡共用 callId 寻址。Optional: old snapshots lack it and simply
+   * Agent 工作台与委派卡共用 callId 寻址（rail 卡点击进入）。委派卡本身
+   * 不再挂「工作台 ↗」入口。Optional: old snapshots lack it and simply
    * render without the entry (graceful degradation).
    */
   callId?: string;

@@ -1,7 +1,7 @@
 // src/harness/__tests__/ContextEngine.test.ts
 
 import { describe, it, expect } from 'bun:test';
-import { ContextEngine, collectModifiedFilePaths, buildRehydrationMessage } from '../ContextEngine';
+import { ContextEngine, DEFAULT_IMAGE_TOKEN_ESTIMATE, collectModifiedFilePaths, buildRehydrationMessage, estimateImageTokens, estimateTokens } from '../ContextEngine';
 import type { Message } from '../../shared/types';
 
 function makeMsgs(count: number, prefix = 'msg'): Message[] {
@@ -497,6 +497,66 @@ describe('ContextEngine', () => {
     expect(result.microcompactedToolResults).toBe(0);
   });
 
+  it('clears inside the newest parallel batch instead of declaring it unshrinkable', async () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000, microcompaction: { minChars: 100 } });
+    const calls = Array.from({ length: 4 }, (_, i) => ({
+      id: `batch${i}`,
+      index: i,
+      function: { name: 'read_file', arguments: '{}' },
+    }));
+    const msgs: Message[] = [
+      { role: 'assistant', content: '', toolCalls: calls },
+      ...calls.map(call => ({
+        role: 'tool' as const,
+        content: 'x'.repeat(2_000),
+        toolCallId: call.id,
+        toolName: 'read_file',
+      })),
+    ];
+    // Four 2KB reads ≈ 2000 tokens in ONE atomic group. The old count-only
+    // tail protected all four and eviction cannot split an assistant batch, so
+    // the group was reported oversized and the run later hard-stopped.
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.microcompactedToolResults).toBeGreaterThanOrEqual(3);
+    expect(result.evictedMessages).toBe(0);
+    expect(result.oversizedNewestGroup).toBe(false);
+    expect(result.messages).toHaveLength(msgs.length);
+    // Pairing survives: every tool message keeps its toolCallId, so the next
+    // provider request is still valid.
+    const ids = new Set(result.messages.filter(m => m.role === 'tool').map(m => m.toolCallId));
+    for (const call of calls) expect(ids.has(call.id)).toBe(true);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(850);
+  });
+
+  it('emergency-clears medium results below minChars when they are all that is left', async () => {
+    // Seven 600-char results in one parallel batch: each is below the 1000-char
+    // normal floor, so passes 1–2 refuse them. The old path left the batch
+    // oversized and stopped the run; the emergency pass must still converge.
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 1000, microcompaction: { minChars: 1000 } });
+    const calls = Array.from({ length: 7 }, (_, i) => ({
+      id: `mid${i}`,
+      index: i,
+      function: { name: 'read_file', arguments: '{}' },
+    }));
+    const msgs: Message[] = [
+      { role: 'assistant', content: '', toolCalls: calls },
+      ...calls.map(call => ({
+        role: 'tool' as const,
+        content: 'x'.repeat(600),
+        toolCallId: call.id,
+        toolName: 'read_file',
+      })),
+    ];
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.microcompactedToolResults).toBeGreaterThanOrEqual(2);
+    expect(result.messages).toHaveLength(msgs.length);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(850);
+    expect(result.oversizedNewestGroup).toBe(false);
+  });
+
   it('aggressive compaction clears recent results too and lands below the configured budget', async () => {
     const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 2000 });
     const msgs: Message[] = [...bigPair('a'), ...bigPair('b'), ...bigPair('c')];
@@ -628,6 +688,68 @@ describe('ContextEngine', () => {
     expect(over).toHaveLength(18);
   });
 
+  it('counts image blocks as vision tokens instead of zero', () => {
+    const known = estimateTokens([{
+      role: 'user',
+      content: '',
+      images: [{ dataUrl: 'data:image/png;base64,AAAA', mimeType: 'image/png', width: 1024, height: 1024 }],
+    }]);
+    // 1024² / 750 = 1398.09 → 1399, plus no text.
+    expect(known).toBe(1399);
+
+    // Old snapshots carry no dimensions; the fallback must still be non-zero.
+    const unknown = estimateTokens([{
+      role: 'user',
+      content: '',
+      images: [{ dataUrl: 'data:image/png;base64,AAAA', mimeType: 'image/png' }],
+    }]);
+    expect(unknown).toBe(DEFAULT_IMAGE_TOKEN_ESTIMATE);
+
+    // The long edge is capped at 1568 before pixel billing: a 4K screenshot
+    // must not be counted as 3840×2160 pixels.
+    expect(estimateImageTokens({ dataUrl: '', mimeType: 'image/png', width: 3840, height: 2160 })).toBeLessThan(2000);
+  });
+
+  it('learns the provider/estimate ratio from usage and applies it to the pressure check', () => {
+    const engine = new ContextEngine({ maxMessages: 100_000, maxTokens: 10_000 });
+    const probe: Message[] = [{ role: 'user', content: 'a'.repeat(8_000) }]; // ≈2000 tokens
+
+    engine.observePromptUsage(3_000, probe);
+
+    expect(engine.getEstimateScale()).toBeCloseTo(1.5, 5);
+    const near: Message[] = [{ role: 'user', content: 'a'.repeat(24_000) }]; // raw ≈6000
+    // Raw is below the 8500 trigger; the provider's real count is 9000 — the
+    // calibrated check must see the wall the provider will see.
+    expect(estimateTokens(near)).toBeLessThan(8_500);
+    expect(engine.needsCompaction(near)).toBe(true);
+  });
+
+  it('ignores noisy usage reports and clamps a pathological one', () => {
+    const probe: Message[] = [{ role: 'user', content: 'a'.repeat(8_000) }]; // ≈2000 tokens
+    const tiny = new ContextEngine({ maxMessages: 100_000, maxTokens: 10_000 });
+    tiny.observePromptUsage(400, probe);
+    expect(tiny.getEstimateScale()).toBe(1);
+
+    const absurd = new ContextEngine({ maxMessages: 100_000, maxTokens: 10_000 });
+    absurd.observePromptUsage(100_000, probe);
+    expect(absurd.getEstimateScale()).toBe(3);
+  });
+
+  it('converts the calibrated target back to estimate units before L1 clears', async () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 10_000, microcompaction: { keepRecent: 0, minChars: 100 } });
+    // The provider counts 2× our estimate, so the 85% line is 4250 of OUR tokens.
+    engine.observePromptUsage(4_000, [{ role: 'user', content: 'a'.repeat(8_000) }]);
+    expect(engine.getEstimateScale()).toBe(2);
+    const msgs = Array.from({ length: 10 }, (_, i) => pair(`cal${i}`, 'x'.repeat(2_000))).flat();
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    // Raw ≈5000, target ≈4250 → shed ≈750 (two results). Reclaiming the
+    // provider-unit gap (≈1500) would clear roughly twice as many results.
+    expect(result.estimatedTokens).toBeLessThanOrEqual(8_500);
+    expect(result.microcompactedToolResults).toBeLessThanOrEqual(3);
+  });
+
   it('needsCompaction stays inert without a token budget (count fallback)', () => {
     const engine = new ContextEngine({ maxMessages: 2 });
     const msgs = Array.from({ length: 9 }, (_, i) => softPair(`p${i}`)).flat();
@@ -659,8 +781,10 @@ describe('ContextEngine', () => {
 
   it('soft mode lets L1 microcompaction satisfy the trigger before any eviction', async () => {
     // 18 pairs of 200-char results (≈56 tokens each) ≈ 1008 tokens: over the
-    // trigger. keepRecent: 8 protects the newest 8, L1 clears the other 10 to
-    // placeholders (≈34 tokens each) → ≈788, back under 850 — L2 must NOT run.
+    // trigger. keepRecent: 8 protects the newest 8; L1 clears old results to
+    // placeholders until the window is back under 850 — L2 must NOT run. The
+    // target-driven pass stops as soon as the line is reached, so it may clear
+    // fewer than all 10 unprotected results.
     const engine = new ContextEngine({
       maxMessages: 1000,
       maxTokens: 1000,
@@ -674,7 +798,8 @@ describe('ContextEngine', () => {
     const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
 
     expect(result.compacted).toBe(true);
-    expect(result.microcompactedToolResults).toBe(10);
+    expect(result.microcompactedToolResults).toBeGreaterThanOrEqual(8);
+    expect(result.microcompactedToolResults).toBeLessThanOrEqual(10);
     expect(result.reclaimedTokens).toBeGreaterThan(0);
     expect(result.evictedMessages).toBe(0);
     // Newest window untouched, placeholders in place of the old results.

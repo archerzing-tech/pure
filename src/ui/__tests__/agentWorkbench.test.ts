@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { AGENT_RAIL_MIN_VIEWPORT, agentRailSpaceGateHit } from '../agentActivityPanel';
-import { agentWorkbench, attachWorkbenchEntry, initAgentWorkbench } from '../agentWorkbench';
+import { agentWorkbench, initAgentWorkbench } from '../agentWorkbench';
 import type { SessionAgentActivity } from '../store';
 
 function activity(overrides: Partial<SessionAgentActivity> = {}): SessionAgentActivity {
@@ -208,27 +208,8 @@ describe('工作台开/关/寻址（§3）', () => {
 });
 
 describe('委派卡跨链（刀 3）', () => {
-  it('attachWorkbenchEntry：dataset + 幂等 + 点击进工作台（卡上纯 ↗ 图标，语义走 title）', () => {
-    const wb = agentWorkbench()!;
-    wb.sync([activity({ callId: 'call-9' })], { sessionId: 's1' });
-    const row = document.createElement('div');
-    row.innerHTML = '<details class="tool-row"><summary class="tool-row-summary"><span class="tool-row-name">researcher</span></summary></details>';
-    attachWorkbenchEntry(row, 'call-9');
-    expect(row.dataset.agentCallId).toBe('call-9');
-    const btn = row.querySelector('.tool-row-workbench-link')!;
-    // 2026-11-12 真机反馈：卡上不显示「工作台」三个字，只留 ↗
-    expect(btn.textContent).toBe('↗');
-    expect(btn.getAttribute('title')).toContain('工作台');
-    // summary 内 stopPropagation：click 不冒泡触发展开（details 默认行为被拦）
-    (btn as HTMLElement).click();
-    expect(wb.isVisible()).toBe(true);
-    expect(document.querySelector('#agent-view .agent-wb-title')!.textContent).toBe('researcher');
-    // 幂等：重复 attach 不重复挂按钮
-    attachWorkbenchEntry(row, 'call-9');
-    expect(row.querySelectorAll('.tool-row-workbench-link')).toHaveLength(1);
-    wb.close();
-  });
-
+  // 委派卡不再挂「工作台 ↗」入口 chip（rail 卡整卡点击已能进入工作台）；
+  // 入口断言改为 rail：onOpenAgent: (callId) => agentWorkbench()?.open(callId)。
   it('工作台打开期间 chrome 隐藏（角钮×2 + 侧栏把手 + rail），关闭恢复', () => {
     const wb = agentWorkbench()!;
     wb.sync([activity()], { sessionId: 's1' });
@@ -295,7 +276,8 @@ describe('源码锁（接线与退役断言）', () => {
     expect(src.split('agentWorkbench()?.sync(').length - 1).toBe(1);
     // updateAgentActivity 必须经 mount 间接喂 workbench（第二消费者不得漏接）。
     expect(src).toMatch(/if \(this\.viewActive\) \{\s*[^}]*this\.mountAgentActivityPanel\(\);\s*\}\s*this\.scheduleAgentActivityPersistence/);
-    expect(src.split('attachWorkbenchEntry(').length - 1).toBeGreaterThanOrEqual(4); // import + 3 落点
+    // 委派卡不再挂「工作台 ↗」入口 chip（rail 卡整卡点击进入）。
+    expect(src).not.toContain('attachWorkbenchEntry(');
     expect(src).toContain("window.addEventListener('resize', applyAgentRailSpaceGate)");
     expect(src).toContain('onOpenAgent: (callId) => agentWorkbench()?.open(callId)');
   });
@@ -333,7 +315,8 @@ describe('源码锁（接线与退役断言）', () => {
     expect(src).toContain('agentWorkbench()?.close();'); // settings onOpen 互斥
     expect(src).toContain('agentWorkbench()?.isVisible()'); // Esc 分支
     expect(src).toContain('applyAgentRailSpaceGate();'); // context 联动
-    expect(src).toContain('if (item.exec.callId) attachWorkbenchEntry(row.el, item.exec.callId);');
+    // main.ts 恢复重放不再挂 chip（rail 卡整卡点击进入）。
+    expect(src).not.toContain('attachWorkbenchEntry(row.el, item.exec.callId)');
     expect(src).toContain('requestCloseSettings');
   });
 
