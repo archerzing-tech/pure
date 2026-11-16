@@ -252,7 +252,11 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
 
   function buildChips(): void {
     const ordered = orderedAgents(activities);
-    const key = ordered.map((a) => `${a.callId}:${isAgentActivityActive(a) ? 1 : 0}`).join('|');
+    // key 带上当前选中项（2026-11-16 用户反馈：多个子 agent 之间切换高亮
+    // 不变）：此前 key 只含 callId+活跃态——setCurrent 换人时 key 不变，
+    // early-return 让 .active 永远停在上一支上。列表与选中任一变化都重建。
+    const key = ordered.map((a) => `${a.callId}:${isAgentActivityActive(a) ? 1 : 0}`).join('|')
+      + `#${currentCallId}`;
     if (key === renderedChipsKey) return;
     renderedChipsKey = key;
     chips.replaceChildren();

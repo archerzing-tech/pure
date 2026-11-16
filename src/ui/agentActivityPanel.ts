@@ -92,6 +92,18 @@ function startedClock(ts: number | undefined): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/** 起止时间（2026-11-16 用户需求）：活跃卡只报介入时刻；已终结的卡把终止
+ *  时刻折出来——编排器终态事件只带 durationMs，但它的计时起点就是
+ *  startedAt，止 = startedAt + durationMs。老存档没有 durationMs（或为 0）
+ *  时退回单起时刻，不造假终点。 */
+function activityClock(activity: SessionAgentActivity): string {
+  const start = startedClock(activity.startedAt);
+  if (!start) return '';
+  if (isAgentActivityActive(activity) || !activity.durationMs || activity.durationMs <= 0) return start;
+  const end = startedClock(activity.startedAt! + activity.durationMs);
+  return end ? `${start} – ${end}` : start;
+}
+
 export function createAgentActivityPanel(
   initialSessionId = '',
   /** 刀 3（工作台设计 §3.3）：卡片可点——运行中/完成/失败卡都开放，
@@ -238,7 +250,7 @@ export function createAgentActivityPanel(
         retrying ? `自愈重试第 ${activity.attempt} 次` : '',
       ].filter(Boolean).join(' · ');
       if (entry.row.title !== wantTitle) entry.row.title = wantTitle;
-      const wantClock = startedClock(activity.startedAt);
+      const wantClock = activityClock(activity);
       if (entry.time.textContent !== wantClock) entry.time.textContent = wantClock;
     }
 
