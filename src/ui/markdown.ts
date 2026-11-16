@@ -4055,6 +4055,45 @@ function countFenceLines(text: string, end: number): number {
   return count;
 }
 
+/**
+ * 「闭环块」边界（2026-11-16 块级流式模式）：返回已经完整闭合的前缀，供
+ * streamingRender=off 的低频渲染只处理沉淀下来的块；未闭合的尾部保持原文。
+ *
+ * 判据用 marked/CommonMark 的块边界事实，只取两处：
+ *  - 围栏之外的**空行**：它关掉前面的段落/列表/表格；
+ *  - **围栏收尾行**：一个代码块在 ``` 闭合的那一刻就完整了，不必等空行。
+ * 围栏内部的空行不算边界（半截代码里的空行不是块结束），所以扫描时维护
+ * 围栏状态。没有可信边界时返回 ''（整段都算尾部原文）。
+ */
+export function closedBlockPrefix(text: string): string {
+  let fence: '`' | '~' | null = null;
+  let boundary = 0;
+  let i = 0;
+  while (i <= text.length) {
+    const nl = text.indexOf('\n', i);
+    const line = nl === -1 ? text.slice(i) : text.slice(i, nl);
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0] as '`' | '~';
+      if (!fence) {
+        fence = marker;
+      } else if (fence === marker) {
+        // 收尾围栏行本身把代码块关上：这一行结束即边界。
+        fence = null;
+        boundary = nl === -1 ? text.length : nl + 1;
+      }
+    } else if (!fence && line.trim() === '' && nl !== -1) {
+      // 空行（围栏外，且这行本身已换行结束）：它前面的块全部闭合。
+      // 文本末尾那个孤立的 \n 不算（段落可能还没写完，块边界的定义是
+      // 「空行」，不是「行尾」）。
+      boundary = nl + 1;
+    }
+    if (nl === -1) break;
+    i = nl + 1;
+  }
+  return boundary > 0 ? text.slice(0, boundary) : '';
+}
+
 export function streamingViewSlice(text: string): StreamingViewSlice | null {
   if (text.length <= STREAM_TAIL_LIMIT) return null;
   const from = text.length - STREAM_TAIL_LIMIT;
@@ -4454,6 +4493,183 @@ export function cancelStreamingRender(container: HTMLElement): void {
   state.lastRenderedText = '';
   state.lastRenderTime = 0;
   state.renderCostMs = 0;
+}
+
+// ── 块级流式渲染（streamingRender=false 时的形态，2026-11-16）──────────
+// 背景：关掉流式渲染原本是「每 token 全文 textContent」——长消息下每个 token
+// 都整条重排（O(N²) 排版），而且一屏 `## ** ``` 源码。现在改成：
+//   • 已闭合的块按正常管线渲染（和「开」同一条 marked/diff 路径），
+//     频率压到每块一次（最小间隔 BLOCK_RENDER_THROTTLE_MS 合并）；
+//   • 还没闭合的尾段保持原文，逐 token 只 append 增量文本节点；
+//   • 完成时仍由 renderMarkdown 全量重绘，不留任何中间态。
+// 成本：每闭合一块一次 O(N) lexer + 该块渲染；尾段 append 是 O(delta)。
+// 比原来的「每 token 全文 textSet」在长消息上便宜一个数量级。
+const BLOCK_RENDER_THROTTLE_MS = 400;
+
+interface BlockRenderState {
+  timer?: number;
+  /** 最新累计文本（token 可能比渲染更快）。 */
+  latestText: string;
+  /** 最近一次算出的闭合前缀（命中缓存，避免每 token 全量扫一遍）。 */
+  currentPrefix: string;
+  /** 最近一次已渲染的闭合前缀（'' = 还没渲染过任何块）。 */
+  renderedPrefix: string;
+  lastRenderTime: number;
+  /** 未闭合尾段的容器（原文直出，逐 token 增量 append）。 */
+  tailEl?: HTMLElement;
+  tailText: string;
+}
+
+const blockStates = new WeakMap<HTMLElement, BlockRenderState>();
+
+function blockStateFor(container: HTMLElement): BlockRenderState {
+  let state = blockStates.get(container);
+  if (!state) {
+    state = { latestText: '', currentPrefix: '', renderedPrefix: '', lastRenderTime: 0, tailText: '' };
+    blockStates.set(container, state);
+  }
+  return state;
+}
+
+/** 渲染闭合前缀（内部）：尾段容器先摘下来，避免 diff 把它当成一个块。 */
+function renderBlockPrefix(container: HTMLElement, state: BlockRenderState, prefix: string): void {
+  const tail = state.tailEl;
+  tail?.remove();
+  try {
+    diffStreaming(container, prefix);
+  } catch (err) {
+    // 失败帧不进阶 prefix 账：下一块到达或完成态全量渲染会再试。
+    if (typeof console !== 'undefined') {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.debug(`[markdown-ts] block render failed; keeping last frame: ${msg}`);
+    }
+    if (tail) container.appendChild(tail);
+    return;
+  }
+  state.renderedPrefix = prefix;
+  state.lastRenderTime = Date.now();
+  if (tail) container.appendChild(tail);
+}
+
+function updateRawTail(container: HTMLElement, state: BlockRenderState, tailText: string): void {
+  if (!tailText) {
+    state.tailEl?.remove();
+    state.tailEl = undefined;
+    state.tailText = '';
+    return;
+  }
+  if (tailText === state.tailText && state.tailEl?.isConnected) return;
+  let el = state.tailEl;
+  if (!el || !el.isConnected) {
+    el = document.createElement('div');
+    el.className = 'stream-block-tail';
+    el.setAttribute('data-stream-tail', '');
+    container.appendChild(el);
+    state.tailEl = el;
+    state.tailText = '';
+  }
+  // 只 append 新增部分：长段落逐 token 重写文本节点是 O(N²)。
+  if (tailText.startsWith(state.tailText)) {
+    if (tailText.length > state.tailText.length) {
+      el.appendChild(document.createTextNode(tailText.slice(state.tailText.length)));
+    }
+  } else if (el.textContent !== tailText) {
+    el.textContent = tailText;
+  }
+  state.tailText = tailText;
+}
+
+/**
+ * 块级流式渲染入口（chat.ts 在 streamingRender=false 时调用）：
+ * 每次 token 只更新尾段原文；新闭合的块按 BLOCK_RENDER_THROTTLE_MS 合并后
+ * 渲染一次。渲染失败保持上一帧，不退回整条源码。
+ */
+export function scheduleBlockRender(
+  text: string,
+  container: HTMLElement,
+  onRendered?: () => void,
+): void {
+  const state = blockStateFor(container);
+  const previous = state.latestText;
+  state.latestText = text;
+  // 块边界只可能随换行出现：没有新换行的 token 复用上一拍的前缀（避免把
+  // 全文重新扫一遍）；文本被整体替换（少见）时无条件重算。
+  const appended = text.startsWith(previous) ? text.slice(previous.length) : text;
+  if (appended.includes('\n') || !text.startsWith(previous)) {
+    state.currentPrefix = closedBlockPrefix(text);
+  }
+  const prefix = state.currentPrefix;
+  updateRawTail(container, state, text.slice(prefix.length));
+
+  if (prefix === state.renderedPrefix) {
+    onRendered?.();
+    return;
+  }
+  const doRender = (): void => {
+    state.timer = undefined;
+    const currentPrefix = closedBlockPrefix(state.latestText);
+    if (currentPrefix === state.renderedPrefix) {
+      onRendered?.();
+      return;
+    }
+    renderBlockPrefix(container, state, currentPrefix);
+    updateRawTail(container, state, state.latestText.slice(currentPrefix.length));
+    onRendered?.();
+  };
+  const elapsed = Date.now() - state.lastRenderTime;
+  if (elapsed >= BLOCK_RENDER_THROTTLE_MS) {
+    if (state.timer != null) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    doRender();
+    return;
+  }
+  if (state.timer == null) {
+    state.timer = window.setTimeout(doRender, BLOCK_RENDER_THROTTLE_MS - elapsed);
+  }
+  onRendered?.();
+}
+
+/** 完成/中断前的收口：清掉待跑的那一拍并丢弃尾段状态（全量渲染会换掉 DOM）。 */
+export function cancelBlockRender(container: HTMLElement): void {
+  const state = blockStates.get(container);
+  if (!state) return;
+  if (state.timer != null) {
+    clearTimeout(state.timer);
+    state.timer = undefined;
+  }
+  // 尾段原文节点随状态一起收掉：状态没了就没人再更新它，留着只会是一截
+  // 永远停在那一刻的残影（收口路径紧随其后的全量渲染会重建整个气泡）。
+  state.tailEl?.remove();
+  state.tailEl = undefined;
+  state.tailText = '';
+  state.renderedPrefix = '';
+  state.lastRenderTime = 0;
+  blockStates.delete(container);
+}
+
+/** 段收口（工具行插入前 / 完成前）用：立刻把最新全文渲染一次，尾段不再留
+ *  原文——下一段文本会开新气泡，这条气泡已经定型。 */
+export function flushBlockRender(container: HTMLElement): void {
+  const state = blockStates.get(container);
+  if (!state) return;
+  if (state.timer != null) {
+    clearTimeout(state.timer);
+    state.timer = undefined;
+  }
+  state.tailEl?.remove();
+  state.tailEl = undefined;
+  state.tailText = '';
+  try {
+    diffStreaming(container, state.latestText);
+    state.renderedPrefix = state.latestText;
+  } catch (err) {
+    if (typeof console !== 'undefined') {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.debug(`[markdown-ts] block flush failed; keeping last frame: ${msg}`);
+    }
+  }
 }
 
 // ── Theme coupling ──

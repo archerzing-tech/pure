@@ -6969,6 +6969,13 @@ body.window-maximized .win-resize-zone { display: none; }
 .bubble p.stream-raw {
   white-space: pre-wrap;
 }
+/* 块级流式（streamingRender=false，2026-11-16）：已闭合的块按正常管线渲染，
+   未闭合的尾段保持原文直出——换行必须原样保留（气泡此时已是 md-rendered
+   的 white-space:normal）。 */
+.bubble .stream-block-tail {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 /* 尾部窗口省略条（streamingViewSlice 判例）：超大流式消息只在末尾窗口里
    渲染，切掉的开头用这一行提示交代去向——人类观感优先，不能让用户以为
    内容丢了。 */

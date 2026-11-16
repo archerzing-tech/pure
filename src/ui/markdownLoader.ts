@@ -90,3 +90,44 @@ export function cancelStreamingRender(container: HTMLElement): void {
   // renderer just to clear a state object that does not exist yet.
   markdownModule?.cancelStreamingRender(container);
 }
+
+// ── 块级流式渲染（streamingRender=false 的形态，2026-11-16）────────────
+// 模块未就绪时先把原文直出（与旧行为一致），加载完成后由下一拍接管；
+// 已就绪时交给 markdown.ts 的调度器（闭合块渲染 + 尾段原文增量）。
+const pendingBlockText = new WeakMap<HTMLElement, string>();
+
+export function scheduleBlockRender(
+  text: string,
+  container: HTMLElement,
+  onRendered?: () => void,
+): void {
+  pendingBlockText.set(container, text);
+  if (markdownModule) {
+    markdownModule.scheduleBlockRender(text, container, onRendered);
+    return;
+  }
+  if (container.textContent !== text) container.textContent = text;
+  void loadMarkdown()
+    .then((module) => {
+      const latest = pendingBlockText.get(container);
+      if (latest === undefined) return;
+      module.scheduleBlockRender(latest, container, onRendered);
+    })
+    .catch(() => {
+      /* 原文已直出，模块加载失败就是旧行为 */
+    });
+}
+
+export function flushBlockRender(container: HTMLElement): void {
+  if (markdownModule) {
+    markdownModule.flushBlockRender(container);
+    return;
+  }
+  const latest = pendingBlockText.get(container);
+  if (latest) container.textContent = latest;
+}
+
+export function cancelBlockRender(container: HTMLElement): void {
+  pendingBlockText.delete(container);
+  markdownModule?.cancelBlockRender(container);
+}

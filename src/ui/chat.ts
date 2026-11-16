@@ -114,7 +114,7 @@ import { getApplicationTmpWorkspace, isTauriRuntime, loadTauriCore, tauriInvoke 
 import { capEventText, createSerializingSink, type SessionEventSink } from '../shared/sessionEventLog';
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
-import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, stripToolCallXml } from './markdownLoader';
+import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, scheduleBlockRender, flushBlockRender, cancelBlockRender, stripToolCallXml } from './markdownLoader';
 import { rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig, takeFormValidationFeedback } from './markdown';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
@@ -5399,6 +5399,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // user sees a sentence cut off halfway through.
         flushStreamingRender(seg.el, text);
         cancelStreamingRender(seg.el);
+        // 块级模式（streamingRender=false）同理：段收口时把尾段也渲染出来，
+        // 工具行/后续气泡出现前不留一截原文。
+        flushBlockRender(seg.el);
+        cancelBlockRender(seg.el);
         seg.el.classList.remove('streaming');
       }
     };
@@ -6898,7 +6902,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             if (streamingRenderEnabled) {
               scheduleStreamingRender(output, fixSegment.el, () => this.scrollUi(chatEl));
             } else {
-              fixSegment.el.textContent = output;
+              scheduleBlockRender(output, fixSegment.el, () => this.scrollUi(chatEl));
             }
           } else if (fixEvent.type === 'ToolResult') {
             const ok = fixEvent.payload.result.success;
@@ -6959,7 +6963,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (streamingRenderEnabled) {
                 scheduleStreamingRender(output, closingSegment.el, () => this.scrollUi(chatEl));
               } else {
-                closingSegment.el.textContent = output;
+                scheduleBlockRender(output, closingSegment.el, () => this.scrollUi(chatEl));
               }
             } else if (closingEvent.type === 'Completed') {
               latestMessages = Array.isArray(closingEvent.payload.messages) ? closingEvent.payload.messages : latestMessages;
@@ -7419,9 +7423,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     this.scrollUi(chatEl);
                   });
                 } else {
-                  // streamingRender disabled: plain-text fallback, full render
-                  // happens once on Completed.
-                  seg.el.textContent = text;
+                  // streamingRender disabled → 低频块级渲染（2026-11-16）：
+                  // 闭合的块每 BLOCK_RENDER_THROTTLE_MS 合并渲染一次，未闭合
+                  // 的尾段保持原文逐 token 增量追加；完成时的全量渲染兜底。
+                  // 旧行为是每 token 全文 textContent（长消息 O(N²) 整条重排，
+                  // 且全程一屏源码），已在 markdown.ts 的 scheduleBlockRender
+                  // 里换成块级增量。
+                  scheduleBlockRender(text, seg.el, () => {
+                    this.scrollUi(chatEl);
+                  });
                 }
                 // Text streaming is itself visible feedback — no gap card
                 // needed while tokens are arriving. (Re-arming here caused the
@@ -7430,7 +7440,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 // longer than the debounce re-opened it. The gap card is only
                 // for the silence AFTER a tool result, armed in ToolResult.)
               }
-              if (!streamingRenderEnabled) this.scrollUi(chatEl);
             } else {
               // ── Tool call delta → append/update inline tool row ──
               // A tool call for an announced-but-blocked later plan is hard
@@ -8330,7 +8339,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Cancel any throttled streaming render on every segment so a
             // late-firing tick from before completion cannot race with the
             // final pipeline below.
-            for (const seg of assistantSegments) cancelStreamingRender(seg.el);
+            for (const seg of assistantSegments) {
+              cancelStreamingRender(seg.el);
+              cancelBlockRender(seg.el);
+            }
             resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
             for (const seg of assistantSegments) seg.el.classList.remove('streaming');
             // Render the text the user actually watched stream in. Each segment
@@ -8625,7 +8637,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Stop any in-flight throttled render so a late tick can't race
             // the finalization below, and resolve any "calling…" pending tool
             // cards whose ToolResult will never arrive.
-            for (const seg of assistantSegments) cancelStreamingRender(seg.el);
+            for (const seg of assistantSegments) {
+              cancelStreamingRender(seg.el);
+              cancelBlockRender(seg.el);
+            }
             resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
             for (const seg of assistantSegments) seg.el.classList.remove('streaming');
             // Re-render each segment through the full markdown pipeline so
@@ -8777,6 +8792,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       for (const seg of assistantSegments) {
         seg.el.classList.remove('streaming');
         cancelStreamingRender(seg.el);
+        cancelBlockRender(seg.el);
       }
       resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
       // 旁路终态的终渲染（2026-11-16 bug2）：异常从这里浮出时，事件循环里的
@@ -8909,6 +8925,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
       for (const seg of assistantSegments) {
         cancelStreamingRender(seg.el);
+        cancelBlockRender(seg.el);
         seg.el.classList.remove('streaming');
       }
       if (gen !== this.generation) assessmentFlow?.cancel('本轮被新的请求接管，未继续执行。');
