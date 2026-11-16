@@ -174,17 +174,6 @@ import { warmPathIndex, type PathRepair } from './pathIndex';
 // 写成「即使判成 task 也必须报」的硬要求（漏报 = 反向执行，误报 = 少排一个
 // 队，两者不对称，所以宁可多报不可漏报）。宿主只认信号。
 
-// Insert a `-v{n}` segment before the extension (or append it for extension-less
-// files) so a written file `a/b/index.html` snapshots to `a/b/index-v1.html`.
-// This mirrors the version badge shown on the artifact card.
-function versionedCopyPath(path: string, version: number): string {
-  const norm = path.trim();
-  const dot = norm.lastIndexOf('.');
-  const slash = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'));
-  if (dot <= slash + 1) return `${norm}-v${version}`;
-  return `${norm.slice(0, dot)}-v${version}${norm.slice(dot)}`;
-}
-
 // Tool-call JSON re-parse throttle: streaming a giant argument (write_file
 // `content`, a whole HTML file) grows the buffer to tens of KB; re-parsing it
 // and rebuilding the Input panel on every token is O(n²) and freezes the UI.
@@ -2152,12 +2141,6 @@ export class ChatController {
    *  尾沿回调里拦掉「事件很多但聚合状态没变」的拍，整条
    *  flushSessionSaves→loadSession→saveSession 读-改-写回路直接跳过。 */
   private lastPersistedAgentActivitiesJson = '';
-  /** Per-session count of how many times each generated/modified file has been
-   * written (write_file / edit_file / replace_files) this session. Drives the
-   * "v1 / v2 / …" version badge on artifact cards so the user can see which
-   * revision a card reflects when a file is updated several times. Keyed by a
-   * normalized path; reset on a new chat (clear()). */
-  private fileWriteVersions = new Map<string, number>();
   // Cumulative list of every file written across all turns of the current
   // project (session-scoped, reset on a new chat). Used to present the
   // "project directory" card exactly once, on genuine completion — including
@@ -5006,9 +4989,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       if (artifactSeen.has(key)) return;
       artifactSeen.add(key);
       const norm = path.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
-      const version = this.fileWriteVersions.get(norm) ?? 1;
       // Only 'edit' is materialized (see transcriptProjection.artifactsFromToolExecs).
-      const item: ArtifactItem = op === 'edit' ? { path, version, op } : { path, version };
+      const item: ArtifactItem = op === 'edit' ? { path, op } : { path };
       turnArtifacts.push(item);
       if (!this.sessionArtifactSeen.has(norm)) {
         this.sessionArtifactSeen.add(norm);
@@ -7977,32 +7959,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // Collect written artifacts for the end-of-turn file cards: only
             // successful writes count (a failed write_file created nothing).
             if (event.payload.result.success && resultArgs) {
-              // Bump the per-session version counter for each file actually
-              // written/edited so the artifact card can show v1/v2/… (the
-              // revision the card reflects when a file is updated repeatedly).
-              const bumpVersion = (p: string): number => {
-                const norm = p.trim().toLowerCase().replaceAll('\\', '/').replace(/^\.\//, '');
-                if (!norm) return 0;
-                const v = (this.fileWriteVersions.get(norm) ?? 0) + 1;
-                this.fileWriteVersions.set(norm, v);
-                // Snapshot the freshly written file as a physical `-v{n}` copy
-                // on disk so the user can compare revisions (v1, v2, …). The
-                // copy is a raw byte copy via the `copy_file` command, so it
-                // preserves binaries (images, etc.) and never recurses back
-                // through the write_file tool.
-                if (effectiveWorkspace && isTauriRuntime()) {
-                  const dst = versionedCopyPath(p, v);
-                  void tauriInvoke('copy_file', { workspace: effectiveWorkspace, src: p, dst }).catch(
-                    () => {
-                      /* best-effort snapshot; ignore copy failures */
-                    },
-                  );
-                }
-                return v;
-              };
               if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_document') {
                 if (typeof resultArgs.path === 'string' && resultArgs.path.trim()) {
-                  bumpVersion(resultArgs.path);
                   // edit_file modifies the user's existing file in place — the
                   // card must surface it even when the extension reads like
                   // source code. write_file / create_document are new files.
@@ -8011,7 +7969,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               } else if (toolName === 'replace_files' && Array.isArray(resultArgs.files)) {
                 for (const f of resultArgs.files) {
                   if (typeof f === 'string' && f.trim()) {
-                    bumpVersion(f);
                     addArtifact(f, 'edit');
                   }
                 }
@@ -9097,7 +9054,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     this.planSeqCounter = 0;
     this.activePlanSeq = 1;
     this.deliveryGatePassed = false;
-    this.fileWriteVersions.clear();
     this.sessionArtifacts = [];
     this.sessionArtifactSeen.clear();
     this.projectDirectoryShown = false;
