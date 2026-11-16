@@ -8822,6 +8822,16 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         cancelStreamingRender(seg.el);
       }
       resolvePendingToolRows(toolCallRefresh, pendingRows, pendingByName);
+      // 旁路终态的终渲染（2026-11-16 bug2）：异常从这里浮出时，事件循环里的
+      // Completed/Interrupted 终渲染都没跑，气泡停在最后一帧——若那帧恰好是
+      // 流式 lexer 降级的 stream-raw 源码帧，源码就永久留在界面上。按已积累
+      // 的段文本补一次终渲染（终态走默认 batch 序，不占活渲染的 serial 契约）；
+      // 最后一段在下方（非 abort）会被错误文案覆写，覆写发生在这之后，错误
+      // 显示仍然胜出。
+      for (const seg of assistantSegments) {
+        if (!seg.text) continue;
+        void renderMarkdown(stripToolCallXml(dedupePlanAnnouncements(seg.text)), seg.el);
+      }
       // Pre-flight failure (the plan gate threw before any engine event): the
       // immediately-rendered user bubble never entered this.messages, so drop
       // it — a visual-only ghost would otherwise linger until session reload.

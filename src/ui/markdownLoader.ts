@@ -33,9 +33,15 @@ export function renderMarkdown(
 ): Promise<void> {
   return loadMarkdown()
     .then((module) => module.renderMarkdown(text, container, options))
-    .catch(() => {
-      // Keep the assistant message readable if the optional renderer chunk is
-      // unavailable; the next completed message can retry the import.
+    .catch((error) => {
+      // Keep the assistant message readable if the renderer is unavailable;
+      // the next completed message can retry the import.
+      // 2026-11-16 bug2：这个兜底此前连「渲染管线自身抛错」（md.parse /
+      // DOMPurify / 图卡管线）也一并吞掉——整条气泡静默变回 markdown 源码，
+      // 无日志、本条不再重试，复现时无法归因。至少留一行错误现场。
+      if (typeof console !== 'undefined') {
+        console.error(`[markdown] render failed → raw fallback (len=${text.length})`, error);
+      }
       container.textContent = text;
     });
 }
