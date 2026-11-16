@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.5
+
+**会话侧栏选中态回归：`setActive` 的同 id 早退把 `.active` 高亮一起吞掉**
+
+一、现象与根因（2026-11-16 用户反馈）：点击会话卡后，切换中的旋转指示/微光按预期亮起，但收尾摘掉它时选中高亮从未挂上；发送结束后 `refresh()` 整段重建列表，高亮同样消失。根因在 `SessionSidebar.setActive`：`load()` 开头会把目标会话 id 预登记进 `currentActiveId`（这是为了让 load 自己经 `openSession→activeSessionCb` 回调进来的同 id 不被误判成「换了会话」而自杀），于是收尾的 `setActive(id)` 永远是「同 id」，直接 `return` 把后面的 DOM 同步一并跳过；`renderList` 收尾的 `setActive(currentActiveId)` 在重建后的新节点上同理。
+
+二、修复：把「是否换代」与「DOM 同步」拆开。`sessionSwitchSeq` 只在 id 真的变化时自增（在飞 load 的 stale 判定语义不变），无论换不换代都按 id 重算所有卡片的 `.active`。
+
+验证：新增 DOM 用例覆盖真实点击链路与 `renderList` 重建两条路径；`bun test src/ui/__tests__/sessionSidebar.test.ts` 15 pass / 0 fail；`tsc` 绿；全量 `bun test`（bun 1.3.14）5433 pass / 8 fail / 4 skip，8 个失败全部是 full-suite 并发下的 5s 超时（`Harness.test.ts` + `LessonReflector.test.ts` 单独跑 98 pass / 0 fail），与本轮改动无关。
+
 ## v4.8.4
 
 **启动卡死在 boot splash 根治：Node 全局 `Buffer` 混进 GUI bundle + 兜底依赖了被兜底的对象**

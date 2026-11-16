@@ -203,9 +203,15 @@ export class SessionSidebar {
     // 只在可见会话「真的换了」时换代：load 流程自己（openSession 的
     // activeSessionCb 链、presentSession 收尾）会用目标 id 回调进来，同 id
     // 不得把在飞的 load 误杀成 stale。
-    if (this.currentActiveId === id) return;
-    this.sessionSwitchSeq += 1;
-    this.currentActiveId = id;
+    if (this.currentActiveId !== id) {
+      this.sessionSwitchSeq += 1;
+      this.currentActiveId = id;
+    }
+    // DOM 同步不能跟着换代判断一起早退。load() 开头就把目标 id 预登记进
+    // currentActiveId（免得自己的回调换代），收尾的 setActive(id) 因此永远是
+    // 「同 id」——早退让点击选中的卡片从来没拿到 .active，用户只看到切换中
+    // 微光随后消失。renderList 收尾的 setActive(currentActiveId) 同样会因
+    // 早退在重建后的新节点上丢掉高亮。
     document.querySelectorAll('.sidebar-session-item').forEach(el => {
       el.classList.toggle('active', el.getAttribute('data-sid') === id);
     });

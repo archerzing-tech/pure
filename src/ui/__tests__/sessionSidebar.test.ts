@@ -304,6 +304,31 @@ describe('SessionSidebar 列表不按工作区分组', () => {
     expect(sids).toEqual(['session_3000_1', 'session_2500_1', 'session_2000_1', 'session_1000_1']);
   });
 
+  it('选中的会话卡保持 .active 高亮：点击预登记与列表重建都不能吞掉', async () => {
+    localStorage.setItem('pure_sessions', JSON.stringify([
+      meta('session_active_1', '选中的会话', 2000),
+    ]));
+
+    const { sidebar } = makeSidebar({
+      disk: (id) => ({
+        snapshot: { modelContext: { messages: [{ role: 'user', content: '已选会话内容' }] } },
+        workspace: '', updatedAt: 2000, messageCount: 1, sessionId: id,
+      }),
+    });
+    document.body.innerHTML = '<div id="sidebar-session-list"></div>';
+    const render = () => (sidebar as unknown as { renderList(): Promise<void> }).renderList();
+    await render();
+
+    // 真实点击链路：load 先把目标 id 预登记，收尾 setActive 拿到的是同 id。
+    await sidebar.load('session_active_1');
+    const card = () => document.querySelector('.sidebar-session-item[data-sid="session_active_1"]');
+    expect(card()?.classList.contains('active')).toBe(true);
+
+    // 发送收尾的 refresh 会整段重建列表：新节点必须重新拿到高亮。
+    await render();
+    expect(card()?.classList.contains('active')).toBe(true);
+  });
+
   it('卡片信息一个不少：id 章、删除按钮照旧（平铺不砍功能）', async () => {
     localStorage.setItem('pure_sessions', JSON.stringify([
       meta('session_1000_1', '某个会话', 1000, '/ws/a'),
