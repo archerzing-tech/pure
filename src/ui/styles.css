@@ -9928,6 +9928,20 @@ button svg,
 .map-route-warning:not(:empty) {
   display: flex;
 }
+/* HTML 卡的外部引用提示行（2026-11-17 判例刀）：多文件原型的 CSS/JS 没写盘，
+ * iframe 裸页像「没加载样式」——检测到相对路径引用即亮这一行，指路完整形态
+ * （write_file 落盘 + 浏览器打开）。:empty 不占位，与 map-route-warning 同款。 */
+.bubble .html-slot .html-refs-hint {
+  display: none;
+  padding: 8px 12px;
+  font: 12px/1.5 var(--font-sans);
+  color: #92640d;
+  background: color-mix(in srgb, #f5a623 10%, var(--bg-card));
+  border-top: 1px solid color-mix(in srgb, #f5a623 25%, transparent);
+}
+.bubble .html-slot .html-refs-hint:not(:empty) {
+  display: block;
+}
 .map-route-warning-icon {
   flex-shrink: 0;
   font-size: 15px;

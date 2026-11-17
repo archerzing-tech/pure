@@ -129,6 +129,7 @@ const translations: Record<Language, Record<string, string>> = {
     'htmlCard.sourceToggle': '查看源码',
     'htmlCard.sourceHide': '收起源码',
     'htmlCard.failed': 'HTML 卡落盘失败，已退回源码显示',
+    'htmlCard.externalRefs': '这张 HTML 卡引用了外部文件（CSS/JS/图片等相对路径）——卡片只含自身，引用不会生效，所以看起来像没加载样式。多文件原型请让 pure 用 write_file 把文件写入磁盘，再用浏览器打开本地目录。',
 
     // ── Paint (```paint blocks) ──
     'paint.parseFailed': '绘图数据格式无法识别，请检查是否符合 paint JSON 格式',
@@ -1541,6 +1542,7 @@ const translations: Record<Language, Record<string, string>> = {
     'htmlCard.sourceToggle': 'View source',
     'htmlCard.sourceHide': 'Hide source',
     'htmlCard.failed': 'HTML card persistence failed — showing source instead',
+    'htmlCard.externalRefs': 'This HTML card references external files (CSS/JS/images via relative paths) — the card contains only itself, so those references never load and the page looks unstyled. For multi-file prototypes ask pure to write the files with write_file, then open the local directory in a browser.',
     'map.truncatedInterrupted': 'Generation was interrupted mid-block — this data was incomplete and has been dropped.',
     'map.expand': 'Expand map',
     'map.close': 'Close',

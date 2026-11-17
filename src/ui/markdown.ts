@@ -293,6 +293,16 @@ export const renderer = new Renderer();
 export const CODE_FOLD_MIN_LINES = 20;
 export const CODE_FOLD_MIN_CHARS = 1200;
 
+/**
+ * 每气泡累计代码预算（2026-11-17 判例刀）：单块阈值挡不住「很多个边界块拼
+ * 成代码看板」——真机原型会话一条气泡 9 个块共 203 行，单块折叠收走 5 块、
+ * 4 块裸奔，看板效应照旧（用户复诉「不是分层处理了吗」）。完成态渲染末段
+ * 扫 pre>code：累计展开行数超过预算后，其余块一律收进折叠壳（壳本身可
+ * 展开，不丢内容）。流式期不做——用户看着代码流出是「正在工作」的信号，
+ * 完成态统一收拢（v4.8.7 定调：完成态是最终形态）。
+ */
+export const BUBBLE_CODE_FOLD_LINES = 40;
+
 function codeLineCount(code: string): number {
   if (!code) return 0;
   let lines = 1;
@@ -337,6 +347,56 @@ if (typeof document !== 'undefined') {
       ? t('code.fold.collapse', '收起')
       : t('code.fold.expand', '展开全部');
   });
+}
+
+/** 把已挂载的 pre 包进折叠壳（foldCodeSweep 的 DOM 侧形态——字符串侧形态
+ *  是 foldableCodeBlock，两者产出同一结构、同一委托开关）。 */
+function wrapPreAsFold(pre: HTMLElement): void {
+  const code = pre.querySelector('code');
+  const text = code?.textContent ?? '';
+  const lines = text.split('\n').length;
+  const lang = /language-([\w-]+)/.exec(code?.className ?? '')?.[1] ?? '';
+  const fold = document.createElement('div');
+  fold.className = 'code-fold';
+  fold.setAttribute('data-code-lines', String(lines));
+  const head = document.createElement('div');
+  head.className = 'code-fold-head';
+  const langEl = document.createElement('span');
+  langEl.className = 'code-fold-lang';
+  langEl.textContent = lang || t('code.fold.code', '代码');
+  const countEl = document.createElement('span');
+  countEl.className = 'code-fold-count';
+  countEl.textContent = `${lines} ${t('code.fold.lines', '行')}`;
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'code-fold-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.textContent = t('code.fold.expand', '展开全部');
+  head.append(langEl, countEl, toggle);
+  const body = document.createElement('div');
+  body.className = 'code-fold-body';
+  pre.replaceWith(fold);
+  body.appendChild(pre);
+  fold.append(head, body);
+}
+
+/** 每气泡累计代码预算的执行面（foldCodeSweep）：按文档序扫 pre>code，跳过
+ *  已折叠块与各 slot 的源码视图（map/html/diagram 的 data 视图不是普通代码
+ *  块），累计展开行数超预算后其余块收壳。 */
+function foldCodeSweep(container: HTMLElement): void {
+  let total = 0;
+  for (const code of Array.from(container.querySelectorAll('pre > code'))) {
+    const pre = code.parentElement;
+    if (!pre || pre.closest('.code-fold')) continue;
+    if (pre.closest('.html-slot, .map-slot, .diagram-slot')) continue;
+    const text = code.textContent ?? '';
+    const lines = text.split('\n').length;
+    if (total >= BUBBLE_CODE_FOLD_LINES) {
+      wrapPreAsFold(pre);
+      continue;
+    }
+    total += lines;
+  }
 }
 
 // marked 18.x: renderer methods receive a single token object — we destructure.
@@ -2864,6 +2924,7 @@ function htmlCardSlot(source: string): string {
       `<span class="diagram-loading-label">${esc(t('htmlCard.loading'))}</span>` +
     `</div>` +
     `<div class="html-frame-wrap"></div>` +
+    `<div class="html-refs-hint" role="status"></div>` +
     `<div class="html-error" role="alert"></div>` +
     `<pre class="html-source"><code class="hljs language-html">${esc(source)}</code></pre>` +
     `</div>`;
@@ -2912,6 +2973,16 @@ async function hydrateHtmlCard(slot: HTMLElement): Promise<void> {
     wrap.innerHTML = '';
     wrap.appendChild(frame);
     setHtmlState(slot, 'ready');
+    // 外部引用提示（2026-11-17 真机判例）：多文件原型把 CSS/JS 当独立代码块
+    // 贴在对话里、从不写盘——卡片 iframe 只含自身 HTML，<link>/<script> 指向
+    // 的本地文件不存在，渲染成无样式裸页（用户复诉「像没加载 CSS」）。检测到
+    // 相对路径引用即亮提示行，指路完整形态（write_file 落盘 + 浏览器打开）。
+    const refsHint = slot.querySelector<HTMLElement>('.html-refs-hint');
+    if (refsHint) {
+      refsHint.textContent = /(?:href|src)\s*=\s*["'](?!(?:https?:|data:|#|\/\/|asset:))[^"']+\.(?:css|m?js|png|jpe?g|svg|gif|webp|woff2?)["']/i.test(source)
+        ? t('htmlCard.externalRefs')
+        : '';
+    }
     // 静默空白兜底（2026-11-09）：ready 置位不依赖 frame 真加载——asset 协议
     // 作用域/路径转换在哪一环断掉，界面上都只剩一张 0 内容的 iframe。10s 无
     // load 即转 error 态（呈现层藏掉空卡体、亮出错误行，源码仍可切），不再
@@ -3803,6 +3874,12 @@ async function renderMarkdownInner(
     await renderAsyncBlocksInDocumentOrder(container, options.visualTiming ?? 'parallel');
   });
 
+  // 4b) 每气泡累计代码预算（2026-11-17 判例刀）：完成态把超出预算的代码块
+  // 收进折叠壳（流式期不收，见 BUBBLE_CODE_FOLD_LINES 注释）。放在 diagrams
+  // 之后——slot 源码视图已定型，排除规则命中稳定；放在 code-actions 之前——
+  // 被收壳的块同样拿到复制/保存按钮。
+  await renderStage('fold-sweep', () => foldCodeSweep(container));
+
   // 5) Bind the post-render preview/source controls and diagram viewers.
   await renderStage('bind-controls', () => {
     bindDiagramControls(container);
@@ -4083,6 +4160,38 @@ function kickStreamingDiagram(el: HTMLElement, container: HTMLElement): void {
       void pipeline.render(container).then(() => pipeline.bind(container));
     }
   }
+}
+
+/**
+ * Streaming hydration kick + hold-gate for ```html cards. 图表/地图都有
+ * 「fence 闭合即水合」的流式 gate（streamingMapGate / streamingDiagramGate），
+ * html 槽漏了——水合只存在于完整渲染的 diagrams 阶段，而流式期间该阶段只在
+ * settle 跑，卡片从闭合到回合结束一直转圈（2026-11-17 真机判例：原型会话
+ * html 卡转圈到用户暂停才出——暂停即 Interrupted 结算触发渲染）。闭合即
+ * kick（落盘 + iframe 加载）；hold 到 ready/error settle，15s 保险丝同款。
+ * 导出仅供测试锁行为。
+ */
+export function streamingHtmlGate(el: HTMLElement): boolean {
+  if (!el.classList.contains('html-slot')) return false;
+  const state = el.getAttribute('data-html-state');
+  if (state === 'ready' || state === 'error' || streamFenceOpen(el)) return false;
+  if (!el.hasAttribute('data-processed') && !el.hasAttribute('data-stream-kick')) {
+    // data-processed 一并置位：settle 的批处理（renderHtmlCards 只挑
+    // :not([data-processed])）不再重复水合同一张卡。
+    el.setAttribute('data-stream-kick', '1');
+    el.setAttribute('data-processed', '1');
+    void hydrateHtmlCard(el);
+  }
+  if (el.getAttribute('data-hold-released') === '1') return false;
+  if (el.hasAttribute('data-hold-since')) {
+    if (Date.now() - Number(el.getAttribute('data-hold-since')) >= DIAGRAM_HOLD_BUDGET_MS) {
+      el.setAttribute('data-hold-released', '1');
+      return false;
+    }
+  } else {
+    el.setAttribute('data-hold-since', String(Date.now()));
+  }
+  return true;
 }
 
 /**
@@ -4369,6 +4478,7 @@ function diffStreaming(container: HTMLElement, text: string): void {
       childIdx++;
       if (streamingMapGate(oldEl)) break;
       if (streamingDiagramGate(oldEl, container)) break;
+      if (streamingHtmlGate(oldEl)) break;
       if (streamingImageGate(oldEl)) break;
       continue;
     }
