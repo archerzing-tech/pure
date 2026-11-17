@@ -7,7 +7,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, ensureKatex, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
+import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, ensureKatex, renderer, parseChartSource, parseChartSourceWithMeta, classifyChartFailure, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {
@@ -1477,5 +1477,75 @@ describe('partitionHljsBudget', () => {
   it('全空与全巨块边界', () => {
     expect(partitionHljsBudget([], BUDGET, SKIP)).toEqual([]);
     expect(partitionHljsBudget([99_999, 31_000], BUDGET, SKIP)).toEqual(['skip', 'skip']);
+  });
+});
+
+// 图表失败分类（2026-11-17）：重试按钮只准出现在「重跑真可能好」的失败类
+// 上。确定性失败（截断/缺数据/乱码/格式）不给假重试，按类给具体出路文案；
+// 渲染器内部错才可重试（mountEchart 防御回收已闭环）。
+describe('classifyChartFailure — 错误类分容错（2026-11-17）', () => {
+  const parseErrorOf = (source: string): unknown => {
+    try {
+      parseChartSource(source);
+      return new Error('did not throw');
+    } catch (err) {
+      return err;
+    }
+  };
+
+  it('empty source → empty，不可重试', () => {
+    const failure = classifyChartFailure('  ', parseErrorOf('  '));
+    expect(failure.kind).toBe('empty');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('truncated JSON（括号不闭合）→ truncated，不可重试——错误措辞会说谎，结构信号不会', () => {
+    const source = '{"type":"bar","data":[[1,2]';
+    const failure = classifyChartFailure(source, parseErrorOf(source));
+    expect(failure.kind).toBe('truncated');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('truncated JSON 掉进兜底行解析器（抛缺数据行）仍判截断', () => {
+    // 真机形态：JSON 没写完 → JSON 修复救不回 → 行解析器把它当数据行、
+    // 抛「缺数据行」。截断的结构判定必须排在错误消息匹配之前。
+    const source = '{"type":"bar","labels":["一","二"],"series":[{"name":"销量","data":[25,26';
+    const failure = classifyChartFailure(source, parseErrorOf(source));
+    expect(failure.kind).toBe('truncated');
+  });
+
+  it('有内容但无可绘制数值 → missing，不可重试', () => {
+    const source = '{"type":"bar","labels":[]}';
+    const failure = classifyChartFailure(source, parseErrorOf(source));
+    expect(failure.kind).toBe('missing');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('乱码（U+FFFD）→ encoding，不可重试', () => {
+    const source = '{"type":"bar","title":"\uFFFD\uFFFD\uFFFD"}\uFFFD';
+    const failure = classifyChartFailure(source, parseErrorOf(source));
+    expect(failure.kind).toBe('encoding');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('格式错（括号闭合、无乱码、解析失败）→ format，不可重试', () => {
+    const source = '{"type":"bar","data":[[1,2]],,,}';
+    const failure = classifyChartFailure(source, parseErrorOf(source));
+    expect(failure.kind).toBe('format');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('渲染段：pie 全零（确定性数据错）→ missing 不可重试；echarts 内部错 → render 可重试', () => {
+    const pieZero = classifyChartFailure('{"type":"pie"}', new Error('pie chart needs positive values'), 'render');
+    expect(pieZero.kind).toBe('missing');
+    expect(pieZero.retryable).toBe(false);
+    const internal = classifyChartFailure('{"type":"bar","data":[[1,2]]}', new Error('setOption failed'), 'render');
+    expect(internal.kind).toBe('render');
+    expect(internal.retryable).toBe(true);
+  });
+
+  it('合法行 DSL 不被结构判定误伤（不以 { [ 开头 → 不判截断）', () => {
+    const failure = classifyChartFailure('type: bar\n一月 120', new Error('chart needs at least one data row'));
+    expect(failure.kind).toBe('missing');
   });
 });

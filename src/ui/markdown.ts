@@ -945,15 +945,19 @@ export function appendFollowupChips(container: HTMLElement, questions: string[])
   container.appendChild(row);
 }
 
-function setDiagramState(slot: HTMLElement, state: DiagramState, message = ''): void {
+function setDiagramState(slot: HTMLElement, state: DiagramState, message = '', opts: { retryable?: boolean } = {}): void {
   slot.setAttribute('data-state', state);
   slot.setAttribute('aria-busy', String(state === 'loading'));
   if (state === 'error') recordFormValidation(slot.getAttribute('data-diagram-kind'), 'failed', message);
   const error = slot.querySelector<HTMLElement>('.diagram-error');
   if (error) {
+    // retryable（默认 true）= 重跑真可能好（渲染器/模块类）。确定性失败
+    // （数据/格式类）不给重试按钮：点了必然原地复发（真机判例：重试被连环
+    // 点击无成效，与地图 parse 错误卡同一纪律）。出路写在 message 里。
+    const retryable = opts.retryable ?? true;
     error.innerHTML = state === 'error'
       ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>` +
-        `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>`
+        (retryable ? `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>` : '')
       : '';
   }
   // The "已自动修复" badge is only valid while the CURRENT preview came from a
@@ -2568,7 +2572,11 @@ async function renderChartNodes(container: HTMLElement): Promise<void> {
     console.error('[pure] chart module load failed:', err);
     for (const { slot, version } of attempts) {
       if (!isCurrentDiagramRender(slot, version)) continue;
-      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（图表模块）：${detail}`);
+      // 重试按钮保留：ensure* 内部的二次 re-import 已消化纯 fetch 瞬时失败，
+      // 走到这里仍可能是「两次都是网络失败」（未求值、晚点重试能好）——chart
+      // 槽没有地图那种常驻刷新钮，这张重试卡是唯一的自愈入口。求值失败类
+      // （ESM 记死，重试重不来）靠重启指引交代出路。
+      setDiagramState(slot, 'error', `${t('diagram.loadFailed')}（图表模块）：${detail}。${t('diagram.loadFailedRestart')}`, { retryable: true });
     }
     return;
   }
@@ -2588,8 +2596,25 @@ async function processChartSlot(slot: HTMLElement, version: number, mod: typeof 
     setDiagramState(slot, 'error', t('diagram.missingTarget'));
     return;
   }
+  // ── 解析段 ── 解析失败是确定性的（重 parse 永远同一段 raw）：按错误类给
+  // 出路，不给假重试按钮。分类见 classifyChartFailure——截断/缺数据/乱码/
+  // 格式各自的文案与处置不同，用户报告的「重试点不通」主因就是这一段。
+  const raw = diagramRawOf(slot);
+  let spec: ChartSpec;
+  let repaired = false;
+  let repairedSource: string | undefined;
   try {
-    const { spec, repaired, repairedSource } = parseChartSourceWithMeta(diagramRawOf(slot));
+    const parsed = parseChartSourceWithMeta(raw);
+    spec = parsed.spec;
+    repaired = parsed.repaired;
+    repairedSource = parsed.repairedSource;
+  } catch (err) {
+    if (!isCurrentDiagramRender(slot, version)) return;
+    const failure = classifyChartFailure(raw, err);
+    setDiagramState(slot, 'error', failure.message, { retryable: false });
+    return;
+  }
+  try {
     // 渲染缓存命中(同 mermaid/puml):echarts init+setOption 是主线程同步
     // 开销,冷会话恢复逐图重跑;命中直接复用上次渲染的 SVG(存入时已
     // viewBox 化,CSS 的 100% 强制尺寸下不变形;id 已去重防 defs 引用串图)。
@@ -2597,10 +2622,12 @@ async function processChartSlot(slot: HTMLElement, version: number, mod: typeof 
     // 容器宽度不同(会话恢复/侧栏开合/窗口尺寸)时直接插会挤压变形或在
     // overflow:hidden 下裁掉——比例不符或槽位还测不出尺寸就当 miss 走真
     // 渲染(mountEchart 的 ResizeObserver 会在布局落地后重适配)。
-    const cacheKey = diagramCacheKey('chart', diagramRawOf(slot));
+    const cacheKey = diagramCacheKey('chart', raw);
     const cachedChart = lookupDiagramSvg(cacheKey);
     if (cachedChart !== undefined && cachedChartFits(cachedChart, target)) {
       if (!isCurrentDiagramRender(slot, version)) return;
+      // 缓存替换前显式回收在册实例（innerHTML 清空不解除 echarts 注册）。
+      mod.disposeChartTarget(target);
       target.innerHTML = dedupeSvgIds(cachedChart);
       if (repaired && repairedSource) markDiagramRepaired(slot, repairedSource);
       setDiagramState(slot, 'preview');
@@ -2613,10 +2640,93 @@ async function processChartSlot(slot: HTMLElement, version: number, mod: typeof 
     setDiagramState(slot, 'preview');
   } catch (err) {
     if (!isCurrentDiagramRender(slot, version)) return;
-    const raw = err instanceof Error ? err.message : String(err);
-    const msg = raw === 'chart needs at least one data row' ? t('diagram.noData') : raw === 'empty chart source' ? t('diagram.chartEmptySource') : t('diagram.chartParseFailed');
-    setDiagramState(slot, 'error', msg);
+    // 渲染段（parse 已过）：echarts init/setOption 内部错是瞬时类——实例
+    // 泄漏已由 mountEchart 的防御回收闭环，重试真出路；buildChartOption 的
+    // 确定性数据错（pie 全零等）按类给确定性出路。
+    const detail = err instanceof Error ? err.message : String(err);
+    const failure = classifyChartFailure(raw, err, 'render');
+    if (failure.kind === 'render') console.error('[pure] chart render failed:', detail);
+    setDiagramState(slot, 'error', failure.message, { retryable: failure.retryable });
   }
+}
+
+/**
+ * 图表失败分类（2026-11-17 偶发图挂死+重试点不通的判例刀）：重试按钮只在
+ * 「重跑真的可能好」的失败类上出现；确定性失败按类给具体的出路文案，不再
+ * 一个「重试」包打天下（真机判例：重试被连环点击无成效，与地图 parse 同病）。
+ *
+ * 类别 → retryable → 出路：
+ *  - empty     数据内容为空           → 不可重试，让模型补数据
+ *  - truncated 数据没下载完全/生成被截断 → 不可重试，让模型续写或重出
+ *  - missing   有内容但没有可绘制数值   → 不可重试，让模型补数据
+ *  - encoding  乱码（修复层已尽力）     → 不可重试，让模型重出
+ *  - format    格式不对（修复层已尽力） → 不可重试，查看数据核对
+ *  - render    渲染器内部错（parse 已过）→ 可重试（mountEchart 防御回收闭环）
+ *  - module    模块加载失败            → 可重试（fetch 失败不缓存），带重启指引
+ *
+ * 截断判定（跨引擎稳）：JSON 报错文案各异，但「写了一半的 JSON」有个结构性
+ * 特征——串尾括号深度不闭合。忽略字符串字面量地扫一遍 {}[] 深度即可，不依赖
+ * 任何引擎的错误措辞。
+ */
+export type ChartFailureClass = 'empty' | 'truncated' | 'missing' | 'format' | 'encoding' | 'render' | 'module';
+
+export function classifyChartFailure(
+  source: string,
+  err: unknown,
+  phase: 'parse' | 'render' = 'parse',
+): {
+  kind: ChartFailureClass;
+  retryable: boolean;
+  message: string;
+} {
+  const raw = err instanceof Error ? err.message : String(err);
+  // 渲染段：buildChartOption（纯函数，echarts init 之前）的确定性抛错照样
+  // 落在渲染段 try 里——pie 全零这类「数据类」失败在渲染段抓到，按类给
+  // 出路；其余（echarts init/setOption 内部）才是真瞬时，重试有效。
+  if (phase === 'render') {
+    if (raw.includes('pie chart needs positive values') || raw.includes('chart needs at least one data row')) {
+      return { kind: 'missing', retryable: false, message: `${t('diagram.chartMissing')} ${t('diagram.retryFutile')}` };
+    }
+    return { kind: 'render', retryable: true, message: `${t('diagram.renderFailed')}（${raw}）` };
+  }
+  if (raw.includes('empty chart source')) {
+    return { kind: 'empty', retryable: false, message: `${t('diagram.chartEmptySource')}。${t('diagram.retryFutile')}` };
+  }
+  // 截断判定必须排在错误消息匹配之前：截断的 JSON 会掉进兜底的行解析器、
+  // 最终抛的是「缺数据行」——错误措辞会说谎，括号深度的结构信号不会。
+  // 乱码次之（损坏可以伴随任何形状），最后才是消息匹配的缺数据与格式。
+  if (jsonTailIsOpen(source)) {
+    return { kind: 'truncated', retryable: false, message: `${t('diagram.chartTruncated')}` };
+  }
+  if (source.includes('�')) {
+    return { kind: 'encoding', retryable: false, message: `${t('diagram.chartEncoding')} ${t('diagram.retryFutile')}` };
+  }
+  if (raw.includes('chart needs at least one data row')) {
+    return { kind: 'missing', retryable: false, message: `${t('diagram.chartMissing')} ${t('diagram.retryFutile')}` };
+  }
+  return { kind: 'format', retryable: false, message: `${t('diagram.chartParseFailed')} ${t('diagram.retryFutile')}` };
+}
+
+/** JSON 括号深度判定（忽略字符串字面量与转义）：>0 即「写了一半」。 */
+function jsonTailIsOpen(source: string): boolean {
+  const s = source.trim();
+  if (!s.startsWith('{') && !s.startsWith('[')) return false;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+  }
+  return depth > 0 || inString;
 }
 
 // ── Paint (```paint) ──
@@ -4878,6 +4988,9 @@ function bindDiagramControls(container: HTMLElement): void {
       const kind = slot.getAttribute('data-diagram-kind');
       const target = slot.querySelector<HTMLElement>('.diagram-preview');
       if (!kind || !target) return;
+      // 重试重挂前显式回收在册 echarts 实例（innerHTML 清空不解除注册——
+      // 僵尸实例的 ResizeObserver 继续打火，下一次 init 撞已注册即死循环）。
+      echartsChartMod?.disposeChartTarget(target as HTMLElement);
       slot.removeAttribute('data-processed');
       target.innerHTML = '';
       setDiagramState(slot, 'loading');

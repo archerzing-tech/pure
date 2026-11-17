@@ -107,6 +107,11 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.svgEmpty': 'SVG 图形内容为空',
     'diagram.svgFailed': 'SVG 图形处理失败',
     'diagram.loadFailed': '图形模块加载失败',
+    'diagram.retryFutile': '这是数据/格式问题，重试只会原样复发——用工具栏「查看数据」核对源内容，或让模型修正后重新出图。',
+    'diagram.loadFailedRestart': '请重启应用后重试；如持续出现请检查应用完整性。',
+    'diagram.chartTruncated': '图表数据不完整——生成可能被输出上限截断（JSON 没写完）。让模型「继续补全」或重新生成这段图。',
+    'diagram.chartMissing': '图表缺少可绘制的数值——源内容里没有可用的数据行。让模型补全数据后重画。',
+    'diagram.chartEncoding': '图表内容含乱码（无法自动修复）——让模型重新输出这段图。',
 
     // ── Map (```map blocks) ──
     'map.title': '地图',
@@ -1521,6 +1526,11 @@ const translations: Record<Language, Record<string, string>> = {
     'diagram.svgEmpty': 'SVG graphic content is empty',
     'diagram.svgFailed': 'SVG graphic processing failed',
     'diagram.loadFailed': 'Diagram module failed to load',
+    'diagram.retryFutile': 'A data/format problem: retrying reproduces it — inspect the source from the toolbar, or ask the model to fix it and re-emit.',
+    'diagram.loadFailedRestart': 'Restart the app and try again; if it persists, verify the app installation.',
+    'diagram.chartTruncated': 'Chart data is incomplete — generation was likely cut off mid-JSON. Ask the model to continue or re-emit this chart.',
+    'diagram.chartMissing': 'The chart has no plottable values — no usable data rows in the source. Ask the model to complete the data and re-emit.',
+    'diagram.chartEncoding': 'The chart source contains unrecoverable mojibake — ask the model to re-emit this chart.',
     'map.title': 'Map',
     'map.loading': 'Loading map…',
     'map.refresh': 'Refresh map',

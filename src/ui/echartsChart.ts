@@ -613,9 +613,20 @@ function mountEchart(target: HTMLElement, option: EChartsOption): void {
   // Never create an ECharts instance for an already-detached target; there is
   // no future mutation in document.body that could reclaim it.
   if (!target.isConnected) return;
-  const hadInstance = instances.has(target);
+  // 实例泄漏闭环（2026-11-17 偶发图挂死+重试无效的判例刀）：echarts 的实例
+  // 注册表以 dom 为键，pure 的 WeakMap 只是旁账。历史上任何绕过 mountEchart
+  // 记账的实例（init 成功后 setOption 抛错的半程实例、外路 wipe 掉 DOM 的
+  // 僵尸）都会让之后每一次 echarts.init 撞「instance already initialized」
+  // ——确定性抛错，错误卡的重试永远原地复发。init 前防御式回收在册实例。
+  const stale = echarts.getInstanceByDom(target);
+  const hadPrior = stale !== null || instances.has(target);
+  if (stale) {
+    try { stale.dispose(); } catch { /* 已毁实例的 dispose 再抛也无妨 */ }
+    instances.delete(target);
+    chartTargets.delete(target);
+  }
   disposeEchartTarget(target);
-  if (hadInstance) target.innerHTML = '';
+  if (hadPrior) target.innerHTML = '';
   // Defensive sizing: echarts renders an invisible 0-sized SVG when the
   // container measures 0 at init (e.g. inside a content-visibility-skipped
   // bubble during session restore, or before CSS loads). Force a synchronous
@@ -630,8 +641,18 @@ function mountEchart(target: HTMLElement, option: EChartsOption): void {
     ? getComputedStyle(document.body).fontFamily || undefined
     : undefined;
   if (font) option.textStyle = { ...option.textStyle, fontFamily: font };
-  const chart = echarts.init(target, undefined, { renderer: 'svg' });
-  chart.setOption(option);
+  // init 与 setOption 之间任何一抛，半程实例必须就地回收再上抛——不回收
+  // 就是下一轮「already initialized」死循环的种子。
+  let chart: ReturnType<typeof echarts.init>;
+  try {
+    chart = echarts.init(target, undefined, { renderer: 'svg' });
+    chart.setOption(option);
+  } catch (err) {
+    try { echarts.getInstanceByDom(target)?.dispose(); } catch { /* 尽力回收 */ }
+    instances.delete(target);
+    chartTargets.delete(target);
+    throw err;
+  }
   const ro = typeof ResizeObserver !== 'undefined'
     ? new ResizeObserver(() => chart.resize())
     : null;
@@ -639,4 +660,19 @@ function mountEchart(target: HTMLElement, option: EChartsOption): void {
   instances.set(target, { chart, ro });
   chartTargets.add(target);
   ensureDetachedChartObserver();
+}
+
+/**
+ * Explicit teardown before a caller wipes the target's DOM (retry click,
+ * render-cache hit). echarts registers instances per dom element — clearing
+ * innerHTML does NOT unregister them, and a zombie instance keeps its
+ * ResizeObserver firing while the next init throws "already initialized".
+ * Safe to call unconditionally: no instance ⇒ no-op.
+ */
+export function disposeChartTarget(target: HTMLElement): void {
+  const stale = echarts.getInstanceByDom(target);
+  if (stale) {
+    try { stale.dispose(); } catch { /* 已毁实例的 dispose 再抛也无妨 */ }
+  }
+  disposeEchartTarget(target);
 }
