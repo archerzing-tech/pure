@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.9.1
+
+**命令超时部分输出保留、截断 write_file 救援落盘、html 卡流式水合 + 代码看板累计预算**
+
+一、命令超时保留部分输出并给机制出路（c282934，大项目测试超时判例）。三条缺口：CLI 侧超时只回一句 timed out、测试跑到 120s 已产出的输出（哪些用例已过、卡在哪一步）全丢；Rust 非流式路径超时返回 stdout 空串；超时错误不教出路。修复：CLI 侧流 promise 提到 try 外持引用，超时/中止先组杀再给部分输出一个 2s 窗口落袋随结果回给模型——孙进程（npm test 的子测试/sleep）攥着管道写端时只杀直接子进程管道迟迟不关，spawn detached 自成组后组杀不伤自身（与 Rust kill_process_group 同一物理）；Rust 非流式改 wait 单独成任务 + 超时杀组后统一读干管道；两处超时错误带机制出路（background:true 立即返回 pid+日志轮询，或 timeoutMs 上限 600000）。
+
+二、截断 write_file 救援落盘（c282934，大写入判例）。2w-3w 字符的 write_file 在 8192 token 输出预留下是必然截断区——参数 JSON 被砍半、按旧口径整笔隔离不执行，已生成的几千字符前缀全损、重试再烧一整轮输出。新刀截断救援：引擎从被砍半的参数里补闭合符解析（截断点挂转义符先剥孤悬反斜杠），抢救出 path + 已生成的 content 前缀（<50 字符不值写盘交回隔离口径），走正常 write_file 执行面写盘——pathPolicy/撤销快照守卫全套在——以原 call.id 发单一配对结果，模型拿 file now 锚点用 append:true 续写。截断从「全损」变「首段免费落盘」。写入结果双侧（Node/Rust 流式+非流式）带累计锚点 file now N bytes——分段续写有锚。
+
+三、html 卡流式水合 gate + 外部引用提示 + 代码看板累计预算（0b4f1cd，原型会话真机三连判例）。html 卡转圈到暂停才渲染：地图/图表都有「fence 闭合即水合」的流式 gate，html 槽漏了——水合只在 settle 的完整渲染里跑，暂停即 Interrupted 结算才触发。补 streamingHtmlGate：闭合即 kick 落盘+iframe 加载，hold 到 ready/error（15s 保险丝同款）。html 卡「像没加载样式」：多文件原型把 CSS/JS 当独立代码块贴对话里、从不写盘——卡片 iframe 只含自身，link/script 指向的本地文件不存在；检测到相对路径引用即亮提示行指路完整形态（write_file 落盘 + 浏览器打开）。代码看板：v4.8.7 的单块折叠阈值挡不住「很多个边界块拼成看板」（真机一条气泡 9 块 203 行，5 折 4 裸）——补每气泡累计预算：完成态渲染累计展开 40 行后其余块收进折叠壳（壳可展开不丢内容；流式期不收，完成态统一收拢）。
+
+验证：typecheck、lint:conventions 绿；engine 89 过（截断救援解析五锁）、adapter 159 过（真实 spawn 超时救援锁：echo&&sleep 撞 1s 杀后部分输出必须回来）、markdownBubbleFold 六锁（累计预算三态/gate 闭合即 kick/开放围栏不 kick）、cargo test --lib 313 全过（超时救援真进程锁 + write 锚点更新）。真机闭环：编译替换部署核验出路指引串在包内。
+
 ## v4.9.0
 
 **读写工具与还原韧性三刀 + 图表错误类分容错（偶发挂死根治）**
