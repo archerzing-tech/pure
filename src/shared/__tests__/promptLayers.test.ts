@@ -17,6 +17,8 @@ import {
   VISUAL_BLOCK_POINTER,
   detectVisualRequest,
   HUMAN_TONE_PROMPT,
+  CODING_TONE_PROMPT,
+  wantsCodingTurn,
   INSERTION_PROTOCOL_PROMPT,
   CAPABILITY_GAP_PROMPT,
   CAPABILITY_GAP_LADDER,
@@ -400,6 +402,29 @@ describe('L1 behavior contracts', () => {
     expect(HUMAN_TONE_PROMPT).toContain('senior engineer');
     expect(HUMAN_TONE_PROMPT).toContain('canned');
     expect(HUMAN_TONE_PROMPT).toContain('control lines');
+  });
+
+  it('gates the slim coding tone on action words, paths and code blocks (2026-11-17)', () => {
+    // 正例：工程动作 / 仓库路径 / 代码块 / build 路由。
+    expect(wantsCodingTurn('帮我把引擎循环拆成可测试的模块')).toBe(true);
+    expect(wantsCodingTurn('修复 src/ui/chat.ts 里的空指针')).toBe(true);
+    expect(wantsCodingTurn('看下这段\n```ts\nconst a = 1\n```')).toBe(true);
+    expect(wantsCodingTurn('随便问点什么', 'build')).toBe(true);
+    // 反例：裸名词（函数/代码）是代码问答，保留完整展示纪律——否则
+    // 「非可视提示词是可视提示词前缀」的缓存纪律会被打破。
+    expect(wantsCodingTurn('这个函数是干什么的？')).toBe(false);
+    expect(wantsCodingTurn('这些代码是什么意思')).toBe(false);
+    expect(wantsCodingTurn('帮我写一份周报，总结本周工作')).toBe(false);
+    expect(wantsCodingTurn('把这些数据做成柱状图')).toBe(false);
+    expect(wantsCodingTurn('hello')).toBe(false);
+    // 瘦身版保留语气内核判据，只是不再铺开讲。
+    expect(CODING_TONE_PROMPT).toContain('Communication tone');
+    expect(CODING_TONE_PROMPT).toContain('senior engineer');
+    expect(CODING_TONE_PROMPT).toContain('canned');
+    expect(CODING_TONE_PROMPT).toContain('首先');
+    // 预算：完整版 1.7k+，瘦身版压在 1k 以内（与输出格式合起来省下约 3k 字符）。
+    expect(CODING_TONE_PROMPT.length).toBeLessThan(1000);
+    expect(CODING_TONE_PROMPT.length).toBeLessThan(HUMAN_TONE_PROMPT.length * 0.6);
   });
 
   it('reports finished work like a colleague, not a changelog (judgment lives in the expression face)', () => {

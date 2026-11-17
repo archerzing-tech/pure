@@ -109,6 +109,14 @@
 2. 盲区 A：**工具 deferred 化须从「评估」升格为确定刀**。Anthropic tool search 已是官方机制（工具定义不进前缀）；pure 126 条描述 ≈13k 随表 + rea 207 工具 MCP——上百工具全量 defs 是几千 token 量级，刚需非优化。
 3. 盲区 B：**引擎侧判定 prompts（≈29k）不在蓝图刀法清单**，纳入终态验收口径。
 
+**后续修正（2026-11-17）：结构性定位工具回归常驻。** 三期把 `list_files` /
+`glob_files` 一并 deferred 后，「工作区长什么样、有哪些文件」这类最基本的理解
+要先猜关键词或额外调一次 `discover_tools`，首轮空转吃掉理解预算——中大型仓库
+上得不偿失。两者已回 `CORE_TOOL_NAMES`（无副作用、schema 很小）；同时
+`read_file` 增加 `outline:true`（声明行 + 行号；GUI 走 Rust `symbol_outline`、
+CLI 走 `src/shared/symbolOutline.ts`，两边判据同一套）。deferred 化本身不撤：
+长尾工具与 MCP 仍走 discover。
+
 ## 五、四期施工规划
 
 **定位一句话：pure = 能力供给 + 机制事实注入 + 确定性护栏 + 索引层；模型 = 全部语义决策。教条不删，改载体。**

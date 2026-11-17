@@ -49,9 +49,9 @@ import { ContextEngine, estimateTokens, type ContextCompactionResult, type Conte
 import { isGitMutationCommand, Tags, BUILT_IN_TOOLS } from '../coding-agent/ToolRegistry';
 import { IMAGE_GEN_TOOL_DEF } from '../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS, type DynamicCapabilityHooks, type DynamicMcpConnectionResult } from '../shared/dynamicCapabilityTools';
-import { markParallelPlanSteps, parsePlanJsonWithMeta, renderLiveContext } from '../coding-agent/Planner';
+import { extractPathTokens, markParallelPlanSteps, normalizePlanPath, parsePlanJsonWithMeta, renderLiveContext } from '../coding-agent/Planner';
 import { resetActiveWorkOrderRegister, resolveWorkOrderRegister, setActiveWorkOrderRegister, type WorkOrderRegister } from '../character';
-import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from './planNarration';
+import { buildPlanThinkingPrompt, formatPlanEvidence, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan, type PlanEvidenceSnapshot } from './planNarration';
 import { compileTurnRoute, prefetchTurnRoute, turnShape, type TurnShape } from '../coding-agent/turnRoute';
 import { createTauriObservationSink } from '../shared/tauriObservationSink';
 import { adaptiveControlPlane } from '../shared/adaptiveControl';
@@ -1787,6 +1787,218 @@ function createToolAdapter(workspace: string, config: PureConfig, sessionId = ''
       return inner.execute(toolCall, signal);
     },
   };
+}
+
+// ── 规划证据采集（2026-11-17 规划落地刀）──────────────────────────────
+// 规划提示词以前只拿到用户原话，计划里的路径与命令全靠联想。这里在出卡前
+// 机械读一遍工作区（目录快照 + 请求点名文件的真实头部 + 清单里的命令），
+// 把读数拼进规划请求；同一份快照同时充当解析阶段的路径存在性依据。
+// 采集失败（无工作区 / fs 工具关闭 / 读取报错）返回 undefined——规划退回
+// 「没有证据」的诚实措辞，绝不拿空快照冒充「这些路径不存在」。
+const PLAN_EVIDENCE_MAX_ENTRIES_PER_DIR = 2000;
+const PLAN_EVIDENCE_MAX_ROOT_ENTRIES = 500;
+const PLAN_EVIDENCE_MAX_NAMED_FILES = 3;
+const PLAN_EVIDENCE_MAX_LINES_PER_FILE = 200;
+const PLAN_EVIDENCE_MAX_CHARS_PER_FILE = 3500;
+const PLAN_EVIDENCE_MAX_GROUPS = 14;
+const PLAN_EVIDENCE_MAX_SAMPLES = 3;
+const PLAN_EVIDENCE_MAX_DIR_SAMPLES = 12;
+const PLAN_EVIDENCE_MAX_COMMANDS = 10;
+const PLAN_EVIDENCE_MAX_EXCERPT = 120;
+const PLAN_EVIDENCE_DEPENDENCY_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', 'target', 'vendor', 'venv', '.venv',
+  '__pycache__', '.next', '.nuxt', '.cache', 'coverage', 'out', '.idea', '.vscode',
+]);
+const PLAN_EVIDENCE_MANIFESTS = new Set([
+  'package.json', 'tsconfig.json', 'pyproject.toml', 'requirements.txt', 'Cargo.toml',
+  'go.mod', 'pom.xml', 'build.gradle', 'Makefile', 'pnpm-lock.yaml', 'package-lock.json',
+  'yarn.lock', 'bun.lock', 'bun.lockb',
+]);
+
+function runEvidenceTool(
+  adapter: ToolAdapter,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string | undefined> {
+  const call: ToolCall = { id: `plan_evidence_${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } };
+  return adapter.execute(call).then(
+    (result) => (result.success && typeof result.result === 'string' ? result.result : undefined),
+    () => undefined,
+  );
+}
+
+/** 把 list_files 的相对路径清单按「前两段目录」分组：规划最需要的粒度就是这个
+ *  （src/engine、packages/web），再深就是噪声、再浅就只有 src。 */
+function planEvidenceGroups(paths: string[]): Array<{ dir: string; count: number; samples: string[] }> {
+  const groups = new Map<string, { count: number; samples: string[] }>();
+  for (const path of paths) {
+    const parts = path.split('/');
+    if (parts.length < 2) continue;
+    const key = parts.length === 2 ? parts[0] : `${parts[0]}/${parts[1]}`;
+    const entry = groups.get(key) ?? { count: 0, samples: [] };
+    entry.count += 1;
+    if (entry.samples.length < PLAN_EVIDENCE_MAX_SAMPLES) entry.samples.push(path);
+    groups.set(key, entry);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, PLAN_EVIDENCE_MAX_GROUPS)
+    .map(([dir, entry]) => ({ dir, count: entry.count, samples: entry.samples }));
+}
+
+function evidenceListingLines(listing: string): string[] {
+  return listing
+    .split('\n')
+    .map((line) => line.trim())
+    // 截断提示与 glob 的「无匹配」句子不是文件；留着它们会把假路径写进快照。
+    .filter((line) => line && !line.startsWith('[') && line !== '(empty directory)' && !line.startsWith('No files matching'))
+    .map((line) => normalizePlanPath(line))
+    .filter(Boolean);
+}
+
+/** 递归 list_files 会把 node_modules 全走一遍——它不剪依赖目录，4000 条配额
+ *  在小仓库里够用、在有依赖目录的仓库里会被整个吃掉（排序发生在采集之后）。
+ *  所以先列根目录、用 glob 区分文件/目录，再逐个子目录递归：依赖目录从根上
+ *  就进不了快照，截断只可能发生在真实源码内部（此时标记 truncated，不拿它
+ *  做存在性核对）。 */
+async function readProjectPaths(
+  adapter: ToolAdapter,
+): Promise<{ paths: string[]; truncated: boolean } | undefined> {
+  const rootListing = await runEvidenceTool(adapter, 'list_files', { path: '.', maxResults: PLAN_EVIDENCE_MAX_ROOT_ENTRIES });
+  if (!rootListing) return undefined;
+  const rootNames = evidenceListingLines(rootListing);
+  if (rootNames.length === 0) return undefined;
+  // glob 只回文件，不回目录：与根目录名单的差集就是子目录。
+  const rootFilesListing = await runEvidenceTool(adapter, 'glob_files', { pattern: '*', path: '.', maxResults: PLAN_EVIDENCE_MAX_ROOT_ENTRIES });
+  const rootFiles = new Set(rootFilesListing ? evidenceListingLines(rootFilesListing) : []);
+  // 截断文案是中文的（"[截断] 仅显示前 N 项"），不能只认英文。
+  let truncated = /\[截断\]|truncated/i.test(rootListing);
+
+  const paths: string[] = [];
+  for (const name of rootNames) {
+    if (rootFiles.has(name)) {
+      paths.push(name);
+      continue;
+    }
+    if (PLAN_EVIDENCE_DEPENDENCY_DIRS.has(name)) continue;
+    const listing = await runEvidenceTool(adapter, 'list_files', {
+      path: name,
+      recursive: true,
+      maxResults: PLAN_EVIDENCE_MAX_ENTRIES_PER_DIR,
+    });
+    if (!listing) {
+      // 不是目录（或读不了）：名单里保留它自己，当作一个条目。
+      paths.push(name);
+      continue;
+    }
+    if (/\[截断\]|truncated/i.test(listing)) truncated = true;
+    const children = evidenceListingLines(listing).map((child) => `${name}/${child}`);
+    paths.push(...(children.length > 0 ? children : [name]));
+  }
+  return { paths, truncated };
+}
+
+/** 规划证据包：`pathExists` 缺席表示快照不可信（被截断）——此时不核路径。 */
+export interface PlanEvidenceBundle {
+  text: string;
+  pathExists?: (path: string) => boolean;
+}
+
+export async function gatherPlanEvidence(
+  adapter: ToolAdapter | undefined,
+  workspace: string,
+  userText: string,
+): Promise<PlanEvidenceBundle | undefined> {
+  if (!adapter || !workspace) return undefined;
+  const snapshot = await readProjectPaths(adapter);
+  if (!snapshot) return undefined;
+  const { truncated } = snapshot;
+  // 归一化后统一过滤依赖目录：子目录内部的 node_modules 更不能进快照。
+  const paths = snapshot.paths.filter(
+    (path) => path && !path.split('/').some((segment) => PLAN_EVIDENCE_DEPENDENCY_DIRS.has(segment)),
+  );
+  if (paths.length === 0) return undefined;
+  const known = new Set(paths);
+
+  // 请求点名的路径：能读到的文件带真实头部；指向目录的给目录清单。
+  const named: PlanEvidenceSnapshot['named'] = [];
+  const extraGroups: Array<{ dir: string; count: number; samples: string[] }> = [];
+  for (const candidate of extractPathTokens(userText)) {
+    if (named.length >= PLAN_EVIDENCE_MAX_NAMED_FILES) break;
+    if (known.has(candidate)) {
+      const excerpt = await runEvidenceTool(adapter, 'read_file', {
+        path: candidate,
+        startLine: 1,
+        endLine: PLAN_EVIDENCE_MAX_LINES_PER_FILE,
+      });
+      if (!excerpt) continue;
+      named.push({
+        path: candidate,
+        lines: `1-${PLAN_EVIDENCE_MAX_LINES_PER_FILE}`,
+        excerpt: excerpt.slice(0, PLAN_EVIDENCE_MAX_CHARS_PER_FILE),
+      });
+      continue;
+    }
+    const under = paths.filter((path) => path.startsWith(`${candidate}/`));
+    if (under.length > 0) {
+      extraGroups.push({
+        dir: candidate,
+        count: under.length,
+        samples: under.slice(0, PLAN_EVIDENCE_MAX_DIR_SAMPLES),
+      });
+    }
+  }
+
+  // 项目命令只从 manifest 里抄，不猜：模型最能落地的验证步骤就在这里。
+  const commands: PlanEvidenceSnapshot['commands'] = [];
+  if (known.has('package.json')) {
+    const raw = await runEvidenceTool(adapter, 'read_file', { path: 'package.json' });
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+        for (const [name, value] of Object.entries(parsed.scripts ?? {})) {
+          if (commands.length >= PLAN_EVIDENCE_MAX_COMMANDS) break;
+          if (typeof value === 'string' && value.trim()) {
+            commands.push({ name, command: value.trim().slice(0, PLAN_EVIDENCE_MAX_EXCERPT) });
+          }
+        }
+      } catch {
+        /* manifest 读不成 JSON 就不给命令——比给错命令好 */
+      }
+    }
+  }
+
+  // 清单只看工作区根目录：子目录里的 package.json 是 workspace 成员，不是这次
+  // 改动的项目根，列出来只会让验证命令看起来有多个答案。
+  const manifests = paths
+    .filter((path) => !path.includes('/') && PLAN_EVIDENCE_MANIFESTS.has(path))
+    .slice(0, 10);
+  const groups = [...extraGroups, ...planEvidenceGroups(paths)]
+    .filter((group, index, all) => all.findIndex((item) => item.dir === group.dir) === index)
+    .slice(0, PLAN_EVIDENCE_MAX_GROUPS);
+
+  const text = formatPlanEvidence({
+    workspace,
+    scannedFiles: paths.length,
+    truncated,
+    groups,
+    named,
+    commands,
+    manifests,
+  });
+
+  // 快照被截断时不做存在性判定：少扫到 ≠ 不存在。核对只交事实，不下结论。
+  const pathExists = truncated
+    ? undefined
+    : (raw: string): boolean => {
+      const path = normalizePlanPath(raw);
+      if (!path || path === '.') return true;
+      if (known.has(path)) return true;
+      if (!path.includes('/') && paths.some((candidate) => candidate.endsWith(`/${path}`))) return true;
+      return paths.some((candidate) => candidate.startsWith(`${path}/`));
+    };
+
+  return { text, pathExists };
 }
 
 /** Let the browser complete one paint after newly appended transcript
@@ -4008,10 +4220,14 @@ export class ChatController {
     projectBuild: boolean,
     onFirstVisible?: () => void,
     register: WorkOrderRegister = 'production',
+    /** 工作区实测快照（目录 + 点名文件头部 + 项目命令）与路径存在性判定。
+     *  缺席 = 无工作区/读取失败：提示词改用「没有证据」的诚实措辞，解析也
+     *  不做路径核对——宁可不核对，也不把「没扫到」谎报成「不存在」。 */
+    evidence?: PlanEvidenceBundle,
   ): Promise<{ narration: string; plan: Plan | null; restarted?: true } | null> {
     const llm = this.planLlm ?? this.turnLlm;
     if (!llm) return null;
-    const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0, register });
+    const { system, user } = buildPlanThinkingPrompt(userText, { projectBuild, hasImages: userImages.length > 0, register, evidence: evidence?.text });
     const request: import('../shared/types').Message[] = [
       { role: 'system', content: system },
       { role: 'user', content: user, images: userImages },
@@ -4111,7 +4327,13 @@ export class ChatController {
     }
     let plan: Plan | null = null;
     if (planText.trim()) {
-      const parsed = parsePlanJsonWithMeta(planText, register);
+      // 路径核对在解析时做（2026-11-17 规划落地刀）：模型编出来的路径在这里
+      // 就被点名，而不是等执行到那一步才报错——那时用户已经批过一张错卡。
+      const parsed = parsePlanJsonWithMeta(
+        planText,
+        register,
+        evidence?.pathExists ? { pathExists: evidence.pathExists } : undefined,
+      );
       if (isUsablePlan(parsed.plan)) plan = parsed.plan;
     }
     if (!narrationText && !plan) {
@@ -5745,7 +5967,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
         try {
           for (;;) {
-            thought = await this.planByThinking(chatEl, bridgeUserText, bridgeUserImages, needsDeliveryGate, undefined, workOrderRegister);
+            // 模型流内自决的规划同样先读真实代码（2026-11-17）：它已经能看到
+            // 工具结果，但规划请求是独立的——不带上快照，卡片又会建在想象上。
+            // 每轮重采：重启时并进来的补充可能点名了新文件。
+            const bridgeEvidence = await gatherPlanEvidence(toolAdapter, effectiveWorkspace, bridgeUserText);
+            thought = await this.planByThinking(chatEl, bridgeUserText, bridgeUserImages, needsDeliveryGate, undefined, workOrderRegister, bridgeEvidence);
             if (signal?.aborted || this.abortController?.signal.aborted) break;
             if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
               bridgeUserText = this.applyPreflightSupplements(bridgeUserText, bridgeUserImages);
@@ -5817,10 +6043,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         this.activeTodoNumber = 1;
         this.activePlanStarted = false;
         bridgeCard.setActivity('方案已经整理好，马上从第一项开始验证。');
+        // 路径核对的结果也回给模型（2026-11-17）：卡已出，但按不存在的路径
+        // 施工是执行期才爆的错——事实此时交回，它下一步就能改路。
+        const bridgeUnresolvedNote = finalPlan.unresolvedPaths?.length
+          ? `\n\n路径核对（按出卡时的工作区快照）：以下路径没找到——${finalPlan.unresolvedPaths.join('、')}。新建目标照常建；如果是既有文件/目录，动手前先核实真实位置。`
+          : '';
         return {
           ...base,
           success: true,
-          result: `规划已完成，步骤卡已出（${finalPlan.steps.length} 步）。按下面这份已批准的计划立即开工，不要再等待确认：\n\n${formatPlanForPrompt(finalPlan, needsDeliveryGate, true)}`,
+          result: `规划已完成，步骤卡已出（${finalPlan.steps.length} 步）。按下面这份已批准的计划立即开工，不要再等待确认：\n\n${formatPlanForPrompt(finalPlan, needsDeliveryGate, true)}${bridgeUnresolvedNote}`,
           duration: Date.now() - started,
         };
       };
@@ -6340,6 +6571,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           if (thinkingCard) setThinkingLabel(thinkingCard, '正在想这个任务怎么做…');
           maybeShowAssessment();
           const needsInteractiveApproval = forcedMode === 'plan' || forcedMode === 'build';
+          // 规划先读真实代码（2026-11-17）：先机械采一份工作区快照，再让模型
+          // 带着这份证据想。采集失败是 undefined，规划自会退回「没有证据」的
+          // 措辞——不让一次读盘失败拖死整次规划。采集放在重启循环内：插话并入
+          // 后的新请求可能点名了新文件，旧快照看不见它们。
           // 思考窗吸收：开窗到关窗之间，插话分类若判 supplements_current 就落进
           // 编排器的暂存（吸收分支）。原思考在飞时照旧掐流重开；重想在飞时
           // 攒批（刀 3.1 事件驱动：只入暂存不掐流）。重启循环：暂存非空或
@@ -6357,7 +6592,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           let thought: Awaited<ReturnType<ChatController['planByThinking']>>;
           try {
             for (;;) {
-              thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister);
+              const planEvidence = await gatherPlanEvidence(toolAdapter, effectiveWorkspace, userText);
+              thought = await this.planByThinking(chatEl, userText, userImages, needsDeliveryGate, removeThinkingCard, workOrderRegister, planEvidence);
               if (this.abortController?.signal.aborted) break;
               if ((this.interjectOrchestrator.pendingPreflightCount() > 0 || thought?.restarted) && thought !== null) {
                 userText = this.applyPreflightSupplements(userText, userImages);
@@ -6419,7 +6655,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               t('plan.narrationNoPlan', '思路讲完了，结构化步骤没能从里面解析出来——不硬凑卡片了，我按刚才的思路直接开工。'),
               false, false, 'info',
             );
-            userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, register: workOrderRegister });
+            userPlan = planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, register: workOrderRegister, unresolvedPaths: thought.plan?.unresolvedPaths });
             if (assessmentFlow) {
               // 跳过了 approvePlan，评估卡的阶段不能悬在半空：同样落定。
               assessmentFlow.completePhase('risk', `风险等级已确认：${riskLabelOf(effectiveIntent.riskLevel)}`);
@@ -6516,7 +6752,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // → approved=true，模型第一轮必须立即开始执行，不能再要求“等用户下一条
             // 消息才开工”，否则引擎第一轮就空转完成，界面会直接从计划跳到交付。
             userPlan = (thought?.narration
-              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification, register: workOrderRegister })}\n\n`
+              ? `${planThinkingContext(thought.narration, { projectBuild: needsDeliveryGate, hasPlanCard: true, verification: approvedPlan.verification, register: workOrderRegister, unresolvedPaths: approvedPlan.unresolvedPaths })}\n\n`
               : '') + formatPlanForPrompt(approvedPlan, needsDeliveryGate, true);
             // Plan is ready: the bubble no longer promises generation.
             if (modeBubble) {
@@ -7150,6 +7386,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ],
         mcpResources: mcpResourceContext,
         mode: analysis.mode,
+        // 工程构建形态（原型/应用/项目）也是编码回合：交付物是磁盘上的文件，
+        // 不是对话里的代码块。机械事实来自流程闸门，不从措辞猜。
+        buildTurn: needsDeliveryGate,
         budget: promptBudgetForProvider(config.customProviders, config.provider, config.model, config.providerOverrides, config.capabilityProbes),
         // Subagent tools join the model-visible list only in workspace mode
         // (finalPromptTools above), so the multi_agent protocol should only

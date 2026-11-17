@@ -5,7 +5,7 @@ import {
   buildCliCapabilities,
   buildGuiCapabilities,
 } from '../PromptAssembler';
-import { composeUserTurn } from '../promptLayers';
+import { HUMAN_TONE_PROMPT, composeUserTurn } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { InMemoryPromptObservationStore, PromptObservability } from '../promptObservability';
 import { VETERAN_FAST_EXPRESSION_PROMPT, VETERAN_FAST_LINES } from '../../character';
@@ -677,9 +677,57 @@ describe('PromptAssembler', () => {
     expect(prompt).not.toContain('NEVER emit fenced svg code blocks');
   });
 
-  it('carries the visual pointer always, and the DSL detail only for a request that needs it', () => {
+  it('slims the voice and presentation budget on a coding turn (2026-11-17 提示词减重)', () => {
+    // 编码回合的交付物是文件里的 diff，不是好看的回复：语气与输出格式换紧凑
+    // 版，展示类纪律（信息价值原则 / 可视指针）不随这一轮进场。
+    const ctx = { surface: 'gui' as const, capabilities: buildGuiCapabilities(true) };
+    const frags = assembler.buildSystemFragments(ctx, '修复 src/ui/chat.ts 里的空指针');
+    const tone = frags.find((f) => f.id === 'human_tone');
+    const style = frags.find((f) => f.id === 'output_style');
+    expect(tone?.content).toContain('pairing on code');
+    expect(tone?.content.length).toBeLessThan(1200);
+    expect(style?.content).toContain('Output style (coding turn)');
+    expect(style?.content).toContain('path:line');
+    expect(style?.content.length).toBeLessThan(700);
+    expect(frags.some((f) => f.id === 'information_value')).toBe(false);
+    expect(frags.some((f) => f.id === 'visual_pointer')).toBe(false);
+    // 非编码回合逐字保留全量：展示纪律就是交付。
+    const plain = assembler.buildSystemFragments(ctx, '帮我写一份周报，总结本周工作');
+    expect(plain.find((f) => f.id === 'human_tone')?.content).toBe(HUMAN_TONE_PROMPT);
+    expect(plain.find((f) => f.id === 'output_style')?.content).toContain('<!-- suggested:');
+    expect(plain.some((f) => f.id === 'information_value')).toBe(true);
+    expect(plain.some((f) => f.id === 'visual_pointer')).toBe(true);
+    // 编码回合里点名要图时，指针照旧到位（否则块标签/禁令清零）。
+    const withChart = assembler.buildSystemFragments(ctx, '给 src/ui 加个趋势图，把这些数据画成柱状图');
+    expect(withChart.some((f) => f.id === 'visual_pointer')).toBe(true);
+  });
+
+  it('treats a build turn as a coding turn and carries the no-paste rule (2026-11-17)', () => {
+    // 判例：用户说「做一个香港 HVC 保障原型」——没有代码动作词，措辞判据抓不到，
+    // 但流程闸门知道这是工程构建。以前的后果：这类回合背着完整展示纪律，而
+    // no-dump 规则只住在会被世界状态 diff 成指针的 user-turn 分区。
+    const ctx = { surface: 'gui' as const, capabilities: buildGuiCapabilities(true) };
+    const build = assembler.buildSystemFragments({ ...ctx, buildTurn: true }, '做一个香港 HVC 保障原型');
+    const deliverable = build.find((f) => f.id === 'build_deliverable');
+    expect(deliverable?.content).toContain('never paste the file back');
+    expect(deliverable?.content).toContain('ten to fifteen');
+    // 构建回合也是编码回合：紧凑语气 + 紧凑输出格式，展示类纪律不进场。
+    expect(build.find((f) => f.id === 'human_tone')?.content).toContain('pairing on code');
+    expect(build.find((f) => f.id === 'output_style')?.content).toContain('Output style (coding turn)');
+    expect(build.some((f) => f.id === 'information_value')).toBe(false);
+    expect(build.some((f) => f.id === 'visual_pointer')).toBe(false);
+    // 同一句话没有闸门事实时不能凭措辞进场（规则与瘦身都不该猜）。
+    const plain = assembler.buildSystemFragments(ctx, '做一个香港 HVC 保障原型');
+    expect(plain.some((f) => f.id === 'build_deliverable')).toBe(false);
+    expect(plain.find((f) => f.id === 'human_tone')?.content).toBe(HUMAN_TONE_PROMPT);
+    // 普通编码回合也不带构建交付规则：它只属于工程构建。
+    const coding = assembler.buildSystemFragments(ctx, '修复 src/ui/chat.ts 里的空指针');
+    expect(coding.some((f) => f.id === 'build_deliverable')).toBe(false);
+  });
+
+  it('carries the visual pointer on every non-coding turn, and the DSL detail only for a request that needs it', () => {
     // 常驻：块标签 + 交付判据守门线（可见性底线 + 脚本产图须内联引用；
-    // 漏判闸门时行为不会翻车）。
+    // 漏判闸门时行为不会翻车）。编码回合且无视觉意图时不带，见上面的减重用例。
     const chat = assembler.buildSystemPrompt({ surface: 'gui', capabilities: buildGuiCapabilities(true) }, '这个函数是干什么的？');
     expect(chat).toContain('Visual output — deliver any picture, chart, map, or diagram so it ends up VISIBLE inside the reply');
     // 细则特有的句子（就在细则段里，指针段没有），用来区分「细则到位/没到位」。

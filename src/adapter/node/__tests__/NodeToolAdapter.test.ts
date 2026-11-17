@@ -650,6 +650,34 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     expect(text).toContain('[read_file：以上是前 2000 行，文件共 2500 行。继续读用 startLine=2001');
   });
 
+  it('outline:true returns declaration lines with line numbers instead of the body（2026-11-17）', async () => {
+    const src = [
+      'import x from "y";',
+      'export class Foo {',
+      '  bar() {',
+      '    if (x) { return 1; }',
+      '  }',
+      '}',
+      'export function baz() {}',
+    ].join('\n');
+    writeFileSync(join(workspace, 'outline.ts'), src);
+    const text = String((await read({ path: 'outline.ts', outline: true })).result);
+    expect(text).toContain('[outline: outline.ts — 7 lines, 3 symbols]');
+    expect(text).toContain('2: export class Foo {');
+    expect(text).toContain('3:   bar() {');
+    expect(text).toContain('7: export function baz() {}');
+    expect(text).not.toContain('import x');
+    // 行范围不改变 outline 的全文语义（schema 已写明忽略）。
+    const ranged = String((await read({ path: 'outline.ts', outline: true, startLine: 3, endLine: 3 })).result);
+    expect(ranged).toContain('export class Foo');
+  });
+
+  it('outline:true is honest for non-code files', async () => {
+    writeFileSync(join(workspace, 'outline-notes.txt'), 'hello');
+    const text = String((await read({ path: 'outline-notes.txt', outline: true })).result);
+    expect(text).toContain('no symbol outline for this file type');
+  });
+
   it('returns an explicitly requested range verbatim with no footer', async () => {
     const r = await read({ path: 'big.txt', startLine: 2400, endLine: 2402 });
     expect(r.success).toBe(true);

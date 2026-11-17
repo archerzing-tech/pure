@@ -647,7 +647,7 @@ export function assessIntent(prompt: string): IntentAssessment {
  * 成对：这里让该指令对这一具体请求显式出现。
  */
 export function formatArtifactPrompt(): string {
-  return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html. Before implementing feature code, choose the project-appropriate test runner and create a runnable test script plus at least one focused smoke/unit/integration test for the main path. For Web/DOM projects, use an appropriate DOM test environment such as happy-dom when needed; for other stacks use the stack's standard test runner. Do not replace automated tests with manual inspection unless the user explicitly opts out.\nAfter writing, run the actual test command (and typecheck/lint/build when the project provides them), fix failures, then briefly tell the user the file path(s), how to run/open the artifact, and the commands and results used to verify it. If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
+  return `\n\n<artifact_output_rule>\nThis request asks you to BUILD a complete runnable artifact (a game, web page, app, tool, script, or small project). Write it to a file on disk — do NOT dump the full source code in your reply.\n- Single-file artifact (HTML page, single JS/CSS file, small script): write it as a new file in the workspace, e.g. index.html, game.html, app.py, or a sensible name derived from the request.\n- Multi-file project: create a directory and write the files into it (entry point + assets), e.g. ./mini-game/index.html. Before implementing feature code, choose the project-appropriate test runner and create a runnable test script plus at least one focused smoke/unit/integration test for the main path. For Web/DOM projects, use an appropriate DOM test environment such as happy-dom when needed; for other stacks use the stack's standard test runner. Do not replace automated tests with manual inspection unless the user explicitly opts out.\n- Reply shape: after writing, run the actual test command (and typecheck/lint/build when the project provides them), fix failures, then report the file path(s) with line counts, how to run/open the artifact, and the command + result of each check. Inline code is allowed only for the few lines the user must judge (a layout choice, an interface, a tricky hunk) — a pasted whole file is a failure of this rule, not a courtesy: the file is already on disk and the UI shows it. If no workspace is configured, say so and ask for one instead of printing the code.\n</artifact_output_rule>`;
 }
 
 /** Result of parsing an LLM plan payload, with a repair flag for callers that
@@ -668,8 +668,92 @@ export interface PlanParseResult {
  * automatically before validation. Returns null on any malformed input so the
  * caller can fall back to the heuristic generic plan.
  */
-export function parsePlanJson(text: string, register?: WorkOrderRegister): Plan | null {
-  return parsePlanJsonCore(text, register).plan;
+export function parsePlanJson(text: string, register?: WorkOrderRegister, options?: PlanPathCheckOptions): Plan | null {
+  return parsePlanJsonCore(text, register, options).plan;
+}
+
+/**
+ * 计划路径核对（2026-11-17 规划落地刀）——解析计划时把步骤里提到的仓库路径与
+ * 宿主提供的真实工作区快照对一遍。核对是**物理事实**（这个路径在快照里有没有），
+ * 不是替模型改计划：对不上的路径原样留在计划里，只在 `unresolvedPaths` 上记一笔，
+ * 由模型裁决这是新建目标还是写错的既有路径。
+ *
+ * 为什么必须在解析时做：规划现在先读真实代码再出卡（见 chat.ts 的
+ * gatherPlanEvidence），证据到手后模型仍可能顺手写一个不存在的文件——等到执行到
+ * 那一步才报错，用户已经看过并批准了一份错的计划卡。
+ */
+export interface PlanPathCheckOptions {
+  /** 工作区里是否存在该路径（文件或目录）。由宿主注入——解析层不碰文件系统。
+   *  快照被截断或没有工作区时不要传：宁可不核对，也不把「没扫到」谎报成
+   *  「不存在」。 */
+  pathExists?: (path: string) => boolean;
+}
+
+/** 步骤文本里可能出现的仓库路径：带目录分隔的任意路径，或带代码/配置扩展名
+ *  的裸文件名。刻意不收 `v1.2`、`e.g`、`npm run build` 这类词——扩展名白名单
+ *  已经挡住它们，目录分隔那一支再由调用方剔除 URL。 */
+const PLAN_PATH_TOKEN_RE = /[A-Za-z0-9_.@-][A-Za-z0-9_.@\/-]*\/[A-Za-z0-9_.@-]+|[A-Za-z0-9_.@-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|jsonc|md|mdx|py|rs|go|java|kt|kts|rb|php|cs|cpp|cc|c|h|hpp|css|scss|sass|less|html|htm|vue|svelte|yml|yaml|toml|ini|conf|sql|sh|bash|zsh|bat|ps1|txt|lock)\b/gi;
+
+/** 路径归一化：反斜杠转正斜杠、去掉 `./` 前缀与句尾标点（计划里写成
+ *  「`src/a.ts`、」是常态）。绝对路径原样返回，交给调用方决定要不要核对。 */
+export function normalizePlanPath(raw: string): string {
+  const trimmed = raw.trim().replace(/\\/g, '/').replace(/^`+|`+$/g, '');
+  const stripped = trimmed.replace(/^(\.\/)+/, '').replace(/[),.;:!?，。、；：！？）】」』]+$/u, '');
+  return stripped.replace(/\/+$/, '');
+}
+
+/** 从一段文本里抽出可能指向工作区的路径（按出现顺序去重）。URL 与绝对路径
+ *  跳过——它们不该拿工作区快照去核对。规划提示词也用它从用户原话里取出
+ *  请求点名的文件，两处同一套词法。 */
+export function extractPathTokens(text: string): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(PLAN_PATH_TOKEN_RE)) {
+    const at = match.index ?? 0;
+    const before = text.slice(Math.max(0, at - 3), at);
+    // URL（`https://host/a/b.ts`）与协议头后面的路径不是工作区路径。
+    if (/[:/]$/.test(before)) continue;
+    const path = normalizePlanPath(match[0]);
+    if (!path || seen.has(path)) continue;
+    // 太短的斜杠词是中文正文里的「和/或」「A/B」而不是路径。
+    if (path.length < 4) continue;
+    // Windows 盘符 / POSIX 绝对路径：不在快照范围内，跳过而不是误报。
+    if (path.startsWith('/') || /^[A-Za-z]:\//.test(path)) continue;
+    seen.add(path);
+    found.push(path);
+  }
+  return found;
+}
+
+/** 计划里所有可能指向工作区的路径（步骤、子步、验证命令），按出现顺序去重。 */
+export function extractPlanPaths(plan: Pick<Plan, 'steps'> & { verification?: PlanVerificationSpec[] }): string[] {
+  const texts: string[] = [];
+  for (const step of plan.steps) {
+    texts.push(step.action ?? '', step.description ?? '', step.expectedOutcome ?? '');
+    for (const sub of step.substeps ?? []) texts.push(sub.action ?? '', sub.description ?? '', sub.expectedOutcome ?? '');
+  }
+  for (const item of plan.verification ?? []) texts.push(item.command ?? '');
+
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    for (const path of extractPathTokens(text)) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      found.push(path);
+    }
+  }
+  return found;
+}
+
+/** 解析后核对：返回快照里查不到的路径（最多 8 条）。调用方只在拿到可信快照时
+ *  调它，结果随 Plan.unresolvedPaths 带出。 */
+export function unresolvedPlanPaths(
+  plan: Pick<Plan, 'steps'> & { verification?: PlanVerificationSpec[] },
+  pathExists: (path: string) => boolean,
+): string[] {
+  return extractPlanPaths(plan).filter((path) => !pathExists(path)).slice(0, 8);
 }
 
 /**
@@ -682,8 +766,8 @@ export function parsePlanJson(text: string, register?: WorkOrderRegister): Plan 
  * 而非全局，多会话并发时各自的回合各带各的档位）。production 缺省 = 现行为
  * 逐字节不变；draft/spike 把步骤/子步/验证三个 slice 收进档位表（只轻不重）。
  */
-export function parsePlanJsonWithMeta(text: string, register?: WorkOrderRegister): PlanParseResult {
-  return parsePlanJsonCore(text, register);
+export function parsePlanJsonWithMeta(text: string, register?: WorkOrderRegister, options?: PlanPathCheckOptions): PlanParseResult {
+  return parsePlanJsonCore(text, register, options);
 }
 
 function normalizePlanSubsteps(raw: unknown, cap: number): NonNullable<PlanStep['substeps']> {
@@ -721,7 +805,7 @@ function normalizePlanVerification(raw: unknown, cap: number): PlanVerificationS
   }).slice(0, cap);
 }
 
-function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'production'): PlanParseResult {
+function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'production', options?: PlanPathCheckOptions): PlanParseResult {
   // 刀 6：production 走现值原样（registerScaledDecision 恒等复制），draft/spike
   // 收进档位表——三个 slice 消费同一份 caps，判定器与缩放器之间没有第二处映射。
   const caps: RegisterScaledCaps = registerScaledDecision(activeCharacterProfile(), register);
@@ -789,12 +873,16 @@ function parsePlanJsonCore(text: string, register: WorkOrderRegister = 'producti
   const rawVerification: unknown = Array.isArray(parsed) ? undefined : (parsed as { verification?: unknown }).verification;
   const verification = normalizePlanVerification(rawVerification, caps.maxVerificationItems);
 
+  const draft: Plan = {
+    steps: indexed,
+    reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
+    verification: verification.length > 0 ? verification : undefined,
+  };
+  // 路径核对只在宿主给了可信快照时做；没有 options 时计划逐字节不变。
+  const unresolved = options?.pathExists ? unresolvedPlanPaths(draft, options.pathExists) : [];
+
   return {
-    plan: {
-      steps: indexed,
-      reasoning: `The task has been broken into ${indexed.length} concrete steps, each with a defined outcome.`,
-      verification: verification.length > 0 ? verification : undefined,
-    },
+    plan: unresolved.length > 0 ? { ...draft, unresolvedPaths: unresolved } : draft,
     repaired,
   };
 }

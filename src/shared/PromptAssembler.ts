@@ -10,6 +10,7 @@ import { closeDanglingFence } from './fenceHygiene';
 import { activeCharacterCore, activeCharacterExpression } from '../character';
 import { promptObservability, promptVersion, type PromptObservability } from './promptObservability';
 import {
+  BUILD_DELIVERABLE_PROMPT,
   CAPABILITY_GAP_LADDER,
   CHART_DSL_PROMPT,
   MAP_DSL_PROMPT,
@@ -24,9 +25,11 @@ import {
   PARALLEL_FIRST_DIRECTIVE,
   ROUTING_ESSENTIALS,
   SVG_OUTPUT_PROMPT,
+  CODING_TONE_PROMPT,
   SYSTEM_CORE_PROMPT,
   VISUAL_BLOCK_POINTER,
   WORKFLOW_PROMPT,
+  wantsCodingTurn,
   composeUserTurn,
   detectServingPreview,
   detectVisualRequest,
@@ -75,6 +78,10 @@ export function activePermissionLine(mode?: 'auto' | 'confirm' | 'restricted'): 
 }
 
 export interface PromptAssemblyContext {
+  /** 这一轮是不是工程构建（原型/应用/项目…）——宿主从流程闸门传入的机械
+   *  事实（needsDeliveryGate），不是从措辞猜的。它同时把回合推成编码回合，
+   *  并挂上交付形态规则（build_deliverable）。 */
+  buildTurn?: boolean;
   surface: PromptSurface;
   capabilities: string;
   /** Definitions sent in the provider's separate tools payload. They are
@@ -237,7 +244,24 @@ export function buildCliCapabilities(): string {
   return CLI_CAPABILITIES_PROMPT;
 }
 
-function buildOutputStyle(surface: PromptSurface, imageGeneration = false): string {
+/**
+ * 编码回合的瘦身版输出纪律（2026-11-17 提示词减重）。
+ *
+ * 完整版（buildOutputStyle 的默认分支）里约 2.5k 字符，大头是高亮标记、
+ * details 折叠、suggested chips、信息类查询的落盘禁令、可视化硬要求——这些
+ * 都在教「怎么展示一个回答」，而编码回合的交付物是文件里的 diff。这里只留
+ * 三条对改代码真正有判别力的：问答内联 vs 改动落盘、path:line 指位、先给
+ * 结论。work_invariant（required）已经承载落盘契约，这里不重复长论述。
+ */
+function buildCodingOutputStyle(): string {
+  return `Output style (coding turn):
+- The files are the deliverable: a file you wrote or edited is referenced (\`path:line\`, line count), not pasted back. Inline code appears only when the answer IS code — the smallest excerpt that answers the question, never a whole file.
+- Reference code locations as \`path:line\` (e.g. src/app.ts:42) — a bare path makes the reader hunt for the line.
+- Lead with the result, then only the evidence that changes what the user does next. No headings on a short answer, no restating the request, no command-by-command log.`;
+}
+
+function buildOutputStyle(surface: PromptSurface, imageGeneration = false, codingTurn = false): string {
+  if (codingTurn) return buildCodingOutputStyle();
   // 可视化细则（chart / map / svg / image）已从常驻块搬出，见 buildVisualFragments：
   // 那四段约 4.3k 字符只对少数请求有用，常驻代价却是每轮都付。GUI/CLI 的可视化
   // 定位由常驻 VISUAL_BLOCK_POINTER（tag 枚举+禁令+发现指针）/ CLI capabilities
@@ -275,12 +299,17 @@ function buildVisualFragments(
   surface: PromptSurface,
   imageGeneration: boolean,
   userText: string | undefined,
+  codingTurn = false,
 ): PromptFragment[] {
   const wants = detectVisualRequest(userText ?? '');
+  // 编码回合不测图表意图时连指针也不带（2026-11-17）：一段 1.3k 字符的块标签/
+  // 禁令常驻在每次改代码的回合里，是纯展示面预算。请求自己提到图/图表/地图/
+  // 归宿时照旧带——那些回合里它才是指针。
+  const visualNeeded = wants.picture || wants.chart || wants.map || wants.paint || wants.destination;
   // 常驻指针不分面：块标签与「不写文件 / 不用脚本画」在 CLI / 渠道同样成立
   // （以前 svg_output 是对所有面注入的，只有细则才是 GUI 专属）。
   const parts: Array<[string, string | undefined, number]> = [
-    ['visual_pointer', VISUAL_BLOCK_POINTER, 64],
+    ['visual_pointer', codingTurn && !visualNeeded ? undefined : VISUAL_BLOCK_POINTER, 64],
     // 归宿词命中（图要进 docs/README/repo、随代码演进）：routing 精要机械
     // 注入。判据必须在场，不赌模型拉卡——两轮真机判例证明自信模型不拉
     // presentation_guide，改卡是空转。同样不分面：CLI/渠道的形式竞争与
@@ -584,6 +613,13 @@ export class PromptAssembler {
    *  that does not know the request pays nothing for the DSL detail. */
   buildSystemFragments(context: PromptAssemblyContext, userText?: string): PromptFragment[] {
     const capabilities = context.capabilities.trim();
+    // 编码回合的常驻瘦身（2026-11-17）：语气与输出格式换成精简版，呈现类
+    // 纪律（信息价值原则 / 可视指针）不随这一轮进场。理由：这两类在复杂
+    // 工程回合里占常驻预算四成以上，而编码交付物是 diff 不是好看的回答。
+    // buildTurn：宿主从流程闸门传进来的机械事实（工程创作形态/已批准的构建
+    // 计划）。它也是编码回合——否则「做一个原型」这种没有代码动作词的说法
+    // 会继续背完整展示纪律（图表/折叠卡），而这轮的交付物是磁盘上的文件。
+    const codingTurn = wantsCodingTurn(userText ?? '', context.mode) || context.buildTurn === true;
     // null = 显式关闭；未传 / 空白 = 取当前激活内核。空内容经 fragment() 收口。
     const characterCore = context.characterCore === null
       ? ''
@@ -616,7 +652,7 @@ export class PromptAssembler {
       // under budget pressure on small-context models. Priority 108 sits
       // below delivery_contract (112) on purpose: evidence discipline
       // outranks tone when the two ever conflict.
-      fragment('human_tone', HUMAN_TONE_PROMPT, 108, true),
+      fragment('human_tone', codingTurn ? CODING_TONE_PROMPT : HUMAN_TONE_PROMPT, 108, true),
       // ── 性格内核的表达面投影（人格轨道刀 3）───────────────────────────
       // 五个高权重场景该怎么说（失败 / 等待 / 打断 / 交付 / 拒绝），内核的
       // 「怎么说」投影；紧跟 human_tone 之下，是同一件事的细化而不是另立一套
@@ -634,7 +670,7 @@ export class PromptAssembler {
       // change would invalidate the cached prefix on every turn).
       fragment('ledger_protocol', LEDGER_PROTOCOL_PROMPT, 105, true),
       fragment('completion', COMPLETION_PROMPT, 80),
-      fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true), 65),
+      fragment('output_style', buildOutputStyle(context.surface, context.imageGeneration === true, codingTurn), 65),
       // Image requests follow ONE contract: the generate_image tool when the
       // provider supports it, otherwise the multi-SVG grid contract. Never both.
       // 契约与 DSL 细则一起搬到尾巴按需装配（见 buildVisualFragments）——它们的
@@ -658,9 +694,11 @@ export class PromptAssembler {
       // information_value（表达纪律，常驻）必须排在所有按请求闸门的尾块
       // （visualization/ladder/mechanics/workflow）之前：问答回合止于它，
       // 动手/可视回合 = 问答序列 + 尾块，公共前缀才不被打破（2026-10-27）。
-      fragment('information_value', INFORMATION_VALUE_PRINCIPLE, 57),
+      // 信息价值原则是**展示**纪律（图表硬要求、长材料折叠）：编码回合没有
+      // 可图表化的交付物，它在场只会把回答往「展示工作量」拽。非编码回合照旧。
+      fragment('information_value', codingTurn ? '' : INFORMATION_VALUE_PRINCIPLE, 57),
       // ── 按请求装配的可视化细则（尾区，随回合变化）──
-      ...buildVisualFragments(context.surface, context.imageGeneration === true, userText),
+      ...buildVisualFragments(context.surface, context.imageGeneration === true, userText, codingTurn),
       // ── 按请求装配的「大头」细则（尾区）：安装路径梯 + 委派机制段 ──
       ...buildRequestDetailFragments(context, userText),
       // ── workflow 闸门块（2026-10-27）住在数组绝对尾部──
@@ -670,6 +708,11 @@ export class PromptAssembler {
       // （wantsHandsOnWorkflow），纯问答轮省 ≈300 tokens；
       // work_invariant（required）与 capability_gap 的 ladder 闸门兜底交付契约与换路线。
       // p25 = 预算紧张时它先被裁（priority 只影响裁剪序）。
+      // 工程构建回合的交付形态（2026-11-17）：no-dump 规则的常驻副本。它原本
+      // 只在 user turn 的 buildProtocol 里，而那个分区会被世界状态 diff 成指针、
+      // 也可能被压缩淘汰，长时间构建里模型经常收不到。住尾区（随回合闸门出现/
+      // 消失不打破稳定区前缀），必选：丢了就回到「整文件贴在对话里」的旧行为。
+      fragment('build_deliverable', context.buildTurn === true ? BUILD_DELIVERABLE_PROMPT : '', 30, true),
       fragment('workflow', wantsHandsOnWorkflow(userText ?? '', context.mode) ? WORKFLOW_PROMPT : '', 25),
     ].filter((item): item is PromptFragment => item !== null);
   }

@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { Planner, assessIntent, formatArtifactPrompt, markParallelPlanSteps, classifyInsertion, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta } from '../Planner';
+import { Planner, assessIntent, extractPathTokens, formatArtifactPrompt, markParallelPlanSteps, classifyInsertion, normalizePlanPath, resolveStopBranchTarget, recheckCoveredInsertion, parsePlanJson, parsePlanJsonWithMeta, unresolvedPlanPaths } from '../Planner';
 import type { LLMAdapter, Message } from '../../shared/types';
 import type { Plan } from '../types';
 
@@ -143,6 +143,10 @@ describe('Planner', () => {
     expect(prompt).toContain('happy-dom');
     expect(prompt).toContain('run the actual test command');
     expect(prompt).toContain('Do not replace automated tests with manual inspection');
+    // 2026-11-17 用户判例：原型/工程里把整文件贴进对话——规则要写成可以判定
+    // 违例的句子，而不是一句“不要 dump”。
+    expect(prompt).toContain('Reply shape');
+    expect(prompt).toContain('a pasted whole file is a failure of this rule');
   });
 });
 
@@ -734,5 +738,53 @@ describe('markParallelPlanSteps (E2.3)', () => {
 
   it('returns the plan untouched for an empty role list', () => {
     expect(markParallelPlanSteps(basePlan, [])).toBe(basePlan);
+  });
+});
+
+// 规划落地刀（2026-11-17）：计划里的路径在**解析时**就与工作区快照对一遍。
+// 核对只交事实（没找到），不改计划——新建目标本来就不存在，判断归模型。
+describe('计划路径核对（parsePlanJsonWithMeta 的 pathExists）', () => {
+  const planJson = JSON.stringify({
+    steps: [
+      { action: '读现有压缩层', description: '打开 src/harness/ContextEngine.ts 看 L1 段落', expectedOutcome: '知道清空规则' },
+      { action: '改循环', description: '编辑 src/engine/AgentLoopEngine.ts 与 src/engine/Nope.ts', expectedOutcome: '行为不变' },
+      { action: '新建测试', description: '新增 src/engine/__tests__/loop.test.ts', expectedOutcome: '测试通过' },
+    ],
+    verification: [{ command: 'bun test src/harness/ContextEngine.test.ts', reason: '定向' }],
+  });
+
+  it('抽出步骤/子步/验证命令里的路径，剔掉 URL 与过短斜杠词', () => {
+    expect(extractPathTokens('看 src/harness/ContextEngine.ts 和 https://example.com/a/b.ts，A/B 测试，v1.2')).toEqual([
+      'src/harness/ContextEngine.ts',
+    ]);
+    expect(normalizePlanPath('./src/a.ts、')).toBe('src/a.ts');
+    expect(normalizePlanPath('src\\ui\\chat.ts')).toBe('src/ui/chat.ts');
+  });
+
+  it('快照里没有的路径进 unresolvedPaths，找到的与目录前缀不误报', () => {
+    const existing = new Set(['src/harness/ContextEngine.ts', 'src/engine/AgentLoopEngine.ts', 'src/harness/__tests__/x.test.ts']);
+    const pathExists = (path: string) =>
+      existing.has(path) || [...existing].some((candidate) => candidate.startsWith(`${path}/`));
+    const parsed = parsePlanJsonWithMeta(planJson, 'production', { pathExists });
+    // 目录前缀算存在；两个不存在的文件（含新建目标）如实带出。
+    expect(parsed.plan?.unresolvedPaths).toEqual([
+      'src/engine/Nope.ts',
+      'src/engine/__tests__/loop.test.ts',
+      'src/harness/ContextEngine.test.ts',
+    ]);
+  });
+
+  it('不传 pathExists 时计划与旧版逐字段一致（不凭空多出核对结果）', () => {
+    const parsed = parsePlanJsonWithMeta(planJson, 'production');
+    expect(parsed.plan?.unresolvedPaths).toBeUndefined();
+    expect(parsed.plan?.steps).toHaveLength(3);
+  });
+
+  it('unresolvedPlanPaths 只在快照可信时才该被调用；结果封顶 8 条', () => {
+    const steps = Array.from({ length: 12 }, (_, i) => ({
+      id: String(i + 1), action: `改 src/missing/f${i}.ts`, description: '', expectedOutcome: '',
+    }));
+    expect(unresolvedPlanPaths({ steps }, () => false)).toHaveLength(8);
+    expect(unresolvedPlanPaths({ steps: [] }, () => false)).toEqual([]);
   });
 });

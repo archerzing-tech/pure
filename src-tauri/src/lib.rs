@@ -1427,8 +1427,9 @@ async fn read_file(
     start_line: Option<usize>,
     end_line: Option<usize>,
     head_lines: Option<usize>,
+    outline: Option<bool>,
 ) -> Result<String, String> {
-    run_blocking(move || read_file_impl(workspace, path, start_line, end_line, head_lines)).await
+    run_blocking(move || read_file_impl(workspace, path, start_line, end_line, head_lines, outline)).await
 }
 
 fn read_file_impl(
@@ -1437,6 +1438,7 @@ fn read_file_impl(
     start_line: Option<usize>,
     end_line: Option<usize>,
     head_lines: Option<usize>,
+    outline: Option<bool>,
 ) -> Result<String, String> {
     let full = resolve(&workspace, &path)?;
     let meta = fs::metadata(&full).map_err(|e| {
@@ -1494,7 +1496,8 @@ fn read_file_impl(
     // A3（2026-11-13 性能审计）：显式行范围（start+end）走流式首窗读取——
     // 40MB 日志只取 1000–1200 行时不必整份读/解码。容器格式（pdf/docx/xlsx…）
     // 与二进制仍走整份提取；窗口输出过同一个 finish_explicit_range 预算。
-    if start_line.is_some() && end_line.is_some() {
+    // outline 是全文语义，跳过窗口捷径（schema 已写明忽略行范围）。
+    if outline != Some(true) && start_line.is_some() && end_line.is_some() {
         if let Ok(Some(windowed)) = read_text_range_prefix(&full, start_line, end_line) {
             return Ok(finish_explicit_range(windowed, start_line.unwrap_or(1).max(1)));
         }
@@ -1508,7 +1511,124 @@ fn read_file_impl(
     if text.is_empty() {
         return Ok("(empty file)".to_string());
     }
+    // 符号大纲（2026-11-17）：中大型文件先给结构，模型再决定读哪一段。
+    if outline == Some(true) {
+        return Ok(symbol_outline(&text, &path));
+    }
     slice_read_file_text(text, start_line, end_line, head_lines)
+}
+
+// ── 符号大纲（read_file outline:true，2026-11-17）─────────────────────────
+// 与 src/shared/symbolOutline.ts 同一套判据的 Rust 镜像（GUI 走这里、CLI 走
+// 那边）：函数/类/方法/类型声明 + 行号，不解析 AST。规则改了必须两边同步，
+// 否则同一文件在 GUI 与 CLI 会给出不同的结构。
+static_regex!(outline_js_decl, r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\s*\*?|class|interface|type|enum|namespace)\s+[A-Za-z_$]");
+static_regex!(outline_js_arrow, r"^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:\s*[^=]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)\s*(?::\s*[^=]+)?=>|function\b)");
+static_regex!(outline_js_method, r"^\s{2,}(?:(?:public|private|protected|static|readonly|abstract|async|override|get|set|\*)\s+)*[A-Za-z_$][\w$]*\s*(?:<[^>]*>)?\s*\([^;]*\)\s*(?::\s*[^{;]+)?\s*\{");
+static_regex!(outline_python, r"^\s*(?:async\s+)?def\s+\w+|^\s*class\s+\w+");
+static_regex!(outline_rust_fn, r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+\w+");
+static_regex!(outline_rust_decl, r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|impl|mod|type|const|static|union|macro_rules!)\b");
+static_regex!(outline_go, r"^func\s+(?:\([^)]*\)\s*)?\w+|^type\s+\w+");
+static_regex!(outline_jvm_decl, r"^\s*(?:(?:public|private|protected|internal|abstract|final|static|sealed|data|open|override|partial)\s+)*(?:class|interface|enum|record|object|struct)\s+\w+");
+static_regex!(outline_jvm_method, r"^\s*(?:public|private|protected|internal|static|final|abstract|synchronized|async|open|override|sealed)\s+[\w<>\[\],.? ]+\s+\w+\s*\(");
+static_regex!(outline_ruby, r"^\s*(?:def|class|module)\s+\w+");
+static_regex!(outline_php, r"^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*function\s+\w+|^\s*(?:abstract\s+|final\s+)?(?:class|interface|trait)\s+\w+");
+
+const OUTLINE_MAX_SYMBOLS: usize = 120;
+const OUTLINE_MAX_LINE_CHARS: usize = 160;
+
+fn outline_family(path: &str) -> &'static str {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let ext = match base.rfind('.') {
+        Some(at) => base[at + 1..].to_ascii_lowercase(),
+        None => return "none",
+    };
+    match ext.as_str() {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => "js",
+        "py" | "pyi" => "python",
+        "rs" => "rust",
+        "go" => "go",
+        "java" | "kt" | "kts" | "scala" | "cs" | "swift" => "jvm",
+        "rb" => "ruby",
+        "php" => "php",
+        _ => "none",
+    }
+}
+
+/// 方法正则按「标识符 + 圆括号」匹配，会误收控制流行；TS 侧同一张排除表。
+fn outline_non_declaration(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let first: String = trimmed
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    matches!(
+        first.as_str(),
+        "if" | "for" | "while" | "switch" | "catch" | "return" | "else" | "do"
+            | "try" | "with" | "new" | "await" | "yield" | "throw" | "typeof"
+            | "delete" | "void" | "super" | "this"
+    )
+}
+
+fn outline_matches(path: &str, line: &str) -> bool {
+    match outline_family(path) {
+        "js" => {
+            outline_js_decl().is_match(line)
+                || outline_js_arrow().is_match(line)
+                || (outline_js_method().is_match(line) && !outline_non_declaration(line))
+        }
+        "python" => outline_python().is_match(line),
+        "rust" => outline_rust_fn().is_match(line) || outline_rust_decl().is_match(line),
+        "go" => outline_go().is_match(line),
+        "jvm" => {
+            outline_jvm_decl().is_match(line)
+                || (outline_jvm_method().is_match(line) && !outline_non_declaration(line))
+        }
+        "ruby" => outline_ruby().is_match(line),
+        "php" => outline_php().is_match(line),
+        _ => false,
+    }
+}
+
+fn symbol_outline(text: &str, path: &str) -> String {
+    let total = text.lines().count();
+    if outline_family(path) == "none" {
+        return format!(
+            "[outline: {} — {} lines; no symbol outline for this file type, read a range with startLine/endLine]",
+            path, total
+        );
+    }
+    let mut found: Vec<String> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || !outline_matches(path, line) {
+            continue;
+        }
+        let shown: String = line.trim_end().chars().take(OUTLINE_MAX_LINE_CHARS).collect();
+        found.push(format!("{}: {}", index + 1, shown));
+        if found.len() >= OUTLINE_MAX_SYMBOLS {
+            break;
+        }
+    }
+    if found.is_empty() {
+        return format!(
+            "[outline: {} — {} lines; no declaration lines matched, read a range with startLine/endLine]",
+            path, total
+        );
+    }
+    let mut out = format!(
+        "[outline: {} — {} lines, {} symbols]\n{}",
+        path,
+        total,
+        found.len(),
+        found.join("\n")
+    );
+    if found.len() >= OUTLINE_MAX_SYMBOLS {
+        out.push_str(&format!(
+            "\n[outline capped at {} symbols — read a range for the rest]",
+            OUTLINE_MAX_SYMBOLS
+        ));
+    }
+    out
 }
 
 /// 刀 D1（2026-10-10）read_file 的行范围语义（纯函数，单测锁定）：
@@ -1727,22 +1847,41 @@ mod read_file_slice_tests {
     fn returns_full_text_when_no_range_or_head_is_given() {
         // 内部调用方（撤销快照 / artifact 预览 / overlay 守卫）依赖全文语义。
         let ws = write_fixture("full", "l1\nl2\nl3");
-        let out = read_file_impl(ws, "f.txt".into(), None, None, None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, None, None).unwrap();
         assert_eq!(out, "l1\nl2\nl3");
+    }
+
+    // 符号大纲（2026-11-17）：只回声明行 + 行号，控制流行不能混进来。
+    #[test]
+    fn outline_returns_declarations_with_line_numbers_and_skips_control_flow() {
+        let text = "const a = 1;\nexport class Foo {\n  bar() {\n    if (x) { y(); }\n  }\n}\nexport function baz() {}\n";
+        let out = symbol_outline(text, "a.ts");
+        assert!(out.contains("[outline: a.ts — 7 lines, 3 symbols]"), "{out}");
+        assert!(out.contains("2: export class Foo {"), "{out}");
+        assert!(out.contains("3:   bar() {"), "{out}");
+        assert!(out.contains("7: export function baz() {}"), "{out}");
+        assert!(!out.contains("if (x)"), "{out}");
+    }
+
+    #[test]
+    fn outline_covers_python_and_rust_and_is_honest_for_other_types() {
+        assert!(symbol_outline("def f():\n    pass\nclass C:\n    pass\n", "a.py").contains("1: def f():"));
+        assert!(symbol_outline("fn a() {}\npub fn b() {}\nimpl X {}\n", "a.rs").contains("3: impl X {}"));
+        assert!(symbol_outline("hello", "notes.txt").contains("no symbol outline for this file type"));
     }
 
     #[test]
     fn slices_explicit_ranges_before_ipc_without_footer() {
         let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(2400), Some(2402), None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
         assert_eq!(out, "line-2400\nline-2401\nline-2402");
     }
 
     #[test]
     fn range_starting_past_eof_returns_empty() {
         let ws = write_fixture("past-eof", "l1\nl2");
-        let out = read_file_impl(ws, "f.txt".into(), Some(9), None, None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), Some(9), None, None, None).unwrap();
         assert_eq!(out, "");
     }
 
@@ -1753,7 +1892,7 @@ mod read_file_slice_tests {
         // 至少知道这行有多长。TS 侧 readFileRangeSlice 同语义。
         let content = format!("head\n{}\n", "x".repeat(5000));
         let ws = write_fixture("clip-line", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(2), Some(2), None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), Some(2), Some(2), None, None).unwrap();
         assert!(out.starts_with("xxxx"), "clipped prefix: {}", &out[..40.min(out.len())]);
         assert!(out.contains("本行共 5000 字符，已截断"), "length marker: {}", out);
         assert!(out.len() < 3000, "clipped output is bounded: {}", out.len());
@@ -1768,7 +1907,7 @@ mod read_file_slice_tests {
         // 取前 16 行（16×1901=30416，加第 17 行 32317 超预算）。
         let content = (1..=20).map(|i| format!("f{}-{}", i, "a".repeat(1897))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range-budget", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(1), Some(20), None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), Some(1), Some(20), None, None).unwrap();
         assert!(out.contains("f16-aaa"), "sixteen lines fit: {}", &out[..60.min(out.len())]);
         assert!(!out.contains("f17-aaa"));
         assert!(out.contains("范围共 20 行，以上显示前 16 行"), "range footer: {}", out);
@@ -1780,7 +1919,7 @@ mod read_file_slice_tests {
         // 小范围逐字返回零漂移：行内无超长、总量在预算内时与旧版逐字一致。
         let content = (1..=20).map(|i| format!("row-{i}")).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range-verbatim", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(5), Some(7), None).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), Some(5), Some(7), None, None).unwrap();
         assert_eq!(out, "row-5\nrow-6\nrow-7");
         assert!(!out.contains("read_file："), "no footer on a small range");
     }
@@ -1789,7 +1928,7 @@ mod read_file_slice_tests {
     fn head_default_returns_head_plus_total_lines_footer() {
         let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("head", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.starts_with("line-1\n"));
         assert!(out.contains("line-2000\n"));
         assert!(!out.contains("line-2001"));
@@ -1799,7 +1938,7 @@ mod read_file_slice_tests {
     #[test]
     fn head_covering_the_whole_file_returns_text_without_footer() {
         let ws = write_fixture("head-all", "l1\nl2\nl3");
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert_eq!(out, "l1\nl2\nl3");
     }
 
@@ -1808,7 +1947,7 @@ mod read_file_slice_tests {
         // 每行 8000 字符：第 4 行撞上 32000 预算 → 只取前 3 行（行中不截断）。
         let content = (0..10).map(|i| format!("f{}-{}", i, "a".repeat(8000))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("head-budget", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.contains("f2-aaa"));
         assert!(!out.contains("f3-aaa"));
         assert!(out.contains("以上是前 3 行，文件共 10 行。继续读用 startLine=4"));
@@ -1820,7 +1959,7 @@ mod read_file_slice_tests {
         // "以上是前 0 行"。现在给首行前缀 + 行号无法续读的出路文案。
         let content = "x".repeat(40_000);
         let ws = write_fixture("one-line", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.starts_with("xxxx"), "prefix present: {}", &out[..16.min(out.len())]);
         assert!(out.contains("首行过长"), "partial notice: {}", out);
         assert!(out.contains("无法续读"), "actionable continuation: {}", out);
@@ -1838,7 +1977,7 @@ mod read_file_slice_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let ws = write_fixture("head-cjk", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000)).unwrap();
+        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.contains("第10行"), "10 lines fit in 32k chars: {}", &out[..40.min(out.len())]);
         assert!(!out.contains("第11行"));
     }
@@ -1850,7 +1989,7 @@ mod read_file_slice_tests {
         let content = (1..=5000).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("stream-range", &content);
         let expected = slice_read_file_text(content.trim().to_string(), Some(2400), Some(2402), None).unwrap();
-        let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(2400), Some(2402), None).unwrap();
+        let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
         assert_eq!(actual, expected);
         let path = std::path::Path::new(&ws).join("f.txt");
         assert!(
@@ -1866,7 +2005,7 @@ mod read_file_slice_tests {
         let ws = write_fixture("stream-trim", &content);
         for (start, end) in [(1usize, 2usize), (2, 3), (4, 6), (100, 120), (2999, 3002)] {
             let expected = slice_read_file_text(content.trim().to_string(), Some(start), Some(end), None).unwrap();
-            let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(start), Some(end), None).unwrap();
+            let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(start), Some(end), None, None).unwrap();
             assert_eq!(actual, expected, "range {start}..{end}");
         }
     }
@@ -1877,7 +2016,7 @@ mod read_file_slice_tests {
         let content = (1..=20_000).map(|i| format!("row-{i}-{}", "x".repeat(12))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("stream-deep", &content);
         let expected = slice_read_file_text(content.trim().to_string(), Some(19_000), Some(19_010), None).unwrap();
-        let actual = read_file_impl(ws, "f.txt".into(), Some(19_000), Some(19_010), None).unwrap();
+        let actual = read_file_impl(ws, "f.txt".into(), Some(19_000), Some(19_010), None, None).unwrap();
         assert_eq!(actual, expected);
     }
 
@@ -1905,7 +2044,7 @@ mod read_file_slice_tests {
         let subdir = std::path::Path::new(&ws).join("subdir");
         fs::create_dir_all(&subdir).unwrap();
         fs::write(subdir.join("b.txt"), "x").unwrap();
-        let out = read_file_impl(ws.clone(), "subdir".into(), None, None, None).unwrap();
+        let out = read_file_impl(ws.clone(), "subdir".into(), None, None, None, None).unwrap();
         assert!(out.contains("是目录"), "应自陈是目录：{}", out);
         assert!(out.contains("b.txt"), "应列出文件条目：{}", out);
         assert!(out.contains("补全到文件名"), "应给出下一步出路：{}", out);

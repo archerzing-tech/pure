@@ -70,6 +70,10 @@ export interface Plan {
   steps: PlanStep[];
   reasoning: string;
   verification?: PlanVerificationSpec[];
+  /** 解析计划时按工作区快照核对过、但没找到的路径（2026-11-17 规划落地刀）。
+   *  可能是新建目标，也可能是写错的既有路径——宿主只交事实，不动计划。
+   *  缺省 = 没做核对（无工作区 / 文件工具不可用 / 快照被截断）。 */
+  unresolvedPaths?: string[];
 }
 
 export type TaskComplexity = 'simple' | 'complex';

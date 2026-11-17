@@ -10,6 +10,53 @@ import type { WorkOrderRegister } from '../character';
 
 const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "steps": [{"action": "imperative, short", "description": "what this step concretely does for THIS task", "expectedOutcome": "what exists or is verified when the step is done", "parallel": false, "substeps": [{"action": "...", "description": "...", "expectedOutcome": "..."}], "todosRequired": false}], "verification": [{"command": "the exact command", "reason": "why running this proves the changes", "final": false}]}`;
 
+/** 规划证据（2026-11-17 规划落地刀）：宿主从工作区**真实读到的快照**。
+ *  只放机制采集的事实（目录结构 / 请求点名文件的头部 / 清单里的命令），不做
+ *  「哪些文件相关」的语义猜测——猜测留给模型，宿主管读数。 */
+export interface PlanEvidenceSnapshot {
+  workspace: string;
+  scannedFiles: number;
+  /** 扫描到上限被截断：此时少扫到的路径不等于不存在，块头必须说清楚。 */
+  truncated: boolean;
+  groups: Array<{ dir: string; count: number; samples: string[] }>;
+  named: Array<{ path: string; lines: string; excerpt: string }>;
+  commands: Array<{ name: string; command: string }>;
+  manifests: string[];
+}
+
+/** 文件正文里的同名标签先剔除：仓库内容不是可信输入，一行 `</workspace_evidence>`
+ *  就能把后面的一切顶出证据块当指令读（同 fenceHygiene / MCP 资源的数据面纪律）。 */
+function neutralizeEvidenceTags(text: string): string {
+  return text.replace(/<\/?(?:workspace_evidence|file)>/gi, '');
+}
+
+/** 把快照排成提示词里的证据块。路径与命令一律原样（模型要靠它们引用），
+ *  不润色、不概括。 */
+export function formatPlanEvidence(input: PlanEvidenceSnapshot): string {
+  const lines = [
+    '<workspace_evidence>',
+    `Workspace root: ${input.workspace}`,
+    `Project files in this snapshot: ${input.scannedFiles}${input.truncated ? ' (listing truncated — a path missing from this snapshot is NOT proof that it does not exist)' : ''}`,
+  ];
+  if (input.groups.length > 0) {
+    lines.push('Project structure (directory — file count — real paths):');
+    for (const group of input.groups) {
+      lines.push(`- ${group.dir} — ${group.count} files — e.g. ${group.samples.join(', ')}`);
+    }
+  }
+  if (input.manifests.length > 0) lines.push(`Manifests present: ${input.manifests.join(', ')}`);
+  if (input.commands.length > 0) {
+    lines.push('Project commands (copied verbatim from the manifest):');
+    for (const command of input.commands) lines.push(`- ${command.name}: ${command.command}`);
+  }
+  for (const file of input.named) {
+    lines.push(`Head of ${file.path} (lines ${file.lines}):`);
+    lines.push('<file>', neutralizeEvidenceTags(file.excerpt), '</file>');
+  }
+  lines.push('</workspace_evidence>');
+  return lines.join('\n');
+}
+
 /**
  * 规划思考的提示词。刻意的克制：不规定思考的提纲、顺序、段数——一旦规定，
  * 就又回到「固定模式」。只规定实质约束：用用户的语言、以自己的口吻想清楚、
@@ -22,7 +69,7 @@ const PLAN_JSON_SHAPE = `{"reasoning": "why this plan, one short paragraph", "st
  */
 export function buildPlanThinkingPrompt(
   userText: string,
-  opts: { projectBuild?: boolean; hasImages?: boolean; register?: WorkOrderRegister } = {},
+  opts: { projectBuild?: boolean; hasImages?: boolean; register?: WorkOrderRegister; evidence?: string } = {},
 ): { system: string; user: string } {
   const register = opts.register ?? 'production';
   const stepAsk = register === 'draft'
@@ -39,10 +86,21 @@ export function buildPlanThinkingPrompt(
     'You are taking on this task yourself. Before doing anything, think it through in front of the user — in the user\'s language, as yourself.',
     'There is no required outline. Think the way a sharp colleague thinks out loud before committing to an approach, and let THIS task decide what needs saying: what the request hinges on, which constraints shape the work, what you assume about anything left unsaid (state the assumption and proceed — never stall on questions here), how you intend to approach it and why, and anything the user would want to veto before you start. Skip whatever does not deserve the words.',
     'Never pad, never repeat the request back verbatim, never open with ritual phrases, never end with "let me know if this looks good" — the plan below is the handoff.',
+    // 规划先读真实代码（2026-11-17）：此前规划是一次不带工具的孤立调用，模型
+    // 只能凭空写路径和命令，计划卡的质量取决于措辞联想。证据块由宿主机械
+    // 采集（目录结构 / 请求点名文件的真实头部 / 项目命令），模型在此基础上
+    // 想，而不是在想象上想。
+    opts.evidence
+      ? [
+        'Read the workspace evidence below before you commit to steps. It is a REAL snapshot taken from the workspace just now — not an outline for you to re-derive from the request:',
+        opts.evidence,
+        'Ground every path and command in that evidence. Name a file or directory only when the evidence shows it, or when this very plan creates it. Never invent a path, a command, or a file layout. If the evidence does not settle something the work depends on, say so in your thinking and make verifying it an explicit step instead of assuming.',
+      ].join('\n')
+      : 'No workspace evidence is available for this turn (no workspace, or file tools are off). Do not invent file paths, commands, or project structure: a step may say what must be verified and why, but name a path only as a target you will check before acting.',
     'When the thinking is done, commit to the plan: a ```json fenced block, and nothing after it.',
     'The thinking itself must be plain spoken prose in the user\'s language — never raw JSON, never a bare JSON object; the only JSON allowed in the entire reply is that final ```json fence.',
     PLAN_JSON_SHAPE,
-    `${stepAsk} Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". Use "todosRequired": false only for a step that genuinely needs no Todo list.`,
+    `${stepAsk} Every step must be earned by your thinking above — concrete to this task, never generic filler like "explore the workspace" or "gather requirements". When a step touches a file the evidence already shows you, cite that exact path; when it needs one the evidence does not show, reading that specific file IS the step. Use "todosRequired": false only for a step that genuinely needs no Todo list.`,
     // 并行步自declared（2026-11-16 bug3）：互不依赖的步标 parallel:true，执行端
     // 同批派发。判断权归模型——宿主的域关键词表只认只读研究域，实现/测试/
     // 多模块这类最典型的可并行步它永远标不出来。依赖早步输出的步绝不能标。
@@ -122,7 +180,7 @@ export function liveNarrationPortion(full: string): string {
  */
 export function planThinkingContext(
   narration: string,
-  opts: { projectBuild?: boolean; hasPlanCard?: boolean; verification?: PlanVerificationSpec[]; register?: WorkOrderRegister } = {},
+  opts: { projectBuild?: boolean; hasPlanCard?: boolean; verification?: PlanVerificationSpec[]; register?: WorkOrderRegister; unresolvedPaths?: string[] } = {},
 ): string {
   // 刀 1.1：清单在执行语境里的两种身份——整份是迭代环的最小验证集（改动后
   // 就地重跑适用的，别攒到最后）；final 子集是收尾宿主机械重跑的闸门清单
@@ -164,6 +222,11 @@ export function planThinkingContext(
     opts.hasPlanCard
       ? ''
       : '没有结构化计划卡这回事，不要输出「## 计划 n：…」这类阶段标记——界面上没有卡片在等它们。',
+    // 路径核对（2026-11-17）：解析时按工作区快照对过的**事实**。不是重规划
+    // 指令——新建目标本来就不存在，所以只说「没找到」并让模型核实，不下结论。
+    opts.unresolvedPaths?.length
+      ? `路径核对：解析计划时按当时的工作区快照对过一遍，下面这些路径在快照里没找到——${opts.unresolvedPaths.join('、')}。新建目标不算错，照常建；如果是既有文件或目录，动手前先核实真实位置，别按不存在的位置施工。`
+      : '',
     projectBuildSection,
     registerSection,
     '</plan_thinking>',

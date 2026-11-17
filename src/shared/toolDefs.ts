@@ -21,13 +21,14 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; images (png/jpg/gif/webp/bmp, up to 5MB) come back as a visible image attachment so you can actually see them — screenshots, photos, charts; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Explicit ranges are bounded too: over ~32k characters a range returns its first lines plus a continue footer, and lines longer than 2000 characters come back clipped with a length marker — request narrower ranges instead of re-reading wide ones. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file.',
+    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; images (png/jpg/gif/webp/bmp, up to 5MB) come back as a visible image attachment so you can actually see them — screenshots, photos, charts; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Explicit ranges are bounded too: over ~32k characters a range returns its first lines plus a continue footer, and lines longer than 2000 characters come back clipped with a length marker — request narrower ranges instead of re-reading wide ones. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file. Pass outline:true to get a SYMBOL OUTLINE of a source file instead of its content: one line per declaration (function, class, method, type) with its line number, which is the cheap way to understand a large file before choosing a range. Outline covers the whole file and ignores startLine/endLine.',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too (e.g. C:/tmp/a.docx, ~/Documents/notes.txt). The workspace is only the default base for relative paths, not a confinement boundary.' },
         startLine: { type: 'number', description: 'First line to read (1-indexed, optional)' },
         endLine: { type: 'number', description: 'Last line to read (1-indexed, optional)' },
+        outline: { type: 'boolean', description: 'Return a symbol outline (declarations + line numbers) instead of the file body. Best for large source files: see the structure first, then read the range that matters. Ignores startLine/endLine.' },
       },
       required: ['path'],
     },
@@ -235,7 +236,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'discover_tools',
-    description: 'Search the deferred tool catalog and ACTIVATE the matches for this session. The resident table only carries the everyday loop (file read/write/edit, find_files/code_searcher, execute_command, web_search/web_fetch, download_file); the long tail (git family, deep research, document writers, network diagnostics, package sources, browser automation & screenshots) and EVERY connected MCP server\'s tools live behind this index — query it before reporting that a capability is missing. Search it when the job sounds like one of those (e.g. "git commit", "docx", "diagnose network") or mentions an MCP tool name. Returns each match\'s full schema; matches are immediately callable and stay available for the rest of the session.',
+    description: 'Search the deferred tool catalog and ACTIVATE the matches for this session. The resident table only carries the everyday loop (file read/write/edit incl. outline, list_files/glob_files/find_files/code_searcher, execute_command, web_search/web_fetch, download_file); the long tail (git family, deep research, document writers, network diagnostics, package sources, browser automation & screenshots) and EVERY connected MCP server\'s tools live behind this index — query it before reporting that a capability is missing. Search it when the job sounds like one of those (e.g. "git commit", "docx", "diagnose network") or mentions an MCP tool name. Returns each match\'s full schema; matches are immediately callable and stay available for the rest of the session.',
     input_schema: {
       type: 'object',
       properties: {
@@ -499,6 +500,11 @@ export const PUBLIC_TOOL_NAMES = new Set([
  */
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'read_file', 'write_file', 'edit_file', 'execute_command', 'find_files',
+  // 结构性定位回常驻（2026-11-17）：中大型项目的理解成本集中在「工作区长
+  // 什么样、有哪些文件」——这两个工具被 deferred 化后，模型要先猜关键词或
+  // 额外调一次 discover_tools 才能回答最基本的「目录里有什么」，首轮空转
+  // 直接吃掉理解预算。它们无副作用、schema 很小，常驻代价远低于误解成本。
+  'list_files', 'glob_files',
   'code_searcher', 'web_search', 'web_fetch', 'download_file',
   'discover_tools', 'presentation_guide', 'generate_image',
 ]);

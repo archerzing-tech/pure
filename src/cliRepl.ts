@@ -308,6 +308,8 @@ async function assembleCliPrompt(
   context: UserTurnContext,
   mcpClient?: MCPClient,
   worldState?: WorldStateRenderer,
+  /** 工程构建回合（流程闸门判定）——system 侧交付形态规则的闸门。 */
+  buildTurn = false,
 ) {
   const userWorkspace = args.workspace && args.workspace !== 'true'
     ? args.workspace
@@ -371,6 +373,7 @@ async function assembleCliPrompt(
     // delays the turn indefinitely.
     mcpResources: mcpClient ? await mcpClient.collectResourceContext() : undefined,
     mode,
+    buildTurn,
     budget: promptBudgetForProvider(args.customProviders, args.provider, args.model, args.providerOverrides, args.capabilityProbes),
     // The CLI merges subagent tools into toolsDefs when it has a workspace, so
     // delegation is possible — enable the multi_agent protocol fragment. Gated
@@ -813,7 +816,7 @@ async function runOneShot(args: CliArgs) {
   const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
     ...workflow.userContext,
     contract: taskContract ? formatTaskContract(taskContract) : undefined,
-  }, mcpClient);
+  }, mcpClient, undefined, needsDeliveryGate);
   const systemPrompt = assembly.systemPrompt;
   const userTurn = assembly.userPrompt ?? args.prompt;
   const budgetDiagnostic = formatPromptBudgetDiagnostic(assembly.budget);
@@ -1106,7 +1109,7 @@ async function runRepl(args: CliArgs) {
     const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, turnInput, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
-    }, mcpClient, cliWorldState);
+    }, mcpClient, cliWorldState, needsDeliveryGate);
     const systemPrompt = assembly.systemPrompt;
     const userTurn = assembly.userPrompt ?? input;
 

@@ -84,3 +84,21 @@ shouldEnterPlanReview（仅测试消费）一并收窄 / 退役。turnShape 本�
 1. tsc + bun test 全量双门禁。
 2. 真机：工程创作句（「做个小游戏」）观察 GLM 是否调 request_plan；不调
    也不算红（无卡直接干是合法路径），连失手（复杂工程直接乱干）才算。
+
+## 后续刀（2026-11-17）：规划先读真实代码
+
+原设计里 `planByThinking` 是一次**不带工具**的孤立调用（`llm.stream(request, [], …)`），
+计划里的路径与命令只能靠措辞联想，而 `planThinkingContext` 又要求模型「不要另起炉灶
+重新规划」——读到真实代码后假设不成立，只能在旧框架里打补丁。补两件机制：
+
+- **出卡前采证据**：`gatherPlanEvidence` 机械读一遍工作区（`list_files` 递归目录、
+  请求点名文件的真实头部、`package.json` 的 scripts），拼进规划提示词的
+  `<workspace_evidence>` 并附「以证据为准、不许编路径/命令」的判据。采集失败
+  （无工作区/fs 工具关闭/读取报错）时提示词明说「没有证据」，而不是留白。
+- **解析时核对路径**：`parsePlanJsonWithMeta(text, register, { pathExists })` 把步骤、
+  子步、验证命令里的路径与同一份快照对一遍，没找到的进 `Plan.unresolvedPaths`，随
+  执行语境与 `request_plan` 的工具结果交回模型。快照被截断时不做核对——少扫到 ≠
+  不存在。Windows 的 `list_files` 回反斜杠，快照先归一化再比对。
+
+核对只交事实、不改计划：新建目标本来就不存在，是新建还是写错由模型裁决。宿主不替
+模型决定「这步该不该做」，只保证它决定时眼前有真实代码。

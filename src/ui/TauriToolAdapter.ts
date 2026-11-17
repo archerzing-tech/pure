@@ -1560,6 +1560,12 @@ export class TauriToolAdapter implements ToolAdapter {
           // 整份过桥。显式范围原样给、不加脚注；默认（未给范围）传 headLines
           // ——Rust 只回头部切片 + 总行数 + 建议范围脚注（真杠杆：小文件零
           // 变化，真大文件不再整份进上下文逼出引擎 40k 盲截）。
+          // outline（2026-11-17）：Rust 侧返回声明行 + 行号；大纲是全文语义，
+          // 不带行范围也不带 headLines。
+          if (args.outline === true) {
+            const outline = await this.call('read_file', { workspace: ws, path: String(args.path ?? ''), outline: true }) as string;
+            return { id: toolCall.id, toolName: name, result: outline, success: true, duration: Date.now() - start };
+          }
           const s = typeof args.startLine === 'number' ? args.startLine : null;
           const e = typeof args.endLine === 'number' ? args.endLine : null;
           const content = await this.call('read_file', s !== null || e !== null

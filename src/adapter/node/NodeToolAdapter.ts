@@ -20,6 +20,7 @@ import { runBrowserTool, runScreenshotTool } from '../../tools/impl/browser';
 import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice, readFileRangeFooter, readFileRangeSlice } from '../../shared/readFileHead';
+import { formatSymbolOutline } from '../../shared/symbolOutline';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, isBenignNoMatchExit, safeParseArgs } from '../../shared/format';
 import { cacheQualityLiveLine } from '../../shared/endpointCacheQuality';
@@ -459,7 +460,8 @@ export class NodeToolAdapter implements ToolAdapter {
     // null（容器格式 / 窗口碰首行 / EOF 早于窗口结束 / 拿不准）回退全文路径。
     const rangeStart = typeof args.startLine === 'number' ? Math.max(1, args.startLine) : null;
     const rangeEnd = typeof args.endLine === 'number' ? Math.max(1, args.endLine) : null;
-    if (rangeStart !== null && rangeEnd !== null) {
+    // outline 是全文语义：行范围对它无意义（schema 已写明忽略），不能走窗口捷径。
+    if (args.outline !== true && rangeStart !== null && rangeEnd !== null) {
       const windowed = await this.readTextRangeWindow(path, rangeStart, rangeEnd);
       if (windowed !== null) {
         return this.explicitRangeResult(windowed.split('\n'), rangeStart, start);
@@ -474,6 +476,18 @@ export class NodeToolAdapter implements ToolAdapter {
     }
     if (!text) {
       text = '(empty file)';
+    }
+
+    // 符号大纲（2026-11-17）：整份读进来后只回声明行 + 行号。放在范围分支之前
+    // ——outline 是全文语义，startLine/endLine 对它没有意义（schema 已写明）。
+    if (args.outline === true) {
+      return {
+        id: `tool_${Date.now()}`,
+        toolName: 'read_file',
+        result: formatSymbolOutline(String(args.path), text),
+        success: true,
+        duration: Date.now() - start,
+      };
     }
 
     const lines = text.split('\n');

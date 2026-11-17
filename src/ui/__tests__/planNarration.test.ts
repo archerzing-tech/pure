@@ -4,7 +4,7 @@
 // 的分流、流式期绝不闪现计划 JSON、无卡时把思考当执行指引。
 
 import { describe, expect, it } from 'bun:test';
-import { buildPlanThinkingPrompt, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from '../planNarration';
+import { buildPlanThinkingPrompt, formatPlanEvidence, isBarePlanJson, isUsablePlan, liveNarrationPortion, planThinkingContext, splitNarrationAndPlan } from '../planNarration';
 
 describe('buildPlanThinkingPrompt — 不给提纲，只给实质约束', () => {
   it('要求用户语言、假设明说、不许复述请求与套话', () => {
@@ -256,5 +256,59 @@ describe('isUsablePlan — 解析结果必须真能当计划用', () => {
     expect(isUsablePlan({ reasoning: 'r', steps: [{ id: '1', action: '  ', description: '', expectedOutcome: '' }] })).toBe(false);
     expect(isUsablePlan(null)).toBe(false);
     expect(isUsablePlan(undefined)).toBe(false);
+  });
+});
+
+// 规划先读真实代码（2026-11-17）：证据块由宿主机械采集，规划提示词必须
+// 明确「以证据为准、不许编路径」，且没有证据时要如实说没有，而不是留白让
+// 模型自由发挥。
+describe('buildPlanThinkingPrompt — 工作区证据', () => {
+  const evidence = formatPlanEvidence({
+    workspace: '/ws/proj',
+    scannedFiles: 42,
+    truncated: false,
+    groups: [{ dir: 'src/engine', count: 7, samples: ['src/engine/AgentLoopEngine.ts'] }],
+    named: [{ path: 'src/engine/AgentLoopEngine.ts', lines: '1-200', excerpt: 'export class AgentLoopEngine {}' }],
+    commands: [{ name: 'typecheck', command: 'tsc --noEmit' }],
+    manifests: ['package.json'],
+  });
+
+  it('带上证据时要求以证据为准，不许编路径与命令', () => {
+    const { system } = buildPlanThinkingPrompt('重构引擎循环', { evidence });
+    expect(system).toContain('<workspace_evidence>');
+    expect(system).toContain('src/engine/AgentLoopEngine.ts');
+    expect(system).toContain('tsc --noEmit');
+    expect(system).toContain('Ground every path and command in that evidence');
+    expect(system).toContain('Never invent a path, a command, or a file layout');
+  });
+
+  it('没有证据时如实说没有，并禁止凭空写路径', () => {
+    const { system } = buildPlanThinkingPrompt('重构引擎循环');
+    expect(system).toContain('No workspace evidence is available');
+    expect(system).toContain('Do not invent file paths');
+    expect(system).not.toContain('<workspace_evidence>');
+  });
+
+  it('截断的快照必须自证截断，不能把「没扫到」当成「不存在」', () => {
+    const truncated = formatPlanEvidence({
+      workspace: '/ws/proj', scannedFiles: 4000, truncated: true,
+      groups: [], named: [], commands: [], manifests: [],
+    });
+    expect(truncated).toContain('listing truncated');
+    expect(truncated).toContain('NOT proof');
+  });
+});
+
+describe('planThinkingContext — 路径核对事实', () => {
+  it('核对结果作为事实交回，并说明新建目标不算错', () => {
+    const g = planThinkingContext('思考', { unresolvedPaths: ['src/a/Missing.ts'] });
+    expect(g).toContain('src/a/Missing.ts');
+    expect(g).toContain('新建目标');
+    expect(g).toContain('核实');
+  });
+
+  it('没有核对结果时一个字都不多', () => {
+    expect(planThinkingContext('思考', {})).not.toContain('路径核对');
+    expect(planThinkingContext('思考', { unresolvedPaths: [] })).not.toContain('路径核对');
   });
 });

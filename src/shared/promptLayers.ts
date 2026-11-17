@@ -343,6 +343,56 @@ export const PAINT_DSL_PROMPT = `To DRAW a static geometric illustration (archit
 - The paint block IS the deliverable — never save it as a file or draw it with a script.
 - A PAINT BLOCK IS NEVER SVG: do NOT render a geometric diagram/illustration as a \`\`\`svg block when paint fits. If a paint block failed to render, fix it by re-emitting a valid \`\`\`paint JSON block — NEVER switch to SVG.`;
 
+/**
+ * 工程构建回合的交付形态（2026-11-17）。用户判例：原型/工程任务里模型把整文件
+ * 贴进对话，界面一直在跳、短时间没人读得完，还多付一遍输出 token。
+ *
+ * 为什么必须有一条 system 侧的：no-dump 规则原本只在 formatArtifactPrompt 里，
+ * 而那一段住 user turn 的 buildProtocol 分区——世界状态 diff 把它渲染成一行
+ * 指针（内容不变就不重发），长时间构建里模型经常看不到原文；历史压缩也可能
+ * 把那份全量拷贝淘汰。这一条按回合闸门（buildTurn）随每轮装配，不再靠账龄。
+ */
+export const BUILD_DELIVERABLE_PROMPT = `<build_deliverable>
+The project files are the deliverable, not the reply. Code goes to disk: after writing or editing a file, point at it (\`path:line\`, line count) and say what changed — never paste the file back. Show code only when the user must judge something specific (an interface, a tricky hunk, a shape they asked to see), and then only the lines that matter — roughly ten to fifteen, never a whole file. Verification reports the command and its result line, not the full log. If there is no workspace to write into, say so and ask for one instead of printing the code.
+</build_deliverable>`;
+
+/**
+ * 编码回合的瘦身版语气（2026-11-17 提示词减重）。
+ *
+ * 背景：复杂工程回合的常驻提示词里，语气/人格/输出格式类合计约 8.6k 字符，
+ * 工作方法类只有约 2k——模型每轮先背四成「怎么说」，再拿到代码事实。这里
+ * 只压缩**表达面**的常驻教学：保留高级工程师人设、结论先行、有立场、禁套话、
+ * 默认自己定。刻意不动 character_core / character_expression：人格是产品不变
+ * 量（人格轨道刀 2/3），压缩它会把长尾情境的语气拧回默认腔。
+ *
+ * 闸门在 wantsCodingTurn：非编码回合（问答/写作/呈现）仍用完整版——那些回合
+ * 的展开、折叠与 chart 纪律就是交付本身。
+ */
+export const CODING_TONE_PROMPT = `Communication tone (pairing on code):
+- You are the senior engineer sitting at the user's keyboard with them. Lead with the verdict or the change itself, then why, then the next step. Short sentences, the user's own language.
+- Have a spine: when there is a trade-off, say which option you would pick and what would change your mind; when something in their code or plan looks wrong, say it plainly and kindly instead of hedging around it.
+- Plain register, no corporate smoothing. Never open with canned filler (好的，以下是 / 我来分析一下 / 我将按照以下步骤 / Here is a step-by-step breakdown), never close with canned politeness, and never scaffold 首先/其次/最后. Do not invent replacement ritual phrases.
+- One short line only when a decision is non-obvious or a result surprises; the work itself is the report.
+- When the user leaves a choice unstated, take the sensible default, say it in one line, and keep going.`;
+
+/**
+ * 编码回合闸门（2026-11-17）：这一轮是不是在代码库里看代码/改东西。
+ *
+ * 判据：代码块 / 仓库路径 / **动作词**（改代码、跑检查、调试），不收「函数 /
+ * 代码 / 模块」这类裸名词——「这个函数是干什么的」是代码问答，属于要保留
+ * 完整展示纪律的回合（图表/折叠卡就是交付），不能因此把它推成编码回合；
+ * 否则「非可视提示词是可视提示词前缀」的缓存纪律也会被打破。模式为 build
+ * （工程创作路由）时直接算编码回合。
+ */
+export function wantsCodingTurn(prompt: string, mode?: 'yolo' | 'plan' | 'build'): boolean {
+  if (mode === 'build') return true;
+  const text = prompt ?? '';
+  if (text.includes('```')) return true;
+  // 仓库路径形态（src/ui/chat.ts）：最短的工作信号。
+  if (/(?:^|[\s"'`(（])(?:[\w.@-]+\/)+[\w.@-]+/.test(text)) return true;
+  return /(?:修(?:复|改)|改(?:一下|动|掉|成)|重构|实现|编写|写一?(?:个)?(?:函数|脚本|模块|组件|接口|类|测试|工具|命令)|新增|添加|删除|移除|升级|迁移|接入|调试|排查|编译|构建|测试|类型检查|拆(?:成|分|开|掉)|报错|崩溃|卡死|bug|refactor|fix|implement|compile|build|test(?:s|ing)?|debug|lint|typecheck|migrate|upgrade)/i.test(text);
+}
+
 /** 拟人化沟通基调 — identical in GUI and CLI (shared, not duplicated).
  * Persona: the senior engineer pairing with the user. Deliberately written as
  * principles only — quoted "good example" sentences get recycled verbatim by
