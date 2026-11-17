@@ -1,7 +1,7 @@
 // src/harness/__tests__/ContextEngine.test.ts
 
 import { describe, it, expect } from 'bun:test';
-import { ContextEngine, DEFAULT_IMAGE_TOKEN_ESTIMATE, collectModifiedFilePaths, buildRehydrationMessage, estimateImageTokens, estimateTokens } from '../ContextEngine';
+import { ContextEngine, DEFAULT_IMAGE_TOKEN_ESTIMATE, collectModifiedFilePaths, collectTouchedFilePaths, buildRehydrationMessage, estimateImageTokens, estimateTokens } from '../ContextEngine';
 import type { Message } from '../../shared/types';
 
 function makeMsgs(count: number, prefix = 'msg'): Message[] {
@@ -632,6 +632,85 @@ describe('ContextEngine', () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].content).toContain('NEW CONTENT');
     expect(blocks[0].content).not.toContain('OLD CONTENT');
+  });
+
+  it('collects read files whose content left the window, newest access deciding', () => {
+    const call = (name: string, path: string, id: string): Message => ({
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id, index: 0, function: { name, arguments: JSON.stringify({ path }) } }],
+    });
+    const tool = (id: string, content: string): Message => ({ role: 'tool', content, toolCallId: id, toolName: 'read_file' });
+    const cleared = '[old read_file result cleared after compaction — 100 chars omitted.]';
+    const touched = collectTouchedFilePaths([
+      call('read_file', 'src/a.ts', 'a-old'),
+      tool('a-old', cleared),
+      // 同一个文件后来重读过，内容还在窗口里：旧的失效访问不能把它拖进来。
+      call('read_file', 'src/a.ts', 'a-new'),
+      tool('a-new', 'export const a = 1;'),
+      call('edit_file', 'src/b.ts', 'b-edit'),
+      tool('b-edit', cleared),
+      call('read_file', 'src/c.ts', 'c-kept'),
+      tool('c-kept', 'kept content'),
+    ], message => message.role === 'tool' && message.content === cleared, 10);
+
+    expect(touched).toEqual([{ path: 'src/b.ts', kind: 'mutation' }]);
+  });
+
+  it('restores already-read files as outlines when L1 clears their bodies (no eviction)', async () => {
+    // 长阅读型任务的典型形状：L1 把 read_file 结果清成占位符，一条消息都没驱逐。
+    // 以前这里什么都不补，模型只知道“结果被清掉” → 整个文件重读。
+    const source = 'export function alpha() {\n  return 1;\n}\n\nexport class Beta {\n}\n';
+    const reads: string[] = [];
+    const engine = new ContextEngine({
+      maxMessages: 1000,
+      maxTokens: 600,
+      microcompaction: { keepRecent: 1 },
+      rehydration: {
+        readFile: async (path) => { reads.push(path); return path === 'src/app.ts' ? source : undefined; },
+        todos: () => '[>] wire the parser',
+      },
+    });
+    const readPair = (id: string, path: string): Message[] => [
+      { role: 'assistant', content: '', toolCalls: [{ id, index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path }) } }] },
+      { role: 'tool', content: 'x'.repeat(1200), toolCallId: id, toolName: 'read_file' },
+    ];
+    const msgs: Message[] = [...readPair('r1', 'src/app.ts'), ...readPair('r2', 'src/other.ts'), ...readPair('r3', 'src/third.ts')];
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 } });
+
+    expect(result.evictedMessages).toBe(0);
+    expect(result.microcompactedToolResults).toBeGreaterThan(0);
+    expect(reads).toContain('src/app.ts');
+    const block = result.messages.find(m => m.content.startsWith('State restored after context compaction'));
+    expect(block).toBeDefined();
+    expect(block!.content).toContain('outline only — body cleared');
+    expect(block!.content).toContain('alpha');
+    expect(block!.content).toContain('Beta');
+    // 大纲而不是正文：刚为省预算清掉的内容不能被原样搬回来。
+    expect(block!.content).not.toContain('return 1;');
+    expect(block!.content).toContain('wire the parser');
+  });
+
+  it('restores a read-only file as an outline after an eviction, mutated files as bodies', async () => {
+    const source = 'export function alpha() {\n  return 1;\n}\n\nexport class Beta {\n}\n';
+    const engine = new ContextEngine({
+      maxMessages: 3,
+      rehydration: { readFile: async () => source },
+    });
+    const msgs: Message[] = [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'r1', index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/app.ts' }) } }] },
+      { role: 'tool', content: 'x', toolCallId: 'r1', toolName: 'read_file' },
+      ...pair('p1'), ...pair('p2'), ...pair('p3'),
+    ];
+
+    const result = await engine.compact(msgs);
+
+    const block = result.messages.find(m => m.content.startsWith('State restored after context compaction'));
+    expect(block).toBeDefined();
+    expect(block!.content).toContain('--- src/app.ts (outline only — body cleared) ---');
+    expect(block!.content).toContain('already read this session');
+    expect(result.rehydratedFiles).toBe(1);
   });
 
   it('does not rehydrate when nothing was evicted', async () => {

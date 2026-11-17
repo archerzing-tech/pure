@@ -24,11 +24,15 @@
 //      modified files are re-read from disk and the live plan/todos are
 //      re-declared — so the model resumes against the real files rather than
 //      a summary's memory of them.
+//      (2026-11-17) 已读文件也进来，但只算大纲；没有驱逐、只是 L1 清空了
+//      read_file 结果的回合同样补一份（改造前那里什么都不补，长阅读型任务
+//      只能整文件重读）。判据是「这个文件的最新一次访问，内容还在窗口里吗」。
 
 import { estimateToolDefinitionTokens } from '../shared/providers';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { stripUserTurnContext } from '../shared/promptLayers';
 import { closeDanglingFence } from '../shared/fenceHygiene';
+import { formatSymbolOutline } from '../shared/symbolOutline';
 import type { Message, MessageImage, LLMAdapter, ToolDefinition } from '../shared/types';
 
 export interface ContextMicrocompactionConfig {
@@ -207,14 +211,32 @@ export function estimateImageTokens(image: MessageImage): number {
 const REHYDRATE_MAX_FILES = 5;
 const REHYDRATE_MAX_CHARS_PER_FILE = 5_000;
 const REHYDRATE_MAX_TOTAL_CHARS = 50_000;
+/** 已读文件的还原只回大纲：正文刚被 L1 清掉，原样搬回来等于把省下的预算
+ *  再花掉。上限刻意压得比正文字小一个量级（5 个 / 800 字符 / 合计 3000）。 */
+const REHYDRATE_OUTLINE_MAX_FILES = 5;
+const REHYDRATE_OUTLINE_MAX_CHARS = 800;
+const REHYDRATE_OUTLINE_TOTAL_CHARS = 3_000;
 
 /** Tool calls that leave a file in the workspace: the rehydration candidates. */
 const FILE_MUTATION_TOOL_RE = /^(write_file|create_file|edit_file|apply_patch|str_replace|multi_edit|notebook_edit|write|edit)$/i;
+/** Tool calls that only read: their content is recoverable, but re-reading is
+ *  exactly the round trip this layer exists to avoid. */
+const FILE_READ_TOOL_RE = /^(read_file|read|view_file|view|open_file|cat|read_multiple_files)$/i;
 
 /** The rehydration block's first line. Used both to announce the block and,
  *  on the NEXT compaction, to recognize and drop the stale one — otherwise a
  *  fresh copy stacks up on every compaction and never leaves the window. */
 const REHYDRATION_PREFIX = 'State restored after context compaction';
+
+/** L1 placeholder marker. Single source for both writing the placeholder and
+ *  recognizing it later, so a cleared result can be traced back to its file. */
+const MICROCOMPACTED_PREFIX = '[old ';
+
+function isMicrocompactedToolResult(message: Message): boolean {
+  return message.role === 'tool'
+    && (message.content ?? '').startsWith(MICROCOMPACTED_PREFIX)
+    && (message.content ?? '').includes('result cleared after compaction');
+}
 
 function summarizeExcerpt(message: Message): string {
   const raw = message.content ?? '';
@@ -267,7 +289,7 @@ export function estimateTokens(messages: Message[]): number {
  *  role/toolCallId/toolName untouched — the wire protocol stays valid — and
  *  tells the model both what was dropped and how to get it back. */
 function microcompactedPlaceholder(toolName: string | undefined, chars: number): string {
-  return `[old ${toolName ?? 'tool'} result cleared after compaction — ${chars} chars omitted. Re-run the tool if you still need this content.]`;
+  return `${MICROCOMPACTED_PREFIX}${toolName ?? 'tool'} result cleared after compaction — ${chars} chars omitted. Re-run the tool if you still need this content.]`;
 }
 
 /** Window-relative protected-tail budget: recent tool context is worth about
@@ -426,38 +448,134 @@ export function collectModifiedFilePaths(messages: Message[], limit: number): st
   return paths;
 }
 
+/** 一个被读/改过、且内容已不在窗口里的文件。`read` 只回大纲（正文搬回来
+ *  等于把刚省下的预算再花掉），`mutation` 回正文（要接着改它）。 */
+export interface TouchedFile {
+  path: string;
+  kind: 'read' | 'mutation';
+}
+
 /**
- * L3 — assemble the post-compaction state block: re-read the files the
- * conversation most recently changed, and restate the live plan/todos. Both
- * halves are optional; a host with neither configured gets no block and the
- * behavior is exactly the pre-9.1 compaction.
+ * 2026-11-17 — 长任务反复重读的根因：L3 只认「改过的文件」+「发生驱逐」，
+ * 而长阅读型任务里丢内容的主路径是 L1 把 read_file 结果清成占位符（不驱逐）。
+ * 模型看不到内容、占位符又只说“需要就重跑工具”，于是整文件重读。
+ *
+ * 这里按**每个文件的最新一次访问**判定：后来读过且内容还在窗口里就不算丢。
+ * 判定用 toolCallId 而不是对象身份——紧急 L1 会重建消息对象。
+ */
+export function collectTouchedFilePaths(
+  messages: Message[],
+  isStale: (message: Message) => boolean,
+  limit: number,
+): TouchedFile[] {
+  const resultById = new Map<string, Message>();
+  for (const message of messages) {
+    if (message.role === 'tool' && message.toolCallId) resultById.set(message.toolCallId, message);
+  }
+  const seen = new Set<string>();
+  const touched: TouchedFile[] = [];
+  for (let index = messages.length - 1; index >= 0 && touched.length < limit; index--) {
+    const message = messages[index];
+    if (message.role !== 'assistant' || !message.toolCalls?.length) continue;
+    // 同一批并行调用里靠后的更新，所以倒序遍历调用数组才能保持“新→旧”。
+    for (let cursor = message.toolCalls.length - 1; cursor >= 0; cursor--) {
+      if (touched.length >= limit) break;
+      const call = message.toolCalls[cursor];
+      const kind: TouchedFile['kind'] | undefined = FILE_MUTATION_TOOL_RE.test(call.function.name)
+        ? 'mutation'
+        : FILE_READ_TOOL_RE.test(call.function.name) ? 'read' : undefined;
+      if (!kind) continue;
+      const path = extractToolPath(call.function.arguments);
+      if (!path || seen.has(path)) continue;
+      // 最新访问先到，无论它是否失效都要占位：否则旧的失效访问会把一个
+      // 内容其实还在窗口里的文件误判成“丢了”。
+      seen.add(path);
+      const result = resultById.get(call.id);
+      // 没有结果消息（中断的调用）也等于内容不在窗口里。
+      if (result && !isStale(result)) continue;
+      touched.push({ path, kind });
+    }
+  }
+  return touched;
+}
+
+export interface ContextRehydrationOptions {
+  /** 这条工具结果是否已不在窗口里（L1 占位或整组驱逐）。缺省时退回旧行为：
+   *  无条件重读最近改过的文件。 */
+  isStale?: (message: Message) => boolean;
+  /** 改过的文件正文是否还原（默认 true）。L1-only 的补丁路径传 false：那一轮
+   *  刚为省预算清了结果，把正文搬回来是自相矛盾。 */
+  bodies?: boolean;
+  /** 已读文件的大纲还原。false 关闭；缺省 5 个 / 800 字符/个 / 合计 3000。 */
+  outlines?: false | { maxFiles?: number; maxCharsPerOutline?: number; maxTotalChars?: number };
+}
+
+/**
+ * L3 — assemble the post-compaction state block: the files the conversation was
+ * working from, plus the live plan/todos. Both halves are optional; a host with
+ * neither configured gets no block and the behavior is exactly the pre-9.1
+ * compaction.
+ *
+ * 2026-11-17 — 已读文件也进来了，但只回大纲：长任务里模型反复整文件重读的
+ * 原因是它已经忘了自己读过什么。回正文会把 L1 刚省下的预算吃回去；回大纲
+ * 既告诉它「读过、结构长这样」，又让它下一次只读需要的区间。
  */
 export async function buildRehydrationMessage(
   messages: Message[],
   config: ContextRehydrationConfig,
+  options: ContextRehydrationOptions = {},
 ): Promise<{ message: Message; files: number; restoredPlan: boolean } | undefined> {
   const parts: string[] = [];
-  let files = 0;
+  const maxFiles = config.maxFiles ?? REHYDRATE_MAX_FILES;
+  const outlineSetting = options.outlines === false ? undefined : (options.outlines ?? {});
+  const outlineMaxFiles = outlineSetting ? Math.max(0, outlineSetting.maxFiles ?? REHYDRATE_OUTLINE_MAX_FILES) : 0;
+  const candidates: TouchedFile[] = options.isStale
+    ? collectTouchedFilePaths(messages, options.isStale, maxFiles + outlineMaxFiles)
+    : collectModifiedFilePaths(messages, maxFiles).map(path => ({ path, kind: 'mutation' as const }));
+  let bodyFiles = 0;
+  let outlineFiles = 0;
   if (config.readFile) {
-    const maxFiles = config.maxFiles ?? REHYDRATE_MAX_FILES;
-    const maxCharsPerFile = config.maxCharsPerFile ?? REHYDRATE_MAX_CHARS_PER_FILE;
-    let remaining = config.maxTotalChars ?? REHYDRATE_MAX_TOTAL_CHARS;
-    for (const path of collectModifiedFilePaths(messages, maxFiles)) {
-      if (remaining <= 0) break;
-      let text: string | undefined;
+    const read = async (path: string): Promise<string | undefined> => {
       try {
-        text = await config.readFile(path);
+        const text = await config.readFile!(path);
+        return typeof text === 'string' && text.length > 0 ? text : undefined;
       } catch {
-        text = undefined;
+        return undefined;
       }
-      if (typeof text !== 'string' || text.length === 0) continue;
-      const cap = Math.min(maxCharsPerFile, remaining);
-      // 先闭合围栏再拼 truncated 标记：cap 停在 ``` 中途时，标记行不能跟着
-      // 被吞进未闭合围栏（同 summarizeExcerpt 的注入面卫生）。
-      const body = text.length > cap ? `${closeDanglingFence(text.slice(0, cap))}\n[...truncated]` : text;
-      remaining -= body.length;
-      files++;
-      parts.push(`--- ${path} ---\n${body}`);
+    };
+    if (options.bodies !== false) {
+      const maxCharsPerFile = config.maxCharsPerFile ?? REHYDRATE_MAX_CHARS_PER_FILE;
+      let remaining = config.maxTotalChars ?? REHYDRATE_MAX_TOTAL_CHARS;
+      for (const candidate of candidates) {
+        if (candidate.kind !== 'mutation') continue;
+        if (bodyFiles >= maxFiles || remaining <= 0) break;
+        const text = await read(candidate.path);
+        if (!text) continue;
+        const cap = Math.min(maxCharsPerFile, remaining);
+        // 先闭合围栏再拼 truncated 标记：cap 停在 ``` 中途时，标记行不能跟着
+        // 被吞进未闭合围栏（同 summarizeExcerpt 的注入面卫生）。
+        const body = text.length > cap ? `${closeDanglingFence(text.slice(0, cap))}\n[...truncated]` : text;
+        remaining -= body.length;
+        bodyFiles++;
+        parts.push(`--- ${candidate.path} ---\n${body}`);
+      }
+    }
+    if (outlineSetting) {
+      const maxChars = outlineSetting.maxCharsPerOutline ?? REHYDRATE_OUTLINE_MAX_CHARS;
+      let remaining = outlineSetting.maxTotalChars ?? REHYDRATE_OUTLINE_TOTAL_CHARS;
+      for (const candidate of candidates) {
+        if (candidate.kind !== 'read') continue;
+        if (outlineFiles >= outlineMaxFiles || remaining <= 0) break;
+        const text = await read(candidate.path);
+        if (!text) continue;
+        const outline = formatSymbolOutline(candidate.path, text);
+        const body = outline.length > Math.min(maxChars, remaining)
+          ? `${closeDanglingFence(outline.slice(0, Math.min(maxChars, remaining)))}\n[...truncated]`
+          : outline;
+        remaining -= body.length;
+        outlineFiles++;
+        parts.push(`--- ${candidate.path} (outline only — body cleared) ---\n${body}`);
+      }
     }
   }
   let restoredPlan = false;
@@ -474,11 +592,19 @@ export async function buildRehydrationMessage(
     }
   }
   if (parts.length === 0) return undefined;
-  const header = files > 0
-    ? `${REHYDRATION_PREFIX} — the versions of these files from before the compaction were evicted; these are their current on-disk contents. Do not assume earlier text still applies.`
-    : `${REHYDRATION_PREFIX} — the transcript was trimmed; this is the live state to continue from.`;
+  const files = bodyFiles + outlineFiles;
+  const headerLines = [
+    bodyFiles > 0
+      ? `${REHYDRATION_PREFIX} — the versions of these files from before the compaction were evicted; these are their current on-disk contents. Do not assume earlier text still applies.`
+      : `${REHYDRATION_PREFIX} — the transcript was trimmed; this is the live state to continue from.`,
+  ];
+  if (outlineFiles > 0) {
+    // 明确“这是大纲不是正文”，否则模型会把大纲当全文引用；也告诉它下一步
+    // 该读区间而不是整文件重读。
+    headerLines.push('Files listed as outline only were already read this session; their bodies left the window. Use the outline to pick a line range (startLine/endLine) instead of reading the whole file again.');
+  }
   return {
-    message: { role: 'system', content: `${header}\n\n${parts.join('\n\n')}` },
+    message: { role: 'system', content: `${headerLines.join(' ')}\n\n${parts.join('\n\n')}` },
     files,
     restoredPlan,
   };
@@ -679,19 +805,44 @@ export class ContextEngine {
       // Microcompaction alone may have been enough. Report it honestly rather
       // than as a no-op, and keep the caller's message order (only tool-result
       // contents changed; nothing was moved or dropped).
+      //
+      // 2026-11-17 — 只被 L1 清空的已读文件在这里补回大纲：没有驱逐时以前什么
+      // 都不补，模型只知道“某次 read_file 的结果被清掉了”，于是整文件重读。
+      // 只回大纲不回正文：这一轮刚为省预算清空它们，把正文搬回来是自相矛盾。
+      const clearedReadIds = new Set<string>();
+      if (microcompactedToolResults > 0) {
+        for (const message of working) {
+          if (isMicrocompactedToolResult(message) && message.toolCallId) clearedReadIds.add(message.toolCallId);
+        }
+      }
+      let earlyRehydration: Awaited<ReturnType<typeof buildRehydrationMessage>>;
+      if (clearedReadIds.size > 0 && this.config.rehydration !== false && this.config.rehydration) {
+        earlyRehydration = await buildRehydrationMessage(working, this.config.rehydration, {
+          isStale: message => message.role === 'tool' && !!message.toolCallId && clearedReadIds.has(message.toolCallId),
+          bodies: false,
+        });
+      }
+      // 不把刚刚落回墙内的窗口再推回墙外：回填大纲是为了少读，不是为了超预算。
+      const blockTokens = earlyRehydration ? this.scaledEstimate([earlyRehydration.message]) : 0;
+      if (earlyRehydration && configuredMax !== undefined && currentTokens + blockTokens > configuredMax) {
+        earlyRehydration = undefined;
+      }
+      const earlyTokens = currentTokens + (earlyRehydration ? blockTokens : 0);
       return this.remember({
-        messages: microcompactedToolResults > 0 ? working : messages,
+        messages: earlyRehydration
+          ? [...baseSystemMessages, ...(priorSummary ? [priorSummary] : []), earlyRehydration.message, ...nonSystem]
+          : microcompactedToolResults > 0 ? working : messages,
         compacted: microcompactedToolResults > 0,
         summarized: false,
         summaryUnavailable: false,
         evictedMessages: 0,
-        estimatedTokens: currentTokens,
+        estimatedTokens: earlyTokens,
         overBudget: false,
         oversizedNewestGroup: false,
         microcompactedToolResults,
         reclaimedTokens,
-        rehydratedFiles: 0,
-        restoredPlan: false,
+        rehydratedFiles: earlyRehydration?.files ?? 0,
+        restoredPlan: earlyRehydration?.restoredPlan ?? false,
       });
     }
 
@@ -854,8 +1005,21 @@ export class ContextEngine {
     let rehydratedFiles = 0;
     let restoredPlan = false;
     let rehydrationMessage: Message | undefined;
-    if (evicted.length > 0 && this.config.rehydration !== false && this.config.rehydration) {
-      const built = await buildRehydrationMessage(working, this.config.rehydration);
+    // 内容已不在窗口里的工具结果 = L1 占位 + 整组驱逐。已读文件靠这个集合被
+    // 认出来；只认驱逐的话，阅读型长任务（L1 清空而不驱逐）永远等不到补丁。
+    const staleToolIds = new Set<string>();
+    for (const message of working) {
+      if (isMicrocompactedToolResult(message) && message.toolCallId) staleToolIds.add(message.toolCallId);
+    }
+    for (const message of evicted) {
+      if (message.role === 'tool' && message.toolCallId) staleToolIds.add(message.toolCallId);
+    }
+    if ((evicted.length > 0 || staleToolIds.size > 0) && this.config.rehydration !== false && this.config.rehydration) {
+      const built = await buildRehydrationMessage(working, this.config.rehydration, {
+        isStale: message => message.role === 'tool' && !!message.toolCallId && staleToolIds.has(message.toolCallId),
+        // 没驱逐时只补大纲：正文是被 L1 主动清掉的，搬回来就是和节约预算对着干。
+        bodies: evicted.length > 0,
+      });
       if (built) {
         rehydrationMessage = built.message;
         rehydratedFiles = built.files;
