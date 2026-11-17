@@ -286,6 +286,59 @@ const KIND_PIPELINE: Record<DiagramKind, {
 
 export const renderer = new Renderer();
 
+/** 聊天里长代码块的折叠阈值（2026-11-16 用户判例：原型工程生成后整屏滚动
+ *  源码，体验极差）。生成代码该落盘、该在产物卡/工具行看；对话里超过这个
+ *  体量的代码块只留一句可展开的摘要，默认不铺满主界面。阈值按行数或字节任一
+ *  命中——压成一行的巨型 JSON/HTML 同样要折叠。 */
+export const CODE_FOLD_MIN_LINES = 20;
+export const CODE_FOLD_MIN_CHARS = 1200;
+
+function codeLineCount(code: string): number {
+  if (!code) return 0;
+  let lines = 1;
+  for (let i = 0; i < code.length; i++) if (code.charCodeAt(i) === 10) lines++;
+  return lines;
+}
+
+/** 长代码块折叠外壳：头部一行「语言 · N 行 · 展开全部」，正文默认限高，
+ *  点开展开/收起。渲染器层实现（不是完成态后处理），流式与完成态同形。 */
+function foldableCodeBlock(code: string, lang: string): string {
+  const lines = codeLineCount(code);
+  const collapsed = lines >= CODE_FOLD_MIN_LINES || code.length >= CODE_FOLD_MIN_CHARS;
+  const escaped = esc(code);
+  const codeAttrs = lang ? ` class="language-${attr(lang)}"` : '';
+  const pre = `<pre><code${codeAttrs}>${escaped}</code></pre>`;
+  if (!collapsed) return pre;
+  const expandLabel = t('code.fold.expand', '展开全部');
+  return (
+    `<div class="code-fold" data-code-lines="${lines}">` +
+    `<div class="code-fold-head">` +
+    `<span class="code-fold-lang">${esc(lang || t('code.fold.code', '代码'))}</span>` +
+    `<span class="code-fold-count">${lines} ${t('code.fold.lines', '行')}</span>` +
+    `<button type="button" class="code-fold-toggle" aria-expanded="false">${expandLabel}</button>` +
+    `</div>` +
+    `<div class="code-fold-body">${pre}</div>` +
+    `</div>`
+  );
+}
+
+// 折叠开关：文档级委托一次（流式每拍重建节点也不丢事件）。只切本块的状态，
+// 不改内容——代码始终在 DOM 里，复制/保存/高亮按钮照常工作。
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (event) => {
+    const target = event.target as Element | null;
+    const toggle = target?.closest?.('.code-fold-toggle');
+    if (!toggle) return;
+    const fold = toggle.closest('.code-fold');
+    if (!fold) return;
+    const expanded = fold.classList.toggle('expanded');
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.textContent = expanded
+      ? t('code.fold.collapse', '收起')
+      : t('code.fold.expand', '展开全部');
+  });
+}
+
 // marked 18.x: renderer methods receive a single token object — we destructure.
 renderer.code = (token: { text: string; lang?: string }): string => {
   const code: string = token.text;
@@ -300,7 +353,7 @@ renderer.code = (token: { text: string; lang?: string }): string => {
   // parsed as real markup instead of displayed text. hljs later re-reads
   // textContent and emits its own escaped highlights, so escaping up front is
   // safe and lossless.
-  return `<pre><code${lang ? ` class="language-${attr(lang)}"` : ''}>${esc(code)}</code></pre>`;
+  return foldableCodeBlock(code, lang);
 };
 
 /**
@@ -4284,11 +4337,14 @@ function diffStreaming(container: HTMLElement, text: string): void {
     // file as one fence) can take hundreds of ms per tick, saturating the
     // main thread and freezing the app. Skip streaming hljs above a size
     // threshold — the completion render (renderMarkdown) highlights it once.
-    if (newEl.tagName === 'PRE' && newEl.firstElementChild?.tagName === 'CODE') {
-      const codeEl = newEl.firstElementChild as HTMLElement;
-      if (codeEl.textContent && codeEl.textContent.length <= STREAM_HLJS_SKIP_ABOVE) {
+    // 长代码块现在包在 .code-fold 壳里（2026-11-16），所以要往下找 pre>code。
+    const streamCodeEl = newEl.tagName === 'PRE'
+      ? newEl.firstElementChild as HTMLElement | null
+      : newEl.querySelector<HTMLElement>('pre > code');
+    if (streamCodeEl?.tagName === 'CODE') {
+      if (streamCodeEl.textContent && streamCodeEl.textContent.length <= STREAM_HLJS_SKIP_ABOVE) {
         try {
-          hljs.highlightElement(codeEl);
+          hljs.highlightElement(streamCodeEl);
         } catch { /* keep raw text on parser failure */ }
       }
     }
