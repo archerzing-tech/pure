@@ -1360,6 +1360,58 @@ fn has_symlink_component(workspace: &str, path: &str) -> bool {
 // 保证脚注（总行数 + 建议范围）在引擎截断下也能存活。
 const READ_FILE_HEAD_LINES: usize = 2000;
 const READ_FILE_HEAD_MAX_CHARS: usize = 32_000;
+// 显式范围（startLine/endLine）输出预算（2026-11-17），TS 侧同款在
+// readFileHead.ts（READ_FILE_LINE_MAX_CHARS / READ_FILE_RANGE_MAX_CHARS）：
+// 范围请求本身也可能大到撞引擎 40k 盲截，盲截 notice 的「请用
+// startLine/endLine」对刚做过这件事的模型是循环指路。
+const READ_FILE_LINE_MAX_CHARS: usize = 2_000;
+const READ_FILE_RANGE_MAX_CHARS: usize = 32_000;
+
+/// 显式范围的输出预算与行截断。TS 侧单源 readFileHead.ts 的
+/// readFileRangeSlice / readFileRangeFooter，常数、行截断标记与续读脚注逐字
+/// 镜像，改必须同步：
+///  - 小范围（≤32k 字符且无行内超长）逐字返回，与旧版零漂移；
+///  - 行内超长（minified JS / 单行 JSON）按 2000 字符截断加标记——整行过桥
+///    只会烧 IPC 再被盲截，标记让模型至少知道这行有多长；
+///  - 整体超预算按行截断，追加续读脚注（总行数 + 已显示 + 续读起点）。
+fn finish_explicit_range(kept: Vec<String>, range_start: usize) -> String {
+    let total_lines = kept.len();
+    let mut processed: Vec<String> = Vec::with_capacity(total_lines);
+    for line in &kept {
+        let char_count = line.chars().count();
+        if char_count <= READ_FILE_LINE_MAX_CHARS {
+            processed.push(line.clone());
+            continue;
+        }
+        let shown: String = line.chars().take(READ_FILE_LINE_MAX_CHARS).collect();
+        processed.push(format!(
+            "{}…[本行共 {} 字符，已截断；读剩余部分用 execute_command 分段提取]",
+            shown, char_count
+        ));
+    }
+    let mut chars = 0usize;
+    let mut take = 0usize;
+    let mut out_lines: Vec<&str> = Vec::with_capacity(total_lines);
+    for p in &processed {
+        let len = p.chars().count();
+        if take > 0 && chars + len + 1 > READ_FILE_RANGE_MAX_CHARS {
+            break;
+        }
+        chars += len + 1;
+        take += 1;
+        out_lines.push(p);
+    }
+    let mut out = out_lines.join("\n");
+    if take < total_lines {
+        out.push_str(&format!(
+            "\n\n[read_file：范围共 {} 行，以上显示前 {} 行（超字符预算，已按行截断）。继续读用 startLine={}（可配 endLine）；定位内容用 code_searcher。]",
+            total_lines,
+            take,
+            range_start + take
+        ));
+    }
+    out
+}
 
 /// 后台命令日志的 basename 模式（pure-bg-<id>.log）。与
 /// src/shared/backgroundCommand.ts 的 isBackgroundLogPath 同构，改必须同步。
@@ -1441,10 +1493,10 @@ fn read_file_impl(
     }
     // A3（2026-11-13 性能审计）：显式行范围（start+end）走流式首窗读取——
     // 40MB 日志只取 1000–1200 行时不必整份读/解码。容器格式（pdf/docx/xlsx…）
-    // 与二进制仍走整份提取，输出一字不变（见 read_text_range_prefix）。
+    // 与二进制仍走整份提取；窗口输出过同一个 finish_explicit_range 预算。
     if start_line.is_some() && end_line.is_some() {
         if let Ok(Some(windowed)) = read_text_range_prefix(&full, start_line, end_line) {
-            return Ok(windowed);
+            return Ok(finish_explicit_range(windowed, start_line.unwrap_or(1).max(1)));
         }
     }
     let bytes = fs::read(&full).map_err(|e| format!("read_file: {}", e))?;
@@ -1461,8 +1513,9 @@ fn read_file_impl(
 
 /// 刀 D1（2026-10-10）read_file 的行范围语义（纯函数，单测锁定）：
 ///  - 显式范围（start_line/end_line 任一给出）：切片在 IPC 之前——大文件
-///    不再整份过桥。原样给，不加脚注（模型点名要的范围）。1 基、含端点；
-///    起点越过 EOF 返回空串（沿用旧 TS 侧切片的退化语义）。
+///    不再整份过桥。小范围逐字给、不加脚注；行内超长 / 超预算按
+///    finish_explicit_range 截断加标记脚注（2026-11-17，语义见该函数）。
+///    1 基、含端点；起点越过 EOF 返回空串（沿用旧 TS 侧切片的退化语义）。
 ///  - head_lines：默认读（模型未给范围）只回头部切片 + 总行数 + 建议范围
 ///    脚注，不做硬截断。不给 head_lines 时全文返回——撤销快照 / artifact
 ///    预览 / overlay 守卫等内部调用方走这条路，语义与旧版完全一致。
@@ -1486,7 +1539,8 @@ fn slice_read_file_text(
         if s > e {
             return Ok(String::new());
         }
-        return Ok(lines[s - 1..e].join("\n"));
+        let kept: Vec<String> = lines[s - 1..e].iter().map(|l| (*l).to_string()).collect();
+        return Ok(finish_explicit_range(kept, s));
     }
     let total = text.lines().count();
     let head = head_lines.unwrap_or(READ_FILE_HEAD_LINES);
@@ -1575,7 +1629,7 @@ fn read_text_range_prefix(
     full: &std::path::Path,
     start_line: Option<usize>,
     end_line: Option<usize>,
-) -> std::io::Result<Option<String>> {
+) -> std::io::Result<Option<Vec<String>>> {
     use std::io::{BufRead, Read};
     let (Some(start), Some(end)) = (start_line, end_line) else {
         return Ok(None);
@@ -1609,7 +1663,7 @@ fn read_text_range_prefix(
     }
     let s = start.max(1);
     if s > end {
-        return Ok(Some(String::new()));
+        return Ok(Some(Vec::new()));
     }
     // 窗口碰到首行：首行内容可能被 trim() 掉前导空白，逐字比对拿不准。
     if s <= dropped + 1 {
@@ -1640,7 +1694,8 @@ fn read_text_range_prefix(
             break;
         }
     }
-    Ok(Some(kept.join("\n")))
+    // 返回原始窗口行（未过预算）；调用方统一走 finish_explicit_range。
+    Ok(Some(kept))
 }
 
 /// `str::lines()` 的字节版：去掉行尾 `\n`，再去掉一个 `\r`。
@@ -1689,6 +1744,45 @@ mod read_file_slice_tests {
         let ws = write_fixture("past-eof", "l1\nl2");
         let out = read_file_impl(ws, "f.txt".into(), Some(9), None, None).unwrap();
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn explicit_range_clips_overlong_line_with_marker() {
+        // 2026-11-17 显式范围预算：行内超长（单行 JSON / minified JS）整行
+        // 过桥只会烧 IPC 再被引擎 40k 盲截——按 2000 字符截断加标记，模型
+        // 至少知道这行有多长。TS 侧 readFileRangeSlice 同语义。
+        let content = format!("head\n{}\n", "x".repeat(5000));
+        let ws = write_fixture("clip-line", &content);
+        let out = read_file_impl(ws, "f.txt".into(), Some(2), Some(2), None).unwrap();
+        assert!(out.starts_with("xxxx"), "clipped prefix: {}", &out[..40.min(out.len())]);
+        assert!(out.contains("本行共 5000 字符，已截断"), "length marker: {}", out);
+        assert!(out.len() < 3000, "clipped output is bounded: {}", out.len());
+        assert!(!out.contains("已按行截断"), "no range footer for a single clipped line");
+    }
+
+    #[test]
+    fn explicit_range_over_budget_gets_continuation_footer() {
+        // 范围请求本身超 32k 预算：按行整体截断 + 续读脚注（总行数 + 已显示
+        // + 续读起点），不再整段过桥撞引擎盲截、拿到无尾巴信息的半截。
+        // 每行 1900 字符（≤2000，不触发行内截断）×20 行 ≈ 38k > 32k →
+        // 取前 16 行（16×1901=30416，加第 17 行 32317 超预算）。
+        let content = (1..=20).map(|i| format!("f{}-{}", i, "a".repeat(1897))).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("range-budget", &content);
+        let out = read_file_impl(ws, "f.txt".into(), Some(1), Some(20), None).unwrap();
+        assert!(out.contains("f16-aaa"), "sixteen lines fit: {}", &out[..60.min(out.len())]);
+        assert!(!out.contains("f17-aaa"));
+        assert!(out.contains("范围共 20 行，以上显示前 16 行"), "range footer: {}", out);
+        assert!(out.contains("继续读用 startLine=17"), "continue hint: {}", out);
+    }
+
+    #[test]
+    fn explicit_range_small_stays_verbatim() {
+        // 小范围逐字返回零漂移：行内无超长、总量在预算内时与旧版逐字一致。
+        let content = (1..=20).map(|i| format!("row-{i}")).collect::<Vec<_>>().join("\n");
+        let ws = write_fixture("range-verbatim", &content);
+        let out = read_file_impl(ws, "f.txt".into(), Some(5), Some(7), None).unwrap();
+        assert_eq!(out, "row-5\nrow-6\nrow-7");
+        assert!(!out.contains("read_file："), "no footer on a small range");
     }
 
     #[test]

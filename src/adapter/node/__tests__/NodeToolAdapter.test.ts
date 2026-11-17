@@ -1,7 +1,7 @@
 // src/adapter/node/__tests__/NodeToolAdapter.test.ts
 
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeToolAdapter, detectLocalTimeLine, detectNetworkSummary, detectRuntimeVersions, encodePowerShellCommand, expandTilde, extendedProbePath, powershellFileLaunchArgs, powershellNeedsFileLaunch, powershellWrappedCommand, tokenizeFindQuery } from '../NodeToolAdapter';
@@ -667,6 +667,97 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     expect(text).toContain('f2-aaa');
     expect(text).not.toContain('f3-aaa');
     expect(text).toContain('[read_file：以上是前 3 行，文件共 10 行。继续读用 startLine=4');
+  });
+
+  it('clips an overlong line inside an explicit range with a length marker（2026-11-17）', async () => {
+    // 单行 5000 字符落在显式范围里：截到 2000 + 标记，不再整行过桥。
+    writeFileSync(join(workspace, 'clip.txt'), `head\n${'x'.repeat(5000)}\n`);
+    const r = await read({ path: 'clip.txt', startLine: 2, endLine: 2 });
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text.startsWith('x'.repeat(2000))).toBe(true);
+    expect(text).toContain('本行共 5000 字符，已截断');
+    expect(text.length).toBeLessThan(3000);
+    expect(text).not.toContain('已按行截断');
+  });
+
+  it('adds a continuation footer when an explicit range exceeds the char budget（2026-11-17）', async () => {
+    // 每行 1900 字符 ×20 行 ≈ 38k > 32k 预算 → 前 16 行 + 续读脚注；不再
+    // 整段过桥撞引擎 40k 盲截、拿到无尾巴信息的半截。
+    const fat = Array.from({ length: 20 }, (_, i) => `f${i + 1}-${'a'.repeat(1897)}`).join('\n');
+    writeFileSync(join(workspace, 'range-fat.txt'), fat);
+    const r = await read({ path: 'range-fat.txt', startLine: 1, endLine: 20 });
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text).toContain('f16-aaa');
+    expect(text).not.toContain('f17-aaa');
+    expect(text).toContain('[read_file：范围共 20 行，以上显示前 16 行');
+    expect(text).toContain('继续读用 startLine=17');
+  });
+
+  it('streams an interior range from a big file verbatim without loading it whole（A3 同刀）', async () => {
+    // 流式首窗：50k 行文件只取最后 3 行——逐行流读到 endLine 即停，输出与
+    // 全文路径逐字一致（1 基、含端点、内部行原样）。
+    const big = Array.from({ length: 50_000 }, (_, i) => `line-${i + 1}`).join('\n');
+    writeFileSync(join(workspace, 'streamed.txt'), big);
+    const r = await read({ path: 'streamed.txt', startLine: 49_998, endLine: 50_000 });
+    expect(r.success).toBe(true);
+    expect(r.result).toBe('line-49998\nline-49999\nline-50000');
+    expect(String(r.result)).not.toContain('read_file：');
+  });
+});
+
+// 撤销快照降级（2026-11-17）：快照是脚手架不是闸门——旧实现超预算 throw
+// 把整次写入拒掉（append 到大日志被硬拦是「写入中断」类），现在降级为跳过
+// 快照、写入照做，结果自带「未提供撤销快照」注记。
+describe('NodeToolAdapter write_file snapshot degrade（2026-11-17）', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-snapdgr-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  const run = async (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+    adapter.execute({
+      id: `call-${name}`,
+      index: 0,
+      function: { name, arguments: JSON.stringify(args) },
+    });
+
+  it('appends to an oversized existing file instead of refusing the write', async () => {
+    const big = join(workspace, 'huge.log');
+    writeFileSync(big, 'a'.repeat(9 * 1024 * 1024));
+    const r = await run('write_file', { path: 'huge.log', content: 'tail', append: true });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('Appended 4 bytes');
+    expect(String(r.result)).toContain('(当前写入未提供撤销快照)');
+    const after = readFileSync(big, 'utf8');
+    expect(after.startsWith('aaaa')).toBe(true);
+    expect(after.endsWith('tail')).toBe(true);
+    // 降级批次不可撤销：撤销端口不提供任何可恢复批次。
+    expect(adapter.getSnapshotPort().getLatestWriteBatch()).toBeNull();
+  });
+
+  it('overwrites an oversized existing file instead of refusing the write', async () => {
+    writeFileSync(join(workspace, 'huge2.log'), 'b'.repeat(9 * 1024 * 1024));
+    const r = await run('write_file', { path: 'huge2.log', content: 'fresh' });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('Wrote 5 bytes');
+    expect(readFileSync(join(workspace, 'huge2.log'), 'utf8')).toBe('fresh');
+  });
+
+  it('keeps the undo snapshot for a normal small write', async () => {
+    writeFileSync(join(workspace, 'small.txt'), 'old');
+    const r = await run('write_file', { path: 'small.txt', content: 'new' });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).not.toContain('当前写入未提供撤销快照');
+    expect(adapter.getSnapshotPort().getLatestWriteBatch()).not.toBeNull();
   });
 });
 

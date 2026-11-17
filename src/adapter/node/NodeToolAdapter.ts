@@ -4,7 +4,7 @@
 // Fixes: handleWriteFile uses proper fs.mkdir() instead of fragile .ensure hack.
 
 import { basename, dirname, isAbsolute, join, normalize, resolve as pathResolve, relative as pathRelative, sep } from 'node:path';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { open, stat, writeFile, readFile, rename, unlink, mkdir, rm, appendFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import type { Readable } from 'node:stream';
@@ -19,7 +19,7 @@ import { runGitTool, type GitToolName } from '../../tools/impl/git';
 import { runBrowserTool, runScreenshotTool } from '../../tools/impl/browser';
 import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
-import { readFileHeadFooter, readFileHeadSlice } from '../../shared/readFileHead';
+import { readFileHeadFooter, readFileHeadSlice, readFileRangeFooter, readFileRangeSlice } from '../../shared/readFileHead';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, isBenignNoMatchExit, safeParseArgs } from '../../shared/format';
 import { cacheQualityLiveLine } from '../../shared/endpointCacheQuality';
@@ -454,6 +454,18 @@ export class NodeToolAdapter implements ToolAdapter {
       return this.fail(null, start, `read_file: 文件 ${(meta.size / 1024 / 1024).toFixed(0)}MB 超过读取上限 ${Math.round(this.maxFileSize / 1024 / 1024)}MB；可以改用 code_searcher 搜索其中的内容，或用 execute_command 分段读取。`);
     }
 
+    // A3 同刀（Rust read_text_range_prefix 镜像）：显式行范围（start+end 都给）
+    // 先试流式首窗——40MB 日志只取 1000–1200 行时不必整份读/解码/切分。返回
+    // null（容器格式 / 窗口碰首行 / EOF 早于窗口结束 / 拿不准）回退全文路径。
+    const rangeStart = typeof args.startLine === 'number' ? Math.max(1, args.startLine) : null;
+    const rangeEnd = typeof args.endLine === 'number' ? Math.max(1, args.endLine) : null;
+    if (rangeStart !== null && rangeEnd !== null) {
+      const windowed = await this.readTextRangeWindow(path, rangeStart, rangeEnd);
+      if (windowed !== null) {
+        return this.explicitRangeResult(windowed.split('\n'), rangeStart, start);
+      }
+    }
+
     const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
     const { text: extracted, note } = await extractFileText(bytes, path);
     let text = extracted.trim();
@@ -466,18 +478,14 @@ export class NodeToolAdapter implements ToolAdapter {
 
     const lines = text.split('\n');
 
-    const startLine = typeof args.startLine === 'number' ? Math.max(1, args.startLine) : 1;
-    const endLine = typeof args.endLine === 'number' ? Math.min(args.endLine, lines.length) : lines.length;
-
-    if (startLine > 1 || endLine < lines.length) {
-      // 模型点名要的范围：原样给，不加脚注。
-      return {
-        id: `tool_${Date.now()}`,
-        toolName: 'read_file',
-        result: lines.slice(startLine - 1, endLine).join('\n'),
-        success: true,
-        duration: Date.now() - start,
-      };
+    // 给了范围就走显式分支（含「范围=整个文件」——与 Rust 侧
+    // slice_read_file_text 的任一给出即显式语义对齐，旧版这里整个文件范围
+    // 会掉进头部路径，两端分叉）：小范围逐字给；行内超长 / 超预算才截断加
+    // 标记脚注（explicitRangeResult，与 Rust finish_explicit_range 镜像）。
+    if (rangeStart !== null || rangeEnd !== null) {
+      const startLine = rangeStart ?? 1;
+      const endLine = rangeEnd !== null ? Math.min(rangeEnd, lines.length) : lines.length;
+      return this.explicitRangeResult(lines.slice(startLine - 1, endLine), startLine, start);
     }
 
     // 刀 D1（2026-10-10）真杠杆：默认（未给范围）大文件只回头部切片 + 总行数
@@ -504,6 +512,114 @@ export class NodeToolAdapter implements ToolAdapter {
       success: true,
       duration: Date.now() - start,
     };
+  }
+
+  /**
+   * 显式范围的统一出口（readFileRangeSlice 单源）：小范围且无行内超长时
+   * 逐字等于原始 join（语义零漂移）；行内超长截断加标记；整体超预算按行
+   * 截断并追加续读脚注——否则范围请求大到撞引擎 40k 盲截时，盲截 notice
+   * 的「请用 startLine/endLine」对刚做过这件事的模型是循环指路。
+   */
+  private explicitRangeResult(rangeLines: string[], rangeStartLine: number, start: number): ToolResult {
+    const slice = readFileRangeSlice(rangeLines);
+    const text = slice.shownLines < slice.totalLines
+      ? `${slice.text}\n\n${readFileRangeFooter(rangeStartLine, slice.shownLines, slice.totalLines)}`
+      : slice.text;
+    return {
+      id: `tool_${Date.now()}`,
+      toolName: 'read_file',
+      result: text,
+      success: true,
+      duration: Date.now() - start,
+    };
+  }
+
+  /** 这些格式的正文必须整份参与解析（zip 目录 / pdf 流 / rtf / OLE），不能
+   * 按行切窗；含 NUL 的字节连「按 0x0A 分行」都不成立。与 Rust
+   * needs_full_extraction 逐字镜像，改必须同步。 */
+  private needsFullExtraction(head: Buffer, ext: string): boolean {
+    if (head.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return true;
+    if (head.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x05, 0x06]))) return true;
+    if (head.subarray(0, 4).toString('latin1') === '%PDF') return true;
+    if (head.subarray(0, 5).toString('latin1') === '{\\rtf') return true;
+    if (head.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) return true;
+    if (head.includes(0)) return true;
+    return ['pdf', 'rtf', 'docx', 'docm', 'xlsx', 'xlsm', 'pptx', 'pptm', 'odt', 'ods', 'odp', 'doc', 'xls', 'ppt'].includes(ext);
+  }
+
+  /**
+   * A3 同刀（Rust read_text_range_prefix 镜像）：显式行范围的流式首窗读取。
+   *
+   * 语义对齐全文路径（`text.trim()` 后的 1 基行号、含端点、起点越界返回
+   * 空串）。与 Rust 同款回退规则：窗口碰首行（首行可能被 trim() 吃掉前导
+   * 空白，逐字比对拿不准）、EOF 早于窗口结束（尾部空白行会被全文路径的
+   * trim() 裁掉，同样拿不准）、容器格式 / 二进制、8KB 前缀全空白——一律
+   * 返回 null 回退全文路径，宁慢不错。
+   *
+   * 逐行独立解码（decodeTextBytes）：多字节序列不含 0x0A，按字节分行再解码
+   * 与整份解码等价——Rust A3 同判据（真机已验）。
+   */
+  private async readTextRangeWindow(path: string, start: number, end: number): Promise<string | null> {
+    if (start > end) return '';
+    if (start <= 1) return null; // 窗口碰首行：trim 前缀差拿不准，回退
+    const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+    const PROBE_BYTES = 8 * 1024;
+    try {
+      // 探测用独立句柄读 8KB 魔数/空白判断（与 Rust 同款：探测读掉的字节
+      // 不参与下面的行号）。
+      const probe = Buffer.alloc(PROBE_BYTES);
+      const handle = await open(path, 'r');
+      let probed = 0;
+      try {
+        probed = (await handle.read(probe, 0, PROBE_BYTES, 0)).bytesRead;
+      } finally {
+        await handle.close();
+      }
+      const head = probe.subarray(0, probed);
+      if (this.needsFullExtraction(head, ext)) return null;
+      if (decodeTextBytes(head).trimStart().length === 0 && probed >= PROBE_BYTES) return null;
+
+      const stream = createReadStream(path, { highWaterMark: 64 * 1024 });
+      let buf = Buffer.alloc(0);
+      let logicalLine = 0;
+      let skippingLeadingBlanks = true;
+      const kept: string[] = [];
+      let done = false;
+      try {
+        for await (const chunk of stream) {
+          buf = Buffer.concat([buf, chunk as Buffer]);
+          let idx: number;
+          while ((idx = buf.indexOf(0x0a)) !== -1) {
+            let lineBytes = buf.subarray(0, idx);
+            buf = buf.subarray(idx + 1);
+            if (lineBytes.length > 0 && lineBytes[lineBytes.length - 1] === 0x0d) {
+              lineBytes = lineBytes.subarray(0, lineBytes.length - 1);
+            }
+            const decoded = decodeTextBytes(lineBytes);
+            if (skippingLeadingBlanks) {
+              // 前导空白行会被全文路径的 trim() 吃掉：行号整体前移。
+              if (decoded.trim() === '') continue;
+              skippingLeadingBlanks = false;
+            }
+            logicalLine++;
+            if (logicalLine < start) continue;
+            kept.push(decoded);
+            if (logicalLine >= end) {
+              done = true;
+              break;
+            }
+          }
+          if (done) break;
+        }
+      } finally {
+        stream.destroy();
+      }
+      // EOF 早于窗口结束：尾部 trim 语义拿不准，回退全文路径（Rust 同款）。
+      if (!done) return null;
+      return kept.join('\n');
+    } catch {
+      return null; // 读不到 / 探测失败：回退全文路径，让它给出结构化报错
+    }
   }
 
   /**
@@ -2985,10 +3101,15 @@ export class NodeToolAdapter implements ToolAdapter {
       if (stat.isDirectory()) {
         entries.push({ path, existed: true, kind: 'directory' });
       } else {
-        const content = await Bun.file(full).text();
-        if (new TextEncoder().encode(content).byteLength > this.maxSnapshotBytes) {
-          throw new Error(`Snapshot too large for ${path}; write was not performed.`);
+        // 快照是脚手架不是闸门（2026-11-17）：旧实现超预算直接 throw 把整次
+        // 写入拒掉——append 到大日志 / 大数据文件被撤销快照的预算硬拦，是
+        // 「写入中断」类。降级为跳过该文件的快照（写入照做，结果自带
+        // 「未提供撤销快照」注记）。判断用 stat.size，不再为算预算整份读盘。
+        if (stat.size > this.maxSnapshotBytes) {
+          entries.push({ path, existed: true, kind: 'file' });
+          continue;
         }
+        const content = await Bun.file(full).text();
         entries.push({ path, existed: true, kind: 'file', content });
       }
     }
@@ -3007,6 +3128,9 @@ export class NodeToolAdapter implements ToolAdapter {
     const finished: WorkspaceSnapshotEntry[] = [];
     for (const entry of batch.entries) {
       if (!changed.has(entry.path)) continue;
+      // 快照降级跳过的文件（超预算无旧内容）不可恢复：不进 finished，撤销
+      // 批次不收它——否则 undo 会拿 undefined 当旧内容把文件清空。
+      if (entry.existed && entry.kind !== 'directory' && entry.content === undefined) continue;
       const full = await this.resolve(entry.path);
       if (existsSync(full) && !lstatSync(full).isDirectory()) {
         entry.afterContent = await Bun.file(full).text();
@@ -3073,6 +3197,12 @@ export class NodeToolAdapter implements ToolAdapter {
         }
         await mkdir(full, { recursive: true });
         restoredPaths.push(entry.path);
+        continue;
+      }
+      // 防御守卫：无旧内容的文件条目（快照降级产物）不可「恢复」——写空串
+      // 等于毁文件。如实报冲突。
+      if (entry.content === undefined) {
+        conflicts.push(entry.path);
         continue;
       }
       if (!exists || currentIsDirectory) {

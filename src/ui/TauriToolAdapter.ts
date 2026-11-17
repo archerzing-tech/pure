@@ -2535,8 +2535,13 @@ export class TauriToolAdapter implements ToolAdapter {
       } else if (info.isDirectory) {
         entries.push({ path, existed: true, kind: 'directory' });
       } else {
+        // 快照是脚手架不是闸门（2026-11-17）：超预算不再 throw 拒写（append
+        // 到大日志被撤销快照预算硬拦是「写入中断」类），降级为跳过该文件的
+        // 快照——写入照做，结果自带「未提供撤销快照」注记。size 取自上面
+        // path_info 的返回，零额外 IO。
         if ((info.size ?? 0) > this.maxSnapshotBytes) {
-          throw new Error(`Snapshot too large for ${path}; write was not performed.`);
+          entries.push({ path, existed: true, kind: 'file' });
+          continue;
         }
         const content = await this.call('read_file', { workspace: this.workspace, path }) as string;
         entries.push({ path, existed: true, kind: 'file', content });
@@ -2557,6 +2562,9 @@ export class TauriToolAdapter implements ToolAdapter {
     const finished: WorkspaceSnapshotEntry[] = [];
     for (const entry of batch.entries) {
       if (!changed.has(entry.path)) continue;
+      // 快照降级跳过的文件（超预算无旧内容）不可恢复：不进 finished，撤销
+      // 批次不收它——否则 undo 会拿 undefined 当旧内容把文件清空。
+      if (entry.existed && entry.kind !== 'directory' && entry.content === undefined) continue;
       const info = await this.call('path_info', { workspace: this.workspace, path: entry.path }) as { exists?: boolean; isDirectory?: boolean; size?: number; isSymlink?: boolean };
       if (info.exists && !info.isDirectory) {
         entry.afterContent = await this.call('read_file', { workspace: this.workspace, path: entry.path }) as string;
@@ -2634,6 +2642,12 @@ export class TauriToolAdapter implements ToolAdapter {
         }
         await this.call('create_directory', { workspace: this.workspace, path: entry.path });
         restoredPaths.push(entry.path);
+        continue;
+      }
+      // 防御守卫：无旧内容的文件条目（快照降级产物）不可「恢复」——写空串
+      // 等于毁文件。如实报冲突。
+      if (entry.content === undefined) {
+        conflicts.push(entry.path);
         continue;
       }
       if (!info.exists || info.isDirectory || info.isSymlink) {

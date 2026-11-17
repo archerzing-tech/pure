@@ -37,6 +37,71 @@ function sliceAtCodePointBoundary(text: string, limit: number): string {
   return text.slice(0, Math.max(1, cut));
 }
 
+// ── 显式范围（startLine/endLine）输出预算（2026-11-17）──────────────────
+// 旧语义「显式范围原样给、不加脚注」只对小范围成立：范围请求本身也可能大到
+// 撞引擎 capToolResult 的 40k 盲截，而盲截 notice 只会循环指路（「请用
+// startLine/endLine」——模型刚做过这件事，拿到半截还不知道尾巴有多长）。
+// 预算哲学与头部切片同款：32k 字符，给引擎 40k 留余量，保证脚注在盲截下
+// 存活。行内超长（minified JS / 单行 JSON / 长 base64）参照 Claude Code 的
+// 按行截断：整行过桥只会烧 IPC 再被盲截，截断加标记让模型至少知道这行有
+// 多长。Rust 侧镜像在 src-tauri/src/lib.rs 的 finish_explicit_range，改这里
+// 必须同步改那边（常数 + 标记 + 脚注逐字一致）。
+
+/** 单行截断阈值（Claude Code 同款 2000 字符）。 */
+export const READ_FILE_LINE_MAX_CHARS = 2_000;
+
+/** 显式范围输出的字符预算。 */
+export const READ_FILE_RANGE_MAX_CHARS = 32_000;
+
+export interface ReadFileRangeSlice {
+  /** 处理后的文本：行内超长已截断加标记，整体超预算已按行截到整行。 */
+  text: string;
+  /** 请求范围内的总行数。 */
+  totalLines: number;
+  /** 实际展示的行数；< totalLines 表示超预算截断（应追加续读脚注）。 */
+  shownLines: number;
+  /** 行内超长被截断标记过的行数（标记已内联在 text 里）。 */
+  clippedLines: number;
+}
+
+/** 行内截断：按码点数取前 READ_FILE_LINE_MAX_CHARS 个字符再补标记。先用
+ * UTF-16 长度做廉价上界快判，超界才做 O(n) 码点计数——10MB 单行不再生成
+ * 百万元素数组。 */
+function clipLine(line: string): { text: string; clipped: boolean } {
+  if (line.length <= READ_FILE_LINE_MAX_CHARS) return { text: line, clipped: false };
+  const total = [...line].length;
+  if (total <= READ_FILE_LINE_MAX_CHARS) return { text: line, clipped: false };
+  const shown = sliceAtCodePointBoundary(line, READ_FILE_LINE_MAX_CHARS);
+  return {
+    text: `${shown}…[本行共 ${total} 字符，已截断；读剩余部分用 execute_command 分段提取]`,
+    clipped: true,
+  };
+}
+
+/** 显式范围切片：行内超长截断加标记 → 整体超预算按行截断。首行恒保留
+ * （clip 后每行 ≤ 约 2.1k 字符，必然落在预算内）。 */
+export function readFileRangeSlice(lines: string[]): ReadFileRangeSlice {
+  let clippedLines = 0;
+  let chars = 0;
+  let shown = 0;
+  const processed: string[] = [];
+  for (const line of lines) {
+    const clip = clipLine(line);
+    if (clip.clipped) clippedLines++;
+    if (shown > 0 && chars + clip.text.length + 1 > READ_FILE_RANGE_MAX_CHARS) break;
+    chars += clip.text.length + 1;
+    shown++;
+    processed.push(clip.text);
+  }
+  return { text: processed.join('\n'), totalLines: lines.length, shownLines: shown, clippedLines };
+}
+
+/** 超预算截断的续读脚注：范围总行数 + 已显示行数 + 续读起点。
+ * rangeStartLine 是该范围第一行的 1 基行号（模型视角）。 */
+export function readFileRangeFooter(rangeStartLine: number, shownLines: number, totalLines: number): string {
+  return `[read_file：范围共 ${totalLines} 行，以上显示前 ${shownLines} 行（超字符预算，已按行截断）。继续读用 startLine=${rangeStartLine + shownLines}（可配 endLine）；定位内容用 code_searcher。]`;
+}
+
 /** 头部切片：取前 READ_FILE_HEAD_LINES 行、且不超过 READ_FILE_HEAD_MAX_CHARS
  *  字符（按行整体取，行中不截断）。count < lines.length 表示截取发生。
  *  首行单行超预算时不再返回空文本（旧行为 count=0 → 模型只拿到"前 0 行"
