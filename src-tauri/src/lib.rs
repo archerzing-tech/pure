@@ -15559,6 +15559,68 @@ mod generate_image_tests {
     }
 
     #[test]
+    fn corrupt_index_self_heals_from_disk_instead_of_orphaning_sessions() {
+        // 2026-11-17 会话索引三锁：index.json 过去裸 fs::write，强杀/断电窗口
+        // 内截断损坏 → 读取退化空列表 → 下一次保存只写回当前会话，其余历史
+        // 会话从侧栏集体消失（数据在盘上、UI 永久不可达，用户视角即「历史
+        // 会话没了」）。三把锁：损坏后读取自愈重建；损坏后保存不再孤儿化
+        // 其他会话；索引缺失同样从盘重建。
+        let _home_guard = super::test_home_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!("pure-session-idxheal-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        fs::create_dir_all(home.join(".pure").join("sessions")).unwrap();
+        let _ = fs::remove_file(sessions_dir().join("index.json"));
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let id_a = format!("idxheala{stamp}");
+        let id_b = format!("idxhealb{stamp}");
+        let snapshot_for = |content: &str| serde_json::json!({
+            "version": 3,
+            "revision": 1,
+            "modelContext": { "messages": [{ "role": "user", "content": content }] },
+            "events": [],
+            "transcript": [],
+            "uiState": {}
+        });
+        save_session_impl(id_a.clone(), snapshot_for("会话甲"), Some(String::new()), None, None).unwrap();
+        save_session_impl(id_b.clone(), snapshot_for("会话乙"), Some(String::new()), None, None).unwrap();
+
+        let contains_both = |list: &Vec<serde_json::Value>| {
+            list.iter().any(|s| s["id"] == id_a.as_str()) && list.iter().any(|s| s["id"] == id_b.as_str())
+        };
+
+        // 锁 1：损坏的索引在读取时自愈——列表返回两个会话，盘上索引被写回。
+        fs::write(sessions_dir().join("index.json"), "{corrupted json").unwrap();
+        let loaded = load_session_list_impl().unwrap();
+        assert!(contains_both(&loaded), "healed list must contain both sessions: {loaded:?}");
+        let healed: Vec<SessionMeta> =
+            serde_json::from_str(&fs::read_to_string(sessions_dir().join("index.json")).unwrap()).unwrap();
+        assert_eq!(healed.len(), 2, "index rewritten with both sessions");
+
+        // 锁 2：损坏后的保存不再孤儿化——保存 A 的索引更新以盘上重建为基座，
+        // B 仍在索引里（旧实现这里会只剩 A，B 永久消失）。
+        fs::write(sessions_dir().join("index.json"), "truncated").unwrap();
+        save_session_impl(id_a.clone(), snapshot_for("会话甲二"), Some(String::new()), None, None).unwrap();
+        let after_save: Vec<SessionMeta> =
+            serde_json::from_str(&fs::read_to_string(sessions_dir().join("index.json")).unwrap()).unwrap();
+        assert_eq!(after_save.len(), 2, "save must not orphan the other session");
+        assert!(after_save.iter().any(|s| s.id == id_b));
+
+        // 锁 3：索引整个丢失（被清理工具删掉）——读取时从盘重建，不空手。
+        let _ = fs::remove_file(sessions_dir().join("index.json"));
+        let reloaded = load_session_list_impl().unwrap();
+        assert!(contains_both(&reloaded), "missing index must rebuild from disk: {reloaded:?}");
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn agent_activities_sidecar_roundtrip_overrides_snapshot_and_survives_corruption() {
         // P0-1 根治刀（2026-11-13 性能审计）：活动流写独立 sidecar，读路径
         // 用它覆盖快照内嵌值；缺失回退内嵌、损坏降级内嵌、会话已删不复活。
@@ -16507,11 +16569,28 @@ async fn load_session_list() -> Result<Vec<serde_json::Value>, String> {
 
 fn load_session_list_impl() -> Result<Vec<serde_json::Value>, String> {
     let index_path = sessions_dir().join("index.json");
-    if !index_path.exists() {
-        return Ok(vec![]);
-    }
-    let raw = fs::read_to_string(&index_path).map_err(|e| format!("read: {}", e))?;
-    let list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
+    let parsed: Option<Vec<SessionMeta>> = if !index_path.exists() {
+        None
+    } else {
+        match fs::read_to_string(&index_path) {
+            Ok(raw) => serde_json::from_str::<Vec<SessionMeta>>(&raw).ok(),
+            Err(_) => None,
+        }
+    };
+    // 索引自愈（2026-11-17）：缺失 / 损坏 / 空-but-盘上有会话目录时从盘重建
+    // 并把索引写回。正常路径（索引完好非空）零额外成本；自愈路径全量解析
+    // 每份 session.json，是一次性的修复代价，不是常驻开销。真没会话时重建
+    // 也返回空，行为不变。
+    let list = match parsed {
+        Some(existing) if !existing.is_empty() => existing,
+        _ => {
+            let rebuilt = rebuild_sessions_index_from_disk();
+            if !rebuilt.is_empty() {
+                let _ = write_sessions_index_atomic(&rebuilt);
+            }
+            rebuilt
+        }
+    };
     Ok(list
         .iter()
         .map(|s| {
@@ -16525,6 +16604,67 @@ fn load_session_list_impl() -> Result<Vec<serde_json::Value>, String> {
             })
         })
         .collect())
+}
+
+/// 索引原子写（2026-11-17）：index.json 过去裸 fs::write——强杀/断电窗口内
+/// 截断损坏后，读取侧 from_str 失败退化成空列表，下一次保存只把当前会话写
+/// 回索引，其余历史会话从侧栏集体消失（数据还在盘上、UI 永久不可达）。
+/// 与 session.json 同款 temp+sync+rename。
+fn write_sessions_index_atomic(list: &[SessionMeta]) -> Result<(), String> {
+    let dir = sessions_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    let index_path = dir.join("index.json");
+    let temp_path = dir.join("index.json.tmp");
+    let serialized = serde_json::to_string_pretty(list).map_err(|e| format!("serialize: {}", e))?;
+    fs::write(&temp_path, &serialized).map_err(|e| format!("write temp: {}", e))?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)
+        .map_err(|e| format!("open temp: {}", e))?;
+    file.sync_all().map_err(|e| format!("sync temp: {}", e))?;
+    fs::rename(&temp_path, &index_path).map_err(|e| format!("replace index: {}", e))?;
+    Ok(())
+}
+
+/// 索引重建（2026-11-17 自愈地基）：扫 sessions 目录里带 session.json 的会话
+/// 目录，从盘上元数据重建列表。半截/解析失败的目录跳过——一份坏档不该把
+/// 整个列表拖死。workspace 取 workspace.txt sidecar，回退档内字段；title 与
+/// message_count 的取数口径与 save_session_impl 一致（新档从 snapshot 取，
+/// 旧档回退顶层 messages 副本）。
+fn rebuild_sessions_index_from_disk() -> Vec<SessionMeta> {
+    let dir = sessions_dir();
+    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
+    let mut list: Vec<SessionMeta> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if validate_session_id(id).is_err() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(path.join("session.json")) else { continue };
+        let Ok(data) = serde_json::from_str::<SessionData>(&raw) else { continue };
+        let messages = data
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.get("modelContext"))
+            .and_then(|c| c.get("messages"))
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_else(|| data.messages.clone());
+        let title = extract_title(&messages);
+        let workspace = load_session_workspace(id).unwrap_or_else(|_| data.workspace.clone());
+        list.push(SessionMeta {
+            id: id.to_string(),
+            title,
+            created_at: data.updated_at,
+            updated_at: data.updated_at,
+            message_count: data.message_count,
+            workspace,
+        });
+    }
+    list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+    list
 }
 
 /// Update ONLY the workspace override of an already-saved session (used when
@@ -16794,13 +16934,15 @@ fn remove_session_from_index(session_id: &str) -> Result<(), String> {
         return Ok(());
     }
     let raw = fs::read_to_string(&index_path).unwrap_or_default();
-    let mut list: Vec<SessionMeta> = serde_json::from_str(&raw).unwrap_or_default();
+    // 损坏基座同刀（2026-11-17）：索引损坏时先从盘重建再删行——否则删除
+    // 一条会话会把「索引已损坏」升级成「索引只剩零星条目」，其余会话跟着
+    // 从侧栏消失。
+    let mut list: Vec<SessionMeta> = match serde_json::from_str::<Vec<SessionMeta>>(&raw) {
+        Ok(existing) if !existing.is_empty() => existing,
+        _ => rebuild_sessions_index_from_disk(),
+    };
     list.retain(|s| s.id != session_id);
-    fs::write(
-        &index_path,
-        serde_json::to_string_pretty(&list).unwrap_or_default(),
-    )
-    .map_err(|e| format!("write: {}", e))
+    write_sessions_index_atomic(&list)
 }
 
 /// Remove one session's durable files: the session directory and the
@@ -17080,11 +17222,17 @@ fn update_sessions_index(
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
 
     let index_path = dir.join("index.json");
+    // 损坏感知基座（2026-11-17）：索引读不出（截断/损坏）或读成空但盘上有
+    // 会话目录时，不再从空列表起底——那会把其余历史会话从索引里永久孤儿化
+    // （只剩当前会话可见）。从盘扫描重建基座，再 upsert 当前会话。
     let mut list: Vec<SessionMeta> = if index_path.exists() {
         let raw = fs::read_to_string(&index_path).unwrap_or_default();
-        serde_json::from_str(&raw).unwrap_or_default()
+        match serde_json::from_str::<Vec<SessionMeta>>(&raw) {
+            Ok(existing) if !existing.is_empty() => existing,
+            _ => rebuild_sessions_index_from_disk(),
+        }
     } else {
-        vec![]
+        Vec::new()
     };
 
     let existing = list.iter().position(|s| s.id == session_id);
@@ -17103,13 +17251,7 @@ fn update_sessions_index(
         list.push(meta);
     }
 
-    fs::write(
-        &index_path,
-        serde_json::to_string_pretty(&list).unwrap_or_default(),
-    )
-    .map_err(|e| format!("write: {}", e))?;
-
-    Ok(())
+    write_sessions_index_atomic(&list)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
