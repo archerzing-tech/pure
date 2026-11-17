@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.8.7
+
+**「上下文快到顶了」每回合弹的预算错配修复 + 长代码块折叠 + 关闭态流式改块级渲染**
+
+一、预算错配（本版核心，真机判例：custom001 deepseek）。用户给自定义 provider 只设 `contextWindowTokens=150000`，`resolvePromptBudget` 没设预留时继承了能力清单 deepseek 家族的 `131072` 输出预留——那是配 1M 家族窗口的——被 75% 上限夹到 112500 后可用输入只剩 36476，85% 触发线每回合都被真实载荷（1.9–2.6 万 prompt tokens）越过，主动压缩每回合开闸，「上下文快到顶了，正在压缩历史」刷屏。预留的一个值两个角色（发送侧 max_tokens + 输入扣减）是错位根源，修复把两个角色分开：显式窗口（用户表达的是输入预算）不再整体继承族/探测预留——输出侧仍取族天花板（砍输入不该砍输出能力），但夹到窗口 1/4（32k 保底、只封顶不抬底），`输入+max_tokens ≤ 窗口` 的严格校验不变量照旧成立；没有显式窗口时族配对逐字节不变；显式成对给的照旧成对生效。`resolvePromptBudget` 是 GUI/CLI/通道/子 agent 的唯一漏斗，全量审计 10 条预算规则确认族默认自身配对全部健康（最高 minimax 64%），错位只发生在这一处交叉。出厂兜底同步升到 2026 基线（131072/8192）：原 32k/4096 让未知托管模型的压缩在 2 万 token 开闸（xingchen free 判例）、输出 4096 会让思考型未知模型把预算烧在暗推理上可见回答为空；乐观误判代价有界——context 类拒绝现场解析真实上限当轮自愈，连通性测试写 capabilityProbes，本地运行时另有保守规则不受影响。UI 文案轻重分开：主动预压缩（软模式清工具结果，秒级）不再念「含一次摘要，可能要一两分钟」的重话，那句留给 provider 拒绝后的被动压缩。
+
+二、聊天里超长代码块默认折叠（L1 界面硬约束 + L2 提示词双层）。原型/建项目类任务生成大文件时整屏滚源码、进度与决策点被淹没（用户判例）。渲染器层给超 20 行或 1200 字符的代码块包 `.code-fold` 壳——头一行「语言 · N 行 · 展开全部」，正文限高 240px + 底部渐隐，点开才铺满；代码始终在 DOM 里，复制/保存/高亮照常，展开开关走文档级事件委托（流式每拍重建节点不丢事件），流式与完成态同形。模板「代码生成与界面呈现」节同步教模型：对话是思路/计划/进度/关键决策的场所不是代码看板，确需展示只贴与决策直接相关的十几行片段；用户明确要代码的豁免条款保留。模板版本 3→4。
+
+三、关闭「流式渲染」改为低频块级渲染。旧关闭态语义是每 token `textContent = 全文`：长消息每拍整条重排（O(N²)），且全程一屏源码、Completed 才一次性格式化。新语义：已闭合的块按正常 marked/diff 管线渲染（每闭合一块渲染一次，400ms 合并窗口；围栏收尾行即边界，代码块不用等空行），未闭合尾段保持原文逐 token 增量追加，段收口/完成时 flush + 全量重绘兜底。默认（开）路径一行未动。
+
+四、markdown 渲染失败局部降级（497aba2 补记）。完成态全量渲染任一后处理阶段抛错曾被 loader catch-all 把整条气泡打回源码；现在 7 个后处理阶段逐段隔离（katex 失败不连累），流式单块 raw fallback，最终兜底走 `renderMarkdownFallback` 最小渲染。
+
+验证：typecheck、lint:conventions 绿；ui+shared 3232 pass（新增 closedBlockPrefix/scheduleBlockRender 11 条、预算解析 4 组、折叠壳既有 renderer.code 直连断言全过）、engine/harness/adapter/channels/coding-agent 1709 pass，0 fail。真机以本版重建并替换 `/Applications/pure.app`（4.8.7）。
+
 ## v4.8.6
 
 **长任务并行与流超时恢复修复（bug1–4）+ 委派面板完善**
