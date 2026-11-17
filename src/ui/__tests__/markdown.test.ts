@@ -7,7 +7,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Marked } from 'marked';
-import { suggestFilename, highlightExt, mathExtInline, mathExtBlock, ensureKatex, renderer, parseChartSource, parseChartSourceWithMeta, classifyChartFailure, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
+import { classifyChartFailure, suggestFilename, highlightExt, mathExtInline, mathExtBlock, ensureKatex, renderer, parseChartSource, parseChartSourceWithMeta, groupAdjacentSvgSlots, splitTopLevelSvgSources, diagramSlot, diffLines, streamRenderThrottleMs, normalizeMapFence, recordFormValidation, takeFormValidationFeedback, partitionHljsBudget, type DiagramKind } from '../markdown';
 
 // ```map blocks render as a dedicated leaflet slot (not a plain code block).
 describe('map code blocks', () => {

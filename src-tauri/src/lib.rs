@@ -1990,10 +1990,15 @@ fn write_file_impl(
             .map_err(|e| format!("write_file append: {}", e))?;
         file.write_all(content.as_bytes())
             .map_err(|e| format!("write_file append: {}", e))?;
-        Ok(format!("Appended {} bytes to {}", content.len(), path))
+        // 累计锚点（2026-11-17 大文件分段写判例）：append 分段写是教过的策略，
+        // 但结果只报本次字节数——模型续写时不知道文件已有多大。「file now」
+        // 就是那个锚（与 NodeToolAdapter 同款）。
+        let total = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        Ok(format!("Appended {} bytes to {} (file now {} bytes)", content.len(), path, total))
     } else {
         fs::write(&full, &content).map_err(|e| format!("write_file: {}", e))?;
-        Ok(format!("Wrote {} bytes to {}", content.len(), path))
+        let total = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        Ok(format!("Wrote {} bytes to {} (file now {} bytes)", content.len(), path, total))
     }
 }
 
@@ -2098,9 +2103,9 @@ fn write_file_stream_inner_blocking(
         let _ = on_progress.send(evt.to_string());
     }
     Ok(if append {
-        format!("Appended {} bytes to {}", total, path)
+        format!("Appended {} bytes to {} (file now {} bytes)", total, path, fs::metadata(&full).map(|m| m.len()).unwrap_or(total as u64))
     } else {
-        format!("Wrote {} bytes to {}", total, path)
+        format!("Wrote {} bytes to {} (file now {} bytes)", total, path, total)
     })
 }
 
@@ -4778,6 +4783,19 @@ fn sandbox_arg_enabled(workspace: &str, sandbox: Option<bool>) -> bool {
 /// Returns structured `{ exitCode, stdout, stderr }` so the frontend can tell
 /// a failed command (non-zero exit) apart from a successful one instead of
 /// squashing everything into a `success: true` string.
+/// Drain a child pipe with a bounded window: after the kill a descendant may
+/// still inherit the pipe and hold it open (the stream variant's deadlock
+/// note applies here too), so read_to_end is capped — the collected partial
+/// is what the timeout salvage returns.
+async fn drain_child_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(mut p) = pipe {
+        use tokio::io::AsyncReadExt;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), p.read_to_end(&mut buf)).await;
+    }
+    buf
+}
+
 #[tauri::command]
 async fn execute_command(
     workspace: String,
@@ -4858,38 +4876,58 @@ async fn execute_command(
         // SIGKILL, and kill_process_group (pid captured before the move)
         // additionally takes out any descendants the command spawned.
         cmd.kill_on_drop(true);
-        // spawn() inherits our stdio by default (output() used to pipe it for
-        // us); pipe explicitly so wait_with_output still captures both streams.
+        // stdin 不喂（PowerShell -NonInteractive / sh -c 都不读）；stdout/
+        // stderr 显式 piped（wait_with_output 曾替我们管，这里手动接管）。
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        let child = cmd.spawn().map_err(|e| format!("execute_command: {}", e))?;
+        let mut child = cmd.spawn().map_err(|e| format!("execute_command: {}", e))?;
         let pid = child.id();
-        match tokio::time::timeout(command_timeout(timeout_ms), child.wait_with_output()).await {
-            Ok(result) => result.map_err(|e| format!("execute_command: {}", e))?,
-            Err(_) => {
-                if let Some(pid) = pid {
-                    let _ = kill_process_group(pid as i32);
-                }
-                return Ok(serde_json::json!({
-                    "exitCode": 124,
-                    "stdout": "",
-                    "stderr": format!("Command timed out after {}s and was terminated.", command_timeout(timeout_ms).as_secs()),
-                }));
+        // 超时部分输出保留（2026-11-17 大项目测试超时判例）：wait_with_output
+        // 在超时分支连同已产出的 stdout 一起被丢弃——测试跑到 120s 被杀时，
+        // 模型拿到的 stdout 是空的，「哪些用例已过、卡在哪一步」全丢。改为
+        // wait 单独成任务 + 超时杀进程组后统一读干管道（kill 后写端关闭，
+        // read_to_end 立即以已产出的部分输出收尾）——salvage 回给模型。
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let wait_task = tokio::spawn(async move { child.wait().await });
+        let wait_out = tokio::time::timeout(command_timeout(timeout_ms), wait_task).await;
+        let timed_out = wait_out.is_err();
+        if timed_out {
+            if let Some(pid) = pid {
+                let _ = kill_process_group(pid as i32);
             }
         }
+        let (stdout_buf, stderr_buf) = tokio::join!(
+            drain_child_pipe(stdout_pipe),
+            drain_child_pipe(stderr_pipe),
+        );
+        let exit_code = if timed_out {
+            124
+        } else {
+            match wait_out {
+                Ok(Ok(Ok(status))) => status.code().unwrap_or(-1),
+                _ => -1,
+            }
+        };
+        #[cfg(windows)]
+        let mut stderr = strip_ansi(&normalize_powershell_stderr(&stderr_buf));
+        #[cfg(not(windows))]
+        let mut stderr = strip_ansi(&decode_process_output(&stderr_buf));
+        if timed_out {
+            stderr.push_str(&format!(
+                "\n[Command timed out after {}s and was terminated — partial output preserved. For long builds/tests: rerun with background:true (returns pid + logFile immediately, poll with task_list), or pass timeoutMs up to 600000.]",
+                command_timeout(timeout_ms).as_secs()
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "exitCode": exit_code,
+            "stdout": strip_ansi(&decode_process_output(&stdout_buf)),
+            "stderr": stderr,
+        }))
     };
-
-    #[cfg(windows)]
-    let stderr = strip_ansi(&normalize_powershell_stderr(&output.stderr));
-    #[cfg(not(windows))]
-    let stderr = strip_ansi(&decode_process_output(&output.stderr));
-
-    Ok(serde_json::json!({
-        "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": strip_ansi(&decode_process_output(&output.stdout)),
-        "stderr": stderr,
-    }))
+    output
 }
 
 /// Run an argv array directly — no shell on any platform. The process
@@ -5911,7 +5949,7 @@ async fn execute_command_stream_inner(
     if timed_out {
         let timeout_line = serde_json::json!({
             "type": "stderr",
-            "content": format!("Command timed out after {}s and was terminated.", command_timeout(timeout_ms).as_secs()),
+            "content": format!("Command timed out after {}s and was terminated — partial output preserved. For long builds/tests: rerun with background:true (returns pid + logFile immediately, poll with task_list), or pass timeoutMs up to 600000.", command_timeout(timeout_ms).as_secs()),
         });
         let _ = on_output.send(timeout_line.to_string());
     }
@@ -5935,6 +5973,36 @@ async fn execute_command_stream_inner(
 /// loss when one pipe closes before the other. The command is registered in the
 /// CommandRegistry under `id` while it runs, so the GUI can cancel it (kill_command) when
 /// the user stops the turn.
+#[cfg(test)]
+mod execute_command_timeout_tests {
+    use super::*;
+
+    /// 超时部分输出保留（2026-11-17 大项目测试超时判例）：echo 先产出、sleep
+    /// 撞超时——kill 后管道关闭，stdout 必须带着已产出的部分回来，stderr 带
+    /// 出路指引；不再是一句 timed out 配空 stdout。
+    #[tokio::test]
+    async fn timeout_preserves_partial_output_and_guides_exit_paths() {
+        let workspace = std::env::temp_dir().join(format!("pure-cmd-timeout-{}", std::process::id()));
+        fs::create_dir_all(&workspace).unwrap();
+        let result = execute_command(
+            workspace.to_string_lossy().to_string(),
+            "echo partial-marker-kept && sleep 30".to_string(),
+            None,
+            None,
+            None,
+            Some(400),
+        )
+        .await
+        .unwrap();
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        let stderr = result["stderr"].as_str().unwrap_or_default();
+        assert!(stdout.contains("partial-marker-kept"), "partial stdout preserved: {stdout:?}");
+        assert!(stderr.contains("background:true"), "exit-path guidance: {stderr:?}");
+        assert_eq!(result["exitCode"], 124);
+        fs::remove_dir_all(&workspace).ok();
+    }
+}
+
 #[tauri::command]
 async fn execute_command_stream(
     state: tauri::State<'_, CommandRegistry>,
@@ -7221,7 +7289,7 @@ mod write_file_stream_tests {
 
         let msg = write_file_stream_inner_blocking(&workspace, "hi.txt", "hello", false, &ch)
             .unwrap();
-        assert_eq!(msg, "Wrote 5 bytes to hi.txt");
+        assert_eq!(msg, "Wrote 5 bytes to hi.txt (file now 5 bytes)");
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -7238,7 +7306,7 @@ mod write_file_stream_tests {
 
         let msg = write_file_stream_inner_blocking(&workspace, "empty.txt", "", false, &ch)
             .unwrap();
-        assert_eq!(msg, "Wrote 0 bytes to empty.txt");
+        assert_eq!(msg, "Wrote 0 bytes to empty.txt (file now 0 bytes)");
         assert_eq!(
             fs::read_to_string(PathBuf::from(&workspace).join("empty.txt")).unwrap(),
             ""
@@ -7263,18 +7331,18 @@ mod write_file_stream_tests {
         // 追加第二段：原文保留 + Appended 口径文案。
         let msg = write_file_stream_inner_blocking(&workspace, "big.txt", "part-2", true, &ch)
             .unwrap();
-        assert_eq!(msg, "Appended 6 bytes to big.txt");
+        assert_eq!(msg, "Appended 6 bytes to big.txt (file now 12 bytes)");
         assert_eq!(fs::read_to_string(dir.join("big.txt")).unwrap(), "part-1part-2");
 
         // 追加到不存在的文件 = 新建（分段写的第一段用 append 起笔也合法）。
         let msg = write_file_stream_inner_blocking(&workspace, "fresh/nested.txt", "seed", true, &ch)
             .unwrap();
-        assert_eq!(msg, "Appended 4 bytes to fresh/nested.txt");
+        assert_eq!(msg, "Appended 4 bytes to fresh/nested.txt (file now 4 bytes)");
         assert_eq!(fs::read_to_string(dir.join("fresh/nested.txt")).unwrap(), "seed");
 
         // 非流式 write_file 的 append 同语义。
         let msg = write_file_impl(&workspace, "big.txt", "part-3", Some(true)).unwrap();
-        assert_eq!(msg, "Appended 6 bytes to big.txt");
+        assert_eq!(msg, "Appended 6 bytes to big.txt (file now 18 bytes)");
         assert_eq!(
             fs::read_to_string(dir.join("big.txt")).unwrap(),
             "part-1part-2part-3"

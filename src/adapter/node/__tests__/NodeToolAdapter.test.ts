@@ -853,3 +853,33 @@ describe('NodeToolAdapter web_fetch netLedger 接线（P0b）', () => {
     }
   });
 });
+
+// 超时部分输出保留（2026-11-17 大项目测试超时判例）：echo 先产出、sleep 撞
+// 超时——结果必须带回已产出的部分输出 + 机制出路指引，不再一句 timed out
+// 配空输出。
+describe('execute_command timeout partial output（2026-11-17）', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-timeout-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  it('returns partial output and exit-path guidance on timeout', async () => {
+    const r = await adapter.execute({
+      id: 'call-timeout',
+      index: 0,
+      function: { name: 'execute_command', arguments: JSON.stringify({ command: 'echo partial-marker-kept && sleep 30', timeoutMs: 600 }) },
+    });
+    expect(r.success).toBe(false);
+    const text = JSON.stringify(r.result);
+    expect(text).toContain('partial-marker-kept');
+    expect(String(r.error)).toContain('background:true');
+    expect(String(r.error)).toContain('600000');
+  }, 20000);
+});

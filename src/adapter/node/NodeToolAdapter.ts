@@ -664,10 +664,18 @@ export class NodeToolAdapter implements ToolAdapter {
     else await Bun.write(path, content);
     const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
+    // 累计锚点（2026-11-17 大文件分段写判例）：append 分段写是教过的策略，
+    // 但结果只报本次字节数——模型续写时不知道文件已有多大、还差多少。
+    // 「file now M bytes」就是那个锚。
+    let sizeNote = '';
+    try {
+      sizeNote = ` (file now ${statSync(path).size} bytes)`;
+    } catch { /* 写后 stat 失败不连累结果 */ }
+
     return {
       id: `tool_${Date.now()}`,
       toolName: 'write_file',
-      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
+      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${sizeNote}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
       success: true,
       duration: Date.now() - start,
     };
@@ -1077,25 +1085,82 @@ export class NodeToolAdapter implements ToolAdapter {
       // 先例（tauriToolAdapter.test.ts 的 sh 展开探针）。语义对齐旧形态：
       // stdin 不喂（PowerShell -NonInteractive / sh -c 都不读），stdout/
       // stderr 全量收管，abort.signal 保留超时取消。
-      let stdoutRaw: string;
-      let stderrRaw: string;
-      let exitCode: number;
+      let stdoutRaw = '';
+      let stderrRaw = '';
+      let exitCode = -1;
+      let proc: ReturnType<typeof spawn> | null = null;
+      let outP: Promise<string> = Promise.resolve('');
+      let errP: Promise<string> = Promise.resolve('');
       try {
-        const proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
+        proc = spawn(shellArgs[0]!, shellArgs.slice(1), {
           cwd: cwd.value,
           env: spawnEnv ?? undefined,
           signal: abort.signal,
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
+          // posix 下子进程自成进程组：超时/中止时的组杀不伤及自身进程组，
+          // 且孙进程（npm test 的 sleep/子测试）一并被收走——只杀直接子进程
+          // 时管道写端被孙进程攥着，部分输出捞不回（与 Rust
+          // kill_process_group 同一物理）。
+          detached: !IS_WINDOWS,
         });
+        // 流 promise 提到 try 外持引用：超时中止时 node 杀掉子进程、管道立即
+        // 关闭、promise 以「已产出的部分输出」resolve——catch 里据此捞回，
+        // 不再把测试跑到 120s 的进度全部丢掉（2026-11-17 大项目测试超时判例）。
+        outP = collectStreamText(proc.stdout);
+        errP = collectStreamText(proc.stderr);
         [stdoutRaw, stderrRaw, exitCode] = await Promise.all([
-          collectStreamText(proc.stdout),
-          collectStreamText(proc.stderr),
+          outP,
+          errP,
           new Promise<number>((resolve, reject) => {
-            proc.on('error', reject);
-            proc.on('exit', (code) => resolve(code ?? -1));
+            proc!.on('error', reject);
+            proc!.on('exit', (code) => resolve(code ?? -1));
           }),
         ]);
+      } catch (err: any) {
+        if (err?.name === 'AbortError' && proc) {
+          // 超时/中止 salvage：先组杀（见 detached 注释——孙进程攥着管道写端
+          // 时只杀直接子进程，管道迟迟不关），再给部分输出一个短窗口落袋，
+          // 随结果一起回给模型——大项目的测试/构建跑到一半被杀时，「哪些
+          // 用例已过、卡在哪一步」比一句 timed out 值钱得多。同时把两条机制
+          // 出路（background:true / 提高上限）写在错误里。
+          const callerCancelled = signal?.aborted === true;
+          if (proc.pid) {
+            if (!IS_WINDOWS) {
+              try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* 已退出 */ }
+            } else {
+              try {
+                const tk = spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+                tk.unref?.();
+              } catch { /* best effort */ }
+            }
+          }
+          const partial = await Promise.race([
+            Promise.all([outP, errP]).catch(() => ['', ''] as const),
+            new Promise<readonly [string, string]>((r) => setTimeout(() => r(['', '']), 2000)),
+          ]);
+          const stdout = stripAnsi(partial[0].trim());
+          const stderr = stripAnsi(stripPowerShellStartupProgress(partial[1].trim()));
+          const stdoutView = spillOversizeOutput(stdout, 'stdout');
+          const stderrView = spillOversizeOutput(stderr, 'stderr');
+          const result: Record<string, unknown> = { stdout: stdoutView.text, stderr: stderrView.text, exitCode: 124 };
+          if (stdoutView.spillFile || stderrView.spillFile) {
+            result.outputFiles = [stdoutView.spillFile, stderrView.spillFile].filter(Boolean);
+          }
+          const note = callerCancelled
+            ? 'Command cancelled before completion — partial output above (full text in outputFiles when present).'
+            : `Command timed out after ${timeoutMs}ms and was terminated — partial output above (full text in outputFiles when present). For long builds/tests: rerun with background:true (returns pid + logFile immediately, poll with task_list), or pass timeoutMs up to 600000.`;
+          result.note = note;
+          return {
+            id: `tool_${Date.now()}`,
+            toolName: 'execute_command',
+            result,
+            error: note,
+            success: false,
+            duration: Date.now() - start,
+          };
+        }
+        throw err;
       } finally {
         if (scriptFile) {
           try { rmSync(scriptFile, { force: true }); } catch { /* best effort */ }

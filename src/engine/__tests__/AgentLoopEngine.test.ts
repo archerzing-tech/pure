@@ -2,7 +2,7 @@
 // v0.4 — updated for new Engine behavior: BudgetWarning events, VERIFY_FAILED → loop back to THINK.
 
 import { describe, it, expect } from 'bun:test';
-import { AgentLoopEngine } from '../AgentLoopEngine';
+import { AgentLoopEngine, salvageTruncatedWriteArgs } from '../AgentLoopEngine';
 import { takeSchemaQuarantineFacts, resetSchemaQuarantineForTests } from '../../shared/schemaQuarantineHeal';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
@@ -3005,5 +3005,41 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
 
     expect(observed).toEqual([4321]);
     expect(events.find(e => e.type === 'Completed')).toBeDefined();
+  });
+});
+
+// 截断救援（2026-11-17 大写入判例）：2w-3w 字符的 write_file 在输出预留下
+// 必然截断——从被砍半的参数里抢救 path + 已生成的 content 前缀，直接落盘
+// 为第一段（引擎接线）让模型 append:true 续写，截断从「全损」变「首段免费」。
+describe('salvageTruncatedWriteArgs', () => {
+  it('salvages path + decoded content prefix when cut inside the content string', () => {
+    const content = 'const data = [\n  { id: 1 },\n'.repeat(20);
+    const raw = '{"path": "src/gen/big.js", "content": "' + content.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n') + 'line-';
+    const salvaged = salvageTruncatedWriteArgs(raw);
+    expect(salvaged).not.toBeNull();
+    expect(salvaged!.path).toBe('src/gen/big.js');
+    expect(salvaged!.content.startsWith('const data = [')).toBe(true);
+    expect(salvaged!.content.endsWith('line-')).toBe(true);
+  });
+
+  it('strips an orphan trailing backslash before closing', () => {
+    const pad = 'x'.repeat(60);
+    const raw = '{"path": "out.txt", "content": "' + pad + '\\nline-2\\';
+    const salvaged = salvageTruncatedWriteArgs(raw);
+    expect(salvaged).not.toBeNull();
+    expect(salvaged!.content).toBe(pad + '\nline-2');
+  });
+
+  it('returns null when the cut happens before content exists', () => {
+    expect(salvageTruncatedWriteArgs('{"path": "out.txt", "con')).toBeNull();
+    expect(salvageTruncatedWriteArgs('{"pat')).toBeNull();
+  });
+
+  it('returns null when the salvaged prefix is too short to be worth a write', () => {
+    expect(salvageTruncatedWriteArgs('{"path": "out.txt", "content": "ab')).toBeNull();
+  });
+
+  it('returns null for non-object raw', () => {
+    expect(salvageTruncatedWriteArgs('not json at all')).toBeNull();
   });
 });

@@ -86,6 +86,38 @@ function parsesAsJson(raw: string): boolean {
     return false;
   }
 }
+
+/**
+ * 截断救援（2026-11-17 大写入判例）：2w-3w 字符的 write_file 在 8192 输出
+ * 预留下就是必然截断区——参数 JSON 被砍半，按旧口径整笔隔离不执行，已生成
+ * 的几千字符前缀全损、重试再烧一整轮输出。从被砍半的参数里抢救 path 与
+ * 已生成的 content 前缀：补闭合符让 JSON.parse 通过即视为抢救成功（截断点
+ * 在字符串内部是最常见形态——模型的「正文后半段」根本没生成，前缀本身是
+ * 完整解码合法的）。content < 50 字符不值一次写盘，交回隔离口径。
+ * 导出仅供测试。
+ */
+export function salvageTruncatedWriteArgs(raw: string): { path: string; content: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return null;
+  // 截断点挂在转义符上（content 以 \ 结尾）时先剥孤悬反斜杠再补闭合。
+  const bases = trimmed.endsWith('\\') ? [trimmed.slice(0, -1), trimmed] : [trimmed];
+  const candidates: string[] = [];
+  for (const base of bases) {
+    candidates.push(`${base}"}`, `${base}"}]`, `${base}}`);
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { path?: unknown; content?: unknown };
+      const path = typeof parsed.path === 'string' ? parsed.path.trim() : '';
+      const content = typeof parsed.content === 'string' ? parsed.content : '';
+      if (!path || content.length < 50) return null;
+      return { path, content };
+    } catch {
+      // 下一个闭合候选
+    }
+  }
+  return null;
+}
 // Tool results (read_file of a big file, a giant build/test dump, …) are folded
 // into the LLM context verbatim. A huge result both inflates the prompt (slow
 // first-token / TTFT → stream timeout) and can blow the context window. Cap the
@@ -1057,7 +1089,51 @@ export class AgentLoopEngine {
         // 半截参数执行了也是灾难。合成结果同时写 result 与 error（transcript
         // 配对对失败结果只取 error 字段），模型拿到的是可自愈的出路而不是
         // 含糊的 invalid-arguments（那只会原样重试再撞一次上限）。
+        // 截断救援落盘（2026-11-17 大写入判例）：write_file 被砍半时，已生成
+        // 的 content 前缀按旧口径全损——重试要重新烧一整轮输出。抢救出
+        // path + 前缀直接走正常 write_file 执行面写盘（pathPolicy/撤销快照
+        // 守卫全套在），模型拿 file now 锚点用 append:true 续写——截断从
+        // 「全损」变「首段免费落盘」。
         for (const call of truncatedCalls) {
+          if (call.function.name === 'write_file') {
+            const salvaged = salvageTruncatedWriteArgs(call.function.arguments);
+            if (salvaged) {
+              const salvageCall: typeof call = {
+                id: call.id,
+                index: call.index,
+                function: { name: 'write_file', arguments: JSON.stringify({ path: salvaged.path, content: salvaged.content }) },
+              };
+              let salvageNote = '';
+              let salvageOk = false;
+              // 只记账不发事件：最终以原 call.id 发一条配对结果（salvage 写入
+              // + 出路文案合一），避免同 id 双条目打乱 transcript 配对。
+              for await (const step of this.runBatch([salvageCall], ctx, budget)) {
+                if (step.kind !== 'tool') continue;
+                const tr = step.tr.result;
+                salvageOk = tr.success === true;
+                salvageNote = typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result);
+              }
+              const cutText = salvageOk
+                ? `This write was cut off by the model output-token limit — salvage-write succeeded: the first ${salvaged.content.length} chars were written to ${salvaged.path} (${salvageNote}). The REMAINDER was never generated. Continue the file with write_file append:true (write exactly the missing rest, do not repeat the saved part), or re-emit write_file with the complete content to replace it.`
+                : `This tool call was cut off by the model output-token limit and the partial content could not be salvaged safely (it was NOT executed). Split the work into smaller calls — write the first chunk with write_file, then append the rest with append:true (part 2, part 3, …) — or reduce the payload size and retry.`;
+              const cut: ExecutedToolResult = {
+                toolCallId: call.id,
+                toolName: call.function.name,
+                result: {
+                  id: call.id,
+                  toolName: call.function.name,
+                  result: cutText,
+                  success: false,
+                  error: cutText,
+                  duration: 0,
+                },
+                duration: 0,
+              };
+              executedResults.push(cut);
+              yield { type: 'ToolResult', payload: cut, timestamp: Date.now() };
+              continue;
+            }
+          }
           const cutText = 'This tool call was cut off by the model output-token limit: the arguments JSON arrived incomplete, so it was NOT executed. Split the work into smaller calls — write the first chunk with write_file, then append the rest with append:true (part 2, part 3, …) — or reduce the payload size and retry.';
           const cut: ExecutedToolResult = {
             toolCallId: call.id,
