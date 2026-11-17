@@ -642,13 +642,15 @@ function mountEchart(target: HTMLElement, option: EChartsOption): void {
     : undefined;
   if (font) option.textStyle = { ...option.textStyle, fontFamily: font };
   // init 与 setOption 之间任何一抛，半程实例必须就地回收再上抛——不回收
-  // 就是下一轮「already initialized」死循环的种子。
+  // 就是下一轮「already initialized」死循环的种子。顺手清掉上面的内联
+  // min-height 兜底：错误态的空 target 不该留 320px 的隐匿占位。
   let chart: ReturnType<typeof echarts.init>;
   try {
     chart = echarts.init(target, undefined, { renderer: 'svg' });
     chart.setOption(option);
   } catch (err) {
     try { echarts.getInstanceByDom(target)?.dispose(); } catch { /* 尽力回收 */ }
+    target.style.minHeight = '';
     instances.delete(target);
     chartTargets.delete(target);
     throw err;

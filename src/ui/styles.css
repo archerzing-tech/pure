@@ -11133,8 +11133,14 @@ button svg,
   cursor: zoom-in;
 }
 .bubble .diagram-slot[data-state="preview"][data-view="preview"] .diagram-preview,
-.bubble .diagram-slot[data-state="error"][data-view="preview"] .diagram-preview {
+.bubble .diagram-slot[data-state="preview"][data-view="preview"] .diagram-preview {
   display: block;
+}
+/* 错误态不显示图占位（2026-11-17 用户定调）：图没渲染出来，340px 的空
+ * chart-target 只是一块没有任何信息的黑框——错误卡本身就是这个槽的全部
+ * 内容。查看数据走工具栏（hover/focus-within 仍可达）。 */
+.bubble .diagram-slot[data-state="error"][data-view="preview"] .diagram-preview {
+  display: none;
 }
 .diagram-preview svg {
   display: block;

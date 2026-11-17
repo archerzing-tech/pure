@@ -951,10 +951,11 @@ function setDiagramState(slot: HTMLElement, state: DiagramState, message = '', o
   if (state === 'error') recordFormValidation(slot.getAttribute('data-diagram-kind'), 'failed', message);
   const error = slot.querySelector<HTMLElement>('.diagram-error');
   if (error) {
-    // retryable（默认 true）= 重跑真可能好（渲染器/模块类）。确定性失败
-    // （数据/格式类）不给重试按钮：点了必然原地复发（真机判例：重试被连环
-    // 点击无成效，与地图 parse 错误卡同一纪律）。出路写在 message 里。
-    const retryable = opts.retryable ?? true;
+    // retryable 默认 false（2026-11-17 用户定调：没渲染出来的错误卡不给重试
+    // 按钮——点了必然原地复发，真机判例「重试被连环点击无成效」）。只有
+    // 显式声明可自愈的失败类（如 chart 模块加载的瞬时网络失败）才 opts
+    // retryable:true。出路写在 message 里，源内容走工具栏「查看数据」。
+    const retryable = opts.retryable ?? false;
     error.innerHTML = state === 'error'
       ? `<strong>${esc(t('diagram.renderFailed'))}</strong><span>${esc(message)}</span>` +
         (retryable ? `<button type="button" class="diagram-retry">${esc(t('diagram.retry'))}</button>` : '')
@@ -2640,13 +2641,13 @@ async function processChartSlot(slot: HTMLElement, version: number, mod: typeof 
     setDiagramState(slot, 'preview');
   } catch (err) {
     if (!isCurrentDiagramRender(slot, version)) return;
-    // 渲染段（parse 已过）：echarts init/setOption 内部错是瞬时类——实例
-    // 泄漏已由 mountEchart 的防御回收闭环，重试真出路；buildChartOption 的
-    // 确定性数据错（pie 全零等）按类给确定性出路。
+    // 渲染段（parse 已过）：buildChartOption 的确定性数据错（pie 全零等）
+    // 按类给确定性出路；echarts 内部错按用户定调同样不给重试按钮——实例
+    // 泄漏已闭环、重开/主题切换都会重水合，出路写在文案里。
     const detail = err instanceof Error ? err.message : String(err);
     const failure = classifyChartFailure(raw, err, 'render');
     if (failure.kind === 'render') console.error('[pure] chart render failed:', detail);
-    setDiagramState(slot, 'error', failure.message, { retryable: failure.retryable });
+    setDiagramState(slot, 'error', failure.message);
   }
 }
 
@@ -2661,8 +2662,11 @@ async function processChartSlot(slot: HTMLElement, version: number, mod: typeof 
  *  - missing   有内容但没有可绘制数值   → 不可重试，让模型补数据
  *  - encoding  乱码（修复层已尽力）     → 不可重试，让模型重出
  *  - format    格式不对（修复层已尽力） → 不可重试，查看数据核对
- *  - render    渲染器内部错（parse 已过）→ 可重试（mountEchart 防御回收闭环）
- *  - module    模块加载失败            → 可重试（fetch 失败不缓存），带重启指引
+ *  - render    渲染器内部错（parse 已过）→ 错误卡不带重试（2026-11-17 用户定调：
+ *              没渲染出来的错误卡一律不给重试钮）；实例回收已闭环，重开/主题
+ *              切换重水合即自愈
+ *  - module    模块加载失败            → 错误卡带重试（fetch 失败不缓存，重试是
+ *              唯一自愈入口；chart 槽没有常驻刷新钮），带重启指引
  *
  * 截断判定（跨引擎稳）：JSON 报错文案各异，但「写了一半的 JSON」有个结构性
  * 特征——串尾括号深度不闭合。忽略字符串字面量地扫一遍 {}[] 深度即可，不依赖
@@ -2692,14 +2696,16 @@ export function classifyChartFailure(
   if (raw.includes('empty chart source')) {
     return { kind: 'empty', retryable: false, message: `${t('diagram.chartEmptySource')}。${t('diagram.retryFutile')}` };
   }
-  // 截断判定必须排在错误消息匹配之前：截断的 JSON 会掉进兜底的行解析器、
-  // 最终抛的是「缺数据行」——错误措辞会说谎，括号深度的结构信号不会。
-  // 乱码次之（损坏可以伴随任何形状），最后才是消息匹配的缺数据与格式。
-  if (jsonTailIsOpen(source)) {
-    return { kind: 'truncated', retryable: false, message: `${t('diagram.chartTruncated')}` };
-  }
+  // 乱码排在截断之前：FFFD 是更特异的损坏信号——断引号型乱码会让字符串
+  // 字面量永不闭合，括号/引号深度的结构判定整体失真，按截断报会误导
+  // （真机预检判例：断引号乱码 fixture 被判 truncated）。
   if (source.includes('�')) {
     return { kind: 'encoding', retryable: false, message: `${t('diagram.chartEncoding')} ${t('diagram.retryFutile')}` };
+  }
+  // 截断判定必须排在错误消息匹配之前：截断的 JSON 会掉进兜底的行解析器、
+  // 最终抛的是「缺数据行」——错误措辞会说谎，括号深度的结构信号不会。
+  if (jsonTailIsOpen(source)) {
+    return { kind: 'truncated', retryable: false, message: `${t('diagram.chartTruncated')}` };
   }
   if (raw.includes('chart needs at least one data row')) {
     return { kind: 'missing', retryable: false, message: `${t('diagram.chartMissing')} ${t('diagram.retryFutile')}` };
