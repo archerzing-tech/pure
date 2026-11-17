@@ -48,13 +48,33 @@ export interface ResolvedPromptBudget {
 }
 
 const PROMPT_BUDGET_FALLBACK = {
-  contextWindowTokens: 32_768,
-  outputReserveTokens: 4_096,
+  // 2026-11-17 出厂基线上调：原 32k/4096 是 2025 年的保守值——未识别模型
+  // 几乎必然 ≥128k 输入（免费/中转托管模型也一样），32k 兜底让压缩在
+  // ~2 万 token 就开闸（真机判例：xingchen free 每回合弹「上下文快到顶」）；
+  // 输出 4096 则会让思考型未知模型把预算烧在暗推理上、可见回答为空
+  // （chat.ts 的 deepseek 判例同因）。乐观误判的代价有界：context 类拒绝
+  // 会现场解析真实上限并当轮自愈（parseProviderContextLimit 覆盖中英文
+  // 报文），设置页连通性测试也会把真实读数写进 capabilityProbes；本地
+  // 运行时不受影响——ollama/lmstudio 有自己的保守规则（主机约束）。
+  contextWindowTokens: 131_072,
+  outputReserveTokens: 8_192,
   safetyMarginTokens: 1_024,
 };
 
 /** Output reserve may claim at most this share of the window; the rest stays input. */
 const OUTPUT_RESERVE_MAX_SHARE = 0.75;
+/** 显式窗口的输出预留份额（2026-11-17 全 provider 审计）：用户把窗口显式
+ *  调小是对**输入预算**的表达，族里动辄 128k 的输出天花板不该原样跟着
+ *  扣（150k 窗口 − 131k 预留 = 输入只剩 36k 的真机判例）。显式窗口小于
+ *  族窗口时，输出预留夹到窗口的 1/4——每回合的真实输出远小于此，而
+ *  输入+max_tokens ≤ 窗口的不变量照旧成立（availableInput 就是按同一
+ *  个预留扣出来的）。 */
+const EXPLICIT_WINDOW_OUTPUT_SHARE = 0.25;
+/** 显式窗口的输出保底：份额随窗口缩小到很低时，输出上限不能低于这个
+ *  值（思考型模型在 8k 输出下会把预算烧完、可见回答为空——deepseek
+ *  真机判例；适配器自带的 32768 同锚）。只封顶不抬底：族天花板比它小
+ *  的（moonshot-v1 的 4096）原样保留。 */
+const EXPLICIT_WINDOW_MIN_OUTPUT = 32_768;
 
 /**
  * Per-family budget defaults = each model generation's published maximums
@@ -90,7 +110,31 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
   const hasOverride = config.contextWindowTokens !== undefined
     || config.outputReserveTokens !== undefined
     || config.safetyMarginTokens !== undefined;
+  // 输出预留的一个值两个角色（2026-11-17 审计定性）：发送侧 max_tokens
+  // （该模型的输出天花板，族知识是厂商发布的真实上限）+ 输入预算扣减。
+  // 溯源顺序不变：显式 > 族 > 探测 > 通用兜底。
+  // 误配对根因（真机判例 2026-11-17：custom001 显式 window=150000 时
+  // 继承了 deepseek 家族 131072 的输出预留——那是配 1M 家族窗口的——被
+  // 75% 上限夹到 112500 后可用输入只剩 36476，85% 触发线每回合都被真实
+  // 载荷越过，「上下文快到顶了」每回合都弹）：
+  //   · 显式窗口（用户只表达输入预算）不整体继承族/探测预留——输出侧取
+  //     族天花板（砍输入不该砍输出能力），但夹到窗口份额，输入侧保住
+  //     大头（EXPLICIT_WINDOW_OUTPUT_SHARE / MIN_OUTPUT 两道）；
+  //   · 没有显式窗口时族配对原样保留（缺省路径行为逐字节不变）；
+  //   · 显式给预留的用户成对意图原样生效；75% 上限护栏只对显式预留与
+  //     缺省路径继续兜底（防 availableInput=1 的最后一道，与继承无关）。
+  const windowIsExplicit = config.contextWindowTokens !== undefined;
   const contextWindowTokens = Math.max(1, config.contextWindowTokens ?? defaults?.contextWindowTokens ?? config.probedBudget?.contextWindowTokens ?? PROMPT_BUDGET_FALLBACK.contextWindowTokens);
+  const outputCeiling = config.outputReserveTokens
+    ?? defaults?.outputReserveTokens
+    ?? config.probedBudget?.outputReserveTokens
+    ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens;
+  const pairedOutputReserve = windowIsExplicit && config.outputReserveTokens === undefined
+    ? Math.min(
+        outputCeiling,
+        Math.max(EXPLICIT_WINDOW_MIN_OUTPUT, Math.floor(contextWindowTokens * EXPLICIT_WINDOW_OUTPUT_SHARE)),
+      )
+    : outputCeiling;
   // At least a quarter of the window must stay available for input. An
   // output reserve equal to the whole window — a mis-paired combination,
   // e.g. a 128_000 provider-level window override meeting glm's 128_000
@@ -98,7 +142,7 @@ export function resolvePromptBudget(config: PromptBudgetConfig = {}): ResolvedPr
   // assembled fragment. No shipped default exceeds this share (the highest
   // is minimax at 64%), so the cap only fires on mis-paired overrides.
   const outputReserveTokens = Math.max(0, Math.min(
-    config.outputReserveTokens ?? defaults?.outputReserveTokens ?? config.probedBudget?.outputReserveTokens ?? PROMPT_BUDGET_FALLBACK.outputReserveTokens,
+    pairedOutputReserve,
     Math.max(1, Math.floor(contextWindowTokens * OUTPUT_RESERVE_MAX_SHARE)),
   ));
   const safetyMarginTokens = Math.max(0, Math.min(

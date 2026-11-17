@@ -2952,6 +2952,9 @@ describe('传输层静默自愈（呈现纪律）', () => {
 
   it('压缩摘要的起点翻牌（start 才翻，done 不需要话）', () => {
     expect(src).toContain("case 'ContextCompactRetry':");
+    // attempt 0（主动软压缩，秒级）与 attempt≥1（被动压缩，真要跑 60s 摘要）
+    // 轻重分开：把重话留给真慢的那条路径。
+    expect(src).toContain('上下文用得比较多，正在腾挪空间（清旧工具结果、归拢历史），马上继续…');
     expect(src).toContain('上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）');
     expect(src).toContain("if (event.payload.stage === 'start') {");
     // 主动预压缩（attempt 0）可能在没有任何卡的中途发生——start 必须自己在

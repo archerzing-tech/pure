@@ -81,15 +81,35 @@ describe('resolvePromptBudget', () => {
     expect(gpt5.outputReserveTokens).toBe(128_000);
   });
 
+  it('an explicit window never inherits a family/probed output reserve', () => {
+    // 真机判例 2026-11-17：custom001 显式 window=150000 没设预留，继承了
+    // deepseek 家族 131072（配 1M 家族窗口的）——被 75% 上限夹到 112500，
+    // 可用输入只剩 36476，85% 触发线每回合都被真实载荷越过，「上下文快到
+    // 顶了」每回合都弹。
+    // 修复分两层：显式窗口不继承族预留（输入预算是用户在调的旋钮）；
+    // 输出侧仍取族天花板（砍输入不该砍输出能力），但夹到窗口份额——
+    // 输入+max_tokens ≤ 窗口的严格校验不变量照旧成立。
+    const custom = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash', contextWindowTokens: 150_000 });
+    expect(custom.outputReserveTokens).toBe(37_500); // max(32768, 150000×0.25)
+    expect(custom.availableInputTokens).toBe(150_000 - 37_500 - 1_024);
+    // 显式成对给的照旧成对生效（窗口换、预留自定）。
+    const paired = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash', contextWindowTokens: 150_000, outputReserveTokens: 16_384 });
+    expect(paired.outputReserveTokens).toBe(16_384);
+    expect(paired.availableInputTokens).toBe(150_000 - 16_384 - 1_024);
+    // 显式窗口 ≥ 族窗口时不夹（族配对原样）：用户重申 1M 与缺省等价。
+    const full = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash', contextWindowTokens: 1_000_000 });
+    expect(full.outputReserveTokens).toBe(131_072);
+    expect(full.availableInputTokens).toBe(1_000_000 - 131_072 - 1_024);
+    // 族天花板比保底小的（gpt-4o 16384）只封顶不抬底。
+    const gpt4o = resolvePromptBudget({ provider: 'openai', model: 'gpt-4o', contextWindowTokens: 64_000 });
+    expect(gpt4o.outputReserveTokens).toBe(16_384); // min(16384, max(32768, 16000))
+    // 没有显式窗口时家族配对原样保留（这是缺省路径，行为不变）。
+    const family = resolvePromptBudget({ provider: 'deepseek-openai', model: 'deepseek-v4-flash' });
+    expect(family.contextWindowTokens).toBe(1_000_000);
+    expect(family.outputReserveTokens).toBe(131_072);
+  });
+
   it('caps an output reserve that would eat the whole window (mis-paired override)', () => {
-    // Real-world regression: glm kept its 128_000 default reserve while a
-    // provider-level override shrank the window to 128_000 —
-    // availableInputTokens resolved to 1 and the assembler stripped every
-    // fragment, so chart-style deliveries degraded to plain text. The real
-    // GUI path carries safetyMarginTokens: 0.
-    const wedged = resolvePromptBudget({ provider: 'glm', contextWindowTokens: 128_000, safetyMarginTokens: 0 });
-    expect(wedged.outputReserveTokens).toBe(96_000);
-    expect(wedged.availableInputTokens).toBe(32_000);
     // Explicit reserves are capped by the same share.
     const explicit = resolvePromptBudget({ contextWindowTokens: 10_000, outputReserveTokens: 9_500, safetyMarginTokens: 0 });
     expect(explicit.outputReserveTokens).toBe(7_500);
@@ -109,11 +129,11 @@ describe('resolvePromptBudget', () => {
     expect(known.source).toBe('provider-model');
     expect(known.contextWindowTokens).toBe(1_000_000);
     // manifest 无档（收窄后的自定义组合）才落到探得值；探得输出缺席时
-    // 输出预留仍保守。
+    // 输出预留落出厂兜底（2026-11-17 起 8192）。
     const probed = resolvePromptBudget({ provider: 'openrouter', model: 'foo-1', probedBudget: { contextWindowTokens: 983_040 } });
     expect(probed.source).toBe('probed');
     expect(probed.contextWindowTokens).toBe(983_040);
-    expect(probed.outputReserveTokens).toBe(4_096);
+    expect(probed.outputReserveTokens).toBe(8_192);
     // 显式 override 永远最高——探得值连 override 的补空位都占不到。
     const overridden = resolvePromptBudget({ provider: 'openrouter', model: 'foo-1', contextWindowTokens: 128_000, probedBudget: { contextWindowTokens: 983_040 } });
     expect(overridden.source).toBe('override');
@@ -208,10 +228,13 @@ describe('resolvePromptBudget', () => {
     // Known family → published maximum.
     expect(promptBudgetDefaultFor('glm', 'glm-5.3-flash').contextWindowTokens).toBe(1_000_000);
     expect(promptBudgetDefaultFor('glm', 'glm-5.3-flash').outputReserveTokens).toBe(128_000);
-    // Unknown model → the conservative fallback, never a fabricated ceiling.
+    // Unknown model → the out-of-box baseline, never a fabricated ceiling.
+    // 2026-11-17：32k/4096 是上一代基线——托管未知模型几乎必然 ≥128k 输入，
+    // 32k 兜底让压缩在 2 万 token 开闸（真机判例）；乐观误判由 context 类
+    // 拒绝的现场解析 + 连通性探测自愈，本地运行时另有保守规则不受影响。
     const unknown = promptBudgetDefaultFor('some-unknown', 'mystery-model');
-    expect(unknown.contextWindowTokens).toBe(32_768);
-    expect(unknown.outputReserveTokens).toBe(4_096);
+    expect(unknown.contextWindowTokens).toBe(131_072);
+    expect(unknown.outputReserveTokens).toBe(8_192);
   });
 });
 
@@ -242,7 +265,7 @@ describe('promptBudgetLiveLine（sys_info 的预算现状行——模型自调�
 
   it('an unknown model names the conservative fallback instead of fabricating a ceiling', () => {
     const line = promptBudgetLiveLine([], 'some-unknown', 'mystery-model');
-    expect(line).toContain('window=32768 outputReserve=4096');
+    expect(line).toContain('window=131072 outputReserve=8192');
     expect(line).toContain('source=conservative-fallback');
     expect(line).toContain('family defaults unknown');
     expect(line).toContain('set an override');

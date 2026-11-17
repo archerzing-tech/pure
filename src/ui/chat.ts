@@ -7355,6 +7355,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // here rather than assume one is already showing. Same silence
             // guard as the wire-status card: never open over a live tool row.
             // 'done' needs no message — the next THINK round speaks for itself.
+            // attempt 0（主动预压缩）走软模式：先清旧工具结果、归拢历史，通常
+            // 秒级且没有摘要调用；「含一次摘要、要一两分钟」的重话只留给
+            // attempt≥1（provider 拒绝后的被动压缩，真要跑 60s 摘要）。轻重
+            // 说反会把一次便宜的整理读成一次卡死（2026-11-17 判例：窗口
+            // 误配对让主动压缩每回合都弹，重文案放大了观感）。
             if (event.payload.stage === 'start') {
               cancelToolGapCard();
               if (!thinkingCard && pendingRows.size === 0 && pendingByName.size === 0) {
@@ -7362,7 +7367,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                 thinkingCard.card.classList.add('waiting');
               }
               if (thinkingCard) {
-                setThinkingLabel(thinkingCard, '上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）…');
+                setThinkingLabel(
+                  thinkingCard,
+                  event.payload.attempt === 0
+                    ? '上下文用得比较多，正在腾挪空间（清旧工具结果、归拢历史），马上继续…'
+                    : '上下文快到顶了，正在压缩历史（含一次摘要，可能要一两分钟）…',
+                );
                 dismissThinkingHint(thinkingCard, HINT_LINGER_MS);
               }
               this.scrollUi(chatEl);
