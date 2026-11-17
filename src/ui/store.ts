@@ -801,11 +801,25 @@ export interface SessionMeta {
 }
 
 /**
- * Aggregated stats for ONE conversation (session id), shown in the right
- * panel's 统计 tab. Token/cost data comes from the provider's billing usage
- * (see src/shared/usage.ts); tool activity is recorded from tool executions.
+ * 对话窗口（直播内存与持久化消息账同限）。2026-11-17 从 400 放宽到 800：
+ * 400 是「历史会话还原不全」的源头——直播数组与快照同上限，长会话（约
+ * 30-50 个工作回合）的头部回合在直播层就被裁掉，快照无从保存。模型上下文
+ * 的真实约束是引擎内的 token 预算修剪（ContextEngine，超阈触发摘要压缩，
+ * send 路径的 historyMessages 每回合过闸），条数只是粗护栏；护栏放宽到
+ * 800（≈60-100 回合）让渲染史活得久一倍，token 修剪仍是预算权威。
  */
-export const MAX_PERSISTED_MESSAGES = 400;
+export const MAX_PERSISTED_MESSAGES = 800;
+
+/**
+ * 渲染史（snapshot.transcript / snapshot.events）的体量护栏（2026-11-17
+ * 解耦刀的闸）：条目数与字节双预算，按回合边界尾留。消息窗口放宽后，大会
+ * 话的渲染史不许跟着无界膨胀——快照的体量天花板由它守（2026-11-13 性能
+ * 审计的 11MB 判例不许复辟：整份快照的 invoke 解析在主线程）。transcript
+ * 与 events 是同一渲染史的两份序列化（投影正源是 events），各自独立裁剪、
+ * 各自对齐到回合头。
+ */
+export const MAX_RENDER_HISTORY_ENTRIES = 2_400;
+export const MAX_RENDER_HISTORY_BYTES = 5 * 1024 * 1024;
 
 /** Keep complete user turns so assistant tool calls never detach from their results. */
 export function limitConversationMessages<T extends { role: string }>(messages: T[], max = MAX_PERSISTED_MESSAGES): T[] {
@@ -1196,18 +1210,110 @@ async function tauriDeleteAll(): Promise<void> {
 const SESSIONS_KEY = 'pure_sessions';
 const LAST_SESSION_KEY = 'pure_last_session';
 
+/** 渲染史条目的廉价体量估计：只做字段长度求和，不 stringify（每次保存都
+ * 跑，几千条 × stringify 是白付的主线程时间）。图片按缩略图 dataUrl 的
+ * 典型量级计（compactTranscriptImages 已把原图换成缩略图）。 */
+function renderHistoryCost(entry: {
+  content?: string | null;
+  analysis?: string;
+  thinking?: string;
+  thinkingPhases?: Array<{ text: string }>;
+  toolExec?: { resultText?: string; resultItems?: unknown[] };
+  toolCalls?: unknown[];
+  images?: unknown[];
+  assessment?: unknown;
+  planCard?: unknown;
+}): number {
+  return (entry.content?.length ?? 0)
+    + (entry.analysis?.length ?? 0)
+    + (entry.thinking?.length ?? 0)
+    + (entry.thinkingPhases ?? []).reduce((sum, phase) => sum + phase.text.length, 0)
+    + (entry.toolExec?.resultText?.length ?? 0)
+    + (entry.toolExec?.resultItems?.length ?? 0) * 200
+    + (entry.toolCalls?.length ?? 0) * 96
+    + (entry.images?.length ?? 0) * 24_000
+    + (entry.assessment ? 200 : 0)
+    + (entry.planCard ? 300 : 0)
+    + 96;
+}
+
+/**
+ * 渲染史尾留裁剪：条目数与字节双预算，超预算从尾部保留、起点对齐到最近的
+ * 回合头（isTurnHead）。回合边界的起点前移不受预算惩罚——还原史不以半截
+ * 回合开屏，边界完整性优先于精确字节数。预算内原样返回（同一引用：保存是
+ * 高频路径，零变化时零拷贝）。导出仅供测试锁行为。
+ */
+export function limitRenderHistory<T>(
+  items: T[],
+  costOf: (item: T) => number,
+  isTurnHead: (item: T) => boolean,
+  entryBudget: number,
+  byteBudget: number,
+): T[] {
+  if (items.length === 0) return items;
+  let total = 0;
+  for (const item of items) total += costOf(item);
+  if (items.length <= entryBudget && total <= byteBudget) return items;
+  let cost = 0;
+  let count = 0;
+  let cut = items.length;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const c = costOf(items[i]);
+    if (count >= entryBudget || (count > 0 && cost + c > byteBudget)) {
+      cut = i + 1;
+      break;
+    }
+    cost += c;
+    count++;
+    cut = i;
+  }
+  // 回合边界对齐：起点向前挪到最近的回合头（isTurnHead），还原史不以半截
+  // 回合开屏——但前移有松弛护栏（预算的 25% ∨ 64KB）：字节预算被巨物回合
+  // 触发时，无界前移等于把整个巨物拖回来，预算形同虚设；宁开半截回合。
+  const slack = Math.max(byteBudget * 0.25, 64 * 1024);
+  let added = 0;
+  while (cut > 0 && !isTurnHead(items[cut])) {
+    const c = costOf(items[cut]);
+    if (added + c > slack) break;
+    added += c;
+    cut--;
+  }
+  return items.slice(cut);
+}
+
 function limitSessionSnapshot(snapshot: SessionSnapshotV3, maxMessages = MAX_PERSISTED_MESSAGES): SessionSnapshotV3 {
   const messages = limitConversationMessages(snapshot.modelContext.messages, maxMessages);
-  const dropped = snapshot.modelContext.messages.length - messages.length;
-  const events = dropped > 0
-    ? snapshot.events.slice(Math.max(0, snapshot.events.length - Math.max(1, messages.length * 8)))
-    : snapshot.events;
-  // 状态叙述行与 transcript 同一命运：锚点消息被裁掉的行一并裁掉，防止
-  // LS 降级副本里留下永远拼不回事件流的悬锚行。
-  const statusLines = dropped > 0
-    ? (snapshot.statusLines ?? []).filter(line => line.afterIndex >= dropped)
-    : snapshot.statusLines;
-  return { ...snapshot, modelContext: { messages }, events, transcript: snapshot.transcript.filter(entry => entry.modelMessageIndex >= dropped), statusLines };
+  // 渲染史预算随消息窗口等比缩（LS 降级副本 40 条消息时预算同缩到 1/20，
+  // 不把 ~5MB 的 localStorage 顶爆；下限护栏防止缩成空史）。
+  const scale = maxMessages / MAX_PERSISTED_MESSAGES;
+  const entryBudget = Math.max(48, Math.round(MAX_RENDER_HISTORY_ENTRIES * scale));
+  const byteBudget = Math.max(256 * 1024, Math.round(MAX_RENDER_HISTORY_BYTES * scale));
+  const transcript = limitRenderHistory(
+    snapshot.transcript,
+    renderHistoryCost,
+    (entry) => entry.role === 'user' && !entry.internal,
+    entryBudget,
+    byteBudget,
+  );
+  const events = limitRenderHistory(
+    snapshot.events,
+    renderHistoryCost,
+    (event) => event.type === 'user' && !event.internal,
+    entryBudget,
+    byteBudget,
+  );
+  // 状态行与 transcript 同一命运：锚在渲染史被裁掉的区段（transcript 首条
+  // 保留条目的绝对消息下标之前）的行一并裁掉——它们没有可锚的条目了。
+  // 空账写 undefined 不留字段（快照卫生，与 uiState 空账同一纪律）。
+  const keepFrom = transcript.length > 0 ? transcript[0].modelMessageIndex : Number.POSITIVE_INFINITY;
+  const statusLines = (snapshot.statusLines ?? []).filter(line => line.afterIndex >= keepFrom);
+  return {
+    ...snapshot,
+    modelContext: { messages },
+    events,
+    transcript,
+    ...(statusLines.length > 0 ? { statusLines } : {}),
+  };
 }
 
 /** localStorage is ~5MB in WebKit and the session payload is by far the largest

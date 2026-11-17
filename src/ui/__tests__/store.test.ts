@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitRenderHistory, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
@@ -751,5 +751,72 @@ describe('turnCheckpointGateMs', () => {
   it('thresholds are injectable (contract lock)', () => {
     expect(turnCheckpointGateMs(100, 1000, 5000, 100)).toBe(5000);
     expect(turnCheckpointGateMs(99, 1000, 5000, 100)).toBe(1000);
+  });
+});
+
+// 渲染史解耦（2026-11-17）：对话窗口从 400 放宽到 800（还原不全的源头是
+// 直播数组与快照同上限），渲染史（transcript/events）改走自己的条目数+字节
+// 双预算护栏——消息窗口放宽后快照体量天花板由它守（11MB 判例不许复辟）。
+describe('render history budget（2026-11-17 解耦刀）', () => {
+  // 与 store 内 renderHistoryCost 同口径的廉价成本（长度求和）。
+  type Item = { id: string; role: string; content: string };
+  const costOf = (e: Item): number => e.content.length;
+  const isUserHead = (e: Item): boolean => e.role === 'user';
+
+  it('conversation window is the widened 800（决策锁）', () => {
+    expect(MAX_PERSISTED_MESSAGES).toBe(800);
+  });
+
+  it('keeps the same array untouched when everything fits the budget', () => {
+    const items = [
+      { id: 'u1', role: 'user', content: '第一问' },
+      { id: 'a1', role: 'assistant', content: '回答' },
+    ];
+    const result = limitRenderHistory<Item>(items, costOf, isUserHead, 2400, 5 * 1024 * 1024);
+    expect(result).toBe(items);
+  });
+
+  it('keeps the tail over the entry budget and reopens at a user turn head', () => {
+    const items: Item[] = [];
+    for (let turn = 0; turn < 30; turn++) {
+      items.push({ id: `u${turn}`, role: 'user', content: `问题${turn}` });
+      items.push({ id: `a${turn}`, role: 'assistant', content: `回答${turn}` });
+    }
+    // 预算 12 条：尾留 12 条 = 回合 24-29；起点恰落在 u24（回合头）。
+    const result = limitRenderHistory<Item>(items, costOf, isUserHead, 12, 5 * 1024 * 1024);
+    expect(result).toHaveLength(12);
+    expect(result[0].content).toBe('问题24');
+    expect(result.at(-1)?.content).toBe('回答29');
+  });
+
+  it('keeps the tail under the byte budget and refuses to drag a fat turn back', () => {
+    const fat = 'x'.repeat(400_000);
+    const items: Item[] = [
+      { id: 'u0', role: 'user', content: '带大工具结果的回合' },
+      { id: 'a0', role: 'assistant', content: fat },
+      { id: 'a0b', role: 'assistant', content: fat },
+      { id: 'a0c', role: 'assistant', content: fat },
+      { id: 'a0d', role: 'assistant', content: fat },
+      { id: 'a0e', role: 'assistant', content: fat },
+      { id: 'u1', role: 'user', content: '轻回合' },
+      { id: 'a1', role: 'assistant', content: '轻回答' },
+    ];
+    // 字节预算 1MB：尾留装下 2 条 fat（800k）+ 轻回合；断点落在第 3 条 fat，
+    // 松弛护栏（256k）挡住它进起点——巨物回合不拖回，宁以半截回合开屏。
+    const result = limitRenderHistory<Item>(items, costOf, isUserHead, 2400, 1024 * 1024);
+    expect(result.map((e) => e.id)).toEqual(['a0d', 'a0e', 'u1', 'a1']);
+  });
+
+  it('widens past the entry budget to avoid opening with a half-turn fragment', () => {
+    const items: Item[] = [];
+    for (let turn = 0; turn < 10; turn++) {
+      items.push({ id: `u${turn}`, role: 'user', content: `问题${turn}` });
+      items.push({ id: `t${turn}`, role: 'tool', content: `工具${turn}` });
+      items.push({ id: `a${turn}`, role: 'assistant', content: `回答${turn}` });
+    }
+    // 条目预算 4 条：尾留 a8/u9/t9/a9 → 起点前移过 t8/a8 到回合头 u8
+    // （小条目前移受松弛护栏放行，边界完整性优先于精确条数）。
+    const result = limitRenderHistory<Item>(items, costOf, isUserHead, 4, 5 * 1024 * 1024);
+    expect(result.map((e) => e.id)).toEqual(['u8', 't8', 'a8', 'u9', 't9', 'a9']);
   });
 });
