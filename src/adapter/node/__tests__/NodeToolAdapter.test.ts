@@ -874,7 +874,7 @@ describe('execute_command timeout partial output（2026-11-17）', () => {
     const r = await adapter.execute({
       id: 'call-timeout',
       index: 0,
-      function: { name: 'execute_command', arguments: JSON.stringify({ command: 'echo partial-marker-kept && sleep 30', timeoutMs: 600 }) },
+      function: { name: 'execute_command', arguments: JSON.stringify({ command: 'echo partial-marker-kept; sleep 30', timeoutMs: 600 }) },
     });
     expect(r.success).toBe(false);
     const text = JSON.stringify(r.result);
