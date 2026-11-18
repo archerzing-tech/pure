@@ -344,6 +344,12 @@ describe('delivery pipeline（2026-11-18 设计先行退役后）', () => {
     // 完成判据仍在：四类检查 + 失败循环 + 真实证据。
     expect(pipeline).toContain('循环直到全部通过');
     expect(pipeline).toContain('禁止只说');
+    // 停点教学（2026-11-18 大屏原型判例）：全绿即收尾，三分类出口，
+    // 打磨美化不重启循环、想继续由用户决定。
+    expect(pipeline).toContain('验证循环到此为止');
+    expect(pipeline).toContain('改断言本身，不算产品问题');
+    expect(pipeline).toContain('环境抖动');
+    expect(pipeline).toContain('由用户决定');
   });
 
   it('footgun 回归：formatDeliveryPipeline 无默认形参（profile 场景必填）', () => {
