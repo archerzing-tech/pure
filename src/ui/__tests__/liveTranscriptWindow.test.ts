@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { LiveTranscriptWindow } from '../liveTranscriptWindow';
+import { setPinnedToBottom } from '../scrollPin';
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -16,6 +17,9 @@ beforeEach(() => {
   // viewport-driven mounting is a browser concern — scripts/verify-plan-restore
   // covers it against real Chrome, where IntersectionObserver exists.
   delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+  // 体量观察器同理：真实 MutationObserver 的增量估算在浏览器里跑，测试直接
+  // 驱动 noteLiveWeight（折叠规则的判定面）。
+  delete (globalThis as { MutationObserver?: unknown }).MutationObserver;
 });
 
 // Small numbers so the folding rules are exercised by a short test session.
@@ -117,5 +121,73 @@ describe('LiveTranscriptWindow', () => {
     const stray = document.createElement('div');
     document.body.appendChild(stray);
     expect(window.moveNodeToTurn(stray, current)).toBe(false);
+  });
+});
+
+// ── 单回合巨物的体量折叠（2026-11-18 run5 判例）─────────────────────────
+// 工程构建是单个 send 内的 auto-continue 巨回合：按「轮数」分箱的直播窗口
+// 对它整体失明（一个 turn 装下 21MB，WKWebView 弃画早期图层=「渲染了一半」）。
+// 体量帽 + 部分折叠：老节点折进泊车组，尾部 4 节点留挂给直播流。
+
+const HEAVY = { groupThreshold: 50, recentPlainTurns: 8, groupSize: 10, liveTurnWeightBytes: 2000 };
+
+function appendHeavyChild(turn: { host: HTMLElement }, chars = 250): void {
+  const el = document.createElement('div');
+  el.textContent = 'x'.repeat(chars); // 估算 500 字节
+  turn.host.appendChild(el);
+}
+
+describe('LiveTranscriptWindow 体量折叠（单回合巨物）', () => {
+  it('越帽把活跃 turn 的老节点折进泊车组，尾部留挂', () => {
+    const window = new LiveTranscriptWindow(HEAVY);
+    const turn = window.startTurn('构建一个大项目');
+    for (let i = 0; i < 10; i++) appendHeavyChild(turn);
+    // 一次记账 5000 字节（观察器在真实浏览器里本就合批后调用）。
+    window.noteLiveWeight(10 * 500);
+
+    const groups = window.getGroupHandles();
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.body.childElementCount).toBe(6);
+    // 尾部 4 节点留挂在活跃 turn 里——直播流正在写的气泡在文档上。
+    expect(turn.host.childElementCount).toBe(4);
+    expect(turn.host.isConnected).toBe(true);
+    // 组排在 turn 之前，转录顺序不变。
+    const chatChildren = [...document.getElementById('chat')!.children];
+    expect(chatChildren.indexOf(groups[0]!.el)).toBeLessThan(chatChildren.indexOf(turn.host));
+  });
+
+  it('继续增长会再次折叠（多组累积），组序在前', () => {
+    const window = new LiveTranscriptWindow(HEAVY);
+    const turn = window.startTurn('构建一个大项目');
+    for (let i = 0; i < 10; i++) appendHeavyChild(turn);
+    window.noteLiveWeight(10 * 500);
+    for (let i = 0; i < 3; i++) {
+      appendHeavyChild(turn);
+      window.noteLiveWeight(4 * 500 + 500);
+    }
+    expect(window.getGroupHandles().length).toBeGreaterThanOrEqual(2);
+    expect(turn.host.childElementCount).toBe(4);
+  });
+
+  it('没钉在底部时不折叠（用户正在翻史，折叠会拽走视野）', () => {
+    const window = new LiveTranscriptWindow(HEAVY);
+    const turn = window.startTurn('构建一个大项目');
+    for (let i = 0; i < 10; i++) appendHeavyChild(turn);
+    setPinnedToBottom(document.getElementById('chat')!, false);
+    window.noteLiveWeight(10 * 500);
+    expect(window.getGroupHandles().length).toBe(0);
+    // 恢复钉底后再记账，折叠照常发生。
+    setPinnedToBottom(document.getElementById('chat')!, true);
+    window.noteLiveWeight(0);
+    expect(window.getGroupHandles().length).toBe(1);
+  });
+
+  it('顶层节点不足 keep+1 时不折（单巨气泡留挂，另一刀的范围）', () => {
+    const window = new LiveTranscriptWindow(HEAVY);
+    const turn = window.startTurn('一个大文件');
+    appendHeavyChild(turn, 5000); // 单节点 10000 字节估算，远超帽
+    window.noteLiveWeight(10_000);
+    expect(window.getGroupHandles().length).toBe(0);
+    expect(turn.host.childElementCount).toBe(1);
   });
 });

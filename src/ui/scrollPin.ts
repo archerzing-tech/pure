@@ -45,6 +45,12 @@ function isPinnedToBottom(el: HTMLElement): boolean {
   return pinnedStates.get(el) ?? true;
 }
 
+/** 只读的钉底查询（liveTranscriptWindow 的部分折叠闸用）：用户钉在底部=
+ *  正在看直播，折叠老节点安全；没钉底=正在翻史，折叠会拽走他的视野。 */
+export function isElementPinnedToBottom(el: HTMLElement): boolean {
+  return isPinnedToBottom(el);
+}
+
 export function setPinnedToBottom(el: HTMLElement, v: boolean): void {
   pinnedStates.set(el, v);
 }

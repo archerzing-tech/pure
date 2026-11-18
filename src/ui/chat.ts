@@ -2761,7 +2761,7 @@ export class ChatController {
     this.viewActive = options.viewActive ?? true;
     this.readWindowModelOverride = options.readWindowModelOverride ?? (() => null);
     this.pinSessionModel = options.pinSessionModel ?? (() => {});
-    this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost });
+    this.liveTranscript = new LiveTranscriptWindow({ root: this.transcriptHost, scrollRoot: this.scrollRoot() });
     this.wireFollowupChips();
     // 代理健康常态探测（期2 路由脑）：启动 + 每 5 分钟。幂等，多会话共享。
     startProxyProbeLoop();
