@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test';
-import { projectTranscript, rebuildInterruptedToolExec, type TranscriptReplayBlock } from '../transcriptProjection';
+import {
+  INTERRUPTED_DELEGATION_CARD_TEXT,
+  projectSessionEvents,
+  projectTranscript,
+  rebuildInterruptedToolExec,
+  type TranscriptReplayBlock,
+} from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
-import type { TranscriptEntry } from '../store';
+import type { SessionEvent, TranscriptEntry } from '../store';
 
 function types(blocks: TranscriptReplayBlock[]): string[] {
   return blocks.map(block => block.type);
@@ -423,5 +429,89 @@ describe('orphaned delegation cards rebuild the user interruption from the activ
     );
     expect(exec.outcome).toBeUndefined();
     expect(exec.success).toBe(false);
+  });
+});
+
+// 进程退出带走的后台委派（2026-11-18 档二续）：模型面已改成 [detached
+// resume] 通告，渲染面若还把「已受理」收执渲成成功卡，用户看到的与模型看到
+// 的是两件事。
+describe('投影期标 interrupted（恢复后卡面如实）', () => {
+  const entries = (): TranscriptEntry[] => [
+    {
+      id: 'a1',
+      modelMessageIndex: 0,
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        { id: 'call-lost', toolName: 'code_editor', args: { instructions: '写 a.ts' } },
+        { id: 'call-done', toolName: 'code_editor', args: { instructions: '写 b.ts' } },
+      ],
+    },
+    {
+      id: 't1',
+      modelMessageIndex: 1,
+      role: 'tool',
+      content: '已受理，后台运行中',
+      toolCallId: 'call-lost',
+      toolName: 'code_editor',
+      toolExec: { toolName: 'code_editor', success: true, duration: 0, resultText: '已受理，后台运行中' },
+    },
+    {
+      id: 't2',
+      modelMessageIndex: 2,
+      role: 'tool',
+      content: 'REAL OUTPUT',
+      toolCallId: 'call-done',
+      toolName: 'code_editor',
+      toolExec: { toolName: 'code_editor', success: true, duration: 4200, resultText: 'REAL OUTPUT' },
+    },
+  ];
+
+  it('transcript 投影：只标丢掉的那条，并把卡面文字换成中断说明', () => {
+    const blocks = projectTranscript(entries(), undefined, ['call-lost']);
+    const tools = blocks.filter((b): b is Extract<TranscriptReplayBlock, { type: 'tool' }> => b.type === 'tool');
+
+    expect(tools[0].exec.interrupted).toBe(true);
+    expect(tools[0].exec.resultText).toBe(INTERRUPTED_DELEGATION_CARD_TEXT);
+    // 已送达的那支一个字都不动。
+    expect(tools[1].exec.interrupted).toBeUndefined();
+    expect(tools[1].exec.resultText).toBe('REAL OUTPUT');
+    expect(tools[1].exec.duration).toBe(4200);
+  });
+
+  it('events 投影同样认 callId（现代会话走的就是这条通道）', () => {
+    const events: SessionEvent[] = [
+      { id: 'a1', type: 'assistant', content: '', toolCalls: [{ id: 'call-lost', toolName: 'code_editor', args: {} }] },
+      { id: 't1', type: 'tool_result', toolCallId: 'call-lost', toolName: 'code_editor', content: '已受理，后台运行中', toolExec: { toolName: 'code_editor', success: true, duration: 0, resultText: '已受理，后台运行中' } },
+    ];
+    const blocks = projectSessionEvents(events, undefined, ['call-lost']);
+    const tool = blocks.find((b) => b.type === 'tool');
+    expect(tool && tool.type === 'tool' ? tool.exec.interrupted : undefined).toBe(true);
+  });
+
+  it('后续存档的 durable 判据：结果文本带通告也算中断', () => {
+    const list = entries();
+    list[1].content = '[detached resume] 这支没回来';
+    list[1].toolExec = { ...list[1].toolExec!, resultText: '[detached resume] 这支没回来' };
+    const blocks = projectTranscript(list);
+    const tool = blocks.find((b) => b.type === 'tool');
+    expect(tool && tool.type === 'tool' ? tool.exec.interrupted : undefined).toBe(true);
+    expect(tool && tool.type === 'tool' ? tool.exec.resultText : undefined).toBe(INTERRUPTED_DELEGATION_CARD_TEXT);
+  });
+
+  it('缺 toolExec 的老存档也能标（卡面不缺字段）', () => {
+    const list = entries();
+    list[1] = { ...list[1], toolExec: undefined };
+    const blocks = projectTranscript(list, undefined, ['call-lost']);
+    const tool = blocks.find((b) => b.type === 'tool');
+    expect(tool && tool.type === 'tool' ? tool.exec.interrupted : undefined).toBe(true);
+    expect(tool && tool.type === 'tool' ? tool.exec.toolName : undefined).toBe('code_editor');
+  });
+
+  it('没有 id 也没有通告时不动任何东西', () => {
+    const blocks = projectTranscript(entries());
+    const tools = blocks.filter((b): b is Extract<TranscriptReplayBlock, { type: 'tool' }> => b.type === 'tool');
+    expect(tools[0].exec.interrupted).toBeUndefined();
+    expect(tools[0].exec.resultText).toBe('已受理，后台运行中');
   });
 });

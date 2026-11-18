@@ -1614,3 +1614,49 @@ describe('tool row renders edit/write results as an inline diff card', () => {
     }
   });
 });
+
+// 后台委派两态（2026-11-18 档二）与恢复后的中断态（档二续）：收执、结算、
+// 进程退出三种结局必须在卡面上分得开——同一种绿 ✓ 会把没干完的活说成完成。
+describe('后台委派卡面三态', () => {
+  it('受理收执：挂起态、明说还在后台跑', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_editor', { instructions: '写 a.ts' });
+      finalizeToolRow(row, { success: true, duration: 0, deferred: true, resultText: '已受理' });
+      expect(row.statusEl.textContent).toBe('⏳ 后台运行中');
+      expect(row.details.classList.contains('paused')).toBe(true);
+      expect(row.details.classList.contains('success')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('同卡可重入：结算到达时上一态被清干净', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_editor', { instructions: '写 a.ts' });
+      finalizeToolRow(row, { success: true, duration: 0, deferred: true, resultText: '已受理' });
+      finalizeToolRow(row, { success: true, duration: 4200, resultText: 'REAL OUTPUT' });
+      expect(row.details.classList.contains('paused')).toBe(false);
+      expect(row.details.classList.contains('success')).toBe(true);
+      expect(row.statusEl.textContent).toBe('✓ 4.2s');
+    } finally {
+      restore();
+    }
+  });
+
+  it('进程退出带走：灰态「已中断」，不是成功也不是失败', () => {
+    const restore = installFakeDocument();
+    try {
+      const row = createToolRow('code_editor', { instructions: '写 a.ts' });
+      finalizeToolRow(row, { success: true, duration: 0, interrupted: true, resultText: '中断' });
+      expect(row.statusEl.textContent).toBe('⛔ 已中断 · 产出未回来');
+      expect(row.details.classList.contains('paused')).toBe(true);
+      expect(row.details.classList.contains('success')).toBe(false);
+      expect(row.details.classList.contains('failure')).toBe(false);
+      expect(row.details.title).toContain('断点续跑');
+    } finally {
+      restore();
+    }
+  });
+});

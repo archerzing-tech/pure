@@ -227,6 +227,9 @@ export interface ToolRowResultMeta {
    *  卡面走中性挂起态（灰，⏳ 后台运行中），不得渲染成绿 ✓ 完成；结算到达
    *  时同一张卡再 finalize 一次（resultEl 本就清空重建，可重入）。 */
   deferred?: boolean;
+  /** 进程退出带走的后台支（2026-11-18 档二续）：恢复会话时那支的产出永远
+   *  不会来。灰态 + 明说中断——它不是完成、不是失败，也不是用户停的。 */
+  interrupted?: boolean;
   resultKind?: 'search' | 'fetch' | 'image' | 'diff';
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
   /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
@@ -1043,6 +1046,12 @@ export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): vo
     // 挂起 ≠ 完成：中性灰态 + 明说还在后台跑，避免「绿✓完成但活还没干」。
     row.details.classList.add('paused');
     row.statusEl.textContent = '⏳ 后台运行中';
+  } else if (meta.interrupted) {
+    // 进程退出带走的后台支：产出永远不会来，续跑靠同参重派（断点还在）。
+    // 灰色而非红色——这是宿主事实，不是这支活干坏了。
+    row.details.classList.add('paused');
+    row.statusEl.textContent = '⛔ 已中断 · 产出未回来';
+    row.details.title = '主进程退出时这支还在跑，产出没有回来；重派同一任务会从断点续跑';
   } else if (meta.outcome) {
     row.details.classList.add(meta.outcome);
     // 出生即拦（委派起飞闸）与跑过再停要一眼分得开：合成取消结果

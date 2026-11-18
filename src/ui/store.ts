@@ -270,6 +270,12 @@ export interface ToolExecMeta {
    */
   outcome?: 'paused' | 'stopped';
   /**
+   * 进程退出带走的后台委派（2026-11-18 档二续）：恢复会话时那支的产出不会
+   * 再回来。回放据此渲灰态「⛔ 已中断」，而不是把「已受理」收执当成完成。
+   * 投影期由 transcriptProjection 按 durable 判据标上（不落盘：判定本身幂等）。
+   */
+  interrupted?: boolean;
+  /**
    * The JSON parameters the LLM passed to the tool (e.g. `{ query: "..." }`
    * for `web_search`). Optional because older saved sessions don't carry it;
    * the UI demotes to the compact one-line summary when it's undefined.

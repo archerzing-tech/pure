@@ -714,3 +714,58 @@ describe('ToolExecutionCoordinator path locks', () => {
     expect(dRanWhileAHeld).toBe(false);
   }, 5_000);
 });
+
+// 后台委派的中止线（2026-11-18 档二）：委派受理后子引擎在后台跑，收执已经
+// 交给父模型——若这里照旧把 abort 监听撤掉，暂停/Esc 就永远到不了那支，
+// 委派提前返回等于把它变成没人能停的孤儿。
+describe('后台委派的中止线（deferred 不撤监听）', () => {
+  function deferredCtx(
+    signal: AbortSignal,
+    execute: (tc: ToolCall, s?: AbortSignal) => Promise<ToolResult>,
+    graceMs: number,
+  ): EngineContext {
+    const tools: ToolAdapter = { getTools: () => [], getMetadata: () => undefined, execute };
+    return { tools, signal, pauseToolGraceMs: graceMs } as unknown as EngineContext;
+  }
+
+  it('收执吐出后监听还在：暂停宽限到期，信号到达后台支', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    let branchSawAbort = false;
+    const ctx = deferredCtx(ac.signal, async (tc, signal) => {
+      signal?.addEventListener('abort', () => { branchSawAbort = true; });
+      return {
+        id: tc.id,
+        toolName: tc.function.name,
+        success: true,
+        duration: 0,
+        deferred: true,
+        result: '已受理，后台运行中',
+      };
+    }, 10);
+
+    const yielded: ExecutedToolResult[] = [];
+    for await (const tr of coordinator.executeStream([call('code_editor')], ctx, BUDGET)) yielded.push(tr);
+    expect(yielded[0].result.deferred).toBe(true);
+    expect(branchSawAbort).toBe(false);
+
+    abortPaused(ac);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(branchSawAbort).toBe(true);
+  }, 5_000);
+
+  it('普通结果照旧撤线：已完成的一步不被暂停波及', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const ac = new AbortController();
+    let sawAbort = false;
+    const ctx = deferredCtx(ac.signal, async (tc, signal) => {
+      signal?.addEventListener('abort', () => { sawAbort = true; });
+      return ok(tc);
+    }, 10);
+
+    for await (const _ of coordinator.executeStream([call('quick_tool')], ctx, BUDGET)) { /* drain */ }
+    abortPaused(ac);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(sawAbort).toBe(false);
+  }, 5_000);
+});

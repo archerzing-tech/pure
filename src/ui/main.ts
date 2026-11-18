@@ -19,6 +19,7 @@ import { setActiveCharacterProfile, applySoulOverrideTexts } from '../character'
 import type { SettingsPanel } from './settings';
 import { groupFileWrites, type BranchEventRecord, type SessionSnapshotV2, type ToolExecMeta } from './store';
 import { projectCanonicalSession } from './sessionEvents';
+import { findInterruptedDelegations } from '../shared/detachedResume';
 import type { TranscriptReplayBlock } from './transcriptProjection';
 import { estimateCostUsd, formatCostUsd, formatTokens } from '../shared/usage';
 import { escapeHtml } from '../shared/html';
@@ -1407,7 +1408,11 @@ function hideSessionLoading(): void {
 async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLElement) {
   // 活动档案同路进投影：孤儿委派卡（结算 ToolResult 没赶上落盘）据此重建
   // 「用户暂停/停掉」的中断结算（第四刀收尾），普通调用保持原兜底。
-  const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript, snapshot.uiState?.agentActivities);
+  // 上个进程丢掉的后台委派（2026-11-18 档二续）：投影发生在 loadFromStorage
+  // 改写模型面之前，所以判据直接取快照里仍挂 deferred 的收执——卡面据此渲
+  // 灰态「已中断」，而不是把「已受理」当完成。
+  const interruptedCallIds = findInterruptedDelegations(snapshot.modelContext.messages).map((d) => d.toolCallId);
+  const blocks = projectCanonicalSession(snapshot.events, snapshot.transcript, snapshot.uiState?.agentActivities, interruptedCallIds);
   const grouped = groupConversationTurns(blocks);
   const segments = segmentConversationTurns(grouped.turns);
   const restoreGroups = [

@@ -3599,6 +3599,9 @@ export class ChatController {
     // 后台委派崩溃恢复（2026-11-18 档二续）：上个进程被杀时在飞的支，收执还
     // 挂着 deferred 标记、产出永远不会来。就地改写成通告——这里改的是宿主自己
     // 持有的转录对象，下次存档带得走（Harness 侧拿到的是重建副本时改不到盘上）。
+    // 渲染面在投影期按同一批 callId 判 interrupted（main.ts renderSessionMessages
+    // 取快照里的 deferred 收执）——这里不改存档条目：回放块在调用本方法之前
+    // 就已从快照投影好，存档每轮又按消息重建，改条目两边都赶不上。
     resolveInterruptedDelegations(this.messages);
     // 恢复后的转录里可能已含运行中注入的目录约定：从历史回灌 delivered 集合，
     // 避免恢复后同目录再读时重复注入（会话级去重跨恢复不断档）。

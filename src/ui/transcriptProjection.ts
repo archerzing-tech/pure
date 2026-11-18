@@ -1,6 +1,7 @@
 import type { IntentAssessment } from '../coding-agent/types';
 import type { MessageAttachment, MessageImage } from '../shared/types';
 import { parseDeliveryMarkers } from '../shared/delivery';
+import { DETACHED_RESUME_TAG } from '../shared/detachedResume';
 import type { PathRepair } from './pathIndex';
 import {
   buildTranscriptToolExec,
@@ -53,6 +54,29 @@ export function rebuildInterruptedToolExec(activity: SessionAgentActivity, call:
       : step.status === 'completed' ? `✓ ${step.name} 完成`
         : `→ ${step.name}${step.args ? ` ${step.args}` : ''}`),
   };
+}
+
+/** 被进程退出带走的后台委派卡面文字（2026-11-18 档二续）。 */
+export const INTERRUPTED_DELEGATION_CARD_TEXT = '主进程退出时这支还在跑，产出没有回来（重派同一任务会从断点续跑）';
+
+/**
+ * 进程退出带走的后台支，渲染面必须与模型面同一口径（模型面见
+ * shared/detachedResume）：否则恢复后那张卡还是「已受理」的成功卡。两个
+ * durable 判据按优先级认：
+ *
+ *  1. callId 命中恢复时的 `deferred: true` 收执（首次恢复——此时存档里的
+ *     events/transcript 还没被改写过）；
+ *  2. 结果文本带 `[detached resume]` 通告（此后每次存档转录里都是它）。
+ *
+ * 不在载入时去改存档条目：回放块是在 loadFromStorage 之前从快照投影的，改
+ * 条目赶不上本次渲染；而存档每轮又按消息重建，改动也活不过下一次落盘。
+ * 投影期判定既不依赖两者，也让卡面幂等。
+ */
+function withInterruptedMark(exec: ToolExecMeta, callId: string | undefined, interruptedIds: ReadonlySet<string>): ToolExecMeta {
+  const interrupted = (callId !== undefined && interruptedIds.has(callId))
+    || (exec.resultText ?? '').includes(DETACHED_RESUME_TAG);
+  if (!interrupted) return exec;
+  return { ...exec, interrupted: true, success: true, duration: 0, resultText: INTERRUPTED_DELEGATION_CARD_TEXT };
 }
 
 /** Interrupted-call fallback enriched from the activity ledger (see
@@ -122,7 +146,13 @@ function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string; op
   return [...paths].map(([path, op]) => (op === 'edit' ? { path, op } : { path }));
 }
 
-export function projectTranscript(entries: TranscriptEntry[], agentActivities?: SessionAgentActivity[]): TranscriptReplayBlock[] {
+export function projectTranscript(
+  entries: TranscriptEntry[],
+  agentActivities?: SessionAgentActivity[],
+  /** 恢复时仍是 `deferred: true` 的后台委派 callId（见 withInterruptedMark）。 */
+  interruptedCallIds: Iterable<string> = [],
+): TranscriptReplayBlock[] {
+  const interruptedIds = new Set(interruptedCallIds);
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
   const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
@@ -165,8 +195,9 @@ export function projectTranscript(entries: TranscriptEntry[], agentActivities?: 
             toolName: entry.toolName || call?.toolName || fallback.toolName,
             args: call?.args ?? fallback.args,
           };
-      blocks.push({ type: 'tool', stopped: false, exec });
-      completedTools.push(exec);
+      const marked = withInterruptedMark(exec, entry.toolCallId, interruptedIds);
+      blocks.push({ type: 'tool', stopped: false, exec: marked });
+      completedTools.push(marked);
       if (entry.toolCallId) pending.delete(entry.toolCallId);
       continue;
     }
@@ -243,7 +274,12 @@ export function projectTranscript(entries: TranscriptEntry[], agentActivities?: 
   return blocks;
 }
 
-export function projectSessionEvents(events: import('./store').SessionEvent[], agentActivities?: SessionAgentActivity[]): TranscriptReplayBlock[] {
+export function projectSessionEvents(
+  events: import('./store').SessionEvent[],
+  agentActivities?: SessionAgentActivity[],
+  interruptedCallIds: Iterable<string> = [],
+): TranscriptReplayBlock[] {
+  const interruptedIds = new Set(interruptedCallIds);
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
   const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
@@ -340,8 +376,9 @@ export function projectSessionEvents(events: import('./store').SessionEvent[], a
               args: call?.args,
               resultText: resultText || undefined,
             };
-        blocks.push({ type: 'tool', stopped: false, exec });
-        completedTools.push(exec);
+        const marked = withInterruptedMark(exec, event.toolCallId, interruptedIds);
+        blocks.push({ type: 'tool', stopped: false, exec: marked });
+        completedTools.push(marked);
         if (event.toolCallId) pending.delete(event.toolCallId);
         break;
       }

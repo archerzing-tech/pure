@@ -7,6 +7,7 @@ import { describe, expect, it } from 'bun:test';
 import { SubagentOrchestrator, type SubagentProgress } from '../SubagentOrchestrator';
 import { Tags } from '../ToolRegistry';
 import { MemoryStateStore } from '../../adapter/storage/MemoryStateStore';
+import { branchOutcomeOf } from '../../shared/branchOutcome';
 import type {
   BudgetConfig,
   LLMAdapter,
@@ -199,5 +200,61 @@ describe('委派后台执行（detach）', () => {
     expect(orch.takeSettled().length).toBeGreaterThanOrEqual(1);
     const rest = await waitForSettlement(orch);
     expect(rest.length + 1).toBeGreaterThanOrEqual(2);
+  }, 10_000);
+});
+
+// 后台支的上限与止损（2026-11-18 档二）：detach 之后 worker 数不再受「一批」
+// 约束，上限 6 是唯一硬线；stop_branch 必须有真实通路，否则「在飞账还在」
+// 只是纸面保证。
+describe('后台支的上限与止损', () => {
+  it('后台支已达上限 6 → 第 7 支退回同步执行（不拒绝、不丢活）', async () => {
+    const orch = makeOrchestrator({ detach: true, llm: delayedLLM('slow result', 150) });
+    for (let i = 0; i < 6; i++) {
+      const receipt = await orch.execute({
+        id: `call_d${i}`,
+        index: 0,
+        function: { name: 'test_researcher', arguments: JSON.stringify({ prompt: `task ${i}` }) },
+      });
+      expect(receipt.deferred).toBe(true);
+    }
+    expect(orch.pendingCount()).toBe(6);
+
+    const seventh = await orch.execute({
+      id: 'call_d6',
+      index: 0,
+      function: { name: 'test_researcher', arguments: JSON.stringify({ prompt: 'task 6' }) },
+    });
+    // 同步那支等到了真产出，且不占后台结算位（在飞 6 支的结算里没有它）。
+    expect(seventh.deferred).toBeUndefined();
+    expect((seventh.result as { output?: string }).output).toContain('slow result');
+
+    const settled = await waitForSettlement(orch);
+    expect(settled).toHaveLength(6);
+    expect(settled.some((s) => s.toolCallId === 'call_d6')).toBe(false);
+    expect(orch.pendingCount()).toBe(0);
+  }, 10_000);
+
+  it('stop_branch 真的能停一支后台支：结算按暂停记账，产出不入账', async () => {
+    const orch = makeOrchestrator({ detach: true, stateStore: new MemoryStateStore(), llm: delayedLLM('never arrives', 300) });
+    const deleg = call('test_researcher', { prompt: 'long job' });
+    await orch.execute(deleg);
+    expect(orch.pendingCount()).toBe(1);
+
+    const stopped = await orch.execute({
+      id: 'call_stop',
+      index: 0,
+      function: { name: 'stop_branch', arguments: JSON.stringify({ call_id: deleg.id, mode: 'pause' }) },
+    });
+    expect(stopped.success).toBe(true);
+    expect(stopped.outcome).toBe('paused');
+
+    const settled = await waitForSettlement(orch);
+    expect(settled).toHaveLength(1);
+    expect(settled[0].toolCallId).toBe(deleg.id);
+    // 暂停不是失败：success 保持 true、结算体内层标 paused（branchOutcomeOf
+    // 读的就是这一层）、产出没混进来。
+    expect(settled[0].result.success).toBe(true);
+    expect(branchOutcomeOf(settled[0])).toBe('paused');
+    expect(JSON.stringify(settled[0].result.result)).not.toContain('never arrives');
   }, 10_000);
 });
