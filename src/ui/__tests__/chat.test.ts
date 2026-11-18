@@ -1182,27 +1182,19 @@ describe('plan overview completion state', () => {
 
   it('injects the agent-driven delivery pipeline prompt for project builds', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 检视→typecheck→单测→e2e 作为计划最后阶段下发给模型；UI 工程附带设计先行协议。
-    const inject = src.indexOf('formatDeliveryPipeline(workspaceProfile, workflow.needsDesignPhase)');
+    // 检视/typecheck/单测/e2e 四类完成判据下发给模型（2026-11-18 设计先行退役：
+    // 只定完成标准，不再带顺序与设计稿确认闸）。
+    const inject = src.indexOf('formatDeliveryPipeline(workspaceProfile)');
     expect(inject).toBeGreaterThan(-1);
     const gate = src.indexOf('deliveryPipeline: needsDeliveryGate');
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(inject);
     // 旧的“交付前测试与审计”节点必须删干净。
     expect(src.indexOf('交付前测试与审计')).toBe(-1);
-  });
-
-  it('pauses UI builds at the design-ready marker until the user confirms the mockup', () => {
-    const src = readSource(new URL('../chat.ts', import.meta.url));
-    // 有界面的工程：模型发出 `## 设计稿已就绪：<file>` 后，GUI 读取文件渲染
-    // 预览卡（iframe），评估卡停在等待态，自动续跑链路被 planTerminal 硬停。
-    const marker = src.indexOf('parseDesignReadyMarker(finalAnswer)');
-    expect(marker).toBeGreaterThan(-1);
-    const card = src.indexOf('createDesignPreviewCard(html, designMockupFile', marker);
-    expect(card).toBeGreaterThan(marker);
-    const awaitPhase = src.indexOf("assessmentFlow.awaitPhase('execute', '设计稿已就绪，等待你在预览卡确认后开始实现…')", card);
-    expect(awaitPhase).toBeGreaterThan(card);
-    expect(src.indexOf('|| designPreviewShown,')).toBeGreaterThan(-1);
+    // 设计先行机器（标记解析/预览卡/等待确认）必须退役干净。
+    expect(src.indexOf('parseDesignReadyMarker')).toBe(-1);
+    expect(src.indexOf('createDesignPreviewCard')).toBe(-1);
+    expect(src.indexOf('designPreviewShown')).toBe(-1);
   });
 
   it('re-arms the queue dispatch on every path where the auto-continue chain dies silently', () => {

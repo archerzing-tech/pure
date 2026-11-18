@@ -124,8 +124,7 @@ import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, 
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
 import { createThinkingCard, appendThinkingText, finalizeThinkingCard, reopenThinkingCard, setThinkingLabel, setThinkingNetDiagnosis, setThinkingPendingIntent, resetThinkingLabelForOutput, startThinkingTimer, stopThinkingTimer, dismissThinkingHint, HINT_LINGER_MS, type ThinkingCardHandle } from './thinkingCard';
-import { DESIGN_READY_MARKER, deliveryVerificationSummary, discoverWorkspace, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, parseDesignReadyMarker, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
-import { createDesignPreviewCard } from './designPreviewCard';
+import { deliveryVerificationSummary, discoverWorkspace, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, isBareWorkspace, buildTaskContract, isVerificationCommand, parseDeliveryMarkers, planVerificationResume, resolveGateSpecs, runDeliveryVerification, workspaceProfileSummary, type DeliveryStepResult, type DeliveryVerificationResult, type TaskContract, type WorkspaceProfile } from '../shared/delivery';
 import { parseResearchResult } from '../shared/research';
 import { copyTextToClipboard } from '../shared/clipboard';
 import { formatBytes } from '../shared/format';
@@ -7411,11 +7410,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           // 新会话零开销。
           ledgerFacts: formatSessionLedgerFacts(this.sessionLedger),
         }),
-        // 项目构建的交付验证管线（检视→typecheck→单测→e2e）作为计划的最后一个
-        // 阶段下发给模型本身执行；UI 工程额外携带设计先行协议（先出 design.html
-        // 等用户在预览卡确认，再写实现代码）。请求作用域，不走分区 diff。
+        // 项目构建的交付验证管线（检视/typecheck/单测/e2e 四类完成判据）下发给
+        // 模型本身执行；只定完成标准，不定执行顺序（2026-11-18 设计先行退役）。
+        // 请求作用域，不走分区 diff。
         deliveryPipeline: needsDeliveryGate
-          ? formatDeliveryPipeline(workspaceProfile, workflow.needsDesignPhase)
+          ? formatDeliveryPipeline(workspaceProfile)
           : undefined,
       });
       systemPrompt = assembly.systemPrompt;
@@ -8465,13 +8464,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             // 已经完成的步骤不一致）；门禁是否通过单独用气泡展示。
             const finalAnswer = String(event.payload.finalOutput ?? '').trim();
             const turnAsksForInput = finalAnswer.length > 0 && /[?？]\s*$/.test(finalAnswer);
-            // Design-first builds: when the model declares the static mockup
-            // ready (`## 设计稿已就绪：<file>`), hold implementation until the
-            // user confirms in the preview card below.
-            const designMockupFile = needsDeliveryGate && workflow.needsDesignPhase
-              && !event.payload.interrupted && gen === this.generation
-              ? parseDesignReadyMarker(finalAnswer)
-              : null;
             const planFinished = planCard && hasToolSuccess && !event.payload.interrupted
               && !turnAsksForInput && gen === this.generation && !this.pausePlanCard;
             const completionSnapshot = planProgress?.getSnapshot();
@@ -8671,33 +8663,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             this.sessionStats.provider = config.provider;
             this.persistStats();
 
-            // Design-first pause: read the mockup from the workspace and render
-            // it in a sandboxed iframe so the user reviews the intended look
-            // BEFORE any implementation code exists. Best-effort: a read
-            // failure never breaks the turn (the model's own evidence remains).
-            let designPreviewShown = false;
-            if (designMockupFile && effectiveWorkspace) {
-              try {
-                const previewAdapter = createToolAdapter(effectiveWorkspace, config);
-                const res = await previewAdapter.execute({
-                  id: `design_preview_${Date.now()}`,
-                  index: 0,
-                  function: { name: 'read_file', arguments: JSON.stringify({ path: designMockupFile }) },
-                }, turnSignal);
-                const html = typeof res.result === 'string' ? res.result : '';
-                if (html.trim() && gen === this.generation) {
-                  this.appendToTranscript(createDesignPreviewCard(html, designMockupFile, () => {
-                    void this.send('用户已确认当前设计稿：请严格按照该设计稿开始实现，实现完成后继续执行交付验证管线。');
-                  }).el);
-                  this.addStatusBubble('已按约定停在实现前：请在上方预览卡确认设计效果；确认前不会写实现代码，想调整直接回复意见。', true, false);
-                  this.scrollUi(chatEl);
-                  designPreviewShown = true;
-                }
-              } catch {
-                // Preview is best-effort only.
-              }
-            }
-
 
             // Artifact cards follow the human rule per TURN: a colleague who
             // edited your file this turn ends with "改好了，文件是 xxx" —
@@ -8787,9 +8752,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               });
               this.scrollUi(chatEl);
             }
-            if (assessmentFlow && designPreviewShown) {
-              assessmentFlow.awaitPhase('execute', '设计稿已就绪，等待你在预览卡确认后开始实现…');
-            } else if (assessmentFlow && !event.payload.interrupted && (!needsDeliveryGate || (hasToolWork && deliveryResult?.passed === true))) {
+            if (assessmentFlow && !event.payload.interrupted && (!needsDeliveryGate || (hasToolWork && deliveryResult?.passed === true))) {
               assessmentFlow.complete('评估、执行与验证已完成，结果满足当前交付条件。');
             } else if (assessmentFlow && event.payload.interrupted) {
               assessmentFlow.cancel('运行已中断，已保留当前进度，未把未验证内容标记为完成。');
@@ -8832,11 +8795,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               // null 即 terminal，Gate1 直接不放行，队列收尾 +40ms 照常派发。
               planTerminal: planMarkedCompleted
                 || this.activeComplexPlan === null
-                || (needsDeliveryGate && !qualityPassed && onFinalStage)
-                // Design-first pause is a hard stop: the chain must wait for
-                // the user's design confirmation, never auto-continue into
-                // implementation.
-                || designPreviewShown,
+                || (needsDeliveryGate && !qualityPassed && onFinalStage),
             };
             break;
           }

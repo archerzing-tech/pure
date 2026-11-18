@@ -6,9 +6,7 @@
 import type { AnalysisResult, Plan } from '../coding-agent/types';
 import { escapeHtml } from '../shared/html';
 import { t } from '../shared/i18n';
-import { parseDesignReadyMarker } from '../shared/delivery';
-import { REVERSIBILITY_LABELS } from './assessmentFlow';
-import { showInlineCard } from './inlineCard';
+import { REVERSIBILITY_LABELS } from './assessmentFlow';import { showInlineCard } from './inlineCard';
 import { PlanProgressModel, type PlanProgressSnapshot } from './planProgress';
 import { deriveTaskScript, formatTaskStepEvidence, type TaskScript } from '../shared/taskScript';
 import { startHeartbeat } from './heartbeat';
@@ -36,9 +34,6 @@ export function evaluatePlanContinuation(args: {
   // A trailing question means the model is asking the USER — a human answer
   // decides what happens next, never an automatic nudge.
   if (/[?？]\s*$/.test(content.trim())) return false;
-  // Design-first gate: the design-ready marker hands control to the user's
-  // preview confirmation; continuing implementation would bypass it.
-  if (parseDesignReadyMarker(content)) return false;
   const stage = plan.steps[snapshot.currentPlan - 1];
   const lastStage = snapshot.currentPlan >= plan.steps.length;
   const stageTodoCount = stage?.todosRequired === false ? 0 : (stage?.substeps?.length ?? 0);

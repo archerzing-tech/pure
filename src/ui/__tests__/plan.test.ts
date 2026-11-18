@@ -41,8 +41,9 @@ describe('evaluatePlanContinuation (engine continueGuard decision)', () => {
     expect(evaluatePlanContinuation({ ...base, content: 'done', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' }, paused: true })).toBe(false);
     // The model asked the user a question.
     expect(evaluatePlanContinuation({ ...base, content: '要不要加上音效？', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' } })).toBe(false);
-    // Design-first gate: the ready marker hands control to the user.
-    expect(evaluatePlanContinuation({ ...base, content: '## 设计稿已就绪：design.html', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' } })).toBe(false);
+    // 2026-11-18 设计先行退役：设计稿标记不再拦自动续跑——要不要停下来等
+    // 用户确认，归模型自己的编排（提问句出口已覆盖）。
+    expect(evaluatePlanContinuation({ ...base, content: '## 设计稿已就绪：design.html', snapshot: { currentPlan: 1, currentTodo: 1, status: 'active' } })).not.toBe(false);
     // No plan at all.
     expect(evaluatePlanContinuation({ ...base, plan: null, snapshot: null, content: 'x' })).toBe(false);
   });

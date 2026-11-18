@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, detectUiDesignRequest, discoverWorkspace, deliveryVerificationSummary, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, DESIGN_READY_MARKER, isBareWorkspace, parseDeliveryMarkers, parseDesignReadyMarker, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
+import { buildTaskContract, buildVerificationPlan, classifyDeliveryFailure, discoverWorkspace, deliveryVerificationSummary, formatDeliveryClosingPrompt, formatDeliveryFixPrompt, formatDeliveryPipeline, formatTaskContract, planVerificationResume, resolveGateSpecs, verificationTimeoutFor, isBareWorkspace, parseDeliveryMarkers, type DeliveryVerificationResult, type WorkspaceProfile } from '../delivery';
 import { expectNoDefaultParams } from './arityLock';
 import type { ToolAdapter, ToolCall, ToolResult } from '../types';
 
@@ -335,29 +335,19 @@ describe('resolveGateSpecs（刀 1.1 验证清单的门禁裁决）', () => {
   });
 });
 
-describe('design-first phase (UI builds)', () => {
-  it('detects UI-building requests for the design-first phase', () => {
-    expect(detectUiDesignRequest('帮设计4个不同风格的企业网站，企业是卖三蹦子小电动车的')).toBe(true);
-    expect(detectUiDesignRequest('做一个后台管理系统 dashboard')).toBe(true);
-    expect(detectUiDesignRequest('修复这个页面的报错 bug')).toBe(false);
+describe('delivery pipeline（2026-11-18 设计先行退役后）', () => {
+  it('只定完成标准，不再带排序规定与设计先行段', () => {
+    const pipeline = formatDeliveryPipeline(undefined);
+    expect(pipeline).not.toContain('设计先行');
+    expect(pipeline).not.toContain('按顺序执行');
+    expect(pipeline).not.toContain('最后一个阶段');
+    // 完成判据仍在：四类检查 + 失败循环 + 真实证据。
+    expect(pipeline).toContain('循环直到全部通过');
+    expect(pipeline).toContain('禁止只说');
   });
 
-  it('carries the design protocol in formatDeliveryPipeline only when requested', () => {
-    const withDesign = formatDeliveryPipeline(undefined, true);
-    expect(withDesign).toContain('设计先行');
-    expect(withDesign).toContain(DESIGN_READY_MARKER);
-    const withoutDesign = formatDeliveryPipeline(undefined, false);
-    expect(withoutDesign.indexOf('设计先行')).toBe(-1);
-  });
-
-  it('extracts the mockup file from the ready marker, null when absent', () => {
-    expect(parseDesignReadyMarker('前言\n## 设计稿已就绪：design.html\n停在这里等待确认。')).toBe('design.html');
-    expect(parseDesignReadyMarker('没有标记的普通回复')).toBeNull();
-    expect(parseDesignReadyMarker('## 设计稿已就绪：\n(无文件名)')).toBeNull();
-  });
-
-  it('footgun 回归：formatDeliveryPipeline 无默认形参（needsDesignPhase 场景必填）', () => {
-    expectNoDefaultParams([['formatDeliveryPipeline', 2, formatDeliveryPipeline]]);
+  it('footgun 回归：formatDeliveryPipeline 无默认形参（profile 场景必填）', () => {
+    expectNoDefaultParams([['formatDeliveryPipeline', 1, formatDeliveryPipeline]]);
   });
 });
 

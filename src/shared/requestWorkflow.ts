@@ -3,7 +3,6 @@ import {
   Planner,
 } from '../coding-agent/Planner';
 import type { AnalysisResult, TaskMode } from '../coding-agent/types';
-import { detectUiDesignRequest } from './delivery';
 import { INCREMENTAL_BUILD_PROMPT } from './agentBehavior';
 import { turnShape } from '../coding-agent/turnRoute';
 import { detectReplyLanguage, replyLanguageDirective } from './langDetect';
@@ -28,10 +27,6 @@ export interface CompiledRequestWorkflow {
   analysis: AnalysisResult;
   stage: RequestWorkflowStage;
   needsDeliveryGate: boolean;
-  /** UI-building requests go through a design-first phase: the agent produces
-   * a static design mockup and waits for user confirmation before writing any
-   * implementation code. */
-  needsDesignPhase: boolean;
   probeRequired: boolean;
   probeAvailable: boolean;
   needsProbe: boolean;
@@ -66,11 +61,10 @@ export function compileRequestWorkflow(
     // 路由分类 build 了，交付闸/探针/落盘协议由这个形态事实保持常开。
     || shape.buildShaped
     || options.continuingProjectBuild === true;
-  // Design-first applies to project builds that look like UI work. A
-  // continuing build keeps its original routing decision (the marker only
-  // matters for the FIRST implementation turn).
-  const needsDesignPhase = needsDeliveryGate && !options.continuingPlan
-    && detectUiDesignRequest(prompt);
+  // 设计先行阶段已退役（2026-11-18 用户定案）：不再人为规定「先设计稿、等
+  // 确认、再实现」的工作顺序。要不要先出设计、要不要等用户确认，是模型的
+  // 工作编排——用户要设计稿时模型自然会给（html 卡本身能预览）。交付闸只
+  // 管「完成时什么必须为真」，不管「先做什么后做什么」。
   const probeRequired = assessment.requiresProbe || needsDeliveryGate;
   const probeAvailable = options.hasTools !== false;
   const needsProbe = probeRequired && probeAvailable;
@@ -109,7 +103,6 @@ export function compileRequestWorkflow(
     analysis,
     stage,
     needsDeliveryGate,
-    needsDesignPhase,
     probeRequired,
     probeAvailable,
     needsProbe,

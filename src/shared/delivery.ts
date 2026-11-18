@@ -438,24 +438,10 @@ export function formatTaskContract(contract: TaskContract): string {
 // loop), and the GUI re-runs only the mechanical checks at turn end as a
 // deterministic stop-gate with a bounded auto-fix loop.
 
-/** Design-phase marker the model emits when a UI design mockup is ready for
- * user review. The GUI scans assistant output for this line, renders the
- * mockup in a preview card, and pauses implementation until the user
- * confirms. */
-export const DESIGN_READY_MARKER = '## 设计稿已就绪：';
-
-/** Extract the design mockup file name from a DESIGN_READY_MARKER line in the
- * assistant output (e.g. `## 设计稿已就绪：design.html` → `design.html`).
- * Returns null when the marker is absent or names no file. */
-export function parseDesignReadyMarker(text: string): string | null {
-  const match = text.match(/##\s*设计稿已就绪：[^\S\n]*([^\s\n]+)/);
-  return match ? match[1] : null;
-}
-
 // ── 交付直达卡（人格轨道刀 6b）：产物标记协议 ──
 // 产物卡的收集面此前只认 write/edit 类工具调用——bash heredoc、生成器脚本、
 // 或模型在无工具路径下给出的文件都会漏卡，用户被迫自己去翻文件系统找「东西
-// 在哪」。泛化 DESIGN_READY_MARKER 的先例：模型明说「产物已就绪：<路径>」
+// 在哪」。先例（已随设计先行闸退役）：模型明说「产物已就绪：<路径>」
 // （每份一行），宿主解析后与工具收集并集去重，实时渲染与重载回放走同一个
 // 解析函数（重载渲染纪律：实时=重放，不许两套口径）。
 
@@ -482,33 +468,24 @@ export function parseDeliveryMarkers(text: string): string[] {
   return out;
 }
 
-/** True when the request looks like a UI-building task that should go through
- * the design-first phase (design mockup → user confirmation → implement). */
-export function detectUiDesignRequest(prompt: string): boolean {
-  return /(?:网页|网站|站点|页面|界面|前端|落地页|官网|首页|后台|管理端|控制台|仪表盘|大屏|可视化|dashboard|landing|web\s*app|web\s*site|website|网页应用|html|css|ui|ux|界面设计|交互设计|视觉|样式|海报|海报页|小程序|h5)/i.test(prompt)
-    && !/(?:修复|修一下|bug|报错|重构(?!.*界面)|重构成|优化性能|性能优化)/i.test(prompt);
-}
-
 /**
  * Build the delivery-pipeline prompt injected into the user turn for project
- * build tasks. The pipeline IS the final plan stage: the model reviews its own
- * code, then runs typecheck → unit tests → e2e/build checks with the exact
- * commands discovered from the workspace, fixing root causes and re-running
- * until everything passes. Evidence (command + real result) is mandatory.
+ * build tasks. Four classes of checks form the completion bar: the model
+ * reviews its own code and runs typecheck → unit tests → e2e/build checks
+ * with the exact commands discovered from the workspace, fixing root causes
+ * and re-running until everything passes. Evidence (command + real result) is
+ * mandatory. 2026-11-18 用户定案：这里只定「完成时什么必须为真」，不再规定
+ * 执行顺序——先检视还是先跑测试、验证安排在实现中还是实现后，都是模型的事
+ * （何时做的裁决权归模型，机制只答怎么做成）。
  */
-// needsDesignPhase 无默认值（2026-10-01 footgun 收口）：它是构建流程的场景
-// 开关（需不需要先行设计稿）。默认 false 会让忘传的构建任务静默漏掉整个设计
-// 确认阶段；调用点传的是 workflow.needsDesignPhase 这个运行期变量，两侧都会
-// 出现，没有安全的默认。
-export function formatDeliveryPipeline(profile: WorkspaceProfile | undefined, needsDesignPhase: boolean): string {
+// profile 无默认值（footgun 纪律延续）：忘传会让构建任务静默丢掉工作区实测
+// 的验证命令清单。
+export function formatDeliveryPipeline(profile: WorkspaceProfile | undefined): string {
   const commands = profile && profile.verification.length > 0
     ? profile.verification.map((spec) => `- ${spec.label}：\`${spec.command}\`${spec.required ? '' : '（可选）'}`).join('\n')
     : '- 先探明项目的验证入口（package.json scripts / Cargo.toml / pyproject.toml），没有标准入口时先补齐测试基础设施再验证。';
-  const designSection = needsDesignPhase
-    ? `\n设计先行（必须遵守）：这是有界面的工程，写任何实现代码之前，先创建一个自包含的静态设计稿 design.html（内联 CSS，不依赖构建工具，展示布局、配色、字体和关键界面/组件的实际视觉效果），然后单独输出一行控制标记「${DESIGN_READY_MARKER}design.html」并立即停止，等待用户在预览卡中确认。用户确认前禁止开始实现；用户提出调整意见时先修改设计稿再重新等确认。确认后严格按照 design.html 的设计实现。`
-    : '';
   return `<delivery_pipeline>
-交付验证管线（项目交付的唯一完成标准，按顺序执行）：
+交付验证管线（项目交付的唯一完成标准）：
 1. 代码检视：实现完成后，用 git_diff / 重读改动文件的方式审查自己的代码——正确性、边界条件、与需求的一致性；发现的问题当场修复。
 2. Typecheck：运行项目声明的类型/编译检查。
 3. 单元测试：运行项目的自动化测试；没有测试基础设施时先补齐再运行。
@@ -520,8 +497,8 @@ ${commands}
 规则：
 - 任何一步失败：定位根因并修复，然后从失败的那一步重新执行——循环直到全部通过，禁止带着失败的检查宣布完成。
 - 每一步在回复中给出真实证据（执行的命令 + 关键结果摘要），禁止只说"已通过"。
-- 把交付验证管线作为计划的最后一个阶段执行（阶段名：交付验证），四个步骤用子步骤标记逐步推进。
-- 工具、权限或网络原因导致某步无法执行时，如实标记为受阻并说明原因，不得伪造通过。${designSection}
+- 四类检查全部真实通过，交付才算完成；何时插进工作流、按什么顺序跑，按任务自行安排。
+- 工具、权限或网络原因导致某步无法执行时，如实标记为受阻并说明原因，不得伪造通过。
 </delivery_pipeline>`;
 }
 

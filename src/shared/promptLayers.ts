@@ -498,9 +498,9 @@ export interface UserTurnContext {
    * 走 user-turn 而非 system 尾：逐回合变化会击穿 system 缓存前缀。 */
   ledgerFacts?: string;
   /** formatDeliveryPipeline() output — the agent-driven delivery verification
-   * pipeline (code review → typecheck → tests → e2e/build) with the exact
-   * commands discovered from THIS workspace, plus the design-first protocol
-   * for UI builds. */
+   * bar (code review / typecheck / tests / e2e-build) with the exact commands
+   * discovered from THIS workspace. Completion criteria only; the sequencing
+   * of the work itself is the model's call (design-first retired 2026-11-18). */
   deliveryPipeline?: string;
   /** 语言对齐指令（2026-11-06 P3）：replyLanguageDirective(detectReplyLanguage(真人文本))
    * 的产物，由 compileRequestWorkflow 统一判定填入。住 user-turn 不住 system
