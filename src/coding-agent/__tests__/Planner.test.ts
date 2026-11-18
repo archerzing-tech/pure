@@ -138,9 +138,9 @@ describe('Planner', () => {
 
   it('keeps the build-protocol prompt instructive for real build requests', () => {
     const prompt = formatArtifactPrompt();
-    expect(prompt).toContain('choose the project-appropriate test runner');
-    expect(prompt).toContain('at least one focused smoke/unit/integration test');
-    expect(prompt).toContain('happy-dom');
+    // 测试先行令退役（2026-11-18 审计）：顺序规定删掉，完成标准（跑真测试、
+    // 手点不算自动化验证）留在本协议与交付管线。
+    expect(prompt).not.toContain('Before implementing feature code');
     expect(prompt).toContain('run the actual test command');
     expect(prompt).toContain('Do not replace automated tests with manual inspection');
     // 2026-11-17 用户判例：原型/工程里把整文件贴进对话——规则要写成可以判定

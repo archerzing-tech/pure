@@ -662,14 +662,14 @@ describe('INCREMENTAL_BUILD_PROMPT (humanized build reporting)', () => {
     expect(INCREMENTAL_BUILD_PROMPT).toContain('live plan card can reflect optional progress markers');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('overall plan context separate from any optional progress list');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('For other complex work');
-    expect(INCREMENTAL_BUILD_PROMPT).toContain('choose and state a test strategy before implementation');
+    // 测试先行令退役（2026-11-18 审计）：不再替模型规定「实现前先建测试」的
+    // 顺序——测试存在性由交付管线的完成标准管（没有设施先补齐再验证）。
+    expect(INCREMENTAL_BUILD_PROMPT).not.toContain('test strategy before implementation');
     // NEW TASK RULE: a fresh user request after a finished plan restarts
     // numbering instead of appending "计划6" to the old plan's stages.
     expect(INCREMENTAL_BUILD_PROMPT).toContain('NEW TASK RULE');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('restart heading numbers');
-    expect(INCREMENTAL_BUILD_PROMPT).toContain('create the project test entry');
-    expect(INCREMENTAL_BUILD_PROMPT).toContain('at least one focused smoke/unit/integration test');
-    expect(INCREMENTAL_BUILD_PROMPT).toContain('happy-dom');
+    // 证据反作弊标准保留：手点不算自动化测试（这是验证口径，不是顺序规定）。
     expect(INCREMENTAL_BUILD_PROMPT).toContain('manual click-through is not an automated test');
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('meaningful protection');
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('dedicated test step');
