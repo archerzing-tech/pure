@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent, DetachedBranchSettlement } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, LLMChunk, AsyncQueueLike, SubagentActivityEvent, DetachedBranchSettlement } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
@@ -176,6 +176,19 @@ function backgroundBranchNote(settled: DetachedBranchSettlement): string {
   return `[background branch settled] 你先前派出的 ${who} 跑完了。这条消息出现时它已经结束——不要查岗、不要用相同参数重派。以下是它的真实产出：\n\n${body}`;
 }
 
+// 送达即结算：把转录里那条受理收执的 deferred 标记降回 false。这个标记
+// 同时是崩溃恢复的判据（shared/detachedResume），不消掉的话，下次重启会把
+// 已经送达的支当成「丢了」再报一遍。
+function markDelegationSettled(messages: Message[], toolCallId: string): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'tool' && m.toolCallId === toolCallId && m.deferred === true) {
+      m.deferred = false;
+      return;
+    }
+  }
+}
+
 // 失败结果的文本形态。error 字段是权威（CLI 适配器放这里），但 GUI 适配器的
 // 失败族把人类可读文案（netFailureHint / blockedHostMessage 组装的状态码、
 // 重试指引）放在 result——error 缺位时必须回退取它，否则文案在最后一米丢失：
@@ -268,6 +281,52 @@ export class AgentLoopEngine {
       }
     } finally {
       reader?.close();
+    }
+  }
+
+  /**
+   * THINK 期间的批次外活动转发（2026-11-18 档二续）：runBatch 的 reader 批结束
+   * 就关，而 detach 后的分支活过批次——trace 从下一批起失明，卡片在整个窗口
+   * 里只有一个转圈。这里在模型生成期间自持一个 reader，把排队的分支活动随
+   * 流块带出去（延迟上限一眼 chunk），结束时关闭队列。
+   *
+   * 竞态纪律与 runBatch 相同：缓冲先排空；readerNext 只在 reader 赢之后重新
+   * 武装——每次迭代都预取会把最老的排队事件吞进 promise，让新事件先吐（trace
+   * 行倒序）。
+   */
+  private async *withThinkActivity(
+    stream: AsyncGenerator<LLMChunk, void, void>,
+    reader: AsyncQueueLike<SubagentActivityEvent> | undefined,
+  ): AsyncGenerator<LLMChunk | { type: 'activity'; event: SubagentActivityEvent }, void, void> {
+    if (!reader) {
+      yield* stream;
+      return;
+    }
+    try {
+      let next = stream.next();
+      let readerNext: Promise<IteratorResult<SubagentActivityEvent>> | null = null;
+      let readerClosed = false;
+      while (true) {
+        for (const event of reader.drainAvailable()) yield { type: 'activity', event };
+        if (!readerClosed && !readerNext) readerNext = reader.next();
+        const chunkArm = next.then((r) => ({ which: 'chunk' as const, r }));
+        const winner = readerNext
+          ? await Promise.race([chunkArm, readerNext.then((r) => ({ which: 'activity' as const, r }))])
+          : await chunkArm;
+        if (winner.which === 'chunk') {
+          if (winner.r.done) return;
+          yield winner.r.value;
+          next = stream.next();
+        } else if (winner.r.done) {
+          readerClosed = true;
+          readerNext = null;
+        } else {
+          yield { type: 'activity', event: winner.r.value };
+          readerNext = null;
+        }
+      }
+    } finally {
+      reader.close();
     }
   }
 
@@ -624,25 +683,33 @@ export class AgentLoopEngine {
           // after the soft cap — Math.max(1, 0) used to become a 1ms deadline
           // that instantly timed out every remaining round.
           const streamTimeoutMs = budget.streamDeadlineMs();
-          for await (const chunk of streamLlmTurn({
-            llm: llmForPhase(ctx, 'THINK'),
-            messages,
-            tools: toolsDefs,
-            signal: ctx.signal,
-            timeoutMs: streamTimeoutMs,
-            // 首块等待随重试放宽一倍（2026-11-05）：大输入场景预填充时间是
-            // 确定性的——同样的请求原样重发还撞同一条 300s 线，两次全烧满
-            // 上限后中断（三个大文档做 PPT 真机判例）。第一次保持 300s 快速
-            // 反馈；重试已证明不是端点死（死链 120s 块间线会先咬住），放宽
-            // 让慢预填充渡过，是物理参数校准不是替模型决策。
-            firstTokenTimeoutMs: budget.streamFirstTokenMs() * (streamTimeoutRepeats > 0 ? 2 : 1),
-            // 块间空闲上限随重试放宽一倍（2026-11-16 bug4，与上方首块放宽
-            // 同一物理校准）：第一次 2m 没渡过的中转静默/大参数攒批，第二次
-            // 仍卡 2m 必然重蹈（真机判例「中途停了 2m，连续 2 次，每次都是
-            // 新建连接」）。首轮保持 120s 快速反馈；已证明流活过或攒批真实
-            // 存在时 4m 给慢链路一个真实机会，真死链由总 deadline 兜底。
-            idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS * ((streamTimeoutRepeats > 0 || toolCallResumes > 0) ? 2 : 1),
-          })) {
+          for await (const chunk of this.withThinkActivity(
+            streamLlmTurn({
+              llm: llmForPhase(ctx, 'THINK'),
+              messages,
+              tools: toolsDefs,
+              signal: ctx.signal,
+              timeoutMs: streamTimeoutMs,
+              // 首块等待随重试放宽一倍（2026-11-05）：大输入场景预填充时间是
+              // 确定性的——同样的请求原样重发还撞同一条 300s 线，两次全烧满
+              // 上限后中断（三个大文档做 PPT 真机判例）。第一次保持 300s 快速
+              // 反馈；重试已证明不是端点死（死链 120s 块间线会先咬住），放宽
+              // 让慢预填充渡过，是物理参数校准不是替模型决策。
+              firstTokenTimeoutMs: budget.streamFirstTokenMs() * (streamTimeoutRepeats > 0 ? 2 : 1),
+              // 块间空闲上限随重试放宽一倍（2026-11-16 bug4，与上方首块放宽
+              // 同一物理校准）：第一次 2m 没渡过的中转静默/大参数攒批，第二次
+              // 仍卡 2m 必然重蹈（真机判例「中途停了 2m，连续 2 次，每次都是
+              // 新建连接」）。首轮保持 120s 快速反馈；已证明流活过或攒批真实
+              // 存在时 4m 给慢链路一个真实机会，真死链由总 deadline 兜底。
+              idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS * ((streamTimeoutRepeats > 0 || toolCallResumes > 0) ? 2 : 1),
+            }),
+            ctx.subagentEvents?.subscribe(),
+          )) {
+            // 批次外到达的后台支活动（detach 后的常规情形）
+            if (chunk.type === 'activity') {
+              yield { type: 'SubagentActivity', payload: chunk.event, timestamp: Date.now() };
+              continue;
+            }
             switch (chunk.type) {
               case 'content':
                 content += chunk.content;
@@ -1308,6 +1375,10 @@ export class AgentLoopEngine {
             toolCallId: tr.toolCallId,
             toolName: tr.toolName,
             images: tr.result.images,
+            // 受理收执的 durable 标记（2026-11-18 档二续）：结算送达时置
+            // false。它是崩溃恢复的唯一判据——转录里还挂着 true 的收执，
+            // 说明上个进程退出时那支没回来（见 shared/detachedResume）。
+            ...(tr.result.deferred === true ? { deferred: true } : {}),
           });
           budget.addTokens(resultText);
         }
@@ -1353,6 +1424,7 @@ export class AgentLoopEngine {
         // 进转录；同时发一条 backgroundSettle 的 ToolResult，让宿主的委派卡
         // 从「后台运行中」结算成真结果（不新开卡）。
         for (const settled of ctx.detachedBranches?.takeSettled() ?? []) {
+          markDelegationSettled(messages, settled.toolCallId);
           const note = backgroundBranchNote(settled);
           messages.push({ role: 'user' as const, content: note, internal: true });
           budget.addTokens(note);
@@ -1539,26 +1611,38 @@ export class AgentLoopEngine {
       if (ctx.detachedBranches && ctx.detachedBranches.pendingCount() > 0) {
         const gateStart = Date.now();
         let delivered = 0;
-        while (ctx.detachedBranches.pendingCount() > 0 && !ctx.signal?.aborted) {
-          if (Date.now() - gateStart >= BRANCH_GATE_MAX_WAIT_MS) break;
-          await ctx.detachedBranches.waitForSettlement(BRANCH_SETTLE_POLL_MS, ctx.signal);
-          for (const settled of ctx.detachedBranches.takeSettled()) {
-            const note = backgroundBranchNote(settled);
-            messages.push({ role: 'user' as const, content: note, internal: true });
-            budget.addTokens(note);
-            delivered++;
-            yield {
-              type: 'ToolResult',
-              payload: {
-                toolName: settled.toolName,
-                result: settled.result,
-                duration: settled.duration,
-                toolCallId: settled.toolCallId,
-                backgroundSettle: true,
-              },
-              timestamp: Date.now(),
-            };
+        // 等待期间支仍在吐活动（detach 后的常规情形）：批级 reader 早关了，
+        // 这里自持一个，每片等待后把排队的 trace 带出去——否则卡片在整个
+        // 终局等待里只有一个转圈。
+        const gateActivity = ctx.subagentEvents?.subscribe();
+        try {
+          while (ctx.detachedBranches.pendingCount() > 0 && !ctx.signal?.aborted) {
+            if (Date.now() - gateStart >= BRANCH_GATE_MAX_WAIT_MS) break;
+            await ctx.detachedBranches.waitForSettlement(BRANCH_SETTLE_POLL_MS, ctx.signal);
+            for (const event of gateActivity?.drainAvailable() ?? []) {
+              yield { type: 'SubagentActivity', payload: event, timestamp: Date.now() };
+            }
+            for (const settled of ctx.detachedBranches.takeSettled()) {
+              markDelegationSettled(messages, settled.toolCallId);
+              const note = backgroundBranchNote(settled);
+              messages.push({ role: 'user' as const, content: note, internal: true });
+              budget.addTokens(note);
+              delivered++;
+              yield {
+                type: 'ToolResult',
+                payload: {
+                  toolName: settled.toolName,
+                  result: settled.result,
+                  duration: settled.duration,
+                  toolCallId: settled.toolCallId,
+                  backgroundSettle: true,
+                },
+                timestamp: Date.now(),
+              };
+            }
           }
+        } finally {
+          gateActivity?.close();
         }
         if (ctx.signal?.aborted) {
           yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };

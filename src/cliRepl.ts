@@ -596,6 +596,18 @@ async function consumeTurn(
           endThinking();
           streamMgr.stop();
           const toolResult = event.payload.result;
+          // 后台委派两态（2026-11-18 档二）：受理收执不是完成（否则终端把刚派
+          // 出去的活印成 ✓），结算也不是同一条被重跑一次。
+          if (event.payload.backgroundSettle === true) {
+            process.stdout.write(`  ${purple(`🔧 ${event.payload.toolName}`)}: ${dim('⤷ 后台结果已送达')}\n`);
+            streamMgr.start();
+            break;
+          }
+          if (toolResult.deferred === true) {
+            process.stdout.write(`  ${purple(`🔧 ${event.payload.toolName}`)}: ${yellow('⏳ 后台运行中')}\n`);
+            streamMgr.start();
+            break;
+          }
           const status = toolResult.success ? green('✓') : red('✗');
           process.stdout.write(`  ${purple(`🔧 ${event.payload.toolName}`)}: ${status} ${dim(`(${event.payload.duration}ms)`)}\n`);
           // A failed tool used to be an opaque `✗` — the reason (missing path,

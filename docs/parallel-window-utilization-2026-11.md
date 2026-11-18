@@ -39,7 +39,7 @@
 
 1. **配对契约**：`assistant.tool_calls` 与 `tool` 结果必须一一配对，缺一条下一次请求 400。异步收结果必须先给一条合成受理收执。
 2. **终局闸**：模型在支在飞时给纯文本会直接 VERIFY → TERMINATE，结果永久丢在回合外，汇总还把没跑完的活说成完成。
-3. **送达通道**：`subagentEvents` 的 reader 是**批级**的（`runBatch` 的 finally 关闭），分支活过这一批，卡片 trace 从下一批起失明。
+3. **送达通道**：`subagentEvents` 的 reader 是**批级**的（`runBatch` 的 finally 关闭），分支活过这一批，卡片 trace 从下一批起失明。**（2026-11-18 续已解：THINK 与终局等待各持一个自己的 reader 转发，见下）**
 4. **控制面**：`executeOne` 的 abort 监听随调用结束移除、编排器在 finally 里删在飞账——委派提前返回等于把分支变成没人能停的孤儿。
 5. **其他**：relay 上游被后台化后下游拿不到产出；同参重派会命中去重游标里的「成功」快照；检查点只带 messages；worker 在飞数不再受「一批」约束。
 
@@ -81,6 +81,12 @@
 - 契约：`src/shared/types.ts`（`ToolResult.deferred`、`DetachedBranchPort`、`backgroundSettle` 事件标记）。
 - 宿主：`CodingAgent` / `cliHarness` 注入端口；`src/ui/toolRow.ts` + `chat.ts` 的「⏳ 后台运行中 → 已收」两态；`config.detachDelegations` 回滚面。
 - 教学：`PARALLEL_FIRST_DIRECTIVE` 一句 + `MULTI_AGENT_MECHANICS` 的 Background delegation 段（收执不是产出、不轮询、不重派；下一步依赖产出时 `detach:false`）。
+
+**崩溃恢复环（2026-11-18 续）**：进程被杀时在飞的支没有结果——后台腿活在父进程的定时器与子引擎里。不另设存档字段：受理收执的工具消息带 `deferred: true`（`Message.deferred`），送达时引擎置 false，所以最后一份 TurnCheckpoint 里「还挂着 true 的收执」就是丢了的那批。恢复时刻（GUI `loadFromStorage`、`Harness.run` 恢复分支与 `continueTurn`）由 `shared/detachedResume.ts` 就地把那条工具结果改写成 `[detached resume]` 通告：没回来、别当完成、要就同参重派（子代理断点续跑），并清掉标记。就地改写而不是另插 internal user 消息——工具结果是配对契约的一部分，且落盘走的就是这条消息（另插的消息在合并转录时会被当成回合前历史丢掉，于是每轮都会重喊）。
+
+**批次外 trace（2026-11-18 续）**：上面第 3 条空白的落地——批级 reader 之外，THINK 期间（`withThinkActivity`，逐块排空、竞态纪律与 `runBatch` 同形）与终局等待期间（每片等待后排空）各自持一个 reader，后台支的活动不再在批次之间丢失。CLI 同时补两态：收执打 `⏳ 后台运行中`、结算打 `⤷ 后台结果已送达`（此前收执被印成 ✓、结算像同一条重跑）。
+
+**这一环未做**：恢复后委派卡仍按存档的 `toolExec` 重建，不显「已中断」态（模型面已如实，用户面的卡还是旧两态）。
 
 **复测口径（下一步数据）**：同一构建回合内，记录「委派在飞总时长」「该窗口内主线完成的真实工具调用数与 THINK 轮数」「收执→结果送达的间隔」三个量；档二的收益判据是前两者从「零产出」变为正向，而不是墙钟单项。
 

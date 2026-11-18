@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { AgentLoopEngine } from '../AgentLoopEngine';
+import { EventFanout } from '../../shared/asyncQueue';
 import type {
   BudgetConfig,
   DetachedBranchPort,
@@ -14,6 +15,7 @@ import type {
   LLMAdapter,
   LLMChunk,
   Message,
+  SubagentActivityEvent,
   ToolAdapter,
   ToolCall,
   ToolDefinition,
@@ -224,6 +226,12 @@ describe('后台委派：配平点送达（2026-11-18 档二）', () => {
     expect((settle as Extract<EngineEvent, { type: 'ToolResult' }>).payload.toolCallId).toBe('call_1_0');
     // 受理收执也要在转录里（配对契约），且整体配对完整。
     expect(transcriptIsPaired(messages)).toBe(true);
+    // 崩溃恢复判据：收执消息先带 deferred 标记，送达后降回 false——否则重启
+    // 会把已送达的支报成「丢了」再喊一遍。
+    const receiptEvent = events.find((e) => e.type === 'ToolResult' && e.payload.toolCallId === 'call_1_0' && e.payload.backgroundSettle !== true);
+    expect((receiptEvent as Extract<EngineEvent, { type: 'ToolResult' }>).payload.result.deferred).toBe(true);
+    const receiptMessage = messages.find((m) => m.role === 'tool' && m.toolCallId === 'call_1_0');
+    expect(receiptMessage?.deferred).toBe(false);
     expect(port.pendingCount()).toBe(0);
   }, 10_000);
 });
@@ -352,5 +360,63 @@ describe('后台委派：失败与用户中断的送达措辞', () => {
     const completed = events.find((e) => e.type === 'Completed' && e.payload.isComplete) as Extract<EngineEvent, { type: 'Completed' }>;
     const notes = internalNotes(completed.payload.messages ?? []);
     expect(notes.some((n) => n.includes('失败了') && n.includes('stream died') && n.includes('不要装作它跑完了'))).toBe(true);
+  }, 10_000);
+});
+
+// 批次外的分支活动（2026-11-18 档二续）：委派 detach 后支活过整批，批级
+// reader 在批结束就关了——detach 之前的引擎在这里会把活动静默丢掉，卡片在
+// 整个窗口里只有一个转圈。
+describe('后台委派：批次外的分支活动不再失明', () => {
+  it('主线 THINK 期间到达的分支活动照样转发', async () => {
+    const engine = new AgentLoopEngine();
+    const port = new FakeBranches();
+    const fanout = new EventFanout<SubagentActivityEvent>();
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const tc: ToolCall = {
+            id: 'call_1_0',
+            index: 0,
+            function: { name: 'code_editor', arguments: '{"instructions":"write A"}' },
+          };
+          yield { type: 'tool_call', index: 0, id: tc.id, name: tc.function.name, arguments: tc.function.arguments };
+          yield { type: 'done', content: '', toolCalls: [tc] };
+          return;
+        }
+        if (round === 2) {
+          // 批级 reader 已在第一批结束时关闭；这一条只在 THINK 期间被拾取。
+          fanout.publish({ callId: 'call_1_0', agentName: 'code_editor', kind: 'tool', toolName: 'write_file' });
+          yield { type: 'content', content: 'draft answer' };
+          yield { type: 'done', content: 'draft answer', toolCalls: [] };
+          return;
+        }
+        yield { type: 'content', content: 'final answer' };
+        yield { type: 'done', content: 'final answer', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final answer', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: delegationAdapter(port, 50),
+      toolsDefs: [EDITOR_TOOL, READ_TOOL],
+      detachedBranches: port,
+      subagentEvents: fanout,
+    });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-detach-think-activity', systemPrompt: 'X', userPrompt: 'Y', budget: BUDGET },
+      ctx,
+    ));
+
+    const forwarded = events.filter((e) => e.type === 'SubagentActivity') as Array<Extract<EngineEvent, { type: 'SubagentActivity' }>>;
+    expect(forwarded.map((e) => e.payload.callId)).toEqual(['call_1_0']);
+    expect(forwarded[0].payload.toolName).toBe('write_file');
+    // 转发发生在回合收尾之前（不是攒到 Completed 一起吐）。
+    const activityAt = events.findIndex((e) => e.type === 'SubagentActivity');
+    const completedAt = events.findIndex((e) => e.type === 'Completed');
+    expect(activityAt).toBeGreaterThan(-1);
+    expect(activityAt).toBeLessThan(completedAt);
   }, 10_000);
 });

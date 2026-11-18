@@ -50,6 +50,11 @@ export interface Message {
   toolName?: string;
   name?: string;
   toolCalls?: ToolCall[];
+  /** 后台委派的受理收执（2026-11-18 档二）：tool 消息上为 true 表示这份
+   *  结果只是「已受理」，子任务还在后台跑，真产出稍后另发；送达时置 false。
+   *  它也是崩溃恢复的唯一 durable 判据——转录里还挂着 true 的收执，说明上个
+   *  进程退出时那支没回来（`shared/detachedResume`）。 */
+  deferred?: boolean;
 }
 
 export interface ToolCall {

@@ -14,7 +14,9 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 三、边界与回滚。同参重派按 stableSessionId 认出去在飞的那支，回来一份指向原 callId 的收执（不重复派工——两支同写一份断点存档）；relay 链成员、`detach:false`、后台支并发上限 6 走同步；`config.detachDelegations === false` 与 `PURE_DETACHED_DELEGATION=0` 是 kill switch。执行池切片 0：写结果与读池一起 race、随完成即吐（此前压到读池排空后按批次序吐，卡片空转整个窗口）。委派受理收执不进失败账、不作同轮复用锚、不当成功去重游标。提示词补一句「收执不是产出」+ Background delegation 教学（不轮询、不重派，下一步依赖产出时 `detach:false`）。
 
-验证：typecheck、lint:conventions 绿；全量 5582 例 5577 过 / 4 skip / 1 例 `Harness lesson reflector` 超时——同例在未改动的 HEAD 工作树全量中同样超时（既有跨文件抖动，单跑 4.77ms 过）；新增 detachedBranches 5 例、SubagentOrchestrator.detach 8 例、执行池切片 0 用例全绿。
+四、崩溃恢复与两态补齐。后台腿活在父进程里，进程一死产出就没了，而转录里还留着「已受理」的收执——恢复会话时模型会以为活干完了或还在跑，两种都把汇总写假。判据不另设存档字段：收执的工具消息带 `deferred: true`，送达时置 false，所以最后一份 TurnCheckpoint 里「还挂着 true 的收执」就是丢了的那批；恢复时刻（GUI 载入、`Harness.run` 恢复分支与 `continueTurn`）由 `shared/detachedResume.ts` 就地把那条工具结果改写成 `[detached resume]` 通告（没回来、别当完成、要就同参重派走子代理断点续跑）。选就地改写而不是另插 internal 消息：工具结果是配对契约的一部分，且落盘走的就是这条消息（另插的在合并转录时会被当成回合前历史丢掉，于是每轮重喊）。不做自动重派——重派花的是用户的 token，被中断的那半可能已经不要了。另两处：批级 reader 之外补 THINK 与终局等待的读收（后台支的活动不再在批次之间失明），CLI 补两态（收执 `⏳ 后台运行中`、结算 `⤷ 后台结果已送达`，此前收执被印成 ✓）。
+
+验证：typecheck、lint:conventions 绿；全量 5589 例 5584 过 / 4 skip / 1 例 `Harness lesson reflector` 超时——同例在未改动的 HEAD 工作树全量中同样超时（既有跨文件抖动，单跑 4.77ms 过）；新增 detachedBranches 6 例（含 THINK 期间分支活动转发）、SubagentOrchestrator.detach 8 例、执行池切片 0 用例、崩溃恢复 7 例（shared 5 + Harness 续轮接线 2）、CLI 两态源码断言 2 例全绿。
 
 ## v4.9.3
 

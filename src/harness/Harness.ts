@@ -68,6 +68,7 @@ import {
   type ReflectedLesson,
   type TurnEvidence,
 } from './LessonReflector';
+import { resolveInterruptedDelegations } from '../shared/detachedResume';
 import { runUserHooksForEvent } from '../shared/userHookRunner';
 import type { UserHookRunner } from '../shared/userHookRunner';
 import { settleWithin, withTimeout } from '../shared/timing';
@@ -616,6 +617,10 @@ export class Harness {
       if (this.config.contextEngine) {
         msgs = await this.config.contextEngine.trim(msgs);
       }
+      // 后台委派恢复通告（2026-11-18 档二续）：上个进程被杀时在飞的支，收执
+      // 还挂在转录里、产出永远不会来。压缩之后再改写——trim 会重建消息数组，
+      // 早改的副本进不了模型上下文。
+      resolveInterruptedDelegations(msgs);
     }
 
     const stream = resumed
@@ -813,6 +818,9 @@ export class Harness {
     if (this.config.contextEngine) {
       msgs = await this.config.contextEngine.trim(msgs);
     }
+    // 后台委派恢复通告（2026-11-18 档二续）：GUI/CLI/通道恢复会话都走这里。
+    // 放在压缩之后：trim 可能重建消息数组，改写要落在真正送进模型的那份上。
+    resolveInterruptedDelegations(msgs);
 
     const stream = this.engine.continue(
       {
