@@ -595,6 +595,16 @@ export function imageGenModelFor(
 // Adding a new family is a one-line diff here plus one test line.
 
 export type ReasoningEffortLevel = 'low' | 'medium' | 'high';
+
+/** 端点实测词表：各家对 reasoning_effort 的合法档位并不统一（2026-11-18
+ *  真机 400 判例：DeepSeek V4.1 的 chat_template_kwargs 只收 low / high /
+ *  xhigh / max / 整数 1-100——没有 medium）。命中模型的族且档位不在词表里
+ *  时撤参不发：端点默认档就是「中」的最近解释，一次 400 比没旋钮贵得多。
+ *  只挡已知端点；未知端点由 paramRejectionHeal 兜底（一次 400 换整会话
+ *  撤参）——两层合起来才是「考虑所有的模型」。 */
+const REASONING_EFFORT_VOCABULARIES: readonly { pattern: RegExp; levels: readonly ReasoningEffortLevel[] }[] = [
+  { pattern: /deepseek-(?:v[4-9]|r[2-9])/i, levels: ['low', 'high'] },
+];
 /** Per-model reasoning setting, stored alongside the model's token budgets:
  * 'off' never sends the parameter, a concrete level forces it, and absence
  * (undefined) means auto — the 2026+ name pattern decides, then medium. */
@@ -649,8 +659,17 @@ export function resolveReasoningEffort(
         : isReasoningModelName(model) ? { supported: true, effort: 'medium' } : { supported: false };
   // The override only DOWNSHIFTS a call that would already carry the parameter
   // (or withdraws it) — it never adds reasoning to a model that takes none.
-  if (effortOverride === undefined || !base.supported) return base;
-  return effortOverride === 'off' ? { supported: false } : { supported: true, effort: effortOverride };
+  let final = base;
+  if (effortOverride !== undefined && base.supported) {
+    final = effortOverride === 'off' ? { supported: false } : { supported: true, effort: effortOverride };
+  }
+  // 端点词表闸（见 REASONING_EFFORT_VOCABULARIES）：档位不在该端点词表里就
+  // 撤参——显式选的档被端点打回也一样，用户旋钮不能把回合打成 400。
+  if (final.effort) {
+    const vocab = REASONING_EFFORT_VOCABULARIES.find((v) => v.pattern.test(model));
+    if (vocab && !vocab.levels.includes(final.effort)) return { supported: false };
+  }
+  return final;
 }
 
 /** Display label for a provider id, resolving custom providers by name. */

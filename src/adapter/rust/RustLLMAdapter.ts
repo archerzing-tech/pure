@@ -19,6 +19,7 @@ import type {
 import { normalizeTokenUsage } from '../../shared/usage';
 import { buildChatParams } from '../openai/mapping';
 import { isTauriRuntime } from '../../shared/tauri';
+import { paramHealScope, planParamWithdrawal, recordParamWithdrawal, withdrawExtraBody } from '../../shared/paramRejectionHeal';
 
 export interface RustLLMConfig {
   provider: string;
@@ -110,10 +111,43 @@ export class RustLLMAdapter implements LLMAdapter {
     };
   }
 
+  /**
+   * 参数拒绝自愈的流式包装：端点 400 拒收 extraBody 里的某个键（如 DeepSeek
+   * V4.1 不收 reasoning_effort=medium）时，记账撤参、原地重试一次——回合
+   * 不中断。只在**零 payload 已吐出**时重试：400 在任何 SSE delta 之前就被
+   * 拒，重发不会重复内容；一旦已有内容吐给引擎，重发会造成重复输出，此时
+   * 原样上抛。重试仍败才把原始错误交给引擎的确定性止损阶梯。
+   */
   async *stream(
     messages: Message[],
     tools: ToolDefinition[],
     signal?: AbortSignal,
+  ): AsyncGenerator<LLMChunk, void, void> {
+    const scope = paramHealScope(this.config.baseURL, this.config.model);
+    for (let attempt = 0; ; attempt++) {
+      let sawPayload = false;
+      try {
+        for await (const chunk of this.streamCore(messages, tools, signal, withdrawExtraBody(this.config.extraBody, scope))) {
+          if (chunk.type !== 'status') sawPayload = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        const param = attempt === 0 && !signal?.aborted && !sawPayload
+          ? planParamWithdrawal(text, Object.keys(this.config.extraBody ?? {}))
+          : null;
+        if (!param) throw err;
+        recordParamWithdrawal(scope, param);
+      }
+    }
+  }
+
+  private async *streamCore(
+    messages: Message[],
+    tools: ToolDefinition[],
+    signal: AbortSignal | undefined,
+    extraBody: Record<string, unknown> | undefined,
   ): AsyncGenerator<LLMChunk, void, void> {
     const deps = await this.getDeps();
     const params = buildChatParams({
@@ -123,7 +157,7 @@ export class RustLLMAdapter implements LLMAdapter {
       maxTokens: this.config.maxTokens,
       temperature: this.config.temperature,
       stream: true,
-      extraBody: this.config.extraBody,
+      extraBody,
     });
 
     // One request id per stream call: passed into chat_stream so the Rust
@@ -167,7 +201,7 @@ export class RustLLMAdapter implements LLMAdapter {
           baseUrl: this.config.baseURL ?? '',
           secretKey: this.config.secretKey ?? '',
           allowLegacyKeyFallback: this.config.allowLegacyKeyFallback ?? false,
-          extraBody: this.config.extraBody,
+          extraBody,
           maxTokens: params.max_tokens,
           temperature: params.temperature,
           requestId,

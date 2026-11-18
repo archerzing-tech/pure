@@ -7,6 +7,7 @@ import OpenAI from 'openai';
 import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall, TokenUsage } from '../../shared/types';
 import { normalizeTokenUsage } from '../../shared/usage';
 import { buildChatParams } from './mapping';
+import { paramHealScope, planParamWithdrawal, recordParamWithdrawal, withdrawExtraBody } from '../../shared/paramRejectionHeal';
 
 export interface OpenAICompatibleConfig {
   baseURL: string;
@@ -23,6 +24,8 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
   private maxTokens: number;
   private temperature: number;
   private extraBody?: Record<string, unknown>;
+  /** 参数拒绝自愈的记账格（baseURL+model，见 paramRejectionHeal）。 */
+  private healScope: string;
 
   constructor(config: OpenAICompatibleConfig) {
     // The openai SDK constructor THROWS 'Missing credentials' on an empty
@@ -41,6 +44,33 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
     this.maxTokens = config.maxTokens ?? 8192;
     this.temperature = config.temperature ?? 0;
     this.extraBody = config.extraBody;
+    this.healScope = paramHealScope(config.baseURL, config.model);
+  }
+
+  /** 发请求 + 参数拒绝自愈：端点 400 拒收 extraBody 里的某个键时，记账撤参
+   *  原地重试一次（撤参后本进程后续请求都不再带它——回合不中断）。重试仍败
+   *  原样上抛，引擎的确定性止损阶梯照旧接手。只有第一次失败尝试参与撤参
+   *  判定：第二回合再撤同一个键没有意义。 */
+  private async sendWithParamHeal<T>(
+    send: (params: unknown) => Promise<T>,
+    rebuildParams: () => unknown,
+  ): Promise<T> {
+    let params: unknown = rebuildParams();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await send(params);
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        // 候选键从注入源头（this.extraBody）读：buildChatParams 把旋钮摊平在
+        // 请求顶层，构建产物上没有 extraBody 属性可查。
+        const param = attempt === 0
+          ? planParamWithdrawal(text, Object.keys(this.extraBody ?? {}))
+          : null;
+        if (!param) throw err;
+        recordParamWithdrawal(this.healScope, param);
+        params = rebuildParams();
+      }
+    }
   }
 
   async *stream(
@@ -48,10 +78,10 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
     tools: ToolDefinition[],
     signal?: AbortSignal,
   ): AsyncGenerator<LLMChunk, void, void> {
-    const stream = await this.client.chat.completions.create(
-      this.buildParams(messages, tools, true),
-      { signal },
-    );
+    const stream = (await this.sendWithParamHeal(
+      (params) => this.client.chat.completions.create(params as never, { signal }),
+      () => this.buildParams(messages, tools, true),
+    )) as unknown as AsyncIterable<any>;
 
     const toolCallAccum: Map<number, { id: string; name: string; arguments: string }> = new Map();
     let content = '';
@@ -123,9 +153,9 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
     tools: ToolDefinition[],
     signal?: AbortSignal,
   ): Promise<LLMResponse> {
-    const response = await this.client.chat.completions.create(
-      this.buildParams(messages, tools, false),
-      signal ? { signal } : undefined,
+    const response = await this.sendWithParamHeal(
+      (params) => this.client.chat.completions.create(params as never, signal ? { signal } : undefined),
+      () => this.buildParams(messages, tools, false),
     );
 
     const choice = response.choices[0]?.message;
@@ -169,7 +199,8 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
       maxTokens: this.maxTokens,
       temperature: this.temperature,
       stream,
-      extraBody: this.extraBody,
+      // 撤参闸读账本：被端点拒过的键不再出现在请求体里（paramRejectionHeal）。
+      extraBody: withdrawExtraBody(this.extraBody, this.healScope),
     });
   }
 }

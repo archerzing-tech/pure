@@ -377,4 +377,69 @@ describe('RustLLMAdapter', () => {
     for await (const c of gen) types.push(c.type);
     expect(types).not.toContain('done');
   });
+
+  // 参数拒绝自愈（2026-11-18 DeepSeek V4.1 真机 400 判例）：第一次 chat_stream
+  // 被端点 400 拒收 reasoning_effort → 撤参原地重试一次，回合不中断。
+  it('retries once without the rejected extraBody key on a param-rejection 400', async () => {
+    const DEEPSEEK_400 = '400 Bad Request: {"error":{"message":"DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100] in chat_template_kwargs"}}';
+    const chatCalls: any[] = [];
+    let call = 0;
+    const deps: RustLLMDeps = {
+      invoke: async (cmd: string, args: any) => {
+        if (cmd !== 'chat_stream') return true;
+        call++;
+        chatCalls.push(args);
+        if (call === 1) throw new Error(DEEPSEEK_400);
+        return { text: 'ok', toolCalls: [] };
+      },
+      Channel: MockChannel as unknown as RustLLMDeps['Channel'],
+    };
+    const adapter = new RustLLMAdapter(
+      {
+        provider: 'deepseek-openai',
+        model: 'deepseek-v4.1',
+        extraBody: { reasoning_effort: 'medium', tool_stream: true },
+      },
+      deps,
+    );
+
+    const chunks: LLMChunk[] = [];
+    for await (const c of adapter.stream(MSGS, [])) chunks.push(c);
+    const done = chunks.find((c) => c.type === 'done');
+    expect(done && (done as { content: string }).content).toBe('ok');
+    // 两次请求；第二次的 extraBody 撤掉了被拒的键、保留了没被拒的。
+    expect(call).toBe(2);
+    expect(chatCalls[0].args.extraBody).toEqual({ reasoning_effort: 'medium', tool_stream: true });
+    expect(chatCalls[1].args.extraBody).toEqual({ tool_stream: true });
+  });
+
+  it('does NOT retry when payloads were already streamed before the error', async () => {
+    let call = 0;
+    const deps: RustLLMDeps = {
+      invoke: async (cmd: string, args: any) => {
+        if (cmd !== 'chat_stream') return true;
+        call++;
+        const channel = args.onChunk as MockChannel<string>;
+        channel.send(JSON.stringify({ type: 'delta', content: 'partial' }));
+        throw new Error('400 Bad Request: {"error":{"message":"reasoning_effort must be low"}}');
+      },
+      Channel: MockChannel as unknown as RustLLMDeps['Channel'],
+    };
+    const adapter = new RustLLMAdapter(
+      { provider: 'x', model: 'm', extraBody: { reasoning_effort: 'medium' } },
+      deps,
+    );
+
+    const chunks: LLMChunk[] = [];
+    let threw = false;
+    try {
+      for await (const c of adapter.stream(MSGS, [])) chunks.push(c);
+    } catch {
+      threw = true;
+    }
+    // 已有内容吐给消费者，重发会造成重复输出——原样上抛，不重试。
+    expect(threw).toBe(true);
+    expect(call).toBe(1);
+    expect(chunks.some((c) => c.type === 'content')).toBe(true);
+  });
 });

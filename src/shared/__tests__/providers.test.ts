@@ -671,6 +671,25 @@ describe('reasoning-effort capability detection', () => {
       .toEqual({ supported: false });
   });
 
+  it('端点词表：DeepSeek V4.x 合法档位不含 medium——缺档撤参不发（2026-11-18 真机 400 判例）', () => {
+    // auto（medium）被词表撤掉：端点默认档就是 medium 的最近解释。
+    expect(resolveReasoningEffort({ provider: 'deepseek', model: 'deepseek-v4.1' }))
+      .toEqual({ supported: false });
+    expect(resolveReasoningEffort({ provider: 'deepseek', model: 'deepseek-v4-flash' }))
+      .toEqual({ supported: false });
+    // 词表内的档位原样发。
+    expect(resolveReasoningEffort({ provider: 'deepseek', model: 'deepseek-v4.1' }, 'low'))
+      .toEqual({ supported: true, effort: 'low' });
+    expect(resolveReasoningEffort({ provider: 'deepseek', model: 'deepseek-v4.1' }, 'high'))
+      .toEqual({ supported: true, effort: 'high' });
+    // 显式选了 medium 也一样撤：用户旋钮不能把回合打成 400。
+    expect(resolveReasoningEffort({ provider: 'deepseek', model: 'deepseek-v4.1' }, 'medium'))
+      .toEqual({ supported: false });
+    // 词表外的族不受影响。
+    expect(resolveReasoningEffort({ provider: 'openai', model: 'gpt-5.2' }))
+      .toEqual({ supported: true, effort: 'medium' });
+  });
+
   it('resolveReasoningEffort: built-in override via modelBudgets, custom wins, anthropic gated', () => {
     const override = {
       glm: {
