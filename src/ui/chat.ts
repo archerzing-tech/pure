@@ -5,6 +5,7 @@
 import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
 import { recordGuiDiagnostic } from './errorLedger';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
+import { recordMainThreadWriteBytes, takeBuildParallelNudge } from '../shared/parallelNudge';
 import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
@@ -1229,7 +1230,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
  * 缓存地基刀A（2026-11-06）吞并两件回合级事实：时间基准行（每回合现算现注入,
  * timeContext 设计意图在此真正落地——冻进 system 时首回合日期会被用到会话结束）
  * 与本会话网络熔断注（随熔断发生逐轮出现,不再让跨会话前缀互不一致）。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string, parallelNudge?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻：时间是每回合都要校准的参考点（timeContext.ts 顶部定调）。
   const time = formatTimeContextLine(currentTimeContext()).trim();
@@ -1262,6 +1263,10 @@ function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFa
   // 与 CLI 面同构。无事件零注入。
   const quarantine = schemaQuarantineFacts?.trim();
   if (quarantine) parts.push(quarantine);
+  // 生产侧并行提醒（2026-11-18 复测判例）：主线直写体量过阈+零委派时的一
+  // 次性处方。是体量事实不是指令，拆不拆仍归模型。无事件零注入。
+  const nudge = parallelNudge?.trim();
+  if (nudge) parts.push(nudge);
   return parts.join('\n\n');
 }
 
@@ -5385,6 +5390,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const toolResults = new Map<string, ToolExecMeta>();
     // 回合中途检查点的上次落盘时刻（TurnCheckpoint 节流，见 TURN_CHECKPOINT_PERSIST_MS）。
     let lastCheckpointPersistAt = 0;
+    // 生产侧并行提醒的回合账（shared/parallelNudge）：主线 write_file 成功的
+    // 次数与内容体量、本回合是否出现过委派调用。越过阈值且零委派 → 记一次性
+    // 处方，下一回合 envFacts 送达。回合作用域变量——新 send 自然归零。
+    let turnWriteBytes = 0;
+    let turnWriteFiles = 0;
+    let turnDelegationSeen = false;
     // 检查点体量累计账：逐次累加最新一条消息的 JSON 量（全量 stringify 本身
     // 就是 O(N) 渲染进程税，不做），落盘一次清零。超阈即切慢档（见
     // TURN_CHECKPOINT_HEAVY_BYTES）。
@@ -7401,7 +7412,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts()),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts(), takeBuildParallelNudge()),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,
@@ -8065,6 +8076,18 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (writtenChars >= THINK_DIGEST_CHARS) {
                 digestNote = { tool: toolDisplayName(toolName), chars: writtenChars };
               }
+            }
+            // 生产侧并行提醒的回合账：write_file 成功计体量（args.content 是
+            // 模型生成的整文件正文，与转写里落的是同一份）；委派调用现身即
+            // 记——模型已经自己拆过路，处方没资格再催。
+            if (toolName === 'write_file' && event.payload.result.success) {
+              const nudgeArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
+              turnWriteBytes += typeof nudgeArgs?.content === 'string' ? nudgeArgs.content.length : 0;
+              turnWriteFiles += 1;
+            }
+            if (subagentNames.has(toolName)) turnDelegationSeen = true;
+            if (needsDeliveryGate && !turnDelegationSeen) {
+              recordMainThreadWriteBytes(turnWriteBytes, turnWriteFiles);
             }
             // 附加：最小化工具结果摘要（不改现有 UI 文案）
             try { void summarizeToolResult(toolName, resultText); } catch {}

@@ -16,6 +16,7 @@ import type { TaskScript } from '../shared/taskScript';
 import type { SessionLedger } from '../shared/sessionLedger';
 import type { PathRepair } from './pathIndex';
 import type { TurnVariantGroup } from './turnVariants';
+import { recordGuiDiagnostic } from './errorLedger';
 import type { ToolDiffData } from './toolDiff';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
@@ -1445,6 +1446,10 @@ function lsDeleteAll() {
 // Throttle the disk-save failure toast: a persistently failing disk must not
 // spam the user on every message — at most one warning per 30s window.
 let lastDiskSaveWarning = 0;
+
+/** 单节保存看门狗窗口：save_session 的 invoke 超过此时长视为死节（弃笔续链）。
+ *  60s 远大于正常整文件写（几 MB 快照实测几十 ms），远小于「46 分钟饿死」。 */
+const SESSION_SAVE_LINK_TIMEOUT_MS = 60_000;
 const sessionSaveChains = new Map<string, Promise<void>>();
 const sessionSaveRevisions = new Map<string, number>();
 const sessionLoadedRevisions = new Map<string, number>();
@@ -1641,16 +1646,35 @@ export async function saveSession(
   const current = previous
     .catch(() => {})
     .then(async () => {
+      // 单节看门狗（2026-11-18 大屏复测判例）：tauriSave 的 invoke promise
+      // 可能永不 settle（Rust 侧卡死/响应通道丢失），串行链的后续保存会无限
+      // 排队——实测快照停更 46 分钟而 stats 线（另一条命令）全程正常。60s
+      // 无结果即弃节：本笔写视为放弃（Rust 若稍后完成，revision 单调+整文
+      // 件落盘让迟到者无害），链继续走，后续保存不再排在死节后面。台账记
+      // 一笔，超时频发说明 Rust 侧有真卡点要查。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const watchdog = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('session save link timed out (60s)')), SESSION_SAVE_LINK_TIMEOUT_MS);
+      });
       try {
-        await saveWithRetry(sessionId, revisionedSnapshot, workspace, model, provider);
+        await Promise.race([
+          saveWithRetry(sessionId, revisionedSnapshot, workspace, model, provider),
+          watchdog,
+        ]);
       } catch (err) {
-        console.error('[pure] save_session failed:', err);
+        const timedOut = err instanceof Error && err.message.includes('timed out');
+        console.error(`[pure] save_session ${timedOut ? 'link timed out; abandoning this write, chain continues' : 'failed'}:`, err);
         const now = Date.now();
         if (now - lastDiskSaveWarning > 30_000) {
           lastDiskSaveWarning = now;
           showToast(t('toast.saveDiskFailed'), 6000);
+          recordGuiDiagnostic(`[store] save_session ${timedOut ? 'LINK TIMEOUT — write abandoned, chain continued' : 'failed'}: ${err instanceof Error ? err.message : String(err)}`);
         }
+        // 超时=弃节不上抛：链必须继续。失败仍按原样（下一节的 .catch 兜）。
+        if (timedOut) return;
         throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     });
   sessionSaveChains.set(sessionId, current);
