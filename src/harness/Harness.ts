@@ -168,6 +168,9 @@ export interface HarnessConfig {
   conventionsPreloaded?: EngineContext['conventionsPreloaded'];
   /** 会话级已注入转录的约定源；跨轮复用，长会话不重复注入同一份规则。 */
   conventionsDelivered?: EngineContext['conventionsDelivered'];
+  /** 生产侧并行提醒的回合中途拉取（见 EngineContext）。宿主按回合账给词，
+   *  引擎在每次工具配平点拉取并作为内部消息递话；不接 = 无此通道。 */
+  pullTurnParallelNudge?: EngineContext['pullTurnParallelNudge'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -504,6 +507,8 @@ export class Harness {
       workspaceConventions: this.config.workspaceConventions,
       conventionsPreloaded: this.config.conventionsPreloaded,
       conventionsDelivered: this.config.conventionsDelivered,
+      // 生产侧并行提醒的回合中途通道（见 EngineContext/parallelNudge）。
+      pullTurnParallelNudge: this.config.pullTurnParallelNudge,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

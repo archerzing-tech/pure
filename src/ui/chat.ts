@@ -6187,6 +6187,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           : undefined,
         conventionsPreloaded: () => guiPreloadedNestedSources,
         conventionsDelivered: this.conventionsDelivered,
+        // 生产侧并行提醒的回合中途通道（run4 判例：envFacts 只在 send 装配
+        // 生效，单 send 长回合必须走引擎内部消息缝）。取走即清——同一处方
+        // 只付一次 token；下次过阈会再记。
+        pullTurnParallelNudge: () => takeBuildParallelNudge(),
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,

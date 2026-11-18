@@ -2948,6 +2948,57 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     expect(conventionsDelivered.has('packages/web/AGENTS.md')).toBe(true);
   });
 
+  it('delivers the turn parallel nudge once as an internal message at the tool-balance point', async () => {
+    let first = true;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        const tc: ToolCall = { id: 'call_write', index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/app.ts', content: 'x' }) } };
+        if (first) {
+          first = false;
+          yield { type: 'done', content: '', toolCalls: [tc] };
+        } else {
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        }
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const pulls: string[] = [];
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'Wrote 1 bytes to src/app.ts (file now 1 bytes)', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+      },
+      pullTurnParallelNudge: () => {
+        const text = pulls.length === 0 ? 'Main-thread write volume this turn: 1 whole-file write(s) — consider batched code_editor delegations.' : '';
+        pulls.push(text);
+        return text;
+      },
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-nudge', systemPrompt: 'sys', userPrompt: '构建一个原型', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    // 第二轮（工具结果配平后）带着内部提醒，只注入一次。
+    const secondRound = rounds[1]!;
+    const injected = secondRound.filter(m => m.role === 'user' && m.internal && m.content.includes('Main-thread write volume'));
+    expect(injected).toHaveLength(1);
+    // Ordering: 提醒落在它所属的工具结果之后（conventions 注入同款契约）。
+    const toolIdx = secondRound.findIndex(m => m.role === 'tool');
+    const nudgeIdx = secondRound.findIndex(m => m.role === 'user' && m.internal && m.content.includes('Main-thread write volume'));
+    expect(nudgeIdx).toBeGreaterThan(toolIdx);
+    // 拉取只发生在工具配平点：一轮工具调用 = 一次拉取；收尾轮（无工具
+    // 结果）没有配平点，不拉——终态转录里恰好一条。
+    expect(pulls).toHaveLength(1);
+    const finalInjected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('Main-thread write volume'));
+    expect(finalInjected).toHaveLength(1);
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
   it('records injected sources into the session-delivered set for later turns', async () => {
     let first = true;
     const llm: LLMAdapter = {

@@ -138,6 +138,8 @@ export interface CodingAgentConfig {
   conventionsPreloaded?: EngineContext['conventionsPreloaded'];
   /** 会话级已注入转录的约定源；跨轮复用，长会话不重复注入同一份规则。 */
   conventionsDelivered?: EngineContext['conventionsDelivered'];
+  /** 生产侧并行提醒的回合中途拉取（见 EngineContext）；透传给 Harness。 */
+  pullTurnParallelNudge?: EngineContext['pullTurnParallelNudge'];
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
@@ -382,6 +384,7 @@ export class CodingAgent {
       workspaceConventions: config.workspaceConventions,
       conventionsPreloaded: config.conventionsPreloaded,
       conventionsDelivered: config.conventionsDelivered,
+      pullTurnParallelNudge: config.pullTurnParallelNudge,
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,

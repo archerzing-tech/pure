@@ -1287,6 +1287,17 @@ export class AgentLoopEngine {
           }
         }
 
+        // 生产侧并行提醒的回合中途送达（2026-11-18 run4 判例）：envFacts 通道
+        // 只在 send 装配时生效，而工程构建是单个 send 内的长回合——中途处方
+        // 必须走内部消息缝（workspaceConventions 同款）。宿主按回合账决定给
+        // 不给（体量过阈+零委派），每次配平点拉一次；空串＝无事。
+        const parallelNudge = ctx.pullTurnParallelNudge?.();
+        if (parallelNudge?.trim()) {
+          const note = parallelNudge.trim();
+          messages.push({ role: 'user' as const, content: note, internal: true });
+          budget.addTokens(note);
+        }
+
         // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果刚配平进消息
         // 账，这是本轮唯一「配对完整」的稳定点。GUI 据此节流落盘中间态——
         // 此前整回合只活在渲染进程内存，回合收尾才落盘，强杀=产物全灭、盘上

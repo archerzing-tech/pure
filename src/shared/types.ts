@@ -432,6 +432,12 @@ export interface EngineContext {
    *  的预加载源不在这里——prompt 每轮重建，一旦某轮没再带上，下一轮读到
    *  文件时仍需要把规则补进转录。 */
   conventionsDelivered?: Set<string>;
+  /** 生产侧并行提醒的回合中途拉取（2026-11-18 run4 判例）：工程构建是单个
+   *  send 内的长回合，envFacts 只在 send 装配时生效——中途处方必须走引擎的
+   *  内部消息缝。宿主按回合账（write_file 体量过阈+零委派）决定给不给，
+   *  每次工具配平点拉一次；返回空串＝无事。引擎把非空文本作为 internal
+   *  user 消息插进转录，模型下一轮带着它。 */
+  pullTurnParallelNudge?: () => string;
 }
 
 export interface LockManager {
