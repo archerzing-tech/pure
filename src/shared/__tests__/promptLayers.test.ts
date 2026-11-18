@@ -481,6 +481,12 @@ describe('L1 behavior contracts', () => {
     // 闸门——判例正是"从多个平台整理"这类没命中词表、于是模型自己串行查的活。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Parallel is the default disposition');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('N delegations issued in ONE batch');
+    // 2026-11-18 大屏原型判例：构建全程主线单干、116KB 生成全落主线转写——
+    // 生产侧形状（契约先行、模块批量委派、大写入搬出主线）必须常驻在场。
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('pin the shared contract in the main thread first');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Whole-file generation of multi-KB modules belongs in worker sessions');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Produce fan-out');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('one code_editor delegation per independent module in the SAME batch');
     const assemblerSrc = readFileSync(new URL('../PromptAssembler.ts', import.meta.url), 'utf8');
     expect(assemblerSrc).toContain("context.hasSubagents ? PARALLEL_FIRST_DIRECTIVE : ''");
     // 它绝不能挂在关键词闸门后面（那是这次的真错）。
