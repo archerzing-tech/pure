@@ -61,11 +61,12 @@ class FakeBranches implements DetachedBranchPort {
     void toolName;
   }
 
-  settle(callId: string, output: string, opts: { success?: boolean } = {}): void {
+  settle(callId: string, output: string, opts: { success?: boolean; aliasToolCallIds?: string[] } = {}): void {
     this.pending.delete(callId);
     const success = opts.success ?? true;
     this.settled.push({
       toolCallId: callId,
+      ...(opts.aliasToolCallIds?.length ? { aliasToolCallIds: opts.aliasToolCallIds } : {}),
       toolName: 'code_editor',
       duration: 7,
       result: success
@@ -233,6 +234,50 @@ describe('后台委派：配平点送达（2026-11-18 档二）', () => {
     const receiptMessage = messages.find((m) => m.role === 'tool' && m.toolCallId === 'call_1_0');
     expect(receiptMessage?.deferred).toBe(false);
     expect(port.pendingCount()).toBe(0);
+  }, 10_000);
+
+  // 同参重派（2026-11-18 beta 审查）：新调用拿到的是指向原支的收执，它不是
+  // 独立支——结算归原 callId，但它的 deferred 也必须一起清掉，否则卡面永久
+  // 「⏳ 后台运行中」，下次重启还会被崩溃恢复误报成丢了的那批。
+  it('同参重派的收执随原支结算：alias 的 deferred 清掉，产出只送达一次', async () => {
+    const engine = new AgentLoopEngine();
+    const port = new FakeBranches();
+    const { llm } = scriptedLLM([
+      [
+        { name: 'code_editor', args: { instructions: 'same module' } },
+        { name: 'code_editor', args: { instructions: 'same module' } },
+      ],
+      'final answer',
+    ]);
+    const executed: string[] = [];
+    const adapter: ToolAdapter = {
+      getTools: () => [EDITOR_TOOL],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        executed.push(tc.id);
+        if (executed.length === 1) {
+          port.add(tc.id);
+          setTimeout(() => port.settle(tc.id, 'REAL MODULE OUTPUT', { aliasToolCallIds: ['call_1_1'] }), 10);
+        }
+        return receipt(tc);
+      },
+    };
+    const events = await collect(engine.run(
+      { sessionId: 's-detach-alias', systemPrompt: 'X', userPrompt: 'Y', budget: BUDGET },
+      baseCtx({ llm, tools: adapter, toolsDefs: [EDITOR_TOOL], detachedBranches: port }),
+    ));
+
+    const completed = events.find((e) => e.type === 'Completed' && e.payload.isComplete);
+    const messages = (completed as Extract<EngineEvent, { type: 'Completed' }>).payload.messages ?? [];
+    for (const callId of ['call_1_0', 'call_1_1']) {
+      expect(messages.find((m) => m.role === 'tool' && m.toolCallId === callId)?.deferred).toBe(false);
+    }
+    const settle = events.find((e) => e.type === 'ToolResult' && e.payload.backgroundSettle === true);
+    expect((settle as Extract<EngineEvent, { type: 'ToolResult' }>).payload.aliasToolCallIds).toEqual(['call_1_1']);
+    // 产出只作为一条通告送达：alias 不是第二份结果。
+    expect(internalNotes(messages).filter((n) => n.includes('REAL MODULE OUTPUT'))).toHaveLength(1);
+    // 同批同参的第二支必须真派、必须有结果——配对契约不能断。
+    expect(transcriptIsPaired(messages)).toBe(true);
   }, 10_000);
 });
 

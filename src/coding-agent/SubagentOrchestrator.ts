@@ -309,6 +309,9 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
   /** 同一个 stableSessionId 只能有一支在跑：两支同参委派命中同一份断点
    *  存档会互相踩。命中的新调用拿到指向现有支的收执，不重复派工。 */
   private readonly detachedBySession = new Map<string, string>();
+  /** 同参重派收执的落账：原支 callId → 那些指向它的收执 callId。它们不是
+   *  独立支，但带着 deferred，结算时必须一并收口（见 DetachedBranchSettlement）。 */
+  private readonly detachedAliases = new Map<string, string[]>();
   /** 已结算、还没被引擎取走的后台结果（配平点取即清）。 */
   private detachedSettled: DetachedBranchSettlement[] = [];
   /** 终局闸的等待者：任一支结算即唤醒。 */
@@ -559,7 +562,12 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
     // 同参委派命中同一个断点 sessionId：两支同时写同一份存档会互相踩。
     // 已在后台跑的那支就是答案——新调用拿指向它的收执，不重复派工。
     const liveCallId = sessionId ? this.detachedBySession.get(sessionId) : undefined;
-    if (liveCallId !== undefined) return this.acceptedReceipt(toolCall, def, { liveCallId });
+    if (liveCallId !== undefined) {
+      const aliases = this.detachedAliases.get(liveCallId) ?? [];
+      aliases.push(toolCall.id);
+      this.detachedAliases.set(liveCallId, aliases);
+      return this.acceptedReceipt(toolCall, def, { liveCallId });
+    }
     if (!this.shouldDetach(args)) return this.runDelegation(toolCall, parentSignal);
     return this.startDetached(toolCall, def, sessionId, parentSignal);
   }
@@ -589,8 +597,11 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
       if (sessionId && this.detachedBySession.get(sessionId) === toolCall.id) {
         this.detachedBySession.delete(sessionId);
       }
+      const aliases = this.detachedAliases.get(toolCall.id);
+      this.detachedAliases.delete(toolCall.id);
       this.detachedSettled.push({
         toolCallId: toolCall.id,
+        ...(aliases?.length ? { aliasToolCallIds: aliases } : {}),
         toolName: def.name,
         duration: result.duration,
         result,

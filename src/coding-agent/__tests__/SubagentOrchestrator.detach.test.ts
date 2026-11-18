@@ -189,8 +189,10 @@ describe('委派后台执行（detach）', () => {
 
     const settled = await waitForSettlement(orch);
     expect(settled).toHaveLength(1);
-    // 结算归在最初那支的 callId 下（收执里已经点名）。
+    // 结算归在最初那支的 callId 下（收执里已经点名）；重派收执作为 alias
+    // 一起上报，引擎/宿主才能把它的 deferred 与卡面收口。
     expect(settled[0].toolCallId).toBe(first.id);
+    expect(settled[0].aliasToolCallIds).toEqual(['call_second']);
   }, 10_000);
 
   it('有一次结算就唤醒所有等待者（多支并行）', async () => {

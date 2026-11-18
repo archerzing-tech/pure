@@ -1275,6 +1275,11 @@ export class AgentLoopEngine {
               // 失败锚点的重试真执行；分支中断锚点（暂停/停掉）的重派同样
               // 真执行——复用它等于把"已暂停"当结论。
               if (!anchor?.result.success) return true;
+              // 受理收执不是产出（2026-11-18 beta 审查）：它 success:true，
+              // 但不是可复用结果——不复用也不重试会让同批同参的第二支
+              // 没有工具结果，配对契约当场断裂（下一次请求 400）。真派下去，
+              // 编排器会认出在飞的那支，回一份指向它的收执。
+              if (anchor.result.deferred === true) return true;
               return branchOutcomeOf(anchor) !== undefined;
             })
             .map((dup) => dup.call);
@@ -1425,6 +1430,9 @@ export class AgentLoopEngine {
         // 从「后台运行中」结算成真结果（不新开卡）。
         for (const settled of ctx.detachedBranches?.takeSettled() ?? []) {
           markDelegationSettled(messages, settled.toolCallId);
+          // 同参重派的收执不是独立支，但同样挂着 deferred：不一起收口，卡面
+          // 会永远「后台运行中」，重启还会被崩溃恢复误报成丢了的那批。
+          for (const alias of settled.aliasToolCallIds ?? []) markDelegationSettled(messages, alias);
           const note = backgroundBranchNote(settled);
           messages.push({ role: 'user' as const, content: note, internal: true });
           budget.addTokens(note);
@@ -1435,6 +1443,7 @@ export class AgentLoopEngine {
               result: settled.result,
               duration: settled.duration,
               toolCallId: settled.toolCallId,
+              ...(settled.aliasToolCallIds?.length ? { aliasToolCallIds: settled.aliasToolCallIds } : {}),
               backgroundSettle: true,
             },
             timestamp: Date.now(),
@@ -1624,6 +1633,7 @@ export class AgentLoopEngine {
             }
             for (const settled of ctx.detachedBranches.takeSettled()) {
               markDelegationSettled(messages, settled.toolCallId);
+              for (const alias of settled.aliasToolCallIds ?? []) markDelegationSettled(messages, alias);
               const note = backgroundBranchNote(settled);
               messages.push({ role: 'user' as const, content: note, internal: true });
               budget.addTokens(note);
@@ -1635,6 +1645,7 @@ export class AgentLoopEngine {
                   result: settled.result,
                   duration: settled.duration,
                   toolCallId: settled.toolCallId,
+                  ...(settled.aliasToolCallIds?.length ? { aliasToolCallIds: settled.aliasToolCallIds } : {}),
                   backgroundSettle: true,
                 },
                 timestamp: Date.now(),

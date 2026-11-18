@@ -8315,6 +8315,24 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               else if (backgroundSettle) detachedRows.delete(event.payload.toolCallId);
               pendingRows.delete(event.payload.toolCallId);
               pendingByName.delete(toolName);
+              // 同参重派的收执卡：产出归在原支名下，但那张卡也必须跟着结算，
+              // 否则它会永久挂在「⏳ 后台运行中」（重启还会被报成丢了的那批）。
+              if (backgroundSettle) {
+                for (const aliasId of event.payload.aliasToolCallIds ?? []) {
+                  const aliasRow = detachedRows.get(aliasId);
+                  if (!aliasRow) continue;
+                  finalizeToolRow(aliasRow.row, {
+                    success: event.payload.result.success,
+                    duration,
+                    resultKind,
+                    resultItems,
+                    resultImages,
+                    resultText: resultPreview,
+                    subagentTrace: subagentTraceByCall.get(aliasId) ?? aliasRow.subagentTrace,
+                  });
+                  detachedRows.delete(aliasId);
+                }
+              }
             } else {
               // 没有对应工具行（极少见）时也要诚实：受理收执不是完成。
               this.addToolStatusBubble(toolName, detachedReceipt ? '⏳' : branchOutcome ? (branchOutcome === 'paused' ? '⏸' : '⏹') : status, duration);

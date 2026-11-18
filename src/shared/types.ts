@@ -92,6 +92,10 @@ export interface ToolResult {
 /** 已在后台跑完的一支委派（引擎从 DetachedBranchPort 取走）。 */
 export interface DetachedBranchSettlement {
   toolCallId: string;
+  /** 同参重派拿到的那些收执 callId（2026-11-18 beta 审查）。它们不是独立支，
+   *  产出归在原支名下——但收执同样带着 deferred，结算必须把它们一并收口：
+   *  不然卡面永远「后台运行中」，重启时还会被崩溃恢复误报成「丢了」。 */
+  aliasToolCallIds?: string[];
   toolName: string;
   duration: number;
   /** 子代理的真实结算体（与同步委派的 ToolResult 同形）。 */
@@ -773,7 +777,7 @@ export type EngineEvent =
   // "thinking" card (animation while collapsed, streaming text when expanded).
   | { type: 'ReasoningDelta'; payload: { content: string; stateId: string }; timestamp: number }
   | { type: 'StateChange'; payload: { from: AgentStateType; to: AgentStateType; stateId: string; reason?: string }; timestamp: number }
-  | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string; /** 后台委派结算送达（2026-11-18 档二）：同 toolCallId 的委派卡从「后台运行中」结算成真结果，不是新执行（不新开卡、不进失败账/去重游标）。 */ backgroundSettle?: true }; timestamp: number }
+  | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string; /** 后台委派结算送达（2026-11-18 档二）：同 toolCallId 的委派卡从「后台运行中」结算成真结果，不是新执行（不新开卡、不进失败账/去重游标）。 */ backgroundSettle?: true; /** 同参重派收执的 callId：宿主把那些卡一并结算（产出仍是同一份，不再开新卡）。 */ aliasToolCallIds?: string[] }; timestamp: number }
   // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果配平进消息账后
   // 发出，payload 是引擎侧此刻的完整会话消息（浅拷贝，含本轮已配对的
   // assistant/tool 行）。GUI 据此节流落盘中间态——强杀最多丢最后一个工具
