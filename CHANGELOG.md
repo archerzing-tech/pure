@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.9.2
+
+**工程回合先读真实代码再规划，交付物从对话搬回磁盘；压缩层保住已读文件与任务态**
+
+一、压缩层保住已读文件与任务态（3b034f8）。L3 重水化原来只认「改过的文件」且只在发生驱逐时触发；长阅读型任务里丢内容的主路径其实是 L1 把 read_file 结果清成占位符（不驱逐），模型只看到「需要就重跑工具」，于是整文件重读、一轮轮把预算再花回去。修复：候选扩到读工具并按「每个文件最新一次访问」判定是否真丢了（后来读过且内容还在窗口就不补）；读过的文件只回符号大纲（5 个 / 800 字符 / 合计 3000），改过的文件仍回正文；只被 L1 清空的回合也补一份且不搬回正文；计划/待办在两条路径都重新声明；回填块若会把窗口再推过墙则不加，estimatedTokens 如实计入。实测四个大文件读后压缩：回填块 2988 字符（≈747 tokens）覆盖三个文件的符号大纲与计划，对照同样内容整读约 80 万字符。
+
+二、规划前先采真实代码证据（ecba6d5）。出卡前 gatherPlanEvidence 采根目录 + package.json scripts + 请求点名文件的头部，解析时 parsePlanJsonWithMeta 回 unresolvedPaths，只把「路径在不在快照里」作为事实 handed back，不替模型猜、不改写计划。list_files/glob_files 回到常驻工具，read_file 增加 outline（src/shared/symbolOutline.ts + Node/Tauri 适配器 + Rust 侧镜像），中大型仓库先看结构再读区间，避免逐页翻。规划证据只交实采快照，是因为替模型猜「哪些文件相关」正是它编路径的来源。
+
+三、构建回合交付物从对话搬到磁盘（ecba6d5）。no-dump 规则原来只在 user turn 的 buildProtocol 分区，被世界状态 diff 成指针、又可能被压缩淘汰，长时间构建里经常看不到；system 侧新增 build_deliverable（598 字符）由流程闸门 needsDeliveryGate 每轮随装配，GUI 与 CLI 同源。构建回合（原型/应用/项目）也被推成编码回合：紧凑语气与紧凑输出格式、不带信息价值原则与可视指针，常驻预算 17271→13181 字符（−23.7%）。coding 输出纪律第一条改成交付契约；artifact_output_rule 新增 Reply shape，把「整文件贴出 = 违规」写成可判定违例的句子。人格内核与表达投影不动。
+
+验证：typecheck、lint:conventions 绿；shared/ui/cli/coding-agent/harness 4020 pass / 2 skip / 0 fail。
+
 ## v4.9.1
 
 **命令超时部分输出保留、截断 write_file 救援落盘、html 卡流式水合 + 代码看板累计预算**
