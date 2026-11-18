@@ -127,3 +127,10 @@ export class FileLockManager {
     }
   }
 }
+
+/** 进程级共享路径锁（2026-11-18 档一前置核）：主引擎与子代理引擎的协调器
+ *  必须共用同一把 per-path 锁——此前每个协调器各自 new 一个实例，主/子代理
+ *  对同一路径的写互不可见，全靠「写在读池后排空」的执行顺序侥幸不重叠。
+ *  写入并发化（见 ToolExecutionCoordinator runPool）让写与读池重叠开跑后，
+ *  这把共享锁是同路径写串行的唯一防线。 */
+export const sharedFileLockManager = new FileLockManager();

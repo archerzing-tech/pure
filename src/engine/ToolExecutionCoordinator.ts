@@ -2,7 +2,7 @@ import type { EngineContext, ToolCall, ToolResult } from '../shared/types';
 import { safeParseArgs } from '../shared/format';
 import { isPauseAbort, PAUSE_TOOL_GRACE_MS, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
-import { FileLockManager } from './FileLockManager';
+import { sharedFileLockManager } from './FileLockManager';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
 import {
@@ -20,6 +20,10 @@ export const TOOL_EXECUTION_TIMEOUT_MS = 180_000;
  * sub-engines and N LLM streams at once; beyond the cap, reads queue
  * (never reject) and start as earlier ones settle. */
 export const DEFAULT_MAX_READ_CONCURRENCY = 5;
+/** 档一：带路径写与读池重叠开跑的并发上限。写是重副作用操作（大载荷
+ *  invoke，Windows 主线程洪水判例），3 足以覆盖「一支委派 + 主线自己认领
+ *  的两三个小活」的窗口填充形状，又不至于并发洪泛。 */
+export const DEFAULT_MAX_WRITE_CONCURRENCY = 3;
 
 export interface ExecutedToolResult {
   toolName: string;
@@ -51,7 +55,7 @@ export interface ToolExecutionBudget {
 }
 
 export class ToolExecutionCoordinator {
-  private readonly fallbackLock = new FileLockManager();
+  private readonly fallbackLock = sharedFileLockManager;
 
   async execute(
     toolCalls: ToolCall[],
@@ -297,12 +301,18 @@ export class ToolExecutionCoordinator {
     // A read entry tags its own promise so the race loop can remove exactly
     // the entry it raced on (see the pending set below).
     type TaggedRead = { p: Promise<TaggedRead>; tr: ExecutedToolResult };
+    // 带路径的写与无路径的写分两条纪律走（2026-11-18 档一，委派窗口利用）：
+    // 带路径写靠共享 FileLockManager 的 per-path 写锁保安全，可以与读池重叠
+    // 开跑（委派在飞时主线自己的写活不再排队）；无路径写没有锁可依，保持
+    // 旧的串行排空纪律。
     const reads: ToolCall[] = [];
     const writes: ToolCall[] = [];
+    const pathlessWrites: ToolCall[] = [];
     for (const call of calls) {
       const metadata = ctx.tools!.getMetadata(call.function.name);
-      if (metadata?.isWrite) writes.push(call);
-      else reads.push(call);
+      if (!metadata?.isWrite) reads.push(call);
+      else if (typeof safeParseArgs(call.function.arguments).path === 'string') writes.push(call);
+      else pathlessWrites.push(call);
     }
 
     // P3-3 — bound concurrent reads: each settles into a tagged entry that
@@ -315,6 +325,25 @@ export class ToolExecutionCoordinator {
       configured !== undefined && configured > 0 ? Math.floor(configured) : DEFAULT_MAX_READ_CONCURRENCY;
     const pending = new Set<Promise<TaggedRead>>();
     let nextRead = 0;
+    // 带路径写的重叠池（档一）：读池启动的同时开跑（上限 DEFAULT_MAX_WRITE_
+    // CONCURRENCY），结果按批次序在读池排空后 yield——引擎账本节奏与 UI 卡
+    // 序不变，变的只是执行的时钟重叠。同路径写由共享锁串行（per-path 写锁
+    // 排队），不同路径写与委派窗口真重叠。
+    const writeOrder: Promise<ExecutedToolResult>[] = [];
+    const pendingWrites = new Set<Promise<ExecutedToolResult>>();
+    let nextWrite = 0;
+    const fillWritePool = (): void => {
+      while (nextWrite < writes.length && pendingWrites.size < DEFAULT_MAX_WRITE_CONCURRENCY) {
+        const writeCall = writes[nextWrite++];
+        const p = this.executeOne(writeCall, ctx, budget, true).then((tr) => {
+          pendingWrites.delete(p);
+          return tr;
+        });
+        pendingWrites.add(p);
+        writeOrder.push(p);
+      }
+    };
+    fillWritePool();
     while (nextRead < reads.length || pending.size > 0) {
       // Top up to the cap; with cap >= reads.length this launches the whole
       // batch up front, byte-identical to the pre-cap behavior.
@@ -330,7 +359,12 @@ export class ToolExecutionCoordinator {
       pending.delete(p);
       yield tr;
     }
-    for (const call of writes) {
+    // 读池排空后：补满写池余量并按批次序收写结果。
+    for (const p of writeOrder) {
+      fillWritePool();
+      yield await p;
+    }
+    for (const call of pathlessWrites) {
       yield await this.executeOne(call, ctx, budget, true);
     }
   }

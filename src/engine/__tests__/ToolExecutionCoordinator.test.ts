@@ -172,6 +172,66 @@ describe('ToolExecutionCoordinator concurrency policy (2026-09-20)', () => {
   }, 5_000);
 });
 
+// ── 档一：委派窗口写入重叠（2026-11-18 run6 判例，docs/parallel-window-）──
+// 旧排空顺序「读池全清再串行写」让同批 [委派(4min), 主线自己的写] 先后而非
+// 并行——委派在飞的窗口主线纯等待。带路径写现在与读池重叠开跑（共享
+// FileLockManager 的 per-path 写锁保同路径串行），yield 顺序不变。
+
+describe('ToolExecutionCoordinator 委派窗口写入重叠（档一）', () => {
+  function pathCall(name: string, path: string): ToolCall {
+    return { id: `call_${name}`, index: 0, function: { name, arguments: JSON.stringify({ path }) } };
+  }
+
+  it('带路径写与慢委派重叠开跑：写启动早于委派结束', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    const events: string[] = [];
+    const metadataFor = (name: string) => (name === 'code_editor' ? { sideEffects: true, isWrite: false } : { sideEffects: true, isWrite: true });
+    const ctx = makeContext(async (tc) => {
+      events.push(`start:${tc.function.name}`);
+      if (tc.function.name === 'code_editor') await new Promise((resolve) => setTimeout(resolve, 300));
+      else await new Promise((resolve) => setTimeout(resolve, 30));
+      events.push(`end:${tc.function.name}`);
+      return ok(tc);
+    }, metadataFor);
+
+    await coordinator.execute([call('code_editor'), pathCall('write_file', 'src/app.js')], ctx, BUDGET);
+    // 档一核心断言：写启动早于委派结束（旧排空顺序下写启动晚于委派结束）。
+    expect(events.indexOf('start:write_file')).toBeLessThan(events.indexOf('end:code_editor'));
+  }, 5_000);
+
+  it('同路径两个写仍串行（共享 FileLockManager 排队）', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let inFlight = 0;
+    let peak = 0;
+    const ctx = makeContext(async (tc) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight--;
+      return ok(tc);
+    }, { sideEffects: true, isWrite: true });
+
+    await coordinator.execute([pathCall('write_file', 'src/a.ts'), pathCall('write_file', 'src/a.ts')], ctx, BUDGET);
+    expect(peak).toBe(1);
+  }, 5_000);
+
+  it('不同路径的两个写并行重叠（窗口填充形状）', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let inFlight = 0;
+    let peak = 0;
+    const ctx = makeContext(async (tc) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      inFlight--;
+      return ok(tc);
+    }, { sideEffects: true, isWrite: true });
+
+    await coordinator.execute([pathCall('write_file', 'src/a.ts'), pathCall('write_file', 'src/b.ts')], ctx, BUDGET);
+    expect(peak).toBe(2);
+  }, 5_000);
+});
+
 describe('ToolExecutionCoordinator read concurrency cap (P3-3)', () => {
   // A batch of N independent delegations used to start N sub-engines and N LLM
   // streams at once; the pool now holds at most maxReadConcurrency reads in
