@@ -453,6 +453,12 @@ describe('L1 behavior contracts', () => {
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Fan-out rule');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Relay rule');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Orchestrator conduct');
+    // Map-reduce 泛化教学（2026-11-18 用户指令：不锚死 3D，按复杂度/时间消耗
+    // 等维度裁决共享引擎族的参数调优 fan-out）。
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Map-reduce fan-out');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('decide by cost dimensions, not by kind');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('one golden instance');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Solo when instances are few');
     expect(MULTI_AGENT_MECHANICS_PROMPT).not.toContain('T1');
     expect(MULTI_AGENT_MECHANICS_PROMPT).not.toContain('Exception (do NOT delegate)');
     // 闸门：普通请求不带细则，装东西/缺能力或多主题的请求带。
