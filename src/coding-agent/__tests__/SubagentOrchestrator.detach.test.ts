@@ -113,6 +113,9 @@ describe('委派后台执行（detach）', () => {
     expect(JSON.stringify(receipt.result)).not.toContain('research findings');
     expect((receipt.result as { output?: string }).output).toContain('不是产出');
     expect((receipt.result as { output?: string }).output).toContain('不要用相同参数再派一次');
+    // 2026-11-18 用户要求：受理当下就提醒模型向用户说一句「趁空档我做什么」。
+    expect((receipt.result as { output?: string }).output).toContain('趁这段空档');
+    expect((receipt.result as { output?: string }).output).toContain('别套固定句式');
     expect(orch.pendingCount()).toBe(1);
     // 在飞账本还在：stop_branch 对后台支仍可见（能停）。
     expect(orch.branchControlToolDefs().map((d) => d.name)).toContain('stop_branch');

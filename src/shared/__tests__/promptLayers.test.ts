@@ -491,6 +491,14 @@ describe('L1 behavior contracts', () => {
     // 生产侧形状（契约先行、模块批量委派、大写入搬出主线）必须常驻在场。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('pin the shared contract in the main thread first');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Whole-file generation of multi-KB modules belongs in worker sessions');
+    // 2026-11-18 用户要求：子 agent 在飞时主 agent 要告诉用户「趁空档我做什么」。
+    // 只给形状不给句式——固定模板会让每轮话说得一模一样。
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Handing work off is worth one sentence');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('never a stock formula');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Say the parallel plan out loud once');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('not a status template');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('fake "meanwhile" sentence is worse than silence');
+    expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('what you are doing with the time they buy you');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Produce fan-out');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('one code_editor delegation per independent module in the SAME batch');
     const assemblerSrc = readFileSync(new URL('../PromptAssembler.ts', import.meta.url), 'utf8');

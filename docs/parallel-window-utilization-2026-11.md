@@ -81,6 +81,7 @@
 - 契约：`src/shared/types.ts`（`ToolResult.deferred`、`DetachedBranchPort`、`backgroundSettle` 事件标记）。
 - 宿主：`CodingAgent` / `cliHarness` 注入端口；`src/ui/toolRow.ts` + `chat.ts` 的「⏳ 后台运行中 → 已收」两态；`config.detachDelegations` 回滚面。
 - 教学：`PARALLEL_FIRST_DIRECTIVE` 一句 + `MULTI_AGENT_MECHANICS` 的 Background delegation 段（收执不是产出、不轮询、不重派；下一步依赖产出时 `detach:false`）。
+- 用户可见的并行叙事（2026-11-18 用户要求）：主 agent 交活时要说一句「趁子 agent 做 X 的空档，我做 Y」——只给形状不给句式（固定模板会让每轮话说得一模一样），落在三处：`parallel_first` 常驻一句、机制段 Background delegation 段、受理收执末尾一句（收执出现在模型眼前的那一刻），另在 Orchestrator conduct 里把背景支的情形点明。要求「说到的必须是真在飞的活」：只有等待没有自己的活时，直说在等或不说，不许编一句假的「meanwhile」。
 
 **崩溃恢复环（2026-11-18 续）**：进程被杀时在飞的支没有结果——后台腿活在父进程的定时器与子引擎里。不另设存档字段：受理收执的工具消息带 `deferred: true`（`Message.deferred`），送达时引擎置 false，所以最后一份 TurnCheckpoint 里「还挂着 true 的收执」就是丢了的那批。恢复时刻（GUI `loadFromStorage`、`Harness.run` 恢复分支与 `continueTurn`）由 `shared/detachedResume.ts` 就地把那条工具结果改写成 `[detached resume]` 通告：没回来、别当完成、要就同参重派（子代理断点续跑），并清掉标记。就地改写而不是另插 internal user 消息——工具结果是配对契约的一部分，且落盘走的就是这条消息（另插的消息在合并转录时会被当成回合前历史丢掉，于是每轮都会重喊）。
 

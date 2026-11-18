@@ -619,7 +619,7 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
   ): ToolResult {
     const output = opts.liveCallId
       ? `同一个任务已经在后台跑了（call_id=${opts.liveCallId}），没有重复派工——它的真实产出会作为一条内部消息出现，不必轮询，也不要换个参数再派一次。`
-      : `已受理，正在后台跑（agent ${opts.agentId}）。这一条只是受理收执，不是产出：它的真实结果会在后面的步骤里以一条内部消息送到你面前。不要用相同参数再派一次，也不要轮询——继续做你手上的事（或把当前能定的部分做定、给出能给的答复），引擎会在收尾前等它回来。`;
+      : `已受理，正在后台跑（agent ${opts.agentId}）。这一条只是受理收执，不是产出：它的真实结果会在后面的步骤里以一条内部消息送到你面前。不要用相同参数再派一次，也不要轮询——继续做你手上的事（或把当前能定的部分做定、给出能给的答复），引擎会在收尾前等它回来。趁这段空档，用你自己的话跟用户说一句你接下来做什么（别套固定句式；真没别的活就直说在等它）。`;
     return {
       id: toolCall.id,
       toolName: def.name,
