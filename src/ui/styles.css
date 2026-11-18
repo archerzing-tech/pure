@@ -7148,7 +7148,8 @@ body.window-maximized .win-resize-zone { display: none; }
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  /* 不设 border-bottom：header 与 body 的底色差（color-mix 混色 vs --bg-input）
+   * 本身就是分界，再画线是双重复分隔（2026-11-18 用户定案）。 */
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
@@ -9818,7 +9819,8 @@ button svg,
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border-light);
+  /* 不设 border-bottom：header（bg-card 92%）与 body 底色已有色差，分割线
+   * 是双重复分隔；地图卡与 html 卡共用本类，两边一起去线（2026-11-18）。 */
   background: color-mix(in srgb, var(--bg-card) 92%, transparent);
 }
 .map-toolbar-title {
