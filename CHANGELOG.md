@@ -4,15 +4,17 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
-## v4.9.6
+## v4.9.6-beta
 
-**后台委派：恢复后的卡面说真话，交活时顺口说一句「空档里我在做什么」**
+**（测试版）后台委派：恢复后的卡面说真话，交活时顺口说一句「空档里我在做什么」**
 
 一、恢复后委派卡补第三态（980df2d）。进程被杀时在飞的后台支，模型面此前已经改写成 `[detached resume]` 通告，渲染面却仍按存档的 `toolExec` 把「已受理」收执渲成绿 ✓ 完成——模型看到「没回来」，用户看到「干完了」。现在回放走灰态「⛔ 已中断 · 产出未回来」：不是成功、不是失败，也不是用户停的，并提示同参重派可走子代理断点续跑。判定放在投影期而不是载入时改存档条目——回放块在 `loadFromStorage` 之前就从快照投影，改条目赶不上本次渲染；现代存档走 `events` 通道，根本不读 `transcript`；存档每轮又按消息重建 `toolExec`，载入时打的标记活不过下一次落盘。投影直接认两个 durable 判据：快照里仍挂 `deferred` 的收执 callId（首次恢复），以及结果文本里的通告标记（此后每次存档都带着它）。同批补上后台支上限与止损的回归锁：到 6 支时第 7 支退回同步（不拒绝、不丢活）、`stop_branch` 对后台支可停且按暂停记账、`deferred` 收执吐出后 abort 监听必须保留（撤了暂停/Esc 就到不了后台支）。
 
 二、主 agent 交活时明说「空档里我做什么」（用户 2026-11-18 要求）。子 agent 派出去后主线继续干活，但此前用户只看到委派卡在转，不知道主 agent 在干什么。现在教学要求交活的当下用一句话说清两件事：子 agent 拿走了什么、你同时做什么——只给形状不给句式，固定模板会让每轮话说得一模一样。载体三处：`parallel_first` 常驻段（委派工具在场就带）、机制段 Background delegation（多主题/构建请求）、受理收执末尾（收执回到模型眼前的那一刻）；`Orchestrator conduct` 同步点明背景支的情形。教学同时要求「说到的必须是真在飞的活」：只有等待没有自己的活时，直说在等或不说，不许编一句假的「meanwhile」——假并行叙事比沉默更糟。
 
-验证：typecheck、lint:conventions 绿；promptLayers / PromptAssembler 107 例、SubagentOrchestrator.detach 55 例、UI 回放与存档往返（transcriptProjection / toolRow / sessionReplayFidelity / store / chat / strippedBranchOutput）284 例、执行池与编排器 159 例全过。
+三、发布前审查修掉两处同参重派的断点。其一：同一批里两支同参委派，引擎的同轮去重只对「失败锚点」重试，而受理收执是 `success:true` 的 deferred 结果——第二支被当成可复用锚点跳过，既没执行也没有工具结果，配对契约当场断裂（下一次请求 400）。现在 deferred 锚点一律真派，编排器认出在飞的那支并回指向它的收执。其二：这类重派收执此前永远等不到结算（结算事件只认原支 callId），卡面永久挂「⏳ 后台运行中」，重启还会被崩溃恢复误报成「丢了的那批」——结算现在携带 alias callId，引擎一并清掉 deferred、宿主一并结算那些卡，产出仍只送达一次。
+
+验证：typecheck、lint:conventions 绿；promptLayers / PromptAssembler 107 例、SubagentOrchestrator.detach 55 例、引擎后台委派 17 例（含同批同参真派与 alias 结算）、UI 回放与存档往返（transcriptProjection / toolRow / sessionReplayFidelity / store / chat / strippedBranchOutput）284 例、执行池与编排器 159 例全过。
 
 ## v4.9.4
 
