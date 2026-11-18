@@ -131,6 +131,9 @@ export interface CodingAgentConfig {
   };
   /** P3-3 — 同一执行池内在飞读调用上限（缺省走协调器默认值）。 */
   maxReadConcurrency?: number;
+  /** 后台委派开关（2026-11-18 档二）：产品路径默认开（false = 回滚到同步
+   *  委派）。宿主传入 config.detachDelegations，只在显式 false 时关闭。 */
+  detachDelegations?: boolean;
   /** 下层 AGENTS.md 按「真读到的文件」注入（见 EngineContext）：宿主给回该
    *  路径目录链的规则，引擎在工具结果后插进转录。缺席 = 只靠请求文本提示。 */
   workspaceConventions?: EngineContext['workspaceConventions'];
@@ -261,6 +264,9 @@ export class CodingAgent {
       // Skill 索引（2026-11-12）：宿主的 skills 解析闭包透传，spawn 时实时
       // 解析（同回合安装的 skill 即见），buildSkills 单一出典生成索引段。
       skillsProvider: config.subagentSkillsProvider,
+      // 后台委派（2026-11-18 档二）：GUI 路径默认开，config 里的显式 false
+      // 是回滚面（编排器自身默认关，嵌入方不会被静默改语义）。
+      detachDelegations: config.detachDelegations !== false,
     };
     this.subagentOrchestrator = new SubagentOrchestrator(orchConfig);
 
@@ -385,6 +391,10 @@ export class CodingAgent {
       conventionsPreloaded: config.conventionsPreloaded,
       conventionsDelivered: config.conventionsDelivered,
       pullTurnParallelNudge: config.pullTurnParallelNudge,
+      // 后台委派端口（2026-11-18 档二）：编排器就是账本本体——引擎经它取
+      // 已结算的后台支结果，收尾前等收齐。子代理引擎自己不带这个端口，
+      // 嵌套委派保持同步（maxDepth 1）。
+      detachedBranches: this.subagentOrchestrator,
       reflection: config.reflection,
       evolutionEnabled: config.evolutionEnabled,
       injectedSkills: config.injectedSkills,

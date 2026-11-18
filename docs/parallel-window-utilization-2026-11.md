@@ -1,6 +1,6 @@
 # 委派窗口利用：主线在子代理在飞时干自己的活（2026-11）
 
-> 地位：档一已落（2026-11-18：runPool 带路径写与读池重叠开跑 + FileLockManager 进程级共享；写入并发上限 3），档三已落（Map-reduce fan-out 教学段 43b191d），档二大手术挂账。
+> 地位：档一已落（2026-11-18：runPool 带路径写与读池重叠开跑 + FileLockManager 进程级共享；写入并发上限 3），档二**改落点后已落地**（2026-11-18：委派后台执行 = 工具层 detach + 引擎三件物理事，见 §三），档三已落（Map-reduce fan-out 教学段 43b191d）。
 > 源头：2026-11-18 用户判语「既然都派遣了子 agent 处理事情了，pure 的主 agent 可以利用这段时间干别的事情」——run6 首次构建路径委派实证后提出。
 > 证据锚：run6（session_1794990780366_1）——nudge 81KB 注入 → 主线委派 code_editor（ag-79a5ed05）写 ECharts 面板，主线原话「先并行派出去写，我同时收事件编排」；周边 commit：cc5b144（nudge 引擎中途通道）、f702532（直播流体量折叠）。
 
@@ -33,16 +33,40 @@
 
 `MULTI_AGENT_MECHANICS_PROMPT` 的 Produce fan-out 段补一句：「委派批里同时塞进你自己认领模块的直接写活——窗口是贵的，别让它在等待里空着」。**依赖档一**：执行层不支持时教这句是空话，模型照做也不并发。
 
-### 档二：引擎交错 THINK（大手术，挂账）
+### 档二：委派后台执行（已落，落点从引擎状态机改到工具层）
 
-**形态**：委派变「发射后继续」——主线在窗口里继续多轮 THINK/工具，被唤醒式收结果。
+**原方案的问题（评审裁定 2026-11-18）**：把档二写成「引擎交错 THINK 大手术」，风险估高了、机制写空了。五个机制空白里两个会静默出错：
 
-**为什么挂账而不是现在落**：
-1. 回合制状态机的根要动：工具配平点（TurnCheckpoint 唯一配对稳定点）、失败恢复的批次语义、TurnCheckpoint/插话/relay 拓扑三面都要重审。
-2. 主线 THINK 与 worker THINK 同飞 = 真实 LLM 并发增量，要配端点并发预算（scale caps 只管 worker，不管主线）。
-3. 价值中等：主线的编排/集成/验证职责天然串行；窗口里「值得主线亲自做」的事，多数更好的形态是多派一支。
+1. **配对契约**：`assistant.tool_calls` 与 `tool` 结果必须一一配对，缺一条下一次请求 400。异步收结果必须先给一条合成受理收执。
+2. **终局闸**：模型在支在飞时给纯文本会直接 VERIFY → TERMINATE，结果永久丢在回合外，汇总还把没跑完的活说成完成。
+3. **送达通道**：`subagentEvents` 的 reader 是**批级**的（`runBatch` 的 finally 关闭），分支活过这一批，卡片 trace 从下一批起失明。
+4. **控制面**：`executeOne` 的 abort 监听随调用结束移除、编排器在 finally 里删在飞账——委派提前返回等于把分支变成没人能停的孤儿。
+5. **其他**：relay 上游被后台化后下游拿不到产出；同参重派会命中去重游标里的「成功」快照；检查点只带 messages；worker 在飞数不再受「一批」约束。
 
-**开工条件**：run 级数据表明档一之后窗口利用率仍然显著不足（委派在飞 ≥5 分钟且主线无活可塞的场景占比高），或出现「主线必须用自己的眼睛看中间态才能决策」的实证场景。
+**新落点（工具层 detach，2026-11-18 落地）**：委派工具支持保留参数 `detach`（默认 true）。受理时立刻返回**受理收执**（`ToolResult.deferred: true`，`success: true` 是配对契约的要求），子引擎在后台继续跑；引擎只加三件物理事：
+
+- **配平点送达**：每个工具批结束后（`TurnCheckpoint` 之前，与 `workspaceConventions` / `pullTurnParallelNudge` 同一缝）取走已结算支，作为 internal user 消息进转录 + 一条 `backgroundSettle` 的 ToolResult 事件（宿主据此把委派卡从「后台运行中」结算成真结果，不新开卡）。
+- **终局闸**：模型给最终答复时还有支在飞 → 先等收齐（30s 片，暂停/硬停即时打断），送达后重入 THINK 让模型拿真产出重写答复；兜底上限 45min（分支自身 30min 总墙钟 + 5min 活性看门狗，正常不可达）。
+- **中止线与账本寿命**：受执是 `deferred` 时工具执行器**保留**回合信号的 abort 监听——暂停/Esc 照旧到达子引擎（现有 paused-checkpoint 路径复用）；编排器的在飞账一直在，`stop_branch` 对后台支仍可见、可停。
+
+**边界（均为机制，不替模型决策）**：
+
+- **relay 链成员强制同步**：下游参数槽要直接吃上游产出，后台化会拿不到东西。
+- **同参去重**：stableSessionId 命中在飞的支 → 新调用拿指向那支的收执，不重复派工（两支同参委派会互相踩同一份断点存档）。
+- **并发上限 6**：detach 后 worker 数不再受「一批」约束，scale cap 退化成软约束；超限的委派退回同步执行（不拒绝、不丢活）。
+- **去重游标不记受理收执**：它不是产出，同参重发必须真派。
+- **默认开 + kill switch**：产品路径（CodingAgent / CLI）默认开；`config.detachDelegations === false`（GUI）/ `PURE_DETACHED_DELEGATION=0`（CLI）回到档一行为。编排器自身默认关——嵌入方（overlay 运行、测试、第三方宿主）没有回合循环，拿到收执而无处送达等于静默丢结果。
+- **嵌套委派保持同步**：子代理引擎不接后台端口（maxDepth 1 的现状不变）。
+
+**验收判据（已落测试）**：
+
+- 时间线：同批 `[detach code_editor(慢), 主线 write_file]` 里写的 ToolResult 在委派完成前就吐（`ToolExecutionCoordinator` 切片 0）；委派工具返回的收执 `deferred: true`、不含产出文本（`SubagentOrchestrator.detach`）。
+- 送达：工具批复平点把后台结果作为内部消息送达，同时发出 `backgroundSettle` 事件，转录配对完整（`AgentLoopEngine.detachedBranches`）。
+- 终局闸：模型在支在飞时给草稿 → 不 TERMINATE，等收齐后重入 THINK，最终答复用的是收到产出后的那一版。
+- 去重：同参重派真执行两次，不被合成复用顶替。
+- 控制面：detach 后在飞账仍在（`branchControlToolDefs` 可见 `stop_branch`）。
+
+**被放弃的形态**：引擎部分批次推进 / 交错 THINK。工具一旦立刻返回，批次照常清空，回合制状态机（配对点、失败恢复批次语义、TurnCheckpoint/插话/relay 拓扑）完全不用动——那场手术是不必要的。
 
 ## 四、判例与边界
 
@@ -50,6 +74,16 @@
 - 决策边界遵守：档一是执行池的物理并发语义（系统手脚），档三是教学（给形状），都不替模型决定「何时委派、派什么」——那是 parallelNudge + 模型自己的裁决（cc5b144 已落）。
 - 本文档不覆盖档二之外的引擎重写动机；若未来出现「主线异步任务账本」的完整设计，另立文档并在此处挂链接。
 
-## 五、增量（2026-11-18 晚）：map-reduce 教学泛化落地
+## 五、落地记录（2026-11-18，档二）
+
+- 工具层：`src/coding-agent/SubagentOrchestrator.ts`（`detach` schema 集中注入、`execute` 受理面、`startDetached` / `acceptedReceipt` / 结算队列与等待者 / 同参 sessionId 去重 / 并发上限 / `DetachedBranchPort` 实现）。
+- 引擎：`src/engine/AgentLoopEngine.ts`（配平点送达、终局闸、`backgroundBranchNote`）、`src/engine/ToolExecutionCoordinator.ts`（切片 0 写结果随完成即吐；detach 时保留 abort 监听）。
+- 契约：`src/shared/types.ts`（`ToolResult.deferred`、`DetachedBranchPort`、`backgroundSettle` 事件标记）。
+- 宿主：`CodingAgent` / `cliHarness` 注入端口；`src/ui/toolRow.ts` + `chat.ts` 的「⏳ 后台运行中 → 已收」两态；`config.detachDelegations` 回滚面。
+- 教学：`PARALLEL_FIRST_DIRECTIVE` 一句 + `MULTI_AGENT_MECHANICS` 的 Background delegation 段（收执不是产出、不轮询、不重派；下一步依赖产出时 `detach:false`）。
+
+**复测口径（下一步数据）**：同一构建回合内，记录「委派在飞总时长」「该窗口内主线完成的真实工具调用数与 THINK 轮数」「收执→结果送达的间隔」三个量；档二的收益判据是前两者从「零产出」变为正向，而不是墙钟单项。
+
+## 六、增量（2026-11-18 晚）：map-reduce 教学泛化落地
 
 run6 现场证据（逐场馆 3D 手写几何的重循环串行研磨）催生「多场景多 3D agent」提案，经裁定**泛化落地**——不锚死 3D，按成本维度裁决：`MULTI_AGENT_MECHANICS` 的 Produce fan-out 段新增 **Map-reduce fan-out (shared-engine families)** 规则，决策维度=单实例调优循环成本 × 实例数量 × 引擎可冻结性（金标准先行）× 协调开销；含 fan-out 后的引擎缺陷出口（停 fan-out→修引擎→重金标准→再展开）与 solo 条件（实例 ≤3 / 引擎未稳 / 实例共享状态）。适用族举例：3D 场景族、图表族、多页样式系统、按平台变体、批量生成文件。commit 锚见本文提交史（promptLayers.ts Map-reduce fan-out 段）。

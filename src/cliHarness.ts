@@ -719,6 +719,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
   // 起飞闸的角色集：与下面注册进 orchestrator/tools 的子代理名单同源（gate
   // 只按角色名认委派批次）。子代理面关着时恒空 = gate 恒放行。
   const cliSubagentNames = new Set<string>();
+  // 后台委派端口（2026-11-18 档二）：工具面打开时头建，Harness 与编排器
+  // 共享同一份在飞账；工具面关着 = 无端口（委派本来也不存在）。
+  let subagentOrchestrator: SubagentOrchestrator | undefined;
   if (tools && tools instanceof ToolRegistry) {
     // Full delegation surface, mirroring the GUI: both the built-in reviewers
     // and the coding roles (task_planner / code_editor / researcher /
@@ -774,7 +777,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
         ...(loadConfig()?.hubSkills ?? []).map(({ name, body, enabled }) => ({ name, body, enabled })),
         ...loadAppSkills(),
       ],
+      // 后台委派（2026-11-18 档二）：CLI 与 GUI 同口径默认开；PURE_DETACHED_
+      // DELEGATION=0 是终端侧的回滚面（GUI 走 config.detachDelegations）。
+      detachDelegations: process.env.PURE_DETACHED_DELEGATION !== '0',
     });
+    subagentOrchestrator = orchestrator;
     for (const def of [...BUILT_IN_SUBAGENTS, ...CODING_AGENT_ROLES, ...externalRoles.defs]) {
       orchestrator.register(def);
       tools.register(def);
@@ -867,6 +874,9 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     // 今天无插话输入路，挂号簿恒空 = 与省略时行为一致；通道宿主经暴露的
     // delegationControl 挂号即生效）。
     gateDelegations: async (calls) => delegationControl.gate(calls, cliSubagentNames),
+    // 后台委派端口（2026-11-18 档二）：与 GUI 同一形状——配平点送结果、
+    // 收尾前等收齐。
+    detachedBranches: subagentOrchestrator,
     // 人格轨道 刀 5 — 长会话人格漂移探针（与 GUI 的 CodingAgent 同源打开）。
     // 触发时机 / 判定口径 / 成本上界见 src/character/drift.ts。
     characterDrift: true,

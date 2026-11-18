@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent } from '../shared/types';
+import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, SubagentActivityEvent, DetachedBranchSettlement } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
@@ -124,6 +124,12 @@ export function salvageTruncatedWriteArgs(raw: string): { path: string; content:
 // slice that enters the conversation; the full output already lives on disk or
 // can be re-read in ranges. read_file gets a tailored nudge to read by range.
 const TOOL_RESULT_MAX_CHARS = 40_000;
+/** 终局闸的等待片（2026-11-18 档二）：每 30s 醒一次，暂停/硬停能即时打断
+ *  等待；任一支结算也会立刻唤醒（不必等满一片）。 */
+const BRANCH_SETTLE_POLL_MS = 30_000;
+/** 终局闸的活性兜底：分支自身有 30min 总墙钟 + 5min 活性看门狗，正常永远
+ *  走不到这条线；真走到了就带着「还有支没回来」的事实收尾，不无限挂。 */
+const BRANCH_GATE_MAX_WAIT_MS = 45 * 60_000;
 function capToolResult(text: string, toolName: string): string {
   if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
   const omitted = text.length - TOOL_RESULT_MAX_CHARS;
@@ -132,6 +138,44 @@ function capToolResult(text: string, toolName: string): string {
     : `\n\n« Tool result too large — ${omitted.toLocaleString()} chars omitted. Fetch it in pages/ranges if you need the rest. »`;
   return text.slice(0, TOOL_RESULT_MAX_CHARS) + notice;
 }
+// 后台委派结算的模型可见文本（2026-11-18 档二）：与同步委派的 tool 结果同一
+// 口径提取——SubagentResult 的产出在 output，失败在 error。
+function backgroundBranchText(settled: DetachedBranchSettlement): string {
+  const r = settled.result;
+  if (!r.success) return r.error ?? '';
+  const value = r.result;
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') {
+    const out = (value as { output?: unknown }).output;
+    if (typeof out === 'string') return out;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return '';
+}
+
+// 送达措辞：受理收执与真结果分开说，且把「已结算」这一物理事实报给模型——
+// 它否则会查岗（重派同参）或把这条误读成中间进度。
+function backgroundBranchNote(settled: DetachedBranchSettlement): string {
+  const who = `${settled.toolName}（call_id=${settled.toolCallId}）`;
+  const outcome = branchOutcomeOf({ result: settled.result });
+  if (outcome === 'paused') {
+    return `[background branch settled] 你先前派出的 ${who} 被暂停了：产出未入账，断点已存档（同参重派会从断点续跑）。别把它算进汇总，也别主动重派。`;
+  }
+  if (outcome === 'stopped') {
+    return `[background branch settled] 你先前派出的 ${who} 被用户停止：产出未入账，断点已存档。别把它算进汇总，也别主动重派。`;
+  }
+  if (!settled.result.success) {
+    const body = capToolResult(backgroundBranchText(settled), settled.toolName);
+    return `[background branch settled] ${who} 失败了：${body || '（没有错误详情）'}。是否重派、换路还是自己接手，由你决定；不要装作它跑完了。`;
+  }
+  const body = capToolResult(backgroundBranchText(settled), settled.toolName);
+  return `[background branch settled] 你先前派出的 ${who} 跑完了。这条消息出现时它已经结束——不要查岗、不要用相同参数重派。以下是它的真实产出：\n\n${body}`;
+}
+
 // 失败结果的文本形态。error 字段是权威（CLI 适配器放这里），但 GUI 适配器的
 // 失败族把人类可读文案（netFailureHint / blockedHostMessage 组装的状态码、
 // 重试指引）放在 result——error 缺位时必须回退取它，否则文案在最后一米丢失：
@@ -1192,7 +1236,9 @@ export class AgentLoopEngine {
         for (const dup of sameRoundDups) {
           const anchor = executedByCallId.get(dup.anchorId);
           // 分支中断锚点不进复用表（上面第二遍已为它真执行过一次）。
-          if (anchor?.result.success && branchOutcomeOf(anchor) === undefined) {
+          // 后台委派的受理收执同样不复用：它不是产出，同参重派必须真派——
+          // 编排器会认出那支还在后台跑，回来一份指向它的收执。
+          if (anchor?.result.success && branchOutcomeOf(anchor) === undefined && anchor.result.deferred !== true) {
             reusedTextByCallId.set(dup.call.id, `${textOfResult(anchor)}\n\n${DEDUPE_NOTE}`);
           }
         }
@@ -1228,13 +1274,16 @@ export class AgentLoopEngine {
         const lastExec = realExecs[realExecs.length - 1];
         if (lastExec) {
           const callFor = toolCalls.find((c) => c.id === lastExec.toolCallId);
+          // 后台委派的受理收执不是产出：把它当成功游标会让同参重派被去重
+          // 吞成回放（一个永远不会有结果的回放）。游标按失败记，重发真派。
+          const deferredReceipt = lastExec.result.deferred === true;
           lastExecuted = {
             key: callKey(lastExec.toolName, callFor?.function.arguments ?? ''),
-            text: textOfResult(lastExec).slice(0, 8_000),
-            ok: lastExec.result.success,
+            text: deferredReceipt ? '' : textOfResult(lastExec).slice(0, 8_000),
+            ok: lastExec.result.success && !deferredReceipt,
             // 分支中断（暂停/停掉一支）的成功不可复用：同参重派是断点续跑
             // 的入口，缓存回放会让"继续"永远停在上一轮的暂停快照上。
-            outcome: branchOutcomeOf(lastExec),
+            outcome: deferredReceipt ? undefined : branchOutcomeOf(lastExec),
           };
         }
 
@@ -1296,6 +1345,28 @@ export class AgentLoopEngine {
           const note = parallelNudge.trim();
           messages.push({ role: 'user' as const, content: note, internal: true });
           budget.addTokens(note);
+        }
+
+        // 后台委派的结果送达（2026-11-18 档二）：委派工具 detach 后批次立刻
+        // 清空，支的产出晚到——这里是转录里唯一「配对完整」的稳定缝（与
+        // workspaceConventions / parallelNudge 同一处）。结果以内部 user 消息
+        // 进转录；同时发一条 backgroundSettle 的 ToolResult，让宿主的委派卡
+        // 从「后台运行中」结算成真结果（不新开卡）。
+        for (const settled of ctx.detachedBranches?.takeSettled() ?? []) {
+          const note = backgroundBranchNote(settled);
+          messages.push({ role: 'user' as const, content: note, internal: true });
+          budget.addTokens(note);
+          yield {
+            type: 'ToolResult',
+            payload: {
+              toolName: settled.toolName,
+              result: settled.result,
+              duration: settled.duration,
+              toolCallId: settled.toolCallId,
+              backgroundSettle: true,
+            },
+            timestamp: Date.now(),
+          };
         }
 
         // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果刚配平进消息
@@ -1458,6 +1529,56 @@ export class AgentLoopEngine {
         yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
         interrupted = true;
         break;
+      }
+      // ── 终局闸：回合不能带着自己派出去的支收尾（2026-11-18 档二）──────
+      // 模型在委派在飞时给出纯文本，看起来就是「答完了」——直接放行到 VERIFY
+      // 会把后台支的产出永久丢在回合外（终态已发，没人再收，最终汇总还会把
+      // 没跑完的活说成完成）。物理不变量：等在飞的支收齐（或用户暂停/停掉），
+      // 把结果作为内部消息送达后重入 THINK，让模型拿真产出重写答复。等待期
+      // 间没有别的活可干，等待本身不浪费。
+      if (ctx.detachedBranches && ctx.detachedBranches.pendingCount() > 0) {
+        const gateStart = Date.now();
+        let delivered = 0;
+        while (ctx.detachedBranches.pendingCount() > 0 && !ctx.signal?.aborted) {
+          if (Date.now() - gateStart >= BRANCH_GATE_MAX_WAIT_MS) break;
+          await ctx.detachedBranches.waitForSettlement(BRANCH_SETTLE_POLL_MS, ctx.signal);
+          for (const settled of ctx.detachedBranches.takeSettled()) {
+            const note = backgroundBranchNote(settled);
+            messages.push({ role: 'user' as const, content: note, internal: true });
+            budget.addTokens(note);
+            delivered++;
+            yield {
+              type: 'ToolResult',
+              payload: {
+                toolName: settled.toolName,
+                result: settled.result,
+                duration: settled.duration,
+                toolCallId: settled.toolCallId,
+                backgroundSettle: true,
+              },
+              timestamp: Date.now(),
+            };
+          }
+        }
+        if (ctx.signal?.aborted) {
+          yield { type: 'Interrupted', payload: { reason: interruptedReasonFor(ctx.signal), lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+          interrupted = true;
+          break;
+        }
+        if (delivered > 0) {
+          // 刚才那条纯文本是「支还没回来时」的草稿：结果已进转录，重入 THINK
+          // 让模型据此给真答复（与 continueGuard 同一形状：保留草稿，注入后
+          // 重开一轮）。
+          turnCount++;
+          budget.incrementTurn();
+          yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
+          continue;
+        }
+        // 兜底（正常不可达）：支没在活性上限内结算。如实告知，不装作全收齐。
+        const pending = ctx.detachedBranches.pendingCount();
+        const note = `[background branch pending] 还有 ${pending} 支后台委派没回来（超出了本次等待上限）。你的最终汇总必须如实说明这一点——不要把它们当成已完成，也不要计算它们的产出。`;
+        messages.push({ role: 'user' as const, content: note, internal: true });
+        budget.addTokens(note);
       }
       // Hook: before_verify
       if (ctx.hooks) {

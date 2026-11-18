@@ -9,6 +9,8 @@ import { BRANCH_ABORT_REASON, isBranchAbort, isPauseAbort, PAUSE_ABORT_REASON } 
 import { BranchLifecycle, type BranchState } from './branchLifecycle';
 import type {
   BudgetConfig,
+  DetachedBranchPort,
+  DetachedBranchSettlement,
   EngineContext,
   FailurePolicy,
   IMemoryStore,
@@ -54,6 +56,20 @@ const SUBAGENT_EN_PERSONA_ROLES = new Set(['code_reviewer', 'project_auditor']);
 
 function subagentReportNote(name: string): string {
   return SUBAGENT_EN_PERSONA_ROLES.has(name) ? SUBAGENT_REPORT_NOTE_EN : SUBAGENT_REPORT_NOTE_ZH;
+}
+
+/** 保留参数 detach（2026-11-18 档二）：后台执行开关。与 relay 同样集中注入
+ *  到每个委派工具的 schema，不改各定义本体（共享单例不能被污染）。 */
+const DETACH_INPUT_SCHEMA: Record<string, unknown> = {
+  type: 'boolean',
+  description: '是否后台执行，默认 true：true = 立刻返回受理收执，子任务在后台继续跑，真实产出稍后以内部消息送达（你可以同时干别的活）；false = 同步等它跑完再返回——下一步马上要用它的产出、或要根据结果改计划时用。relay 链里的调用总按同步执行。',
+};
+
+function withDetachSchema(inputSchema: Record<string, unknown>): Record<string, unknown> {
+  const props = inputSchema.properties;
+  const existing = props && typeof props === 'object' && !Array.isArray(props) ? props : {};
+  if ('detach' in existing) return inputSchema;
+  return { ...inputSchema, properties: { ...existing, detach: DETACH_INPUT_SCHEMA } };
 }
 
 /**
@@ -251,6 +267,11 @@ export interface SubagentOrchestratorConfig {
    *  总开关关闭即整条自进化弧（含抵达子代理的部分）缺席，委派 prompt 与
    *  本焊点诞生前逐字节一致。 */
   evolutionEnabled?: boolean;
+  /** 后台委派开关（2026-11-18 档二）：宿主显式打开。产品路径（CodingAgent /
+   *  CLI）默认开，并留 config/环境变量的回滚面；编排器自身默认关——嵌入方
+   *  （overlay 运行、测试、第三方宿主）没有回合循环，拿到受理收执而无处送达
+   *  等于静默丢结果。 */
+  detachDelegations?: boolean;
   /** Skill 索引注入（2026-11-12，对齐 Anthropic Agent Skills 渐进披露）——
    *  宿主提供与主对话 assemble 同源的 skills 列表（app skills + hub skills），
    *  spawn 时实时解析一次：同回合刚装的 skill（loadAppSkills 的 30s TTL 窗口
@@ -262,7 +283,7 @@ export interface SubagentOrchestratorConfig {
   skillsProvider?: () => PromptSkill[] | Promise<PromptSkill[]>;
 }
 
-export class SubagentOrchestrator implements ToolAdapter {
+export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
   private engine = new AgentLoopEngine();
   private defs = new Map<string, SubagentDefinition>();
   private config: SubagentOrchestratorConfig;
@@ -279,6 +300,24 @@ export class SubagentOrchestrator implements ToolAdapter {
    *  先亮「待批准」卡时预分配 agentId，execute() 复用同一枚——卡的 run id
    *  从批准前到结算保持同一个。 */
   private readonly queuedAgentIds = new Map<string, string>();
+
+  /** 后台委派（2026-11-18 档二）：detach 的支在跑，受理收执已经交给父模型。
+   *  callId → 角色/sessionId；结算即出账。这是「引擎要等谁」的账，与
+   *  branches（能 abort 的把手）分开：branges 只在 runDelegation 里建，
+   *  detach 的窗口从受理那一刻开始。 */
+  private readonly detachedInFlight = new Map<string, { toolName: string; sessionId?: string }>();
+  /** 同一个 stableSessionId 只能有一支在跑：两支同参委派命中同一份断点
+   *  存档会互相踩。命中的新调用拿到指向现有支的收执，不重复派工。 */
+  private readonly detachedBySession = new Map<string, string>();
+  /** 已结算、还没被引擎取走的后台结果（配平点取即清）。 */
+  private detachedSettled: DetachedBranchSettlement[] = [];
+  /** 终局闸的等待者：任一支结算即唤醒。 */
+  private readonly detachedWaiters = new Set<() => void>();
+
+  /** 后台委派并发上限（物理不变量）：detach 之后 worker 数不再受「一批」
+   *  约束（模型可以边跑边派），scale cap 就退化成软约束了。超限的委派退回
+   *  同步执行（批次等它），既不拒绝也不悄悄丢活——编排处能看到这一跳。 */
+  private static readonly MAX_DETACHED_BRANCHES = 6;
 
   constructor(config: SubagentOrchestratorConfig) {
     this.config = config;
@@ -357,11 +396,11 @@ export class SubagentOrchestrator implements ToolAdapter {
       tools.push({
         name: def.name,
         description: def.description,
-        // 接力流水线（北极星第 5 步）：每个委派工具的 schema 都带上保留参数
-        // relay（as/from），模型用它在同一条消息里声明串行依赖链，运行时在
-        // ToolExecutionCoordinator 里按拓扑序交接。克隆注入——定义是共享
-        // 单例，不能被 schema 扩展污染。
-        input_schema: withRelaySchema(def.input_schema),
+        // 保留参数集中注入（克隆——定义是共享单例，不能被 schema 扩展污染）：
+        //  - relay（北极星第 5 步）：同一条消息里声明串行依赖链，协调器按
+        //    拓扑序交接；
+        //  - detach（2026-11-18 档二）：后台执行开关，默认 true。
+        input_schema: withDetachSchema(withRelaySchema(def.input_schema)),
       });
     }
     return tools;
@@ -467,7 +506,142 @@ export class SubagentOrchestrator implements ToolAdapter {
     return undefined;
   }
 
+  // ── 后台委派端口（2026-11-18 档二：派出去，主线接着干）───────────────
+  // 引擎在每个工具配平点取一次已结算结果，给最终答复前等收齐。端口只回答
+  // “谁还在跑 / 谁跑完了”，不参与任何调度决策。
+
+  pendingCount(): number {
+    return this.detachedInFlight.size;
+  }
+
+  takeSettled(): DetachedBranchSettlement[] {
+    return this.detachedSettled.splice(0);
+  }
+
+  waitForSettlement(timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (this.detachedSettled.length > 0 || this.detachedInFlight.size === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let done = false;
+      // 永不 reject：暂停/硬停也只是一个「不必再等」的返回，由引擎按
+      // ctx.signal 自己判定回合状态（与工具执行的 abort 口径一致）。
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        this.detachedWaiters.delete(finish);
+        resolve();
+      };
+      timer = setTimeout(finish, Math.max(50, timeoutMs));
+      signal?.addEventListener('abort', finish, { once: true });
+      this.detachedWaiters.add(finish);
+    });
+  }
+
+  /**
+   * 委派受理面：默认后台执行（detach），立刻返回受理收执。
+   *
+   * 为什么落在工具层而不是引擎状态机：工具一旦立刻返回，批次照常清空，
+   * 回合制（配对点 / TurnCheckpoint）完全不用动——引擎只多「取结果 / 等
+   * 收齐」两件物理事。退回同步的四种情形：宿主 kill switch、调用显式
+   * detach:false、relay 链成员（下游要拿上游产出）、后台支已达并发上限。
+   */
   async execute(toolCall: ToolCall, parentSignal?: AbortSignal): Promise<ToolResult> {
+    const def = this.defs.get(toolCall.function.name);
+    if (toolCall.function.name === STOP_BRANCH_TOOL_NAME || !def) {
+      return this.runDelegation(toolCall, parentSignal);
+    }
+    const args = parseToolArguments(toolCall.function.arguments);
+    const sessionId = this.config.stateStore
+      ? SubagentOrchestrator.stableSessionId(this.config.parentSessionId, def.name, args)
+      : undefined;
+    // 同参委派命中同一个断点 sessionId：两支同时写同一份存档会互相踩。
+    // 已在后台跑的那支就是答案——新调用拿指向它的收执，不重复派工。
+    const liveCallId = sessionId ? this.detachedBySession.get(sessionId) : undefined;
+    if (liveCallId !== undefined) return this.acceptedReceipt(toolCall, def, { liveCallId });
+    if (!this.shouldDetach(args)) return this.runDelegation(toolCall, parentSignal);
+    return this.startDetached(toolCall, def, sessionId, parentSignal);
+  }
+
+  private shouldDetach(args: Record<string, unknown>): boolean {
+    if (this.config.detachDelegations !== true) return false;
+    if (args.detach === false) return false;
+    if (args.relay !== undefined) return false;
+    if (this.detachedInFlight.size >= SubagentOrchestrator.MAX_DETACHED_BRANCHES) return false;
+    return true;
+  }
+
+  private startDetached(
+    toolCall: ToolCall,
+    def: SubagentDefinition,
+    sessionId: string | undefined,
+    parentSignal?: AbortSignal,
+  ): ToolResult {
+    // 卡的 run id 从受理那一刻就要定下来：预出卡给了就复用，补给 runDelegation
+    // （它从 queuedAgentIds 取同一枚并出账）。
+    const agentId = this.queuedAgentIds.get(toolCall.id) ?? makeAgentId();
+    this.queuedAgentIds.set(toolCall.id, agentId);
+    this.detachedInFlight.set(toolCall.id, { toolName: def.name, sessionId });
+    if (sessionId) this.detachedBySession.set(sessionId, toolCall.id);
+    const settle = (result: ToolResult): void => {
+      this.detachedInFlight.delete(toolCall.id);
+      if (sessionId && this.detachedBySession.get(sessionId) === toolCall.id) {
+        this.detachedBySession.delete(sessionId);
+      }
+      this.detachedSettled.push({
+        toolCallId: toolCall.id,
+        toolName: def.name,
+        duration: result.duration,
+        result,
+      });
+      for (const wake of [...this.detachedWaiters]) wake();
+    };
+    // 后台开跑：runDelegation 自带 catch/结算，异常也只会落到这里一次。
+    void this.runDelegation(toolCall, parentSignal).then(settle, (error: unknown) => {
+      settle({
+        id: toolCall.id,
+        toolName: def.name,
+        error: error instanceof Error ? error.message : String(error),
+        success: false,
+        duration: 0,
+      });
+    });
+    return this.acceptedReceipt(toolCall, def, { agentId });
+  }
+
+  /** 受理收执：success:true 是配对契约的要求（每条 tool_call 必须有结果），
+   *  文本必须说清「这不是产出」，否则模型会当成活干完了。 */
+  private acceptedReceipt(
+    toolCall: ToolCall,
+    def: SubagentDefinition,
+    opts: { agentId?: string; liveCallId?: string } = {},
+  ): ToolResult {
+    const output = opts.liveCallId
+      ? `同一个任务已经在后台跑了（call_id=${opts.liveCallId}），没有重复派工——它的真实产出会作为一条内部消息出现，不必轮询，也不要换个参数再派一次。`
+      : `已受理，正在后台跑（agent ${opts.agentId}）。这一条只是受理收执，不是产出：它的真实结果会在后面的步骤里以一条内部消息送到你面前。不要用相同参数再派一次，也不要轮询——继续做你手上的事（或把当前能定的部分做定、给出能给的答复），引擎会在收尾前等它回来。`;
+    return {
+      id: toolCall.id,
+      toolName: def.name,
+      // deferred 放在 ToolResult 顶层：引擎/宿主的判定（去重豁免、卡面挂起态、
+      // 终局闸）都读这一层；内层副本只是让 SubagentResult 自己说得清楚。
+      deferred: true,
+      result: {
+        id: toolCall.id,
+        agentId: opts.agentId,
+        agentName: def.name,
+        success: true,
+        deferred: true,
+        output,
+      },
+      success: true,
+      duration: 0,
+    };
+  }
+
+  /** 同步委派（原 execute 本体）：跑完再返回。detach 只改受理时刻，不改
+   *  这一条路径的任何语义。 */
+  private async runDelegation(toolCall: ToolCall, parentSignal?: AbortSignal): Promise<ToolResult> {
     const def = this.defs.get(toolCall.function.name);
     const startTime = Date.now();
     const done = (durationMs: number): number => Date.now() - startTime;

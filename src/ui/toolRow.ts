@@ -223,6 +223,10 @@ export interface ToolRowResultMeta {
    *  'stopped' = 用户点名取消（灰卡 ⏹）。二者都不是失败——不染红、不打 ✗，
    *  也不读失败 tooltip。会话重放（ToolExecMeta）与实时结算共用本字段。 */
   outcome?: 'paused' | 'stopped';
+  /** 后台委派受理收执（2026-11-18 档二）：这不是产出，子任务还在后台跑。
+   *  卡面走中性挂起态（灰，⏳ 后台运行中），不得渲染成绿 ✓ 完成；结算到达
+   *  时同一张卡再 finalize 一次（resultEl 本就清空重建，可重入）。 */
+  deferred?: boolean;
   resultKind?: 'search' | 'fetch' | 'image' | 'diff';
   resultItems?: Array<{ title: string; snippet: string; url: string }>;
   /** Generated images (data URLs) rendered as <img> cards, ChatGPT/Gemini style. */
@@ -1029,10 +1033,17 @@ export function updateToolRowArgs(
 
 export function finalizeToolRow(row: ToolRowHandle, meta: ToolRowResultMeta): void {
   stopElapsedTicker(row);
-  row.details.classList.remove('pending');
+  // 可重入（后台委派：先挂起态、结算到达后同卡再结一次）：上一次的态类必须
+  // 先清干净，否则一张卡会同时带 paused 与 success。
+  row.details.classList.remove('pending', 'paused', 'stopped', 'success', 'failure');
+  row.details.title = '';
   // 分支中断（暂停/停掉一支子 agent）走静音结算：灰态 + ⏸/⏹，不染红、
   // 不打 ✗——用户自己的决定不是错误（2026-09-25 复测）。
-  if (meta.outcome) {
+  if (meta.deferred) {
+    // 挂起 ≠ 完成：中性灰态 + 明说还在后台跑，避免「绿✓完成但活还没干」。
+    row.details.classList.add('paused');
+    row.statusEl.textContent = '⏳ 后台运行中';
+  } else if (meta.outcome) {
     row.details.classList.add(meta.outcome);
     // 出生即拦（委派起飞闸）与跑过再停要一眼分得开：合成取消结果
     // duration=0、代理从未出生，状态行直说「未派出·已取消」——一张灰色

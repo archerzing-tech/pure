@@ -5272,6 +5272,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // own decision (kept visible, stoppable), not a UI dedup promise.
     const completedToolRowKeys = new Map<string, ToolRowEntry>();
     const pendingByName = new Map<string, ToolRowEntry>();
+    // 后台委派的委派卡（2026-11-18 档二）：受理收执已经结算过一次（「⏳ 后台
+    // 运行中」），真实结果晚到时要找回同一张卡再 finalize 一次——不能新开
+    // 一张（同一次委派两张卡），也不能丢下它永远挂着。
+    const detachedRows = new Map<string, ToolRowEntry>();
     // Per-call throttle for tool-call JSON re-parses (keyed by toolCallId or
     // staged tool name). Streaming a giant argument (write_file `content`, a
     // whole HTML file) grows the buffer to tens of KB; re-parsing it AND
@@ -6179,6 +6183,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // P3-3 — 同一执行池内在飞读上限（Settings 尚无输入行，
         // 缺省走协调器默认 5；config.maxReadConcurrency 存在时生效）。
         maxReadConcurrency: config.maxReadConcurrency,
+        // 后台委派（2026-11-18 档二）：默认开，config.detachDelegations ===
+        // false 时退回同步委派（kill switch，不必回退版本）。
+        detachDelegations: config.detachDelegations,
         // 下层 AGENTS.md 的引擎侧通路：模型真读了哪个文件，那个目录的规则
         // 就进下一轮（请求文本里的路径提示仍是提前量）。conventionsDelivered
         // 是会话级「已进转录」账，跨轮复用后长会话不重复注入同一份规则。
@@ -8260,16 +8267,29 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             }
             // Finalize the matching pending row — keyed by toolCallId (the
             // engine's id-bearing TokenDelta ensures one row per call).
+            // 后台委派两态（2026-11-18 档二）：受理收执 → 挂起态并留卡；真实
+            // 结算到达（backgroundSettle）→ 找回同一张卡换成真结果。
             liveToolOutputQueue.delete(event.payload.toolCallId);
-            const pending = pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
+            const detachedReceipt = event.payload.result.deferred === true;
+            const backgroundSettle = event.payload.backgroundSettle === true;
+            const pending = backgroundSettle
+              ? detachedRows.get(event.payload.toolCallId)
+                ?? pendingRows.get(event.payload.toolCallId)
+                ?? pendingByName.get(toolName)
+              : pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName);
             if (pending) {
               // Remember the completed card so a repeated identical call
-              // collapses onto it instead of rendering twice.
-              if (pending.args) completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
+              // collapses onto it instead of rendering twice. 受理收执不能进
+              // 这张表：它不是产出，同参重派必须真派（真派回了收执也不能
+              // 把新卡折进旧的挂起卡上）。
+              if (pending.args && !detachedReceipt) {
+                completedToolRowKeys.set(`${toolName}::${stableArgsStringify(pending.args)}`, pending);
+              }
 
               finalizeToolRow(pending.row, {
                 success: event.payload.result.success,
                 outcome: branchOutcome,
+                deferred: detachedReceipt && !backgroundSettle,
                 duration,
                 resultKind,
                 resultItems,
@@ -8283,10 +8303,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (downloadMeta && event.payload.result.success) {
                 pending.row.el.appendChild(createDownloadCard(downloadMeta.path, downloadMeta.size, downloadMeta.via));
               }
+              if (detachedReceipt) detachedRows.set(event.payload.toolCallId, pending);
+              else if (backgroundSettle) detachedRows.delete(event.payload.toolCallId);
               pendingRows.delete(event.payload.toolCallId);
               pendingByName.delete(toolName);
             } else {
-              this.addToolStatusBubble(toolName, branchOutcome ? (branchOutcome === 'paused' ? '⏸' : '⏹') : status, duration);
+              // 没有对应工具行（极少见）时也要诚实：受理收执不是完成。
+              this.addToolStatusBubble(toolName, detachedReceipt ? '⏳' : branchOutcome ? (branchOutcome === 'paused' ? '⏸' : '⏹') : status, duration);
             }
             this.scrollUi(chatEl);
             // The model now re-reads the tool result and plans the next step —

@@ -199,6 +199,30 @@ describe('ToolExecutionCoordinator 委派窗口写入重叠（档一）', () => 
     expect(events.indexOf('start:write_file')).toBeLessThan(events.indexOf('end:code_editor'));
   }, 5_000);
 
+  it('写的结算随完成即吐：慢委派还在飞时 write_file 的 ToolResult 已到（切片 0）', async () => {
+    const coordinator = new ToolExecutionCoordinator();
+    let delegationResolved = false;
+    const metadataFor = (name: string) => (name === 'code_editor' ? { isWrite: false } : { isWrite: true });
+    const ctx = makeContext(async (tc) => {
+      if (tc.function.name === 'code_editor') {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        delegationResolved = true;
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return ok(tc);
+    }, metadataFor);
+
+    const order: string[] = [];
+    for await (const tr of coordinator.executeStream([call('code_editor'), pathCall('write_file', 'src/a.ts')], ctx, BUDGET)) {
+      // 写早已落盘，结果就该立刻交出去——旧行为是押在读池排空后按批序吐。
+      if (tr.toolCallId === 'call_write_file') expect(delegationResolved).toBe(false);
+      order.push(tr.toolCallId);
+    }
+    expect(order[0]).toBe('call_write_file');
+    expect(order).toHaveLength(2);
+  }, 5_000);
+
   it('同路径两个写仍串行（共享 FileLockManager 排队）', async () => {
     const coordinator = new ToolExecutionCoordinator();
     let inFlight = 0;

@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.9.4
+
+**后台委派：派出去就接着干，主 agent 不再被自己的子 agent 堵住**
+
+一、委派从同步等待改成工具层 detach（档二，真瓶颈在批次屏障而非执行池）。此前委派工具必须等子引擎跑完才返回，整批工具因此在那一支上排队——主 agent 的读写、验证、整合全部空转；档一（读池与带路径写重叠）只买到墙钟，不解决「主线继续干活」。现在委派调用立刻返回受理收执（`deferred: true`），子引擎在后台继续跑，主线拿收执继续自己的 THINK 与工具调用。不做引擎状态机重写：工具一旦立刻返回，批次照常清空，回合制配对点、失败恢复批次语义、插话与 relay 拓扑全部不动。
+
+二、结果送达与终局闸。结算在工具配平点（`TurnCheckpoint` 之前）取走，作为 internal user 消息进转录 + 一条 `backgroundSettle` 的 ToolResult 事件（宿主据此把委派卡从「后台运行中」结算成真结果，不新开卡）。收尾前若还有支在飞，终局闸拦住「带着自己派出去的支收尾」——那会把后台产出永久丢在回合外、最终汇总还把没跑完的活说成完成；等待期间暂停/硬停即时打断，45 分钟活性兜底，送达后重入 THINK 让模型拿真产出重写答复。被放弃：静默放弃在飞支、或让宿主自己猜结果何时到。
+
+三、边界与回滚。同参重派按 stableSessionId 认出去在飞的那支，回来一份指向原 callId 的收执（不重复派工——两支同写一份断点存档）；relay 链成员、`detach:false`、后台支并发上限 6 走同步；`config.detachDelegations === false` 与 `PURE_DETACHED_DELEGATION=0` 是 kill switch。执行池切片 0：写结果与读池一起 race、随完成即吐（此前压到读池排空后按批次序吐，卡片空转整个窗口）。委派受理收执不进失败账、不作同轮复用锚、不当成功去重游标。提示词补一句「收执不是产出」+ Background delegation 教学（不轮询、不重派，下一步依赖产出时 `detach:false`）。
+
+验证：typecheck、lint:conventions 绿；全量 5582 例 5577 过 / 4 skip / 1 例 `Harness lesson reflector` 超时——同例在未改动的 HEAD 工作树全量中同样超时（既有跨文件抖动，单跑 4.77ms 过）；新增 detachedBranches 5 例、SubagentOrchestrator.detach 8 例、执行池切片 0 用例全绿。
+
 ## v4.9.3
 
 **工程回合编排权归还模型 + 并行委派机制包 + 直播渲染有界化**

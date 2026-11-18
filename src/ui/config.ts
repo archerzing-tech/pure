@@ -267,6 +267,13 @@ export interface PureConfig {
    */
   maxReadConcurrency?: number;
   /**
+   * 后台委派开关（2026-11-18 档二）：默认开——委派立刻返回受理收执，子任务
+   * 在后台跑，产出稍后以内部消息送达，主线同时干自己的活。显式 false 回到
+   * 同步委派（批次等它跑完）。kill switch：出问题时不必回退版本，改这一个
+   * 键即可。
+   */
+  detachDelegations?: boolean;
+  /**
    * Offline basemap tile cache size cap in MB (Settings → General). The Rust
    * fetch_map_tile evicts the oldest tiles past this byte budget.
    */

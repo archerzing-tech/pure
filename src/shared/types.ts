@@ -76,6 +76,37 @@ export interface ToolResult {
    *  →修」。与 GeneratedImage（只给 UI、LLM 永远不见）刻意相反：那是交付物，
    *  这是模型的眼睛。 */
   images?: MessageImage[];
+  /** 后台委派受理收执（2026-11-18 档二）：委派已在后台继续跑，**这不是最终
+   *  产出**。父引擎仍按普通成功结果把它配对进转录——配对契约要求每条
+   *  tool_call 都有结果，否则下一次请求 400；真实产出稍后由
+   *  DetachedBranchPort 送达为内部消息，终局前必须收齐才能 TERMINATE。
+   *  去重游标不记它：它没碰世界，同参重派是真派（编排器按 sessionId 去重）。 */
+  deferred?: true;
+}
+
+/** 已在后台跑完的一支委派（引擎从 DetachedBranchPort 取走）。 */
+export interface DetachedBranchSettlement {
+  toolCallId: string;
+  toolName: string;
+  duration: number;
+  /** 子代理的真实结算体（与同步委派的 ToolResult 同形）。 */
+  result: ToolResult;
+}
+
+/** 后台分支端口（2026-11-18 档二）：主引擎在子代理在飞时继续干活所需的
+ *  最小接口。由子代理编排器实现（它本来就在飞支账本），宿主在装配引擎
+ *  ctx 时注入一层。
+ *
+ *  为什么在工具层而不是引擎状态机：委派工具 detach 后立刻返回受理收执，
+ *  批次照常清空——回合制的配对点（TurnCheckpoint）仍是唯一稳定点，引擎
+ *  只多「取结果 / 等收齐」两件物理事。 */
+export interface DetachedBranchPort {
+  /** 还在跑的后台支数量（终局闸用；0 = 可以收尾）。 */
+  pendingCount(): number;
+  /** 取走已结算的后台结果（取即清，避免重复送达）。 */
+  takeSettled(): DetachedBranchSettlement[];
+  /** 等到至少一支结算、或超时/被取消（永不 reject：引擎按 aborted 自判）。 */
+  waitForSettlement(timeoutMs: number, signal?: AbortSignal): Promise<void>;
 }
 
 export interface ToolDefinition {
@@ -438,6 +469,11 @@ export interface EngineContext {
    *  每次工具配平点拉一次；返回空串＝无事。引擎把非空文本作为 internal
    *  user 消息插进转录，模型下一轮带着它。 */
   pullTurnParallelNudge?: () => string;
+  /** 后台委派端口（2026-11-18 档二）。设置后：每个工具配平点取走已结算的
+   *  后台支结果（作为内部消息 + ToolResult 事件送达），模型给最终答复时还有
+   *  支在飞则先等收齐再重入 THINK——「回合不能带着自己派出去的支收尾」是
+   *  物理不变量，不是教学。不设 ⇒ 旧行为（委派一律同步占住批次）。 */
+  detachedBranches?: DetachedBranchPort;
 }
 
 export interface LockManager {
@@ -732,7 +768,7 @@ export type EngineEvent =
   // "thinking" card (animation while collapsed, streaming text when expanded).
   | { type: 'ReasoningDelta'; payload: { content: string; stateId: string }; timestamp: number }
   | { type: 'StateChange'; payload: { from: AgentStateType; to: AgentStateType; stateId: string; reason?: string }; timestamp: number }
-  | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string }; timestamp: number }
+  | { type: 'ToolResult'; payload: { toolName: string; result: ToolResult; duration: number; toolCallId: string; /** 后台委派结算送达（2026-11-18 档二）：同 toolCallId 的委派卡从「后台运行中」结算成真结果，不是新执行（不新开卡、不进失败账/去重游标）。 */ backgroundSettle?: true }; timestamp: number }
   // 回合中途检查点（2026-11-09 强杀丢会话判例）：工具结果配平进消息账后
   // 发出，payload 是引擎侧此刻的完整会话消息（浅拷贝，含本轮已配对的
   // assistant/tool 行）。GUI 据此节流落盘中间态——强杀最多丢最后一个工具

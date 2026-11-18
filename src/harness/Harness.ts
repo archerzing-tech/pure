@@ -171,6 +171,9 @@ export interface HarnessConfig {
   /** 生产侧并行提醒的回合中途拉取（见 EngineContext）。宿主按回合账给词，
    *  引擎在每次工具配平点拉取并作为内部消息递话；不接 = 无此通道。 */
   pullTurnParallelNudge?: EngineContext['pullTurnParallelNudge'];
+  /** 后台委派端口（2026-11-18 档二，见 EngineContext）：宿主的子代理编排器
+   *  实现它（在飞账 / 结算队列）。不接 = 委派一律同步占住批次。 */
+  detachedBranches?: EngineContext['detachedBranches'];
   /** E1.1 lesson reflector tuning; omitted = defaults (enabled, 20/day,
    * multi-step threshold 3 tool calls). */
   reflection?: ReflectionConfig;
@@ -509,6 +512,8 @@ export class Harness {
       conventionsDelivered: this.config.conventionsDelivered,
       // 生产侧并行提醒的回合中途通道（见 EngineContext/parallelNudge）。
       pullTurnParallelNudge: this.config.pullTurnParallelNudge,
+      // 后台委派端口：配平点取结果、终局前等收齐。
+      detachedBranches: this.config.detachedBranches,
       tools: this.config.tools,
       toolsDefs: this.currentToolsDefs(),
       toolsDefsProvider: this.config.toolsDefsProvider,

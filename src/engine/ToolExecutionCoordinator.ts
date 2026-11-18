@@ -43,6 +43,10 @@ export interface ExecutedToolResult {
    *  照常收录（模型要知道这次调用没跑），但 toolErrors 过滤它（拒绝不是
    *  新失败，是旧裁决的执行；再入账会让阶梯把「拒绝」当燃料继续升级）。 */
   engineRefusal?: true;
+  /** 后台委派结算送达（2026-11-18 档二）：这条不是新执行的结果，是先前
+   *  受理收执对应的后台支跑完了。宿主按它更新已有卡（不是新开一张），
+   *  引擎不把它记进失败账 / 去重游标 / 转录配对（结果已走内部消息）。 */
+  backgroundSettle?: true;
 }
 
 export interface ToolExecutionBudget {
@@ -300,7 +304,7 @@ export class ToolExecutionCoordinator {
   ): AsyncGenerator<ExecutedToolResult, void, unknown> {
     // A read entry tags its own promise so the race loop can remove exactly
     // the entry it raced on (see the pending set below).
-    type TaggedRead = { p: Promise<TaggedRead>; tr: ExecutedToolResult };
+    type Tagged = { p: Promise<Tagged>; tr: ExecutedToolResult };
     // 带路径的写与无路径的写分两条纪律走（2026-11-18 档一，委派窗口利用）：
     // 带路径写靠共享 FileLockManager 的 per-path 写锁保安全，可以与读池重叠
     // 开跑（委派在飞时主线自己的写活不再排队）；无路径写没有锁可依，保持
@@ -323,46 +327,43 @@ export class ToolExecutionCoordinator {
     const configured = ctx.maxReadConcurrency;
     const maxInFlight =
       configured !== undefined && configured > 0 ? Math.floor(configured) : DEFAULT_MAX_READ_CONCURRENCY;
-    const pending = new Set<Promise<TaggedRead>>();
+    const pending = new Set<Promise<Tagged>>();
     let nextRead = 0;
     // 带路径写的重叠池（档一）：读池启动的同时开跑（上限 DEFAULT_MAX_WRITE_
-    // CONCURRENCY），结果按批次序在读池排空后 yield——引擎账本节奏与 UI 卡
-    // 序不变，变的只是执行的时钟重叠。同路径写由共享锁串行（per-path 写锁
-    // 排队），不同路径写与委派窗口真重叠。
-    const writeOrder: Promise<ExecutedToolResult>[] = [];
-    const pendingWrites = new Set<Promise<ExecutedToolResult>>();
+    // CONCURRENCY）。同路径写由共享锁串行（per-path 写锁排队），不同路径写
+    // 与委派窗口真重叠。
+    // 结算随完成即吐（2026-11-18 委派窗口利用切片 0）：此前写结果压到读池
+    // 排空后按批次序吐——委派在飞时主线自己写的文件早已落盘，模型却在下一
+    // 轮才看得到「写完没有」，卡片也跟着空转整个窗口。结算顺序本来就是完成
+    // 序（executeStream 上方注释），引擎按 toolCallId 配对，没有批序依赖。
+    const pendingWrites = new Set<Promise<Tagged>>();
     let nextWrite = 0;
     const fillWritePool = (): void => {
       while (nextWrite < writes.length && pendingWrites.size < DEFAULT_MAX_WRITE_CONCURRENCY) {
         const writeCall = writes[nextWrite++];
-        const p = this.executeOne(writeCall, ctx, budget, true).then((tr) => {
-          pendingWrites.delete(p);
-          return tr;
-        });
-        pendingWrites.add(p);
-        writeOrder.push(p);
+        const entry: Promise<Tagged> =
+          this.executeOne(writeCall, ctx, budget, true).then((tr) => ({ p: entry, tr }));
+        pendingWrites.add(entry);
       }
     };
     fillWritePool();
-    while (nextRead < reads.length || pending.size > 0) {
+    while (nextRead < reads.length || pending.size > 0 || nextWrite < writes.length || pendingWrites.size > 0) {
       // Top up to the cap; with cap >= reads.length this launches the whole
       // batch up front, byte-identical to the pre-cap behavior.
       while (nextRead < reads.length && pending.size < maxInFlight) {
         const call = reads[nextRead++];
         // Explicit annotation: the closure reads `entry` itself, which the
         // inference algorithm refuses to untangle on its own (TS7022).
-        const entry: Promise<TaggedRead> =
+        const entry: Promise<Tagged> =
           this.executeOne(call, ctx, budget, false).then((tr) => ({ p: entry, tr }));
         pending.add(entry);
       }
-      const { p, tr } = await Promise.race(pending);
-      pending.delete(p);
-      yield tr;
-    }
-    // 读池排空后：补满写池余量并按批次序收写结果。
-    for (const p of writeOrder) {
       fillWritePool();
-      yield await p;
+      const winner = await Promise.race([...pending, ...pendingWrites]);
+      // A settled entry leaves its own set — reads and writes race together,
+      // so the pool reports whichever actually finished first.
+      if (!pending.delete(winner.p)) pendingWrites.delete(winner.p);
+      yield winner.tr;
     }
     for (const call of pathlessWrites) {
       yield await this.executeOne(call, ctx, budget, true);
@@ -499,23 +500,17 @@ export class ToolExecutionCoordinator {
         // P0 实测：A 还拿着写锁，C 的 acquire 被 abort 后 D 立刻被授予）。
         lockHeld = true;
       }
-      try {
-        const cap = Math.min(
-          metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
-          budget.streamDeadlineMs(),
-        );
-        executed = await runWithDeadline(
-          () => ctx.tools!.execute(call, toolStop.signal),
-          raceStop.signal,
-          cap,
-          `tool ${call.function.name}`,
-          () => toolStop.abort(),
-        );
-      } finally {
-        ctx.signal?.removeEventListener('abort', forwardAbort);
-        ctx.hardStopSignal?.removeEventListener('abort', escalateHardStop);
-        clearTimeout(pauseGraceTimer);
-      }
+      const cap = Math.min(
+        metadata?.timeoutMs ?? TOOL_EXECUTION_TIMEOUT_MS,
+        budget.streamDeadlineMs(),
+      );
+      executed = await runWithDeadline(
+        () => ctx.tools!.execute(call, toolStop.signal),
+        raceStop.signal,
+        cap,
+        `tool ${call.function.name}`,
+        () => toolStop.abort(),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // 宽限到期被掐的结果要说实话：不是工具自己错，是暂停的宽限到了。
@@ -551,6 +546,15 @@ export class ToolExecutionCoordinator {
       }
     } finally {
       if (path && lockHeld) lockManager.release(path);
+      // 后台委派（2026-11-18 档二）：受理收执已交给父模型，子引擎还在后台
+      // 跑——它的中止线必须继续挂在回合信号上，否则「委派提前返回」等于
+      // 把分支变成没人能停的孤儿（暂停/Esc 都到不了它）。监听器随回合 ctx
+      // 一起被回收，分支结算后再 abort 也是一个空动作。
+      if (!executed?.deferred) {
+        ctx.signal?.removeEventListener('abort', forwardAbort);
+        ctx.hardStopSignal?.removeEventListener('abort', escalateHardStop);
+        clearTimeout(pauseGraceTimer);
+      }
     }
     // on_post_tool runs after the lock is released, on both success and
     // failure. stdout the model should see on its next THINK is appended to a
