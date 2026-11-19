@@ -53,8 +53,6 @@ export class LiveTranscriptWindow {
   private groupedTurns = 0;
   private nextTurnId = 1;
   private activeObserver: MutationObserver | null = null;
-  /** 流式期禁泊车的折叠组：回合落定（finishTurn）后交还 IO 泊车。 */
-  private readonly liveFoldGroups: HistoryGroupHandle[] = [];
   private activeWeightBytes = 0;
 
   constructor(options: LiveTranscriptWindowOptions = {}) {
@@ -99,8 +97,6 @@ export class LiveTranscriptWindow {
     if (!this.turns.includes(turn)) return;
     turn.completed = true;
     turn.host.dataset.turnState = 'complete';
-    // 回合落定：本回合的折叠组交还 IO 泊车（静止态泊车/恢复是安全形状）。
-    for (const g of this.liveFoldGroups.splice(0)) g.setParkOffscreen(true);
     this.compactHistory();
   }
 
@@ -108,7 +104,6 @@ export class LiveTranscriptWindow {
     this.activeObserver?.disconnect();
     this.activeObserver = null;
     this.activeWeightBytes = 0;
-    this.liveFoldGroups.length = 0;
     this.turns.length = 0;
     this.groups.length = 0;
     this.groupedTurns = 0;
@@ -232,7 +227,7 @@ export class LiveTranscriptWindow {
         images += el.querySelectorAll('img').length;
       }
     }
-    const group = createHistoryGroup({ scrollRoot: this.scrollRoot, parkOffscreen: false });
+    const group = createHistoryGroup({ scrollRoot: this.scrollRoot, parkOffscreen: true });
     group.setSummary(formatHistoryGroupSummary({
       startTurn: turn.id,
       endTurn: turn.id,
@@ -244,11 +239,13 @@ export class LiveTranscriptWindow {
     this.root().insertBefore(group.el, host);
     group.adopt(fold);
     this.groups.push(group);
-    // 流式期禁泊车：泊车/重挂载循环会踩 WKWebView「已画行向上滚回变空白」
-    // 的已知疾病（#chat CSS 注释同族），且高频循环直接把窗口踩卡死。回合
-    // 落定（finishTurn）后交还 IO 泊车——静止态的泊车/恢复是恢复路径验证
-    // 过的安全形状。
-    this.liveFoldGroups.push(group);
+    // 折后立即泊车：组在钉底视图的上方（视口外），先挂后泊的展开闪烁没有
+    // 观众。2026-11-19 二次修正：曾因 WKWebView「已画行向上滚回变空白」
+    // 改为流式期禁泊车，但用户快速上翻仍卡死——真凶是挂载 DOM 全量常驻
+    // （折叠只挪账不减重量）。剥图（上方）+asset src+lazy 之后，泊车/重挂
+    // 载的重 paint 源（base64 巨串与位图解码）已消失，纯文本挂载与恢复路
+    // 径同形状（实测安全），泊车回归。
+    group.park();
     // 权重按余下节点精确重算：增量估算的累计误差在这里归零。
     this.activeWeightBytes = keep.reduce((sum, n) => sum + estimateNodeBytes(n), 0);
   }

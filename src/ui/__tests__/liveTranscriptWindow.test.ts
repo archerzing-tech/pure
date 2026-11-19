@@ -138,7 +138,7 @@ function appendHeavyChild(turn: { host: HTMLElement }, chars = 250): void {
 }
 
 describe('LiveTranscriptWindow 体量折叠（单回合巨物）', () => {
-  it('越帽把活跃 turn 的老节点折进泊车组，尾部留挂', () => {
+  it('越帽把活跃 turn 的老节点折进泊车组（折后即泊），尾部留挂', () => {
     const window = new LiveTranscriptWindow(HEAVY);
     const turn = window.startTurn('构建一个大项目');
     for (let i = 0; i < 10; i++) appendHeavyChild(turn);
@@ -147,6 +147,10 @@ describe('LiveTranscriptWindow 体量折叠（单回合巨物）', () => {
 
     const groups = window.getGroupHandles();
     expect(groups.length).toBe(1);
+    // 折后立即泊车（组在钉底视图上方，挂了也没观众）：body 空、内容在
+    // parked 里，mount() 可完整恢复——2026-11-19 泊车回归。
+    expect(groups[0]!.body.childElementCount).toBe(0);
+    groups[0]!.mount();
     expect(groups[0]!.body.childElementCount).toBe(6);
     // 尾部 4 节点留挂在活跃 turn 里——直播流正在写的气泡在文档上。
     expect(turn.host.childElementCount).toBe(4);
