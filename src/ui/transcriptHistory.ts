@@ -276,10 +276,20 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
     }, parkIdleMs);
   };
 
+  // 分级虚拟化的最后一块（2026-11-19 用户提案）：泊车不塌高度。泊车卸内容
+  // 后组体塌成一行摘要，滚动几何大幅摆动——快速 fling 时摆幅峰值就是合成器
+  // 卡死的触发面。泊车前把实测内容高记到 body 的 min-height 占位（滚动几何
+  // 稳定），挂载时清除。卸载的行不画、占位撑高度——绕开 WKWebView
+  // content-visibility 的空白行疾病（不引入该属性）。
   const park = (): void => {
+    if (!body.style.minHeight) {
+      const h = body.getBoundingClientRect().height;
+      if (h > 1) body.style.minHeight = `${Math.round(h)}px`;
+    }
     while (body.firstChild) parked.push(body.removeChild(body.firstChild));
   };
   const mount = (): void => {
+    body.style.minHeight = '';
     while (parked.length > 0) body.appendChild(parked.shift()!);
   };
 
