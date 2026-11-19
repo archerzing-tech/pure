@@ -573,7 +573,11 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
   }
 
   private shouldDetach(args: Record<string, unknown>): boolean {
-    if (this.config.detachDelegations !== true) return false;
+    // opt-out 语义（2026-11-19 修正）：CodingAgent/chat.ts 的注释都写「只在
+    // 显式 false 时关闭」，但旧判 `!== true` 让 config 缺省（undefined，GUI
+    // config.json 无此键的默认形状）静默变关——run7 实测整条后台委派被关死，
+    // GUI 委派全走同步。改 `=== false` 才关：缺省=开，与三面宿主注释一致。
+    if (this.config.detachDelegations === false) return false;
     if (args.detach === false) return false;
     if (args.relay !== undefined) return false;
     if (this.detachedInFlight.size >= SubagentOrchestrator.MAX_DETACHED_BRANCHES) return false;

@@ -101,6 +101,27 @@ async function waitForSettlement(orch: SubagentOrchestrator, timeoutMs = 3_000) 
 }
 
 describe('委派后台执行（detach）', () => {
+  // 2026-11-19 GUI 默认路径修复：config.json 无此键（undefined）时旧判
+  // `!== true` 把整条后台委派关死（run7 实测同步委派）——缺省=开。
+  it('config 缺省（undefined）= 默认开：受理收执而非同步等待', async () => {
+    const orch = new SubagentOrchestrator({
+      llm: delayedLLM('research findings'),
+      parentTools: stubAdapter,
+      parentToolsDefs: [],
+      defaultBudget: BUDGET,
+      progress: undefined,
+      stateStore: undefined,
+      parentSessionId: 'parent-1',
+    });
+    orch.register(def('test_researcher'));
+    const receipt = await orch.execute(call('test_researcher', { prompt: 'research X' }));
+    expect(receipt.deferred).toBe(true);
+    expect(orch.pendingCount()).toBe(1);
+    const settled = await waitForSettlement(orch);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.toolName).toBe('test_researcher');
+  });
+
   it('立刻返回受理收执：deferred 标记 + 明说不是产出，支仍在跑', async () => {
     const orch = makeOrchestrator({ detach: true });
     const toolCall = call('test_researcher', { prompt: 'research X' });
