@@ -11,6 +11,7 @@ import {
   shouldShowOutline,
   wireTranscriptOutline,
 } from '../transcriptOutline';
+import { setPinnedToBottom } from '../scrollPin';
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -159,6 +160,65 @@ describe('wireTranscriptOutline', () => {
     expect(rail.hidden).toBe(true);
     await flushMeasure();
     expect(rail.querySelectorAll('.transcript-ruler-mark')).toHaveLength(0);
+  });
+
+  it('scrolls without re-measuring ticks, then measures once the scroll settles', async () => {
+    // 2026-11-19 滚动路径去强制重排：滚动处理只读 scrollTop 并写滑块
+    // transform；刻度位置在滚动中不变，重量只会在流式写入后逼一次整列重排。
+    const { chat, view } = buildTranscript([200, 1200, 2100]);
+    wireTranscriptOutline(chat);
+    const track = view.querySelector<HTMLElement>('.transcript-ruler-track')!;
+    stubSize(track, { top: 20, left: 100, height: 600, width: 20 }, { clientHeight: 600 });
+    // 轨道尺寸是接好线之后才桩的：追加一个非回合节点触发一次 refresh，让缓存
+    // 度量拿到轨道高度（真实页面上布局先于首帧 refresh，没这一步）。
+    chat.appendChild(document.createElement('div'));
+    await flushMeasure();
+    expect(track.querySelectorAll('.transcript-ruler-mark')).toHaveLength(3);
+
+    let rowReads = 0;
+    for (const row of chat.querySelectorAll<HTMLElement>('.bubble-row.user')) {
+      const original = row.getBoundingClientRect.bind(row);
+      row.getBoundingClientRect = () => { rowReads++; return original(); };
+    }
+
+    // 未钉底 = 用户在看历史，停止后才会重量刻度。
+    setPinnedToBottom(chat, false);
+    chat.scrollTop = 1500;
+    chat.dispatchEvent(new Event('scroll'));
+    await new Promise(resolve => setTimeout(resolve, 40));
+    // 滚动帧里一次行盒子都不读。
+    expect(rowReads).toBe(0);
+    // 滑块跟上了，而且是 transform（写 top 会让定位上下文每个滚动帧失效布局）。
+    const thumb = track.querySelector<HTMLElement>('.transcript-ruler-thumb')!;
+    // 1500/2200 走完 440px 行程 → 300px。
+    expect(thumb.style.transform).toBe('translateY(300px)');
+    expect(thumb.style.top).toBe('');
+
+    // 停手 180ms 后重量一轮（这里等过 350ms 的刷新节流窗口）。
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(rowReads).toBeGreaterThan(0);
+    // 行盒是静态桩（不随 scrollTop 平移），重量后点数不做精确断言。
+    expect(track.querySelectorAll('.transcript-ruler-mark').length).toBeGreaterThan(0);
+  });
+
+  it('never re-measures while the transcript is pinned to the live tail', async () => {
+    const { chat, view } = buildTranscript([200, 1200, 2100]);
+    wireTranscriptOutline(chat);
+    const track = view.querySelector<HTMLElement>('.transcript-ruler-track')!;
+    stubSize(track, { top: 20, left: 100, height: 600, width: 20 }, { clientHeight: 600 });
+    chat.appendChild(document.createElement('div'));
+    await flushMeasure();
+
+    let rowReads = 0;
+    for (const row of chat.querySelectorAll<HTMLElement>('.bubble-row.user')) {
+      const original = row.getBoundingClientRect.bind(row);
+      row.getBoundingClientRect = () => { rowReads++; return original(); };
+    }
+    // 钉底跟直播：上方内容高度不变，旧刻度的坐标依旧成立。
+    setPinnedToBottom(chat, true);
+    chat.dispatchEvent(new Event('scroll'));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(rowReads).toBe(0);
   });
 
   it('wires a transcript only once', () => {
