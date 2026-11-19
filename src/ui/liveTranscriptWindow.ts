@@ -53,6 +53,8 @@ export class LiveTranscriptWindow {
   private groupedTurns = 0;
   private nextTurnId = 1;
   private activeObserver: MutationObserver | null = null;
+  /** 流式期禁泊车的折叠组：回合落定（finishTurn）后交还 IO 泊车。 */
+  private readonly liveFoldGroups: HistoryGroupHandle[] = [];
   private activeWeightBytes = 0;
 
   constructor(options: LiveTranscriptWindowOptions = {}) {
@@ -97,6 +99,8 @@ export class LiveTranscriptWindow {
     if (!this.turns.includes(turn)) return;
     turn.completed = true;
     turn.host.dataset.turnState = 'complete';
+    // 回合落定：本回合的折叠组交还 IO 泊车（静止态泊车/恢复是安全形状）。
+    for (const g of this.liveFoldGroups.splice(0)) g.setParkOffscreen(true);
     this.compactHistory();
   }
 
@@ -104,6 +108,7 @@ export class LiveTranscriptWindow {
     this.activeObserver?.disconnect();
     this.activeObserver = null;
     this.activeWeightBytes = 0;
+    this.liveFoldGroups.length = 0;
     this.turns.length = 0;
     this.groups.length = 0;
     this.groupedTurns = 0;
@@ -160,7 +165,11 @@ export class LiveTranscriptWindow {
 
   /** 活跃 turn 的体量观察器：直播流对 turn host 的每一次插入/文本增长都
    *  折算成估算字节并送 noteLiveWeight。观察器回调本就按微任务合批，增量
-   *  估算只对新增子树做 textContent/img 统计，全程 O(内容总量)。 */
+   *  估算只对新增子树做 textContent/img 统计，全程 O(内容总量)。
+   *  不开 characterDataOldValue（流式 tick 每拍强制旧值拷贝是卡顿源，
+   *  2026-11-19 判例）：文本节点用 WeakMap 记上次长度算增量。 */
+  private readonly lastSeenTextLen = new WeakMap<Node, number>();
+
   private attachWeightObserver(host: HTMLElement): void {
     this.activeObserver?.disconnect();
     this.activeWeightBytes = 0;
@@ -170,15 +179,19 @@ export class LiveTranscriptWindow {
       for (const m of muts) {
         if (m.type === 'characterData') {
           const nv = m.target.textContent?.length ?? 0;
-          const ov = m.oldValue?.length ?? 0;
+          const ov = this.lastSeenTextLen.get(m.target) ?? 0;
           delta += Math.max(0, nv - ov) * 2;
+          this.lastSeenTextLen.set(m.target, nv);
         } else {
-          for (const n of m.addedNodes) delta += estimateNodeBytes(n);
+          for (const n of m.addedNodes) {
+            delta += estimateNodeBytes(n);
+            if (n.nodeType === Node.TEXT_NODE) this.lastSeenTextLen.set(n, n.textContent?.length ?? 0);
+          }
         }
       }
       if (delta > 0) this.noteLiveWeight(delta);
     });
-    this.activeObserver.observe(host, { childList: true, subtree: true, characterData: true, characterDataOldValue: true });
+    this.activeObserver.observe(host, { childList: true, subtree: true, characterData: true });
   }
 
   /**
@@ -205,10 +218,21 @@ export class LiveTranscriptWindow {
       if (n.nodeType === Node.ELEMENT_NODE) {
         const el = n as Element;
         toolCalls += el.querySelectorAll('.tool-row-row').length;
+        // 剥重物（2026-11-19 窗口卡死判例）：折叠组若带 base64 截图挂载，文
+        // 本虽轻、位图解码与合成层照旧压垮 WKWebView。原图在盘上与快照里都
+        // 在——DOM 里换成轻占位，重开会话走恢复路径可看原图。
+        for (const img of el.querySelectorAll('img')) {
+          const src = img.getAttribute('src') ?? '';
+          if (!src.startsWith('data:')) continue;
+          const note = document.createElement('span');
+          note.className = 'folded-image-note';
+          note.textContent = `📷 截图已存盘（${Math.round(src.length / 1365)} KB），重开会话可看原图`;
+          img.replaceWith(note);
+        }
         images += el.querySelectorAll('img').length;
       }
     }
-    const group = createHistoryGroup({ scrollRoot: this.scrollRoot, parkOffscreen: true });
+    const group = createHistoryGroup({ scrollRoot: this.scrollRoot, parkOffscreen: false });
     group.setSummary(formatHistoryGroupSummary({
       startTurn: turn.id,
       endTurn: turn.id,
@@ -220,6 +244,11 @@ export class LiveTranscriptWindow {
     this.root().insertBefore(group.el, host);
     group.adopt(fold);
     this.groups.push(group);
+    // 流式期禁泊车：泊车/重挂载循环会踩 WKWebView「已画行向上滚回变空白」
+    // 的已知疾病（#chat CSS 注释同族），且高频循环直接把窗口踩卡死。回合
+    // 落定（finishTurn）后交还 IO 泊车——静止态的泊车/恢复是恢复路径验证
+    // 过的安全形状。
+    this.liveFoldGroups.push(group);
     // 权重按余下节点精确重算：增量估算的累计误差在这里归零。
     this.activeWeightBytes = keep.reduce((sum, n) => sum + estimateNodeBytes(n), 0);
   }

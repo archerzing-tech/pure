@@ -209,6 +209,8 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
 
   // patch 账（外科手术式：引用没换就跳过）
   let renderedActivity: SessionAgentActivity | null = null;
+  /** 上次整段 patch 的内容版本键（见 patchCurrent 守卫）。 */
+  let renderedRevKey = '';
   let renderedOutputLen = 0;
   let renderedTrace: SessionAgentActivity['toolTrace'] | undefined = undefined;
   let renderedChipsKey = '';
@@ -320,7 +322,15 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     chips.hidden = orderedAgents(activities).length === 0;
     if (!cur) return;
     buildChips();
-    if (cur === renderedActivity) return; // 引用没换 = 无变更，零 DOM
+    // 版本键守卫（2026-11-19 委派卡顿判例）：chat.ts 每个事件都 merge 出新
+    // 对象，引用相等守卫必然失守——5-20Hz 事件率下整段 header/chips 全量重
+    // 渲染就是工作台开着的卡顿源。改按内容版本键判定；计时器每拍照刷（廉
+    // 价），其余零 DOM。renderedActivity=null 的三处强制重 patch 不受影响
+    // （引用不同自然走过守卫）。
+    const rev = `${cur.lastUpdatedAt ?? 0}|${cur.sequence ?? -1}|${cur.output?.length ?? 0}|${cur.state ?? ''}|${cur.lifecycle ?? ''}`;
+    renderTimes(cur);
+    if (rev === renderedRevKey && cur === renderedActivity) return;
+    renderedRevKey = rev;
 
     // 头部
     titleEl.textContent = cur.agentName + (cur.instanceNo && cur.instanceNo > 1 ? `（${cur.instanceNo}）` : '');

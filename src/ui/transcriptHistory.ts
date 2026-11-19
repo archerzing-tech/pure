@@ -218,9 +218,16 @@ export interface HistoryGroupHandle {
   park(): void;
   mount(): void;
   disconnect(): void;
+  /** 泊车开关（2026-11-19 直播折叠判例）：流式回合中泊车/重挂载循环会踩
+   *  WKWebView「已画行向上滚回变空白」的已知疾病（#chat 注释同族），直播
+   *  侧折叠组在回合落定前保持挂载、落定后交还 IO 泊车。 */
+  setParkOffscreen(v: boolean): void;
 }
 
 export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGroupHandle {
+  // 泊车开关可变（2026-11-19 直播折叠判例）：流式回合落定前禁泊车，落定后
+  // 交还 IO——见 HistoryGroupHandle.setParkOffscreen 注释。
+  let parkOffscreen = options.parkOffscreen === true;
   const details = document.createElement('details');
   details.className = 'transcript-history-group';
   details.open = true;
@@ -294,7 +301,7 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
         // Park again when the user collapsed the group, or when it finished
         // building after it had already been scrolled out of view.
         if (!details.open) park();
-        else if (options.parkOffscreen && !inViewport) armParkTimer();
+        else if (parkOffscreen && !inViewport) armParkTimer();
       });
       renderChain = run.then(() => {}, () => {});
     } else if (!renderer) {
@@ -327,7 +334,7 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
             mount();
             void renderNow();
           }
-        } else if (options.parkOffscreen) {
+        } else if (parkOffscreen) {
           // Don't park mid-fling — the boundary would ping-pong against the
           // mount side. The timer re-checks distance AND fling idleness.
           armParkTimer();
@@ -374,6 +381,14 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
     },
     park,
     mount,
+    setParkOffscreen(v) {
+      parkOffscreen = v;
+      if (!parkOffscreen) {
+        // 禁泊车 = 直播流需要内容保持挂载：撤掉待泊定时器，若已泊则先挂回。
+        cancelParkTimer();
+        if (!details.open) mount();
+      }
+    },
     disconnect() {
       disconnected = true;
       cancelParkTimer();

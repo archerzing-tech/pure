@@ -1880,6 +1880,17 @@ body.window-maximized .win-resize-zone { display: none; }
   list-style: none;
   user-select: none;
 }
+
+/* 直播折叠组里剥掉 base64 截图后的轻占位（2026-11-19 窗口卡死判例）：
+   原图在盘上与快照里，重开会话走恢复路径可看原图。 */
+.folded-image-note {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--bg-card) 80%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+}
 .transcript-history-group-summary::-webkit-details-marker { display: none; }
 .transcript-history-group-summary::before {
   content: '›';
