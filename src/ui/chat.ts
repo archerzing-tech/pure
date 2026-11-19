@@ -6201,7 +6201,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         maxReadConcurrency: config.maxReadConcurrency,
         // 后台委派（2026-11-18 档二）：默认开，config.detachDelegations ===
         // false 时退回同步委派（kill switch，不必回退版本）。
-        detachDelegations: config.detachDelegations,
+        detachDelegations: config.detachDelegations !== false,
         // 下层 AGENTS.md 的引擎侧通路：模型真读了哪个文件，那个目录的规则
         // 就进下一轮（请求文本里的路径提示仍是提前量）。conventionsDelivered
         // 是会话级「已进转录」账，跨轮复用后长会话不重复注入同一份规则。
