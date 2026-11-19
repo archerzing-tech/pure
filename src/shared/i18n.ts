@@ -1237,6 +1237,11 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.error': '错误：{msg}',
     'chat.newContent': '↓ 有新内容',
     'chat.newContentHint': '有新内容到达，点击回到最新',
+    // 左栏对话大纲刻度尺（transcriptOutline.ts）
+    'chat.outline': '对话大纲',
+    'chat.outline.track': '点击刻度跳到该轮，点空白处按比例定位',
+    'chat.outline.top': '回到开头',
+    'chat.outline.bottom': '回到最新',
     'session.restoring': '正在加载会话…',
     'session.loading.history': '正在调取历史记录…',
 
@@ -2650,6 +2655,11 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.error': 'Error: {msg}',
     'chat.newContent': '↓ New content',
     'chat.newContentHint': 'New content arrived — click to return to the latest',
+    // Left-rail conversation outline (transcriptOutline.ts)
+    'chat.outline': 'Conversation outline',
+    'chat.outline.track': 'Click a tick to jump to that turn; click empty track to scrub',
+    'chat.outline.top': 'Back to the beginning',
+    'chat.outline.bottom': 'Back to the latest',
     'session.restoring': 'Loading session…',
     'session.loading.history': 'Loading history…',
 

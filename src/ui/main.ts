@@ -48,6 +48,7 @@ import { createRestoredPlanCard } from './plan';
 import { renderArtifactCards } from './artifactCards';
 import { attachPlanPauseActions } from './planPauseActions';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom } from './scrollPin';
+import { wireTranscriptOutline } from './transcriptOutline';
 import { initPathLinks, linkifyPaths, openPathLink } from './pathLink';
 import { setupWindowChrome } from './windowChrome';
 import { setupResizeZones } from './resizeZones';
@@ -1453,6 +1454,9 @@ async function renderSessionMessages(snapshot: SessionSnapshotV2, hostEl?: HTMLE
   // one-shot restore scroll joins the shared rAF budget instead of forcing a
   // synchronous full-transcript layout at the end of the restore.
   wireScrollPin(scrollContainer);
+  // 恢复出来的长会话一打开就该有左栏大纲（不必等到下一次 send）：刻度尺自己
+  // 按 DOM 量刻度，恢复期间逐块追加的 mutation 会驱动它重测。
+  wireTranscriptOutline(scrollContainer);
   // Loading notice while the transcript replays: a long session restores
   // bubble-by-bubble with rAF yields (seconds), so without feedback the app
   // looks frozen. Removed in the finally below on success or failure.

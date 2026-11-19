@@ -162,6 +162,7 @@ import type { PermissionMode, PermissionRequestHandler, PermissionRequestInfo, P
 import type { SessionAgentActivity } from './store';
 import { createOptimizeCard } from './optimizeCard';
 import { LiveTranscriptWindow, type LiveTurnHandle } from './liveTranscriptWindow';
+import { wireTranscriptOutline } from './transcriptOutline';
 import { setInlineCardHost } from './inlineCard';
 import { createPathRepairNote } from './pathRepairNote';
 import { resolveInterruptedDelegations } from '../shared/detachedResume';
@@ -450,50 +451,6 @@ function showNewContentHint(chatEl: HTMLElement): void {
 export function hideNewContentHint(): void {
   scrollHintBtn?.remove();
   scrollHintBtn = null;
-}
-
-// ── 「回到两端」箭头 ──
-// 一键跳转对话两端（2026-11-19 用户定案，互斥双向箭头）：深处显 ↑ 回顶端，
-// 近顶显 ↓ 回底端（最新）；点击都是单次写 scrollTop 直跳对应端——途中不
-// 与组交叉，中间内容不挂载不绘制（巨幅 delta 自动标记 fling，沿途组保持
-// 摘要条）。深度阈值 1200px ≈ 一屏半，浅中带（400-1200）保持当前箭头——
-// 天然滞回防抖。
-const BACK_TO_TOP_DEPTH_PX = 1200;
-const NEAR_TOP_DEPTH_PX = 400;
-
-/** Idempotent per-transcript wiring: deep-scroll reveals the jump-to-top
- *  pill; clicking jumps instantly to the transcript head. */
-export function wireBackToTopHint(chatEl: HTMLElement): void {
-  if (chatEl.dataset.backToTopWired === '1') return;
-  chatEl.dataset.backToTopWired = '1';
-  // 互斥双向箭头（2026-11-19 用户定案）：深处显 ↑ 回顶端，近顶显 ↓ 回底端；
-  // 点击都是单次写 scrollTop 直跳对应端——途中不与组交叉，中间内容不挂载
-  // 不绘制（巨幅 delta 自动标记 fling，沿途组保持摘要条）。两阈值之间
-  // （400-1200px 浅中带）保持当前箭头不动——天然滞回防抖。
-  let arrowDir: '' | 'up' | 'down' = '';
-  let arrowBtn: HTMLButtonElement | null = null;
-  chatEl.addEventListener('scroll', () => {
-    const st = chatEl.scrollTop;
-    let dir: 'up' | 'down' = arrowDir === '' ? (st >= BACK_TO_TOP_DEPTH_PX ? 'up' : 'down') : arrowDir;
-    if (st >= BACK_TO_TOP_DEPTH_PX) dir = 'up';
-    else if (st <= NEAR_TOP_DEPTH_PX) dir = 'down';
-    if (dir === arrowDir) return;
-    arrowDir = dir;
-    if (!arrowBtn) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'back-to-top-hint';
-      btn.setAttribute('aria-label', '回到对话两端');
-      btn.addEventListener('click', () => {
-        chatEl.scrollTop = arrowDir === 'up' ? 0 : chatEl.scrollHeight;
-      });
-      document.getElementById('chat-view')?.appendChild(btn);
-      arrowBtn = btn;
-    }
-    arrowBtn.textContent = dir === 'up' ? '↑' : '↓';
-    arrowBtn.title = dir === 'up' ? '回到顶端' : '回到底端（最新）';
-    arrowBtn.setAttribute('aria-label', arrowBtn.title);
-  }, { passive: true });
 }
 
 /** Idempotent per-transcript wiring: bridges scrollPin observers → hint UI.
@@ -4885,7 +4842,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
-    wireBackToTopHint(chatEl);
+    // 左栏对话大纲刻度尺（2026-11-19 用户提案）：按回合打点、点节点直达锚点，
+    // 两端回开头 / 最新——替代原先右下角的双向箭头。
+    wireTranscriptOutline(chatEl);
     // 设置 agent 化（2026-11-01）：回合边界活检盘上 config.json——agent 上一
     // 回合用文件工具改的设置，本回合装配就生效（热生效，不重启）。
     await refreshConfigFromFile();

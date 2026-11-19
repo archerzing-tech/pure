@@ -1864,6 +1864,11 @@ body.window-maximized .win-resize-zone { display: none; }
    aid the user can fold away — never a place history hides. */
 .transcript-history-group {
   width: 100%;
+  /* 不许被列 flex 压扁（2026-11-19 截图判例）：转写宿主是 flex column，
+     会话一长就要收缩子项；本组带 overflow:hidden，自动最小高度按 0 算，
+     于是整组被压成 2px 边框——摘要和占位高度一起消失。组永远是内容尺寸，
+     溢出交给 #chat 滚。 */
+  flex: 0 0 auto;
   border: 1px solid var(--border-light);
   border-radius: 12px;
   background: color-mix(in srgb, var(--bg-card, #fff) 98%, var(--accent-soft));
@@ -11118,33 +11123,116 @@ button svg,
   transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
 }
 
-/* 一键返回开头（2026-11-19 用户诉求）：深翻时浮现，点击瞬时跳顶（途中不
-   挂载不绘制中间内容）。位置=右下 FAB（行业标准回到顶部形态）：不遮居中
-   阅读内容、与底部居中的 ↓有新内容 pill 错开、靠近滚动操作的手位。 */
-.back-to-top-hint {
+/* ── 左栏对话大纲刻度尺（2026-11-19 用户提案）──
+   替代原右下角双向箭头：会话超过两屏时在内容左侧长出一把尺子，回合为刻度,
+   两端是「开头 / 最新」。定位与显隐由 transcriptOutline.ts 按 #chat 的实测
+   盒子写 left/top/height（挂在 #chat-view 上才不会被内容滚走），这里只管长相。 */
+.transcript-ruler {
   position: absolute;
-  right: 18px;
-  bottom: 96px;
-  width: 40px;
-  height: 40px;
-  z-index: 5;
+  width: 20px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+  /* 阅读优先（2026-11-19 用户定调）：默认只留一丝痕迹，不跟正文抢注意力；
+     鼠标进到尺子上再亮起来。竖起时也不做位移动画，避免余光里“抖”。 */
+  opacity: 0.75;
+  transition: opacity 0.18s var(--ease-out);
+}
+.transcript-ruler:hover,
+.transcript-ruler:focus-within {
+  opacity: 1;
+}
+.transcript-ruler[hidden] {
+  display: none;
+}
+.transcript-ruler-cap {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
-  color: var(--accent);
-  font: 600 16px var(--font-sans);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: 600 11px/1 var(--font-sans);
   cursor: pointer;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
-  user-select: none;
-  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
+  opacity: 0.45;
+  transition: opacity 0.15s var(--ease-out), color 0.15s var(--ease-out), background 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
 }
-.back-to-top-hint:hover {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  transform: translateY(-2px);
+.transcript-ruler-cap:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-card);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.transcript-ruler-track {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  cursor: pointer;
+}
+/* 尺子的主干：一条 1px 竖线，刻度从它向右伸出来。 */
+.transcript-ruler-track::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-light) 85%, transparent);
+}
+.transcript-ruler-thumb {
+  position: absolute;
+  left: 7px;
+  width: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  pointer-events: none;
+  transition: background 0.15s var(--ease-out);
+}
+.transcript-ruler:hover .transcript-ruler-thumb {
+  background: color-mix(in srgb, var(--accent) 58%, transparent);
+}
+.transcript-ruler-mark {
+  position: absolute;
+  left: 11px;
+  width: 8px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-tertiary) 40%, transparent);
+  transform: translateY(-50%);
+  transition: width 0.12s var(--ease-out), background 0.12s var(--ease-out);
+}
+/* 尺子被 hover 时整排刻度才提亮一档：看正文时它们是背景，要用时才浮现。 */
+.transcript-ruler:hover .transcript-ruler-mark {
+  background: color-mix(in srgb, var(--text-tertiary) 82%, transparent);
+}
+.transcript-ruler:hover .transcript-ruler-mark:hover {
+  width: 15px;
+  background: var(--accent);
+}
+/* 折叠组刻度比单轮刻度更短更淡：老历史是按组给的粗粒度节点。 */
+.transcript-ruler-mark.is-group {
+  width: 5px;
+  opacity: 0.5;
+}
+.transcript-ruler-mark.is-group:hover {
+  width: 12px;
+  opacity: 1;
+}
+/* 窄窗里 #chat 的左右内边距只有 14px，尺子会压到正文——直接不给看。 */
+@media (max-width: 720px) {
+  .transcript-ruler {
+    display: none !important;
+  }
 }
 
 .new-content-hint:hover {
