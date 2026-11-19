@@ -899,18 +899,35 @@ body.window-maximized .win-resize-zone { display: none; }
   display: none !important;
 }
 
+/* 子 agent 工作台：从右侧滑入的覆盖层（2026-11-19 用户定调：转场要平滑）。
+   旧做法是 flex 宽度 0%↔100%：对话列宽度每帧都在变，长转写跟着每帧重排，
+   切回来时肉眼可见的顿挫就是它；而且 #chat-view 的 width 在 0↔auto 之间根本
+   不插值（靠 #agent-view 收窄让位），节奏也不可控。改成绝对定位覆盖 +
+   transform：对话列尺寸全程不变，转场只走合成器。 */
 #agent-view {
-  width: 0%;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  /* 绝对定位已按 view-container 的 padding-box 对齐，负 margin 那套不再需要
+     （上方 #agent-view 的 padding-top: 40px 依然给透明标题栏留位）。 */
+  margin-top: 0;
+  width: 100%;
   flex-shrink: 0;
   background: var(--bg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width 0.4s var(--ease-out);
+  transform: translateX(100%);
+  /* 收起后不参与命中测试与绘制；滑出动画期间保持可见，结束后才隐藏。 */
+  visibility: hidden;
+  will-change: transform;
+  transition: transform 0.32s var(--ease-out), visibility 0s linear 0.32s;
 }
 
 #agent-view.expanded {
-  width: 100%;
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.32s var(--ease-out), visibility 0s;
 }
 
 .agent-wb-header {

@@ -3375,6 +3375,16 @@ export class ChatController {
       host.hidden = true;
       return;
     }
+    // 工作台全屏盖住对话期间不画 rail（2026-11-19 用户定调：不显示的页面停
+    // 渲染）：卡片的 DOM 更新挂起，只把快照喂给工作台（它开着，需要新数据）。
+    // 关闭时由 AgentWorkbenchHooks.onClosed 让可见会话在关闭后再补画一次，
+    // 挂起期间到达的活动不会丢。
+    const workbench = agentWorkbench();
+    if (workbench?.isVisible()) {
+      host.hidden = true;
+      workbench.sync(this.agentActivities, { historical: this.agentActivityHistorical, sessionId: this.sessionId });
+      return;
+    }
     if (this.agentActivityPanel && !this.agentActivityPanel.el.isConnected) {
       // Another session mounted over ours while we were hidden — reattach the
       // SAME panel (its per-agent animation state is still current).

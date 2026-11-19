@@ -7,28 +7,33 @@ import { t } from '../shared/i18n';
  * Agent 工作台（2026-11-12 设计定稿 docs/agent-workbench-2026-11.md §3）：
  * 多 agent 协作的整页视图。右侧悬浮卡/委派卡点击进入，Back/Esc 切回。
  *
- * 页面机制照抄 #settings-view：flex 同排 width:0% → .expanded 100%，
- * chat DOM 不卸载、流式照常写进被挤压的 DOM（settings 已验证此路无损）。
+ * 页面机制（2026-11-19 改）：从右侧滑入的绝对定位覆盖层（transform 0.32s），
+ * 不再挤压 #chat-view——对话列宽度全程不变，长转写不跟着每帧重排；chat DOM
+ * 不卸载，流式照常写进被覆盖的 DOM。关闭时等工作台滑出完成再把 rail 放回。
  *
  * 性能契约（§3.5，硬约束）：
  * - 打开零 I/O：只读内存里的 SessionAgentActivity 快照；
  * - 外科手术式 patch：对象引用即变更信号（mergeAgentActivity 变更必产新
  *   对象、陈旧必返旧对象），引用没换就整段跳过；trace ≤20 行全量小重建；
  *   output 增量 append 文本节点；禁止 rail 的 replaceChildren 全列重建；
- * - 全开（chat 被挤到 0 宽不可见）时挂起 chat 流式 DOM 渲染（markdown.ts
- *   的 renderGate），数据照收、关闭后下一拍追平——推迟不丢弃；
+ * - 全开（工作台完全覆盖对话）时挂起 chat 流式 DOM 渲染（markdown.ts
+ *   的 renderGate），数据照收、关闭后下一拍追平——推迟不丢弃；rail 卡片
+ *   的 DOM 更新同样挂起（chat.mountAgentActivityPanel 早退），关闭后补画一次；
  * - 1s 计时器仅打开时跑，关闭即停；产出追加靠事件驱动不轮询。
  */
 
 export interface AgentWorkbenchHooks {
-  /** 打开工作台前若设置页开着，先收起它（两个整页视图互斥，同占
-   *  view-container 的 squeeze 机制）。由 main.ts 注入。 */
+  /** 打开工作台前若设置页开着，先收起它（两个整页视图互斥）。由 main.ts 注入。 */
   requestCloseSettings?: () => void;
   /** 委派产出全文（2026-11-12 用户定案：对话委派卡=主要内容摘要，
    *  工作台=详情页显示全部——截断后踢去委派卡是死胡同反模式）。实现按
    *  callId 从活会话转写取委派 tool result 原文；未命中（历史会话转写
    *  不在内存等）返回 null，工作台回退 2000 字符存档镜像并如实提示。 */
   getFullOutput?: (callId: string) => string | null;
+  /** 关闭后回调（2026-11-19）：工作台全屏盖住对话期间，可见会话的 rail
+   *  DOM 更新被 chat.mountAgentActivityPanel 挂起，关闭时靠这个钩子让可见
+   *  会话补画一次。由 main.ts 注入。 */
+  onClosed?: () => void;
 }
 
 export interface AgentWorkbenchHandle {
@@ -217,6 +222,57 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
 
   const chatView = document.getElementById('chat-view');
 
+  // ── 关闭时的 rail 放回时机（2026-11-19 真机反馈）──
+  // rail（#agent-activity-host）是绝对定位的浮层，压在对话列右侧。关闭工作台
+  // 时立刻解开隐藏，卡片会先浮在还没展开的对话区上——切回主界面看到的顺序
+  // 变成「rail 卡先出现、正文后到」。改成等页面切换的宽度过渡走完再放回。
+  //
+  // 等的是 #agent-view 的 transform（2026-11-19 改为覆盖层滑入/滑出，见
+  // styles.css 的 #agent-view 段）：它是唯一在真正插值的属性。过渡禁用/后台
+  // 标签页时用同长度定时器兜底，时长读实测值。
+  let railRevealTimer: number | null = null;
+  let railRevealWaiter: ((e: Event) => void) | null = null;
+
+  const panelSwitchDurationMs = (): number => {
+    if (typeof getComputedStyle !== 'function') return 320;
+    const first = Number.parseFloat(getComputedStyle(view).transitionDuration || '');
+    return Number.isFinite(first) ? Math.max(0, first) * 1000 : 320;
+  };
+
+  const cancelPendingRailReveal = (): void => {
+    if (railRevealTimer !== null) {
+      window.clearTimeout(railRevealTimer);
+      railRevealTimer = null;
+    }
+    if (railRevealWaiter) view.removeEventListener('transitionend', railRevealWaiter);
+    railRevealWaiter = null;
+  };
+
+  const revealRail = (): void => {
+    cancelPendingRailReveal();
+    // 过渡期间又被重新打开（或换会话重挂载）：rail 必须继续让位。
+    if (visible) return;
+    document.getElementById('agent-activity-host')?.classList.remove('wb-chrome-hidden');
+  };
+
+  const scheduleRailReveal = (): void => {
+    cancelPendingRailReveal();
+    const waitMs = panelSwitchDurationMs();
+    if (waitMs <= 0) {
+      revealRail();
+      return;
+    }
+    railRevealWaiter = (event: Event) => {
+      // 只认 #agent-view 自己的 transform：子元素的过渡会冒泡上来，认错就会
+      // 提前放 rail 出来。
+      if (event.target !== view) return;
+      if ((event as TransitionEvent).propertyName !== 'transform') return;
+      revealRail();
+    };
+    view.addEventListener('transitionend', railRevealWaiter);
+    railRevealTimer = window.setTimeout(revealRail, waitMs + 80);
+  };
+
   const startTimer = (): void => {
     if (elapsedTimer !== null) return;
     elapsedTimer = window.setInterval(() => {
@@ -267,10 +323,10 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     if (timeRow.textContent !== range.text) timeRow.textContent = range.text;
   }
 
-  /** 全开判定：width 过渡走完（transitionend）才算——半开期 chat 还看得见，
+  /** 全开判定：滑入过渡走完（transitionend）才算——半开期 chat 还看得见，
    *  流式照常画（§3.5：半开过渡期不挂起）。 */
   view.addEventListener('transitionend', (e) => {
-    if (e.target !== view || e.propertyName !== 'width') return;
+    if (e.target !== view || e.propertyName !== 'transform') return;
     fullyOpen = visible;
   });
 
@@ -423,6 +479,8 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
   const api: AgentWorkbenchHandle = {
     open(callId) {
       activeHooks.requestCloseSettings?.();
+      // 覆盖层滑入：不再挤压 #chat-view（宽度收缩会让整条转写每帧重排）。
+      // 对话页在滑入期间保持原尺寸，被覆盖而不是被压扁。
       if (orderedAgents(activities).length === 0) currentCallId = '';
       else if (!callId || !activities.some((a) => a.callId === callId)) {
         currentCallId = orderedAgents(activities)[0].callId;
@@ -431,11 +489,12 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
       renderedOutputLen = 0;
       renderedTrace = undefined;
       outputEl.replaceChildren();
+      // 上一次关闭排着的 rail 放回作废：现在要的是让它继续让位。
+      cancelPendingRailReveal();
       if (!visible) {
         visible = true;
         focusBeforeOpen = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         view.classList.add('expanded');
-        chatView?.classList.add('squeezed');
         // 工作台全开时程序 chrome 让位：左上/右上角钮与右侧 rail 卡都不显示
         //（2026-11-12 真机反馈：角钮叠在工作台头部上、rail 叠在状态徽标上）。
         setChromeHidden(true);
@@ -449,8 +508,13 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
       fullyOpen = false;
       stopTimer();
       view.classList.remove('expanded');
-      chatView?.classList.remove('squeezed');
       setChromeHidden(false);
+      // 角钮属于窗口 chrome，立刻回来无妨；rail 是对话内容的浮层，必须等工作台
+      // 滑出完成再放回（见 scheduleRailReveal 的注释）。
+      scheduleRailReveal();
+      // 工作台盖住对话期间 rail 的 DOM 更新被挂起（chat.mountAgentActivityPanel
+      // 的早退分支）：关闭后让可见会话补画一次，挂起期间的活动不会丢。
+      activeHooks.onClosed?.();
       // settings 同款焦点归还（settings.ts focusBeforeOpen 模式）。
       focusBeforeOpen?.focus();
       focusBeforeOpen = null;
@@ -490,9 +554,12 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
 // gate-hidden=空间门）正交，任意一口命中都藏、互不覆盖。
 // context-panel-reopen 也在列（2026-11-12 用户定案）：右侧侧边栏只属于主
 // 对话窗口，工作台页内把手隐去、不可弹出。
+// 注意方向不对称：打开时 rail 立刻让位（否则会浮在展开中的工作台上），
+// 关闭时只由调用侧安排「对话列展开完再放回」——这里不直接解除 rail 隐藏。
 function setChromeHidden(hidden: boolean): void {
-  for (const sel of ['#sidebar-toggle', '#right-settings-btn', '#context-panel-reopen', '#agent-activity-host']) {
+  for (const sel of ['#sidebar-toggle', '#right-settings-btn', '#context-panel-reopen']) {
     document.querySelector(sel)?.classList.toggle('wb-chrome-hidden', hidden);
   }
+  if (hidden) document.getElementById('agent-activity-host')?.classList.add('wb-chrome-hidden');
 }
 

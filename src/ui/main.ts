@@ -266,6 +266,9 @@ initAgentWorkbench({
   // 委派产出全文（2026-11-12 用户定案：工作台=详情页显示全部）：活会话
   // 转写按 callId 取委派 tool result 原文，历史会话返回 null 走存档镜像。
   getFullOutput: (callId) => chat.getDelegationFullOutput(callId),
+  // 工作台盖住对话期间 rail 卡片 DOM 更新被挂起（不显示的页面不渲染）：
+  // 关闭后让可见会话补画一次，挂起期间到达的活动不会丢。
+  onClosed: () => chat.mountAgentActivityPanel(),
 });
 setStreamingRenderGate(() => agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false);
 

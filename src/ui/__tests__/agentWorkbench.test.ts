@@ -91,8 +91,9 @@ describe('工作台开/关/寻址（§3）', () => {
     expect(timeRow.textContent).toContain('起 ');
     expect(timeRow.textContent).toContain('已运行');
     expect(timeRow.textContent).not.toContain('止');
-    // chat 被挤压（settings 同款机制）
-    expect(document.getElementById('chat-view')!.classList.contains('squeezed')).toBe(true);
+    // 2026-11-19 转场改造：工作台是滑入覆盖层，不再挤压对话列（宽度收缩会
+    // 让整条转写每帧重排，长会话切回来时可见顿挫）。
+    expect(document.getElementById('chat-view')!.classList.contains('squeezed')).toBe(false);
   });
 
   it('终态把起止时刻都报出来（止 = 起点 + 时长，用时同源折算）', () => {
@@ -228,11 +229,11 @@ describe('工作台开/关/寻址（§3）', () => {
     const wb = agentWorkbench()!;
     wb.sync([activity()], { sessionId: 's1' });
     wb.open('call-1');
-    // 半开过渡期（width 动画中）：不挂起
+    // 半开过渡期（transform 滑入中）：不挂起
     expect(wb.shouldSuspendChatStreamingRender()).toBe(false);
-    // width 过渡终了（happy-dom 无真实过渡，手动派发）
+    // 滑入过渡终了（happy-dom 无真实过渡，手动派发）
     const ev = new Event('transitionend');
-    (ev as unknown as { propertyName: string }).propertyName = 'width';
+    (ev as unknown as { propertyName: string }).propertyName = 'transform';
     document.getElementById('agent-view')!.dispatchEvent(ev);
     expect(wb.shouldSuspendChatStreamingRender()).toBe(true);
     // 关闭即解除（追平由 markdown.ts 的重试拍兜底）
@@ -244,7 +245,7 @@ describe('工作台开/关/寻址（§3）', () => {
 describe('委派卡跨链（刀 3）', () => {
   // 委派卡不再挂「工作台 ↗」入口 chip（rail 卡整卡点击已能进入工作台）；
   // 入口断言改为 rail：onOpenAgent: (callId) => agentWorkbench()?.open(callId)。
-  it('工作台打开期间 chrome 隐藏（角钮×2 + 侧栏把手 + rail），关闭恢复', () => {
+  it('工作台打开期间 chrome 隐藏（角钮×2 + 侧栏把手 + rail），关闭立即恢复角钮', () => {
     const wb = agentWorkbench()!;
     wb.sync([activity()], { sessionId: 's1' });
     wb.open('call-1');
@@ -252,9 +253,45 @@ describe('委派卡跨链（刀 3）', () => {
       expect(document.querySelector(sel)!.classList.contains('wb-chrome-hidden')).toBe(true);
     }
     wb.close();
-    for (const sel of ['#sidebar-toggle', '#right-settings-btn', '#context-panel-reopen', '#agent-activity-host']) {
+    for (const sel of ['#sidebar-toggle', '#right-settings-btn', '#context-panel-reopen']) {
       expect(document.querySelector(sel)!.classList.contains('wb-chrome-hidden')).toBe(false);
     }
+  });
+
+  it('关闭时 rail 等对话列展开完再放回（不能先浮在空对话区上）', () => {
+    // 2026-11-19 真机反馈：切回主界面时 rail 卡先出现、正文后到。#chat-view
+    // 从 0 宽展开有 0.4s 过渡，rail 是绝对定位浮层，必须先压住。
+    const wb = agentWorkbench()!;
+    const agentView = document.getElementById('agent-view')!;
+    const rail = document.getElementById('agent-activity-host')!;
+    wb.sync([activity()], { sessionId: 's1' });
+    wb.open('call-1');
+    wb.close();
+    // 过渡还没走完：rail 仍在让位
+    expect(rail.classList.contains('wb-chrome-hidden')).toBe(true);
+    // 滑出过渡终了（happy-dom 无真实过渡，手动派发）→ 放回。
+    // 信号挂在 #agent-view 的 transform：它是这段转场里唯一插值的属性。
+    const ev = new Event('transitionend');
+    (ev as unknown as { propertyName: string }).propertyName = 'transform';
+    agentView.dispatchEvent(ev);
+    expect(rail.classList.contains('wb-chrome-hidden')).toBe(false);
+  });
+
+  it('过渡中途重新打开：挂起的 rail 放回作废，rail 继续让位', async () => {
+    const wb = agentWorkbench()!;
+    const rail = document.getElementById('agent-activity-host')!;
+    wb.sync([activity()], { sessionId: 's1' });
+    wb.open('call-1');
+    wb.close();
+    wb.open('call-1');
+    // 等过定时器兜底窗口（过渡时长 400ms + 80ms），rail 仍应隐藏。
+    await new Promise(resolve => setTimeout(resolve, 560));
+    expect(rail.classList.contains('wb-chrome-hidden')).toBe(true);
+    wb.close();
+    const ev = new Event('transitionend');
+    (ev as unknown as { propertyName: string }).propertyName = 'transform';
+    document.getElementById('agent-view')!.dispatchEvent(ev);
+    expect(rail.classList.contains('wb-chrome-hidden')).toBe(false);
   });
 
   it('产出全文：钩子命中时显示全文（突破 2000 存档镜像），不再有「跳去委派卡」死胡同', () => {
@@ -314,6 +351,23 @@ describe('源码锁（接线与退役断言）', () => {
     expect(src).not.toContain('attachWorkbenchEntry(');
     expect(src).toContain("window.addEventListener('resize', applyAgentRailSpaceGate)");
     expect(src).toContain('onOpenAgent: (callId) => agentWorkbench()?.open(callId)');
+    // 2026-11-19：工作台盖住对话期间不画 rail 卡（不显示的页面停渲染），
+    // 快照仍喂给它；关闭后由 onClosed 补画。
+    expect(src).toMatch(/const workbench = agentWorkbench\(\);\s*if \(workbench\?\.isVisible\(\)\) \{\s*host\.hidden = true;\s*workbench\.sync\(this\.agentActivities/);
+  });
+
+  it('styles.css：#agent-view 是 transform 滑入的覆盖层，不再挤压对话列', () => {
+    const styles = read('styles.css');
+    // 取最后一处：标题栏那段也有一个 `#agent-view` 规则（透明标题栏留位）。
+    const block = styles.slice(styles.lastIndexOf('#agent-view {'), styles.lastIndexOf('#agent-view.expanded'));
+    expect(block).toContain('position: absolute');
+    expect(block).toContain('transform: translateX(100%)');
+    expect(block).toContain('visibility: hidden');
+    expect(block).not.toContain('width: 0%');
+    const expandedAt = styles.lastIndexOf('#agent-view.expanded');
+    const expanded = styles.slice(expandedAt, expandedAt + 220);
+    expect(expanded).toContain('transform: translateX(0)');
+    expect(expanded).toContain('visibility: visible');
   });
 
   it('bottom sheet 退役：两处 720px agent 规则不复存在，gate 规则在位', () => {
@@ -352,6 +406,8 @@ describe('源码锁（接线与退役断言）', () => {
     // main.ts 恢复重放不再挂 chip（rail 卡整卡点击进入）。
     expect(src).not.toContain('attachWorkbenchEntry(row.el, item.exec.callId)');
     expect(src).toContain('requestCloseSettings');
+    // rail 挂起后的补画钩子（朝向 chat 的唯一出口）。
+    expect(src).toContain('onClosed: () => chat.mountAgentActivityPanel()');
   });
 
   it('store.ts：ToolExecMeta.callId 向后兼容字段在位', () => {
