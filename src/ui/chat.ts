@@ -452,43 +452,47 @@ export function hideNewContentHint(): void {
   scrollHintBtn = null;
 }
 
-// ── 「回到开头」hint ──
-// 一键返回对话开头（2026-11-19 用户诉求）：深翻时浮现，点击瞬时跳顶——
-// 程序化跳转是单次大位移，途中不与任何组交叉（「略过中间渲染」由 fling
-// 抑制天然满足：跳转的巨幅 delta 自动标记 fling，沿途组保持摘要条，落定
-// 后只挂载顶部）。深度阈值 1200px ≈ 一屏半，浅翻不打扰。
-let backTopBtn: HTMLButtonElement | null = null;
+// ── 「回到两端」箭头 ──
+// 一键跳转对话两端（2026-11-19 用户定案，互斥双向箭头）：深处显 ↑ 回顶端，
+// 近顶显 ↓ 回底端（最新）；点击都是单次写 scrollTop 直跳对应端——途中不
+// 与组交叉，中间内容不挂载不绘制（巨幅 delta 自动标记 fling，沿途组保持
+// 摘要条）。深度阈值 1200px ≈ 一屏半，浅中带（400-1200）保持当前箭头——
+// 天然滞回防抖。
 const BACK_TO_TOP_DEPTH_PX = 1200;
-
-export function hideBackToTopHint(): void {
-  backTopBtn?.remove();
-  backTopBtn = null;
-}
+const NEAR_TOP_DEPTH_PX = 400;
 
 /** Idempotent per-transcript wiring: deep-scroll reveals the jump-to-top
  *  pill; clicking jumps instantly to the transcript head. */
 export function wireBackToTopHint(chatEl: HTMLElement): void {
   if (chatEl.dataset.backToTopWired === '1') return;
   chatEl.dataset.backToTopWired = '1';
+  // 互斥双向箭头（2026-11-19 用户定案）：深处显 ↑ 回顶端，近顶显 ↓ 回底端；
+  // 点击都是单次写 scrollTop 直跳对应端——途中不与组交叉，中间内容不挂载
+  // 不绘制（巨幅 delta 自动标记 fling，沿途组保持摘要条）。两阈值之间
+  // （400-1200px 浅中带）保持当前箭头不动——天然滞回防抖。
+  let arrowDir: '' | 'up' | 'down' = '';
+  let arrowBtn: HTMLButtonElement | null = null;
   chatEl.addEventListener('scroll', () => {
-    const deep = chatEl.scrollTop > BACK_TO_TOP_DEPTH_PX;
-    if (deep && !backTopBtn) {
+    const st = chatEl.scrollTop;
+    let dir: 'up' | 'down' = arrowDir === '' ? (st >= BACK_TO_TOP_DEPTH_PX ? 'up' : 'down') : arrowDir;
+    if (st >= BACK_TO_TOP_DEPTH_PX) dir = 'up';
+    else if (st <= NEAR_TOP_DEPTH_PX) dir = 'down';
+    if (dir === arrowDir) return;
+    arrowDir = dir;
+    if (!arrowBtn) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'back-to-top-hint';
-      btn.textContent = '↑';
-      btn.title = t('chat.backToTopHint', '跳回对话开头');
-      btn.setAttribute('aria-label', t('chat.backToTopHint', '跳回对话开头'));
+      btn.setAttribute('aria-label', '回到对话两端');
       btn.addEventListener('click', () => {
-        // 单次写 scrollTop=0：途中不与组交叉，中间内容不挂载不绘制。
-        chatEl.scrollTop = 0;
-        hideBackToTopHint();
+        chatEl.scrollTop = arrowDir === 'up' ? 0 : chatEl.scrollHeight;
       });
       document.getElementById('chat-view')?.appendChild(btn);
-      backTopBtn = btn;
-    } else if (!deep && backTopBtn) {
-      hideBackToTopHint();
+      arrowBtn = btn;
     }
+    arrowBtn.textContent = dir === 'up' ? '↑' : '↓';
+    arrowBtn.title = dir === 'up' ? '回到顶端' : '回到底端（最新）';
+    arrowBtn.setAttribute('aria-label', arrowBtn.title);
   }, { passive: true });
 }
 

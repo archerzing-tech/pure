@@ -4,31 +4,23 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
-## v4.9.6-beta
-
-**（测试版）后台委派：恢复后的卡面说真话，交活时顺口说一句「空档里我在做什么」**
-
-一、恢复后委派卡补第三态（980df2d）。进程被杀时在飞的后台支，模型面此前已经改写成 `[detached resume]` 通告，渲染面却仍按存档的 `toolExec` 把「已受理」收执渲成绿 ✓ 完成——模型看到「没回来」，用户看到「干完了」。现在回放走灰态「⛔ 已中断 · 产出未回来」：不是成功、不是失败，也不是用户停的，并提示同参重派可走子代理断点续跑。判定放在投影期而不是载入时改存档条目——回放块在 `loadFromStorage` 之前就从快照投影，改条目赶不上本次渲染；现代存档走 `events` 通道，根本不读 `transcript`；存档每轮又按消息重建 `toolExec`，载入时打的标记活不过下一次落盘。投影直接认两个 durable 判据：快照里仍挂 `deferred` 的收执 callId（首次恢复），以及结果文本里的通告标记（此后每次存档都带着它）。同批补上后台支上限与止损的回归锁：到 6 支时第 7 支退回同步（不拒绝、不丢活）、`stop_branch` 对后台支可停且按暂停记账、`deferred` 收执吐出后 abort 监听必须保留（撤了暂停/Esc 就到不了后台支）。
-
-二、主 agent 交活时明说「空档里我做什么」（用户 2026-11-18 要求）。子 agent 派出去后主线继续干活，但此前用户只看到委派卡在转，不知道主 agent 在干什么。现在教学要求交活的当下用一句话说清两件事：子 agent 拿走了什么、你同时做什么——只给形状不给句式，固定模板会让每轮话说得一模一样。载体三处：`parallel_first` 常驻段（委派工具在场就带）、机制段 Background delegation（多主题/构建请求）、受理收执末尾（收执回到模型眼前的那一刻）；`Orchestrator conduct` 同步点明背景支的情形。教学同时要求「说到的必须是真在飞的活」：只有等待没有自己的活时，直说在等或不说，不许编一句假的「meanwhile」——假并行叙事比沉默更糟。
-
-三、发布前审查修掉两处同参重派的断点。其一：同一批里两支同参委派，引擎的同轮去重只对「失败锚点」重试，而受理收执是 `success:true` 的 deferred 结果——第二支被当成可复用锚点跳过，既没执行也没有工具结果，配对契约当场断裂（下一次请求 400）。现在 deferred 锚点一律真派，编排器认出在飞的那支并回指向它的收执。其二：这类重派收执此前永远等不到结算（结算事件只认原支 callId），卡面永久挂「⏳ 后台运行中」，重启还会被崩溃恢复误报成「丢了的那批」——结算现在携带 alias callId，引擎一并清掉 deferred、宿主一并结算那些卡，产出仍只送达一次。
-
-验证：typecheck、lint:conventions 绿；promptLayers / PromptAssembler 107 例、SubagentOrchestrator.detach 55 例、引擎后台委派 17 例（含同批同参真派与 alias 结算）、UI 回放与存档往返（transcriptProjection / toolRow / sessionReplayFidelity / store / chat / strippedBranchOutput）284 例、执行池与编排器 159 例全过。
-
 ## v4.9.4
 
-**后台委派：派出去就接着干，主 agent 不再被自己的子 agent 堵住**
+**后台委派：派出去就接着干，主 agent 不再被自己的子 agent 堵住；直播渲染有界化与两端跳转**
 
 一、委派从同步等待改成工具层 detach（档二，真瓶颈在批次屏障而非执行池）。此前委派工具必须等子引擎跑完才返回，整批工具因此在那一支上排队——主 agent 的读写、验证、整合全部空转；档一（读池与带路径写重叠）只买到墙钟，不解决「主线继续干活」。现在委派调用立刻返回受理收执（`deferred: true`），子引擎在后台继续跑，主线拿收执继续自己的 THINK 与工具调用。不做引擎状态机重写：工具一旦立刻返回，批次照常清空，回合制配对点、失败恢复批次语义、插话与 relay 拓扑全部不动。
 
 二、结果送达与终局闸。结算在工具配平点（`TurnCheckpoint` 之前）取走，作为 internal user 消息进转录 + 一条 `backgroundSettle` 的 ToolResult 事件（宿主据此把委派卡从「后台运行中」结算成真结果，不新开卡）。收尾前若还有支在飞，终局闸拦住「带着自己派出去的支收尾」——那会把后台产出永久丢在回合外、最终汇总还把没跑完的活说成完成；等待期间暂停/硬停即时打断，45 分钟活性兜底，送达后重入 THINK 让模型拿真产出重写答复。被放弃：静默放弃在飞支、或让宿主自己猜结果何时到。
 
-三、边界与回滚。同参重派按 stableSessionId 认出去在飞的那支，回来一份指向原 callId 的收执（不重复派工——两支同写一份断点存档）；relay 链成员、`detach:false`、后台支并发上限 6 走同步；`config.detachDelegations === false` 与 `PURE_DETACHED_DELEGATION=0` 是 kill switch。执行池切片 0：写结果与读池一起 race、随完成即吐（此前压到读池排空后按批次序吐，卡片空转整个窗口）。委派受理收执不进失败账、不作同轮复用锚、不当成功去重游标。提示词补一句「收执不是产出」+ Background delegation 教学（不轮询、不重派，下一步依赖产出时 `detach:false`）。
+三、边界与回滚。同参重派按 stableSessionId 认出去在飞的那支，回来一份指向原 callId 的收执（不重复派工——两支同写一份断点存档）；发布前审查修掉两处同参重派断点（deferred 收执不再被同轮去重当复用锚跳过、结算携带 alias callId 一并清卡）；relay 链成员、`detach:false`、后台支并发上限 6 走同步；`config.detachDelegations === false` 与 `PURE_DETACHED_DELEGATION=0` 是 kill switch。执行池切片 0：写结果与读池一起 race、随完成即吐（此前压到读池排空后按批次序吐，卡片空转整个窗口）。委派受理收执不进失败账、不作同轮复用锚、不当成功去重游标。提示词补一句「收执不是产出」+ Background delegation 教学（不轮询、不重派，下一步依赖产出时 `detach:false`）+ 交活时说清「空档里我做什么」（只给形状不给句式，假并行叙事比沉默更糟）。
 
-四、崩溃恢复与两态补齐。后台腿活在父进程里，进程一死产出就没了，而转录里还留着「已受理」的收执——恢复会话时模型会以为活干完了或还在跑，两种都把汇总写假。判据不另设存档字段：收执的工具消息带 `deferred: true`，送达时置 false，所以最后一份 TurnCheckpoint 里「还挂着 true 的收执」就是丢了的那批；恢复时刻（GUI 载入、`Harness.run` 恢复分支与 `continueTurn`）由 `shared/detachedResume.ts` 就地把那条工具结果改写成 `[detached resume]` 通告（没回来、别当完成、要就同参重派走子代理断点续跑）。选就地改写而不是另插 internal 消息：工具结果是配对契约的一部分，且落盘走的就是这条消息（另插的在合并转录时会被当成回合前历史丢掉，于是每轮重喊）。不做自动重派——重派花的是用户的 token，被中断的那半可能已经不要了。另两处：批级 reader 之外补 THINK 与终局等待的读收（后台支的活动不再在批次之间失明），CLI 补两态（收执 `⏳ 后台运行中`、结算 `⤷ 后台结果已送达`，此前收执被印成 ✓）。
+四、崩溃恢复与两态补齐。后台腿活在父进程里，进程一死产出就没了，而转录里还留着「已受理」的收执——恢复会话时模型会以为活干完了或还在跑，两种都把汇总写假。判据不另设存档字段：收执的工具消息带 `deferred: true`，送达时置 false，所以最后一份 TurnCheckpoint 里「还挂着 true 的收执」就是丢了的那批；恢复时刻（GUI 载入、`Harness.run` 恢复分支与 `continueTurn`）由 `shared/detachedResume.ts` 就地把那条工具结果改写成 `[detached resume]` 通告（没回来、别当完成、要就同参重派走子代理断点续跑）；恢复后的委派卡渲染灰态「⛔ 已中断 · 产出未回来」（判定放投影期，认两个 durable 判据：快照里仍挂 deferred 的收执 callId 与结果文本里的通告标记）。选就地改写而不是另插 internal 消息：工具结果是配对契约的一部分，且落盘走的就是这条消息（另插的在合并转录时会被当成回合前历史丢掉，于是每轮重喊）。不做自动重派——重派花的是用户的 token，被中断的那半可能已经不要了。另两处：批级 reader 之外补 THINK 与终局等待的读收（后台支的活动不再在批次之间失明），CLI 补两态（收执 `⏳ 后台运行中`、结算 `⤷ 后台结果已送达`，此前收执被印成 ✓）。
 
-验证：typecheck、lint:conventions 绿；全量 5589 例 5584 过 / 4 skip / 1 例 `Harness lesson reflector` 超时——同例在未改动的 HEAD 工作树全量中同样超时（既有跨文件抖动，单跑 4.77ms 过）；新增 detachedBranches 6 例（含 THINK 期间分支活动转发）、SubagentOrchestrator.detach 8 例、执行池切片 0 用例、崩溃恢复 7 例（shared 5 + Harness 续轮接线 2）、CLI 两态源码断言 2 例全绿。
+五、后台委派默认开修正（GUI 默认路径）。config.json 无 detachDelegations 键（undefined）时旧判 `!== true` 把后台委派静默关死——注释三面都写「默认开，显式 false 才关」，唯独编排器是 opt-in 语义。收正：编排器保持保守 opt-in（程序化消费方依赖隐式同步委派），「默认开」移到宿主解析层兑现（chat.ts 传 `!== false`），三面语义一致。
+
+六、直播渲染有界化与滚动导航。直播体量折叠防卡死三刀：活跃 turn 体量观察器（MutationObserver 增量估算，文本×2+图片 src 全长）、越 1.5MB 帽把老节点部分折叠进泊车组、折叠剥 base64 截图换轻占位（原图在盘上与快照里）。流式期禁泊车→泊车回归两阶段定案：泊车/重挂载的重 paint 源是 base64 巨串与位图解码，剥图后重挂载=纯文本挂载（与恢复路径同形状，实测安全），回归折后即泊；泊车高度保持（占位 min-height 不塌滚动几何，分级虚拟化收口——react-virtuoso 的两条关键经验由此等价获得，item 级虚拟化因 WKWebView 空白行疾病前科不采纳）。转录图片 src 走盘上 asset URL+lazy（十余张 1.7MB data 巨串不再常驻直播 DOM）。工作台补丁守卫修复（引用相等守卫被每事件新对象击穿→版本键判定，5-20Hz 全量重渲染卡顿源）。快速滚动：滚轮连发窗口判据（200ms 累计 ≥360px 视为 fling——滚轮每档 ~120px 到不了触屏惯性单事件阈值，fling 抑制从不生效的残余缺口）+ 回到两端互斥 FAB（深处 ↑ 近顶 ↓，点击直跳对应端，途中不挂载不绘制）。
+
+验证：typecheck、lint:conventions 绿；全量 5589 例 5584 过 / 4 skip（Harness lesson reflector 既有跨文件抖动单跑过）；promptLayers / PromptAssembler 107 例、SubagentOrchestrator.detach 11 例（含 config 缺省语义锁）、引擎后台委派、执行池档一三态、崩溃恢复、UI 回放与存档往返全过。真机四轮同题复测 + run8 双支后台委派（受理收执×2 + 产物交付）生产实证。
 
 ## v4.9.3
 
