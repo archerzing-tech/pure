@@ -182,19 +182,54 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
     rail.style.left = `${Math.round(Math.max(2, contentLeft - viewRect.left - RAIL_WIDTH_PX - CONTENT_GAP_PX))}px`;
   };
 
-  const paintThumb = (): void => {
-    const scrollHeight = chatEl.scrollHeight;
-    const clientHeight = chatEl.clientHeight;
-    maxScroll = Math.max(0, scrollHeight - clientHeight);
-    rail.hidden = !shouldShowOutline(scrollHeight, clientHeight);
-    if (rail.hidden) return;
-    // 轨道高度要在去掉 hidden 之后读，否则量到 0（display:none 的子树）。
-    const geometry = outlineThumbGeometry(chatEl.scrollTop, scrollHeight, clientHeight, track.clientHeight);
-    thumb.style.top = `${Math.round(geometry.top)}px`;
-    thumb.style.height = `${Math.round(geometry.height)}px`;
+  // 盒子度量只在 refresh 时读一次并缓存：滚动处理里读 scrollHeight/clientHeight
+  // 会和上一帧写滑块样式交替，构成「写→读」的强制重排——长转写里每帧一次，
+  // 快速翻动时就是那种节律性的卡。滚动路径只读 scrollTop（不触发布局）。
+  const metrics = { scrollHeight: 0, clientHeight: 0, trackHeight: 0, maxScroll: 0 };
+  let railShown = false;
+  let thumbTop = -1;
+  let thumbHeight = -1;
+
+  const syncMetrics = (): void => {
+    metrics.scrollHeight = chatEl.scrollHeight;
+    metrics.clientHeight = chatEl.clientHeight;
+    metrics.maxScroll = Math.max(0, metrics.scrollHeight - metrics.clientHeight);
+    maxScroll = metrics.maxScroll;
+    const visible = shouldShowOutline(metrics.scrollHeight, metrics.clientHeight);
+    if (railShown !== visible) {
+      railShown = visible;
+      rail.hidden = !visible;
+    }
+    // 轨道高度要在尺子可见时读，否则量到 0（display:none 的子树）。
+    metrics.trackHeight = visible ? track.clientHeight : 0;
   };
 
+  const paintThumb = (): void => {
+    if (!railShown) return;
+    const geometry = outlineThumbGeometry(
+      chatEl.scrollTop, metrics.scrollHeight, metrics.clientHeight, metrics.trackHeight,
+    );
+    const top = Math.round(geometry.top);
+    const height = Math.round(geometry.height);
+    // 改 top 会让滑块的定位上下文失效布局，下一帧的度量读取又要为它重排一次；
+    // transform 只走合成器。两处都先比较再写，滚动时多数帧其实只有一个值在变。
+    if (top !== thumbTop) {
+      thumbTop = top;
+      thumb.style.transform = `translateY(${top}px)`;
+    }
+    if (height !== thumbHeight) {
+      thumbHeight = height;
+      thumb.style.height = `${height}px`;
+    }
+  };
+
+  // 上一次画出来的刻度快照：一层没变时整轮只看字符串比较，不碰 DOM。
+  let lastMarksKey = '';
+
   const renderMarks = (marks: readonly OutlineMark[]): void => {
+    const key = marks.map((m) => `${Math.round(m.offset)}:${Math.round(m.y)}:${m.kind}`).join(',');
+    if (key === lastMarksKey) return;
+    lastMarksKey = key;
     while (markEls.length > marks.length) markEls.pop()?.remove();
     for (let i = 0; i < marks.length; i++) {
       let el = markEls[i];
@@ -258,8 +293,9 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
 
   const refresh = (readPadding = false): void => {
     layout(readPadding);
+    syncMetrics();
     paintThumb();
-    if (!rail.hidden) scheduleMeasure();
+    if (railShown) scheduleMeasure();
   };
 
   /**
@@ -289,20 +325,34 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
     jumpTo(ratio * maxScroll);
   });
 
+  /** 滚动停下后再量刻度：滚动本身不改变任何刻度位置，滚动中重量只是把上千
+   *  次 rect 读塞进甩动里——而每次读都可能接着流式写入触发整列重排，正是
+   *  「快速翻动时一顿一顿」的那个来源。停手 180ms 后一次量完。 */
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  const SCROLL_SETTLE_MS = 180;
+  const scheduleMeasureAfterSettle = (): void => {
+    if (settleTimer !== null) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      scheduleMeasure();
+    }, SCROLL_SETTLE_MS);
+  };
+
   chatEl.addEventListener('scroll', () => {
     if (typeof requestAnimationFrame !== 'function') {
       paintThumb();
+      scheduleMeasureAfterSettle();
       return;
     }
     if (scrollFrame) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
       // 滚动只动滑块：尺子的 left/top/height 只跟 #chat 的盒子有关，滚动期
-      // 间重算等于每帧多两次无意义的盒子读。
+      // 间重算等于每帧多几次无意义的盒子读。
       paintThumb();
-      // 钉底跟直播时不重测：旧刻度的内容坐标是稳的（上方内容高度不变），
+      // 钉底跟直播时不必重测：旧刻度的内容坐标是稳的（上方内容高度不变），
       // 只有尾部几轮会有偏差，用户一往上翻就会再量一轮。
-      if (!isElementPinnedToBottom(chatEl)) scheduleMeasure();
+      if (!isElementPinnedToBottom(chatEl)) scheduleMeasureAfterSettle();
     });
   }, { passive: true });
 
@@ -319,7 +369,20 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
     // 白量几百次。hidden 是多会话切会话的信号（各会话的转写宿主同为 #chat
     // 子节点，切换只翻 hidden，不产生 childList），不跟就会沿用上一个会话的
     // 刻度。
-    const observer = new MutationObserver(() => refresh());
+    // 一帧最多刷一次：流式追加经常一帧好几处 childList，观察器直接调 refresh
+    // 就是每处各读一遍盒子。
+    let refreshFrame = 0;
+    const observer = new MutationObserver(() => {
+      if (typeof requestAnimationFrame !== 'function') {
+        refresh();
+        return;
+      }
+      if (refreshFrame) return;
+      refreshFrame = requestAnimationFrame(() => {
+        refreshFrame = 0;
+        refresh();
+      });
+    });
     observer.observe(chatEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
   }
 

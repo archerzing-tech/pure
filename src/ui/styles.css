@@ -11208,6 +11208,9 @@ button svg,
 }
 .transcript-ruler-thumb {
   position: absolute;
+  /* 纵向位置由脚本写 transform: translateY(...)（2026-11-19 滚动路径去强制重排），
+     top 固定 0 作为位移原点。 */
+  top: 0;
   left: 7px;
   width: 5px;
   border-radius: 999px;
