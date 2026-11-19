@@ -476,7 +476,7 @@ export function wireBackToTopHint(chatEl: HTMLElement): void {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'back-to-top-hint';
-      btn.textContent = t('chat.backToTop', '回到开头');
+      btn.textContent = '↑';
       btn.title = t('chat.backToTopHint', '跳回对话开头');
       btn.setAttribute('aria-label', t('chat.backToTopHint', '跳回对话开头'));
       btn.addEventListener('click', () => {

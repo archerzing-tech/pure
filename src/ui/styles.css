@@ -11118,28 +11118,33 @@ button svg,
   transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
 }
 
-/* 一键返回开头（2026-11-19 用户诉求）：深翻时浮现于聊天区顶部中央，点击
-   瞬时跳顶（途中不挂载不绘制中间内容）。 */
+/* 一键返回开头（2026-11-19 用户诉求）：深翻时浮现，点击瞬时跳顶（途中不
+   挂载不绘制中间内容）。位置=右下 FAB（行业标准回到顶部形态）：不遮居中
+   阅读内容、与底部居中的 ↓有新内容 pill 错开、靠近滚动操作的手位。 */
 .back-to-top-hint {
   position: absolute;
-  top: 52px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 18px;
+  bottom: 96px;
+  width: 40px;
+  height: 40px;
   z-index: 5;
-  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg-card) 92%, var(--accent-soft));
   color: var(--accent);
-  font: 600 12px var(--font-sans);
+  font: 600 16px var(--font-sans);
   cursor: pointer;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
   user-select: none;
-  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
 }
 .back-to-top-hint:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
+  transform: translateY(-2px);
 }
 
 .new-content-hint:hover {
