@@ -452,6 +452,46 @@ export function hideNewContentHint(): void {
   scrollHintBtn = null;
 }
 
+// ── 「回到开头」hint ──
+// 一键返回对话开头（2026-11-19 用户诉求）：深翻时浮现，点击瞬时跳顶——
+// 程序化跳转是单次大位移，途中不与任何组交叉（「略过中间渲染」由 fling
+// 抑制天然满足：跳转的巨幅 delta 自动标记 fling，沿途组保持摘要条，落定
+// 后只挂载顶部）。深度阈值 1200px ≈ 一屏半，浅翻不打扰。
+let backTopBtn: HTMLButtonElement | null = null;
+const BACK_TO_TOP_DEPTH_PX = 1200;
+
+export function hideBackToTopHint(): void {
+  backTopBtn?.remove();
+  backTopBtn = null;
+}
+
+/** Idempotent per-transcript wiring: deep-scroll reveals the jump-to-top
+ *  pill; clicking jumps instantly to the transcript head. */
+export function wireBackToTopHint(chatEl: HTMLElement): void {
+  if (chatEl.dataset.backToTopWired === '1') return;
+  chatEl.dataset.backToTopWired = '1';
+  chatEl.addEventListener('scroll', () => {
+    const deep = chatEl.scrollTop > BACK_TO_TOP_DEPTH_PX;
+    if (deep && !backTopBtn) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'back-to-top-hint';
+      btn.textContent = t('chat.backToTop', '回到开头');
+      btn.title = t('chat.backToTopHint', '跳回对话开头');
+      btn.setAttribute('aria-label', t('chat.backToTopHint', '跳回对话开头'));
+      btn.addEventListener('click', () => {
+        // 单次写 scrollTop=0：途中不与组交叉，中间内容不挂载不绘制。
+        chatEl.scrollTop = 0;
+        hideBackToTopHint();
+      });
+      document.getElementById('chat-view')?.appendChild(btn);
+      backTopBtn = btn;
+    } else if (!deep && backTopBtn) {
+      hideBackToTopHint();
+    }
+  }, { passive: true });
+}
+
 /** Idempotent per-transcript wiring: bridges scrollPin observers → hint UI.
  * Exported for the replay suite's 串台 regression test (真实链路的接线口). */
 export function wireNewContentHint(chatEl: HTMLElement): void {
@@ -4841,6 +4881,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const chatEl = this.scrollRoot();
     wireScrollPin(chatEl);
     wireNewContentHint(chatEl);
+    wireBackToTopHint(chatEl);
     // 设置 agent 化（2026-11-01）：回合边界活检盘上 config.json——agent 上一
     // 回合用文件工具改的设置，本回合装配就生效（热生效，不重启）。
     await refreshConfigFromFile();

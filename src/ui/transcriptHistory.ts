@@ -85,6 +85,12 @@ export function setTranscriptFlingTimings(opts: { flingDeltaPx?: number; flingSe
 let lastFlingAt = 0;
 const flingWiredRoots = new WeakSet<HTMLElement>();
 const prevScrollTops = new WeakMap<HTMLElement, number>();
+/** 滚轮连发窗口判据：窗口内累计位移达到此值即视为 fling（滚轮单档只有
+ *  ~100-120px，够不到触屏惯性的单事件阈值）。 */
+const WHEEL_BURST_WINDOW_MS = 200;
+const WHEEL_BURST_PX = 360;
+let wheelBurstSince = 0;
+let wheelBurstPx = 0;
 
 function observedRoot(options: HistoryGroupOptions): HTMLElement | null {
   if (options.scrollRoot) return options.scrollRoot;
@@ -99,9 +105,21 @@ function wireFlingClock(root: HTMLElement | null): void {
   if (!root || flingWiredRoots.has(root)) return;
   flingWiredRoots.add(root);
   prevScrollTops.set(root, root.scrollTop);
+  // 快速滚轮连发也判 fling（2026-11-19 用户判例「快速滚动鼠标翻动卡死」）：
+  // 滚轮每档只有 ~100-120px，到不了触屏惯性调的单事件阈值（240px）——快速
+  // 连滚时 fling 抑制从不生效，每个组边界都即时全量挂载=卡死。补窗口累计
+  // 判据：200ms 内累计 ≥360px 同样标记 fling。慢速阅读（偶尔一格）不触发。
   root.addEventListener('scroll', () => {
+    const now = Date.now();
     const prev = prevScrollTops.get(root) ?? root.scrollTop;
-    if (Math.abs(root.scrollTop - prev) >= flingDeltaPx) lastFlingAt = Date.now();
+    const delta = Math.abs(root.scrollTop - prev);
+    if (delta >= flingDeltaPx) lastFlingAt = now;
+    if (now - wheelBurstSince > WHEEL_BURST_WINDOW_MS) {
+      wheelBurstSince = now;
+      wheelBurstPx = 0;
+    }
+    wheelBurstPx += delta;
+    if (wheelBurstPx >= WHEEL_BURST_PX) lastFlingAt = now;
     prevScrollTops.set(root, root.scrollTop);
   }, { passive: true });
 }
