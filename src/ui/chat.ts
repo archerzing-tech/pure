@@ -116,7 +116,7 @@ import { capEventText, createSerializingSink, type SessionEventSink } from '../s
 import { invoke } from '@tauri-apps/api/core';
 import { resourceDir, join, homeDir } from '@tauri-apps/api/path';
 import { renderMarkdown, scheduleStreamingRender, flushStreamingRender, cancelStreamingRender, scheduleBlockRender, flushBlockRender, cancelBlockRender, stripToolCallXml } from './markdownLoader';
-import { rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig, takeFormValidationFeedback } from './markdown';
+import { assetUrlFor, rehydrateThemeStaleDiagrams, syncPresentationCardsFromConfig, takeFormValidationFeedback } from './markdown';
 import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './artifactCards';
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
@@ -634,7 +634,14 @@ export function renderUserImageAttachments(bubble: HTMLElement, images: MessageI
   const gallery = document.createElement('div');
   gallery.className = 'user-image-attachments';
   for (const image of images) {
-    if (!image.dataUrl) continue;
+    // src 优先走盘上路径的 asset URL（2026-11-19 run7 判例）：read_file 截图
+    // 的 data: URL 单张 1.7MB 字符串直接住进 DOM 属性，十余张 = 十几 MB 常驻
+    // 直播转录，WKWebView 合成器弃画（「渲染一半」+滚动空白+窗口卡死三连）。
+    // asset src 只有几十字节；loading=lazy 让离屏图不解码；双击放大查看器
+    // 仍取 dataUrl（有 path 时放大器也走 asset）。无 path（纯内存图）回落
+    // dataUrl 原行为。
+    const src = image.path ? assetUrlFor(image.path) : image.dataUrl;
+    if (!src) continue;
     const img = document.createElement('img');
     img.className = 'user-image-thumb';
     // P2-3：固有尺寸现在记在消息里。缩略图格子本身是固定 96px，属性不改变
@@ -644,9 +651,10 @@ export function renderUserImageAttachments(bubble: HTMLElement, images: MessageI
       img.width = image.width;
       img.height = image.height;
     }
-    img.src = image.dataUrl;
+    img.src = src;
     img.alt = image.name || '上传图片';
     img.decoding = 'async';
+    img.loading = 'lazy';
     img.title = '双击放大';
     img.addEventListener('dblclick', (event) => {
       event.stopPropagation();
