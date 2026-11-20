@@ -4,6 +4,26 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.9.6
+
+**委派在写第一行前就决策；首块超时先压缩再重试（子 agent 同样生效）；卡内预览的外部资源落本地缓存；滚动路径不再每帧强制重排**
+
+一、委派拆分时点前移。多 agent 不够果断的根因不是模型不会拆，而是判断出现得太晚：体量提醒等到主线累计直写 60KB 才亮，那时通常已经连写四五个模块，剩余工作要么太少、要么已被自己的实现细节绑死。现在 `parallel_first` 与 artifact 协议都明确「先定拆分再写第一个文件」，提醒阈值降到 24KB——两三个中等模块正是还有活可拆的窗口。提醒仍只递事实，单干与否归模型裁决。
+
+二、首块超时先压缩再重试。原样重发同一个大 payload 是确定性重败：请求与失败那次一字不差，服务端拥塞或上下文超限不会因为多等一次而消失。上下文 ≥50k token 时先做一次无摘要的激进压缩再重试，让第二次请求实质不同；小上下文不压缩，避免为概率性救援丢掉现场。子代理此前完全没有 `contextEngine`，引擎这条救援在委派分支上空转——现在只把 `compact` 压缩面接给它，窗口取子代理自己的 `maxTotalTokens`（≤100k），不接主动压缩闸。
+
+三、网络失败给可执行阶梯。「换源或跳过」原来只是抽象建议：模型知道该绕，却不知道按什么顺序绕、绕到什么程度算够，真机表现为构建卡在一个 3D 瓦片或 CDN 资源上反复重试。分类级提示与单次失败提示统一为「换等价来源/镜像 → 内联或本地替代（占位、简化数据、离线副本）→ 跳过并继续」，并明确构建类任务里一个资源拿不到不能让整条构建停下。
+
+四、卡内预览资源落本地缓存。```html 卡此前完全依赖运行时 CDN：离线、CDN 被墙或代理只覆盖部分路由时，瓦片/模型请求悬着，整张卡停在半加载。卡跑在 sandbox 的不透明源里，Cache Storage 与 CORS 都给不了可靠副本，所以缓存放宿主：新增 `cache_preview_asset` 按 URL 哈希落到 `~/.pure/cache/preview-assets`，sidecar 记扩展名与 mime（asset 协议按扩展名出 Content-Type），无扩展名瓦片端点靠字节嗅探补；512MB 预算最旧优先，复用瓦片缓存的代理路由，并拒绝内网/本机地址，避免模型生成的页面拿宿主当内网探针。卡内注入加载器把 `fetch` / XHR / `img.src` 的资源请求经 postMessage 交给宿主，换成已落盘的 `asset://` URL；宿主取不到时原 URL 直连一次，再失败图片落透明占位、其余交给调用方，单个资源不会拖住整页。卡片源码展示仍是原文。
+
+五、滚动路径去重排。左栏刻度尺原来在滚动处理里每帧读 `scrollHeight`/`clientHeight` 再写滑块 `top`/`height`，读写交替等于每帧逼一次整列重排；现在盒子度量只在 refresh 时读一次并缓存，滚动只读 `scrollTop`，滑块走 `transform`，刻度重测改到停手 180ms 后一次，钉底跟直播时完全不重测。回归用例锁住「滚动帧零行盒读取、滑块不写 top、停手后才重量」。
+
+六、Windows PowerShell 写中文不再按 ANSI 落盘。PS 5.1 的 `Set-Content`/`Add-Content`/`Out-File` 缺省按系统代码页写文件，zh-CN 机器上就是 GBK——模型用 `execute_command` 写中文，落盘字节当场就是坏码，事后教学救不回来。在 spawn 处加编码前导，把三个 cmdlet 的缺省编码兜到 UTF-8（不覆盖显式 `-Encoding`），同时治 Console 与 native 管道乱码；行文本抽成 `shared/powershellEncoding.ts` 单一源，工具入口与 user hook 共用，Rust wrapper 孪生同刀。
+
+七、写入尺寸锚与文档对齐。简单单文件任务不走并行教学闸，`write_file` 描述是模型唯一在场的教学面；补 ~5k 字符的单次调用尺寸锚（远低于写入截断线），并挂钩分段 append、并行批次与委派 worker，`edit_file` 补「发增量不重发全文件」判据。README 版本/平台徽章与 docs 索引对齐实际发布状态（只发 macOS/Windows、三项并行档已全落）。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；Rust `cargo check` 与 4 个预览缓存用例通过；受影响 TS 套件 335 例（引擎/委派/提示/网络/预览）与 UI 240 例（markdown/toolRow）全过。未在本机跑全量 `bun test` 与 GUI 打包；构建、签名与 `latest.json` 由 tag 发布流水线完成。
+
 ## v4.9.5
 
 **对话左栏大纲刻度尺；子 agent 工作台改滑入覆盖层，切换不再重排整条转写**
