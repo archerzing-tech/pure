@@ -20,6 +20,7 @@ import { runBrowserTool, runScreenshotTool } from '../../tools/impl/browser';
 import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice, readFileRangeFooter, readFileRangeSlice } from '../../shared/readFileHead';
+import { POWERSHELL_ENCODING_LINES } from '../../shared/powershellEncoding';
 import { formatSymbolOutline } from '../../shared/symbolOutline';
 import { generateDocument } from '../../shared/docGen';
 import { formatCommandError, isBenignNoMatchExit, safeParseArgs } from '../../shared/format';
@@ -93,9 +94,16 @@ function windowsSystemShell(name: 'powershell.exe' | 'cmd.exe'): string {
  * `if ($?) { exit $LASTEXITCODE } else { exit 1 }` 把一切非零压成 1，与良性
  * exit-1 白名单（grep/git diff 无匹配）叠加后 128 类真失败被标 success；
  * PS 5.1 在 `2>&1` 下把 stderr 非空的成功 native 命令的 `$?` 打成 false，
- * 成功被报失败——真实码透传双双修复。 */
+ * 成功被报失败——真实码透传双双修复。
+ *
+ * 编码前导（Windows 判例 2026-11-20，用户真机报 Set-Content 把中文写坏）：
+ * PS 5.1 的 Set-Content/Add-Content/Out-File 缺省按系统 ANSI 代码页落盘
+ * （zh-CN=GBK），中文内容落盘的字节就是坏的——前导把三个文件 cmdlet 的
+ * 缺省编码兜到 UTF-8 并治 Console/管道乱码；行文本唯一源在
+ * shared/powershellEncoding.ts（hook 入口共用），与 Rust
+ * powershell_command_wrapped 同刀，两侧必须一致。 */
 export function powershellWrappedCommand(command: string): string {
-  return `$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n${command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`;
+  return `${POWERSHELL_ENCODING_LINES.join('\n')}\n$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n${command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`;
 }
 
 export function encodePowerShellCommand(command: string): string {

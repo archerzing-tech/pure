@@ -15,6 +15,7 @@
 
 import type { UserHook, UserHookEvent, UserHooksConfig } from './userHooks';
 import { stripPowerShellStartupProgress } from './powershellOutput';
+import { POWERSHELL_ENCODING_LINES } from './powershellEncoding';
 import { decodeTextBytes } from '../adapter/node/fileText';
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 10_000;
@@ -118,13 +119,15 @@ async function drainWithDeadline(stream: ReadableStream<Uint8Array>, deadline: n
  * `$ProgressPreference='SilentlyContinue'`（Windows 判例 2026-11-14）：hook 的
  * stderr 是 veto reason 的来源，zh-CN 首次模块加载的 CLIXML 进度记录
  * （stripPowerShellStartupProgress 只认英文文案，兜不住）会把 veto 理由淹没
- * ——与其他 PowerShell 入口同刀，源头关掉进度流。 */
+ * ——与其他 PowerShell 入口同刀，源头关掉进度流。编码前导同理随行
+ * （shared/powershellEncoding.ts 唯一源，Windows 判例 2026-11-20）：hook 用
+ * Set-Content 落盘中文时同样按 ANSI 写坏，hook 与工具命令行为必须一致。 */
 export function createNodeUserHookRunner(opts: { cwd?: string } = {}): UserHookRunner {
   return async (hook, payload) => {
     const started = Date.now();
     const isWindows = process.platform === 'win32';
     const argv = isWindows
-      ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ProgressPreference='SilentlyContinue'; ${hook.command}`, 'utf16le').toString('base64')]
+      ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from([`$ProgressPreference='SilentlyContinue'`, ...POWERSHELL_ENCODING_LINES].join('; ') + `; ${hook.command}`, 'utf16le').toString('base64')]
       : ['bash', '-c', hook.command];
     const proc = Bun.spawn(argv, {
       cwd: opts.cwd,

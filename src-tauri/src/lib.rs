@@ -4367,10 +4367,18 @@ fn extract_file_text(bytes: &[u8], path: &std::path::Path) -> (String, String) {
 ///    命令的 `$?` 打成 false（NativeCommandError），成功被报失败——真实码
 ///    透传双双修复。无 native 参与时按 `$?` 兜底（cmdlet 失败 exit 1，
 ///    成功 exit 0）。
+/// 4. 编码前导（Windows 判例 2026-11-20，用户真机报 Set-Content 把中文写坏，
+///    与 TS shared/powershellEncoding.ts 同刀，两侧必须一致）：PS 5.1 的
+///    Set-Content/Add-Content/Out-File 缺省按系统 ANSI 代码页落盘
+///    （zh-CN=GBK），中文内容落盘的字节就是坏的。`$PSDefaultParameterValues`
+///    只填缺省参数——命令里显式写了 `-Encoding` 的不受影响；`'utf8'` 在 5.1
+///    带 BOM（5.1 没有 utf8NoBOM，保住中文优先于去 BOM），pwsh 7 下同一句
+///    即无 BOM。Console 编码治 native exe 输出乱码；重定向下设句柄可能抛
+///    「句柄无效」——catch 兜住，前导绝不能弄死命令本身。
 #[cfg(windows)]
 fn powershell_command_wrapped(command: &str) -> String {
     format!(
-        "$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n{command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) {{ exit $LASTEXITCODE }}\nif ($?) {{ exit 0 }}\nexit 1"
+        "try {{ [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) }} catch {{ }}\ntry {{ [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }} catch {{ }}\n$OutputEncoding = [Text.UTF8Encoding]::new($false)\n$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'\n$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'\n$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'\n$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\n{command}\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) {{ exit $LASTEXITCODE }}\nif ($?) {{ exit 0 }}\nexit 1"
     )
 }
 
@@ -4610,15 +4618,22 @@ mod clixml_tests {
     fn wrapper_uses_line_separated_exit_resolution() {
         // 换行拼接（4.9.0 判例）：单行 `; ` 拼接下命令尾部 `# 注释` 会把整个
         // wrapper 吞进注释，here-string `"@` 收尾会炸解析。wrapper 必须是
-        // 独立行：# 注释只吞它自己那一行。
+        // 独立行：# 注释只吞它自己那一行。编码前导（2026-11-20 判例）六行
+        // 逐行锁文本——与 TS shared/powershellEncoding.ts 必须逐字一致。
         let wrapped = powershell_command_wrapped("cmd /c exit 3 # trailing comment");
         let lines: Vec<&str> = wrapped.lines().collect();
-        assert_eq!(lines[0], "$ProgressPreference='SilentlyContinue'", "{}", wrapped);
-        assert_eq!(lines[1], "$__pure_prev = $LASTEXITCODE", "{}", wrapped);
-        assert_eq!(lines[2], "cmd /c exit 3 # trailing comment", "{}", wrapped);
-        assert!(lines[3].starts_with("if (($null -ne $LASTEXITCODE)"), "{}", wrapped);
-        assert_eq!(lines[4], "if ($?) { exit 0 }", "{}", wrapped);
-        assert_eq!(lines[5], "exit 1", "{}", wrapped);
+        assert_eq!(lines[0], "try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch { }", "{}", wrapped);
+        assert_eq!(lines[1], "try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }", "{}", wrapped);
+        assert_eq!(lines[2], "$OutputEncoding = [Text.UTF8Encoding]::new($false)", "{}", wrapped);
+        assert_eq!(lines[3], "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'", "{}", wrapped);
+        assert_eq!(lines[4], "$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'", "{}", wrapped);
+        assert_eq!(lines[5], "$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'", "{}", wrapped);
+        assert_eq!(lines[6], "$ProgressPreference='SilentlyContinue'", "{}", wrapped);
+        assert_eq!(lines[7], "$__pure_prev = $LASTEXITCODE", "{}", wrapped);
+        assert_eq!(lines[8], "cmd /c exit 3 # trailing comment", "{}", wrapped);
+        assert!(lines[9].starts_with("if (($null -ne $LASTEXITCODE)"), "{}", wrapped);
+        assert_eq!(lines[10], "if ($?) { exit 0 }", "{}", wrapped);
+        assert_eq!(lines[11], "exit 1", "{}", wrapped);
     }
 
     #[test]

@@ -147,8 +147,10 @@ describe('encodePowerShellCommand', () => {
     // zh-CN 首次模块加载的 CLIXML 进度记录不再粘进 stderr。换行拼接 +
     // $__pure_prev 基线透传真实退出码（与 Rust powershell_command_wrapped
     // 同刀）：压码成 1 会与良性 exit-1 白名单叠加出假成功，2>&1 下的
-    // NativeCommandError 会把成功打成失败。
-    expect(decoded).toBe(`$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\nWrite-Output "hello world"\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`);
+    // NativeCommandError 会把成功打成失败。编码前导（Windows 判例
+    // 2026-11-20，shared/powershellEncoding.ts 唯一源）：PS 5.1 文件 cmdlet
+    // 缺省按 ANSI 落盘，中文写坏——全串 toBe 同时锁前导六行与 wrapper。
+    expect(decoded).toBe(`try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch { }\ntry { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }\n$OutputEncoding = [Text.UTF8Encoding]::new($false)\n$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'\n$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'\n$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'\n$ProgressPreference='SilentlyContinue'\n$__pure_prev = $LASTEXITCODE\nWrite-Output "hello world"\nif (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne $__pure_prev)) { exit $LASTEXITCODE }\nif ($?) { exit 0 }\nexit 1`);
   });
 
   it('keeps double quotes and CJK intact (the point of -EncodedCommand)', () => {
@@ -159,10 +161,13 @@ describe('encodePowerShellCommand', () => {
 
   it('puts the wrapper on its own lines so a trailing # comment cannot swallow it', () => {
     // 尾部 `# 注释` 在单行拼接下会吞掉整段 wrapper；换行后注释只管自己那行。
+    // 编码前导六行居首（0-5），wrapper 各行索引随之整体后移。
     const decoded = Buffer.from(encodePowerShellCommand('cmd /c exit 3 # trailing comment'), 'base64').toString('utf16le');
     const lines = decoded.split('\n');
-    expect(lines[2]).toBe('cmd /c exit 3 # trailing comment');
-    expect(lines[3]).toContain('exit $LASTEXITCODE');
+    expect(lines[5]).toBe(`$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'`);
+    expect(lines[6]).toBe(`$ProgressPreference='SilentlyContinue'`);
+    expect(lines[8]).toBe('cmd /c exit 3 # trailing comment');
+    expect(lines[9]).toContain('exit $LASTEXITCODE');
   });
 });
 
