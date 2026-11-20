@@ -18,7 +18,7 @@ import type {
   ToolDefinition,
 } from '../../shared/types';
 import { normalizeTokenUsage } from '../../shared/usage';
-import { buildChatParams, stripHistoricalThinking } from '../openai/mapping';
+import { buildChatParams, stripAllThinking, stripHistoricalThinking } from '../openai/mapping';
 import { isTauriRuntime } from '../../shared/tauri';
 import { paramHealScope, planParamWithdrawal, recordParamWithdrawal, withdrawExtraBody } from '../../shared/paramRejectionHeal';
 
@@ -165,7 +165,9 @@ export class RustLLMAdapter implements LLMAdapter {
       && (!lastToolAssistant || lastToolAssistant.thinkingBlocks?.length)
       ? this.config.thinkingBudget
       : undefined;
-    const wireMessages = protocol === 'anthropic' ? stripHistoricalThinking(messages) : messages;
+    const wireMessages = protocol === 'anthropic'
+      ? (thinkingBudget ? stripHistoricalThinking(messages) : stripAllThinking(messages))
+      : messages;
     const params = buildChatParams({
       model: this.config.model,
       messages: wireMessages,

@@ -12,7 +12,7 @@ import type { AssistantThinkingBlock, LLMAdapter, Message, ToolDefinition, LLMCh
 import { safeParseArgs } from '../../shared/format';
 import { normalizeTokenUsage } from '../../shared/usage';
 import { trimHistoricalImages } from '../../shared/imageContext';
-import { stripHistoricalThinking } from '../openai/mapping';
+import { stripAllThinking, stripHistoricalThinking } from '../openai/mapping';
 
 export interface DeepSeekAnthropicConfig {
   /** Optional: keyless local endpoints (anthropic 兼容路由器) legitimately
@@ -80,7 +80,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   ): AsyncGenerator<LLMChunk, void, void> {
     const thinkingBudget = this.effectiveThinkingBudget(messages);
     const { system, conversationMessages } = this.splitSystemMessage(
-      thinkingBudget ? stripHistoricalThinking(messages) : messages,
+      thinkingBudget ? stripHistoricalThinking(messages) : stripAllThinking(messages),
     );
     const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 
@@ -215,7 +215,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   ): Promise<LLMResponse> {
     const thinkingBudget = this.effectiveThinkingBudget(messages);
     const { system, conversationMessages } = this.splitSystemMessage(
-      thinkingBudget ? stripHistoricalThinking(messages) : messages,
+      thinkingBudget ? stripHistoricalThinking(messages) : stripAllThinking(messages),
     );
     const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 

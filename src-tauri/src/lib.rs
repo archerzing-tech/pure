@@ -14715,7 +14715,8 @@ fn anthropic_thinking_result_blocks(
         .into_iter()
         .map(|(_, block)| block)
         .filter(|block| {
-            block.get("type").and_then(|v| v.as_str()) == Some("redacted_thinking")
+            (block.get("type").and_then(|v| v.as_str()) == Some("redacted_thinking")
+                && block.get("data").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
                 || (block.get("thinking").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty())
                     && block.get("signature").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
         })

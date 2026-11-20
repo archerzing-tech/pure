@@ -32,6 +32,10 @@ export interface OpenAIWireMessage {
  * 全部（断点续跑要用最近一条），发请求前只留最后一条 assistant 的思考块。
  * 最后一条没有 toolCalls 时一并剥掉——普通文本回答没有待配对的 tool_use。
  */
+export function stripAllThinking(messages: Message[]): Message[] {
+  return messages.map((m) => m.thinkingBlocks?.length ? { ...m, thinkingBlocks: undefined } : m);
+}
+
 export function stripHistoricalThinking(messages: Message[]): Message[] {
   let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
