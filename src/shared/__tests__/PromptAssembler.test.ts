@@ -288,6 +288,23 @@ describe('PromptAssembler', () => {
     expect(assembly).not.toContain('x'.repeat(161));
   });
 
+  it('caps an over-long frontmatter description in the index line', () => {
+    // 2026-11-20：索引行描述此前完全不截断，技能一多常驻段被撑成正文。
+    const longDesc = `${'y'.repeat(400)}   second   line`;
+    const assembly = assembler.buildSystemPrompt({
+      surface: 'gui',
+      capabilities: 'test',
+      skills: [
+        { name: 'long-desc', description: longDesc, path: '/skills/long-desc/SKILL.md', enabled: true },
+        { name: 'awareness-long', description: longDesc, enabled: true },
+      ],
+    });
+    // 截到 160 字符 + 省略号，换行与多余空白折成一行。
+    expect(assembly).toContain(`>${'y'.repeat(160)}…</skill>`);
+    expect(assembly).not.toContain('y'.repeat(161));
+    expect(assembly).not.toContain('second   line');
+  });
+
   it('escapes XML-significant characters in skill index attributes and descriptions', () => {
     const assembly = assembler.buildSystemPrompt({
       surface: 'cli',

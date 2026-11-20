@@ -415,6 +415,18 @@ function escapeXmlText(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 }
 
+/** 索引行描述上限：索引是「够不够得着」的线索，不是说明书。技能一多，长
+ *  frontmatter 描述会把常驻段撑成正文（2026-11-20 实测 20 个技能 ≈ 8.5k 字符），
+ *  而正文本来就由 path 按需读。超出的截成一行。 */
+const MAX_SKILL_INDEX_DESCRIPTION_CHARS = 160;
+
+function clampSkillIndexDescription(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_SKILL_INDEX_DESCRIPTION_CHARS
+    ? `${flat.slice(0, MAX_SKILL_INDEX_DESCRIPTION_CHARS)}…`
+    : flat;
+}
+
 /** 索引行的描述回退:frontmatter 的 description 缺失或坏形时取 body 首段
  *  截断。坏形含空串、YAML 块标量指示符(`>` / `|`,parseSkillMarkdown 的单行
  *  正则取不到块标量——geo-3d-scene-builder 真实踩中,取到字面 ">")和纯引
@@ -422,13 +434,13 @@ function escapeXmlText(value: string): string {
  *  一段;全 body 只剩标题时才用标题凑数。 */
 function effectiveSkillDescription(skill: PromptSkill): string {
   const usable = usableSkillDescription(skill);
-  if (usable) return usable;
+  if (usable) return clampSkillIndexDescription(usable);
   const paragraphs = (skill.body ?? '')
     .split(/\n\s*\n/)
     .map((s) => s.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
   const paragraph = paragraphs.find((s) => !s.startsWith('#')) ?? paragraphs[0] ?? '';
-  return paragraph.length > 160 ? `${paragraph.slice(0, 160)}…` : paragraph;
+  return clampSkillIndexDescription(paragraph);
 }
 
 /** 知晓行(无 body 条目)只吃「可当人话读」的 description——YAML 指示符、
@@ -436,7 +448,8 @@ function effectiveSkillDescription(skill: PromptSkill): string {
  *  回退,buildSkills 靠它决定整条收还是丢。 */
 function usableSkillDescription(skill: PromptSkill): string {
   const raw = (skill.description ?? '').trim();
-  return raw && !/^[>|][+-0-9]*$/.test(raw) && !/^["']["']?$/.test(raw) ? raw : '';
+  if (!raw || /^[>|][+-0-9]*$/.test(raw) || /^["']["']?$/.test(raw)) return '';
+  return clampSkillIndexDescription(raw);
 }
 
 /** Skill 索引段的单一出典：主对话走 fragment 管道（assemble → skills），
