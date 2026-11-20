@@ -127,6 +127,72 @@ function wireFlingClock(root: HTMLElement | null): void {
 const flingActive = (now = Date.now()): boolean => now - lastFlingAt < flingSettleMs;
 const flingSettledFor = (ms: number, now = Date.now()): boolean => now - lastFlingAt >= ms;
 
+// 泊车占位的宽度失效（2026-11-20 卡顿 P0）：park() 记下的 min-height 是旧
+// 宽度量的像素值；拖窗口/开关侧栏改宽度后，窄了占位偏矮（滚动条缩、钉底被
+// 拽走），宽了留大段空白。停手后把泊车组逐个「临时挂载→量高→再泊回」，
+// 一帧一个，避免一次长任务。只认宽度变化，纯高度变化不动占位。
+export const PARK_REMEASURE_SETTLE_MS = 200;
+interface ParkedRemeasure {
+  alive: () => boolean;
+  isParked: () => boolean;
+  remeasure: () => void;
+}
+const parkedGroups = new Set<ParkedRemeasure>();
+let widthRemeasureTimer: ReturnType<typeof setTimeout> | null = null;
+let widthRemeasureQueue: ParkedRemeasure[] = [];
+let widthRemeasureFrame = 0;
+
+const pumpWidthRemeasure = (): void => {
+  if (widthRemeasureFrame) return;
+  if (typeof requestAnimationFrame !== 'function') {
+    while (widthRemeasureQueue.length > 0) widthRemeasureQueue.shift()!.remeasure();
+    return;
+  }
+  widthRemeasureFrame = requestAnimationFrame(() => {
+    widthRemeasureFrame = 0;
+    widthRemeasureQueue.shift()?.remeasure();
+    if (widthRemeasureQueue.length > 0) pumpWidthRemeasure();
+  });
+};
+
+const scheduleWidthRemeasure = (): void => {
+  if (widthRemeasureTimer !== null) clearTimeout(widthRemeasureTimer);
+  widthRemeasureTimer = setTimeout(() => {
+    widthRemeasureTimer = null;
+    const groups = [...parkedGroups];
+    // 直播窗口 reset() 只清组数组不逐个 disconnect：顺手把脱离文档的尸体
+    // 从集合里摘掉，否则长会话反复切换会让这张表无界增长。
+    for (const group of groups) if (!group.alive()) parkedGroups.delete(group);
+    widthRemeasureQueue = groups.filter((group) => group.isParked());
+    pumpWidthRemeasure();
+  }, PARK_REMEASURE_SETTLE_MS);
+};
+
+let widthWatchInstalled = false;
+function installWidthWatch(): void {
+  if (widthWatchInstalled || typeof window === 'undefined') return;
+  widthWatchInstalled = true;
+  // 两条口子：窗口拖动（window resize）与侧栏开合（#chat 自身宽度变化）。
+  let lastInnerWidth = window.innerWidth;
+  window.addEventListener('resize', () => {
+    if (window.innerWidth === lastInnerWidth) return;
+    lastInnerWidth = window.innerWidth;
+    scheduleWidthRemeasure();
+  }, { passive: true });
+  if (typeof document !== 'undefined' && typeof ResizeObserver === 'function') {
+    const chat = document.getElementById('chat');
+    if (chat) {
+      let lastChatWidth = chat.clientWidth;
+      new ResizeObserver(() => {
+        const width = chat.clientWidth;
+        if (width === lastChatWidth) return;
+        lastChatWidth = width;
+        scheduleWidthRemeasure();
+      }).observe(chat);
+    }
+  }
+}
+
 interface PendingGroupWork {
   /** Runs only if the group is still inside the band (and not disconnected). */
   run: () => Promise<void> | void;
@@ -311,6 +377,19 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
     while (parked.length > 0) body.appendChild(parked.shift()!);
   };
 
+  const parkedRemeasure: ParkedRemeasure = {
+    alive: () => !disconnected && details.isConnected,
+    isParked: () => !disconnected && details.isConnected && details.open && parked.length > 0 && body.firstChild === null,
+    remeasure: () => {
+      // 排队到执行之间可能被 IO 挂回；再判一次，别把正在看的组又泊掉。
+      if (!parkedRemeasure.isParked()) return;
+      mount();
+      park(); // park 会在清空后的 min-height 上写入新宽度量到的高度
+    },
+  };
+  parkedGroups.add(parkedRemeasure);
+  installWidthWatch();
+
   const renderNow = async (): Promise<void> => {
     mount();
     if (materialized || disconnected) return;
@@ -420,6 +499,7 @@ export function createHistoryGroup(options: HistoryGroupOptions = {}): HistoryGr
     disconnect() {
       disconnected = true;
       cancelParkTimer();
+      parkedGroups.delete(parkedRemeasure);
       observer?.disconnect();
       observer = null;
     },

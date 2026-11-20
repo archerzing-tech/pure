@@ -225,19 +225,19 @@ describe('工作台开/关/寻址（§3）', () => {
     wb.close();
   });
 
-  it('流式渲染闸：半开不挂起，transitionend 后挂起，关闭解除', () => {
+  it('流式渲染闸：打开即挂起，滑出结束后才解除', () => {
     const wb = agentWorkbench()!;
     wb.sync([activity()], { sessionId: 's1' });
     wb.open('call-1');
-    // 半开过渡期（transform 滑入中）：不挂起
-    expect(wb.shouldSuspendChatStreamingRender()).toBe(false);
-    // 滑入过渡终了（happy-dom 无真实过渡，手动派发）
+    // 打开即挂起：不等 transitionend（转场被打断时事件可能永不来，
+    // 半开期两份 DOM 同时重排正是被砍掉的那一段）。
+    expect(wb.shouldSuspendChatStreamingRender()).toBe(true);
+    wb.close();
+    // 滑出期间仍挂起，追平那一帧落在转场之后。
+    expect(wb.shouldSuspendChatStreamingRender()).toBe(true);
     const ev = new Event('transitionend');
     (ev as unknown as { propertyName: string }).propertyName = 'transform';
     document.getElementById('agent-view')!.dispatchEvent(ev);
-    expect(wb.shouldSuspendChatStreamingRender()).toBe(true);
-    // 关闭即解除（追平由 markdown.ts 的重试拍兜底）
-    wb.close();
     expect(wb.shouldSuspendChatStreamingRender()).toBe(false);
   });
 });
@@ -349,7 +349,10 @@ describe('源码锁（接线与退役断言）', () => {
     expect(src).toMatch(/if \(this\.viewActive\) \{\s*[^}]*this\.mountAgentActivityPanel\(\);\s*\}\s*this\.scheduleAgentActivityPersistence/);
     // 委派卡不再挂「工作台 ↗」入口 chip（rail 卡整卡点击进入）。
     expect(src).not.toContain('attachWorkbenchEntry(');
-    expect(src).toContain("window.addEventListener('resize', applyAgentRailSpaceGate)");
+    // 2026-11-20 P0：resize 合帧到 scheduleLayout，空间门与输入栏量高同拍走，
+    // 杜绝每事件一次 offsetHeight 强制布局 + class 失效。
+    expect(src).toContain("window.addEventListener('resize', scheduleLayout)");
+    expect(src).toMatch(/layoutFrame = requestAnimationFrame\(\(\) => \{[\s\S]*?applyAgentRailSpaceGate\(\);\s*sync\(\);/);
     expect(src).toContain('onOpenAgent: (callId) => agentWorkbench()?.open(callId)');
     // 2026-11-19：工作台盖住对话期间不画 rail 卡（不显示的页面停渲染），
     // 快照仍喂给它；关闭后由 onClosed 补画。

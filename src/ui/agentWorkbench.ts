@@ -323,12 +323,40 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     if (timeRow.textContent !== range.text) timeRow.textContent = range.text;
   }
 
-  /** 全开判定：滑入过渡走完（transitionend）才算——半开期 chat 还看得见，
-   *  流式照常画（§3.5：半开过渡期不挂起）。 */
-  view.addEventListener('transitionend', (e) => {
-    if (e.target !== view || e.propertyName !== 'transform') return;
-    fullyOpen = visible;
-  });
+  // 渲染闸不再靠 transitionend 塑形（2026-11-20 卡顿 P0）：滑入时若立刻
+  // 挂起，被覆盖的 chat 在转场期间就会被砍掉渲染；但等 transitionend 才挂
+  // 起又会让整段滑入期间两份 DOM 同时重排，且转场被打断时事件可能永不来。
+  // 改成打开即挂起、关闭后等滑出走完才解除（带定时器兜底），让追平那一帧
+  // 落在转场之后。
+  let gateReleaseTimer: number | null = null;
+  let gateReleaseWaiter: ((e: Event) => void) | null = null;
+  const cancelGateRelease = (): void => {
+    if (gateReleaseTimer !== null) {
+      window.clearTimeout(gateReleaseTimer);
+      gateReleaseTimer = null;
+    }
+    if (gateReleaseWaiter) view.removeEventListener('transitionend', gateReleaseWaiter);
+    gateReleaseWaiter = null;
+  };
+  const releaseRenderGate = (): void => {
+    cancelGateRelease();
+    fullyOpen = false;
+  };
+  const scheduleGateRelease = (): void => {
+    cancelGateRelease();
+    const waitMs = panelSwitchDurationMs();
+    if (waitMs <= 0) {
+      releaseRenderGate();
+      return;
+    }
+    gateReleaseWaiter = (event: Event) => {
+      if (event.target !== view) return;
+      if ((event as TransitionEvent).propertyName !== 'transform') return;
+      releaseRenderGate();
+    };
+    view.addEventListener('transitionend', gateReleaseWaiter);
+    gateReleaseTimer = window.setTimeout(releaseRenderGate, waitMs + 80);
+  };
 
   function buildChips(): void {
     const ordered = orderedAgents(activities);
@@ -491,6 +519,9 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
       outputEl.replaceChildren();
       // 上一次关闭排着的 rail 放回作废：现在要的是让它继续让位。
       cancelPendingRailReveal();
+      // 打开即挂起 chat 渲染；取消上一次关闭排着的解除，避免转场中途被放开。
+      cancelGateRelease();
+      fullyOpen = true;
       if (!visible) {
         visible = true;
         focusBeforeOpen = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -505,7 +536,8 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
     close() {
       if (!visible) return;
       visible = false;
-      fullyOpen = false;
+      // 不立刻解除渲染闸：滑出期间 chat 仍被盖住，追平那一帧等转场走完再落。
+      scheduleGateRelease();
       stopTimer();
       view.classList.remove('expanded');
       setChromeHidden(false);
@@ -520,7 +552,8 @@ function createAgentWorkbench(): AgentWorkbenchHandle {
       focusBeforeOpen = null;
     },
     isVisible() { return visible; },
-    shouldSuspendChatStreamingRender() { return visible && fullyOpen; },
+    // 关闭后 fullyOpen 还要保持到滑出结束，不能再叠 visible 判定。
+    shouldSuspendChatStreamingRender() { return fullyOpen; },
     sync(next, options = {}) {
       // 会话更替（挂载路径带着新 sessionId 来）：整页视图跟会话走——关闭。
       if (options.sessionId !== undefined && sessionId !== '' && options.sessionId !== sessionId) {

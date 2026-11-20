@@ -2199,16 +2199,34 @@ function installAgentActivityHostLayout(): void {
   const inputBar = document.getElementById('input-bar');
   if (!host || !inputBar) return;
   agentActivityHostLayoutInstalled = true;
+  let lastBottom = -1;
   const sync = (): void => {
     const h = inputBar.offsetHeight;
-    host.style.setProperty('--agent-host-bottom', `${h > 0 ? h + 12 : 0}px`);
+    const next = h > 0 ? h + 12 : 0;
+    if (next === lastBottom) return;
+    lastBottom = next;
+    host.style.setProperty('--agent-host-bottom', `${next}px`);
   };
-  if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(inputBar);
-  // 空间门（工作台设计 §2）：宽度判定挂进既有的 resize 监听，不新增监听器
-  // 家族；context-panel 展开态由 main.ts 的 setContextPanelCollapsed 调
-  // applyAgentRailSpaceGate 补一拍。
-  window.addEventListener('resize', applyAgentRailSpaceGate);
-  window.addEventListener('resize', sync);
+  // 拖动窗口时 resize 事件按帧连发，offsetHeight 读一次就是一次强制布局。
+  // 合帧到一帧一次，并且值没变就不写自定义属性（2026-11-20 窗口卡顿 P0）。
+  let layoutFrame = 0;
+  const scheduleLayout = (): void => {
+    if (layoutFrame) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      applyAgentRailSpaceGate();
+      sync();
+      return;
+    }
+    layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = 0;
+      // 空间门（工作台设计 §2）跟布局同一拍；context-panel 展开态仍由
+      // main.ts 的 setContextPanelCollapsed 同步调 applyAgentRailSpaceGate。
+      applyAgentRailSpaceGate();
+      sync();
+    });
+  };
+  if (typeof ResizeObserver === 'function') new ResizeObserver(scheduleLayout).observe(inputBar);
+  window.addEventListener('resize', scheduleLayout);
   sync();
   applyAgentRailSpaceGate();
 }

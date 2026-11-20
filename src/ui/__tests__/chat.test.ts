@@ -2071,8 +2071,12 @@ describe('plan overview completion state', () => {
     // ResizeObserver 实时写进 --agent-host-bottom，而不是写死的 CSS 长度。
     const fn = src.indexOf('function installAgentActivityHostLayout(');
     expect(fn).toBeGreaterThan(-1);
-    const body = src.slice(fn, fn + 1_200);
-    expect(body.indexOf("new ResizeObserver(sync).observe(inputBar)")).toBeGreaterThan(-1);
+    const body = src.slice(fn, fn + 2_400);
+    // 2026-11-20 P0：观察器与 resize 都走 scheduleLayout 合帧，读一次
+    // offsetHeight 写一拍自定义属性；不再每 resize 事件各读一次。
+    expect(body.indexOf("new ResizeObserver(scheduleLayout).observe(inputBar)")).toBeGreaterThan(-1);
+    expect(body.indexOf("window.addEventListener('resize', scheduleLayout)")).toBeGreaterThan(-1);
+    expect(body.indexOf('inputBar.offsetHeight')).toBeGreaterThan(-1);
     expect(body.indexOf("host.style.setProperty('--agent-host-bottom'")).toBeGreaterThan(-1);
     // 挂载点接线：面板一挂上就装观察器（幂等，重复调用是空操作）。
     const mount = src.indexOf('mountAgentActivityPanel(): void');

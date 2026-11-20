@@ -45,13 +45,40 @@ export function setupWindowChrome(): void {
 
       // 最大化态把 maximize 图标换成 restore，并去掉窗口圆角（铺满屏幕时
       // 圆角会在四角露出底色）。菜单/系统改变窗口尺寸时也会走到 onResized。
-      const syncMax = async (): Promise<void> => {
-        const isMax = await win.isMaximized();
+      // 拖动窗口时 resize 事件按帧连发：每事件一次 isMaximized() IPC + body
+      // class 写入会把样式失效堆在系统 resize 的同一帧里。合帧到一帧一次，
+      // 且值没变就不碰 class（2026-11-20 窗口卡顿 P0）。
+      let lastMaximized: boolean | null = null;
+      let maxSyncFrame = 0;
+      let maxSyncing = false;
+      let maxSyncAgain = false;
+      const applyMax = (isMax: boolean): void => {
+        if (lastMaximized === isMax) return;
+        lastMaximized = isMax;
         max?.classList.toggle('is-max', isMax);
         document.body.classList.toggle('window-maximized', isMax);
       };
+      const syncMax = async (): Promise<void> => {
+        // IPC 在飞时再来一拍只记脏标记，不并发第二次；落地后补一拍取最新值。
+        if (maxSyncing) { maxSyncAgain = true; return; }
+        maxSyncing = true;
+        try {
+          applyMax(await win.isMaximized());
+        } finally {
+          maxSyncing = false;
+          if (maxSyncAgain) { maxSyncAgain = false; void syncMax(); }
+        }
+      };
       await syncMax();
-      void win.onResized(() => { void syncMax(); });
+      const scheduleMaxSync = (): void => {
+        if (maxSyncFrame) return;
+        if (typeof requestAnimationFrame !== 'function') { void syncMax(); return; }
+        maxSyncFrame = requestAnimationFrame(() => {
+          maxSyncFrame = 0;
+          void syncMax();
+        });
+      };
+      void win.onResized(scheduleMaxSync);
     } catch {
       // 窗口 API 意外不可用（例如老版本 webview 注入缺失）：退回浏览器
       // 形态，别留三个点了没反应的按钮。

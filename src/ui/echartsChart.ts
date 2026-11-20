@@ -556,7 +556,12 @@ export function buildChartOption(spec: ChartSpec, dark: boolean): EChartsOption 
 interface ChartEntry {
   chart: ReturnType<typeof echarts.init>;
   ro: ResizeObserver | null;
+  resizeTimer: ReturnType<typeof setTimeout> | null;
 }
+
+/** 与 leafletMap 同款停手窗口：拖窗口时容器宽度每帧都在变，裸 chart.resize()
+ *  每帧重建整棵 SVG；图表由 CSS 拉满容器，停手后再适配视觉上无损。 */
+const CHART_RESIZE_SETTLE_MS = 150;
 
 const instances = new WeakMap<HTMLElement, ChartEntry>();
 const chartTargets = new Set<HTMLElement>();
@@ -566,6 +571,7 @@ function disposeEchartTarget(target: HTMLElement): void {
   const existing = instances.get(target);
   if (existing) {
     existing.ro?.disconnect();
+    if (existing.resizeTimer !== null) clearTimeout(existing.resizeTimer);
     existing.chart.dispose();
     instances.delete(target);
   }
@@ -655,11 +661,20 @@ function mountEchart(target: HTMLElement, option: EChartsOption): void {
     chartTargets.delete(target);
     throw err;
   }
+  const entry: ChartEntry = { chart, ro: null, resizeTimer: null };
   const ro = typeof ResizeObserver !== 'undefined'
-    ? new ResizeObserver(() => chart.resize())
+    ? new ResizeObserver(() => {
+        // 尾沿合帧：拖动/侧栏动画期间只让 CSS 拉伸，停手后 refit 一次。
+        if (entry.resizeTimer !== null) clearTimeout(entry.resizeTimer);
+        entry.resizeTimer = setTimeout(() => {
+          entry.resizeTimer = null;
+          if (target.isConnected && instances.get(target) === entry) chart.resize();
+        }, CHART_RESIZE_SETTLE_MS);
+      })
     : null;
+  entry.ro = ro;
   ro?.observe(target);
-  instances.set(target, { chart, ro });
+  instances.set(target, entry);
   chartTargets.add(target);
   ensureDetachedChartObserver();
 }
