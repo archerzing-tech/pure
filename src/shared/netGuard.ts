@@ -550,7 +550,7 @@ export function netFailureHint(url: string, message: string): string {
   // 去配代理，而是把这一次请求换成字节一致的镜像端点。
   const rw = primaryRewrite(url);
   const rewrite = rw ? ` 这个 URL 有字节一致的镜像端点，可直接改用 ${rw.url}（${rw.rule}，单请求改写、不落盘），无需先配代理。` : '';
-  return `${message} — 若为网络不可达，请勿原样重试：换镜像/来源、内联替代或跳过此资源继续任务。${rewrite}`;
+  return `${message} — 若为网络不可达，请勿原样重试：按「换等价来源/镜像 → 内联或本地替代（占位、简化数据、离线副本）→ 跳过并继续」的顺序变通；构建类任务里一个资源拿不到不能让整条构建停下。${rewrite}`;
 }
 
 /** True when a transport error is the provider REJECTING the request itself
@@ -661,7 +661,7 @@ export function classifyFailure(message: string): FailureClass {
 /** Per-class recovery guidance (what "skip / work around" MEANS for this
  *  class — the model gets an actionable escape, not just "try differently"). */
 export const FAILURE_CLASS_HINTS: Record<FailureClass, string> = {
-  network: '此类失败 = 该主机/网络在此环境不可达。换镜像或离线替代、内联内容，或跳过该资源；不要请求同一主机的其他地址。',
+  network: '此类失败 = 该主机/网络在此环境不可达。按「换等价来源或镜像（不同域名/官方 CDN/镜像站）→ 内联或本地替代（占位、简化数据、离线副本）→ 跳过该资源」的顺序变通；不要请求同一主机的其他地址。构建类任务里一个资源拿不到不能让整条构建停下。',
   timeout: '此类失败 = 操作超时。把任务拆小、换更快路径或改后台执行；不要原样重试。',
   auth: '此类失败 = 凭证缺失或无效。停止重试，向用户索要正确的密钥/登录。',
   gateway: '此类失败 = 请求被中间网络设备（内网安全网关/上网行为管理/代理出口）的策略拦下——不是模型服务故障，与凭证无关。重试与换措辞改变不了网关策略：如实告知用户被拦截的事实与出路（拆小任务/减少附件/换网络/请管理员放行模型服务域名），不要继续重试。',

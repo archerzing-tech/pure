@@ -201,6 +201,10 @@ describe('host circuit breaker', () => {
     expect(msg).toContain('熔断');
     expect(msg).toContain('connection reset');
     expect(netFailureHint(url, 'timeout')).toContain('请勿原样重试');
+    // 2026-11-20 3D 瓦片判例：网络失败要给可执行的变通梯（换源 → 本地
+    // 降级 → 跳过），构建里的单个资源不能拖停整条构建。
+    expect(netFailureHint(url, 'timeout')).toContain('换等价来源/镜像');
+    expect(netFailureHint(url, 'timeout')).toContain('不能让整条构建停下');
   });
 
   it('S2 改写建议：有镜像端点的 URL 在失败文案里给出确切替代地址（无则不加）', () => {
