@@ -7821,8 +7821,10 @@ fn map_tile_payload(bytes: &[u8]) -> Result<MapTilePayload, String> {
     })
 }
 
-/// Remove the oldest tiles (by mtime) until the cache fits the byte budget.
-fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
+/// Remove the oldest files (by mtime) until the cache fits the byte budget.
+/// Shared by the tile and preview-asset caches; they only differ in directory
+/// and budget, not in eviction policy.
+fn evict_dir_oldest_first(dir: &PathBuf, max_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
     let mut total: u64 = 0;
@@ -7848,6 +7850,12 @@ fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
         let _ = std::fs::remove_file(&path);
         total = total.saturating_sub(size);
     }
+}
+
+/// Tile-cache entry point kept separate so the map cache tests and callers
+/// keep naming the thing they evict.
+fn evict_map_tile_cache(dir: &PathBuf, max_bytes: u64) {
+    evict_dir_oldest_first(dir, max_bytes)
 }
 
 /// Reused map-tile clients, keyed by the RESOLVED proxy URL ("direct" when
@@ -7937,6 +7945,303 @@ async fn fetch_map_tile(
         Err(e) => map_tile_debug_log(&url, proxy_url.as_deref(), "fail", ms, e),
     }
     outcome
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Preview asset disk cache (~/.pure/cache/preview-assets) — 2026-11-20
+//  ```html 卡里的瓦片/模型/纹理由卡内加载器转给宿主，取回后落盘，卡再从
+//  asset:// 读。缓存按 URL 哈希命名，sidecar 记住真实扩展名与 mime（asset
+//  协议按扩展名出 Content-Type；无扩展名的瓦片端点需要靠字节嗅探补上）。
+//  同一 URL 第二次预览不再碰网络；字节预算与瓦片缓存同款最旧优先，独立
+//  目录避免一张大模型挤掉整片地图。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PREVIEW_ASSET_CACHE_DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const PREVIEW_ASSET_MAX_BYTES: usize = 64 * 1024 * 1024;
+const PREVIEW_ASSET_FETCH_TIMEOUT_SECS: u64 = 30;
+
+fn preview_asset_cache_dir() -> PathBuf {
+    let base = std::env::var("PURE_CACHE_DIR").unwrap_or_else(|_| format!("{}/.pure", pure_home_dir()));
+    PathBuf::from(base).join("cache").join("preview-assets")
+}
+
+fn preview_asset_base(url: &str) -> String {
+    format!("{:x}", fnv1a64(url))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreviewAssetMeta {
+    file: String,
+    mime: String,
+}
+
+/// Cache hit = sidecar exists AND the named file is still on disk. A sidecar
+/// whose file was evicted just means "refetch", never a broken path.
+fn preview_asset_cached(url: &str) -> Option<(PathBuf, String)> {
+    let dir = preview_asset_cache_dir();
+    let raw = std::fs::read(dir.join(format!("{}.meta.json", preview_asset_base(url)))).ok()?;
+    let meta: PreviewAssetMeta = serde_json::from_slice(&raw).ok()?;
+    if meta.file.is_empty() || meta.file.contains('/') || meta.file.contains('\\') {
+        return None;
+    }
+    let path = dir.join(&meta.file);
+    path.is_file().then_some((path, meta.mime))
+}
+
+/// Pick an extension the asset protocol can serve with a useful Content-Type.
+/// Bytes win over the URL: tile endpoints are often extensionless.
+fn preview_asset_extension(url: &str, mime: &str, bytes: &[u8]) -> String {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return "png".to_string();
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return "jpg".to_string();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "gif".to_string();
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return "webp".to_string();
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis") {
+        return "avif".to_string();
+    }
+    let from_url = reqwest::Url::parse(url).ok().and_then(|u| {
+        let name = u.path().rsplit('/').next()?;
+        let (_, ext) = name.rsplit_once('.')?;
+        let ext = ext.to_ascii_lowercase();
+        (ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())).then_some(ext)
+    });
+    if let Some(ext) = from_url {
+        return ext;
+    }
+    match mime {
+        "model/gltf-binary" => "glb",
+        "model/gltf+json" => "gltf",
+        "application/json" | "application/geo+json" => "json",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "font/woff2" => "woff2",
+        "font/woff" => "woff",
+        _ => "bin",
+    }
+    .to_string()
+}
+
+fn preview_asset_mime(url: &str, content_type: Option<&str>) -> String {
+    let header = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !header.is_empty() && header != "application/octet-stream" && header != "binary/octet-stream" {
+        return header;
+    }
+    let ext = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            let name = u.path().rsplit('/').next()?;
+            let (_, ext) = name.rsplit_once('.')?;
+            Some(ext.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "json" => "application/json",
+        "ktx2" => "image/ktx2",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// A CDN error page returned with 200 must never be cached as the asset.
+fn preview_asset_is_html(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
+        .trim_start()
+        .to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+/// Only public http(s) targets. The card is model-generated code running in a
+/// privileged bridge; without this it could use the host to reach the user's
+/// router, metadata endpoint or local services. Redirects are followed by
+/// reqwest, so this is a literal-address guard, not a DNS-rebinding defense.
+fn preview_asset_url_allowed(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else { return false };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else { return false };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                !(v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast())
+            }
+            std::net::IpAddr::V6(v6) => {
+                let head = v6.segments()[0];
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (head & 0xfe00) == 0xfc00
+                    || (head & 0xffc0) == 0xfe80)
+            }
+        };
+    }
+    true
+}
+
+fn preview_asset_evict_tick() -> bool {
+    static WRITES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 32 == 0
+}
+
+/// Cache one preview asset and return its absolute path. The WebView converts
+/// that path to asset:// itself (assetUrlFor), so the bytes never cross IPC.
+#[tauri::command]
+async fn cache_preview_asset(
+    url: String,
+    proxy_url: Option<String>,
+    max_bytes: Option<u64>,
+) -> Result<String, String> {
+    if !preview_asset_url_allowed(&url) {
+        return Err("preview asset: only public http(s) URLs are supported".to_string());
+    }
+    if let Some((path, _)) = preview_asset_cached(&url) {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let key = proxy_url.clone().unwrap_or_else(|| "direct".to_string());
+    let client = {
+        let mut map = map_tile_clients().lock().map_err(|_| "preview asset client lock")?;
+        if let Some(cached) = map.get(&key) {
+            cached.clone()
+        } else {
+            let built = build_http_client(
+                std::time::Duration::from_secs(PREVIEW_ASSET_FETCH_TIMEOUT_SECS),
+                proxy_url.as_deref(),
+            )?;
+            map.insert(key, built.clone());
+            built
+        }
+    };
+    let resp = client
+        .get(&url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept", "*/*")
+        .send()
+        .await
+        .map_err(|e| format!("preview asset fetch: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("preview asset HTTP {}", status.as_u16()));
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let cap = max_bytes
+        .unwrap_or(PREVIEW_ASSET_MAX_BYTES as u64)
+        .min(PREVIEW_ASSET_MAX_BYTES as u64);
+    if resp.content_length().is_some_and(|n| n > cap) {
+        return Err(format!("preview asset exceeded {} bytes", cap));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("preview asset read: {}", e))?;
+    if bytes.len() > cap as usize {
+        return Err(format!("preview asset exceeded {} bytes", cap));
+    }
+    if bytes.is_empty() {
+        return Err("preview asset was empty".to_string());
+    }
+    let mime = preview_asset_mime(&url, content_type.as_deref());
+    if mime == "text/html" || preview_asset_is_html(&bytes) {
+        return Err("preview asset response was HTML, not an asset".to_string());
+    }
+    let dir = preview_asset_cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("preview asset mkdir: {}", e))?;
+    let base = preview_asset_base(&url);
+    let ext = preview_asset_extension(&url, &mime, &bytes);
+    let file = format!("{}.{}", base, ext);
+    let path = dir.join(&file);
+    std::fs::write(&path, &bytes).map_err(|e| format!("preview asset write: {}", e))?;
+    let meta = PreviewAssetMeta { file, mime };
+    let meta_bytes = serde_json::to_vec(&meta).map_err(|e| format!("preview asset meta: {}", e))?;
+    std::fs::write(dir.join(format!("{}.meta.json", base)), meta_bytes)
+        .map_err(|e| format!("preview asset meta write: {}", e))?;
+    if preview_asset_evict_tick() {
+        evict_dir_oldest_first(&dir, PREVIEW_ASSET_CACHE_DEFAULT_MAX_BYTES);
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod preview_asset_tests {
+    use super::*;
+
+    #[test]
+    fn url_guard_blocks_private_and_local_targets() {
+        assert!(preview_asset_url_allowed("https://tiles.example/3/4/5.png"));
+        assert!(!preview_asset_url_allowed("http://127.0.0.1:8080/a.png"));
+        assert!(!preview_asset_url_allowed("http://localhost/a.glb"));
+        assert!(!preview_asset_url_allowed("http://192.168.1.2/a.glb"));
+        assert!(!preview_asset_url_allowed("http://169.254.169.254/latest/meta-data"));
+        assert!(!preview_asset_url_allowed("file:///tmp/a.glb"));
+        assert!(!preview_asset_url_allowed("https://user:pass@example.com/a.glb"));
+    }
+
+    #[test]
+    fn extension_prefers_bytes_over_an_extensionless_url() {
+        let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        assert_eq!(
+            preview_asset_extension("https://tile.example/1/2/3", "image/png", &png),
+            "png"
+        );
+        assert_eq!(
+            preview_asset_extension("https://cdn.example/model.glb", "application/octet-stream", b"glTF"),
+            "glb"
+        );
+        assert_eq!(
+            preview_asset_extension("https://cdn.example/1/2/3", "application/octet-stream", b"abc"),
+            "bin"
+        );
+    }
+
+    #[test]
+    fn mime_maps_model_extensions_when_the_server_says_octet_stream() {
+        assert_eq!(preview_asset_mime("https://cdn.example/m.glb", None), "model/gltf-binary");
+        assert_eq!(
+            preview_asset_mime("https://cdn.example/tileset.json", Some("application/json; charset=utf-8")),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn html_error_pages_are_not_cached_as_assets() {
+        assert!(preview_asset_is_html(b"  <!DOCTYPE html><html>blocked</html>"));
+        assert!(!preview_asset_is_html(b"glTF"));
+    }
 }
 
 /// One-line-per-fetch debug log for the tile chain (2026-11-05 field
@@ -20281,6 +20586,7 @@ pub fn run() {
             web_scrape,
             // Map tile disk cache (offline basemap)
             fetch_map_tile,
+            cache_preview_asset,
             map_tile_cache_usage,
             clear_map_tile_cache,
             // Command execution

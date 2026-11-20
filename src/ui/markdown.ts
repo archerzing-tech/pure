@@ -23,6 +23,10 @@ import { stripToolCallXml } from './markdownCore';
 import { renderPaintInto, renderPaintToBlob, paintCanvasToDataUrl, parsePaintSource } from './paintCanvas';
 import { registerCustomCards, type CustomCardInput } from '../shared/presentationLibrary';
 import { recordFormValidation } from '../shared/formValidationFeedback';
+import { injectPreviewAssetLoader } from '../shared/previewAssets';
+import { assetUrlFor } from './assetUrl';
+import { issuePreviewCardToken } from './previewAssetBridge';
+export { assetUrlFor };
 export { stripToolCallXml } from './markdownCore';
 
 // ── Languages registered for hljs (tree-shaken subset) ──
@@ -587,26 +591,6 @@ renderer.html = (token: { text: string; block?: boolean }): string => {
   return token.block ? `<p class="md-raw-html">${text}</p>` : text;
 };
 
-// scheme-less 本机绝对路径(/Users/… 或 C:\…)在 WebView 里按同源相对 URL
-// 解析(tauri://localhost/Users/…)必然 404——「主题风格一览」会话里技能
-// 生成的配图全死在这。转 asset protocol 后经 asset://localhost(macOS/Linux)
-// 或 http://asset.localhost(Windows)加载,CSP img-src 两形态都已放行。
-// 只转「像本机绝对路径」的形状(POSIX / 开头但排除 //host、Windows 盘符开头);
-// 浏览器 dev / 转换不可用时原样返回。直读 __TAURI_INTERNALS__ 是同步唯一路
-// (renderer 是同步钩子,dynamic import 给不了),与 store.ts 的运行时探测同源。
-export function assetUrlFor(src: string): string {
-  if (!/^\/(?!\/)/.test(src) && !/^[a-z]:[\\/]/i.test(src)) return src;
-  const internals = typeof window !== 'undefined'
-    ? (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (path: string, protocol?: string) => string } }).__TAURI_INTERNALS__
-    : undefined;
-  const convert = internals?.convertFileSrc;
-  if (!convert) return src;
-  try {
-    return convert(src);
-  } catch {
-    return src;
-  }
-}
 
 // Images (```![alt](src)```) are allowed through with a strict scheme allowlist
 // (http/https/data/blob — never javascript: or file:), then WRAPPED so the
@@ -2952,9 +2936,14 @@ async function hydrateHtmlCard(slot: HTMLElement): Promise<void> {
   const source = htmlRawOf(slot);
   const wrap = slot.querySelector<HTMLElement>('.html-frame-wrap');
   if (!wrap) return;
+  // 资源加载器必须在页面自己的脚本之前跑：卡里的瓦片/模型请求由它转给宿主
+  // 缓存，取不到时走透明占位而不是把整页卡在 pending 上。卡片源码展示仍用
+  // 原文，落盘的是注入后的版本。
+  const token = issuePreviewCardToken();
+  const prepared = injectPreviewAssetLoader(source, token);
   let dataBase64 = '';
   try {
-    dataBase64 = btoa(unescape(encodeURIComponent(source)));
+    dataBase64 = btoa(unescape(encodeURIComponent(prepared)));
   } catch {
     setHtmlState(slot, 'error', t('htmlCard.failed'));
     return;
