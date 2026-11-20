@@ -27,6 +27,7 @@ import {
   resolvePromptBudget,
   isReasoningModelName,
   resolveReasoningEffort,
+  resolveAnthropicThinkingBudget,
   planThinkingOffExtraBody,
   isCustomKeyless,
   isCustomProviderId,
@@ -669,6 +670,31 @@ describe('reasoning-effort capability detection', () => {
     };
     expect(resolveReasoningEffort({ provider: 'ds', model: 'deepseek-v4-flash', customProviders: [off] }))
       .toEqual({ supported: false });
+  });
+
+  it('resolveAnthropicThinkingBudget：只给 Claude 3.7/4，思考旋钮复用同一档位', () => {
+    // 官方 Claude 4 + anthropic 协议：默认中档 8k。
+    expect(resolveAnthropicThinkingBudget({ provider: 'anthropic', model: 'claude-sonnet-4-5', protocol: 'anthropic' }))
+      .toBe(8_192);
+    // 其他 anthropic 兼容端点不保证吃 thinking 字段，一律不发。
+    expect(resolveAnthropicThinkingBudget({ provider: 'glm', model: 'glm-5.3', protocol: 'anthropic' }))
+      .toBeUndefined();
+    expect(resolveAnthropicThinkingBudget({ provider: 'deepseek', model: 'deepseek-v4.1', protocol: 'anthropic' }))
+      .toBeUndefined();
+    // 非 anthropic 协议不开启。
+    expect(resolveAnthropicThinkingBudget({ provider: 'anthropic', model: 'claude-sonnet-4-5', protocol: 'openai' }))
+      .toBeUndefined();
+    // 模型行的低/中/高/关闭旋钮直接映射预算。
+    const custom: CustomProvider = {
+      ...OLLAMA_PRESET, id: 'anth', name: 'Anth', baseURL: 'https://api.anthropic.com',
+      defaultModel: 'claude-opus-4-1', models: ['claude-opus-4-1'],
+      modelBudgets: { 'claude-opus-4-1': { reasoningEffort: 'high' } },
+    };
+    expect(resolveAnthropicThinkingBudget({ provider: 'anth', model: 'claude-opus-4-1', customProviders: [custom], protocol: 'anthropic' }))
+      .toBe(16_384);
+    const off: CustomProvider = { ...custom, modelBudgets: { 'claude-opus-4-1': { reasoningEffort: 'off' } } };
+    expect(resolveAnthropicThinkingBudget({ provider: 'anth', model: 'claude-opus-4-1', customProviders: [off], protocol: 'anthropic' }))
+      .toBeUndefined();
   });
 
   it('端点词表：DeepSeek V4.x 合法档位不含 medium——缺档撤参不发（2026-11-18 真机 400 判例）', () => {

@@ -10,7 +10,7 @@ import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
 import { currentTimeContext, formatTimeContextLine } from '../shared/timeContext';
-import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
+import { defaultModelFor, baseURLFor, isDeepSeekFamily, customProviderFor, customBaseURL, customDefaultModel, isCustomKeyless, providerOverrideFor, providerDef, promptBudgetForProvider, imageGenEnabled, imageGenModelFor, estimatePromptTokens, estimateToolDefinitionTokens, resolveProviderProtocol, firstTokenHintTimeoutMs, resolveReasoningEffort, resolveAnthropicThinkingBudget, planThinkingOffExtraBody, type ReasoningEffortSetting } from '../shared/providers';
 import { saveSession, loadLastSession, loadSession, flushSessionSaves, saveSessionStats, loadSessionStats, refreshSessionStatsFromDisk, dedupeFileWrites, upsertFileWrite, limitConversationMessages, mergeSessionSnapshotMetadata, createSessionSnapshot, createSessionPlanProgressPersistence, createSessionTaskScriptPersistence, MAX_PERSISTED_MESSAGES, extractTitle, turnCheckpointGateMs, lastPersistedSnapshotBytes, lastSavedTranscript, type TranscriptDraft, type ToolExecMeta, type SessionSnapshotV2, type SessionSnapshot, type SessionEvent, type SessionStats, type TurnTiming, type PlanCardSnapshot, type SessionPlanProgressPersistence, type SessionTaskScriptPersistence, type StatusLineRecord } from './store';
 import { mergeTokenUsage, readDelegationUsage } from '../shared/usage';
 import { recordEndpointCacheOutcome } from '../shared/endpointCacheQuality';
@@ -1574,6 +1574,9 @@ export function createLLMAdapter(
   // extraBody plumb and anthropic endpoints reject unknown top-level fields,
   // so this stays an OpenAI-protocol-only parameter for now.
   const reasoning = resolveReasoningEffort({ ...config, protocol }, opts.reasoningEffort);
+  // Anthropic 扩展思考独立于 reasoning_effort：官方 Claude 3.7/4 系走原生
+  // thinking 块，其他 anthropic 兼容端点不保证接受该字段（resolve 里按模型门控）。
+  const thinkingBudget = resolveAnthropicThinkingBudget({ ...config, protocol });
   // 规划思考调用（disableThinking）在支持的 provider 上显式关掉暗推理：
   // 可见叙述本身就是思考，暗推理只把第一个可见字推迟 90s+（见
   // planThinkingOffExtraBody 的实测注）。不支持的 provider 得 undefined，
@@ -1583,7 +1586,7 @@ export function createLLMAdapter(
   const apiKey = custom?.apiKey ?? builtinOverride?.apiKey ?? config.apiKey;
   if (protocol === 'anthropic' && !isTauriRuntime()) {
     if (!apiKey && !isCustomKeyless(customs, config.provider)) throw new Error('No API key configured');
-    return new DeepSeekAnthropicAdapter({ apiKey: apiKey ?? '', model, baseURL, maxTokens });
+    return new DeepSeekAnthropicAdapter({ apiKey: apiKey ?? '', model, baseURL, maxTokens, thinkingBudget });
   }
   if (isTauriRuntime()) {
     // Desktop: the key lives in Rust secrets (~/.pure/secrets.json, 0600) and
@@ -1629,6 +1632,7 @@ export function createLLMAdapter(
       proxyBypassProviders: config.proxy?.bypassProviders ?? [],
       extraBody,
       maxTokens,
+      thinkingBudget,
     });
   }
   if (!apiKey && !isCustomKeyless(customs, config.provider)) {

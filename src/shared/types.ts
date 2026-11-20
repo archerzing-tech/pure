@@ -38,6 +38,16 @@ export interface MessageImage {
   height?: number;
 }
 
+/** Anthropic 扩展思考的原生块。`signature` 是 API 要求原样回传的校验串，
+ *  `redacted_thinking` 只有不透明 data。只对 anthropic 协议有意义，其他
+ *  provider 从不产生也不需要它。 */
+export interface AssistantThinkingBlock {
+  type: 'thinking' | 'redacted_thinking';
+  thinking?: string;
+  signature?: string;
+  data?: string;
+}
+
 export interface Message {
   role: Role;
   content: string;
@@ -50,6 +60,10 @@ export interface Message {
   toolName?: string;
   name?: string;
   toolCalls?: ToolCall[];
+  /** Anthropic 扩展思考块（含 signature）。工具循环里必须原样回传最近一条
+   *  assistant 工具调用的 thinking 块，否则 API 会拒绝下一次请求；更早的
+   *  回合只留在存档里，不随请求重发（见 stripHistoricalThinking）。 */
+  thinkingBlocks?: AssistantThinkingBlock[];
   /** 后台委派的受理收执（2026-11-18 档二）：tool 消息上为 true 表示这份
    *  结果只是「已受理」，子任务还在后台跑，真产出稍后另发；送达时置 false。
    *  它也是崩溃恢复的唯一 durable 判据——转录里还挂着 true 的收执，说明上个
@@ -165,7 +179,7 @@ export type LLMChunk =
   // stream chunk; DeepSeek `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`).
   // Yielded once per stream so the engine can aggregate per-turn totals.
   | { type: 'usage'; usage: TokenUsage }
-  | { type: 'done'; content: string; toolCalls: ToolCall[]; truncated?: boolean };
+  | { type: 'done'; content: string; toolCalls: ToolCall[]; truncated?: boolean; thinkingBlocks?: AssistantThinkingBlock[] };
 
 /** Normalized per-request token usage (provider fields mapped into one shape). */
 export interface TokenUsage {
@@ -181,6 +195,7 @@ export interface LLMResponse {
   content: string;
   toolCalls?: ToolCall[];
   usage?: TokenUsage;
+  thinkingBlocks?: AssistantThinkingBlock[];
 }
 
 export interface LLMAdapter {

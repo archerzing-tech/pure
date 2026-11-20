@@ -672,6 +672,38 @@ export function resolveReasoningEffort(
   return final;
 }
 
+/**
+ * Anthropic 扩展思考预算。只对官方 Claude 3.7/4 系 + anthropic 协议生效：
+ * 其他 anthropic 兼容端点（GLM / MiniMax / DeepSeek 的 /anthropic）不保证接受
+ * `thinking` 字段，误发一次就是整回合 400。模型的「思考深度」旋钮复用同一
+ * 优先级：off 不发，low/medium/high 映射 4k/8k/16k，未设置按中档。
+ *
+ * 不在这里受 maxTokens 约束：Rust 侧会把 max_tokens 抬到 budget 之上，
+ * 满足 Anthropic「max_tokens 必须大于 budget_tokens」的硬约束。
+ */
+export function resolveAnthropicThinkingBudget(
+  cfg: {
+    provider?: string | null;
+    model?: string | null;
+    customProviders?: readonly CustomProvider[] | null;
+    providerOverrides?: Record<string, ProviderOverride> | null;
+    protocol?: 'openai' | 'anthropic' | string | null;
+  },
+): number | undefined {
+  if (cfg.protocol !== 'anthropic') return undefined;
+  const model = cfg.model?.trim();
+  if (!model || !/claude-(?:[a-z]+-)?(?:3[-.]7|4)/i.test(model)) return undefined;
+  const custom = customProviderFor(cfg.customProviders, cfg.provider);
+  const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
+  const setting: ReasoningEffortSetting | undefined
+    = custom?.modelBudgets?.[model]?.reasoningEffort
+      ?? override?.modelBudgets?.[model]?.reasoningEffort;
+  if (setting === 'off') return undefined;
+  if (setting === 'low') return 4_096;
+  if (setting === 'high') return 16_384;
+  return 8_192;
+}
+
 /** Display label for a provider id, resolving custom providers by name. */
 export function customProviderLabel(
   customs: readonly CustomProvider[] | undefined | null,

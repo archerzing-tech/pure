@@ -3,7 +3,7 @@
 // Fixes: BudgetWarning events, completedSteps/lastState tracking, note injection for recoverable errors,
 //        VERIFY_FAILED → loop back to THINK with reflection note instead of completing.
 
-import type { Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, LLMChunk, AsyncQueueLike, SubagentActivityEvent, DetachedBranchSettlement } from '../shared/types';
+import type { AssistantThinkingBlock, Message, EngineContext, EngineEvent, EngineLlmPhase, RunInput, RunContinueInput, ToolCall, AgentStateType, FailureRecord, TokenUsage, VerificationSummary, ToolResult, LLMAdapter, LLMChunk, AsyncQueueLike, SubagentActivityEvent, DetachedBranchSettlement } from '../shared/types';
 import { mergeTokenUsage } from '../shared/usage';
 import { interruptedReasonFor } from '../shared/pauseSignal';
 import { classifyFailure, isPayloadIndependentHttp4xx, isProviderHttp4xx, parseProviderContextLimit } from '../shared/netGuard';
@@ -539,6 +539,9 @@ export class AgentLoopEngine {
       let content = '';
       let reasoningText = '';
       let toolCalls: ToolCall[] = [];
+      // Anthropic 扩展思考块（含 signature）必须随最近一条 assistant 工具调用
+      // 原样回传，否则下一次请求会被 API 拒绝。每轮重新收集，不跨轮串。
+      let thinkingBlocks: AssistantThinkingBlock[] = [];
       // 刀 3：本回合是否被输出上限截断（Rust finish_reason 透传）。用于把
       // 「截断导致的坏 JSON」与「模型真写错 JSON」分开——前者给可自愈的
       // 精准文案（append 分段），后者维持原 invalid-arguments 口径。
@@ -755,6 +758,7 @@ export class AgentLoopEngine {
               case 'done':
                 content = chunk.content || content;
                 toolCalls = chunk.toolCalls;
+                thinkingBlocks = chunk.thinkingBlocks ?? [];
                 if (chunk.truncated === true) turnTruncated = true;
                 sawDone = true;
                 if (toolCalls.length > 0) sawToolCall = true;
@@ -1116,7 +1120,12 @@ export class AgentLoopEngine {
       }
 
       budget.addTokens(content + reasoningText);
-      messages.push({ role: 'assistant' as const, content, ...(toolCalls.length > 0 ? { toolCalls } : {}) });
+      messages.push({
+        role: 'assistant' as const,
+        content,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        ...(thinkingBlocks.length > 0 ? { thinkingBlocks } : {}),
+      });
 
       // Hook: after_think
       if (ctx.hooks) {

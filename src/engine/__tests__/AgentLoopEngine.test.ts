@@ -286,6 +286,26 @@ describe('AgentLoopEngine', () => {
     expect(assistantMsg?.content).not.toContain('file layout');
   });
 
+  it('keeps Anthropic thinking blocks on the assistant message for the next tool round', async () => {
+    const thinkingBlocks = [{ type: 'thinking' as const, thinking: 'inspect then patch', signature: 'sig-1' }];
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        yield { type: 'content', content: 'Done.' };
+        yield { type: 'done', content: 'Done.', toolCalls: [], thinkingBlocks };
+      },
+      complete: async () => ({ content: 'Done.', thinkingBlocks }),
+    };
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-thinking', systemPrompt: 'You are helpful.', userPrompt: 'Hi', budget: STD_BUDGET },
+      baseCtx({ llm }),
+    ));
+    const completed = events.find(e => e.type === 'Completed') as any;
+    const assistantMsg = completed.payload.messages?.find((m: Message) => m.role === 'assistant');
+    // 工具循环下一轮要把它们原样带回 wire；丢了签名 Anthropic 会拒绝请求。
+    expect(assistantMsg?.thinkingBlocks).toEqual(thinkingBlocks);
+    expect(completed.payload.finalOutput).toBe('Done.');
+  });
+
   it('forwards transport status chunks as TransportStatus events, out of the answer', async () => {
     // Wire-lifecycle notices from the Rust transport (retry backoff / route
     // failover): the GUI's only honest signal during a silent connect window.

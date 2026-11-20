@@ -1,6 +1,41 @@
 import { describe, expect, it } from 'bun:test';
-import { mapMessages } from '../mapping';
+import { mapMessages, stripHistoricalThinking } from '../mapping';
 import type { Message } from '../../../shared/types';
+
+describe('Anthropic thinking blocks on the wire', () => {
+  const thinking = [{ type: 'thinking' as const, thinking: 'plan', signature: 'sig' }];
+
+  it('includes thinking blocks only when the transport opts in', () => {
+    const messages: Message[] = [{ role: 'assistant', content: '', thinkingBlocks: thinking }];
+    expect(mapMessages(messages)[0]).not.toHaveProperty('thinkingBlocks');
+    expect(mapMessages(messages, true)[0]).toMatchObject({ thinkingBlocks: thinking });
+  });
+
+  it('sends the latest tool-calling assistant thinking and drops older turns', () => {
+    const messages: Message[] = [
+      { role: 'assistant', content: 'old', thinkingBlocks: thinking },
+      { role: 'user', content: 'next' },
+      {
+        role: 'assistant',
+        content: '',
+        thinkingBlocks: thinking,
+        toolCalls: [{ id: 'c1', index: 0, function: { name: 'read_file', arguments: '{}' } }],
+      },
+      { role: 'tool', toolCallId: 'c1', toolName: 'read_file', content: 'ok' },
+    ];
+    const stripped = stripHistoricalThinking(messages);
+    expect(stripped[0].thinkingBlocks).toBeUndefined();
+    expect(stripped[2].thinkingBlocks).toEqual(thinking);
+  });
+
+  it('drops all thinking blocks when the last assistant turn has no tool call', () => {
+    const stripped = stripHistoricalThinking([
+      { role: 'assistant', content: 'old', thinkingBlocks: thinking },
+      { role: 'user', content: 'new ask' },
+    ]);
+    expect(stripped[0].thinkingBlocks).toBeUndefined();
+  });
+});
 
 describe('OpenAI message mapping with image attachments', () => {
   it('maps a user image to an image_url content block without dropping the text', () => {

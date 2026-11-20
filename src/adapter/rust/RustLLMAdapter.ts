@@ -8,6 +8,7 @@
 // invoke + Channel without a live Tauri runtime.
 
 import type {
+  AssistantThinkingBlock,
   LLMAdapter,
   LLMChunk,
   LLMResponse,
@@ -17,7 +18,7 @@ import type {
   ToolDefinition,
 } from '../../shared/types';
 import { normalizeTokenUsage } from '../../shared/usage';
-import { buildChatParams } from '../openai/mapping';
+import { buildChatParams, stripHistoricalThinking } from '../openai/mapping';
 import { isTauriRuntime } from '../../shared/tauri';
 import { paramHealScope, planParamWithdrawal, recordParamWithdrawal, withdrawExtraBody } from '../../shared/paramRejectionHeal';
 
@@ -27,6 +28,9 @@ export interface RustLLMConfig {
   protocol?: 'openai' | 'anthropic';
   baseURL?: string;
   extraBody?: Record<string, unknown>;
+  /** Anthropic 扩展思考预算；仅 claude-3.7/4 系 + anthropic 协议由宿主设置。
+   *  工具循环里 Rust 会把最近一条 assistant 的 thinking 块原样回传。 */
+  thinkingBudget?: number;
   maxTokens?: number;
   temperature?: number;
   /**
@@ -150,14 +154,27 @@ export class RustLLMAdapter implements LLMAdapter {
     extraBody: Record<string, unknown> | undefined,
   ): AsyncGenerator<LLMChunk, void, void> {
     const deps = await this.getDeps();
+    const protocol = this.config.protocol ?? 'openai';
+    // 旧会话（功能上线前）里最近的工具调用没有 thinking 块；此时再开 thinking
+    // 会让 Anthropic 以“必须原样保留思考块”拒绝整个请求，宁可不升级这条会话。
+    const lastToolAssistant = [...messages].reverse().find(
+      (m) => m.role === 'assistant' && m.toolCalls?.length,
+    );
+    const thinkingBudget = protocol === 'anthropic'
+      && this.config.thinkingBudget
+      && (!lastToolAssistant || lastToolAssistant.thinkingBlocks?.length)
+      ? this.config.thinkingBudget
+      : undefined;
+    const wireMessages = protocol === 'anthropic' ? stripHistoricalThinking(messages) : messages;
     const params = buildChatParams({
       model: this.config.model,
-      messages,
+      messages: wireMessages,
       tools,
       maxTokens: this.config.maxTokens,
       temperature: this.config.temperature,
       stream: true,
       extraBody,
+      includeThinkingBlocks: protocol === 'anthropic',
     });
 
     // One request id per stream call: passed into chat_stream so the Rust
@@ -203,6 +220,7 @@ export class RustLLMAdapter implements LLMAdapter {
           allowLegacyKeyFallback: this.config.allowLegacyKeyFallback ?? false,
           extraBody,
           maxTokens: params.max_tokens,
+          ...(thinkingBudget ? { thinkingBudget } : {}),
           temperature: params.temperature,
           requestId,
           proxyUrl: this.config.proxyUrl ?? '',
@@ -353,10 +371,17 @@ export class RustLLMAdapter implements LLMAdapter {
           arguments: (tc.function?.arguments as string | undefined) ?? '',
         },
       }));
+      const thinkingBlocks = (finalResult?.thinkingBlocks as AssistantThinkingBlock[] | undefined) ?? [];
       // 刀 3：Rust 侧截断信号（finish_reason=length / stop_reason=max_tokens）
       // 原样透传——引擎靠它区分「模型写错 JSON」与「参数被输出上限砍半」。
       const truncated = finalResult?.truncated === true;
-      yield { type: 'done', content: text, toolCalls, truncated };
+      yield {
+        type: 'done',
+        content: text,
+        toolCalls,
+        truncated,
+        ...(thinkingBlocks.length > 0 ? { thinkingBlocks } : {}),
+      };
     } finally {
       signal?.removeEventListener('abort', abortHandler);
       if (!closed && !invokeDone) {
@@ -373,15 +398,21 @@ export class RustLLMAdapter implements LLMAdapter {
   async complete(messages: Message[], tools: ToolDefinition[], signal?: AbortSignal): Promise<LLMResponse> {
     let content = '';
     let toolCalls: ToolCall[] = [];
+    let thinkingBlocks: AssistantThinkingBlock[] | undefined;
     for await (const chunk of this.stream(messages, tools, signal)) {
       if (chunk.type === 'content') {
         content += chunk.content;
       } else if (chunk.type === 'done') {
         content = chunk.content;
         toolCalls = chunk.toolCalls;
+        thinkingBlocks = chunk.thinkingBlocks;
       }
     }
-    return { content, toolCalls: toolCalls.length > 0 ? toolCalls : undefined };
+    return {
+      content,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      thinkingBlocks,
+    };
   }
 }
 

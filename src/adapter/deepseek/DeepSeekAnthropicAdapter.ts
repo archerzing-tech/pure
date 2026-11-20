@@ -8,10 +8,11 @@
 // the openai protocol already reports via DeepSeek's automatic caching.
 
 import Anthropic from '@anthropic-ai/sdk';
-import type { LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
+import type { AssistantThinkingBlock, LLMAdapter, Message, ToolDefinition, LLMChunk, LLMResponse, ToolCall } from '../../shared/types';
 import { safeParseArgs } from '../../shared/format';
 import { normalizeTokenUsage } from '../../shared/usage';
 import { trimHistoricalImages } from '../../shared/imageContext';
+import { stripHistoricalThinking } from '../openai/mapping';
 
 export interface DeepSeekAnthropicConfig {
   /** Optional: keyless local endpoints (anthropic 兼容路由器) legitimately
@@ -22,6 +23,8 @@ export interface DeepSeekAnthropicConfig {
   temperature?: number;
   /** Per-provider endpoint override (Settings → LLM → 连接设置 / providerOverrides). */
   baseURL?: string;
+  /** Anthropic 扩展思考预算（仅 Claude 3.7/4 系由宿主设置）。 */
+  thinkingBudget?: number;
 }
 
 interface ToolBlock {
@@ -35,6 +38,7 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
   private model: string;
   private maxTokens: number;
   private temperature: number;
+  private thinkingBudget?: number;
 
   constructor(config: DeepSeekAnthropicConfig) {
     // dangerouslyAllowBrowser matches OpenAICompatibleAdapter: the desktop build
@@ -55,6 +59,18 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     // reasoning_content consumes the whole budget first.
     this.maxTokens = config.maxTokens ?? 32768;
     this.temperature = config.temperature ?? 0;
+    this.thinkingBudget = config.thinkingBudget;
+  }
+
+  /** 旧会话最近的工具调用没有 thinking 块时不要开 thinking——Anthropic 会以
+   *  「thinking blocks must be preserved」拒绝整个请求。 */
+  private effectiveThinkingBudget(messages: Message[]): number | undefined {
+    if (!this.thinkingBudget) return undefined;
+    const lastToolAssistant = [...messages].reverse().find(
+      (m) => m.role === 'assistant' && m.toolCalls?.length,
+    );
+    if (lastToolAssistant && !lastToolAssistant.thinkingBlocks?.length) return undefined;
+    return this.thinkingBudget;
   }
 
   async *stream(
@@ -62,7 +78,10 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     tools: ToolDefinition[],
     signal?: AbortSignal,
   ): AsyncGenerator<LLMChunk, void, void> {
-    const { system, conversationMessages } = this.splitSystemMessage(messages);
+    const thinkingBudget = this.effectiveThinkingBudget(messages);
+    const { system, conversationMessages } = this.splitSystemMessage(
+      thinkingBudget ? stripHistoricalThinking(messages) : messages,
+    );
     const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 
     const stream = this.client.messages.stream({
@@ -70,13 +89,18 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       system: cacheable.system,
       messages: cacheable.conversationMessages,
       tools: tools.length > 0 ? this.mapTools(tools) : undefined,
-      max_tokens: this.maxTokens,
-      temperature: this.temperature,
+      // Anthropic 硬约束：max_tokens 必须大于 budget_tokens；开思考时不发
+      // temperature（官方要求思考模式温度不可自定义，发了会 400）。
+      max_tokens: thinkingBudget ? Math.max(this.maxTokens, thinkingBudget + 1024) : this.maxTokens,
+      ...(thinkingBudget
+        ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } }
+        : { temperature: this.temperature }),
     });
 
     signal?.addEventListener('abort', () => stream.controller.abort(), { once: true });
 
     const toolBlocks: Map<number, ToolBlock> = new Map();
+    const thinkingBlocks = new Map<number, AssistantThinkingBlock>();
     let content = '';
     // Anthropic reports billing usage as message_start (input + cache split)
     // plus message_delta (final cumulative output_tokens) — captured here and
@@ -105,6 +129,16 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
             content += event.delta.text;
             yield { type: 'content', content: event.delta.text };
           }
+          if (event.delta.type === 'thinking_delta') {
+            const block = thinkingBlocks.get(event.index);
+            if (block) block.thinking = (block.thinking ?? '') + event.delta.thinking;
+            // 思考流独立于正文，与 DeepSeek/GLM 的 reasoning_content 同面。
+            yield { type: 'reasoning', content: event.delta.thinking };
+          }
+          if (event.delta.type === 'signature_delta') {
+            const block = thinkingBlocks.get(event.index);
+            if (block) block.signature = (block.signature ?? '') + event.delta.signature;
+          }
           if (event.delta.type === 'input_json_delta') {
             const idx = event.index;
             if (!toolBlocks.has(idx)) {
@@ -131,6 +165,12 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
               arguments: '',
             });
           }
+          if (event.content_block.type === 'thinking') {
+            thinkingBlocks.set(event.index, { type: 'thinking', thinking: '', signature: '' });
+          }
+          if (event.content_block.type === 'redacted_thinking') {
+            thinkingBlocks.set(event.index, { type: 'redacted_thinking', data: event.content_block.data });
+          }
           break;
 
         case 'content_block_stop':
@@ -155,8 +195,17 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
         index,
         function: { name: block.name, arguments: block.arguments },
       }));
+    const collectedThinking = [...thinkingBlocks.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, block]) => block)
+      .filter((block) => block.type === 'redacted_thinking' || Boolean(block.thinking && block.signature));
 
-    yield { type: 'done', content, toolCalls };
+    yield {
+      type: 'done',
+      content,
+      toolCalls,
+      ...(collectedThinking.length > 0 ? { thinkingBlocks: collectedThinking } : {}),
+    };
   }
 
   async complete(
@@ -164,7 +213,10 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
     tools: ToolDefinition[],
     signal?: AbortSignal,
   ): Promise<LLMResponse> {
-    const { system, conversationMessages } = this.splitSystemMessage(messages);
+    const thinkingBudget = this.effectiveThinkingBudget(messages);
+    const { system, conversationMessages } = this.splitSystemMessage(
+      thinkingBudget ? stripHistoricalThinking(messages) : messages,
+    );
     const cacheable = cacheableAnthropicRequest(system, conversationMessages);
 
     const response = await this.client.messages.create({
@@ -172,8 +224,10 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       system: cacheable.system,
       messages: cacheable.conversationMessages,
       tools: tools.length > 0 ? this.mapTools(tools) : undefined,
-      max_tokens: this.maxTokens,
-      temperature: this.temperature,
+      max_tokens: thinkingBudget ? Math.max(this.maxTokens, thinkingBudget + 1024) : this.maxTokens,
+      ...(thinkingBudget
+        ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } }
+        : { temperature: this.temperature }),
     }, signal ? { signal } : undefined);
 
     const textBlocks = response.content.filter(b => b.type === 'text');
@@ -187,10 +241,17 @@ export class DeepSeekAnthropicAdapter implements LLMAdapter {
       function: { name: b.name, arguments: JSON.stringify(b.input) },
     }));
 
+    const thinkingBlocks: AssistantThinkingBlock[] = response.content
+      .filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking')
+      .map((b) => b.type === 'thinking'
+        ? { type: 'thinking', thinking: b.thinking, signature: b.signature }
+        : { type: 'redacted_thinking', data: b.data });
+
     return {
       content,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage: normalizeTokenUsage(anthropicUsageToOpenAI(response.usage as unknown as Record<string, unknown>)),
+      ...(thinkingBlocks.length > 0 ? { thinkingBlocks } : {}),
     };
   }
 
@@ -349,6 +410,14 @@ export function mapAnthropicMessages(
       }
     } else if (m.role === 'assistant') {
       const content: Anthropic.ContentBlockParam[] = [];
+      // thinking 块必须排在 text / tool_use 之前，且 signature 原样回传。
+      for (const block of m.thinkingBlocks ?? []) {
+        if (block.type === 'thinking' && block.thinking && block.signature) {
+          content.push({ type: 'thinking', thinking: block.thinking, signature: block.signature } as Anthropic.ContentBlockParam);
+        } else if (block.type === 'redacted_thinking' && block.data) {
+          content.push({ type: 'redacted_thinking', data: block.data } as Anthropic.ContentBlockParam);
+        }
+      }
       if (m.content) {
         content.push({ type: 'text', text: m.content });
       }

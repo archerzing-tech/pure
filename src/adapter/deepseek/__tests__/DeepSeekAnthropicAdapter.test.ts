@@ -120,6 +120,34 @@ describe('mapAnthropicMessages — consecutive user merging', () => {
   });
 });
 
+describe('Anthropic extended thinking block round-trip', () => {
+  it('puts thinking blocks before text and tool_use, preserving signatures', () => {
+    const { conversationMessages } = mapAnthropicMessages([
+      {
+        role: 'assistant',
+        content: 'visible answer',
+        thinkingBlocks: [
+          { type: 'thinking', thinking: 'internal plan', signature: 'sig-1' },
+          { type: 'redacted_thinking', data: 'opaque' },
+        ],
+        toolCalls: [{ id: 'c1', index: 0, function: { name: 'read_file', arguments: '{}' } }],
+      },
+    ]);
+    const blocks = conversationMessages[0].content as unknown as Array<{ type: string; signature?: string; data?: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'redacted_thinking', 'text', 'tool_use']);
+    expect(blocks[0]).toMatchObject({ thinking: 'internal plan', signature: 'sig-1' });
+    expect(blocks[1]).toMatchObject({ data: 'opaque' });
+  });
+
+  it('never sends a thinking block whose signature is missing', () => {
+    const { conversationMessages } = mapAnthropicMessages([
+      { role: 'assistant', content: 'x', thinkingBlocks: [{ type: 'thinking', thinking: 'draft' }] },
+    ]);
+    const blocks = conversationMessages[0].content as unknown as Array<{ type: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['text']);
+  });
+});
+
 describe('8.2 — anthropic prompt-cache breakpoints', () => {
   it('marks the second-to-last message and leaves the newest turn unmarked', () => {
     const { conversationMessages } = mapAnthropicMessages([

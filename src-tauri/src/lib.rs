@@ -13563,6 +13563,10 @@ struct ChatStreamArgs {
     extra_body: Option<serde_json::Value>,
     #[serde(default, rename = "maxTokens")]
     max_tokens_override: Option<u32>,
+    /// Anthropic 扩展思考预算（仅 claude-3.7/4 系）。Rust 负责满足
+    /// `max_tokens > budget_tokens` 的硬约束；0/缺省 = 不开启。
+    #[serde(default, rename = "thinkingBudget")]
+    thinking_budget: Option<u32>,
     #[serde(default)]
     temperature: Option<f64>,
     #[serde(default, rename = "requestId")]
@@ -14101,6 +14105,7 @@ mod proxy_tests {
             allow_legacy_key_fallback: None,
             extra_body: None,
             max_tokens_override: None,
+            thinking_budget: None,
             temperature: None,
             request_id: String::new(),
             proxy_url: "socks5://127.0.0.1:1080".to_string(),
@@ -14127,6 +14132,7 @@ mod proxy_tests {
             allow_legacy_key_fallback: None,
             extra_body: None,
             max_tokens_override: None,
+            thinking_budget: None,
             temperature: None,
             request_id: String::new(),
             proxy_url: String::new(),
@@ -14667,6 +14673,61 @@ fn apply_anthropic_cache_breakpoints(body: &mut serde_json::Value) {
 
 /// 用户消息里的图片以 OpenAI wire 形状传来（TS 面的 mapMessages 把
 /// Message.images 折成 {type:"image_url",image_url:{url:…}}，见
+/// Anthropic 扩展思考：assistant 历史里的 thinking 块必须排在 text/tool_use
+/// 之前原样回传（signature 校验）；缺签名的块不能重发，宁可少一块也不让
+/// 整个请求 400。`redacted_thinking` 只带不透明 data。
+fn anthropic_thinking_request_blocks(message: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut blocks = Vec::new();
+    let Some(thinking) = message.get("thinkingBlocks").and_then(|v| v.as_array()) else {
+        return blocks;
+    };
+    for block in thinking {
+        match block.get("type").and_then(|v| v.as_str()) {
+            Some("thinking") => {
+                if let (Some(text), Some(signature)) = (
+                    block.get("thinking").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+                    block.get("signature").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+                ) {
+                    blocks.push(serde_json::json!({
+                        "type":"thinking",
+                        "thinking":text,
+                        "signature":signature,
+                    }));
+                }
+            }
+            Some("redacted_thinking") => {
+                if let Some(data) = block.get("data").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    blocks.push(serde_json::json!({"type":"redacted_thinking","data":data}));
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// 流结束后的 thinking 结果：按 content block 顺序回传，过滤没有正文/签名的
+/// 半截块（重发它们会被签名校验拒绝）。
+fn anthropic_thinking_result_blocks(
+    blocks: BTreeMap<u32, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    blocks
+        .into_iter()
+        .map(|(_, block)| block)
+        .filter(|block| {
+            block.get("type").and_then(|v| v.as_str()) == Some("redacted_thinking")
+                || (block.get("thinking").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty())
+                    && block.get("signature").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+        })
+        .collect()
+}
+
+/// Anthropic 必须满足 max_tokens > budget_tokens；预算开启时把输出上限抬到
+/// 预算之上，否则请求在服务端直接被参数校验拒绝。
+fn anthropic_max_tokens(base: u32, budget: Option<u32>) -> u32 {
+    base.max(budget.map(|b| b.saturating_add(1024)).unwrap_or(0))
+}
+
 /// src/adapter/openai/mapping.ts），而 anthropic 原生 API 只认
 /// {"type":"image","source":{…}} content block——原样透传等于把非法 block
 /// 直发服务端，请求 400 或图被静默丢弃。这里把 data URI
@@ -14836,6 +14897,24 @@ fn apply_auth_headers(
     }
 }
 
+/// 去掉请求体里的 anthropic 扩展思考开关；没有该字段时返回 None（不重试）。
+fn without_thinking(body: &serde_json::Value) -> Option<serde_json::Value> {
+    body.get("thinking")?;
+    let mut relaxed = body.clone();
+    let object = relaxed.as_object_mut()?;
+    object.remove("thinking");
+    // 关掉 thinking 后，assistant 历史里的 thinking 块也不再合法；一并剥掉，
+    // 否则 fallback 请求仍会被同一个端点以“思考块与开关不一致”拒绝。
+    if let Some(messages) = object.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages {
+            if let Some(message) = message.as_object_mut() {
+                message.remove("thinkingBlocks");
+            }
+        }
+    }
+    Some(relaxed)
+}
+
 async fn send_chat_request(
     client: &reqwest::Client,
     url: &str,
@@ -14853,8 +14932,13 @@ async fn send_chat_request(
     status_channel: Option<&Channel<String>>,
 ) -> Result<reqwest::Response, String> {
     let mut attempts: u32 = 0;
+    // 扩展思考是可选增强：端点（尤其是自称 Claude 的兼容代理）可能不认
+    // `thinking` 字段并回 400。首次 400 时去掉该字段重发一次，整回合不因
+    // 一个可选能力而失败；去掉后 max_tokens 仍合法（只是输出上限更高）。
+    let mut body_without_thinking: Option<serde_json::Value> = None;
     loop {
         attempts += 1;
+        let request_body = body_without_thinking.as_ref().unwrap_or(body);
         let base_request = client
             .post(url)
             .header("Content-Type", "application/json")
@@ -14864,7 +14948,7 @@ async fn send_chat_request(
             // proxy truncates gzip/brotli output and reqwest reports only the
             // generic `error decoding response body` from its decompressor.
             .header("Accept-Encoding", "identity")
-            .json(body);
+            .json(request_body);
         let request = apply_auth_headers(base_request, anthropic, api_key);
         let send_result = tokio::time::timeout(
             std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS),
@@ -14907,6 +14991,14 @@ async fn send_chat_request(
                     return Ok(resp);
                 }
                 let code = status.as_u16();
+                if code == 400 && body_without_thinking.is_none() {
+                    if let Some(relaxed) = without_thinking(body) {
+                        body_without_thinking = Some(relaxed);
+                        // 这次 400 是可选能力被拒，不占连接重试预算。
+                        attempts = attempts.saturating_sub(1);
+                        continue;
+                    }
+                }
                 if retryable_status(code) && attempts < LLM_RETRY_MAX_ATTEMPTS {
                     let retry_after = parse_retry_after(&resp);
                     let wait = sleep_backoff(attempts, retry_after);
@@ -14989,6 +15081,8 @@ async fn chat_stream(
             }
             if role == "assistant" {
                 let mut blocks = Vec::new();
+                // thinking 块必须排在 text/tool_use 之前，signature 原样回传。
+                blocks.extend(anthropic_thinking_request_blocks(message));
                 if let Some(text) = message.get("content").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                     blocks.push(serde_json::json!({"type":"text","text":text}));
                 }
@@ -15022,12 +15116,18 @@ async fn chat_stream(
             }
             messages.push(anthropic_image_blocks(message));
         }
+        let thinking_budget = args.thinking_budget.filter(|budget| *budget >= 1024);
+        let max_tokens = anthropic_max_tokens(args.max_tokens_override.unwrap_or(32768), thinking_budget);
         let mut value = serde_json::json!({
             "model": args.model,
             "messages": messages,
-            "max_tokens": args.max_tokens_override.unwrap_or(32768),
+            "max_tokens": max_tokens,
             "stream": true,
         });
+        if let Some(budget) = thinking_budget {
+            // Anthropic 要求开思考时不自定义 temperature（本分支本来就不发）。
+            value["thinking"] = serde_json::json!({"type":"enabled","budget_tokens":budget});
+        }
         if !system_parts.is_empty() { value["system"] = serde_json::json!(system_parts.join("\n\n")); }
         if !args.tools.is_empty() {
             value["tools"] = serde_json::Value::Array(args.tools.iter().map(|tool| serde_json::json!({
@@ -15153,7 +15253,7 @@ async fn chat_stream(
     }
 
     let mut stream_attempt: u32 = 0;
-    let (text, usage, tc_map, truncated) = 'stream_attempts: loop {
+    let loop_result = 'stream_attempts: loop {
         stream_attempt += 1;
         let mut stream = resp.bytes_stream();
         // Keep the SSE buffer as bytes until a full line is available. Decoding
@@ -15168,6 +15268,9 @@ async fn chat_stream(
         // and forwarded through the same `usage` channel as the openai branch.
         let mut anthropic_usage: Option<serde_json::Value> = None;
         let mut tc_map: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
+        // Anthropic thinking 块按 content block index 收集：start 建块、
+        // thinking_delta 拼正文、signature_delta 拼签名，结束时按 index 排序回传。
+        let mut thinking_blocks: BTreeMap<u32, serde_json::Value> = BTreeMap::new();
         // 刀 3：回合是被说完还是被输出上限砍半。OpenAI `finish_reason: "length"`
         // / Anthropic `stop_reason: "max_tokens"` 都归一为 true——引擎拿它区分
         // 「模型写错 JSON」与「参数被截断」，后者给可自愈的精准文案而不是含糊失败。
@@ -15364,6 +15467,15 @@ async fn chat_stream(
                             }
                             "thinking_delta" => {
                                 if let Some(content) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                    let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let block = thinking_blocks.entry(index).or_insert_with(|| serde_json::json!({
+                                        "type":"thinking", "thinking":"", "signature":""
+                                    }));
+                                    block["thinking"] = serde_json::Value::String(format!(
+                                        "{}{}",
+                                        block["thinking"].as_str().unwrap_or(""),
+                                        content
+                                    ));
                                     if delta_kind != 2 && !delta_buf.is_empty() {
                                         stream_emitted |= flush_delta_batch(
                                             &on_chunk,
@@ -15382,6 +15494,19 @@ async fn chat_stream(
                                             &mut delta_flushed_at,
                                         )?;
                                     }
+                                }
+                            }
+                            "signature_delta" => {
+                                if let Some(signature) = delta.get("signature").and_then(|v| v.as_str()) {
+                                    let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let block = thinking_blocks.entry(index).or_insert_with(|| serde_json::json!({
+                                        "type":"thinking", "thinking":"", "signature":""
+                                    }));
+                                    block["signature"] = serde_json::Value::String(format!(
+                                        "{}{}",
+                                        block["signature"].as_str().unwrap_or(""),
+                                        signature
+                                    ));
                                 }
                             }
                             "input_json_delta" => {
@@ -15427,6 +15552,17 @@ async fn chat_stream(
                     "content_block_start" => {
                         let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                         let block = &json["content_block"];
+                        if block.get("type").and_then(|v| v.as_str()) == Some("thinking") {
+                            thinking_blocks.insert(index, serde_json::json!({
+                                "type":"thinking", "thinking":"", "signature":""
+                            }));
+                        }
+                        if block.get("type").and_then(|v| v.as_str()) == Some("redacted_thinking") {
+                            thinking_blocks.insert(index, serde_json::json!({
+                                "type":"redacted_thinking",
+                                "data": block.get("data").and_then(|v| v.as_str()).unwrap_or(""),
+                            }));
+                        }
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                             stream_emitted = true;
                             tc_map.insert(index, serde_json::json!({"id": block["id"], "name": block["name"], "arguments":""}));
@@ -15633,8 +15769,9 @@ async fn chat_stream(
         // flush (and its cancel propagation) matters.
         let _ =
             flush_delta_batch(&on_chunk, &mut delta_kind, &mut delta_buf, &mut delta_flushed_at)?;
-        break (text, usage, tc_map, truncated);
+        break (text, usage, tc_map, thinking_blocks, truncated);
     };
+    let (text, usage, tc_map, thinking_blocks, truncated) = loop_result;
 
     // Build tool_calls list
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -15650,7 +15787,17 @@ async fn chat_stream(
         }
     }
 
-    Ok(serde_json::json!({ "text": text, "toolCalls": tool_calls, "usage": usage, "netRoute": served_route, "headersMs": headers_ms, "truncated": truncated }))
+    let thinking_blocks = anthropic_thinking_result_blocks(thinking_blocks);
+
+    Ok(serde_json::json!({
+        "text": text,
+        "toolCalls": tool_calls,
+        "thinkingBlocks": thinking_blocks,
+        "usage": usage,
+        "netRoute": served_route,
+        "headersMs": headers_ms,
+        "truncated": truncated
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -21407,6 +21554,70 @@ mod session_stats_tests {
         assert!(single["messages"][0]["content"].is_string());
         assert!(single.get("system").is_none());
         assert!(single.get("tools").is_none());
+    }
+
+    #[test]
+    fn anthropic_thinking_blocks_round_trip_with_signatures() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "answer",
+            "thinkingBlocks": [
+                { "type": "thinking", "thinking": "plan", "signature": "sig-1" },
+                { "type": "thinking", "thinking": "unsigned" },
+                { "type": "redacted_thinking", "data": "opaque" }
+            ]
+        });
+        let blocks = anthropic_thinking_request_blocks(&message);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[1]["data"], "opaque");
+    }
+
+    #[test]
+    fn anthropic_thinking_result_drops_half_blocks_and_keeps_order() {
+        let mut blocks = BTreeMap::new();
+        blocks.insert(2, serde_json::json!({
+            "type": "thinking", "thinking": "second", "signature": "s2"
+        }));
+        blocks.insert(0, serde_json::json!({
+            "type": "thinking", "thinking": "first", "signature": "s1"
+        }));
+        blocks.insert(1, serde_json::json!({
+            "type": "thinking", "thinking": "no sig", "signature": ""
+        }));
+        blocks.insert(3, serde_json::json!({
+            "type": "redacted_thinking", "data": "opaque"
+        }));
+        let result = anthropic_thinking_result_blocks(blocks);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0]["thinking"], "first");
+        assert_eq!(result[1]["thinking"], "second");
+        assert_eq!(result[2]["type"], "redacted_thinking");
+    }
+
+    #[test]
+    fn without_thinking_removes_only_the_optional_capability() {
+        let body = serde_json::json!({
+            "thinking": { "type": "enabled", "budget_tokens": 8192 },
+            "max_tokens": 9216,
+            "messages": [
+                { "role": "assistant", "thinkingBlocks": [{ "type": "thinking" }] }
+            ]
+        });
+        let relaxed = without_thinking(&body).unwrap();
+        assert!(relaxed.get("thinking").is_none());
+        assert_eq!(relaxed["max_tokens"], 9216);
+        assert!(relaxed["messages"][0].get("thinkingBlocks").is_none());
+        assert!(without_thinking(&serde_json::json!({ "max_tokens": 1 })).is_none());
+    }
+
+    #[test]
+    fn anthropic_max_tokens_stays_above_the_thinking_budget() {
+        assert_eq!(anthropic_max_tokens(8192, Some(4096)), 8192);
+        assert_eq!(anthropic_max_tokens(2048, Some(4096)), 5120);
+        assert_eq!(anthropic_max_tokens(8192, None), 8192);
     }
 
     #[test]
