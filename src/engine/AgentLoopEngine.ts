@@ -1669,20 +1669,20 @@ export class AgentLoopEngine {
       // 没跑完的活说成完成）。物理不变量：等在飞的支收齐（或用户暂停/停掉），
       // 把结果作为内部消息送达后重入 THINK，让模型拿真产出重写答复。等待期
       // 间没有别的活可干，等待本身不浪费。
-      if (ctx.detachedBranches && ctx.detachedBranches.pendingCount() > 0) {
+      if (ctx.detachedBranches) {
         const gateStart = Date.now();
         let delivered = 0;
         // 等待期间支仍在吐活动（detach 后的常规情形）：批级 reader 早关了，
         // 这里自持一个，每片等待后把排队的 trace 带出去——否则卡片在整个
-        // 终局等待里只有一个转圈。
-        const gateActivity = ctx.subagentEvents?.subscribe();
+        // 终局等待里只有一个转圈。没有在飞支时不订阅。
+        let gateActivity: ReturnType<NonNullable<typeof ctx.subagentEvents>['subscribe']> | undefined;
         try {
-          while (ctx.detachedBranches.pendingCount() > 0 && !ctx.signal?.aborted) {
-            if (Date.now() - gateStart >= BRANCH_GATE_MAX_WAIT_MS) break;
-            await ctx.detachedBranches.waitForSettlement(BRANCH_SETTLE_POLL_MS, ctx.signal);
-            for (const event of gateActivity?.drainAvailable() ?? []) {
-              yield { type: 'SubagentActivity', payload: event, timestamp: Date.now() };
-            }
+          for (;;) {
+            if (ctx.signal?.aborted) break;
+            // 已结算、还没被取走的支先送达：闸门此前只看在飞数，模型写草稿的
+            // 那一拍若恰好是支失败收尾（2026-11-20 用户判例：三支并行全部报错，
+            // 主 agent 手里只有「还在等」的草稿），pendingCount 已归零，结果
+            // 会被整段跳过、一条都送不到主 agent。先取再判。
             for (const settled of ctx.detachedBranches.takeSettled()) {
               markDelegationSettled(messages, settled.toolCallId);
               for (const alias of settled.aliasToolCallIds ?? []) markDelegationSettled(messages, alias);
@@ -1702,6 +1702,13 @@ export class AgentLoopEngine {
                 },
                 timestamp: Date.now(),
               };
+            }
+            if (ctx.detachedBranches.pendingCount() === 0) break;
+            if (Date.now() - gateStart >= BRANCH_GATE_MAX_WAIT_MS) break;
+            gateActivity ??= ctx.subagentEvents?.subscribe();
+            await ctx.detachedBranches.waitForSettlement(BRANCH_SETTLE_POLL_MS, ctx.signal);
+            for (const event of gateActivity?.drainAvailable() ?? []) {
+              yield { type: 'SubagentActivity', payload: event, timestamp: Date.now() };
             }
           }
         } finally {
@@ -1723,9 +1730,11 @@ export class AgentLoopEngine {
         }
         // 兜底（正常不可达）：支没在活性上限内结算。如实告知，不装作全收齐。
         const pending = ctx.detachedBranches.pendingCount();
-        const note = `[background branch pending] 还有 ${pending} 支后台委派没回来（超出了本次等待上限）。你的最终汇总必须如实说明这一点——不要把它们当成已完成，也不要计算它们的产出。`;
-        messages.push({ role: 'user' as const, content: note, internal: true });
-        budget.addTokens(note);
+        if (pending > 0) {
+          const note = `[background branch pending] 还有 ${pending} 支后台委派没回来（超出了本次等待上限）。你的最终汇总必须如实说明这一点——不要把它们当成已完成，也不要计算它们的产出。`;
+          messages.push({ role: 'user' as const, content: note, internal: true });
+          budget.addTokens(note);
+        }
       }
       // Hook: before_verify
       if (ctx.hooks) {

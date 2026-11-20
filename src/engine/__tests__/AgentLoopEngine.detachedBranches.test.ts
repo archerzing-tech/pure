@@ -314,6 +314,66 @@ describe('后台委派：终局闸（回合不能带着自己派出去的支收�
     expect(port.pendingCount()).toBe(0);
   }, 10_000);
 
+  // 2026-11-20 用户真机判例：三支并行子 agent 全部报错返回，主 agent 还在
+  // 等——三支在模型写草稿的那一拍同时失败结算，pendingCount 归零，旧闸门
+  // 只看在飞数就整段跳过，已结算的结果一次都没被取走（模型手里只有草稿）。
+  it('支在写草稿的窗口里全部失败：已结算的结果不能漏送', async () => {
+    const engine = new AgentLoopEngine();
+    const port = new FakeBranches();
+    let round = 0;
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        round++;
+        if (round === 1) {
+          const tcs: ToolCall[] = ['A', 'B', 'C'].map((tag, i) => ({
+            id: `call_1_${i}`,
+            index: i,
+            function: { name: 'code_editor', arguments: JSON.stringify({ instructions: `module ${tag}` }) },
+          }));
+          for (const tc of tcs) {
+            yield { type: 'tool_call', index: tc.index, id: tc.id, name: tc.function.name, arguments: tc.function.arguments };
+          }
+          yield { type: 'done', content: '', toolCalls: tcs };
+          return;
+        }
+        if (round === 2) {
+          // 草稿开始流式时三支同时失败收尾：这一拍已经没有任何「在飞」的支。
+          port.settle('call_1_0', 'provider boom A', { success: false });
+          port.settle('call_1_1', 'provider boom B', { success: false });
+          port.settle('call_1_2', 'provider boom C', { success: false });
+          yield { type: 'content', content: '还在等三个子 agent 回来。' };
+          yield { type: 'done', content: '还在等三个子 agent 回来。', toolCalls: [] };
+          return;
+        }
+        yield { type: 'content', content: 'final answer after failures' };
+        yield { type: 'done', content: 'final answer after failures', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'final answer after failures', toolCalls: [] }),
+    };
+    // 三支都只受理不自行结算：结算由上面第二轮手动触发，精确落进草稿窗口。
+    const adapter: ToolAdapter = {
+      getTools: () => [EDITOR_TOOL],
+      getMetadata: () => ({ isWrite: false }),
+      execute: async (tc: ToolCall): Promise<ToolResult> => {
+        port.add(tc.id);
+        return receipt(tc);
+      },
+    };
+    const events = await collect(engine.run(
+      { sessionId: 's-detach-fast-fail', systemPrompt: 'X', userPrompt: 'Y', budget: BUDGET },
+      baseCtx({ llm, tools: adapter, toolsDefs: [EDITOR_TOOL], detachedBranches: port }),
+    ));
+
+    const completed = events.find((e) => e.type === 'Completed' && e.payload.isComplete) as Extract<EngineEvent, { type: 'Completed' }>;
+    const notes = internalNotes(completed.payload.messages ?? []);
+    for (const tag of ['A', 'B', 'C']) {
+      expect(notes.some((n) => n.includes('失败了') && n.includes(`provider boom ${tag}`))).toBe(true);
+    }
+    // 收尾用的是拿到三份失败结果之后重写的答复，不是「还在等」的草稿。
+    expect(completed.payload.finalOutput).toBe('final answer after failures');
+    expect(port.takeSettled()).toHaveLength(0);
+  }, 10_000);
+
   it('多支在飞：等全部结算后一次性送达，再收尾', async () => {
     const engine = new AgentLoopEngine();
     const port = new FakeBranches();
