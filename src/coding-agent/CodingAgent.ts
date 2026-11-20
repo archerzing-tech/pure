@@ -575,8 +575,9 @@ export class CodingAgent {
     images?: MessageImage[],
     hardStopSignal?: AbortSignal,
     userInternal?: boolean,
+    llmOverride?: LLMAdapter,
   ): AsyncGenerator<EngineEvent, void, void> {
-    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, hardStopSignal, userInternal);
+    yield* this.harness.continueTurn(systemPrompt, messages, newUserPrompt, signal, images, hardStopSignal, userInternal, llmOverride);
   }
 
   /** Get the underlying Harness instance (for advanced use). */

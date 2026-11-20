@@ -3012,3 +3012,23 @@ describe('会话切换同步模型显示链(main.ts onSessionIdChanged)', () => 
     expect(mainSrc).toContain('if (!base || !override) return base;');
   });
 });
+
+// 修复轮升档（2026-11-20）：交付验证失败后的修复回合单独用 high 思考档，
+// 正常回合仍按模型行设置跑；适配器构造失败要退回主适配器，不能因升档失败
+// 断掉修复。
+describe('交付修复轮思考升档', () => {
+  const src = readSource(new URL('../chat.ts', import.meta.url));
+
+  it('单独构造 high 适配器并作为 llmOverride 传给 continueTurn', () => {
+    expect(src).toContain("createLLMAdapter(config, { reasoningEffort: 'high' })");
+    expect(src).toContain('true, repairLlm)');
+  });
+
+  it('构造失败时退回主适配器', () => {
+    const head = src.indexOf("createLLMAdapter(config, { reasoningEffort: 'high' })");
+    const body = src.slice(head - 400, head + 600);
+    expect(body).toContain('let repairLlm: LLMAdapter | undefined;');
+    expect(body).toContain('catch (err)');
+    expect(body).toContain('沿用主适配器');
+  });
+});

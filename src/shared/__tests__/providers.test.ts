@@ -695,6 +695,17 @@ describe('reasoning-effort capability detection', () => {
     const off: CustomProvider = { ...custom, modelBudgets: { 'claude-opus-4-1': { reasoningEffort: 'off' } } };
     expect(resolveAnthropicThinkingBudget({ provider: 'anth', model: 'claude-opus-4-1', customProviders: [off], protocol: 'anthropic' }))
       .toBeUndefined();
+    // 单轮覆盖（修复轮升 high）不改模型行设置，只影响这一条适配器；
+    // 用户显式关闭思考时保持关闭，不偷偷为修复轮打开。
+    expect(resolveAnthropicThinkingBudget(
+      { provider: 'anth', model: 'claude-opus-4-1', customProviders: [off], protocol: 'anthropic' }, 'high',
+    )).toBeUndefined();
+    expect(resolveAnthropicThinkingBudget(
+      { provider: 'anthropic', model: 'claude-sonnet-4-5', protocol: 'anthropic' }, 'high',
+    )).toBe(16_384);
+    expect(resolveAnthropicThinkingBudget(
+      { provider: 'anth', model: 'claude-opus-4-1', customProviders: [custom], protocol: 'anthropic' }, 'off',
+    )).toBeUndefined();
   });
 
   it('端点词表：DeepSeek V4.x 合法档位不含 medium——缺档撤参不发（2026-11-18 真机 400 判例）', () => {

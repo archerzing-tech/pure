@@ -689,15 +689,20 @@ export function resolveAnthropicThinkingBudget(
     providerOverrides?: Record<string, ProviderOverride> | null;
     protocol?: 'openai' | 'anthropic' | string | null;
   },
+  /** 单轮覆盖（修复轮升档）：不写进配置，只影响这一条适配器。 */
+  effortOverride?: ReasoningEffortSetting,
 ): number | undefined {
   if (cfg.protocol !== 'anthropic') return undefined;
   const model = cfg.model?.trim();
   if (!model || !/claude-(?:[a-z]+-)?(?:3[-.]7|4)/i.test(model)) return undefined;
   const custom = customProviderFor(cfg.customProviders, cfg.provider);
   const override = providerOverrideFor(cfg.providerOverrides, cfg.provider);
-  const setting: ReasoningEffortSetting | undefined
+  const rowSetting: ReasoningEffortSetting | undefined
     = custom?.modelBudgets?.[model]?.reasoningEffort
       ?? override?.modelBudgets?.[model]?.reasoningEffort;
+  // 显式关闭优先于单轮升档：用户把思考关了，就不在修复轮偷偷打开。
+  if (rowSetting === 'off') return undefined;
+  const setting = effortOverride ?? rowSetting;
   if (setting === 'off') return undefined;
   if (setting === 'low') return 4_096;
   if (setting === 'high') return 16_384;

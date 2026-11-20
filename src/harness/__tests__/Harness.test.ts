@@ -2386,3 +2386,28 @@ describe('memory injection funnel', () => {
     expect(procedures).toEqual(['p1']);
   });
 });
+
+// 修复轮升档（2026-11-20）：失败修复只在这一次 continueTurn 里换成 high
+// 适配器，正常回合仍用会话主适配器。
+describe('continueTurn 单轮适配器覆盖', () => {
+  it('llmOverride 接管 THINK，主适配器不被调用', async () => {
+    const main = recordingLLM('main answer');
+    const repair = recordingLLM('repair answer');
+    const harness = new Harness({
+      sessionId: 'sess-repair-escalation',
+      llm: main,
+      toolsDefs: [],
+      budget: STD_BUDGET,
+    });
+    const history: Message[] = [
+      { role: 'system', content: 'BASE SYSTEM' },
+      { role: 'user', content: 'build it' },
+      { role: 'assistant', content: 'partial' },
+    ];
+    await collect(harness.continueTurn('BASE SYSTEM', history, 'fix the failing check', undefined, undefined, undefined, false, repair));
+
+    expect(repair.received.length).toBe(1);
+    expect(repair.received[0].some(m => m.role === 'user')).toBe(true);
+    expect(main.received.length).toBe(0);
+  });
+});

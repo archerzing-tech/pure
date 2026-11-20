@@ -491,12 +491,15 @@ export class Harness {
     return this.config.toolsDefsProvider ? this.config.toolsDefsProvider() : this.config.toolsDefs;
   }
 
-  private buildContext(signal?: AbortSignal, hardStopSignal?: AbortSignal): EngineContext {
+  private buildContext(signal?: AbortSignal, hardStopSignal?: AbortSignal, llmOverride?: LLMAdapter): EngineContext {
     return {
       llm: this.config.llm,
       // E0.3 — per-phase adapter selection (THINK/HANDOVER); the engine reads
       // it through llmForPhase and falls back to llm per phase.
-      llmFor: this.config.llmFor,
+      // 单轮升档（修复轮）：只接管 THINK，HANDOVER/REFLECT 的省钱选型不变。
+      llmFor: llmOverride
+        ? (phase) => phase === 'THINK' ? llmOverride : this.config.llmFor?.(phase)
+        : this.config.llmFor,
       // Mid-run steering: the engine drains this at each THINK boundary.
       takeSteerMessages: this.config.takeSteerMessages,
       // 代执行回合：宿主给出的本轮 toolCalls，非空则本轮跳过模型调用。
@@ -772,6 +775,8 @@ export class Harness {
     images?: MessageImage[],
     hardStopSignal?: AbortSignal,
     userInternal?: boolean,
+    /** 修复轮专用适配器：只在本次 continueTurn 的 THINK 阶段生效。 */
+    llmOverride?: LLMAdapter,
   ): AsyncGenerator<EngineEvent, void, void> {
     this.verificationSummary = 'No project-level verification evidence was recorded.';
     this.verificationPassed = false;
@@ -831,7 +836,7 @@ export class Harness {
         budget: this.config.budget,
         userInternal,
       },
-      this.buildContext(signal, hardStopSignal),
+      this.buildContext(signal, hardStopSignal, llmOverride),
     );
 
     const traceId = this.observability.startRun({

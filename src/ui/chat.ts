@@ -1576,7 +1576,7 @@ export function createLLMAdapter(
   const reasoning = resolveReasoningEffort({ ...config, protocol }, opts.reasoningEffort);
   // Anthropic 扩展思考独立于 reasoning_effort：官方 Claude 3.7/4 系走原生
   // thinking 块，其他 anthropic 兼容端点不保证接受该字段（resolve 里按模型门控）。
-  const thinkingBudget = resolveAnthropicThinkingBudget({ ...config, protocol });
+  const thinkingBudget = resolveAnthropicThinkingBudget({ ...config, protocol }, opts.reasoningEffort);
   // 规划思考调用（disableThinking）在支持的 provider 上显式关掉暗推理：
   // 可见叙述本身就是思考，暗推理只把第一个可见字推迟 90s+（见
   // planThinkingOffExtraBody 的实测注）。不支持的 provider 得 undefined，
@@ -7180,7 +7180,17 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           } catch { /* 台账不可用不追击 */ }
         }
         const fixSegment = createSegment();
-        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true);
+        // 修复轮才升到 high：正常回合继续按模型行设置跑，不为一两次失败把
+        // 整场对话的思考成本拖高。适配器按这条回合单独构造，不改全局配置；
+        // 构造失败时退回主适配器，修复能力不受影响。
+        let repairLlm: LLMAdapter | undefined;
+        try {
+          repairLlm = this.wrapThinkStream(createLLMAdapter(config, { reasoningEffort: 'high' }));
+          recordGuiDiagnostic('[repair] 修复轮升到 high 思考档');
+        } catch (err) {
+          recordGuiDiagnostic(`[repair] high 思考档适配器构造失败，沿用主适配器: ${String(err)}`);
+        }
+        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true, repairLlm);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
         let output = '';
         let latestMessages = messages;
