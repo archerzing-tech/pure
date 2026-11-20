@@ -1,0 +1,334 @@
+{
+  "version": "4.9.6",
+  "revision": "d8e63d6",
+  "generatedAt": "2026-11-20T07:41:07.629Z",
+  "provider": "custom001",
+  "model": "deepseek-v4-1-flash-261017",
+  "tasks": [
+    {
+      "taskId": "fix-take-top-off-by-one",
+      "shortPrompt": "修复 takeTop 的边界错误（count=3 返回 3 项，count<=0 返回空数组），跑 bun test 直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "fix-take-top-off-by-one",
+        "category": "bugfix",
+        "difficulty": "easy",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 9730,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 26,
+            "output": {
+              "chars": 234,
+              "hash": "ed6f43bf"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 61464,
+            "completionTokens": 398,
+            "cacheHitTokens": 60288,
+            "cacheMissTokens": 1176
+          },
+          "toolCalls": 6,
+          "turns": 6
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 61464,
+          "completionTokens": 398,
+          "cacheHitTokens": 60288,
+          "cacheMissTokens": 1176
+        },
+        "toolCalls": 6,
+        "turns": 6,
+        "completed": true,
+        "finalText": "`src/score.ts` 已修复：原来的 slice(0, count - 1) 少取一项，现在改为 slice(0, count)，并对 count <= 0 提前返回空数组。\n\n`bun test` 全过：2 pass / 0 fail。"
+      }
+    },
+    {
+      "taskId": "add-normalize-slug",
+      "shortPrompt": "实现 normalizeSlug（去首尾空白、转小写、连续非字母数字压成一个连字符），补测试并跑 bun test 直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "add-normalize-slug",
+        "category": "feature",
+        "difficulty": "easy",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 14785,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 26,
+            "output": {
+              "chars": 647,
+              "hash": "45f8b4cc"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 62644,
+            "completionTokens": 1161,
+            "cacheHitTokens": 61056,
+            "cacheMissTokens": 1588
+          },
+          "toolCalls": 6,
+          "turns": 6
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 62644,
+          "completionTokens": 1161,
+          "cacheHitTokens": 61056,
+          "cacheMissTokens": 1588
+        },
+        "toolCalls": 6,
+        "turns": 6,
+        "completed": true,
+        "finalText": "`normalizeSlug` 写进 `src/slug.ts:1-6`：trim → 小写 → 连续非字母数字压成单个 `-` → 去掉两端连字符。用 `\\p{L}\\p{N}` 而不是 `a-z0-9`，所以带重音字母和其他文字的字符会保留下来（`Naïve` 不会压成 `na-ve`）；这是我自己选的口径，如果你要纯 ASCII，把正则改成 `/[^a-zA-Z0-9]+/g` 即可。\n\n测试扩到 7 条（`src/slug.test.ts`），覆盖原有用例、边界全分隔符/空串、大小写、数字、制表符换行 trim。`bun test` 跑过：7 pass / 0 fail / 12 expect。\n\n一个已知限制：非字母数字的定义按你说的“字母数字”来，`héllo` 这类 Unicode 字母不会被切断，但也意味着 `—` 这类之外还有别的标点被压掉——行为是对的，只是提醒一下引号和撇号（`don't` → `don-t`）也是这个结果。"
+      }
+    },
+    {
+      "taskId": "hard-bugfix-task-queue-leak",
+      "shortPrompt": "修复任务队列的两个问题（并发超上限、一个任务抛错后队列永久挂起），跑 bun test 直到全过，不改测试文件。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "hard-bugfix-task-queue-leak",
+        "category": "bugfix",
+        "difficulty": "hard",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 13994,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 99,
+            "output": {
+              "chars": 362,
+              "hash": "7b79cb07"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 63964,
+            "completionTokens": 963,
+            "cacheHitTokens": 62080,
+            "cacheMissTokens": 1884
+          },
+          "toolCalls": 8,
+          "turns": 6
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 63964,
+          "completionTokens": 963,
+          "cacheHitTokens": 62080,
+          "cacheMissTokens": 1884
+        },
+        "toolCalls": 8,
+        "turns": 6,
+        "completed": true,
+        "finalText": "Two bugs in `src/task-queue.ts`: the acquire guard compares `>` instead of `>=` (so it admits concurrency+1 jobs), and `run` has no `finally`, so a rejecting job never releases its slot nor wakes a waiter.3 个测试全过，测试文件没动。\n\n两处根因都在 `src/task-queue.ts`：`acquire()` 的守卫写成了 `active > concurrency`，实际放大到 concurrency+1 个并发在跑，改成 `>=`；`run()` 里 `job()` 抛错就直接跳出，既不释放槽位也不唤醒下一个等待者，队列就永久卡在 `active` 上，改成 `try/finally` 保证释放。"
+      }
+    },
+    {
+      "taskId": "frontier-selfverify-pricing-web",
+      "shortPrompt": "修复开票计算的计价错误：按规则文档补齐所有边界与组合，跑 bun test 和验收脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "frontier-selfverify-pricing-web",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 39395,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 29,
+            "output": {
+              "chars": 767,
+              "hash": "4b53da16"
+            }
+          },
+          {
+            "name": "acceptance",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 28,
+            "output": {
+              "chars": 40,
+              "hash": "235d0b77"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 102883,
+            "completionTokens": 4129,
+            "cacheHitTokens": 87040,
+            "cacheMissTokens": 15843
+          },
+          "toolCalls": 12,
+          "turns": 7
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 102883,
+          "completionTokens": 4129,
+          "cacheHitTokens": 87040,
+          "cacheMissTokens": 15843
+        },
+        "toolCalls": 12,
+        "turns": 7,
+        "completed": true,
+        "finalText": "规则与验收期望对得上，问题集中在三处：百分比折扣用 `Math.floor` 而非四舍五入、附加费/冲销被当成与折扣同序执行、cap 加在了税基上而不是税后总额上，且钳零被错记成 cap 事件。验收已经全过。我再补几条单测，把修掉的四处缺陷固定住，避免以后又出现“看起来没问题、实际有错”的通过状态。修复已经完成，`bun test` 11 通过 0 失败，`bun run check` 输出 `acceptance ok: 12 properties, 13 checks`。\n\n问题出在 `src/pricing.ts` 中的四处实现与 `docs/pricing.md` 不符：\n\n- **R2 取整方式错误**：百分比折扣用了 `Math.floor`，文档要求四舍五入，半分进位。现在改为按 10001 的情况计 50 分，而不是 50 分，见 `src/pricing.ts:1` 的 `roundHalfUp`。\n- **R3/R4 执行顺序错误**：原代码把 `surcharge`、`chargeback` 和折扣放在同一个循环里按声明顺序执行。文档要求所有折扣先作用于滚动金额，然后加附加费，最后减冲销。现在按类别分别聚合附加费和冲销，再按后续顺序处理，见 `src/pricing.ts:33-42`。\n- **R6 作用位置错误**：cap 被算在税基上，然后才计税。文档明确规定，剔除的是税后总额，而 `taxableCents` 必须保持 cap 之前的值。现在先计税再 cap，见 `src/pricing.ts:44-52`。\n- **R7 错误记账**：钳零时把差额加进了 `capAppliedCents`，而文档明说这不是 cap 事件，`capAppliedCents` 只记录 R6。现在钳零不再触碰计数器，见 `src/pricing.ts:54-57`。\n\n`tests/pricing.test.ts` 补了“边界与组合”一组共 7 条，把上面每条规则和 R6×R7 并存的情形都固定为一条断言——原测试只有主路径，所以这些错误都能通过。\n\n运行 `bun test`、`bun run check` 均没有问题"
+      }
+    },
+    {
+      "taskId": "frontier-contract-window-units",
+      "shortPrompt": "修复限流器的单位换算：核心层和适配层都要符合契约，跑 bun test 和审计脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "frontier-contract-window-units",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 45018,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 29,
+            "output": {
+              "chars": 729,
+              "hash": "bb0c6d58"
+            }
+          },
+          {
+            "name": "audit",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 28,
+            "output": {
+              "chars": 43,
+              "hash": "a88af1e6"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 204105,
+            "completionTokens": 4268,
+            "cacheHitTokens": 194944,
+            "cacheMissTokens": 9161
+          },
+          "toolCalls": 14,
+          "turns": 14
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 204105,
+          "completionTokens": 4268,
+          "cacheHitTokens": 194944,
+          "cacheMissTokens": 9161
+        },
+        "toolCalls": 14,
+        "turns": 14,
+        "completed": true,
+        "finalText": "I'll start by finding the rate limiter code and the tests/audit script.Tests pass but the audit is red on 7 probes. Root cause is exactly the contract's two clauses: core does no boundary validation, and both adapters use `Math.round` instead of ceil/floor.Both green. Let me verify the contract's §4 edge cases that the audit doesn't probe (fractional count flooring to 0, zero duration), then lock them in tests.The probe sat outside the workspace, so relative imports didn't resolve. I'll put it inside the project.所有边界都符合契约。把这几条契约断言固化进测试，并删掉临时探针脚本。全绿：`bun test` 10 pass / 0 fail，审计 `contract holds at every boundary`。\n\n两个根因，都在契约点名的位置上：\n\n1. **core 没有边界校验**（`src/core/window.ts:16`、`:24`）——构造器和 `tryAcquire` 直接吃下小数与 0 值，`windowMs: 0` 会让过滤条件恒假、窗口里什么都出不去/全放行。现在 `windowMs`（正整数毫秒）、`maxEvents`（≥1 整数）、`atMs`（≥0 整数）各自在入口抛 `RangeError`，符合 §1「错误在离源头最近的地方响，core 不猜测、不截断」。\n2. **两个 adapter 用了 `Math.round`**（`src/adapters/seconds.ts:8-9`）——方向反了一半：0.0004 秒被 round 成 0ms（窗口归零＝放行一切），2.5 个配额被 round 成 3（比申请的更宽）。改成 `Math.ceil` 时长、`Math.floor` 计数，并在换算后补上 §4 的边界：floor 后不足 1、非正时长、NaN 一律 `RangeError`。\n\n另外核查了一处契约没写死但容易漏的：`minutes` adapter 的校验本来是对的，但它把 `1 * 60_000` 传进 core 后仍受 core 新校验保护，两条路径行为一致。临时探针脚本已删掉，边界用例固化进了 `tests/window.test.ts`（新增 7 个用例覆盖 §1/§3/§4），以后回归跑测试就能挡住。\n\n有一处遗留你可能会想知道：`Math.ceil(NaN)` 是 `NaN`，靠 `!(windowMs > 0)` 才拦住，`Infinity` 同理过不了 `Number.isInteger`——这两条我实测确认过会抛，但如果你以后放宽成接受 Infinity 表达「无限窗口」，需要另加显式分支。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "version": "4.9.6",
+  "revision": "ace9288",
+  "generatedAt": "2026-11-20T07:47:49.508Z",
+  "provider": "custom001",
+  "model": "deepseek-v4-1-flash-261017",
+  "label": "main-rep2",
+  "tasks": [
+    {
+      "taskId": "frontier-contract-window-units",
+      "shortPrompt": "修复限流器的单位换算：核心层和适配层都要符合契约，跑 bun test 和审计脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": false,
+        "workShaped": true,
+        "buildShaped": false
+      },
+      "light": false,
+      "options": {},
+      "result": {
+        "taskId": "frontier-contract-window-units",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 56194,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 29,
+            "output": {
+              "chars": 616,
+              "hash": "36e616a5"
+            }
+          },
+          {
+            "name": "audit",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 26,
+            "output": {
+              "chars": 43,
+              "hash": "a88af1e6"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 128580,
+            "completionTokens": 5064,
+            "cacheHitTokens": 122496,
+            "cacheMissTokens": 6084
+          },
+          "toolCalls": 15,
+          "turns": 10
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 128580,
+          "completionTokens": 5064,
+          "cacheHitTokens": 122496,
+          "cacheMissTokens": 6084
+        },
+        "toolCalls": 15,
+        "turns": 10,
+        "completed": true,
+        "finalText": "基线：`bun test` 3 项全过，审计脚本 7 个探针失败。根因正是 core 不校验、seconds 适配层用了 `Math.round`。先修 core。管线和探针都通过了。再补几条回归测试把这次的换算方向钉住，避免以后被改回 `round`。全过了。\n\n根因有两处，都指向「换算比调用方申请的更宽松」：core 完全不校验（`src/core/window.ts` 直接存值），seconds 适配层用 `Math.round`（时长 round 得 0ms 等于放行一切，计数 round 把 2.5 变成 3）。\n\n改动：\n- `src/core/window.ts:8` 起加了 `assertPositiveInteger`，构造时校验 `windowMs`/`maxEvents`，`tryAcquire` 校验 `atMs`——非整数、非正数一律 `RangeError`，不截断。\n- `src/adapters/seconds.ts:10` 换成 `Math.ceil(windowSeconds * 1_000)` + `Math.floor(maxEvents)`，并在 floor/ceil 后不足 1 或非正时自己抛 `RangeError`（不再把这个非法值交给 core 兜）。\n- `tests/window.test.ts` 补了 5 组回归测试，把 ceil/floor 方向和边界拒收钉死。\n\n验证：`bun test` 8 pass / 0 fail（26 expects），`bun run audit` 输出 `audit ok: contract holds at every boundary`。审计脚本本身没动。\n\n一点提醒：`createWindowFromMinutes` 校验的是「正整数分钟」，而 core 只要求 `windowMs > 0`——行为契约没冲突，但如果调用方想传 `0.5` 分钟，现在会被拒。要放开就得改成「换算后毫秒为整数」的校验，这属于放宽 API，我没擅自改。"
+      }
+    }
+  ]
+}

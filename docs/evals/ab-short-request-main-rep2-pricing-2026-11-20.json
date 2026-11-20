@@ -1,0 +1,79 @@
+{
+  "version": "4.9.6",
+  "revision": "ace9288",
+  "generatedAt": "2026-11-20T07:46:44.164Z",
+  "provider": "custom001",
+  "model": "deepseek-v4-1-flash-261017",
+  "label": "main-rep2",
+  "tasks": [
+    {
+      "taskId": "frontier-selfverify-pricing-web",
+      "shortPrompt": "修复开票计算的计价错误：按规则文档补齐所有边界与组合，跑 bun test 和验收脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": false,
+        "workShaped": true,
+        "buildShaped": false
+      },
+      "light": false,
+      "options": {},
+      "result": {
+        "taskId": "frontier-selfverify-pricing-web",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 81692,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 30,
+            "output": {
+              "chars": 918,
+              "hash": "ddac5c53"
+            }
+          },
+          {
+            "name": "acceptance",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 27,
+            "output": {
+              "chars": 40,
+              "hash": "235d0b77"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 106086,
+            "completionTokens": 8758,
+            "cacheHitTokens": 97792,
+            "cacheMissTokens": 8294
+          },
+          "toolCalls": 13,
+          "turns": 7
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 106086,
+          "completionTokens": 8758,
+          "cacheHitTokens": 97792,
+          "cacheMissTokens": 8294
+        },
+        "toolCalls": 13,
+        "turns": 7,
+        "completed": true,
+        "finalText": "`bun test` 4/4 通过，验收 13 项检查全部通过。现在把边界和组合用例也补进单元测试，让 `bun test` 自己就能抓住这些回归。修好了。原实现有四处错误，其中三处会让验收直接失败：\n\n- **R2 百分比折扣用 `Math.floor`**（src/pricing.ts 原第 20 行）：文档要求四舍五入到整分，半分要进位。101 分 × 50% = 50.5，旧码扣 50 剩 51，正确应扣 51 剩 50（P03）。现在统一用 `roundHalfAwayFromZero` 的整数运算（`src/pricing.ts:4`）。\n- **R5/R6 顺序颠倒**（原第 32–41 行）：旧码先 cap 再计税，等于对加了 cap 的金额计税；文档 R5 的税基是 cap **之前**的调整后金额，cap 剔除的是**税后**总额（P07/P09）。\n- **R7 钳零被记成 cap 事件**（原第 43–45 行）：`capAppliedCents += -totalCents`。冲销推到负数钳零时，文档明确说不计入 cap，旧码把 200 记进了 capApplied（P10/P11）。\n- **R3/R4 阶段划分**：旧码按调整项的声明位置顺序混跑，文档规定所有折扣 → 附加费 → 冲销三阶段，跟声明位置无关（P05/P06）。\n\n现在 `src/pricing.ts` 按 R1–R7 分阶段实现：R1 精确小计 → R2 折扣（声明顺序、每个百分比各自取整）→ R3 附加费 → R4 冲销（中间不钳负）→ R5 按 cap 前金额计税 → R6 cap 只作用于税后总额 → R7 钳零不记账。\n\n验证：`bun test` 16 pass / 0 fail，`bun run check` 输出 `acceptance ok: 12 properties, 13 checks`。验收脚本未改动。\n\n顺手把 12 条属性也写进了 `tests/pricing.test.ts`，另补了三条验收没覆盖的边界：百分比折扣逐次取整、税后总额恰好等于 cap 时不记事、以及 cap 未触发时钳零仍不记 cap。这样 `bun test` 自己就能挡住这些回归，不用只指望验收脚本。\n\n一个我替你做主的判断：调整项里的 `percent-discount` 遇到 `basisPoints` 缺失时按 0 处理（原码也是这个行为），没有改成抛错——文档没规定，保住向后兼容。如果你希望缺字段直接报错，说一声我改。"
+      }
+    }
+  ]
+}

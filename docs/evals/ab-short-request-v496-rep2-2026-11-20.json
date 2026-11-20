@@ -1,0 +1,152 @@
+{
+  "version": "4.9.6",
+  "revision": "d8e63d6",
+  "generatedAt": "2026-11-20T07:45:14.308Z",
+  "provider": "custom001",
+  "model": "deepseek-v4-1-flash-261017",
+  "label": "v4.9.6-rep2",
+  "tasks": [
+    {
+      "taskId": "frontier-selfverify-pricing-web",
+      "shortPrompt": "修复开票计算的计价错误：按规则文档补齐所有边界与组合，跑 bun test 和验收脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "frontier-selfverify-pricing-web",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 57962,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 30,
+            "output": {
+              "chars": 972,
+              "hash": "b6a8c6bd"
+            }
+          },
+          {
+            "name": "acceptance",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 27,
+            "output": {
+              "chars": 40,
+              "hash": "235d0b77"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 128075,
+            "completionTokens": 6086,
+            "cacheHitTokens": 120192,
+            "cacheMissTokens": 7883
+          },
+          "toolCalls": 13,
+          "turns": 9
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 128075,
+          "completionTokens": 6086,
+          "cacheHitTokens": 120192,
+          "cacheMissTokens": 7883
+        },
+        "toolCalls": 13,
+        "turns": 9,
+        "completed": true,
+        "finalText": "规则和代码都看完了。差异点很清楚：百分比折扣用 floor（应四舍五入）、附加费/冲销跟随声明顺序（应在折扣后按 R3/R4 固定次序）、cap 错误地作用在税基上（应作用在税后总额）、R7 钳零被误记成 cap 事件。Both green. Adding boundary tests to the suite (the acceptance script is locked, the unit tests aren't).计价内核修好了。`src/pricing.ts` 原来有四处与 `docs/pricing.md` 不符：\n\n- **R2 取整**：百分比折扣用 `Math.floor`（截断），规则要求四舍五入到整分 → 101 分 × 50% 本该 50，原实现给 51 分的扣减。\n- **R3/R4 次序**：附加费和冲销混在折扣的声明顺序循环里，规则要求所有折扣先滚动完、再一次性加附加费、再一次性减冲销（所以验收里把 surcharge 声明在折扣之前，原实现结果就错）。\n- **R6 cap 位置**：原实现拿 cap 去削**税基**，规则要求 cap 作用在**税后总额**上、`taxableCents`/`taxCents` 保持 cap 前的值。\n- **R7 钳零记账**：负总额钳回 0 时把差额累加进 `capAppliedCents`，规则明确钳制不是 cap 事件。\n\n核心改动是把折扣滚动和 R3/R4 拆成两段（`src/pricing.ts:20`），并对未知 kind 抛错而不是静默当冲销处理。\n\n验证：`bun test` 14 pass / 0 fail（原 4 条 + 我按 R2–R7 的边界与组合补的 10 条：半分进位、叠乘顺序敏感、surplus/chargeback 次序无关、冲销穿透到负税基、负税基计税、cap 削税后总额、cap 边界不记帐、cap 在场但未触发时的钳零），`bun scripts/acceptance.ts` 输出 `acceptance ok: 12 properties, 13 checks`。\n\n一点没动的地方：验收脚本的 13 个 check 覆盖了全部规则，但没覆盖 `spendCapCents = 0` 这种退化上限，我按 R6 的字面口径实现（总额 > 0 就整额剔除、`capAppliedCents` 记全额），如果业务上 0 应该表示「不限」，这里就得改。"
+      }
+    },
+    {
+      "taskId": "frontier-contract-window-units",
+      "shortPrompt": "修复限流器的单位换算：核心层和适配层都要符合契约，跑 bun test 和审计脚本直到全过。",
+      "shape": {
+        "codeShaped": false,
+        "longForm": false,
+        "shortChat": true,
+        "buildShaped": false
+      },
+      "light": true,
+      "options": {
+        "disableThinking": true,
+        "reasoningEffort": "low"
+      },
+      "result": {
+        "taskId": "frontier-contract-window-units",
+        "category": "bugfix",
+        "difficulty": "extreme",
+        "status": "passed",
+        "success": true,
+        "passAt1": true,
+        "agentCompleted": true,
+        "verificationPassed": true,
+        "score": 1,
+        "durationMs": 37248,
+        "verification": [
+          {
+            "name": "bun test",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 30,
+            "output": {
+              "chars": 470,
+              "hash": "1167fedf"
+            }
+          },
+          {
+            "name": "audit",
+            "passed": true,
+            "exitCode": 0,
+            "durationMs": 29,
+            "output": {
+              "chars": 43,
+              "hash": "a88af1e6"
+            }
+          }
+        ],
+        "agent": {
+          "usage": {
+            "promptTokens": 113942,
+            "completionTokens": 3526,
+            "cacheHitTokens": 108416,
+            "cacheMissTokens": 5526
+          },
+          "toolCalls": 15,
+          "turns": 9
+        }
+      },
+      "run": {
+        "usage": {
+          "promptTokens": 113942,
+          "completionTokens": 3526,
+          "cacheHitTokens": 108416,
+          "cacheMissTokens": 5526
+        },
+        "toolCalls": 15,
+        "turns": 9,
+        "completed": true,
+        "finalText": "修好了，`bun test` 7 项全过、`bun run audit` 输出 `audit ok`，审计脚本本身没动（它的注释明确说不得修改）。\n\n根因有两处：\n- `src/adapters/seconds.ts` 两个方向都用了 `Math.round`，正好踩中契约点名的两个漏洞：`0.0004` 秒 → `0ms` 窗口（归零等于放行一切），`2.5` 个计数 → `3`（比申请更宽松）。\n- `src/core/window.ts` 构造和 `tryAcquire` 全是直接赋值，非整数 `windowMs`/`maxEvents`/`atMs` 照收，core 边界没有\"最近的响\"。\n\n改动：`src/adapters/seconds.ts:9` 时长改 `Math.ceil`、计数改 `Math.floor`，取整后不足 1 或非有限值在 adapter 边界抛 `RangeError`（契约 §4）；`src/core/window.ts:16` 构造函数校验 `windowMs` 正整数、`maxEvents` 正整数，`tryAcquire` 校验 `atMs` 非负整数。`src/adapters/minutes.ts` 同步同样的换算方向与边界校验。\n\n一处取舍要你知道：`minutes` 原来要求 `windowMinutes` 是正整数，我改成与 `seconds` 一致的口径——小数分钟也按 ceil/floor 换算。契约 §3 说的是\"换算方向由契约钉死\"且没有给 minutes 例外，我按统一口径做了；结果是 `0.5` 分钟从抛错变成 30_000ms 的合法窗口，比原行为宽松。若你希望 minutes 保持\"只收整数分钟\"，把该文件改回 `Number.isInteger` 校验即可，审计和测试都不受影响。\n\n测试补了 4 项：core 边界拒收、亚毫秒窗口不归零、小数计数向下取整、取整后越界抛 `RangeError`（`tests/window.test.ts:26`）。"
+      }
+    }
+  ]
+}
