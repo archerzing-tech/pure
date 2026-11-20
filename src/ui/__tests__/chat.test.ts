@@ -2855,6 +2855,15 @@ describe('isLightShapedTurn（形态 → 思考档）', () => {
     expect(isLightShapedTurn(turnShape('看看 https://example.com'), undefined, false)).toBe(false);
   });
 
+  it('短小的中文工程请求保持主档（没有路径/URL 不是寒暄的理由）', () => {
+    // 首轮最需要思考档：这里降成 low，计划与第一跳都会变浅，而且用户看不到
+    // 任何提示。工作动词命中即留主档；寒暄仍然轻档。
+    expect(isLightShapedTurn(turnShape('修复登录超时并补回归测试'), undefined, false)).toBe(false);
+    expect(isLightShapedTurn(turnShape('实现一个撤销栈'), undefined, false)).toBe(false);
+    expect(isLightShapedTurn(turnShape('登录一直白屏'), undefined, false)).toBe(false);
+    expect(isLightShapedTurn(turnShape('你好'), undefined, false)).toBe(true);
+  });
+
   it('历史里有工具活动的会话永不轻档（干过活的会话=工作会话）', () => {
     expect(isLightShapedTurn(turnShape('继续'), undefined, true)).toBe(false);
     expect(isLightShapedTurn(turnShape('好的'), undefined, true)).toBe(false);

@@ -76,6 +76,17 @@ describe('turnShape (shape facts, not verdicts)', () => {
     // 路径形态是机械可辨的信号——寒暄误判主档只慢一两秒，方向保守。
     expect(turnShape('把 src/ui/scrollPin.ts 里的自动滚动改成按块触发，改用 IntersectionObserver。').shortChat).toBe(false);
   });
+
+  it('never reads a short work request as chit-chat just because it names no path', () => {
+    // 2026-11-20 判例：13 字的中文工程请求没有路径/URL，原来被当成寒暄，
+    // 首轮思考档直接降到 low。工作动词是第二类机械信号。
+    expect(turnShape('修复登录超时并补回归测试')).toMatchObject({ shortChat: false, workShaped: true });
+    expect(turnShape('实现一个撤销栈')).toMatchObject({ shortChat: false, workShaped: true });
+    expect(turnShape('登录一直白屏，帮我看看').shortChat).toBe(false);
+    // 真正的寒暄仍然是寒暄，不能把所有短句都拉进主档。
+    expect(turnShape('你好')).toMatchObject({ shortChat: true, workShaped: false });
+    expect(turnShape('今天天气怎么样')).toMatchObject({ shortChat: true, workShaped: false });
+  });
 });
 
 describe('compileTurnRoute (mechanical workflow)', () => {

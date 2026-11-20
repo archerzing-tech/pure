@@ -46,12 +46,19 @@ export interface TurnShape {
   /** The input is a long-form description (>= LONG_FORM_CHARS). */
   longForm: boolean;
   /** The input is too short to carry work (<= SHORT_TURN_CHARS, no code
-   *  block, no URL, no path/domain shape) — the chit-chat shape. A short
-   *  sentence CAN carry work ("把 src/ui/scrollPin.ts 里的自动滚动改成按块
-   *  触发" is 47 chars) — a path or domain reference is the mechanical tell
-   *  that it did, and the miss direction stays conservative: work that reads
-   *  like chat keeps the main thinking tier, not the light one. */
+   *  block, no URL, no path/domain shape, no work verb) — the chit-chat shape.
+   *  A short sentence CAN carry work ("把 src/ui/scrollPin.ts 里的自动滚动
+   *  改成按块触发" is 47 chars) — a path or domain reference is one mechanical
+   *  tell, but Chinese work requests often carry neither path nor URL
+   *  ("修复登录超时并补回归测试" is 13 chars) and used to be downgraded to the
+   *  light thinking tier on the FIRST turn, when the plan is formed. Work verbs
+   *  are the second tell; the miss direction stays conservative: work that
+   *  reads like chat keeps the main thinking tier, not the light one. */
   shortChat: boolean;
+  /** A work verb (repair / implement / refactor / debug / add / remove / test …)
+   *  appears in the input. Short work requests must not be mistaken for chat
+   *  just because they name no path. */
+  workShaped: boolean;
   /** The input reads as an engineering-artifact brief (创作动词 × 工程产物名词
    *  同现，排除问法与单资产创意) — the shape that keeps the delivery gate,
    *  the workspace probe and the write-to-disk protocol alive now that no
@@ -72,6 +79,11 @@ const HOW_ASKING_RE = /(?:如何|怎么|怎样|咋(?:办|样)|为什么|求(?:�
 const SINGLE_ASSET_RE = /(?:logo|图标|头像|封面|插画|横幅|banner|海报|贴纸|壁纸|起(?:个)?名|命名|名字|名称|口号|slogan|配[色图]|表情包)/i;
 const BUILD_VERB_RE = /(?:写|做|创[建作]|开发|生成|搭[建载]|制作|实现|给我|build|create|make|generate|develop|implement|scaffold)/i;
 const BUILD_ARTIFACT_RE = /(?:项目|应用|网站|网页|游戏|工具|页面|系统|插件|脚本|组件|服务|机器人|大屏|dashboard|原型|app\b|application|website|extension|cli\b|api\b)/i;
+/** 短句里的「这活要动代码/要排障」信号。2026-11-20 判例：`shortChat` 原来
+ *  只认路径/URL/代码块，中文工程请求两者都没有，于是首轮被降到 low 思考档。
+ *  宁可把「加个好友」误判成工作（多几秒思考），也不让「修复登录超时」跳过
+ *  主档——误判方向的代价不对称。 */
+const WORK_VERB_RE = /(?:修(?:复|正|改)|改(?:成|为|一下|掉)|重构|实现|排查|调试|定位|诊断|分析|补(?:上|齐|充)?|添加|新增|删除|移除|替换|升级|接入|优化|迁移|重命名|更新|测试|加(?:上|个|入|进|一下)|去掉|拆(?:分|开)|看(?:看|一下|下)|bug|报错|错误|异常|崩溃|白屏|不工作|没反应|卡死|闪退|失败|\b(?:fix|repair|debug|diagnose|investigate|trace|implement|refactor|patch|add|remove|delete|replace|upgrade|migrate|rename|update|change|optimi[sz]e|test|write|build|create|error|exception|crash|broken|failing)\b)/i;
 
 export function turnShape(prompt: string): TurnShape {
   const trimmed = prompt.trim();
@@ -81,10 +93,11 @@ export function turnShape(prompt: string): TurnShape {
   // 路径/域名形态（src/ui/x.ts、example.com）：短句也能装下真工作，这是
   // 机械可辨的工作信号——命中就不再当寒暄形状。
   const hasPathRef = /\/|\w+\.\w/.test(prompt);
-  const shortChat = trimmed.length <= SHORT_TURN_CHARS && !codeShaped && !hasUrl && !hasPathRef;
+  const workShaped = WORK_VERB_RE.test(prompt);
+  const shortChat = trimmed.length <= SHORT_TURN_CHARS && !codeShaped && !hasUrl && !hasPathRef && !workShaped;
   const buildShaped = !HOW_ASKING_RE.test(prompt) && !SINGLE_ASSET_RE.test(prompt)
     && BUILD_VERB_RE.test(prompt) && BUILD_ARTIFACT_RE.test(prompt);
-  return { codeShaped, longForm, shortChat, buildShaped };
+  return { codeShaped, longForm, shortChat, workShaped, buildShaped };
 }
 
 export interface TurnRoutePrefetch {
