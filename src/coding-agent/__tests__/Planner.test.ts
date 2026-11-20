@@ -147,6 +147,12 @@ describe('Planner', () => {
     // 违例的句子，而不是一句“不要 dump”。
     expect(prompt).toContain('Reply shape');
     expect(prompt).toContain('a pasted whole file is a failure of this rule');
+    // 2026-11-20 用户判例：复杂工程开工先定拆分，不许「先写模块 1 再说」。
+    expect(prompt).toContain('Split before you write');
+    expect(prompt).toContain('BEFORE writing the first module');
+    // 3D 瓦片判例：单个外部资源拿不到必须换源/降级继续，不能停整条构建。
+    expect(prompt).toContain('External assets');
+    expect(prompt).toContain('Never let one unreachable asset stall the build');
   });
 });
 

@@ -8,18 +8,21 @@ beforeEach(() => resetParallelNudgeForTests());
 
 describe('recordMainThreadWriteBytes / takeBuildParallelNudge', () => {
   it('越过阈值才落处方：小写入零注入', () => {
-    recordMainThreadWriteBytes(30_000, 4);
+    recordMainThreadWriteBytes(10_000, 4);
     expect(takeBuildParallelNudge()).toBe('');
   });
 
   it('累计越阈（调用方传累计总量）落一条含体量的处方', () => {
-    recordMainThreadWriteBytes(20_000, 2);
+    recordMainThreadWriteBytes(12_000, 2);
     expect(takeBuildParallelNudge()).toBe('');
-    recordMainThreadWriteBytes(45_000, 3);
+    recordMainThreadWriteBytes(20_000, 3);
     expect(takeBuildParallelNudge()).toBe('');
-    recordMainThreadWriteBytes(65_000, 4);
+    // 2026-11-20：阈值降到 24KB——60KB 时往往已连写四五个模块，拆分窗口
+    // 已经过去；提前到第二三个模块，让模型在还有活可拆时做决定。
+    recordMainThreadWriteBytes(26_000, 4);
     const nudge = takeBuildParallelNudge();
-    expect(nudge).toContain('63 KB');
+    expect(nudge).toContain('25 KB');
+    expect(nudge).toContain('before the next module');
     expect(nudge).toContain('code_editor');
     // 是体量事实不是指令：明说 solo 也行
     expect(nudge).toContain('not an order');

@@ -491,6 +491,12 @@ describe('L1 behavior contracts', () => {
     // 生产侧形状（契约先行、模块批量委派、大写入搬出主线）必须常驻在场。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('pin the shared contract in the main thread first');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Whole-file generation of multi-KB modules belongs in worker sessions');
+    // 2026-11-20 用户判例「多 agent 激发不够果断」：拆分决策必须在第一次
+    // 写盘之前，批量委派是默认预期；单干只能是能一句话说清的决定，不许
+    // 「先写模块 1、以后再说」式漂移。
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('The split decision comes BEFORE the first write');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('the expected move is the delegation batch');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('instead of drifting into it');
     // 2026-11-18 用户要求：子 agent 在飞时主 agent 要告诉用户「趁空档我做什么」。
     // 只给形状不给句式——固定模板会让每轮话说得一模一样。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Handing work off is worth one sentence');
