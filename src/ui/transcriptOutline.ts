@@ -25,10 +25,14 @@ export const OUTLINE_MIN_SCREENS = 2;
 export const OUTLINE_MARK_MIN_GAP_PX = 5;
 /** 点刻度时目标轮顶部留出的上下文（像素）。 */
 export const OUTLINE_JUMP_ALIGN_PX = 24;
-/** 单次测量最多扫描的用户气泡数（超长会话按等距抽样，读数成本封顶）。 */
-const MAX_MEASURED_ROWS = 1200;
+/** 单次测量最多扫描的用户气泡数（超长会话按等距抽样，读数成本封顶）。
+ *  1200 个气泡在 1200 轮会话上实测一次同步测量 ~0.5s；尺子在 20px 轨道上
+ *  最多也就能放下 ~160 个点，扫 1200 个是纯浪费。480 已覆盖 4K 轨道上限。 */
+const MAX_MEASURED_ROWS = 480;
 /** 刻度测量节流窗口：流式期间 DOM 每几拍就变，重新量一轮不必每次变更都做。 */
 const MEASURE_INTERVAL_MS = 350;
+/** resize 停手后再全量测量：拖动窗口时每个 resize 都量一遍会把主线程塞满。 */
+const RESIZE_SETTLE_MS = 200;
 /** 滑块最矮高度：内容再长也要能看见、能抓。 */
 const THUMB_MIN_HEIGHT_PX = 24;
 /** 尺子占的宽度（与 styles.css 的 .transcript-ruler 对齐）。 */
@@ -157,6 +161,10 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
   let measureTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMeasureAt = 0;
   let scrollFrame = 0;
+  let resizeFrame = 0;
+  let resizeSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  let resizing = false;
+  let repaintTimer: ReturnType<typeof setTimeout> | null = null;
   // 正文列的左内边距（桌面 32px / 窄窗 14px）只在窗口尺寸变了才变，缓存它：
   // 流式期间每次 mutation 都读 getComputedStyle 是白付一次样式重算。
   let contentPadLeft = 32;
@@ -225,6 +233,20 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
 
   // 上一次画出来的刻度快照：一层没变时整轮只看字符串比较，不碰 DOM。
   let lastMarksKey = '';
+  // 上一次全量测量的偏移（scrollTop 坐标）。流式只改尾部高度时这些偏移
+  // 仍然成立，重画刻度只需要按新的 maxScroll 重映射，不必再扫一遍 DOM。
+  let cachedMarks: OutlineMarkInput[] = [];
+  // 用户气泡的文本只在追加那一刻定型；滚动/流式重测时反复读 textContent
+  // 会把整段长文本再拼一遍。
+  const labelCache = new WeakMap<HTMLElement, string>();
+  const labelOf = (row: HTMLElement): string => {
+    let label = labelCache.get(row);
+    if (label === undefined) {
+      label = row.textContent ?? '';
+      labelCache.set(row, label);
+    }
+    return label;
+  };
 
   const renderMarks = (marks: readonly OutlineMark[]): void => {
     const key = marks.map((m) => `${Math.round(m.offset)}:${Math.round(m.y)}:${m.kind}`).join(',');
@@ -250,6 +272,11 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
   const measureMarks = (): void => {
     const chatRect = chatEl.getBoundingClientRect();
     if (chatRect.height <= 0 || rail.hidden) return;
+    // 轨道高度只在可见时量得到，而首帧 refresh 可能早于轨道完成布局；每次全量
+    // 测量顺手校准一次（一次读数），否则会一直用 0 映射，尺子上一根刻度都没有。
+    const trackHeight = track.clientHeight;
+    if (trackHeight <= 0) return;
+    metrics.trackHeight = trackHeight;
     const scrollTop = chatEl.scrollTop;
     const offsetOf = (el: HTMLElement): number | null => {
       const rect = el.getBoundingClientRect();
@@ -265,7 +292,7 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
       const row = rows[i];
       const offset = offsetOf(row);
       if (offset === null) continue;
-      marks.push({ offset, label: row.textContent ?? '', kind: 'turn' });
+      marks.push({ offset, label: labelOf(row), kind: 'turn' });
     }
     // 老历史按折叠组打点：组体泊车时组内每一轮的 DOM 不在文档里，量不到。
     // 组体挂载后组里已经有用户气泡，逐轮刻度接管，组刻度让位。
@@ -276,13 +303,14 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
       const summary = group.querySelector('.transcript-history-group-summary')?.textContent ?? '';
       marks.push({ offset, label: summary, kind: 'group' });
     }
-    renderMarks(collapseOutlineMarks(marks, track.clientHeight, maxScroll));
+    cachedMarks = marks;
+    renderMarks(collapseOutlineMarks(marks, trackHeight, maxScroll));
   };
 
   // 节流而不是防抖：流式期间 DOM 一直在变，防抖会永远推后；节流保证每
   // MEASURE_INTERVAL_MS 最多量一轮，会话再长也有上限成本。
   const scheduleMeasure = (): void => {
-    if (measureTimer !== null) return;
+    if (resizing || measureTimer !== null) return;
     const wait = Math.max(0, MEASURE_INTERVAL_MS - (Date.now() - lastMeasureAt));
     measureTimer = setTimeout(() => {
       measureTimer = null;
@@ -291,11 +319,55 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
     }, wait);
   };
 
-  const refresh = (readPadding = false): void => {
+  /** 只重映射缓存偏移：流式尾部变高只改 maxScroll，旧偏移仍然有效。 */
+  const repaintCachedMarks = (): void => {
+    if (!railShown || cachedMarks.length === 0) return;
+    renderMarks(collapseOutlineMarks(cachedMarks, metrics.trackHeight, maxScroll));
+  };
+
+  const scheduleCachedRepaint = (): void => {
+    if (repaintTimer !== null || resizing) return;
+    repaintTimer = setTimeout(() => {
+      repaintTimer = null;
+      repaintCachedMarks();
+    }, MEASURE_INTERVAL_MS);
+  };
+
+  /** 流式与尺子无关的 DOM 变化：只同步几何和滑块，刻度按缓存重映射。 */
+  const refresh = (readPadding = false, remeasure = true): void => {
+    const wasShown = railShown;
     layout(readPadding);
     syncMetrics();
     paintThumb();
-    if (railShown) scheduleMeasure();
+    if (!railShown) return;
+    // 刚从隐藏变可见时缓存是空的/过期的，必须走一次全量测量。
+    if (remeasure || !wasShown) scheduleMeasure();
+    else scheduleCachedRepaint();
+  };
+
+  /** 拖动窗口期间每个 ResizeObserver 回调都全量测量会堆出秒级卡顿：
+   *  逐帧只做轨道几何与滑块，停手 RESIZE_SETTLE_MS 后再扫一次刻度。 */
+  const onResize = (): void => {
+    resizing = true;
+    // 上一帧排队的测量/重画不能落进拖动中：那正是 0.5s 长任务的入口。
+    if (measureTimer !== null) { clearTimeout(measureTimer); measureTimer = null; }
+    if (repaintTimer !== null) { clearTimeout(repaintTimer); repaintTimer = null; }
+    if (resizeSettleTimer !== null) clearTimeout(resizeSettleTimer);
+    resizeSettleTimer = setTimeout(() => {
+      resizeSettleTimer = null;
+      resizing = false;
+      refresh(true);
+    }, RESIZE_SETTLE_MS);
+    if (typeof requestAnimationFrame !== 'function') {
+      refresh(true, false);
+      return;
+    }
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      // 拖动中只做便宜的部分：padding 首帧读一次，后续帧沿用缓存。
+      refresh(false, false);
+    });
   };
 
   /**
@@ -357,11 +429,11 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
   }, { passive: true });
 
   if (typeof ResizeObserver === 'function') {
-    const observer = new ResizeObserver(() => refresh(true));
+    const observer = new ResizeObserver(onResize);
     observer.observe(chatEl);
     observer.observe(host);
   } else {
-    window.addEventListener('resize', () => refresh(true));
+    window.addEventListener('resize', onResize);
   }
 
   if (typeof MutationObserver === 'function') {
@@ -372,15 +444,30 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
     // 一帧最多刷一次：流式追加经常一帧好几处 childList，观察器直接调 refresh
     // 就是每处各读一遍盒子。
     let refreshFrame = 0;
-    const observer = new MutationObserver(() => {
+    // 只有会移动刻度锚点的结构变化才全量测量：流式追加的 assistant 块只改
+    // 尾部高度，用缓存偏移重映射即可；每 350ms 扫全部用户回合正是长会话在
+    // 流式 + resize 时卡死的来源。
+    const STRUCTURAL = '.bubble-row.user, .transcript-history-group';
+    const needsMeasure = (records: MutationRecord[]): boolean => records.some((record) => {
+      if (record.type === 'attributes') return true;
+      if (record.type !== 'childList') return false;
+      for (const node of [...record.addedNodes, ...record.removedNodes]) {
+        if (node.nodeType !== 1) continue;
+        const el = node as Element;
+        if (el.matches(STRUCTURAL) || el.querySelector(STRUCTURAL)) return true;
+      }
+      return false;
+    });
+    const observer = new MutationObserver((records) => {
+      const structural = needsMeasure(records);
       if (typeof requestAnimationFrame !== 'function') {
-        refresh();
+        refresh(false, structural);
         return;
       }
       if (refreshFrame) return;
       refreshFrame = requestAnimationFrame(() => {
         refreshFrame = 0;
-        refresh();
+        refresh(false, structural);
       });
     });
     observer.observe(chatEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
