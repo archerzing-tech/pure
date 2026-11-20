@@ -1688,6 +1688,10 @@ describe('plan overview completion state', () => {
     expect(startedBody.indexOf('pendingRows.has(callId)')).toBeGreaterThan(-1);
     expect(startedBody.indexOf("appendToolRow(toolName, args, subagentNames.has(toolName) ? 'agent' : 'tool')")).toBeGreaterThan(-1);
     expect(startedBody.indexOf('pendingRows.set(callId,')).toBeGreaterThan(-1);
+    // 委派卡出卡时机（2026-11-20 用户判例）：流式阶段不为委派建行——tool call
+    // 的 JSON 按调用串行流出，逐张出卡会把「一批同时派出」拆成先后三个时刻；
+    // 整批 ToolStarted 是唯一的出卡点。
+    expect(src).toContain('if (toolName && !subagentNames.has(toolName)) {');
     // 插话回显次序（2026-09-23 用户实测：回执压在用户原话头上；2026-09-25
     // 复测升级：流式行插进判定窗口时「末尾追加+相邻才搬」失守，改为回显
     // 插队到 ack 行正前；2026-10-28 呈现层契约：ack 行退役，次序保证改由

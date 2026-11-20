@@ -7768,7 +7768,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               const toolName = event.payload.toolCallName ||
                 (event.payload.toolCallBuffer || '').slice(0, 256).match(/"name"\s*:\s*"([^"]+)"/)?.[1];
               const toolCallId = event.payload.toolCallId;
-              if (toolName) {
+              // 委派卡不在流式阶段出（2026-11-20 用户判例：同一批三支并行委派，
+              // 第一张卡随第一支的任务书流完就亮，另两张要等各自参数流到才亮，
+              // 看起来像「过了一会又同时冒出两张」。工具调用的 JSON 本来就是
+              // 按调用顺序串行流出的，先出卡只会把「派出」拆成三个时刻；
+              // ToolStarted 是引擎按整批一起发的，委派卡统一在那里落地。
+              if (toolName && !subagentNames.has(toolName)) {
                 const now = Date.now();
                 if (toolCallId) {
                   // Id-bearing chunk (`tool_call` / `done`): the call's FINAL
@@ -7800,7 +7805,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     } else if (staged) {
                       pendingByName.delete(toolName);
                       entry = { ...staged, toolCallId };
-                      // 委派行是 mid-stream 先按 name 暂存的（id 未知），id 到手；
+                      // 流式半截行按 name 暂存着（id 未知），id 到手；
                       // 工作台入口改由 rail 卡点击进入，此处不再挂 ↗ chip。
                       pendingRows.set(toolCallId, entry);
                     } else {
@@ -7879,11 +7884,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
 
           case 'ToolStarted': {
             cancelPreflightCard();
-            // 代执行回合（fold-in 补跑）的委派卡在这里落地：合成回合完全跳过
-            // 模型流式调用，TokenDelta 里永远等不到它的 id 分块——没有这条
-            // 兜底，追加的委派在后台跑得欢，对话流里却一张卡都不出（用户实测
-            // 报过）。流式回合走到这里时行早已建好（id 分块先行），直接跳过，
-            // 不会重卡。
+            // 委派卡统一在这里落地（2026-11-20）：委派不走 TokenDelta 出卡，
+            // 引擎对整批 tool_call 一次性发 ToolStarted，三支并行委派的卡因此
+            // 同帧亮起来。合成回合（fold-in 补跑）完全跳过模型流式调用，本来
+            // 就只能靠这条兜底。普通工具的行仍由流式的 id 分块先建，这里跳过。
             const callId = event.payload.toolCallId;
             const toolName = event.payload.toolName;
             if (!callId || !toolName || pendingRows.has(callId)) break;
