@@ -1734,3 +1734,21 @@ describe('SubagentOrchestrator self-heal silence keeps the watchdog fed (source 
     expect(body.slice(degrade, degrade + 120)).toContain('kickWatchdog()');
   });
 });
+
+// ── 子 agent 的首块超时压缩救援（2026-11-20）──
+// 引擎层的救援只在 ctx.contextEngine 存在时生效，而编排器此前没有接线，
+// 委派分支在大 brief 下只能原样重发。行为窗口由 90s 首块硬编码决定，单测
+// 无法快速构造，按本文件的契约测试风格锁接线与边界。
+describe('SubagentOrchestrator context-engine wiring (source contracts)', () => {
+  const src = readFileSync(new URL('../SubagentOrchestrator.ts', import.meta.url), 'utf8');
+
+  it('gives each subagent a compact-only port built from its own budget', () => {
+    expect(src).toContain("import { ContextEngine } from '../harness/ContextEngine';");
+    expect(src).toContain("const subagentCompactorPort: NonNullable<EngineContext['contextEngine']> = {");
+    expect(src).toContain('compact: (messages, options) => subagentCompactor.compact(messages, options),');
+    expect(src).toContain('maxTokens: subagentContextBudget.maxTotalTokens,');
+    expect(src).toContain('contextEngine: subagentCompactorPort,');
+    // 只借超时救援：主动压缩仍归父宿主，别把 needsCompaction 一起接进来。
+    expect(src).not.toContain('contextEngine: subagentCompactor,');
+  });
+});

@@ -2759,6 +2759,55 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     expect(gap).toBeGreaterThanOrEqual(250);
     expect(gap).toBeLessThan(2000);
   }, 20000);
+
+  it('首块超时先压缩再重试：第二次请求的 payload 真的更小（2026-11-20 长任务判例）', async () => {
+    const attempts: Message[][] = [];
+    const hanging: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        attempts.push(messages.map((m) => ({ ...m })));
+        await new Promise(() => {});
+        yield { type: 'done', content: '', toolCalls: [] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    const compactCalls: Message[][] = [];
+    const budget: BudgetConfig = { ...STD_BUDGET, firstTokenTimeoutMs: 80 };
+    const history: Message[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: '旧材料 '.repeat(30_000) },
+      { role: 'assistant', content: '收到' },
+      { role: 'user', content: '基于这些大材料继续做 PPT' },
+    ];
+    const events = await collect(new AgentLoopEngine().continue(
+      { sessionId: 's_timeout_compact', messages: history, newUserPrompt: '继续', budget },
+      baseCtx({
+        llm: hanging,
+        budget,
+        contextEngine: {
+          compact: async (messages) => {
+            compactCalls.push([...messages]);
+            // 激进压缩：只留 system 与最近一条 user，payload 可量化变小。
+            return {
+              messages: [messages[0]!, messages[messages.length - 1]!],
+              evictedMessages: Math.max(0, messages.length - 2),
+              reclaimedTokens: 999,
+              estimatedTokens: 10,
+            };
+          },
+        },
+      }),
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted')!;
+    expect(interrupted.payload.reasonCode).toBe('stream_timeout_first_token');
+    // 压缩发生在超时之后、停机之前，且只做一次。
+    expect(compactCalls.length).toBeGreaterThanOrEqual(1);
+    // 至少两次请求：原始一次，压缩后的重试一次；重试的转录确实更小。
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+    expect(attempts[1]!.length).toBeLessThan(attempts[0]!.length);
+    // 停机散文如实说明压缩过（不把没发生的事写成救过）。
+    expect(interrupted.payload.reason).toContain('已先压缩上下文再重试');
+  }, 20000);
 });
 
 describe('AgentLoopEngine workspace conventions (read-triggered, 2026-11-15)', () => {

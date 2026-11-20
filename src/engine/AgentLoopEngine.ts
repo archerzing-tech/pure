@@ -425,6 +425,17 @@ export class AgentLoopEngine {
     // 持续性故障，直接停，真话交还。
     let streamTimeoutRepeats = 0;
     const MAX_STREAM_TIMEOUT_RETRIES = 2;
+    // 首块超时的压缩救援（2026-11-20 用户判例）：大上下文的首块超时是服务端
+    // 预填充的确定性变慢，原样重发只会原样撞线——用户点多少次「重试」都是
+    // 同一份 payload。第一次首块超时就先做一次无摘要的激进压缩，让紧接着的
+    // 那次重试打在一个真正更小的请求上；没缩小就如实走原有阶梯。每段连续
+    // 超时只用一次（干净工具轮后清零），避免反复驱逐历史。
+    let timeoutCompactionUsed = false;
+    // 仅在真的带着更小 payload 重试过之后为真——停机散文不能说没发生的事。
+    let timeoutCompactionRetried = false;
+    // 只有真正的大 payload 值得为超时压缩：小上下文的首块超时是端点卡死，
+    // 压掉历史既救不了也白丢现场。5 万 token 级的预填充才可能烧满首块线。
+    const TIMEOUT_COMPACTION_MIN_TOKENS = 50_000;
     // 流超时重试退避（2026-10-31）：1s 起步指数增长、8s 封顶、±20% 抖动。
     // 业界 SDK 同款（Rust 传输层已按此实现）；引擎层此前 t=0 立即重发，对
     // 仍在拥塞的服务端是确定性重败——大输入慢首块场景两次全烧满超时上限。
@@ -997,18 +1008,46 @@ export class AgentLoopEngine {
         }
         if (isTimeout) {
           streamTimeoutRepeats++;
+          // err.message 的 label（'LLM stream first token' / 'LLM stream
+          // read'）是流层给的最准锚——两种 TimeoutError 必须分开讲（2026-11-05，
+          // 三个大文档做 PPT 真机判例）。
+          const waitedForFirstToken = /first.?token/i.test(err?.message ?? '');
+          // 空正文的首块超时先缩小请求再谈重试：无摘要的激进压缩只做数据
+          // 手脚、不再雇一次可能同样慢的摘要调用；没缩小就如实走停机。
+          const inputTokensForTimeout = messages.reduce((n, m) => n + (typeof m.content === 'string' ? estimateTextTokens(m.content) : 0), 0);
+          if (waitedForFirstToken && content.length === 0 && !sawToolCall && !timeoutCompactionUsed
+            && ctx.contextEngine && inputTokensForTimeout >= TIMEOUT_COMPACTION_MIN_TOKENS) {
+            timeoutCompactionUsed = true;
+            yield { type: 'ContextCompactRetry', payload: { stage: 'start', attempt: 0, evictedMessages: 0, reclaimedTokens: 0, estimatedTokens: 0 }, timestamp: Date.now() };
+            try {
+              const compacted = await ctx.contextEngine.compact(messages, { force: true, aggressive: true, skipSummary: true });
+              const shrank = compacted.messages.length > 0
+                && (compacted.messages.length !== messages.length || (compacted.reclaimedTokens ?? 0) > 0);
+              if (shrank) {
+                messages.length = 0;
+                messages.push(...compacted.messages);
+                timeoutCompactionRetried = true;
+                yield {
+                  type: 'ContextCompactRetry',
+                  payload: {
+                    stage: 'done',
+                    attempt: 0,
+                    evictedMessages: compacted.evictedMessages ?? 0,
+                    reclaimedTokens: compacted.reclaimedTokens ?? 0,
+                    estimatedTokens: compacted.estimatedTokens ?? 0,
+                  },
+                  timestamp: Date.now(),
+                };
+              }
+            } catch {
+              // 压缩失败/不可用：走原来的诚实停机，既不吞错也不谎报救过。
+            }
+          }
           if (streamTimeoutRepeats >= MAX_STREAM_TIMEOUT_RETRIES) {
-            // 两种 TimeoutError 必须分开讲（2026-11-05，三个大文档做 PPT 真
-            // 机判例）：「等不到第一个块」是大请求在服务端预处理慢或端点卡
-            // 死；「中途停顿」才是链路在流中卡住。混成一句「无响应」会让大
-            // 文档场景的用户去查网络，也让下一回合的模型不知道上次死在哪。
-            // err.message 的 label（'LLM stream first token' / 'LLM stream
-            // read'）是流层给的最准锚。
-            const waitedForFirstToken = /first.?token/i.test(err?.message ?? '');
             const waitedMatch = /timed out after (\d+(?:\.\d+)?)(m|s)/.exec(err?.message ?? '');
             const waitedHuman = waitedMatch ? `${waitedMatch[1]}${waitedMatch[2]}` : '超时上限';
             const stopReason = waitedForFirstToken
-              ? `模型在 ${waitedHuman} 内没有输出第一个内容块（连续 ${streamTimeoutRepeats} 次，每次都是新建连接重发完整请求）——大请求（长文档、大上下文）在服务端预处理慢，或端点当时卡住；不是你的网络问题。已停止；可直接重发（重试时首块等待上限已放宽一倍），或开新会话先摘要/压缩大材料再继续。`
+              ? `模型在 ${waitedHuman} 内没有输出第一个内容块（连续 ${streamTimeoutRepeats} 次，每次都是新建连接重发${timeoutCompactionRetried ? '；其中一次已先压缩上下文再重试' : ''}）——大请求（长文档、大上下文）在服务端预处理慢，或端点当时卡住；不是你的网络问题。已停止；可直接重发（重试时首块等待上限已放宽一倍${timeoutCompactionRetried ? '、上下文已压缩' : ''}），或开新会话先摘要/压缩大材料再继续。`
               : `模型的输出中途停了 ${waitedHuman} 没有后续（连续 ${streamTimeoutRepeats} 次，每次都是新建连接）——服务端或中转链路在流中卡住了，不是你的网络问题。已停止；可直接重新发送，或稍后再试。`;
             yield { type: 'FailurePolicyDecision', payload: { action: { kind: 'stop', reason: stopReason }, failure: { type: 'llm_error', message: err?.message ?? String(err), turnNumber: turnCount }, turnNumber: turnCount }, timestamp: Date.now() };
             // UI 已见到的部分正文先进 transcript（2026-11-16 bug4）：此前这条
@@ -1554,6 +1593,10 @@ export class AgentLoopEngine {
           streamResumes = 0;
           streamTimeoutRepeats = 0;
           toolCallResumes = 0;
+          // 干净轮证明链路已恢复：压缩救援的配额随之重置，下一次独立卡顿
+          // 仍有缩小请求的机会。
+          timeoutCompactionUsed = false;
+          timeoutCompactionRetried = false;
         }
 
         yield { type: 'StateChange', payload: { from: 'ACT', to: 'OBSERVE', stateId: sid() }, timestamp: Date.now() };

@@ -26,6 +26,7 @@ import { DefaultFailurePolicy } from '../engine/FailurePolicy';
 import type { TokenUsage } from '../shared/types';
 import { withRelaySchema } from '../engine/relayPipeline';
 import { trimUnresolvedToolCalls } from '../harness/Harness';
+import { ContextEngine } from '../harness/ContextEngine';
 import { applyPersonaOverlay } from '../harness/personaOverlays';
 import { activeCharacterCore, activeWorkOrderNote } from '../character';
 import { retrieveDelegationMemory } from './subagentMemory';
@@ -849,6 +850,24 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
       ? AbortSignal.any([parentSignal, branchController.signal, timeoutSignal, watchdog.signal])
       : AbortSignal.any([branchController.signal, timeoutSignal, watchdog.signal]);
 
+    // 首块超时的压缩救援（2026-11-20 续）：子代理此前没有 contextEngine，
+    // 引擎那套「大 payload 首块超时先压小再重试」在这里是空转——大 brief /
+    // 长转录只能原样重发，委派分支于是反复超时。只暴露 compact：主动压缩
+    // 仍归父宿主（needsCompaction / compactBeforeSend 不接），子代理只拿超时
+    // 救援这一刀。窗口取子代理自己的预算（deriveSubagentBudget 已压到
+    // ≤100k），不借父会话窗口——小任务不该按大窗口放行。
+    const subagentContextBudget = this.subagentBudget();
+    const subagentCompactor = new ContextEngine({
+      maxMessages: 20,
+      maxTokens: subagentContextBudget.maxTotalTokens,
+      ...(this.config.parentToolsDefsProvider
+        ? { toolsProvider: this.config.parentToolsDefsProvider }
+        : { tools: this.config.parentToolsDefs ?? [] }),
+    });
+    const subagentCompactorPort: NonNullable<EngineContext['contextEngine']> = {
+      compact: (messages, options) => subagentCompactor.compact(messages, options),
+    };
+
     // Engine context is per-segment (fresh budget per slice); the static
     // parts are hoisted. The subagent also verifies (default rule-based
     // verifier) and re-computes its tool list each THINK instead of a
@@ -866,6 +885,8 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
       // 经常失败" the GUI surfaced. Escalating retry → reflect → degrade →
       // stop mirrors the parent harness.
       failurePolicy: this.config.failurePolicy ?? new DefaultFailurePolicy(),
+      // 只接超时救援（见上方 subagentCompactorPort 注释）。
+      contextEngine: subagentCompactorPort,
       depth,
       maxDepth: this.config.maxDepth ?? 1,
       // 插话通道：与父引擎共享宿主的 steer 队列（见 config 注释）。引擎在

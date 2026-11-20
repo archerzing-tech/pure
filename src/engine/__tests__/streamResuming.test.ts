@@ -82,7 +82,20 @@ describe('空正文流超时的专属短阶梯(2026-10-30 判例)', () => {
     expect(engine).toContain('大请求（长文档、大上下文）在服务端预处理慢');
     expect(engine).toContain('已停止；可直接重新发送，或稍后再试。');
     // 散文不写死分钟数——等待时长从 err.message 的实际值动态取(waitedHuman)。
-    expect(engine).toContain('每次都是新建连接重发完整请求');
+    expect(engine).toContain('每次都是新建连接重发');
+  });
+
+  it('首块超时先压缩再重试：大 payload 的原样重发不是重试（2026-11-20 长任务判例）', () => {
+    // 判例：长任务在大上下文下首块超时，用户连点重试仍然失败——每次都是
+    // 同一份 payload 撞同一条预填充线。停机前必须先做无摘要的激进压缩；
+    // 只有真缩小了才多给一轮，且这一轮与失败那次实质不同。
+    const at = engine.indexOf('if (waitedForFirstToken && content.length === 0');
+    expect(at).toBeGreaterThan(-1);
+    const block = engine.slice(at, at + 1800);
+    expect(block).toContain("compact(messages, { force: true, aggressive: true, skipSummary: true })");
+    expect(block).toContain('timeoutCompactionRetried = true');
+    // 压缩先于停机判定：第一次首块超时就缩小请求，随后的重试才不是原样重发。
+    expect(block.indexOf('compact(messages')).toBeLessThan(block.indexOf('streamTimeoutRepeats >= MAX_STREAM_TIMEOUT_RETRIES'));
   });
 
   it('停时不做收尾轮:刚连卡两次,handover 大概率再卡满 2 分钟', () => {
