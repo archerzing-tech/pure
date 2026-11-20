@@ -656,6 +656,16 @@ describe('file & shell tool descriptions (framework-reform phase 2 carrier)', ()
 
   it('carries the write + shell discipline: split big output, quiet flags, no re-read verification', () => {
     expect(desc('write_file')).toContain('split it by concern');
+    // 尺寸锚（~5k 字符）+ 三种拆法要在工具决策点常驻：简单单文件任务两个 L2
+    // 教学闸（parallel_first / multi_agent_mechanics）都不开，工具描述是唯一
+    // 在场的教学面；锚点远低于写入截断线（约 2w-3w 字符必截），留判断权不设闸。
+    expect(desc('write_file')).toContain('~5,000 characters');
+    expect(desc('write_file')).toContain('splitting is the default you consciously depart from');
+    expect(desc('write_file')).toContain('ONE parallel batch');
+    expect(desc('write_file')).toContain('append:true calls');
+    expect(desc('write_file')).toContain('delegated worker session');
+    // 大文件改动的默认形状=增量不是重发（Aider diff > whole 的同构判据）。
+    expect(desc('edit_file')).toContain('emit the delta, not the whole file');
     expect(desc('execute_command')).toContain('Token discipline');
     expect(desc('execute_command')).toContain('do NOT re-read the whole file to verify');
   });

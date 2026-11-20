@@ -35,7 +35,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. With append:true the content is appended instead (missing file is created) — for large files write the first chunk normally, then append each following chunk, so no single call has to carry the whole file. Large output: never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2) and write each piece with its own write_file; incremental write_file then edit_file also works.',
+    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. With append:true the content is appended instead (missing file is created) — for large files write the first chunk normally, then append each following chunk, so no single call has to carry the whole file. Size discipline: past ~5,000 characters in one call, splitting is the default you consciously depart from, not an optimization — pick the shape that fits the artifact: independent modules become separate files issued as ONE parallel batch of write_file calls; a single big file is written in sections (first chunk here, the rest as append:true calls); a module whose whole-file generation would flood this conversation belongs in a delegated worker session instead. Never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2); incremental write_file then edit_file also works. One oversized call is the shape most likely to be truncated mid-body.',
     input_schema: {
       type: 'object',
       properties: {
@@ -48,7 +48,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'edit_file',
-    description: 'Replace an exact string in a file. Read the current file first; if the target is not found, re-read it and use shorter exact context instead of repeating the same edit. Line-ending differences are handled safely; approximate or fuzzy replacement is never used.',
+    description: 'Replace an exact string in a file. Read the current file first; if the target is not found, re-read it and use shorter exact context instead of repeating the same edit. Line-ending differences are handled safely; approximate or fuzzy replacement is never used. For changing a large file this beats write_file by default — emit the delta, not the whole file again.',
     input_schema: {
       type: 'object',
       properties: {
