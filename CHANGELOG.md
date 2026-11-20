@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.9.7
+
+**窗口拖动与侧栏开合不再每帧强制重排；工作台转场不再叠两份活跃 DOM；折叠组泊车占位跟着宽度重算**
+
+一、窗口 resize 合帧。拖窗口时 resize 事件按帧连发：最大化态同步每事件一次 `isMaximized()` IPC 与 body class 写入，agent rail 的布局同步每事件读一次 `inputBar.offsetHeight`——两者都把强制布局和系统 resize 挤在同一帧。现在二者各自合帧到一帧一次，值没变就不写 class / 自定义属性；IPC 在飞时只记脏标记，落地后补一拍取最新值。
+
+二、图表 refit 停手才做。echarts 实例此前给每个图表挂裸 `ResizeObserver(() => chart.resize())`，SVG renderer 下容器宽度每变一帧就重建整棵 SVG；地图与画板早已有防抖/合帧，唯独图表裸奔。改成 150ms 尾沿防抖（与地图同款），拖动期间由 CSS 拉满容器，停手后 refit 一次；销毁时清定时器并校验目标仍在册。
+
+三、工作台渲染闸不再靠 transitionend。旧实现等滑入动画的 `transitionend` 才挂起 chat 流式渲染，整段滑入期间被覆盖的转写照常重排，转场被打断时事件还可能永不来；关闭时又立刻解除，追平那一帧正好压在滑出动画上。改成打开即挂起、关闭后等滑出走完才解除（transitionend + 定时器兜底），两份 DOM 不再同时重排，追平的那一帧落在转场之后。
+
+四、折叠组泊车占位跟着宽度重算。`park()` 记下的 `min-height` 是旧宽度量的像素值，拖窗口/开关侧栏后窄了占位偏矮、宽了留大段空白，滚动几何抖动还会让观察器二次重入。现在宽度停手 200ms 后把泊车组逐个「临时挂载 → 量新高度 → 再泊回」，一帧一个；脱离文档的组顺手从表里摘掉，避免反复切会话时无界增长。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；受影响 UI 套件 387 例全过。全量 `bun test` 另有 10 项已知失败（9 项 Harness 用例仅在全量并行负载下超时、单跑全过；1 项 FailurePolicy 文案锁与当前提示词不一致，本次未改），与本次改动无关。未在本机采样 GUI 或打包；构建、签名与 `latest.json` 由 tag 发布流水线完成。
+
 ## v4.9.6
 
 **委派在写第一行前就决策；首块超时先压缩再重试（子 agent 同样生效）；卡内预览的外部资源落本地缓存；滚动路径不再每帧强制重排**
