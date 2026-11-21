@@ -10,6 +10,31 @@ import type { Message, LLMAdapter, LLMResponse } from '../../shared/types';
 function readSource(url: URL): string {
   return readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 }
+// 仓库骨架图接入（2026-11-21）：探索气泡必须只在真正附了图时出现，且摘要
+// 与展开正文来自同一份地图——两处各拼一半会让用户看到的和模型拿到的对不上。
+describe('repo map exploration bubble', () => {
+  it('只在动手回合采集，且气泡摘要来自同一份地图', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const collect = src.indexOf('const repoMap = effectiveWorkspace && wantsHandsOnWorkflow');
+    expect(collect).toBeGreaterThan(-1);
+    const after = src.slice(collect, collect + 900);
+    expect(after).toContain("if (repoMap) this.addStatusBubble(repoMapBubbleText(repoMap), false, false, 'info', repoMap);");
+    // 装配点拿到的必须还是这个 repoMap（不要另采一份）。
+    expect(src).toContain('takeBuildParallelNudge(), repoMap)');
+  });
+
+  it('可展开状态行的正文写在 details 里，摘要仍按纯文本入账', () => {
+    const src = readSource(new URL('../chat.ts', import.meta.url));
+    const fn = src.indexOf('private addStatusBubble(');
+    const body = src.slice(fn, fn + 1600);
+    expect(body).toContain("details.className = 'status-details'");
+    expect(body).toContain('body.textContent = expandable');
+    // 账上只记 text：回放是摘要行，不是整张地图。
+    expect(body).toContain('text,');
+    const css = readSource(new URL('../styles.css', import.meta.url));
+    expect(css).toContain('.bubble.status .status-details-body');
+  });
+});
 // Regression guard (2026-09-25 用户实测「hello 也报 Maximum call stack size
 // exceeded」）：把滚动调用统一收口进 scrollUi() 时，批量替换把 scrollUi 自己
 // 的函数体也换成了 this.scrollUi(…)——无限自递归，第一次发送就爆栈。守卫：

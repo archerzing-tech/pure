@@ -4,11 +4,46 @@ import {
   formatRepoMap,
   parseRepoMapListing,
   pickRepoMapSymbolFiles,
+  repoMapBubbleText,
   repoMapFingerprint,
   repoMapSymbolNamesFromOutline,
 } from '../repoMap';
 import { clearRepoMapCache, collectRepoMap } from '../repoMapSource';
 import type { ToolAdapter, ToolResult } from '../types';
+
+describe('repoMap 探索气泡摘要', () => {
+  const map = [
+    '<repo_map>',
+    'Workspace snapshot: 904 source/entry files. Format: path — top-level declarations.',
+    'This is a scan taken when the turn started, not ground truth.',
+    'Key files:',
+    '  src/ui/chat.ts — ChatController, send',
+    '  src/shared/repoMap.ts — formatRepoMap',
+    'Tree:',
+    '  src/ui/ (2) chat.ts, styles.css',
+    '</repo_map>',
+  ].join('\n');
+
+  it('报出扫描文件数、带符号的文件数和字符量', () => {
+    const text = repoMapBubbleText(map);
+    expect(text).toContain('904 个源文件');
+    expect(text).toContain('2 个文件带符号');
+    expect(text).toContain(`${map.length} 字符`);
+  });
+
+  it('没有符号段时不给零计数', () => {
+    const bare = ['<repo_map>', 'Workspace snapshot: 70 source/entry files.', 'Tree:', '  src/ (1) a.ts', '</repo_map>'].join('\n');
+    const text = repoMapBubbleText(bare);
+    expect(text).toContain('70 个源文件');
+    expect(text).not.toContain('0 个文件带符号');
+  });
+
+  it('头部读不出来也不编数字', () => {
+    const text = repoMapBubbleText('<repo_map>\nnothing\n</repo_map>');
+    expect(text).toContain('已附仓库骨架图：');
+    expect(text).not.toContain('个源文件');
+  });
+});
 
 describe('repoMap 纯函数', () => {
   it('drops dependency dirs, binaries and duplicate lines from a listing', () => {

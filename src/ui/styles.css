@@ -2137,6 +2137,36 @@ body.window-maximized .win-resize-zone { display: none; }
   animation: statusPulse 1.6s ease-in-out infinite;
 }
 
+/* 可展开的状态行（仓库骨架图）：摘要是引用气泡本身的那行字，关着的时候
+   与普通状态行等高；展开的正文按等宽字体截断显示，不把一屏高的地图直接
+   摊在对话里。 */
+.bubble.status .status-details summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.bubble.status .status-details summary::-webkit-details-marker { display: none; }
+
+.bubble.status .status-details summary::marker { content: ''; }
+
+.bubble.status .status-details summary::after {
+  content: '  ▾';
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.bubble.status .status-details[open] summary::after { content: '  ▴'; }
+
+.bubble.status .status-details-body {
+  margin: 8px 0 2px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-secondary);
+}
+
 /* Highlighted tool name inside status bubbles (🔧 read_file: ✓) */
 .bubble.status .tool-name {
   color: var(--accent);

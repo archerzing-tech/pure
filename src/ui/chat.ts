@@ -42,6 +42,7 @@ import {
 } from '../shared/conventions';
 import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
 import { stripUserTurnContext, wantsHandsOnWorkflow } from '../shared/promptLayers';
+import { repoMapBubbleText } from '../shared/repoMap';
 import { collectRepoMap } from '../shared/repoMapSource';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
@@ -7461,6 +7462,10 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const repoMap = effectiveWorkspace && wantsHandsOnWorkflow(userText, analysis.mode)
         ? await collectRepoMap(codingAgent.toolRegistry, { signal: this.abortController?.signal })
         : '';
+      // 探索气泡：让用户看见 agent 这一步拿到的骨架图是哪一张（并可以展开
+      // 核对）。只在真正附了图时出现——小仓库一次 list_files 就看完，没有图
+      // 可给，气泡也就不该凭空多一行。
+      if (repoMap) this.addStatusBubble(repoMapBubbleText(repoMap), false, false, 'info', repoMap);
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen, hasImageAttachment: (userMessageAttachments?.length ?? 0) > 0 }),
@@ -10118,8 +10123,23 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     pending = false,
     isError = false,
     kind: 'success' | 'warn' | 'info' | undefined = undefined,
+    /** 折叠正文（如仓库骨架图）：摘要留在行上，展开才占地方。账上只记 text，
+     *  回放照旧是一行摘要——骨架图属于回合上下文，不是对话内容。 */
+    expandable?: string,
   ): HTMLElement {
     const { row, bubble } = buildStatusRow(text, { pending, error: isError, kind });
+    if (expandable) {
+      bubble.textContent = '';
+      const details = document.createElement('details');
+      details.className = 'status-details';
+      const summary = document.createElement('summary');
+      summary.textContent = text;
+      const body = document.createElement('pre');
+      body.className = 'status-details-body';
+      body.textContent = expandable;
+      details.append(summary, body);
+      bubble.appendChild(details);
+    }
     this.appendToTranscript(row);
     const record: StatusLineRecord = {
       afterIndex: this.anchorIndex(),

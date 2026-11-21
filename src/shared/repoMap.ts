@@ -291,6 +291,20 @@ export function formatRepoMap(input: FormatRepoMapInput): string {
   return [...header, ...keyLines, ...kept, ...footer(omitted)].join('\n');
 }
 
+/** 给用户看的一行摘要（GUI 探索气泡）：说清这张图扫了多少文件、挑了哪些
+ *  文件做符号、占多少字符。解析失败时退回一个不含数字的说法——宁可少给
+ *  一个计数，也不编一个。 */
+export function repoMapBubbleText(map: string): string {
+  const files = /Workspace snapshot: (\d+) source\/entry files/.exec(map)?.[1];
+  const keySection = /Key files:\n([\s\S]*?)(?:\nTree:|\n\u2026\(|\nMore:|\n<\/repo_map>)/.exec(map)?.[1] ?? '';
+  const keyFiles = keySection.split('\n').filter((line) => line.startsWith('  ')).length;
+  const parts: string[] = [];
+  if (files) parts.push(`${files} 个源文件`);
+  if (keyFiles > 0) parts.push(`${keyFiles} 个文件带符号`);
+  parts.push(`${map.length} 字符`);
+  return `已附仓库骨架图：${parts.join(' · ')}`;
+}
+
 /** 清单指纹：一次递归清单就是一次全量枚举，指纹相同说明这期间没增删文件，
  *  可以直接复用上一份地图（含已读的大纲）。FNV-1a 足够——这里只防「变了还
  *  用旧图」，不是安全哈希。 */

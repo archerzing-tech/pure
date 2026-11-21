@@ -41,6 +41,7 @@
 | [agents-md-design-review.md](agents-md-design-review.md) | AGENTS.md 设计评审：与 Claude Code / opencode 2.x 的加载机制与职责对照，pure 的优缺点与 P0–P2 改进（P0 已落地） |
 | [pure-positioning-audit-2026-11.md](pure-positioning-audit-2026-11.md) | 定位审计（外部视角五维差距扫描，2026-11-04） | 大部分 Phase 建议已是完成时；净增量「模型主导自进化」与 11-03 定调同向，作 P3 候选参考而非施工单 |
 | [evals/ab-short-request-2026-11-20.md](evals/ab-short-request-2026-11-20.md) | 短请求思考档真实任务 A/B（v4.9.6 vs main）：确认不再降档；一次性记录，5 题两档全过、评测集已饱和，下一缺口是验收绿后的停止纪律 |
+| [evals/ab-stop-at-green-2026-11-21.md](evals/ab-stop-at-green-2026-11-21.md) | 验收即停提醒的真实 A/B（`8175fa8`）：300 文件 fixture 两臂绿后回合都是 1，**未测出收益**；长尾需多失败任务形态才能显形 |
 
 ## 其他
 
