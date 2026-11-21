@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.11.0
+
+**CLI 认密钥库里的自定义 provider key；「打转」提醒按事实与指令分流；桌面 GUI 有了可复用的真机探针**
+
+一、自定义 provider 的 key 从密钥库回退。CLI 之前只认 `config.json` 明文里的 `apiKey`，而桌面端把 key 存在 `~/.pure/secrets.json` 的 `llm.apiKey.<id>` 下：同一份配置 GUI 能跑、CLI 直接 401。现在明文缺失时回退密钥库，火山引擎这类自定义 provider 两端行为一致。
+
+二、提醒分两类。事实类（同一个成功调用重复 N 次、连续 N 轮没有写入）照发；可重复的指令类同文 K 轮只发一次，长任务里不再逐轮刷同一句「你已经打转了」。
+
+三、回合级无进展判据。成功重复 3 次、连续 6 轮无写入各提醒一次。真机基线（`docs/evals/turn-progress-baseline-2026-11-21.md`）显示：成功重复几乎不存在，真正常见的形态是无写入连。
+
+四、桌面 GUI 真机探针。macOS 的 Tauri 跑在 WKWebView 里没有 CDP，探针改走辅助功能：`scripts/lib/axDump.swift` 直连 AX API 取窗口里的文字与输入框（约 100ms，替代 60s 的 AppleScript 遍历），`scripts/gui-probe.ts` 负责抢前台、清草稿、贴 prompt、回车、按 `--expect` 判「比回显多出现一次」并截图回读。用法 `bun run probe:gui --prompt "…" --expect …`。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；`probe:gui` 在打包 app 上连跑普通对话、工具调用、失败恢复与回归共 4 例（火山引擎 deepseek-v4-1-flash-261017）。本轮未在本机重打包 GUI；构建、签名与 `latest.json` 由 tag 发布流水线完成。
+
 ## v4.10.0
 
 **大仓库先给骨架图再动手；跑通全量验证后提醒收尾；骨架图在探索气泡里可见**

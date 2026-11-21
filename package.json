@@ -1,6 +1,6 @@
 {
   "name": "pure",
-  "version": "4.10.0",
+  "version": "4.11.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -38,6 +38,7 @@
     "e2e:apikey": "bun run scripts/e2e-settings-apikey.ts",
     "e2e:evolution": "bun run scripts/e2e-evolution-dashboard.ts",
     "e2e:overlay-flow": "bun run scripts/e2e-overlay-flow.ts",
+    "probe:gui": "bun run scripts/gui-probe.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "lint:conventions": "bun run scripts/check-conventions.ts",
     "scan:defaults": "bun run scripts/scan-default-scenario-switches.ts",
