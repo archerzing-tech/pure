@@ -12,6 +12,7 @@ import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/s
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { filePathsFromToolCalls } from '../shared/conventions';
 import { createGreenWatch, stopAtGreenEnabled } from '../shared/stopAtGreen';
+import { createTurnProgressWatch, turnProgressEnabled } from '../shared/turnProgress';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -452,6 +453,9 @@ export class AgentLoopEngine {
     // 验收即停（2026-11-21）：本回合首次跑通项目级验证后提醒一次。回合级实例
     // ——重修、续跑、子代理各自独立，不串账；已提醒后不再重复。
     const greenWatch = stopAtGreenEnabled() ? createGreenWatch() : null;
+    // 回合级无进展（2026-11-21）：成功重复调用 / 连续无写入各提醒一次。
+    // 阈值来自实测基线（shared/turnProgress.ts 头注释），只陈述事实。
+    const progressWatch = turnProgressEnabled() ? createTurnProgressWatch() : null;
     // Proactive pre-send compaction gave up for this run (nothing shed, still
     // over the trigger, or the compactor threw). One long turn would otherwise
     // repeat the check-and-summarize cycle every round for a window that
@@ -1443,12 +1447,19 @@ export class AgentLoopEngine {
         // 摆一条收束提醒。位置与另外两条中途注入（并行提醒 / 下层约定）同缝：
         // 工具结果刚配平完，内部 user 消息不会插进 toolCalls 与结果之间。
         // 只提醒一次；模型仍可自主决定是否还有用户真正要的交付物没写。
+        // 两条判据共用这一处缝：都要在每条工具结果上记账（无写入连靠回合推进
+        // 结算），但每回合各自最多注入一次；先绿后进展的优先级无所谓——两者
+        // 同时命中时，绿的收束语义更强。
         for (const tr of toolResults) {
           const call = toolCalls.find((c) => c.id === tr.toolCallId);
           const greenNote = greenWatch ? greenWatch.observe(tr.toolName, call?.function.arguments, tr.result.success === true) : '';
-          if (!greenNote) continue;
-          messages.push({ role: 'user' as const, content: greenNote, internal: true });
-          budget.addTokens(greenNote);
+          const progressNote = progressWatch
+            ? progressWatch.observe(call?.function.name ?? tr.toolName, call?.function.arguments, tr.result.success === true, turnCount)
+            : '';
+          const note = greenNote || progressNote;
+          if (!note) continue;
+          messages.push({ role: 'user' as const, content: note, internal: true });
+          budget.addTokens(note);
           break;
         }
 

@@ -3141,6 +3141,48 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     expect(rounds[1]!.some(m => m.content.includes('<stop_at_green>'))).toBe(false);
   });
 
+  it('injects one turn-progress note after the same call succeeds three times', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ < 3) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: `call_read_${round}`, index: 0, function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/app.ts' }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'file contents', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'read_file', description: 'read', input_schema: {} }],
+      },
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-progress', systemPrompt: 'sys', userPrompt: '修一下这个文件', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    // 第 3 次成功之后的那一轮才看得到提醒（前两轮还没有第三次）。
+    expect(rounds[2]!.some(m => m.content.includes('signal="repeated_call"'))).toBe(false);
+    expect(rounds[3]!.some(m => m.content.includes('signal="repeated_call"'))).toBe(true);
+    // 位置契约：内部 user 消息必须在工具结果之后，否则 provider 会 400。
+    const third = rounds[3]!;
+    expect(third.findIndex(m => m.role === 'tool')).toBeLessThan(third.findIndex(m => m.content.includes('signal="repeated_call"')));
+    // 只提醒一次，且转录仍然配对完整。
+    expect(completed.payload.messages!.filter(m => m.content.includes('signal="repeated_call"'))).toHaveLength(1);
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
   it('records injected sources into the session-delivered set for later turns', async () => {
     let first = true;
     const llm: LLMAdapter = {
