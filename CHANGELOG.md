@@ -4,6 +4,20 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.0
+
+**大仓库先给骨架图再动手；跑通全量验证后提醒收尾；骨架图在探索气泡里可见**
+
+一、仓库符号地图。中大型仓库里模型此前每回合都要自己 list/glob/grep 摸结构，摸不出来就绕路：现在动手类回合随上下文附一张 `<repo_map>`——一次递归清单挑出入口文件优先的候选，最多 16 个文件读 `outline` 取符号，压成「关键文件声明 + 目录骨架」，预算 3200 字符。采集走工具面（GUI 无 `node:fs`，工具面是两端唯一成立的读路径），按清单指纹 + 60 秒窗口缓存，热回合零成本；仓库不足 60 个源文件时不注入。地图头明确写它是回合开始时的扫描快照，避免模型拿它当存在性核对而否认刚写的文件。
+
+二、验收即停。回合内首次跑通项目级验证（`bun test`、`tsc --noEmit`、`go test ./...` 这类；带测试路径的局部跑不算）时，在工具结果配平点注入一次收尾提醒。判据是确定性证据（进程 exit 0）而不是模型自述，是否还有用户真正要的交付物仍归模型裁决。`PURE_STOP_AT_GREEN=0` 可关闭。
+
+三、探索气泡显示骨架图。地图进上下文的同一时刻追加一行状态气泡（扫了多少源文件、几个文件带符号、多少字符），点开是完整地图原文，与模型拿到的是同一份字符串。状态行账只记摘要，回放不会重铺整张图。
+
+四、提示词收紧。既有库里先看 `outline`、改签名前查调用点，一次定向后只读要改的文件，不重读刚改过的文件、不重跑本轮已通过的检查。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；`repoMap` 12 例、`stopAtGreen` 6 例、`AgentLoopEngine` 94 例、`chat` 176 例、`cli-intent`/`worldStateRender`/`promptLayers` 62 例全过。真机 A/B（`scripts/ab-stop-at-green.ts`，300 文件 fixture，两臂各 2 次）两臂绿后回合都是 1，**本次未测出验收即停的收益**，全量读数是单失败任务上根本没有绿后巡游可收，记录见 `docs/evals/ab-stop-at-green-2026-11-21.md`。未在本机采样 GUI 或打包；构建、签名与 `latest.json` 由 tag 发布流水线完成。
+
 ## v4.9.7
 
 **窗口拖动与侧栏开合不再每帧强制重排；工作台转场不再叠两份活跃 DOM；折叠组泊车占位跟着宽度重算**
