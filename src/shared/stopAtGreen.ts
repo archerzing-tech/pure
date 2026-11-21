@@ -117,12 +117,36 @@ function commandFromArgs(rawArgs: string | undefined): string {
  * 在后半段，前置的 `cd` 与后置的管道不该影响判定。
  */
 function commandSegments(command: string): string[] {
-  return command
+  return stripHeredocBodies(command)
     .replace(/\\\r?\n/g, ' ')
     .split(/&&|\|\||;|\r?\n/)
     .map((segment) => segment.split('|')[0] ?? '')
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0);
+}
+
+/**
+ * 去掉 heredoc 正文（2026-11-21 真机误报判例）。`cat > /tmp/smoke.mjs <<'EOF' … EOF`
+ * 的正文里可能有任意代码行——按换行切段会把正文当成命令，其中带
+ * `smoke.mjs` 的一行就冒充了项目级验收，绿信号在 acceptance 还没跑通时
+ * 就发了出去。heredoc 正文不是命令，切段前先整段剥掉。
+ */
+function stripHeredocBodies(command: string): string {
+  const lines = command.split(/\r?\n/);
+  const out: string[] = [];
+  let pending: string[] = [];
+  for (const line of lines) {
+    if (pending.length > 0) {
+      const terminator = pending.indexOf(line.trim());
+      if (terminator >= 0) pending.splice(terminator, 1);
+      continue;
+    }
+    out.push(line);
+    for (const match of line.matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) {
+      pending.push(match[2]!);
+    }
+  }
+  return out.join('\n');
 }
 
 /** 去掉环境变量赋值与包装词，返回真正可执行命令的词元。 */
@@ -188,7 +212,11 @@ function isScriptVerification(args: string[]): boolean {
   if (args.includes('--test')) return true;
   const scriptIndex = args.findIndex((arg) => !arg.startsWith('-'));
   if (scriptIndex < 0) return false;
-  if (!VERIFICATION_SCRIPT.test(args[scriptIndex]!.replace(/\\/g, '/'))) return false;
+  const script = args[scriptIndex]!.replace(/\\/g, '/');
+  if (!VERIFICATION_SCRIPT.test(script)) return false;
+  // 临时目录里的一次性 smoke 不是项目验收（2026-11-21 误报同案：
+  // /tmp/smoke.mjs 冒充了 scripts/verify.mjs）。只认项目内的脚本。
+  if (/^(?:\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/var\/tmp\/)/.test(script)) return false;
   return broadRun(args.slice(scriptIndex + 1));
 }
 

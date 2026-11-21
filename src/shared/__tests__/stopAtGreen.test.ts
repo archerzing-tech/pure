@@ -65,9 +65,26 @@ describe('isProjectVerificationCommand — 项目级验证识别', () => {
       'node server.mjs',
       'node scripts/build-assets.mjs',
       'node scripts/verify.mjs --only src/login.ts',
+      // 临时目录的一次性 smoke 不是项目验收。
+      'node /tmp/smoke.mjs',
+      'node /private/tmp/e2e.mjs',
     ]) {
       expect(isProjectVerificationCommand(command)).toBe(false);
     }
+  });
+
+  it('heredoc 正文不是命令：cat 写 smoke 脚本不冒充验收（2026-11-21 真机误报）', () => {
+    const command = [
+      "cd /repo/app && cat > /tmp/smoke.mjs <<'EOF'",
+      "import fs from 'node:fs';",
+      "// node scripts/verify.mjs 只是正文里的一句话",
+      "console.log('smoke');",
+      'EOF',
+    ].join('\n');
+    expect(isProjectVerificationCommand(command)).toBe(false);
+    // 正文之外的那条真命令仍按自己的语义判定。
+    expect(isProjectVerificationCommand(`${command}\nnode /tmp/smoke.mjs`)).toBe(false);
+    expect(isProjectVerificationCommand(`${command}\nnode scripts/verify.mjs`)).toBe(true);
   });
 });
 
