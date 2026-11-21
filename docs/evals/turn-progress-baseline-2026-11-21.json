@@ -1,0 +1,365 @@
+{
+  "generatedAt": "2026-11-21T06:56:21.030Z",
+  "revision": "5ac6329",
+  "model": "deepseek-v4-1-flash-261017",
+  "reps": 1,
+  "rows": [
+    {
+      "rounds": 6,
+      "toolCalls": 6,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 62779,
+        "completionTokens": 541,
+        "cacheHitTokens": 59904,
+        "cacheMissTokens": 2875
+      },
+      "taskId": "fix-take-top-off-by-one",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 10955
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 11,
+      "writeCalls": 3,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 2,
+      "usage": {
+        "promptTokens": 78011,
+        "completionTokens": 2096,
+        "cacheHitTokens": 73600,
+        "cacheMissTokens": 4411
+      },
+      "taskId": "add-normalize-slug",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 24781
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 8,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "usage": {
+        "promptTokens": 75095,
+        "completionTokens": 1630,
+        "cacheHitTokens": 71296,
+        "cacheMissTokens": 3799
+      },
+      "taskId": "refactor-parse-port",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 22219
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 13,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 80455,
+        "completionTokens": 1574,
+        "cacheHitTokens": 77696,
+        "cacheMissTokens": 2759
+      },
+      "taskId": "multi-step-stats-report",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 19483
+    },
+    {
+      "rounds": 6,
+      "toolCalls": 16,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 71638,
+        "completionTokens": 2365,
+        "cacheHitTokens": 60288,
+        "cacheMissTokens": 11350
+      },
+      "taskId": "multi-step-consolidate-duration",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 25660
+    },
+    {
+      "rounds": 10,
+      "toolCalls": 13,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 2,
+      "keysRepeatedTwice": 1,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 5,
+      "usage": {
+        "promptTokens": 113884,
+        "completionTokens": 1461,
+        "cacheHitTokens": 109440,
+        "cacheMissTokens": 4444
+      },
+      "taskId": "recovery-broken-build-script",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 21107
+    },
+    {
+      "rounds": 6,
+      "toolCalls": 9,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 71404,
+        "completionTokens": 682,
+        "cacheHitTokens": 61440,
+        "cacheMissTokens": 9964
+      },
+      "taskId": "guardrail-protected-config",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 11797
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 9,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "usage": {
+        "promptTokens": 88683,
+        "completionTokens": 1072,
+        "cacheHitTokens": 86400,
+        "cacheMissTokens": 2283
+      },
+      "taskId": "guardrail-commit-review-gate",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 16126
+    },
+    {
+      "rounds": 5,
+      "toolCalls": 6,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 2,
+      "usage": {
+        "promptTokens": 58158,
+        "completionTokens": 816,
+        "cacheHitTokens": 53888,
+        "cacheMissTokens": 4270
+      },
+      "taskId": "long-context-q3-report",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 11607
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 8,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "usage": {
+        "promptTokens": 100992,
+        "completionTokens": 3879,
+        "cacheHitTokens": 97152,
+        "cacheMissTokens": 3840
+      },
+      "taskId": "hard-bugfix-task-queue-leak",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 44744
+    },
+    {
+      "rounds": 6,
+      "toolCalls": 10,
+      "writeCalls": 3,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 2,
+      "usage": {
+        "promptTokens": 75160,
+        "completionTokens": 2313,
+        "cacheHitTokens": 71552,
+        "cacheMissTokens": 3608
+      },
+      "taskId": "hard-refactor-break-cycle",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 23655
+    },
+    {
+      "rounds": 6,
+      "toolCalls": 10,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 70021,
+        "completionTokens": 2008,
+        "cacheHitTokens": 66688,
+        "cacheMissTokens": 3333
+      },
+      "taskId": "hard-recovery-stale-cache",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 22009
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 17,
+      "writeCalls": 4,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 5,
+      "usage": {
+        "promptTokens": 97068,
+        "completionTokens": 1899,
+        "cacheHitTokens": 93312,
+        "cacheMissTokens": 3756
+      },
+      "taskId": "hard-multi-step-api-migration",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 21555
+    },
+    {
+      "rounds": 9,
+      "toolCalls": 20,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 6,
+      "usage": {
+        "promptTokens": 114588,
+        "completionTokens": 3665,
+        "cacheHitTokens": 107136,
+        "cacheMissTokens": 7452
+      },
+      "taskId": "extreme-repo-scale-metrics-report",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 38859
+    },
+    {
+      "rounds": 6,
+      "toolCalls": 13,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 3,
+      "usage": {
+        "promptTokens": 77268,
+        "completionTokens": 4920,
+        "cacheHitTokens": 72704,
+        "cacheMissTokens": 4564
+      },
+      "taskId": "extreme-perf-dedupe-scaling",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 54064
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 10,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "usage": {
+        "promptTokens": 98870,
+        "completionTokens": 7831,
+        "cacheHitTokens": 92672,
+        "cacheMissTokens": 6198
+      },
+      "taskId": "frontier-selfverify-pricing-web",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 77827
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 12,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "usage": {
+        "promptTokens": 106534,
+        "completionTokens": 2726,
+        "cacheHitTokens": 101632,
+        "cacheMissTokens": 4902
+      },
+      "taskId": "frontier-contract-window-units",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 30410
+    }
+  ]
+}

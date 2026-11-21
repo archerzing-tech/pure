@@ -1,0 +1,123 @@
+{
+  "generatedAt": "2026-11-21T07:00:45.629Z",
+  "revision": "5ac6329",
+  "model": "deepseek-v4-1-flash-261017",
+  "reps": 1,
+  "rows": [
+    {
+      "rounds": 5,
+      "toolCalls": 11,
+      "writeCalls": 2,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 2,
+      "maxSamePathSuccess": 1,
+      "pathsRepeatedThrice": 0,
+      "usage": {
+        "promptTokens": 56319,
+        "completionTokens": 1215,
+        "cacheHitTokens": 54144,
+        "cacheMissTokens": 2175
+      },
+      "taskId": "multi-step-stats-report",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 15026
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 11,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 5,
+      "maxSamePathSuccess": 1,
+      "pathsRepeatedThrice": 0,
+      "usage": {
+        "promptTokens": 87114,
+        "completionTokens": 1214,
+        "cacheHitTokens": 85248,
+        "cacheMissTokens": 1866
+      },
+      "taskId": "recovery-broken-build-script",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 17113
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 18,
+      "writeCalls": 4,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "maxSamePathSuccess": 2,
+      "pathsRepeatedThrice": 0,
+      "usage": {
+        "promptTokens": 84235,
+        "completionTokens": 2416,
+        "cacheHitTokens": 80640,
+        "cacheMissTokens": 3595
+      },
+      "taskId": "hard-multi-step-api-migration",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 26504
+    },
+    {
+      "rounds": 8,
+      "toolCalls": 18,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 5,
+      "maxSamePathSuccess": 1,
+      "pathsRepeatedThrice": 0,
+      "usage": {
+        "promptTokens": 99916,
+        "completionTokens": 2016,
+        "cacheHitTokens": 95232,
+        "cacheMissTokens": 4684
+      },
+      "taskId": "extreme-repo-scale-metrics-report",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 30676
+    },
+    {
+      "rounds": 7,
+      "toolCalls": 10,
+      "writeCalls": 1,
+      "maxIdenticalSuccess": 1,
+      "keysRepeatedTwice": 0,
+      "keysRepeatedThrice": 0,
+      "maxConsecutiveIdentical": 1,
+      "period2Windows": 0,
+      "maxNoWriteRounds": 4,
+      "maxSamePathSuccess": 1,
+      "pathsRepeatedThrice": 0,
+      "usage": {
+        "promptTokens": 99282,
+        "completionTokens": 5914,
+        "cacheHitTokens": 93312,
+        "cacheMissTokens": 5970
+      },
+      "taskId": "frontier-selfverify-pricing-web",
+      "rep": 1,
+      "passAt1": true,
+      "wallMs": 60156
+    }
+  ]
+}
