@@ -41,7 +41,8 @@ import {
   type MergeInput,
 } from '../shared/conventions';
 import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
-import { stripUserTurnContext } from '../shared/promptLayers';
+import { stripUserTurnContext, wantsHandsOnWorkflow } from '../shared/promptLayers';
+import { collectRepoMap } from '../shared/repoMapSource';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { REQUEST_PLAN_TOOL_DEF, REQUEST_PLAN_TOOL_NAME } from '../coding-agent/planControlTool';
@@ -1240,7 +1241,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
  * 缓存地基刀A（2026-11-06）吞并两件回合级事实：时间基准行（每回合现算现注入,
  * timeContext 设计意图在此真正落地——冻进 system 时首回合日期会被用到会话结束）
  * 与本会话网络熔断注（随熔断发生逐轮出现,不再让跨会话前缀互不一致）。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string, parallelNudge?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string, parallelNudge?: string, repoMap?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻：时间是每回合都要校准的参考点（timeContext.ts 顶部定调）。
   const time = formatTimeContextLine(currentTimeContext()).trim();
@@ -1277,6 +1278,11 @@ function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFa
   // 次性处方。是体量事实不是指令，拆不拆仍归模型。无事件零注入。
   const nudge = parallelNudge?.trim();
   if (nudge) parts.push(nudge);
+  // 仓库符号地图（2026-11-21）：中大型仓库里「先看骨架再动手」。只有动手类
+  // 回合才带，且由 collectRepoMap 自己判规模——小仓库一次 list_files 就看完，
+  // 地图是纯开销。扫描失败返回空串，环境事实照旧。
+  const map = repoMap?.trim();
+  if (map) parts.push(map);
   return parts.join('\n\n');
 }
 
@@ -7450,6 +7456,11 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         lastSentModelKey: this.lastSentModelKey,
       });
       this.lastSentModelKey = capabilityTurn.currentKey;
+      // 仓库符号地图（2026-11-21）：只给动手类回合。问答轮不需要骨架；采集
+      // 本身按清单指纹缓存，同一仓库首回合之后只是一次 list_files。
+      const repoMap = effectiveWorkspace && wantsHandsOnWorkflow(userText, analysis.mode)
+        ? await collectRepoMap(codingAgent.toolRegistry, { signal: this.abortController?.signal })
+        : '';
       const assembly = promptAssembler.assemble({
         surface: 'gui',
         capabilities: buildGuiCapabilities(!!effectiveWorkspace, usingTemporaryWorkspace, { imageGeneration: imageGen, hasImageAttachment: (userMessageAttachments?.length ?? 0) > 0 }),
@@ -7485,7 +7496,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts(), takeBuildParallelNudge()),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts(), takeBuildParallelNudge(), repoMap),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,

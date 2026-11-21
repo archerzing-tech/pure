@@ -3068,6 +3068,79 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
   });
 
+  it('injects one stop-at-green nudge after a project-level verification passes', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ === 0) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: 'call_test', index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command: 'bun test' }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'all tests passed', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'execute_command', description: 'run', input_schema: {} }],
+      },
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-green', systemPrompt: 'sys', userPrompt: '修掉这个失败测试', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    const secondRound = rounds[1]!;
+    const injected = secondRound.filter(m => m.role === 'user' && m.internal && m.content.includes('<stop_at_green>'));
+    expect(injected).toHaveLength(1);
+    // 提醒落在它所属的工具结果之后（与并行提醒/下层约定同一配平契约）。
+    expect(secondRound.findIndex(m => m.role === 'tool')).toBeLessThan(secondRound.findIndex(m => m.content.includes('<stop_at_green>')));
+    expect(completed.payload.messages!.filter(m => m.content.includes('<stop_at_green>'))).toHaveLength(1);
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
+  it('does not treat a narrowed test run as project-level green', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ === 0) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: 'call_partial', index: 0, function: { name: 'execute_command', arguments: JSON.stringify({ command: 'bun test src/a.test.ts' }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: false }),
+        getTools: () => [{ name: 'execute_command', description: 'run', input_schema: {} }],
+      },
+    });
+    await collect(new AgentLoopEngine().run(
+      { sessionId: 's-green-partial', systemPrompt: 'sys', userPrompt: '修掉这个失败测试', budget: STD_BUDGET },
+      ctx,
+    ));
+    expect(rounds[1]!.some(m => m.content.includes('<stop_at_green>'))).toBe(false);
+  });
+
   it('records injected sources into the session-delivered set for later turns', async () => {
     let first = true;
     const llm: LLMAdapter = {

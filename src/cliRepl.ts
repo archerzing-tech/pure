@@ -50,6 +50,8 @@ import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './
 import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
 import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
+import { wantsHandsOnWorkflow } from './shared/promptLayers';
+import { collectRepoMap } from './shared/repoMapSource';
 import { loadConfig, defaultCliAutoApprove, PURE_DIR, resolveDefaultModel } from './cliConfig';
 import { runCliSleepCycle } from './evolution/cliHost';
 
@@ -310,6 +312,8 @@ async function assembleCliPrompt(
   worldState?: WorldStateRenderer,
   /** 工程构建回合（流程闸门判定）——system 侧交付形态规则的闸门。 */
   buildTurn = false,
+  /** 仓库地图的采集面（工具面）：缺省=地图不采集（无工作区/纯问答）。 */
+  tools?: ToolAdapter,
 ) {
   const userWorkspace = args.workspace && args.workspace !== 'true'
     ? args.workspace
@@ -348,6 +352,12 @@ async function assembleCliPrompt(
   }
   // PURE_DEBUG_CONVENTIONS=1 prints which layer each section came from and
   // which sections a child layer replaced (same report as `bun run agents:show`).
+  // 仓库符号地图（2026-11-21）：与 GUI 同源。只在动手类回合采集，且由
+  // collectRepoMap 自判仓库规模（小仓库返回空串）。扫描走工具面，所以必须
+  // 在有工作区工具时才有意义。
+  const repoMap = tools && wantsHandsOnWorkflow(userText, mode)
+    ? await collectRepoMap(tools)
+    : '';
   if (process.env.PURE_DEBUG_CONVENTIONS === '1') {
     process.stderr.write(`${formatConventionsDiagnostics(merged.diagnostics)}\n`);
   }
@@ -384,8 +394,8 @@ async function assembleCliPrompt(
     // 四期 4b 分区化：REPL 传入了渲染器就走 diff（同内容回合只发指针）；
     // 一次性 -p 模式不传，保持逐字全量。
     envFacts: worldState
-      ? worldState.renderTurn({ envFacts: buildCliEnvFacts(conventions) }).envFacts
-      : buildCliEnvFacts(conventions),
+      ? worldState.renderTurn({ envFacts: buildCliEnvFacts(conventions, repoMap) }).envFacts
+      : buildCliEnvFacts(conventions, repoMap),
   });
 }
 
@@ -409,7 +419,7 @@ function cliProviderHealContext(args: CliArgs): { provider: string; model: strin
  *  刀 6 CLI 面回流（2026-11-03）：围栏块在文本投影/线框渲染失败时 cliDiagram
  *  记了事件——每回合装配读走（读即清）注入 envFacts 区，模型看到自己上一
  *  回合哪些块没渲染出来。无事件=空串，零注入。 */
-function buildCliEnvFacts(conventions?: string): string {
+function buildCliEnvFacts(conventions?: string, repoMap?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻（刀A，2026-11-06）：每回合现算现注入，timeContext 设计
   // 意图落地；不再冻进 system 首回合前缀。
@@ -437,6 +447,10 @@ function buildCliEnvFacts(conventions?: string): string {
   // 模型不再对着已消失的工具空耗轮次。
   const quarantineFacts = takeSchemaQuarantineFacts();
   if (quarantineFacts) parts.push(quarantineFacts);
+  // 仓库符号地图（2026-11-21）：与 GUI 面同源同形。只有动手类回合才传进来，
+  // 空串（小仓库/无工具面）直接跳过。
+  const map = repoMap?.trim();
+  if (map) parts.push(map);
   return parts.join('\n\n');
 }
 
@@ -828,7 +842,7 @@ async function runOneShot(args: CliArgs) {
   const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, args.prompt, {
     ...workflow.userContext,
     contract: taskContract ? formatTaskContract(taskContract) : undefined,
-  }, mcpClient, undefined, needsDeliveryGate);
+  }, mcpClient, undefined, needsDeliveryGate, tools);
   const systemPrompt = assembly.systemPrompt;
   const userTurn = assembly.userPrompt ?? args.prompt;
   const budgetDiagnostic = formatPromptBudgetDiagnostic(assembly.budget);
@@ -1121,7 +1135,7 @@ async function runRepl(args: CliArgs) {
     const assembly = await assembleCliPrompt(analysis.mode, args, toolsDefs, turnInput, {
       ...workflow.userContext,
       contract: taskContract ? formatTaskContract(taskContract) : undefined,
-    }, mcpClient, cliWorldState, needsDeliveryGate);
+    }, mcpClient, cliWorldState, needsDeliveryGate, tools);
     const systemPrompt = assembly.systemPrompt;
     const userTurn = assembly.userPrompt ?? input;
 

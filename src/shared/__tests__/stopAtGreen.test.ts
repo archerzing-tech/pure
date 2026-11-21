@@ -1,0 +1,81 @@
+import { describe, expect, it } from 'bun:test';
+import { createGreenWatch, isProjectVerificationCommand } from '../stopAtGreen';
+
+function args(command: string): string {
+  return JSON.stringify({ command });
+}
+
+describe('isProjectVerificationCommand — 项目级验证识别', () => {
+  it('认全量验证：脚本名与直调命令', () => {
+    for (const command of [
+      'bun test',
+      'bun run typecheck',
+      'bun run build',
+      'npm test',
+      'npm run lint',
+      'pnpm run check',
+      'yarn build',
+      'npx tsc --noEmit',
+      'tsc -p tsconfig.json',
+      'vitest run',
+      'pytest',
+      'python -m pytest',
+      'go test ./...',
+      'cargo test',
+      'make check',
+      'eslint .',
+    ]) {
+      expect(isProjectVerificationCommand(command)).toBe(true);
+    }
+  });
+
+  it('组合命令按段判定：前置 cd 与后置管道不影响语义', () => {
+    expect(isProjectVerificationCommand('cd app && bun test 2>&1 | tail -5')).toBe(true);
+    expect(isProjectVerificationCommand('CI=1 bun run typecheck')).toBe(true);
+    expect(isProjectVerificationCommand('git add -A && npm test')).toBe(true);
+  });
+
+  it('局部跑与开发命令不算项目已绿', () => {
+    for (const command of [
+      'bun test src/a.test.ts',
+      'bun test tests/',
+      'pytest tests/test_api.py',
+      'vitest run src/foo.spec.ts',
+      'tsc src/a.ts',
+      'go test ./pkg/foo',
+      'npm run dev',
+      'bun run test:unit',
+      'bun build src/index.ts',
+      'cat package.json',
+      'ls -la',
+    ]) {
+      expect(isProjectVerificationCommand(command)).toBe(false);
+    }
+  });
+});
+
+describe('createGreenWatch — 每回合一次收束提醒', () => {
+  it('首次项目级验证通过时给出提醒，之后不再重复', () => {
+    const watch = createGreenWatch();
+    expect(watch.observe('execute_command', args('bun test src/a.test.ts'), true)).toBe('');
+    const first = watch.observe('execute_command', args('bun test'), true);
+    expect(first).toContain('<stop_at_green>');
+    expect(first).toContain('bun test');
+    expect(watch.observe('execute_command', args('bun run typecheck'), true)).toBe('');
+  });
+
+  it('失败、非命令工具、坏参数都不触发', () => {
+    const watch = createGreenWatch();
+    expect(watch.observe('execute_command', args('bun test'), false)).toBe('');
+    expect(watch.observe('read_file', args('bun test'), true)).toBe('');
+    expect(watch.observe('execute_command', '{not json', true)).toBe('');
+    expect(watch.observe('execute_command', undefined, true)).toBe('');
+  });
+
+  it('观察器彼此独立：子代理/续跑不会吃掉父回合的提醒', () => {
+    const parent = createGreenWatch();
+    const child = createGreenWatch();
+    expect(child.observe('execute_command', args('bun run typecheck'), true)).not.toBe('');
+    expect(parent.observe('execute_command', args('npm test'), true)).not.toBe('');
+  });
+});

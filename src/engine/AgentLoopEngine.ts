@@ -11,6 +11,7 @@ import { stripAllPatterns } from '../shared/schemaSanitize';
 import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/schemaQuarantineHeal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { filePathsFromToolCalls } from '../shared/conventions';
+import { createGreenWatch, stopAtGreenEnabled } from '../shared/stopAtGreen';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -448,6 +449,9 @@ export class AgentLoopEngine {
     // 9.1 reactive compactions this run: provider context-length rejections
     // answered by compacting harder and retrying (see the THINK catch).
     let reactiveCompactions = 0;
+    // 验收即停（2026-11-21）：本回合首次跑通项目级验证后提醒一次。回合级实例
+    // ——重修、续跑、子代理各自独立，不串账；已提醒后不再重复。
+    const greenWatch = stopAtGreenEnabled() ? createGreenWatch() : null;
     // Proactive pre-send compaction gave up for this run (nothing shed, still
     // over the trigger, or the compactor threw). One long turn would otherwise
     // repeat the check-and-summarize cycle every round for a window that
@@ -1435,6 +1439,19 @@ export class AgentLoopEngine {
           });
           budget.addTokens(resultText);
         }
+        // 验收即停注入（2026-11-21）：项目级验证刚跑绿，就在下一轮模型眼前
+        // 摆一条收束提醒。位置与另外两条中途注入（并行提醒 / 下层约定）同缝：
+        // 工具结果刚配平完，内部 user 消息不会插进 toolCalls 与结果之间。
+        // 只提醒一次；模型仍可自主决定是否还有用户真正要的交付物没写。
+        for (const tr of toolResults) {
+          const call = toolCalls.find((c) => c.id === tr.toolCallId);
+          const greenNote = greenWatch ? greenWatch.observe(tr.toolName, call?.function.arguments, tr.result.success === true) : '';
+          if (!greenNote) continue;
+          messages.push({ role: 'user' as const, content: greenNote, internal: true });
+          budget.addTokens(greenNote);
+          break;
+        }
+
         // 下层约定按「真读到文件」注入（2026-11-15）。请求文本里的路径提示
         // 只是提前量；真正决定某个目录的 AGENTS.md 该生效的，是本轮真的读了
         // 那里的文件。位置必须在工具结果配平之后：内部 user 消息绝不能插进
