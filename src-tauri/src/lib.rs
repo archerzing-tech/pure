@@ -20160,6 +20160,77 @@ fn gui_error_log(entries: Vec<String>) {
     }
 }
 
+/// 关掉 WKWebView 的遮挡检测（2026-11-21 画面冻结判例）。macOS 上窗口被
+/// 遮挡/隐藏后，WebKit 的遮挡检测会暂停渲染；恢复正常后偶发不再提交帧——
+/// 进程、JS、DOM 都活着，只有屏幕停在旧帧（AX 读到的新内容比画面多）。
+/// Windows 侧早已用 `CalculateNativeWinOcclusion` 关掉同类机制，这里用
+/// WKWebView 的私有开关做对称处理。代价是窗口被遮挡时仍持续渲染：对一个
+/// 后台长跑、用户切走再切回的编码 agent，这个取舍比回来看见冻住的画面划算。
+/// 私有 selector 不存在时返回 false（老 WebKit 只是白调一次，不影响启动）。
+/// 在 NSView 子树里找真正响应 `_setWindowOcclusionDetectionEnabled:` 的对象
+/// （WKWebView 本体，通常被容器 NSView 包着）。深度上限防环。
+#[cfg(target_os = "macos")]
+unsafe fn try_set_occlusion_on_view(view: *mut objc2::runtime::AnyObject, enabled: bool) -> bool {
+    unsafe fn at_depth(view: *mut objc2::runtime::AnyObject, enabled: bool, depth: usize) -> bool {
+        if view.is_null() || depth > 5 {
+            return false;
+        }
+        let sel = objc2::sel!(_setWindowOcclusionDetectionEnabled:);
+        let responds: objc2::runtime::Bool = objc2::msg_send![view, respondsToSelector: sel];
+        if responds.as_bool() {
+            let flag = if enabled { objc2::runtime::Bool::YES } else { objc2::runtime::Bool::NO };
+            let _: () = objc2::msg_send![view, _setWindowOcclusionDetectionEnabled: flag];
+            return true;
+        }
+        let subviews: *mut objc2::runtime::AnyObject = objc2::msg_send![view, subviews];
+        if subviews.is_null() {
+            return false;
+        }
+        let count: usize = objc2::msg_send![subviews, count];
+        for i in 0..count.min(64) {
+            let child: *mut objc2::runtime::AnyObject = objc2::msg_send![subviews, objectAtIndex: i];
+            if at_depth(child, enabled, depth + 1) {
+                return true;
+            }
+        }
+        false
+    }
+    unsafe { at_depth(view, enabled, 0) }
+}
+
+#[tauri::command]
+fn set_webview_occlusion_detection(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let ptr = window.ns_view().map_err(|e| e.to_string())?;
+        if ptr.is_null() {
+            return Ok(false);
+        }
+        let obj = ptr as *mut objc2::runtime::AnyObject;
+        unsafe {
+            let direct = try_set_occlusion_on_view(obj, enabled);
+            if direct {
+                return Ok(true);
+            }
+            // ns_view 可能是包裹层而不是 WKWebView 本体：从 NSWindow 的
+            // contentView 再向下找一层。真机第一版就是这样漏掉的（selector
+            // 在 ws_view 上 respondsToSelector=false，日志 applied:false）。
+            let win_ptr = window.ns_window().map_err(|e| e.to_string())?;
+            if win_ptr.is_null() {
+                return Ok(false);
+            }
+            let win = win_ptr as *mut objc2::runtime::AnyObject;
+            let content: *mut objc2::runtime::AnyObject = objc2::msg_send![win, contentView];
+            Ok(try_set_occlusion_on_view(content, enabled))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, enabled);
+        Ok(false)
+    }
+}
+
 /// 性能埋点台账（~/.pure/gui_perf.log）：JSONL append + 轮转，与
 /// gui_error_log 同机制、文件分开——错误台账语义是「错误」，性能样本混入
 /// 会污染 `pure errors` 的对账语义。行内容由 TS 侧 perfLog 聚合后才写
@@ -20681,6 +20752,8 @@ pub fn run() {
             gui_error_log,
             // GUI perf telemetry: aggregated render-cost samples (~/.pure/gui_perf.log)
             gui_perf_log,
+            // macOS: disable WKWebView occlusion-based render suspension (frozen-frame fix)
+            set_webview_occlusion_detection,
             // Remote control bridge port discovery (gateway bridge.json)
             bridge_port,
             // File tools

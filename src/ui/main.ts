@@ -81,6 +81,7 @@ import { loadDeferredStyles } from './deferredStyles';
 import { invoke } from '@tauri-apps/api/core';
 import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
 import { logBootSample } from './perfLog';
+import { startFrameWatchdog } from './frameWatchdog';
 
 // ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
 // 僵尸态事故(按钮全死/窗口空白)唯一的页面内第一手证据,机制见 errorLedger.ts;
@@ -1026,6 +1027,18 @@ function dismissBootSplash(minVisibleMs = 450): void {
   // 那样「没有这一行」既可能是模块求值期崩了、也可能只是窗口在后台，判据就废了。
   // ms = 从模块开始执行到决定撤场；forced 表示走到 10s 兜底。
   void logBootSample(performance.now() - bootStartedAt, minVisibleMs === 0 ? 'forced' : 'dismissed');
+  // macOS 画面冻结两件（2026-11-21）：关掉 WKWebView 的遮挡检测（防再次
+  // 停帧），并起帧停摆探针（下一次冻结留下 rAF/DOM 现场）。
+  startFrameWatchdog();
+  void loadTauriCore()
+    .then((core) => core?.invoke('set_webview_occlusion_detection', { enabled: false }))
+    .then((applied) => {
+      // 取证行：true = 私有开关确实存在并已关；false = 老 WebKit/非 macOS。
+      void loadTauriCore().then((core) => core?.invoke('gui_perf_log', {
+        lines: [JSON.stringify({ ts: Date.now(), kind: 'occlusion', applied: applied === true })],
+      })).catch(() => {});
+    })
+    .catch(() => { /* 非 macOS 或旧后端：静默 */ });
   const wait = Math.max(0, minVisibleMs - (performance.now() - bootStartedAt));
   setTimeout(() => {
     // Two rAFs guarantee the landing page has actually painted before the
