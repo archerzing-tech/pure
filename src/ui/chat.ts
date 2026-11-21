@@ -317,6 +317,13 @@ export function sanitizeInterruptedReason(raw: string, reasonCode?: string): str
   if (reasonCode === 'stream_timeout') {
     return t('chat.interrupted.streamTimeout', 'Generation timed out: the model took too long (output too large or input file too large). Split the task into smaller steps, generate the file in parts, or compress/summarize oversized input first.');
   }
+  // 时间预算用尽不是端点故障（2026-11-21 大屏真机）：引擎给的是结构化
+  // code，必须在这里讲人话；落到 generic 会把「预算到点」说成「操作中断，
+  // 请重试」——用户会重发一个注定再撞同一面墙的请求。
+  if (reasonCode === 'time_budget_exhausted') {
+    const base = t('chat.interrupted.timeBudget', '本次运行的时间预算已用尽——不是模型或网络故障。已完成的文件与工具结果都还在，继续时从检查点续跑或重新发送即可');
+    return raw ? `${base}\n${raw}` : base;
+  }
   if (reasonCode === 'failure_policy_stop') {
     const cause = extractFailureCause(raw);
     const base = t('chat.interrupted.repeatedFailures', 'Stopped after repeated failed attempts — please check the task or try a different approach');

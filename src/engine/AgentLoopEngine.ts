@@ -428,6 +428,13 @@ export class AgentLoopEngine {
     // 持续性故障，直接停，真话交还。
     let streamTimeoutRepeats = 0;
     const MAX_STREAM_TIMEOUT_RETRIES = 2;
+    // 一轮模型请求至少需要这么多剩余预算才值得发起（2026-11-21 大屏真机
+    // 判例：code_editor 把 43KB style.css 写完，600s 硬预算到点后，最后一轮
+    // 拿到的流窗口只剩 1ms——首块 0s 秒超时，重试两次同样 1ms 秒超时，父
+    // agent 收到的却是「模型在 0s 内没有输出第一个内容块」。这是预算用尽，
+    // 不是端点卡住；把物理事实讲成服务端故障，会诱导重派一个刚干完活的
+    // worker。剩余窗口低于这条线时直接如实停机，不进入流超时重试阶梯。
+    const MIN_LLM_ROUND_MS = 5_000;
     // 首块超时的压缩救援（2026-11-20 用户判例）：大上下文的首块超时是服务端
     // 预填充的确定性变慢，原样重发只会原样撞线——用户点多少次「重试」都是
     // 同一份 payload。第一次首块超时就先做一次无摘要的激进压缩，让紧接着的
@@ -1025,6 +1032,23 @@ export class AgentLoopEngine {
           continue;
         }
         if (isTimeout) {
+          // 预算先于重试结算：剩余窗口不足一轮请求时，任何重试都只是在
+          // 0s 线上再撞一次，并且会把「预算用尽」讲成端点故障。
+          const budgetLeftMs = budget.streamDeadlineMs();
+          if (budgetLeftMs < MIN_LLM_ROUND_MS) {
+            const leftHuman = budgetLeftMs >= 1_000
+              ? `${Math.round(budgetLeftMs / 100) / 10}s`
+              : '不到 1s';
+            const stopReason = `本次运行的时间预算已用尽（最后一步只剩 ${leftHuman}，不足以发起模型请求）——不是模型端点卡住，也不是网络问题。已完成的工作（写入的文件、工具结果、检查点）都还在原处；继续时从检查点续跑或重新派发即可。`;
+            flushPartialAssistant();
+            const salvaged = await salvageStopMessages(messages);
+            messages.length = 0;
+            messages.push(...salvaged);
+            messages.push({ role: 'user', internal: true, content: `系统现状：上一回合因运行时间预算用尽而中断——最后一步只剩 ${leftHuman}，模型请求没有发出。已完成的工具结果与写入都在工作区和检查点里，不是端点故障。` });
+            yield { type: 'Interrupted', payload: { reason: stopReason, reasonCode: 'time_budget_exhausted', lastState: 'THINK', completedSteps, messages, turnCount }, timestamp: Date.now() };
+            interrupted = true;
+            break;
+          }
           streamTimeoutRepeats++;
           // err.message 的 label（'LLM stream first token' / 'LLM stream
           // read'）是流层给的最准锚——两种 TimeoutError 必须分开讲（2026-11-05，

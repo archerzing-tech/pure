@@ -495,7 +495,10 @@ async function createTools(
       registry.register(tool);
     }
     if (external.execs.size > 0) {
-      registry.setExternalToolsExecutor(createExternalToolsCommandExecutor(external.execs, registry.getDelegate()));
+      registry.setExternalToolsExecutor(
+        createExternalToolsCommandExecutor(external.execs, registry.getDelegate()),
+        external.execs.keys(),
+      );
     }
   }
 

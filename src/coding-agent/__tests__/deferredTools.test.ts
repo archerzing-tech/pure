@@ -79,6 +79,39 @@ describe('deferred tool table (framework-reform phase 3)', () => {
     expect(names).toContain('rea__do_thing');
   });
 
+  it('EXTERNAL 标签不是执行器所有权：browser 走 delegate，只有自家脚本走外部执行器', async () => {
+    // 2026-11-21 大屏真机：内建 browser 带 EXTERNAL 标签，被外部脚本执行器
+    // （按标签路由）截胡，主线程和 code_editor worker 都收到 "has no exec
+    // template"，worker 还白烧了 4 次重试。所有权 = 执行器真有模板的名字。
+    const delegated: string[] = [];
+    const delegate = {
+      getTools: () => [],
+      getMetadata: () => ({}),
+      execute: async (tc: import('../../shared/types').ToolCall): Promise<import('../../shared/types').ToolResult> => {
+        delegated.push(tc.function.name);
+        return { id: tc.id, toolName: tc.function.name, success: true, duration: 0 };
+      },
+    };
+    const registry = new ToolRegistry(delegate);
+    const viaExternal: string[] = [];
+    const externalExecutor = {
+      getTools: () => [],
+      getMetadata: () => ({}),
+      execute: async (tc: import('../../shared/types').ToolCall): Promise<import('../../shared/types').ToolResult> => {
+        viaExternal.push(tc.function.name);
+        return { id: tc.id, toolName: tc.function.name, success: true, duration: 0 };
+      },
+    };
+    registry.register({ name: 'my_script_tool', description: 'user script', input_schema: { type: 'object' }, tags: [Tags.EXTERNAL] });
+    registry.setExternalToolsExecutor(externalExecutor, ['my_script_tool']);
+
+    await registry.execute(call('browser', { action: 'navigate', url: 'http://x' }));
+    await registry.execute(call('my_script_tool', { x: '1' }));
+
+    expect(delegated).toEqual(['browser']);
+    expect(viaExternal).toEqual(['my_script_tool']);
+  });
+
   it('the settings visibility gate also hides deferred tools from discovery', async () => {
     const registry = new ToolRegistry(noopExecutor);
     registry.setVisibilityGate((name) => name !== 'switch_package_source');

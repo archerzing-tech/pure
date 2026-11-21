@@ -2780,6 +2780,42 @@ describe('AgentLoopEngine pause semantics (阶段 12)', () => {
     expect(gap).toBeLessThan(2000);
   }, 20000);
 
+  // 预算耗尽 ≠ 端点卡住（2026-11-21 大屏真机判例）：code_editor 600s 硬预算
+  // 到点后，最后一轮流窗口只剩 1ms，首块 0s 秒超时，重试同样 0s，父 agent
+  // 收到「模型在 0s 内没有输出第一个内容块」。这里用同一个形态复现：预算
+  // 已耗尽时只发起一次请求，然后如实报 time_budget_exhausted，不进入重试。
+  it('预算耗尽不再伪装成首块超时：不重试，如实报时间预算用尽', async () => {
+    let calls = 0;
+    const instantTimeout: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        calls++;
+        const err = new Error('LLM stream first token timed out after 0s');
+        err.name = 'TimeoutError';
+        throw err;
+        yield { type: 'done', content: '', toolCalls: [] };
+      },
+      complete: async () => ({ content: '', toolCalls: [] }),
+    };
+    // hardMaxTime 1ms：一进 THINK 预算就只剩 ~0ms；graceTurns 让预算检查
+    // 停在 warning（真机那一轮正是这样走到流请求的）。
+    const budget: BudgetConfig = { ...STD_BUDGET, hardMaxTime: 1, graceTurns: 3 };
+    const engine = new AgentLoopEngine();
+
+    const events = await collect(engine.run(
+      { sessionId: 's_budget_exhausted', systemPrompt: 'sys', userPrompt: '写一个演示原型', budget },
+      baseCtx({ llm: instantTimeout, budget }),
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    expect(interrupted!.payload.reasonCode).toBe('time_budget_exhausted');
+    expect(interrupted!.payload.reason).toContain('时间预算已用尽');
+    expect(interrupted!.payload.reason).toContain('不是模型端点卡住');
+    // 不重试：只发起过一次请求，也没有 StreamResuming。
+    expect(calls).toBe(1);
+    expect(events.find(e => e.type === 'StreamResuming')).toBeUndefined();
+  }, 20000);
+
   it('首块超时先压缩再重试：第二次请求的 payload 真的更小（2026-11-20 长任务判例）', async () => {
     const attempts: Message[][] = [];
     const hanging: LLMAdapter = {

@@ -35,6 +35,19 @@ describe('isProjectVerificationCommand — 项目级验证识别', () => {
     expect(isProjectVerificationCommand('git add -A && npm test')).toBe(true);
   });
 
+  it('认自建验收脚本：node/bun/npx tsx 跑 verify/e2e/smoke 整页验收', () => {
+    for (const command of [
+      'node scripts/verify.mjs',
+      'cd app && node scripts/verify.mjs 2>&1 | tail -25',
+      'bun scripts/verify.ts',
+      'bun run scripts/verify.mjs',
+      'npx tsx scripts/e2e.ts',
+      'node --test',
+    ]) {
+      expect(isProjectVerificationCommand(command)).toBe(true);
+    }
+  });
+
   it('局部跑与开发命令不算项目已绿', () => {
     for (const command of [
       'bun test src/a.test.ts',
@@ -48,6 +61,10 @@ describe('isProjectVerificationCommand — 项目级验证识别', () => {
       'bun build src/index.ts',
       'cat package.json',
       'ls -la',
+      // 自建脚本只认验收面文件名：server/build/seed 不是验收。
+      'node server.mjs',
+      'node scripts/build-assets.mjs',
+      'node scripts/verify.mjs --only src/login.ts',
     ]) {
       expect(isProjectVerificationCommand(command)).toBe(false);
     }

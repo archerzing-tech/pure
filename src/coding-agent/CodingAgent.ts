@@ -298,6 +298,7 @@ export class CodingAgent {
       if (config.externalToolExecs && config.externalToolExecs.size > 0) {
         this.toolRegistry.setExternalToolsExecutor(
           this.createExternalToolsExecutor(config.externalToolExecs, config.externalToolQuarantine),
+          config.externalToolExecs.keys(),
         );
       }
     }

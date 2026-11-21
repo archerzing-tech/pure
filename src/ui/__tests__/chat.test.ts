@@ -128,6 +128,20 @@ describe('interruption reason classification', () => {
     expect(sanitizeInterruptedReason('Budget exceeded')).toContain('本轮预算上限');
   });
 
+  it('讲清「时间预算用尽」不是端点故障，并透出引擎给出的细节', () => {
+    // 2026-11-21 大屏真机：code_editor 600s 预算到点，最后两轮流窗口 1ms。
+    // 落进 generic 会变成「操作中断，请重试」，用户会重发一个必撞同一面墙的请求。
+    const message = sanitizeInterruptedReason(
+      '本次运行的时间预算已用尽（最后一步只剩 不到 1s，不足以发起模型请求）',
+      'time_budget_exhausted',
+    );
+    expect(message).toContain('时间预算已用尽');
+    expect(message).toContain('不是模型或网络故障');
+    expect(message).toContain('已完成的文件与工具结果都还在');
+    expect(message).toContain('不到 1s');
+    expect(message).not.toContain('操作被中断');
+  });
+
   it('explains a context-window overflow in plain words and surfaces the provider line', () => {
     // The field wedge: the provider 400 body said "maximum context length",
     // but the old truncation regex showed only `400 bad request {` — cryptic.

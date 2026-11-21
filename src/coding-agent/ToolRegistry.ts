@@ -137,6 +137,8 @@ export class ToolRegistry implements ToolAdapter {
   private planControl?: PlanControl;
   private mcpExecutor?: ToolAdapter;
   private externalToolsExecutor?: ToolAdapter;
+  /** 外部脚本执行器拥有的工具名；null = 未声明（旧接线，按标签放行）。 */
+  private externalToolNames: Set<string> | null = null;
   private permissionManager?: PermissionManager;
   private commandGuard?: (command: string) => string | null;
   private errorLogSink?: (line: string) => void;
@@ -180,8 +182,17 @@ export class ToolRegistry implements ToolAdapter {
     this.errorLogSink = sink;
   }
 
-  setExternalToolsExecutor(executor: ToolAdapter): void {
+  /**
+   * `ownedNames`：执行器真正拥有 exec 模板的工具名。必须给——Tags.EXTERNAL
+   * 是「外部可见动作」的分类标签，不是「属于外部脚本执行器」的所有权证明：
+   * 内建的 browser / task_kill 也带 EXTERNAL，按标签转发会把它们送进一个
+   * 没有模板的执行器，模型只收到一句 has no exec template（2026-11-21 大屏
+   * 真机：browser 被 discover_tools 激活后主线程与 code_editor worker 都撞
+   * 上，worker 因此白烧 4 次重试）。旧的按标签路由保留给未传名单的测试接线。
+   */
+  setExternalToolsExecutor(executor: ToolAdapter, ownedNames?: Iterable<string>): void {
     this.externalToolsExecutor = executor;
+    this.externalToolNames = ownedNames ? new Set(ownedNames) : null;
   }
 
   /** Set the permission manager consulted before every tool execution. */
@@ -548,8 +559,10 @@ export class ToolRegistry implements ToolAdapter {
       return this.mcpExecutor.execute(toolCall, signal);
     }
 
-    // Route external script tools to their adapter
-    if (known.tags.includes(Tags.EXTERNAL) && this.externalToolsExecutor) {
+    // Route external script tools to their adapter. Ownership beats the tag:
+    // 内建 browser/task_kill 也带 EXTERNAL，但它们的执行面在 delegate 里。
+    if (known.tags.includes(Tags.EXTERNAL) && this.externalToolsExecutor
+      && (!this.externalToolNames || this.externalToolNames.has(known.name))) {
       return this.externalToolsExecutor.execute(toolCall, signal);
     }
 
