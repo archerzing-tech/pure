@@ -119,9 +119,15 @@ function parseArgs(): { args: CliArgs; command: SubCommand } {
   // config (browser mode) or the Rust secrets slot (desktop). It wins over
   // the legacy global file key but loses to --api-key and provider env vars.
   const override = isCustom ? undefined : providerOverrideFor(fileCfg?.providerOverrides, provider);
-  const overrideKey = override?.apiKey || (override?.hasApiKey ? resolveOverrideSecretKey(provider) : '');
+  // 自定义 provider 的 key 以前在这里直接给空串，只认 config.json 里的明文 apiKey
+  // ——GUI 存在密钥库（secrets.json 的 `llm.apiKey.<id>`）的自定义 key，CLI 一律
+  // 看不到，真机表现为 401「key 格式错误」。密钥库是同一份文件，直接回退到它；
+  // config 明文仍优先（人在 CLI 里显式填的以那个为准）。
+  const overrideKey = override?.apiKey || resolveOverrideSecretKey(provider);
   const apiKey = flags['api-key'] ??
-    (isCustom ? '' : (envKeyForProvider(provider) ?? (overrideKey || fileCfg?.apiKey || '')));
+    (isCustom
+      ? (overrideKey || '')
+      : (envKeyForProvider(provider) ?? (overrideKey || fileCfg?.apiKey || '')));
 
   const model = flags.model ?? fileCfg?.model ?? resolveDefaultModel(provider, fileCfg?.customProviders);
   const workspace =
