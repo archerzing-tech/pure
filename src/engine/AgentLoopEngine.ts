@@ -12,6 +12,7 @@ import { recordSchemaQuarantineEvent, schemaQuarantineDetail } from '../shared/s
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { filePathsFromToolCalls } from '../shared/conventions';
 import { createGreenWatch, stopAtGreenEnabled } from '../shared/stopAtGreen';
+import { createTurnNoteBudget } from '../shared/turnNoteBudget';
 import { createTurnProgressWatch, turnProgressEnabled } from '../shared/turnProgress';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
@@ -456,6 +457,11 @@ export class AgentLoopEngine {
     // 回合级无进展（2026-11-21）：成功重复调用 / 连续无写入各提醒一次。
     // 阈值来自实测基线（shared/turnProgress.ts 头注释），只陈述事实。
     const progressWatch = turnProgressEnabled() ? createTurnProgressWatch() : null;
+    // 机制提醒节流（2026-11-21）：同一段指令 K 轮内只发一次，事实型不受限。
+    // 分类依据见 shared/turnNoteBudget.ts 头注释：事件型（流恢复/握手/阶梯）
+    // 不经过这里，只有可重复的行为指令走预算。
+    const noteBudget = createTurnNoteBudget();
+    const instructionNote = (text: string): string => noteBudget.note('instruction', text, turnCount);
     // Proactive pre-send compaction gave up for this run (nothing shed, still
     // over the trigger, or the compactor threw). One long turn would otherwise
     // repeat the check-and-summarize cycle every round for a window that
@@ -1107,8 +1113,8 @@ export class AgentLoopEngine {
           // retry/reflect carry a hint; degrade carries a reason. Inject
           // whichever applies — the model must SEE the directive, including
           // the degraded-mode instruction, or the escalate levels are silent.
-          const guidance = action.kind === 'degrade' ? action.reason : action.hint;
-          messages.push({ role: 'user' as const, content: guidance, internal: true });
+          const guidance = instructionNote(action.kind === 'degrade' ? action.reason : action.hint);
+          if (guidance) messages.push({ role: 'user' as const, content: guidance, internal: true });
           // rate-limit 阶梯重试退避（2026-11-01 审查判例）：429 每轮 t=0 补枪
           // 限流端点是确定性重败，套用流超时同款指数退避。
           if (errClass === 'rate-limit') {
@@ -1494,9 +1500,11 @@ export class AgentLoopEngine {
         // 不给（体量过阈+零委派），每次配平点拉一次；空串＝无事。
         const parallelNudge = ctx.pullTurnParallelNudge?.();
         if (parallelNudge?.trim()) {
-          const note = parallelNudge.trim();
-          messages.push({ role: 'user' as const, content: note, internal: true });
-          budget.addTokens(note);
+          const note = instructionNote(parallelNudge.trim());
+          if (note) {
+            messages.push({ role: 'user' as const, content: note, internal: true });
+            budget.addTokens(note);
+          }
         }
 
         // 后台委派的结果送达（2026-11-18 档二）：委派工具 detach 后批次立刻
@@ -1586,23 +1594,27 @@ export class AgentLoopEngine {
           // prefer paths already proven this session. Complements the policy
           // hint (which decides retry vs reflect): a retry must change
           // something material instead of re-issuing the identical call.
-          for (const te of toolErrors) {
-            const note = this.degradationNote(te);
-            messages.push({ role: 'user' as const, content: note, internal: true });
-            budget.addTokens(note);
+          // 同一轮的退化说明 + 策略指令合并成一条：以前是 N+1 条独立 internal
+          // 消息，内容全是「这条调用已死 + 接下来怎么做」，分开发只让模型多
+          // 读几遍同一件事（2026-11-21 提醒审计）。
+          const failureNote = instructionNote([
+            ...toolErrors.map((te) => this.degradationNote(te)),
+            action.kind === 'degrade' ? action.reason : action.hint,
+          ].join('\n\n'));
+          if (failureNote) {
+            messages.push({ role: 'user' as const, content: failureNote, internal: true });
+            budget.addTokens(failureNote);
           }
-          // retry/reflect carry a hint; degrade carries a reason — inject
-          // whichever applies so the model sees the directive (degrade must
-          // not silently retry without guidance).
-          const toolGuidance = action.kind === 'degrade' ? action.reason : action.hint;
-          messages.push({ role: 'user' as const, content: toolGuidance, internal: true });
           // 失败的检索轮同样推进守卫（审计批 5⑧）：全检索轮全失败也要在
           // 上限处触发收束指令，否则模型可以无限循环失败搜索。
           const failedBump = this.bumpResearchStreak(researchStreak, toolCalls);
           researchStreak = failedBump.streak;
           if (failedBump.wrapUp) {
-            messages.push({ role: 'user' as const, content: failedBump.wrapUp, internal: true });
-            budget.addTokens(failedBump.wrapUp);
+            const wrapUp = instructionNote(failedBump.wrapUp);
+            if (wrapUp) {
+              messages.push({ role: 'user' as const, content: wrapUp, internal: true });
+              budget.addTokens(wrapUp);
+            }
           }
           turnCount++; budget.incrementTurn();
           yield { type: 'YieldControl', payload: { turnNumber: turnCount, budget: budget.snapshot() }, timestamp: Date.now() };
@@ -1646,10 +1658,12 @@ export class AgentLoopEngine {
         // v1.9.7 — same degradation without a failure policy: the model still
         // sees the raw error, but the explicit directive guarantees the next
         // THINK treats the failed call as a dead-end instead of re-issuing it.
-        for (const te of toolErrors) {
-          const note = this.degradationNote(te);
-          messages.push({ role: 'user' as const, content: note, internal: true });
-          budget.addTokens(note);
+        if (toolErrors.length > 0) {
+          const failureNote = instructionNote(toolErrors.map((te) => this.degradationNote(te)).join('\n\n'));
+          if (failureNote) {
+            messages.push({ role: 'user' as const, content: failureNote, internal: true });
+            budget.addTokens(failureNote);
+          }
         }
 
         // v1.9.15 — research-loop guard: after several consecutive all-web
@@ -1661,8 +1675,11 @@ export class AgentLoopEngine {
         const bump = this.bumpResearchStreak(researchStreak, toolCalls);
         researchStreak = bump.streak;
         if (bump.wrapUp) {
-          messages.push({ role: 'user' as const, content: bump.wrapUp, internal: true });
-          budget.addTokens(bump.wrapUp);
+          const wrapUp = instructionNote(bump.wrapUp);
+          if (wrapUp) {
+            messages.push({ role: 'user' as const, content: wrapUp, internal: true });
+            budget.addTokens(wrapUp);
+          }
         }
 
         turnCount++;
@@ -1826,18 +1843,20 @@ export class AgentLoopEngine {
               // internal: true（审计批 5③）——这是给模型的机制指令，不是用户
               // 说话：漏标会渲染成用户气泡。语言判定已搬宿主（2026-11-06 P3），
               // 但 internal 纪律不随之退役。
-              messages.push({ role: 'user' as const, content: hint, internal: true });
+              const throttledHint = instructionNote(hint);
+              if (throttledHint) messages.push({ role: 'user' as const, content: throttledHint, internal: true });
             } else {
               yield {
                 type: 'Error',
                 payload: { code: 'VERIFY_FAILED', message: result.feedback ?? 'Verification failed', stateType: 'VERIFY', recoverable: true, recoveryAction: 'reflect' },
                 timestamp: Date.now(),
               };
-              messages.push({
-                role: 'user' as const,
-                content: `Verification failed: ${result.feedback ?? ''}. Please review the output above and fix any issues.`,
-                internal: true,
-              });
+              // 同一份验证失败反馈连续几轮重复时只发一次：模型没改代码，
+              // 重读同一句话不会帮它改对（同一验证重复失败是打转的典型形态）。
+              const verifyNote = instructionNote(`Verification failed: ${result.feedback ?? ''}. Please review the output above and fix any issues.`);
+              if (verifyNote) {
+                messages.push({ role: 'user' as const, content: verifyNote, internal: true });
+              }
             }
             turnCount++;
             budget.incrementTurn();
@@ -1895,6 +1914,9 @@ export class AgentLoopEngine {
         const nudge = typeof directive === 'string' && directive.trim()
           ? directive
           : (!content.trim() && guardContinues < MAX_GUARD_CONTINUES ? emptyOutputNudge : false);
+        // continueGuard 不走节流：它的机制就是「同样的提醒最多再发 N 次」，
+        // 去重会把计数账吃掉（2026-11-21 测试抓到：守卫只会响一次）——同文
+        // 重复在这里恰恰是功能，不是噪音。
         if (nudge && guardContinues < MAX_GUARD_CONTINUES) {
           guardContinues++;
           messages.push({ role: 'user' as const, content: nudge, internal: true });

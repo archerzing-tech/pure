@@ -3141,6 +3141,47 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     expect(rounds[1]!.some(m => m.content.includes('<stop_at_green>'))).toBe(false);
   });
 
+  it('does not repeat the same mid-turn instruction on the next round', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ < 2) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: `call_${round}`, index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: `src/m${round}.ts`, content: 'x' }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const repeated = 'Main-thread write volume this turn: 2 whole-file write(s) — consider batched code_editor delegations.';
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+      },
+      // 同一个配平点建议连着两轮都拉得到，但内容一字未变。
+      pullTurnParallelNudge: () => repeated,
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-note-budget', systemPrompt: 'sys', userPrompt: '构建一个原型', budget: STD_BUDGET },
+      ctx,
+    ));
+    const completed = events.find(e => e.type === 'Completed')!;
+    // 两轮都有配平点，但同文指令只发一次（K=2 轮内去重）。
+    expect(rounds[1]!.filter(m => m.content.includes('Main-thread write volume'))).toHaveLength(1);
+    expect(rounds[2]!.filter(m => m.content.includes('Main-thread write volume'))).toHaveLength(1);
+    expect(completed.payload.messages!.filter(m => m.content.includes('Main-thread write volume'))).toHaveLength(1);
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
   it('injects one turn-progress note after the same call succeeds three times', async () => {
     let round = 0;
     const rounds: Message[][] = [];
