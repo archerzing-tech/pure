@@ -28,6 +28,7 @@ import { buildBackgroundLaunchPlan, buildBackgroundResult, parseBackgroundPid } 
 import { listTasks, registerTask, unregisterTask } from '../shared/taskRegistry';
 import { isBenignNoMatchExit } from '../shared/format';
 import { imageMimeForPath } from '../shared/imageFiles';
+import { loadTauriCore } from '../shared/tauri';
 import { installDesktopControl } from '../shared/desktopToolkit';
 import { blockedHostMessage, contentStatusFromMessage, detectHijack, hijackReason, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../shared/netGuard';
 import { primaryRewrite } from '../shared/sourceRewrite';
@@ -516,6 +517,24 @@ export class TauriToolAdapter implements ToolAdapter {
     if (normalized.startsWith('/')) return normalized;
     const base = ws.replace(/\\/g, '/').replace(/\/+$/, '');
     return base ? `${base}/${normalized}` : normalized;
+  }
+
+  /**
+   * 整写 vs 编辑记账（2026-11-22 用户反馈：「改一处就全量写」）。只记事实、
+   * 不改行为：每次成功的 write_file / edit_file 落一行 `file_edit` 到
+   * gui_perf.log——op、是否已有文件、本次会话是否已知（读过/写过）、字节数、
+   * append。分析端按 op 汇总就能算全量写入占比与「重写已知文件」占比。
+   * 埋点尽力而为：桥不可用/写盘失败不影响工具结果。
+   */
+  private noteFileEditOp(op: 'write' | 'edit', path: string, extra: Record<string, unknown>): void {
+    try {
+      const line = JSON.stringify({ ts: Date.now(), kind: 'file_edit', op, path, ...extra });
+      void loadTauriCore()
+        .then((core) => core?.invoke('gui_perf_log', { lines: [line] }))
+        .catch(() => { /* best-effort */ });
+    } catch {
+      /* best-effort */
+    }
   }
 
   constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false, githubMirror = '', githubCustomMirror = '', summarizeForExtract?: SummarizeForExtract) {
@@ -1640,12 +1659,28 @@ export class TauriToolAdapter implements ToolAdapter {
               append,
               onProgress: channel,
             }) as string;
+            const knownBefore = this.readPaths.has(this.readKey(ws, path));
             this.readPaths.add(this.readKey(ws, path));
+            this.noteFileEditOp('write', path, {
+              existed: batch.entries[0]?.existed === true,
+              knownBefore,
+              append,
+              overwrite: args.overwrite === true,
+              bytes: content.length,
+            });
             const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
             return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
           }
           const msg = await this.call('write_file', { workspace: ws, path, content, append }) as string;
+          const knownBefore = this.readPaths.has(this.readKey(ws, path));
           this.readPaths.add(this.readKey(ws, path));
+          this.noteFileEditOp('write', path, {
+            existed: batch.entries[0]?.existed === true,
+            knownBefore,
+            append,
+            overwrite: args.overwrite === true,
+            bytes: content.length,
+          });
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
           return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
         }
@@ -1666,6 +1701,10 @@ export class TauriToolAdapter implements ToolAdapter {
             newString: String(args.newString ?? ''),
             allowMultiple: Boolean(args.allowMultiple),
           }) as string;
+          this.noteFileEditOp('edit', path, {
+            bytes: String(args.newString ?? '').length,
+            allowMultiple: Boolean(args.allowMultiple),
+          });
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
           return { id: toolCall.id, toolName: name, result: `${editMsg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
         }
