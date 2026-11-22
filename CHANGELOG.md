@@ -4,11 +4,11 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
-## v4.10.2-beta
+## v4.10.2
 
 **编码回合不再走弯路：读到的有行号、改完有 diff、验证命令由项目自己给出，检索入口只剩一个**
 
-说明：本版是编码/项目构建效率改造的第一个 beta（清单见 `docs/coding-efficiency-plan-2026-11.md`），以预发布通道发出，不进稳定更新流。
+说明：本版是编码/项目构建效率改造（清单见 `docs/coding-efficiency-plan-2026-11.md`）。beta 期的真机采样已完成，读数见文末。
 
 一、动手面补信息。`read_file` 在模型面向的路径上带 `N→` 行号 gutter，`edit_file` 回显改动的 hunk，`write_file` 在目标已存在且本会话没读过时要求先读——按错行、改错处、覆盖未读文件这三类返工从源头削减。gutter 只在整块每个非空行都带前缀时才剥离，撤销快照与预览拿到的仍是原始正文。
 
@@ -18,7 +18,9 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 四、并行委派按规模触发。完整的委派指令只在任务规模命中时注入，单文件信号一票否决；常驻只留一句范围提示，小任务不再为多文件场景预付首轮开销。
 
-验证：`bun run typecheck`、`bun run lint:conventions` 绿；新增 `verificationEntry`、`lineGutter` 用例，相关面 512 pass / 2 skip，CLI 侧 42 pass；`cargo test --lib` 326 pass / 1 ignored。真机读数（首条验证命令命中率、检索选对率、返工次数）尚未采样，本 beta 的目的即是采集这批数据。
+五、绿信号只认退出码由验收本身决定的命令。beta 真机案例撞上假绿：`npm run test 2>&1 | tail -30` 输出明确 1 fail，管道却把退出码换成 `tail` 的 0，收束提醒在红测试上触发。现在只认「整条命令的最后一段就是项目验收」；管道、`; echo "EXIT=$?"`、`|| true` 这类把退出码换走的形式都不算确定性证据。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；新增 `verificationEntry`、`lineGutter` 用例，相关面 512 pass / 2 skip，CLI 侧 42 pass；`cargo test --lib` 326 pass / 1 ignored；`stopAtGreen` 10 例。真机采样（结算样本，单文件 bug，火山引擎）：两轮 15.0s / 13.2s，各 1 次编辑、0 次委派、编辑后零重读；`<project_verification>` 命中并让模型直接跑 `npm run test`；行号 gutter 与 edit hunk 均出现在结果里。`code_searcher` 的检索收益在 6 文件小仓库里无检索需求，未采到读数。
 
 ## v4.10.1
 
