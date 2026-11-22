@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createGreenWatch, isProjectVerificationCommand } from '../stopAtGreen';
+import { createGreenWatch, isGreenEvidenceCommand, isProjectVerificationCommand } from '../stopAtGreen';
 
 function args(command: string): string {
   return JSON.stringify({ command });
@@ -85,6 +85,34 @@ describe('isProjectVerificationCommand — 项目级验证识别', () => {
     // 正文之外的那条真命令仍按自己的语义判定。
     expect(isProjectVerificationCommand(`${command}\nnode /tmp/smoke.mjs`)).toBe(false);
     expect(isProjectVerificationCommand(`${command}\nnode scripts/verify.mjs`)).toBe(true);
+  });
+});
+
+describe('isGreenEvidenceCommand — 退出码必须由验收本身决定', () => {
+  it('最后一段就是验收：认', () => {
+    for (const command of [
+      'bun test',
+      'cd app && bun test',
+      'git add -A && npm test',
+      'CI=1 bun run typecheck',
+      'node scripts/verify.mjs',
+    ]) {
+      expect(isGreenEvidenceCommand(command), command).toBe(true);
+    }
+  });
+
+  it('管道 / 分号尾巴 / || true 把退出码换走：不认（2026-11-22 真机假绿）', () => {
+    for (const command of [
+      'npm run test 2>&1 | tail -30',
+      'bun test 2>&1 | tail -5',
+      'node scripts/verify.mjs 2>&1 | tail -25',
+      'npm run test 2>&1; echo "EXIT=$?"',
+      'bun test || true',
+    ]) {
+      expect(isGreenEvidenceCommand(command), command).toBe(false);
+      // 分类面仍认它是「一条验证命令」——只拒绝它当确定性绿证据。
+      expect(isProjectVerificationCommand(command), command).toBe(true);
+    }
   });
 });
 

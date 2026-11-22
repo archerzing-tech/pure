@@ -86,11 +86,31 @@ export function createGreenWatch(): GreenWatch {
       const base = toolName.includes('__') ? toolName.slice(toolName.lastIndexOf('__') + 2) : toolName;
       if (base !== 'execute_command') return '';
       const command = commandFromArgs(rawArgs);
-      if (!command || !isProjectVerificationCommand(command)) return '';
+      if (!command || !isGreenEvidenceCommand(command)) return '';
       announced = true;
       return renderStopAtGreen(command);
     },
   };
+}
+
+/**
+ * 绿信号的证据命令（2026-11-22 真机判例）：退出码必须由验收本身决定。
+ * `npm run test 2>&1 | tail -30` 里测试挂了、退出码却是 tail 的 0；`cmd;
+ * echo "EXIT=$?"` 同理。工具面按最后一段的状态报 success，绿信号就会在红
+ * 测试上触发。只认「整条命令的最后一段就是项目验收」——管道、分号尾巴、
+ * `|| true` 这些把退出码换走的形式都不算确定性证据。
+ */
+export function isGreenEvidenceCommand(command: string): boolean {
+  if (!command.trim()) return false;
+  const segments = stripHeredocBodies(command)
+    .replace(/\\\r?\n/g, ' ')
+    .split(/&&|\|\||;|\||\r?\n/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+  const final = segments[segments.length - 1];
+  if (!final) return false;
+  const tokens = commandTokens(final);
+  return tokens.length > 0 && isVerificationTokens(tokens);
 }
 
 function renderStopAtGreen(command: string): string {
