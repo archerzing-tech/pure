@@ -4,6 +4,22 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.2-beta
+
+**编码回合不再走弯路：读到的有行号、改完有 diff、验证命令由项目自己给出，检索入口只剩一个**
+
+说明：本版是编码/项目构建效率改造的第一个 beta（清单见 `docs/coding-efficiency-plan-2026-11.md`），以预发布通道发出，不进稳定更新流。
+
+一、动手面补信息。`read_file` 在模型面向的路径上带 `N→` 行号 gutter，`edit_file` 回显改动的 hunk，`write_file` 在目标已存在且本会话没读过时要求先读——按错行、改错处、覆盖未读文件这三类返工从源头削减。gutter 只在整块每个非空行都带前缀时才剥离，撤销快照与预览拿到的仍是原始正文。
+
+二、验证入口机械化。首轮读一次根目录清单，按 `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod` / `Makefile` 取项目自己声明的命令（包管理器由 lockfile 判定），注入 envFacts；识别不到就什么都不注入，绝不拼一条猜出来的命令。
+
+三、探索面收口。`code_searcher` 成为唯一内容检索入口，`find_files` 退回文档主题定位，`search_files` 退成隐藏工具（执行面保留兼容）；未知工具的错误改成指向 `discover_tools` 的恢复路径，不再列一份混着隐藏工具的可用清单。`git_status` / `git_diff` / `git_commit` 回常驻，提交前不再先白付一轮发现。
+
+四、并行委派按规模触发。完整的委派指令只在任务规模命中时注入，单文件信号一票否决；常驻只留一句范围提示，小任务不再为多文件场景预付首轮开销。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；新增 `verificationEntry`、`lineGutter` 用例，相关面 512 pass / 2 skip，CLI 侧 42 pass；`cargo test --lib` 326 pass / 1 ignored。真机读数（首条验证命令命中率、检索选对率、返工次数）尚未采样，本 beta 的目的即是采集这批数据。
+
 ## v4.10.1
 
 **撤回 4.11.0，并把真机复验暴露的四个问题收口：验收绿后真的会收手、预算耗尽不再伪装成端点故障、外部工具不再被标签截胡、macOS 画面冻结有了预防与取证**
