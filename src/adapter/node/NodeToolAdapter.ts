@@ -20,6 +20,7 @@ import { runBrowserTool, runScreenshotTool } from '../../tools/impl/browser';
 import { readDevToolsPort } from '../../channels/rasterize/headlessChrome';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../../tools/runtime';
 import { readFileHeadFooter, readFileHeadSlice, readFileRangeFooter, readFileRangeSlice } from '../../shared/readFileHead';
+import { formatEditHunk, formatNumberedLines, lineRangeAt, stripLineNumberGutter } from '../../shared/lineGutter';
 import { POWERSHELL_ENCODING_LINES } from '../../shared/powershellEncoding';
 import { formatSymbolOutline } from '../../shared/symbolOutline';
 import { generateDocument } from '../../shared/docGen';
@@ -304,6 +305,8 @@ export class NodeToolAdapter implements ToolAdapter {
   private sessionId: string;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
+  /** 本会话成功读过的绝对路径——write_file 读前门的凭据（2026-11-22）。 */
+  private readPaths = new Set<string>();
 
   private tools: ToolDefinition[] = [...BUILT_IN_TOOL_DEFS];
 
@@ -397,7 +400,7 @@ export class NodeToolAdapter implements ToolAdapter {
         case 'diagnose_network': return await this.handleDiagnoseNetwork(args, start);
         case 'switch_package_source': return await this.handleSwitchPackageSource(args, start);
         default:
-          return this.fail(toolCall, start, `Unknown tool: ${toolCall.function.name}`);
+          return this.fail(toolCall, start, `Unknown tool "${toolCall.function.name}". If it is a deferred built-in or MCP tool, call discover_tools with "${toolCall.function.name}" (or its keywords) and retry — do not invent tool names.`);
       }
     } catch (err: any) {
       return this.fail(toolCall, start, err?.message ?? String(err));
@@ -408,6 +411,9 @@ export class NodeToolAdapter implements ToolAdapter {
 
   private async handleReadFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const path = await this.resolve(String(args.path));
+    // 行号 gutter（2026-11-22）：正文默认带 `N→` 坐标系；outline 自带行号不
+    // 重复加，空文件与显式 lineNumbers:false 保持旧形态。
+    const numbered = args.lineNumbers !== false;
 
     if (!existsSync(path)) {
       // 后台日志的引用悬空（见 BACKGROUND_LOG_MISS_HINT）：给结构化出路，别让
@@ -472,7 +478,7 @@ export class NodeToolAdapter implements ToolAdapter {
     if (args.outline !== true && rangeStart !== null && rangeEnd !== null) {
       const windowed = await this.readTextRangeWindow(path, rangeStart, rangeEnd);
       if (windowed !== null) {
-        return this.explicitRangeResult(windowed.split('\n'), rangeStart, start);
+        return this.explicitRangeResult(windowed.split('\n'), rangeStart, start, numbered);
       }
     }
 
@@ -485,6 +491,9 @@ export class NodeToolAdapter implements ToolAdapter {
     if (!text) {
       text = '(empty file)';
     }
+    // 读前门的凭据：目录与图片在上面的分支已经返回，这里只记真正看过内容的
+    // 文件。outline 也算看过（模型至少知道结构与行号）。
+    this.readPaths.add(path);
 
     // 符号大纲（2026-11-17）：整份读进来后只回声明行 + 行号。放在范围分支之前
     // ——outline 是全文语义，startLine/endLine 对它没有意义（schema 已写明）。
@@ -507,7 +516,7 @@ export class NodeToolAdapter implements ToolAdapter {
     if (rangeStart !== null || rangeEnd !== null) {
       const startLine = rangeStart ?? 1;
       const endLine = rangeEnd !== null ? Math.min(rangeEnd, lines.length) : lines.length;
-      return this.explicitRangeResult(lines.slice(startLine - 1, endLine), startLine, start);
+      return this.explicitRangeResult(lines.slice(startLine - 1, endLine), startLine, start, numbered);
     }
 
     // 刀 D1（2026-10-10）真杠杆：默认（未给范围）大文件只回头部切片 + 总行数
@@ -521,7 +530,7 @@ export class NodeToolAdapter implements ToolAdapter {
       return {
         id: `tool_${Date.now()}`,
         toolName: 'read_file',
-        result: `${head.text}\n\n${readFileHeadFooter(head.count, lines.length, head.partialFirstLine)}`,
+        result: `${numbered ? formatNumberedLines(head.text.split('\n'), 1) : head.text}\n\n${readFileHeadFooter(head.count, lines.length, head.partialFirstLine)}`,
         success: true,
         duration: Date.now() - start,
       };
@@ -530,7 +539,7 @@ export class NodeToolAdapter implements ToolAdapter {
     return {
       id: `tool_${Date.now()}`,
       toolName: 'read_file',
-      result: text,
+      result: numbered && text !== '(empty file)' ? formatNumberedLines(lines, 1) : text,
       success: true,
       duration: Date.now() - start,
     };
@@ -542,11 +551,14 @@ export class NodeToolAdapter implements ToolAdapter {
    * 截断并追加续读脚注——否则范围请求大到撞引擎 40k 盲截时，盲截 notice
    * 的「请用 startLine/endLine」对刚做过这件事的模型是循环指路。
    */
-  private explicitRangeResult(rangeLines: string[], rangeStartLine: number, start: number): ToolResult {
+  private explicitRangeResult(rangeLines: string[], rangeStartLine: number, start: number, numbered: boolean): ToolResult {
     const slice = readFileRangeSlice(rangeLines);
+    // 行号加在预算判定之后：先按原字符预算决定显示几行，再补 gutter——
+    // 否则每行多出的 5-7 个字符会让同一个文件在不同开关下切出不同行数。
+    const body = numbered ? formatNumberedLines(slice.text.split('\n'), rangeStartLine) : slice.text;
     const text = slice.shownLines < slice.totalLines
-      ? `${slice.text}\n\n${readFileRangeFooter(rangeStartLine, slice.shownLines, slice.totalLines)}`
-      : slice.text;
+      ? `${body}\n\n${readFileRangeFooter(rangeStartLine, slice.shownLines, slice.totalLines)}`
+      : body;
     return {
       id: `tool_${Date.now()}`,
       toolName: 'read_file',
@@ -674,6 +686,16 @@ export class NodeToolAdapter implements ToolAdapter {
     const path = await this.resolve(pathArg);
     const content = String(args.content);
     const append = args.append === true;
+    // 读前门（2026-11-22）：覆写一个本会话没读过的已有文件，会静默丢掉模型
+    // 从未见过的内容（配置、导出、测试）。新建、追加、显式 overwrite:true 不
+    // 受此门限制。
+    if (!append && args.overwrite !== true && existsSync(path) && !this.readPaths.has(path)) {
+      return this.fail(
+        null,
+        start,
+        `write_file refused: ${pathArg} already exists and has not been read in this session. Read it first with read_file (then edit_file for a targeted change), or pass overwrite:true to replace the whole file.`,
+      );
+    }
     const batch = await this.captureWriteBatch('write_file', [pathArg]);
 
     // Ensure parent directory exists
@@ -684,6 +706,7 @@ export class NodeToolAdapter implements ToolAdapter {
 
     if (append) await appendFile(path, content);
     else await Bun.write(path, content);
+    this.readPaths.add(path);
     const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
     // 累计锚点（2026-11-17 大文件分段写判例）：append 分段写是教过的策略，
@@ -706,8 +729,10 @@ export class NodeToolAdapter implements ToolAdapter {
   private async handleEditFile(args: Record<string, unknown>, start: number): Promise<ToolResult> {
     const pathArg = String(args.path);
     const path = await this.resolve(pathArg);
-    const oldStr = String(args.oldString);
-    const newStr = String(args.newString);
+    // 允许模型把带行号的显示层整块复制进 oldString/newString：只有整块都带
+    // gutter 才剥离（判据见 shared/lineGutter.ts）。
+    const oldStr = stripLineNumberGutter(String(args.oldString)) ?? String(args.oldString);
+    const newStr = stripLineNumberGutter(String(args.newString)) ?? String(args.newString);
     const allowMultiple = Boolean(args.allowMultiple);
 
     const file = Bun.file(path);
@@ -734,10 +759,14 @@ export class NodeToolAdapter implements ToolAdapter {
     await Bun.write(path, newText);
     const undoAvailable = await this.tryFinishWriteBatch(batch, [pathArg]);
 
+    // 改动回显（2026-11-22）：只回「替换了几处」时，模型无法确认改在了预期
+    // 位置，只能再读一遍；给它带行号的 ±3 行窗口，这一轮就读得回来。
+    const range = lineRangeAt(newText, match.index, replacement);
+    const hunk = formatEditHunk(newText, range.startLine, range.endLine);
     return {
       id: `tool_${Date.now()}`,
       toolName: 'edit_file',
-      result: `Replaced ${allowMultiple ? occurrences : 1} occurrence(s) in ${String(args.path)}${match.lineEnding === 'crlf' ? ' (matched CRLF line endings)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
+      result: `Replaced ${allowMultiple ? occurrences : 1} occurrence(s) in ${pathArg} (now ${newText.split('\n').length} lines)${match.lineEnding === 'crlf' ? ' (matched CRLF line endings)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}.\nChanged region:\n${hunk}`,
       success: true,
       duration: Date.now() - start,
     };

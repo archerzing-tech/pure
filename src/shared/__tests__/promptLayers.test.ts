@@ -24,10 +24,11 @@ import {
   CAPABILITY_GAP_LADDER,
   MULTI_AGENT_MECHANICS_PROMPT,
   PARALLEL_FIRST_DIRECTIVE,
+  PARALLEL_SCOPE_NOTE,
   composeUserTurn,
   stripUserTurnContext,
   wantsCapabilityLadder,
-  wantsDelegationMechanics,
+  wantsDelegationScale,
   wantsHandsOnWorkflow,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
@@ -464,41 +465,42 @@ describe('L1 behavior contracts', () => {
     // 闸门：普通请求不带细则，装东西/缺能力或多主题的请求带。
     expect(wantsCapabilityLadder('把 README 里的 typo 修一下')).toBe(false);
     expect(wantsCapabilityLadder('帮我装 ffmpeg')).toBe(true);
-    expect(wantsDelegationMechanics('改一下标题', false)).toBe(false);
-    expect(wantsDelegationMechanics('改一下标题', true)).toBe(true);
-    expect(wantsDelegationMechanics('分别研究 A、B、C 三个方向', false)).toBe(true);
+    expect(wantsDelegationScale('改一下标题', 'build')).toBe(false);
+    expect(wantsDelegationScale('改一下标题')).toBe(false);
+    expect(wantsDelegationScale('分别研究 A、B、C 三个方向')).toBe(true);
     // 2026-11-02 体量拆路增补：素材量大/盘点类请求也开闸（fan-out 规则同步补体量触发，
     // 对齐 Claude Code「量检测→拆路并行→只收结论」编排形态）。
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('flood the main session');
-    expect(wantsDelegationMechanics('把这批历史文档盘点一遍', false)).toBe(true);
-    expect(wantsDelegationMechanics('通读所有文档写一份摘要', false)).toBe(true);
+    expect(wantsDelegationScale('把这批历史文档盘点一遍')).toBe(true);
+    expect(wantsDelegationScale('通读所有文档写一份摘要')).toBe(true);
     // 2026-11-15 真机判例：用户说"从多个平台帮我快速整理最新国漫上新剧集"，
     // 模型手里有 researcher 却连打 6 个 web_search——来源集合当时不在词表里，
     // 编排规则没进提示词，"快速"又把它推向自己串行查。来源集合 = N 路调研。
-    expect(wantsDelegationMechanics('从多个平台帮我快速的整理一下最新的国漫上新剧集', false)).toBe(true);
-    expect(wantsDelegationMechanics('对比 B 站、腾讯、爱奇艺各平台的国漫上新', false)).toBe(true);
-    expect(wantsDelegationMechanics('去各社区看看大家怎么评价这个模型', false)).toBe(true);
-    expect(wantsDelegationMechanics('多渠道确认一下这个价格', false)).toBe(true);
+    expect(wantsDelegationScale('从多个平台帮我快速的整理一下最新的国漫上新剧集')).toBe(true);
+    expect(wantsDelegationScale('对比 B 站、腾讯、爱奇艺各平台的国漫上新')).toBe(true);
+    expect(wantsDelegationScale('去各社区看看大家怎么评价这个模型')).toBe(true);
+    expect(wantsDelegationScale('多渠道确认一下这个价格')).toBe(true);
     // 单一来源的检索不开闸：别把一次普通搜索也说成多路。
-    expect(wantsDelegationMechanics('帮我搜一下国漫上新', false)).toBe(false);
+    expect(wantsDelegationScale('帮我搜一下国漫上新')).toBe(false);
+    // 2026-11-22 主判据：单文件/单链路不因 mode=build 被抬成可拆任务。
+    expect(wantsDelegationScale('修复 src/ui/chat.ts 里的滚动抖动并补测试', 'build')).toBe(false);
+    expect(wantsDelegationScale('改这个文件里的空指针', 'build')).toBe(false);
+    expect(wantsDelegationScale('给这个函数补一个单测', 'plan')).toBe(false);
+    // 真正的项目级产物才开闸。
+    expect(wantsDelegationScale('做一个后台管理系统', 'build')).toBe(true);
+    expect(wantsDelegationScale('做一个多文件的网页应用', 'build')).toBe(true);
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('A sources set counts as N investigations');
 
-    // 2026-11-15 用户定调「能并行的就不要串行」：并行默认必须常驻，不走关键词
-    // 闸门——判例正是"从多个平台整理"这类没命中词表、于是模型自己串行查的活。
-    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Parallel is the default disposition');
+    // 2026-11-22：并行从「默认立场」收回「按规模触发」。常驻的只有成本事实，
+    // 拆分教学只在规模命中时进场——单文件修复被推给 worker 是用户说的"绕弯子"。
+    expect(PARALLEL_SCOPE_NOTE).toContain('Keep work you can finish yourself in one pass');
+    expect(PARALLEL_SCOPE_NOTE).toContain('a fresh brief, the same files read again');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Parallel is worth it only when the work genuinely decomposes');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('Do NOT split work you can finish yourself in one pass');
+    expect(PARALLEL_FIRST_DIRECTIVE).toContain('one or two files, a single call chain');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('N delegations issued in ONE batch');
-    // 2026-11-18 大屏原型判例：构建全程主线单干、116KB 生成全落主线转写——
-    // 生产侧形状（契约先行、模块批量委派、大写入搬出主线）必须常驻在场。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('pin the shared contract in the main thread first');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Whole-file generation of multi-KB modules belongs in worker sessions');
-    // 2026-11-20 用户判例「多 agent 激发不够果断」：拆分决策必须在第一次
-    // 写盘之前，批量委派是默认预期；单干只能是能一句话说清的决定，不许
-    // 「先写模块 1、以后再说」式漂移。
-    expect(PARALLEL_FIRST_DIRECTIVE).toContain('The split decision comes BEFORE the first write');
-    expect(PARALLEL_FIRST_DIRECTIVE).toContain('the expected move is the delegation batch');
-    expect(PARALLEL_FIRST_DIRECTIVE).toContain('instead of drifting into it');
-    // 2026-11-18 用户要求：子 agent 在飞时主 agent 要告诉用户「趁空档我做什么」。
-    // 只给形状不给句式——固定模板会让每轮话说得一模一样。
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('Handing work off is worth one sentence');
     expect(PARALLEL_FIRST_DIRECTIVE).toContain('never a stock formula');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Say the parallel plan out loud once');
@@ -508,9 +510,9 @@ describe('L1 behavior contracts', () => {
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('Produce fan-out');
     expect(MULTI_AGENT_MECHANICS_PROMPT).toContain('one code_editor delegation per independent module in the SAME batch');
     const assemblerSrc = readFileSync(new URL('../PromptAssembler.ts', import.meta.url), 'utf8');
-    expect(assemblerSrc).toContain("context.hasSubagents ? PARALLEL_FIRST_DIRECTIVE : ''");
-    // 它绝不能挂在关键词闸门后面（那是这次的真错）。
-    expect(assemblerSrc).not.toContain('wantsDelegationMechanics(text, complexTask) ? PARALLEL_FIRST_DIRECTIVE');
+    // 完整立场必须挂在规模闸门后面；常驻的只能是那条成本事实。
+    expect(assemblerSrc).toContain('context.hasSubagents && scale ? PARALLEL_FIRST_DIRECTIVE : \'\'');
+    expect(assemblerSrc).toContain('context.hasSubagents && !scale ? PARALLEL_SCOPE_NOTE : \'\'');
   });
 
   it('uses dynamic capability tools for skills and MCP services', () => {
@@ -654,8 +656,12 @@ describe('file & shell tool descriptions (framework-reform phase 2 carrier)', ()
   it('carries the read/find discipline: locate first, read ranges, never paste whole files', () => {
     expect(desc('read_file')).toContain('Never paste a whole file into the conversation');
     expect(desc('read_file')).toContain('startLine');
-    expect(desc('find_files')).toContain('Use this FIRST');
-    expect(desc('find_files')).toContain('follow those suggestions instead of guessing');
+    // 检索面收口（2026-11-22）：代码/符号检索的唯一入口是 code_searcher；
+    // find_files 退回「不知道文件在哪时的主题定位」，不能再自称 FIRST。
+    expect(desc('find_files')).toContain('NOT for code or symbol lookup');
+    expect(desc('find_files')).not.toContain('Use this FIRST');
+    expect(desc('code_searcher')).toContain('single content-search entry');
+    expect(desc('code_searcher')).toContain('startLine/endLine');
     expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'replace_files')).toBeTruthy();
     expect(BUILT_IN_TOOL_DEFS.find((t) => t.name === 'git_status')).toBeTruthy();
   });

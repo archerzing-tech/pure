@@ -406,12 +406,34 @@ describe('Tauri workspace snapshots', () => {
       throw new Error(`unexpected command: ${command}`);
     };
     const adapter = new TauriToolAdapter('/ws', '', '', '', invoke, 'session-tauri');
+    // 读前门（2026-11-22）：覆写已存在文件前先读一次。
+    expect((await adapter.execute(toolCall('read_file', { path: 'app.ts' }))).success).toBe(true);
     const changed = await adapter.execute(toolCall('write_file', { path: 'app.ts', content: 'after' }));
     expect(changed.success).toBe(true);
     expect(adapter.getSnapshotPort().getLatestWriteBatch()?.sessionId).toBe('session-tauri');
     const restored = await adapter.getSnapshotPort().undoLastWriteBatch();
     expect(restored.restored).toBe(true);
     expect(content).toBe('before');
+  });
+
+  it('refuses an unread overwrite and honours overwrite:true (2026-11-22)', async () => {
+    let exists = true;
+    let content = 'before';
+    const invoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+      if (command === 'path_info') return { exists, isDirectory: false };
+      if (command === 'read_file') return content;
+      if (command === 'write_file') { exists = true; content = String(args?.content ?? ''); return 'Wrote'; }
+      if (command === 'remove_path') { exists = false; return 'Removed'; }
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
+    const refused = await adapter.execute(toolCall('write_file', { path: 'app.ts', content: 'after' }));
+    expect(refused.success).toBe(false);
+    expect(refused.error).toContain('has not been read in this session');
+    expect(content).toBe('before');
+    const forced = await adapter.execute(toolCall('write_file', { path: 'app.ts', content: 'after', overwrite: true }));
+    expect(forced.success).toBe(true);
+    expect(content).toBe('after');
   });
 
   it('does not restore over a newer external value', async () => {

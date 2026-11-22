@@ -485,6 +485,8 @@ export class TauriToolAdapter implements ToolAdapter {
   private invokeFn: InvokeFunction | null;
   private latestWriteBatch: WorkspaceSnapshotBatch | null = null;
   private snapshotSequence = 0;
+  /** 本会话成功读过的文件——write_file 读前门的凭据（2026-11-22）。 */
+  private readPaths = new Set<string>();
   private readonly maxSnapshotBytes = 8 * 1024 * 1024;
   private readonly imageGen?: ImageGenContext;
   private readonly capabilityHooks?: DynamicCapabilityHooks;
@@ -502,6 +504,19 @@ export class TauriToolAdapter implements ToolAdapter {
    *  宿主注入(chat.ts 工厂用当前配置的模型);缺席时抓取行为与旧版一致。 */
   private readonly summarizeForExtract?: SummarizeForExtract;
   private readonly mcpCandidates = new Map<string, McpCandidate>();
+
+  /** 读前门的会话 key：相对/绝对写法、`./` 前缀与重复斜杠归一到同一个 key。
+   *  读与写只要写法不同就不算「读过」，所以归一是这个门不误伤的前提。 */
+  private readKey(ws: string, path: string): string {
+    const normalized = path
+      .replace(/\\/g, '/')
+      .replace(/\/{2,}/g, '/')
+      .replace(/\/\.(?=\/)/g, '')
+      .replace(/^\.\//, '');
+    if (normalized.startsWith('/')) return normalized;
+    const base = ws.replace(/\\/g, '/').replace(/\/+$/, '');
+    return base ? `${base}/${normalized}` : normalized;
+  }
 
   constructor(workspace: string, tavilyApiKey = '', serperApiKey = '', location = '', invoke?: InvokeFunction, sessionId = '', proxyUrl = '', imageGen?: ImageGenContext, searxngUrl = '', capabilityHooks?: DynamicCapabilityHooks, sandbox = false, githubMirror = '', githubCustomMirror = '', summarizeForExtract?: SummarizeForExtract) {
     this.workspace = workspace;
@@ -1562,15 +1577,20 @@ export class TauriToolAdapter implements ToolAdapter {
           // 变化，真大文件不再整份进上下文逼出引擎 40k 盲截）。
           // outline（2026-11-17）：Rust 侧返回声明行 + 行号；大纲是全文语义，
           // 不带行范围也不带 headLines。
+          // 行号 gutter（2026-11-22）：只有模型面向的这条路径传 lineNumbers；
+          // Rust 侧默认关闭，内部调用方（撤销快照 / 预览）拿到的仍是原始正文。
+          const lineNumbers = args.lineNumbers !== false;
           if (args.outline === true) {
             const outline = await this.call('read_file', { workspace: ws, path: String(args.path ?? ''), outline: true }) as string;
+            this.readPaths.add(this.readKey(ws, rawPath));
             return { id: toolCall.id, toolName: name, result: outline, success: true, duration: Date.now() - start };
           }
           const s = typeof args.startLine === 'number' ? args.startLine : null;
           const e = typeof args.endLine === 'number' ? args.endLine : null;
           const content = await this.call('read_file', s !== null || e !== null
-            ? { workspace: ws, path: String(args.path ?? ''), startLine: s, endLine: e }
-            : { workspace: ws, path: String(args.path ?? ''), headLines: READ_FILE_HEAD_LINES }) as string;
+            ? { workspace: ws, path: String(args.path ?? ''), startLine: s, endLine: e, lineNumbers }
+            : { workspace: ws, path: String(args.path ?? ''), headLines: READ_FILE_HEAD_LINES, lineNumbers }) as string;
+          this.readPaths.add(this.readKey(ws, rawPath));
           return { id: toolCall.id, toolName: name, result: content, success: true, duration: Date.now() - start };
         }
         case 'write_file': {
@@ -1578,6 +1598,17 @@ export class TauriToolAdapter implements ToolAdapter {
           const content = String(args.content ?? '');
           const append = args.append === true;
           const batch = await this.captureWriteBatch('write_file', [path]);
+          // 读前门（2026-11-22）：覆写已存在且本会话未读过的文件会静默丢掉
+          // 未见过的内容。新建、追加、显式 overwrite:true 三条路不受限。
+          if (!append && args.overwrite !== true && batch.entries[0]?.existed === true && !this.readPaths.has(this.readKey(ws, path))) {
+            return {
+              id: toolCall.id,
+              toolName: name,
+              error: `write_file refused: ${path} already exists and has not been read in this session. Read it first with read_file (then edit_file for a targeted change), or pass overwrite:true to replace the whole file.`,
+              success: false,
+              duration: Date.now() - start,
+            };
+          }
           // diff 旁路:旧内容取自撤销快照(新建文件时为空串→纯新增视图)。
           // append 的新视图 = 旧全文 + 追加段,diff 自然只高亮追加的部分。
           cacheToolDiff(toolCall.id, {
@@ -1609,10 +1640,12 @@ export class TauriToolAdapter implements ToolAdapter {
               append,
               onProgress: channel,
             }) as string;
+            this.readPaths.add(this.readKey(ws, path));
             const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
             return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
           }
           const msg = await this.call('write_file', { workspace: ws, path, content, append }) as string;
+          this.readPaths.add(this.readKey(ws, path));
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
           return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
         }
@@ -2518,7 +2551,9 @@ export class TauriToolAdapter implements ToolAdapter {
           return {
             id: toolCall.id,
             toolName: name,
-            error: `Unknown tool: ${name}. Available: read_file, write_file, edit_file, search_files, list_files, execute_command, create_directory, diff_files, web_search, web_fetch, web_public_api, web_scrape, glob_files, replace_files, git_diff, git_log, git_status, git_commit, git_branch, sys_info, diagnose_network, switch_package_source`,
+            // 不再列举「Available」：那份清单里混着已隐藏的 search_files 与 deferred
+            // 的 git_*，模型照着念仍然失败（2026-11-22）。只给可执行的恢复路径。
+            error: `Unknown tool "${name}". If it is a deferred built-in or MCP tool, call discover_tools with "${name}" (or its keywords) and retry — do not invent tool names.`,
             success: false,
             duration: Date.now() - start,
           };

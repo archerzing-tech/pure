@@ -21,7 +21,7 @@ import type { ToolDefinition } from './types';
 export const BUILT_IN_TOOL_DEFS = [
   {
     name: 'read_file',
-    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; images (png/jpg/gif/webp/bmp, up to 5MB) come back as a visible image attachment so you can actually see them — screenshots, photos, charts; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Explicit ranges are bounded too: over ~32k characters a range returns its first lines plus a continue footer, and lines longer than 2000 characters come back clipped with a length marker — request narrower ranges instead of re-reading wide ones. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file. Pass outline:true to get a SYMBOL OUTLINE of a source file instead of its content: one line per declaration (function, class, method, type) with its line number, which is the cheap way to understand a large file before choosing a range. Outline covers the whole file and ignores startLine/endLine.',
+    description: 'Read a file from the workspace: text/code (UTF-8/UTF-16/GBK/GB18030), PDF (Chinese-capable), DOCX/XLSX/PPTX/ODT, RTF; images (png/jpg/gif/webp/bmp, up to 5MB) come back as a visible image attachment so you can actually see them — screenshots, photos, charts; binary/scanned files return an actionable error instead of mojibake. Never paste a whole file into the conversation — read the relevant range and reference the path. Lines come back with a `N→` line-number prefix (display only — never copy the prefix into edit_file oldString/newString; there it is stripped only when every line carries one). Optionally specify startLine and endLine for a range; very large files return the head plus a footer stating the total line count — continue from the suggested startLine or pinpoint with code_searcher. Explicit ranges are bounded too: over ~32k characters a range returns its first lines plus a continue footer, and lines longer than 2000 characters come back clipped with a length marker — request narrower ranges instead of re-reading wide ones. Pointing path at a directory lists its first-level contents with exact paths echoed back, so you can immediately re-read a specific file. Pass outline:true to get a SYMBOL OUTLINE of a source file instead of its content: one line per declaration (function, class, method, type) with its line number, which is the cheap way to understand a large file before choosing a range. Outline covers the whole file and ignores startLine/endLine.',
     input_schema: {
       type: 'object',
       properties: {
@@ -29,26 +29,28 @@ export const BUILT_IN_TOOL_DEFS = [
         startLine: { type: 'number', description: 'First line to read (1-indexed, optional)' },
         endLine: { type: 'number', description: 'Last line to read (1-indexed, optional)' },
         outline: { type: 'boolean', description: 'Return a symbol outline (declarations + line numbers) instead of the file body. Best for large source files: see the structure first, then read the range that matters. Ignores startLine/endLine.' },
+        lineNumbers: { type: 'boolean', description: 'Prefix each body line with `N→` (default true). Turn off only when you need byte-exact content such as a license header or a generated file.' },
       },
       required: ['path'],
     },
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. With append:true the content is appended instead (missing file is created) — for large files write the first chunk normally, then append each following chunk, so no single call has to carry the whole file. Size discipline: past ~5,000 characters in one call, splitting is the default you consciously depart from, not an optimization — pick the shape that fits the artifact: independent modules become separate files issued as ONE parallel batch of write_file calls; a single big file is written in sections (first chunk here, the rest as append:true calls); a module whose whole-file generation would flood this conversation belongs in a delegated worker session instead. Never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2); incremental write_file then edit_file also works. One oversized call is the shape most likely to be truncated mid-body.',
+    description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. Overwriting an EXISTING file that you have not read in this session is refused: read it first (then edit_file for a targeted change) or pass overwrite:true. With append:true the content is appended instead (missing file is created) — for large files write the first chunk normally, then append each following chunk, so no single call has to carry the whole file. Size discipline: past ~5,000 characters in one call, splitting is the default you consciously depart from, not an optimization — pick the shape that fits the artifact: independent modules become separate files issued as ONE parallel batch of write_file calls; a single big file is written in sections (first chunk here, the rest as append:true calls); a module whose whole-file generation would flood this conversation belongs in a delegated worker session instead. Never emit a big artifact as one giant code block in chat — split it by concern (index.html + styles.css + app.js, or part-1/part-2); incremental write_file then edit_file also works. One oversized call is the shape most likely to be truncated mid-body.',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'File path — relative paths resolve from the workspace root; absolute paths anywhere on disk work too. The workspace is only the default base for relative paths, not a confinement boundary.' },
         content: { type: 'string', description: 'Content to write to the file' },
         append: { type: 'boolean', description: 'Append to the file instead of overwriting (created if missing). For files too large for one call: write part 1 normally, then append part 2, part 3, …' },
+        overwrite: { type: 'boolean', description: 'Replace an existing file even though it was not read in this session. Use only when a full intentional rewrite is the goal.' },
       },
       required: ['path', 'content'],
     },
   },
   {
     name: 'edit_file',
-    description: 'Replace an exact string in a file. Read the current file first; if the target is not found, re-read it and use shorter exact context instead of repeating the same edit. Line-ending differences are handled safely; approximate or fuzzy replacement is never used. For changing a large file this beats write_file by default — emit the delta, not the whole file again.',
+    description: 'Replace an exact string in a file. Read the current file first; if the target is not found, re-read it and use shorter exact context instead of repeating the same edit. Line-ending differences are handled safely; approximate or fuzzy replacement is never used. A `N→` line-number prefix copied from read_file is stripped when the whole block carries it. The result echoes a numbered window around the change — use it to confirm placement instead of re-reading the file. For changing a large file this beats write_file by default — emit the delta, not the whole file again.',
     input_schema: {
       type: 'object',
       properties: {
@@ -61,6 +63,9 @@ export const BUILT_IN_TOOL_DEFS = [
     },
   },
   {
+    // 检索面収口后不再对模型可见（2026-11-22）：code_searcher 是代码检索的唯一
+    // 入口，find_files 管文档主题定位。这个定义只为执行面兼容而留在注册表里，
+    // 既不进常驻清单也不进 discover 候选（HIDDEN_TOOL_NAMES）。
     name: 'search_files',
     description: 'Search for a text pattern inside files under the workspace (content search, not filename matching). Searches inside supported documents too: PDF, DOCX, XLSX, PPTX, ODT, RTF, and GBK-encoded text. Returns matching lines with file paths and line numbers; unreadable binary files are listed in a skip notice instead of being silently ignored.',
     input_schema: {
@@ -77,7 +82,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'find_files',
-    description: 'Smartly locate the files most likely to contain a topic or keyword (e.g. "学历", "education", "发票") without reading every file. Filename matches rank first (cheap, no content reads), then content hits are counted across files and the TOP candidates come back with a few snippet lines each (never full content); works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text. Use this FIRST when asked to find information spread across many files, then read_file only the top 1-2 candidates (optionally with startLine/endLine). Returns actionable fallback guidance when nothing matches — follow those suggestions instead of guessing or reading files one by one. Dependency directories (node_modules, venv, target, …) are skipped unless path/filePattern names one explicitly.',
+    description: 'Locate files by topic when you do not know which file holds it — documents, dumps, notes, and non-code material (e.g. "学历", "发票"). Filename matches rank first, then content hits are counted across files and only the top candidates come back with snippet lines; works inside PDF/DOCX/XLSX/PPTX/ODT/RTF and GBK text. NOT for code or symbol lookup: use code_searcher for that (it returns exact line/column hits). Dependency directories (node_modules, venv, target, …) are skipped unless path/filePattern names one explicitly.',
     input_schema: {
       type: 'object',
       properties: {
@@ -194,7 +199,7 @@ export const BUILT_IN_TOOL_DEFS = [
   },
   {
     name: 'code_searcher',
-    description: 'Search repository source and configuration with ripgrep-style regex matching. Returns structured file paths, 1-indexed lines, columns, snippets, truncation state, and diagnostics. Respects gitignore while including relevant hidden project configuration.',
+    description: 'The single content-search entry for code and configuration: ripgrep-style regex over source files. Use it before reading files when you need to find a symbol, string, or definition, and read the hit window with read_file startLine/endLine from the returned line number instead of reading the whole file. Returns structured file paths, 1-indexed lines, columns, snippets, truncation state, and diagnostics; respects gitignore. Narrow with globs (e.g. ["*.ts", "!*.test.ts"]) when tests or generated files would drown the hits.',
     input_schema: {
       type: 'object',
       properties: {
@@ -498,6 +503,10 @@ export const PUBLIC_TOOL_NAMES = new Set([
  * ToolRegistry.getTools() 按这套集合裁剪；执行面（execute 按注册表名查）
  * 不受影响——激活只改可见性，不改能力。
  */
+/** 执行面保留、但对模型完全不可见的工具：既不在常驻清单，也不进 discover 候选。
+ *  与「deferred」不同——deferred 有发现路径，hidden 没有。 */
+export const HIDDEN_TOOL_NAMES: ReadonlySet<string> = new Set(['search_files']);
+
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'read_file', 'write_file', 'edit_file', 'execute_command', 'find_files',
   // 结构性定位回常驻（2026-11-17）：中大型项目的理解成本集中在「工作区长
@@ -506,6 +515,10 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // 直接吃掉理解预算。它们无副作用、schema 很小，常驻代价远低于误解成本。
   'list_files', 'glob_files',
   'code_searcher', 'web_search', 'web_fetch', 'download_file',
+  // 收尾三件回常驻（2026-11-22）：编码任务的最后一步总是「看改了什么 → 提交」或
+  // 「看当前状态」。deferred 化后每次收尾都要先 discover_tools 激活一次，白付
+  // 一轮；三者 schema 很小，常驻代价低于这轮成本。git_log/git_branch 仍是长尾。
+  'git_status', 'git_diff', 'git_commit',
   'discover_tools', 'presentation_guide', 'generate_image',
 ]);
 

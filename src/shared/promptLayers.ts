@@ -526,25 +526,31 @@ export interface UserTurnContext {
  * whole job). What remains here is the HOW: mechanics you need once you have
  * actually decided to delegate — artifact fit, fan-out batching, relay
  * chains, and the orchestrator conduct rules. Injected on demand via
- * wantsDelegationMechanics (mode build/plan or multi-topic signals).
+ * wantsDelegationScale (scale signals in the request, or a project-level build).
  */
 /**
- * 并行默认（2026-11-15 用户定调："能并行的就不要串行"）。
+ * 并行/委派的默认立场（2026-11-22 改：从「默认拆」收回「按规模触发」）。
  *
- * 与 MULTI_AGENT_MECHANICS_PROMPT 的分工：那一段讲"决定要拆之后怎么做"（fan-out
- * 批量、relay 串接、编排话术），按请求闸门注入；这一句讲**默认倾向**，只要委派
- * 工具在场就常驻——不做关键词匹配。判例：用户说「从多个平台整理国漫上新」，
- * 词表没命中、机制段没注入，模型就自己连打 6 个 web_search；并行能力一直在，
- * 缺的是一条不问措辞的常驻立场。串行必须给出理由（依赖关系），而不是默认。
- * 判例 2（2026-11-18 大屏原型真机）：构建全程主线单干——8 次整体写入 116KB
- * 生成代码全落在主线转写（≈3 万 tokens 常驻），零委派。缺口是生产侧形状没人
- * 教：调研 fan-out 有教学，模块生产 fan-out 没有。补一句「契约先行、模块批量
- * 委派、大写入搬出主线」的常驻立场——何时拆仍归模型，但拆的形状要知道。
+ * 旧版把并行写成 not an optimization you opt into，只要委派工具在场就常驻，并
+ * 要求单干给理由。真机代价：单文件修复也被推给 code_editor worker——worker
+ * 从零重读同一批文件，父级等收执再汇总，比主线直做慢数倍。用户原话「绕弯子」
+ * 直接指向这条默认立场。
+ *
+ * 现分工：
+ *  - `PARALLEL_SCOPE_NOTE` 常驻（委派工具在场时）：只讲物理事实——独立工作
+ *    并行、有依赖按序，以及单文件/单链路留在主线的成本理由。
+ *  - `PARALLEL_FIRST_DIRECTIVE` 只在对的工作规模命中时注入（wantsDelegationScale）。
+ *  - `MULTI_AGENT_MECHANICS_PROMPT` 同一道规模闸门。
+ * 拆分权仍归模型：这里调的是**默认倾向**，不是宿主裁决。
  */
+export const PARALLEL_SCOPE_NOTE = `<parallel_scope>
+Independent work runs in parallel; dependent steps run in order. Keep work you can finish yourself in one pass — one or two files, or a single call chain — in the main thread: handing it to a worker means a fresh brief, the same files read again, and a receipt you still have to verify. Parallel is for work that genuinely decomposes, not a badge of effort.
+</parallel_scope>`;
+
 export const PARALLEL_FIRST_DIRECTIVE = `<parallel_first>
-Parallel is the default disposition, not an optimization you opt into. Independent subtasks run at the SAME time; only genuinely dependent steps run one after another, and then you say in one sentence what depends on what. N sources / N subjects / N files / N directions = N delegations issued in ONE batch. Running N independent things yourself in a row is the wrong shape even when you could finish it alone: it is slower, it floods your context with raw material, and it is the first thing a user notices as "this agent works serially".
-Builds follow the same rule: a project that decomposes into modules is parallel work — pin the shared contract in the main thread first (data schema, class names, entry API, file boundaries), then batch the independent modules as N produce delegations in ONE message. Whole-file generation of multi-KB modules belongs in worker sessions; your own transcript carries receipts, not generated source — contracts, integration and the verify loop stay with you. Writing every module yourself in sequence is the serial shape users notice.
-The split decision comes BEFORE the first write, not after the first module: once you have written module after module yourself, the decision has already been made by default. On a build that decomposes into independent modules the expected move is the delegation batch (contract pinned, N briefs in ONE message); staying solo is legitimate, but make it a decision you can state in one line — one coherent module, or parts that would overwrite each other's files — instead of drifting into it.
+Parallel is worth it only when the work genuinely decomposes. Independent subtasks (N sources, N subjects, N independent modules or files) run at the SAME time — N delegations issued in ONE batch. Dependent steps run in order, and you say in one sentence what depends on what.
+Do NOT split work you can finish yourself in one pass: a change that lands in one or two files, a single call chain, or one coherent module stays in the main thread. Delegating it costs a worker that re-reads the same files and hands back more to verify — slower, not faster.
+When the work does decompose: pin the shared contract in the main thread first (data schema, class names, entry API, file boundaries), then batch the independent modules as N produce delegations in ONE message. Whole-file generation of multi-KB modules belongs in worker sessions; your own transcript carries receipts, not generated source — contracts, integration and the verify loop stay with you.
 A delegation returns an acceptance receipt, not the work: the worker keeps running in the background while you do your own part, and its real output arrives as a message at your next step. A receipt is never a deliverable — do not report it as done, do not poll it, do not re-delegate the same brief.
 Handing work off is worth one sentence to the user: say what you are doing with the time it buys (the part you kept, the contract you are pinning, the check you are running), in your own words the way a colleague mentions it. The user should see the work advancing on two fronts instead of watching an agent wait. Vary the wording, never a stock formula; if the honest answer is that you have nothing to do but wait, say that plainly instead of inventing work.
 </parallel_first>`;
@@ -563,20 +569,30 @@ Worker discipline: every worker starts from a fresh brief, not this conversation
 Scale caps: at most 4 workers running at once. A failed gate goes back to the producer at most twice; if it still fails, stop and report the current state, where the conclusions disagree, and what you recommend — do not loop.
 </multi_agent_mechanics>`;
 
-/** 委派机制段的闸门：复杂任务（路由已判 build/plan）或请求自带多主题信号。
- * 判据宽一点无害——多带一次是 2.4k 字符，少带一次是 fan-out 变逐个串行。
- * 触发测试（何时该委派）不靠它：那已随 task_planner 的工具描述走，工具表
- * 在 hasSubagents 时才暴露委派工具——闸门天然成立。 */
-export function wantsDelegationMechanics(prompt: string, complexTask: boolean): boolean {
-  if (complexTask) return true;
-  // 2026-11-15 真机判例（"从多个平台帮我快速的整理一下最新的国漫上新剧集"）：
-  // 模型手里有 researcher 却没拆路，因为这一段没开闸——当时的多主题词表只认
-  // "多个方向/分别/对比"，不认"多个平台"。用户说的是 N 个来源，模型读到的是
-  // 一次检索，加上"快速"就更倾向自己连打几个 web_search。
-  // 来源集合（平台/站点/渠道/社区）与子主题等价：N 个来源就是 N 路调研。
-  return /(?:分别|各自|并行|同时|多路|多个方向|几个方向|多个方案|几个方案|三个方面|三个方向|多条线|对比|调研|分工|多文件|多模块|多个子|每个方向|盘点|通读|全部文档|所有文档|所有文件|大量文件|批量|多(?:个)?平台|跨平台|各(?:个)?平台|不同平台|几个平台|多(?:个)?(?:来源|渠道|站点|网站|社区|论坛|商城|书城)|各(?:个)?(?:平台|来源|渠道|站点|网站|社区)|多渠道|多家|各家)/i
-    .test(prompt ?? '');
+/**
+ * 并行/委派机制段的规模闸门（2026-11-22）。
+ *
+ * 旧闸门是 `complexTask (mode=build/plan) → 一律注入`，于是「修复一个文件」在
+ * build 模式下也会背上 2.4k 字符的 fan-out 教学。现在只认两类事实：
+ *  1. 请求自己点名了可拆的规模（N 个来源 / 多文件 / 多模块 / 批量 / 盘点…）；
+ *  2. build/plan 且请求确实是**项目级产物**（多页面/整套/系统），不是单文件。
+ * 明确的单件信号（单文件/这个文件/单个 html）一票否决——这是「不绕弯子」的
+ * 主判据。拆分权仍归模型，这里只决定要不要把机制段摆到它眼前。
+ */
+const SINGLE_UNIT_RE = /(?:单文件|单个文件|一个文件|这个文件|该文件|同一个文件|单个\s*html|single[- ]file|one file)/i;
+
+const DELEGATION_SCALE_RE = /(?:分别|各自|并行|同时|多路|多个方向|几个方向|多个方案|几个方案|三个方面|三个方向|多条线|对比|调研|分工|多文件|多模块|多个模块|多个子|多个页面|多页面|多个组件|多组件|多个接口|每个方向|盘点|通读|全部文档|所有文档|所有文件|大量文件|批量|整套|全站|整站|整个项目|整个仓库|全仓|重构(?:整个|全)|迁移(?:整个|全)|多(?:个)?平台|跨平台|各(?:个)?平台|不同平台|几个平台|多(?:个)?(?:来源|渠道|站点|网站|社区|论坛|商城|书城)|各(?:个)?(?:平台|来源|渠道|站点|网站|社区)|多渠道|多家|各家)/i;
+
+const PROJECT_SCALE_RE = /(?:后台|管理系统|平台|多页面|多模块|全站|整站|整套|完整(?:项目|应用|网站)|dashboard|app\b|application|website)/i;
+
+export function wantsDelegationScale(prompt: string, mode?: 'yolo' | 'plan' | 'build'): boolean {
+  const text = prompt ?? '';
+  if (SINGLE_UNIT_RE.test(text)) return false;
+  if (DELEGATION_SCALE_RE.test(text)) return true;
+  // build/plan 不是拆分理由：只有项目级产物才带机制段。
+  return (mode === 'build' || mode === 'plan') && PROJECT_SCALE_RE.test(text);
 }
+
 
 /**
  * The pre-commit review contract moved to git_commit's tool description

@@ -352,6 +352,8 @@ describe('NodeToolAdapter workspace snapshots', () => {
 
   it('restores an existing file and removes a newly-created file', async () => {
     writeFileSync(join(workspace, 'existing.txt'), 'before');
+    // 读前门（2026-11-22）：覆写前先读一次，同时把真实调用顺序走一遍。
+    expect((await adapter.execute(call('read_file', { path: 'existing.txt' }))).success).toBe(true);
     expect((await adapter.execute(call('write_file', { path: 'existing.txt', content: 'after' }))).success).toBe(true);
     const port = adapter.getSnapshotPort();
     expect(port.getLatestWriteBatch()?.sessionId).toBe('session-test');
@@ -638,8 +640,11 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     writeFileSync(join(workspace, 'small.txt'), 'l1\nl2\nl3');
     const r = await read({ path: 'small.txt' });
     expect(r.success).toBe(true);
-    expect(r.result).toBe('l1\nl2\nl3');
+    expect(r.result).toBe('1→l1\n2→l2\n3→l3');
     expect(String(r.result)).not.toContain('read_file：');
+    // 显式关掉行号时保持旧形态（逐字内容场景）。
+    const bare = await read({ path: 'small.txt', lineNumbers: false });
+    expect(bare.result).toBe('l1\nl2\nl3');
   });
 
   it('returns only the head plus total-lines footer for a big file without a range', async () => {
@@ -648,8 +653,8 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     const r = await read({ path: 'big.txt' });
     expect(r.success).toBe(true);
     const text = String(r.result);
-    expect(text).toContain('line-1\n');
-    expect(text).toContain('line-2000');
+    expect(text).toContain('1→line-1\n');
+    expect(text).toContain('2000→line-2000');
     expect(text).not.toContain('line-2001');
     // 脚注如实交代总行数 + 建议续读起点。
     expect(text).toContain('[read_file：以上是前 2000 行，文件共 2500 行。继续读用 startLine=2001');
@@ -686,7 +691,7 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
   it('returns an explicitly requested range verbatim with no footer', async () => {
     const r = await read({ path: 'big.txt', startLine: 2400, endLine: 2402 });
     expect(r.success).toBe(true);
-    expect(r.result).toBe('line-2400\nline-2401\nline-2402');
+    expect(r.result).toBe('2400→line-2400\n2401→line-2401\n2402→line-2402');
     expect(String(r.result)).not.toContain('read_file：');
   });
 
@@ -708,7 +713,7 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     const r = await read({ path: 'clip.txt', startLine: 2, endLine: 2 });
     expect(r.success).toBe(true);
     const text = String(r.result);
-    expect(text.startsWith('x'.repeat(2000))).toBe(true);
+    expect(text.startsWith(`2→${'x'.repeat(2000)}`)).toBe(true);
     expect(text).toContain('本行共 5000 字符，已截断');
     expect(text.length).toBeLessThan(3000);
     expect(text).not.toContain('已按行截断');
@@ -735,7 +740,7 @@ describe('NodeToolAdapter read_file head-default（刀 D1）', () => {
     writeFileSync(join(workspace, 'streamed.txt'), big);
     const r = await read({ path: 'streamed.txt', startLine: 49_998, endLine: 50_000 });
     expect(r.success).toBe(true);
-    expect(r.result).toBe('line-49998\nline-49999\nline-50000');
+    expect(r.result).toBe('49998→line-49998\n49999→line-49999\n50000→line-50000');
     expect(String(r.result)).not.toContain('read_file：');
   });
 });
@@ -779,7 +784,7 @@ describe('NodeToolAdapter write_file snapshot degrade（2026-11-17）', () => {
 
   it('overwrites an oversized existing file instead of refusing the write', async () => {
     writeFileSync(join(workspace, 'huge2.log'), 'b'.repeat(9 * 1024 * 1024));
-    const r = await run('write_file', { path: 'huge2.log', content: 'fresh' });
+    const r = await run('write_file', { path: 'huge2.log', content: 'fresh', overwrite: true });
     expect(r.success).toBe(true);
     expect(String(r.result)).toContain('Wrote 5 bytes');
     expect(readFileSync(join(workspace, 'huge2.log'), 'utf8')).toBe('fresh');
@@ -787,7 +792,7 @@ describe('NodeToolAdapter write_file snapshot degrade（2026-11-17）', () => {
 
   it('keeps the undo snapshot for a normal small write', async () => {
     writeFileSync(join(workspace, 'small.txt'), 'old');
-    const r = await run('write_file', { path: 'small.txt', content: 'new' });
+    const r = await run('write_file', { path: 'small.txt', content: 'new', overwrite: true });
     expect(r.success).toBe(true);
     expect(String(r.result)).not.toContain('当前写入未提供撤销快照');
     expect(adapter.getSnapshotPort().getLatestWriteBatch()).not.toBeNull();
@@ -915,4 +920,73 @@ describe('execute_command timeout partial output（2026-11-17）', () => {
     expect(String(r.error)).toContain('background:true');
     expect(String(r.error)).toContain('600000');
   }, 20000);
+});
+
+// 2026-11-22 coding loop: read-before-write gate + edit hunk echo.
+describe('NodeToolAdapter write_file read-before-write gate', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-gate-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  const exec = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+    adapter.execute({ id: `gate-${name}`, index: 0, function: { name, arguments: JSON.stringify(args) } });
+
+  it('refuses to overwrite an existing file that was never read', async () => {
+    writeFileSync(join(workspace, 'unread.txt'), 'original');
+    const r = await exec('write_file', { path: 'unread.txt', content: 'replaced' });
+    expect(r.success).toBe(false);
+    expect(r.error).toContain('has not been read in this session');
+    expect(readFileSync(join(workspace, 'unread.txt'), 'utf8')).toBe('original');
+  });
+
+  it('allows the overwrite after a read in the same session', async () => {
+    writeFileSync(join(workspace, 'read-first.txt'), 'original');
+    expect((await exec('read_file', { path: 'read-first.txt' })).success).toBe(true);
+    const r = await exec('write_file', { path: 'read-first.txt', content: 'replaced' });
+    expect(r.success).toBe(true);
+    expect(readFileSync(join(workspace, 'read-first.txt'), 'utf8')).toBe('replaced');
+  });
+
+  it('allows creating a new file without a read', async () => {
+    const r = await exec('write_file', { path: 'brand-new.txt', content: 'hello' });
+    expect(r.success).toBe(true);
+  });
+
+  it('allows an explicit overwrite:true', async () => {
+    writeFileSync(join(workspace, 'force.txt'), 'original');
+    const r = await exec('write_file', { path: 'force.txt', content: 'forced', overwrite: true });
+    expect(r.success).toBe(true);
+    expect(readFileSync(join(workspace, 'force.txt'), 'utf8')).toBe('forced');
+  });
+
+  it('never blocks append:true (chunked write flow)', async () => {
+    writeFileSync(join(workspace, 'chunked.txt'), 'part1');
+    const r = await exec('write_file', { path: 'chunked.txt', content: '-part2', append: true });
+    expect(r.success).toBe(true);
+    expect(readFileSync(join(workspace, 'chunked.txt'), 'utf8')).toBe('part1-part2');
+  });
+
+  it('accepts a copied gutter block in edit_file and echoes the changed region', async () => {
+    writeFileSync(join(workspace, 'edit.ts'), 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+    const r = await exec('edit_file', {
+      path: 'edit.ts',
+      // 模型把 read_file 的显示层整块复制进来的真实形态。
+      oldString: '2→const b = 2;',
+      newString: 'const b = 20;',
+    });
+    expect(r.success).toBe(true);
+    const text = String(r.result);
+    expect(text).toContain('(now 4 lines)');
+    expect(text).toContain('Changed region:');
+    expect(text).toContain('2→const b = 20;');
+    expect(text).toContain('1→const a = 1;');
+  });
 });

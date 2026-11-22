@@ -44,6 +44,7 @@ import { DEFAULT_AGENTS_MD } from '../shared/defaultAgentsMd';
 import { stripUserTurnContext, wantsHandsOnWorkflow } from '../shared/promptLayers';
 import { repoMapBubbleText } from '../shared/repoMap';
 import { collectRepoMap } from '../shared/repoMapSource';
+import { collectVerificationEntry } from '../shared/verificationEntrySource';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { REQUEST_PLAN_TOOL_DEF, REQUEST_PLAN_TOOL_NAME } from '../coding-agent/planControlTool';
@@ -1249,7 +1250,7 @@ function buildSystemPrompt(hasWorkspace: boolean, temporaryWorkspace = false, co
  * 缓存地基刀A（2026-11-06）吞并两件回合级事实：时间基准行（每回合现算现注入,
  * timeContext 设计意图在此真正落地——冻进 system 时首回合日期会被用到会话结束）
  * 与本会话网络熔断注（随熔断发生逐轮出现,不再让跨会话前缀互不一致）。 */
-function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string, parallelNudge?: string, repoMap?: string): string {
+function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFacts?: string, providerHealFacts?: string, schemaQuarantineFacts?: string, parallelNudge?: string, repoMap?: string, verificationEntry?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻：时间是每回合都要校准的参考点（timeContext.ts 顶部定调）。
   const time = formatTimeContextLine(currentTimeContext()).trim();
@@ -1286,6 +1287,10 @@ function buildEnvFacts(conventions?: string, formFeedback?: string, capabilityFa
   // 次性处方。是体量事实不是指令，拆不拆仍归模型。无事件零注入。
   const nudge = parallelNudge?.trim();
   if (nudge) parts.push(nudge);
+  // 项目验证入口（2026-11-22）：清单里声明过的命令，读一次就是确定事实——
+  // 省掉「猜 npm test → 换 bun test」那一轮，也不让一条猜测的红命令进转录。
+  const verification = verificationEntry?.trim();
+  if (verification) parts.push(verification);
   // 仓库符号地图（2026-11-21）：中大型仓库里「先看骨架再动手」。只有动手类
   // 回合才带，且由 collectRepoMap 自己判规模——小仓库一次 list_files 就看完，
   // 地图是纯开销。扫描失败返回空串，环境事实照旧。
@@ -7466,9 +7471,15 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       this.lastSentModelKey = capabilityTurn.currentKey;
       // 仓库符号地图（2026-11-21）：只给动手类回合。问答轮不需要骨架；采集
       // 本身按清单指纹缓存，同一仓库首回合之后只是一次 list_files。
-      const repoMap = effectiveWorkspace && wantsHandsOnWorkflow(userText, analysis.mode)
-        ? await collectRepoMap(codingAgent.toolRegistry, { signal: this.abortController?.signal })
-        : '';
+      // 验证入口与骨架图同一回合收集、并行跑：两者都走工具面，都不阻断回合
+      // （失败返回空串）。
+      const handsOnTurn = effectiveWorkspace && wantsHandsOnWorkflow(userText, analysis.mode);
+      const [repoMap, verificationEntry] = handsOnTurn
+        ? await Promise.all([
+            collectRepoMap(codingAgent.toolRegistry, { signal: this.abortController?.signal }),
+            collectVerificationEntry(codingAgent.toolRegistry, { signal: this.abortController?.signal }),
+          ])
+        : ['', ''];
       // 探索气泡：让用户看见 agent 这一步拿到的骨架图是哪一张（并可以展开
       // 核对）。只在真正附了图时出现——小仓库一次 list_files 就看完，没有图
       // 可给，气泡也就不该凭空多一行。
@@ -7508,7 +7519,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         ...this.worldState.renderTurn({
           // P2 下沉：惯例 + 运行时 + 网络 + shell 走 user turn（envFacts），
           // `conventions` is in scope from the pre-analysis build above.
-          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts(), takeBuildParallelNudge(), repoMap),
+          envFacts: buildEnvFacts(conventions, takeFormValidationFeedback(), capabilityTurn.facts, takeProviderHealFacts(), takeSchemaQuarantineFacts(), takeBuildParallelNudge(), repoMap, verificationEntry),
           buildProtocol: userBuildProtocol,
           plan: userPlan,
           contract: taskContract ? formatTaskContract(taskContract) : undefined,

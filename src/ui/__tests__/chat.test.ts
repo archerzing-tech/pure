@@ -15,12 +15,15 @@ function readSource(url: URL): string {
 describe('repo map exploration bubble', () => {
   it('只在动手回合采集，且气泡摘要来自同一份地图', () => {
     const src = readSource(new URL('../chat.ts', import.meta.url));
-    const collect = src.indexOf('const repoMap = effectiveWorkspace && wantsHandsOnWorkflow');
-    expect(collect).toBeGreaterThan(-1);
-    const after = src.slice(collect, collect + 900);
+    const gate = src.indexOf('const handsOnTurn = effectiveWorkspace && wantsHandsOnWorkflow(userText, analysis.mode);');
+    expect(gate).toBeGreaterThan(-1);
+    const after = src.slice(gate, gate + 1200);
+    // 骨架图与验证入口共用这一道闸门、同一次并行采集：问答轮两者都不进提示词。
+    expect(after).toContain('collectRepoMap(codingAgent.toolRegistry');
+    expect(after).toContain('collectVerificationEntry(codingAgent.toolRegistry');
     expect(after).toContain("if (repoMap) this.addStatusBubble(repoMapBubbleText(repoMap), false, false, 'info', repoMap);");
-    // 装配点拿到的必须还是这个 repoMap（不要另采一份）。
-    expect(src).toContain('takeBuildParallelNudge(), repoMap)');
+    // 装配点拿到的必须还是这一份 repoMap（不要另采一份）。
+    expect(src).toContain('takeBuildParallelNudge(), repoMap, verificationEntry)');
   });
 
   it('可展开状态行的正文写在 details 里，摘要仍按纯文本入账', () => {

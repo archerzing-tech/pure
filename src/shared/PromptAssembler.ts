@@ -35,7 +35,8 @@ import {
   detectVisualRequest,
   SERVING_PREVIEW_PROMPT,
   wantsCapabilityLadder,
-  wantsDelegationMechanics,
+  PARALLEL_SCOPE_NOTE,
+  wantsDelegationScale,
   wantsHandsOnWorkflow,
   type UserTurnContext,
 } from './promptLayers';
@@ -349,18 +350,24 @@ function buildRequestDetailFragments(
   userText: string | undefined,
 ): PromptFragment[] {
   const text = userText ?? '';
-  const complexTask = context.mode === 'build' || context.mode === 'plan';
+  const scale = wantsDelegationScale(text, context.mode);
   return [
-    // 并行默认：只要委派工具在场就常驻，不问措辞（见 PARALLEL_FIRST_DIRECTIVE 注释）。
+    // 2026-11-22：并行不再常驻。规模命中时给完整立场，否则只留一条成本事实
+    // ——单文件/单链路的活留在主线（见 promptLayers 的 judgment note）。
     fragment(
       'parallel_first',
-      context.hasSubagents ? PARALLEL_FIRST_DIRECTIVE : '',
+      context.hasSubagents && scale ? PARALLEL_FIRST_DIRECTIVE : '',
+      60,
+    ),
+    fragment(
+      'parallel_scope',
+      context.hasSubagents && !scale ? PARALLEL_SCOPE_NOTE : '',
       60,
     ),
     fragment('capability_gap_ladder', wantsCapabilityLadder(text) ? CAPABILITY_GAP_LADDER : '', 59),
     fragment(
       'multi_agent_mechanics',
-      context.hasSubagents && wantsDelegationMechanics(text, complexTask) ? MULTI_AGENT_MECHANICS_PROMPT : '',
+      context.hasSubagents && scale ? MULTI_AGENT_MECHANICS_PROMPT : '',
       // 59（2026-11-16）：58 排在预算裁剪的牺牲区——长任务恰恰是工具表最大、
       // 最容易把这块挤掉的回合，而它缺席的代价是 fan-out 变逐个串行（真机
       // bug3）。与 capability_gap_ladder 同档，仅次于常驻的 parallel_first。

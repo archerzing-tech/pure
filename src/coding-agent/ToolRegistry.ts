@@ -11,7 +11,7 @@ import type { TaggedTool, PermissionContext } from './types';
 import type { WorkspaceSnapshotPort } from '../shared/workspaceSnapshot';
 import type { PermissionManager } from './PermissionManager';
 import { REQUEST_PLAN_TOOL_NAME, REQUEST_PLAN_TIMEOUT_MS, type PlanControl } from './planControlTool';
-import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, isPublicToolName } from '../shared/toolDefs';
+import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, HIDDEN_TOOL_NAMES, isPublicToolName } from '../shared/toolDefs';
 import { isDynamicCapabilityTool } from '../shared/dynamicCapabilityTools';
 import { safeParseArgs } from '../shared/format';
 import { formatErrorLine, buildToolErrorEntry } from '../shared/errorLog';
@@ -261,6 +261,9 @@ export class ToolRegistry implements ToolAdapter {
     for (const tool of this.tools) {
       if (tool.tags.includes(Tags.AGENT)) continue;
       if (isPublicToolName(tool.name) && (tool.name === 'discover_tools' || CORE_TOOL_NAMES.has(tool.name))) continue;
+      // 隐藏工具没有发现路径：discover 激活它们只会把「已退役但能用」的工具
+      // 重新推给模型，与收口检索面的目的相反。
+      if (HIDDEN_TOOL_NAMES.has(tool.name)) continue;
       if (this.activatedDeferred.has(tool.name)) continue;
       if (isDynamicCapabilityTool(tool.name)) continue;
       if (this.visibilityGate && !this.visibilityGate(tool.name)) continue;
@@ -459,7 +462,7 @@ export class ToolRegistry implements ToolAdapter {
       return {
         id: toolCall.id,
         toolName: toolCall.function.name,
-        error: `Unknown tool: ${toolCall.function.name}`,
+        error: `Unknown tool "${toolCall.function.name}". If it is a deferred built-in or MCP tool, call discover_tools with "${toolCall.function.name}" (or its keywords) and retry — do not invent tool names.`,
         success: false,
         duration: 0,
       };

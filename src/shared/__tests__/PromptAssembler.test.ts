@@ -604,6 +604,22 @@ describe('PromptAssembler', () => {
     expect(withoutSubagents.systemPrompt).not.toContain('<multi_agent_mechanics>');
   });
 
+  it('keeps single-file work in the main thread (2026-11-22)', () => {
+    const single = assembler.assemble({
+      surface: 'gui',
+      capabilities: 'capabilities',
+      hasSubagents: true,
+      mode: 'build',
+    }, '修复 src/ui/chat.ts 里的滚动抖动并补测试');
+
+    // 只留成本事实，不摆 fan-out 机制段，也不推「默认拆」。
+    expect(single.budget.includedFragmentIds).toContain('parallel_scope');
+    expect(single.budget.includedFragmentIds).not.toContain('parallel_first');
+    expect(single.budget.includedFragmentIds).not.toContain('multi_agent_mechanics');
+    expect(single.systemPrompt).not.toContain('<parallel_first>');
+    expect(single.systemPrompt).toContain('Keep work you can finish yourself in one pass');
+  });
+
   it('phase-2 retirements: delivery_contract / pre_commit_review are no longer assembly fragments', () => {
     // 交付契约与 pre-commit 审查常驻块随二期退役：前者三条规则各有更强载体
     // （formatArtifactPrompt / execute_command 描述 / 收尾报告纪律），后者

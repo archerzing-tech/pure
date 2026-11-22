@@ -1073,7 +1073,9 @@ describe('SubagentOrchestrator relay schema exposure (北极星第 5 步)', () =
     expect(text).toContain('≥2 种职能视角');
     expect(text).toContain('可并行的独立子块');
     expect(text).toContain('刷爆主会话');
-    expect(text).toContain('自己串行做');
+    // 2026-11-22：单文件/单链路留在主线——委派要从零重读并把核对成本带回来。
+    expect(text).toContain('留在主线自己做');
+    expect(text).toContain('单文件');
     // 四真增量：开场假设形状 / 假设护栏 / 失败全账 / 不确定性围栏。
     expect(text).toContain('2-4 个按假设推进的点');
     expect(text).toContain('邀一次纠偏就开工');

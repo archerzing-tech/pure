@@ -1374,7 +1374,85 @@ const READ_FILE_RANGE_MAX_CHARS: usize = 32_000;
 ///  - 行内超长（minified JS / 单行 JSON）按 2000 字符截断加标记——整行过桥
 ///    只会烧 IPC 再被盲截，标记让模型至少知道这行有多长；
 ///  - 整体超预算按行截断，追加续读脚注（总行数 + 已显示 + 续读起点）。
-fn finish_explicit_range(kept: Vec<String>, range_start: usize) -> String {
+fn format_numbered_lines(lines: &[String], start_line: usize) -> String {
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}→{}", start_line + index, line));
+    }
+    out
+}
+
+/// 行首 gutter 的字节长度（含 `→`）。与 TS 侧 /^[ \t]*\d+→/ 同判据。
+fn gutter_prefix_len(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits_start {
+        return None;
+    }
+    if line[i..].starts_with('→') {
+        Some(i + '→'.len_utf8())
+    } else {
+        None
+    }
+}
+
+/// 整块都带 gutter 才剥离；任一行不带就返回 None（真实内容可能以数字开头）。
+fn strip_line_number_gutter(text: &str) -> Option<String> {
+    let mut any = false;
+    let mut out: Vec<&str> = Vec::new();
+    for line in text.split('\n') {
+        match gutter_prefix_len(line) {
+            Some(prefix) => {
+                any = true;
+                out.push(&line[prefix..]);
+            }
+            None if line.is_empty() => out.push(""),
+            None => return None,
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(out.join("\n"))
+}
+
+fn line_range_at(text: &str, index: usize, replacement: &str) -> (usize, usize) {
+    let cut = index.min(text.len());
+    let before = &text[..cut];
+    let start_line = before.bytes().filter(|b| *b == b'\n').count() + 1;
+    let end_line = start_line + replacement.bytes().filter(|b| *b == b'\n').count();
+    (start_line, end_line)
+}
+
+/// 改动回显：带行号的 ±3 行窗口，最多 10 行（与 shared/lineGutter.ts 同参数）。
+fn format_edit_hunk(text: &str, start_line: usize, end_line: usize) -> String {
+    const CONTEXT: usize = 3;
+    const MAX_LINES: usize = 10;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let total = lines.len();
+    let from = start_line.saturating_sub(CONTEXT).max(1);
+    let mut to = (end_line.max(start_line) + CONTEXT).min(total);
+    if to >= from && to - from + 1 > MAX_LINES {
+        to = from + MAX_LINES - 1;
+    }
+    if from > total {
+        return String::new();
+    }
+    let slice: Vec<String> = lines[from - 1..to].iter().map(|line| line.to_string()).collect();
+    format_numbered_lines(&slice, from)
+}
+
+fn finish_explicit_range(kept: Vec<String>, range_start: usize, line_numbers: bool) -> String {
     let total_lines = kept.len();
     let mut processed: Vec<String> = Vec::with_capacity(total_lines);
     for line in &kept {
@@ -1401,7 +1479,14 @@ fn finish_explicit_range(kept: Vec<String>, range_start: usize) -> String {
         take += 1;
         out_lines.push(p);
     }
-    let mut out = out_lines.join("\n");
+    // 行号在预算判定之后加：与 TS 侧 explicitRangeResult 同序，否则同样的
+    // 字符预算在开关两档下会切出不同行数。
+    let mut out = if line_numbers {
+        let numbered: Vec<String> = out_lines.iter().map(|line| (*line).to_string()).collect();
+        format_numbered_lines(&numbered, range_start)
+    } else {
+        out_lines.join("\n")
+    };
     if take < total_lines {
         out.push_str(&format!(
             "\n\n[read_file：范围共 {} 行，以上显示前 {} 行（超字符预算，已按行截断）。继续读用 startLine={}（可配 endLine）；定位内容用 code_searcher。]",
@@ -1428,8 +1513,9 @@ async fn read_file(
     end_line: Option<usize>,
     head_lines: Option<usize>,
     outline: Option<bool>,
+    line_numbers: Option<bool>,
 ) -> Result<String, String> {
-    run_blocking(move || read_file_impl(workspace, path, start_line, end_line, head_lines, outline)).await
+    run_blocking(move || read_file_impl(workspace, path, start_line, end_line, head_lines, outline, line_numbers)).await
 }
 
 fn read_file_impl(
@@ -1439,7 +1525,11 @@ fn read_file_impl(
     end_line: Option<usize>,
     head_lines: Option<usize>,
     outline: Option<bool>,
+    line_numbers: Option<bool>,
 ) -> Result<String, String> {
+    // 默认关：内部调用方（撤销快照 / artifact 预览 / overlay 守卫）用 read_file
+    // 取原始正文，带行号会把 gutter 写回磁盘。只有模型面向的适配器会传 true。
+    let numbered = line_numbers.unwrap_or(false);
     let full = resolve(&workspace, &path)?;
     let meta = fs::metadata(&full).map_err(|e| {
         // 后台日志的引用悬空：路径随工具结果写进对话记录成为永久引用，文件却
@@ -1499,7 +1589,7 @@ fn read_file_impl(
     // outline 是全文语义，跳过窗口捷径（schema 已写明忽略行范围）。
     if outline != Some(true) && start_line.is_some() && end_line.is_some() {
         if let Ok(Some(windowed)) = read_text_range_prefix(&full, start_line, end_line) {
-            return Ok(finish_explicit_range(windowed, start_line.unwrap_or(1).max(1)));
+            return Ok(finish_explicit_range(windowed, start_line.unwrap_or(1).max(1), numbered));
         }
     }
     let bytes = fs::read(&full).map_err(|e| format!("read_file: {}", e))?;
@@ -1515,7 +1605,7 @@ fn read_file_impl(
     if outline == Some(true) {
         return Ok(symbol_outline(&text, &path));
     }
-    slice_read_file_text(text, start_line, end_line, head_lines)
+    slice_read_file_text(text, start_line, end_line, head_lines, numbered)
 }
 
 // ── 符号大纲（read_file outline:true，2026-11-17）─────────────────────────
@@ -1647,9 +1737,14 @@ fn slice_read_file_text(
     start_line: Option<usize>,
     end_line: Option<usize>,
     head_lines: Option<usize>,
+    line_numbers: bool,
 ) -> Result<String, String> {
     if start_line.is_none() && end_line.is_none() && head_lines.is_none() {
-        return Ok(text);
+        if !line_numbers {
+            return Ok(text);
+        }
+        let lines: Vec<String> = text.split('\n').map(|line| line.to_string()).collect();
+        return Ok(format_numbered_lines(&lines, 1));
     }
     if start_line.is_some() || end_line.is_some() {
         let lines: Vec<&str> = text.lines().collect();
@@ -1660,7 +1755,7 @@ fn slice_read_file_text(
             return Ok(String::new());
         }
         let kept: Vec<String> = lines[s - 1..e].iter().map(|l| (*l).to_string()).collect();
-        return Ok(finish_explicit_range(kept, s));
+        return Ok(finish_explicit_range(kept, s, line_numbers));
     }
     let total = text.lines().count();
     let head = head_lines.unwrap_or(READ_FILE_HEAD_LINES);
@@ -1687,7 +1782,11 @@ fn slice_read_file_text(
         kept.push(line);
     }
     if take >= total {
-        return Ok(text);
+        if !line_numbers {
+            return Ok(text);
+        }
+        let lines: Vec<String> = kept.iter().map(|line| (*line).to_string()).collect();
+        return Ok(format_numbered_lines(&lines, 1));
     }
     if take == 0 && head > 0 {
         // 首行单独超预算：给前缀 + 专门的出路文案（脚注与 TS 侧逐字一致）。
@@ -1696,17 +1795,24 @@ fn slice_read_file_text(
             .chars()
             .take(READ_FILE_HEAD_MAX_CHARS.saturating_sub(1))
             .collect();
+        let shown_chars = shown.chars().count();
         return Ok(format!(
             "{}\n\n[read_file：首行过长（共 {} 字符），以上只显示该行前 {} 字符——按行号无法续读这一行的剩余部分。剩余内容请用 execute_command 按字节/字符分段提取（如 tail -c +N），或用 code_searcher 定位。]",
-            shown,
+            if line_numbers { format!("1→{}", shown) } else { shown },
             first.chars().count(),
-            shown.chars().count()
+            shown_chars
         ));
     }
     // 脚注格式与 src/shared/readFileHead.ts 的 readFileHeadFooter 保持一致。
+    let body = if line_numbers {
+        let lines: Vec<String> = kept.iter().map(|line| (*line).to_string()).collect();
+        format_numbered_lines(&lines, 1)
+    } else {
+        kept.join("\n")
+    };
     Ok(format!(
         "{}\n\n[read_file：以上是前 {} 行，文件共 {} 行。继续读用 startLine={}（可配 endLine）；定位内容用 code_searcher。]",
-        kept.join("\n"),
+        body,
         take,
         total,
         take + 1
@@ -1843,11 +1949,63 @@ mod read_file_slice_tests {
         dir.to_string_lossy().to_string()
     }
 
+    /// 测试默认走「无行号」语义：内部调用方（撤销快照 / 预览 / overlay 守卫）
+    /// 依赖全文原文，带 gutter 会被写回磁盘。行号是模型面向适配器的显式选择。
+    fn read_default(
+        ws: String,
+        path: String,
+        start: Option<usize>,
+        end: Option<usize>,
+        head: Option<usize>,
+        outline: Option<bool>,
+    ) -> Result<String, String> {
+        read_file_impl(ws, path, start, end, head, outline, None)
+    }
+
+    fn slice_default(
+        text: String,
+        start: Option<usize>,
+        end: Option<usize>,
+        head: Option<usize>,
+    ) -> Result<String, String> {
+        slice_read_file_text(text, start, end, head, false)
+    }
+
+    #[test]
+    fn line_numbers_prefix_each_line_and_keep_the_start_offset() {
+        let ws = write_fixture("numbered", "l1\nl2\nl3");
+        let all = read_file_impl(ws.clone(), "f.txt".into(), None, None, None, None, Some(true)).unwrap();
+        assert_eq!(all, "1→l1\n2→l2\n3→l3");
+        let ranged = read_file_impl(ws, "f.txt".into(), Some(2), Some(3), None, None, Some(true)).unwrap();
+        assert_eq!(ranged, "2→l2\n3→l3");
+    }
+
+    #[test]
+    fn edit_file_strips_a_copied_gutter_and_echoes_the_changed_region() {
+        let ws = write_fixture("edit-gutter", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+        let out = edit_file_impl(&ws, "f.txt", "2→const b = 2;", "const b = 20;", None).unwrap();
+        assert!(out.contains("(now 4 lines)"), "{out}");
+        assert!(out.contains("2→const b = 20;"), "{out}");
+        assert!(out.contains("1→const a = 1;"), "{out}");
+        let written = fs::read_to_string(std::path::Path::new(&ws).join("f.txt")).unwrap();
+        assert_eq!(written, "const a = 1;\nconst b = 20;\nconst c = 3;\n");
+    }
+
+    #[test]
+    fn gutter_stripping_only_touches_a_fully_numbered_block() {
+        assert_eq!(
+            strip_line_number_gutter("2→const b = 2;").unwrap(),
+            "const b = 2;"
+        );
+        assert!(strip_line_number_gutter("2→a\nplain").is_none());
+        assert!(strip_line_number_gutter("plain").is_none());
+    }
+
     #[test]
     fn returns_full_text_when_no_range_or_head_is_given() {
         // 内部调用方（撤销快照 / artifact 预览 / overlay 守卫）依赖全文语义。
         let ws = write_fixture("full", "l1\nl2\nl3");
-        let out = read_file_impl(ws, "f.txt".into(), None, None, None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, None, None).unwrap();
         assert_eq!(out, "l1\nl2\nl3");
     }
 
@@ -1874,14 +2032,14 @@ mod read_file_slice_tests {
     fn slices_explicit_ranges_before_ipc_without_footer() {
         let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
         assert_eq!(out, "line-2400\nline-2401\nline-2402");
     }
 
     #[test]
     fn range_starting_past_eof_returns_empty() {
         let ws = write_fixture("past-eof", "l1\nl2");
-        let out = read_file_impl(ws, "f.txt".into(), Some(9), None, None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), Some(9), None, None, None).unwrap();
         assert_eq!(out, "");
     }
 
@@ -1892,7 +2050,7 @@ mod read_file_slice_tests {
         // 至少知道这行有多长。TS 侧 readFileRangeSlice 同语义。
         let content = format!("head\n{}\n", "x".repeat(5000));
         let ws = write_fixture("clip-line", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(2), Some(2), None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), Some(2), Some(2), None, None).unwrap();
         assert!(out.starts_with("xxxx"), "clipped prefix: {}", &out[..40.min(out.len())]);
         assert!(out.contains("本行共 5000 字符，已截断"), "length marker: {}", out);
         assert!(out.len() < 3000, "clipped output is bounded: {}", out.len());
@@ -1907,7 +2065,7 @@ mod read_file_slice_tests {
         // 取前 16 行（16×1901=30416，加第 17 行 32317 超预算）。
         let content = (1..=20).map(|i| format!("f{}-{}", i, "a".repeat(1897))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range-budget", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(1), Some(20), None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), Some(1), Some(20), None, None).unwrap();
         assert!(out.contains("f16-aaa"), "sixteen lines fit: {}", &out[..60.min(out.len())]);
         assert!(!out.contains("f17-aaa"));
         assert!(out.contains("范围共 20 行，以上显示前 16 行"), "range footer: {}", out);
@@ -1919,7 +2077,7 @@ mod read_file_slice_tests {
         // 小范围逐字返回零漂移：行内无超长、总量在预算内时与旧版逐字一致。
         let content = (1..=20).map(|i| format!("row-{i}")).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("range-verbatim", &content);
-        let out = read_file_impl(ws, "f.txt".into(), Some(5), Some(7), None, None).unwrap();
+        let out = read_default(ws, "f.txt".into(), Some(5), Some(7), None, None).unwrap();
         assert_eq!(out, "row-5\nrow-6\nrow-7");
         assert!(!out.contains("read_file："), "no footer on a small range");
     }
@@ -1928,7 +2086,7 @@ mod read_file_slice_tests {
     fn head_default_returns_head_plus_total_lines_footer() {
         let content = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("head", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.starts_with("line-1\n"));
         assert!(out.contains("line-2000\n"));
         assert!(!out.contains("line-2001"));
@@ -1938,7 +2096,7 @@ mod read_file_slice_tests {
     #[test]
     fn head_covering_the_whole_file_returns_text_without_footer() {
         let ws = write_fixture("head-all", "l1\nl2\nl3");
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert_eq!(out, "l1\nl2\nl3");
     }
 
@@ -1947,7 +2105,7 @@ mod read_file_slice_tests {
         // 每行 8000 字符：第 4 行撞上 32000 预算 → 只取前 3 行（行中不截断）。
         let content = (0..10).map(|i| format!("f{}-{}", i, "a".repeat(8000))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("head-budget", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.contains("f2-aaa"));
         assert!(!out.contains("f3-aaa"));
         assert!(out.contains("以上是前 3 行，文件共 10 行。继续读用 startLine=4"));
@@ -1959,7 +2117,7 @@ mod read_file_slice_tests {
         // "以上是前 0 行"。现在给首行前缀 + 行号无法续读的出路文案。
         let content = "x".repeat(40_000);
         let ws = write_fixture("one-line", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.starts_with("xxxx"), "prefix present: {}", &out[..16.min(out.len())]);
         assert!(out.contains("首行过长"), "partial notice: {}", out);
         assert!(out.contains("无法续读"), "actionable continuation: {}", out);
@@ -1977,7 +2135,7 @@ mod read_file_slice_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let ws = write_fixture("head-cjk", &content);
-        let out = read_file_impl(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
+        let out = read_default(ws, "f.txt".into(), None, None, Some(2000), None).unwrap();
         assert!(out.contains("第10行"), "10 lines fit in 32k chars: {}", &out[..40.min(out.len())]);
         assert!(!out.contains("第11行"));
     }
@@ -1988,8 +2146,8 @@ mod read_file_slice_tests {
         // 读取后切片」逐字一致。
         let content = (1..=5000).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("stream-range", &content);
-        let expected = slice_read_file_text(content.trim().to_string(), Some(2400), Some(2402), None).unwrap();
-        let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
+        let expected = slice_default(content.trim().to_string(), Some(2400), Some(2402), None).unwrap();
+        let actual = read_default(ws.clone(), "f.txt".into(), Some(2400), Some(2402), None, None).unwrap();
         assert_eq!(actual, expected);
         let path = std::path::Path::new(&ws).join("f.txt");
         assert!(
@@ -2004,8 +2162,8 @@ mod read_file_slice_tests {
         content.push_str(&(1..=3000).map(|i| format!("row-{i}\r\n")).collect::<String>());
         let ws = write_fixture("stream-trim", &content);
         for (start, end) in [(1usize, 2usize), (2, 3), (4, 6), (100, 120), (2999, 3002)] {
-            let expected = slice_read_file_text(content.trim().to_string(), Some(start), Some(end), None).unwrap();
-            let actual = read_file_impl(ws.clone(), "f.txt".into(), Some(start), Some(end), None, None).unwrap();
+            let expected = slice_default(content.trim().to_string(), Some(start), Some(end), None).unwrap();
+            let actual = read_default(ws.clone(), "f.txt".into(), Some(start), Some(end), None, None).unwrap();
             assert_eq!(actual, expected, "range {start}..{end}");
         }
     }
@@ -2015,8 +2173,8 @@ mod read_file_slice_tests {
         // 深位窗口（超过 8KB 探测窗口）必须仍与全文切片一致：跳过段不解码、不保留。
         let content = (1..=20_000).map(|i| format!("row-{i}-{}", "x".repeat(12))).collect::<Vec<_>>().join("\n");
         let ws = write_fixture("stream-deep", &content);
-        let expected = slice_read_file_text(content.trim().to_string(), Some(19_000), Some(19_010), None).unwrap();
-        let actual = read_file_impl(ws, "f.txt".into(), Some(19_000), Some(19_010), None, None).unwrap();
+        let expected = slice_default(content.trim().to_string(), Some(19_000), Some(19_010), None).unwrap();
+        let actual = read_default(ws, "f.txt".into(), Some(19_000), Some(19_010), None, None).unwrap();
         assert_eq!(actual, expected);
     }
 
@@ -2044,7 +2202,7 @@ mod read_file_slice_tests {
         let subdir = std::path::Path::new(&ws).join("subdir");
         fs::create_dir_all(&subdir).unwrap();
         fs::write(subdir.join("b.txt"), "x").unwrap();
-        let out = read_file_impl(ws.clone(), "subdir".into(), None, None, None, None).unwrap();
+        let out = read_default(ws.clone(), "subdir".into(), None, None, None, None).unwrap();
         assert!(out.contains("是目录"), "应自陈是目录：{}", out);
         assert!(out.contains("b.txt"), "应列出文件条目：{}", out);
         assert!(out.contains("补全到文件名"), "应给出下一步出路：{}", out);
@@ -2358,6 +2516,9 @@ fn edit_file_impl(
     let full = resolve(workspace, path)?;
     let text = fs::read_to_string(&full).map_err(|e| format!("read: {}", e))?;
 
+    // 允许模型把带行号的显示层整块复制进来；只有整块都带 gutter 才剥离。
+    let old_string = strip_line_number_gutter(old_string).unwrap_or_else(|| old_string.to_string());
+    let new_string = strip_line_number_gutter(new_string).unwrap_or_else(|| new_string.to_string());
     let crlf_file = text.contains("\r\n");
     let normalized_old = old_string.replace("\r\n", "\n");
     let line_ending_adjusted = crlf_file
@@ -2401,10 +2562,23 @@ fn edit_file_impl(
     };
 
     fs::write(&full, &new_text).map_err(|e| format!("write: {}", e))?;
+    // 改动回显（2026-11-22）：只回「替换了几处」时模型只能再读一遍来确认，
+    // 给它带行号的 ±3 行窗口，这一轮就核对得回来。
+    let index = if replacement.is_empty() {
+        text.find(&old_for_match).unwrap_or(0)
+    } else {
+        new_text
+            .find(&replacement)
+            .unwrap_or_else(|| text.find(&old_for_match).unwrap_or(0))
+    };
+    let (start_line, end_line) = line_range_at(&new_text, index, &replacement);
+    let hunk = format_edit_hunk(&new_text, start_line, end_line);
     Ok(format!(
-        "Replaced {} occurrence(s) in {}",
+        "Replaced {} occurrence(s) in {} (now {} lines).\nChanged region:\n{}",
         if multi { occurrences } else { 1 },
-        path
+        path,
+        new_text.split('\n').count(),
+        hunk
     ))
 }
 

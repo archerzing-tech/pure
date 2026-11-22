@@ -52,6 +52,7 @@ import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { wantsHandsOnWorkflow } from './shared/promptLayers';
 import { collectRepoMap } from './shared/repoMapSource';
+import { collectVerificationEntry } from './shared/verificationEntrySource';
 import { loadConfig, defaultCliAutoApprove, PURE_DIR, resolveDefaultModel } from './cliConfig';
 import { runCliSleepCycle } from './evolution/cliHost';
 
@@ -355,9 +356,10 @@ async function assembleCliPrompt(
   // 仓库符号地图（2026-11-21）：与 GUI 同源。只在动手类回合采集，且由
   // collectRepoMap 自判仓库规模（小仓库返回空串）。扫描走工具面，所以必须
   // 在有工作区工具时才有意义。
-  const repoMap = tools && wantsHandsOnWorkflow(userText, mode)
-    ? await collectRepoMap(tools)
-    : '';
+  const handsOnTurn = Boolean(tools) && wantsHandsOnWorkflow(userText, mode);
+  const [repoMap, verificationEntry] = handsOnTurn && tools
+    ? await Promise.all([collectRepoMap(tools), collectVerificationEntry(tools)])
+    : ['', ''];
   if (process.env.PURE_DEBUG_CONVENTIONS === '1') {
     process.stderr.write(`${formatConventionsDiagnostics(merged.diagnostics)}\n`);
   }
@@ -394,8 +396,8 @@ async function assembleCliPrompt(
     // 四期 4b 分区化：REPL 传入了渲染器就走 diff（同内容回合只发指针）；
     // 一次性 -p 模式不传，保持逐字全量。
     envFacts: worldState
-      ? worldState.renderTurn({ envFacts: buildCliEnvFacts(conventions, repoMap) }).envFacts
-      : buildCliEnvFacts(conventions, repoMap),
+      ? worldState.renderTurn({ envFacts: buildCliEnvFacts(conventions, repoMap, verificationEntry) }).envFacts
+      : buildCliEnvFacts(conventions, repoMap, verificationEntry),
   });
 }
 
@@ -419,7 +421,7 @@ function cliProviderHealContext(args: CliArgs): { provider: string; model: strin
  *  刀 6 CLI 面回流（2026-11-03）：围栏块在文本投影/线框渲染失败时 cliDiagram
  *  记了事件——每回合装配读走（读即清）注入 envFacts 区，模型看到自己上一
  *  回合哪些块没渲染出来。无事件=空串，零注入。 */
-function buildCliEnvFacts(conventions?: string, repoMap?: string): string {
+function buildCliEnvFacts(conventions?: string, repoMap?: string, verificationEntry?: string): string {
   const parts: string[] = [];
   // 时间基准行常驻（刀A，2026-11-06）：每回合现算现注入，timeContext 设计
   // 意图落地；不再冻进 system 首回合前缀。
@@ -447,6 +449,9 @@ function buildCliEnvFacts(conventions?: string, repoMap?: string): string {
   // 模型不再对着已消失的工具空耗轮次。
   const quarantineFacts = takeSchemaQuarantineFacts();
   if (quarantineFacts) parts.push(quarantineFacts);
+  // 项目验证入口（2026-11-22）：与 GUI 面同源同形；空串（无清单/探测失败）跳过。
+  const verification = verificationEntry?.trim();
+  if (verification) parts.push(verification);
   // 仓库符号地图（2026-11-21）：与 GUI 面同源同形。只有动手类回合才传进来，
   // 空串（小仓库/无工具面）直接跳过。
   const map = repoMap?.trim();
