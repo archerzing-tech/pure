@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { ToolRegistry, Tags } from '../ToolRegistry';
-import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES } from '../../shared/toolDefs';
+import { BUILT_IN_TOOL_DEFS, CORE_TOOL_NAMES, HIDDEN_TOOL_NAMES } from '../../shared/toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../../shared/dynamicCapabilityTools';
 
 const noopExecutor = {
@@ -27,26 +27,30 @@ describe('deferred tool table (framework-reform phase 3)', () => {
       if (core === 'generate_image') continue; // 条件注册，测试注册表里没有
       expect(names, core).toContain(core);
     }
-    // 长尾默认缺席：git 家族、深检索变体、诊断、文档写作。
-    for (const tail of ['git_commit', 'git_status', 'researcher_web', 'web_scrape', 'diagnose_network', 'switch_package_source', 'create_document', 'sys_info']) {
+    // git 三家（status/diff/commit）2026-11-22 起回常驻——编码收尾不再先
+    // discover 一轮；长尾默认缺席的是 git 的历史/分支、深检索变体、诊断、
+    // 文档写作与隐藏工具。
+    for (const resident of ['git_status', 'git_diff', 'git_commit']) {
+      expect(names, resident).toContain(resident);
+    }
+    for (const tail of ['git_log', 'git_branch', 'researcher_web', 'web_scrape', 'diagnose_network', 'switch_package_source', 'create_document', 'sys_info', 'search_files']) {
       expect(names, tail).not.toContain(tail);
     }
   });
 
   it('discover_tools search activates matches and they become visible + callable', async () => {
     const registry = new ToolRegistry(noopExecutor);
-    expect(registry.getTools().map((t) => t.name)).not.toContain('git_commit');
-    const result = await registry.execute(call('discover_tools', { query: 'git commit' }));
+    expect(registry.getTools().map((t) => t.name)).not.toContain('git_log');
+    const result = await registry.execute(call('discover_tools', { query: 'git log' }));
     expect(result.success).toBe(true);
     const text = String(result.result);
     expect(text).toContain('Activated');
-    expect(text).toContain('── git_commit ──');
-    expect(text).toContain('VERDICT: PASS / FAIL'); // 激活即带完整 schema 与教学
+    expect(text).toContain('── git_log ──');
     // 激活后进可见清单——引擎逐请求重算 toolsDefs，下一请求就能看到。
-    expect(registry.getTools().map((t) => t.name)).toContain('git_commit');
+    expect(registry.getTools().map((t) => t.name)).toContain('git_log');
     // 幂等：重复搜索不重复计数，已激活工具不再回搜。
-    const again = await registry.execute(call('discover_tools', { query: 'git commit' }));
-    expect(String(again.result)).not.toContain('── git_commit ──');
+    const again = await registry.execute(call('discover_tools', { query: 'git log' }));
+    expect(String(again.result)).not.toContain('── git_log ──');
   });
 
   it('zero-result search lists the remaining catalog instead of a bare no', async () => {
@@ -55,7 +59,7 @@ describe('deferred tool table (framework-reform phase 3)', () => {
     expect(result.success).toBe(true);
     const text = String(result.result);
     expect(text).toContain('No deferred tool matches');
-    expect(text).toContain('git_commit'); // 目录里点名还藏着什么
+    expect(text).toContain('git_log'); // 目录里点名还藏着什么
   });
 
   it('MCP tools hide until discovered; EXTERNAL and dynamic tools stay resident', async () => {
@@ -147,6 +151,9 @@ describe('deferred tool table (framework-reform phase 3)', () => {
     // 假阴性。
     for (const def of BUILT_IN_TOOL_DEFS) {
       if (CORE_TOOL_NAMES.has(def.name)) continue;
+      // 隐藏工具（search_files）是 2026-11-22 检索面收口的刻意结果：执行面
+      // 保留兼容、模型侧没有发现路径。它们不属于「死区」，单独豁免。
+      if (HIDDEN_TOOL_NAMES.has(def.name)) continue;
       const registry = new ToolRegistry(noopExecutor);
       const found = registry.searchDeferredTools(def.name, 20).map((t) => t.name);
       expect(found, `${def.name} must be discoverable`).toContain(def.name);
