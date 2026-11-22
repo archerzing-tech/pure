@@ -4,6 +4,24 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.1
+
+**撤回 4.11.0，并把真机复验暴露的四个问题收口：验收绿后真的会收手、预算耗尽不再伪装成端点故障、外部工具不再被标签截胡、macOS 画面冻结有了预防与取证**
+
+说明：v4.11.0 的发布已撤回，其内容并入本版；本版同时包含 4.11.0 之后的三刀与两处 UI 修复。
+
+一、验收绿后收束。`stopAtGreen` 认 `node scripts/verify.mjs` / `bun scripts/verify.ts` / `npx tsx scripts/e2e.ts` / `node --test` 这类自建验收；切命令前剥掉 heredoc 正文，`/tmp` 等临时目录的一次性 smoke 不再冒充项目验收。真机小样（单页 + 3 断言）在 `===== 3/3 通过 =====` 那一刻注入收束提醒，模型随即收手：37 秒完成、绿后零额外工具调用。此前大屏复验因 heredoc 误报消费掉一次性信号，绿后仍跑了多轮验收。
+
+二、预算耗尽讲真话。子 agent 的 600s 硬预算到点时，最后一步只剩 1ms 流窗口，旧版重试两次并报「模型在 0s 内没有输出第一个内容块」——把预算用尽讲成了端点故障，诱导重派刚干完活的 worker。现在剩余窗口不足 5s 直接报 `time_budget_exhausted`，UI 有专门话术并说明已写文件与结果都在。
+
+三、外部工具按所有权路由。内建 `browser` / `task_kill` 带 EXTERNAL 标签（外部可见动作的分类），曾被外部脚本执行器按标签截胡，主线程与 worker 都收到 "has no exec template"；现在执行器只接管自己真有 exec 模板的工具名。
+
+四、macOS 画面冻结。真机出现「DOM 在更新、屏幕停在旧帧」：关掉 WKWebView 的遮挡检测（私有开关，未提供时降级空操作），并加帧停摆探针：每 2s 对比 rAF 与 DOM 变更，可见且聚焦时 rAF 连续为 0 落 `frame_stall`、恢复落 `frame_resume`，不自动重载（引擎住在渲染进程里）。
+
+五、两处 UI 反馈。会话记录「全量删除」第一次不生效：异步列表渲染没有代际检查，删除前发起的读盘结果会把旧列表写回；现在每次渲染领号、写 DOM 前对号。LLM 模型库删除一行后仍显示一行空输入框：去掉「至少两行」的补位，真实模型一行一行渲染，空库才给一行空白入口。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；`stopAtGreen` 8 例、`AgentLoopEngine` 97 例、工具路由、`chat`、`FailurePolicy`（修正了锁旧文案的断言）全过。真机：火山引擎端点两端可用；预算文案、`occlusion applied:true`、模型行删除即时消失均已实测；全量删除为代码修复 + 代际检查，未做破坏性真机验证。
+
 ## v4.11.0
 
 **CLI 认密钥库里的自定义 provider key；「打转」提醒按事实与指令分流；桌面 GUI 有了可复用的真机探针**

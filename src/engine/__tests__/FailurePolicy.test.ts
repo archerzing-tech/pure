@@ -167,7 +167,11 @@ describe('DefaultFailurePolicy repeated-error detection (v0.11)', () => {
     expect(action3.kind).toBe('reflect');
     if (action3.kind === 'reflect') {
       expect(action3.hint).toContain('same class (network)');
-      expect(action3.hint).toContain('换镜像或离线替代');
+      // v0.13 的阶梯文案：换等价来源/镜像 → 本地替代 → 跳过。旧断言锁的是
+      // 更早的短句「换镜像或离线替代」，文案升级后测试一直红在 CI 上
+      // （v4.11.0 发布时同样红），这里锁当前语义而不是旧措辞。
+      expect(action3.hint).toContain('换等价来源或镜像');
+      expect(action3.hint).toContain('离线副本');
     }
     // A 4th network-class failure → degrade with the skip-and-continue
     // directive instead of grinding to the generic ceiling.

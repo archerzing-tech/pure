@@ -195,6 +195,15 @@ export class SessionSidebar {
    */
   private sessionSwitchSeq = 0;
 
+  /**
+   * Monotonic list-render counter（2026-11-21 用户反馈：全量删除第一次不生效，
+   * 要再点一次）。renderList 是异步的：先读盘、再批量读用量，两次 await 之间
+   * 删光动作可能已经完成；没有代际检查时，删除前发起的那次渲染会在删除后
+   * 把旧列表整块写回 innerHTML——磁盘是空的、界面还是旧会话，第二次点击
+   * 触发的渲染才把空列表画上去。每次渲染领一个号，写 DOM 前不对号就放弃。
+   */
+  private renderSeq = 0;
+
   constructor(deps: SessionSidebarDeps) {
     this.deps = deps;
   }
@@ -443,9 +452,13 @@ export class SessionSidebar {
   }
 
   private async renderList(): Promise<void> {
+    const seq = ++this.renderSeq;
     const container = document.getElementById('sidebar-session-list')!;
     try {
       const list = await loadSessionList();
+      // A delete-all may have completed while this read was in flight — the
+      // stale list must not be painted back over the empty one.
+      if (seq !== this.renderSeq) return;
       // Sessions streaming in the background merge ON TOP of the disk list: a
       // first turn that is still running has never been persisted, so without
       // this the conversation the user just started vanishes from the sidebar
@@ -477,6 +490,7 @@ export class SessionSidebar {
       // row (one IPC round-trip) and show a compact `1.2k · $0.01` line under
       // the title. Sessions without usage data simply omit the line.
       const statsMap = await loadSessionStatsForList(sorted.map(s => s.id));
+      if (seq !== this.renderSeq) return;
       const usageLine = (s: SessionMeta): string => {
         const stats: SessionStats | undefined = statsMap.get(s.id);
         if (!stats?.usage) return '';
@@ -604,6 +618,8 @@ export class SessionSidebar {
     // running or re-persisting after the disk wipe.
     this.deps.chat.clearAll();
     this.resetToLanding();
+    // 立刻作废删除前发起的在途渲染，别等 150ms 防抖后新渲染的号来救场。
+    this.renderSeq++;
     this.refresh();
     showToast(t('toast.sessionsCleared'));
   }

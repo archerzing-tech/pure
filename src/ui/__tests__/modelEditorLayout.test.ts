@@ -117,9 +117,11 @@ describe('LLM page layout (default-model bar + provider grid)', () => {
     expect(settings).toContain("savedProtocol: LLMProtocol");
     expect(settings).toContain("entry.protocol = protocol");
     expect(settings).toContain("next.protocol = protocol");
-    // Padding to a minimum of 2 rows (real models + empty add-slots).
-    expect(settings).toContain('models.length >= 2 ? models :');
-    expect(settings).toContain('[...models, \'\', \'\'].slice(0, 2)');
+    // Real models render one row each；只有空库才给一行空白入口。
+    // 2026-11-21 用户反馈：删掉两行里的第二行后仍显示一行空输入框、toast 却
+    // 说已删除——「至少两行」的补位把删除效果吃掉了；禁止再补空槽。
+    expect(settings).toContain("models.length > 0 ? models : ['']");
+    expect(settings).not.toContain("[...models, '', ''].slice(0, 2)");
   });
 
   it('keeps proxy bypass rules at provider scope only', () => {

@@ -4376,8 +4376,11 @@ export class SettingsPanel {
       || models[0]
       || '';
 
-    // Always show at least 2 rows: real models first, then empty add-slots.
-    const rows = models.length >= 2 ? models : [...models, '', ''].slice(0, 2);
+    // 渲染真实的模型行，不为“凑两行”自动补空槽（2026-11-21 用户反馈：
+    // 火山引擎有两行模型，删掉一行后列表仍显示一行空输入框、toast 却说已
+    // 删除——补位空行把删除效果吃掉了）。空库才给一行空白入口；要加模型
+    // 走「添加模型」按钮。
+    const rows = models.length > 0 ? models : [''];
     const hidden = document.getElementById('cfg-model') as HTMLInputElement | null;
     if (hidden) hidden.value = defaultModel;
     list.hidden = false;
@@ -4498,6 +4501,12 @@ export class SettingsPanel {
     this.commitModelRows();
     const list = document.getElementById('cfg-model-list');
     if (!list) return;
+    // 末尾已有空白行就聚焦它（空库渲染的一行空白入口），不再叠出第二行。
+    const lastId = list.querySelector<HTMLInputElement>('.llm-model-row:last-child .llm-model-row-id');
+    if (lastId && !lastId.value.trim()) {
+      lastId.focus();
+      return;
+    }
     const index = list.querySelectorAll('.llm-model-row').length;
     const row = document.createElement('div');
     row.className = 'llm-model-row';
