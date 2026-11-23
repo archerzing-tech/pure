@@ -14,6 +14,8 @@ import { filePathsFromToolCalls } from '../shared/conventions';
 import { createGreenWatch, stopAtGreenEnabled } from '../shared/stopAtGreen';
 import { createTurnNoteBudget } from '../shared/turnNoteBudget';
 import { createTurnProgressWatch, turnProgressEnabled } from '../shared/turnProgress';
+import { createWriteFeedbackWatch, writeFeedbackEnabled } from '../shared/writeFeedback';
+import { createTurnWriteTracker } from '../shared/parallelNudge';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
 import { runWithDeadline } from './streamDeadline';
@@ -464,6 +466,12 @@ export class AgentLoopEngine {
     // 回合级无进展（2026-11-21）：成功重复调用 / 连续无写入各提醒一次。
     // 阈值来自实测基线（shared/turnProgress.ts 头注释），只陈述事实。
     const progressWatch = turnProgressEnabled() ? createTurnProgressWatch() : null;
+    // 写入成本即时反馈（2026-11-23）：体量事实随工具结果一起回去，不给额外一轮。
+    // 实例按本次 run 存活——一次构建通常在一个回合内完成，跨回合同路径的重写
+    // 由下一回合重新记账（宁可少报一次，也不把上一段会话的账带进新任务）。
+    const writeFeedback = writeFeedbackEnabled() ? createWriteFeedbackWatch() : null;
+    // 并行提醒的回合账（2026-11-23 收口）：宿主的重复记账已删，统一在这里记。
+    const turnWrites = createTurnWriteTracker();
     // 机制提醒节流（2026-11-21）：同一段指令 K 轮内只发一次，事实型不受限。
     // 分类依据见 shared/turnNoteBudget.ts 头注释：事件型（流恢复/握手/阶梯）
     // 不经过这里，只有可重复的行为指令走预算。
@@ -1458,11 +1466,32 @@ export class AgentLoopEngine {
             ? typeof tr.result.result === 'string' ? tr.result.result : JSON.stringify(tr.result.result)
             : failedResultText(tr.result);
           const resultText = capToolResult(rawText, tr.toolName);
+          // 写入成本反馈（2026-11-23）：拼在这条结果尾部，模型在同一配平里读到。
+          // 合成结果（同参复用）不算真实写入：去重已经避免了重复执行，再记一次
+          // 会把「同一路径第几次写」算错。
+          const writeCall = toolCalls.find((c) => c.id === tr.toolCallId);
+          const writeNote = writeFeedback && !tr.synthetic
+            ? writeFeedback.note({
+                toolName: tr.toolName,
+                args: writeCall?.function.arguments,
+                success: tr.result.success === true,
+              })
+            : '';
+          const resultContent = writeNote ? `${resultText}\n\n${writeNote}` : resultText;
+          // 同步回合账：委派现身就不再催拆分；同参复用的合成结果不重复记账。
+          if (!tr.synthetic) {
+            turnWrites.observe(
+              tr.toolName,
+              writeCall?.function.arguments,
+              tr.result.success === true,
+              ctx.isDelegationCall?.(tr.toolName) === true,
+            );
+          }
           // W4-2: tool screenshots fold into the tool message as images — the
           // model sees the page it just captured (visual loop 改→截→判→修).
           messages.push({
             role: 'tool',
-            content: resultText,
+            content: resultContent,
             toolCallId: tr.toolCallId,
             toolName: tr.toolName,
             images: tr.result.images,
@@ -1471,7 +1500,7 @@ export class AgentLoopEngine {
             // 说明上个进程退出时那支没回来（见 shared/detachedResume）。
             ...(tr.result.deferred === true ? { deferred: true } : {}),
           });
-          budget.addTokens(resultText);
+          budget.addTokens(resultContent);
         }
         // 验收即停注入（2026-11-21）：项目级验证刚跑绿，就在下一轮模型眼前
         // 摆一条收束提醒。位置与另外两条中途注入（并行提醒 / 下层约定）同缝：

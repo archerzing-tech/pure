@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'bun:test';
 import { AgentLoopEngine, salvageTruncatedWriteArgs } from '../AgentLoopEngine';
 import { takeSchemaQuarantineFacts, resetSchemaQuarantineForTests } from '../../shared/schemaQuarantineHeal';
+import { resetParallelNudgeForTests, takeBuildParallelNudge } from '../../shared/parallelNudge';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
 import { EventFanout } from '../../shared/asyncQueue';
@@ -3102,6 +3103,224 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
     const finalInjected = completed.payload.messages!.filter(m => m.role === 'user' && m.internal && m.content.includes('Main-thread write volume'));
     expect(finalInjected).toHaveLength(1);
     expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
+  it('attaches the write-feedback cost note to the tool result the model sees next round', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const content = 'x'.repeat(7_000);
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ === 0) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: 'call_write', index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/app.ts', content }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({
+          id: tc.id,
+          toolName: tc.function.name,
+          result: 'Wrote 7000 bytes to src/app.ts (file now 7000 bytes)',
+          success: true,
+          duration: 1,
+        }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+      },
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-write-feedback', systemPrompt: 'sys', userPrompt: '搭一个页面', budget: STD_BUDGET },
+      ctx,
+    ));
+    const toolMsg = rounds[1]!.find((m) => m.role === 'tool')!;
+    // 结果在前、成本事实在后：模型读到的还是同一条配对结果，不额外占一轮。
+    expect(toolMsg.content.indexOf('Wrote 7000 bytes')).toBe(0);
+    expect(toolMsg.content).toContain('[write feedback]');
+    expect(toolMsg.content).toContain('7,000 characters');
+    expect(toolMsg.content).toContain('append:true');
+    expect(toolMsg.content).toContain('edit_file');
+    const completed = events.find(e => e.type === 'Completed')!;
+    expect(completed.payload.messages!.filter((m) => m.content.includes('[write feedback]'))).toHaveLength(1);
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+  });
+
+  it('flags the second full rewrite of the same file within the run', async () => {
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round < 2) {
+          round += 1;
+          const content = 'y'.repeat(round === 1 ? 7_000 : 9_000);
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [{ id: `call_w${round}`, index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/app.ts', content }) } }],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'Wrote file', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+      },
+    });
+    await collect(new AgentLoopEngine().run(
+      { sessionId: 's-write-rewrite', systemPrompt: 'sys', userPrompt: '继续改这个页面', budget: STD_BUDGET },
+      ctx,
+    ));
+    const lastToolMsg = rounds[2]!.filter((m) => m.role === 'tool').pop()!;
+    expect(lastToolMsg.content).toContain('[write feedback]');
+    expect(lastToolMsg.content).toContain('from scratch again');
+    expect(lastToolMsg.content).toContain('9,000 characters');
+    expect(lastToolMsg.content).toContain('edit_file');
+  });
+
+  it('honours PURE_WRITE_FEEDBACK=0 as the A/B kill switch', async () => {
+    const prev = process.env.PURE_WRITE_FEEDBACK;
+    process.env.PURE_WRITE_FEEDBACK = '0';
+    try {
+      let round = 0;
+      const rounds: Message[][] = [];
+      const llm: LLMAdapter = {
+        stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+          rounds.push([...messages]);
+          if (round++ === 0) {
+            yield {
+              type: 'done',
+              content: '',
+              toolCalls: [{ id: 'call_off', index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/app.ts', content: 'z'.repeat(8_000) }) } }],
+            };
+            return;
+          }
+          yield { type: 'done', content: 'done', toolCalls: [] };
+        },
+        complete: async () => ({ content: 'done', toolCalls: [] }),
+      };
+      const ctx = baseCtx({
+        llm,
+        tools: {
+          execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'Wrote file', success: true, duration: 1 }),
+          getMetadata: () => ({ isWrite: true }),
+          getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+        },
+      });
+      await collect(new AgentLoopEngine().run(
+        { sessionId: 's-write-feedback-off', systemPrompt: 'sys', userPrompt: '搭一个页面', budget: STD_BUDGET },
+        ctx,
+      ));
+      expect(rounds[1]!.some((m) => m.content.includes('[write feedback]'))).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.PURE_WRITE_FEEDBACK;
+      else process.env.PURE_WRITE_FEEDBACK = prev;
+    }
+  });
+
+  it('records main-thread write volume itself and delivers the parallel nudge once', async () => {
+    resetParallelNudgeForTests();
+    let round = 0;
+    const rounds: Message[][] = [];
+    const paths = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ === 0) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: paths.map((path, i) => ({
+              id: `call_w${i}`,
+              index: i,
+              function: { name: 'write_file', arguments: JSON.stringify({ path, content: 'x'.repeat(10_000) }) },
+            })),
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      pullTurnParallelNudge: () => takeBuildParallelNudge(),
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'Wrote file', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
+      },
+    });
+    const events = await collect(new AgentLoopEngine().run(
+      { sessionId: 's-engine-nudge', systemPrompt: 'sys', userPrompt: '搭一个大屏原型', budget: STD_BUDGET },
+      ctx,
+    ));
+    const nudges = rounds[1]!.filter((m) => m.role === 'user' && m.internal && m.content.includes('Main-thread write volume'));
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0]!.content).toContain('29 KB');
+    expect(nudges[0]!.content).toContain('3 whole-file write(s)');
+    const completed = events.find(e => e.type === 'Completed')!;
+    expect(transcriptIsPaired(completed.payload.messages!)).toBe(true);
+    resetParallelNudgeForTests();
+  });
+
+  it('stops asking for a split once the host reports a delegation', async () => {
+    resetParallelNudgeForTests();
+    let round = 0;
+    const rounds: Message[][] = [];
+    const llm: LLMAdapter = {
+      stream: async function* (messages: Message[]): AsyncGenerator<LLMChunk, void, void> {
+        rounds.push([...messages]);
+        if (round++ === 0) {
+          yield {
+            type: 'done',
+            content: '',
+            toolCalls: [
+              { id: 'call_sub', index: 0, function: { name: 'code_editor', arguments: JSON.stringify({ task: '写模块' }) } },
+              { id: 'call_big', index: 1, function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/big.ts', content: 'y'.repeat(40_000) }) } },
+            ],
+          };
+          return;
+        }
+        yield { type: 'done', content: 'done', toolCalls: [] };
+      },
+      complete: async () => ({ content: 'done', toolCalls: [] }),
+    };
+    const ctx = baseCtx({
+      llm,
+      pullTurnParallelNudge: () => takeBuildParallelNudge(),
+      isDelegationCall: (name) => name === 'code_editor',
+      tools: {
+        execute: async (tc: ToolCall): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 }),
+        getMetadata: () => ({ isWrite: true }),
+        getTools: () => [
+          { name: 'code_editor', description: 'c', input_schema: {} },
+          { name: 'write_file', description: 'w', input_schema: {} },
+        ],
+      },
+    });
+    await collect(new AgentLoopEngine().run(
+      { sessionId: 's-engine-nudge-delegated', systemPrompt: 'sys', userPrompt: '搭一个大屏原型', budget: STD_BUDGET },
+      ctx,
+    ));
+    const nudges = rounds[1]!.filter((m) => m.content.includes('Main-thread write volume'));
+    expect(nudges).toHaveLength(0);
+    resetParallelNudgeForTests();
   });
 
   it('injects one stop-at-green nudge after a project-level verification passes', async () => {

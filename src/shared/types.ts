@@ -493,6 +493,11 @@ export interface EngineContext {
    *  每次工具配平点拉一次；返回空串＝无事。引擎把非空文本作为 internal
    *  user 消息插进转录，模型下一轮带着它。 */
   pullTurnParallelNudge?: () => string;
+  /** 这次工具调用是不是一次委派（2026-11-23 收口）：并行提醒的回合账现在
+   *  由引擎统一记（write_file 体量 + 是否已委派），宿主只回答这一件事——
+   *  GUI 传自己的 subagentNames，CLI 传注册表里的角色名。不设 ⇒ 引擎只按体量
+   *  记账，不会误以为「已委派」。 */
+  isDelegationCall?: (toolName: string) => boolean;
   /** 后台委派端口（2026-11-18 档二）。设置后：每个工具配平点取走已结算的
    *  后台支结果（作为内部消息 + ToolResult 事件送达），模型给最终答复时还有
    *  支在飞则先等收齐再重入 THINK——「回合不能带着自己派出去的支收尾」是

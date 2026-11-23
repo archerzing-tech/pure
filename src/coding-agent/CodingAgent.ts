@@ -143,6 +143,9 @@ export interface CodingAgentConfig {
   conventionsDelivered?: EngineContext['conventionsDelivered'];
   /** 生产侧并行提醒的回合中途拉取（见 EngineContext）；透传给 Harness。 */
   pullTurnParallelNudge?: EngineContext['pullTurnParallelNudge'];
+  /** 这次工具调用是不是委派（见 EngineContext）：并行提醒的回合账归引擎，
+   *  宿主只回答这一句。 */
+  isDelegationCall?: EngineContext['isDelegationCall'];
   /** E1.1 lesson reflector tuning; omitted = defaults. */
   reflection?: ReflectionConfig;
   /** P0 棘轮 — 进化总开关（GUI 从 config.skills.evolution 解析）；false 时
@@ -392,6 +395,7 @@ export class CodingAgent {
       conventionsPreloaded: config.conventionsPreloaded,
       conventionsDelivered: config.conventionsDelivered,
       pullTurnParallelNudge: config.pullTurnParallelNudge,
+      isDelegationCall: config.isDelegationCall,
       // 后台委派端口（2026-11-18 档二）：编排器就是账本本体——引擎经它取
       // 已结算的后台支结果，收尾前等收齐。子代理引擎自己不带这个端口，
       // 嵌套委派保持同步（maxDepth 1）。

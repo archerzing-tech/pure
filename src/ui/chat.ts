@@ -5,7 +5,7 @@
 import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
 import { recordGuiDiagnostic } from './errorLedger';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
-import { recordMainThreadWriteBytes, takeBuildParallelNudge } from '../shared/parallelNudge';
+import { takeBuildParallelNudge } from '../shared/parallelNudge';
 import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
 import { abortPaused, upgradeToHardStop, abortReenter } from '../shared/pauseSignal';
 import { settleWithin } from '../shared/timing';
@@ -5465,12 +5465,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     const toolResults = new Map<string, ToolExecMeta>();
     // 回合中途检查点的上次落盘时刻（TurnCheckpoint 节流，见 TURN_CHECKPOINT_PERSIST_MS）。
     let lastCheckpointPersistAt = 0;
-    // 生产侧并行提醒的回合账（shared/parallelNudge）：主线 write_file 成功的
-    // 次数与内容体量、本回合是否出现过委派调用。越过阈值且零委派 → 记一次性
-    // 处方，下一回合 envFacts 送达。回合作用域变量——新 send 自然归零。
-    let turnWriteBytes = 0;
-    let turnWriteFiles = 0;
-    let turnDelegationSeen = false;
     // 检查点体量累计账：逐次累加最新一条消息的 JSON 量（全量 stringify 本身
     // 就是 O(N) 渲染进程税，不做），落盘一次清零。超阈即切慢档（见
     // TURN_CHECKPOINT_HEAVY_BYTES）。
@@ -6269,6 +6263,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // 生效，单 send 长回合必须走引擎内部消息缝）。取走即清——同一处方
         // 只付一次 token；下次过阈会再记。
         pullTurnParallelNudge: () => takeBuildParallelNudge(),
+        // 并行提醒的回合账在引擎里（2026-11-23 收口）：宿主只回答「这次调用
+        // 是不是委派」——委派出现后引擎就不再催拆分。
+        isDelegationCall: (toolName) => subagentNames.has(toolName),
         // Cross-session memory: passed only when the Memory skill is enabled;
         // the Harness composes it into the system prompt at session start.
         memory: memoryEnabled ? memoryStore : undefined,
@@ -8187,18 +8184,6 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
               if (writtenChars >= THINK_DIGEST_CHARS) {
                 digestNote = { tool: toolDisplayName(toolName), chars: writtenChars };
               }
-            }
-            // 生产侧并行提醒的回合账：write_file 成功计体量（args.content 是
-            // 模型生成的整文件正文，与转写里落的是同一份）；委派调用现身即
-            // 记——模型已经自己拆过路，处方没资格再催。
-            if (toolName === 'write_file' && event.payload.result.success) {
-              const nudgeArgs = (pendingRows.get(event.payload.toolCallId) ?? pendingByName.get(toolName))?.args;
-              turnWriteBytes += typeof nudgeArgs?.content === 'string' ? nudgeArgs.content.length : 0;
-              turnWriteFiles += 1;
-            }
-            if (subagentNames.has(toolName)) turnDelegationSeen = true;
-            if (needsDeliveryGate && !turnDelegationSeen) {
-              recordMainThreadWriteBytes(turnWriteBytes, turnWriteFiles);
             }
             // 附加：最小化工具结果摘要（不改现有 UI 文案）
             try { void summarizeToolResult(toolName, resultText); } catch {}

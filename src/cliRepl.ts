@@ -13,6 +13,7 @@ import { takeFormValidationFeedback } from './shared/formValidationFeedback';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from './shared/providerSelfHeal';
 import { takeSchemaQuarantineFacts } from './shared/schemaQuarantineHeal';
 import { recordEndpointCacheOutcome } from './shared/endpointCacheQuality';
+import { takeBuildParallelNudge } from './shared/parallelNudge';
 import { WorldStateRenderer } from './shared/worldStateRender';
 import type { RequestWorkflowStage } from './shared/requestWorkflow';
 import { compileTurnRoute, prefetchTurnRoute } from './coding-agent/turnRoute';
@@ -452,6 +453,10 @@ function buildCliEnvFacts(conventions?: string, repoMap?: string, verificationEn
   // 项目验证入口（2026-11-22）：与 GUI 面同源同形；空串（无清单/探测失败）跳过。
   const verification = verificationEntry?.trim();
   if (verification) parts.push(verification);
+  // 生产侧并行提醒的下一回合通道（2026-11-23，与 GUI buildEnvFacts 同款）：
+  // 引擎中途拉取是主路；这里是上回合结束前没被拉走的那一条的兜底，读即清。
+  const parallelNudge = takeBuildParallelNudge();
+  if (parallelNudge) parts.push(parallelNudge);
   // 仓库符号地图（2026-11-21）：与 GUI 面同源同形。只有动手类回合才传进来，
   // 空串（小仓库/无工具面）直接跳过。
   const map = repoMap?.trim();

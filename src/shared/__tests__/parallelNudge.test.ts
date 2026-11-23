@@ -2,7 +2,7 @@
 // 生产侧并行提醒的记账面（2026-11-18 大屏复测判例：114.9KB 主线直写零委派）。
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { recordMainThreadWriteBytes, resetParallelNudgeForTests, takeBuildParallelNudge } from '../parallelNudge';
+import { createTurnWriteTracker, recordMainThreadWriteBytes, resetParallelNudgeForTests, takeBuildParallelNudge } from '../parallelNudge';
 
 beforeEach(() => resetParallelNudgeForTests());
 
@@ -39,5 +39,55 @@ describe('recordMainThreadWriteBytes / takeBuildParallelNudge', () => {
     resetParallelNudgeForTests();
     recordMainThreadWriteBytes(70_000, 5);
     expect(takeBuildParallelNudge()).not.toBe('');
+  });
+});
+
+// 2026-11-23 收口：引擎是唯一记账人，tracker 自己累加（宿主不再传累计值）。
+describe('createTurnWriteTracker', () => {
+  const big = (n: number) => 'x'.repeat(n);
+  const args = (chars: number) => JSON.stringify({ path: 'a.ts', content: big(chars) });
+  const call = (chars: number) => JSON.stringify({ path: 'a.ts', content: big(chars) });
+
+  it('小写入不落处方，累计越阈才落一条含文件数与体量的处方', () => {
+    const t = createTurnWriteTracker();
+    t.observe('write_file', call(10_000), true, false);
+    t.observe('write_file', call(10_000), true, false);
+    expect(takeBuildParallelNudge()).toBe('');
+    t.observe('write_file', call(10_000), true, false);
+    const nudge = takeBuildParallelNudge();
+    expect(nudge).toContain('29 KB');
+    expect(nudge).toContain('3 whole-file write(s)');
+  });
+
+  it('失败与非 write_file 不记账', () => {
+    const t = createTurnWriteTracker();
+    t.observe('write_file', args(50_000), false, false);
+    t.observe('edit_file', args(50_000), true, false);
+    expect(takeBuildParallelNudge()).toBe('');
+  });
+
+  it('委派现身即封口：之后的整写不再触发（模型已经自己拆过路）', () => {
+    const t = createTurnWriteTracker();
+    t.observe('code_editor', JSON.stringify({ task: '写模块' }), true, true);
+    t.observe('write_file', call(40_000), true, true);
+    expect(takeBuildParallelNudge()).toBe('');
+  });
+
+  it('append 分段也计体量；参数坏掉的那笔不记（不猜）', () => {
+    const t = createTurnWriteTracker();
+    t.observe('write_file', JSON.stringify({ path: 'a.ts', content: big(9_000), append: true }), true, false);
+    t.observe('write_file', JSON.stringify({ path: 'a.ts', content: big(9_000), append: true }), true, false);
+    t.observe('write_file', JSON.stringify({ path: 'a.ts', content: big(9_000), append: true }), true, false);
+    expect(takeBuildParallelNudge()).toContain('26 KB');
+    resetParallelNudgeForTests();
+    const t2 = createTurnWriteTracker();
+    t2.observe('write_file', '{broken', true, false);
+    expect(takeBuildParallelNudge()).toBe('');
+  });
+
+  it('MCP 前缀名按基础名识别', () => {
+    const t = createTurnWriteTracker();
+    t.observe('mcp__fs__write_file', call(30_000), true, false);
+    expect(takeBuildParallelNudge()).toContain('29 KB');
   });
 });

@@ -60,6 +60,7 @@ import { DEFAULT_BUDGET, evolutionCfg, PURE_DIR } from './cliConfig';
 import { loadUserHooks } from './shared/userHooks';
 import { createGatedUserHookRunner, createNodeUserHookRunner } from './shared/userHookRunner';
 import { loadHookApprovals } from './shared/userHookApprovals';
+import { takeBuildParallelNudge } from './shared/parallelNudge';
 import type { CliArgs } from './cliConfig';
 
 // E0.1 — mirror finished prompt/run observations to ~/.pure/observations/cli.jsonl.
@@ -836,6 +837,11 @@ async function createHarness(args: CliArgs, overrides: HarnessOverrides = {}): P
     conventionsPreloaded: overrides.conventionsPreloaded,
     conventionsDelivered,
     llmFor,
+    // 回合中途的拆分处方（体量过阈且零委派时由 shared/parallelNudge 记下，
+    // 引擎在每个工具配平点拉一次；空串＝无事）。GUI 同款。
+    pullTurnParallelNudge: () => takeBuildParallelNudge(),
+    // 回合账在引擎里（2026-11-23 收口）：这里只回答「这次调用是不是委派」。
+    isDelegationCall: (toolName) => cliSubagentNames.has(toolName),
     tools,
     toolsDefs,
     // 工具 deferred 化（框架改革三期）：discover_tools 激活的长尾/MCP 工具要

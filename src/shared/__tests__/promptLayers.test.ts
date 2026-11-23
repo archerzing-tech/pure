@@ -668,11 +668,13 @@ describe('file & shell tool descriptions (framework-reform phase 2 carrier)', ()
 
   it('carries the write + shell discipline: split big output, quiet flags, no re-read verification', () => {
     expect(desc('write_file')).toContain('split it by concern');
-    // 尺寸锚（~5k 字符）+ 三种拆法要在工具决策点常驻：简单单文件任务两个 L2
+    // 尺寸锚（~24k 字符）+ 三种拆法要在工具决策点常驻：简单单文件任务两个 L2
     // 教学闸（parallel_first / multi_agent_mechanics）都不开，工具描述是唯一
-    // 在场的教学面；锚点远低于写入截断线（约 2w-3w 字符必截），留判断权不设闸。
-    expect(desc('write_file')).toContain('~5,000 characters');
-    expect(desc('write_file')).toContain('splitting is the default you consciously depart from');
+    // 在场的教学面。锚点抬到接近真实输出上限（2026-11-22 P1-8）：5k 一刀会把
+    // 一个 12k 文件切成三次写入，每次都是一整轮模型往返——拆分本身成了最慢的形状。
+    expect(desc('write_file')).toContain('~24,000 characters');
+    expect(desc('write_file')).toContain('the default is one write per file');
+    expect(desc('write_file')).toContain('full model round per piece');
     expect(desc('write_file')).toContain('ONE parallel batch');
     expect(desc('write_file')).toContain('append:true calls');
     expect(desc('write_file')).toContain('delegated worker session');

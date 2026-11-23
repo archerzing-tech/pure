@@ -24,6 +24,48 @@ export function recordMainThreadWriteBytes(bytes: number, files: number): void {
   pending = `Main-thread write volume this turn: ${files} whole-file write(s), ~${kb} KB generated code in YOUR OWN transcript — every future round re-reads it. Make the split decision now, before the next module: if the remaining work still has independent modules, pin their shared contract (schema / class names / entry API) in one message, then batch code_editor delegations in the SAME message so big files are written in worker sessions. If what is left is tightly coupled or small, continuing solo is fine — this is a volume fact, not an order.`;
 }
 
+/**
+ * 回合写入账（2026-11-23 收口）：引擎是唯一的记账人，宿主只回答「这次调用
+ * 是不是委派」。此前 GUI 在事件流里按 args 记、CLI 在 execute 层包一层记，
+ * 同一个事实两套实现，各自的阈值口径还容易漂。现在两边都删掉，引擎按 run
+ * 建一个 tracker，工具结果配平时 observe 一次。
+ */
+export interface TurnWriteTracker {
+  /** 每个真实执行的工具结果调一次。委派现身即封口（模型已经自己拆过路）。 */
+  observe(toolName: string, args: string | undefined, success: boolean, delegated: boolean): void;
+}
+
+export function createTurnWriteTracker(): TurnWriteTracker {
+  let bytes = 0;
+  let files = 0;
+  let delegationSeen = false;
+  return {
+    observe(toolName: string, args: string | undefined, success: boolean, delegated: boolean): void {
+      if (delegated) {
+        delegationSeen = true;
+        return;
+      }
+      if (!success || delegationSeen) return;
+      const base = toolName.includes('__') ? toolName.slice(toolName.lastIndexOf('__') + 2) : toolName;
+      if (base !== 'write_file' || !args) return;
+      let chars = 0;
+      try {
+        const parsed: unknown = JSON.parse(args);
+        if (parsed && typeof parsed === 'object') {
+          const content = (parsed as { content?: unknown }).content;
+          if (typeof content === 'string') chars = content.length;
+        }
+      } catch {
+        // 参数残缺不记账：那条走失败/截断救援路径，自有对应文案。
+        return;
+      }
+      bytes += chars;
+      files += 1;
+      recordMainThreadWriteBytes(bytes, files);
+    },
+  };
+}
+
 /** 读走处方（读即清）。无处方返回空串——envFacts 装配零开销。 */
 export function takeBuildParallelNudge(): string {
   const p = pending;
