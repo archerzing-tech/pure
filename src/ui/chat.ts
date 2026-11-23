@@ -124,6 +124,7 @@ import { renderArtifactCards, computeProjectDir, type ArtifactItem } from './art
 import { linkifyPaths, setPathLinkWorkspace, openPathLink, revealPath } from './pathLink';
 import { downloadHub } from '../shared/downloadHub';
 import { wireScrollPin, scrollChatToBottomIfPinned, forceScrollToBottom, setScrollPinObservers } from './scrollPin';
+import { isWindowResizing, onWindowResizeSettledOnce } from './windowResizeGate';
 import { createToolRow, updateToolRowArgs, finalizeToolRow, markToolRowStopped, appendToolStreamLine, truncateResultLines, failureResultPreview, formatSubagentTraceLine, isWebSearchLike, toolGridClass, toolDisplayName, extractPartialToolArgs, MAX_LIVE_STREAM_LINES, type ToolRowHandle, type ToolCardKind } from './toolRow';
 import { isToolEnabled } from './toolInventory';
 import type { AppSkillEntry } from '../shared/skillFiles';
@@ -2238,10 +2239,18 @@ function installAgentActivityHostLayout(): void {
     }
     layoutFrame = requestAnimationFrame(() => {
       layoutFrame = 0;
+      // 拖窗口时输入栏高度不会变，这一拍的 offsetHeight 只会白做一次全布局；
+      // 停手补一次即可（与流式渲染闸同一套全局事实）。
+      if (isWindowResizing()) {
+        onWindowResizeSettledOnce(() => { sync(); applyAgentRailSpaceGate(); });
+        return;
+      }
+      // 先读后写：sync() 的 offsetHeight 若排在空间门的 class 写入之后，
+      // 会在同一帧里强制一次全布局（拖动窗口时六条回调叠加的那份额外成本）。
       // 空间门（工作台设计 §2）跟布局同一拍；context-panel 展开态仍由
       // main.ts 的 setContextPanelCollapsed 同步调 applyAgentRailSpaceGate。
-      applyAgentRailSpaceGate();
       sync();
+      applyAgentRailSpaceGate();
     });
   };
   if (typeof ResizeObserver === 'function') new ResizeObserver(scheduleLayout).observe(inputBar);

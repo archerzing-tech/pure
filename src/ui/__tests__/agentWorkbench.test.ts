@@ -352,7 +352,7 @@ describe('源码锁（接线与退役断言）', () => {
     // 2026-11-20 P0：resize 合帧到 scheduleLayout，空间门与输入栏量高同拍走，
     // 杜绝每事件一次 offsetHeight 强制布局 + class 失效。
     expect(src).toContain("window.addEventListener('resize', scheduleLayout)");
-    expect(src).toMatch(/layoutFrame = requestAnimationFrame\(\(\) => \{[\s\S]*?applyAgentRailSpaceGate\(\);\s*sync\(\);/);
+    expect(src).toMatch(/layoutFrame = requestAnimationFrame\(\(\) => \{[\s\S]*?sync\(\);\s*applyAgentRailSpaceGate\(\);/);
     expect(src).toContain('onOpenAgent: (callId) => agentWorkbench()?.open(callId)');
     // 2026-11-19：工作台盖住对话期间不画 rail 卡（不显示的页面停渲染），
     // 快照仍喂给它；关闭后由 onClosed 补画。
@@ -402,7 +402,7 @@ describe('源码锁（接线与退役断言）', () => {
 
   it('main.ts：闸注册 + 双整页互斥 + Esc 分支 + context 联动 + 恢复跨链', () => {
     const src = read('main.ts');
-    expect(src).toContain('setStreamingRenderGate(() => agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false)');
+    expect(src).toContain('setStreamingRenderGate(() => isWindowResizing() || (agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false))');
     expect(src).toContain('agentWorkbench()?.close();'); // settings onOpen 互斥
     expect(src).toContain('agentWorkbench()?.isVisible()'); // Esc 分支
     expect(src).toContain('applyAgentRailSpaceGate();'); // context 联动

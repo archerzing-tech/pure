@@ -82,6 +82,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
 import { logBootSample } from './perfLog';
 import { startFrameWatchdog } from './frameWatchdog';
+import { installWindowResizeGate, isWindowResizing } from './windowResizeGate';
 
 // ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
 // 僵尸态事故(按钮全死/窗口空白)唯一的页面内第一手证据,机制见 errorLedger.ts;
@@ -92,6 +93,9 @@ const guiErrorLedger = createErrorLedger({
 // 设计内正常路径的取证现场（chat.ts 的 ctx-shape 门禁进入等）走这里：
 // kind:"info" 落盘，与真正的 error/panic 分开（Windows 判例 2026-11-14）。
 setGuiDiagnosticSink(message => guiErrorLedger.record({ kind: 'info', message }));
+// 缩放总闸必须在任何启动分支之前装好：dismissBootSplash 在无 splash 的
+// 恢复路径上会提前返回，挂在那里会让这套保护静默失效。
+installWindowResizeGate();
 window.addEventListener('error', e => {
   guiErrorLedger.record({
     kind: 'error',
@@ -271,7 +275,9 @@ initAgentWorkbench({
   // 关闭后让可见会话补画一次，挂起期间到达的活动不会丢。
   onClosed: () => chat.mountAgentActivityPanel(),
 });
-setStreamingRenderGate(() => agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false);
+// 拖动窗口期间整段挂起流式 markdown 渲染：diffStreaming 的 lexer/高亮/图片门
+// 都带强制布局，叠在 WKWebView 自己的 resize 重排上会把主线程吃满。
+setStreamingRenderGate(() => isWindowResizing() || (agentWorkbench()?.shouldSuspendChatStreamingRender() ?? false));
 
 function getSettingsPanel(): Promise<SettingsPanel> {
   if (!settingsPanelPromise) {

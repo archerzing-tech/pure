@@ -40,6 +40,8 @@
 //     that blew past a group never materializes it point-blank, and no group
 //     is left unmaterialized while its summary is on screen.
 
+import { isWindowResizing, onWindowResizeSettledOnce } from './windowResizeGate';
+
 /** Turns per folded group. */
 export const TRANSCRIPT_GROUP_TURNS = 10;
 /** Newest turns that always stay as plain, ungrouped turns. */
@@ -164,6 +166,12 @@ const scheduleWidthRemeasure = (): void => {
     // 从集合里摘掉，否则长会话反复切换会让这张表无界增长。
     for (const group of groups) if (!group.alive()) parkedGroups.delete(group);
     widthRemeasureQueue = groups.filter((group) => group.isParked());
+    if (isWindowResizing()) {
+      // 泊车组逐个「挂载→量高→泊回」每帧一次全转录布局，叠在拖动的
+      // resize 帧上正是卡顿放大器；停手后补一次即可，宽度只有最终值有意义。
+      onWindowResizeSettledOnce(() => pumpWidthRemeasure());
+      return;
+    }
     pumpWidthRemeasure();
   }, PARK_REMEASURE_SETTLE_MS);
 };

@@ -18,6 +18,7 @@
 
 import { t } from '../shared/i18n';
 import { forceScrollToBottom, isElementPinnedToBottom } from './scrollPin';
+import { isWindowResizing } from './windowResizeGate';
 
 /** 内容不足两屏不出现——短会话里这把尺子是纯噪音。 */
 export const OUTLINE_MIN_SCREENS = 2;
@@ -161,7 +162,6 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
   let measureTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMeasureAt = 0;
   let scrollFrame = 0;
-  let resizeFrame = 0;
   let resizeSettleTimer: ReturnType<typeof setTimeout> | null = null;
   let resizing = false;
   let repaintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -358,16 +358,9 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
       resizing = false;
       refresh(true);
     }, RESIZE_SETTLE_MS);
-    if (typeof requestAnimationFrame !== 'function') {
-      refresh(true, false);
-      return;
-    }
-    if (resizeFrame) return;
-    resizeFrame = requestAnimationFrame(() => {
-      resizeFrame = 0;
-      // 拖动中只做便宜的部分：padding 首帧读一次，后续帧沿用缓存。
-      refresh(false, false);
-    });
+    // 拖动中连「便宜」的 refresh 都不做：它仍要读 2 次 rect + 3 次滚动度量、
+    // 写一次 rail/thumb，每帧一次就足以和流式渲染叠成强制布局风暴。停手后
+    // 上面的 settle 拍会补一次全量 refresh(true)，尺子会在 220ms 内归位。
   };
 
   /**
@@ -459,6 +452,9 @@ export function wireTranscriptOutline(chatEl: HTMLElement): void {
       return false;
     });
     const observer = new MutationObserver((records) => {
+      // 拖动期间流式结构变化不进尺子：resize 的 settle 拍会补一次全量测量。
+      // 这里每帧一次 refresh 正是「流式 + resize 卡死」里那份额外的强制布局。
+      if (isWindowResizing()) return;
       const structural = needsMeasure(records);
       if (typeof requestAnimationFrame !== 'function') {
         refresh(false, structural);

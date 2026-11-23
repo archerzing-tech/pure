@@ -7,7 +7,24 @@
 // pinned, every content change scrolls to the absolute bottom; once the user
 // scrolls up, auto-scroll stops until they return to the bottom.
 
+import { isWindowResizing, onWindowResizeSettled } from './windowResizeGate';
+
 const pinnedStates = new WeakMap<HTMLElement, boolean>();
+
+// 拖窗口期间不写 scrollTop：每次写入前都要读 scrollHeight/clientHeight，
+// 这是全转录强制布局。停手后补一次，直播跟底不会丢。
+const pendingResizeScrolls = new Set<HTMLElement>();
+onWindowResizeSettled(() => {
+  const targets = [...pendingResizeScrolls];
+  pendingResizeScrolls.clear();
+  for (const el of targets) {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => scrollChatToBottomIfPinned(el));
+    } else {
+      scrollChatToBottomIfPinned(el);
+    }
+  }
+});
 
 // Observers bridge scrollPin's policy to UI affordances (the "new content
 // below" pill in chat.ts). Module-level singletons: exactly one chat view
@@ -90,6 +107,10 @@ export function wireScrollPin(el: HTMLElement): void {
 }
 
 export function scrollChatToBottomIfPinned(el: HTMLElement): void {
+  if (isWindowResizing()) {
+    pendingResizeScrolls.add(el);
+    return;
+  }
   if (!isPinnedToBottom(el)) {
     // New content arrived while the user is reading history — the UI shows
     // its "new content below" affordance instead of hijacking the scroll.
