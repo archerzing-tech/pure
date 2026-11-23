@@ -4,6 +4,22 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.3
+
+**坏下载物不再被当图片打死整轮；非交互模式不再必然判「不交付」；并行 worker 与主线不再共写同一个文件**
+
+一、图片按签名判，不按扩展名判。大屏 A/B 里下载失败的错误页被原样存成 `oss.png`（395 字节 XML），`read_file` 按扩展名当图片附进请求，端点回 400 image format 直接终止整轮；案头还把这条 400 报成「服务拒绝了你的 API key」——错误体尾部 Request id 里的 `403` 被裸子串匹配当成了状态码。现在判据是文件头签名（TS `sniffImageMime` / Rust `detect_image_mime`），签名不认识就按文本读，错误体本身往往就写着为什么没下到；归因把 401/403 收紧到独立 token，并新增 `image` 失败类与专门止损文案（不是 key、也不是上下文长度，重发同一张图不会变）。
+
+二、非交互模式先讲清能力边界。stdin 非 TTY 时把「命令通道与交付闸都拿不到确认」写进开工前的 envFacts——实测探测次数从连环试错降到一次；`PURE_USAGE_REPORT=1` 另打印本回合聚合用量（端点不报 usage 时按转写估算，实测每轮固定重发约 1.2 万 token）。
+
+三、交付闸有了可执行的确认路径。闸自己发起的验证命令带 `ToolCall.hostAuthorized` 宿主戳（只从模型的 name/arguments 重建，模型伪造不了），权限层只对这类调用跳过确认，模型回合里发的命令照旧过闸；CLI 打印一行 🔐 说明授权范围。顺带修掉三条让闸必然判不过的前置缺陷：闸前重新 `discoverWorkspace`（回合开始前的 profile 看不见本回合刚建的项目）、清单读取关掉行号 gutter、`test/` 这类约定目录本身就算可发现的测试入口。
+
+四、写入反馈落到决策点。拆分阈值从 ~5k 抬到接近真实输出上限（~24k）——把 12k 的文件切成三次，每次都是一整轮模型往返；首次大写入与同路径重写的体量随工具结果送回，并行提醒的回合账从 GUI 事件流与 CLI 包装收口到引擎一份。
+
+五、文件级写所有权。并行委派时主线程与 worker 先后写同一路径，会落盘成两套内部约定拼接的残片。现在每条路径记住最后写它的人：同一个执行者反复写零摩擦；换人必须先读过对方写下的那一版，盲写拒绝、读过再覆盖允许并明说接管；append 只对「自己上一版」成立。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；`delivery` / `projectQualityGate` / `PermissionFlow` / `ToolExecutionCoordinator` 与 CLI 权限面 130 例全过（2 skip 为 Windows 专项）；图片签名改动 `cargo check` 通过。真机：坏图片定点复现不再打死整轮；非交互跑交付闸得到 `✅ 项目允许交付`（13.976s）。同题 A/B 读数见 `docs/evals/pure-vs-freebuff-bigscreen-2026-11-23.md`：修复后能交付，但 900s 仍未收尾，收尾纪律与并行共写之外的膨胀仍在账上。
+
 ## v4.10.2
 
 **编码回合不再走弯路：读到的有行号、改完有 diff、验证命令由项目自己给出，检索入口只剩一个**
