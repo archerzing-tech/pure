@@ -494,7 +494,10 @@ export class ToolRegistry implements ToolAdapter {
         // 显示故障不阻断执行（与编排器内 emit 同纪律）。
       }
     }
-    if (this.permissionManager) {
+    // hostAuthorized：宿主自己的手脚（交付闸的验证命令）。非交互模式下没有 TTY
+    // 可确认，权限层若照旧拦就必然判「不交付」；只跳过宿主发的调用，模型发起的
+    // 命令照旧过闸（标记不可由模型伪造，见 ToolCall.hostAuthorized 注释）。
+    if (this.permissionManager && toolCall.hostAuthorized !== true) {
       const args = safeParseArgs(toolCall.function.arguments);
       const isWrite = known.tags.includes(Tags.WRITE) || known.tags.includes(Tags.DESTRUCTIVE);
       // 写性未知 ≠ 只读（审计批 5①）：MCP 工具的写性客户端永远无从得知

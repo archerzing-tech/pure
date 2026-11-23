@@ -75,6 +75,14 @@ export interface ToolCall {
   id: string;
   index: number;
   function: { name: string; arguments: string };
+  /** 宿主自己的手脚（2026-11-23）：交付闸发起的验证命令携带这个标记，权限层据此
+   *  跳过交互确认——非交互模式（`-p` / 管道 stdin）没有 TTY，命令类操作永远拿不到
+   *  批准，过去交付闸因此必然判「不交付」，与「本次运行的授权」矛盾。
+   *
+   *  不可由模型伪造：ToolCall 只从模型的 name/arguments 重建，其余字段由宿主填写。
+   *  只给「命令来自工作区自己的验证入口 + 固定静态审查脚本」的闸用，模型发起的
+   *  命令照旧过权限闸。 */
+  hostAuthorized?: true;
 }
 
 export interface ToolResult {

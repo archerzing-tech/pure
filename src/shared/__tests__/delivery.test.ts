@@ -40,6 +40,41 @@ describe('delivery workspace discovery', () => {
     expect(profile.testFilesFound).toBe(false);
   });
 
+  it('读清单必须关行号 gutter，否则 scripts 解析为空（2026-11-23 交付闸判例）', async () => {
+    // 真机形态：read_file 默认带 `1→` 行号前缀，package.json 于是不是 JSON，
+    // profile 的 scripts 全空 → 交付闸报「未发现验证入口」并硬判不交付。
+    const raw = JSON.stringify({ scripts: { test: 'bun test' } });
+    const gutter = raw.split('\n').map((line, i) => `${i + 1}→${line}`).join('\n');
+    const tools: ToolAdapter = {
+      getTools: () => [],
+      getMetadata: () => undefined,
+      execute: async (call: ToolCall): Promise<ToolResult> => {
+        const args = JSON.parse(call.function.arguments) as { path?: string; lineNumbers?: boolean };
+        if (call.function.name === 'list_files') return { id: call.id, toolName: call.function.name, result: 'package.json\nsrc/index.test.ts', success: true, duration: 1 };
+        if (call.function.name === 'read_file' && args.path === 'package.json') {
+          const body = args.lineNumbers === false ? raw : gutter;
+          return { id: call.id, toolName: call.function.name, result: body, success: true, duration: 1 };
+        }
+        return { id: call.id, toolName: call.function.name, result: '', success: false, error: 'not found', duration: 1 };
+      },
+    };
+    const profile = await discoverWorkspace(tools);
+    expect(profile.scripts).toEqual({ test: 'bun test' });
+    expect(profile.verification.map((spec) => spec.command)).toContain('npm run test');
+  });
+
+  it('非递归清单只给到 test/ 目录时也算可发现的测试入口（2026-11-23 交付闸判例）', async () => {
+    // 真机形态：package.json 有 test script、test/smoke.test.mjs 也在，但清单
+    // 只列到目录 → 旧判据只看文件名，交付闸以 verify-missing-tests 硬失败。
+    const profile = await discoverWorkspace(adapter(
+      'package.json\ntest\nindex.html',
+      JSON.stringify({ scripts: { test: 'node --test test/smoke.test.mjs' } }),
+    ));
+    expect(profile.testFilesFound).toBe(true);
+    const contract = buildTaskContract('做一个静态页面', profile);
+    expect(contract.acceptanceCriteria.some((c) => c.id === 'test-infrastructure')).toBe(false);
+  });
+
   it('marks projects without discoverable tests so delivery cannot silently pass', async () => {
     const profile = await discoverWorkspace(adapter(
       'package.json\npackage-lock.json\nsrc/index.ts',

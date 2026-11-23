@@ -731,10 +731,19 @@ async function consumeTurn(
 async function runCliDeliveryGate(
   tools: ToolAdapter,
   profile: WorkspaceProfile,
+  authorizeCommands: boolean,
 ): Promise<ProjectQualityGateResult> {
   process.stdout.write(`\n  ${cyan('🧪')} ${cyan('Delivery gate')} ${dim('— review, audit, typecheck, test, lint, build')}\n`);
+  // 非交互模式的确认路径（2026-11-23 大屏 A/B）：没有 TTY 就没人能批准，过去
+  // 交付闸必然以「review 拿不到确认」收场，与「用户已经用 `-p` 授权本次运行」
+  // 矛盾。这里把闸自己的验证命令当作宿主手脚执行，并明说这件事；模型在回合
+  // 里发起的命令仍走权限闸，不会被这条授权刷开。
+  if (authorizeCommands) {
+    process.stdout.write(`  ${dim('🔐 非交互模式：交付闸的验证命令以本次运行的授权执行；模型自己发起的命令仍按原规则处理。')}\n`);
+  }
   const result = await runProjectQualityGate(tools, {
     profile,
+    authorizeCommands,
     onPhase: (phase, status, summary) => {
       const icon = status === 'active' ? '●' : status === 'passed' ? '✓' : status === 'failed' ? '✗' : status === 'not_applicable' ? '–' : '!';
       process.stdout.write(`  ${status === 'passed' ? green(icon) : status === 'failed' ? red(icon) : yellow(icon)} ${phase}: ${summary ?? status}\n`);
@@ -763,10 +772,20 @@ async function runCliDeliveryGateWithRepair(
   streamMgr: StreamManager,
   signal?: AbortSignal,
   heal?: { provider: string; model: string; models: string[] },
+  authorizeCommands = false,
 ): Promise<{ result: ProjectQualityGateResult; messages: Message[] }> {
+  // 交付闸判的必须是「此刻磁盘上的项目」：profile 是回合开始前探的，而本回合
+  // 刚建出 package.json / 测试文件时，它会说「未发现标准验证入口」，verify 于是
+  // 以 verify-missing-tests 硬失败——非交互模式最典型的新项目场景（2026-11-23）。
+  // 探不到时退回传入的快照。
   let currentProfile = profile;
+  try {
+    currentProfile = await discoverWorkspace(tools);
+  } catch {
+    /* 保留传入快照 */
+  }
   let currentMessages = messages;
-  let result = await runCliDeliveryGate(tools, currentProfile);
+  let result = await runCliDeliveryGate(tools, currentProfile, authorizeCommands);
   let rounds = 0;
   while (!result.passed && rounds < MAX_CLI_QUALITY_REPAIR_ROUNDS && hasRepairableQualityFindings(result) && !signal?.aborted) {
     rounds += 1;
@@ -779,7 +798,7 @@ async function runCliDeliveryGateWithRepair(
     if (repairResult.messages.length > 0) currentMessages = repairResult.messages;
     if (!repairResult.ok) break;
     currentProfile = await discoverWorkspace(tools);
-    result = await runCliDeliveryGate(tools, currentProfile);
+    result = await runCliDeliveryGate(tools, currentProfile, authorizeCommands);
   }
   if (!result.passed && rounds >= MAX_CLI_QUALITY_REPAIR_ROUNDS && hasRepairableQualityFindings(result)) {
     process.stdout.write(`  ${red('⛔')} ${red(`质量修复达到 ${MAX_CLI_QUALITY_REPAIR_ROUNDS} 轮上限，项目暂不交付`)}\\n`);
@@ -886,7 +905,7 @@ async function runOneShot(args: CliArgs) {
   if (needsDeliveryGate && tools) {
     const profile = workspaceProfile ?? await discoverWorkspace(tools);
     if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
-    const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, undefined, cliProviderHealContext(args));
+    const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, undefined, cliProviderHealContext(args), !process.stdin.isTTY);
     ok = ok && delivery.result.passed;
   }
 
@@ -1198,7 +1217,7 @@ async function runRepl(args: CliArgs) {
     if (needsDeliveryGate && tools && !currentAbort.signal.aborted) {
       const profile = workspaceProfile ?? await discoverWorkspace(tools);
       if (!workspaceProfile) process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(profile))}\\n`);
-      const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, currentAbort.signal, cliProviderHealContext(args));
+      const delivery = await runCliDeliveryGateWithRepair(tools, profile, harness, systemPrompt, result.messages, streamMgr, currentAbort.signal, cliProviderHealContext(args), !process.stdin.isTTY);
       turnOk = turnOk && delivery.result.passed;
       turnMessages = delivery.messages;
     }

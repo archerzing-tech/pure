@@ -144,7 +144,16 @@ function projectListing(listing: string): string {
 }
 
 function hasTestFile(listing: string): boolean {
-  return listing.split(/\r?\n/).some((entry) => /(?:__tests__|(?:^|[./_-])[^/\n]+\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|[./_-])test_[^/\n]+)/i.test(entry.trim()));
+  return listing.split(/\r?\n/).some((entry) => {
+    const line = entry.trim();
+    if (!line) return false;
+    // 非递归清单只给到目录：约定名为 test/tests/specs/__tests__ 的目录本身就是
+    // 「可发现的测试入口」。只看文件名会把标准 test/ 布局判成「没有测试文件」，
+    // 交付闸于是以 verify-missing-tests 硬失败（2026-11-23 非交互模式判例：
+    // 工作区里 package.json 有 test script、test/smoke.test.mjs 也在，仍然判缺）。
+    if (/(?:^|\/)(?:tests?|specs?|__tests__)(?:\/|$)/i.test(line)) return true;
+    return /(?:^|[./_-])[^/\n]+\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|[./_-])test_[^/\n]+/i.test(line);
+  });
 }
 
 function hasAny(listing: string, names: string[]): boolean {
@@ -247,7 +256,7 @@ async function captureWorkspaceFingerprint(tools: ToolAdapter, profile: Workspac
   const root = await execute(tools, 'list_files', { path: '.', recursive: false }, signal);
   if (root?.success !== true) return null;
   const packageJsonPath = workspacePackageJsonPath(profile);
-  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath }, signal)) : '';
+  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath, lineNumbers: false }, signal)) : '';
   return {
     gitStatus: status?.success === true ? resultString(status) : null,
     rootListing: resultString(root),
@@ -265,7 +274,7 @@ async function workspaceUnchanged(tools: ToolAdapter, prev: WorkspaceFingerprint
   const root = await execute(tools, 'list_files', { path: '.', recursive: false }, signal);
   if (root?.success !== true || resultString(root) !== prev.rootListing) return false;
   if (prev.packageJsonPath) {
-    const packageJson = resultString(await execute(tools, 'read_file', { path: prev.packageJsonPath }, signal));
+    const packageJson = resultString(await execute(tools, 'read_file', { path: prev.packageJsonPath, lineNumbers: false }, signal));
     if (packageJson !== prev.packageJson) return false;
   }
   return true;
@@ -300,7 +309,7 @@ async function scanWorkspace(tools: ToolAdapter, signal?: AbortSignal): Promise<
   // manifest actually is so a nested project gets a real verification plan.
   const hasManifest = (name: string): boolean => manifests.some((entry) => entry === name || entry.endsWith(`/${name}`));
   const packageJsonPath = manifestPaths.find((entry) => entry === 'package.json' || entry.endsWith('/package.json'));
-  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath }, signal)) : '';
+  const packageJson = packageJsonPath ? resultString(await execute(tools, 'read_file', { path: packageJsonPath, lineNumbers: false }, signal)) : '';
   const scripts = parseScripts(packageJson);
   const projectType: WorkspaceProjectType = hasManifest('Cargo.toml')
     ? 'rust'

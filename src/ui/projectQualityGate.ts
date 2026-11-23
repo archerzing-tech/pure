@@ -34,6 +34,26 @@ export interface QualityGateRunnerOptions {
   /** Workspace facts discovered before planning; avoids guessing the package manager and checks. */
   profile?: WorkspaceProfile;
   signal?: AbortSignal;
+  /** 宿主授权（2026-11-23）：为 true 时，本闸发起的每个工具调用都带
+   *  `hostAuthorized`，权限层跳过交互确认。非交互宿主（`-p` / 管道 stdin）用它——
+   *  没有 TTY 就永远拿不到确认，过去交付闸因此必然判「不交付」。命令本身仍是
+   *  工作区自己的验证入口与固定静态审查脚本，不是模型自由选定的命令。 */
+  authorizeCommands?: boolean;
+}
+
+/** 给闸发起的调用盖上宿主授权戳。用 Proxy 而不是展开对象：Adapter 常是类实例，
+ *  展开会丢掉原型方法（仅保留 execute/getTools 两个自有属性）。 */
+function withHostAuthorization(tools: ToolAdapter): ToolAdapter {
+  return new Proxy(tools, {
+    get(target, prop, receiver) {
+      if (prop === 'execute') {
+        return (toolCall: ToolCall, signal?: AbortSignal) =>
+          target.execute({ ...toolCall, hostAuthorized: true }, signal);
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
 }
 
 const REVIEW_TIMEOUT_MS = 45_000;
@@ -474,6 +494,8 @@ export async function runProjectQualityGate(
 ): Promise<ProjectQualityGateResult> {
   const checks: QualityGateCheck[] = [];
   const finish = (passed: boolean): ProjectQualityGateResult => ({ passed, checks, evidence: buildDeliveryEvidence(checks) });
+  // 宿主授权（2026-11-23）：闸内每个调用都盖戳，权限层跳过交互确认。
+  const runTools = options.authorizeCommands ? withHostAuthorization(tools) : tools;
   const commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
   const projectDir = projectDirectoryFor(options.profile);
   for (const phase of ['review', 'audit', 'verify'] as const) {
@@ -486,10 +508,10 @@ export async function runProjectQualityGate(
     }
     options.onPhase?.(phase, 'active');
     const check = phase === 'review'
-      ? await runReview(tools, options.signal, (message) => options.onActivity?.(phase, message), options.reviewTimeoutMs, commandTimeoutMs)
+      ? await runReview(runTools, options.signal, (message) => options.onActivity?.(phase, message), options.reviewTimeoutMs, commandTimeoutMs)
       : phase === 'audit'
-        ? await runAudit(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, projectDir)
-        : await runVerification(tools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, options.profile, projectDir);
+        ? await runAudit(runTools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, projectDir)
+        : await runVerification(runTools, options.signal, (message) => options.onActivity?.(phase, message), commandTimeoutMs, options.profile, projectDir);
     checks.push(check);
     options.onPhase?.(phase, check.status, check.summary);
     options.onCheck?.(check);

@@ -521,3 +521,35 @@ describe('ToolRegistry visibility gate aligns the model list with the settings t
     expect(names).toContain('read_file'); // 其余内建照常可见
   });
 });
+
+describe('宿主授权的工具调用（交付闸验证命令）', () => {
+  it('hostAuthorized 跳过权限闸，无标记的模型调用照旧被问', async () => {
+    const tools: ToolDefinition[] = [{ name: 'execute_command', description: 'run', input_schema: { type: 'object' } }];
+    let asked = 0;
+    const delegate: ToolAdapter = {
+      getTools: () => tools,
+      getMetadata: () => ({ sideEffects: true }),
+      execute: async (tc): Promise<ToolResult> => ({ id: tc.id, toolName: tc.function.name, result: 'ok', success: true, duration: 1 }),
+    };
+    const registry = new ToolRegistry(delegate);
+    registry.setPermissionManager(new PermissionManager('NORMAL', async () => {
+      asked += 1;
+      return { allowed: false, reason: 'Non-interactive: this operation requires TTY confirmation' };
+    }));
+    const call = (authorized: boolean): ToolCall => ({
+      id: authorized ? 'gate' : 'model',
+      index: 0,
+      function: { name: 'execute_command', arguments: JSON.stringify({ command: 'bun test' }) },
+      ...(authorized ? { hostAuthorized: true as const } : {}),
+    });
+
+    const denied = await registry.execute(call(false));
+    expect(denied.success).toBe(false);
+    expect(asked).toBe(1);
+
+    // 交付闸发起的验证命令：非交互模式没有 TTY，确认路径 = 本次运行的授权。
+    const allowed = await registry.execute(call(true));
+    expect(allowed.success).toBe(true);
+    expect(asked).toBe(1); // 没有再问一次
+  });
+});

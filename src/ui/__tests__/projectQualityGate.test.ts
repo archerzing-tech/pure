@@ -492,3 +492,33 @@ describe('verification command helpers', () => {
     expect(isVerificationCommand('git add .')).toBe(false);
   });
 });
+
+describe('交付闸的宿主授权（2026-11-23 非交互模式）', () => {
+  function recordingAdapter(seen: Array<boolean | undefined>): ToolAdapter {
+    return {
+      getTools: () => [REVIEW_TOOL, COMMAND_TOOL],
+      getMetadata: () => ({ sideEffects: true }),
+      execute: async (call: ToolCall): Promise<ToolResult> => {
+        seen.push(call.hostAuthorized);
+        const output = call.function.name === 'code_reviewer'
+          ? 'VERDICT: PASS'
+          : '[local-review] no credential pattern found\n[audit-exit] 0\nbun test passed\nexit 0';
+        return { id: call.id, toolName: call.function.name, result: output, success: true, duration: 1 };
+      },
+    };
+  }
+
+  it('authorizeCommands 时闸内每个调用都带 hostAuthorized', async () => {
+    const seen: Array<boolean | undefined> = [];
+    await runProjectQualityGate(recordingAdapter(seen), { authorizeCommands: true });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((v) => v === true)).toBe(true);
+  });
+
+  it('不授权时保持原样（交互宿主照旧走确认）', async () => {
+    const seen: Array<boolean | undefined> = [];
+    await runProjectQualityGate(recordingAdapter(seen), {});
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((v) => v === undefined)).toBe(true);
+  });
+});
