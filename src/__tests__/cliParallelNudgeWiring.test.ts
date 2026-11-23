@@ -37,3 +37,21 @@ describe('平行提醒接线', () => {
     expect(read('../ui/chat.ts')).toContain('takeBuildParallelNudge(), repoMap, verificationEntry');
   });
 });
+
+// 2026-11-23 大屏 A/B：非交互模式下命令通道与交付闸都拿不到确认，这条事实
+// 过去只在第一个 ✗ 里出现，模型于是把回合花在「换种方式试探权限」上。
+describe('非交互模式的前置告知与用量插桩', () => {
+  it('开工前就讲清命令通道与交付闸不可用', () => {
+    const repl = read('../cliRepl.ts');
+    expect(repl).toContain("if (!process.stdin.isTTY) {");
+    expect(repl).toContain('<non_interactive_mode>');
+    expect(repl).toContain('Do NOT probe for permission');
+  });
+
+  it('PURE_USAGE_REPORT 打开时打印本回合聚合用量', () => {
+    const repl = read('../cliRepl.ts');
+    expect(repl).toContain("process.env.PURE_USAGE_REPORT === '1'");
+    expect(repl).toContain('usage: ${parts.join(');
+    expect(repl).toContain('usage = event.payload.usage');
+  });
+});

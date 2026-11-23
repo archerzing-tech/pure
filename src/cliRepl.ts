@@ -48,7 +48,8 @@ import { buildRepairPrompt, hasRepairableQualityFindings, qualityGateSummary, ru
 import type { Harness } from './harness/Harness';
 import type { MCPClient } from './harness/mcp/MCPClient';
 import { parseMcpPromptCommand, describeMcpPrompt, MCP_PROMPT_COMMAND } from './shared/mcpPrompt';
-import type { EngineEvent, Message, ToolAdapter, ToolDefinition } from './shared/types';
+import { estimateTextTokens } from './shared/tokenEstimate';
+import type { EngineEvent, Message, TokenUsage, ToolAdapter, ToolDefinition } from './shared/types';
 import type { LLMAdapter } from './shared/types';
 import type { UserTurnContext } from './shared/promptLayers';
 import { wantsHandsOnWorkflow } from './shared/promptLayers';
@@ -428,6 +429,21 @@ function buildCliEnvFacts(conventions?: string, repoMap?: string, verificationEn
   // 意图落地；不再冻进 system 首回合前缀。
   const time = formatTimeContextLine(currentTimeContext()).trim();
   if (time) parts.push(time);
+  // 非交互能力边界先说清（2026-11-23 大屏 A/B）：stdin 不是 TTY 时，需要确认的
+  // 操作（执行命令是 high risk → danger，非 TTY 永不自动批准）直接失败，交付闸
+  // 的 review 也拿不到确认。这条事实过去只在第一个 ✗ 里出现，模型于是把整轮
+  // 预算花在「换种方式试探权限」上（download_file 探网络、read_file 验下载物），
+  // 而探测动作本身把回合烧光。开工前讲明，探测就不必发生。
+  if (!process.stdin.isTTY) {
+    parts.push([
+      '<non_interactive_mode>',
+      'This run is NON-INTERACTIVE (stdin is not a TTY) — these are facts, not obstacles:',
+      '- Operations that need a confirmation fail outright: command execution (high risk, never auto-approved) and any danger-level tool. The delivery gate\'s review step cannot confirm either and will end as "not delivered".',
+      '- Do NOT probe for permission with other tools (download_file/read_file/list_files): a denied call tells you nothing new, and a download that fails may save an HTML/XML error body under an image name.',
+      '- Work with what is allowed: read-only tools plus the writes you are granted. Produce the files directly, and list in the final answer anything that would have needed a command (install/verify/build) instead of trying to run it.',
+      '</non_interactive_mode>',
+    ].join('\n'));
+  }
   if (conventions?.trim()) parts.push(`<project_conventions>\n${conventions.trim()}\n</project_conventions>`);
   const runtimes = buildRuntimesContext().trim();
   const network = buildNetworkContext().trim();
@@ -529,11 +545,12 @@ async function consumeTurn(
   events: AsyncGenerator<EngineEvent, void, void>,
   streamMgr: StreamManager,
   heal?: { provider: string; model: string; models: string[] },
-): Promise<{ output: string; messages: Message[]; turnCount: number; ok: boolean }> {
+): Promise<{ output: string; messages: Message[]; turnCount: number; ok: boolean; usage?: TokenUsage }> {
   let finalOutput = '';
   let messages: Message[] = [];
   let turnCount = 1;
   let ok = true;
+  let usage: TokenUsage | undefined;
 
   // Diagram wireframe conversion: mermaid/puml fenced blocks from the model
   // stream as raw source; the converter holds open diagram fences until they
@@ -649,6 +666,7 @@ async function consumeTurn(
           finalOutput = event.payload.finalOutput ?? '';
           messages = event.payload.messages ?? [];
           turnCount = event.payload.turnCount;
+          usage = event.payload.usage;
           // A turn that truly completed (interrupted=false) succeeded even if
           // it passed through recoverable VERIFY_FAILED retries earlier — don't
           // let the sticky `ok=false` from an intermediate recoverable error
@@ -878,6 +896,24 @@ async function runOneShot(args: CliArgs) {
   const time = dim(`${Date.now() - startTime}ms`);
   const turn = dim(`| turn ${result.turnCount}`);
   process.stdout.write(`  ${emoji} ${time} ${turn}\n`);
+  // 用量插桩（PURE_USAGE_REPORT=1）：真机 A/B 需要「这轮到底写了多少上下文、
+  // 模型回了多少」的硬读数。引擎已在 Completed 上聚合了本回合所有 LLM 调用的
+  // usage，这里只是把它打出来——默认关，不改变日常输出。交付闸的修复轮另算
+  // （它们自己的 Completed 不进这份合计）。
+  if (process.env.PURE_USAGE_REPORT === '1') {
+    const u = result.usage;
+    if (u) {
+      const parts = [`prompt ${u.promptTokens ?? '?'}`, `completion ${u.completionTokens ?? '?'}`,
+        ...(u.cacheHitTokens !== undefined ? [`cache hit ${u.cacheHitTokens}`] : [])];
+      console.log(dim(`usage: ${parts.join(' / ')}`));
+    } else {
+      // 端点不报 usage 时（火山引擎的流式响应就没有）用同一套估算器量转写体量：
+      // 这不是账单数字，只是「每轮要重发多大的上下文」的硬读数，报数时须标注。
+      const estimated = result.messages.reduce(
+        (n, m) => n + (typeof m.content === 'string' ? estimateTextTokens(m.content) : 0), 0);
+      console.log(dim(`usage: provider reported none — estimated final transcript ${estimated} tokens over ${result.messages.length} messages`));
+    }
+  }
 
   // E1.1 — a triggered turn launched a fire-and-forget lesson reflection; give
   // it a bounded window to land before the process exits (no-op when the turn

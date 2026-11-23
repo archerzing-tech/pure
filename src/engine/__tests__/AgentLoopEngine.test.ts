@@ -1633,6 +1633,36 @@ describe('AgentLoopEngine', () => {
     expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
   });
 
+  it('stops an image-format rejection as an image problem, never as bad credentials (2026-11-23 大屏 A/B)', async () => {
+    // 真机形态：请求里带了不可解码的图片（read_file 当时按扩展名判图）。旧归因
+    // 把 request id 里的 403 当状态码，中断卡写「服务拒绝了你的 API key」——
+    // 用户会去换一把正常的 key，重发同一张图依旧 400。
+    const IMAGE_400 = '400 The request failed because the image format is not supported by the API. Request id: 0217954030527342a2bed297ad64eae2b89e2702342ef978cca44';
+    const llm: LLMAdapter = {
+      stream: async function* (): AsyncGenerator<LLMChunk, void, void> {
+        throw new Error(IMAGE_400);
+      },
+      complete: async () => ({ content: 'ok', toolCalls: [] }),
+    };
+    const engine = new AgentLoopEngine();
+    const ctx = baseCtx({ llm, failurePolicy: new DefaultFailurePolicy() });
+
+    const events = await collect(engine.run(
+      { sessionId: 's-image-400', systemPrompt: 'X', userPrompt: 'Y', budget: ctx.budget },
+      ctx,
+    ));
+
+    const interrupted = events.find(e => e.type === 'Interrupted');
+    expect(interrupted).toBeDefined();
+    const reason = interrupted!.payload.reason;
+    expect(reason).toContain('rejected an IMAGE');
+    expect(reason).not.toContain('API credentials');
+    expect(reason).not.toContain('HTTP 401/403');
+    expect(reason).toContain(IMAGE_400); // provider 原话保留
+    const decision = events.find(e => e.type === 'FailurePolicyDecision');
+    expect(decision?.type === 'FailurePolicyDecision' && decision.payload.action.kind).toBe('stop');
+  });
+
   it('self-heals a schema rejection: quarantines the named tool, resends pattern-free, completes', async () => {
     // 2026-11-01 rea 判例：严格端点拒收工具 schema 里的 `\0` 正则转义时，
     // 老行为是搭 4xx 确定性拒绝的便车直接停——但这个 400 有具体的每工具

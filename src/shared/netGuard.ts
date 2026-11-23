@@ -615,6 +615,7 @@ export type FailureClass =
   | 'context'
   | 'content'
   | 'schema'
+  | 'image'
   | 'generic';
 
 /** 网关/出口拦截判据（2026-11-02 内网判例：公司 NetentSec SWG 策略阻断，
@@ -634,12 +635,26 @@ export function isGatewayBlockedText(message: string): boolean {
   return /<html|<!doctype|netentsec|网康|上网行为|安全网关|sangfor|深信服|zscaler|forcepoint|palo ?alto|cloudflare|waf|firewall|blocked|rejected|denied|拦截|阻断|审查|违规|content filter/.test(m);
 }
 
+/** 端点以「图片格式不支持」拒收：请求体里带了不可解码的图片字节。
+ *
+ * 与凭证、上下文长度都无关：重发同一张图必然原样失败，改 key 或压缩对话都
+ * 是白费。源头在 read_file 按扩展名判图（已修为按签名判定），这里是兜底
+ * 与归因——真出现了要让用户知道该丢掉/重读的是那张图。 */
+export function isImagePayloadRejection(message: string): boolean {
+  return /image (?:format|type|data)\b[^.\n]{0,60}(?:not supported|unsupported|invalid|malformed)|unsupported image (?:format|type)|invalid image (?:format|data)|malformed image/i.test(message);
+}
+
 export function classifyFailure(message: string): FailureClass {
   const m = message.toLowerCase();
   if (isGatewayBlockedText(message)) return 'gateway';
+  if (isImagePayloadRejection(message)) return 'image';
   if (/error sending request|connection|unable to connect|unable to resolve|unreachable|\bdns\b|econn|reset by peer|fetch failed|network|证书|certificate|tls|连接/.test(m)) return 'network';
   if (/timed?[\s-]?out|超时/.test(m)) return 'timeout';
-  if (/401|403|unauthorized|forbidden|api[- ]?key|invalid.*key|凭证|未授权/.test(m)) return 'auth';
+  // 状态码只在独立 token 处算数（2026-11-23）：provider 错误体常附带 opaque
+  // request id（"Request id: 0217954030527…"），旧的裸 `403` 子串匹配把
+  // 「400 image format is not supported」判成了凭证被拒，提示用户去换一把
+  // 本来正常的 key。前后都不许是数字，才是一个真的 HTTP 状态码。
+  if (/(?<!\d)(?:401|403)(?!\d)|unauthorized|forbidden|api[- ]?key|invalid.*key|凭证|未授权/.test(m)) return 'auth';
   if (/permission denied|eacces|eperm|access denied|权限/.test(m)) return 'permission';
   if (/404|not found|no such file|does not exist|不存在|无法找到/.test(m)) return 'not-found';
   if (/429|rate limit|too many requests|限流/.test(m)) return 'rate-limit';
@@ -670,6 +685,7 @@ export const FAILURE_CLASS_HINTS: Record<FailureClass, string> = {
   'rate-limit': '此类失败 = 被限流。换后端或降低频率，不要立即原样重试。',
   context: '此类失败 = 窗口装不下。请求级（对话整体）超窗时重试只会更糟，交回用户压缩或新开会话；工具级（子代理/委派/单调用）超窗时任务可绕——拆小输入或砍输出重试，不要原样重发。',
   schema: '此类失败 = 端点严格校验拒绝了某个工具的参数格式定义，与对话内容无关。工具清单随每个请求整体发送，重试必然原样失败；新版 pure 会在发送前清洗不兼容的正则写法，或停用对应 MCP server。',
+  image: '此类失败 = 请求里带了一张端点解不了的图片（常见于把下载失败的错误页当图片读了）。重发同一张图不会变；重新读取那个文件确认它真是图片，或去掉这张图继续用文本。',
   content: '此类失败 = 返回内容不符合预期。换解析方式或来源；不要原样重试。',
   generic: '',
 };

@@ -990,3 +990,52 @@ describe('NodeToolAdapter write_file read-before-write gate', () => {
     expect(text).toContain('1→const a = 1;');
   });
 });
+
+// 2026-11-23 大屏 A/B：read_file 按扩展名把坏下载物当图片附进请求，端点回
+// 400 image format，整轮终止。判据改为文件签名：扩展名是图片但签名不是，
+// 就按文本读（错误体本身有用），绝不把不可解码的字节当图片发送。
+describe('NodeToolAdapter read_file image signature gate', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-imagegate-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  const read = async (args: Record<string, unknown>): Promise<ToolResult> =>
+    adapter.execute({
+      id: 'call-imagegate',
+      index: 0,
+      function: { name: 'read_file', arguments: JSON.stringify(args) },
+    });
+
+  it('reads an image-named error body as text instead of attaching it as an image', async () => {
+    writeFileSync(join(workspace, 'oss.png'), '<?xml version="1.0"?>\n<Error><Code>NoSuchBucket</Code></Error>');
+    const r = await read({ path: 'oss.png' });
+    expect(r.success).toBe(true);
+    expect(r.images).toBeUndefined();
+    const text = String(r.result);
+    expect(text).toContain('不是可解码的图片');
+    expect(text).toContain('NoSuchBucket');
+  });
+
+  it('still attaches a real image, using the signature mime', async () => {
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    writeFileSync(join(workspace, 'real.png'), png);
+    const r = await read({ path: 'real.png' });
+    expect(r.success).toBe(true);
+    expect(r.images?.[0]?.mimeType).toBe('image/png');
+
+    // 扩展名与内容不符时以内容为准（.png 里其实是 JPEG）。
+    writeFileSync(join(workspace, 'actually-jpeg.png'), new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0]));
+    const jpeg = await read({ path: 'actually-jpeg.png' });
+    expect(jpeg.images?.[0]?.mimeType).toBe('image/jpeg');
+    expect(String(jpeg.result)).toContain('image/jpeg');
+  });
+});

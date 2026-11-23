@@ -14129,14 +14129,6 @@ async fn write_temp_file(name: String, content: String) -> Result<String, String
 async fn read_image_file(workspace: String, path: String) -> Result<serde_json::Value, String> {
     run_blocking(move || {
         const IMAGE_READ_MAX_BYTES: u64 = 5 * 1024 * 1024;
-        let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-            Some("png") => "image/png",
-            Some("jpg") | Some("jpeg") => "image/jpeg",
-            Some("gif") => "image/gif",
-            Some("webp") => "image/webp",
-            Some("bmp") => "image/bmp",
-            _ => return Err("read_image_file: unsupported image extension".into()),
-        };
         let full = resolve(&workspace, &path)?;
         let meta = fs::metadata(&full).map_err(|e| format!("read_image_file: {}", e))?;
         if !meta.is_file() {
@@ -14148,6 +14140,14 @@ async fn read_image_file(workspace: String, path: String) -> Result<serde_json::
             ));
         }
         let bytes = fs::read(&full).map_err(|e| format!("read_image_file: {}", e))?;
+        // 扩展名只说明「打算读成图片」，内容由签名判定（2026-11-23 大屏 A/B）：
+        // 下载失败的错误页常被存成 .png，把这种字节当图片附进请求会被端点以
+        // 400 image format 打死整轮。签名不认识就拒绝，让模型改走 read_file
+        // 文本路径——错误文本里就写着为什么没下到。
+        let mime = detect_image_mime(&bytes).ok_or_else(|| format!(
+            "read_image_file: '{}' 的扩展名是图片，但内容不是可解码的图片（签名不匹配；下载失败时错误页常被原样存成图片名）。不要把它当图片发送，用 read_file 读它的文本。",
+            path
+        ))?;
         use base64::Engine as _;
         Ok(serde_json::json!({
             "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -16016,6 +16016,26 @@ fn image_proxy_url(args: &GenerateImageArgs) -> Option<&str> {
         None
     } else {
         Some(args.proxy_url.trim())
+    }
+}
+
+/// 按签名判定图片 MIME；不认识返回 None（与 TS 侧 sniffImageMime 同判据）。
+/// 与下方 sniff_image_mime 的区别：那个服务于「确定是图片、只差细分格式」的
+/// 场景（生成图占位），不认识时回落 image/png；这里要回答「到底是不是图片」，
+/// 所以必须有「不是」这个答案。
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") && bytes.len() >= 14 {
+        Some("image/bmp")
+    } else {
+        None
     }
 }
 

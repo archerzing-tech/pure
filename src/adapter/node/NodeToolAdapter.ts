@@ -34,7 +34,7 @@ import { stripAnsi } from '../../shared/ansi';
 import { stripPowerShellStartupProgress } from '../../shared/powershellOutput';
 import { BACKGROUND_LOG_MISS_HINT, buildBackgroundLaunchPlan, buildBackgroundResult, buildWrapperScript, isBackgroundLogPath } from '../../shared/backgroundCommand';
 import { listTasks, registerTask, unregisterTask } from '../../shared/taskRegistry';
-import { IMAGE_READ_MAX_BYTES, imageMimeForPath } from '../../shared/imageFiles';
+import { IMAGE_READ_MAX_BYTES, imageMimeForPath, sniffImageMime } from '../../shared/imageFiles';
 import { filterResearchSources, isOfficialDocumentationSource, makeResearchPayload, parseWebSearchText, type ResearchSource } from '../../shared/research';
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
@@ -449,16 +449,32 @@ export class NodeToolAdapter implements ToolAdapter {
         return this.fail(null, start, `read_file: 图片 ${(meta.size / 1024 / 1024).toFixed(1)}MB 超过视觉读取上限 ${Math.round(IMAGE_READ_MAX_BYTES / 1024 / 1024)}MB。先用 execute_command 压缩再读：macOS 'sips -Z 1600 <path> --out <smaller.png>'，Windows PowerShell 用 System.Drawing 缩放。`);
       }
       const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+      // 签名才是判据（2026-11-23 大屏 A/B）：扩展名 .png 的下载物常是 HTML/XML
+      // 错误页，当图片附进请求会让端点回 400 并终止整轮。这类文件按文本读出
+      // 来反而有用——错误体里就写着为什么没下到。
+      const sniffed = sniffImageMime(bytes);
+      if (!sniffed) {
+        const { text: body, note } = await extractFileText(bytes, path);
+        const readable = body.trim();
+        this.readPaths.add(path);
+        return {
+          id: `tool_${Date.now()}`,
+          toolName: 'read_file',
+          result: `read_file: '${String(args.path)}' 的扩展名是图片（${imageMime}），但内容不是可解码的图片（签名不匹配；下载失败时错误页常被原样存成图片名）。已按文本读取，未作为图片附给模型：\n\n${readable || note || '(binary or empty)'}`,
+          success: true,
+          duration: Date.now() - start,
+        };
+      }
       let binary = '';
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-      const dataUrl = `data:${imageMime};base64,${btoa(binary)}`;
+      const dataUrl = `data:${sniffed};base64,${btoa(binary)}`;
       return {
         id: `tool_${Date.now()}`,
         toolName: 'read_file',
-        result: `[image: ${String(args.path)} — ${imageMime}, ${(meta.size / 1024).toFixed(0)}KB — returned as a visible image attachment]`,
+        result: `[image: ${String(args.path)} — ${sniffed}, ${(meta.size / 1024).toFixed(0)}KB — returned as a visible image attachment]`,
         success: true,
         duration: Date.now() - start,
-        images: [{ dataUrl, mimeType: imageMime, path, sizeBytes: meta.size }],
+        images: [{ dataUrl, mimeType: sniffed, path, sizeBytes: meta.size }],
       };
     }
 

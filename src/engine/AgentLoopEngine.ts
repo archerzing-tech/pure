@@ -905,7 +905,7 @@ export class AgentLoopEngine {
         // key 不换，重试一百次也是同一个 401。之前它落进通用阶梯——5 连败 +
         // 一轮白烧的 L2 压缩 + 收尾轮，38 秒后才说「连续多次尝试均失败」，既
         // 不快也不准（错误与对话内容零相关，压缩/重试都改变不了凭证）。
-        const deterministicRejection = errClass === 'context' || errClass === 'auth' || isProviderHttp4xx(errMessage);
+        const deterministicRejection = errClass === 'context' || errClass === 'auth' || errClass === 'image' || isProviderHttp4xx(errMessage);
         const structuralSendFailure = deterministicRejection || identicalRepeats >= 1;
         if (structuralSendFailure) {
           // Provider-taught budget: the body's own limit beats the advertised
@@ -927,7 +927,9 @@ export class AgentLoopEngine {
           // gate: the tool list survives compaction byte-identical, so
           // shedding transcript can never clear a validator rejection
           // (2026-11-01 rea 判例：坏 pattern 400 不该白烧两轮压缩).
-          const compactionCanHelp = errClass !== 'schema' && errClass !== 'auth' && !isPayloadIndependentHttp4xx(errMessage);
+          // image：压缩对话不会删掉那张图（它在 tool 结果里随转写一起重发），
+          // 白烧一轮摘要也就改变不了 400。
+          const compactionCanHelp = errClass !== 'schema' && errClass !== 'auth' && errClass !== 'image' && !isPayloadIndependentHttp4xx(errMessage);
           if (ctx.contextEngine && reactiveCompactions < MAX_REACTIVE_COMPACTIONS && compactionCanHelp) {
             reactiveCompactions++;
             // 压缩不是一段可以无声熬过的静默：L2 摘要是一次完整的非流式 LLM
@@ -978,6 +980,8 @@ export class AgentLoopEngine {
               // keep the plural even when the count is 1.
               : errClass === 'schema'
               ? `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected a TOOL PARAMETER SCHEMA in the bundled tool list, not the conversation — retrying cannot fix it. Last: "${errMessage}". An MCP tool ships a pattern the endpoint's regex dialect rejects; upgrading pure (it sanitizes incompatible patterns before sending) or disabling the offending MCP server clears it.`
+              : errClass === 'image'
+              ? `Repeated request failures (${identicalRepeats + 1} consecutive failures): the provider rejected an IMAGE in the request (not your API key, not the transcript length). Last: "${errMessage}". Resending the same attachment cannot fix it — re-read the file that produced the image (a failed download often saves an HTML/XML error body under an image name) and check whether it is really a picture, or continue without it.`
               : errClass === 'auth'
               ? // 凭证被拒的止损散文（tail「This is not a network problem」是
                 // sanitizeInterruptedReason 第五锚的固定尾，别改写）。

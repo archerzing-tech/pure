@@ -26,6 +26,7 @@ import {
   hostOf,
   isGatewayBlockedText,
   isHtmlContentType,
+  isImagePayloadRejection,
   isNetworkError,
   isPayloadIndependentHttp4xx,
   isProviderHttp4xx,
@@ -261,6 +262,22 @@ describe('classifyFailure', () => {
     expect(classifyFailure('Invalid schema for tool \'x\': pattern is not a regex')).toBe('schema');
     // Content-class neighbors must NOT drift into schema.
     expect(classifyFailure('invalid json in response body')).toBe('content');
+  });
+
+  it('does not read a 403 inside a request id as auth (2026-11-23 大屏 A/B 判例)', () => {
+    // 真机形态：端点拒收坏图片的 400，尾部带 opaque request id
+    // 0217954030527…——里面的 403 不是状态码。旧裸子串匹配把它判成 auth，
+    // 中断卡写「服务拒绝了你的 API key」，用户被引去换一把正常的 key。
+    const IMAGE_400 = '400 The request failed because the image format is not supported by the API. Request id: 0217954030527342a2bed297ad64eae2b89e2702342ef978cca44';
+    expect(classifyFailure(IMAGE_400)).toBe('image');
+    expect(isImagePayloadRejection(IMAGE_400)).toBe(true);
+    // 同一个 request id 换了错误原因，也不该变成 auth。
+    expect(classifyFailure('400 bad request. Request id: 0217954030527342')).toBe('generic');
+    // 真状态码照旧（前后不是数字）。
+    expect(classifyFailure('HTTP 401 Unauthorized: bad api key')).toBe('auth');
+    expect(classifyFailure('403 Forbidden')).toBe('auth');
+    expect(classifyFailure('{"code":403}')).toBe('auth');
+    expect(isImagePayloadRejection('the transcript may exceed the maximum context length')).toBe(false);
   });
 
   it('classifies gateway/SWG interception pages as gateway, not auth/network (2026-11-02 内网判例)', () => {
