@@ -13989,8 +13989,17 @@ mod read_image_file_tests {
 
     #[tokio::test]
     async fn rejects_unsupported_extensions_and_oversize_files() {
-        let err = read_image_file(".".into(), "notes.txt".into()).await.unwrap_err();
-        assert!(err.contains("unsupported image extension"));
+        // 扩展名不再决定能否当图片读：签名判定才是契约（下载失败的错误页常被存成
+        // .png 喂给视觉端点）。给一份非图片字节，断言拿到的是签名不匹配而不是
+        // 早已删除的「unsupported image extension」文案。
+        let dir = std::env::temp_dir().join(format!("pure-readimg-bad-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("notes.txt");
+        fs::write(&text, b"not an image, just text").unwrap();
+        let err = read_image_file(dir.to_string_lossy().into_owned(), "notes.txt".into()).await.unwrap_err();
+        assert!(err.contains("签名不匹配") || err.contains("不是可解码的图片"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+
         let dir = std::env::temp_dir().join(format!("pure-readimg-big-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let big = dir.join("huge.png");
