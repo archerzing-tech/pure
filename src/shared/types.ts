@@ -498,6 +498,11 @@ export interface EngineContext {
    *  GUI 传自己的 subagentNames，CLI 传注册表里的角色名。不设 ⇒ 引擎只按体量
    *  记账，不会误以为「已委派」。 */
   isDelegationCall?: (toolName: string) => boolean;
+  /** 文件级写所有权的执行者身份（2026-11-23）：宿主不设 = 'main'；子代理
+   *  引擎设成自己的 agentId、书写角色名。同一路径换人盲写会被拒，读过对方
+   *  那一版再覆盖则允许并披露（见 engine/FileWriteOwnership.ts）。 */
+  writeOwner?: string;
+  writeOwnerLabel?: string;
   /** 后台委派端口（2026-11-18 档二）。设置后：每个工具配平点取走已结算的
    *  后台支结果（作为内部消息 + ToolResult 事件送达），模型给最终答复时还有
    *  支在飞则先等收齐再重入 THINK——「回合不能带着自己派出去的支收尾」是

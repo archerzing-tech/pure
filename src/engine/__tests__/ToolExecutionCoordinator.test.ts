@@ -14,6 +14,7 @@ import {
 } from '../ToolExecutionCoordinator';
 import { abortPaused } from '../../shared/pauseSignal';
 import { FileLockManager } from '../FileLockManager';
+import { resetWriteOwnership } from '../FileWriteOwnership';
 import type { EngineContext, ToolAdapter, ToolCall, ToolResult } from '../../shared/types';
 
 const BUDGET = {
@@ -768,4 +769,72 @@ describe('后台委派的中止线（deferred 不撤监听）', () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(sawAbort).toBe(false);
   }, 5_000);
+});
+
+// 2026-11-23 大屏 A/B：主线程与地图 worker 都写 js/map-engine.js，落盘成了
+// 两套内部约定拼接的残片。锁定纪律：同一路径换人写必须先读过对方那一版；
+// 往别人文件后面 append 一律拒绝（那不是续写，是拼接）。
+describe('文件级写所有权', () => {
+  const FILE_META = (name: string): ToolMetadata | undefined =>
+    name === 'write_file' || name === 'edit_file' ? { isWrite: true } : undefined;
+
+  const ctxFor = (owner: string, label: string): EngineContext => ({
+    ...makeContext(async (tc) => ok(tc), FILE_META),
+    writeOwner: owner,
+    writeOwnerLabel: label,
+  });
+
+  const write = (path: string, append = false): ToolCall => ({
+    id: `w_${path}_${append}`, index: 0,
+    function: { name: 'write_file', arguments: JSON.stringify({ path, content: 'body', ...(append ? { append: true } : {}) }) },
+  });
+
+  const read = (path: string): ToolCall => ({
+    id: `r_${path}`, index: 0,
+    function: { name: 'read_file', arguments: JSON.stringify({ path }) },
+  });
+
+  it('拒绝换人盲写，读过那一版后覆盖允许并披露', async () => {
+    resetWriteOwnership();
+    const coordinator = new ToolExecutionCoordinator();
+    const main = ctxFor('main', '主线');
+    const worker = ctxFor('worker-1', '地图 worker');
+
+    expect((await coordinator.execute([write('js/map.js')], main, BUDGET))[0].result.success).toBe(true);
+
+    const blind = (await coordinator.execute([write('js/map.js')], worker, BUDGET))[0].result;
+    expect(blind.success).toBe(false);
+    expect(String(blind.error)).toContain('地图 worker');
+    expect(String(blind.error)).toContain('先 read_file');
+
+    expect((await coordinator.execute([read('js/map.js')], worker, BUDGET))[0].result.success).toBe(true);
+    const takeover = (await coordinator.execute([write('js/map.js')], worker, BUDGET))[0].result;
+    expect(takeover.success).toBe(true);
+    expect(String(takeover.result)).toContain('覆盖了 主线');
+  });
+
+  it('往别的执行者刚写的文件后面 append 一律拒绝，读过也不行', async () => {
+    resetWriteOwnership();
+    const coordinator = new ToolExecutionCoordinator();
+    const main = ctxFor('main', '主线');
+    const worker = ctxFor('worker-1', '地图 worker');
+
+    expect((await coordinator.execute([write('js/charts.js')], main, BUDGET))[0].result.success).toBe(true);
+    await coordinator.execute([read('js/charts.js')], worker, BUDGET);
+    const append = (await coordinator.execute([write('js/charts.js', true)], worker, BUDGET))[0].result;
+    expect(append.success).toBe(false);
+    expect(String(append.error)).toContain('拼接');
+  });
+
+  it('同一个执行者对自己文件的反复写入零摩擦（分块 append 不受影响）', async () => {
+    resetWriteOwnership();
+    const coordinator = new ToolExecutionCoordinator();
+    const main = ctxFor('main', '主线');
+    const results = await coordinator.execute(
+      [write('big.html'), write('big.html', true), write('big.html', true)],
+      main,
+      BUDGET,
+    );
+    expect(results.map(r => r.result.success)).toEqual([true, true, true]);
+  });
 });

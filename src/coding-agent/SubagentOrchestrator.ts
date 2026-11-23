@@ -887,6 +887,11 @@ export class SubagentOrchestrator implements ToolAdapter, DetachedBranchPort {
       failurePolicy: this.config.failurePolicy ?? new DefaultFailurePolicy(),
       // 只接超时救援（见上方 subagentCompactorPort 注释）。
       contextEngine: subagentCompactorPort,
+      // 文件级写所有权（2026-11-23 大屏判例）：主线程与这一支共写同一个文件
+      // 时，先写的那份会被后写的盖掉或拼在一起。这支用 agentId 当身份，冲突
+      // 文案里用角色名；主线不设 = 'main'。
+      writeOwner: agentId,
+      writeOwnerLabel: def.name,
       depth,
       maxDepth: this.config.maxDepth ?? 1,
       // 插话通道：与父引擎共享宿主的 steer 队列（见 config 注释）。引擎在

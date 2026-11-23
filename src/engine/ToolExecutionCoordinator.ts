@@ -3,6 +3,7 @@ import { safeParseArgs } from '../shared/format';
 import { isPauseAbort, PAUSE_TOOL_GRACE_MS, PAUSE_ABORT_REASON } from '../shared/pauseSignal';
 import { branchOutcomeOf } from '../shared/branchOutcome';
 import { sharedFileLockManager } from './FileLockManager';
+import { notePathRead, notePathWrite } from './FileWriteOwnership';
 import { HOOK_BLOCK_EXIT_CODE, runUserHooksForEvent } from '../shared/userHookRunner';
 import { runWithDeadline } from './streamDeadline';
 import {
@@ -489,6 +490,25 @@ export class ToolExecutionCoordinator {
     ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
     ctx.hardStopSignal?.addEventListener('abort', escalateHardStop, { once: true });
     const lockManager = ctx.lockManager ?? this.fallbackLock;
+    // 文件级写所有权（2026-11-23 大屏 A/B 判例）：主线程与委派支都写同一个
+    // 文件时，先写的那份会被后写的盖掉或拼在一起。判定放在取锁之前——被拒
+    // 的写不该先占住别人要用的锁。
+    const writeOwner = ctx.writeOwner ?? 'main';
+    const writeOwnerLabel = ctx.writeOwnerLabel ?? '主线';
+    let ownershipNote: string | undefined;
+    if (path && write) {
+      const verdict = notePathWrite(path, writeOwner, { append: args.append === true, label: writeOwnerLabel });
+      if (!verdict.allow) {
+        return {
+          toolName: call.function.name,
+          result: { id: call.id, toolName: call.function.name, error: verdict.message ?? 'write conflict', success: false, duration: 0 },
+          duration: 0,
+          toolCallId: call.id,
+        };
+      }
+      ownershipNote = verdict.note;
+    }
+
     let executed: ToolResult | undefined;
     let lockHeld = false;
     try {
@@ -565,6 +585,12 @@ export class ToolExecutionCoordinator {
       if (output && typeof executed.result === 'string') {
         executed = { ...executed, result: `${executed.result}\n[hook] ${output}` };
       }
+    }
+    // 读完登记版本：只有「看过对方这一版」的人后续才能覆盖它。
+    if (path && !write && executed.success) notePathRead(path, writeOwner);
+    // 接管别人的稿子要说一声（只披露，不阻止）。
+    if (ownershipNote && typeof executed.result === 'string') {
+      executed = { ...executed, result: `${executed.result}\n${ownershipNote}` };
     }
     return { toolName: call.function.name, result: executed, duration: executed.duration, toolCallId: call.id };
   }
