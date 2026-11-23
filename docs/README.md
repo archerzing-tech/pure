@@ -43,6 +43,7 @@
 | [evals/ab-short-request-2026-11-20.md](evals/ab-short-request-2026-11-20.md) | 短请求思考档真实任务 A/B（v4.9.6 vs main）：确认不再降档；一次性记录，5 题两档全过、评测集已饱和，下一缺口是验收绿后的停止纪律 |
 | [evals/ab-stop-at-green-2026-11-21.md](evals/ab-stop-at-green-2026-11-21.md) | 验收即停提醒的真实 A/B（`8175fa8`）：300 文件 fixture 两臂绿后回合都是 1，**未测出收益**；长尾需多失败任务形态才能显形 |
 | [evals/turn-progress-baseline-2026-11-21.md](evals/turn-progress-baseline-2026-11-21.md) | 回合级「无进展」基线（`5ac6329`，17 个 fixture）：重复调用几乎不存在（>=3 次 0/17），无写入连中位 3——重复类判据不加、无写入阈值会误报 |
+| [evals/pure-vs-freebuff-bigscreen-2026-11-23.md](evals/pure-vs-freebuff-bigscreen-2026-11-23.md) | 大屏任务同题真机 A/B：首轮两臂零交付、均死于坏图片 400；修复后能交付但 900s 未收尾，暴露并行 worker 共写同一文件的拼接残片 |
 
 ## 其他
 
