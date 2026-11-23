@@ -249,6 +249,39 @@ describe('NodeToolAdapter edit_file', () => {
   });
 });
 
+describe('NodeToolAdapter write_file 局部改动硬闸', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-write-gate-'));
+    adapter = new NodeToolAdapter({ workspace });
+  });
+  afterAll(() => safeRm(workspace));
+
+  const write = (content: string, extra: Record<string, unknown> = {}): ToolCall => ({
+    id: `write-${Date.now()}-${Math.random()}`,
+    index: 0,
+    function: { name: 'write_file', arguments: JSON.stringify({ path: 'big.ts', content, ...extra }) },
+  });
+
+  it('refuses a near-identical full rewrite and leaves the file untouched', async () => {
+    const base = `// header\n${'const a = 1;\n'.repeat(900)}`;
+    expect((await adapter.execute(write(base, { overwrite: true }))).success).toBe(true);
+
+    const result = await adapter.execute(write(base.replace('const a = 1;', 'const a = 2;'), { overwrite: true }));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('edit_file');
+    expect(await Bun.file(join(workspace, 'big.ts')).text()).toBe(base);
+  });
+
+  it('allows a genuine full rewrite and append:true', async () => {
+    expect((await adapter.execute(write('ZZZ'.repeat(5000), { overwrite: true }))).success).toBe(true);
+    expect((await adapter.execute(write('\nappended', { append: true }))).success).toBe(true);
+  });
+});
+
 describe('NodeToolAdapter list_files', () => {
   let workspace: string;
   let adapter: NodeToolAdapter;

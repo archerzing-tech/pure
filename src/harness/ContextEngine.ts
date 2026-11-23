@@ -113,7 +113,9 @@ export interface ContextCompactionResult {
   oversizedNewestGroup: boolean;
   /** L1 — tool results replaced by a placeholder this pass. */
   microcompactedToolResults: number;
-  /** L1 — tokens the placeholder substitution removed from the window. */
+  /** L1b — write_file bodies replaced by a placeholder this pass. */
+  microcompactedWriteBodies: number;
+  /** L1 — tokens the placeholder substitutions removed from the window. */
   reclaimedTokens: number;
   /** L3 — files re-read and restated after the compaction. */
   rehydratedFiles: number;
@@ -165,6 +167,18 @@ const AGGRESSIVE_MIN_CHARS = 200;
 /** Reactive mode targets this fraction of the configured budget: the provider
  *  ignored our estimate once, so land well under the limit rather than on it. */
 const AGGRESSIVE_BUDGET_RATIO = 0.7;
+
+// ── L1b：写入正文的参数压缩 ──────────────────────────────────────────────
+// 工具结果占位只省「结果正文」，而大写入的重载荷在 assistant 的
+// tool_calls[].function.arguments 里：estimateTokens 明确把它算进线载荷，
+// microcompactToolResults 却只认 role='tool'，那段 1.2 万字符的 content 于是
+// 每轮原样重发——这正是「正在消化 Write 的结果」的成本来源。
+// 正文比结果更重，保护窗刻意比结果的 8 小得多。
+const WRITE_BODY_CLEARED_MARK = 'write body cleared after compaction';
+const WRITE_BODY_KEEP_RECENT = 1;
+const AGGRESSIVE_WRITE_BODY_KEEP_RECENT = 1;
+/** 带命名空间的工具名（mcp__fs__write_file）按最后一段认。 */
+const WRITE_BODY_TOOL_RE = /(?:^|__)write_file$/i;
 
 /** Clamp a soft-mode fraction into [0, 1]. The caller passes constants; this
  *  keeps a bad config from producing a nonsense retention budget. */
@@ -410,6 +424,99 @@ export function microcompactToolResults(
       if (reclaimedTokens >= reclaimTarget) break;
       clear(candidate.index, 1);
     }
+  }
+  return { messages: output, cleared, reclaimedTokens };
+}
+
+interface WriteBodyCandidate {
+  messageIndex: number;
+  callIndex: number;
+  args: Record<string, unknown>;
+  chars: number;
+}
+
+/** 扫描转录里还没被裁掉的大写入正文，供「是否有过期正文」和「实际裁」共用一套判据。 */
+function collectWriteBodies(messages: Message[], minChars: number): WriteBodyCandidate[] {
+  const candidates: WriteBodyCandidate[] = [];
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message.role !== 'assistant' || !message.toolCalls) continue;
+    message.toolCalls.forEach((call, callIndex) => {
+      if (!WRITE_BODY_TOOL_RE.test(call.function.name)) return;
+      const raw = call.function.arguments;
+      if (!raw || raw.includes(WRITE_BODY_CLEARED_MARK)) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      const args = parsed as Record<string, unknown>;
+      const content = args.content;
+      if (typeof content !== 'string' || content.length < minChars) return;
+      candidates.push({ messageIndex, callIndex, args, chars: content.length });
+    });
+  }
+  return candidates;
+}
+
+/**
+ * 是否有「已过期」的写入正文：超过保护窗就算有，哪怕窗口离预算还很远。
+ *
+ * 这是与工具结果占位最关键的差别：结果可能仍在模型工作集里，所以只在压力时清；
+ * 写入正文是磁盘上已有内容的逐字副本，留着只会每轮重发，清掉一次收益永久有效。
+ * 不接这个判据，中等任务（4×12k ≈ 1.6 万 token，32k 预算）永远到不了 85% 触发线，
+ * 优化永远不会发生——正是用户实测「管不管用」的原因。
+ */
+export function hasStaleWriteBodies(messages: Message[], keepRecent: number, minChars: number): boolean {
+  return collectWriteBodies(messages, minChars).length > Math.max(0, keepRecent);
+}
+
+/**
+ * L1b — 把过期的 write_file 正文参数换成占位符。
+ *
+ * 与工具结果占位互补：后者清不掉 assistant 的 tool_calls 参数，而那正是大写入
+ * 正文所在的位置。这里只做字符串手术——调用 id/index/name 与配对的工具结果
+ * 全部不动，线请求仍然有效；path 和其余参数保留，模型知道文件在哪、正文要用
+ * 时从磁盘读回。无 LLM、不丢消息。
+ */
+export function microcompactWriteBodies(
+  messages: Message[],
+  options: { keepRecent: number; minChars: number; reclaimTokens?: number },
+): { messages: Message[]; cleared: number; reclaimedTokens: number } {
+  const candidates = collectWriteBodies(messages, options.minChars);
+
+  // 与结果占位同款保护思路：最近几段正文还在模型的工作集里，先不动。
+  const protectedCount = Math.max(0, options.keepRecent);
+  const reclaimTarget = options.reclaimTokens ?? Number.POSITIVE_INFINITY;
+  const output = messages.slice();
+  const replacedByMessage = new Map<number, Message>();
+  let cleared = 0;
+  let reclaimedTokens = 0;
+
+  for (const candidate of candidates.slice(0, Math.max(0, candidates.length - protectedCount))) {
+    if (reclaimedTokens >= reclaimTarget) break;
+    const base = replacedByMessage.get(candidate.messageIndex) ?? output[candidate.messageIndex];
+    if (!base.toolCalls) continue;
+    const call = base.toolCalls[candidate.callIndex];
+    if (!call) continue;
+    // 用与 estimateTokens 相同的 4/3 密集 JSON 系数衡量收益，回收目标才不会算错。
+    const before = Math.ceil((estimateTextTokens(call.function.name) + estimateTextTokens(call.function.arguments)) * 4 / 3);
+    const placeholder = JSON.stringify({
+      ...candidate.args,
+      content: `[old ${WRITE_BODY_CLEARED_MARK} — ${candidate.chars} chars omitted. The file is on disk; use read_file to see it and edit_file for later changes.]`,
+    });
+    const after = Math.ceil((estimateTextTokens(call.function.name) + estimateTextTokens(placeholder)) * 4 / 3);
+    const saving = before - after;
+    if (saving <= 0) continue;
+    const toolCalls = base.toolCalls.slice();
+    toolCalls[candidate.callIndex] = { ...call, function: { ...call.function, arguments: placeholder } };
+    const next: Message = { ...base, toolCalls };
+    output[candidate.messageIndex] = next;
+    replacedByMessage.set(candidate.messageIndex, next);
+    cleared++;
+    reclaimedTokens += saving;
   }
   return { messages: output, cleared, reclaimedTokens };
 }
@@ -665,9 +772,19 @@ export class ContextEngine {
    */
   needsCompaction(messages: Message[], trigger: number = PROACTIVE_COMPACT_TRIGGER): boolean {
     const max = this.config.maxTokens;
-    if (max === undefined) return false;
-    const toolTokens = this.scaleTokens(estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools));
-    return this.scaledEstimate(messages) + toolTokens > max * softFraction(trigger);
+    if (max !== undefined) {
+      const toolTokens = this.scaleTokens(estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools));
+      if (this.scaledEstimate(messages) + toolTokens > max * softFraction(trigger)) return true;
+    }
+    // 过期写入正文是独立于预算的第二个触发器：它每轮都要重发，而中等任务
+    // （实测 4×12k ≈ 1.6 万 token / 32k 窗口）永远到不了 85% 触发线。
+    if (this.config.microcompaction === false) return false;
+    const setting = this.config.microcompaction ?? {};
+    return hasStaleWriteBodies(
+      messages,
+      Math.min(setting.keepRecent ?? MICROCOMPACT_KEEP_RECENT, WRITE_BODY_KEEP_RECENT),
+      setting.minChars ?? MICROCOMPACT_MIN_CHARS,
+    );
   }
 
   /** Feed one provider response's prompt-token count back into the estimator.
@@ -727,6 +844,7 @@ export class ContextEngine {
     // deleted whole turns instead.
     let working = messages;
     let microcompactedToolResults = 0;
+    let microcompactedWriteBodies = 0;
     let reclaimedTokens = 0;
     const microSetting = this.config.microcompaction === false ? undefined : (this.config.microcompaction ?? {});
     const preTokens = this.scaledEstimate(messages) + toolTokens;
@@ -736,9 +854,16 @@ export class ContextEngine {
     const softPressure = options.soft !== undefined && configuredMax !== undefined &&
       preTokens > configuredMax * softFraction(options.soft.trigger);
     const overCountWindow = configuredMax === undefined && messages.filter(m => m.role !== 'system').length > this.config.maxMessages;
-    if (microSetting && (underPressure || overCountWindow || softPressure || options.aggressive === true)) {
-      const baseKeep = microSetting.keepRecent ?? MICROCOMPACT_KEEP_RECENT;
-      const baseMin = microSetting.minChars ?? MICROCOMPACT_MIN_CHARS;
+    const resultPressure = underPressure || overCountWindow || softPressure || options.aggressive === true;
+    const baseKeep = microSetting ? (microSetting.keepRecent ?? MICROCOMPACT_KEEP_RECENT) : MICROCOMPACT_KEEP_RECENT;
+    const baseMin = microSetting ? (microSetting.minChars ?? MICROCOMPACT_MIN_CHARS) : MICROCOMPACT_MIN_CHARS;
+    const writeKeep = options.aggressive
+      ? Math.min(baseKeep, AGGRESSIVE_WRITE_BODY_KEEP_RECENT)
+      : Math.min(baseKeep, WRITE_BODY_KEEP_RECENT);
+    const staleWriteBodies = microSetting
+      ? hasStaleWriteBodies(messages, writeKeep, baseMin)
+      : false;
+    if (microSetting && (resultPressure || staleWriteBodies)) {
       // How far L1 must shed: reactive lands on the aggressive target (the
       // provider already refused once); soft lands just under its trigger; the
       // hard path only needs to get under the wall (eviction/summary then own
@@ -760,20 +885,36 @@ export class ContextEngine {
         ? undefined
         : Math.max(0, Math.ceil(estimateTokens(messages) -
             (l1Target / this.usageScale - estimateToolDefinitionTokens(this.config.toolsProvider?.() ?? this.config.tools))));
-      const outcome = microcompactToolResults(messages, {
-        keepRecent: options.aggressive ? Math.min(baseKeep, AGGRESSIVE_KEEP_RECENT) : baseKeep,
-        minChars: options.aggressive ? Math.min(baseMin, AGGRESSIVE_MIN_CHARS) : baseMin,
-        keepRecentTokens: options.aggressive
-          ? AGGRESSIVE_KEEP_RECENT_TOKENS
-          : (microSetting.keepRecentTokens ?? recentToolResultBudget(configuredMax)),
+      // 先清写入正文：它是线载荷里最重的一块，且与结果占位共享同一个回收目标。
+      // 没有预算压力时目标为空，过期正文照清——它每轮都要重发，与预算无关；
+      // 有压力时先用掉目标的一部分，剩下的才交给结果占位，避免两层重复清空。
+      const writeOutcome = microcompactWriteBodies(messages, {
+        keepRecent: writeKeep,
+        minChars: baseMin,
         reclaimTokens: l1RawTarget,
-        // Normal pressure leaves the newest results alone and lets eviction
-        // drop old groups; reactive compaction has no such second chance.
-        clearProtected: options.aggressive === true,
       });
+      working = writeOutcome.messages;
+      microcompactedWriteBodies = writeOutcome.cleared;
+      const remainingRawTarget = l1RawTarget === undefined
+        ? undefined
+        : Math.max(0, l1RawTarget - writeOutcome.reclaimedTokens);
+      // 结果占位仍只在真压力时运行：无压力时清掉模型可能还在用的结果只会亏。
+      const outcome = resultPressure
+        ? microcompactToolResults(working, {
+            keepRecent: options.aggressive ? Math.min(baseKeep, AGGRESSIVE_KEEP_RECENT) : baseKeep,
+            minChars: options.aggressive ? Math.min(baseMin, AGGRESSIVE_MIN_CHARS) : baseMin,
+            keepRecentTokens: options.aggressive
+              ? AGGRESSIVE_KEEP_RECENT_TOKENS
+              : (microSetting.keepRecentTokens ?? recentToolResultBudget(configuredMax)),
+            reclaimTokens: remainingRawTarget,
+            // Normal pressure leaves the newest results alone and lets eviction
+            // drop old groups; reactive compaction has no such second chance.
+            clearProtected: options.aggressive === true,
+          })
+        : { messages: working, cleared: 0, reclaimedTokens: 0 };
       working = outcome.messages;
       microcompactedToolResults = outcome.cleared;
-      reclaimedTokens = outcome.reclaimedTokens;
+      reclaimedTokens = writeOutcome.reclaimedTokens + outcome.reclaimedTokens;
     }
 
     const nonSystem = working.filter(message => message.role !== 'system');
@@ -804,7 +945,7 @@ export class ContextEngine {
     if (!options.force && !overMessageBudget && !overTokenBudget && !softTriggered && !hasInvalidFragments && !hasCollapsedSummaries) {
       // Microcompaction alone may have been enough. Report it honestly rather
       // than as a no-op, and keep the caller's message order (only tool-result
-      // contents changed; nothing was moved or dropped).
+      // contents and write-body arguments changed; nothing was moved or dropped).
       //
       // 2026-11-17 — 只被 L1 清空的已读文件在这里补回大纲：没有驱逐时以前什么
       // 都不补，模型只知道“某次 read_file 的结果被清掉了”，于是整文件重读。
@@ -831,8 +972,8 @@ export class ContextEngine {
       return this.remember({
         messages: earlyRehydration
           ? [...baseSystemMessages, ...(priorSummary ? [priorSummary] : []), earlyRehydration.message, ...nonSystem]
-          : microcompactedToolResults > 0 ? working : messages,
-        compacted: microcompactedToolResults > 0,
+          : (microcompactedToolResults > 0 || microcompactedWriteBodies > 0) ? working : messages,
+        compacted: microcompactedToolResults > 0 || microcompactedWriteBodies > 0,
         summarized: false,
         summaryUnavailable: false,
         evictedMessages: 0,
@@ -840,6 +981,7 @@ export class ContextEngine {
         overBudget: false,
         oversizedNewestGroup: false,
         microcompactedToolResults,
+        microcompactedWriteBodies,
         reclaimedTokens,
         rehydratedFiles: earlyRehydration?.files ?? 0,
         restoredPlan: earlyRehydration?.restoredPlan ?? false,
@@ -937,24 +1079,41 @@ export class ContextEngine {
       const groupBudget = retentionBudget! - systemTokens;
       const groupExcess = this.scaledEstimate(newestRetained!.messages) - groupBudget;
       if (groupExcess > 0) {
-        const emergency = microcompactToolResults(newestRetained!.messages, {
+        const floor = Math.min(microSetting.minChars ?? MICROCOMPACT_MIN_CHARS, AGGRESSIVE_MIN_CHARS);
+        // 最新一组超限最常见的原因就是一段巨大的 write_file content，清工具结果
+        // 对它无能为力。先试写入正文，不够再清结果。
+        const writeEmergency = microcompactWriteBodies(newestRetained!.messages, {
           keepRecent: 0,
-          // The normal floor is deliberately conservative; an unshrinkable
-          // newest batch justifies clearing medium results too (the saving
-          // guard below still skips anything the placeholder would not shrink).
-          minChars: Math.min(microSetting.minChars ?? MICROCOMPACT_MIN_CHARS, AGGRESSIVE_MIN_CHARS),
+          minChars: floor,
           reclaimTokens: groupExcess,
-          clearProtected: true,
         });
-        if (emergency.cleared > 0) {
+        let groupMessages = writeEmergency.messages;
+        let resultCleared = 0;
+        let resultReclaimed = 0;
+        if (this.scaledEstimate(groupMessages) - groupBudget > 0) {
+          const emergency = microcompactToolResults(groupMessages, {
+            keepRecent: 0,
+            // The normal floor is deliberately conservative; an unshrinkable
+            // newest batch justifies clearing medium results too (the saving
+            // guard below still skips anything the placeholder would not shrink).
+            minChars: floor,
+            reclaimTokens: groupExcess,
+            clearProtected: true,
+          });
+          groupMessages = emergency.messages;
+          resultCleared = emergency.cleared;
+          resultReclaimed = emergency.reclaimedTokens;
+        }
+        if (writeEmergency.cleared > 0 || resultCleared > 0) {
           newestRetained!.messages.length = 0;
-          newestRetained!.messages.push(...emergency.messages);
+          newestRetained!.messages.push(...groupMessages);
           // Rebuild the retained tail from the (mutated) group so the caller
           // persists the cleared bodies instead of the old messages.
           retained.length = 0;
           for (const group of groups) if (kept.has(group)) retained.push(...group.messages);
-          microcompactedToolResults += emergency.cleared;
-          reclaimedTokens += emergency.reclaimedTokens;
+          microcompactedWriteBodies += writeEmergency.cleared;
+          microcompactedToolResults += resultCleared;
+          reclaimedTokens += writeEmergency.reclaimedTokens + resultReclaimed;
           oversizedNewestGroup = this.scaledEstimate(newestRetained!.messages) > groupBudget;
         }
       }
@@ -1048,6 +1207,7 @@ export class ContextEngine {
       overBudget: configuredMax !== undefined && estimatedTokens > configuredMax,
       oversizedNewestGroup,
       microcompactedToolResults,
+      microcompactedWriteBodies,
       reclaimedTokens,
       rehydratedFiles,
       restoredPlan,

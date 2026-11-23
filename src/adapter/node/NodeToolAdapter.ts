@@ -39,6 +39,7 @@ import { filterResearchSources, isOfficialDocumentationSource, makeResearchPaylo
 import { isPublicToolName } from '../../shared/toolDefs';
 import { downloadHub, type DownloadProgress, type DownloadController } from '../../shared/downloadHub';
 import type { WorkspaceRestoreResult, WorkspaceSnapshotBatch, WorkspaceSnapshotEntry, WorkspaceSnapshotPort } from '../../shared/workspaceSnapshot';
+import { classifyRewrite, rewriteRefusal } from '../../shared/rewriteGate';
 import { cachedDirectPublicApi } from './publicApis';
 import { pageCacheKey, PAGE_TTL_MS, webCache } from './webCache';
 // web_search 执行单源在 tools/impl/webSearch（P2-5）：编排/解析器/CJK 相关性门/
@@ -713,6 +714,13 @@ export class NodeToolAdapter implements ToolAdapter {
       );
     }
     const batch = await this.captureWriteBatch('write_file', [pathArg]);
+    // 局部改动硬闸：上面的读前门只挡「没读过」，模型传 overwrite:true 就能绕过，
+    // 然后照样把几乎一样的全文重发一遍——那本来是 edit_file 的活。用撤销快照里的
+    // 磁盘旧内容算改动比例，只拦「只改了一小段」；整体重写照常放行，不误伤。
+    if (!append) {
+      const verdict = classifyRewrite(batch.entries[0]?.content, content);
+      if (verdict.blocked) return this.fail(null, start, rewriteRefusal(pathArg, verdict));
+    }
     // 整份重写已读过的文件（2026-11-23 一次性 CLI 判例）：模型只改一个函数
     // 也用 write_file 把全文重发一遍，文件一大就是几千 token 的一轮。事实放在
     // 结果里，让下一次改动看见；不拦，重写仍有正当场景。

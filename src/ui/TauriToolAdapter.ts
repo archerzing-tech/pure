@@ -11,6 +11,7 @@ import { BUILT_IN_TOOL_DEFS, TOOL_METADATA, isPublicToolName } from '../shared/t
 import { runGitTool, type GitToolName } from '../tools/impl/git';
 import { runBrowserTool, runScreenshotTool } from '../tools/impl/browser';
 import { cachedDirectPublicApi } from '../tools/impl/publicApi';
+import { classifyRewrite, rewriteRefusal } from '../shared/rewriteGate';
 import { runWebSearch } from '../tools/impl/webSearch';
 import type { PageFetchFn, PageFetchInit, PageFetchResult } from '../tools/impl/webSearch';
 import type { ArgvRunOptions, ArgvRunResult, ChromeLaunch } from '../tools/runtime';
@@ -1617,6 +1618,21 @@ export class TauriToolAdapter implements ToolAdapter {
           const content = String(args.content ?? '');
           const append = args.append === true;
           const batch = await this.captureWriteBatch('write_file', [path]);
+          // 局部改动硬闸：读前门只挡「没读过」，overwrite:true 能绕过它，然后照样
+          // 把几乎一样的全文重发一遍。用撤销快照里的磁盘旧内容算改动比例，只拦
+          // 「只改了一小段」；整体重写照常放行。GUI/CLI/子代理共用同一判据。
+          if (!append) {
+            const verdict = classifyRewrite(batch.entries[0]?.content, content);
+            if (verdict.blocked) {
+              return {
+                id: toolCall.id,
+                toolName: name,
+                error: rewriteRefusal(path, verdict),
+                success: false,
+                duration: Date.now() - start,
+              };
+            }
+          }
           // 读前门（2026-11-22）：覆写已存在且本会话未读过的文件会静默丢掉
           // 未见过的内容。新建、追加、显式 overwrite:true 三条路不受限。
           if (!append && args.overwrite !== true && batch.entries[0]?.existed === true && !this.readPaths.has(this.readKey(ws, path))) {

@@ -1,7 +1,7 @@
 // src/harness/__tests__/ContextEngine.test.ts
 
 import { describe, it, expect } from 'bun:test';
-import { ContextEngine, DEFAULT_IMAGE_TOKEN_ESTIMATE, collectModifiedFilePaths, collectTouchedFilePaths, buildRehydrationMessage, estimateImageTokens, estimateTokens } from '../ContextEngine';
+import { ContextEngine, DEFAULT_IMAGE_TOKEN_ESTIMATE, collectModifiedFilePaths, collectTouchedFilePaths, buildRehydrationMessage, estimateImageTokens, estimateTokens, microcompactWriteBodies } from '../ContextEngine';
 import type { Message } from '../../shared/types';
 
 function makeMsgs(count: number, prefix = 'msg'): Message[] {
@@ -924,5 +924,140 @@ describe('注入面围栏卫生（fenceHygiene，渲染侧同族判例 0b5679f �
       { readFile: async () => content },
     );
     expect(built!.message.content).toContain(content);
+  });
+});
+
+describe('ContextEngine — 写入正文压缩（L1b）', () => {
+  /** 一次大写入的 assistant+tool 配对：正文在 tool_calls 参数里，不是结果里。 */
+  const writePair = (id: string, path: string, chars: number): Message[] => [
+    {
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id, index: 0, function: { name: 'write_file', arguments: JSON.stringify({ path, content: 'x'.repeat(chars) }) } }],
+    },
+    { role: 'tool', content: `Wrote ${chars} bytes`, toolCallId: id, toolName: 'write_file' },
+  ];
+  const argsOf = (message: Message | undefined): Record<string, unknown> =>
+    JSON.parse(message?.toolCalls?.[0]?.function.arguments ?? '{}');
+
+  it('clears stale write bodies, keeps the newest, and leaves the wire valid', async () => {
+    // 三段 12k 正文各 ≈ 4019 tokens（含密集 JSON 系数），合计 ~12057。
+    // 5000 预算下 L1b 清掉两段旧的即落回墙内，无需驱逐，最近一段得以保留。
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 5_000, microcompaction: { keepRecent: 1 } });
+    const msgs: Message[] = [
+      ...writePair('a', 'src/a.ts', 12_000),
+      ...writePair('b', 'src/b.ts', 12_000),
+      ...writePair('c', 'src/c.ts', 12_000),
+    ];
+
+    const result = await engine.compact(msgs);
+
+    expect(result.microcompactedWriteBodies).toBe(2);
+    expect(result.reclaimedTokens).toBeGreaterThan(1000);
+    expect(result.evictedMessages).toBe(0);
+    expect(result.messages).toHaveLength(6);
+    // 配对没破：三个工具结果原样在，toolCallId 一一对应。
+    expect(result.messages.filter(m => m.role === 'tool').map(m => m.toolCallId)).toEqual(['a', 'b', 'c']);
+    // 最近一段正文不动；旧的两段换成合法 JSON 占位，path 与取回指引都在。
+    expect(argsOf(result.messages[4]).content).toBe('x'.repeat(12_000));
+    const cleared = argsOf(result.messages[0]);
+    expect(cleared.path).toBe('src/a.ts');
+    expect(String(cleared.content)).toContain('write body cleared after compaction');
+    expect(String(cleared.content)).toContain('read_file');
+    // 入参不被改。
+    expect(argsOf(msgs[0]).content).toBe('x'.repeat(12_000));
+  });
+
+  it('leaves write bodies alone while the window fits', async () => {
+    const engine = new ContextEngine({ maxMessages: 100, maxTokens: 100_000, microcompaction: {} });
+    // 只有一段正文时它还在保护窗内（WRITE_BODY_KEEP_RECENT=1），不该被清。
+    const msgs = writePair('a', 'a.ts', 12_000);
+
+    const result = await engine.compact(msgs);
+
+    expect(result.microcompactedWriteBodies).toBe(0);
+    expect(result.compacted).toBe(false);
+  });
+
+  it('needsCompaction fires on a stale body far below the budget, then stops', async () => {
+    // 真机判例：4×12k 写入才 ~1.6 万 token，32k 窗口的 85% 触发线永远到不了。
+    // 只按预算判断会让这条优化完全不发生，所以过期正文必须独立成为触发器。
+    const engine = new ContextEngine({ maxMessages: 100, maxTokens: 100_000, microcompaction: {} });
+    const msgs = [
+      ...writePair('a', 'a.ts', 12_000),
+      ...writePair('b', 'b.ts', 12_000),
+      ...writePair('c', 'c.ts', 12_000),
+    ];
+
+    expect(engine.needsCompaction(msgs)).toBe(true);
+    const result = await engine.compactBeforeSend(msgs);
+    expect(result.evictedMessages).toBe(0);
+    // 最近一段保留，其余裁掉；清完不再触发，避免每回合白跑一轮压缩。
+    expect(result.microcompactedWriteBodies).toBeGreaterThan(0);
+    expect(engine.needsCompaction(result.messages)).toBe(false);
+  });
+
+  it('does not re-clear an already-cleared body on a second pass', () => {
+    const msgs = writePair('a', 'a.ts', 12_000);
+    const opts = { keepRecent: 0, minChars: 1_000 };
+
+    const first = microcompactWriteBodies(msgs, opts);
+    const second = microcompactWriteBodies(first.messages, opts);
+
+    expect(first.cleared).toBe(1);
+    expect(second.cleared).toBe(0);
+    expect(argsOf(second.messages[0]).content).toBe(argsOf(first.messages[0]).content);
+  });
+
+  it('recognizes namespaced write_file names and preserves the other arguments', () => {
+    const msgs: Message[] = [{
+      role: 'assistant',
+      content: '',
+      toolCalls: [{
+        id: 'x',
+        index: 0,
+        function: {
+          name: 'mcp__fs__write_file',
+          arguments: JSON.stringify({ path: 'a.ts', content: 'x'.repeat(5_000), append: true }),
+        },
+      }],
+    }];
+
+    const out = microcompactWriteBodies(msgs, { keepRecent: 0, minChars: 1_000 });
+
+    expect(out.cleared).toBe(1);
+    const args = argsOf(out.messages[0]);
+    expect(args.path).toBe('a.ts');
+    expect(args.append).toBe(true);
+    expect(String(args.content)).toContain('write body cleared after compaction');
+    expect(out.messages[0].toolCalls![0].id).toBe('x');
+  });
+
+  it('soft pre-send compaction sheds write bodies before evicting anything', async () => {
+    const engine = new ContextEngine({ maxMessages: 1000, maxTokens: 12_000, microcompaction: {} });
+    const msgs = [
+      ...writePair('a', 'a.ts', 12_000),
+      ...writePair('b', 'b.ts', 12_000),
+      ...writePair('c', 'c.ts', 12_000),
+    ];
+
+    const result = await engine.compactBeforeSend(msgs);
+
+    expect(result.evictedMessages).toBe(0);
+    expect(result.microcompactedWriteBodies).toBeGreaterThan(0);
+    expect(result.messages).toHaveLength(msgs.length);
+  });
+
+  it('emergency path clears the newest write body when that group alone is oversized', async () => {
+    const engine = new ContextEngine({ maxMessages: 100, maxTokens: 1_000, microcompaction: {} });
+    const msgs: Message[] = [
+      { role: 'user', content: 'write it' },
+      ...writePair('a', 'a.ts', 12_000),
+    ];
+
+    const result = await engine.compact(msgs, { soft: { trigger: 0.85, target: 0.7 }, skipSummary: true });
+
+    expect(result.microcompactedWriteBodies).toBeGreaterThan(0);
+    expect(String(argsOf(result.messages.find(m => m.role === 'assistant')).content)).toContain('write body cleared');
   });
 });

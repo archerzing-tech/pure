@@ -3285,7 +3285,7 @@ export class ChatController {
   async compactContext(): Promise<ContextCompactionResult> {
     const messages = this.messages;
     if (this.streaming || messages.length === 0) {
-      return { messages, compacted: false, summarized: false, summaryUnavailable: false, evictedMessages: 0, estimatedTokens: 0, overBudget: false, oversizedNewestGroup: false, microcompactedToolResults: 0, reclaimedTokens: 0, rehydratedFiles: 0, restoredPlan: false };
+      return { messages, compacted: false, summarized: false, summaryUnavailable: false, evictedMessages: 0, estimatedTokens: 0, overBudget: false, oversizedNewestGroup: false, microcompactedToolResults: 0, microcompactedWriteBodies: 0, reclaimedTokens: 0, rehydratedFiles: 0, restoredPlan: false };
     }
     this.cancelBackgroundPreCompaction();
     const config = this.resolvedGuiConfig(loadConfig());
