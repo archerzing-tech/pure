@@ -39,6 +39,12 @@ export class CdpSession {
     };
   }
 
+  /** 关掉底层 websocket（2026-11-23 一次性 CLI 判例）：Chrome 退出前这条长连接
+   *  会一直占着事件循环——答完任务的进程因此再挂几分钟才肯退。调用方收尾时显式关。 */
+  close(): void {
+    try { this.ws.close(); } catch { /* 已经关了 */ }
+  }
+
   send(method: string, params: Record<string, unknown> = {}): Promise<CdpMessage> {
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;

@@ -14,6 +14,7 @@ import { hookApprovalKey, type HookApprovalStore } from './shared/userHookApprov
 import type { UserHookGate } from './shared/userHookRunner';
 import type { UserHook, UserHookEvent } from './shared/userHooks';
 import { bold, cyan, dim, green, magenta, red, yellow } from './termcolors';
+import { isVerificationCommand } from './shared/delivery';
 
 /**
  * Render the confirmation block shown before a permission-sensitive tool runs.
@@ -83,7 +84,39 @@ export function nonTtyDecision(info: PermissionRequestInfo): PermissionDecision 
  * approving. The CLI passes `true` for ordinary requests when its default
  * auto-approve policy is active.
  */
-export function createCliPermissionHandler(autoApprove = false): PermissionRequestHandler {
+/** 非交互授权里绝不放行的动作：写盘重定向之外，任何变更类命令都不算「项目自证」。 */
+const DESTRUCTIVE_COMMAND_RE = /\b(?:rm|rmdir|mv|cp|dd|sudo|su|chmod|chown|kill|pkill|curl|wget|ssh|scp|nc|git\s+(?:push|reset|clean|checkout|restore|commit)|npm\s+(?:install|i|publish|ci)|bun\s+(?:add|install|remove)|pnpm\s+(?:add|install|remove)|yarn\s+(?:add|install)|pip3?\s+install|docker\s+)/i;
+/** 管道后段只允许「读输出」的过滤器（tail/head/grep 一类的常规写法）。 */
+const READ_ONLY_PIPE_RE = /^(?:\d+\s*)?(?:tail|head|grep|rg|cat|wc|sort|uniq|cut|tr|sed|awk|jq|column|nl|echo|true|false|date)\b/i;
+
+/**
+ * 这条命令是否属于「本次运行已授权的项目自证」（2026-11-23 一次性 CLI 判例）：
+ * 非交互模式没有 TTY，命令一律拿不到确认，修复类任务因此只剩「手算」这一条
+ * 路——模型的结论没被任何一次真实执行验证过，还会把「手算通过」当成交付证据。
+ *
+ * 授权边界与交付闸一致：第一段必须是 test / typecheck / build / lint 这类项目
+ * 自己的验收入口；后续管道段只能是读输出的过滤器；出现写盘重定向，或 rm / mv /
+ * git push / 安装类动作，一律不授权（那些不是自证，是变更）。
+ */
+export function isAuthorizableVerificationCommand(command: string): boolean {
+  // 2>&1 / 2>/dev/null 是读输出的常规写法，先摘掉再判重定向。
+  const cleaned = command.replace(/\d?>>?\s*(?:&\d|\/dev\/null)/g, ' ').trim();
+  if (!cleaned) return false;
+  if (/>>?/.test(cleaned)) return false;
+  const segments = cleaned.split(/&&|\|\||[;|]/).map((s) => s.trim()).filter(Boolean);
+  if (segments.length === 0) return false;
+  if (!isVerificationCommand(segments[0])) return false;
+  if (segments.some((s) => DESTRUCTIVE_COMMAND_RE.test(s))) return false;
+  // 后段允许两类：项目自己的又一条验证命令（`build && test`）、或读输出的过滤器。
+  return segments.slice(1).every((s) => isVerificationCommand(s) || READ_ONLY_PIPE_RE.test(s));
+}
+
+export interface CliPermissionOptions {
+  /** 非 TTY 下把项目自己的验证命令视为本次运行的授权（见 isAuthorizableVerificationCommand）。 */
+  authorizeVerificationCommands?: boolean;
+}
+
+export function createCliPermissionHandler(autoApprove = false, options: CliPermissionOptions = {}): PermissionRequestHandler {
   return async (info: PermissionRequestInfo): Promise<PermissionDecision> => {
     // Already-aborted signal: addEventListener on an aborted signal never
     // fires, so without this the prompt would hang forever. Honored *before*
@@ -98,7 +131,15 @@ export function createCliPermissionHandler(autoApprove = false): PermissionReque
       return { allowed: true, autoApproved: true, reason: 'CLI auto-approve (operator reviewed the prompt)' };
     }
 
-    if (!process.stdin.isTTY) return nonTtyDecision(info);
+    if (!process.stdin.isTTY) {
+      // 项目自证的确认路径：没有人在键盘前，但「跑一遍项目自己的测试」不需要
+      // 人去批准什么新决定，它就是本次运行被要求做的事。模型发起的其他命令
+      // 照旧落到 nonTtyDecision 的拒绝。
+      if (options.authorizeVerificationCommands && info.command && isAuthorizableVerificationCommand(info.command)) {
+        return { allowed: true, autoApproved: true, reason: 'non-interactive: project verification command (authorized for this run)' };
+      }
+      return nonTtyDecision(info);
+    }
 
     // Leading newline separates the prompt from streamed token output (the
     // engine is blocked awaiting this decision, so nothing interleaves here).

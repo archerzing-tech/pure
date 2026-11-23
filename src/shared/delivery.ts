@@ -518,7 +518,10 @@ ${commands}
  * (typecheck / test / build / lint)? Used to recognize the model's own
  * verification commands in the live tool stream. */
 export function isVerificationCommand(command: string): boolean {
-  return /(?:npm run (?:typecheck|test|build|lint|check|verify)|npm test|bun (?:test|run (?:typecheck|test|build|lint|check))|pnpm (?:test|run (?:typecheck|test|build|lint|check))|tsc(?: --noEmit)?|cargo (?:test|build|check|clippy)|pytest|python -m pytest|vitest|jest|go test|make (?:test|check)|flutter test|flutter analyze)/i.test(command);
+  // `node --test` / `node --run test`（2026-11-23 一次性 CLI 判例）：Node 内置
+  // 测试跑器是零依赖项目里最常见的验收入口，漏了它，非交互授权与绿信号都
+  // 认不出「模型已经在跑项目自己的测试」。
+  return /(?:npm run (?:typecheck|test|build|lint|check|verify)|npm test|bun (?:test|run (?:typecheck|test|build|lint|check))|pnpm (?:test|run (?:typecheck|test|build|lint|check))|tsc(?: --noEmit)?|cargo (?:test|build|check|clippy)|pytest|python -m pytest|vitest|jest|go test|make (?:test|check)|flutter test|flutter analyze|node\s+(?:--test|--run\s+(?:test|build|lint|typecheck))|deno\s+test)/i.test(command);
 }
 
 export interface DeliveryStepResult {

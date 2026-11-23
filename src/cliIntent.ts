@@ -25,9 +25,20 @@ export function resolveCliAutoApprove(
  *  silent: the word-list safety gate (assessIntent) only raises risk on
  *  destructive operations, so what prints here is a safety warning, not a
  *  guess about what the turn is. */
-export function formatCliIntentAssessment(assessment: IntentAssessment): string {
+export function formatCliIntentAssessment(
+  assessment: IntentAssessment,
+  options: { bareWorkspace?: boolean } = {},
+): string {
   if (assessment.riskLevel === 'low') return '';
   const label = assessment.riskLevel === 'high' ? red('high risk') : yellow('medium risk');
+  // 空工作区里的任务级「删除」指向的是待写的功能，不是磁盘上的既有对象
+  // （2026-11-23 判例：从零做一个待办页，「删除」只是按钮文案，却让开场多付
+  // 一次「先只读探查、列受影响对象」）。词表命中的是请求，探查对象得看磁盘：
+  // 没有清单也没有验证入口时，这句话不成立。操作级毁灭词（high）不受影响。
+  if (options.bareWorkspace && assessment.riskLevel !== 'high') {
+    return `  ${cyan('🧭')} ${label} ${dim(`· ${assessment.reversibility}`)}\n`
+      + `     ${dim('空工作区：没有既有对象要探查，直接按需求实现。')}\n`;
+  }
   return `  ${cyan('🧭')} ${label} ${dim(`· ${assessment.reversibility}`)}\n`
     + `     ${dim(assessment.impact)}\n`
     + `     ${yellow('↳')} ${dim(assessment.recommendation)}\n`;

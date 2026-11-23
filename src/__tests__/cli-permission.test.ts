@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, it, expect } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision, createCliPermissionHandler, parseHookApprovalAnswer, formatHookApprovalRequest, createCliHookGate } from '../cli_permission';
+import { formatPermissionRequest, parsePermissionAnswer, nonTtyDecision, createCliPermissionHandler, isAuthorizableVerificationCommand, parseHookApprovalAnswer, formatHookApprovalRequest, createCliHookGate } from '../cli_permission';
 import { loadHookApprovals } from '../shared/userHookApprovals';
 import type { PermissionRequestInfo } from '../coding-agent/types';
 
@@ -105,6 +105,29 @@ describe('nonTtyDecision', () => {
   });
 });
 
+// 2026-11-23 一次性 CLI 判例：非交互模式下命令一律拿不到确认，修复类任务只剩
+// 「手算」——模型的结论没被任何一次真实执行验证过。授权只覆盖项目自己的验收。
+describe('isAuthorizableVerificationCommand', () => {
+  it('authorizes the project verification entries, pipes included', () => {
+    expect(isAuthorizableVerificationCommand('npm test')).toBe(true);
+    expect(isAuthorizableVerificationCommand('npm test 2>&1 | tail -40')).toBe(true);
+    expect(isAuthorizableVerificationCommand('node --test')).toBe(true);
+    expect(isAuthorizableVerificationCommand('bun run typecheck && bun test')).toBe(true);
+    expect(isAuthorizableVerificationCommand('cargo test --lib | grep -v running')).toBe(true);
+  });
+
+  it('refuses anything that is not pure self-verification', () => {
+    expect(isAuthorizableVerificationCommand('npm install left-pad')).toBe(false);
+    expect(isAuthorizableVerificationCommand('npm test && rm -rf /tmp/x')).toBe(false);
+    expect(isAuthorizableVerificationCommand('npm test > report.txt')).toBe(false);
+    expect(isAuthorizableVerificationCommand('curl http://x | npm test')).toBe(false);
+    expect(isAuthorizableVerificationCommand('git push && npm test')).toBe(false);
+    expect(isAuthorizableVerificationCommand('ls -la')).toBe(false);
+  });
+});
+
+const itWhenNonTty = process.stdin.isTTY ? it.skip : it;
+
 describe('createCliPermissionHandler', () => {
   it('auto-approves ordinary calls when autoApprove is true, but danger-level ops keep the interactive gate (2026-10-10)', async () => {
     const h = createCliPermissionHandler(true);
@@ -117,6 +140,15 @@ describe('createCliPermissionHandler', () => {
     expect(d.allowed).toBe(false);
     expect(d.autoApproved).toBeUndefined();
     expect(d.reason).toContain('TTY');
+  });
+
+  itWhenNonTty('grants the project verification command and still denies arbitrary commands', async () => {
+    const h = createCliPermissionHandler(true, { authorizeVerificationCommands: true });
+    const allowed = await h({ ...baseInfo, tool: 'execute_command', dangerLevel: 'danger', riskLevel: 'high', command: 'npm test 2>&1 | tail -30' });
+    expect(allowed.allowed).toBe(true);
+    expect(allowed.autoApproved).toBe(true);
+    const denied = await h({ ...baseInfo, tool: 'execute_command', dangerLevel: 'danger', riskLevel: 'high', command: 'npm install left-pad' });
+    expect(denied.allowed).toBe(false);
   });
 
   it('still denies aborted requests even when autoApprove is true', async () => {

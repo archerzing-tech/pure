@@ -481,6 +481,7 @@ describe('verification command helpers', () => {
     expect(isVerificationCommand('npm test')).toBe(true);
     expect(isVerificationCommand('npm run build && npm test')).toBe(true);
     expect(isVerificationCommand('bun test')).toBe(true);
+    expect(isVerificationCommand('node --test')).toBe(true);
     expect(isVerificationCommand('tsc --noEmit')).toBe(true);
     expect(isVerificationCommand('cargo test --lib')).toBe(true);
     expect(isVerificationCommand('pytest tests/')).toBe(true);

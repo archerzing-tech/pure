@@ -955,6 +955,14 @@ describe('NodeToolAdapter write_file read-before-write gate', () => {
     expect(readFileSync(join(workspace, 'read-first.txt'), 'utf8')).toBe('replaced');
   });
 
+  it('hints edit_file when rewriting a file that was already read (2026-11-23)', async () => {
+    writeFileSync(join(workspace, 'rewrite.js'), 'export const a = 1;\n');
+    expect((await exec('read_file', { path: 'rewrite.js' })).success).toBe(true);
+    const r = await exec('write_file', { path: 'rewrite.js', content: 'export const a = 2;\n' });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('edit_file sends only the diff');
+  });
+
   it('allows creating a new file without a read', async () => {
     const r = await exec('write_file', { path: 'brand-new.txt', content: 'hello' });
     expect(r.success).toBe(true);

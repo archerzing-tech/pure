@@ -60,7 +60,27 @@ export function closeSharedSession(): void {
   try {
     void sharedSession.session.send('Browser.close');
   } catch { /* best effort */ }
+  // 只发 Browser.close 不够：Chrome 退出前那条 CDP websocket 还挂着事件循环。
+  // 空闲路径无所谓（进程还能用），但一次性 CLI 收尾时它就是「答完不退」。
+  sharedSession.session.close();
   sharedSession = null;
+}
+
+/** 收尾用（2026-11-23 一次性 CLI 判例）：等 Browser.close 真的发出去再关 ws——
+ *  closeSharedSession 是 fire-and-forget，进程可能在 Chrome 收到消息前就退出。
+ *  没有会话时零开销。 */
+export async function shutdownBrowserSession(): Promise<void> {
+  const current = sharedSession;
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  if (!current) return;
+  sharedSession = null;
+  try {
+    await current.session.send('Browser.close');
+  } catch { /* CDP 已断：ws 下面照样关 */ }
+  current.session.close();
 }
 
 /** Launch Chrome (via the runtime primitive), open a page tab, and wire the

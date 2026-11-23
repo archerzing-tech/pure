@@ -1660,6 +1660,7 @@ export class TauriToolAdapter implements ToolAdapter {
               onProgress: channel,
             }) as string;
             const knownBefore = this.readPaths.has(this.readKey(ws, path));
+            const wholeFileRewriteOfKnown = !append && batch.entries[0]?.existed === true && knownBefore;
             this.readPaths.add(this.readKey(ws, path));
             this.noteFileEditOp('write', path, {
               existed: batch.entries[0]?.existed === true,
@@ -1669,10 +1670,14 @@ export class TauriToolAdapter implements ToolAdapter {
               bytes: content.length,
             });
             const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
-            return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
+            return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
           }
           const msg = await this.call('write_file', { workspace: ws, path, content, append }) as string;
           const knownBefore = this.readPaths.has(this.readKey(ws, path));
+          // 整份重写已读过的文件（2026-11-23 一次性 CLI 判例）：只改一个函数也用
+          // write_file 把全文再发一遍，文件一大就是几千 token 一轮。事实放在结果里
+          // 让下一次改动看见；不拦，重写仍有正当场景。
+          const wholeFileRewriteOfKnown = !append && batch.entries[0]?.existed === true && knownBefore;
           this.readPaths.add(this.readKey(ws, path));
           this.noteFileEditOp('write', path, {
             existed: batch.entries[0]?.existed === true,
@@ -1682,7 +1687,7 @@ export class TauriToolAdapter implements ToolAdapter {
             bytes: content.length,
           });
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
-          return { id: toolCall.id, toolName: name, result: `${msg}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
+          return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
         }
         case 'edit_file': {
           const path = String(args.path ?? '');

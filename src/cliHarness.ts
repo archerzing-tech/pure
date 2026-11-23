@@ -442,7 +442,7 @@ async function createTools(
   setCustomPresentationCardsLoader(() => loadConfig()?.presentationCards);
   // 通道来源默认 PLAN（只读）并由 gateway 注入审批 handler；CLI 保持 NORMAL +
   // 终端 y/n/a。同一接口，两个表面，PermissionManager 本身零改动。
-  registry.setPermissionManager(new PermissionManager(permissionMode, permissionHandler ?? createCliPermissionHandler(autoApprove)));
+  registry.setPermissionManager(new PermissionManager(permissionMode, permissionHandler ?? createCliPermissionHandler(autoApprove, { authorizeVerificationCommands: true })));
 
   // MCP servers: GUI-written ~/.pure/config.json `mcpServers` plus repeatable
   // --mcp-server flags. Tools are registered into the same registry as the

@@ -713,6 +713,10 @@ export class NodeToolAdapter implements ToolAdapter {
       );
     }
     const batch = await this.captureWriteBatch('write_file', [pathArg]);
+    // 整份重写已读过的文件（2026-11-23 一次性 CLI 判例）：模型只改一个函数
+    // 也用 write_file 把全文重发一遍，文件一大就是几千 token 的一轮。事实放在
+    // 结果里，让下一次改动看见；不拦，重写仍有正当场景。
+    const wholeFileRewriteOfKnown = !append && existsSync(path) && this.readPaths.has(path);
 
     // Ensure parent directory exists
     const dir = dirname(path);
@@ -736,7 +740,7 @@ export class NodeToolAdapter implements ToolAdapter {
     return {
       id: `tool_${Date.now()}`,
       toolName: 'write_file',
-      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${sizeNote}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
+      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${sizeNote}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
       success: true,
       duration: Date.now() - start,
     };

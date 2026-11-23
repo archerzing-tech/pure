@@ -23,6 +23,8 @@ import type { IntentAssessment, TaskMode } from './coding-agent/types';
 import { ToolRegistry } from './coding-agent/ToolRegistry';
 import { PermissionManager } from './coding-agent/PermissionManager';
 import { createCliPermissionHandler } from './cli_permission';
+import { shutdownBrowserSession } from './tools/impl/browser';
+import { isBareWorkspace } from './shared/delivery';
 import { BUILT_IN_SUBAGENTS, CODING_AGENT_ROLES } from './coding-agent/SubagentOrchestrator';
 import { dim, bold, red, green, yellow, cyan, purple, frameGray } from './termcolors';
 import { sanitizeForTerminal } from './termwidth';
@@ -438,9 +440,10 @@ function buildCliEnvFacts(conventions?: string, repoMap?: string, verificationEn
     parts.push([
       '<non_interactive_mode>',
       'This run is NON-INTERACTIVE (stdin is not a TTY) — these are facts, not obstacles:',
-      '- Operations that need a confirmation fail outright: command execution (high risk, never auto-approved) and any danger-level tool. The delivery gate\'s review step cannot confirm either and will end as "not delivered".',
+      '- The project\'s own verification entries (test / typecheck / build / lint / check) ARE authorized for this run: run them, pipes included (`npm test 2>&1 | tail -30`). Everything else that would need a TTY confirmation is denied — installs, writes outside the workspace, arbitrary commands — and the delivery gate\'s review step cannot confirm either.',
       '- Do NOT probe for permission with other tools (download_file/read_file/list_files): a denied call tells you nothing new, and a download that fails may save an HTML/XML error body under an image name.',
-      '- Work with what is allowed: read-only tools plus the writes you are granted. Produce the files directly, and list in the final answer anything that would have needed a command (install/verify/build) instead of trying to run it.',
+      '- Verify with the command you actually ran. Only when no verification entry exists at all: change exactly what the failing assertion or the request names — do not retune unrelated constants or restyle unrelated lines to feel safe.',
+      '- Produce the files directly; list in the final answer anything that would have needed a denied command (install/build) instead of trying it twice.',
       '</non_interactive_mode>',
     ].join('\n'));
   }
@@ -513,8 +516,11 @@ function printModeSwitch(mode: TaskMode): void {
   process.stdout.write(`  ${cyan('🧭')} ${cyan(label)} ${dim('— complex multi-step task, will execute in phases')}\n`);
 }
 
-function printWorkflowStage(stage: RequestWorkflowStage): void {
+function printWorkflowStage(stage: RequestWorkflowStage, bareWorkspace = false): void {
   if (stage === 'direct') return;
+  // 空工作区没有「既有范围」要探（2026-11-23 判例）：从零搭建的首步就是写文件，
+  // 「先探再决定范围」在这里是纯粹的额外一问。
+  if (bareWorkspace && stage === 'probe') return;
   const message = stage === 'probe'
     ? '先做只读工作区探针，再决定具体修改范围'
     : stage === 'plan'
@@ -523,8 +529,8 @@ function printWorkflowStage(stage: RequestWorkflowStage): void {
   process.stdout.write(`  ${cyan('↳')} ${dim(message)}\n`);
 }
 
-function printIntentAssessment(assessment: IntentAssessment): void {
-  process.stdout.write(formatCliIntentAssessment(assessment));
+function printIntentAssessment(assessment: IntentAssessment, bareWorkspace = false): void {
+  process.stdout.write(formatCliIntentAssessment(assessment, { bareWorkspace }));
 }
 
 /** Apply the CLI permission stance (per-run flag + global default). 请求风险
@@ -536,7 +542,7 @@ function applyCliIntentPermission(
 ): void {
   if (!(tools instanceof ToolRegistry)) return;
   const autoApprove = resolveCliAutoApprove(!args.autoApprove, defaultCliAutoApprove());
-  tools.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove)));
+  tools.setPermissionManager(new PermissionManager('NORMAL', createCliPermissionHandler(autoApprove, { authorizeVerificationCommands: true })));
 }
 
 // ── Shared event consumer ──
@@ -867,8 +873,15 @@ async function runOneShot(args: CliArgs) {
     mcpClient?.disconnectAll();
     return;
   }
-  printIntentAssessment(analysis.intent);
-  printWorkflowStage(workflow.stage);
+  // 空工作区的判据要看磁盘，不能只看请求里的词（2026-11-23 判例：从零做待办页，
+  // 「删除」是按钮功能，却让开场打出一条「先只读探查、列受影响对象」）。这里
+  // 先探一次，下文复用同一份 profile，不重复付费。
+  const probeProfile = tools && (workflow.needsDeliveryGate || workflow.needsProbe)
+    ? await discoverWorkspace(tools)
+    : undefined;
+  const bareWorkspace = probeProfile ? isBareWorkspace(probeProfile) : false;
+  printIntentAssessment(analysis.intent, bareWorkspace);
+  printWorkflowStage(workflow.stage, bareWorkspace);
   if (workflow.probeRequired && !workflow.probeAvailable) {
     process.stdout.write(`  ${yellow('⚠')} ${yellow('需要只读探针，但当前没有可用工作区工具，已诚实降级')}\n`);
   }
@@ -879,7 +892,7 @@ async function runOneShot(args: CliArgs) {
   let workspaceProfile: WorkspaceProfile | undefined;
   let taskContract: TaskContract | undefined;
   if ((needsDeliveryGate || needsIntentProbe) && tools) {
-    workspaceProfile = await discoverWorkspace(tools);
+    workspaceProfile = probeProfile ?? await discoverWorkspace(tools);
     taskContract = buildTaskContract(args.prompt, workspaceProfile);
     process.stdout.write(`  ${dim('🔎 Explore:')} ${dim(workspaceProfileSummary(workspaceProfile))}\\n`);
     if (needsDeliveryGate) process.stdout.write(`  ${dim('📋 Contract:')} ${dim(`${taskContract.acceptanceCriteria.length} 项验收标准，验证证据将决定是否交付`)}\\n`);
@@ -943,6 +956,10 @@ async function runOneShot(args: CliArgs) {
   // 建议增量路由。进程内 in-turn 反思已写过的会话被 reflect: 查重跳过 ——
   // 这里只补漏（反思失败/超时）+ 跑建议路由；总开关关了直接零开销。
   await runCliSleepCycle({ llm: resolveReflectAdapter(args, adapter), sessionId, projectPath, messages: result.messages, budget: 'cli' });
+
+  // 浏览器会话是「每进程一份、空闲 5 分钟才关」：一次性模式答完就该关掉，
+  // 否则 CDP websocket 把进程吊在已完成状态（2026-11-23 实测答完 260s 不退）。
+  await shutdownBrowserSession();
 
   // MCP subprocesses keep stdio pipes open — without an explicit disconnect the
   // event loop never drains and the one-shot CLI would hang after finishing.

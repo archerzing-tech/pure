@@ -27,6 +27,15 @@ describe('CLI proactive intent assessment', () => {
     expect(output).not.toContain('high risk');
   });
 
+  it('空工作区不把任务级「删除」当成要探查的既有对象（2026-11-23 判例）', () => {
+    const output = formatCliIntentAssessment(deletionTask, { bareWorkspace: true });
+    expect(output).toContain('medium risk');
+    expect(output).toContain('空工作区');
+    expect(output).not.toContain(deletionTask.recommendation);
+    // 操作级毁灭词（high）照旧给建议：那是真的要动磁盘。
+    expect(formatCliIntentAssessment(highRisk, { bareWorkspace: true })).toContain(highRisk.recommendation);
+  });
+
   it('does not print a risk banner for a low-risk question', () => {
     expect(formatCliIntentAssessment(lowRisk)).toBe('');
   });
