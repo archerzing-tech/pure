@@ -198,6 +198,7 @@ function armNonModalResize(dir: ResizeDirection, down: PointerEvent, zone: HTMLE
     try {
       if (zone.hasPointerCapture?.(down.pointerId)) zone.releasePointerCapture(down.pointerId);
     } catch { /* 指针已失效:收尾不能因此抛错 */ }
+    void notifyDragState(false);
   };
 
   // 首帧立即发(计数从 N-1 起步),之后每 N 帧一拍。lastSent* 兜住空转:指针
@@ -239,6 +240,10 @@ function armNonModalResize(dir: ResizeDirection, down: PointerEvent, zone: HTMLE
   window.addEventListener('blur', finish);
   zone.addEventListener('lostpointercapture', finish);
   try { zone.setPointerCapture(down.pointerId); } catch { /* 捕获失败仍可用窗口级事件 */ }
+  // 预先断粮:按下瞬间就让 Rust 拉长 delta 闸,不等第一帧几何 invoke(那要
+  // 先过 3 次只读 IPC + 越阈值 move)——按下前的最后一批 in-flight delta 是
+  // 残余微卡的候选源(2026-11-25)。
+  void notifyDragState(true);
 
   // 起始几何只在按下时取一次(三次只读 IPC)。最大化时直接放弃:那跟窗口壳一起
   // 缩放,逐帧 SetWindowPos 反而会破坏最大化态。
@@ -265,6 +270,15 @@ function armNonModalResize(dir: ResizeDirection, down: PointerEvent, zone: HTMLE
       finish();
     }
   })();
+}
+
+/** 拖动预先断粮信号(pointerdown true / 收尾 false):失败静默——信号迟到
+ *  最多多撞一拍,不能成为新的失败面。 */
+async function notifyDragState(active: boolean): Promise<void> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('set_resize_drag_active', { active });
+  } catch { /* 探针尽力而为 */ }
 }
 
 /** 动态导入(模块缓存后零成本)+ 失败落日志:capabilities 漏授权时 resize

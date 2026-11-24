@@ -5522,6 +5522,10 @@ const RESIZE_FEED_HOLD_BYTES: usize = 512 * 1024;
 static RESIZE_QUEUED_AT_MS: AtomicU64 = AtomicU64::new(0);
 static RESIZE_EXEC_ENTER_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_RESIZE_COMMAND_AT_MS: AtomicU64 = AtomicU64::new(0);
+/// 前端 pointerdown 的预先断粮信号:比第一帧几何 invoke 更早,消掉按下
+/// 瞬间 in-flight 批次撞链。false 不清零——hold 窗口按最后活动时间自然
+/// 过期,松手后的积压消化期继续被盖住。
+static LAST_RESIZE_ARM_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn unix_millis() -> u64 {
     std::time::SystemTime::now()
@@ -5530,12 +5534,21 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// 是否处于拖动喂食 hold 窗口。判定源是「最后一次拖动活动」的两种形态:
+/// resize 命令本体(拖动中每帧刷新)与前端 pointerdown 的预先断粮信号
+/// (set_resize_drag_active,消除第一帧几何 invoke 之前 in-flight 批次撞链)。
+fn resize_feed_holding() -> bool {
+    let last = LAST_RESIZE_COMMAND_AT_MS
+        .load(Ordering::Relaxed)
+        .max(LAST_RESIZE_ARM_AT_MS.load(Ordering::Relaxed));
+    last != 0 && unix_millis().saturating_sub(last) < RESIZE_FEED_HOLD_WINDOW_MS
+}
+
 /// delta flush 的双闸:拖动中(含 settle 后 3s 窗口,覆盖积压消化期)时间腿
 /// 永不触发、字节腿放大——渲染管线完全静止,主线程的 SetWindowPos 同步链
 /// 不再与内容更新撞车。
 fn delta_flush_gates() -> (u128, usize) {
-    let last = LAST_RESIZE_COMMAND_AT_MS.load(Ordering::Relaxed);
-    if last != 0 && unix_millis().saturating_sub(last) < RESIZE_FEED_HOLD_WINDOW_MS {
+    if resize_feed_holding() {
         (RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES)
     } else {
         (DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)
@@ -5645,6 +5658,17 @@ unsafe fn atomic_resize_win(win: &tauri::WebviewWindow, width: f64, height: f64,
     let (pw, ph) = ((width * dpi).round() as i32, (height * dpi).round() as i32);
     let (px, py) = ((x * dpi).round() as i32, (y * dpi).round() as i32);
     SetWindowPos(hwnd, std::ptr::null_mut(), px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/// 前端 pointerdown 的预先断粮信号:比第一帧几何 invoke 更早(几何要先过
+/// 3 次只读 IPC + 越阈值 move),按下瞬间就拉长 delta 闸,消掉 in-flight
+/// 批次撞链。active=false 不清零——hold 窗口按最后活动时间自然过期,松手
+/// 后的积压消化期继续被盖住。
+#[tauri::command]
+fn set_resize_drag_active(active: bool) {
+    if active {
+        LAST_RESIZE_ARM_AT_MS.store(unix_millis(), Ordering::Relaxed);
+    }
 }
 
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
@@ -14063,6 +14087,13 @@ fn forward_tool_call_delta(
 ) -> Result<bool, String> {
     let slow = arguments.len() > TOOL_CALL_EMIT_CAP_BYTES;
     let gate = if slow { TOOL_CALL_EMIT_MS_SLOW } else { TOOL_CALL_EMIT_MS };
+    // 拖动 hold 期直接 skip:预览是纯锦上添花(GUI 的 tool row 只需要活预览,
+    // 工具调用本体走命令返回值,见下),不值得为它把渲染管线叫醒——残余微卡
+    // 的候选源之一(2026-11-25)。skip 时刷新 last_emit,窗口外不瞬间连发。
+    if resize_feed_holding() {
+        *last_emit = Instant::now();
+        return Ok(false);
+    }
     if last_emit.elapsed().as_millis() < gate {
         return Ok(false);
     }
@@ -21202,6 +21233,8 @@ pub fn run() {
             disable_resize_hotzones,
             // Windows 非模态 resize:每帧一次 SetWindowPos,不进模态 sizing 循环
             resize_window_nonmodal,
+            // 拖动预先断粮信号(pointerdown 即拉长 delta 闸)
+            set_resize_drag_active,
             // MCP subprocess
             spawn_mcp,
             mcp_request,

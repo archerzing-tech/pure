@@ -37,21 +37,25 @@ let invokeCalls: string[] = [];
 let resized: ResizeDirection[] = [];
 // 非模态路径(Windows)按帧送来的几何。
 let nonModalGeometries: ResizeGeometry[] = [];
+// 预先断粮信号的轨迹(true=按下/false=收尾)。
+let dragSignals: boolean[] = [];
 
 beforeEach(() => {
   invokeCalls = [];
   resized = [];
   nonModalGeometries = [];
+  dragSignals = [];
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
     // getCurrentWindow() 读 metadata.currentWindow.label,缺了整个 Window API 不可用。
     metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
-    invoke: (cmd: string) => {
+    invoke: (cmd: string, args?: Record<string, unknown>) => {
       // 未知命令拒绝自愈(bun mock 污染判例):绝不静默 resolve。
       if (cmd === 'disable_resize_hotzones') { invokeCalls.push(cmd); return Promise.resolve(); }
       if (cmd === 'plugin:window|is_maximized') return Promise.resolve(false);
       if (cmd === 'plugin:window|inner_size') return Promise.resolve({ width: 1200, height: 800 });
       if (cmd === 'plugin:window|outer_position') return Promise.resolve({ x: 100, y: 80 });
       if (cmd === 'plugin:window|scale_factor') return Promise.resolve(1);
+      if (cmd === 'set_resize_drag_active') { dragSignals.push(Boolean(args?.active)); return Promise.resolve(); }
       return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
     },
   };
@@ -263,6 +267,9 @@ describe('armNonModalResize（Windows 非模态路径）', () => {
     pmove(1300, 220); // 松手后的迟到 move 无效
     await tick();
     expect(nonModalGeometries.length).toBe(2);
+    // 预先断粮信号:按下即 true,收尾即 false(不等几何 IPC 就绪)。
+    expect(dragSignals[0]).toBe(true);
+    expect(dragSignals[dragSignals.length - 1]).toBe(false);
   });
 
   it('W 边横向拖反向改位置,钉住右边界', async () => {
