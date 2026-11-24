@@ -1698,3 +1698,21 @@ describe('netLedger 接线（P0b runRouted 入账）', () => {
     expect(dests).toBe(calls);
   });
 });
+
+  it('attaches page-baseline findings to html writes (2026-11-24 对拍落地刀)', async () => {
+    const invoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+      if (command === 'path_info') return { exists: false, isDirectory: false };
+      if (command === 'write_file') return 'Wrote';
+      throw new Error(`unexpected command: ${command}`);
+    };
+    const adapter = new TauriToolAdapter('/ws', '', '', '', invoke);
+    const ok = await adapter.execute(toolCall('write_file', {
+      path: 'login.html',
+      content: '<html><body><form><input name="e"><button>go</button></form></body></html>',
+    }));
+    expect(ok.success).toBe(true);
+    expect(String(ok.result)).toContain('[页面底线自检]');
+    expect(String(ok.result)).toContain('aria-');
+    const plain = await adapter.execute(toolCall('write_file', { path: 'app.ts', content: 'const a = 1;' }));
+    expect(String(plain.result)).not.toContain('页面底线自检');
+  });

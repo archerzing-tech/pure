@@ -30,6 +30,8 @@ import {
   wantsCapabilityLadder,
   wantsDelegationScale,
   wantsHandsOnWorkflow,
+  detectSimulationRequest,
+  SIMULATED_DATA_PROMPT,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
@@ -719,5 +721,25 @@ describe('INCREMENTAL_BUILD_PROMPT (humanized build reporting)', () => {
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('dedicated test step');
     expect(INCREMENTAL_BUILD_PROMPT).not.toContain('at least three rounds');
     expect(INCREMENTAL_BUILD_PROMPT).toContain('concrete failing checks and evidence');
+  });
+});
+
+describe('detectSimulationRequest（2026-11-24 对拍落地刀）', () => {
+  it('hits dashboard/monitoring/mock-data wording', () => {
+    expect(detectSimulationRequest('实现一个大屏的网络监控管理后台')).toBe(true);
+    expect(detectSimulationRequest('做一个数据 dashboard，前端模拟数据')).toBe(true);
+    expect(detectSimulationRequest('写个监控仪表盘 demo，数据用 mock data')).toBe(true);
+    expect(detectSimulationRequest('模拟数据要有物理语义')).toBe(true);
+  });
+
+  it('does not fire on unrelated requests', () => {
+    expect(detectSimulationRequest('修一下登录页的表单校验')).toBe(false);
+    expect(detectSimulationRequest('写个博客主页')).toBe(false);
+  });
+
+  it('SIMULATED_DATA_PROMPT carries the physical-semantics anchors', () => {
+    expect(SIMULATED_DATA_PROMPT).toContain('mean-reverting');
+    expect(SIMULATED_DATA_PROMPT).toContain('State drives numbers');
+    expect(SIMULATED_DATA_PROMPT).toContain('rolling history window');
   });
 });

@@ -28,6 +28,7 @@ import { formatCommandError, isBenignNoMatchExit, safeParseArgs } from '../../sh
 import { cacheQualityLiveLine } from '../../shared/endpointCacheQuality';
 import { blockedHostMessage, detectResponseHijack, hijackErrorMessage, hostBlocked, isNetworkError, netFailureHint, recordNetFailure, recordNetSuccess } from '../../shared/netGuard';
 import { primaryRewrite } from '../../shared/sourceRewrite';
+import { formatBaselineFindings, pageBaselineCheck } from '../../shared/pageBaselineCheck';
 import { condenseToolBody, type SummarizeForExtract } from '../../shared/webExtract';
 import { recordNetOutcome, unblockAttemptsBeforeMirror } from '../../shared/netRoute';
 import { stripAnsi } from '../../shared/ansi';
@@ -745,10 +746,15 @@ export class NodeToolAdapter implements ToolAdapter {
       sizeNote = ` (file now ${statSync(path).size} bytes)`;
     } catch { /* 写后 stat 失败不连累结果 */ }
 
+    // 页面底线自检（2026-11-24 对拍落地刀）：HTML/CSS 交付物的机械可判底线
+    // （aria/焦点环/reduced-motion/对比度）随返回体注入发现。感知非闸门：
+    // 修不修由模型裁决，绝不拦截写入。
+    const baseline = append ? '' : formatBaselineFindings(pageBaselineCheck(String(args.path), content));
+
     return {
       id: `tool_${Date.now()}`,
       toolName: 'write_file',
-      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${sizeNote}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`,
+      result: `${append ? 'Appended' : 'Wrote'} ${content.length} bytes to ${String(args.path)}${sizeNote}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}${baseline}`,
       success: true,
       duration: Date.now() - start,
     };

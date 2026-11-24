@@ -1080,3 +1080,40 @@ describe('NodeToolAdapter read_file image signature gate', () => {
     expect(String(jpeg.result)).toContain('image/jpeg');
   });
 });
+
+describe('NodeToolAdapter write_file 页面底线自检（2026-11-24 对拍落地刀）', () => {
+  let workspace: string;
+  let adapter: NodeToolAdapter;
+
+  beforeAll(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pure-node-pagebase-'));
+    adapter = new NodeToolAdapter({ workspace, commandTimeout: 10000 });
+  });
+
+  afterAll(() => {
+    safeRm(workspace);
+  });
+
+  const run = async (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+    adapter.execute({
+      id: `call-${name}`,
+      index: 0,
+      function: { name, arguments: JSON.stringify(args) },
+    });
+
+  it('interactive HTML without aria marks ride on the write result', async () => {
+    const r = await run('write_file', {
+      path: 'login.html',
+      content: '<html><body><form><input name="e"><button>go</button></form><style>.a{animation:rise .6s}</style></body></html>',
+    });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).toContain('[页面底线自检]');
+    expect(String(r.result)).toContain('aria-');
+  });
+
+  it('non-page deliverables keep the result clean', async () => {
+    const r = await run('write_file', { path: 'notes.txt', content: '<form>not a page</form>' });
+    expect(r.success).toBe(true);
+    expect(String(r.result)).not.toContain('页面底线自检');
+  });
+});

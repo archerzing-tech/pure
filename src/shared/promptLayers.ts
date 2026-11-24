@@ -255,6 +255,24 @@ export const SERVING_PREVIEW_PROMPT = `Serving/preview protocol for this request
 - Pick the vehicle FIRST: single self-contained .html → open directly via file://. Anything with a dev-server script (vite/next/flask…), fetch(), ES modules, or CORS-sensitive assets → http://localhost: install deps, start the server with background:true, then poll with a bounded probe until it answers — Windows: \`curl.exe -s -o NUL -w "%{http_code}" http://localhost:<port>\`; macOS/Linux: \`curl -s -o /dev/null -w "%{http_code}" http://localhost:<port>\`. (Bare \`curl\` on Windows is a PowerShell alias and rejects these flags; /dev/null does not exist on Windows.) Then open the page and report the URL + how to stop it (task_kill <pid>; activate the task tools via discover_tools if they are not in view).
 - Never leave a foreground server running; never fake a preview with file:// for something that needs a server.`;
 
+// ── 模拟/监控数据的物理语义判据（2026-11-24 对拍落地刀）──────────────────
+// pure vs Claude 大屏对拍判例：Claude 的模拟数据引擎有物理语义（均值回归+
+// 慢周期+突发衰减、状态翻转联动聚合与告警流、离线节点从趋势曲线剔除），pure
+// 直白随机跳变。这条长尾判据按闸门装配：只有请求真的是做监控大屏/仪表盘/
+// 模拟数据时才在场（召回优先：误判只多 ~400 字符，漏判交付照样能用、只是
+// 仿真质感降一档——所以宽词不追）。
+
+/** 请求涉及大屏/监控后台/仪表盘/模拟数据——闸门。 */
+export function detectSimulationRequest(prompt: string): boolean {
+  const text = prompt ?? '';
+  return /大屏|监控|仪表盘|看板|数据大屏|模拟数据|仿真|\bdashboard\b|\bmonitor(?:ing)?\b|\bsimulated?\s+data\b|\bmock\s+data\b/i.test(text);
+}
+
+export const SIMULATED_DATA_PROMPT = `Simulated-data protocol for this request (monitoring screens, dashboards, mock feeds):
+- Give simulated series physical semantics: a mean-reverting walk plus a slow cycle plus occasional decaying bursts — not an independent random jump per tick.
+- State drives numbers: offline/alarming nodes must fade out of aggregates and trend lines; every state flip emits an event into the alert/event feed.
+- Refresh smoothly: ease numeric changes over a few frames and keep a rolling history window, so curves scroll forward instead of restarting.`;
+
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
  * renders fenced ```svg blocks inline as the PICTURE (single images full
  * width, consecutive blocks as a side-by-side grid), so every image request

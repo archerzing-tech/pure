@@ -1010,3 +1010,19 @@ describe('composeMemoryPrompt · 注入面围栏卫生（fenceHygiene，渲染�
     expect(injection).toContain(entry);
   });
 });
+
+describe('simulated_data fragment（2026-11-24 对拍落地刀）', () => {
+  const ctx = () => ({ surface: 'gui' as const, capabilities: buildGuiCapabilities(true) });
+  it('rides only on dashboard/monitoring/mock-data requests', () => {
+    const hit = assembler.buildSystemFragments(ctx(), '实现一个大屏的网络监控管理后台，数据用模拟数据');
+    expect(hit.some((f) => f.id === 'simulated_data')).toBe(true);
+    const miss = assembler.buildSystemFragments(ctx(), '修复登录页的表单校验');
+    expect(miss.some((f) => f.id === 'simulated_data')).toBe(false);
+  });
+  it('the fragment answers how, not when', () => {
+    const hit = assembler.buildSystemFragments(ctx(), '做一个流量监控大屏');
+    const frag = hit.find((f) => f.id === 'simulated_data');
+    expect(frag?.content).toContain('mean-reverting');
+    expect(frag?.content).not.toContain('何时');
+  });
+});

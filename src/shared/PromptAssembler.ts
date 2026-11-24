@@ -32,8 +32,10 @@ import {
   wantsCodingTurn,
   composeUserTurn,
   detectServingPreview,
+  detectSimulationRequest,
   detectVisualRequest,
   SERVING_PREVIEW_PROMPT,
+  SIMULATED_DATA_PROMPT,
   wantsCapabilityLadder,
   PARALLEL_SCOPE_NOTE,
   wantsDelegationScale,
@@ -379,6 +381,14 @@ function buildRequestDetailFragments(
       'serving_preview',
       detectServingPreview(text) ? SERVING_PREVIEW_PROMPT : '',
       57,
+    ),
+    // 模拟数据物理语义判据随请求（2026-11-24 对拍落地刀）：监控大屏/仪表盘/
+    // mock 数据类请求才在场。判据答「模拟数据怎么做才像真的」，何时做由
+    // detectSimulationRequest 的召回机制决定——符合「只答怎么做」铁律。
+    fragment(
+      'simulated_data',
+      detectSimulationRequest(text) ? SIMULATED_DATA_PROMPT : '',
+      56,
     ),
   ].filter((item): item is PromptFragment => item !== null);
 }

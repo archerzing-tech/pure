@@ -398,6 +398,7 @@ const GUI_BENCH_TIMEOUT_MS = 8_000;
 /** 测速路径与拼接规则在 shared/mirrorSources（纯函数，CLI 同一份）。 */
 import { benchmarkUrlFor } from '../shared/mirrorSources';
 import { condenseToolBody, type SummarizeForExtract } from '../shared/webExtract';
+import { formatBaselineFindings, pageBaselineCheck } from '../shared/pageBaselineCheck';
 
 /** 提炼回调:宿主用当前配置的模型把超长网页正文压成要点。类型单源已挪
  *  shared/webExtract(2026-11-04,CLI 侧也要接线),这里 re-export 兜住既有
@@ -1686,7 +1687,10 @@ export class TauriToolAdapter implements ToolAdapter {
               bytes: content.length,
             });
             const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
-            return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
+            // 页面底线自检（2026-11-24 对拍落地刀）：HTML/CSS 交付物的机械底线发现
+            // 随返回体注入。感知非闸门，修否由模型裁决。
+            const baseline = append ? '' : formatBaselineFindings(pageBaselineCheck(path, content));
+            return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}${baseline}`, success: true, duration: Date.now() - start };
           }
           const msg = await this.call('write_file', { workspace: ws, path, content, append }) as string;
           const knownBefore = this.readPaths.has(this.readKey(ws, path));
@@ -1703,7 +1707,8 @@ export class TauriToolAdapter implements ToolAdapter {
             bytes: content.length,
           });
           const undoAvailable = await this.tryFinishWriteBatch(batch, [path]);
-          return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}`, success: true, duration: Date.now() - start };
+          const baseline = append ? '' : formatBaselineFindings(pageBaselineCheck(path, content));
+          return { id: toolCall.id, toolName: name, result: `${msg}${wholeFileRewriteOfKnown ? ' (whole-file rewrite of a file you had already read — for the next targeted change, edit_file sends only the diff)' : ''}${undoAvailable ? '' : ' (当前写入未提供撤销快照)'}${baseline}`, success: true, duration: Date.now() - start };
         }
         case 'edit_file': {
           const path = String(args.path ?? '');
