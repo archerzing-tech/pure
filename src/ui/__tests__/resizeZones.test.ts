@@ -5,13 +5,19 @@
 // 策略走 setResizeAction 测试缝验证(不碰真窗口),Rust 侧的灭活调用顺带钉住。
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import {
+  computeResizeGeometry,
   exceedsResizeDragThreshold,
   RESIZE_DRAG_THRESHOLD_PX,
+  RESIZE_MIN_HEIGHT,
+  RESIZE_MIN_WIDTH,
+  setNonModalResizeAction,
   setResizeAction,
   setupResizeZones,
   type ResizeDirection,
+  type ResizeGeometry,
 } from '../resizeZones';
 
 let registeredHere = false;
@@ -29,23 +35,36 @@ afterAll(() => {
 let invokeCalls: string[] = [];
 // 被策略放行的 resize 方向。
 let resized: ResizeDirection[] = [];
+// 非模态路径(Windows)按帧送来的几何。
+let nonModalGeometries: ResizeGeometry[] = [];
 
 beforeEach(() => {
   invokeCalls = [];
   resized = [];
+  nonModalGeometries = [];
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    // getCurrentWindow() 读 metadata.currentWindow.label,缺了整个 Window API 不可用。
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
     invoke: (cmd: string) => {
-      invokeCalls.push(cmd);
-      return Promise.resolve();
+      // 未知命令拒绝自愈(bun mock 污染判例):绝不静默 resolve。
+      if (cmd === 'disable_resize_hotzones') { invokeCalls.push(cmd); return Promise.resolve(); }
+      if (cmd === 'plugin:window|is_maximized') return Promise.resolve(false);
+      if (cmd === 'plugin:window|inner_size') return Promise.resolve({ width: 1200, height: 800 });
+      if (cmd === 'plugin:window|outer_position') return Promise.resolve({ x: 100, y: 80 });
+      if (cmd === 'plugin:window|scale_factor') return Promise.resolve(1);
+      return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
     },
   };
   setResizeAction((dir) => resized.push(dir));
+  setNonModalResizeAction((g) => nonModalGeometries.push(g));
 });
 
 afterEach(() => {
   setResizeAction();
+  setNonModalResizeAction();
   document.body.innerHTML = '';
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  delete (navigator as unknown as Record<string, unknown>).platform; // 拆掉用例钉的平台
 });
 
 function zone(cls: string): HTMLElement {
@@ -80,6 +99,44 @@ describe('exceedsResizeDragThreshold', () => {
     expect(exceedsResizeDragThreshold(100, 100, 95, 95)).toBe(true);
     expect(RESIZE_DRAG_THRESHOLD_PX).toBe(3);
     expect(exceedsResizeDragThreshold(0, 0, 10, 10, 20)).toBe(false);
+  });
+});
+
+describe('computeResizeGeometry（Windows 非模态 resize）', () => {
+  const start = { width: 1200, height: 800, x: 100, y: 80 };
+
+  it('E/S 只改尺寸,左上角不动', () => {
+    expect(computeResizeGeometry('East', 50, 0, start)).toEqual({ width: 1250, height: 800, x: 100, y: 80 });
+    expect(computeResizeGeometry('South', 0, 40, start)).toEqual({ width: 1200, height: 840, x: 100, y: 80 });
+  });
+
+  it('W/N 反向改位置,钉住对边', () => {
+    expect(computeResizeGeometry('West', -50, 0, start)).toEqual({ width: 1250, height: 800, x: 50, y: 80 });
+    expect(computeResizeGeometry('North', 0, -40, start)).toEqual({ width: 1200, height: 840, x: 100, y: 40 });
+  });
+
+  it('四角同时改尺寸与位置', () => {
+    expect(computeResizeGeometry('NorthWest', -50, -40, start)).toEqual({ width: 1250, height: 840, x: 50, y: 40 });
+    expect(computeResizeGeometry('SouthEast', 50, 40, start)).toEqual({ width: 1250, height: 840, x: 100, y: 80 });
+  });
+
+  it('触到最小尺寸后夹住,位置按夹后的尺寸算,对边不漂移', () => {
+    const east = computeResizeGeometry('East', -500, 0, start);
+    expect(east.width).toBe(RESIZE_MIN_WIDTH);
+    const west = computeResizeGeometry('West', 500, 0, start);
+    expect(west.width).toBe(RESIZE_MIN_WIDTH);
+    // 初始右边界 = 100 + 1200 = 1300;夹住后仍应是 1300。
+    expect(west.x + west.width).toBe(1300);
+    const north = computeResizeGeometry('North', 0, 900, start);
+    expect(north.height).toBe(RESIZE_MIN_HEIGHT);
+    expect(north.y + north.height).toBe(880);
+  });
+
+  it('最小尺寸与 tauri.conf.json 锁在一起', () => {
+    const conf = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+    const win = conf.app.windows[0]; // Tauri v2 结构：窗口配置在 app.windows
+    expect(RESIZE_MIN_WIDTH).toBe(win.minWidth);
+    expect(RESIZE_MIN_HEIGHT).toBe(win.minHeight);
   });
 });
 
@@ -137,5 +194,90 @@ describe('setupResizeZones', () => {
     zone('s').dispatchEvent(new window.MouseEvent('mousedown', { button: 2, clientX: 400, clientY: 900, bubbles: true }));
     move(400, 860);
     expect(resized).toEqual([]);
+  });
+});
+
+// ---- Windows 非模态路径(pointerdown → 逐帧几何 → Rust SetWindowPos) ----
+// 这条路径不再有任何模态循环入口;测试锁三件事:阈值内零动作、几何值正确、
+// 松手/按钮抬起后彻底冻结。
+
+function pinPlatform(value: string): void {
+  Object.defineProperty(navigator, 'platform', { value, configurable: true });
+}
+
+function pdown(el: HTMLElement, x: number, y: number): void {
+  el.dispatchEvent(new window.PointerEvent('pointerdown', {
+    button: 0, pointerId: 1, screenX: x, screenY: y, clientX: x, clientY: y, bubbles: true,
+  }));
+}
+
+function pmove(x: number, y: number, buttons = 1): void {
+  window.dispatchEvent(new window.PointerEvent('pointermove', {
+    pointerId: 1, screenX: x, screenY: y, buttons, bubbles: true,
+  }));
+}
+
+function pup(): void {
+  window.dispatchEvent(new window.PointerEvent('pointerup', { pointerId: 1, button: 0, buttons: 0 }));
+}
+
+async function tick(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 30));
+}
+
+describe('armNonModalResize（Windows 非模态路径）', () => {
+  beforeAll(async () => {
+    // 预热动态 import,让首个用例的计时只测异步 invoke 链,不测模块加载。
+    await import('@tauri-apps/api/window');
+    await import('@tauri-apps/api/core');
+  });
+
+  it('阈值内零动作;越阈值后按帧发几何,同帧合并,松手即冻结', async () => {
+    pinPlatform('Win32');
+    setupResizeZones();
+    pdown(zone('se'), 1100, 20);
+    await tick(); // 起始几何(3 次 IPC)落地;未动不发帧
+    expect(nonModalGeometries).toEqual([]);
+
+    pmove(1150, 70); // dx=50, dy=50 越阈值 → 首帧
+    await tick();
+    expect(nonModalGeometries).toEqual([{ width: 1250, height: 850, x: 100, y: 80 }]);
+
+    pmove(1200, 120);
+    pmove(1250, 170); // 同帧内两次 move 合成一次
+    await tick();
+    expect(nonModalGeometries.length).toBe(2);
+    expect(nonModalGeometries[1]).toEqual({ width: 1350, height: 950, x: 100, y: 80 });
+
+    pup();
+    pmove(1300, 220); // 松手后的迟到 move 无效
+    await tick();
+    expect(nonModalGeometries.length).toBe(2);
+  });
+
+  it('W 边横向拖反向改位置,钉住右边界', async () => {
+    pinPlatform('Win32');
+    setupResizeZones();
+    pdown(zone('w'), 2, 400);
+    await tick();
+    // W 边只吃水平分量(与原生 HTLEFT 一致),竖向拖不动它;dx=-50 → 左移 50 加宽 50,
+    // 右边界钉在 100+1200=1300。
+    pmove(-48, 400);
+    await tick();
+    expect(nonModalGeometries).toEqual([{ width: 1250, height: 800, x: 50, y: 80 }]);
+    pup();
+  });
+
+  it('pointerup 丢失时 buttons=0 的 move 也收尾', async () => {
+    pinPlatform('Win32');
+    setupResizeZones();
+    pdown(zone('e'), 1100, 20);
+    await tick();
+    pmove(1150, 20); // 发出首帧
+    await tick();
+    pmove(1200, 20, 0); // 左键已抬(系统接管/切窗)
+    pmove(1250, 20); // 之后迟到的 move 没人听
+    await tick();
+    expect(nonModalGeometries.length).toBe(1);
   });
 });

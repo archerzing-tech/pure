@@ -41,7 +41,11 @@ function delimiter(): string {
 }
 
 export function isWindowsPlatform(isWindows?: boolean): boolean {
-  return isWindows ?? (typeof navigator !== 'undefined' ? /Win/i.test(navigator.platform || navigator.userAgent) : false);
+  // 判据必须显式（Windows/Win32/Win64），不能用 /Win/i：happy-dom 的
+  // platform 是 "X11; Darwin x64"，"Darwin" 里的 "win" 会被宽匹配误命中，
+  // 2026-11-24 resizeZones 测试红就栽在这——测试环境整个被当成 Windows。
+  return isWindows
+    ?? (typeof navigator !== 'undefined' ? /Windows|Win32|Win64/i.test(navigator.platform || navigator.userAgent) : false);
 }
 
 /** 后台命令日志的 basename 模式：pure-bg-<id>.log。read_file 的 miss 分支

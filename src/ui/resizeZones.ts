@@ -1,22 +1,24 @@
 // src/ui/resizeZones.ts
 // 无边框窗口的自绘边缘 resize 热区(4 边 + 4 角)。
 //
-// 判例(2026-11-09 / 2026-11-10 Windows 真机卡死):系统给无边框窗口注入的
+// 判例(2026-11-09 / 11-10 Windows 真机卡死):系统给无边框窗口注入的
 // 原生热区(tauri-runtime-wry 的 TAURI_DRAG_RESIZE_BORDERS 子窗,顶边答
 // HTTOP)会把按下拖进 DefWindowProc 的模态 sizing 循环——输入全吞、光标变
 // 上下双箭头,而 WebView2 独立进程照常渲染。Rust 侧已把该子窗隐藏并把顶层
-// WM_NCHITTEST 一律答 HTCLIENT(hotzone.rs),原生热区不复存在;边缘 resize
-// 改由这里接手:mousedown → startResizeDragging(方向),与原生热区走同一条
-// WM_NCLBUTTONDOWN 消息链,零新增行为面。
+// WM_NCHITTEST 一律答 HTCLIENT(hotzone.rs),原生热区不复存在。
 //
-// 但「按下即发」本身就是那条消息链的另一个入口:tao 的 begin_resize_drag 是
-// PostMessageW(WM_NCLBUTTONDOWN, HT方向, 光标点),异步投递——连点时上一次
-// 投递还没被分发,鼠标已经抬起,模态循环拿到的是一次「按着却再也等不到抬起」
-// 的 sizing,窗口就此钉死在循环里(11-10 判例的忙碌态)。所以这里给按下加一道
-// 闸:只有按下后指针真的位移超过阈值才进模态循环,纯点击/连点永远不进。
+// 2026-11-24 用户复验:4.10.6 在 Windows 上「回复中拖窗口 → 整个窗口连尺寸
+// 都不再变化」——原来自绘热区接手后调用的 startResizeDragging,底层仍是
+// tao 的 PostMessageW(WM_NCLBUTTONDOWN),只是换了个入口钻进同一条模态循环。
+// 3px 阈值的 11-10 补丁只挡连点,真拖拽照样进循环。这次在 Windows 上彻底不
+// 走那条消息:pointermove 里按帧算几何,调 Rust 命令直接 SetWindowPos。
+// 非模态路径没有系统级的 mouseup 兜底,因此用 setPointerCapture 保证指针移出
+// 窗口仍能跟住;松手/取消/失焦都收尾。macOS 没有这条循环,继续走原生路径,
+// 避免把已经验证过的行为一起改掉。
 //
 // 最大化时隐藏:resize 对最大化窗口无意义,且会白白挡住标题栏顶部 6px 的
 // 拖拽——windowChrome 的 onResized 同步 body.window-maximized,CSS 直接吃。
+import { isWindowsPlatform } from '../shared/backgroundCommand';
 import { isTauriRuntime } from '../shared/tauri';
 
 export type ResizeDirection = 'North' | 'South' | 'East' | 'West' | 'NorthEast' | 'NorthWest' | 'SouthEast' | 'SouthWest';
@@ -34,8 +36,13 @@ const ZONES: ReadonlyArray<readonly [ResizeDirection, string]> = [
 ];
 
 /** 按下到「算一次真拖拽」的位移阈值(px)。小于这个数只可能是点击/手抖/连点,
- *  那几条都不该进系统模态 sizing 循环。 */
+ *  那几条都不该启动 resize。 */
 export const RESIZE_DRAG_THRESHOLD_PX = 3;
+
+/** 必须与 tauri.conf.json 的 minWidth/minHeight 一致:tao 在 WM_GETMINMAXINFO
+ *  里也会夹一次,前端按同一个值算位置才不会让 N/W 边在被夹住时漂移。 */
+export const RESIZE_MIN_WIDTH = 1000;
+export const RESIZE_MIN_HEIGHT = 600;
 
 /** 纯判定:按下点与当前点的位移是否已构成一次拖拽(坐标同坐标系即可,client
  *  或 screen 都行,只用来算差值)。 */
@@ -49,6 +56,40 @@ export function exceedsResizeDragThreshold(
   return Math.abs(x1 - x0) > threshold || Math.abs(y1 - y0) > threshold;
 }
 
+/** 窗口几何,单位为 CSS/logical px。innerSize / outerPosition 都按 scaleFactor
+ *  折算到这里,Rust 命令再用 LogicalSize/LogicalPosition 折回物理像素。 */
+export interface ResizeGeometry {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+}
+
+/** 非模态 resize 的几何:按拖拽方向改尺寸,N/W 边还要反向改位置以钉住对边。
+ *  用 screen 坐标的累计位移而不是 client 坐标——窗口自己一移动,client 坐标
+ *  就会跟着跳,反馈回来把位移抵消掉。 */
+export function computeResizeGeometry(
+  dir: ResizeDirection,
+  dx: number,
+  dy: number,
+  start: ResizeGeometry,
+  minWidth = RESIZE_MIN_WIDTH,
+  minHeight = RESIZE_MIN_HEIGHT,
+): ResizeGeometry {
+  let { width, height, x, y } = start;
+  if (dir.includes('East')) width = Math.max(minWidth, start.width + dx);
+  if (dir.includes('West')) {
+    width = Math.max(minWidth, start.width - dx);
+    x = start.x + (start.width - width);
+  }
+  if (dir.includes('South')) height = Math.max(minHeight, start.height + dy);
+  if (dir.includes('North')) {
+    height = Math.max(minHeight, start.height - dy);
+    y = start.y + (start.height - height);
+  }
+  return { width, height, x, y };
+}
+
 export function setupResizeZones(): void {
   if (!isTauriRuntime()) return;
   if (document.getElementById('resize-zones')) return;
@@ -57,8 +98,16 @@ export function setupResizeZones(): void {
   for (const [dir, cls] of ZONES) {
     const zone = document.createElement('div');
     zone.className = `win-resize-zone rz-${cls}`;
+    // Windows:非模态路径走 pointer 事件(setPointerCapture 要 pointerId)。
+    zone.addEventListener('pointerdown', (ev) => {
+      if (!isWindowsPlatform() || ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      armNonModalResize(dir, ev, zone);
+    });
+    // 其他平台维持已验证过的原生路径。
     zone.addEventListener('mousedown', (ev) => {
-      if (ev.button !== 0) return;
+      if (isWindowsPlatform() || ev.button !== 0) return;
       // 拦住气泡选择/拖拽区等一切下层语义:这 6px 属于窗口边缘。
       ev.preventDefault();
       ev.stopPropagation();
@@ -89,7 +138,14 @@ export function setResizeAction(action?: (dir: ResizeDirection) => void): void {
   resizeAction = action ?? ((dir) => void resizeWith(dir));
 }
 
-/** 按下后再等「真正的位移」才发起 resize:纯点击不进模态循环(见文件头判例)。
+/** 非模态路径的动作缝:收的是算好的几何,不是方向。 */
+let nonModalAction: (geometry: ResizeGeometry) => void = (g) => void invokeResize(g);
+
+export function setNonModalResizeAction(action?: (geometry: ResizeGeometry) => void): void {
+  nonModalAction = action ?? ((g) => void invokeResize(g));
+}
+
+/** 按下后再等「真正的位移」才发起 resize:纯点击不进任何 resize 路径。
  *  捕获阶段挂 window 监听:指针移出热区/窗口也照样跟得住;松手即拆,零残留。 */
 function armResizeOnDrag(dir: ResizeDirection, down: MouseEvent): void {
   const x0 = down.clientX;
@@ -112,13 +168,109 @@ function armResizeOnDrag(dir: ResizeDirection, down: MouseEvent): void {
   window.addEventListener('mouseup', cleanup, true);
 }
 
+/** Windows:非模态 resize。没有原生 modal loop 替我们抓鼠标,所以自己抓 pointer,
+ *  并按帧把几何送到 Rust;所有收尾路径都走 finish,绝不留悬挂监听。 */
+function armNonModalResize(dir: ResizeDirection, down: PointerEvent, zone: HTMLElement): void {
+  const x0 = down.screenX;
+  const y0 = down.screenY;
+  let active = true;
+  let start: ResizeGeometry | null = null;
+  let latestDx = 0;
+  let latestDy = 0;
+  let frame = 0;
+
+  const finish = (): void => {
+    if (!active) return;
+    active = false;
+    if (frame) cancelAnimationFrame(frame);
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', finish, true);
+    window.removeEventListener('pointercancel', finish, true);
+    window.removeEventListener('blur', finish);
+    zone.removeEventListener('lostpointercapture', finish);
+    try {
+      if (zone.hasPointerCapture?.(down.pointerId)) zone.releasePointerCapture(down.pointerId);
+    } catch { /* 指针已失效:收尾不能因此抛错 */ }
+  };
+
+  const schedule = (): void => {
+    if (frame || !start || !active) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (!active || !start) return;
+      nonModalAction(computeResizeGeometry(dir, latestDx, latestDy, start));
+    });
+  };
+
+  const onMove = (mv: PointerEvent): void => {
+    if (!active) return;
+    if ((mv.buttons & 1) === 0) { finish(); return; }
+    if (!exceedsResizeDragThreshold(x0, y0, mv.screenX, mv.screenY)) return;
+    latestDx = mv.screenX - x0;
+    latestDy = mv.screenY - y0;
+    schedule();
+  };
+
+  window.addEventListener('pointermove', onMove, true);
+  window.addEventListener('pointerup', finish, true);
+  window.addEventListener('pointercancel', finish, true);
+  window.addEventListener('blur', finish);
+  zone.addEventListener('lostpointercapture', finish);
+  try { zone.setPointerCapture(down.pointerId); } catch { /* 捕获失败仍可用窗口级事件 */ }
+
+  // 起始几何只在按下时取一次(三次只读 IPC)。最大化时直接放弃:那跟窗口壳一起
+  // 缩放,逐帧 SetWindowPos 反而会破坏最大化态。
+  void (async () => {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      if (await win.isMaximized()) { finish(); return; }
+      const [size, pos, factor] = await Promise.all([
+        win.innerSize(), win.outerPosition(), win.scaleFactor(),
+      ]);
+      if (!active) return;
+      start = {
+        width: size.width / factor,
+        height: size.height / factor,
+        x: pos.x / factor,
+        y: pos.y / factor,
+      };
+      // 不在这里 schedule:起始就绪即发会放出一帧等值几何(白付一次 IPC +
+      // 一轮 resize 事件)。首个越阈值的 move 自会带 schedule 进来;拖拽过程
+      // 中 move 是连续的,不缺这最后一脚。
+    } catch (err) {
+      console.warn('[resize-zones] non-modal resize init failed:', err);
+      finish();
+    }
+  })();
+}
+
 /** 动态导入(模块缓存后零成本)+ 失败落日志:capabilities 漏授权时 resize
- * 会「按了没反应」,与窗口键同一条判例(2026-10-11),不静默。 */
+ * 会「按了没反应」,与窗口键同一条判例(2026-10-11),不静默。
+ * 双保险:Windows 永不走这条路——它是模态 sizing 循环的入口。 */
 async function resizeWith(dir: ResizeDirection): Promise<void> {
+  if (isWindowsPlatform()) return;
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
     await getCurrentWindow().startResizeDragging(dir);
   } catch (err) {
     console.warn('[resize-zones] startResizeDragging failed:', err);
+  }
+}
+
+/** 每帧一次 IPC,把一个完整的几何交给 Rust 一次落地。窗口侧不并发多个调用:
+ *  rAF 已经把同一帧内的多次 pointermove 合成一次。 */
+async function invokeResize(geometry: ResizeGeometry): Promise<void> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    // 显式铺开字段：ResizeGeometry 没有索引签名，直接传会卡 InvokeArgs。
+    await invoke('resize_window_nonmodal', {
+      width: geometry.width,
+      height: geometry.height,
+      x: geometry.x,
+      y: geometry.y,
+    });
+  } catch (err) {
+    console.warn('[resize-zones] resize_window_nonmodal failed:', err);
   }
 }

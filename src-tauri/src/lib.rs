@@ -5489,6 +5489,35 @@ async fn disable_resize_hotzones(window: tauri::WebviewWindow) -> Result<(), Str
     Ok(())
 }
 
+/// 非模态 resize:前端 pointermove 按帧送来算好的逻辑几何,这里用 set_position
+/// + set_size 直接 SetWindowPos。绝不发 WM_NCLBUTTONDOWN——tao 的
+/// start_resize_dragging 底层就是那条消息,会进 DefWindowProc 的模态 sizing
+/// 循环;失去 mouseup 时窗口被钉在循环里,输入全吞且尺寸不再变化(2026-11-24
+/// 用户复验:4.10.6 在 Windows 回复中拖窗口仍然整个卡死)。位置先于尺寸落地,
+/// 这样 N/W 边的对边中途不会先被拽走一帧。两个写操作合成一次 IPC,顺带避免
+/// 给前端开 core:window:allow-set-size / allow-set-position 权限。
+#[tauri::command]
+async fn resize_window_nonmodal(
+    window: tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    if !width.is_finite() || !height.is_finite() || !x.is_finite() || !y.is_finite()
+        || width <= 0.0 || height <= 0.0
+    {
+        return Err("invalid resize geometry".into());
+    }
+    window
+        .set_position(tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
 /// cancel one mid-run: execute_command_stream registers the child pid when it
 /// starts and removes it when it exits; kill_command SIGKILLs the process
@@ -21029,6 +21058,8 @@ pub fn run() {
             save_artifact,
             // Windows 无边框窗口 resize 热区灭活(hotzone.rs)
             disable_resize_hotzones,
+            // Windows 非模态 resize:每帧一次 SetWindowPos,不进模态 sizing 循环
+            resize_window_nonmodal,
             // MCP subprocess
             spawn_mcp,
             mcp_request,
