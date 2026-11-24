@@ -395,7 +395,11 @@ export function defaults(): PureConfig {
     proxy: normalizeProxyConfig({ enabled: false, llmEnabled: false, toolsEnabled: false, url: '', username: '', password: '', hasPassword: false, bypassProviders: [] }),
     githubMirror: DEFAULT_GITHUB_MIRROR,
     customGithubMirror: '',
-    streamingRender: true,
+    // 默认关闭(2026-11-24 真机判例):流式渲染的逐拍 DOM 更新是 Windows
+    // 「流式中拖窗口挂起」的撞车源——与拖动的 SetWindowPos 同步链互等,
+    // 主线程停泵整机无响应。块级流式(markdown.ts 4769 行形态)是关闭后的
+    // 形态:沉淀块低频渲染,回复体验仍是渐进的,只牺牲逐拍跟随。
+    streamingRender: false,
     showThinking: true,
     taskMode: 'auto',
     autoContinue: true,
