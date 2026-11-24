@@ -4,6 +4,14 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.10
+
+**追掉残余微卡：工具预览流挂拖动感知；按下瞬间预先断粮**
+
+4.10.9 复验挂死已根治（微卡、快速缓解），这一版把两个残余候选源也收掉。**工具预览流挂拖动感知**：`tool_call_delta` 预览是纯锦上添花（工具卡的活预览，工具调用本体走命令返回值），拖动 hold 期直接 skip——不为它把渲染管线叫醒；skip 时刷新节拍，窗口外不瞬间连发。**pointerdown 预先断粮**：新增 `set_resize_drag_active` 命令，前端按下瞬间就拉长 delta 闸，不等第一帧几何 invoke（那要先过 3 次只读 IPC + 越阈值 move）——按下前的最后一批在途 delta 不再撞链；松手信号不清零，hold 窗口按最后活动时间自然过期，积压消化期继续被盖住。两个判定源统一进 `resize_feed_holding()`，delta 转发与工具预览闸共用。
+
+验证：`cargo test --lib` 绿；`x86_64-pc-windows-gnu` 交叉 check（--tests）绿；typecheck 与 resizeZones 16 例绿。微卡是否归零以 Windows 真机复验为准。
+
 ## v4.10.9
 
 **Windows 拖动挂起第二刀：流式中拖窗口时喂食全停（渲染管线完全静止）；取证升级为队列/执行分段测量**
