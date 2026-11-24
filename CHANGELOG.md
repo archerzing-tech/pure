@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.6
+
+**流式渲染期间拖动窗口不再叠加全转录布局；缩放闸门自带真机取证**
+
+一、拖窗口时重活整段停掉。11-20 把每条 resize/RO 回调各自合帧到一帧一次，但拖动时仍有六条回调与流式渲染交替读写布局：composer 量高、大纲尺子、窗口键 IPC、泊车占位重测、图表 refit、流式 markdown 渲染，每条都触发一次全转录强制布局。新增全局缩放闸门（`windowResizeGate.ts`）：从第一条 resize 到最后一条之间 `isWindowResizing()` 恒为真，重活整段挂起，停手 220ms 后统一补一次——补的是最终宽度，中间值本来没有意义。挂起的是流式 markdown 渲染、大纲尺子的 ResizeObserver 与 MutationObserver 刷新、钉底 `scrollTop` 写入、泊车组逐帧重测、composer `offsetHeight` 量高（顺带把同拍里的读/写顺序调成先读后写）。
+
+二、闸门自带取证。真机压测发现一次拖动里 DOM `resize` 只到 1–4 条——原生 sizing 循环期间 WebKit 把事件压掉了，此前没有任何日志能证明闸门当时是否真的把重活停掉。现在每次拖动结束落一行 `resize_gate`：dom/native 各多少条、持续多久、有没有热点真的来问过闸。下次卡死能直接分开「闸没装上 / 没被问过」与「闸生效了但仍然卡」。同时接入 Tauri `onResized`：实测它给出的条数与 DOM 通道完全相等，保留只为兜住 DOM 事件被整段吞掉的情形（Windows 模态 sizing 的 11-09 判例即此类）。
+
+三、未验证的部分如实说明。用 `cliclick` 做真实鼠标拖拽（右边缘每 14ms 移 5px，接近 60Hz），在流式输出期间连拖十几轮：帧停摆 0 次、AX 查询 0 失败、拖动中 AX 往返 p50 687–755ms（空闲基线 478ms）、回合全部正常收尾。但未修复版本在同一脚本下几乎一模一样（p50 713ms、零失败、零停摆），说明这套合成压测没有命中用户报告的长转录场景——测试会话只有 1–3 轮，没有折叠组和几百个刻度点。因此本次不能宣称「已修复用户报告的卡死」，只能宣称「拖窗口期间的重活确实被停掉了，并且留下了可判读的取证」。
+
+验证：`bun run typecheck`、`bun run lint:conventions` 绿；相关面 54 pass / 0 fail（闸门双通道、settle 续期、一次性订阅、既有接线锁）。真机三组拖动压测见上。
+
 ## v4.10.5
 
 **大写入正文不再每轮重发；已有文件只改一小段时，整份写入会被挡下并逼回 edit_file**
