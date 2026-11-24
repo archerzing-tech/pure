@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.8
+
+**Windows 流式中拖动缩放挂起收口：拖动感知喂食降频；应用学会在挂死时给自己写尸检报告**
+
+一、真机判据补全，真凶锁定。4.10.7 复验两分支：非流式拖动完全健康（非模态路径成立），流式中拖动缩放 100% 卡死——且是**挂起不是饱和**：全系统零 CPU 占用、无巨 DOM（一句话的回复）也复现、缩放闸门取证正常（dom/native 都到、`consulted:true`）。三个「显然嫌疑人」（闸门失效 / JS 流式渲染饱和 / 巨 DOM 重排）全被证据洗清。结构性真凶：4.10.5 的缩放闸门只闸得住 JS 侧的活，闸不住 Rust→JS 每 50ms 一条的 delta 喂食——渲染进程队列永不空，非模态拖动的 `SetWindowPos→put_Bounds` 同步链的应答排在后面饿死，宿主主线程停泵，窗口「未响应」，所有 invoke 断（`save_session` 10 秒超时是同一死法的轻症）。挂起而非饱和，正是 4.10.5/4.10.6 两刀都打不中的原因。
+
+二、对策三件。**拖动感知喂食降频**：`resize_window_nonmodal` 被调用 = 拖动进行中（Rust 侧原子时间戳），delta flush 时间闸从 50ms 拉长到 400ms（含停手后 1.5 秒窗口），给渲染进程留出排空同步链应答的窗口；合批只延迟不清内容，零丢失——v4.6.1「打字优先」的同构推广：操作优先于展示。**Windows 原子 SetWindowPos**：位置+尺寸一次落地（`run_on_main_thread`，`GetDpiForWindow` 按窗口当前 DPI 实时换算），主线程消息轮次减半。**JS 侧同步降帧**：非模态拖帧按帧计数节流到 15fps，指针停住时断链零 invoke。前端不再依赖 60fps 拖拽——resize 不需要那个帧率，撞链频率才是生死线。
+
+三、挂起态自取证。新增监控线程每 500ms 巡检：主线程在 resize 命令内逗留超 2 秒即落 `resize_stuck` 行（每秒一条），恢复时落 `resize_unstuck`——挂死时主线程写不了自己的尸检报告，监控线程替它写。下次再卡，`gui_perf.log` 直接量出「卡在命令内多久、是否恢复」，不再需要用户口述复现条件。
+
+验证：`cargo test --lib` 绿（含拖动感知闸新用例）；`x86_64-pc-windows-gnu` 交叉 check（--tests）绿；typecheck 与 resizeZones 16 例绿。Windows 真机复验挂账：流式中拖动缩放（一句话回复即可），若仍卡，`resize_stuck` 行直接给挂起时长与恢复性。
+
 ## v4.10.7
 
 **Windows 流式中拖窗口不再卡死（resize 弃模态循环改非模态）；页面交付底线自检与模拟数据判据随写随附**
