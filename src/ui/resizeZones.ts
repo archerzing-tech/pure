@@ -44,6 +44,13 @@ export const RESIZE_DRAG_THRESHOLD_PX = 3;
 export const RESIZE_MIN_WIDTH = 1000;
 export const RESIZE_MIN_HEIGHT = 600;
 
+/** 拖帧节流:每 N 个 rAF 发一次 invoke(60fps 下 ≈15fps)。resize 不需要
+ *  60fps,而每次 invoke 都在宿主主线程走一轮 SetWindowPos→put_Bounds 消息
+ *  链——Windows 真机判例(2026-11-25):流式中这条链与渲染进程排队互撞会
+ *  挂起整个应用(零 CPU 全员等待)。降帧=降撞链频率,拖拽跟手度不受影响。
+ *  帧计数不用时钟:测试里 rAF 是手动 tick 的,时钟断言会抖。 */
+export const RESIZE_SEND_EVERY_N_FRAMES = 4;
+
 /** 纯判定:按下点与当前点的位移是否已构成一次拖拽(坐标同坐标系即可,client
  *  或 screen 都行,只用来算差值)。 */
 export function exceedsResizeDragThreshold(
@@ -193,11 +200,26 @@ function armNonModalResize(dir: ResizeDirection, down: PointerEvent, zone: HTMLE
     } catch { /* 指针已失效:收尾不能因此抛错 */ }
   };
 
+  // 首帧立即发(计数从 N-1 起步),之后每 N 帧一拍。lastSent* 兜住空转:指针
+  // 停住时节流拍到的帧发现位移没变,断掉 rAF 链等下一个 move——否则按住不动
+  // 也会每 N 帧白发一帧等值几何。finish 不重置——下一次 arm 是全新闭包。
+  let framesSinceSend = RESIZE_SEND_EVERY_N_FRAMES - 1;
+  let lastSentDx = Number.NaN;
+  let lastSentDy = Number.NaN;
   const schedule = (): void => {
     if (frame || !start || !active) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
       if (!active || !start) return;
+      framesSinceSend += 1;
+      if (framesSinceSend < RESIZE_SEND_EVERY_N_FRAMES) {
+        schedule(); // 未到节流拍:继续排帧
+        return;
+      }
+      if (latestDx === lastSentDx && latestDy === lastSentDy) return; // 无新位移:断链等下一个 move
+      framesSinceSend = 0;
+      lastSentDx = latestDx;
+      lastSentDy = latestDy;
       nonModalAction(computeResizeGeometry(dir, latestDx, latestDy, start));
     });
   };

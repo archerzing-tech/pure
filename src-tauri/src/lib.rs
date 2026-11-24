@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 mod path_policy;
@@ -5489,13 +5490,83 @@ async fn disable_resize_hotzones(window: tauri::WebviewWindow) -> Result<(), Str
     Ok(())
 }
 
-/// 非模态 resize:前端 pointermove 按帧送来算好的逻辑几何,这里用 set_position
-/// + set_size 直接 SetWindowPos。绝不发 WM_NCLBUTTONDOWN——tao 的
+/// 非模态 resize:前端 pointermove 按帧送来算好的逻辑几何,Windows 上一次
+/// 原子 SetWindowPos 落位置+尺寸。绝不发 WM_NCLBUTTONDOWN——tao 的
 /// start_resize_dragging 底层就是那条消息,会进 DefWindowProc 的模态 sizing
 /// 循环;失去 mouseup 时窗口被钉在循环里,输入全吞且尺寸不再变化(2026-11-24
-/// 用户复验:4.10.6 在 Windows 回复中拖窗口仍然整个卡死)。位置先于尺寸落地,
-/// 这样 N/W 边的对边中途不会先被拽走一帧。两个写操作合成一次 IPC,顺带避免
-/// 给前端开 core:window:allow-set-size / allow-set-position 权限。
+/// 用户复验:4.10.6 在 Windows 回复中拖窗口仍然整个卡死)。
+///
+/// 2026-11-25 真机判例补刀:非模态路径在非流式下完全健康,但「流式中拖动
+/// 缩放 100% 卡死」——全系统零 CPU 占用(挂起不是饱和)、无巨 DOM 一句话的
+/// 回复也复现、4.10.6 的缩放闸门取证正常(dom/native 都到、consulted:true)。
+/// 闸门救不了的原因是它只闸得住 JS 侧的活,闸不住 Rust→JS 每 50ms 一条的
+/// delta 喂食:渲染进程队列永不空,SetWindowPos→put_Bounds 同步链的应答排
+/// 在后面饿死,宿主主线程停泵,窗口「未响应」,所有 invoke 断(save_session
+/// 10s 超时是同一死法的轻症)。对策三件:
+///   1. RESIZE_WATCH_ENTER_MS + 监控线程:主线程在命令内逗留超阈值时落盘取
+///      证——挂死时主线程自己写不了日志,监控线程能,还能量出「卡 N 秒恢复」
+///      还是「永久死」。
+///   2. LAST_RESIZE_COMMAND_AT_MS:拖动中(含 settle 后窗口)把 delta 喂食时
+///      间闸从 50ms 拉长到 RESIZE_FEED_HOLD_MS(见 delta_flush_gate_ms),
+///      给渲染进程留出排空同步链应答的窗口。合批只延迟不清内容,零丢失。
+///   3. Windows 原子 SetWindowPos:位置+尺寸一次落地,主线程消息轮次减半。
+const RESIZE_STUCK_LOG_MS: u64 = 2_000;
+const RESIZE_FEED_HOLD_MS: u128 = 400;
+const RESIZE_FEED_HOLD_WINDOW_MS: u64 = 1_500;
+static RESIZE_WATCH_ENTER_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_RESIZE_COMMAND_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// delta flush 的时间闸:拖动中(含 settle 后窗口)拉长喂食间隔。
+fn delta_flush_gate_ms() -> u128 {
+    let last = LAST_RESIZE_COMMAND_AT_MS.load(Ordering::Relaxed);
+    if last != 0 && unix_millis().saturating_sub(last) < RESIZE_FEED_HOLD_WINDOW_MS {
+        RESIZE_FEED_HOLD_MS
+    } else {
+        DELTA_FLUSH_MS
+    }
+}
+
+/// 拖动挂起监控线程:只在主线程逗留 resize 命令超过阈值时落盘。主线程挂死
+/// 时它照常工作——这正是它存在的理由:主线程写不了自己的尸检报告。节流为
+/// 同一段挂起每秒一行,恢复时补一行 resize_unstuck,把「卡了多久」量出来。
+fn spawn_resize_watch_dog() {
+    std::thread::spawn(|| {
+        let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
+        let mut stuck_logged = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let enter = RESIZE_WATCH_ENTER_MS.load(Ordering::Relaxed);
+            let now = unix_millis();
+            if enter == 0 {
+                if stuck_logged {
+                    stuck_logged = false;
+                    gui_perf_log_at(
+                        vec![format!(r#"{{"ts":{now},"kind":"resize_unstuck"}}"#)],
+                        &path,
+                    );
+                }
+                continue;
+            }
+            let held = now.saturating_sub(enter);
+            if held >= RESIZE_STUCK_LOG_MS {
+                stuck_logged = true;
+                gui_perf_log_at(
+                    vec![format!(r#"{{"ts":{now},"kind":"resize_stuck","heldMs":{held}}}"#)],
+                    &path,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1_000));
+            }
+        }
+    });
+}
+
 #[tauri::command]
 async fn resize_window_nonmodal(
     window: tauri::WebviewWindow,
@@ -5509,13 +5580,50 @@ async fn resize_window_nonmodal(
     {
         return Err("invalid resize geometry".into());
     }
-    window
-        .set_position(tauri::LogicalPosition::new(x, y))
-        .map_err(|e| e.to_string())?;
-    window
-        .set_size(tauri::LogicalSize::new(width, height))
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    LAST_RESIZE_COMMAND_AT_MS.store(unix_millis(), Ordering::Relaxed);
+    RESIZE_WATCH_ENTER_MS.store(unix_millis(), Ordering::Relaxed);
+    #[cfg(windows)]
+    {
+        // 位置+尺寸一次原子 SetWindowPos,主线程执行——SetWindowPos 的消息链
+        // 必须落在窗口所属线程;从命令线程(tokio)直接调会把当前线程吊在
+        // SendMessage 上,主线程一忙雪上加霜。tauri 的 set_position+set_size
+        // 是两次投递、两轮 WM_SIZE→put_Bounds;合一后轮次减半。DPI 取窗口
+        // 当前值:多显示器跨 DPI 拖动时按目标屏实时换算,不按按下时的旧值。
+        let win = window.clone();
+        let posted = window.run_on_main_thread(move || {
+            unsafe { atomic_resize_win(&win, width, height, x, y) };
+        });
+        // 投递失败(窗口已关)不报错:下一次拖帧会再试,报错反而打断拖拽节奏。
+        let _ = posted;
+        RESIZE_WATCH_ENTER_MS.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let r = window
+            .set_position(tauri::LogicalPosition::new(x, y))
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                window
+                    .set_size(tauri::LogicalSize::new(width, height))
+                    .map_err(|e| e.to_string())
+            });
+        RESIZE_WATCH_ENTER_MS.store(0, Ordering::Relaxed);
+        r
+    }
+}
+
+/// Windows 专用:一次 SetWindowPos 落位置+尺寸。失败静默——下一帧会带新
+/// 几何再来,单帧失败不该打断拖拽。
+#[cfg(windows)]
+unsafe fn atomic_resize_win(win: &tauri::WebviewWindow, width: f64, height: f64, x: f64, y: f64) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+    let Ok(handle) = win.hwnd() else { return };
+    let hwnd = handle.0;
+    let dpi = windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) as f64 / 96.0;
+    let (pw, ph) = ((width * dpi).round() as i32, (height * dpi).round() as i32);
+    let (px, py) = ((x * dpi).round() as i32, (y * dpi).round() as i32);
+    SetWindowPos(hwnd, std::ptr::null_mut(), px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 /// Track running shell commands (keyed by the LLM tool-call id) so the GUI can
@@ -6206,12 +6314,19 @@ mod delta_batch_tests {
         // stale Instant; here lock the size leg only.
         let small = "a".repeat(DELTA_FLUSH_BYTES - 1);
         let stale = Instant::now() - std::time::Duration::from_secs(3600);
-        assert!(delta_batch_due(&small, &stale)); // time leg
+        assert!(delta_batch_due(&small, &stale, DELTA_FLUSH_MS)); // time leg
         let fresh = Instant::now();
-        assert!(!delta_batch_due(&small, &fresh)); // neither leg
+        assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS)); // neither leg
         let big = "a".repeat(DELTA_FLUSH_BYTES);
-        assert!(delta_batch_due(&big, &fresh)); // size leg
-        assert!(!delta_batch_due("", &stale)); // empty never flushes
+        assert!(delta_batch_due(&big, &fresh, DELTA_FLUSH_MS)); // size leg
+        assert!(!delta_batch_due("", &stale, DELTA_FLUSH_MS)); // empty never flushes
+        // 拖动感知降频(2026-11-25 真机判例):闸值是参数——同一个刚 flush 过
+        // 的 buf,普通 50ms 闸不发、拉长到 400ms 闸更不发;时间过了才到。
+        // 字节数腿不受闸影响。
+        assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS));
+        assert!(!delta_batch_due(&small, &fresh, RESIZE_FEED_HOLD_MS));
+        let mid = Instant::now() - std::time::Duration::from_millis(RESIZE_FEED_HOLD_MS as u64 + 1);
+        assert!(delta_batch_due(&small, &mid, RESIZE_FEED_HOLD_MS));
     }
 
     #[test]
@@ -13900,9 +14015,9 @@ fn flush_delta_batch(
 /// True when a pending delta batch is due for the wire (size cap or time
 /// gate). Checked where tokens arrive; between chunks the batch just waits —
 /// flush happens at the next arrival, the next non-delta send, or stream exit.
-fn delta_batch_due(buf: &str, flushed_at: &Instant) -> bool {
+fn delta_batch_due(buf: &str, flushed_at: &Instant, time_gate_ms: u128) -> bool {
     !buf.is_empty()
-        && (buf.len() >= DELTA_FLUSH_BYTES || flushed_at.elapsed().as_millis() >= DELTA_FLUSH_MS)
+        && (buf.len() >= DELTA_FLUSH_BYTES || flushed_at.elapsed().as_millis() >= time_gate_ms)
 }
 
 /// Forward the accumulated tool-call arguments buffer to the GUI as a
@@ -15668,7 +15783,7 @@ async fn chat_stream(
                                     }
                                     delta_kind = 1;
                                     delta_buf.push_str(content);
-                                    if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
                                         stream_emitted |= flush_delta_batch(
                                             &on_chunk,
                                             &mut delta_kind,
@@ -15699,7 +15814,7 @@ async fn chat_stream(
                                     }
                                     delta_kind = 2;
                                     delta_buf.push_str(content);
-                                    if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
                                         stream_emitted |= flush_delta_batch(
                                             &on_chunk,
                                             &mut delta_kind,
@@ -15836,7 +15951,7 @@ async fn chat_stream(
                 }
                 delta_kind = 1;
                 delta_buf.push_str(content);
-                if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
                     stream_emitted |= flush_delta_batch(
                         &on_chunk,
                         &mut delta_kind,
@@ -15889,7 +16004,7 @@ async fn chat_stream(
                 }
                 delta_kind = 2;
                 delta_buf.push_str(&rc);
-                if delta_batch_due(&delta_buf, &delta_flushed_at) {
+                if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
                     stream_emitted |= flush_delta_batch(
                         &on_chunk,
                         &mut delta_kind,
@@ -20689,6 +20804,8 @@ fn show_all_windows(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // 拖动挂起监控线程(2026-11-25 真机判例):主线程挂死时它替主线程落尸检报告。
+    spawn_resize_watch_dog();
     tauri::Builder::default()
         // 单实例锁：官方文档要求它必须是第一个注册的插件。回调把已有实例
         // 带回前台（自己那次启动随即退出）。

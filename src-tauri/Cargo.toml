@@ -56,4 +56,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # GetDpiForWindow：原子 resize 按窗口当前 DPI 换算物理像素（拖动感知刀）。
+    "Win32_UI_HiDpi",
 ] }

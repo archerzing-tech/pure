@@ -244,10 +244,20 @@ describe('armNonModalResize（Windows 非模态路径）', () => {
     expect(nonModalGeometries).toEqual([{ width: 1250, height: 850, x: 100, y: 80 }]);
 
     pmove(1200, 120);
-    pmove(1250, 170); // 同帧内两次 move 合成一次
+    pmove(1250, 170); // 同帧内两次 move 合成一次;之后按 15fps 节流,每 4 个 rAF 一拍
+    await tick();
+    await tick();
+    await tick();
     await tick();
     expect(nonModalGeometries.length).toBe(2);
     expect(nonModalGeometries[1]).toEqual({ width: 1350, height: 950, x: 100, y: 80 });
+
+    // 指针停住:节流链发现位移没变,断掉等下一个 move——按住不动零 invoke。
+    await tick();
+    await tick();
+    await tick();
+    await tick();
+    expect(nonModalGeometries.length).toBe(2);
 
     pup();
     pmove(1300, 220); // 松手后的迟到 move 无效
