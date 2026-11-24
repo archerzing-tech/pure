@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.7
+
+**Windows 流式中拖窗口不再卡死（resize 弃模态循环改非模态）；页面交付底线自检与模拟数据判据随写随附**
+
+一、Windows 流式回复中拖动窗口导致的整机卡死根治。自绘边缘热区此前调用的 `startResizeDragging`，底层是 tao 的 `PostMessageW(WM_NCLBUTTONDOWN)`——自绘只是换了个入口钻进 DefWindowProc 的模态 sizing 循环，3px 阈值只挡「投递后等不到抬起」的连点，真拖拽照样进；流式期间主线程被 IPC 洪水与重布局压饱和，循环里的输入处理被饿死，表现就是「尺寸不再变化、输入全吞」（11-24 真机复验 4.10.6 仍卡死）。现在 Windows 走非模态路径：pointerdown 用 setPointerCapture 抓住指针，rAF 合帧按屏幕坐标算几何，每帧一次 IPC 把完整逻辑几何交给新增 Rust 命令 `resize_window_nonmodal` 直接 `set_position`+`set_size`（主线程事件队列 FIFO，先 position 后 size 顺序有保证；顺带不给前端开 `core:window` 的 set-size/set-position 授权面）。收尾五路全幂等（pointerup/pointercancel/blur/buttons=0/lostpointercapture）。macOS 没有这条循环，维持原生路径。最小尺寸在前端夹持——tao 的 minmax 只在模态循环消费，程序化 SetWindowPos 不受它管，前端是唯一闸，测试把它与 tauri.conf.json 锁在一起。顺带修掉 `isWindowsPlatform` 判据地雷：`/Win/i` 会把 "Darwin" 判成 Windows（happy-dom 测试环境实锤，生产 mac 靠 MacIntel 侥幸不中），收紧为显式 Windows/Win32/Win64。
+
+二、pure vs Claude 三案对拍（个人主页/登录页/网络监控大屏，各自产品原生形态裸跑）暴露的差距落地为两机制。**页面底线自检**（`pageBaselineCheck`）：HTML/CSS 写入时机械检查交互页 aria 标注、outline 抹掉无 `:focus-visible` 替代、动效无 prefers-reduced-motion 降级、同规则块 color+background 对比度（WCAG，<3:1 硬 / <4.5:1 软，解一层 var 引用；渐变/低透明/不成对一律跳过）——发现附加在 write_file 返回体，GUI/CLI 双端接线；感知非闸门，修不修由模型裁决。判据「宁缺勿滥」是这条通道的生命线：误报会教会模型忽略整个通道。对拍里 pure 大屏交付 aria 归零（T2 尚有 17 处）正是「任务一大、底线就滑、靠模型自觉记不住」的证据。**模拟数据物理语义判据**（`SIMULATED_DATA_PROMPT` 随 `detectSimulationRequest` 闸门）：监控大屏/仪表盘/mock 数据类请求才随附「均值回归+慢周期+突发衰减、状态翻转联动聚合与事件流、滚动历史窗口」——对拍里 Claude 的数据引擎赢在这里，pure 是直白随机跳变；按请求闸门装配，答怎么做不答何时做。
+
+三、对照面如实记录：真渲染验证闭环（headless Chrome 截图读回自检）、大任务速度与 token 效率、验证脚手架自造，这三样对拍里 pure 已领先，未引入。
+
+验证：`bun run typecheck`、`bun run lint:conventions`、`bun run build:vite` 绿；resize 侧 cargo check 绿；本刀相关面 358 tests 全绿（底线自检 19、闸门/装配/双端适配器接线）。Windows 非模态 resize 与页面底线自检的 Windows 真机复验挂账。
+
 ## v4.10.6
 
 **流式渲染期间拖动窗口不再叠加全转录布局；缩放闸门自带真机取证**
