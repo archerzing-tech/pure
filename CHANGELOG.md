@@ -4,6 +4,18 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.9
+
+**Windows 拖动挂起第二刀：流式中拖窗口时喂食全停（渲染管线完全静止）；取证升级为队列/执行分段测量**
+
+一、4.10.8 复验仍卡，但用户观察拼上最后一块：「松手后 UI 还在滞后地继续拖动」——主线程队列积压的直接目击。模型闭环：流式中每帧 invoke 的 resize 闭包进主线程队列，执行 SetWindowPos 时 WebView2 的 bounds 变更同步链要等浏览器进程应答，而浏览器进程正消化流式内容更新（4.10.8 的 400ms 批仍在活动），应答秒级延迟 → 主线程挂几秒（停泵 = 窗口「无响应」标记）→ 恢复后逐个执行积压闭包 = 窗口滞后地继续动。此前全部观察一次解释：JS 活（gate 行落盘，invoke 慢但通）、渲染进程收不到 bounds（`dom:0`）、每次拖动只落地一帧（`native:1`）、无巨 DOM 也复现（应答延迟来自流式管线在动，与文档大小无关）。
+
+二、**喂食全停**：拖动窗口（含停手后 3 秒，覆盖积压消化期）内，delta 转发的时间腿永不触发、字节腿放大到 512KB（只防 OOM）——拖动期渲染管线**完全静止**，主线程的 SetWindowPos 同步链不再与内容更新撞车。窗口外恢复 16KB/50ms，积压由既有机制自然消化。合批只延迟不清内容，零丢失。
+
+三、**取证升级**：修正 4.10.8 探针的结构性盲区——`run_on_main_thread` 是异步投递，命令函数立即返回、监控原子归零，真正执行的闭包时段从来不在监控窗口内（所以 4.10.8 从未落过 `resize_stuck`）。换成 queued/exec 双原子分段测量：**到达→执行之间 = 主线程队列深度**（滞后执行的直接测量），**闭包内 = SetWindowPos 执行时长**。下次卡死，`resize_queue_stuck` / `resize_exec_stuck` 两类行直接判案——队列堵还是执行挂，二选一有坐标，不再隔空推演。
+
+验证：`cargo test --lib` 绿（delta 双闸新用例：hold 期时间腿不触发、512KB OOM 防线仍在）；`x86_64-pc-windows-gnu` 交叉 check（--tests）绿。Windows 真机复验挂账。
+
 ## v4.10.8
 
 **Windows 流式中拖动缩放挂起收口：拖动感知喂食降频；应用学会在挂死时给自己写尸检报告**
