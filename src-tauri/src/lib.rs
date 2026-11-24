@@ -5510,10 +5510,17 @@ async fn disable_resize_hotzones(window: tauri::WebviewWindow) -> Result<(), Str
 ///      间闸从 50ms 拉长到 RESIZE_FEED_HOLD_MS(见 delta_flush_gate_ms),
 ///      给渲染进程留出排空同步链应答的窗口。合批只延迟不清内容,零丢失。
 ///   3. Windows 原子 SetWindowPos:位置+尺寸一次落地,主线程消息轮次减半。
-const RESIZE_STUCK_LOG_MS: u64 = 2_000;
-const RESIZE_FEED_HOLD_MS: u128 = 400;
-const RESIZE_FEED_HOLD_WINDOW_MS: u64 = 1_500;
-static RESIZE_WATCH_ENTER_MS: AtomicU64 = AtomicU64::new(0);
+const RESIZE_STUCK_LOG_MS: u64 = 2_500;
+const RESIZE_FEED_HOLD_WINDOW_MS: u64 = 3_000;
+/// hold 期的时间腿永不触发、字节腿放大到 512KB——拖动期渲染管线完全静止,
+/// 只在拖动中内容更新批次极大时才放一条(防 OOM,不是节流)。
+const RESIZE_FEED_HOLD_TIME_MS: u128 = 1 << 40;
+const RESIZE_FEED_HOLD_BYTES: usize = 512 * 1024;
+/// 命令到达(invoke 投递)→闭包开始执行之间 = 主线程队列深度的直接测量;
+/// 闭包内 = SetWindowPos 执行时长。滞后执行(2026-11-25 真机:松手后窗口还
+/// 在滞后地继续动)= 主线程队列积压的目击,两段分开量才判得了案。
+static RESIZE_QUEUED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static RESIZE_EXEC_ENTER_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_RESIZE_COMMAND_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn unix_millis() -> u64 {
@@ -5523,13 +5530,15 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// delta flush 的时间闸:拖动中(含 settle 后窗口)拉长喂食间隔。
-fn delta_flush_gate_ms() -> u128 {
+/// delta flush 的双闸:拖动中(含 settle 后 3s 窗口,覆盖积压消化期)时间腿
+/// 永不触发、字节腿放大——渲染管线完全静止,主线程的 SetWindowPos 同步链
+/// 不再与内容更新撞车。
+fn delta_flush_gates() -> (u128, usize) {
     let last = LAST_RESIZE_COMMAND_AT_MS.load(Ordering::Relaxed);
     if last != 0 && unix_millis().saturating_sub(last) < RESIZE_FEED_HOLD_WINDOW_MS {
-        RESIZE_FEED_HOLD_MS
+        (RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES)
     } else {
-        DELTA_FLUSH_MS
+        (DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)
     }
 }
 
@@ -5539,29 +5548,38 @@ fn delta_flush_gate_ms() -> u128 {
 fn spawn_resize_watch_dog() {
     std::thread::spawn(|| {
         let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
-        let mut stuck_logged = false;
+        let mut last_q_log = 0u64;
+        let mut last_e_log = 0u64;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let enter = RESIZE_WATCH_ENTER_MS.load(Ordering::Relaxed);
             let now = unix_millis();
-            if enter == 0 {
-                if stuck_logged {
-                    stuck_logged = false;
-                    gui_perf_log_at(
-                        vec![format!(r#"{{"ts":{now},"kind":"resize_unstuck"}}"#)],
-                        &path,
-                    );
-                }
-                continue;
-            }
-            let held = now.saturating_sub(enter);
-            if held >= RESIZE_STUCK_LOG_MS {
-                stuck_logged = true;
+            let queued = RESIZE_QUEUED_AT_MS.load(Ordering::Relaxed);
+            let exec = RESIZE_EXEC_ENTER_MS.load(Ordering::Relaxed);
+            // 队列段:到达了却迟迟没被执行 = 主线程队列积压(滞后执行的实锤)。
+            if queued != 0 && now.saturating_sub(queued) >= RESIZE_STUCK_LOG_MS
+                && now.saturating_sub(last_q_log) >= 1_000
+            {
+                last_q_log = now;
                 gui_perf_log_at(
-                    vec![format!(r#"{{"ts":{now},"kind":"resize_stuck","heldMs":{held}}}"#)],
+                    vec![format!(
+                        r#"{{"ts":{now},"kind":"resize_queue_stuck","heldMs":{}}}"#,
+                        now - queued
+                    )],
                     &path,
                 );
-                std::thread::sleep(std::time::Duration::from_millis(1_000));
+            }
+            // 执行段:闭包内逗留超阈值 = SetWindowPos 消息链内部挂。
+            if exec != 0 && now.saturating_sub(exec) >= RESIZE_STUCK_LOG_MS
+                && now.saturating_sub(last_e_log) >= 1_000
+            {
+                last_e_log = now;
+                gui_perf_log_at(
+                    vec![format!(
+                        r#"{{"ts":{now},"kind":"resize_exec_stuck","heldMs":{}}}"#,
+                        now - exec
+                    )],
+                    &path,
+                );
             }
         }
     });
@@ -5580,8 +5598,8 @@ async fn resize_window_nonmodal(
     {
         return Err("invalid resize geometry".into());
     }
-    LAST_RESIZE_COMMAND_AT_MS.store(unix_millis(), Ordering::Relaxed);
-    RESIZE_WATCH_ENTER_MS.store(unix_millis(), Ordering::Relaxed);
+    let now = unix_millis();
+    LAST_RESIZE_COMMAND_AT_MS.store(now, Ordering::Relaxed);
     #[cfg(windows)]
     {
         // 位置+尺寸一次原子 SetWindowPos,主线程执行——SetWindowPos 的消息链
@@ -5589,13 +5607,17 @@ async fn resize_window_nonmodal(
         // SendMessage 上,主线程一忙雪上加霜。tauri 的 set_position+set_size
         // 是两次投递、两轮 WM_SIZE→put_Bounds;合一后轮次减半。DPI 取窗口
         // 当前值:多显示器跨 DPI 拖动时按目标屏实时换算,不按按下时的旧值。
+        // QUEUED 在闭包入口清零:到达→执行之间的时长就是主线程队列深度。
+        RESIZE_QUEUED_AT_MS.store(now, Ordering::Relaxed);
         let win = window.clone();
         let posted = window.run_on_main_thread(move || {
+            RESIZE_QUEUED_AT_MS.store(0, Ordering::Relaxed);
+            RESIZE_EXEC_ENTER_MS.store(unix_millis(), Ordering::Relaxed);
             unsafe { atomic_resize_win(&win, width, height, x, y) };
+            RESIZE_EXEC_ENTER_MS.store(0, Ordering::Relaxed);
         });
         // 投递失败(窗口已关)不报错:下一次拖帧会再试,报错反而打断拖拽节奏。
         let _ = posted;
-        RESIZE_WATCH_ENTER_MS.store(0, Ordering::Relaxed);
         Ok(())
     }
     #[cfg(not(windows))]
@@ -5608,7 +5630,6 @@ async fn resize_window_nonmodal(
                     .set_size(tauri::LogicalSize::new(width, height))
                     .map_err(|e| e.to_string())
             });
-        RESIZE_WATCH_ENTER_MS.store(0, Ordering::Relaxed);
         r
     }
 }
@@ -6314,19 +6335,19 @@ mod delta_batch_tests {
         // stale Instant; here lock the size leg only.
         let small = "a".repeat(DELTA_FLUSH_BYTES - 1);
         let stale = Instant::now() - std::time::Duration::from_secs(3600);
-        assert!(delta_batch_due(&small, &stale, DELTA_FLUSH_MS)); // time leg
+        assert!(delta_batch_due(&small, &stale, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // time leg
         let fresh = Instant::now();
-        assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS)); // neither leg
+        assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // neither leg
         let big = "a".repeat(DELTA_FLUSH_BYTES);
-        assert!(delta_batch_due(&big, &fresh, DELTA_FLUSH_MS)); // size leg
-        assert!(!delta_batch_due("", &stale, DELTA_FLUSH_MS)); // empty never flushes
-        // 拖动感知降频(2026-11-25 真机判例):闸值是参数——同一个刚 flush 过
-        // 的 buf,普通 50ms 闸不发、拉长到 400ms 闸更不发;时间过了才到。
-        // 字节数腿不受闸影响。
-        assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS));
-        assert!(!delta_batch_due(&small, &fresh, RESIZE_FEED_HOLD_MS));
-        let mid = Instant::now() - std::time::Duration::from_millis(RESIZE_FEED_HOLD_MS as u64 + 1);
-        assert!(delta_batch_due(&small, &mid, RESIZE_FEED_HOLD_MS));
+        assert!(delta_batch_due(&big, &fresh, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // size leg
+        assert!(!delta_batch_due("", &stale, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // empty never flushes
+        // 拖动感知全停(2026-11-25 真机判例:滞后执行=主线程队列积压):hold 期
+        // 时间腿永不触发、字节腿放大到 512KB——渲染管线完全静止。
+        assert!(!delta_batch_due(&small, &stale, RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES));
+        let huge = "a".repeat(RESIZE_FEED_HOLD_BYTES);
+        assert!(delta_batch_due(&huge, &fresh, RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES)); // OOM 防线仍在
+        // 非拖动期窗口外:字节数腿按常规 16KB 生效。
+        assert!(delta_batch_due(&big, &fresh, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES));
     }
 
     #[test]
@@ -14015,9 +14036,9 @@ fn flush_delta_batch(
 /// True when a pending delta batch is due for the wire (size cap or time
 /// gate). Checked where tokens arrive; between chunks the batch just waits —
 /// flush happens at the next arrival, the next non-delta send, or stream exit.
-fn delta_batch_due(buf: &str, flushed_at: &Instant, time_gate_ms: u128) -> bool {
+fn delta_batch_due(buf: &str, flushed_at: &Instant, time_gate_ms: u128, byte_gate: usize) -> bool {
     !buf.is_empty()
-        && (buf.len() >= DELTA_FLUSH_BYTES || flushed_at.elapsed().as_millis() >= time_gate_ms)
+        && (buf.len() >= byte_gate || flushed_at.elapsed().as_millis() >= time_gate_ms)
 }
 
 /// Forward the accumulated tool-call arguments buffer to the GUI as a
@@ -15783,7 +15804,8 @@ async fn chat_stream(
                                     }
                                     delta_kind = 1;
                                     delta_buf.push_str(content);
-                                    if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
+                                    let (gate_ms, gate_bytes) = delta_flush_gates();
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {
                                         stream_emitted |= flush_delta_batch(
                                             &on_chunk,
                                             &mut delta_kind,
@@ -15814,7 +15836,8 @@ async fn chat_stream(
                                     }
                                     delta_kind = 2;
                                     delta_buf.push_str(content);
-                                    if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
+                                    let (gate_ms, gate_bytes) = delta_flush_gates();
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {
                                         stream_emitted |= flush_delta_batch(
                                             &on_chunk,
                                             &mut delta_kind,
@@ -15951,7 +15974,8 @@ async fn chat_stream(
                 }
                 delta_kind = 1;
                 delta_buf.push_str(content);
-                if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
+                let (gate_ms, gate_bytes) = delta_flush_gates();
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {
                     stream_emitted |= flush_delta_batch(
                         &on_chunk,
                         &mut delta_kind,
@@ -16004,7 +16028,8 @@ async fn chat_stream(
                 }
                 delta_kind = 2;
                 delta_buf.push_str(&rc);
-                if delta_batch_due(&delta_buf, &delta_flushed_at, delta_flush_gate_ms()) {
+                let (gate_ms, gate_bytes) = delta_flush_gates();
+                                    if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {
                     stream_emitted |= flush_delta_batch(
                         &on_chunk,
                         &mut delta_kind,
