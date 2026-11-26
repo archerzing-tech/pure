@@ -86,6 +86,19 @@ export function writeVolumeChars(toolName: string, args: WriteCallFacts['args'])
   return typeof record.content === 'string' ? record.content.length : 0;
 }
 
+let runSharedWatch: WriteFeedbackWatch | null = null;
+
+/**
+ * 跨 run 的共享账本（2026-11-26 文档修订判例）：文档的「生成」与「修订」
+ * 几乎总是分处两个 run（用户看到结果后才提修订），per-run 实例在这个场景
+ * 下让重写提示结构性缺席——修订 run 的写入成了新实例的「首次写入」。路径
+ * 维度的记账跨 run 累积正是「同一路径反复整写」的真信号；会话边界仍可用
+ * reset() 收窄。engine 每次改为取这个单例。
+ */
+export function getWriteFeedbackWatch(): WriteFeedbackWatch {
+  return (runSharedWatch ??= createWriteFeedbackWatch());
+}
+
 export function createWriteFeedbackWatch(): WriteFeedbackWatch {
   const seen = new Map<string, PathRecord>();
   const announced = new Set<string>();

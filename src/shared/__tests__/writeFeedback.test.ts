@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
+  getWriteFeedbackWatch,
   LARGE_WRITE_CHARS,
   REWRITE_MIN_CHARS,
   createWriteFeedbackWatch,
@@ -129,5 +130,27 @@ describe('createWriteFeedbackWatch', () => {
     expect(watch.note(write('b.js', big(7_000)))).toContain('b.js');
     watch.reset();
     expect(watch.note(write('a.js', big(7_000)))).toContain('This single write_file carried');
+  });
+});
+
+
+describe('getWriteFeedbackWatch 跨 run 共享账本（2026-11-26 文档修订判例）', () => {
+  it('同一路径跨实例记账：生成 run 与修订 run 分开建 watch，重写提示仍触发', () => {
+    // 模拟真实时序：生成 run 建实例 A 写入文档；修订 run 建实例 B 整篇重写。
+    // 单例让 B 读到 A 的账本——这正是「文档生成→简化」两段分处两个 run 的场景。
+    const genRun = getWriteFeedbackWatch();
+    genRun.note(write('docs/design.md', big(4_200)));
+    const reviseRun = getWriteFeedbackWatch();
+    const note = reviseRun.note(write('docs/design.md', big(2_800)));
+    expect(note).toContain('from scratch again');
+    expect(note).toContain('shrinks it from 4,200 to 2,800 characters');
+  });
+
+  it('reset() 仍可显式清场（新会话/换工作区）', () => {
+    const w = getWriteFeedbackWatch();
+    w.note(write('docs/x.md', big(4_000)));
+    w.reset();
+    expect(w.note(write('docs/x.md', big(4_000)))).toBe(''); // 清场后是首次写入，4k < 6k 静默
+    getWriteFeedbackWatch().reset();
   });
 });

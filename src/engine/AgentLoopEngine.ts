@@ -14,7 +14,7 @@ import { filePathsFromToolCalls } from '../shared/conventions';
 import { createGreenWatch, stopAtGreenEnabled } from '../shared/stopAtGreen';
 import { createTurnNoteBudget } from '../shared/turnNoteBudget';
 import { createTurnProgressWatch, turnProgressEnabled } from '../shared/turnProgress';
-import { createWriteFeedbackWatch, writeFeedbackEnabled } from '../shared/writeFeedback';
+import { getWriteFeedbackWatch, writeFeedbackEnabled } from '../shared/writeFeedback';
 import { createTurnWriteTracker } from '../shared/parallelNudge';
 import { estimateTextTokens } from '../shared/tokenEstimate';
 import { streamLlmTurn, MAX_STREAM_RESUMES, STREAM_RESUME_HINT, MAX_TOOL_CALL_RESUMES, TOOL_CALL_RESUME_HINT, STREAM_IDLE_TIMEOUT_MS } from './LlmTurnRunner';
@@ -469,7 +469,7 @@ export class AgentLoopEngine {
     // 写入成本即时反馈（2026-11-23）：体量事实随工具结果一起回去，不给额外一轮。
     // 实例按本次 run 存活——一次构建通常在一个回合内完成，跨回合同路径的重写
     // 由下一回合重新记账（宁可少报一次，也不把上一段会话的账带进新任务）。
-    const writeFeedback = writeFeedbackEnabled() ? createWriteFeedbackWatch() : null;
+    const writeFeedback = writeFeedbackEnabled() ? getWriteFeedbackWatch() : null;
     // 并行提醒的回合账（2026-11-23 收口）：宿主的重复记账已删，统一在这里记。
     const turnWrites = createTurnWriteTracker();
     // 机制提醒节流（2026-11-21）：同一段指令 K 轮内只发一次，事实型不受限。
