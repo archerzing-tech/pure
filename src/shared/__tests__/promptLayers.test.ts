@@ -32,6 +32,8 @@ import {
   wantsHandsOnWorkflow,
   detectSimulationRequest,
   SIMULATED_DATA_PROMPT,
+  detectInvestigationTask,
+  INVESTIGATION_PROMPT,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
@@ -741,5 +743,25 @@ describe('detectSimulationRequest（2026-11-24 对拍落地刀）', () => {
     expect(SIMULATED_DATA_PROMPT).toContain('mean-reverting');
     expect(SIMULATED_DATA_PROMPT).toContain('State drives numbers');
     expect(SIMULATED_DATA_PROMPT).toContain('rolling history window');
+  });
+});
+
+describe('detectInvestigationTask（2026-11-26 行为对拍落地刀）', () => {
+  it('hits analysis/reverse-engineering wording (freebuff 判例原话)', () => {
+    expect(detectInvestigationTask('分析一个三方软件 freebuff，找到其中隐藏的免费对接模型 api')).toBe(true);
+    expect(detectInvestigationTask('研究一下这个应用是怎么实现的')).toBe(true);
+    expect(detectInvestigationTask('逆向这个服务的接口')).toBe(true);
+  });
+
+  it('does not fire on coding requests', () => {
+    expect(detectInvestigationTask('修复登录页的表单校验')).toBe(false);
+    expect(detectInvestigationTask('把 config.json 改成多环境')).toBe(false);
+  });
+
+  it('INVESTIGATION_PROMPT carries the methodology anchors', () => {
+    expect(INVESTIGATION_PROMPT).toContain('RUNNING first');
+    expect(INVESTIGATION_PROMPT).toContain('app.asar');
+    expect(INVESTIGATION_PROMPT).toContain('OFFICIAL channel');
+    expect(INVESTIGATION_PROMPT).toContain('do NOT extract');
   });
 });

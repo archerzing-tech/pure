@@ -273,6 +273,25 @@ export const SIMULATED_DATA_PROMPT = `Simulated-data protocol for this request (
 - State drives numbers: offline/alarming nodes must fade out of aggregates and trend lines; every state flip emits an event into the alert/event feed.
 - Refresh smoothly: ease numeric changes over a few frames and keep a rolling history window, so curves scroll forward instead of restarting.`;
 
+// ── 分析/调研类任务判据（2026-11-26 pure vs Claude 行为对拍落地）──────────
+// 真机判例：「分析三方软件 Freebuff，找到隐藏的免费模型 API」——Claude 的
+// 行为序列是「启动应用看形态 → 识别技术栈(Electron→asar) → 解包 grep 端点
+// → 识别本质(codebuff 壳) → 官方通道优先 → 凭证边界自觉」；pure 则绕道文件
+// 系统乱翻。差距不在工具面（execute_command 全盘可用），在方法论没有判据
+// 承载——workflow 5 条全是编码语境。把这套隐性方法论显性化。
+/** 请求涉及分析/调研/逆向一个软件或服务——闸门（召回优先：误判只多几百字符）。 */
+export function detectInvestigationTask(prompt: string): boolean {
+  const text = prompt ?? '';
+  return /分析|调研|逆向|研究一下|看看.{0,12}(软件|应用|app|服务|项目|怎么实现|原理)|找出.{0,12}(api|接口|端点|密钥|key|配置)|隐藏的|是怎么(实现|工作|运作)|逆向工程|它用(了)?什么(模型|接口)/i.test(text);
+}
+
+export const INVESTIGATION_PROMPT = `Investigation protocol for this request (analyzing a third-party app/service):
+- Look at the object RUNNING first: if it is a launchable app, launch it and read its UI/menus — form and purpose are visible in seconds, while file-digging blind costs minutes.
+- Identify the stack before choosing tools: Electron → Resources/app.asar is unpackable (npx @electron/asar extract) and greppable; Tauri → front-end assets; native binary → strings + network capture. Match the data source to the stack: install dir AND the per-user data dir (e.g. ~/Library/Application Support/<app>).
+- For endpoint/credential targets: grep domains and auth headers in the unpacked source; then prefer the OFFICIAL channel — vendor's API-key page, open-source repo, official CLI — before anything else.
+- Boundary: do NOT extract or repurpose internal credentials/tokens to bypass a vendor's terms; if the capability exists only behind the vendor's own auth, say so and point to the official path.
+- Deliver: the capability conclusion, evidence (exact files/commands that proved it), and a reproducible setup path for the consumer tool.`;
+
 /** SVG 输出规范 — identical in GUI and CLI (shared, not duplicated). The GUI
  * renders fenced ```svg blocks inline as the PICTURE (single images full
  * width, consecutive blocks as a side-by-side grid), so every image request

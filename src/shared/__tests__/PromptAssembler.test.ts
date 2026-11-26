@@ -1011,6 +1011,16 @@ describe('composeMemoryPrompt · 注入面围栏卫生（fenceHygiene，渲染�
   });
 });
 
+describe('investigation fragment（2026-11-26 行为对拍落地刀）', () => {
+  const ctx = () => ({ surface: 'gui' as const, capabilities: buildGuiCapabilities(true) });
+  it('rides on investigation requests, absent on coding requests', () => {
+    const hit = assembler.buildSystemFragments(ctx(), '分析一下 freebuff 这个软件，找到隐藏的免费模型 api');
+    expect(hit.some((f) => f.id === 'investigation')).toBe(true);
+    const miss = assembler.buildSystemFragments(ctx(), '修复登录页的表单校验');
+    expect(miss.some((f) => f.id === 'investigation')).toBe(false);
+  });
+});
+
 describe('simulated_data fragment（2026-11-24 对拍落地刀）', () => {
   const ctx = () => ({ surface: 'gui' as const, capabilities: buildGuiCapabilities(true) });
   it('rides only on dashboard/monitoring/mock-data requests', () => {

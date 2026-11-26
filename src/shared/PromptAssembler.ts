@@ -33,9 +33,11 @@ import {
   composeUserTurn,
   detectServingPreview,
   detectSimulationRequest,
+  detectInvestigationTask,
   detectVisualRequest,
   SERVING_PREVIEW_PROMPT,
   SIMULATED_DATA_PROMPT,
+  INVESTIGATION_PROMPT,
   wantsCapabilityLadder,
   PARALLEL_SCOPE_NOTE,
   wantsDelegationScale,
@@ -388,6 +390,15 @@ function buildRequestDetailFragments(
     fragment(
       'simulated_data',
       detectSimulationRequest(text) ? SIMULATED_DATA_PROMPT : '',
+      56,
+    ),
+    // 分析/调研类任务方法论随请求（2026-11-26 行为对拍落地刀）：侦察先行/
+    // 识别技术栈/官方通道优先/凭证边界。判据把 Claude 的隐性执行策略显性化
+    // （pure vs Claude freebuff 任务对拍：pure 绕道文件系统，Claude 启动应用
+    // 看形态直取本质）。
+    fragment(
+      'investigation',
+      detectInvestigationTask(text) ? INVESTIGATION_PROMPT : '',
       56,
     ),
   ].filter((item): item is PromptFragment => item !== null);
