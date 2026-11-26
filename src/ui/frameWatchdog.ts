@@ -17,6 +17,23 @@
 import { loadTauriCore } from '../shared/tauri';
 
 const TICK_MS = 2_000;
+/** 帧停自愈阈值：rAF 连续停超过这个时长且从没 nudge 过，就发一次原生
+ *  frame nudge（强制 WKWebView 重布局重绘制）。 */
+export const FRAME_NUDGE_AFTER_MS = 12_000;
+/** 两次 nudge 的最小间隔。 */
+export const FRAME_NUDGE_EVERY_MS = 15_000;
+/** 连续 nudge 到这个次数仍 stall，判定自愈无效，落升级信号（该重启了）。 */
+export const FRAME_NUDGE_MAX = 3;
+
+/** nudge 决策（纯函数，测试缝）：帧停够久、且距上次 nudge 超过节流窗。
+ *  不看 mut：mut>0 且 frames=0（更新了却不画）恰是最强的呈现断链信号。 */
+export function shouldNudge(
+  deltaFrames: number,
+  stalledMs: number,
+  msSinceLastNudge: number,
+): boolean {
+  return deltaFrames === 0 && stalledMs >= FRAME_NUDGE_AFTER_MS && msSinceLastNudge >= FRAME_NUDGE_EVERY_MS;
+}
 
 export function startFrameWatchdog(): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
@@ -26,6 +43,8 @@ export function startFrameWatchdog(): void {
   let lastFrames = -1;
   let stalledSince = 0;
   let announced = false;
+  let lastNudgeAt = 0;
+  let nudgeCount = 0;
 
   const raf = (): void => {
     frames += 1;
@@ -53,9 +72,28 @@ export function startFrameWatchdog(): void {
 
     if (deltaFrames === 0 && visible && focused) {
       if (stalledSince === 0) stalledSince = Date.now();
-      if (!announced && Date.now() - stalledSince >= TICK_MS) {
+      const stalledMs = Date.now() - stalledSince;
+      if (!announced && stalledMs >= TICK_MS) {
         announced = true;
-        void logLine({ kind: 'frame_stall', stalledMs: Date.now() - stalledSince, mut: deltaMut });
+        void logLine({ kind: 'frame_stall', stalledMs, mut: deltaMut });
+      }
+      // 呈现冻结自愈（2026-11-26 真机判例：occlusion 补丁缺位时窗口被覆盖
+      // 后停帧 368s 不恢复，四进程全活全空闲——帧不呈现但事件链活着）。
+      // nudge 是禁用补丁（occlusion 重试）缺位时的兜底唤醒；连发无效则落
+      // 升级信号——剩下的路只有重启。
+      if (shouldNudge(deltaFrames, stalledMs, lastNudgeAt === 0 ? Number.MAX_SAFE_INTEGER : Date.now() - lastNudgeAt)) {
+        lastNudgeAt = Date.now();
+        nudgeCount += 1;
+        void logLine({ kind: 'frame_nudge', stalledMs, nudge: nudgeCount });
+        void (async () => {
+          try {
+            const core = await loadTauriCore();
+            const ok = (await core?.invoke('webview_frame_nudge')) === true;
+            if (!ok && nudgeCount >= FRAME_NUDGE_MAX) {
+              void logLine({ kind: 'frame_nudge_exhausted', stalledMs: Date.now() - stalledSince });
+            }
+          } catch { /* 尽力而为 */ }
+        })();
       }
       return;
     }
@@ -63,6 +101,8 @@ export function startFrameWatchdog(): void {
       void logLine({ kind: 'frame_resume', stalledMs: Date.now() - stalledSince, frames: deltaFrames, mut: deltaMut });
       stalledSince = 0;
       announced = false;
+      nudgeCount = 0;
+      lastNudgeAt = 0;
     }
   }, TICK_MS);
 }

@@ -4,6 +4,16 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.13
+
+**呈现冻结自愈：WKWebView 停帧不再需要强杀重启**
+
+真机挂死案（本机 4.10.12）完整取证定案：流式长任务中「渲染内容不见了 → 整机无响应」——四进程（宿主/渲染/GPU/网络）**全活全空闲**、AX 可读完整 DOM、JS 可跑（watchdog 在落日志）、CPU 全零——**不是死锁不是过载，是 WKWebView 呈现管线冻结**：rAF/BeginFrame 停了（`frame_stall frames=0` 长达 368 秒），画面冻在旧帧，事件链看似死实则活。触发面：boot 时 occlusion 禁用补丁 `applied:false`（WKWebView 视图尚浅，递归找不到响应 selector 的层，禁用没打上）→ 窗口被覆盖触发 render suspension 且不自动恢复。
+
+两刀：**occlusion 补丁指数重试**（boot 失败后 2s/8s/20s/45s 重试直至真正打上，每次落 `occlusion_retry` 行）——治本，补丁在位则挂起不触发。**呈现冻结自愈**（frameWatchdog 升级）：帧停超 12s 自动发原生 `webview_frame_nudge`（对 NSView 强制重布局重绘制，强制重合成的已知唤醒法），15s 节流、连发 3 次无效落 `frame_nudge_exhausted` 升级信号——把「冻结需强杀重启」降级为「十几秒自动唤醒」。nudge 决策抽纯函数（`shouldNudge`，不看 mut：mut>0 且 frames=0 的「更新了却不画」恰是最强断链信号）。
+
+验证：typecheck 绿；`cargo check` 绿；nudge 决策 6 例绿；transcriptProjection 26 例绿。
+
 ## v4.10.12
 
 **分析/调研类任务方法论判据：pure vs Claude 行为对拍的落地刀**

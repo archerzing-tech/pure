@@ -20639,6 +20639,35 @@ fn set_webview_occlusion_detection(window: tauri::WebviewWindow, enabled: bool) 
 /// 会污染 `pure errors` 的对账语义。行内容由 TS 侧 perfLog 聚合后才写
 /// （流式每 100 拍 / 完成态每 20 条一行，写盘频率与热路径解耦），Rust 不
 /// 解析。失败静默——埋点永远不能成为新的性能问题。
+/// 呈现冻结自愈（2026-11-26 真机判例）：WKWebView 呈现管线冻结——四进程
+/// 全活全空闲、AX 可读 DOM、JS 可跑（watchdog 在落日志），但 rAF/BeginFrame
+/// 不再来（frame_stall frames=0 长达 368s），画面冻在旧帧。触发面是 occlusion
+/// 补丁缺位（boot 时 applied:false）时窗口被遮挡触发 render suspension 且
+/// 不自动恢复。本命令对 WKWebView 的 NSView 强制重布局重绘制——把「冻结
+/// 需要强杀重启」降级为「watchdog 12s 自动唤醒」。
+#[tauri::command]
+fn webview_frame_nudge(window: tauri::WebviewWindow) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let ptr = window.ns_view().map_err(|e| e.to_string())?;
+        if ptr.is_null() {
+            return Ok(false);
+        }
+        let obj = ptr as *mut objc2::runtime::AnyObject;
+        unsafe {
+            let _: () = objc2::msg_send![obj, setNeedsDisplay: objc2::runtime::Bool::YES];
+            let _: () = objc2::msg_send![obj, setNeedsLayout];
+            let _: () = objc2::msg_send![obj, layoutSubtreeIfNeeded];
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Ok(false)
+    }
+}
+
 #[tauri::command]
 fn gui_perf_log(lines: Vec<String>) {
     if lines.is_empty() {
@@ -21159,6 +21188,8 @@ pub fn run() {
             gui_perf_log,
             // macOS: disable WKWebView occlusion-based render suspension (frozen-frame fix)
             set_webview_occlusion_detection,
+            // 呈现冻结自愈：frameWatchdog 停帧超阈值时强制重布局重绘制
+            webview_frame_nudge,
             // Remote control bridge port discovery (gateway bridge.json)
             bridge_port,
             // File tools

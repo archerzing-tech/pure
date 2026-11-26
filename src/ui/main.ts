@@ -1035,16 +1035,26 @@ function dismissBootSplash(minVisibleMs = 450): void {
   void logBootSample(performance.now() - bootStartedAt, minVisibleMs === 0 ? 'forced' : 'dismissed');
   // macOS 画面冻结两件（2026-11-21）：关掉 WKWebView 的遮挡检测（防再次
   // 停帧），并起帧停摆探针（下一次冻结留下 rAF/DOM 现场）。
+  // 2026-11-26 冻结复现判例：boot 时一次性调用会 applied:false（WKWebView
+  // 视图尚浅、递归找不到响应 selector 的层），禁用补丁没打上 → occlusion
+  // suspension 活着 → 窗口被覆盖后停帧 368s 不恢复（frame_stall frames=0
+  // 实证）。改为指数重试直到补丁真正打上。
   startFrameWatchdog();
-  void loadTauriCore()
-    .then((core) => core?.invoke('set_webview_occlusion_detection', { enabled: false }))
-    .then((applied) => {
-      // 取证行：true = 私有开关确实存在并已关；false = 老 WebKit/非 macOS。
-      void loadTauriCore().then((core) => core?.invoke('gui_perf_log', {
-        lines: [JSON.stringify({ ts: Date.now(), kind: 'occlusion', applied: applied === true })],
-      })).catch(() => {});
-    })
-    .catch(() => { /* 非 macOS 或旧后端：静默 */ });
+  const applyOcclusionOff = async (attempt: number): Promise<void> => {
+    try {
+      const core = await loadTauriCore();
+      if (!core) return;
+      const applied = (await core.invoke('set_webview_occlusion_detection', { enabled: false })) === true;
+      void core.invoke('gui_perf_log', {
+        lines: [JSON.stringify({ ts: Date.now(), kind: attempt > 0 ? 'occlusion_retry' : 'occlusion', applied, attempt })],
+      }).catch(() => {});
+      if (!applied && attempt < 4) {
+        const delays = [2_000, 8_000, 20_000, 45_000];
+        setTimeout(() => void applyOcclusionOff(attempt + 1), delays[attempt] ?? 45_000);
+      }
+    } catch { /* 非 macOS 或旧后端：静默 */ }
+  };
+  void applyOcclusionOff(0);
   const wait = Math.max(0, minVisibleMs - (performance.now() - bootStartedAt));
   setTimeout(() => {
     // Two rAFs guarantee the landing page has actually painted before the
