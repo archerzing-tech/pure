@@ -3,6 +3,21 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.10.14
+
+**工具/子代理报错治理三刀：URL 清洗、诊断分道、台账写原子化**
+
+真机复验盘点 pure 测试会话的报错，把「总有子 agent、工具执行报错」拆成三类：**任务固有试错**（npm 半途超时、无 key 401 探测、端点不可达——agent 从中恢复继续，不是故障）、**环境差异**（Windows PowerShell 语法、国内线路）、**pure 自身机制 bug**（要修的）。本轮修掉三类机制 bug：
+
+1. **open 链接失败**（`Launcher "http://127.0.0.1:5188（当前"`）：模型生成的 URL 带中文尾注，open 把整串当 URL。`resolvePathForOpen` 对 http(s) 链接截断到第一个非法 URL 字符（空白/全角标点/CJK），ASCII 半角括号视为合法保留。
+2. **错误台账 JSON 损坏**（字段名截断成 `"sourcind"`）：append 旧实现把 line 与换行分两次 write，多命令并发调 `gui_error_log`/`gui_perf_log` 时行交错。行+换行拼一次 `write_all`（append 单次 syscall 原子）+ 进程内锁。
+3. **诊断与错误混排**（ctx-shape 门禁取证 14 条进错误台账，毁对账信噪比）：`setGuiDiagnosticSink` 目标从错误台账改走 `gui_perf.log`。
+
+另两类不修、如实记录：Spread TypeError / `t.steps` undefined 三条是旧 bundle 时代的运行时错误（stack 指向旧 minified hash），新版本观察；`save_session LINK TIMEOUT` 与呈现冻结同源，4.10.13 自愈后观察缓解。
+
+验证：typecheck、`cargo check` 绿；pathLink 24 例绿（新增 URL 清洗 3 例：CJK 尾注截断、半角括号保留、非 URL 不动）。
+
+
 
 ## v4.10.13
 
