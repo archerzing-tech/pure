@@ -5,6 +5,7 @@ import { describe, it, expect } from 'bun:test';
 import { AgentLoopEngine, salvageTruncatedWriteArgs } from '../AgentLoopEngine';
 import { takeSchemaQuarantineFacts, resetSchemaQuarantineForTests } from '../../shared/schemaQuarantineHeal';
 import { resetParallelNudgeForTests, takeBuildParallelNudge } from '../../shared/parallelNudge';
+import { getWriteFeedbackWatch } from '../../shared/writeFeedback';
 import { DefaultHookRouter } from '../HookRouter';
 import { DefaultFailurePolicy } from '../FailurePolicy';
 import { EventFanout } from '../../shared/asyncQueue';
@@ -3168,6 +3169,7 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
         getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
       },
     });
+    getWriteFeedbackWatch().reset(); // 单例跨测试隔离（单例本体是 feature）
     const events = await collect(new AgentLoopEngine().run(
       { sessionId: 's-write-feedback', systemPrompt: 'sys', userPrompt: '搭一个页面', budget: STD_BUDGET },
       ctx,
@@ -3212,6 +3214,7 @@ describe('AgentLoopEngine conventions dedupe against the prompt (2026-11-15)', (
         getTools: () => [{ name: 'write_file', description: 'w', input_schema: {} }],
       },
     });
+    getWriteFeedbackWatch().reset(); // 单例跨测试隔离
     await collect(new AgentLoopEngine().run(
       { sessionId: 's-write-rewrite', systemPrompt: 'sys', userPrompt: '继续改这个页面', budget: STD_BUDGET },
       ctx,
