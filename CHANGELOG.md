@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.10.16
+
+**文档修订判据：修订请求在回合开场就给出「逐节编辑」的形态**
+
+4.10.15 复测如实记录：生成设计文档后说「简化设计文档」，pure 仍整篇重写（4,220 → 2,201 字符），静默删掉整个接口子节（3.1–3.5）。机制核查表明工具描述引导与重写后的提示都送到了，缺的是**决策点（动手前）的判据**——模型把「简化」理解成「逐段改写文字」，整篇重发比逐节编辑便宜，顺手丢掉了可见性。
+
+`detectDocumentRevision` 闸门 + `DOCUMENT_REVISION_PROMPT`：文档修订请求（简化/精简/缩短/删减/改写 + 文档/说明/报告/README/md）的回合开场就讲清形态——先重读目标文件（上下文里的正文可能已漂移、`edit_file` 需要精确 oldString），逐节 `edit_file` 删/缩、未改动章节逐字节保持（让 diff 显示改了什么），只有大部分章节真变才整篇重发且保留事实不得静默丢节，改完一次范围读验证。
+
+验证：typecheck 绿；闸门 5 例（含真机原话「文档太复杂了，简化设计文档。」）与装配 2 例绿。
+
+
 ## v4.10.15
 
 **文档修订不再静默整篇重写：重写反馈解耦 6k 早退；工具描述补删减形态**
