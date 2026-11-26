@@ -59,7 +59,7 @@ describe('createWriteFeedbackWatch', () => {
     expect(note).toContain('src/styles.css');
     expect(note).toContain('9,000 characters');
     expect(note).toContain('edit_file');
-    expect(note).toContain('append:true only when adding to the end');
+    expect(note).toContain('append:true when adding to the end');
     // 同路径重写提示每会话只一条，避免长任务里刷屏
     expect(watch.note(write('src/styles.css', big(8_000)))).toBe('');
   });
@@ -80,6 +80,27 @@ describe('createWriteFeedbackWatch', () => {
     const rewrite = watch.note(write('src/big.ts', big(15_000)));
     expect(rewrite).toContain('from scratch again');
     expect(rewrite).toContain('16,000 characters');
+  });
+
+  it('中等文档重写也提醒（2026-11-26 判例：1.2k–6k 曾因 6k 早退完全静默）', () => {
+    const watch = createWriteFeedbackWatch();
+    // 首次写入 3000 字符（设计文档典型体量）：低于 6k，首次提示不说（合理）。
+    expect(watch.note(write('docs/design.md', big(3_000)))).toBe('');
+    // 「简化文档」→ 整篇重写到 2000 字符：文件里已有内容，必须给出事实与可选动作。
+    const note = watch.note(write('docs/design.md', big(2_000)));
+    expect(note).toContain('from scratch again');
+    expect(note).toContain('edit_file');
+    expect(note).toContain('previous write in this session: 3,000 characters');
+    // 缩小型重写额外点明「逐节删除可保住未改动部分原文」。
+    expect(note).toContain('shrinks it from 3,000 to 2,000 characters');
+  });
+
+  it('放大型重写不出现 shrink 措辞', () => {
+    const watch = createWriteFeedbackWatch();
+    watch.note(write('docs/plan.md', big(2_000)));
+    const note = watch.note(write('docs/plan.md', big(2_400)));
+    expect(note).toContain('from scratch again');
+    expect(note).not.toContain('shrinks it from');
   });
 
   it('小补丁不计为重写：整写 12k 之后再来 800 字符不算重新生成', () => {

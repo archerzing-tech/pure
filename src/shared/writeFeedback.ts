@@ -116,9 +116,9 @@ export function createWriteFeedbackWatch(): WriteFeedbackWatch {
       entry.chars += content.length;
       entry.writes += 1;
 
-      if (content.length < LARGE_WRITE_CHARS) return '';
-
       if (firstWrite) {
+        // 首次提示只管「大写入」：几百到几千字符的首次写入不值得讲拆分形状。
+        if (content.length < LARGE_WRITE_CHARS) return '';
         const key = `first:${path}`;
         if (announced.has(key)) return '';
         announced.add(key);
@@ -128,14 +128,22 @@ export function createWriteFeedbackWatch(): WriteFeedbackWatch {
           'and later changes to this file go through edit_file with only the changed lines.';
       }
 
-      if (previousChars >= REWRITE_MIN_CHARS) {
+      // 同路径再整写：判据只看「文件里是否已有内容」（REWRITE_MIN_CHARS），与本次
+      // 体量解耦——2026-11-26 判例：旧实现把这条挂在 LARGE_WRITE_CHARS(6k) 的早退
+      // 之后，1.2k–6k 之间的中等文档（设计文档/说明页的典型体量）重写时模型一条
+      // 成本信号都收不到，于是「简化文档」直接整篇重写且毫无提示。
+      // 本次体量也要过 REWRITE_MIN_CHARS，避免几百字符的小补丁被判成重写。
+      if (previousChars >= REWRITE_MIN_CHARS && content.length >= REWRITE_MIN_CHARS) {
         const key = `rewrite:${path}`;
         if (announced.has(key)) return '';
         announced.add(key);
+        const shrink = content.length < previousChars
+          ? ` This rewrite shrinks it from ${grouped(previousChars)} to ${grouped(content.length)} characters; deleting each section with edit_file keeps the untouched sections verbatim.`
+          : '';
         return `[write feedback] You have written ${path} from scratch again — ${grouped(content.length)} characters re-generated this time ` +
           `(previous write in this session: ${grouped(previousChars)} characters). The file on disk already contains that earlier body, ` +
-          'so this second generation buys nothing. Replace the changed region with edit_file (oldString → newString) instead of re-emitting the file; ' +
-          'use append:true only when adding to the end.';
+          'so re-emitting the unchanged parts buys nothing: send only the changed regions with edit_file (oldString → newString), ' +
+          `or continue with append:true when adding to the end.${shrink}`;
       }
 
       return '';
