@@ -4,6 +4,17 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.12
+
+**分析/调研类任务方法论判据：pure vs Claude 行为对拍的落地刀**
+
+真机判例：同题「分析三方软件 Freebuff，找到隐藏的免费模型 API」——Claude 的行为序列是「启动应用看形态 → 识别技术栈（Electron → app.asar 可解包可 grep）→ 解包定位端点 → 识别本质（codebuff 桌面壳）→ 官方通道优先（api-key 页/开源仓库/官方 CLI）→ 凭证边界自觉」；pure 则绕道文件系统乱翻。差距不在工具面（execute_command 全盘可用），在**方法论没有判据承载**：workflow 五条全是编码语境，分析/调研/逆向类任务零引导；模型知识面也补不了这条路径（不认识 codebuff 生态就不会有「识别出 codebuff → 找官方通道」的跳跃）。
+
+`detectInvestigationTask` 闸门 + `INVESTIGATION_PROMPT`：启动应用看形态先于翻文件、按技术栈选工具、双线数据源（安装目录 + 用户数据目录）、端点目标先找官方通道、内部凭证提取不做（服务条款边界，指向官方路径）。判据答「怎么分析」，闸门管何时在场——与模拟数据判据同形态。
+
+验证：freebuff 任务原话命中闸门、编码任务不命中；typecheck 与 promptLayers/PromptAssembler 共 118 例绿。
+
+
 ## v4.10.11
 
 **项目未完成的会话历史拉起不再显示产物卡（用户定案：产物卡必须项目结束才显示）**
