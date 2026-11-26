@@ -4,6 +4,14 @@ All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
 
+## v4.10.11
+
+**项目未完成的会话历史拉起不再显示产物卡（用户定案：产物卡必须项目结束才显示）**
+
+实时层本有闸——回合 completion 带 `interrupted` 标志时，产物卡的渲染与持久化都会被拦住。洞在回放投影：`entry.artifacts` 为空时从工具执行记录无条件兜底重建卡片，连「transcript 以 tool result 结尾的中断会话」也专门重建（旧注释称卡片不能静默丢）——被暂停的回合 persist 走中间态（不持久化 artifacts），兜底却从工具记录把卡片原样重建回来，于是「实时不显示、历史拉起反而出现」。回放语义收敛为：**产物卡只认显式持久化的 artifacts**（实时侧 `deliveredThisTurn` 的产物，=「该回合通过交付判定」的唯一可靠记录）。模型自报的「## 产物已就绪」markers 改为回合级攒存，flush 时按回合级交付判定统一并入——未完成回合的中间态文本（可能已自报「已就绪」）不可信，不显示。后台会话投影同语义处理，三处兜底与死数据流一并清除。已存在的旧会话里若有过往误持久化的卡片，本版起按新语义自然不再重建。
+
+验证：typecheck、`lint:conventions` 绿；transcriptProjection 26 例（旧「中断会话发卡」用例翻转为新语义 + 新增 markers 抑制用例）、transcript 相关面 31 例全绿。
+
 ## v4.10.10
 
 **追掉残余微卡：工具预览流挂拖动感知；按下瞬间预先断粮**
