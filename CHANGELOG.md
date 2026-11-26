@@ -3,7 +3,7 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
-## v4.10.17 补遗（同日第二次复测与结构性修复）
+## v4.10.17
 
 4.10.16 二次复测仍失败（判据 fragment 在场验证过，模型仍整篇重写 7,782→2,846）——挖到**结构性根因**：`writeFeedback` 实例按 run 存活，文档「生成」与「修订」几乎总是分处两个 run（用户看到结果后才提修订），修订 run 的新实例把写入记成「首次」，重写提示**结构性不触发**。`getWriteFeedbackWatch()` 单例：路径维度记账跨 run 累积，同一路径反复整写跨 run 依然触发「from scratch again」提示（工具结果紧贴决策，比 system 判据硬），缩小型重写带 shrink 措辞；`reset()` 保留给新会话/换工作区。engine 两个用例显式 reset 做测试隔离。
 
