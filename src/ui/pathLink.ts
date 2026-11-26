@@ -146,6 +146,14 @@ export function resolvePathForOpen(raw: string, workspace?: string): string {
   let p = raw.trim();
   p = p.replace(/:\d+(?::\d+)?$/, '');
   if (!p) return p;
+  // URL 清洗（2026-11-26 判例）：模型生成的链接常带中文尾注（
+  // "http://127.0.0.1:5188（当前…""）——open 把整串当 URL 会失败。截断到
+  // 第一个非法 URL 字符（空白/全角标点/CJK）；ASCII 半角括号视为合法
+  // （合法 URL 可含 ()，如 wikipedia 路径）。
+  const urlMatch = /^(https?:\/\/[^\s（）【】「」『』，。；：！？、]+)/.exec(p);
+  if (urlMatch) {
+    return urlMatch[1];
+  }
   const isAbsolute = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('~');
   const ws = workspace ?? activeWorkspace;
   if (!isAbsolute && ws) {

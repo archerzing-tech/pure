@@ -92,7 +92,14 @@ const guiErrorLedger = createErrorLedger({
 });
 // 设计内正常路径的取证现场（chat.ts 的 ctx-shape 门禁进入等）走这里：
 // kind:"info" 落盘，与真正的 error/panic 分开（Windows 判例 2026-11-14）。
-setGuiDiagnosticSink(message => guiErrorLedger.record({ kind: 'info', message }));
+// 诊断分道（2026-11-26 判例）：ctx-shape 这类设计内取证现场走性能台账
+// （gui_perf.log），不进 gui_errors.log——错误台账的信噪比是它的命
+// （Windows 判例 2026-11-14：info 混排毁对账语义）。诊断低频，单条直发。
+setGuiDiagnosticSink(message => {
+  void invoke('gui_perf_log', {
+    lines: [JSON.stringify({ ts: Date.now(), source: 'diagnostic', kind: 'info', message })],
+  }).catch(() => { /* 尽力而为 */ });
+});
 // 缩放总闸必须在任何启动分支之前装好：dismissBootSplash 在无 splash 的
 // 恢复路径上会提前返回，挂在那里会让这套保护静默失效。
 installWindowResizeGate();

@@ -20717,10 +20717,17 @@ fn append_error_log_line_at(line: &str, path: &str, max_bytes: u64) {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // 单次 write + 进程内锁(2026-11-26 判例):旧实现 line 与换行分两次
+    // write,多命令并发调 gui_error_log/gui_perf_log 时行交错,日志里出现
+    // "sourcind" 这类字段名截断的损坏 JSON。行+换行拼一次 write_all,
+    // append 模式下单次 syscall 原子;进程内锁再挡住不同命令线程的并发面。
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
-        let _ = f.write_all(line.as_bytes());
-        let _ = f.write_all(b"\n");
+        static LOG_APPEND_LOCK: StdMutex<()> = StdMutex::new(());
+        let _guard = LOG_APPEND_LOCK.lock();
+        let mut buf = line.as_bytes().to_vec();
+        buf.push(b'\n');
+        let _ = f.write_all(&buf);
     }
 }
 

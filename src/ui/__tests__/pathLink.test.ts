@@ -122,3 +122,19 @@ describe('resolvePathForOpen', () => {
     expect(resolvePathForOpen('~/project/x.ts')).toBe('~/project/x.ts');
   });
 });
+
+describe('resolvePathForOpen — URL 清洗（2026-11-26 判例）', () => {
+  test('truncates CJK annotations glued to a URL (模型生成链接带中文尾注)', () => {
+    expect(resolvePathForOpen('http://127.0.0.1:5188（当前页面在跑）')).toBe('http://127.0.0.1:5188');
+    expect(resolvePathForOpen('https://docs.bigmodel.cn/cn/api/rate-limit，可直接点击')).toBe('https://docs.bigmodel.cn/cn/api/rate-limit');
+  });
+
+  test('keeps clean URLs and ASCII parentheses intact', () => {
+    expect(resolvePathForOpen('https://example.com/a(b)')).toBe('https://example.com/a(b)');
+    expect(resolvePathForOpen('https://example.com/path?q=1&r=2')).toBe('https://example.com/path?q=1&r=2');
+  });
+
+  test('non-URL paths are untouched', () => {
+    expect(resolvePathForOpen('/abs/normal/path.ts')).toBe('/abs/normal/path.ts');
+  });
+});
