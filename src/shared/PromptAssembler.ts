@@ -34,6 +34,8 @@ import {
   detectServingPreview,
   detectSimulationRequest,
   detectInvestigationTask,
+  detectDocumentRevision,
+  DOCUMENT_REVISION_PROMPT,
   detectVisualRequest,
   SERVING_PREVIEW_PROMPT,
   SIMULATED_DATA_PROMPT,
@@ -399,6 +401,14 @@ function buildRequestDetailFragments(
     fragment(
       'investigation',
       detectInvestigationTask(text) ? INVESTIGATION_PROMPT : '',
+      56,
+    ),
+    // 文档修订判据（2026-11-26 复测判例）：「简化设计文档」这类修订请求在
+    // 回合开场就把修订形态讲清——逐节 edit、未改动文字逐字节保持。模型在
+    // 决策点（动手前）拿到它，整篇重写才不是默认路径。
+    fragment(
+      'document_revision',
+      detectDocumentRevision(text) ? DOCUMENT_REVISION_PROMPT : '',
       56,
     ),
   ].filter((item): item is PromptFragment => item !== null);

@@ -1011,6 +1011,15 @@ describe('composeMemoryPrompt · 注入面围栏卫生（fenceHygiene，渲染�
   });
 });
 
+describe('document_revision fragment（2026-11-26 复测判例）', () => {
+  const ctx = () => ({ surface: 'gui' as const, capabilities: buildGuiCapabilities(true) });
+  it('rides only on document-revision requests', () => {
+    const hit = assembler.buildSystemFragments(ctx(), '文档太复杂了，简化设计文档。');
+    expect(hit.some((f) => f.id === 'document_revision')).toBe(true);
+    expect(assembler.buildSystemFragments(ctx(), '生成一份登录系统设计文档').some((f) => f.id === 'document_revision')).toBe(false);
+  });
+});
+
 describe('investigation fragment（2026-11-26 行为对拍落地刀）', () => {
   const ctx = () => ({ surface: 'gui' as const, capabilities: buildGuiCapabilities(true) });
   it('rides on investigation requests, absent on coding requests', () => {

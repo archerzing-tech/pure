@@ -34,6 +34,8 @@ import {
   SIMULATED_DATA_PROMPT,
   detectInvestigationTask,
   INVESTIGATION_PROMPT,
+  detectDocumentRevision,
+  DOCUMENT_REVISION_PROMPT,
 } from '../promptLayers';
 import { BUILT_IN_TOOL_DEFS } from '../toolDefs';
 import { DYNAMIC_CAPABILITY_TOOL_DEFS } from '../dynamicCapabilityTools';
@@ -743,6 +745,26 @@ describe('detectSimulationRequest（2026-11-24 对拍落地刀）', () => {
     expect(SIMULATED_DATA_PROMPT).toContain('mean-reverting');
     expect(SIMULATED_DATA_PROMPT).toContain('State drives numbers');
     expect(SIMULATED_DATA_PROMPT).toContain('rolling history window');
+  });
+});
+
+describe('detectDocumentRevision（2026-11-26 复测判例）', () => {
+  it('hits the real scenario wording', () => {
+    expect(detectDocumentRevision('文档太复杂了，简化设计文档。')).toBe(true);
+    expect(detectDocumentRevision('把 README 精简一下')).toBe(true);
+    expect(detectDocumentRevision('这份说明写得太啰嗦了，帮我压缩')).toBe(true);
+  });
+
+  it('does not fire on coding work or plain reading', () => {
+    expect(detectDocumentRevision('修复登录页的表单校验')).toBe(false);
+    expect(detectDocumentRevision('读一下设计文档，告诉我缺点')).toBe(false);
+    expect(detectDocumentRevision('生成一份登录系统设计文档')).toBe(false);
+  });
+
+  it('DOCUMENT_REVISION_PROMPT carries the section-wise anchors', () => {
+    expect(DOCUMENT_REVISION_PROMPT).toContain('SECTION BY SECTION');
+    expect(DOCUMENT_REVISION_PROMPT).toContain('byte-identical');
+    expect(DOCUMENT_REVISION_PROMPT).toContain('no silent section drops');
   });
 });
 

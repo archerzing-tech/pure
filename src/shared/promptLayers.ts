@@ -285,6 +285,26 @@ export function detectInvestigationTask(prompt: string): boolean {
   return /分析|调研|逆向|研究一下|看看.{0,12}(软件|应用|app|服务|项目|怎么实现|原理)|找出.{0,12}(api|接口|端点|密钥|key|配置)|隐藏的|是怎么(实现|工作|运作)|逆向工程|它用(了)?什么(模型|接口)/i.test(text);
 }
 
+// ── 文档修订判据（2026-11-26 复测判例）──────────────────────────────────
+// 真机复测：生成设计文档后说「简化设计文档」，pure 仍整篇重写并静默删掉整个
+// 接口子节（3.1–3.5）——描述引导与重写后提示都送到了，缺的是决策点（动手前）
+// 的判据：模型把「简化」理解成「逐段改写文字」，整篇重发比逐节编辑便宜，于是
+// 顺手丢了可见性。这道闸门在修订请求的回合开场就把修订形态讲清：逐节 edit、
+// 未改动文字逐字节保持、只有大部分章节真变才整篇重发。
+/** 请求是对一份已有文档做修订（简化/精简/改写/删减）——闸门。 */
+export function detectDocumentRevision(prompt: string): boolean {
+  const text = prompt ?? '';
+  const docWord = /文档|说明|报告|规约|方案|readme|md|\.md/i.test(text);
+  const reviseWord = /简化|精简|缩短|删减|压缩|改写|重写|调整|太长|太复杂|太啰嗦|太冗长/.test(text);
+  return docWord && reviseWord;
+}
+
+export const DOCUMENT_REVISION_PROMPT = `Document revision protocol for this request (an EXISTING document is being revised):
+- Re-read the target file first: the body sitting in your context may have drifted after earlier edits, and edit_file needs exact oldString text.
+- Work SECTION BY SECTION with edit_file (oldString → newString): delete what the user wants gone, condense what is too long, and leave untouched sections byte-identical so the diff shows exactly what changed.
+- Re-emit the whole body with write_file only when most sections genuinely change; when you do, every retained fact must survive verbatim — no silent section drops.
+- Verify with one ranged read of the regions you changed; do not re-read the whole file.`;
+
 export const INVESTIGATION_PROMPT = `Investigation protocol for this request (analyzing a third-party app/service):
 - Look at the object RUNNING first: if it is a launchable app, launch it and read its UI/menus — form and purpose are visible in seconds, while file-digging blind costs minutes.
 - Identify the stack before choosing tools: Electron → Resources/app.asar is unpackable (npx @electron/asar extract) and greppable; Tauri → front-end assets; native binary → strings + network capture. Match the data source to the stack: install dir AND the per-user data dir (e.g. ~/Library/Application Support/<app>).
