@@ -86,7 +86,10 @@ describe('projectTranscript', () => {
     expect(blocks[1]).toMatchObject({ type: 'tool', stopped: true, exec: { toolName: 'read_file', args: { path: 'b.ts' } } });
   });
 
-  it('derives legacy artifact cards from successful write tools when metadata is absent', () => {
+  it('无 artifacts 元数据的回合不再从工具推导卡片(2026-11-26 用户语义)', () => {
+    // 旧语义(已翻转):entry.artifacts 缺失时从成功的 write 工具兜底推导卡片。
+    // 新语义:元数据缺失 = 该回合未通过交付判定(实时侧 deliveredThisTurn
+    // 才会持久化 artifacts)——历史拉起不显示,card 只认显式持久化。
     const blocks = projectTranscript([
       {
         id: 'call',
@@ -106,8 +109,8 @@ describe('projectTranscript', () => {
       { id: 'answer', modelMessageIndex: 2, role: 'assistant', content: '完成' },
     ]);
 
-    expect(blocks.at(-2)).toMatchObject({ type: 'assistant', content: '完成' });
-    expect(blocks.at(-1)).toEqual({ type: 'artifact', items: [{ path: 'src/app.ts' }] });
+    expect(blocks.at(-1)).toMatchObject({ type: 'assistant', content: '完成' });
+    expect(blocks.some((b) => b.type === 'artifact')).toBe(false);
   });
 
   it('刀 6b：模型自报的「产物已就绪」标记与工具收集并集成卡（重放与实时同源）', () => {
@@ -119,7 +122,15 @@ describe('projectTranscript', () => {
         role: 'assistant',
         content: '三版都好了。\n## 产物已就绪：designs/v1.html\n## 产物已就绪：designs/v2.html',
       },
-      { id: 'a2', modelMessageIndex: 2, role: 'assistant', content: '## 产物已就绪：designs/v1.html' },
+      {
+        id: 'a2',
+        modelMessageIndex: 2,
+        role: 'assistant',
+        content: '## 产物已就绪：designs/v1.html',
+        // 2026-11-26 语义:markers 只在显式持久化了 artifacts 的回合收
+        //(元数据非空 = 该回合通过了交付判定),未完成回合的中间态文本不可信。
+        artifacts: [{ path: 'designs/v1.html' }],
+      },
     ]);
 
     const artifact = blocks.find((b) => b.type === 'artifact') as Extract<TranscriptReplayBlock, { type: 'artifact' }>;
@@ -215,7 +226,7 @@ describe('projectTranscript', () => {
       { id: 'a2', modelMessageIndex: 3, role: 'assistant', content: '第1步完成' },
       { id: 'a3', modelMessageIndex: 4, role: 'assistant', content: '', toolCalls: [{ id: 'w2', toolName: 'write_file', args: { path: 'index.html' } }, { id: 'w3', toolName: 'write_file', args: { path: 'style.css' } }] },
       { id: 't3', modelMessageIndex: 5, role: 'tool', content: 'ok', toolCallId: 'w3', toolName: 'write_file' },
-      { id: 'a4', modelMessageIndex: 6, role: 'assistant', content: '全部完成' },
+      { id: 'a4', modelMessageIndex: 6, role: 'assistant', content: '全部完成', artifacts: [{ path: 'index.html' }, { path: 'style.css' }] },
       { id: 'u2', modelMessageIndex: 7, role: 'user', content: '从新设计4个UI界面' },
     ];
 
@@ -233,10 +244,11 @@ describe('projectTranscript', () => {
     });
   });
 
-  it('emits artifact card when the transcript ends on a tool result (interrupted session)', () => {
-    // Regression: completedTools were only drained into turnArtifactPaths
-    // inside the assistant branch, so a transcript ending on a tool entry
-    // (interrupted session) silently dropped the artifact card.
+  it('does NOT emit an artifact card for an interrupted turn without persisted artifacts (2026-11-26 用户语义)', () => {
+    // 旧语义（已翻转）：transcript 以 tool entry 结尾的中断会话会从 toolExecs
+    // 兜底重建卡片（"不能静默丢"）。2026-11-26 用户定案：项目未完成（暂停/
+    // 中断）的回合，历史拉起不得显示产物卡——toolExecs 兜底整个删除，卡片
+    // 只认显式持久化的 entry.artifacts（= 实时侧 deliveredThisTurn 的产物）。
     const entries: TranscriptEntry[] = [
       { id: 'u1', modelMessageIndex: 0, role: 'user', content: '写一个文件' },
       { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '', toolCalls: [{ id: 'w1', toolName: 'write_file', args: { path: 'output.txt' } }] },
@@ -244,7 +256,20 @@ describe('projectTranscript', () => {
     ];
 
     const blocks = projectTranscript(entries);
-    expect(blocks.at(-1)).toMatchObject({ type: 'artifact', items: [{ path: 'output.txt' }] });
+    expect(blocks.some((b) => b.type === 'artifact')).toBe(false);
+  });
+
+  it('suppresses delivery markers from an unpersisted (interrupted) turn too', () => {
+    // 模型在暂停前自报「## 产物已就绪」——中间态文本不可信：非交付回合的
+    // markers 同样不显示。
+    const entries: TranscriptEntry[] = [
+      { id: 'u1', modelMessageIndex: 0, role: 'user', content: '写一个文件' },
+      { id: 'a1', modelMessageIndex: 1, role: 'assistant', content: '## 产物已就绪：output.txt', toolCalls: [{ id: 'w1', toolName: 'write_file', args: { path: 'output.txt' } }] },
+      { id: 't1', modelMessageIndex: 2, role: 'tool', content: 'written', toolCallId: 'w1', toolName: 'write_file' },
+    ];
+
+    const blocks = projectTranscript(entries);
+    expect(blocks.some((b) => b.type === 'artifact')).toBe(false);
   });
 
   it('preserves the edit op so replayed turns can show edited-file cards', () => {

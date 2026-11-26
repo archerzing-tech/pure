@@ -121,31 +121,6 @@ function visibleUserContent(content: string): string {
   return text.trim();
 }
 
-function artifactsFromToolExecs(execs: ToolExecMeta[]): Array<{ path: string; op?: 'edit' | 'create' }> {
-  const paths = new Map<string, 'edit' | 'create'>();
-  const add = (path: string, op: 'edit' | 'create'): void => {
-    if (path.trim()) paths.set(path, op);
-  };
-  for (const exec of execs) {
-    if (!exec.success) continue;
-    if (exec.toolName === 'write_file' && typeof exec.args?.path === 'string') {
-      add(exec.args.path, 'create');
-    } else if (exec.toolName === 'edit_file' && typeof exec.args?.path === 'string') {
-      add(exec.args.path, 'edit');
-    } else if (exec.toolName === 'create_document' && typeof exec.args?.path === 'string') {
-      add(exec.args.path, 'create');
-    } else if (exec.toolName === 'replace_files' && Array.isArray(exec.args?.files)) {
-      for (const file of exec.args.files) {
-        if (typeof file === 'string') add(file, 'edit');
-      }
-    }
-  }
-  // `op` is only materialized for 'edit': a missing op already means
-  // "created/unknown" everywhere it is consumed, so persisted JSON stays lean
-  // and legacy replays compare equal.
-  return [...paths].map(([path, op]) => (op === 'edit' ? { path, op } : { path }));
-}
-
 export function projectTranscript(
   entries: TranscriptEntry[],
   agentActivities?: SessionAgentActivity[],
@@ -156,7 +131,6 @@ export function projectTranscript(
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
   const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
-  const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
 
   // Live rendering shows ONE artifact/project-directory card per turn, after
@@ -164,14 +138,25 @@ export function projectTranscript(
   // turn's written files (deduped by path) and emit a single artifact block
   // at the turn boundary — never one card per assistant message.
   const turnArtifactPaths = new Map<string, { path: string; op?: 'edit' | 'create' }>();
+  // 回合内模型自报的「产物已就绪」标记单独攒:markers 是否可信要等回合级
+  // 交付判定(turnHasExplicitArtifacts)落定——同回合前面的 assistant 消息
+  // 没有 artifacts 元数据,但回合最终持久化了 artifacts 就整体可信。
+  const turnMarkerPaths = new Set<string>();
   let turnHasExplicitArtifacts = false;
 
   const flushTurnArtifacts = (): void => {
     if (turnArtifactPaths.size === 0) return;
+    const items = [...turnArtifactPaths.values()];
+    if (turnHasExplicitArtifacts) {
+      for (const path of turnMarkerPaths) {
+        if (!items.some((item) => item.path === path)) items.push({ path });
+      }
+    }
     blocks.push(lastUserRequest
-      ? { type: 'artifact', items: [...turnArtifactPaths.values()], userRequest: lastUserRequest }
-      : { type: 'artifact', items: [...turnArtifactPaths.values()] });
+      ? { type: 'artifact', items, userRequest: lastUserRequest }
+      : { type: 'artifact', items });
     turnArtifactPaths.clear();
+    turnMarkerPaths.clear();
   };
 
   const flushPending = (): void => {
@@ -197,7 +182,6 @@ export function projectTranscript(
           };
       const marked = withInterruptedMark(exec, entry.toolCallId, interruptedIds);
       blocks.push({ type: 'tool', stopped: false, exec: marked });
-      completedTools.push(marked);
       if (entry.toolCallId) pending.delete(entry.toolCallId);
       continue;
     }
@@ -212,6 +196,7 @@ export function projectTranscript(
       flushPending();
       flushTurnArtifacts();
       turnHasExplicitArtifacts = false;
+      turnMarkerPaths.clear();
       // 存在性判断用剥壳后的可见文本：插话框架剥出原话照常上屏；宿主机制
       // 行（【系统接管执行】）剥成空串就整条不渲染——它不是用户说的话。
       const visible = visibleUserContent(entry.content ?? '');
@@ -238,36 +223,31 @@ export function projectTranscript(
     const content = getTranscriptContent(entry);
     if (content) {
       blocks.push({ type: 'assistant', content, isPlanPause: !!entry.isPlanPause });
-      // 6b 交付直达卡：模型自报的「## 产物已就绪：<路径>」与工具收集并集——
-      // 与实时渲染同一个解析函数（重载渲染纪律：实时=重放，不许两套口径）。
+      // 6b 交付直达卡：模型自报的「## 产物已就绪：<路径>」先攒到回合级。
+      // 是否显示由 flushTurnArtifacts 按回合级交付判定
+      // （turnHasExplicitArtifacts = 实时侧 deliveredThisTurn 的持久化产物）
+      // 统一决定：未完成/被暂停的回合 content 是中间态，模型可能已经说了
+      // 「已就绪」但项目没结束，按用户语义（2026-11-26）不显示任何产物卡。
       for (const markerPath of parseDeliveryMarkers(content)) {
-        if (!turnArtifactPaths.has(markerPath)) turnArtifactPaths.set(markerPath, { path: markerPath });
+        turnMarkerPaths.add(markerPath);
       }
     }
+    // 只认显式持久化的 artifacts。旧逻辑在 entry.artifacts 为空时从
+    // toolExecs 兜底重建（连「transcript 以 tool result 结尾的中断会话」也
+    // 专门重建，注释称卡片不能静默丢）——那是「中断也显示」的旧语义，
+    // 与 2026-11-26 用户需求正好相反：项目未完成（暂停/中断）的回合，
+    // 历史拉起不得显示产物卡。完成交付的回合由实时侧 deliveredThisTurn
+    // 持久化 entry.artifacts，这里照常显示；兜底删除后不丢任何
+    // 「已判定交付」的卡片。
     if (entry.artifacts?.length) {
       turnHasExplicitArtifacts = true;
       for (const artifact of entry.artifacts) {
         if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
       }
-    } else if (!turnHasExplicitArtifacts) {
-      for (const artifact of artifactsFromToolExecs(completedTools)) {
-        if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
-      }
     }
-    completedTools.length = 0;
     for (const call of entry.toolCalls ?? []) {
       if (call.id) pending.set(call.id, call);
     }
-  }
-
-  // Drain any completed tool results that arrived after the last assistant
-  // entry (e.g. an interrupted session ending on a tool result) so their
-  // artifact cards are not silently dropped.
-  if (completedTools.length > 0 && !turnHasExplicitArtifacts) {
-    for (const artifact of artifactsFromToolExecs(completedTools)) {
-      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
-    }
-    completedTools.length = 0;
   }
   flushPending();
   flushTurnArtifacts();
@@ -283,7 +263,6 @@ export function projectSessionEvents(
   const blocks: TranscriptReplayBlock[] = [];
   const pending = new Map<string, StoredToolCallInfo>();
   const activityByCall = new Map((agentActivities ?? []).filter((a) => a.callId).map((a) => [a.callId, a]));
-  const completedTools: ToolExecMeta[] = [];
   let lastUserRequest = '';
   const turnArtifactPaths = new Map<string, { path: string; op?: 'edit' | 'create' }>();
   let turnHasExplicitArtifacts = false;
@@ -294,12 +273,6 @@ export function projectSessionEvents(
       ? { type: 'artifact', items: [...turnArtifactPaths.values()], userRequest: lastUserRequest }
       : { type: 'artifact', items: [...turnArtifactPaths.values()] });
     turnArtifactPaths.clear();
-  };
-  const addArtifactsFromTools = (): void => {
-    if (turnHasExplicitArtifacts) return;
-    for (const artifact of artifactsFromToolExecs(completedTools)) {
-      if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
-    }
   };
   const registerCalls = (event: import('./store').SessionEvent): void => {
     for (const call of event.toolCalls ?? []) {
@@ -320,8 +293,6 @@ export function projectSessionEvents(
         // Engine-injected internal nudge — never rendered (see entry path).
         if (event.internal) break;
         flushPending();
-        addArtifactsFromTools();
-        completedTools.length = 0;
         flushTurnArtifacts();
         turnHasExplicitArtifacts = false;
         {
@@ -352,10 +323,7 @@ export function projectSessionEvents(
           for (const artifact of event.artifacts) {
             if (!turnArtifactPaths.has(artifact.path)) turnArtifactPaths.set(artifact.path, artifact);
           }
-        } else {
-          addArtifactsFromTools();
         }
-        completedTools.length = 0;
         registerCalls(event);
         break;
       case 'tool_result': {
@@ -378,7 +346,6 @@ export function projectSessionEvents(
             };
         const marked = withInterruptedMark(exec, event.toolCallId, interruptedIds);
         blocks.push({ type: 'tool', stopped: false, exec: marked });
-        completedTools.push(marked);
         if (event.toolCallId) pending.delete(event.toolCallId);
         break;
       }
@@ -402,7 +369,6 @@ export function projectSessionEvents(
         break;
     }
   }
-  addArtifactsFromTools();
   flushPending();
   flushTurnArtifacts();
   return blocks;
