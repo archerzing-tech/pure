@@ -3,6 +3,15 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.10.18
+
+**Windows 呈现冻结自愈对称落地：HWND 尺寸抖动强制 WebView2 重排重合成**
+
+`webview_frame_nudge` 此前非 macOS 返回 false——Windows 上呈现冻结（`frame_stall frames=0`，进程全活全空闲的「卡死」形态）没有兜底唤醒。Windows 分支：对窗口 HWND 做一次宽度抖动（+1px 来回）——wry 在 WM_SIZE 里 put_Bounds，WebView2 被迫重排+重合成，自家平台的强制唤醒路径；`run_on_main_thread` 执行（跨线程 SetWindowPos 会把命令线程吊在 SendMessage 上）。
+
+背景：Windows 双窗口并发对话双卡死的新案取证中，先落对称自愈兜底；根因刀等现场取证（任务管理器进程状态 + `gui_perf.log` 的 frame_stall 行）。
+
+
 ## v4.10.17
 
 4.10.16 二次复测仍失败（判据 fragment 在场验证过，模型仍整篇重写 7,782→2,846）——挖到**结构性根因**：`writeFeedback` 实例按 run 存活，文档「生成」与「修订」几乎总是分处两个 run（用户看到结果后才提修订），修订 run 的新实例把写入记成「首次」，重写提示**结构性不触发**。`getWriteFeedbackWatch()` 单例：路径维度记账跨 run 累积，同一路径反复整写跨 run 依然触发「from scratch again」提示（工具结果紧贴决策，比 system 判据硬），缩小型重写带 shrink 措辞；`reset()` 保留给新会话/换工作区。engine 两个用例显式 reset 做测试隔离。
