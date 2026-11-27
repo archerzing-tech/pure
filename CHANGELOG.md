@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.2-beta
+
+**主线程心跳诊断（双窗口冻结分诊专用预发布）**
+
+beta 复验：Windows 双窗口并发对话（A 流式中「+」开 B 对话）仍冻结。现有取证只有 JS 侧 `frame_stall`，而 JS 探针同样走主线程队列——主线程被 IPC 投递堵死时它也停摆，「主线程堵（M2/M3）」与「呈现停帧（M4）」分不出来，两者的解完全不同：nudge 自愈只对 M4 有效（它的 invoke 本身也要走主线程）。
+
+本版加 Rust 侧主线程心跳：监控线程每 500ms 向主线程投递空闭包并测队列延迟，≥500ms 落 `main_thread_stall`（每秒一行，带 `answered`）；每 5s 落 `window_count`（验证多 WebView2 宿主假设）。判读：心跳延迟秒级 + `frame_stall` = 主线程真堵；心跳毫秒级而 `frame_stall` 在 = 呈现停帧。
+
+Windows 真机矩阵已回填（四路 worker 全通、1MB 克隆 0.7–0.8ms、408KB checkpoint 0.2–0.4ms、后台 timer maxDrift ~9.8ms）；P2-c 开工判定解除。
+
+
 ## v4.11.1-beta
 
 **Windows 真机矩阵回填专用 beta（预发布）：worker 探针随包自动跑**
