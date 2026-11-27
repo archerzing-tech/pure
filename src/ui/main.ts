@@ -1051,6 +1051,11 @@ function dismissBootSplash(minVisibleMs = 450): void {
   // suspension 活着 → 窗口被覆盖后停帧 368s 不恢复（frame_stall frames=0
   // 实证）。改为指数重试直到补丁真正打上。
   startFrameWatchdog();
+  // 版本自证（2026-11-27 判据）：日志里的探针行缺失曾让「包版本不对」被误读成
+  // 「探针没触发」。每个 boot 落一行版本，任何日志都能一眼确认跑的是哪个包。
+  void invoke('gui_perf_log', {
+    lines: [JSON.stringify({ ts: Date.now(), kind: 'version', version: __APP_VERSION__ })],
+  }).catch(() => { /* 尽力而为 */ });
   const applyOcclusionOff = async (attempt: number): Promise<void> => {
     try {
       const core = await loadTauriCore();

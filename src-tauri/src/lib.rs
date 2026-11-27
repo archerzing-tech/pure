@@ -5551,10 +5551,13 @@ fn delta_flush_gates() -> (u128, usize) {
     if resize_feed_holding() {
         return (RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES);
     }
-    // 活跃流自适应:每多一条并发流,合批闸按比例拉长——转发总量守恒,双
-    // 窗口并发对话时宿主主线程不再双倍挨打(2026-11-27 判例)。
+    // 活跃流自适应(2026-11-27 二次判例):4.10.19 的线性缩放是「总量守恒」
+    // (双窗各 20/s 减半 → 总量仍 20/s),但真机双窗仍冻且 save_session 10s
+    // 超时——说明每条消息的主线程成本随窗口数上升(两套 WebView2 宿主的
+    // 呈现/投递竞争),守恒不够。改为按流数二次缩放:双窗时总量砍到 10/s
+    // (每条流 5/s、200ms 批),流式观感仍连续。
     let streams = ACTIVE_DELTA_STREAMS.load(Ordering::Relaxed).max(1) as u128;
-    (DELTA_FLUSH_MS * streams, DELTA_FLUSH_BYTES)
+    (DELTA_FLUSH_MS * streams * streams, DELTA_FLUSH_BYTES)
 }
 
 /// 拖动挂起监控线程:只在主线程逗留 resize 命令超过阈值时落盘。主线程挂死
@@ -5606,6 +5609,12 @@ fn spawn_resize_watch_dog() {
 fn spawn_main_thread_heartbeat(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
+        // 首行自证（2026-11-27 判据）：日志里没有这行 = 跑的不是带心跳的包，
+        // 别把「探针缺失」误读成「主线程没堵」。
+        gui_perf_log_at(
+            vec![format!(r#"{{"ts":{},"kind":"main_thread_heartbeat_started"}}"#, unix_millis())],
+            &path,
+        );
         let mut stalled_logged = 0u64;
         let mut last_window_count_log = 0u64;
         loop {
