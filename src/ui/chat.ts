@@ -48,6 +48,7 @@ import { collectVerificationEntry } from '../shared/verificationEntrySource';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
 import { MainThreadEngineHost } from './engineHost';
+import { buildTranscriptDelta } from './checkpointLog';
 import { REQUEST_PLAN_TOOL_DEF, REQUEST_PLAN_TOOL_NAME } from '../coding-agent/planControlTool';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
@@ -3617,7 +3618,7 @@ export class ChatController {
    *  会话后不得写进别人的 stats；同会话被接替时 sessionId 未变，落定照记无害
    *  且必要。失败/中断路径仍走 finally 提交：那里的 scheduleDispatch 在提交
    *  之后，顺序天然安全。 */
-  private commitTurnSettled(turnStartMs: number, turnTiming: TurnTiming, turnMessageBaseline: number): void {
+  private commitTurnSettled(turnStartMs: number, turnTiming: TurnTiming, logCursor: { count: number }): void {
     turnTiming.totalMs = Math.round(performance.now() - turnStartMs);
     const timings = this.sessionStats.turnTimings ?? (this.sessionStats.turnTimings = []);
     timings.push(turnTiming);
@@ -3626,9 +3627,12 @@ export class ChatController {
     // 架构评审 v2 A1（S1-3）— 转录增量落日志：本提交点处 this.messages 已由
     // 本回合的提交点（完成/中断路径，都在 try 内）写入终态，切片即本回合新增。
     // 与 turn_settled 同一世代护栏（由调用方的 gen 守卫保证）。
-    const turnDelta = this.messages.slice(turnMessageBaseline);
+    // 检查点已经逐段追加过的消息不再写第二遍：cursor 是本回合日志已覆盖的
+    // 消息数，回合落定只补最后一段（未到检查点就落定的回合 cursor=基线）。
+    const turnDelta = this.messages.slice(Math.min(logCursor.count, this.messages.length));
     if (turnDelta.length > 0) {
       const transcriptEventTs = Date.now();
+      logCursor.count = this.messages.length;
       this.logFoldedThrough = transcriptEventTs;
       void getSessionEventSink(this.sessionId).append({
         ts: transcriptEventTs,
@@ -4949,6 +4953,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
     // （limitMessageHistory 越界），极端情况下会少记几条新消息：快照仍是
     // 权威、fold 读取侧会对账，这是绞杀期的已知边界。
     const turnMessageBaseline = this.messages.length;
+    // P1-b：检查点与落定共用同一个日志游标——检查点先写增量，落定只补尾部，
+    // 同一批消息不会在 events.jsonl 里出现两次。
+    const turnLogCursor = { count: turnMessageBaseline };
     // 架构评审 v2 A1（S1-1）— 用户输入进会话事件日志（带 gui 来源；通道/CLI
     // 来源的输入事件由各自宿主在 S1-2 接入）。fire-and-forget：日志失败熔断
     // 降级，绝不挡回合。重新生成（skipUserPersist）不重记：这条输入的
@@ -8110,6 +8117,31 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             lastCheckpointPersistAt = checkpointNow;
             checkpointEstBytes = 0;
             const checkpointMessages = mergeTranscriptWithTurn(this.messages, Array.isArray(event.payload.messages) ? event.payload.messages : [], userText);
+            // P1-b：检查点不再只靠全量快照。按游标切出本回合新增的消息，同一
+            // ts 写 turn_messages（模型上下文）与 transcript_delta（转录草稿）；
+            // 快照仍是 fold，但强杀时日志已能独立恢复到最后一次检查点。
+            const checkpointDeltaStart = Math.min(turnLogCursor.count, checkpointMessages.length);
+            const checkpointDelta = checkpointMessages.slice(checkpointDeltaStart);
+            if (checkpointDelta.length > 0) {
+              const deltaTs = checkpointNow;
+              turnLogCursor.count = checkpointMessages.length;
+              // 同一次 persist 的快照会带上这些消息与新的 foldedThrough，
+              // 所以恢复侧按 ts ≤ 水位跳过它们，不会重复。
+              this.logFoldedThrough = deltaTs;
+              const checkpointSink = getSessionEventSink(sendSessionId);
+              void checkpointSink.append({
+                ts: deltaTs,
+                kind: 'turn_messages',
+                actor: 'gui',
+                payload: { messages: checkpointDelta },
+              });
+              void checkpointSink.append({
+                ts: deltaTs,
+                kind: 'transcript_delta',
+                actor: 'gui',
+                payload: { drafts: buildTranscriptDelta(checkpointDelta, checkpointDeltaStart) },
+              });
+            }
             void this.persistSession(
               checkpointMessages,
               toolResults,
@@ -9136,7 +9168,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // bump generation，finally 的提交就被世代守卫杀掉——主任务 SETTLED
         // 消失的病根。此刻同步执行无 await，世代必然还是本回合的。
         turnSettledCommitted = true;
-        this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline);
+        this.commitTurnSettled(turnStartMs, turnTiming, turnLogCursor);
         this.setStreaming(false);
         await this.persistSession(
           finalMessages,
@@ -9267,7 +9299,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       // 队列 reenter 接替后这里的世代守卫会误杀同会话落定，防双写即可。这里
       // 只补失败/中断路径——它们的 scheduleDispatch 在提交之后，顺序安全。
       if (!turnSettledCommitted && gen === this.generation) {
-        this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline);
+        this.commitTurnSettled(turnStartMs, turnTiming, turnLogCursor);
       }
       if (liveToolOutputFrame !== undefined) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(liveToolOutputFrame);

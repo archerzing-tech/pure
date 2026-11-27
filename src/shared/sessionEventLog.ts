@@ -27,7 +27,8 @@ export type SessionEventKind =
   | 'receipt'               // 插话/操作收执的终稿（settleAck 单点）
   | 'insertion_classified'  // 插话裁决结果（kind/action/via）
   | 'delegation_settled'    // 一路子代理委派落定（onDone/onError 单点）
-  | 'turn_messages';        // 回合转录增量（引擎消息数组，快照 fold 的原料）
+  | 'turn_messages'         // 回合转录增量（引擎消息数组，快照 fold 的原料）
+  | 'transcript_delta';     // 检查点级转录草稿（P1-b；与同 ts 的 turn_messages 配对）
 
 export interface SessionEvent<K extends string = string> {
   /** 事件时刻（epoch ms）。 */

@@ -1283,13 +1283,17 @@ describe('plan overview completion state', () => {
     expect(release - success).toBeLessThan(600);
     const finallyGate = src.indexOf('if (!turnSettledCommitted && gen === this.generation) {');
     expect(finallyGate).toBeGreaterThan(-1);
-    expect(src.slice(finallyGate, finallyGate + 200)).toContain('this.commitTurnSettled(turnStartMs, turnTiming, turnMessageBaseline)');
+    expect(src.slice(finallyGate, finallyGate + 200)).toContain('this.commitTurnSettled(turnStartMs, turnTiming, turnLogCursor)');
     const method = src.indexOf('private commitTurnSettled(');
     expect(method).toBeGreaterThan(-1);
     const methodBody = src.slice(method, method + 2500);
     expect(methodBody).toContain("kind: 'turn_settled'");
     expect(methodBody).toContain("kind: 'turn_messages'");
     expect(methodBody).toContain('this.persistStats()');
+    // P1-b：检查点增量与落定共用游标；两个 kind 同 ts 写入，落定不重写已覆盖段。
+    expect(src).toContain("kind: 'transcript_delta'");
+    expect(src).toContain('buildTranscriptDelta(checkpointDelta, checkpointDeltaStart)');
+    expect(methodBody).toContain('Math.min(logCursor.count, this.messages.length)');
   });
 
   it('never records a clean end for an interrupted round, so Stop kills the auto-continue chain', () => {
