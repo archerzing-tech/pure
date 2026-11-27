@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.4-beta
+
+**Tauri 升级到 2.12.7 全家 + 双窗主线程堵因取证**
+
+一、Tauri 升级：`tauri 2.11.5 → 2.12.7`、`tauri-build 2.7.6`、`tauri-runtime-wry 2.12.5`、`wry 0.55.1 → 0.57.4`、`tao 0.35.3 → 0.37.3`、`webview2-com 0.39.1`、`window-vibrancy 0.8.1`；插件同步（dialog 2.8.4 / shell 2.6.0 / process 2.4.0 / single-instance 2.5.5 / updater 2.14.1），npm 侧对齐（api 2.12.5 / cli 2.12.6 / dialog 2.8.4 / process 2.4.0 / updater 2.14.1）。
+
+二、取证：上一份 beta3 日志定案 **M2**——双窗时主线程被真堵（空闭包 3 秒都执行不了、`answered:false` 持续数分钟，不是慢而是队列灌死），且单窗口六分钟零 stall。两条薄刀点名堵因：`delta_stats` 测 `Channel::send` 自身耗时（每 10s 一行：条数/均毫秒/单条最大）；`big_invoke` 记 `save_session` 参数体积与耗时（>256KB）。两条与 `main_thread_stall` 时间轴对齐即可定案——send 变慢 = 投递是主嫌；send 正常而 big_invoke 大 = MB 级快照是主嫌。
+
+**注意**：tao 0.35→0.37 跨大版本，macOS 原生 resize 路径（`startResizeDragging`）需真机复验；Windows 侧已不走该路径，不受影响。
+
+
 ## v4.11.3-beta
 
 **双窗转发总量二次缩放（M2 下一刀）+ 取证自证（日志自带版本）**
