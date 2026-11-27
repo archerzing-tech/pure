@@ -36,11 +36,11 @@
 | **P0-1** | 静态依赖闸门 + 引擎图体检 | — | ✅ 本次 |
 | **P0-2** | wasm 基准 URI 可注入（记忆进 Worker 的前置） | — | ✅ 本次 |
 | **P0-3** | 两端真机探针：worker 加载 / 往返 / 克隆 / 后台定时器 | 真机 | ✅ 2026-11-27（macOS；Windows 待真机） |
-| **P0-4** | 任务 B 取证：`save_session` 是丢写还是丢回执 | 真机 | 待做 |
-| **P0-5** | 记忆后端决策（IndexedDB / Rust 文件） | P0-3 | 待做 |
+| **P0-4** | 任务 B 取证：`save_session` 是丢写还是丢回执 | 真机 | ✅ 2026-11-27（macOS 判定丢写） |
+| **P0-5** | 记忆后端决策（IndexedDB / Rust 文件） | P0-3 | ✅ 2026-11-27（单写者服务 + Worker 镜像） |
 | **P1-a** | 恢复路径接日志尾（模型上下文） | — | ✅ 2026-11-27 |
 | **P1-b** | 检查点级增量（`turn_messages` + `transcript_delta`） | P1-a | 待做 |
-| **P1-c** | Rust `chat_stream` journal（可选，只做文本打捞） | P0-4 | 待定 |
+| **P1-c** | Rust `chat_stream` journal（只做文本打捞） | P0-4 | 必做（P0-4 判定丢写） |
 | **P1-d** | fold 水位收口（恢复后不重复、不回退） | P1-a | 待做 |
 | **P2-a** | `EngineHost` 接口 + 主线程实现（零行为切换） | — | ✅ 2026-11-27 |
 | **P2-b** | 协议与纯类型（`sessionProtocol.ts`） | P2-a | 待做 |
@@ -91,6 +91,18 @@
 
 判读：文件在长、回执超时 = **只丢回执**（问题降级为状态陈旧）；文件也停 = **丢写**（P1-c 升级为必做）。
 
+**落地记录（2026-11-27）**
+
+- 新增 `src/ui/saveProbe.ts` + `scripts/save-session-probe.ts`（`bun run probe:save`）：
+  构造 ~3.2MB 快照，派发 `save_session` 后**立刻忙等冻结主线程**，CLI 以 100ms 采样
+  `~/.pure/sessions/<id>/session.json` 的 size/mtime。独立 productName/identifier 拉起，
+  避开已安装 app 的单实例锁。
+- macOS 实测（freeze=8s）：冻结窗口相对 start 行 +2ms → +8001ms；文件**首次出现在
+  +8385ms**，即解冻后才到达 Rust。判定为**丢写**（写请求本身被主线程队列卡住），
+  不是只丢回执。P1-c 因此升级为必做。
+- 边界：这是一次直接 `save_session` 的取证，不是整回合工具链；但「主线程冻结会卡住
+  IPC 投递」与任务 B 的 `LINK TIMEOUT` 形态一致，足够决定 P1-c 的优先级。
+
 ### P0-5 记忆后端决策
 
 `LocalStorageMemoryStore` 在 Worker 里不可用。二选一：
@@ -99,6 +111,16 @@
 - **Rust 文件**（与 CLI `FSMemoryStore` 对齐）：跨端一致、无浏览器配额；需要新命令与 schema。
 
 决策输入：P0-3 的模型加载耗时 + 现有记忆条目体量。倾向 IndexedDB（先解阻断），Rust 化留给 S3。
+
+**决策（2026-11-27）：主线程记忆服务 + Worker 只读镜像**
+
+- `IMemoryStore.list` 是**同步**接口；IndexedDB 与 Rust 文件两条路线在 Worker 内都
+  必须先在内存里放一份镜像才能满足同步 `list`。既然镜像不可避免，保留主线程单一
+  写者（现状 localStorage / FS）比迁移存储更稳：不产生双写、不需要回滚开关。
+- 形态：Worker attach 时注入记忆快照（只读）；`add/recordHits/forget` 走白名单桥
+  回主线程，主线程仍是唯一权威。实现随 P2-c/P3-a 落地。
+- 代价：记忆检索的向量计算如果搬进 Worker，仍需 wasm 资源（P0-2 已解 baseUri）；
+  但存储 I/O 不经 Worker，省掉 IndexedDB 配额与迁移风险。
 
 ## 4. P1：持久化外置（独立于 Worker，先做）
 

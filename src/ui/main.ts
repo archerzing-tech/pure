@@ -1848,6 +1848,18 @@ workerProbeGlobal.__pureWorkerProbe = async (options) => {
   return runWorkerProbe(options);
 };
 
+// P0-4：save_session 冻结取证。同样只认 dev query，release 不跑。
+const saveProbeRequested = new URLSearchParams(window.location.search).get('save_probe') === '1';
+if (saveProbeRequested) {
+  window.setTimeout(() => {
+    void (async () => {
+      const { runSaveProbe } = await import('./saveProbe');
+      const freezeMs = Number(new URLSearchParams(window.location.search).get('freeze_ms')) || 15_000;
+      await runSaveProbe({ freezeMs });
+    })();
+  }, 2500);
+}
+
 const workerProbeRequested = import.meta.env.VITE_WORKER_PROBE === '1'
   || new URLSearchParams(window.location.search).get('worker_probe') === '1';
 

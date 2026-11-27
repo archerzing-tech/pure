@@ -40,6 +40,7 @@
     "e2e:overlay-flow": "bun run scripts/e2e-overlay-flow.ts",
     "probe:gui": "bun run scripts/gui-probe.ts",
     "probe:worker": "bun run scripts/worker-probe.ts",
+    "probe:save": "bun run scripts/save-session-probe.ts",
     "typecheck": "bun run --no-run tsc --noEmit",
     "lint:conventions": "bun run scripts/check-conventions.ts",
     "check:worker": "bun run scripts/check-worker-env.ts",
