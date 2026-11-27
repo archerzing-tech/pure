@@ -18,6 +18,7 @@
 | [pure-vs-industry-2026-11.md](pure-vs-industry-2026-11.md) | 现役对照评估（2026-11-05） | pure 4.2.2 与业界 agent 水位对照：七项差异化优势 + 八项差距（按严重度）+ 行动含义 |
 | [presentation-pack-blueprint-2026-11.md](presentation-pack-blueprint-2026-11.md) | 设计稿（未开工，2026-11-05 裁定可行分期） | 表现形式包化：一期文本形态包（扫描装载+create 技能，零沙箱）+ 二期沙箱渲染器（挂账等真需求） |
 | [parallel-window-utilization-2026-11.md](parallel-window-utilization-2026-11.md) | 三档全落（2026-11-18） | 委派窗口利用：runPool 写入并发化（档一）+ 委派后台执行=工具层 detach（档二，改落点后落地）+ Map-reduce fan-out 教学段（档三） |
+| [engine-worker-migration.md](engine-worker-migration.md) | 立项（2026-11-27，P0 未开工） | 引擎 WebWorker 化：会话执行/persist 移独立事件循环，UI 退化为投影——「前端冻结=全停」的结构性解绑；sidecar 化（方案 3）挂接 remote-office-bridge S3 |
 
 ## 活参考（宪法 / 行为规格 / 操作手册）
 
