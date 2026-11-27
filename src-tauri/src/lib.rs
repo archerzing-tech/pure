@@ -5617,6 +5617,7 @@ fn spawn_main_thread_heartbeat(app: tauri::AppHandle) {
         );
         let mut stalled_logged = 0u64;
         let mut last_window_count_log = 0u64;
+        let mut last_delta_stats_log = 0u64;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let sent_at = unix_millis();
@@ -5640,6 +5641,22 @@ fn spawn_main_thread_heartbeat(app: tauri::AppHandle) {
                         vec![format!(
                             r#"{{"ts":{now},"kind":"main_thread_stall","latencyMs":{latency},"answered":{}}}"#,
                             done.load(Ordering::Relaxed)
+                        )],
+                        &path,
+                    );
+                }
+            }
+            if now.saturating_sub(last_delta_stats_log) >= 10_000 {
+                last_delta_stats_log = now;
+                let sends = DELTA_SENDS.swap(0, Ordering::Relaxed);
+                let total_ms = DELTA_SEND_MS_TOTAL.swap(0, Ordering::Relaxed);
+                let max_ms = DELTA_SEND_MS_MAX.swap(0, Ordering::Relaxed);
+                if sends > 0 {
+                    gui_perf_log_at(
+                        vec![format!(
+                            r#"{{"ts":{now},"kind":"delta_stats","sends":{sends},"avgMs":{},"maxMs":{max_ms},"streams":{}}}"#,
+                            total_ms / sends.max(1),
+                            ACTIVE_DELTA_STREAMS.load(Ordering::Relaxed)
                         )],
                         &path,
                     );
@@ -14092,6 +14109,12 @@ const DELTA_FLUSH_MS: u128 = 50;
 /// 串行瓶颈，转发总量必须守恒（2026-11-27 双窗口判例：两窗口各 50ms 批
 /// = 40 条/秒跨进程注入，主线程饱和，save_session 排队 10s+ 超时）。
 static ACTIVE_DELTA_STREAMS: AtomicUsize = AtomicUsize::new(0);
+/// delta 投递账（2026-11-27 双窗冻结判例）：Channel::send 在 WebView2 上做
+/// 主线程 ExecuteScript，双窗时每条的成本可能随竞争上升。这里累计「条数 /
+/// 总毫秒 / 单条最大」——send 自身变慢是最直接的堵因，比推断可靠。
+static DELTA_SENDS: AtomicU64 = AtomicU64::new(0);
+static DELTA_SEND_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DELTA_SEND_MS_MAX: AtomicU64 = AtomicU64::new(0);
 struct DeltaStreamGuard;
 impl Drop for DeltaStreamGuard {
     fn drop(&mut self) {
@@ -14220,10 +14243,16 @@ fn flush_delta_batch(
     *kind = 0;
     buf.clear();
     *flushed_at = Instant::now();
-    on_chunk
-        .send(msg.to_string())
-        .map(|_| true)
-        .map_err(|_| "cancelled".to_string())
+    let t0 = Instant::now();
+    let sent = on_chunk.send(msg.to_string()).map(|_| true).map_err(|_| "cancelled".to_string());
+    let send_ms = t0.elapsed().as_millis() as u64;
+    DELTA_SENDS.fetch_add(1, Ordering::Relaxed);
+    DELTA_SEND_MS_TOTAL.fetch_add(send_ms, Ordering::Relaxed);
+    let prev_max = DELTA_SEND_MS_MAX.load(Ordering::Relaxed);
+    if send_ms > prev_max {
+        DELTA_SEND_MS_MAX.store(send_ms, Ordering::Relaxed);
+    }
+    sent
 }
 
 /// True when a pending delta batch is due for the wire (size cap or time
@@ -17536,7 +17565,24 @@ async fn save_session(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<usize, String> {
-    run_blocking(move || save_session_impl(session_id, snapshot, workspace, model, provider)).await
+    // 大载荷 IPC 取证（2026-11-27 双窗冻结判例）：快照是 MB 级参数，双窗各
+    // 周期性保存时，参数反序列化与回执投递都是主线程的大活。>256KB 落一行
+    // （体积、耗时），与 main_thread_stall 对齐就能点名「是不是它」。
+    let approx_bytes = snapshot.to_string().len();
+    let t0 = std::time::Instant::now();
+    let result = run_blocking(move || save_session_impl(session_id, snapshot, workspace, model, provider)).await;
+    if approx_bytes >= 256 * 1024 {
+        let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
+        gui_perf_log_at(
+            vec![format!(
+                r#"{{"ts":{},"kind":"big_invoke","cmd":"save_session","bytes":{approx_bytes},"ms":{}}}"#,
+                unix_millis(),
+                t0.elapsed().as_millis()
+            )],
+            &path,
+        );
+    }
+    result
 }
 
 fn save_session_impl(
