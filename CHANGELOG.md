@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.10.19
+
+**Windows 双窗口并发对话双卡死：转发自适应合批 + occlusion 重试平台闸**
+
+真机判例（2026-11-27）：窗口 A 流式中经「+」开窗口 B 开始对话，两窗全冻。日志判读：`save_session LINK TIMEOUT` ×4 连发（invoke 10s 级堵死）+ `occlusion_retry` ×8 全败。机制：宿主主线程是所有窗口所有 ExecuteScript 的串行瓶颈，双窗口各 50ms 批 = 40 条/秒跨进程注入，饱和后 save_session 排队 10s+，双窗帧全停。单窗口一条流（20 条/秒）扛得住——与「单窗口无此问题」吻合。
+
+两刀：**活跃流自适应合批**——`ACTIVE_DELTA_STREAMS` 原子计数（chat_stream 入口 +1 / RAII 出口 -1），delta flush 闸按流数缩放（双窗 100ms、三窗 150ms），转发总量守恒，主线程不再随窗口数线性挨打。**occlusion 重试平台闸**——该开关 macOS 专属（非 macOS 恒 false），Windows 上重试一个不存在的开关纯噪声，非 macOS 一次即停。
+
+验证：`cargo check` 双平台（含 Windows target）绿；typecheck 绿。
+
+
 ## v4.10.18
 
 **Windows 呈现冻结自愈对称落地：HWND 尺寸抖动强制 WebView2 重排重合成**
