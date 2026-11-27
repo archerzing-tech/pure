@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 mod path_policy;
@@ -5549,10 +5549,12 @@ fn resize_feed_holding() -> bool {
 /// 不再与内容更新撞车。
 fn delta_flush_gates() -> (u128, usize) {
     if resize_feed_holding() {
-        (RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES)
-    } else {
-        (DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)
+        return (RESIZE_FEED_HOLD_TIME_MS, RESIZE_FEED_HOLD_BYTES);
     }
+    // 活跃流自适应:每多一条并发流,合批闸按比例拉长——转发总量守恒,双
+    // 窗口并发对话时宿主主线程不再双倍挨打(2026-11-27 判例)。
+    let streams = ACTIVE_DELTA_STREAMS.load(Ordering::Relaxed).max(1) as u128;
+    (DELTA_FLUSH_MS * streams, DELTA_FLUSH_BYTES)
 }
 
 /// 拖动挂起监控线程:只在主线程逗留 resize 命令超过阈值时落盘。主线程挂死
@@ -14024,6 +14026,17 @@ fn char_boundary_truncate(s: &str, cap: usize) -> &str {
 /// and per-token forwarding stacked on top of parallel command-output floods
 /// saturated the Windows UI thread into the 2026-11-09 freeze class.
 const DELTA_FLUSH_MS: u128 = 50;
+/// 活跃 delta 流计数（chat_stream 入口 +1 / RAII 出口 -1）。多窗口并发
+/// 对话时转发闸按流数自适应拉长——宿主主线程是所有窗口 ExecuteScript 的
+/// 串行瓶颈，转发总量必须守恒（2026-11-27 双窗口判例：两窗口各 50ms 批
+/// = 40 条/秒跨进程注入，主线程饱和，save_session 排队 10s+ 超时）。
+static ACTIVE_DELTA_STREAMS: AtomicUsize = AtomicUsize::new(0);
+struct DeltaStreamGuard;
+impl Drop for DeltaStreamGuard {
+    fn drop(&mut self) {
+        ACTIVE_DELTA_STREAMS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 const DELTA_FLUSH_BYTES: usize = 16 * 1024;
 
 /// Delta batch message shape (locked by a unit test): type is "delta" for
@@ -15410,6 +15423,8 @@ async fn chat_stream(
     args: ChatStreamArgs,
     on_chunk: Channel<String>,
 ) -> Result<serde_json::Value, String> {
+    ACTIVE_DELTA_STREAMS.fetch_add(1, Ordering::Relaxed);
+    let _delta_stream_guard = DeltaStreamGuard;
     // The API key never travels through the WebView: when the frontend omits
     // it, resolve from the secrets store (~/.pure/secrets.json, 0600). Empty is
     // allowed for keyless local providers (Ollama / LM Studio) — the

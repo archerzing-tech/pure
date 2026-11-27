@@ -1055,7 +1055,11 @@ function dismissBootSplash(minVisibleMs = 450): void {
       void core.invoke('gui_perf_log', {
         lines: [JSON.stringify({ ts: Date.now(), kind: attempt > 0 ? 'occlusion_retry' : 'occlusion', applied, attempt })],
       }).catch(() => {});
-      if (!applied && attempt < 4) {
+      // 平台闸（2026-11-27 双窗口日志判例）：该开关是 macOS 专属（非 macOS
+      // 恒 false），Windows 上的重试从根上是在重试一个不存在的开关——每窗
+      // 4 条无效 retry 纯噪声。非 macOS 一次即停。
+      const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
+      if (!applied && isMac && attempt < 4) {
         const delays = [2_000, 8_000, 20_000, 45_000];
         setTimeout(() => void applyOcclusionOff(attempt + 1), delays[attempt] ?? 45_000);
       }
