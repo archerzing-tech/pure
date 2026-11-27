@@ -82,6 +82,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
 import { logBootSample } from './perfLog';
 import { startFrameWatchdog } from './frameWatchdog';
+
+// 构建期烤入（vite define，源 package.json.version）。含 "beta" 时探针与取证
+// 自动跑——Windows 真机矩阵回填专用（2026-11-27），正式包不跑。
+declare const __APP_VERSION__: string;
 import { installWindowResizeGate, isWindowResizing } from './windowResizeGate';
 
 // ── GUI 未捕获异常台账(尽量早装:本模块后续装配代码抛的错也要接得住)──
@@ -1861,7 +1865,10 @@ if (saveProbeRequested) {
 }
 
 const workerProbeRequested = import.meta.env.VITE_WORKER_PROBE === '1'
-  || new URLSearchParams(window.location.search).get('worker_probe') === '1';
+  || new URLSearchParams(window.location.search).get('worker_probe') === '1'
+  // beta 包自动跑一次 worker 探针（Windows 真机矩阵回填专用）：探针只读不改，
+  // boot 后 2.5s 执行并落 gui_perf.log；正式包（版本号无 beta）不跑。
+  || __APP_VERSION__.includes('beta');
 
 if (workerProbeRequested) {
   window.setTimeout(() => {

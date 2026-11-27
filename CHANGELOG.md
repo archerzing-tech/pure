@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.1-beta
+
+**Windows 真机矩阵回填专用 beta（预发布）：worker 探针随包自动跑**
+
+给 Windows 真机的预发布包：安装启动后 **boot 约 2.5 秒自动执行 worker 探针**（四路加载：asset/blob × classic/module；1MB 与 408KB checkpoint 的结构化克隆成本；后台窗口 timer 间隔），结果落 `~/.pure/gui_perf.log` 的 `worker_probe` 行并 toast 显示——为引擎 Worker 化（方案 2）回填 Windows 真机矩阵。正式包（版本号无 beta）不跑探针，行为与 4.11.0 一致。
+
+另含 4.11.0 之后的三刀：双窗口并发卡死的转发自适应合批与 occlusion 平台闸（v4.10.19）、Windows 呈现冻结自愈（HWND 尺寸抖动 nudge，v4.10.18 对称落地）、文档修订判据与打捞 CLI。
+
+**取证清单（复现双窗口卡死时收集）**：① 任务管理器 → 详细信息 → `pure.exe` 状态列（是否「未响应」）与 `msedgewebview2` 各进程 CPU；② `~/.pure/gui_perf.log` 尾部的 `frame_stall` / `frame_nudge` / `worker_probe` 行；③ 等待 60 秒观察是否自愈。数据发回后回填方案 2 的 §3.8 双平台矩阵。
+
+
 ## v4.11.0
 
 **引擎 Worker 化 P0/P1：卡死取证、会话恢复与日志增量、chat_stream journal**
