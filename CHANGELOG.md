@@ -3,6 +3,18 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.0
+
+**引擎 Worker 化 P0/P1：卡死取证、会话恢复与日志增量、chat_stream journal**
+
+P0 取证：新增 `check:worker` 静态依赖闸门（引擎图 108 模块、0 静态阻断）；wasm 基准 URI 可注入；macOS 探针实测 asset/blob × classic/module 四路全通（加载 3–99ms，1MB 克隆 1.1–2.4ms，408KB checkpoint 0.75–1.25ms）。`save_session` 冻结探针判定主线程冻结时写请求要等解冻才到达 Rust——是**丢写**而非只丢回执，因此 Rust `chat_stream` 增加 `journalSessionId`，在 Rust 侧把文本增量落到 `turn.journal.jsonl`（8MB 上限，只用于崩溃打捞）。
+
+P1 数据安全：会话恢复读 1MB 日志尾并按 `foldedThrough` 合并；检查点按游标写 `turn_messages` + `transcript_delta`（有界、图片有 path 不带 base64），回合落定复用游标不重复；恢复后推进水位，连续恢复不再重复追加。
+
+P2：`EngineHost` 驱动面抽壳 + Worker 协议纯核（seq 缺口 resync、重放幂等、preview 背压）。P2-c–P4（Worker 宿主、三条桥、租约、全量切换）**未开工**：M1 占比与 Windows 真机数据未齐，按计划停止条件不切默认引擎。
+
+验证：`bunx tsc --noEmit`、相关 `bun test`、`bun run lint:conventions`、`bun run check:worker`、`cargo check --lib`、`cargo test turn_journal_tests` 绿；macOS 探针真机跑过，Windows 列待真机。
+
 ## v4.10.19
 
 **Windows 双窗口并发对话双卡死：转发自适应合批 + occlusion 重试平台闸**

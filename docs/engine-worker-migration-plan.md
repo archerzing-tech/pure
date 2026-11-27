@@ -15,7 +15,16 @@
 | 打包参考 | Bun browser target：Harness 129 模块 / 0.31MB，CodingAgent 166 / 0.64MB。**注意**：Bun 会给 `node:crypto` 塞 shim（实测打包成功），所以它只能当参考，不能当闸门 | P0 探针 |
 | **P1-a 恢复接日志尾** | `mergeSessionLogTail` + 两条恢复入口（`loadSession` / `loadLastSession`）；有界尾读 1MB + 超时兑底；只补模型上下文，不动 transcript | `src/ui/store.ts` + `store.test.ts`（6 例） |
 | **P2-a 驱动面抽壳** | `EngineHost` 接口 + `MainThreadEngineHost`；chat.ts 的 6 个驱动调用点全部改走宿主，工具/审批/交付核验仍直连 | `src/ui/engineHost.ts` + `engineHost.test.ts`（5 例） |
+| **P1-b 检查点级增量** | 检查点按游标切增量，同 `ts` 写 `turn_messages` + `transcript_delta`；有界截断，落定复用游标不重复 | `src/ui/checkpointLog.ts` + `checkpointLog.test.ts`（5 例） |
+| **P1-d fold 水位收口** | 恢复返回真正并入的最后一条 `turn_messages` ts，快照水位随之推进；连续两次恢复不重复 | `store.test.ts`（连续恢复用例） |
+| **P2-b Worker 协议纯核** | `sessionProtocol.ts`：seq 缺口 resync、重放幂等、preview 背压只留最后一帧 | `sessionProtocol.test.ts`（7 例） |
 | **P0-3 双平台探针** | macOS 四种 worker 加载全通；1MB 克隆 1.1–2.4ms、408KB checkpoint 0.75–1.25ms；最小化后 timer 未被节流。Windows 列待真机 | `bun run probe:worker -- --run` / `--summarize` |
+
+**交付边界（2026-11-27）**：P0/P1 全部完成，P2-a/b 完成；**P2-c–P4 未开工**。
+依据计划 §9 的停止条件：P0-3 只证明 worker 加载/克隆便宜，尚未测 M1（JS 自算）在
+真实卡死中的占比；P0-4 反而证明卡死链条里含主线程 IPC 投递（P1-c 已解数据丢失）。
+在拿到 M1 占比与 Windows 真机数据前，不把默认引擎切到 Worker；P2-c 的 LLM/工具/审批
+三条桥与租约留作下一里程碑。
 
 ### 1. 体检结论（决定后续刀序）
 
@@ -39,11 +48,11 @@
 | **P0-4** | 任务 B 取证：`save_session` 是丢写还是丢回执 | 真机 | ✅ 2026-11-27（macOS 判定丢写） |
 | **P0-5** | 记忆后端决策（IndexedDB / Rust 文件） | P0-3 | ✅ 2026-11-27（单写者服务 + Worker 镜像） |
 | **P1-a** | 恢复路径接日志尾（模型上下文） | — | ✅ 2026-11-27 |
-| **P1-b** | 检查点级增量（`turn_messages` + `transcript_delta`） | P1-a | 待做 |
+| **P1-b** | 检查点级增量（`turn_messages` + `transcript_delta`） | P1-a | ✅ 2026-11-27 |
 | **P1-c** | Rust `chat_stream` journal（只做文本打捞） | P0-4 | ✅ 2026-11-27 |
-| **P1-d** | fold 水位收口（恢复后不重复、不回退） | P1-a | 待做 |
+| **P1-d** | fold 水位收口（恢复后不重复、不回退） | P1-a | ✅ 2026-11-27 |
 | **P2-a** | `EngineHost` 接口 + 主线程实现（零行为切换） | — | ✅ 2026-11-27 |
-| **P2-b** | 协议与纯类型（`sessionProtocol.ts`） | P2-a | 待做 |
+| **P2-b** | 协议与纯类型（`sessionProtocol.ts`） | P2-a | ✅ 2026-11-27 |
 | **P2-c** | Worker 入口 + client + 允许清单桥 | P0-3, P2-b | 待做 |
 | **P2-d** | 开关 / 租约 / epoch / 崩溃恢复 | P2-c | 待做 |
 | **P3-a** | 工具执行桥（审批留主线程） | P2-d | 待做 |

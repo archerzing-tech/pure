@@ -2725,7 +2725,12 @@ describe('plan-by-thinking flow', () => {
     // 嘴/手分开（刀 B 细化 1）：主流 THINK 流适配器经 wrapThinkStream 包一层
     // （进流 +1 / finally -1）——isThinkingStreamActive 读这个计数，插话直投
     // 后要不要掐流重入就靠它。裸 createLLMAdapter 会让重入判据永远读到假。
-    expect(src).toMatch(/const llm = this\.wrapThinkStream\(createLLMAdapter\(config, lightTurn \? lightOpts : \{\}\)\);/);
+    const llmIdx = src.indexOf('const llm = this.wrapThinkStream(createLLMAdapter(config, {');
+    expect(llmIdx).toBeGreaterThan(-1);
+    const llmBlock = src.slice(llmIdx, src.indexOf('}));', llmIdx) + 4);
+    expect(llmBlock).toContain('...(lightTurn ? lightOpts : {})');
+    // P1-c：主回合的流必须带当前会话 id，Rust 侧才能写崩溃打捞 journal。
+    expect(llmBlock).toContain('journalSessionId: sendSessionId');
     // 2026-10-31「子agent路线被宿主中断」判例：wrapThinkStream 的实例整条
     // 传给 CodingAgent → SubagentOrchestrator，子 agent 的 THINK 流也进同一
     // 计数——3 支在飞时 depth 恒 >0,inline 直投的 abortReenter 会把在飞支
