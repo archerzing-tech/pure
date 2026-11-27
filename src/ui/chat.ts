@@ -1554,7 +1554,7 @@ export function isLightShapedTurn(
 // persona overlay and runs its A/B gate on the SAME provider/adapter pipeline.
 export function createLLMAdapter(
   config: ReturnType<typeof loadConfig>,
-  opts: { disableThinking?: boolean; reasoningEffort?: ReasoningEffortSetting } = {},
+  opts: { disableThinking?: boolean; reasoningEffort?: ReasoningEffortSetting; journalSessionId?: string } = {},
 ): LLMAdapter {
   if (!config) {
     throw new Error('No configuration');
@@ -1630,6 +1630,9 @@ export function createLLMAdapter(
       allowLegacyKeyFallback: !custom,
       proxyUrl: llmProxy.proxyUrl,
       fallbackProxyUrl: llmProxy.fallbackProxyUrl,
+      // P1-c：回合文本增量的崩溃打捞 journal。缺省（如设置页 A/B 预览）
+      // 不写 journal，避免把非会话请求混进某个会话目录。
+      ...(opts.journalSessionId ? { journalSessionId: opts.journalSessionId } : {}),
       // 实测学习：这条路由真的通了（或真的失败）就按主机记住，下次直接走
       // 可行的路。没配代理时不学——所有轮次都是直连，记了只是噪声。
       // 传完整 baseURL 而不是 host：recordNetOutcome 内部自己归一化，
@@ -5913,7 +5916,13 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
       const lightTurn = isLightShapedTurn(turnShape(userText), forcedMode, historyHadToolUse);
       // 嘴/手分开（2026-10-28 细化 1）：主流 THINK 流适配器经 wrapThinkStream
       // 包一层——进流 +1、finally -1，isThinkingStreamActive 读这个计数。
-      const llm = this.wrapThinkStream(createLLMAdapter(config, lightTurn ? lightOpts : {}));
+      // P1-c：主回合的每个 chat_stream 都带当前会话 id，Rust 侧把文本增量
+      // 追加到 turn.journal.jsonl。judge/plan/phase 等辅助适配器不写，
+      // 避免把内部提示混进崩溃打捞文本。
+      const llm = this.wrapThinkStream(createLLMAdapter(config, {
+        ...(lightTurn ? lightOpts : {}),
+        journalSessionId: sendSessionId,
+      }));
       this.turnLlm = llm;
       // 规划实例：planByThinking 的流式思考轮走它。GLM 端点上关暗思考
       // （planThinkingOffExtraBody），让「当着用户想」的第一个字秒级出现——

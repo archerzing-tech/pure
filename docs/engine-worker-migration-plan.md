@@ -40,7 +40,7 @@
 | **P0-5** | 记忆后端决策（IndexedDB / Rust 文件） | P0-3 | ✅ 2026-11-27（单写者服务 + Worker 镜像） |
 | **P1-a** | 恢复路径接日志尾（模型上下文） | — | ✅ 2026-11-27 |
 | **P1-b** | 检查点级增量（`turn_messages` + `transcript_delta`） | P1-a | 待做 |
-| **P1-c** | Rust `chat_stream` journal（只做文本打捞） | P0-4 | 必做（P0-4 判定丢写） |
+| **P1-c** | Rust `chat_stream` journal（只做文本打捞） | P0-4 | ✅ 2026-11-27 |
 | **P1-d** | fold 水位收口（恢复后不重复、不回退） | P1-a | 待做 |
 | **P2-a** | `EngineHost` 接口 + 主线程实现（零行为切换） | — | ✅ 2026-11-27 |
 | **P2-b** | 协议与纯类型（`sessionProtocol.ts`） | P2-a | 待做 |
@@ -167,6 +167,19 @@
 只有 P0-4 判定「丢写」才做。形态：`chat_stream` 增加可选 `journalSessionId`，每批 delta
 追加到 `turn.journal.jsonl`；**只用于崩溃打捞**，不参与正常恢复（正常恢复读 `turn_messages`）。
 不做工具结果 journal——工具结果已经在 Rust 侧执行，重放会重复副作用。
+
+**落地记录（2026-11-27）**
+
+- `ChatStreamArgs` 新增 `journalSessionId`；`chat_stream` 在 Rust 侧把 content / thinking /
+  reasoning delta 追加到 `~/.pure/sessions/<id>/turn.journal.jsonl`。8MB 上限，超限才截断；
+  平时**追加不截断**，因为一个回合会有多个工具轮、每次 `chat_stream` 都要保留（行内 `stream`
+  记 requestId，打捞时按它分组取最后一段）。
+- GUI 主回合适配器传当前 `sendSessionId`；judge / plan / phase 与设置页预览不写，避免内部
+  提示混进打捞文本。
+- 单测：Rust `turn_journal_tests` 锁「空 delta 不写行 / stream 分组 / 追加语义」；TS 适配器
+  补「传了 journalSessionId 才带、没传不能凭空出现」。
+- 边界：journal 只打捞**文本**，不含工具结果（重放会有副作用）；正常退出后文件保留在
+  上限内，下一次回合继续追加。
 
 ### P1-d fold 水位收口
 

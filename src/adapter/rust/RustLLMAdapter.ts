@@ -27,6 +27,8 @@ export interface RustLLMConfig {
   model: string;
   protocol?: 'openai' | 'anthropic';
   baseURL?: string;
+  /** P1-c：崩溃打捞 journal 的会话 id（GUI 每回合传当前会话）。 */
+  journalSessionId?: string;
   extraBody?: Record<string, unknown>;
   /** Anthropic 扩展思考预算；仅 claude-3.7/4 系 + anthropic 协议由宿主设置。
    *  工具循环里 Rust 会把最近一条 assistant 的 thinking 块原样回传。 */
@@ -225,6 +227,7 @@ export class RustLLMAdapter implements LLMAdapter {
           ...(thinkingBudget ? { thinkingBudget } : {}),
           temperature: params.temperature,
           requestId,
+          ...(this.config.journalSessionId ? { journalSessionId: this.config.journalSessionId } : {}),
           proxyUrl: this.config.proxyUrl ?? '',
           // Must be ABSENT (not empty) when there is no fallback: Rust reads
           // Some("") as the DIRECT route.

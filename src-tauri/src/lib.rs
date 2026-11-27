@@ -13936,6 +13936,10 @@ struct ChatStreamArgs {
     temperature: Option<f64>,
     #[serde(default, rename = "requestId")]
     request_id: String,
+    /// P1-c：崩溃打捞用的会话 id。Some 时把本回合的文本增量追加到
+    /// ~/.pure/sessions/<id>/turn.journal.jsonl；正常恢复不读它。
+    #[serde(default, rename = "journalSessionId")]
+    journal_session_id: Option<String>,
     #[serde(default, rename = "proxyUrl")]
     proxy_url: String,
     /// One-shot alternate route for the request-level fallback: "" = direct,
@@ -14051,6 +14055,101 @@ fn delta_batch_message(kind: u8, buf: &str) -> serde_json::Value {
 /// Flush a pending delta batch (if any). Returns Ok(true) when a message went
 /// out, Err("cancelled") when the WebView is gone. `kind`/`buf`/`flushed_at`
 /// are the loop-local batch state.
+/// P1-c — 回合 journal：只用于崩溃打捞，不参与正常恢复。
+///
+/// 为什么挂在 Rust 而不是 WebView：P0-4 实测主线程冻结时 `save_session` 的
+/// 请求要等解冻才到达 Rust（丢写）。journal 必须在 delta 抵达 Rust 的同一侧
+/// 落盘，才能在主线程卡住时保住已经生成的内容。
+///
+/// 每次 open 截断：一个会话同一时刻只跑一个回合，旧内容没有保留价值；
+/// 8MB 上限防止异常长的回合把盘写爆。
+const TURN_JOURNAL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+struct TurnJournal {
+    file: std::fs::File,
+    written: u64,
+    /// 一次 chat_stream 调用一个 id：一个回合可能有多个工具轮，journal
+    /// 追加而不是截断，打捞时按 stream 分组取最后一段。
+    stream: String,
+}
+
+impl TurnJournal {
+    fn open(session_id: &str, request_id: &str) -> Option<Self> {
+        if validate_session_id(session_id).is_err() {
+            return None;
+        }
+        let dir = sessions_dir().join(session_id);
+        std::fs::create_dir_all(&dir).ok()?;
+        Self::open_at(dir.join("turn.journal.jsonl"), request_id)
+    }
+
+    fn open_at(path: std::path::PathBuf, request_id: &str) -> Option<Self> {
+        let existing = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        // 超上限才截断；平时追加，保住同一回合前面工具轮已生成的文本。
+        let file = if existing > TURN_JOURNAL_MAX_BYTES {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .ok()?
+        } else {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .ok()?
+        };
+        Some(Self {
+            file,
+            written: if existing > TURN_JOURNAL_MAX_BYTES { 0 } else { existing },
+            stream: request_id.to_string(),
+        })
+    }
+
+    fn append(&mut self, kind: &str, text: &str) {
+        if text.is_empty() || self.written >= TURN_JOURNAL_MAX_BYTES {
+            return;
+        }
+        let line = serde_json::json!({
+            "ts": unix_millis(),
+            "stream": self.stream,
+            "kind": kind,
+            "text": text,
+        })
+        .to_string();
+        use std::io::Write;
+        if writeln!(self.file, "{}", line).is_ok() {
+            self.written += line.len() as u64 + 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_journal_tests {
+    use super::*;
+
+    #[test]
+    fn appends_one_jsonl_line_per_non_empty_delta() {
+        let path = std::env::temp_dir().join(format!(
+            "pure-turn-journal-{}-{}.jsonl",
+            std::process::id(),
+            unix_millis()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut journal = TurnJournal::open_at(path.clone(), "req-1").expect("journal open");
+        journal.append("content", "hello");
+        journal.append("content", "");
+        journal.append("reasoning", "think");
+        let raw = std::fs::read_to_string(&path).expect("journal read");
+        assert_eq!(raw.lines().count(), 2, "empty delta must not write a line");
+        assert!(raw.contains("\"stream\":\"req-1\""));
+        assert!(raw.contains("\"text\":\"hello\""));
+        assert!(raw.contains("\"kind\":\"reasoning\""));
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn flush_delta_batch(
     on_chunk: &Channel<String>,
     kind: &mut u8,
@@ -14486,6 +14585,7 @@ mod proxy_tests {
     #[test]
     fn provider_match_bypasses_llm_proxy() {
         let mut args = ChatStreamArgs {
+            journal_session_id: None,
             messages: Vec::new(),
             provider: "ollama".to_string(),
             protocol: String::new(),
@@ -14513,6 +14613,7 @@ mod proxy_tests {
     #[test]
     fn llm_fallback_proxy_url_respects_bypass_and_direct_sentinel() {
         let mut args = ChatStreamArgs {
+            journal_session_id: None,
             messages: Vec::new(),
             provider: "qwen".to_string(),
             protocol: String::new(),
@@ -15587,6 +15688,12 @@ async fn chat_stream(
     // guard removes the entry on ANY exit path — normal finish, error, or
     // cancel — so a stale id can never fire a reused slot.
     let request_id = args.request_id.clone();
+    // P1-c：在 Rust 侧开 journal。delta 一到就落盘，不经过 WebView 主线程；
+    // 没有 session id 的调用（CLI 评测等）不写。
+    let mut turn_journal = args
+        .journal_session_id
+        .as_deref()
+        .and_then(|id| TurnJournal::open(id, &request_id));
     let reg = state.inner().clone();
     let mut cancel_rx = register_chat_cancel(&reg, &request_id);
     let _guard = ChatCancelGuard {
@@ -15834,6 +15941,9 @@ async fn chat_stream(
                             "text_delta" => {
                                 if let Some(content) = delta.get("text").and_then(|v| v.as_str()) {
                                     text.push_str(content);
+                                    if let Some(journal) = turn_journal.as_mut() {
+                                        journal.append("content", content);
+                                    }
                                     // Batch instead of per-token send (see
                                     // DELTA_FLUSH_MS). A pending batch of the
                                     // other type flushes first so wire order
@@ -15881,6 +15991,9 @@ async fn chat_stream(
                                         )?;
                                     }
                                     delta_kind = 2;
+                                    if let Some(journal) = turn_journal.as_mut() {
+                                        journal.append("thinking", content);
+                                    }
                                     delta_buf.push_str(content);
                                     let (gate_ms, gate_bytes) = delta_flush_gates();
                                     if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {
@@ -16010,6 +16123,9 @@ async fn chat_stream(
             // a real flush so the retry gate reflects what the UI saw).
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 text.push_str(content);
+                if let Some(journal) = turn_journal.as_mut() {
+                    journal.append("content", content);
+                }
                 if delta_kind != 1 && !delta_buf.is_empty() {
                     stream_emitted |= flush_delta_batch(
                         &on_chunk,
@@ -16073,6 +16189,9 @@ async fn chat_stream(
                     )?;
                 }
                 delta_kind = 2;
+                if let Some(journal) = turn_journal.as_mut() {
+                    journal.append("reasoning", &rc);
+                }
                 delta_buf.push_str(&rc);
                 let (gate_ms, gate_bytes) = delta_flush_gates();
                                     if delta_batch_due(&delta_buf, &delta_flushed_at, gate_ms, gate_bytes) {

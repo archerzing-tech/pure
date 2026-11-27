@@ -91,6 +91,17 @@ describe('RustLLMAdapter', () => {
     expect(args.args.baseUrl).toBe('https://api.deepseek.com');
   });
 
+  it('passes journalSessionId to chat_stream for crash salvage', async () => {
+    const { deps, lastArgs } = makeDeps({ result: { text: 'ok', toolCalls: [] } });
+    const adapter = new RustLLMAdapter({
+      provider: 'deepseek-openai',
+      model: 'deepseek-v4-flash',
+      journalSessionId: 'session_1700000000000_1',
+    }, deps);
+    for await (const _chunk of adapter.stream(MSGS, [])) { /* drain */ }
+    expect(lastArgs().args.journalSessionId).toBe('session_1700000000000_1');
+  });
+
   it('passes proxy settings and provider identity to Rust without sending the API key', async () => {
     const { deps, lastArgs } = makeDeps({ result: { text: 'ok', toolCalls: [] } });
     const adapter = new RustLLMAdapter({
@@ -105,6 +116,8 @@ describe('RustLLMAdapter', () => {
     expect(lastArgs().args.proxyBypassProviders).toEqual(['ollama']);
     expect(lastArgs().args.proxyBypassModels).toBeUndefined();
     expect(lastArgs().args.apiKey).toBe('');
+    // 没配置 journal 的调用（设置页预览等）不能凭空带上会话 id。
+    expect(lastArgs().args.journalSessionId).toBeUndefined();
   });
 
   it('streams reasoning deltas as reasoning chunks, separate from content', async () => {
