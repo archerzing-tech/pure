@@ -5600,6 +5600,54 @@ fn spawn_resize_watch_dog() {
     });
 }
 
+/// 主线程心跳：每 500ms 投递空闭包到主线程，测队列延迟。分诊用——
+/// M2/M3（主线程堵）时延迟秒级；M4（呈现停）时延迟仍是毫秒级。
+/// 同时每 5s 记一行窗口数（双窗口判例要确认「两个 WebView2 宿主」假设）。
+fn spawn_main_thread_heartbeat(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let path = format!("{}/.pure/gui_perf.log", pure_home_dir());
+        let mut stalled_logged = 0u64;
+        let mut last_window_count_log = 0u64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let sent_at = unix_millis();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = done.clone();
+            let _ = app.run_on_main_thread(move || {
+                flag.store(true, Ordering::Relaxed);
+            });
+            // 最多等 3s；超时视为主线程严重堵塞。
+            let deadline = unix_millis() + 3_000;
+            while !done.load(Ordering::Relaxed) && unix_millis() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let latency = unix_millis().saturating_sub(sent_at);
+            let now = unix_millis();
+            if latency >= 500 {
+                // 同一段堵塞每秒一行，别刷屏。
+                if now.saturating_sub(stalled_logged) >= 1_000 {
+                    stalled_logged = now;
+                    gui_perf_log_at(
+                        vec![format!(
+                            r#"{{"ts":{now},"kind":"main_thread_stall","latencyMs":{latency},"answered":{}}}"#,
+                            done.load(Ordering::Relaxed)
+                        )],
+                        &path,
+                    );
+                }
+            }
+            if now.saturating_sub(last_window_count_log) >= 5_000 {
+                last_window_count_log = now;
+                let windows = app.webview_windows().len();
+                gui_perf_log_at(
+                    vec![format!(r#"{{"ts":{now},"kind":"window_count","windows":{windows}}}"#)],
+                    &path,
+                );
+            }
+        }
+    });
+}
+
 #[tauri::command]
 async fn resize_window_nonmodal(
     window: tauri::WebviewWindow,
@@ -21296,6 +21344,14 @@ pub fn run() {
             if let Ok(mut slot) = _app.state::<TrayHandle>().0.lock() {
                 *slot = Some(tray_icon);
             }
+
+            // 主线程心跳（2026-11-27 双窗口冻结判例）：卡死取证此前只有 JS 侧
+            // frame_stall——但 JS 侧探针本身也走主线程队列，主线程被堵时它同样
+            // 停摆，「M2/M3（主线程堵）vs M4（呈现停）」分不出来。这里用监控
+            // 线程直接测主线程队列延迟：每 500ms 投递一个空闭包，量它多久才被
+            // 执行。>500ms 持续 = 主线程真堵；一直 <100ms 而 frame_stall 在 =
+            // 呈现停（nudge 才有效）。
+            spawn_main_thread_heartbeat(_app.handle().clone());
 
             Ok(())
         })
