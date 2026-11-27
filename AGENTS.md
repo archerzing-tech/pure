@@ -18,6 +18,7 @@ bun test                           # 全量
 bun test src/shared/__tests__/conventions.test.ts   # 单文件
 bun test -t "merge"                # 按用例名过滤
 bun run lint:conventions           # 约定检查（scripts/check-conventions.ts）
+bun run check:worker               # 引擎 Worker 环境闸门（静态依赖图；--audit 看运行时触碰）
 bun run build                      # typecheck + vite + cli 打包
 bun run cli                        # 本地跑 CLI
 bun run agents:sync                # 改 templates/default-agents.md 后重新生成默认值
