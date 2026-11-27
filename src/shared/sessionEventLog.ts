@@ -221,17 +221,40 @@ export function recentTimelineDigest(events: readonly SessionEvent[], limit = 12
  *   - ts ≤ 水位的 turn_messages 已在快照里，跳过（水位语义即不重复计入）；
  *   - 非 turn_messages 事件不参与转录合并（叙事事件走时间线投影）。
  */
+export interface FoldMergeResult<T> {
+  messages: T[];
+  /** 本次真正并入的最后一条 turn_messages ts；没有增量时为 undefined。 */
+  lastMergedTs?: number;
+}
+
+export function mergeFoldWithLogDetailed<T>(
+  snapshotMessages: readonly T[],
+  foldedThrough: number | undefined,
+  events: readonly SessionEvent[],
+): FoldMergeResult<T> {
+  if (foldedThrough === undefined) return { messages: [...snapshotMessages] };
+  const tail: T[] = [];
+  let lastMergedTs: number | undefined;
+  for (const event of events) {
+    if (event.kind !== 'turn_messages' || event.ts <= foldedThrough) continue;
+    const payload = event.payload as { messages?: unknown } | null | undefined;
+    if (!Array.isArray(payload?.messages)) continue;
+    const batch = payload.messages as T[];
+    if (batch.length === 0) continue;
+    tail.push(...batch);
+    lastMergedTs = Math.max(lastMergedTs ?? 0, event.ts);
+  }
+  return {
+    messages: [...snapshotMessages, ...tail],
+    ...(lastMergedTs !== undefined ? { lastMergedTs } : {}),
+  };
+}
+
+/** 只读视图（历史调用点）；需要推进 fold 水位时用 detailed。 */
 export function mergeFoldWithLog<T>(
   snapshotMessages: readonly T[],
   foldedThrough: number | undefined,
   events: readonly SessionEvent[],
 ): T[] {
-  if (foldedThrough === undefined) return [...snapshotMessages];
-  const tail: T[] = [];
-  for (const event of events) {
-    if (event.kind !== 'turn_messages' || event.ts <= foldedThrough) continue;
-    const payload = event.payload as { messages?: unknown } | null | undefined;
-    if (Array.isArray(payload?.messages)) tail.push(...(payload.messages as T[]));
-  }
-  return [...snapshotMessages, ...tail];
+  return mergeFoldWithLogDetailed(snapshotMessages, foldedThrough, events).messages;
 }

@@ -20,7 +20,7 @@ import { recordGuiDiagnostic } from './errorLedger';
 import type { ToolDiffData } from './toolDiff';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
-import { mergeFoldWithLog, parseSessionEvents } from '../shared/sessionEventLog';
+import { mergeFoldWithLogDetailed, parseSessionEvents } from '../shared/sessionEventLog';
 
 export const SESSION_SNAPSHOT_VERSION = 3;
 
@@ -1748,15 +1748,22 @@ export async function mergeSessionLogTail(
     return { snapshot, mergedMessages: 0 };
   }
   if (!raw) return { snapshot, mergedMessages: 0 };
-  const messages = mergeFoldWithLog(
+  const merged = mergeFoldWithLogDetailed(
     snapshot.modelContext.messages,
     snapshot.foldedThrough,
     parseSessionEvents(raw),
   );
-  const mergedMessages = messages.length - snapshot.modelContext.messages.length;
+  const mergedMessages = merged.messages.length - snapshot.modelContext.messages.length;
   if (mergedMessages <= 0) return { snapshot, mergedMessages: 0 };
   return {
-    snapshot: { ...snapshot, modelContext: { ...snapshot.modelContext, messages } },
+    snapshot: {
+      ...snapshot,
+      modelContext: { ...snapshot.modelContext, messages: merged.messages },
+      // P1-d：水位必须推进到本次真正并入的最后一条 turn_messages。只补消息
+      // 不抬水位，下一次 saveSession 仍写旧值，再恢复就会把同一段尾部追加
+      // 第二遍——这是「恢复→保存→恢复」重复消息的根因。
+      ...(merged.lastMergedTs !== undefined ? { foldedThrough: merged.lastMergedTs } : {}),
+    },
     mergedMessages,
   };
 }

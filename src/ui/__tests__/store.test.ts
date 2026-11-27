@@ -862,6 +862,24 @@ describe('mergeSessionLogTail (P1-a 恢复路径接日志尾)', () => {
       .toEqual(['old', 'tail-1', 'tail-2']);
     // 转录没有尾部卡片元数据：宁可缺，不伪造。
     expect(result.snapshot.transcript).toBe(snapshot.transcript);
+    // P1-d：水位推进到本次并入的最后一条，下一次保存才不会写回旧值。
+    expect(result.snapshot.foldedThrough).toBe(101);
+  });
+
+  it('恢复推进水位：连续两次恢复不会重复追加同一段尾部', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const log = [
+      turnLine(101, [{ role: 'assistant', content: 'tail-1' }]),
+      turnLine(105, [{ role: 'assistant', content: 'tail-2' }]),
+    ].join('\n');
+    const first = await mergeSessionLogTail(snapshot, async () => log);
+    expect(first.mergedMessages).toBe(2);
+    expect(first.snapshot.foldedThrough).toBe(105);
+
+    // 模拟「恢复后保存」：把返回的快照再次交给恢复路径，同一段日志不应再进消息。
+    const second = await mergeSessionLogTail(first.snapshot, async () => log);
+    expect(second.mergedMessages).toBe(0);
+    expect(second.snapshot.modelContext.messages).toHaveLength(3);
   });
 
   it('水位相等不重复计入（ts ≤ foldedThrough 已在快照里）', async () => {
