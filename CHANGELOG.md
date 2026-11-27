@@ -3,6 +3,17 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.3-beta
+
+**双窗转发总量二次缩放（M2 下一刀）+ 取证自证（日志自带版本）**
+
+分诊：上一份真机日志里 `save_session LINK TIMEOUT`（10 秒）证明 IPC 回执被积压堵死 = **M2 未解除**；而日志里没有 `window_count` / `main_thread_stall`——心跳线程根本不在那个包里（跑的多半仍是 4.11.1-beta），「探针行缺失」被误读成「主线程没堵」。取证本身必须先能自证。
+
+两刀：① **取证自证**——JS boot 落 `version` 行，Rust 心跳线程首行落 `main_thread_heartbeat_started`，以后「探针缺失」两选一即判；② **M2 二次缩放**——4.10.19 的线性缩放是总量守恒（双窗仍 20 条/秒），但真机双窗仍冻，说明每条消息的主线程成本随窗口数上升（两套 WebView2 宿主竞争），守恒不够。改为按流数二次缩放：双窗时总量砍到 10 条/秒（每流 5/s、200ms 批），流式观感仍连续。
+
+验证：`cargo check` 双平台绿、`cargo test --lib delta_batch` 绿、typecheck 绿。
+
+
 ## v4.11.2-beta
 
 **主线程心跳诊断（双窗口冻结分诊专用预发布）**
