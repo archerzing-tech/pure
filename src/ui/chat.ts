@@ -47,6 +47,7 @@ import { collectRepoMap } from '../shared/repoMapSource';
 import { collectVerificationEntry } from '../shared/verificationEntrySource';
 import { groupAnchoredToTurn, lastUserTurnStart, normalizeTurnVariants, TURN_VARIANT_CAP, variantFingerprint, type TurnVariantGroup } from './turnVariants';
 import { CodingAgent } from '../coding-agent/CodingAgent';
+import { MainThreadEngineHost } from './engineHost';
 import { REQUEST_PLAN_TOOL_DEF, REQUEST_PLAN_TOOL_NAME } from '../coding-agent/planControlTool';
 import { failureHistoryFromMemories } from '../engine/FailurePolicy';
 import { ContextEngine, estimateTokens, type ContextCompactionResult, type ContextRehydrationConfig } from '../harness/ContextEngine';
@@ -6348,6 +6349,9 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         // workspace instead of a summary's memory of it.
         rehydration: this.contextRehydration(),
       });
+      // P2-a：引擎驱动面收口。工具注册/可见性/MCP 发现/交付核验仍在下面
+      // 直接走 codingAgent——这次只把「谁跑回合」抽成可替换的宿主。
+      const engineHost = new MainThreadEngineHost(codingAgent);
       // MCP warm-up: kick the transport handshake off HERE so it overlaps the
       // local preflight that follows, instead of being awaited on its own right
       // before the first model call. A cold stdio server (spawn + initialize)
@@ -6428,7 +6432,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
           ];
       const conventions = await loadGuiConventions(effectiveWorkspace || undefined, userText);
       systemPrompt = buildSystemPrompt(!!effectiveWorkspace, usingTemporaryWorkspace, config, promptTools, imageGen, conventions, (userMessageAttachments?.length ?? 0) > 0);
-      this.contextEngine = codingAgent.getHarness().getContextEngine();
+      this.contextEngine = engineHost.getContextEngine();
 
       // ── Logical-trap pre-scan (runs in plain-chat AND workspace mode):
       // contradictory / impossible / trick premises are flagged before the
@@ -7233,7 +7237,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         } catch (err) {
           recordGuiDiagnostic(`[repair] high 思考档适配器构造失败，沿用主适配器: ${String(err)}`);
         }
-        const fixEvents = codingAgent.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true, repairLlm);
+        const fixEvents = engineHost.continueTurn(systemPrompt, messages, fixPrompt, turnSignal, undefined, undefined, true, repairLlm);
         codingAgent.toolRegistry.setCommandGuard(fixCommandGuard);
         let output = '';
         let latestMessages = messages;
@@ -7293,7 +7297,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         issues: string[],
       ): Promise<{ completed: boolean; messages: Message[]; output: string }> => {
         const closingPrompt = formatDeliveryClosingPrompt(result, issues);
-        const closingEvents = codingAgent.continueTurn(systemPrompt, messages, closingPrompt, turnSignal, undefined, undefined, true);
+        const closingEvents = engineHost.continueTurn(systemPrompt, messages, closingPrompt, turnSignal, undefined, undefined, true);
         let closingSegment: AssistantSegment | null = null;
         let output = '';
         let latestMessages = messages;
@@ -7574,8 +7578,8 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
         } catch { /* 台账不可用不追击 */ }
       }
       const events = this.hasHistory
-        ? codingAgent.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, turnHardStop.signal, isAuto)
-        : codingAgent.run(systemPrompt, userTurn, turnSignal, userImages, turnHardStop.signal);
+        ? engineHost.continueTurn(systemPrompt, historyMessages, userTurn, turnSignal, userImages, turnHardStop.signal, isAuto)
+        : engineHost.run(systemPrompt, userTurn, turnSignal, userImages, turnHardStop.signal);
       // 本轮是否至少有一个工具真实成功：全失败的工具轮既不能推进阶段，也不能
       // 作为“阶段完成”的证据（hasToolWork 只表示模型调用了工具，含失败）。
       let hasToolSuccess = false;
@@ -8896,7 +8900,7 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
                     index: 0,
                     function: { name: 'code_reviewer', arguments: JSON.stringify({ prompt, files: files.join(', ') }) },
                   };
-                  const result = await codingAgent.subagentOrchestrator.execute(toolCall, this.abortController?.signal);
+                  const result = await engineHost.executeSubagent(toolCall, this.abortController?.signal);
                   if (!result.success || result.error) throw new Error(result.error || 'code_reviewer failed');
                   // 修复（2026-09-29 用户反馈「[object Object]」）：execute 的
                   // result.result 是子代理结果对象（{ output, agentId, … }），
