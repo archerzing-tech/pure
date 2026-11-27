@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitRenderHistory, limitStoredMessages, loadSession, loadSessionStats, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitRenderHistory, limitStoredMessages, loadSession, loadSessionStats, mergeSessionLogTail, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, SESSION_LOG_TAIL_MAX_BYTES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
@@ -818,5 +819,87 @@ describe('render history budget（2026-11-17 解耦刀）', () => {
     // （小条目前移受松弛护栏放行，边界完整性优先于精确条数）。
     const result = limitRenderHistory<Item>(items, costOf, isUserHead, 4, 5 * 1024 * 1024);
     expect(result.map((e) => e.id)).toEqual(['u8', 't8', 'a8', 'u9', 't9', 'a9']);
+  });
+});
+
+describe('mergeSessionLogTail (P1-a 恢复路径接日志尾)', () => {
+  const snapshotWith = (messages: Message[], foldedThrough?: number) => {
+    const snapshot = createSessionSnapshot(
+      messages,
+      messages.map((message, modelMessageIndex) => ({ message, modelMessageIndex })),
+    );
+    return foldedThrough === undefined ? snapshot : { ...snapshot, foldedThrough };
+  };
+  const turnLine = (ts: number, messages: unknown[]) =>
+    JSON.stringify({ ts, kind: 'turn_messages', actor: 'gui', payload: { messages } });
+
+  it('旧会话（无 foldedThrough）原样返回且不读日志', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }]);
+    let reads = 0;
+    const result = await mergeSessionLogTail(snapshot, async () => {
+      reads++;
+      return turnLine(1, [{ role: 'assistant', content: 'tail' }]);
+    });
+    expect(reads).toBe(0);
+    expect(result.snapshot).toBe(snapshot);
+    expect(result.mergedMessages).toBe(0);
+  });
+
+  it('只追加水位之后的 turn_messages，且不改 transcript', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    let requestedMax = 0;
+    const result = await mergeSessionLogTail(snapshot, async (maxBytes) => {
+      requestedMax = maxBytes;
+      return [
+        turnLine(90, [{ role: 'assistant', content: 'already-folded' }]),
+        JSON.stringify({ ts: 95, kind: 'receipt', actor: 'gui', payload: { text: 'x' } }),
+        turnLine(101, [{ role: 'assistant', content: 'tail-1' }, { role: 'assistant', content: 'tail-2' }]),
+      ].join('\n');
+    });
+    expect(requestedMax).toBe(SESSION_LOG_TAIL_MAX_BYTES);
+    expect(result.mergedMessages).toBe(2);
+    expect(result.snapshot.modelContext.messages.map((m) => m.content))
+      .toEqual(['old', 'tail-1', 'tail-2']);
+    // 转录没有尾部卡片元数据：宁可缺，不伪造。
+    expect(result.snapshot.transcript).toBe(snapshot.transcript);
+  });
+
+  it('水位相等不重复计入（ts ≤ foldedThrough 已在快照里）', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(
+      snapshot,
+      async () => turnLine(100, [{ role: 'assistant', content: 'folded' }]),
+    );
+    expect(result.mergedMessages).toBe(0);
+    expect(result.snapshot).toBe(snapshot);
+  });
+
+  it('坏行跳过，不影响同一批里的好行', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(
+      snapshot,
+      async () => ['{not-json', turnLine(101, [{ role: 'assistant', content: 'tail' }])].join('\n'),
+    );
+    expect(result.mergedMessages).toBe(1);
+    expect(result.snapshot.modelContext.messages.at(-1)?.content).toBe('tail');
+  });
+
+  it('尾读失败退回快照，不让恢复失败', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(snapshot, async () => {
+      throw new Error('read_session_events unavailable');
+    });
+    expect(result.snapshot).toBe(snapshot);
+    expect(result.mergedMessages).toBe(0);
+  });
+
+  it('接线锁：两条恢复入口都必须走日志尾合并', () => {
+    const source = readFileSync('src/ui/store.ts', 'utf-8');
+    const lastStart = source.indexOf('export async function loadLastSession');
+    const sessionStart = source.indexOf('export async function loadSession');
+    expect(lastStart).toBeGreaterThan(-1);
+    expect(sessionStart).toBeGreaterThan(lastStart);
+    expect(source.slice(lastStart, sessionStart)).toContain('mergeLogTailFromDisk');
+    expect(source.slice(sessionStart)).toContain('mergeLogTailFromDisk');
   });
 });

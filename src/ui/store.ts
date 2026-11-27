@@ -20,6 +20,7 @@ import { recordGuiDiagnostic } from './errorLedger';
 import type { ToolDiffData } from './toolDiff';
 import { relocatePreflightNarration } from '../shared/conversation';
 import { stripUserTurnContext } from '../shared/promptLayers';
+import { mergeFoldWithLog, parseSessionEvents } from '../shared/sessionEventLog';
 
 export const SESSION_SNAPSHOT_VERSION = 3;
 
@@ -1711,10 +1712,74 @@ export async function saveSessionWorkspace(sessionId: string, workspace: string)
   lsSaveWorkspace(sessionId, workspace);
 }
 
+/**
+ * P1-a（engine-worker-migration 落地计划）— 恢复路径接日志尾。
+ *
+ * 快照是日志的 fold 视图：`foldedThrough` 之前的 turn_messages 已在
+ * `modelContext.messages` 里，之后的是检查点/落定后新增、但可能因进程被杀或
+ * 写回执丢失而没进快照的尾部。这里把尾部补回模型上下文——**只补模型上下文**，
+ * transcript 不动（尾部没有卡片元数据，硬造 UI 反而会骗人）。
+ *
+ * 旧会话没有 `foldedThrough`（水位标记诞生前）时原样返回，且不读日志：
+ * 快照权威的口径不能被这次改动改变。
+ *
+ * 尾读上限 1MB 是「够救一拍、又不拖慢会话切换」的折中：检查点快照每 3–12s 一拍，日志尾
+ * 通常只有几秒的输出；而每次 `loadSession` 都要在主线程 JSON.parse 这段尾部，
+ * 4MB 会白白多付 ~30ms（性能审计的 O(N) 教训）。真出现超大尾时宁可少救一拍，
+ * 后续可加按 ts 过滤的读取命令（P1-d）。
+ */
+export const SESSION_LOG_TAIL_MAX_BYTES = 1 * 1024 * 1024;
+let logTailWarningLogged = false;
+
+export async function mergeSessionLogTail(
+  snapshot: SessionSnapshotV2,
+  readTail: (maxBytes: number) => Promise<string>,
+): Promise<{ snapshot: SessionSnapshotV2; mergedMessages: number }> {
+  if (snapshot.foldedThrough === undefined) return { snapshot, mergedMessages: 0 };
+  let raw: string;
+  try {
+    raw = await readTail(SESSION_LOG_TAIL_MAX_BYTES);
+  } catch (err) {
+    // 一次熔断：老后端没有该命令时每次加载都报会刷屏。恢复必须能退化到快照。
+    if (!logTailWarningLogged) {
+      logTailWarningLogged = true;
+      recordGuiDiagnostic(`[session-log] tail read failed; snapshot stays authoritative: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { snapshot, mergedMessages: 0 };
+  }
+  if (!raw) return { snapshot, mergedMessages: 0 };
+  const messages = mergeFoldWithLog(
+    snapshot.modelContext.messages,
+    snapshot.foldedThrough,
+    parseSessionEvents(raw),
+  );
+  const mergedMessages = messages.length - snapshot.modelContext.messages.length;
+  if (mergedMessages <= 0) return { snapshot, mergedMessages: 0 };
+  return {
+    snapshot: { ...snapshot, modelContext: { ...snapshot.modelContext, messages } },
+    mergedMessages,
+  };
+}
+
+/** Tauri 模式：尾读有界（Rust 侧按行边界回退），并用加载超时兜住卡死的 IPC。 */
+async function mergeLogTailFromDisk<T extends { snapshot: SessionSnapshotV2 }>(sessionId: string, loaded: T): Promise<T> {
+  const merged = await mergeSessionLogTail(loaded.snapshot, (maxBytes) =>
+    withTauriTimeout<string>(
+      tauriInvoke<string>('read_session_events', { sessionId, tailBytes: maxBytes }),
+      'read_session_events',
+    ));
+  if (merged.mergedMessages === 0) return loaded;
+  recordGuiDiagnostic(`[session-log] ${sessionId}: restored ${merged.mergedMessages} message(s) past the fold watermark`);
+  return { ...loaded, snapshot: merged.snapshot };
+}
+
 export async function loadLastSession(): Promise<{ sessionId: string; snapshot: SessionSnapshotV2; workspace: string } | null> {
-  const loaded = tauriAvailable
+  let loaded = tauriAvailable
     ? await tauriLoadLast().catch(() => null)
     : lsLoadLast();
+  if (loaded && tauriAvailable) {
+    loaded = await mergeLogTailFromDisk(loaded.sessionId, loaded);
+  }
   if (loaded) rememberTranscript(loaded.sessionId, loaded.snapshot.transcript);
   return loaded;
 }
@@ -1725,6 +1790,9 @@ export async function loadSession(sessionId: string): Promise<LoadedSession | nu
     try { loaded = await tauriLoad(sessionId); } catch { loaded = null; }
   } else {
     loaded = lsLoad(sessionId);
+  }
+  if (loaded && tauriAvailable) {
+    loaded = await mergeLogTailFromDisk(sessionId, loaded);
   }
   if (loaded) {
     sessionLoadedRevisions.set(sessionId, loaded.snapshot.revision ?? 0);
