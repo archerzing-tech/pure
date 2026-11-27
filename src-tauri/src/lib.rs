@@ -20661,11 +20661,43 @@ fn webview_frame_nudge(window: tauri::WebviewWindow) -> Result<bool, String> {
         }
         Ok(true)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // Windows 对称自愈（2026-11-27 双窗口挂起判例）：对窗口 HWND 做一次
+        // 宽度抖动（±1px 来回）——wry 在 WM_SIZE 里 put_Bounds，WebView2 被迫
+        // 重排+重合成，呈现冻结的已知强制唤醒路径。必须在主线程执行：跨线程
+        // SetWindowPos 会把命令线程吊在 SendMessage 上。与 mac 的 NSView
+        // setNeedsDisplay 同位，各自是自家 WebKit/WebView2 的强制重绘法。
+        let win = window.clone();
+        let posted = window.run_on_main_thread(move || {
+            unsafe { nudge_webview_frame(&win) };
+        });
+        let _ = posted;
+        Ok(true)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = window;
         Ok(false)
     }
+}
+
+/// Windows 专用：宽度抖动强制 WebView2 重排+重合成。失败静默——nudge 是
+/// 兜底唤醒，下一轮 watchdog 会再试。
+#[cfg(windows)]
+unsafe fn nudge_webview_frame(win: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER};
+    let Ok(handle) = win.hwnd() else { return };
+    let hwnd = handle.0;
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return;
+    }
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w + 1, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 #[tauri::command]
