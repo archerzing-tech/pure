@@ -1835,6 +1835,41 @@ function dumpInputProfiles(): void {
 const profileGlobal = window as unknown as { __pureInputProfile: () => void };
 profileGlobal.__pureInputProfile = dumpInputProfiles;
 
+// ── Worker probe (P0-3) ──
+// 手动入口始终可用（devtools: await __pureWorkerProbe()）；自动跑认两个 dev 信号：
+// VITE_WORKER_PROBE=1 或 ?worker_probe=1。后者是 CLI 实际用的——tauri dev 的
+// beforeDevCommand 不保证把环境变量传给 Vite，而 --config 覆盖 devUrl 是确定的；
+// release 构建既没有该常量也不带 query，正式包不会多跑一轮 worker。
+const workerProbeGlobal = window as unknown as {
+  __pureWorkerProbe: (options?: { sessionId?: string }) => Promise<unknown>;
+};
+workerProbeGlobal.__pureWorkerProbe = async (options) => {
+  const { runWorkerProbe } = await import('./workerProbe');
+  return runWorkerProbe(options);
+};
+
+const workerProbeRequested = import.meta.env.VITE_WORKER_PROBE === '1'
+  || new URLSearchParams(window.location.search).get('worker_probe') === '1';
+
+if (workerProbeRequested) {
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        const { runWorkerProbe } = await import('./workerProbe');
+        const report = await runWorkerProbe({ sessionId: chat.getSessionId() ?? undefined });
+        const summary = report.workers
+          .map((worker) => (worker.ok
+            ? `${worker.label} 加载 ${Math.round(worker.loadMs ?? 0)}ms / 1MB ${Math.round(worker.oneMbMs ?? 0)}ms`
+            : `${worker.label} 失败：${worker.error ?? 'unknown'}`))
+          .join('；');
+        showToast(`worker probe：${summary}`, 15000);
+      } catch (err) {
+        showToast(`worker probe 失败：${err instanceof Error ? err.message : String(err)}`, 15000);
+      }
+    })();
+  }, 2500);
+}
+
 landingPrompt.addEventListener('input', () => {
   // Typing = human takeover: stop any pending auto-continue chain.
   chat.cancelAutoContinue();
