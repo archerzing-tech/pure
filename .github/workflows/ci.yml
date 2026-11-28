@@ -203,6 +203,36 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+  # Windows Rust gate。上面的 ubuntu job 结构上抓不到平台特有破绽。
+  # 2026-11-28 判例：25 例 Windows red 在 main 上躺了一整个版本没人发现——
+  # 线程名带冒号（`generate_image_tests::x`）在 Windows 是非法文件名，报
+  # Os error 123 并毒化 test_home_lock（连带 9 个 PoisonError）；而
+  # clixml_tests 是 `cfg(all(test, windows))`，ubuntu 门永远跑不到它，断言
+  # 过期也就长期无人知。这些直到 tag 打包才暴露，是最贵的时刻。
+  # 与 rust job 一样在 push/PR 都跑（rust-warm 只在 push 且不跑测试）。
+  rust-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # 同 rust job：bundle.resources 的 ./AGENTS.md 相对 src-tauri/ 解析。
+      - name: Stage AGENTS.md next to tauri.conf.json
+        shell: bash
+        run: cp AGENTS.md src-tauri/AGENTS.md
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
   # Rust release-cache warmer（windows + macos）。release.yml 的 tag run 对
   # GitHub 缓存只能「读 main 作用域、写 tag 作用域」——写进去的缓存随 tag
   # 作用域搁浅，永远读不到（本仓库缓存列表里 v3.3.8/v3.3.10 release run 存
