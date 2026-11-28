@@ -2,6 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "mainBinaryName": "pure-app",
   "bundle": {
+    "targets": ["nsis"],
     "windows": {
       "nsis": {
         "installerHooks": "./windows-installer-hooks.nsh"
