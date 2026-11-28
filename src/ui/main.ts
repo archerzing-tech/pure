@@ -1054,7 +1054,11 @@ function dismissBootSplash(minVisibleMs = 450): void {
   startFrameWatchdog();
   // M1 计量（2026-11-28）：主线程忙时按已知锚点扣减，残余算 M1 上界。与帧停
   // 摆探针互补——一个回答「有没有出帧」，一个回答「没出帧时主线程在干什么」。
-  startThreadTimeProbe();
+  // 只在取证包（beta）或显式 query 下开：它是 10s 一行的高频账，正式包里跟
+  // 错误台账争同一个 1MB 轮转文件，会把真正的证据挤掉。
+  if (__APP_VERSION__.includes('beta') || new URLSearchParams(window.location.search).get('thread_time') === '1') {
+    startThreadTimeProbe();
+  }
   // 版本自证（2026-11-27 判据）：日志里的探针行缺失曾让「包版本不对」被误读成
   // 「探针没触发」。每个 boot 落一行版本，任何日志都能一眼确认跑的是哪个包。
   void invoke('gui_perf_log', {

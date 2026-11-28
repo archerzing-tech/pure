@@ -3,6 +3,22 @@
 All notable changes to **Pure**. Each release's section is shown as the GitHub
 release summary when publishing (see `.github/workflows/release.yml`).
 v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起按产品线补齐。
+## v4.11.5-beta
+
+**双窗冻结取证包（Windows 真机用）**
+
+这一版只动取证面，不改运行时行为：一次带全三条线的构建，让「双窗到底堵在哪」可以判。
+
+一、**主线程忙时分桶（M1 计量）**：新增 `thread_time` 行，每 10s 一条——定时器滞后采样出主线程忙时（基准自校准，后台/最小化窗口的节流不计入），再按能夹住的同步段（markdown 流式渲染、快照构建）扣减，残余记作 **M1 上界**；滞后 ≥250ms 时另落一条 `thread_stall`。只在 beta 包或 `?thread_time=1` 下运行，正式包不写。
+
+二、**判读口径**（与已有心跳、delta_stats 三条线对齐）：冻结期间 `thread_time` 每 10s 照常落行且 `beats≈100` = JS 活着，堵在原生侧（再用 `delta_stats.avgMs` 分 M2/M3）；`thread_time` 断行或 `beats` 掉到个位数 = JS 计时器自己饿死（M1 侧，Worker 才有意义）；`big_invoke` >256KB 且慢 = 快照写是洪水源。
+
+三、**两处取证修正**：① 每次 boot 必落的一对假帧停（首拍未立基准，把 `lastFrames=-1` 当成上一拍 0 帧）已除——日志里那对 `frame_resume stalledMs:2000` 不是停过帧；② worker 探针改为按会话索引取最长会话做 checkpoint 克隆，不再一律用合成样本，Windows 的真实体量数字这次能拿到。
+
+四、**文档**：把 4.11.3-beta 双窗日志的判例写进计划，并把「双窗冻结已定案 M2」降回推断——`Channel::send` 在主线程做 ExecuteScript 且要等 JS 跑完，所以「JS 忙」与「投递洪水」在心跳线上同形。
+
+**复现清单（Windows）**：开两个窗口各跑一个流式长任务 → 等卡顿出现 → 卡住后停 30 秒以上再关窗口 → 发 `~/.pure/gui_perf.log`。重点是 `main_thread_stall` / `thread_time` / `thread_stall` / `delta_stats` / `big_invoke` 这几类行，尤其是冻结窗口那几分钟内的。
+
 ## v4.11.4-beta
 
 **Tauri 升级到 2.12.7 全家 + 双窗主线程堵因取证**
