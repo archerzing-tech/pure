@@ -478,6 +478,48 @@ function compactTranscriptImages(images?: MessageImage[]): MessageImage[] | unde
   );
 }
 
+/**
+ * 转写条目构造（P1-b 读侧复用）：指纹、id 复用与字段投影都在这里，
+ * 免得恢复路径另造一套 id 规则——同一条消息在快照与日志恢复两条路上
+ * 必须得到同一个 id，否则回放按 id 的关联（工具行、变体账）会断。
+ */
+function transcriptEntryFromDraft(
+  draft: TranscriptDraft,
+  occurrenceKey: string,
+  occurrence: number,
+  prior?: TranscriptEntry,
+): TranscriptEntry {
+  const message = draft.message;
+  const reuseId = prior
+    && prior.role === message.role
+    && transcriptFingerprint(prior.role, prior.content, prior.toolCallId) === occurrenceKey
+    ? prior.id
+    : undefined;
+  const calls = messageToolCallInfos(message);
+  return {
+    id: reuseId ?? stableMessageId(occurrenceKey, occurrence),
+    modelMessageIndex: draft.modelMessageIndex,
+    role: message.role as TranscriptEntry['role'],
+    content: draft.content ?? message.content,
+    internal: message.role === 'user' && message.internal ? true : undefined,
+    images: compactTranscriptImages(draft.images ?? message.images),
+    attachments: draft.attachments ?? message.attachments,
+    pathRepairs: draft.pathRepairs,
+    displayOverride: draft.displayOverride,
+    toolCallId: message.toolCallId,
+    toolName: message.toolName,
+    toolCalls: calls.length > 0 ? calls : undefined,
+    analysis: draft.analysis,
+    thinking: draft.thinking,
+    thinkingPhases: draft.thinkingPhases,
+    artifacts: draft.artifacts,
+    isPlanPause: draft.isPlanPause,
+    assessment: draft.assessment,
+    toolExec: draft.toolExec,
+    planCard: draft.planCard,
+  };
+}
+
 export function createSessionSnapshot(
   modelMessages: Message[],
   source: TranscriptDraft[] | StoredMessage[],
@@ -494,41 +536,13 @@ export function createSessionSnapshot(
   const priorByIndex = new Map<number, TranscriptEntry>();
   for (const entry of priorTranscript) priorByIndex.set(entry.modelMessageIndex, entry);
   const occurrences = new Map<string, number>();
-  const transcript = drafts.map((draft): TranscriptEntry => {
+  const transcript = drafts.map((draft) => {
     const message = draft.message;
     const content = draft.content ?? message.content;
     const occurrenceKey = transcriptFingerprint(message.role, content, message.toolCallId);
     const occurrence = occurrences.get(occurrenceKey) ?? 0;
     occurrences.set(occurrenceKey, occurrence + 1);
-    const prior = priorByIndex.get(draft.modelMessageIndex);
-    const reuseId = prior
-      && prior.role === message.role
-      && transcriptFingerprint(prior.role, prior.content, prior.toolCallId) === occurrenceKey
-      ? prior.id
-      : undefined;
-    const calls = messageToolCallInfos(message);
-    return {
-      id: reuseId ?? stableMessageId(occurrenceKey, occurrence),
-      modelMessageIndex: draft.modelMessageIndex,
-      role: message.role as TranscriptEntry['role'],
-      content: draft.content ?? message.content,
-      internal: message.role === 'user' && message.internal ? true : undefined,
-      images: compactTranscriptImages(draft.images ?? message.images),
-      attachments: draft.attachments ?? message.attachments,
-      pathRepairs: draft.pathRepairs,
-      displayOverride: draft.displayOverride,
-      toolCallId: message.toolCallId,
-      toolName: message.toolName,
-      toolCalls: calls.length > 0 ? calls : undefined,
-      analysis: draft.analysis,
-      thinking: draft.thinking,
-      thinkingPhases: draft.thinkingPhases,
-      artifacts: draft.artifacts,
-      isPlanPause: draft.isPlanPause,
-      assessment: draft.assessment,
-      toolExec: draft.toolExec,
-      planCard: draft.planCard,
-    };
+    return transcriptEntryFromDraft(draft, occurrenceKey, occurrence, priorByIndex.get(draft.modelMessageIndex));
   });
   const latestPlanState = [...drafts].reverse().find(draft => draft.planState !== undefined)?.planState;
   const legacy = {
@@ -587,6 +601,34 @@ function eventId(index: number, type: SessionEvent['type']): string {
   return `event-${index}-${type}`;
 }
 
+/**
+ * 一条转写条目 → 渲染事件（P1-b 读侧复用）。快照派生（旧账迁移）与日志尾
+ * 恢复两条路必须用同一套事件形状，否则恢复出来的那一回合卡面会与实时渲染
+ * 不一致（工具卡、思考分段、计划卡都会走形）。
+ */
+function eventsFromTranscriptEntry(entry: TranscriptEntry): SessionEvent[] {
+  const out: SessionEvent[] = [];
+  if (entry.role === 'user') {
+    out.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, pathRepairs: entry.pathRepairs, internal: entry.internal });
+    return out;
+  }
+  if (entry.analysis) out.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });
+  if (entry.planCard) out.push({ id: `${entry.id}-plan`, type: 'plan', planCard: entry.planCard });
+  const phases = entry.thinkingPhases ?? (entry.thinking ? [{ text: entry.thinking, assistantIndex: 0 }] : []);
+  phases.forEach((phase, index) => {
+    out.push({ id: `${entry.id}-thinking-${index}`, type: 'thinking', content: phase.text });
+  });
+  if (entry.role === 'assistant') {
+    if (entry.assessment) out.push({ id: `${entry.id}-assessment`, type: 'assessment', assessment: entry.assessment });
+    if (entry.content) out.push({ id: `${entry.id}-assistant`, type: 'assistant', content: entry.content, isPlanPause: entry.isPlanPause });
+    for (const call of entry.toolCalls ?? []) out.push({ id: `${entry.id}-call-${call.id}`, type: 'tool_call', toolCallId: call.id, toolName: call.toolName, toolCalls: [call] });
+    if (entry.artifacts?.length) out.push({ id: `${entry.id}-artifacts`, type: 'artifact', artifacts: entry.artifacts });
+  } else if (entry.role === 'tool') {
+    out.push({ id: `${entry.id}-result`, type: 'tool_result', content: entry.content ?? '', toolCallId: entry.toolCallId, toolName: entry.toolName, toolExec: entry.toolExec });
+  }
+  return out;
+}
+
 function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy, statusLines: StatusLineRecord[] = []): SessionSnapshotV3 {
   const events: SessionEvent[] = [];
   // 状态叙述行按 afterIndex 锚定拼接（见 StatusLineRecord）：锚点消息的全部
@@ -609,24 +651,7 @@ function snapshotV2ToV3(snapshot: SessionSnapshotV2Legacy, statusLines: StatusLi
   };
   flushStatuses(-1);
   for (const entry of snapshot.transcript) {
-    if (entry.role === 'user') {
-      events.push({ id: entry.id, type: 'user', content: entry.content ?? '', images: entry.images, attachments: entry.attachments, pathRepairs: entry.pathRepairs, internal: entry.internal });
-      flushStatuses(entry.modelMessageIndex);
-      continue;
-    }
-    if (entry.analysis) events.push({ id: `${entry.id}-analysis`, type: 'analysis', content: entry.analysis });
-    if (entry.planCard) events.push({ id: `${entry.id}-plan`, type: 'plan', planCard: entry.planCard });
-    for (const phase of entry.thinkingPhases ?? (entry.thinking ? [{ text: entry.thinking, assistantIndex: 0 }] : [])) {
-      events.push({ id: `${entry.id}-thinking-${events.length}`, type: 'thinking', content: phase.text });
-    }
-    if (entry.role === 'assistant') {
-      if (entry.assessment) events.push({ id: `${entry.id}-assessment`, type: 'assessment', assessment: entry.assessment });
-      if (entry.content) events.push({ id: `${entry.id}-assistant`, type: 'assistant', content: entry.content, isPlanPause: entry.isPlanPause });
-      for (const call of entry.toolCalls ?? []) events.push({ id: `${entry.id}-call-${call.id}`, type: 'tool_call', toolCallId: call.id, toolName: call.toolName, toolCalls: [call] });
-      if (entry.artifacts?.length) events.push({ id: `${entry.id}-artifacts`, type: 'artifact', artifacts: entry.artifacts });
-    } else if (entry.role === 'tool') {
-      events.push({ id: `${entry.id}-result`, type: 'tool_result', content: entry.content ?? '', toolCallId: entry.toolCallId, toolName: entry.toolName, toolExec: entry.toolExec });
-    }
+    events.push(...eventsFromTranscriptEntry(entry));
     flushStatuses(entry.modelMessageIndex);
   }
   return { version: 3, modelContext: snapshot.modelContext, events, uiState: snapshot.uiState, transcript: snapshot.transcript, statusLines: statusLines.length > 0 ? statusLines : undefined };
@@ -1731,11 +1756,92 @@ export async function saveSessionWorkspace(sessionId: string, workspace: string)
 export const SESSION_LOG_TAIL_MAX_BYTES = 1 * 1024 * 1024;
 let logTailWarningLogged = false;
 
+/** 日志事件（parseSessionEvents 的产物）——与 store 自己的 UI `SessionEvent` 区分。 */
+type SessionLogEvent = ReturnType<typeof parseSessionEvents>[number];
+
+/** checkpointLog 写入侧的两处截断标记（见 checkpointLog.ts 的有意降级）。 */
+const CHECKPOINT_TEXT_TRUNCATION_MARK = '[checkpoint truncated';
+const CHECKPOINT_ARGS_TRUNCATION_MARK = '…[truncated]';
+
+function draftLooksTruncated(draft: TranscriptDraft): boolean {
+  const content = draft.content ?? draft.message.content;
+  if (typeof content === 'string' && content.includes(CHECKPOINT_TEXT_TRUNCATION_MARK)) return true;
+  return (draft.message.toolCalls ?? []).some(call =>
+    typeof call.function?.arguments === 'string'
+    && call.function.arguments.includes(CHECKPOINT_ARGS_TRUNCATION_MARK));
+}
+
+export interface TranscriptDeltaMerge {
+  transcript: TranscriptEntry[];
+  appended: number;
+  /** 尾部带截断标记：内容不完整，提示文案要如实说。 */
+  truncated: boolean;
+}
+
+/**
+ * P1-b 读侧（2026-11-28）——检查点级转录草稿的恢复。
+ *
+ * 写入侧（chat.ts 的 TurnCheckpoint 臂）与 `turn_messages` 同一 ts 写一条
+ * `transcript_delta`，payload.drafts 是 buildTranscriptDelta 的产物（已带
+ * modelMessageIndex）。这里按同一个 `foldedThrough` 水位把它们接回 transcript：
+ * 水位之前的草稿已在快照里，重复接会多一整套气泡。
+ *
+ * 以 modelMessageIndex 去重而不是 ts：同一批消息可能在多个检查点重复出现
+ * （游标回退、回合未落定），下标才是消息身份。旧会话没有 transcript_delta
+ * （该 kind 诞生前）时 transcript 原样返回。
+ */
+export function mergeTranscriptDeltaWithLog(
+  transcript: readonly TranscriptEntry[],
+  foldedThrough: number | undefined,
+  events: readonly SessionLogEvent[],
+): TranscriptDeltaMerge {
+  if (foldedThrough === undefined) return { transcript: [...transcript], appended: 0, truncated: false };
+  const seen = new Set(transcript.map(entry => entry.modelMessageIndex));
+  // 指纹计数从既有条目起算：新条目的 id 是「同指纹第几次出现」的函数，从 0
+  // 重算会与快照里已有的条目撞 id。
+  const occurrences = new Map<string, number>();
+  for (const entry of transcript) {
+    const key = transcriptFingerprint(entry.role, entry.content, entry.toolCallId);
+    occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
+  }
+  const drafts: TranscriptDraft[] = [];
+  let truncated = false;
+  for (const event of events) {
+    if (event.kind !== 'transcript_delta' || event.ts <= foldedThrough) continue;
+    const payload = event.payload as { drafts?: unknown } | null | undefined;
+    if (!Array.isArray(payload?.drafts)) continue;
+    for (const raw of payload.drafts) {
+      const draft = raw as TranscriptDraft | null | undefined;
+      if (!draft || typeof draft !== 'object' || !draft.message) continue;
+      if (typeof draft.modelMessageIndex !== 'number' || seen.has(draft.modelMessageIndex)) continue;
+      seen.add(draft.modelMessageIndex);
+      drafts.push(draft);
+      if (!truncated && draftLooksTruncated(draft)) truncated = true;
+    }
+  }
+  if (drafts.length === 0) return { transcript: [...transcript], appended: 0, truncated: false };
+  const restored = drafts.map((draft) => {
+    const key = transcriptFingerprint(draft.message.role, draft.content ?? draft.message.content, draft.message.toolCallId);
+    const occurrence = occurrences.get(key) ?? 0;
+    occurrences.set(key, occurrence + 1);
+    return transcriptEntryFromDraft(draft, key, occurrence);
+  });
+  return { transcript: [...transcript, ...restored], appended: restored.length, truncated };
+}
+
+export interface SessionLogTailMerge {
+  snapshot: SessionSnapshotV2;
+  mergedMessages: number;
+  mergedTranscript: number;
+  transcriptTruncated: boolean;
+}
+
 export async function mergeSessionLogTail(
   snapshot: SessionSnapshotV2,
   readTail: (maxBytes: number) => Promise<string>,
-): Promise<{ snapshot: SessionSnapshotV2; mergedMessages: number }> {
-  if (snapshot.foldedThrough === undefined) return { snapshot, mergedMessages: 0 };
+): Promise<SessionLogTailMerge> {
+  const nothing: SessionLogTailMerge = { snapshot, mergedMessages: 0, mergedTranscript: 0, transcriptTruncated: false };
+  if (snapshot.foldedThrough === undefined) return nothing;
   let raw: string;
   try {
     raw = await readTail(SESSION_LOG_TAIL_MAX_BYTES);
@@ -1745,26 +1851,41 @@ export async function mergeSessionLogTail(
       logTailWarningLogged = true;
       recordGuiDiagnostic(`[session-log] tail read failed; snapshot stays authoritative: ${err instanceof Error ? err.message : String(err)}`);
     }
-    return { snapshot, mergedMessages: 0 };
+    return nothing;
   }
-  if (!raw) return { snapshot, mergedMessages: 0 };
+  if (!raw) return nothing;
+  const events = parseSessionEvents(raw);
   const merged = mergeFoldWithLogDetailed(
     snapshot.modelContext.messages,
     snapshot.foldedThrough,
-    parseSessionEvents(raw),
+    events,
   );
   const mergedMessages = merged.messages.length - snapshot.modelContext.messages.length;
-  if (mergedMessages <= 0) return { snapshot, mergedMessages: 0 };
+  // P1-b 读侧：与 turn_messages 同一水位接回转录草稿——只补模型上下文会留
+  // 下「模型记得、界面上那段消失了」的静默状态（P1-a 落地时记的第一个坑）。
+  const transcriptDelta = mergeTranscriptDeltaWithLog(snapshot.transcript, snapshot.foldedThrough, events);
+  if (mergedMessages <= 0 && transcriptDelta.appended <= 0) return nothing;
+  // 转写条目还要有对应的渲染事件：快照带 events 时投影只读 events
+  // （projectCanonicalSession），只补 transcript 就变成「模型记得、界面上没有」。
+  const restoredEvents = transcriptDelta.appended > 0
+    ? transcriptDelta.transcript.slice(snapshot.transcript.length).flatMap(eventsFromTranscriptEntry)
+    : [];
   return {
     snapshot: {
       ...snapshot,
-      modelContext: { ...snapshot.modelContext, messages: merged.messages },
+      ...(mergedMessages > 0
+        ? { modelContext: { ...snapshot.modelContext, messages: merged.messages } }
+        : {}),
+      ...(transcriptDelta.appended > 0 ? { transcript: transcriptDelta.transcript } : {}),
+      ...(restoredEvents.length > 0 ? { events: [...(snapshot.events ?? []), ...restoredEvents] } : {}),
       // P1-d：水位必须推进到本次真正并入的最后一条 turn_messages。只补消息
       // 不抬水位，下一次 saveSession 仍写旧值，再恢复就会把同一段尾部追加
       // 第二遍——这是「恢复→保存→恢复」重复消息的根因。
       ...(merged.lastMergedTs !== undefined ? { foldedThrough: merged.lastMergedTs } : {}),
     },
     mergedMessages,
+    mergedTranscript: transcriptDelta.appended,
+    transcriptTruncated: transcriptDelta.truncated,
   };
 }
 
@@ -1775,8 +1896,20 @@ async function mergeLogTailFromDisk<T extends { snapshot: SessionSnapshotV2 }>(s
       tauriInvoke<string>('read_session_events', { sessionId, tailBytes: maxBytes }),
       'read_session_events',
     ));
-  if (merged.mergedMessages === 0) return loaded;
-  recordGuiDiagnostic(`[session-log] ${sessionId}: restored ${merged.mergedMessages} message(s) past the fold watermark`);
+  if (merged.mergedMessages === 0 && merged.mergedTranscript === 0) return loaded;
+  recordGuiDiagnostic(
+    `[session-log] ${sessionId}: restored ${merged.mergedMessages} message(s) / ${merged.mergedTranscript} transcript entr(ies) past the fold watermark`
+    + (merged.transcriptTruncated ? ' (truncated at checkpoint cap)' : '')
+    + (merged.mergedTranscript === 0 && merged.mergedMessages > 0 ? ' — transcript tail missing' : ''),
+  );
+  // 恢复提示（P1-a 的「诚实降级」）：只补了模型上下文时必须说出来，否则界面
+  // 看起来就是「那段对话丢了」。toast 只做提示，台账里是完整计数。
+  const toastKey = merged.transcriptTruncated
+    ? 'toast.sessionRestoredTruncated'
+    : merged.mergedTranscript > 0
+      ? 'toast.sessionRestored'
+      : 'toast.sessionRestoredContextOnly';
+  showToast(t(toastKey).replace('{n}', String(merged.mergedMessages)), 8000);
   return { ...loaded, snapshot: merged.snapshot };
 }
 

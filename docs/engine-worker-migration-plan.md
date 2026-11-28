@@ -5,7 +5,7 @@
 > 关联：[`decision-boundary-2026-11.md`](decision-boundary-2026-11.md)（四分归属）、
 > [`remote-office-bridge-design.md`](remote-office-bridge-design.md)（S1 已落 / S3 未开工）。
 
-## 0. 本次已落地（2026-11-27）
+## 0. 已落地（2026-11-27，末两条为 2026-11-28 补）
 
 | 项 | 结果 | 证据 |
 |---|---|---|
@@ -13,18 +13,31 @@
 | 引擎图体检 | **108 个模块、0 条静态阻断**；惰性依赖 10 条（都有浏览器守卫）；运行时触碰 4 处 | `bun run check:worker --audit` |
 | wasm 基准 URI | `resolveWasmAsset(name, baseUri)` 可注入；Worker 不再依赖 `document.baseURI` | `src/adapter/memory/wasmRuntime.ts` + `__tests__/wasmRuntime.test.ts` |
 | 打包参考 | Bun browser target：Harness 129 模块 / 0.31MB，CodingAgent 166 / 0.64MB。**注意**：Bun 会给 `node:crypto` 塞 shim（实测打包成功），所以它只能当参考，不能当闸门 | P0 探针 |
-| **P1-a 恢复接日志尾** | `mergeSessionLogTail` + 两条恢复入口（`loadSession` / `loadLastSession`）；有界尾读 1MB + 超时兑底；只补模型上下文，不动 transcript | `src/ui/store.ts` + `store.test.ts`（6 例） |
+| **P1-a 恢复接日志尾** | `mergeSessionLogTail` + 两条恢复入口（`loadSession` / `loadLastSession`）；有界尾读 1MB + 超时兑底；当时只补模型上下文、不动 transcript（转录读侧冉 2026-11-28 的 P1-b 读侧补齐） | `src/ui/store.ts` + `store.test.ts`（6 例） |
 | **P2-a 驱动面抽壳** | `EngineHost` 接口 + `MainThreadEngineHost`；chat.ts 的 6 个驱动调用点全部改走宿主，工具/审批/交付核验仍直连 | `src/ui/engineHost.ts` + `engineHost.test.ts`（5 例） |
 | **P1-b 检查点级增量** | 检查点按游标切增量，同 `ts` 写 `turn_messages` + `transcript_delta`；有界截断，落定复用游标不重复 | `src/ui/checkpointLog.ts` + `checkpointLog.test.ts`（5 例） |
 | **P1-d fold 水位收口** | 恢复返回真正并入的最后一条 `turn_messages` ts，快照水位随之推进；连续两次恢复不重复 | `store.test.ts`（连续恢复用例） |
 | **P2-b Worker 协议纯核** | `sessionProtocol.ts`：seq 缺口 resync、重放幂等、preview 背压只留最后一帧 | `sessionProtocol.test.ts`（7 例） |
-| **P0-3 双平台探针** | macOS 四种 worker 加载全通；1MB 克隆 1.1–2.4ms、408KB checkpoint 0.75–1.25ms；最小化后 timer 未被节流。Windows 列待真机 | `bun run probe:worker -- --run` / `--summarize` |
+| **P0-3 双平台探针** | macOS 四种 worker 加载全通；1MB 克隆 1.1–2.4ms、408KB checkpoint 0.75–1.25ms；最小化后 timer 未被节流。Windows 已回填（v4.11.2-beta 真机：四路全通、1MB 克隆 0.7–0.8ms、408KB checkpoint 0.2–0.4ms、后台 timer maxDrift ≈9.8ms） | `bun run probe:worker -- --run` / `--summarize`；Windows 由 beta 包 boot 后自动探针落 `worker_probe` 行 |
+| **P1-b 读侧（转录草稿恢复）** | `mergeTranscriptDeltaWithLog`：按同一 `foldedThrough` 水位、以 `modelMessageIndex` 去重接回 `transcript_delta`，并按 `eventsFromTranscriptEntry` 派生渲染事件——快照带 events 时投影只读 events，不派生就还是「模型记得、界面上没有」 | `store.test.ts`（6 例，含幂等与截断） |
+| **P1-a 恢复提示** | 只补上下文 / 转录已补齐 / 内容截断 三档 toast + 台账完整计数：恢复后的界面不再静默地少一段对话 | `store.test.ts` + `toast.sessionRestored*` 三键 |
 
 **交付边界（2026-11-27）**：P0/P1 全部完成，P2-a/b 完成；**P2-c–P4 未开工**。
 依据计划 §9 的停止条件：P0-3 只证明 worker 加载/克隆便宜，尚未测 M1（JS 自算）在
 真实卡死中的占比；P0-4 反而证明卡死链条里含主线程 IPC 投递（P1-c 已解数据丢失）。
 在拿到 M1 占比与 Windows 真机数据前，不把默认引擎切到 Worker；P2-c 的 LLM/工具/审批
 三条桥与租约留作下一里程碑。
+
+**P1 收尾（2026-11-28）**：P1-a 的「只补模型上下文」与 P1-b 的「写了 `transcript_delta`
+但没人读」两条尾巴已补齐（见上表）。`transcript_delta` 自 v4.11.0 起一直在写，读侧
+此前为空——强杀恢复后模型上下文完整、界面缺尾巴，正是本计划 §4 要求「诚实降级」而
+当时没落的那一格。
+
+**停止条件状态（2026-11-28）**：条件 1（两端 worker 都加载不了）**已解除**——Windows
+v4.11.2-beta 真机四路全通。条件 2（M1 在真实卡死里占比低 → P2 降级为可选）**未判定**：
+v4.11.2–v4.11.4 的 beta 取证把双窗冻结定案在 **M2**（主线程被 Channel 投递灌死、空闭包
+3 秒执行不了），而 Worker 对 M2 无效。所以 P2-c 缺的不是排期，是「M1 占比」这个前提——
+没有它就不开工。
 
 ### 1. 体检结论（决定后续刀序）
 
@@ -44,7 +57,7 @@
 |---|---|---|---|
 | **P0-1** | 静态依赖闸门 + 引擎图体检 | — | ✅ 本次 |
 | **P0-2** | wasm 基准 URI 可注入（记忆进 Worker 的前置） | — | ✅ 本次 |
-| **P0-3** | 两端真机探针：worker 加载 / 往返 / 克隆 / 后台定时器 | 真机 | ✅ 2026-11-27（macOS；Windows 待真机） |
+| **P0-3** | 两端真机探针：worker 加载 / 往返 / 克隆 / 后台定时器 | 真机 | ✅ macOS 2026-11-27 / Windows v4.11.2-beta 回填 |
 | **P0-4** | 任务 B 取证：`save_session` 是丢写还是丢回执 | 真机 | ✅ 2026-11-27（macOS 判定丢写） |
 | **P0-5** | 记忆后端决策（IndexedDB / Rust 文件） | P0-3 | ✅ 2026-11-27（单写者服务 + Worker 镜像） |
 | **P1-a** | 恢复路径接日志尾（模型上下文） | — | ✅ 2026-11-27 |
@@ -54,7 +67,7 @@
 | **P2-a** | `EngineHost` 接口 + 主线程实现（零行为切换） | — | ✅ 2026-11-27 |
 | **P2-b** | 协议与纯类型（`sessionProtocol.ts`） | P2-a | ✅ 2026-11-27 |
 | **P2-c** | Worker 入口 + client + 允许清单桥 | P0-3, P2-b | 待做 |
-| **P2-d** | 开关 / 租约 / epoch / 崩溃恢复 | P2-c | 待做 |
+| **P2-d** | 开关 / 租约 / epoch / 崩溃恢复 | P2-c | 租约仲裁纯核已落（`src/shared/engineLease.ts`，2026-11-27）；开关 / lock 收发 / 崩溃降级待做 |
 | **P3-a** | 工具执行桥（审批留主线程） | P2-d | 待做 |
 | **P3-b** | LLM ProxyAdapter（协议半边进 Worker） | P2-d | 待做 |
 | **P3-c** | 诊断/日志桥 + 大载荷策略 | P3-a | 待做 |
@@ -85,8 +98,11 @@
   为 dev 构建的备用入口；release 无 query/无常量，不会跑。
 - macOS 数字见设计稿 §3.8：asset classic/module 与 blob classic/module 全通；
   1MB 克隆 1.1–2.4ms，408KB checkpoint 0.75–1.25ms；后台最小化 timer p50=0ms。
-- Windows：脚本已就绪，**未实测**；同一命令在 Windows 跑一次即可回填。停止条件
-  「两端都加载失败」目前只在 macOS 判为不触发，Windows 待真机后才能定论。
+- Windows：**已回填**（v4.11.2-beta 真机，beta 包 boot 后 2.5s 自动跑探针并落
+  `worker_probe` 行）：四路全通、1MB 克隆 0.7–0.8ms、408KB checkpoint 0.2–0.4ms、
+  后台 timer maxDrift ≈9.8ms。停止条件「两端都加载失败」因此不触发。beta 包只汇总落行，
+  逐路加载耗时与单条 `EngineEvent` 成本仍未单独记录；要这两列就在 Windows 跑一次
+  `probe:worker -- --run`。
 - 附带发现：WKWebView 单次 `performance.now()` 被钳到 1ms，报告改用整段平均；
   真实长会话的 checkpoint 未测（探针在 2.5s 启动窗内拿不到 sessionId，用合成 200 条）。
 
@@ -159,8 +175,26 @@
   否则恢复时会把已在快照里的检查点消息重复追加。
 - 测试：`store.test.ts` 6 例（旧会话不读日志、只追加水位之后、水位相等不重复、
   坏行跳过、读失败退化、两条入口接线锁）+ `sessionEventLog`/重放保真合计 91 例绿。
+- **2026-11-28 补「诚实降级」**：计划要求的恢复标记当时没做，恢复后只是静默地少一段。
+  现在 `mergeLogTailFromDisk` 按三档发 toast——转录已补齐 / 只补了模型上下文 / 内容截断，
+  台账 `[session-log]` 行仍记完整计数。文案进 `toast.sessionRestored*` 三键（zh/en）。
 
 ### P1-b 检查点级增量
+
+**落地记录（写侧 2026-11-27，读侧 2026-11-28）**
+
+- 写侧：`chat.ts` 的 `TurnCheckpoint` 臂按游标切增量，同一 `ts` 写 `turn_messages` +
+  `transcript_delta`（`buildTranscriptDelta` 做有界投影，图片有 path 不带 base64）。
+- **读侧当时是空的**：`transcript_delta` 从 v4.11.0 起一直在落盘，但全仓没有消费点，
+  强杀恢复后界面缺的尾巴只能靠「模型记得」自证。2026-11-28 补 `mergeTranscriptDeltaWithLog`：
+  同一 `foldedThrough` 水位过滤、以 `modelMessageIndex` 去重（同一批消息会在多个检查点
+  重复出现，ts 不是消息身份）、指纹计数从既有条目起算以免 id 碰撞。
+- 光补 `transcript` 不够：快照带 `events` 时 `projectCanonicalSession` 只读 events，
+  所以尾部条目还要经 `eventsFromTranscriptEntry` 派生渲染事件（与旧账迁移同一套形状），
+  否则恢复出来的内容照样不显示。
+- 测试：`store.test.ts` 6 例（接回下标/工具行、只有 `transcript_delta` 也恢复、水位内
+  忽略、恢复→保存→再恢复幂等、截断标记上报、旧会话不接草稿，其中一例直接断言回放块
+  出现 `assistant` / `tool`）。
 
 - 位置：`src/ui/chat.ts` 的 `TurnCheckpoint` 消费臂（约 4946 起的切片逻辑）与回合落定提交点（约 3633）。
 - 改动：检查点处按「上次已追加的消息下标」切出增量，追加 `turn_messages`（现有 kind）；

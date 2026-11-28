@@ -1210,6 +1210,9 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.sessionsCleared': '已删除全部会话',
     'toast.deleteFailed': '删除失败',
     'toast.saveDiskFailed': '会话保存到磁盘失败，已临时保存到浏览器本地——重启后可能丢失',
+    'toast.sessionRestored': '上次中断的回合已从日志恢复（{n} 条消息，转录已补齐）',
+    'toast.sessionRestoredContextOnly': '上次中断的回合只恢复了模型上下文（{n} 条消息），界面上的转录缺失',
+    'toast.sessionRestoredTruncated': '上次中断的回合已从日志恢复（{n} 条消息，超长内容已截断）',
 
     // ── Chat transcript runtime bubbles ──
     'chat.interrupted': '⏹ 已中断：{reason}',
@@ -2632,6 +2635,9 @@ const translations: Record<Language, Record<string, string>> = {
     'toast.sessionsCleared': 'All sessions deleted',
     'toast.deleteFailed': 'Failed to delete',
     'toast.saveDiskFailed': 'Failed to save the session to disk — temporarily saved to browser storage (may be lost on restart)',
+    'toast.sessionRestored': 'Recovered the interrupted turn from the session log ({n} messages, transcript included)',
+    'toast.sessionRestoredContextOnly': 'Recovered only the model context of the interrupted turn ({n} messages); the transcript is missing',
+    'toast.sessionRestoredTruncated': 'Recovered the interrupted turn from the session log ({n} messages; oversized content was truncated)',
 
     // ── Chat transcript runtime bubbles ──
     'chat.interrupted': '⏹ Interrupted: {reason}',

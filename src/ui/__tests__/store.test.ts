@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { projectSessionEvents, projectTranscript } from '../transcriptProjection';
 import { projectCanonicalSession } from '../sessionEvents';
 import type { SessionEvent } from '../store';
-import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitRenderHistory, limitStoredMessages, loadSession, loadSessionStats, mergeSessionLogTail, mergeSessionSnapshotMetadata, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, SESSION_LOG_TAIL_MAX_BYTES, type StoredMessage, type TranscriptDraft } from '../store';
+import { createSessionSnapshot, createSessionSnapshotFromLegacy, createSessionPlanProgressPersistence, dedupeFileWrites, groupFileWrites, lastSavedTranscript, limitRenderHistory, limitStoredMessages, loadSession, loadSessionStats, mergeSessionLogTail, mergeSessionSnapshotMetadata, mergeTranscriptDeltaWithLog, mergeStoredMetadata, normalizeFileWritePath, saveSession, saveSessionStats, turnCheckpointGateMs, upsertFileWrite, MAX_PERSISTED_MESSAGES, SESSION_LOG_TAIL_MAX_BYTES, type StoredMessage, type TranscriptDraft } from '../store';
 import type { Message } from '../../shared/types';
 import type { Plan } from '../../coding-agent/types';
 
@@ -919,5 +919,97 @@ describe('mergeSessionLogTail (P1-a 恢复路径接日志尾)', () => {
     expect(sessionStart).toBeGreaterThan(lastStart);
     expect(source.slice(lastStart, sessionStart)).toContain('mergeLogTailFromDisk');
     expect(source.slice(sessionStart)).toContain('mergeLogTailFromDisk');
+  });
+});
+
+describe('mergeTranscriptDeltaWithLog (P1-b 读侧：检查点转录草稿恢复)', () => {
+  const snapshotWith = (messages: Message[], foldedThrough?: number) => {
+    const snapshot = createSessionSnapshot(
+      messages,
+      messages.map((message, modelMessageIndex) => ({ message, modelMessageIndex })),
+    );
+    return foldedThrough === undefined ? snapshot : { ...snapshot, foldedThrough };
+  };
+  const turnLine = (ts: number, messages: unknown[]) =>
+    JSON.stringify({ ts, kind: 'turn_messages', actor: 'gui', payload: { messages } });
+  const deltaLine = (ts: number, drafts: unknown[]) =>
+    JSON.stringify({ ts, kind: 'transcript_delta', actor: 'gui', payload: { drafts } });
+
+  it('水位之后的草稿接回 transcript：下标、角色、工具行都在', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const log = [
+      turnLine(101, [
+        { role: 'assistant', content: 'tail' },
+        { role: 'tool', content: 'ok', toolCallId: 'call-1', toolName: 'read_file' },
+      ]),
+      deltaLine(101, [
+        { message: { role: 'assistant', content: 'tail' }, modelMessageIndex: 1 },
+        { message: { role: 'tool', content: 'ok', toolCallId: 'call-1', toolName: 'read_file' }, modelMessageIndex: 2 },
+      ]),
+    ].join('\n');
+    const result = await mergeSessionLogTail(snapshot, async () => log);
+    expect(result.mergedTranscript).toBe(2);
+    expect(result.snapshot.transcript).toHaveLength(3);
+    expect(result.snapshot.transcript[1]).toMatchObject({ modelMessageIndex: 1, role: 'assistant', content: 'tail' });
+    expect(result.snapshot.transcript[2]).toMatchObject({ role: 'tool', toolCallId: 'call-1', toolName: 'read_file' });
+    // id 仍唯一（重复读取时按 id 的关联不能串）。
+    const ids = result.snapshot.transcript.map(entry => entry.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // 快照带 events 时投影只读 events（projectCanonicalSession）——只补
+    // transcript 会让尾巴在界面上继续消失。
+    const blocks = projectCanonicalSession(result.snapshot.events, result.snapshot.transcript);
+    expect(blocks.map(block => block.type)).toEqual(['user', 'assistant', 'tool']);
+  });
+
+  it('只有 transcript_delta 没有 turn_messages 时也要恢复（旧实现直接返回了快照）', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(
+      snapshot,
+      async () => deltaLine(101, [{ message: { role: 'assistant', content: 'tail' }, modelMessageIndex: 1 }]),
+    );
+    expect(result.mergedMessages).toBe(0);
+    expect(result.mergedTranscript).toBe(1);
+    expect(result.snapshot.modelContext.messages).toHaveLength(1);
+    expect(result.snapshot.transcript.at(-1)?.content).toBe('tail');
+  });
+
+  it('水位内的草稿不重复接（ts ≤ foldedThrough 已在快照里）', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(
+      snapshot,
+      async () => deltaLine(100, [{ message: { role: 'assistant', content: 'folded' }, modelMessageIndex: 1 }]),
+    );
+    expect(result.mergedTranscript).toBe(0);
+    expect(result.snapshot).toBe(snapshot);
+  });
+
+  it('下标已存在时不重复追加（幂等：恢复→保存→再恢复）', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const log = deltaLine(101, [{ message: { role: 'assistant', content: 'tail' }, modelMessageIndex: 1 }]);
+    const first = await mergeSessionLogTail(snapshot, async () => log);
+    const second = await mergeSessionLogTail(first.snapshot, async () => log);
+    expect(second.mergedTranscript).toBe(0);
+    expect(second.snapshot.transcript).toBe(first.snapshot.transcript);
+    expect(second.snapshot.transcript).toHaveLength(2);
+  });
+
+  it('截断标记如实上报（恢复提示不能假装完整）', async () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }], 100);
+    const result = await mergeSessionLogTail(
+      snapshot,
+      async () => deltaLine(101, [
+        { message: { role: 'assistant', content: 'long…\n…[checkpoint truncated 120 chars]' }, modelMessageIndex: 1 },
+      ]),
+    );
+    expect(result.mergedTranscript).toBe(1);
+    expect(result.transcriptTruncated).toBe(true);
+  });
+
+  it('旧会话（无 foldedThrough）不接草稿', () => {
+    const snapshot = snapshotWith([{ role: 'user', content: 'old' }]);
+    const events = [JSON.parse(deltaLine(101, [{ message: { role: 'assistant', content: 'tail' }, modelMessageIndex: 1 }]))];
+    const result = mergeTranscriptDeltaWithLog(snapshot.transcript, undefined, events as never);
+    expect(result.appended).toBe(0);
+    expect(result.transcript).toEqual(snapshot.transcript);
   });
 });

@@ -271,8 +271,13 @@ worker 加载方式、记忆后端**；业务层与协议层必须共用一份�
 - **后台定时器**：最小化后 `visibilityState=hidden`，`setTimeout(50)` 3 拍漂移
   p50=0ms / max=1ms → 本次 App Nap 没有节流定时器。不能据此推断 Windows
   （WebView2 的 timer 合并是另一套机制），也不能据此认为 M4 已解。
-- **Windows**：未实测。`probe:worker` 在 Windows 上跑同一条命令即可回填；在拿到数字前
-  矩阵里 Windows 列保持设计推断，不写实测值。
+- **Windows（v4.11.2-beta 真机，随包自动探针）**：asset/blob × classic/module 四路
+  **全通**；1MB 字符串克隆 0.7–0.8ms；408KB checkpoint 0.2–0.4ms；后台窗口 timer
+  maxDrift ≈9.8ms（无明显合并延迟）。beta 包只汇总落行，**逐路加载耗时与单条
+  EngineEvent 成本没有单独记录**——需要这两列时用 `probe:worker -- --run` 在 Windows
+  再跑一次。结论：停止条件 1（两端 worker 都加载不了）不触发。
+- 两端数字在同一量级，克隆成本都远低于 16ms 合帧阈值；差异集中在**加载方式**（blob
+  比 asset 快一个量级）与 **IPC 成本**（Windows 的 M2 是主因，Worker 不解）。
 
 **分平台结论：**
 
