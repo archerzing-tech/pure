@@ -15,7 +15,9 @@ v3.3.5 – v3.3.14 的逐版明细见 git tag 历史；本文件自 v3.3.15 起�
 
 三、**两处取证修正**：① 每次 boot 必落的一对假帧停（首拍未立基准，把 `lastFrames=-1` 当成上一拍 0 帧）已除——日志里那对 `frame_resume stalledMs:2000` 不是停过帧；② worker 探针改为按会话索引取最长会话做 checkpoint 克隆，不再一律用合成样本，Windows 的真实体量数字这次能拿到。
 
-四、**文档**：把 4.11.3-beta 双窗日志的判例写进计划，并把「双窗冻结已定案 M2」降回推断——`Channel::send` 在主线程做 ExecuteScript 且要等 JS 跑完，所以「JS 忙」与「投递洪水」在心跳线上同形。
+四、**修 `isTauriRuntime` 的缓存坑**：原来「不是 Tauri」也被缓存，bun 单进程跑整包时先跑的用例文件把 `false` 写死，后面的 UI 用例即使注入了 `__TAURI_INTERNALS__` 也读不回来（Linux CI 上 resizeZones 九例全红，本机单文件跑却全绿）。现在只缓存「是」，并留了一条子进程隔离的回归用例。
+
+五、**文档**：把 4.11.3-beta 双窗日志的判例写进计划，并把「双窗冻结已定案 M2」降回推断——`Channel::send` 在主线程做 ExecuteScript 且要等 JS 跑完，所以「JS 忙」与「投递洪水」在心跳线上同形。
 
 **复现清单（Windows）**：开两个窗口各跑一个流式长任务 → 等卡顿出现 → 卡住后停 30 秒以上再关窗口 → 发 `~/.pure/gui_perf.log`。重点是 `main_thread_stall` / `thread_time` / `thread_stall` / `delta_stats` / `big_invoke` 这几类行，尤其是冻结窗口那几分钟内的。
 

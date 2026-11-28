@@ -4,15 +4,22 @@
 
 let cached: boolean | null = null;
 
-/** Synchronous detection — safe in browser, test and Node runtimes. */
+/** Synchronous detection — safe in browser, test and Node runtimes.
+ *
+ *  只缓存「是」：`__TAURI_INTERNALS__` 由 WebView 的初始化脚本注入，早于它的
+ *  一次探测不能代表此后——把 false 也钉住，等于让整个进程从此认不出宿主。
+ *  判例：bun 单进程跑整包测试时，先跑的用例文件（Node 环境，无 window）把
+ *  false 写进缓存，后面的 UI 用例即便注入了 __TAURI_INTERNALS__ 也读不到，
+ *  resizeZones 因此一例都建不出热区（CI Linux 9 例全红，mac 单文件跑却全绿）。
+ *  反向代价是一次 `in` 判断，可以忽略。 */
 export function isTauriRuntime(): boolean {
-  if (cached !== null) return cached;
+  if (cached === true) return true;
   try {
     cached = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   } catch {
     cached = false;
   }
-  return cached;
+  return cached === true;
 }
 
 /** Lazily load @tauri-apps/api/core — null outside the Tauri runtime. */
