@@ -105,21 +105,27 @@ export function setupResizeZones(): void {
   for (const [dir, cls] of ZONES) {
     const zone = document.createElement('div');
     zone.className = `win-resize-zone rz-${cls}`;
-    // Windows:非模态路径走 pointer 事件(setPointerCapture 要 pointerId)。
+    // 全平台走非模态 pointer 路径（2026-11-27 tao 0.37 判例）：macOS 的
+    // drag_resize_window 在 tao 0.37 起直接返回 NotSupported——原生 resize
+    // 路径已不存在，startResizeDragging 会静默抛错。我们自己逐帧算几何、
+    // 用 resize_window_nonmodal 落 SetWindowPos/set_size，两端同一套。
     zone.addEventListener('pointerdown', (ev) => {
-      if (!isWindowsPlatform() || ev.button !== 0) return;
+      if (ev.button !== 0) return;
       ev.preventDefault();
       ev.stopPropagation();
       armNonModalResize(dir, ev, zone);
     });
-    // 其他平台维持已验证过的原生路径。
-    zone.addEventListener('mousedown', (ev) => {
-      if (isWindowsPlatform() || ev.button !== 0) return;
-      // 拦住气泡选择/拖拽区等一切下层语义:这 6px 属于窗口边缘。
-      ev.preventDefault();
-      ev.stopPropagation();
-      armResizeOnDrag(dir, ev);
-    });
+    // 无 PointerEvent 的旧环境（老 WebView）退回 mousedown 原生路径：
+    // 那里 startResizeDragging 仍是唯一手段（mac tao 0.37 下会失败，但这类
+    // 环境本身已不在支持面内）。
+    if (typeof PointerEvent === 'undefined') {
+      zone.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        armResizeOnDrag(dir, ev);
+      });
+    }
     host.appendChild(zone);
   }
   document.body.appendChild(host);
@@ -281,9 +287,9 @@ async function notifyDragState(active: boolean): Promise<void> {
   } catch { /* 探针尽力而为 */ }
 }
 
-/** 动态导入(模块缓存后零成本)+ 失败落日志:capabilities 漏授权时 resize
- * 会「按了没反应」,与窗口键同一条判例(2026-10-11),不静默。
- * 双保险:Windows 永不走这条路——它是模态 sizing 循环的入口。 */
+/** 旧环境兜底（无 PointerEvent 时）的原生 resize。Windows 上它是模态 sizing
+ *  循环的入口、macOS 上 tao 0.37 起是 NotSupported——两个平台都别用，只在
+ *  确实没有 PointerEvent 的老 WebView 里作为最后手段。 */
 async function resizeWith(dir: ResizeDirection): Promise<void> {
   if (isWindowsPlatform()) return;
   try {

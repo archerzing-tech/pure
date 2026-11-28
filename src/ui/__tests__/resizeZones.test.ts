@@ -155,49 +155,56 @@ describe('setupResizeZones', () => {
     expect(invokeCalls).toEqual(['disable_resize_hotzones']);
   });
 
-  it('a plain click on the top edge never enters the sizing loop', () => {
+  it('a plain click on the edge never starts a resize（2026-11-27 全平台非模态）', async () => {
     setupResizeZones();
-    down(zone('n'), 500, 2);
-    up();
-    expect(resized).toEqual([]);
+    pdown(zone('n'), 500, 2);
+    pup();
+    await tick();
+    expect(nonModalGeometries).toEqual([]);
     // 松手后残留的 move 也不许反过来触发 resize。
-    move(500, 40);
-    expect(resized).toEqual([]);
+    pmove(500, 40);
+    await tick();
+    expect(nonModalGeometries).toEqual([]);
   });
 
-  it('a click that only jitters inside the threshold stays a click', () => {
+  it('a click that only jitters inside the threshold stays a click', async () => {
     setupResizeZones();
-    down(zone('n'), 500, 2);
-    move(502, 3);
-    up();
-    expect(resized).toEqual([]);
+    pdown(zone('n'), 500, 2);
+    pmove(502, 3);
+    await tick();
+    expect(nonModalGeometries).toEqual([]);
   });
 
-  it('a real drag starts one resize with the pressed direction', () => {
+  it('a real drag drives the non-modal path (mac 无原生 resize 后的唯一路径)', async () => {
     setupResizeZones();
-    down(zone('ne'), 900, 2);
-    move(902, 2); // 仍在阈值内
-    expect(resized).toEqual([]);
-    move(910, 2); // 越过阈值 → 发起
-    expect(resized).toEqual(['NorthEast']);
-    move(960, 2); // 已发起,不再重复
-    expect(resized).toEqual(['NorthEast']);
+    pdown(zone('n'), 500, 2);
+    await tick(); // 起始几何落地
+    pmove(500, 40); // 越过阈值 → 逐帧几何
+    await tick();
+    expect(nonModalGeometries.length).toBeGreaterThan(0);
+    // 上边缘向下拖 38px = 高度收 38、y 增 38（对边钉住）。
+    expect(nonModalGeometries[0]).toEqual({ width: 1200, height: 762, x: 100, y: 118 });
+    pup();
   });
 
-  it('ignores moves that arrive after the button is already up', () => {
+  it('ignores moves that arrive after the button is already up', async () => {
     setupResizeZones();
-    down(zone('w'), 2, 400);
-    move(2, 430, 0); // 左键已抬(切窗/系统接管)
-    expect(resized).toEqual([]);
-    move(2, 430); // 之后迟到的 move 也没人听了
-    expect(resized).toEqual([]);
+    pdown(zone('w'), 2, 400);
+    await tick();
+    pmove(2, 430, 0); // 左键已抬(切窗/系统接管)
+    pmove(2, 430); // 之后迟到的 move 也没人听了
+    await tick();
+    expect(nonModalGeometries).toEqual([]);
   });
 
-  it('non-left buttons never arm a resize', () => {
+  it('non-left buttons never arm a resize', async () => {
     setupResizeZones();
-    zone('s').dispatchEvent(new window.MouseEvent('mousedown', { button: 2, clientX: 400, clientY: 900, bubbles: true }));
-    move(400, 860);
-    expect(resized).toEqual([]);
+    zone('s').dispatchEvent(new window.PointerEvent('pointerdown', {
+      button: 2, pointerId: 1, screenX: 400, screenY: 900, bubbles: true,
+    }));
+    pmove(400, 860);
+    await tick();
+    expect(nonModalGeometries).toEqual([]);
   });
 });
 
