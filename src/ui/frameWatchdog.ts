@@ -65,7 +65,14 @@ export function startFrameWatchdog(): void {
   setInterval(() => {
     const visible = document.visibilityState === 'visible';
     const focused = document.hasFocus();
-    const deltaFrames = lastFrames < 0 ? 0 : frames - lastFrames;
+    // 首拍只立基准就返回：没有上一拍可比时 deltaFrames 恒为 0，会被当成停帧
+    // 开一段 stall，下一拍再以 frame_resume 收尾——每个 boot 都白落一对假信号
+    // （真机日志里那对 stalledMs:2000 就是这个，不是真的停过帧）。
+    if (lastFrames < 0) {
+      lastFrames = frames;
+      return;
+    }
+    const deltaFrames = frames - lastFrames;
     lastFrames = frames;
     const deltaMut = mutations;
     mutations = 0;
