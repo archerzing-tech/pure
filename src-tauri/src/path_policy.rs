@@ -156,7 +156,16 @@ mod tests {
                             std::path::Component::RootDir => {
                                 if root.is_empty() {
                                     root.push('/');
-                                } else if !root.ends_with('/') {
+                                } else if !root.ends_with('/')
+                                    && !root.ends_with('\\')
+                                    && !root.starts_with(r"\\")
+                                    && !root.starts_with("//")
+                                {
+                                    // 盘符根（`C:` → `C:/`）要补分隔符；UNC 前缀
+                                    // （`\\server\share`）本身就是根，共享表里的
+                                    // 约定是不带尾分隔符（pathPolicyFixtures 的
+                                    // `//server/share` 行）——补了就与 TS 侧对不上，
+                                    // 而产品的 join 产物两种写法等价。
                                     root.push('/');
                                 }
                             }

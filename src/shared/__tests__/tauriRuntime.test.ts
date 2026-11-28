@@ -8,19 +8,41 @@
 // 断言就跟库的实际行为无关了。
 
 import { describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-const PROBE = `
-  const { isTauriRuntime } = await import('./src/shared/tauri.ts');
-  const before = isTauriRuntime();
-  globalThis.window = { __TAURI_INTERNALS__: { invoke: () => Promise.resolve() } };
-  console.log(JSON.stringify([before, isTauriRuntime()]));
-`;
+const TAURI_TS = join(import.meta.dir, '..', 'tauri.ts');
+
+/** 探针落成文件再跑，不用 `bun -e <多行脚本>`。
+ *
+ *  Windows 上 `bun` 走 .cmd 垫片，带换行/引号的多行参数会被 cmd 的特殊字符保护
+ *  直接拒绝（`The argument 'args[2]' contains a cmd.exe special character`），
+ *  于是这条判例在 Windows 全量里必红——而它验的恰恰是「不同宿主上缓存行为一致」，
+ *  在哪个平台都该跑得起来。用 process.execPath 同时绕开垫片解析。 */
+function runProbe(lines: string[], env?: Record<string, string>): { stdout: string; stderr: string; exitCode: number | null } {
+  const dir = mkdtempSync(join(tmpdir(), 'pure-tauri-probe-'));
+  const fixture = join(dir, 'probe.mjs');
+  writeFileSync(fixture, lines.join('\n'));
+  try {
+    const proc = Bun.spawnSync([process.execPath, 'run', fixture], { env, stdout: 'pipe', stderr: 'pipe' });
+    return { stdout: proc.stdout.toString(), stderr: proc.stderr.toString(), exitCode: proc.exitCode };
+  } finally {
+    // Windows：刚退出的子进程句柄可能还没完全释放，退避重试。
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
 
 describe('isTauriRuntime', () => {
   it('无宿主时探过的「不是」不会钉死整个进程', () => {
-    const proc = Bun.spawnSync(['bun', '-e', PROBE], { stdout: 'pipe', stderr: 'pipe' });
-    expect(proc.stderr.toString()).toBe('');
+    const proc = runProbe([
+      `const { isTauriRuntime } = await import(${JSON.stringify(TAURI_TS)});`,
+      'const before = isTauriRuntime();',
+      'globalThis.window = { __TAURI_INTERNALS__: { invoke: () => Promise.resolve() } };',
+      'console.log(JSON.stringify([before, isTauriRuntime()]));',
+    ]);
+    expect(proc.stderr).toBe('');
     expect(proc.exitCode).toBe(0);
-    expect(JSON.parse(proc.stdout.toString().trim())).toEqual([false, true]);
+    expect(JSON.parse(proc.stdout.trim())).toEqual([false, true]);
   });
 });

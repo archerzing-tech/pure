@@ -42,6 +42,19 @@ fn test_home_lock() -> &'static StdMutex<()> {
     TEST_HOME_LOCK.get_or_init(|| StdMutex::new(()))
 }
 
+/// 测试临时目录名用的标签：线程名在 Windows 上是 `模块::用例`，冒号属非法文件
+/// 名（Os error 123）——直接拿去拼目录，这一族的会话落盘测试全红，还会毒化
+/// test_home_lock 级联出 PoisonError（2026-11-28 Windows 实测 8 例）。
+#[cfg(test)]
+fn test_tmp_tag() -> String {
+    std::thread::current()
+        .name()
+        .unwrap_or("test")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 fn build_http_client(timeout: std::time::Duration, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
@@ -4904,9 +4917,15 @@ mod clixml_tests {
         let bytes = std::fs::read(&path).expect("read back");
         assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "missing UTF-8 BOM");
         let text = String::from_utf8_lossy(&bytes[3..]).into_owned();
-        assert!(text.starts_with("$ProgressPreference='SilentlyContinue'\n"), "{}", text);
-        assert!(text.contains("echo 长命令判例"), "{}", text);
-        assert!(text.contains("Remove-Item -LiteralPath $PSCommandPath"), "{}", text);
+        // 与 EncodedCommand 用的 wrapper 同一份（单一来源），再加尾部自删。
+        // 旧断言把 `$ProgressPreference` 钉在首行，包装后来在前面加了编码收口
+        // 三行，这条就一直是红的——而它只在本模块（cfg(windows)）里跑，ubuntu
+        // 门禁看不见（2026-11-28 实测）。
+        let expected = format!(
+            "{}\nRemove-Item -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue\n",
+            powershell_command_wrapped("echo 长命令判例")
+        );
+        assert_eq!(text, expected);
         let _ = std::fs::remove_file(&path);
     }
 }
@@ -6434,7 +6453,14 @@ mod delta_batch_tests {
         // Below cap: not due on size alone... but due on time is faked via a
         // stale Instant; here lock the size leg only.
         let small = "a".repeat(DELTA_FLUSH_BYTES - 1);
-        let stale = Instant::now() - std::time::Duration::from_secs(3600);
+        // Windows 的 Instant 是开机后的 QPC，减 1h 在刚开机的机器上直接 panic
+        // （overflow when subtracting duration from instant，2026-11-28 实测）；
+        // 时间腿只需要「已超过阈值」，退而求其次减刚过阈值一点点就够。
+        let now = Instant::now();
+        let stale = now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .or_else(|| now.checked_sub(std::time::Duration::from_millis((DELTA_FLUSH_MS + 1) as u64)))
+            .expect("a stale instant at least one flush window in the past");
         assert!(delta_batch_due(&small, &stale, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // time leg
         let fresh = Instant::now();
         assert!(!delta_batch_due(&small, &fresh, DELTA_FLUSH_MS, DELTA_FLUSH_BYTES)); // neither leg
@@ -6577,13 +6603,18 @@ mod execute_command_timeout_tests {
     async fn timeout_preserves_partial_output_and_guides_exit_paths() {
         let workspace = std::env::temp_dir().join(format!("pure-cmd-timeout-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
+        // 用 `;` 而不是 `&&`：Windows 走 PowerShell 5.1，`&&` 是 7.x 才有的
+        // 语法（5.1 直接语法错、命令立刻结束，等不到超时）。`sleep` 两边都有。
         let result = execute_command(
             workspace.to_string_lossy().to_string(),
-            "echo partial-marker-kept && sleep 30".to_string(),
+            "echo partial-marker-kept; sleep 30".to_string(),
             None,
             None,
             None,
-            Some(400),
+            // 下限是 1000ms（command_timeout 夹紧），而 Windows 上 powershell
+            // 冷启动本身就能吃掉一秒多——给 2.5s 才能等到 `echo` 真的跑过、
+            // 又远小于 30s 的 sleep（2026-11-28 实测：400ms 下 stdout 恒为空）。
+            Some(2_500),
         )
         .await
         .unwrap();
@@ -7460,12 +7491,14 @@ mod resolve_tests {
     fn expands_tilde_prefixes_with_injected_home() {
         // 纯函数注入 home，不碰进程环境——任何平台跑结果一致。
         let home = "/Users/tester";
+        // 产物用平台分隔符（join 语义），所以精确串按 MAIN_SEPARATOR 拼。
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(expand_tilde_with("~", home), home);
-        assert_eq!(expand_tilde_with("~/Downloads/a.md", home), "/Users/tester/Downloads/a.md");
+        assert_eq!(expand_tilde_with("~/Downloads/a.md", home), format!("/Users/tester{sep}Downloads/a.md"));
         assert_eq!(expand_tilde_with("$HOME", home), home);
-        assert_eq!(expand_tilde_with("$HOME/doc.txt", home), "/Users/tester/doc.txt");
+        assert_eq!(expand_tilde_with("$HOME/doc.txt", home), format!("/Users/tester{sep}doc.txt"));
         // home 带尾分隔符时不得产生双分隔符。
-        assert_eq!(expand_tilde_with("~/a", "/Users/tester/"), "/Users/tester/a");
+        assert_eq!(expand_tilde_with("~/a", "/Users/tester/"), format!("/Users/tester{sep}a"));
         // `~\` 的展开产物含平台分隔符，非 Windows 上反斜杠是合法文件名字符，
         // 精确串会随平台漂移——只锁行为（落在 home 下且内容没丢）。
         let backslashed = expand_tilde_with("~\\Downloads\\a.md", home);
@@ -7488,7 +7521,14 @@ mod resolve_tests {
         let sep = std::path::MAIN_SEPARATOR;
         let r = resolve(&ws, &format!("~{sep}pure-tilde-probe.txt")).unwrap();
         assert!(r.is_absolute(), "{}", r.display());
-        assert!(r.starts_with(PathBuf::from(pure_home_dir())), "{}", r.display());
+        // Windows 的 canonicalize 会给绝对路径加 `\\?\` 前缀，拿纯 HOME 直接
+        // starts_with 会假红；两边都归一掉 verbatim 前缀再比（2026-11-28 实测）。
+        let strip_verbatim = |p: &str| p.trim_start_matches(r"\\?\").to_string();
+        assert!(
+            strip_verbatim(&r.to_string_lossy()).starts_with(&strip_verbatim(&pure_home_dir())),
+            "{}",
+            r.display()
+        );
         assert!(r.ends_with("pure-tilde-probe.txt"), "{}", r.display());
         fs::remove_dir_all(&ws).unwrap();
     }
@@ -14342,9 +14382,14 @@ mod command_timeout_tests {
     fn expands_home_prefix_or_passes_through() {
         // HOME is process-global: save/restore or concurrent test threads
         // (sandbox's write_profile_file reads HOME) see our fake value.
-        let saved = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/Users/tester");
-        assert_eq!(expand_home_dir("~/work"), "/Users/tester/work");
+        // 这里同时持 test_home_lock，且用平台本地的绝对 home：`/Users/tester`
+        // 在 Windows 上既不是绝对路径、又会顺着 HOME 泄给并发用例（gateway
+        // 候选表要求绝对路径，2026-11-28 Windows 实测连着红）。
+        let _guard = test_home_lock().lock().unwrap();
+        let saved = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join("pure-home-probe");
+        std::env::set_var("HOME", &home);
+        assert_eq!(expand_home_dir("~/work"), home.join("work").to_string_lossy());
         assert_eq!(expand_home_dir("/abs/path"), "/abs/path");
         assert_eq!(expand_home_dir("rel"), "rel");
         match saved {
@@ -16751,7 +16796,7 @@ mod generate_image_tests {
     #[test]
     fn save_session_rejects_stale_revision() {
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-revision-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -16795,7 +16840,7 @@ mod generate_image_tests {
         // 复制进顶层 messages——文件里只留快照一份；索引 title/message_count
         // 改从 snapshot 取；旧档（顶层 messages + 无 snapshot）的回退读取不受影响。
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-p03-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-p03-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -16864,7 +16909,7 @@ mod generate_image_tests {
         // 会话没了」）。三把锁：损坏后读取自愈重建；损坏后保存不再孤儿化
         // 其他会话；索引缺失同样从盘重建。
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-idxheal-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-idxheal-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -16923,7 +16968,7 @@ mod generate_image_tests {
         // P0-1 根治刀（2026-11-13 性能审计）：活动流写独立 sidecar，读路径
         // 用它覆盖快照内嵌值；缺失回退内嵌、损坏降级内嵌、会话已删不复活。
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-p01-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-p01-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -16972,7 +17017,7 @@ mod generate_image_tests {
         // 保存不再解析整份 session.json。反证：磁盘上的 session.json 自称
         // revision 99，若保存仍整份解析，本次保存会被 stale revision 拒绝。
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-meta-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-meta-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -17056,7 +17101,7 @@ mod generate_image_tests {
         // A4（2026-11-13 性能审计）：图片附件目录在 sessions 之外，必须随会话
         // 一起删除，否则每删一个会话就留一份孤儿原图。
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-attach-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-attach-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -17090,7 +17135,7 @@ mod generate_image_tests {
     #[test]
     fn checkpoint_save_load_cleanup_roundtrip() {
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-checkpoint-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -17135,7 +17180,7 @@ mod generate_image_tests {
     #[test]
     fn workspace_override_wins_over_session_snapshot_workspace() {
         let _home_guard = super::test_home_lock().lock().unwrap();
-        let home = std::env::temp_dir().join(format!("pure-session-workspace-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        let home = std::env::temp_dir().join(format!("pure-session-workspace-{}-{}", std::process::id(), test_tmp_tag()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let old_home = std::env::var_os("HOME");
@@ -20532,39 +20577,55 @@ mod reveal_path_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 平台本地绝对根：两个函数靠 `Path::is_absolute` 判「已展开成绝对路径」。
+    /// 拿 `/ws/dir` 这种 unix 形状喂它，Windows 上没盘符就不算绝对，会再拼一层
+    /// 前缀（2026-11-28 实测：`/Users/tester/Downloads//Users/tester/Documents/…`）。
+    /// 这里按平台造绝对路径，行为与两条平台上的真实输入一致。
+    fn native_abs(parts: &[&str]) -> String {
+        if cfg!(windows) {
+            format!("C:\\{}", parts.join("\\"))
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    }
+
     #[test]
     fn resolve_document_path_matches_the_delivery_semantics() {
-        let home = "/Users/tester";
+        let home = native_abs(&["Users", "tester"]);
+        let ws = native_abs(&["ws", "dir"]);
         // 有工作区：相对路径锚工作区，子目录结构保留
-        assert_eq!(resolve_document_path("docs/deck.pptx", "/ws/dir", home), "/ws/dir/docs/deck.pptx");
+        assert_eq!(resolve_document_path("docs/deck.pptx", &ws, &home), format!("{ws}/docs/deck.pptx"));
         // 工作区尾斜杠不拼出双斜杠
-        assert_eq!(resolve_document_path("a.pptx", "/ws/dir/", home), "/ws/dir/a.pptx");
+        assert_eq!(resolve_document_path("a.pptx", &format!("{ws}/"), &home), format!("{ws}/a.pptx"));
         // 没工作区：落 ~/Downloads（保结构），绝不落进程 cwd
-        assert_eq!(resolve_document_path("docs/deck.pptx", "", home), "/Users/tester/Downloads/docs/deck.pptx");
+        assert_eq!(resolve_document_path("docs/deck.pptx", "", &home), format!("{home}/Downloads/docs/deck.pptx"));
         // `~/` 前缀展开到真实 home，不许落字面量 `~` 目录
-        assert_eq!(resolve_document_path("~/Documents/r.docx", "", home), "/Users/tester/Documents/r.docx");
+        assert_eq!(resolve_document_path("~/Documents/r.docx", "", &home), format!("{home}/Documents/r.docx"));
         // `$HOME` 前缀同款
-        assert_eq!(resolve_document_path("$HOME/Downloads/a.xlsx", "/ws", home), "/Users/tester/Downloads/a.xlsx");
+        assert_eq!(resolve_document_path("$HOME/Downloads/a.xlsx", &ws, &home), format!("{home}/Downloads/a.xlsx"));
         // 绝对路径原样（全盘可达契约）
-        assert_eq!(resolve_document_path("/data/a.pptx", "/ws", home), "/data/a.pptx");
+        let abs = native_abs(&["data", "a.pptx"]);
+        assert_eq!(resolve_document_path(&abs, &ws, &home), abs);
     }
 
     #[test]
     fn expand_download_path_never_lands_on_a_cwd_relative_literal() {
-        let home = "/Users/tester";
+        let home = native_abs(&["Users", "tester"]);
+        let ws = native_abs(&["ws", "dir"]);
         // 常规 $HOME / $PWD 展开
-        assert_eq!(expand_download_path("$HOME/Downloads/a.png", "", home), "/Users/tester/Downloads/a.png");
-        assert_eq!(expand_download_path("$PWD/a.png", "/ws/dir", home), "/ws/dir/a.png");
-        assert_eq!(expand_download_path("$PWD/a.png", "/ws/dir/", home), "/ws/dir/a.png");
+        assert_eq!(expand_download_path("$HOME/Downloads/a.png", "", &home), format!("{home}/Downloads/a.png"));
+        assert_eq!(expand_download_path("$PWD/a.png", &ws, &home), format!("{ws}/a.png"));
+        assert_eq!(expand_download_path("$PWD/a.png", &format!("{ws}/"), &home), format!("{ws}/a.png"));
         // 模型写 `~/`：展开到真实 home，不许落到字面量 `~` 目录
-        assert_eq!(expand_download_path("~/Downloads/a.png", "", home), "/Users/tester/Downloads/a.png");
+        assert_eq!(expand_download_path("~/Downloads/a.png", "", &home), format!("{home}/Downloads/a.png"));
         // 空 workspace + $PWD：宁可落 Downloads，也不拼出 `/a.png` 这种根路径
-        assert_eq!(expand_download_path("$PWD/a.png", "", home), "/Users/tester/Downloads/a.png");
+        assert_eq!(expand_download_path("$PWD/a.png", "", &home), format!("{home}/Downloads/a.png"));
         // 绝对路径原样通过
-        assert_eq!(expand_download_path("/data/a.png", "/ws", home), "/data/a.png");
+        let abs = native_abs(&["data", "a.png"]);
+        assert_eq!(expand_download_path(&abs, &ws, &home), abs);
         // 兜底：任何剩余的非绝对 spec 都折回 ~/Downloads/<名>，
         // 报出去的路径必须就是写入的路径
-        assert_eq!(expand_download_path("relative/a.png", "", home), "/Users/tester/Downloads/a.png");
+        assert_eq!(expand_download_path("relative/a.png", "", &home), format!("{home}/Downloads/a.png"));
     }
 }
 
@@ -22854,12 +22915,16 @@ mod asset_scope_dotdir_contract {
         };
 
         // 配置形态 ["**"]：unix 上对点目录路径永远 false（403 的直接原因）。
-        let wildcard = glob::Pattern::new("**").unwrap();
-        assert!(
-            !wildcard.matches_path_with(&canonical, opts),
-            "** 不得匹配点目录路径（否则本测试前提失效，修复可退役）"
-        );
-        assert!(wildcard.matches_path_with(&plain_path, opts));
+        // Windows 的 MatchOptions 没有 leading-dot 约束（opts 里就是 cfg!(unix)），
+        // `**` 照常匹配——这条前提只在 unix 上成立。
+        if cfg!(unix) {
+            let wildcard = glob::Pattern::new("**").unwrap();
+            assert!(
+                !wildcard.matches_path_with(&canonical, opts),
+                "** 不得匹配点目录路径（否则本测试前提失效，修复可退役）"
+            );
+            assert!(wildcard.matches_path_with(&plain_path, opts));
+        }
 
         // 修复形态：allow_directory(~/.pure) 推入的字面前缀 + /** 模式。
         let grant = glob::Pattern::new(&format!(

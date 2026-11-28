@@ -4,7 +4,7 @@
 // 验了「下个会话 <skills> 可见」的前半段）。
 
 import { describe, it, expect } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryEntry } from '../types';
@@ -169,19 +169,28 @@ describe('writeAutoSkillDir (CLI 落盘闭环)', () => {
   // 进程把 HOME 整个摘掉：新代码落 os.homedir() 的家目录，旧代码落 '/.pure'。
   // 这个测试在任何开发机上都判得动红绿。
   it('skillsRootDir falls back to os.homedir() when HOME is missing (subprocess)', () => {
-    const probe = `
-      import { skillsRootDir } from ${JSON.stringify(join(import.meta.dir, '..', '..', 'cliSkillStore.ts'))};
-      console.log(skillsRootDir());
-    `;
+    // 探针落成文件再跑，不用 `bun -e <多行脚本>`：Windows 上 `bun` 走 .cmd 垫片，
+    // 多行参数被 cmd 特殊字符保护拒绝，这条用例在 Windows 全量里必红（判例见
+    // tauriRuntime.test.ts 同一处注释）。process.execPath 同时绕开垫片解析。
+    const dir = mkdtempSync(join(tmpdir(), 'pure-skills-probe-'));
+    const fixture = join(dir, 'probe.mjs');
+    writeFileSync(fixture, [
+      `import { skillsRootDir } from ${JSON.stringify(join(import.meta.dir, '..', '..', 'cliSkillStore.ts'))};`,
+      'console.log(skillsRootDir());',
+    ].join('\n'));
     const { HOME: _drop, ...envWithoutHome } = process.env;
-    const proc = Bun.spawnSync(['bun', '-e', probe], {
-      env: envWithoutHome as Record<string, string>,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    expect(proc.exitCode).toBe(0);
-    // 与 cliConfig 同源：无 HOME 时读 os.homedir()，而不是落 '/.pure/skills'。
-    expect(proc.stdout.toString().trim()).toBe(join(homedir(), '.pure', 'skills'));
+    try {
+      const proc = Bun.spawnSync([process.execPath, 'run', fixture], {
+        env: envWithoutHome as Record<string, string>,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      expect(proc.exitCode).toBe(0);
+      // 与 cliConfig 同源：无 HOME 时读 os.homedir()，而不是落 '/.pure/skills'。
+      expect(proc.stdout.toString().trim()).toBe(join(homedir(), '.pure', 'skills'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   });
 
   it('skillsRootDir honors PURE_SKILLS_DIR overrides at call time', () => {

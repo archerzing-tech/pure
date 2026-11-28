@@ -249,7 +249,14 @@ mod tests {
         let ws = std::path::Path::new("/tmp");
         let (argv, wrapped) = wrap_command(ws, "echo hi");
         assert!(!wrapped);
-        assert_eq!(argv, vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]);
+        if cfg!(windows) {
+            // Windows 不是 noop，但包的不是沙箱：命令走 PowerShell 的 UTF-8
+            // 编码壳（输出编码 / CLIXML 收口，见 powershellEncoding）。
+            assert_eq!(argv[0], "powershell");
+            assert!(argv.iter().any(|a| a == "-EncodedCommand"));
+        } else {
+            assert_eq!(argv, vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]);
+        }
     }
 
     #[cfg(target_os = "macos")]

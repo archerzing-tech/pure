@@ -4,8 +4,29 @@ import { readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findChromePath, readDevToolsPort } from '../../channels/rasterize/headlessChrome';
-import { CHROME_NOT_FOUND_HINT, closeSharedSession, runBrowserTool, runScreenshotTool } from './browser';
+import { CHROME_NOT_FOUND_HINT, closeSharedSession, runBrowserTool, runScreenshotTool, shutdownBrowserSession } from './browser';
 import type { ToolRuntime } from '../runtime';
+
+/** 清临时目录。Windows 上 Chrome 进程刚退、profile 里的文件句柄还没完全松开，
+ *  `rmSync` 会抛 EBUSY（断言已过，挂在 finally 上）——用重试吃掉这段竞态。
+ *  残留如果真清不掉，仍让用例失败，不静默吞。 */
+function rmDir(dir: string): void {
+  rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+}
+
+/** 收尾：先把 Browser.close 真的送出去，再等 Chrome 退。
+ *  测试里 Chrome 是本进程拉的，只有等到它退出，Windows 才会放开 profile
+ *  里的文件句柄；closeSharedSession 是 fire-and-forget（见 browser.ts 注释），
+ *  单靠它 + rmSync 重试在这里不够。 */
+async function closeChromeAndCleanup(proc: { exited: Promise<number>; exitCode: number | null; kill: () => void }, dirs: string[]): Promise<void> {
+  await shutdownBrowserSession();
+  await Promise.race([proc.exited, Bun.sleep(10_000)]);
+  if (proc.exitCode === null) {
+    proc.kill();
+    await proc.exited;
+  }
+  for (const dir of dirs) rmDir(dir);
+}
 
 /** A runtime whose OS-touching primitives all explode: the argument-contract
  * tests below prove malformed calls fail BEFORE any of these can fire. */
@@ -72,13 +93,15 @@ const onCi = typeof process !== 'undefined' && process.env.CI === 'true';
   it('navigate → evaluate → type → click → screenshot edits a page end to end', async () => {
     const profile = mkdtempSync(join(tmpdir(), 'pure-browser-it-'));
     const shotDir = mkdtempSync(join(tmpdir(), 'pure-shots-it-'));
+    // 起在 try 外：finally 要拿到进程句柄等它退出（Windows 上 Chrome 活着时
+    // profile 句柄不放，删目录必 EBUSY）。
+    const proc = Bun.spawn([
+      chromePath!,
+      '--headless=new', '--remote-debugging-port=0', '--no-first-run',
+      '--no-default-browser-check', '--disable-gpu', '--disable-dev-shm-usage',
+      '--window-size=1400,900', 'about:blank', `--user-data-dir=${profile}`,
+    ], { stdout: 'ignore', stderr: 'pipe' });
     try {
-      const proc = Bun.spawn([
-        chromePath!,
-        '--headless=new', '--remote-debugging-port=0', '--no-first-run',
-        '--no-default-browser-check', '--disable-gpu', '--disable-dev-shm-usage',
-        '--window-size=1400,900', 'about:blank', `--user-data-dir=${profile}`,
-      ], { stdout: 'ignore', stderr: 'pipe' });
       const port = await readDevToolsPort(proc, 30_000);
       expect(port).not.toBeNull();
       const runtime: ToolRuntime = {
@@ -129,9 +152,8 @@ const onCi = typeof process !== 'undefined' && process.env.CI === 'true';
       expect(shot.screenshot?.dataUrl.startsWith('data:image/png;base64,')).toBe(true);
       expect(shot.screenshot?.mimeType).toBe('image/png');
     } finally {
-      closeSharedSession(); // Browser.close → the spawned Chrome exits
-      rmSync(profile, { recursive: true, force: true });
-      rmSync(shotDir, { recursive: true, force: true });
+      // Browser.close → 等拉起的 Chrome 真退 → 再清 profile（Windows 句柄）
+      await closeChromeAndCleanup(proc, [profile, shotDir]);
     }
   });
 
@@ -139,13 +161,14 @@ const onCi = typeof process !== 'undefined' && process.env.CI === 'true';
     const profile = mkdtempSync(join(tmpdir(), 'pure-browser-it2-'));
     const shotDir = mkdtempSync(join(tmpdir(), 'pure-shots-it2-'));
     let launches = 0;
+    // 同上：句柄提到 try 外给 finally。
+    const proc = Bun.spawn([
+      chromePath!,
+      '--headless=new', '--remote-debugging-port=0', '--no-first-run',
+      '--no-default-browser-check', '--disable-gpu', '--disable-dev-shm-usage',
+      '--window-size=1400,900', 'about:blank', `--user-data-dir=${profile}`,
+    ], { stdout: 'ignore', stderr: 'pipe' });
     try {
-      const proc = Bun.spawn([
-        chromePath!,
-        '--headless=new', '--remote-debugging-port=0', '--no-first-run',
-        '--no-default-browser-check', '--disable-gpu', '--disable-dev-shm-usage',
-        '--window-size=1400,900', 'about:blank', `--user-data-dir=${profile}`,
-      ], { stdout: 'ignore', stderr: 'pipe' });
       const port = await readDevToolsPort(proc, 30_000);
       expect(port).not.toBeNull();
       const runtime: ToolRuntime = {
@@ -169,9 +192,7 @@ const onCi = typeof process !== 'undefined' && process.env.CI === 'true';
       // Session warmth is the whole point: one launch serves many calls.
       expect(launches).toBe(1);
     } finally {
-      closeSharedSession();
-      rmSync(profile, { recursive: true, force: true });
-      rmSync(shotDir, { recursive: true, force: true });
+      await closeChromeAndCleanup(proc, [profile, shotDir]);
     }
   });
 });
