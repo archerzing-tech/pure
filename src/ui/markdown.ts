@@ -16,6 +16,7 @@ import { stripAnsi } from '../shared/ansi';
 import { showToast } from '../shared/toast';
 import { linkifyPaths } from './pathLink';
 import { createPerfAggregator } from './perfLog';
+import { recordThreadInterval } from './threadTime';
 import { repairJsonSource, repairMermaidSource, repairSvgSource } from '../shared/parseRepair';
 import hljs from 'highlight.js/lib/core';
 import 'highlight.js/styles/atom-one-light.css';
@@ -4693,6 +4694,7 @@ export function scheduleStreamingRender(
       state.renderCostMs = Date.now() - startedAt;
       // 失败帧也计入埋点（成本异常本身就是要抓的信号）。
       streamPerfAgg.record(state.renderCostMs, latest.length);
+      recordThreadInterval('render', startedAt, Date.now());
       if (typeof console !== 'undefined') {
         const msg = err instanceof Error ? err.message : String(err);
         console.debug(`[markdown-ts] streaming render failed; keeping last frame: ${msg}`);
@@ -4701,6 +4703,7 @@ export function scheduleStreamingRender(
     }
     state.renderCostMs = Date.now() - startedAt;
     streamPerfAgg.record(state.renderCostMs, latest.length);
+    recordThreadInterval('render', startedAt, Date.now());
     state.lastRenderedText = latest;
     state.lastRenderTime = Date.now();
     onRendered?.();

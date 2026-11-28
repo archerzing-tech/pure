@@ -41,6 +41,16 @@ export async function logBootSample(ms: number, splash: 'dismissed' | 'forced'):
   }
 }
 
+/** 单行落盘（threadTime 这类「一行一结论」的探针复用；失败静默）。 */
+export async function logPerfLine(payload: Record<string, unknown>): Promise<void> {
+  try {
+    const core = await loadTauriCore();
+    if (core) await core.invoke('gui_perf_log', { lines: [JSON.stringify({ ts: Date.now(), ...payload })] });
+  } catch {
+    // 埋点是尽力而为：命令不可用/写盘失败都不该有可观察的失败面。
+  }
+}
+
 /** 聚合器工厂：样本攒到 flushEveryBeats 个或首样本起 flushEveryMs 到期，
  *  落一行 {ts, kind, beats, p50, p90, max, lenMax}。 */
 export function createPerfAggregator(

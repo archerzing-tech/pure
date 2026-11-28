@@ -82,6 +82,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { createErrorLedger, setGuiDiagnosticSink } from './errorLedger';
 import { logBootSample } from './perfLog';
 import { startFrameWatchdog } from './frameWatchdog';
+import { startThreadTimeProbe } from './threadTime';
 
 // 构建期烤入（vite define，源 package.json.version）。含 "beta" 时探针与取证
 // 自动跑——Windows 真机矩阵回填专用（2026-11-27），正式包不跑。
@@ -1051,6 +1052,9 @@ function dismissBootSplash(minVisibleMs = 450): void {
   // suspension 活着 → 窗口被覆盖后停帧 368s 不恢复（frame_stall frames=0
   // 实证）。改为指数重试直到补丁真正打上。
   startFrameWatchdog();
+  // M1 计量（2026-11-28）：主线程忙时按已知锚点扣减，残余算 M1 上界。与帧停
+  // 摆探针互补——一个回答「有没有出帧」，一个回答「没出帧时主线程在干什么」。
+  startThreadTimeProbe();
   // 版本自证（2026-11-27 判据）：日志里的探针行缺失曾让「包版本不对」被误读成
   // 「探针没触发」。每个 boot 落一行版本，任何日志都能一眼确认跑的是哪个包。
   void invoke('gui_perf_log', {

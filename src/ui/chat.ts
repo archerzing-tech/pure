@@ -4,6 +4,7 @@
 
 import { loadConfig, hasConfiguredKey, providerSecretKeyFor, persistConfig, refreshConfigFromFile, modelListForProvider, type PureConfig } from './config';
 import { recordGuiDiagnostic } from './errorLedger';
+import { measureThreadTime } from './threadTime';
 import { planProviderSelfHeal, recordProviderHealEvent, takeProviderHealFacts } from '../shared/providerSelfHeal';
 import { takeBuildParallelNudge } from '../shared/parallelNudge';
 import { takeSchemaQuarantineFacts } from '../shared/schemaQuarantineHeal';
@@ -9862,10 +9863,12 @@ ${this.buildInsertionContext(images).slice(0, 2_000)}
             status: turnPlanState.complete ? 'complete' as const : turnPlanState.started ? 'active' as const : 'waiting' as const,
           }
         : null);
-    const nextSnapshotV2 = createSessionSnapshot(canonicalMessages, transcriptDrafts, {
+    // M1 计量（threadTime）：快照构建是主线程上的 MB 级同步段，夹住它才能把
+    // 「忙时里到底有多少是落盘准备」从引擎自算里扣掉。
+    const nextSnapshotV2 = measureThreadTime('persist', () => createSessionSnapshot(canonicalMessages, transcriptDrafts, {
       planProgress: progressSnapshot,
       planState: turnPlanState,
-    }, this.statusLines, lastSavedTranscript(sessionId));
+    }, this.statusLines, lastSavedTranscript(sessionId)));
     const events = nextSnapshotV2.events;
     const nextSnapshot: SessionSnapshot = {
       version: 3,

@@ -21,6 +21,7 @@
 | **P0-3 双平台探针** | macOS 四种 worker 加载全通；1MB 克隆 1.1–2.4ms、408KB checkpoint 0.75–1.25ms；最小化后 timer 未被节流。Windows 已回填（v4.11.2-beta 真机：四路全通、1MB 克隆 0.7–0.8ms、408KB checkpoint 0.2–0.4ms、后台 timer maxDrift ≈9.8ms） | `bun run probe:worker -- --run` / `--summarize`；Windows 由 beta 包 boot 后自动探针落 `worker_probe` 行 |
 | **P1-b 读侧（转录草稿恢复）** | `mergeTranscriptDeltaWithLog`：按同一 `foldedThrough` 水位、以 `modelMessageIndex` 去重接回 `transcript_delta`，并按 `eventsFromTranscriptEntry` 派生渲染事件——快照带 events 时投影只读 events，不派生就还是「模型记得、界面上没有」 | `store.test.ts`（6 例，含幂等与截断） |
 | **P1-a 恢复提示** | 只补上下文 / 转录已补齐 / 内容截断 三档 toast + 台账完整计数：恢复后的界面不再静默地少一段对话 | `store.test.ts` + `toast.sessionRestored*` 三键 |
+| **M1 计量探针（停止条件 2 的取证面）** | `src/ui/threadTime.ts`：定时器滞后采样出「主线程忙时」，再按可夹住的同步段（markdown 流式渲染 / 快照构建）扣减，残余记作 **M1 上界**；每 10s 一行 `thread_time`，滞后 ≥250ms 额外一行 `thread_stall` 带分桶 | `threadTime.test.ts`（5 例）+ 真机一回合 |
 
 **交付边界（2026-11-27）**：P0/P1 全部完成，P2-a/b 完成；**P2-c–P4 未开工**。
 依据计划 §9 的停止条件：P0-3 只证明 worker 加载/克隆便宜，尚未测 M1（JS 自算）在
@@ -34,10 +35,27 @@
 当时没落的那一格。
 
 **停止条件状态（2026-11-28）**：条件 1（两端 worker 都加载不了）**已解除**——Windows
-v4.11.2-beta 真机四路全通。条件 2（M1 在真实卡死里占比低 → P2 降级为可选）**未判定**：
+v4.11.2-beta 真机四路全通。条件 2（M1 在真实卡死里占比低 → P2 降级为可选）**仍未判定**：
 v4.11.2–v4.11.4 的 beta 取证把双窗冻结定案在 **M2**（主线程被 Channel 投递灌死、空闭包
 3 秒执行不了），而 Worker 对 M2 无效。所以 P2-c 缺的不是排期，是「M1 占比」这个前提——
 没有它就不开工。
+
+**计量口径与首个样本（2026-11-28）**：`thread_time` 只回答一个问题——「主线程忙的时候在
+干什么」。分母是定时器滞后（自校准基准，后台节流不计入），扣减项是能夹住的同步段，残余
+即 M1 上界（含引擎自算、未埋点的 UI 应用与 GC，所以是上界不是精确值）。
+
+macOS 真机一回合（流式思考 + 代码产出，窗口在前台）：每 10s 忙时 **62–68ms**（≈0.6%），
+单拍最大滞后 **27ms**，`renderMs` / `persistMs` 记到 0（单次渲染不足 1ms，WKWebView 的
+毫秒钳位会吃掉），全程**没有一条 `thread_stall`（≥250ms 的同步块）**。同机对比：空闲窗口
+忙时 22–29ms/10s。
+
+两点必须一起读：① 这一样本里 M1 根本没上场，与「mac 的主战场是 M4、Worker 只买 M1」的
+设计判断一致；② 样本里没有发生过卡死，所以**归因于卡死窗口的分桶仍是空白**——要等真机
+复现双窗冻结时才能拿到那条 `thread_stall` 的 breakdown。Windows 侧同样未采。
+
+已知局限（照实写）：渲染桶按毫秒整数累加，单次 <1ms 的帧记 0（低估 render、抬高残余）；
+后台/最小化窗口的 timer 被系统节流，`beats` 与 `tickMs` 是判断该窗口样本是否可用的第一道闸
+（`beats=1` 说明计时器被冻，那一段不能用）。
 
 ### 1. 体检结论（决定后续刀序）
 
