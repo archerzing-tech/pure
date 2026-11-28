@@ -267,7 +267,8 @@ worker 加载方式、记忆后端**；业务层与协议层必须共用一份�
   冷启动含模块解析）；blob 3–5ms 是兜底里最快的。§3.8 里「module worker 历史坑」
   在 macOS 14 未复现，但 Windows 列仍待真机。
 - **克隆**：1MB 与 408KB checkpoint 都在 1–3ms 量级，单条 50KB 事件 <0.3ms——
-  16ms 合帧阈值有充足余量；这不构成 P2 的瓶颈。
+  16ms 合帧阈值有充足余量；这不构成 P2 的瓶颈。**真实长会话（400 条 / 3.1MB，2026-11-28
+  补测）** 的 checkpoint 克隆 3.0–4.5ms，同样不构成瓶颈。
 - **后台定时器**：最小化后 `visibilityState=hidden`，`setTimeout(50)` 3 拍漂移
   p50=0ms / max=1ms → 本次 App Nap 没有节流定时器。不能据此推断 Windows
   （WebView2 的 timer 合并是另一套机制），也不能据此认为 M4 已解。

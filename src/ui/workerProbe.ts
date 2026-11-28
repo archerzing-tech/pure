@@ -148,6 +148,32 @@ function byteLength(value: unknown): number {
   }
 }
 
+/**
+ * 探针取真实样本的入口（2026-11-28）：boot 后 2.5s 里 `chat.getSessionId()` 要
+ * 么是新建的会话（盘上没有）、要么还没恢复完，所以早期探针一律退合成样本——
+ * 「真实长会话的 checkpoint 克隆成本」因此一直是空白。会话索引（index.json）
+ * 里的 `messageCount` 是现成的：取最长那个会话即可，比遍历盘上目录便宜。
+ */
+export async function pickLongestSessionForProbe(): Promise<string | undefined> {
+  try {
+    const core = await loadTauriCore();
+    const list = await core?.invoke<unknown>('load_session_list');
+    if (!Array.isArray(list)) return undefined;
+    let best: { id: string; count: number } | undefined;
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const item = raw as { id?: unknown; messageCount?: unknown };
+      if (typeof item.id !== 'string' || item.id.length === 0) continue;
+      const count = typeof item.messageCount === 'number' ? item.messageCount : 0;
+      if (!best || count > best.count) best = { id: item.id, count };
+    }
+    return best?.id;
+  } catch {
+    // 索引命令不可用（浏览器 dev / 旧后端）：退合成样本，探针不因此失败。
+    return undefined;
+  }
+}
+
 async function loadCheckpointPayload(
   sessionId?: string,
 ): Promise<{ payload: { messages: unknown[] }; source: 'session' | 'synthetic' }> {

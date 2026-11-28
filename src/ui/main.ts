@@ -1883,8 +1883,11 @@ if (workerProbeRequested) {
   window.setTimeout(() => {
     void (async () => {
       try {
-        const { runWorkerProbe } = await import('./workerProbe');
-        const report = await runWorkerProbe({ sessionId: chat.getSessionId() ?? undefined });
+        const { runWorkerProbe, pickLongestSessionForProbe } = await import('./workerProbe');
+        // 真样本优先：启动窗里 chat 的会话号往往是新建/未恢复的，直接拿它会
+        // 读到不存在的会话并退合成样本（真实长会话 checkpoint 一直没测就是这个原因）。
+        const sessionId = await pickLongestSessionForProbe() ?? chat.getSessionId() ?? undefined;
+        const report = await runWorkerProbe({ sessionId });
         const summary = report.workers
           .map((worker) => (worker.ok
             ? `${worker.label} 加载 ${Math.round(worker.loadMs ?? 0)}ms / 1MB ${Math.round(worker.oneMbMs ?? 0)}ms`

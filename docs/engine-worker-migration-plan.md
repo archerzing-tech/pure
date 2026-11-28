@@ -121,8 +121,11 @@ macOS 真机一回合（流式思考 + 代码产出，窗口在前台）：每 1
   后台 timer maxDrift ≈9.8ms。停止条件「两端都加载失败」因此不触发。beta 包只汇总落行，
   逐路加载耗时与单条 `EngineEvent` 成本仍未单独记录；要这两列就在 Windows 跑一次
   `probe:worker -- --run`。
-- 附带发现：WKWebView 单次 `performance.now()` 被钳到 1ms，报告改用整段平均；
-  真实长会话的 checkpoint 未测（探针在 2.5s 启动窗内拿不到 sessionId，用合成 200 条）。
+- 附带发现：WKWebView 单次 `performance.now()` 被钳到 1ms，报告改用整段平均。
+  真实长会话的 checkpoint 当时没测（探针在 2.5s 启动窗内拿不到 sessionId，用合成 200 条）——
+  **2026-11-28 已补**：`pickLongestSessionForProbe()` 从会话索引按 `messageCount` 取最长会话，
+  实跑得到 **400 条 / 3.1MB，克隆 3.0–4.5ms**（同机合成 408KB 样本 0.75–1.25ms）。
+  结论：真实体量下也没有接近 16ms 合帧阈值的迹象，P2 的桥不是被克隆成本卡住的。
 
 ### P0-4 任务 B 取证
 

@@ -246,6 +246,8 @@ describe('streaming tail window (diffStreaming integration)', () => {
     }
   });
 
+  // 这一条要真实渲染 2400 个段落（≈5s）：默认 5s 预算是拿秒表赌机器负载，
+  // 机器一忙就红（HEAD 上实测 4999ms 通过）。断言没变，只把预算拉出噪声带。
   it('cut 不前移的跨拍生长：头块 data-md-raw 不变（配对稳定，不整帧重建）', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -259,5 +261,5 @@ describe('streaming tail window (diffStreaming integration)', () => {
     } finally {
       container.remove();
     }
-  });
+  }, 20_000);
 });
